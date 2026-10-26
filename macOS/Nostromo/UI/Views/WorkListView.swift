@@ -332,10 +332,17 @@ final class WorkListView: NSView {
             scopeControl.target = self
             scopeControl.action = #selector(scopeChosen(_:))
             scopeControl.setAccessibilityLabel("Show")
-            controlsRow.addArrangedSubview(scopeControl)
+            // Its own full-width row: three count-bearing segments ("Unassigned 20")
+            // are wider than the 280 pt minimum pane leaves beside the menus, and a
+            // stack row has nothing that can shrink. Filling the width lets the
+            // segments share it and never push the row past the pane.
+            scopeControl.controlSize = .small
+            scopeControl.segmentDistribution = .fillProportionally
+            scopeControl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
         controlsRow.addArrangedSubview(sortPopup)
         filterBar.addArrangedSubview(controlsRow)
+        if config.scopeFacet != nil { filterBar.addArrangedSubview(scopeControl) }
         filterBar.addArrangedSubview(searchField)
         filterBar.translatesAutoresizingMaskIntoConstraints = false
 

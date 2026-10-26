@@ -78,12 +78,15 @@ final class TeriSentryViewTracker {
 }
 
 /// The Sentry tab: unresolved issues assigned to the user plus fresh unassigned
-/// errors, newest activity first. A Mine | Unassigned | All control (default Mine,
-/// remembered) narrows them; "Mine" is assigned directly to the user, not to a team,
-/// and an empty Mine shows the normal empty state rather than falling back to All. Rows read
-/// `ERROR  TypeError in FacesheetParser … 312 events / 24 h · 41 users · last seen 4 min ago  new`.
-/// (Sentry's issue list does not say which environment an issue is in, so there
-/// is no environment column or filter.)
+/// errors, newest activity first.
+///
+/// A Mine | Unassigned | All control (default Mine, remembered) narrows them.
+/// "Mine" is assigned directly to the user, not to a team, and an empty Mine shows
+/// the normal empty state rather than falling back to All.
+///
+/// Rows read `ERROR  TypeError in FacesheetParser … 312 events / 24 h · 41 users ·
+/// last seen 4 min ago  new`. (Sentry's issue list does not say which environment
+/// an issue is in, so there is no environment column or filter.)
 enum TeriSentryTab {
     /// Replaceable so tests can inject a clock and isolated defaults.
     static var tracker = TeriSentryViewTracker(defaults: .standard)

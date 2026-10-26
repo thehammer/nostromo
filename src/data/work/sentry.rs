@@ -85,6 +85,9 @@ struct Search {
 pub const ASSIGNEE_ME: &str = "me";
 pub const ASSIGNEE_UNASSIGNED: &str = "unassigned";
 
+// Order matters: an issue returned by more than one search keeps the assignee of
+// the FIRST (`seen.insert` dedupes), so `assigned:me` must stay ahead of the
+// unassigned search for "Mine wins".
 const SEARCHES: [Search; 2] = [
     // Assigned to me stays assigned however quiet the issue is: look far back.
     Search {
@@ -869,11 +872,7 @@ fn priority_for(level: &str) -> Priority {
     }
 }
 
-fn to_item(
-    issue: &Value,
-    repos: &HashMap<String, String>,
-    assignee: &str,
-) -> Option<WorkItem> {
+fn to_item(issue: &Value, repos: &HashMap<String, String>, assignee: &str) -> Option<WorkItem> {
     let id = text(&issue["id"]).or_else(|| number(&issue["id"]).map(|n| n.to_string()))?;
     let title = one_line(
         &text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()),
