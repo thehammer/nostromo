@@ -197,3 +197,25 @@ Output is coalesced. A chunk goes out at once if nothing was sent in the last 8 
 Refused lines are capped at 120 a minute per channel (one budget for the whole MCP channel, not one per focus), so a flood over TCP neither fills the log quickly nor silences local refusals. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.
 
 **The audit trail fails closed.** `AuditLog::open` creates the file at once, and each open checks the file can still be appended to. If it cannot (at start `nostromd` logs an error and runs with an unavailable log), `terminal_open_local` is refused with `terminal_audit_unavailable` and no process, pane or record is created. Terminals that already exist keep running.
+
+## The Mac pane (slice 1d)
+
+The app draws a terminal with SwiftTerm 1.18.0 (a remote Swift package pinned exactly; 1.19+ add a build-tool plugin that command-line `xcodebuild` refuses without `-skipPackagePluginValidation`). SwiftTerm is linked into the `Nostromo` app target only: `NostromoTerminalView` and `TerminalPaneHostView` are the only files that import it. `NostromoTests` compiles app sources directly and must never import SwiftTerm (`TerminalFitnessTests` asserts it), so the wire, the store and the guard are plain Swift.
+
+- **Routing.** `DynamicFocusView.makeLeafView` sends pane ids `terminal-*` to `TerminalPaneHostView` (per window, reused across layout rebuilds like the REPL). The daemon's `pane_content` `terminal` is only a placeholder for clients that cannot attach.
+- **Data flow.** `NostromodClient` decodes the `terminal_*` frames into `ServerMsg` cases; `AppStore` hands them to `TerminalSessionStore`. The store keeps the latest `TerminalInfo` per terminal, a bounded copy of each attached terminal's bytes (to start a second window's view), and reference-counts `terminal_attach`/`terminal_detach` per terminal. A view's size goes out as `terminal_resize` before its `terminal_attach`, so the replay already has the view's size. After a reconnect every terminal that still has a view is attached again.
+- **Handshake.** On a connection whose `Welcome` carried an `operator_nonce`, the app sends a follow-up `Subscribe` naming topic `terminal`, capability `terminal_ui` and the nonce. Without it the daemon never honours a terminal verb from this connection.
+- **Opening.** Terminal ▸ New Terminal (⌘T) asks for a shell in the key window's focus, in the focus's project directory, split below the pane that holds the keyboard (the REPL by default). That window's view takes the keyboard when the daemon reports the terminal (`opened_by_request` matches a token the window made). A terminal an agent opened has no token and never takes the keyboard.
+- **Ended.** A shell that exits non-zero leaves the pane with a "[process exited with code N]" overlay and **Restart** (same pane, new `terminal_id`) and **Close**. Exit 0 closes the pane.
+- **Edit ▸ Find…** (⌘F) and **Find Next** (⌘G) go to the first responder only; SwiftTerm shows its find bar. **Debug ▸ Copy terminal latency stats** copies key down to echo fed, p50 and p95 over the last 500 keys (the log also carries the line every 100 keys). The screen text is the view's accessibility value, which is how the QA script reads it.
+
+### The synthetic-input rule
+
+Nothing that app-control synthesised may reach a shell or change a terminal. `TerminalInputGuard` is the one call site, over approvals AP1's `SyntheticInputGate` and `HumanGesture` (there is no second gate):
+
+- **Keystrokes, `insertText`, paste** (`NostromoTerminalView.send`/`insertText`/`paste`): refused when `SyntheticInputGate.isSynthetic(NSApp.currentEvent)`, unless this is the QA build with `NOSTROMO_QA_ALLOW_SYNTHETIC_INPUT=1`.
+- **Controls** (the header ×, Restart and Close on the overlay, Terminal ▸ Close Terminal Pane): `HumanGesture.permit`, so a synthetic or marked event, an Accessibility press and an event from another window all do nothing. A main-menu item passes `menuSelection: true` (AppKit gives a chosen menu item the mouse event that tracked the menu, which is not in the key window); every other check still applies.
+- A refused attempt sends nothing and reports `terminal_refusal_report {op, channel: "app_control"}` (at most one a second per terminal and op); the daemon audits it as `refused` in `terminal.jsonl`.
+- Opening a terminal (⌘T) is not gated: it types nothing and closes nothing.
+
+`scripts/qa/terminal-local.sh` drives the isolated QA instance through the positive scenario and the `--no-synthetic` negative case. Live QA needs an awake, unlocked display.

@@ -780,6 +780,91 @@ final class NostromodClientHandshakeTests: XCTestCase {
         let zero = try XCTUnwrap(byId["req-out-3"])
         XCTAssertEqual(zero["offset"] as? Int, 0, "offset 0 (the start) is not the same as no offset (the tail): \(zero)")
     }
+
+    // MARK: - Terminal panes (1d)
+    //
+    // The daemon honours the app's terminal verbs only after a subscribe that names the `terminal`
+    // topic, declares the `terminal_ui` capability and echoes the welcome's `operator_nonce`. A
+    // connection the daemon did not verify (no nonce) never says any of that, and the first subscribe
+    // (sent before any welcome) never does either.
+
+    func testAVerifiedConnectionSubscribesToTheTerminalTopicWithItsCapabilityAndNonce() throws {
+        let subs = try subscribes(connectingTo: .init(features: nil, operatorNonce: "nonce-term-1"), expecting: 2)
+        guard subs.count >= 2 else { return XCTFail("expected a follow-up subscribe, got \(subs.map(\.json))") }
+
+        let later = subs[1]
+        XCTAssertTrue(later.topics.contains("terminal"), "topics: \(later.topics)")
+        XCTAssertEqual(later.json["capabilities"] as? [String], ["terminal_ui"], "\(later.json)")
+        XCTAssertEqual(later.json["operator_nonce"] as? String, "nonce-term-1", "\(later.json)")
+        XCTAssertEqual(subs.count, 2, "exactly one follow-up subscribe")
+    }
+
+    func testTheFirstSubscribeNeverNamesTheTerminalTopicOrCarriesCapabilities() throws {
+        let subs = try subscribes(connectingTo: .init(features: nil, operatorNonce: "nonce-term-2"), expecting: 2)
+        let first = try XCTUnwrap(subs.first)
+        XCTAssertFalse(first.topics.contains("terminal"), "topics: \(first.topics)")
+        XCTAssertNil(first.json["capabilities"], "\(first.json)")
+        XCTAssertNil(first.json["operator_nonce"], "\(first.json)")
+    }
+
+    func testALaterSubscribeStillKeepsTheBaseTopicsAndWhatTheWelcomeAdvertised() throws {
+        let subs = try subscribes(connectingTo: .init(features: ["work"], operatorNonce: "nonce-term-3"), expecting: 2)
+        guard subs.count >= 2 else { return XCTFail("expected a follow-up subscribe, got \(subs.map(\.topics))") }
+        let later = subs[1]
+        XCTAssertTrue(Set(NostromodClient.baseTopics).isSubset(of: Set(later.topics)), "\(later.topics)")
+        XCTAssertTrue(later.topics.contains("work"), "\(later.topics)")
+        XCTAssertTrue(later.topics.contains("terminal"), "\(later.topics)")
+    }
+
+    func testAConnectionWithoutAnOperatorNonceNeverNamesTheTerminalTopicCapabilitiesOrNonce() throws {
+        let subs = try subscribes(connectingTo: .init(features: nil), expecting: 1)
+        XCTAssertEqual(subs.count, 1, "no nonce, no features: no follow-up subscribe at all (\(subs.map(\.topics)))")
+        for sub in subs {
+            XCTAssertFalse(sub.topics.contains("terminal"), "topics: \(sub.topics)")
+            XCTAssertNil(sub.json["capabilities"], "\(sub.json)")
+            XCTAssertNil(sub.json["operator_nonce"], "\(sub.json)")
+        }
+    }
+
+    func testAFollowUpSubscribeForOtherFeaturesStillOmitsTerminalThingsWithoutANonce() throws {
+        let subs = try subscribes(connectingTo: .init(features: ["work"]), expecting: 2)
+        XCTAssertEqual(subs.count, 2, "\(subs.map(\.topics))")
+        for sub in subs {
+            XCTAssertFalse(sub.topics.contains("terminal"), "topics: \(sub.topics)")
+            XCTAssertNil(sub.json["capabilities"], "\(sub.json)")
+            XCTAssertNil(sub.json["operator_nonce"], "\(sub.json)")
+        }
+    }
+
+    func testSendTerminalWritesATerminalAttachFrameNamingTheTerminal() throws {
+        let c = try connectClient(to: [.init(features: nil, operatorNonce: "nonce-term-4")])
+        waitForWelcome(connection: 0, c)
+
+        c.sendTerminal(.attach(terminalId: "t1"))
+        waitForFrame(connection: 0, type: "terminal_attach")
+
+        let frame = try XCTUnwrap(daemon.frames(connection: 0, ofType: "terminal_attach").first).json
+        XCTAssertEqual(frame["terminal_id"] as? String, "t1", "\(frame)")
+        XCTAssertEqual(Set(frame.keys), ["type", "terminal_id"], "\(frame)")
+    }
+
+    func testSendTerminalInputWritesBase64Bytes() throws {
+        let c = try connectClient(to: [.init(features: nil, operatorNonce: "nonce-term-5")])
+        waitForWelcome(connection: 0, c)
+
+        c.sendTerminal(.input(terminalId: "t1", bytes: Array("ls\n".utf8)))
+        waitForFrame(connection: 0, type: "terminal_input")
+
+        let frame = try XCTUnwrap(daemon.frames(connection: 0, ofType: "terminal_input").first).json
+        XCTAssertEqual(frame["terminal_id"] as? String, "t1")
+        XCTAssertEqual(frame["bytes"] as? String, "bHMK")
+    }
+
+    func testSendTerminalBeforeAnyConnectionIsDroppedWithoutCrashing() {
+        let c = NostromodClient(socketPath: "/tmp/nsfd-none-\(getpid())-\(UUID().uuidString.prefix(8)).sock")
+        c.sendTerminal(.attach(terminalId: "t1"))
+        XCTAssertFalse(c.hasConnection)
+    }
 }
 
 

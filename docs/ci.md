@@ -38,10 +38,14 @@ failure are the same failure.
   bump the font, update the version and checksum in `ci.yml` together.
 - Concurrency is per job, event and ref; a newer push to a PR cancels the older
   run (pushes to `main` and dispatches are never cancelled).
-- Nothing is cached. NostromoKit is a local SwiftPM package and the Xcode
-  projects have no remote package dependencies, so there is nothing safe to
-  cache, and restoring stale DerivedData could let a stale build product
-  mask a failure.
+- Nothing is cached. NostromoKit is a local SwiftPM package, and the Mac app
+  has one remote package, SwiftTerm, pinned exactly to 1.18.0 in the project
+  and in `macOS/Nostromo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`
+  (so every job resolves and builds it fresh; it adds a minute or so to a Mac
+  build). Restoring stale DerivedData could let a stale build product mask a
+  failure. SwiftTerm 1.19+ has a build-tool plugin that command-line
+  `xcodebuild` rejects without `-skipPackagePluginValidation`: do not upgrade
+  it without deciding that flag's place in `make mac`, CI and the smoke.
 - On failure the jobs upload the `.xcresult` bundle (`swift-tests-mac-xcresult`),
   the NostromoKit log (`swift-tests-kit-log`) or the iOS build log
   (`ios-simulator-build-log`) for 14 days. The Makefile filters

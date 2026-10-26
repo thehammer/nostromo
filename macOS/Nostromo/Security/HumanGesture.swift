@@ -56,7 +56,11 @@ enum HumanGesture {
     ///   - now: the current time on `NSEvent.timestamp`'s clock (seconds since
     ///     boot). A seam for tests.
     ///   - maxEventAge: an event older than this is `.staleEvent`.
-    static func permit(_ event: NSEvent?, control: NSView,
+    ///   - menuSelection: the action is a main-menu item. AppKit hands a chosen menu item's action
+    ///     the mouse event that tracked the menu, which belongs to the menu and not to the control's
+    ///     window; with this set a mouse event is not held to the control's window (a key equivalent
+    ///     still is). Every other check applies, so a synthetic, stale or missing event is refused.
+    static func permit(_ event: NSEvent?, control: NSView, menuSelection: Bool = false,
                        voiceOverEnabled: () -> Bool = { NSWorkspace.shared.isVoiceOverEnabled },
                        allowsSynthetic: () -> Bool = { SyntheticInputGate.allowsSynthetic },
                        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
@@ -72,7 +76,8 @@ enum HumanGesture {
         guard [.leftMouseUp, .leftMouseDown, .keyDown].contains(event.type) else {
             return .refused(reason: .notAUserEvent)
         }
-        guard let window = control.window, event.window === window else {
+        guard let window = control.window else { return .refused(reason: .notAUserEvent) }
+        if event.window !== window && !(menuSelection && event.type != .keyDown) {
             return .refused(reason: .notAUserEvent)
         }
         let age = now() - event.timestamp

@@ -241,6 +241,40 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         appLog.info("pane diagnostics copied to pasteboard")
     }
 
+    // MARK: - Terminal
+
+    /// Debug > Copy terminal latency stats: key down to echo fed, p50 / p95 over the last 500 keys.
+    @objc func copyTerminalLatencyStats() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(TerminalLatencyStats.shared.report(), forType: .string)
+    }
+
+    /// Terminal > New Terminal (⌘T): a login shell in the key window's focus, in its project directory,
+    /// split below the pane that holds the keyboard (the REPL by default). That window's terminal takes
+    /// the keyboard when the daemon reports it; an agent-opened terminal never does.
+    @objc func newTerminal(_ sender: Any?) {
+        guard let window = NSApp.keyWindow, let layout = window.contentView as? MainLayout,
+              AppStore.shared.client.hasConnection else {
+            NSSound.beep()
+            return
+        }
+        let requestId = UUID().uuidString
+        let store = TerminalSessionStore.shared
+        store.expectKeyboardFocus(clientRequestId: requestId, windowId: layout.terminalWindowId)
+        store.transport(.openLocal(tag: layout.activeFocusTag,
+                                   relativeTo: layout.activePaneId(containing: window.firstResponder) ?? "repl",
+                                   position: "split_below",
+                                   cwd: layout.activeFocusProjectPath,
+                                   clientRequestId: requestId))
+    }
+
+    /// Terminal > Close Terminal Pane (⇧⌘W): the terminal pane that holds the keyboard. The pane asks
+    /// `TerminalInputGuard` before it acts, so a synthetic key does nothing.
+    @objc func closeTerminalPane(_ sender: Any?) {
+        TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)?.closeFromMenu()
+    }
+
     // MARK: - Private
 
     private func setupMenu() {
@@ -266,6 +300,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(closeTerminalPane(_:)) {
+            return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
+        }
+        if menuItem.action == #selector(newTerminal(_:)) { return NSApp.keyWindow?.contentView is MainLayout }
         if menuItem.action == ModelShortcut.action { return !ModelShortcut.bars(in: NSApp.keyWindow).isEmpty }
         if menuItem.action == BackgroundShortcut.action { return !BackgroundShortcut.bars(in: NSApp.keyWindow).isEmpty }
         return true

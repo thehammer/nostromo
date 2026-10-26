@@ -32,10 +32,27 @@ private struct ClientSubscribe: Encodable {
     /// `approvals_v1` (see `NostromodClient.claimsRendersApprovals`): the first
     /// subscribe, sent before any welcome, never makes it.
     var rendersApprovals = false
+    /// Optional client capabilities (`terminal_ui`). Sent only on a connection the daemon verified as the
+    /// operator app, and omitted when empty.
+    var capabilities: [String] = []
+    /// The `operator_nonce` from this connection's `welcome`. The daemon honours the app's terminal
+    /// verbs only after a subscribe that echoes it. Omitted when nil.
+    var operatorNonce: String? = nil
     enum CodingKeys: String, CodingKey {
         case type_  = "type"
         case topics
         case rendersApprovals = "renders_approvals"
+        case capabilities
+        case operatorNonce = "operator_nonce"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encode(topics, forKey: .topics)
+        try c.encode(rendersApprovals, forKey: .rendersApprovals)
+        if !capabilities.isEmpty { try c.encode(capabilities, forKey: .capabilities) }
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
     }
 }
 
@@ -272,6 +289,20 @@ enum ServerMsg {
     case trackerBoard(TrackerBoardFrameWire)
     /// Whether a focus has a tracker, and its counts.
     case trackerSummary(TrackerSummaryFrameWire)
+
+    // ── terminal panes (1d) ───────────────────────────────────────────────────
+    /// Every terminal the daemon knows. Local clients only.
+    case terminalList(TerminalListFrame)
+    /// One terminal's metadata changed (opened, resized, ended, restarted).
+    case terminalState(TerminalInfo)
+    /// A terminal and its pane are gone.
+    case terminalClosed(TerminalClosedInfo)
+    /// The start of an attachment: reset the view and feed these bytes.
+    case terminalReplay(TerminalReplayFrame)
+    /// Bytes from an attached terminal.
+    case terminalOutput(TerminalOutputFrame)
+    /// A terminal request was refused or failed; nothing changed.
+    case terminalRefused(TerminalRefusedFrame)
 
     case unknown
 }
@@ -806,12 +837,27 @@ class NostromodClient {
     /// connection's daemon advertised. Evaluated per connection (a daemon that is
     /// replaced by an older or newer build between reconnects is re-detected from
     /// its own `welcome`); a daemon with no `features` gets nothing extra.
-    private func subscribeToAdvertisedFeatures(_ features: [String]) {
+    ///
+    /// A connection the daemon verified as the operator app (its `welcome` carried an `operator_nonce`)
+    /// also names the `terminal` topic, declares the `terminal_ui` capability and echoes the nonce:
+    /// the daemon honours the app's terminal verbs only after such a subscribe. A daemon that predates
+    /// the topic reads it as an unknown topic and ignores it.
+    private func subscribeToAdvertisedFeatures(_ features: [String], operatorNonce nonce: String?) {
         let extra = features.compactMap { NostromodClient.featureTopics[$0] }
         let approvals = NostromodClient.claimsRendersApprovals(features: features)
-        guard !extra.isEmpty || approvals else { return }
-        send(ClientSubscribe(topics: NostromodClient.baseTopics + extra, rendersApprovals: approvals), type: "subscribe")
+        let terminals = nonce != nil
+        guard !extra.isEmpty || approvals || terminals else { return }
+        send(ClientSubscribe(topics: NostromodClient.baseTopics + extra + (terminals ? [NostromodClient.terminalTopic] : []),
+                             rendersApprovals: approvals,
+                             capabilities: terminals ? [NostromodClient.terminalUICapability] : [],
+                             operatorNonce: nonce),
+             type: "subscribe")
     }
+
+    /// The topic that carries terminal metadata (`terminal_state`, `terminal_closed`).
+    static let terminalTopic = "terminal"
+    /// The client capability that says this app draws terminal panes.
+    static let terminalUICapability = "terminal_ui"
 
     /// Clean, unambiguous round-trip probe: no side effects, no fan-out
     /// ambiguity (unlike `session_send`, which is answered by a broadcast
@@ -1000,6 +1046,16 @@ class NostromodClient {
                                                                           channel: channel))
         else { return }
         writeFrameLocked(body, to: curFd, type: "approval_refusal_report", tag: nil)
+    }
+
+    // MARK: - Terminal panes (1d)
+
+    /// Send one terminal frame. Dropped when not connected (the store attaches again on a reconnect).
+    func sendTerminal(_ msg: TerminalClientMessage) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0, let body = msg.encoded() else { return }
+        writeFrameLocked(body, to: curFd, type: msg.wireType, tag: nil)
     }
 
     /// Record (or clear) the operator nonce from the `welcome` on `sock`.
@@ -1208,7 +1264,8 @@ class NostromodClient {
         if type_ == "welcome", fd == sock {
             noteWelcome(operatorNonce: json["operator_nonce"] as? String, on: sock)
             sendLock.lock(); advertisedFeatures = json["features"] as? [String] ?? []; sendLock.unlock()
-            subscribeToAdvertisedFeatures(json["features"] as? [String] ?? [])
+            subscribeToAdvertisedFeatures(json["features"] as? [String] ?? [],
+                                          operatorNonce: json["operator_nonce"] as? String)
             connected.send(true)
         }
 
@@ -1543,6 +1600,53 @@ class NostromodClient {
                 return .trackerSummary(m)
             } else {
                 log.error("failed to decode tracker_summary")
+            }
+
+        // ── terminal panes (1d) ─────────────────────────────────────────────
+        case "terminal_list":
+            if let m = try? decoder.decode(TerminalListFrame.self, from: raw) {
+                return .terminalList(m)
+            } else {
+                log.error("failed to decode terminal_list")
+            }
+
+        case "terminal_state":
+            if let m = try? decoder.decode(TerminalStateFrame.self, from: raw) {
+                return .terminalState(m.terminal)
+            } else {
+                log.error("failed to decode terminal_state")
+            }
+
+        case "terminal_closed":
+            if let m = try? decoder.decode(TerminalClosedInfo.self, from: raw) {
+                return .terminalClosed(m)
+            } else {
+                log.error("failed to decode terminal_closed")
+            }
+
+        // Output is the hot path: read the already parsed object instead of decoding the frame again.
+        case "terminal_replay":
+            if let id = json["terminal_id"] as? String, let text = json["bytes"] as? String,
+               let bytes = Data(base64Encoded: text) {
+                return .terminalReplay(TerminalReplayFrame(terminalId: id, cols: json["cols"] as? Int ?? 80,
+                                                           rows: json["rows"] as? Int ?? 24, bytes: [UInt8](bytes)))
+            } else {
+                log.error("failed to decode terminal_replay")
+            }
+
+        case "terminal_output":
+            if let id = json["terminal_id"] as? String, let text = json["bytes"] as? String,
+               let bytes = Data(base64Encoded: text) {
+                return .terminalOutput(TerminalOutputFrame(terminalId: id, bytes: [UInt8](bytes)))
+            } else {
+                log.error("failed to decode terminal_output")
+            }
+
+        case "terminal_refused":
+            if let m = try? decoder.decode(TerminalRefusedFrame.self, from: raw) {
+                return .terminalRefused(m)
+            } else {
+                log.error("failed to decode terminal_refused")
             }
 
         default:

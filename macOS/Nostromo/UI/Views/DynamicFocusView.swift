@@ -385,6 +385,17 @@ final class DynamicFocusView: NSView {
         }
     }
 
+    /// The id of the pane that holds `responder` (a view inside it), for menu commands that act on
+    /// "the pane in use". Nil when the responder is outside every pane of this focus.
+    func paneId(containing responder: NSResponder?) -> String? {
+        var view = responder as? NSView
+        while let current = view {
+            if let hit = leafViews.first(where: { $0.value === current }) { return hit.key }
+            view = current.superview
+        }
+        return nil
+    }
+
     private func makeLeafView(paneId: String, reusing existing: NSView?) -> NSView {
         if let existing {
             // Same pane_id as before this structural change — reuse the
@@ -431,6 +442,13 @@ final class DynamicFocusView: NSView {
             let tracker = TrackerPaneView(tag: focus.sessionTag)
             leafViews[paneId] = tracker
             return tracker
+        } else if paneId.hasPrefix("terminal-") {
+            // A daemon-owned shell (1d): the host draws its bytes with SwiftTerm and takes the
+            // keyboard when this window opened it. Kept per window and reused across rebuilds
+            // like the REPL, so the screen and scrollback survive a layout change.
+            let terminal = TerminalPaneHostView(tag: focus.sessionTag, paneId: paneId, windowId: windowId)
+            leafViews[paneId] = terminal
+            return terminal
         } else {
             let wrapper = PaneContentNSView()
             wrapper.paneId = paneId
@@ -880,6 +898,10 @@ final class DynamicFocusView: NSView {
                     region.setCaption(address[paneId]?.reason, for: paneId)
                     region.noteContentPushed(for: paneId)
                 }
+            } else if leafViews[paneId] is TerminalPaneHostView {
+                // A terminal pane draws from `TerminalSessionStore`; the daemon's `terminal`
+                // pane content is only a placeholder for clients that cannot attach (iOS).
+                continue
             } else {
                 // A miss here — no materialised view for a pane id `paneContent`
                 // names — means the hierarchy has already diverged from what's

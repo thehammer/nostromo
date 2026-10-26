@@ -9,6 +9,9 @@ import AppKit
     func copyPaneDiagnostics()
     func captureRenderStateNow()
     func goToApprovalCard(_ sender: Any?)
+    func newTerminal(_ sender: Any?)
+    func closeTerminalPane(_ sender: Any?)
+    func copyTerminalLatencyStats()
 }
 
 enum MainMenu {
@@ -41,6 +44,31 @@ enum MainMenu {
         editMenu.addItem(.separator())
         editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
         editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
+        // Find: no target, so the action goes to the first responder only. A terminal pane shows its
+        // find bar; a view that does not take the action leaves the items disabled.
+        editMenu.addItem(.separator())
+        let findItem = NSMenuItem(title: "Find\u{2026}", action: Selector(("performFindPanelAction:")), keyEquivalent: "f")
+        findItem.tag = NSTextFinder.Action.showFindInterface.rawValue
+        editMenu.addItem(findItem)
+        let findNextItem = NSMenuItem(title: "Find Next", action: Selector(("performFindPanelAction:")), keyEquivalent: "g")
+        findNextItem.tag = NSTextFinder.Action.nextMatch.rawValue
+        editMenu.addItem(findNextItem)
+
+        // Terminal menu: ⌘T opens a shell in the key window's focus; ⇧⌘W closes the terminal pane that
+        // holds the keyboard (only for a person: the item does nothing for a synthetic key or click).
+        let terminalMenuItem = NSMenuItem()
+        mainMenu.addItem(terminalMenuItem)
+        let terminalMenu = NSMenu(title: "Terminal")
+        terminalMenuItem.submenu = terminalMenu
+        let newTerminalItem = NSMenuItem(title: "New Terminal", action: #selector(MainMenuActions.newTerminal(_:)),
+                                         keyEquivalent: "t")
+        newTerminalItem.target = target
+        terminalMenu.addItem(newTerminalItem)
+        let closeTerminalItem = NSMenuItem(title: "Close Terminal Pane", action: #selector(MainMenuActions.closeTerminalPane(_:)),
+                                           keyEquivalent: "w")
+        closeTerminalItem.keyEquivalentModifierMask = [.command, .shift]
+        closeTerminalItem.target = target
+        terminalMenu.addItem(closeTerminalItem)
 
         // Debug menu — the app's answer to "is it holding more than it should?"
         // without attaching a debugger. Several acceptance criteria for the
@@ -74,6 +102,11 @@ enum MainMenu {
         paneDiagItem.keyEquivalentModifierMask = [.command, .shift]
         paneDiagItem.target = target
         debugMenu.addItem(paneDiagItem)
+        let terminalLatencyItem = NSMenuItem(title: "Copy terminal latency stats",
+                                             action: #selector(MainMenuActions.copyTerminalLatencyStats),
+                                             keyEquivalent: "")
+        terminalLatencyItem.target = target
+        debugMenu.addItem(terminalLatencyItem)
         // ⌥⇧⌘B: ⇧⌘B is the Session menu's Background Activity (BA3).
         let captureItem = NSMenuItem(title: "Capture render state now",
                                      action: #selector(MainMenuActions.captureRenderStateNow),
