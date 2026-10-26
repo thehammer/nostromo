@@ -9,111 +9,54 @@ import ObjectiveC
 
 enum ProbeCensus {
     struct Snapshot {
-        var classes: [UInt: Int] = [:]
-        var sizes: [Int] = Array(repeating: 0, count: 257)
-        var zones = 0
-        var blocks = 0
+        var classes: [String: Int] = [:]
+        var error = ""
+        var total = 0
     }
 
-    final class Table {
-        let capacity = 1 << 17
-        let keys: UnsafeMutablePointer<UInt>
-        let counts: UnsafeMutablePointer<Int>
-        let sizes: UnsafeMutablePointer<Int>
-        var blocks = 0
-        let mask: UInt
-        init(mask: UInt) {
-            self.mask = mask
-            keys = .allocate(capacity: capacity); keys.initialize(repeating: 0, count: capacity)
-            counts = .allocate(capacity: capacity); counts.initialize(repeating: 0, count: capacity)
-            sizes = .allocate(capacity: 257); sizes.initialize(repeating: 0, count: 257)
-        }
-        deinit { keys.deallocate(); counts.deallocate(); sizes.deallocate() }
-
-        func slot(_ key: UInt) -> Int {
-            var i = Int(truncatingIfNeeded: (key >> 3) &* 0x9E37_79B9) & (capacity - 1)
-            while keys[i] != 0 && keys[i] != key { i = (i + 1) & (capacity - 1) }
-            return i
-        }
-        func insert(_ key: UInt) { keys[slot(key)] = key }
-        func lookup(_ key: UInt) -> Int? {
-            let i = slot(key)
-            return keys[i] == key ? i : nil
-        }
-    }
-
+    /// Runs /usr/bin/heap against this very process (test-only; never in the app) and parses the class table.
     static func snapshot() -> Snapshot {
-        let maskSym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "objc_debug_isa_class_mask")
-        let mask: UInt = maskSym.map { $0.assumingMemoryBound(to: UInt.self).pointee } ?? 0x0000_000f_ffff_fff8
-        let table = Table(mask: mask)
-        var n: UInt32 = 0
-        if let list = objc_copyClassList(&n) {
-            for i in 0 ..< Int(n) { table.insert(unsafeBitCast(list[i], to: UInt.self)) }
-            free(UnsafeMutableRawPointer(list))
-        }
-        let ctx = Unmanaged.passUnretained(table).toOpaque()
-
         var snap = Snapshot()
-        var zones: UnsafeMutablePointer<vm_address_t>?
-        var zoneCount: UInt32 = 0
-        guard malloc_get_all_zones(mach_task_self_, nil, &zones, &zoneCount) == KERN_SUCCESS, let zones else { return snap }
-        snap.zones = Int(zoneCount)
-        for z in 0 ..< Int(zoneCount) {
-            guard let zone = UnsafeMutablePointer<malloc_zone_t>(bitPattern: UInt(zones[z])),
-                  let introspect = zone.pointee.introspect,
-                  let enumerate = introspect.pointee.enumerator else { continue }
-            _ = enumerate(mach_task_self_, ctx, 4 /* MALLOC_PTR_IN_USE_RANGE_TYPE */, zones[z],
-                          { _, address, _, ptr in
-                              ptr?.pointee = UnsafeMutableRawPointer(bitPattern: UInt(address))
-                              return KERN_SUCCESS
-                          },
-                          { _, context, _, ranges, count in
-                              guard let context, let ranges else { return }
-                              let t = Unmanaged<Table>.fromOpaque(context).takeUnretainedValue()
-                              for i in 0 ..< Int(count) {
-                                  let r = ranges[i]
-                                  guard r.size >= 16, let p = UnsafeRawPointer(bitPattern: UInt(r.address)) else { continue }
-                                  t.blocks += 1
-                                  let isa = p.load(as: UInt.self) & t.mask
-                                  if isa != 0, let slot = t.lookup(isa) {
-                                      t.counts[slot] += 1
-                                  } else {
-                                      t.sizes[min(Int(r.size) / 16, 256)] += 1
-                                  }
-                              }
-                          })
+        let out = NSTemporaryDirectory() + "heap-\(UUID().uuidString).txt"
+        FileManager.default.createFile(atPath: out, contents: nil)
+        guard let handle = FileHandle(forWritingAtPath: out) else { snap.error = "no out file"; return snap }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/heap")
+        p.arguments = ["\(getpid())"]
+        p.standardOutput = handle
+        p.standardError = handle
+        do { try p.run() } catch { snap.error = "heap failed to start: \(error)"; return snap }
+        let deadline = Date().addingTimeInterval(180)
+        while p.isRunning, Date() < deadline { usleep(50_000) }
+        if p.isRunning { p.terminate(); snap.error = "heap timed out"; return snap }
+        try? handle.close()
+        guard let text = try? String(contentsOfFile: out, encoding: .utf8) else { snap.error = "no heap output"; return snap }
+        try? FileManager.default.removeItem(atPath: out)
+        let regex = try? NSRegularExpression(
+            pattern: #"^\s*(\d+)\s+(\d+)\s+[\d.]+\s+(.*?)\s*(?:\s{2,}(?:ObjC|Swift|C\+\+|C)\b.*)?$"#)
+        for line in text.split(separator: "\n") {
+            let l = String(line)
+            guard let m = regex?.firstMatch(in: l, range: NSRange(l.startIndex..., in: l)), m.numberOfRanges == 4,
+                  let countRange = Range(m.range(at: 1), in: l), let nameRange = Range(m.range(at: 3), in: l),
+                  let count = Int(l[countRange]) else { continue }
+            snap.classes[String(l[nameRange]), default: 0] += count
+            snap.total += count
         }
-        for i in 0 ..< table.capacity where table.keys[i] != 0 && table.counts[i] != 0 {
-            snap.classes[table.keys[i]] = table.counts[i]
-        }
-        for i in 0 ... 256 { snap.sizes[i] = table.sizes[i] }
-        snap.blocks = table.blocks
+        if snap.classes.isEmpty { snap.error = "no class table; head: " + String(text.prefix(300)).replacingOccurrences(of: "\n", with: " | ") }
         return snap
     }
 
-    static func className(_ ptr: UInt) -> String {
-        guard let cls = unsafeBitCast(ptr, to: AnyClass?.self) else { return "?" }
-        return String(cString: class_getName(cls))
-    }
-
-    /// The biggest movers between two snapshots: "Class +n, ...; size48 +n, ...".
-    static func delta(_ a: Snapshot, _ b: Snapshot, top: Int = 7) -> String {
+    /// The biggest movers between two snapshots.
+    static func delta(_ a: Snapshot, _ b: Snapshot, top: Int = 9) -> String {
+        if !a.error.isEmpty || !b.error.isEmpty { return "heap error: \(a.error) / \(b.error)" }
         var moves: [(String, Int)] = []
         for key in Set(a.classes.keys).union(b.classes.keys) {
             let d = (b.classes[key] ?? 0) - (a.classes[key] ?? 0)
-            if abs(d) >= 50 { moves.append((className(key), d)) }
+            if abs(d) >= 50 { moves.append((key, d)) }
         }
         moves.sort { abs($0.1) > abs($1.1) }
-        var sizeMoves: [(String, Int)] = []
-        for i in 0 ... 256 {
-            let d = b.sizes[i] - a.sizes[i]
-            if abs(d) >= 100 { sizeMoves.append(("sz\(i * 16)", d)) }
-        }
-        sizeMoves.sort { abs($0.1) > abs($1.1) }
-        func fmt(_ m: [(String, Int)]) -> String {
-            m.prefix(top).map { "\($0.0) \($0.1 >= 0 ? "+" : "")\($0.1)" }.joined(separator: ", ")
-        }
-        return "classes[\(fmt(moves))] sizes[\(fmt(sizeMoves))] (zones \(b.zones), total blocks \(b.blocks))"
+        return "heap[" + moves.prefix(top).map { "\($0.0) \($0.1 >= 0 ? "+" : "")\($0.1)" }.joined(separator: ", ")
+            + "] (total objects \(b.total))"
     }
 }
 
@@ -235,6 +178,39 @@ final class ViewTreeLeakProbeTests: XCTestCase {
         }
         probe("CopyMenuTextField add/remove") { host, _ in
             let v = CopyMenuTextField(labelWithString: "hello world"); host.addSubview(v); v.removeFromSuperview()
+        }
+    }
+
+    func testProbeRealViews() {
+        probe("measureIsland x3 on an ATTACHED TextBlockView (every remeasure of an on-screen column)", n: 300) { host, _ in
+            let block: TextBlockView
+            if let existing = host.subviews.first as? TextBlockView { block = existing } else {
+                block = TextBlockView(text: "Plain words " + String(repeating: "more ", count: 30))
+                host.addSubview(block)
+            }
+            for _ in 0 ..< 3 { _ = ChatTurnView.measureIsland(block, width: 600) }
+        }
+        probe("measureIsland x3 on an ATTACHED UserBubbleView", n: 300) { host, _ in
+            let v: UserBubbleView
+            if let existing = host.subviews.first as? UserBubbleView { v = existing } else {
+                v = UserBubbleView(text: "a question the user asked")
+                host.addSubview(v)
+            }
+            for _ in 0 ..< 3 { _ = ChatTurnView.measureIsland(v, width: 600) }
+        }
+        var counter = 0
+        var turn = ChatTurn(userInput: "question", timestamp: Date(), blocks: [.text("alpha")], isComplete: false)
+        probe("live ChatTurnView: the streaming block's text replaced each delta (same length)", n: 300) { host, _ in
+            let view: ChatTurnView
+            if let existing = host.subviews.first as? ChatTurnView { view = existing } else {
+                view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState())
+                view.setIslandWidth(800)
+                host.addSubview(view)
+            }
+            counter += 1
+            turn.blocks = [.text(counter % 2 == 0 ? "alpha beta gamma delta" : "omega sigma theta lambda")]
+            view.update(turn: turn)
+            host.layoutSubtreeIfNeeded()
         }
     }
 }
