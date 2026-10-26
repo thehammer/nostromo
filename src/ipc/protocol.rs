@@ -1664,6 +1664,28 @@ pub enum ClientMsg {
         #[serde(default)]
         invite_follow: bool,
     },
+
+    // ── agent follow (3b; every one refused over TCP) ─────────────────────────
+    /// Invite the focus `follower_tag` to follow a terminal: output produced
+    /// from now on is delivered into its conversation. Moves the invitation
+    /// if another focus follows. `include_screen` also delivers what is on
+    /// the screen now. Operator app with `terminal_follow_ui` only.
+    TerminalFollowInvite {
+        terminal_id: String,
+        follower_tag: String,
+        #[serde(default)]
+        include_screen: bool,
+    },
+    /// Stop following at once; output not yet delivered is discarded.
+    /// Operator app only.
+    TerminalFollowStop {
+        terminal_id: String,
+    },
+    /// Resume a following that paused itself (too much output). Operator
+    /// app only.
+    TerminalFollowResume {
+        terminal_id: String,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -1917,6 +1939,17 @@ pub struct RemoteShellEnvironment {
     pub services: Vec<String>,
 }
 
+/// The focus following a terminal (`TerminalInfo.follower`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalFollower {
+    pub tag: String,
+    /// Following paused itself; one `terminal_follow_resume` restarts it.
+    pub paused: bool,
+    /// Why it paused: `too_much_output` or `too_many_deliveries`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<String>,
+}
+
 /// A terminal's metadata. Never its bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalInfo {
@@ -1942,6 +1975,9 @@ pub struct TerminalInfo {
     /// The `client_request_id` of the `TerminalOpenLocal` that opened it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened_by_request: Option<String>,
+    /// The focus following this terminal, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follower: Option<TerminalFollower>,
 }
 
 /// `ServerMsg::TerminalClosed`'s fields. `reason`: `exited`, `user_closed`,
@@ -2620,6 +2656,7 @@ mod tests {
                 timestamp: None,
                 blocks: vec![],
                 is_complete: false,
+                origin: None,
             }],
         });
         round_trip_server(ServerMsg::SessionTurnDelta {
@@ -2631,6 +2668,7 @@ mod tests {
                     timestamp: None,
                     blocks: vec![],
                     is_complete: false,
+                    origin: None,
                 },
             },
         });
@@ -6818,6 +6856,7 @@ mod terminal_wire_tests {
                 tag: None,
             },
             opened_by_request: Some("req-1".into()),
+            follower: None,
         }
     }
 

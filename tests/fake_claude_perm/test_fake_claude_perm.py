@@ -975,6 +975,92 @@ class AuthModeTest(unittest.TestCase):
             self.assertEqual(f.read(), "expired")
 
 
+class HoldCueTest(unittest.TestCase):
+    """HOLD:<abs path> keeps a turn open until that file exists."""
+
+    def hold_path(self):
+        d = tempfile.mkdtemp(prefix="fcphold")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return os.path.join(d, "release")
+
+    def release(self, path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("go")
+
+    def fake(self, path=None):
+        fake = Fake(self)
+        fake.start()
+        if path is not None:
+            # Runs before the fake's own cleanup, so a held fake exits promptly.
+            self.addCleanup(self.release_quietly, path)
+        return fake
+
+    def release_quietly(self, path):
+        if not os.path.exists(path):
+            self.release(path)
+
+    def test_a_held_message_is_echoed_then_nothing_until_the_file_exists(self):
+        path = self.hold_path()
+        fake = self.fake(path)
+        echo = fake.cue("please HOLD:%s now" % path)
+        self.assertEqual(echo["message"]["content"], "please HOLD:%s now" % path)
+        self.assertTrue(fake.no_more_frames(grace=0.5))
+        self.assertIsNone(fake.proc.poll(), "alive while held")
+
+    def test_creating_the_file_ends_the_turn_with_a_short_ok(self):
+        path = self.hold_path()
+        fake = self.fake(path)
+        fake.cue("HOLD:%s" % path)
+        self.assertTrue(fake.no_more_frames(grace=0.2))
+        self.release(path)
+        frames = fake.until_result()
+        self.assertEqual([f["type"] for f in frames], ["assistant", "result"])
+        self.assertEqual(frames[0]["message"]["content"], [{"type": "text", "text": "ok"}])
+        self.assertIs(frames[1]["is_error"], False)
+        self.assertEqual(frames[1]["result"], "done")
+
+    def test_a_file_that_already_exists_does_not_hold_the_turn(self):
+        path = self.hold_path()
+        self.release(path)
+        fake = self.fake()
+        fake.send(user("HOLD:%s" % path))
+        frames = fake.until_result()
+        self.assertEqual([f["type"] for f in frames], ["user", "assistant", "result"])
+
+    def test_a_message_sent_while_held_is_not_read_until_the_hold_ends(self):
+        path = self.hold_path()
+        fake = self.fake(path)
+        fake.cue("HOLD:%s" % path)
+        fake.send(user("second message"))
+        self.assertTrue(fake.no_more_frames(grace=0.5), "second message is not echoed while held")
+        self.release(path)
+        frames = fake.take(4)  # held turn: assistant, result; then the second echo and its turn
+        self.assertEqual([f["type"] for f in frames[:2]], ["assistant", "result"])
+        self.assertEqual(frames[2]["type"], "user")
+        self.assertEqual(frames[2]["message"]["content"], "second message")
+
+    def test_stdin_log_records_the_held_message_verbatim(self):
+        path = self.hold_path()
+        fake = self.fake(path)
+        sent = user("HOLD:%s" % path)
+        fake.send(sent)
+        fake.next()
+        self.assertEqual(fake.jsonl("stdin.jsonl"), [sent])
+
+    def test_a_message_without_the_cue_is_unchanged_by_the_hold_feature(self):
+        fake = self.fake()
+        fake.send(user("HOLD: relative/path is not a cue"))
+        kinds = [f["type"] for f in fake.until_result()]
+        self.assertEqual(kinds, ["user", "assistant", "result"])
+
+    def test_the_fake_never_creates_the_hold_file(self):
+        path = self.hold_path()
+        fake = self.fake(path)
+        fake.cue("HOLD:%s" % path)
+        self.assertTrue(fake.no_more_frames(grace=0.3))
+        self.assertFalse(os.path.exists(path))
+
+
 class HygieneTest(unittest.TestCase):
     def test_fake_requires_the_log_dir_env_var(self):
         proc = subprocess.run([sys.executable, "-I", os.path.abspath(FAKE)], input=b"",
