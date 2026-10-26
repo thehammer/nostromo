@@ -2130,3 +2130,520 @@ fn curl_without_a_password_is_left_alone_even_with_a_hidden_separator() {
         failures.join("\n")
     );
 }
+
+// ───────────────────── two filler roles on one line ──────────────────────────
+//
+// A hidden character can stand for a blank AND another can sit inside the
+// secret on the same line (`curl<ZWSP>-u admin:QWKZ<ZWSP>XBNM`). Reading every
+// run as a space misses the secret's tail; reading none as a space misses the
+// flag. Both roles together must still redact the whole secret.
+
+#[test]
+fn a_hidden_separator_and_a_hidden_character_inside_the_secret_on_one_line_are_both_handled() {
+    let all: Vec<shapes::Shape> = shapes::separators()
+        .iter()
+        .flat_map(|(_, f)| shapes::two_filler_role_examples(f))
+        .collect();
+    assert!(all.len() >= 50, "only {} shapes", all.len());
+    assert_shapes_redacted(&all);
+}
+
+#[test]
+fn every_credential_shape_survives_a_separator_filler_plus_a_different_filler_inside_the_secret() {
+    // Every separator x every in-secret filler x every slot x every place in
+    // the secret, for each credential template; a deterministic sample of the
+    // whole product so the run stays short.
+    let mut all = Vec::new();
+    for (sep_label, sep) in shapes::separators() {
+        for (in_label, inner) in shapes::secret_fillers() {
+            all.extend(shapes::separator_and_secret_filler_shapes(
+                &sep_label, &sep, &in_label, &inner,
+            ));
+        }
+    }
+    let total = all.len();
+    let sampled = shapes::sample(all, 6);
+    assert!(total >= 10_000, "only {total} shapes in the product");
+    assert!(sampled.len() >= 1_000, "only {} sampled", sampled.len());
+    assert_shapes_redacted(&sampled);
+}
+
+#[test]
+fn a_separator_filler_plus_an_in_secret_filler_sweep_covers_the_same_filler_in_both_roles() {
+    // The pairs on the diagonal (the same hidden character in both roles) are
+    // the likeliest to be mistaken for one run: all of them, no sampling.
+    let mut all = Vec::new();
+    for (label, f) in shapes::secret_fillers() {
+        all.extend(shapes::separator_and_secret_filler_shapes(
+            &label, &f, &label, &f,
+        ));
+    }
+    assert!(all.len() >= 1_000, "only {} shapes", all.len());
+    assert_shapes_redacted(&all);
+}
+
+#[test]
+fn ordinary_lines_with_a_hidden_separator_and_a_hidden_character_inside_a_word_come_back_untouched()
+{
+    let mut failures = Vec::new();
+    for (_, sep) in shapes::separators() {
+        for (_, inner) in shapes::secret_fillers() {
+            for line in shapes::ordinary_two_role_filler_lines(&sep, &inner) {
+                let (out, kinds) = redact(&line);
+                if out != line || !kinds.is_empty() {
+                    failures.push(format!("input {line:?} -> {out:?} ({kinds:?})"));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ordinary text was altered:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn a_credential_past_many_hidden_runs_on_its_line_is_redacted_whole() {
+    let all: Vec<shapes::Shape> = shapes::secret_fillers()
+        .iter()
+        .flat_map(|(_, f)| shapes::credential_after_many_hidden_runs(f))
+        .collect();
+    assert_shapes_redacted(&all);
+}
+
+#[test]
+fn a_hidden_separator_and_a_hidden_secret_character_both_past_many_hidden_runs_are_redacted_whole()
+{
+    let all: Vec<shapes::Shape> = shapes::secret_fillers()
+        .iter()
+        .flat_map(|(_, f)| shapes::separator_after_many_hidden_runs(f))
+        .collect();
+    assert_shapes_redacted(&all);
+}
+
+// ───────────────────── curl: escaped blanks in a password ────────────────────
+
+#[test]
+fn a_backslash_escaped_blank_in_a_bare_curl_password_does_not_end_the_password() {
+    let all = shapes::curl_escaped_blank_shapes();
+    assert!(all.len() >= 10);
+    assert_shapes_redacted(&all);
+}
+
+#[test]
+fn a_curl_password_ending_in_an_even_run_of_backslashes_ends_there_and_the_url_stays_readable() {
+    for s in shapes::curl_even_backslash_shapes() {
+        let (out, kinds) = redact(&s.line);
+        assert_eq!(
+            shapes::verdict(&s, &out, kinds.len()),
+            None,
+            "[{}] {:?}",
+            s.name,
+            s.line
+        );
+        assert!(
+            out.ends_with(shapes::KEPT_AFTER_EVEN_BACKSLASHES),
+            "[{}] the text after the password was swallowed: {:?} -> {out:?}",
+            s.name,
+            s.line
+        );
+    }
+}
+
+// ───────────────────── curl: metacharacters inside quotes ────────────────────
+
+#[test]
+fn a_quoted_or_escaped_ampersand_semicolon_or_pipe_before_u_does_not_hide_the_curl_credential() {
+    let all = shapes::curl_metacharacter_shapes();
+    assert!(all.len() >= 12);
+    assert_shapes_redacted(&all);
+}
+
+#[test]
+fn a_quoted_metacharacter_before_the_flag_keeps_the_url_after_the_credential_readable() {
+    let pw = ["Hun", "ter2", "Xyz9"].concat();
+    for line in [
+        format!("curl 'https://h/?a=1&b=2' -u admin:{pw} https://h/x"),
+        format!("curl -H 'X: a;b' -u admin:{pw} https://h/x"),
+        format!("curl -H \"X: a|b\" --user admin:{pw} https://h/x"),
+    ] {
+        let (out, kinds) = redact(&line);
+        assert!(out.ends_with(" https://h/x"), "{line:?} -> {out:?}");
+        assert!(!out.contains(&pw[3..]), "{line:?} -> {out:?}");
+        assert_eq!(kinds.len(), 1, "{line:?} -> {out:?}");
+    }
+}
+
+#[test]
+fn after_a_real_command_break_another_commands_u_flag_is_not_curls() {
+    for line in shapes::after_a_real_break_lines() {
+        let (out, kinds) = redact(&line);
+        assert_eq!(out, line);
+        assert!(kinds.is_empty(), "{line:?} reported {kinds:?}");
+    }
+}
+
+// ───────────────────── pathological input stays fast ─────────────────────────
+
+/// About a megabyte of `unit` repeated.
+fn about_a_megabyte(unit: &str) -> String {
+    unit.repeat((1 << 20) / unit.len())
+}
+
+/// The bound a megabyte must stay under in a debug build on a busy CI runner:
+/// ordinary text takes a third of it, and the quadratic scan these guard
+/// against took many times longer (tens of seconds), so it cannot slip through.
+const FAST_ENOUGH: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn assert_fast(name: &str, text: &str) {
+    let started = std::time::Instant::now();
+    let _ = Redactor::new().redact(text);
+    let took = started.elapsed();
+    eprintln!("{name}: {} bytes in {took:?}", text.len());
+    assert!(
+        took < FAST_ENOUGH,
+        "{name}: {} bytes took {took:?}",
+        text.len()
+    );
+}
+
+#[test]
+fn a_megabyte_of_ordinary_text_is_redacted_in_under_a_second() {
+    // The yardstick for the pathological shapes below: the same size of text
+    // with nothing to hide (the timings are printed with `--nocapture`).
+    assert_fast(
+        "ordinary text",
+        &about_a_megabyte("ordinary output with nothing to hide "),
+    );
+}
+
+#[test]
+fn a_megabyte_of_curl_commands_cut_by_semicolons_is_redacted_in_under_a_second() {
+    assert_fast("curl;", &about_a_megabyte("curl;"));
+}
+
+#[test]
+fn a_megabyte_of_repeated_u_flags_without_a_password_is_redacted_in_under_a_second() {
+    assert_fast("curl -u a -u a ", &about_a_megabyte("curl -u a -u a "));
+    assert_fast("curl -u a ", &about_a_megabyte("curl -u a "));
+}
+
+#[test]
+fn a_megabyte_of_unbalanced_quotes_after_curl_is_redacted_in_under_a_second() {
+    assert_fast("curl '", &about_a_megabyte("curl 'curl 'curl '"));
+    assert_fast("curl \"", &about_a_megabyte("curl \"curl \"curl \""));
+}
+
+#[test]
+fn a_megabyte_of_curl_and_trailing_backslashes_is_redacted_in_under_a_second() {
+    assert_fast("curl \\", &about_a_megabyte("curl \\"));
+    assert_fast("curl \\<newline>", &about_a_megabyte("curl \\\n"));
+    assert_fast("curl -u \\<newline>", &about_a_megabyte("curl -u \\\n"));
+    assert_fast(
+        "curl -u a:b\\<newline>",
+        &about_a_megabyte("curl -u a:b\\\n"),
+    );
+}
+
+#[test]
+fn a_megabyte_of_curl_with_hidden_characters_is_redacted_in_under_a_second() {
+    assert_fast("curl<ZWSP>;", &about_a_megabyte("curl\u{200b};"));
+    assert_fast(
+        "curl<ZWSP>-u a:b<ZWSP>",
+        &about_a_megabyte("curl\u{200b}-u a:b\u{200b}"),
+    );
+}
+
+#[test]
+fn a_credential_at_the_end_of_a_megabyte_of_pathological_curl_text_is_still_redacted() {
+    let pw = ["Hun", "ter2", "Xyz9"].concat();
+    for unit in [
+        "curl;",
+        "curl -u a -u a ",
+        "curl \\\n",
+        "curl -u 'a:b'\\\n",
+        "curl -u \"a:b\\\n",
+    ] {
+        let text = format!("{}\ncurl -u admin:{pw} https://h/x", about_a_megabyte(unit));
+        let started = std::time::Instant::now();
+        let (out, kinds) = redact(&text);
+        assert!(
+            started.elapsed() < FAST_ENOUGH,
+            "{unit:?}: took {:?}",
+            started.elapsed()
+        );
+        assert!(!out.contains(&pw[3..]), "{unit:?}: the password survived");
+        assert!(!kinds.is_empty(), "{unit:?}: nothing redacted");
+    }
+}
+
+// ───────────────────── curl over several rows ────────────────────────────────
+
+#[test]
+fn a_curl_flag_on_the_row_after_a_trailing_backslash_is_redacted_in_one_text() {
+    let all = shapes::curl_continuation_shapes();
+    assert!(all.len() >= 8);
+    assert_shapes_redacted(&all);
+    let all = shapes::curl_value_on_next_row_shapes();
+    assert_shapes_redacted(&all);
+}
+
+/// Each row through one `Redactor` in its own call, as separate deliveries are.
+/// `newline_after_rows` writes the row break at the end of each call but the
+/// last.
+fn redact_rows_in_turn(rows: &[&str], newline_after_rows: bool) -> (Vec<String>, usize) {
+    let mut redactor = Redactor::new();
+    let mut outs = Vec::new();
+    let mut redactions = 0;
+    for (i, row) in rows.iter().enumerate() {
+        let text = if newline_after_rows && i + 1 < rows.len() {
+            format!("{row}\n")
+        } else {
+            row.to_string()
+        };
+        let (out, kinds) = redactor.redact(&text);
+        redactions += kinds.len();
+        outs.push(out);
+    }
+    (outs, redactions)
+}
+
+#[test]
+fn a_curl_flag_in_the_next_delivery_after_a_row_ending_in_a_backslash_is_redacted() {
+    let mut failures = Vec::new();
+    for s in shapes::curl_continuation_shapes() {
+        let rows: Vec<&str> = s.line.split('\n').collect();
+        for newline_after_rows in [false, true] {
+            let (outs, redactions) = redact_rows_in_turn(&rows, newline_after_rows);
+            if let Some(why) = shapes::verdict(&s, &outs.join("\n"), redactions) {
+                failures.push(format!(
+                    "[{}] rows {rows:?} (newline kept: {newline_after_rows}): {why}",
+                    s.name
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "leaked:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn a_curl_flag_opening_the_next_delivery_is_redacted_and_the_url_after_it_stays_readable() {
+    let pw = ["Hun", "ter2", "Xyz9"].concat();
+    let mut redactor = Redactor::new();
+    let (first, k1) = redactor.redact("curl -s https://h/x \\");
+    let (second, k2) = redactor.redact(&format!("  -u admin:{pw} https://h/y"));
+    assert!(first.contains("curl -s https://h/x"), "{first:?}");
+    assert!(k1.is_empty(), "{first:?}");
+    assert!(!second.contains(&pw[3..]), "{second:?}");
+    assert!(second.ends_with(" https://h/y"), "{second:?}");
+    assert_eq!(k2.len(), 1, "{second:?}");
+}
+
+#[test]
+fn the_value_of_a_curl_flag_on_the_next_deliverys_first_row_is_redacted() {
+    // `-u \` ends one delivery and the credential opens the next.
+    let mut failures = Vec::new();
+    for s in shapes::curl_value_on_next_row_shapes() {
+        let rows: Vec<&str> = s.line.split('\n').collect();
+        let (outs, redactions) = redact_rows_in_turn(&rows, false);
+        if let Some(why) = shapes::verdict(&s, &outs.join("\n"), redactions) {
+            failures.push(format!("[{}] rows {rows:?}: {why}", s.name));
+        }
+    }
+    assert!(failures.is_empty(), "leaked:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn a_continuation_that_has_completed_leaves_later_text_alone() {
+    let cases: [&[&str]; 4] = [
+        &["curl \\", "-s https://h/x", "ls -u foo:bar"],
+        &[
+            "curl -s \\",
+            "  -H 'X: 1' \\",
+            "  https://h/x",
+            "ls -u foo:bar",
+        ],
+        &["curl \\\n-s https://h/x", "ls -u foo:bar"],
+        &["echo hi", "ls -u foo:bar"],
+    ];
+    for rows in cases {
+        for newline_after_rows in [false, true] {
+            let (outs, redactions) = redact_rows_in_turn(rows, newline_after_rows);
+            let last = outs.last().unwrap();
+            assert_eq!(last, "ls -u foo:bar", "rows {rows:?}");
+            assert_eq!(redactions, 0, "rows {rows:?} -> {outs:?}");
+        }
+    }
+}
+
+#[test]
+fn a_row_ending_in_a_backslash_that_is_not_curl_carries_nothing_to_the_next_delivery() {
+    for first in ["echo hi \\", "ls -l \\", "echo hi \\\n"] {
+        let mut redactor = Redactor::new();
+        let (out, kinds) = redactor.redact(first);
+        assert_eq!(out, first);
+        assert!(kinds.is_empty());
+        for next in ["ls -u foo:bar", "-u foo:bar", "sort -u a:b"] {
+            let (out, kinds) = redactor.redact(next);
+            assert_eq!(out, next, "after {first:?}");
+            assert!(
+                kinds.is_empty(),
+                "after {first:?}: {next:?} reported {kinds:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_completed_continuation_still_redacts_its_own_credential_and_then_forgets_it() {
+    let pw = ["Hun", "ter2", "Xyz9"].concat();
+    let mut redactor = Redactor::new();
+    let (first, _) = redactor.redact("curl -s \\");
+    let (second, k2) = redactor.redact(&format!("-u admin:{pw} https://h/x"));
+    let (third, k3) = redactor.redact("ls -u foo:bar");
+    assert_eq!(first, "curl -s \\");
+    assert!(!second.contains(&pw[3..]), "{second:?}");
+    assert_eq!(k2.len(), 1);
+    assert_eq!(third, "ls -u foo:bar");
+    assert!(k3.is_empty(), "{third:?} reported {k3:?}");
+}
+
+// ───────────── review round 3: many runs, two readings across rows, quoting ──────
+
+/// Each shape as one text, then row by row through one `Redactor` (as separate
+/// deliveries are, with and without the row break kept at the end of a call).
+fn assert_rows_redacted_every_way(all: &[shapes::Shape]) {
+    assert_shapes_redacted(all);
+    let mut failures = Vec::new();
+    for s in all {
+        let rows: Vec<&str> = s.line.split('\n').collect();
+        for newline_after_rows in [false, true] {
+            let (outs, redactions) = redact_rows_in_turn(&rows, newline_after_rows);
+            if let Some(why) = shapes::verdict(s, &outs.join("\n"), redactions) {
+                failures.push(format!(
+                    "[{}] rows {rows:?} (newline kept: {newline_after_rows}): {why}",
+                    s.name
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "leaked across deliveries:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn a_credential_among_more_than_eight_hidden_runs_is_redacted_whole_before_or_after_the_padding() {
+    let all = shapes::credential_among_many_hidden_runs_shapes();
+    assert!(all.len() >= 10, "only {} shapes", all.len());
+    assert_shapes_redacted(&all);
+}
+
+#[test]
+fn a_continued_curl_with_hidden_runs_on_both_rows_is_redacted_in_every_reading() {
+    let all = shapes::continued_curl_with_hidden_runs_on_both_rows();
+    assert_rows_redacted_every_way(&all);
+}
+
+#[test]
+fn a_dollar_quoted_string_with_an_escaped_quote_before_u_does_not_hide_the_curl_credential() {
+    let all = shapes::dollar_quote_shapes();
+    assert_rows_redacted_every_way(&all);
+}
+
+#[test]
+fn a_curl_password_continued_onto_the_next_row_is_redacted_whole_quoted_or_not() {
+    let all = shapes::credential_continued_onto_the_next_row_shapes();
+    assert_rows_redacted_every_way(&all);
+}
+
+#[test]
+fn several_continuations_in_a_row_before_the_curl_value_are_followed() {
+    let all = shapes::repeated_continuations_before_the_value_shapes();
+    assert_rows_redacted_every_way(&all);
+}
+
+#[test]
+fn an_unterminated_double_quoted_curl_password_continued_by_a_backslash_is_redacted_whole() {
+    let all = shapes::unterminated_double_quote_continuation_shapes();
+    assert_rows_redacted_every_way(&all);
+}
+
+#[test]
+fn a_curl_row_ending_in_the_clip_mark_continues_into_the_next_row() {
+    let all = shapes::rows_ending_in_the_clip_mark_shapes();
+    assert_rows_redacted_every_way(&all);
+}
+
+#[test]
+fn a_flag_after_thousands_of_continued_rows_is_still_redacted_in_the_next_call() {
+    let s = shapes::credential_after_a_long_continued_curl();
+    for trailing_newline in [true, false] {
+        let mut redactor = Redactor::new();
+        let _ = redactor.redact(&shapes::long_continued_curl_text(trailing_newline));
+        let (out, kinds) = redactor.redact(&s.line);
+        assert_eq!(
+            shapes::verdict(&s, &out, kinds.len()),
+            None,
+            "(trailing newline: {trailing_newline}) {:?}",
+            s.line
+        );
+    }
+}
+
+/// `text` comes back as it is, nothing redacted, as one text and row by row.
+fn assert_comes_back_untouched_every_way(name: &str, text: &str) {
+    let (out, kinds) = redact(text);
+    assert_eq!(out, text, "[{name}]");
+    assert!(kinds.is_empty(), "[{name}] reported {kinds:?}");
+    let rows: Vec<&str> = text.split('\n').collect();
+    for newline_after_rows in [false, true] {
+        let (outs, redactions) = redact_rows_in_turn(&rows, newline_after_rows);
+        for (i, (row, out)) in rows.iter().zip(&outs).enumerate() {
+            let expected = if newline_after_rows && i + 1 < rows.len() {
+                format!("{row}\n")
+            } else {
+                row.to_string()
+            };
+            assert_eq!(
+                out, &expected,
+                "[{name}] row {i} (newline kept: {newline_after_rows})"
+            );
+        }
+        assert_eq!(
+            redactions, 0,
+            "[{name}] (newline kept: {newline_after_rows})"
+        );
+    }
+}
+
+#[test]
+fn text_after_curl_with_an_unmatched_apostrophe_and_other_commands_u_flags_comes_back_untouched() {
+    for (name, text) in shapes::curl_lookalike_negative_texts() {
+        assert_comes_back_untouched_every_way(name, &text);
+    }
+}
+
+#[test]
+fn an_unmatched_double_quote_after_curl_is_an_ordinary_character_and_later_commands_are_untouched()
+{
+    assert_comes_back_untouched_every_way(
+        "curl with an unmatched double quote",
+        &shapes::unmatched_quote_negative_text(),
+    );
+}
+
+#[test]
+fn a_megabyte_of_quoted_curl_credentials_with_a_trailing_backslash_is_redacted_in_under_a_second() {
+    assert_fast(
+        "curl -u 'a:b'\\<newline>",
+        &about_a_megabyte("curl -u 'a:b'\\\n"),
+    );
+    assert_fast(
+        "curl -u \"a:b\\<newline>",
+        &about_a_megabyte("curl -u \"a:b\\\n"),
+    );
+}

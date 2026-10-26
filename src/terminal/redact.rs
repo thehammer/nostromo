@@ -71,9 +71,39 @@
 //! recognised. The tracker guard has the same gap; NFKC (fullwidth forms) and
 //! the dash and digit folds above are all the normalisation there is.
 //!
-//! A text with several hidden characters in different roles (one inside a
-//! keyword, one standing for the separator) is read under four fixed
-//! assumptions, not every combination.
+//! A line can hold hidden runs in different roles (one standing for the
+//! separator, one inside the secret: `curl<ZWSP>-u admin:QWKZ<ZWSP>XBNM`). The
+//! text is read under four fixed assumptions and under **every combination** of
+//! "this run is a space / this run is nothing" for the first eight runs of
+//! each line (the rows of a command continued with trailing backslashes count
+//! as one line) and, for a line with more than eight, for its last eight too
+//! (fewer for a long text, see `VIEW_BUDGET`). Runs in the middle of a line
+//! with more than sixteen are only read under the four fixed assumptions. A
+//! credential that ends right before a hidden run is extended to the next real
+//! blank or the end of the line (`extend_over_hidden`): the run may have been
+//! a character of the secret that the reading which found the credential took
+//! for a space. The extra text is redacted too; leaking the tail is worse.
+//!
+//! ## `curl` over several rows
+//!
+//! The end of a `curl` command is found with the shell's quoting in mind: a
+//! `&`, `;` or `|` inside quotes does not end it (`curl 'https://h/?a=1&b=2'
+//! -u user:pw`), a backslash escapes the next character, and a backslash at
+//! the end of a row continues the command on the next one. The [`Redactor`]
+//! remembers a call that ended inside such a command, so the continuation is
+//! caught when it arrives in the next delivery. A `-u` password that ends in a
+//! backslash goes on through the blank (or newline) it escapes
+//! (`-u admin:QWKZXB\ NMVCFG`). The line assembler's clip mark `…` at the end
+//! of a row counts like a trailing backslash (the cut-off rest may hold the
+//! flag), a `$'…'` string has escapes, and a quote with no mate is an ordinary
+//! character, so `curl: Couldn't connect` does not make the rows after it part
+//! of a command.
+//!
+//! Known gaps: a fullwidth `；` folds to `;` and ends the command in the view
+//! although the shell does not; a continuation inside the user part
+//! (`-u admin\` newline `:pw`) or a newline inside a quoted password is not
+//! followed; only the last 8 KiB of an open command's rows are carried to the
+//! next delivery, so a flag further back than that is not seen there.
 //!
 //! ## Contract: whole lines
 //!
@@ -229,7 +259,24 @@ enum Hidden {
     /// Only ambiguous runs next to a word (a letter on one side, a non-letter
     /// on the other) are one space (`SSN<ZWSP>2<ZWSP>19`).
     AtWords,
+    /// Bit `n` of the mask decides the `n`th hidden run of each row group
+    /// (see [`RowGroup`]): set is one space, clear is removed. Every mask up to
+    /// a size the text allows gives every combination of the first runs of a
+    /// group (see [`View::all`]).
+    Mask(u32),
+    /// Like [`Mask`](Hidden::Mask), counting the runs of each group from its
+    /// end: for a group with more runs than a mask reaches.
+    TailMask(u32),
 }
+
+/// Most hidden runs of one row group whose every combination is read (the
+/// first ones and the last ones of a longer group).
+const MAX_MASK_RUNS: usize = 8;
+
+/// Most bytes of view text (all combinations of one text together) built to
+/// read the combinations of hidden runs; a longer text reads fewer runs per
+/// line (the four fixed readings always apply).
+const VIEW_BUDGET: usize = 1 << 20;
 
 /// A hidden character: invisible and not layout whitespace.
 fn is_hidden(c: char) -> bool {
@@ -264,7 +311,10 @@ fn fold(text: &str) -> Vec<Piece> {
             piece(' ', true);
         } else if is_odd_blank(c) {
             piece(' ', false);
-        } else if c.is_ascii() {
+        } else if c.is_ascii() || c == '…' {
+            // The ellipsis stays one character: NFKC would spell it `...`, and
+            // the clip mark the line assembler ends a cut row with must be
+            // recognisable (see `command_end`).
             piece(c, false);
         } else {
             for n in std::iter::once(c).nfkc() {
@@ -332,6 +382,58 @@ fn is_ambiguous(before: char, after: char) -> bool {
         && !(before.is_ascii_alphabetic() && after.is_ascii_alphabetic())
 }
 
+/// The rows of one command: a row that ends in a backslash (or the assembler's
+/// clip mark) continues on the next. A hidden run is numbered within its group,
+/// so the rows of a continued command are read as one line.
+#[derive(Default)]
+struct RowGroup {
+    /// The last visible character of the current row.
+    last: Option<char>,
+    /// Number of the current group.
+    index: usize,
+}
+
+impl RowGroup {
+    /// Take the next visible character; whether it starts a new group.
+    fn see(&mut self, c: char) -> bool {
+        if c != '\n' {
+            if !c.is_whitespace() {
+                self.last = Some(c);
+            }
+            return false;
+        }
+        let ends = !matches!(self.last.take(), Some('\\' | '…'));
+        if ends {
+            self.index += 1;
+        }
+        ends
+    }
+}
+
+/// How many hidden runs each row group holds (runs are separated by visible
+/// characters).
+fn runs_per_group(pieces: &[Piece]) -> Vec<u32> {
+    let mut counts = vec![0u32];
+    let mut group = RowGroup::default();
+    let mut in_run = false;
+    for piece in pieces {
+        if piece.hidden {
+            if !in_run {
+                if let Some(count) = counts.last_mut() {
+                    *count += 1;
+                }
+            }
+            in_run = true;
+        } else {
+            in_run = false;
+            if group.see(piece.c) {
+                counts.push(0);
+            }
+        }
+    }
+    counts
+}
+
 /// Where each character of a view came from.
 struct Origins {
     /// Byte offset in the view of each character.
@@ -358,20 +460,33 @@ impl<'a> View<'a> {
             }];
         }
         let pieces = fold(text);
+        let totals = runs_per_group(&pieces);
         let any_hidden = pieces.iter().any(|p| p.hidden);
-        let modes: &[Hidden] = if !any_hidden {
-            &[Hidden::Dropped]
-        } else {
-            &[
-                Hidden::Dropped,
+        let mut modes = vec![Hidden::Dropped];
+        if any_hidden {
+            modes.extend([
                 Hidden::EverySpaced,
                 Hidden::AmbiguousSpaced,
                 Hidden::AtWords,
-            ]
-        };
+            ]);
+            // A line can hold hidden runs in different roles (one a separator,
+            // one inside the secret): read every combination of the runs of a
+            // line, as far as the budget goes. A group with more runs than that
+            // is read at both ends.
+            let most = totals.iter().copied().max().unwrap_or(0) as usize;
+            let tails = most > MAX_MASK_RUNS;
+            let mut runs = most.min(MAX_MASK_RUNS);
+            while runs > 0 && (text.len() * if tails { 2 } else { 1 }) << runs > VIEW_BUDGET {
+                runs -= 1;
+            }
+            modes.extend((1..1u32 << runs).map(Hidden::Mask));
+            if tails {
+                modes.extend((1..1u32 << runs).map(Hidden::TailMask));
+            }
+        }
         let mut views: Vec<View<'a>> = Vec::with_capacity(modes.len());
-        for &mode in modes {
-            let view = View::from_pieces(&pieces, mode);
+        for mode in modes {
+            let view = View::from_pieces(&pieces, mode, &totals);
             if !views.iter().any(|v| v.text == view.text) {
                 views.push(view);
             }
@@ -380,10 +495,10 @@ impl<'a> View<'a> {
     }
 
     fn build(text: &str, mode: Hidden) -> View<'static> {
-        View::from_pieces(&fold(text), mode)
+        View::from_pieces(&fold(text), mode, &[])
     }
 
-    fn from_pieces(pieces: &[Piece], mode: Hidden) -> View<'static> {
+    fn from_pieces(pieces: &[Piece], mode: Hidden, totals: &[u32]) -> View<'static> {
         let mut text = String::with_capacity(pieces.len());
         let mut starts = Vec::with_capacity(pieces.len());
         let mut ranges = Vec::with_capacity(pieces.len());
@@ -393,8 +508,14 @@ impl<'a> View<'a> {
             text.push(c);
         };
         let mut i = 0;
+        // Hidden runs seen in the current row group.
+        let mut group = RowGroup::default();
+        let mut group_run = 0u32;
         while let Some(piece) = pieces.get(i) {
             if !piece.hidden {
+                if group.see(piece.c) {
+                    group_run = 0;
+                }
                 push(piece.c, piece.origin);
                 i += 1;
                 continue;
@@ -412,6 +533,12 @@ impl<'a> View<'a> {
             let space = match mode {
                 Hidden::Dropped => false,
                 Hidden::EverySpaced => true,
+                Hidden::Mask(bits) => bits.checked_shr(group_run).is_some_and(|b| b & 1 == 1),
+                Hidden::TailMask(bits) => totals
+                    .get(group.index)
+                    .and_then(|total| total.checked_sub(group_run + 1))
+                    .and_then(|from_end| bits.checked_shr(from_end))
+                    .is_some_and(|b| b & 1 == 1),
                 Hidden::AmbiguousSpaced | Hidden::AtWords => match (before, after) {
                     (Some(b), Some(a)) if is_ambiguous(b.c, a.c) => {
                         mode == Hidden::AmbiguousSpaced
@@ -423,6 +550,7 @@ impl<'a> View<'a> {
             if space {
                 push(' ', run);
             }
+            group_run = group_run.saturating_add(1);
             i = j;
         }
         View {
@@ -754,33 +882,40 @@ fn scan_cli_credentials(text: &str, hits: &mut Vec<Hit>) {
 // ───────────────────────────── curl -u ───────────────────────────────────────
 
 /// The flags that carry a user: `-u`, `-U` (proxy), their long forms, and the
-/// short ones behind a cluster of curl's no-argument short flags (`-su`).
+/// short ones behind a cluster of curl's no-argument short flags (`-su`). A
+/// newline counts as the blank before a flag: it is the start of a line that
+/// continues the command (`curl \` then `-u user:pw`).
 static CURL_USER_FLAG: LazyLock<Regex> = LazyLock::new(|| {
-    re(r"[ \t](?:(?-i:-[#0-46aBfgGhiIjJkLlMnNOpqRsSvVZ]*[uU])[ \t]*|--(?:proxy-)?user(?:[ \t]+|=))")
+    re(
+        r"[ \t\n](?:(?-i:-[#0-46aBfgGhiIjJkLlMnNOpqRsSvVZ]*[uU])[ \t]*|--(?:proxy-)?user(?:[ \t]+|=))",
+    )
 });
 
-static CURL_WORD: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\bcurl\b"));
+/// ASCII word boundaries: cheaper than Unicode ones on a long text, and
+/// matching a `curl` glued to a non-ASCII letter only redacts more.
+static CURL_WORD: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)(?-u:\b)curl(?-u:\b)"));
 
 /// `curl -u user:password`, in every quoting the shell allows: bare, the whole
 /// credential quoted (it may hold spaces), a quoted user with a bare or quoted
 /// password (`-u "admin":secret`), and quotes inside the value
 /// (`-u 'admin:hun'\''ter2'`, `-u "admin:hun\"ter2"`). It fails closed: when a
 /// quote is followed by more text glued to it, or a value holds a quote, the
-/// credential runs to the end of the line. Every `-u` of one command counts.
+/// credential runs to the end of the line. Every `-u` of one command counts,
+/// wherever the command's flags sit: after a quoted `&`, `;` or `|`, or on a
+/// line that a trailing backslash continues.
 fn scan_curl_users(text: &str, hits: &mut Vec<Hit>) {
     // The flags of a command are all found from its first `curl`; skipping the
     // later ones keeps `curl curl curl …` linear.
     let mut scanned_to = 0;
+    // End of the line the last flag was on. The flags come in text order, so
+    // one search serves every flag up to it: a long line of `curl;curl;…` is
+    // searched once, not once per `curl`.
+    let mut line_end = 0;
     for curl in CURL_WORD.find_iter(text) {
         if curl.start() < scanned_to {
             continue;
         }
-        let line_end = text[curl.end()..]
-            .find('\n')
-            .map_or(text.len(), |n| curl.end() + n);
-        let command_end = text[curl.end()..]
-            .find(['\n', '|', ';', '&'])
-            .map_or(text.len(), |n| curl.end() + n);
+        let command_end = command_end(text, curl.end());
         scanned_to = command_end;
         let mut pos = curl.end();
         while pos <= command_end {
@@ -788,7 +923,12 @@ fn scan_curl_users(text: &str, hits: &mut Vec<Hit>) {
                 break;
             };
             pos = flag.end();
-            if let Some(range) = curl_credential(text, flag.end(), line_end) {
+            // `-u \` + newline + `admin:pw`: the value is on the next line.
+            let at = skip_continuation(text, flag.end());
+            if at > line_end || line_end == 0 {
+                line_end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+            }
+            if let Some(range) = curl_credential(text, at, line_end) {
                 pos = pos.max(range.end);
                 hits.push(Hit {
                     range,
@@ -799,21 +939,107 @@ fn scan_curl_users(text: &str, hits: &mut Vec<Hit>) {
     }
 }
 
+/// Where the command whose arguments start at `from` ends: at an unquoted
+/// newline, `|`, `;` or `&`. A backslash escapes the next character (so `\;` and
+/// a backslash before a newline do not end it), a quote opens a string that
+/// may hold any of them (`$'…'` has escapes too), and the clip mark `…` that
+/// the line assembler puts at the end of a row it cut counts like a trailing
+/// backslash: the rest of the command may be on the next row.
+///
+/// A quote with no closing mate is an ordinary character (an apostrophe in
+/// `curl: Couldn't connect` must not swallow what follows); every other
+/// quote is skipped to its mate, so one pass is linear.
+fn command_end(text: &str, from: usize) -> usize {
+    // Once a kind of quote has no mate after some point, no later one has.
+    let (mut single_closes, mut double_closes) = (true, true);
+    let mut prev = None;
+    let mut idx = from;
+    while let Some(c) = text[idx..].chars().next() {
+        let next = idx + c.len_utf8();
+        let after = &text[next..];
+        idx = next;
+        match c {
+            '\\' | '…' => {
+                // Blanks between the mark and the newline are tolerated (the
+                // terminal may have padded the row).
+                let blanks = after.len() - after.trim_start_matches([' ', '\t', '\r']).len();
+                if after[blanks..].starts_with('\n') {
+                    idx = next + blanks + 1;
+                } else if c == '\\' {
+                    idx = next + after.chars().next().map_or(0, char::len_utf8);
+                }
+            }
+            '\'' | '"' => {
+                let ansi_c = c == '\'' && prev == Some('$');
+                let closes = if c == '\'' {
+                    &mut single_closes
+                } else {
+                    &mut double_closes
+                };
+                if *closes || ansi_c {
+                    let mate = if c == '\'' && !ansi_c {
+                        after.find('\'')
+                    } else {
+                        find_closing_quote(after, c)
+                    };
+                    match mate {
+                        Some(n) => idx = next + n + 1,
+                        None => *closes &= ansi_c,
+                    }
+                }
+            }
+            '\n' | '|' | ';' | '&' => return next - c.len_utf8(),
+            _ => {}
+        }
+        prev = Some(c);
+    }
+    text.len()
+}
+
+/// `at` past the backslash-newlines (or clip-mark newlines) and the blanks
+/// around them that start there: a value can be on a row that several continuations lead to.
+fn skip_continuation(text: &str, mut at: usize) -> usize {
+    loop {
+        let Some(after) = text[at..].strip_prefix(['\\', '…']) else {
+            return at;
+        };
+        let after = after.trim_start_matches([' ', '\t', '\r']);
+        let Some(next) = after.strip_prefix('\n') else {
+            return at;
+        };
+        at = text.len() - next.trim_start_matches([' ', '\t']).len();
+    }
+}
+
+/// `end`, the end of a row, moved to the end of the next row for as long as
+/// the row ends in a backslash: the shell joins them into one word.
+fn through_continuation(text: &str, mut end: usize) -> usize {
+    while ends_in_backslash(text[..end].trim_end_matches('\r')) && text[end..].starts_with('\n') {
+        end = text[end + 1..]
+            .find('\n')
+            .map_or(text.len(), |n| end + 1 + n);
+    }
+    end
+}
+
 /// The password of the credential starting at `at` (just after the flag).
 fn curl_credential(text: &str, at: usize, line_end: usize) -> Option<Range<usize>> {
     let rest = &text[at..line_end];
+    // Where a credential that runs to the end of the line ends (found only
+    // when needed: a chain of continued rows is long).
+    let eol = || through_continuation(text, line_end);
     let first = rest.chars().next()?;
     if matches!(first, '"' | '\'') {
         let body = at + 1;
         let Some(close) = closing_quote(&text[body..line_end], first) else {
             // Unterminated: from the first colon to the end of the line.
             let colon = text[body..line_end].find(':')?;
-            return non_empty(body + colon + 1..line_end);
+            return non_empty(body + colon + 1..eol());
         };
         let (close, after) = (body + close, body + close + 1);
         if let Some(colon) = text[body..close].find(':') {
             let end = if is_continued(text, after) {
-                line_end
+                eol()
             } else {
                 close
             };
@@ -825,11 +1051,11 @@ fn curl_credential(text: &str, at: usize, line_end: usize) -> Option<Range<usize
         // `-u 'ad'min:secret`: the quote is glued to more of the credential.
         if is_continued(text, after) {
             let colon = text[after..line_end].find(':')?;
-            return non_empty(after + colon + 1..line_end);
+            return non_empty(after + colon + 1..eol());
         }
         return None;
     }
-    let stop = rest.find(|c: char| c == ':' || c.is_whitespace() || matches!(c, '"' | '\''))?;
+    let stop = user_stop(rest)?;
     if rest[stop..].starts_with(':') {
         return curl_password(text, at + stop + 1, line_end);
     }
@@ -838,7 +1064,7 @@ fn curl_credential(text: &str, at: usize, line_end: usize) -> Option<Range<usize
         let colon = rest[stop..]
             .find(':')
             .filter(|&n| stop + n < line_end - at)?;
-        return non_empty(at + stop + colon + 1..line_end);
+        return non_empty(at + stop + colon + 1..eol());
     }
     None
 }
@@ -852,26 +1078,61 @@ fn curl_password(text: &str, at: usize, line_end: usize) -> Option<Range<usize>>
     if first.is_whitespace() {
         return None;
     }
+    let eol = || through_continuation(text, line_end);
     if matches!(first, '"' | '\'') {
         let end = match closing_quote(&rest[1..], first) {
             Some(close) => at + 1 + close + 1,
-            None => line_end,
+            None => eol(),
         };
-        return non_empty(
-            at..if is_continued(text, end) {
-                line_end
-            } else {
-                end
-            },
-        );
+        return non_empty(at..if is_continued(text, end) { eol() } else { end });
     }
-    let word = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    let end = if rest[..word].contains(['"', '\'']) {
-        line_end
-    } else {
-        at + word
-    };
+    let mut end = at + rest.find(char::is_whitespace).unwrap_or(rest.len());
+    // A word that ends in a backslash goes on past the blank it escapes
+    // (`pw\ tail`), or onto the next line when the backslash is the last
+    // character of its row.
+    while ends_in_backslash(&text[at..end]) {
+        let after = &text[end..];
+        let newline = after.starts_with('\n') || after.starts_with("\r\n");
+        let skip = if after.starts_with("\r\n") {
+            2
+        } else if newline || after.starts_with([' ', '\t']) {
+            1
+        } else {
+            break;
+        };
+        let from = end + skip;
+        let tail = text[from..]
+            .find(char::is_whitespace)
+            .unwrap_or(text.len() - from);
+        if newline && tail == 0 {
+            break;
+        }
+        end = from + tail;
+    }
+    if text[at..end].contains(['"', '\'']) {
+        end = text[end..].find('\n').map_or(text.len(), |n| end + n);
+        end = through_continuation(text, end);
+    }
     non_empty(at..end)
+}
+
+/// Offset in `rest` of the first `:`, quote or unescaped blank. A backslash
+/// keeps the blank after it in the word (`ad\ min:pw`).
+fn user_stop(rest: &str) -> Option<usize> {
+    let mut chars = rest.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '\\' && chars.peek().is_some_and(|&(_, n)| matches!(n, ' ' | '\t')) {
+            chars.next();
+        } else if c == ':' || c.is_whitespace() || matches!(c, '"' | '\'') {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Whether `word` ends in a backslash that escapes what follows: an odd run.
+fn ends_in_backslash(word: &str) -> bool {
+    (word.len() - word.trim_end_matches('\\').len()) % 2 == 1
 }
 
 /// Offset of the quote closing `text`'s start. Backslash escapes a quote inside
@@ -1199,15 +1460,32 @@ const UNTERMINATED_MARKER: &str = "[redacted: private-key (no END line; output r
 
 /// Redacts secrets from successive pieces of one terminal's text.
 ///
-/// Stateful only for private-key blocks: a block whose `BEGIN` has no `END` in
+/// Stateful for private-key blocks: a block whose `BEGIN` has no `END` in
 /// the same call is redacted to the end of the text and the following calls
 /// keep redacting until an `END` arrives, or until the block has swallowed
-/// [`MAX_UNTERMINATED_KEY_BYTES`] without one (then output resumes).
+/// [`MAX_UNTERMINATED_KEY_BYTES`] without one (then output resumes). Also for
+/// one `curl` command written over several rows with trailing backslashes:
+/// a call that ends inside one keeps its rows, and the next call reads them in
+/// front of its own, so `curl \` then `-u user:pw` (or `-u \` then
+/// `user:pw`) is caught across two deliveries too.
 #[derive(Debug, Default, Clone)]
 pub struct Redactor {
     inside_private_key: bool,
     /// Bytes swallowed by the current private-key block so far.
     swallowed: usize,
+    /// The rows of the `curl` command the previous call ended inside.
+    curl_rows: Option<CarriedRows>,
+}
+
+/// Raw rows of an open `curl` command. They can hold a secret, so they are
+/// never printed.
+#[derive(Default, Clone)]
+struct CarriedRows(String);
+
+impl fmt::Debug for CarriedRows {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "CarriedRows({} bytes)", self.0.len())
+    }
 }
 
 impl Redactor {
@@ -1234,6 +1512,26 @@ impl Redactor {
     /// a call that continues a block from the previous call reports it again,
     /// so every delivery shows what it hides.
     pub fn redact(&mut self, text: &str) -> (String, Vec<RedactionKind>) {
+        let stand_in = self.curl_stand_in();
+        let result = self.redact_text(text, &stand_in);
+        self.curl_rows = if self.inside_private_key {
+            None
+        } else {
+            open_curl_rows(&stand_in, text).map(CarriedRows)
+        };
+        result
+    }
+
+    /// What goes in front of the next text: a `curl` and the rows of the
+    /// command left open, or nothing.
+    fn curl_stand_in(&self) -> String {
+        self.curl_rows
+            .as_ref()
+            .map_or_else(String::new, |rows| format!("curl {}\n", rows.0))
+    }
+
+    fn redact_text(&mut self, text: &str, stand_in: &str) -> (String, Vec<RedactionKind>) {
+        let mut stand_in = stand_in;
         let mut out = String::with_capacity(text.len());
         let mut kinds = Vec::new();
         if self.inside_private_key && text.is_empty() {
@@ -1244,6 +1542,7 @@ impl Redactor {
         let mut pos = 0;
         loop {
             if self.inside_private_key {
+                stand_in = "";
                 out.push_str(&RedactionKind::PrivateKey.marker());
                 kinds.push(RedactionKind::PrivateKey);
                 match self.swallow_block(&scan, pos) {
@@ -1262,14 +1561,24 @@ impl Redactor {
             }
             match scan.find_from(&PRIVATE_KEY_BEGIN, pos) {
                 Some(begin) => {
-                    redact_plain(&text[pos..begin.start], &mut out, &mut kinds);
+                    redact_plain(
+                        &text[pos..begin.start],
+                        std::mem::take(&mut stand_in),
+                        &mut out,
+                        &mut kinds,
+                    );
                     // The block's own marker is pushed at the top of the loop.
                     self.inside_private_key = true;
                     self.swallowed = 0;
                     pos = begin.end;
                 }
                 None => {
-                    redact_plain(&text[pos..], &mut out, &mut kinds);
+                    redact_plain(
+                        &text[pos..],
+                        std::mem::take(&mut stand_in),
+                        &mut out,
+                        &mut kinds,
+                    );
                     return (out, kinds);
                 }
             }
@@ -1297,6 +1606,8 @@ impl Redactor {
             self.inside_private_key = true;
             self.swallowed = 0;
         }
+        // The lost text may have left a `curl` command open.
+        self.curl_rows = open_curl_rows(&self.curl_stand_in(), &lines.join("\n")).map(CarriedRows);
     }
 
     /// Consume the inside of a private-key block that starts at `from` in
@@ -1333,6 +1644,85 @@ enum Swallowed {
     Through(usize),
     /// The block outran [`MAX_UNTERMINATED_KEY_BYTES`]; resume at this offset.
     GaveUp(usize),
+}
+
+/// Most bytes at the end of a text read to find out whether it ends inside a
+/// `curl` command. A longer text is assumed to (over-redacting is safe).
+const OPEN_CURL_WINDOW: usize = 64 * 1024;
+
+/// Most bytes of an open command's rows carried to the next call.
+const MAX_CARRIED_ROWS: usize = 8 * 1024;
+
+/// Characters at the end of a row that may continue its command: a backslash
+/// (the fullwidth and small forms fold to it) or the assembler's clip mark.
+const BACKSLASHES: [char; 4] = ['\\', '\u{ff3c}', '\u{fe68}', '…'];
+
+fn without_trailing_blanks(text: &str) -> &str {
+    text.trim_end_matches(|c: char| c.is_whitespace() || is_hidden(c))
+}
+
+/// The rows of the `curl` command that `text` (which follows `stand_in`) ends
+/// inside, when its last row ends in a backslash: from the first row of the
+/// command, capped at [`MAX_CARRIED_ROWS`] bytes.
+fn open_curl_rows(stand_in: &str, text: &str) -> Option<String> {
+    // Cheap exit for the usual text.
+    if !without_trailing_blanks(text).ends_with(BACKSLASHES) {
+        return None;
+    }
+    let combined = if text.len() < OPEN_CURL_WINDOW {
+        format!("{stand_in}{text}")
+    } else {
+        let from = ceil_boundary(text, text.len() - OPEN_CURL_WINDOW);
+        format!("{CURL_STAND_IN}{}", &text[from..])
+    };
+    if !View::all(&combined)
+        .iter()
+        .any(|view| open_curl_command(&view.text))
+    {
+        return None;
+    }
+    // Back to the first row of the command: the rows before the last one that
+    // end in a backslash belong to it.
+    let rows: Vec<&str> = combined.split('\n').collect();
+    let mut first = rows.len() - 1;
+    while first > 0 && without_trailing_blanks(rows[first - 1]).ends_with(BACKSLASHES) {
+        first -= 1;
+    }
+    let joined = rows[first..].join("\n");
+    // The stand-in ends the rows with one newline of its own.
+    let joined = joined.trim_end_matches('\n').to_owned();
+    let joined = match joined.strip_prefix(CURL_STAND_IN) {
+        Some(rest) if first == 0 => rest,
+        _ => &joined,
+    };
+    let from = ceil_boundary(joined, joined.len().saturating_sub(MAX_CARRIED_ROWS));
+    // A cut that lands on a row break must not leave the stand-in ending at it.
+    Some(joined[from..].trim_start_matches('\n').to_owned())
+}
+
+/// Whether the last `curl` command of `text` runs to its end, which ends in a
+/// backslash.
+fn open_curl_command(text: &str) -> bool {
+    if !text.trim_end().ends_with(['\\', '…']) {
+        return false;
+    }
+    let mut open = false;
+    let mut scanned_to = 0;
+    for curl in CURL_WORD.find_iter(text) {
+        if curl.start() < scanned_to {
+            continue;
+        }
+        scanned_to = command_end(text, curl.end());
+        open = scanned_to == text.len();
+    }
+    open
+}
+
+fn ceil_boundary(text: &str, mut idx: usize) -> usize {
+    while !text.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
 }
 
 fn floor_boundary(text: &str, mut idx: usize) -> usize {
@@ -1375,10 +1765,21 @@ struct Span {
 }
 
 /// Apply the pattern rules (everything except private keys) to `text`.
-fn redact_plain(text: &str, out: &mut String, kinds: &mut Vec<RedactionKind>) {
+///
+/// `stand_in` (empty for most texts) goes in front when the text continues a
+/// `curl` command the previous call left open, so the scanners see one command.
+/// Nothing found inside it is reported: that call already redacted it.
+fn redact_plain(text: &str, stand_in: &str, out: &mut String, kinds: &mut Vec<RedactionKind>) {
     if text.is_empty() {
         return;
     }
+    let combined;
+    let (text, skip) = if stand_in.is_empty() {
+        (text, 0)
+    } else {
+        combined = format!("{stand_in}{text}");
+        (combined.as_str(), stand_in.len())
+    };
     // Accepted spans never overlap, so keying by start also orders them by
     // end: an overlap test is one range lookup.
     let mut accepted: BTreeMap<usize, Span> = BTreeMap::new();
@@ -1393,20 +1794,52 @@ fn redact_plain(text: &str, out: &mut String, kinds: &mut Vec<RedactionKind>) {
                 // A span the view cannot place in the original is dropped; the
                 // other views and rules still cover the text.
                 if let Some(range) = view.to_original(range) {
+                    let range = extend_over_hidden(text, range, kind);
                     accept(&mut accepted, text, Hit { range, kind }, priority);
                 }
             }
         }
     }
 
-    let mut cursor = 0;
+    let mut cursor = skip;
     for (start, span) in accepted {
-        out.push_str(&text[cursor..start]);
+        if span.end <= skip {
+            continue;
+        }
+        out.push_str(&text[cursor..start.max(skip)]);
         out.push_str(&span.kind.marker());
         kinds.push(span.kind);
         cursor = span.end;
     }
     out.push_str(&text[cursor..]);
+}
+
+/// What starts the text in front of a row that continues a `curl` command.
+const CURL_STAND_IN: &str = "curl ";
+
+/// A credential that ends right before hidden text may go on past it: the run
+/// was read as a blank in the view that found it, but it can be a character
+/// of the secret (`-u admin:QWKZ<ZWSP>XBNM`, one more hidden run somewhere
+/// else having made the other readings miss). Take everything up to the next
+/// real blank, or the end of the line. Over-redacting is the safe error.
+///
+/// Only for the kinds that end at a word: a token has a shape that includes
+/// its own tail, and a URL password ends at its `@`.
+fn extend_over_hidden(text: &str, range: Range<usize>, kind: RedactionKind) -> Range<usize> {
+    let ends_at_a_word = matches!(
+        kind,
+        RedactionKind::SecretAssignment
+            | RedactionKind::BearerToken
+            | RedactionKind::BasicAuth
+            | RedactionKind::AwsSecretKey
+    );
+    if !ends_at_a_word || !next_char(text, range.end).is_some_and(is_hidden) {
+        return range;
+    }
+    let end = text[range.end..]
+        .find(char::is_whitespace)
+        .map_or(text.len(), |n| range.end + n);
+    range.start..end
 }
 
 /// Add `hit` unless accepted spans already account for all of its text.
