@@ -330,8 +330,9 @@ final class MemoryWatchdog {
         let summarize = self.summarize
         summaryExecutor { [weak self] in
             let summary = summarize()
-            let deliver = { self?.announceMemoryHeldOutsideTranscript(summary: summary, reason: reason, before: before,
-                                                                      after: after) }
+            let deliver: () -> Void = {
+                self?.announceMemoryHeldOutsideTranscript(summary: summary, reason: reason, before: before, after: after)
+            }
             if Thread.isMainThread { deliver() } else { DispatchQueue.main.async(execute: deliver) }
         }
     }
