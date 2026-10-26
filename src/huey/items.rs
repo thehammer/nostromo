@@ -124,7 +124,9 @@ fn canonical(url: &str, keep_fragment: bool) -> String {
 /// Group items that are the same story. Items from different sources join
 /// when they share a URL, or when one links to the other's URL. Items of one
 /// source never join directly (a docs page whose bullets all link to the
-/// page is not one story).
+/// page is not one story). A link joins nothing from an item with more than
+/// three of them (a roundup), and never fuses two clusters that each already
+/// hold a first-party item.
 ///
 /// Clusters come out in order of their earliest input item; members best
 /// source class first, then oldest first.
@@ -143,19 +145,42 @@ pub fn cluster(items: &[NewsItem]) -> Vec<Cluster> {
         .iter()
         .map(|i| i.outbound_links.iter().map(|l| cluster_key(l)).collect())
         .collect();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            if items[i].source_id == items[j].source_id {
-                continue;
-            }
-            let same_page = own[i] == own[j];
-            let i_links_j = links[i].contains(&own[j]);
-            let j_links_i = links[j].contains(&own[i]);
-            if same_page || i_links_j || j_links_i {
-                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
-                if a != b {
-                    parent[b.max(a)] = b.min(a);
+    // A first-party item is its own story: two of them never end up in one
+    // cluster through a link (a roundup post linking to a release and to a
+    // docs bullet must not fuse the two). `has_first_party[root]` says
+    // whether a component already holds one.
+    let mut has_first_party: Vec<bool> = items
+        .iter()
+        .map(|i| i.class == SourceClass::FirstParty)
+        .collect();
+    // An item with more links than this is a roundup: its links say "also
+    // see", not "this is the same story", so they join nothing.
+    const MAX_JOINING_LINKS: usize = 3;
+    let links_to = |from: usize, to: usize| {
+        links[from].len() <= MAX_JOINING_LINKS && links[from].contains(&own[to])
+    };
+    // Same page first (certain), then links (a guess).
+    for by_link in [false, true] {
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if items[i].source_id == items[j].source_id {
+                    continue;
                 }
+                let joins = if by_link {
+                    links_to(i, j) || links_to(j, i)
+                } else {
+                    own[i] == own[j]
+                };
+                if !joins {
+                    continue;
+                }
+                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                if a == b || (by_link && has_first_party[a] && has_first_party[b]) {
+                    continue;
+                }
+                let (root, child) = (a.min(b), a.max(b));
+                parent[child] = root;
+                has_first_party[root] |= has_first_party[child];
             }
         }
     }
@@ -325,6 +350,74 @@ mod tests {
         let clusters = cluster(&[post, release]);
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].primary().id, "gh:v1");
+    }
+
+    #[test]
+    fn a_post_linking_two_first_party_items_does_not_fuse_them() {
+        let release = item(
+            "gh:v1",
+            "gh",
+            SourceClass::FirstParty,
+            "https://x.test/r/v1",
+            &[],
+        );
+        let docs = item(
+            "docs:1",
+            "docs",
+            SourceClass::FirstParty,
+            "https://docs.test/notes#1",
+            &[],
+        );
+        let roundup = item(
+            "blog:1",
+            "blog",
+            SourceClass::Curated,
+            "https://blog.test/p",
+            &["https://x.test/r/v1", "https://docs.test/notes#1"],
+        );
+        let clusters = cluster(&[release, docs, roundup]);
+        assert_eq!(clusters.len(), 2);
+        for c in &clusters {
+            let first_party = c
+                .items
+                .iter()
+                .filter(|i| i.class == SourceClass::FirstParty)
+                .count();
+            assert_eq!(first_party, 1, "{:?}", c.items);
+        }
+        assert!(clusters
+            .iter()
+            .all(|c| c.primary().class == SourceClass::FirstParty));
+    }
+
+    #[test]
+    fn links_from_a_roundup_with_many_links_join_nothing() {
+        let a = item("a:1", "a", SourceClass::Curated, "https://a.test/1", &[]);
+        let b = item("b:1", "b", SourceClass::Aggregator, "https://b.test/1", &[]);
+        let c = item("c:1", "c", SourceClass::Curated, "https://c.test/1", &[]);
+        let d = item("d:1", "d", SourceClass::Curated, "https://d.test/1", &[]);
+        let roundup = item(
+            "r:1",
+            "r",
+            SourceClass::Curated,
+            "https://r.test/weekly",
+            &[
+                "https://a.test/1",
+                "https://b.test/1",
+                "https://c.test/1",
+                "https://d.test/1",
+            ],
+        );
+        assert_eq!(cluster(&[a.clone(), b, c, d, roundup]).len(), 5);
+        // A post with a few links still joins what it links to.
+        let few = item(
+            "r:2",
+            "r",
+            SourceClass::Curated,
+            "https://r.test/short",
+            &["https://a.test/1"],
+        );
+        assert_eq!(cluster(&[a, few]).len(), 1);
     }
 
     #[test]
