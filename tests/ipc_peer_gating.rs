@@ -2095,6 +2095,7 @@ async fn session_transcript_frames_for_a_sensitive_tag_are_never_broadcast_to_a_
         timestamp: None,
         blocks: vec![],
         is_complete: false,
+        origin: None,
     };
     for tag in ["fred", "teri", W] {
         h.broadcast(ServerMsg::SessionTurns {

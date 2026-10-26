@@ -101,6 +101,27 @@ Slice 2b runs `shell_command`, and `shell_command`, `profile` and `cluster` come
 2. show the content hash of the file(s) it was read from, or record it in the audit, at Connect;
 3. never reload the file between Connect and launch.
 
+## Agent follow (slice 3b)
+
+A focus follows a terminal only when the user invites it. Output the terminal produces afterwards is delivered into the follower's conversation without any user action (`src/terminal/follow/manager.rs`).
+
+| Client → daemon | Fields |
+|---|---|
+| `terminal_follow_invite`* | `terminal_id, follower_tag, include_screen?` (needs the connection's `terminal_follow_ui` capability, else `terminal_follow_ui_required`) |
+| `terminal_follow_stop`* | `terminal_id` |
+| `terminal_follow_resume`* | `terminal_id` (only a paused follow) |
+
+Refusal codes: `terminal_control_forbidden` (not the operator app; audited), `unknown_terminal`, `follower_not_running`, `not_followed`, `not_paused`. `TerminalInfo.follower` is `{tag, paused, pause_reason?}` while a focus follows; each change is broadcast as `terminal_state`.
+
+- **One follower per terminal.** Inviting another focus moves the invitation: the previous follower is told it stopped (`moved_to <tag>`).
+- **Only output after the invite** is delivered, unless `include_screen`: then the visible screen goes first, in the same message as the `started` notice.
+- **The pump.** A reader hook queues each chunk for the follow's task, which feeds the line assembler and asks the delivery policy every 100 ms: settled output (800 ms quiet, 200 ms at a prompt) or sustained output (at most every 10 s) is redacted, capped (200 lines / 16 KiB, head and tail) and written as `<nostromo-terminal-output terminal_id pane kind lines omitted redactions>` with a fixed advisory line. A full-screen program is delivered as a screen snapshot (`kind="screen"`). `pane` is `local shell in <dir>` or the remote shell's label. Flooding pauses the follow (`too_much_output`, `too_many_deliveries`) until `terminal_follow_resume`; what arrived while paused is never delivered.
+- **Into the conversation** (`SessionManager::inject`): an idle session is written to at once and starts a turn. While a turn runs, deliveries and notices wait in the queue and are combined into one message (48 KiB at most; middle deliveries are dropped with `[… K earlier deliveries omitted …]`). A user's queued message is never combined with anything. The echoed message opens a turn whose `origin` lists each delivery (`Turn.origin`, read from the text, so a reloaded transcript has it too).
+- **Notices** (`<nostromo-terminal-follow event reason?/>` plus a sentence): `started`, `paused`, `resumed`, `stopped` with `user_stopped`, `moved_to <tag>`, `pane_closed`, `terminal_restarted`, `app_closed`.
+- **Ends** when the user stops it (output not yet delivered, buffered or still queued, is discarded), the pane closes or the terminal is restarted, the follower's session stops, restarts, starts a new session, crash-loops or its focus is removed (no notice), or the last operator-app connection goes. Nothing is persisted: a new daemon follows nothing.
+
+Audit events: `follow_invited {follower, include_screen, via}`, `follow_stopped {follower, reason}`, `follow_paused {follower, reason}`, `follow_resumed {follower}`, `delivery {follower, kind, lines, bytes, redactions, truncated}`. Counts and sizes only.
+
 ## Network peers (FND-1)
 
 Every `terminal_*` client frame is `NetworkPolicy::Refused` (`src/ipc/peer.rs`): over TCP it is answered with `requires_secure_connection` before dispatch and audited with `channel: "tcp"`. Every terminal server frame is `ServerClass::LocalOnly`: a TCP peer receives none of them, not even metadata.
@@ -138,7 +159,7 @@ Output is coalesced. A chunk goes out at once if nothing was sent in the last 8 
 
 ## Audit
 
-`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, the remote-shell events above, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
+`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, the remote-shell and follow events above, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
 
 Refused lines are capped at 120 a minute per channel (one budget for the whole MCP channel, not one per focus), so a flood over TCP neither fills the log quickly nor silences local refusals. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.
 

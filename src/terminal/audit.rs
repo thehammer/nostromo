@@ -174,6 +174,47 @@ pub enum AuditEvent {
     RefusalLimitReached { channel: RefusalChannel },
     /// How many of a channel's refusals the cap kept out of the log.
     RefusalsSuppressed { channel: RefusalChannel, count: u32 },
+    /// The user invited a focus to follow the terminal (`via`: `control`,
+    /// `sheet` or `request`).
+    FollowInvited {
+        terminal_id: String,
+        tag: String,
+        follower: String,
+        include_screen: bool,
+        via: String,
+    },
+    /// Following ended: `user_stopped`, `moved_to <focus>`, `pane_closed`,
+    /// `terminal_restarted`, `session_ended` or `app_closed`.
+    FollowStopped {
+        terminal_id: String,
+        tag: String,
+        follower: String,
+        reason: String,
+    },
+    /// Following paused itself: `too_much_output` or `too_many_deliveries`.
+    FollowPaused {
+        terminal_id: String,
+        tag: String,
+        follower: String,
+        reason: String,
+    },
+    FollowResumed {
+        terminal_id: String,
+        tag: String,
+        follower: String,
+    },
+    /// One delivery into the follower's conversation: counts and sizes only.
+    Delivery {
+        terminal_id: String,
+        tag: String,
+        follower: String,
+        /// `lines` or `screen`.
+        kind: String,
+        lines: usize,
+        bytes: usize,
+        redactions: usize,
+        truncated: bool,
+    },
 }
 
 #[derive(Serialize)]

@@ -73,11 +73,16 @@ use crate::model::store as model_store;
 use crate::model::{Actor, ModelPaths, ModelTarget};
 
 mod control;
+mod inject;
+#[cfg(test)]
+mod inject_tests;
 mod login;
 mod model_switch;
 mod task_runtime;
 use control::ControlReply;
 pub use control::CONTROL_TIMEOUT;
+use inject::PendingOrigin;
+pub use inject::{SessionEndHook, INJECT_MERGE_CAP};
 pub use login::{ResendOutcome, ResendTrigger};
 use model_switch::{
     emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ModelRuntime,
@@ -156,6 +161,8 @@ struct PendingMessage {
     text: String,
     /// Absolute file paths; daemon reads + base64-encodes at drain time.
     images: Vec<String>,
+    /// The user's, or the daemon's (combinable; see `inject`).
+    origin: PendingOrigin,
 }
 
 // ── shared, reader-thread-visible session state ───────────────────────────────
@@ -565,6 +572,8 @@ pub struct SessionManager {
     claude_bin_cache: Mutex<Option<(Option<PathBuf>, Instant)>>,
     /// How new sessions read and control their background tasks.
     task_io: TaskIoConfig,
+    /// Told when a session ends (terminal follow ends with it).
+    session_end_hook: Option<SessionEndHook>,
 }
 
 impl SessionManager {
@@ -632,6 +641,7 @@ impl SessionManager {
             login: None,
             claude_bin_cache: Mutex::new(None),
             task_io: TaskIoConfig::default(),
+            session_end_hook: None,
         }
     }
 
@@ -1272,10 +1282,7 @@ impl SessionManager {
         // message is queued, not written, while a turn runs or a model switch
         // is being applied; queueing happens under the same lock so a turn end
         // draining the queue can't miss it.
-        let message = PendingMessage {
-            text: text.to_string(),
-            images: images.to_vec(),
-        };
+        let message = PendingMessage::user(text, images);
         let should_write = {
             let mut state = lock_recover(&session.shared.state);
             let applying = lock_recover(&session.shared.model).applying.is_some();
@@ -1593,6 +1600,8 @@ impl SessionManager {
         }
         // A stopped session is no longer waiting for a sign-in.
         self.login_changed();
+        // Nothing follows a terminal for a session that went down.
+        self.session_ended(tag);
     }
 
     /// Stop then respawn with `--resume <session_id>`, preserving the set of
@@ -1906,6 +1915,7 @@ impl SessionManager {
                 if let Some(reg) = &self.decisions {
                     reg.lock().unwrap().cancel_tag(&tag);
                 }
+                self.session_ended(&tag);
             } else if wants_recovery {
                 // Exit-code-aware restart policy:
                 //   exit 0 or signal (None) → restart immediately (clean shutdown).
@@ -3101,6 +3111,7 @@ fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
                 &PendingMessage {
                     text,
                     images: msg.images.clone(),
+                    origin: msg.origin.clone(),
                 },
             );
             if result.is_err() {
@@ -5379,10 +5390,7 @@ mod tests {
             shared.note_prefix.is_poisoned(),
             "precondition: the lock is poisoned"
         );
-        let msg = PendingMessage {
-            text: "hello".into(),
-            images: vec![],
-        };
+        let msg = PendingMessage::user("hello", &[]);
 
         let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             write_user_message(&shared, &msg)
@@ -5412,10 +5420,7 @@ mod tests {
             shared.stdin.is_poisoned(),
             "precondition: the lock is poisoned"
         );
-        let msg = PendingMessage {
-            text: "hello".into(),
-            images: vec![],
-        };
+        let msg = PendingMessage::user("hello", &[]);
 
         let (message, control) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (
@@ -5487,10 +5492,7 @@ mod tests {
     async fn a_queued_message_whose_write_panics_is_not_lost_and_the_session_is_not_left_writing() {
         let dir = tempfile::tempdir().unwrap();
         let (_reap, shared) = stub_session(&dir, "t", "cat > /dev/null");
-        lock_recover(&shared.pending).push_back(PendingMessage {
-            text: "M1".into(),
-            images: vec![],
-        });
+        lock_recover(&shared.pending).push_back(PendingMessage::user("M1", &[]));
         // Start writing M1 the way `step` does: off the queue, the write marked in flight, mid-turn.
         // (Nothing in the write path panics by itself any more now that it survives poisoned locks, so
         // the panic is made by hand while the write is in flight.)

@@ -107,6 +107,10 @@ pub struct OperatorConn {
 /// remote shell's confirm sheet.
 pub const REMOTE_SHELL_CONFIRM: &str = "remote_shell_confirm";
 
+/// The capability an operator connection declares when it can show who
+/// follows a terminal and stop it: only such a connection may invite.
+pub const TERMINAL_FOLLOW_UI: &str = "terminal_follow_ui";
+
 /// Why a terminal request failed. Nothing changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalError {
@@ -239,6 +243,8 @@ pub struct TerminalManager {
     remote_launcher: Arc<dyn RemoteLauncher>,
     /// Where the remote-shell vocabulary's files are (read per request).
     ecs_paths: EcsPaths,
+    /// Agent follow, once the IPC server has wired it.
+    follow: Option<Arc<follow::FollowManager>>,
 }
 
 /// One channel's `refused` lines in the current window.
@@ -268,6 +274,7 @@ impl TerminalManager {
                 remote_requests: RemoteRequests::default(),
                 remote_launcher: Arc::new(UnavailableLauncher),
                 ecs_paths: EcsPaths::from_config(&crate::config::TerminalConfig::default()),
+                follow: None,
             })
         })
     }
@@ -296,6 +303,19 @@ impl TerminalManager {
 
     pub fn audit(&self) -> &AuditLog {
         &self.audit
+    }
+
+    pub(crate) fn sensitive_tags(&self) -> SensitiveTags {
+        self.sensitive.clone()
+    }
+
+    /// Agent follow for these terminals, if wired ([`follow::FollowManager::install`]).
+    pub fn follow(&self) -> Option<Arc<follow::FollowManager>> {
+        self.follow.clone()
+    }
+
+    pub(crate) fn set_follow(&mut self, follow: Arc<follow::FollowManager>) {
+        self.follow = Some(follow);
     }
 
     /// Settle what a previous daemon left (see [`store::reconcile`]). Call
@@ -341,11 +361,49 @@ impl TerminalManager {
     // ── reads ─────────────────────────────────────────────────────────────────
 
     pub fn list(&self) -> Vec<TerminalInfo> {
-        self.terminals.values().map(|t| t.info.clone()).collect()
+        self.terminals
+            .values()
+            .map(|t| self.described(&t.info))
+            .collect()
     }
 
     pub fn info(&self, terminal_id: &str) -> Option<TerminalInfo> {
-        self.terminals.get(terminal_id).map(|t| t.info.clone())
+        self.terminals
+            .get(terminal_id)
+            .map(|t| self.described(&t.info))
+    }
+
+    /// `info` with who follows the terminal now.
+    fn described(&self, info: &TerminalInfo) -> TerminalInfo {
+        TerminalInfo {
+            follower: self
+                .follow
+                .as_ref()
+                .and_then(|f| f.current_follower(&info.terminal_id)),
+            ..info.clone()
+        }
+    }
+
+    /// What following `terminal_id` needs: its metadata and its live session
+    /// (`None` for an unknown terminal, or one a previous daemon left).
+    pub(crate) fn follow_target(
+        &self,
+        terminal_id: &str,
+    ) -> Option<(TerminalInfo, Arc<TerminalSession>)> {
+        let t = self.terminals.get(terminal_id)?;
+        Some((t.info.clone(), Arc::clone(t.session.as_ref()?)))
+    }
+
+    /// Broadcast `terminal_id`'s current metadata (its follower changed).
+    pub(crate) fn send_state(&self, terminal_id: &str) {
+        if let Some(info) = self.info(terminal_id) {
+            self.send(ServerMsg::TerminalState { terminal: info });
+        }
+    }
+
+    /// Is any verified operator-app connection registered?
+    pub fn has_operator_conns(&self) -> bool {
+        !self.operator_conns.is_empty()
     }
 
     /// The `TerminalList` a newly connected local client is sent.
@@ -374,6 +432,13 @@ impl TerminalManager {
             conn.capabilities = caps;
         }
         self.end_remote_request_if_unanswerable();
+    }
+
+    /// Did the operator connection `conn_key` declare `capability`?
+    pub fn conn_has_capability(&self, conn_key: &str, capability: &str) -> bool {
+        self.operator_conns
+            .get(conn_key)
+            .is_some_and(|c| c.capabilities.iter().any(|have| have == capability))
     }
 
     /// The connection is gone: detach it everywhere and forget it.
@@ -552,6 +617,7 @@ impl TerminalManager {
             rows,
             requested_by,
             opened_by_request: req.client_request_id,
+            follower: None,
         };
         self.insert_live(info.clone(), session);
         self.persist();
@@ -574,7 +640,7 @@ impl TerminalManager {
         }
         self.send_pane_content(&info);
         self.send(ServerMsg::TerminalState {
-            terminal: info.clone(),
+            terminal: self.described(&info),
         });
         Ok(info)
     }
@@ -713,7 +779,9 @@ impl TerminalManager {
         t.info.cols = cols;
         t.info.rows = rows;
         let info = t.info.clone();
-        self.send(ServerMsg::TerminalState { terminal: info });
+        self.send(ServerMsg::TerminalState {
+            terminal: self.described(&info),
+        });
         Ok(())
     }
 
@@ -784,6 +852,9 @@ impl TerminalManager {
                 TerminalError::OpenFailed
             })?;
         let old = self.terminals.remove(terminal_id).expect("checked above");
+        if let Some(follow) = &self.follow {
+            follow.terminal_closed(terminal_id, true);
+        }
         if let Some(old_session) = &old.session {
             // Already exited: this signals nothing, it ends the old reader.
             old_session.kill();
@@ -796,6 +867,7 @@ impl TerminalManager {
             exit_code: None,
             ended_reason: None,
             opened_by_request: None,
+            follower: None,
             ..old.info
         };
         self.insert_live(info.clone(), session);
@@ -809,7 +881,7 @@ impl TerminalManager {
         });
         self.send_pane_content(&info);
         self.send(ServerMsg::TerminalState {
-            terminal: info.clone(),
+            terminal: self.described(&info),
         });
         Ok(info)
     }
@@ -1058,6 +1130,7 @@ impl TerminalManager {
         t.info.status = TerminalStatus::Ended;
         t.info.exit_code = code;
         let info = t.info.clone();
+        let info = self.described(&info);
         self.persist();
         self.record(AuditEvent::Ended {
             terminal_id: info.terminal_id.clone(),
@@ -1071,6 +1144,9 @@ impl TerminalManager {
 
     /// A terminal left the registry: remove its leaf, persist, audit, tell clients.
     fn finish_closed(&mut self, info: TerminalInfo, reason: &str, exit_code: Option<i32>) {
+        if let Some(follow) = &self.follow {
+            follow.terminal_closed(&info.terminal_id, false);
+        }
         let tree = self.remove_leaf(&info.tag, &info.pane_id);
         self.persist();
         self.record(AuditEvent::Closed {
@@ -1185,6 +1261,9 @@ pub fn op_of(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::TerminalClose { .. } => "close",
         ClientMsg::TerminalRestart { .. } => "restart",
         ClientMsg::TerminalRefusalReport { .. } => "refusal_report",
+        ClientMsg::TerminalFollowInvite { .. } => "follow_invite",
+        ClientMsg::TerminalFollowStop { .. } => "follow_stop",
+        ClientMsg::TerminalFollowResume { .. } => "follow_resume",
         // The remote-shell verbs are all "control" to the audit trail.
         ClientMsg::RemoteShellTargetsRequest
         | ClientMsg::RemoteShellOpen { .. }
@@ -1201,7 +1280,10 @@ pub fn terminal_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::TerminalInput { terminal_id, .. }
         | ClientMsg::TerminalResize { terminal_id, .. }
         | ClientMsg::TerminalClose { terminal_id }
-        | ClientMsg::TerminalRestart { terminal_id } => Some(terminal_id),
+        | ClientMsg::TerminalRestart { terminal_id }
+        | ClientMsg::TerminalFollowInvite { terminal_id, .. }
+        | ClientMsg::TerminalFollowStop { terminal_id }
+        | ClientMsg::TerminalFollowResume { terminal_id } => Some(terminal_id),
         ClientMsg::TerminalRefusalReport { terminal_id, .. } => terminal_id.as_deref(),
         _ => None,
     }
