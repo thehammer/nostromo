@@ -293,6 +293,15 @@ pub struct PostureSnapshot {
     /// Only Mother-attributable agents appear here; absent/empty → empty map.
     /// Raw token counts — never treat these as percentages.
     pub agents: BTreeMap<String, AgentSpend>,
+    /// Model families Bishop reports as exhausted (`exhausted_models`), as
+    /// written (e.g. `"sonnet"`). Empty when absent.
+    pub exhausted_models: Vec<String>,
+    /// Bishop's own flag that its inputs are stale (`stale_input`).
+    pub stale_input: bool,
+    /// `billing_mode` as written (`"metered"`, `"subscription"`), if any.
+    pub billing_mode: Option<String>,
+    /// When Bishop wrote the file (`ts`), if it says.
+    pub written_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl PostureSnapshot {
@@ -303,12 +312,16 @@ impl PostureSnapshot {
     /// `five_hour: None` / `seven_day: None` rather than a `None` return.
     pub fn load() -> Option<Self> {
         let home = dirs_next::home_dir()?;
-        let path = home.join(".claude").join("budget-posture.json");
+        Self::load_from(&home.join(".claude").join("budget-posture.json"))
+    }
+
+    /// Load from an explicit path (Huey reads the file its context names).
+    pub fn load_from(path: &std::path::Path) -> Option<Self> {
         let content = std::fs::read_to_string(path).ok()?;
         Self::parse_json(&content)
     }
 
-    fn parse_json(s: &str) -> Option<Self> {
+    pub fn parse_json(s: &str) -> Option<Self> {
         let v: serde_json::Value = serde_json::from_str(s).ok()?;
         let posture = {
             let p_str = v.get("posture")?.as_str()?;
@@ -318,6 +331,16 @@ impl PostureSnapshot {
         let seven_day = parse_window_pace(&v, "seven_day");
         let sonnet_seven_day = parse_sonnet_window(&v);
         let agents = parse_agents_map(&v);
+        let exhausted_models = v
+            .get("exhausted_models")
+            .and_then(|m| m.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|m| m.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         Some(PostureSnapshot {
             posture,
             five_hour,
@@ -325,6 +348,20 @@ impl PostureSnapshot {
             sonnet_seven_day,
             loaded_at: std::time::Instant::now(),
             agents,
+            exhausted_models,
+            stale_input: v
+                .get("stale_input")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false),
+            billing_mode: v
+                .get("billing_mode")
+                .and_then(|b| b.as_str())
+                .map(str::to_string),
+            written_at: v
+                .get("ts")
+                .and_then(|t| t.as_str())
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.with_timezone(&chrono::Utc)),
         })
     }
 

@@ -17,6 +17,7 @@ use chrono::{DateTime, Local, Utc};
 
 use crate::huey::interests::Interests;
 use crate::huey::paths::HueyPaths;
+use crate::huey::sources::config::ContextSwitches;
 use crate::mother::MotherJob;
 use collectors::{BoardSummary, PrRecord, PrState, PrsInput};
 use digest::{project_ignored, DigestInputs, ProjectContext};
@@ -234,15 +235,43 @@ pub fn gather(
     profile_cache: Option<&Path>,
     now: DateTime<Utc>,
 ) -> DigestInputs {
-    let repos: Vec<Repo> = projects::discover(&env.code_root)
-        .into_iter()
-        .filter(|r| !project_ignored(interests, &r.id, &r.name))
-        .collect();
+    gather_with(
+        env,
+        interests,
+        live,
+        profile_cache,
+        now,
+        &ContextSwitches::default(),
+    )
+}
+
+/// [`gather`], reading only the sources `switches` leave on: a source
+/// switched off is not touched at all. `prs`, `mother` and `interests` are
+/// the caller's to honour (they decide what goes into `live` and
+/// `interests`); `bishop` is honoured here and by the budget assessment.
+pub fn gather_with(
+    env: &ContextEnv,
+    interests: &Interests,
+    live: &LiveInputs,
+    profile_cache: Option<&Path>,
+    now: DateTime<Utc>,
+    switches: &ContextSwitches,
+) -> DigestInputs {
+    let repos: Vec<Repo> = if switches.code_root {
+        projects::discover(&env.code_root)
+            .into_iter()
+            .filter(|r| !project_ignored(interests, &r.id, &r.name))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let mut boards: BTreeMap<String, Vec<BoardSummary>> = BTreeMap::new();
-    for board in collectors::tracker_boards(&env.state_root) {
-        if let Some(repo) = board_project(&board, &repos) {
-            boards.entry(repo.id.clone()).or_default().push(board);
+    if switches.tracker {
+        for board in collectors::tracker_boards(&env.state_root) {
+            if let Some(repo) = board_project(&board, &repos) {
+                boards.entry(repo.id.clone()).or_default().push(board);
+            }
         }
     }
 
@@ -275,7 +304,11 @@ pub fn gather(
     let mut commits_by = BTreeMap::new();
     let mut activity: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
     for repo in &repos {
-        let commits = projects::recent_commits(&repo.root, 20);
+        let commits = if switches.git {
+            projects::recent_commits(&repo.root, 20)
+        } else {
+            Vec::new()
+        };
         let sources = ActivitySources {
             commits: &commits,
             prs: prs_by.get(&repo.id).map_or(&[][..], Vec::as_slice),
@@ -294,12 +327,17 @@ pub fn gather(
         .iter()
         .filter(|r| in_flight.contains(&r.id))
         .map(|repo| {
-            let prof = profile::profile_cached(&repo.root, &repo.id, profile_cache);
+            // The profile's `git grep` counts are git reads too.
+            let how_it_runs = if switches.git {
+                profile::profile_cached(&repo.root, &repo.id, profile_cache).line()
+            } else {
+                "not read (git is switched off)".to_string()
+            };
             ProjectContext {
                 id: repo.id.clone(),
                 name: repo.name.clone(),
                 root: repo.root.clone(),
-                how_it_runs: prof.line(),
+                how_it_runs,
                 prs: prs_by.remove(&repo.id).unwrap_or_default(),
                 boards: boards.remove(&repo.id).unwrap_or_default(),
                 jobs: jobs_by.remove(&repo.id).unwrap_or_default(),
@@ -324,12 +362,27 @@ pub fn gather(
         interests: interests.clone(),
         projects: project_contexts,
         prs_available,
-        posture: collectors::posture(&env.posture_file()),
+        posture: switches
+            .bishop
+            .then(|| collectors::posture(&env.posture_file()))
+            .flatten(),
         // Shown on `mother`, or as a machine line when Mother has jobs here.
         mother_queue: (!live.jobs.is_empty() || in_flight.contains("mother"))
             .then(|| collectors::queue_line(&live.jobs)),
-        ideas: collectors::ideas(&env.ideas_dir()),
-        todos: collectors::todos(&env.teri_db),
-        notes: collectors::notes(&env.notes_dir(), today),
+        ideas: if switches.ideas {
+            collectors::ideas(&env.ideas_dir())
+        } else {
+            Vec::new()
+        },
+        todos: if switches.todos {
+            collectors::todos(&env.teri_db)
+        } else {
+            Vec::new()
+        },
+        notes: if switches.notes {
+            collectors::notes(&env.notes_dir(), today)
+        } else {
+            Vec::new()
+        },
     }
 }
