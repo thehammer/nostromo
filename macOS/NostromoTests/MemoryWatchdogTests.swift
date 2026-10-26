@@ -256,6 +256,8 @@ final class MemoryWatchdogTests: XCTestCase {
         // race is real rather than hypothetical.
         watchdog.shedCompletionTimeout = 0.05
         watchdog.footprint = { Self.beforeBytes }
+        // The memory summary is taken off the main thread in the app; this test reads the toast at once.
+        watchdog.summaryExecutor = { $0() }
 
         var reliefCount = 0
         watchdog.relievePressure = { reliefCount += 1 }
@@ -294,6 +296,8 @@ final class MemoryWatchdogTests: XCTestCase {
     func testAShedWithNoListenerStillRelievesPressureAndReports() {
         let watchdog = MemoryWatchdog()
         watchdog.footprint = { Self.beforeBytes }
+        // The memory summary is taken off the main thread in the app; this test reads the toast at once.
+        watchdog.summaryExecutor = { $0() }
 
         var reliefCount = 0
         watchdog.relievePressure = { reliefCount += 1 }

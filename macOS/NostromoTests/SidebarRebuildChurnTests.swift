@@ -212,7 +212,6 @@ final class SidebarRebuildChurnTests: XCTestCase {
         settle(sidebar.window)
         let growth = SidebarChurnMeter.blocksInUse() - before
 
-        XCTFail("TEMP-MEASURE sidebar churn: \(frames) unchanged frames, live malloc blocks +\(growth), rebuilt-counter \(RebuildCounters.snapshot)")
         XCTAssertLessThan(growth, frames * allowedBlocksPerFrame,
                           "\(frames) frames that changed nothing left \(growth) more live malloc blocks "
                           + "(allowed \(frames * allowedBlocksPerFrame)): the sidebar is being rebuilt, and every new "
