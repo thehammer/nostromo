@@ -2783,3 +2783,106 @@ fn the_projects_note_says_the_description_is_read() {
     );
     assert!(!note.contains("no file contents"), "{note}");
 }
+
+#[test]
+fn a_git_file_pointing_outside_the_code_root_is_not_probed_there() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let outside = base.join("outside").join("victim");
+    make_repo(&outside, &[("secret.txt", "OUTSIDE-ONLY-TOKEN\n")]);
+    let code = base.join("code");
+    fs::create_dir_all(code.join("evil")).unwrap();
+    fs::write(
+        code.join("evil/.git"),
+        format!("gitdir: {}\n", outside.join(".git").display()),
+    )
+    .unwrap();
+
+    let repos = nostromo::huey::context::projects::discover(&code);
+    assert!(
+        repos.iter().all(|r| r.root.starts_with(&code)),
+        "no probe root outside the code root: {repos:?}"
+    );
+    assert!(
+        repos.is_empty(),
+        "a .git file nothing links back to is not a repository: {repos:?}"
+    );
+}
+
+#[test]
+fn a_linked_worktree_of_an_outside_checkout_is_probed_in_its_own_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let main = base.join("elsewhere").join("proj");
+    make_repo(&main, &[("README.md", "MAIN-CHECKOUT-TOKEN\n")]);
+    let code = base.join("code");
+    fs::create_dir_all(&code).unwrap();
+    let wt = code.join("proj-feature");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ],
+        now(),
+    );
+    fs::write(wt.join("worktree-only.txt"), "WORKTREE-TOKEN\n").unwrap();
+    commit_all(&wt, "Worktree work", days_ago(1));
+
+    let repos = nostromo::huey::context::projects::discover(&code);
+    assert_eq!(repos.len(), 1, "{repos:?}");
+    let repo = &repos[0];
+    assert_eq!(repo.id, "proj");
+    assert_eq!(repo.root, wt, "probes run in the directory under the root");
+    assert!(repo.worktrees.contains(&main) && repo.worktrees.contains(&wt));
+
+    let found = check(
+        "c1",
+        "proj",
+        &repo.root,
+        &Probe::Text {
+            term: "WORKTREE-TOKEN".into(),
+        },
+    )
+    .unwrap();
+    assert!(found.found, "{}", found.line());
+    let in_main_only = check(
+        "c2",
+        "proj",
+        &repo.root,
+        &Probe::Text {
+            term: "MAIN-CHECKOUT-TOKEN".into(),
+        },
+    )
+    .unwrap();
+    assert!(
+        in_main_only.found,
+        "history is shared: {}",
+        in_main_only.line()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_directories_are_not_discovered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let real = base.join("outside").join("real");
+    make_repo(&real, &[("a.txt", "x\n")]);
+    let code = base.join("code");
+    fs::create_dir_all(&code).unwrap();
+    std::os::unix::fs::symlink(&real, code.join("linked")).unwrap();
+    let group = base.join("outside").join("group");
+    fs::create_dir_all(&group).unwrap();
+    std::os::unix::fs::symlink(&real, group.join("inner")).unwrap();
+    std::os::unix::fs::symlink(&group, code.join("grouplink")).unwrap();
+    make_repo(&code.join("own"), &[("b.txt", "y\n")]);
+
+    let repos = nostromo::huey::context::projects::discover(&code);
+    let ids: Vec<&str> = repos.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, vec!["own"], "{repos:?}");
+}

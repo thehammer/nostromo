@@ -27,9 +27,11 @@ pub struct Repo {
     pub id: String,
     /// The main worktree's directory name as written.
     pub name: String,
-    /// The main worktree (where probes and the profile look).
+    /// Where probes and the profile run: the main worktree when it is under
+    /// the code root, else the first worktree that is. Never outside it.
     pub root: PathBuf,
-    /// Every directory that resolved to this repository, main included, sorted.
+    /// Every directory that resolved to this repository, main included (even
+    /// when it is outside the code root; it is only compared, never probed), sorted.
     pub worktrees: Vec<PathBuf>,
 }
 
@@ -136,6 +138,34 @@ fn is_candidate(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
 
+/// A `.git` directory is the repository itself. A `.git` file (a linked
+/// worktree) is trusted only when the git dir it names points back at it, so a
+/// planted `gitdir:` cannot make a directory under the code root stand in for
+/// a repository elsewhere.
+fn is_genuine(dir: &Path) -> bool {
+    let dot_git = dir.join(".git");
+    let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
+        return false;
+    };
+    if meta.is_dir() {
+        return true;
+    }
+    if !meta.is_file() || meta.len() > 4096 {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(&dot_git) else {
+        return false;
+    };
+    let Some(target) = text.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let gitdir = dir.join(target.trim());
+    let Ok(back) = std::fs::read_to_string(gitdir.join("gitdir")) else {
+        return false;
+    };
+    canonical(&dir.join(back.trim())) == canonical(&dot_git)
+}
+
 fn listable_children(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -170,8 +200,12 @@ pub fn discover(code_root: &Path) -> Vec<Repo> {
             );
         }
     }
+    let code_root_canonical = canonical(code_root);
     let mut by_main: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for dir in dirs {
+        if !is_genuine(&dir) {
+            continue;
+        }
         if let Some(main) = main_worktree(&dir) {
             by_main.entry(main).or_default().push(canonical(&dir));
         }
@@ -180,15 +214,26 @@ pub fn discover(code_root: &Path) -> Vec<Repo> {
         .into_iter()
         .filter_map(|(main, mut worktrees)| {
             let name = main.file_name()?.to_string_lossy().into_owned();
+            // Probes run under the code root: in the main worktree when it is
+            // there, else in the first candidate directory that is.
+            let root = if main.starts_with(&code_root_canonical) {
+                main.clone()
+            } else {
+                worktrees
+                    .iter()
+                    .filter(|w| w.starts_with(&code_root_canonical))
+                    .min()?
+                    .clone()
+            };
             if !worktrees.contains(&main) {
                 worktrees.push(main.clone());
             }
             worktrees.sort();
             worktrees.dedup();
             Some(Repo {
-                id: name.to_lowercase(),
+                id: super::collectors::safe_id(&name, 64),
                 name,
-                root: main,
+                root,
                 worktrees,
             })
         })
