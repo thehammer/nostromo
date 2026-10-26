@@ -37,9 +37,16 @@ mod tests {
     async fn get_state_reports_an_unset_up_machine_without_creating_anything() {
         let root = tempfile::tempdir().unwrap();
         let mut state = McpSharedState::for_test();
-        let src = HueyEngine::spawn(HueyDeps::production(
+        let context = crate::huey::context::ContextEnv::for_home(
+            root.path(),
+            root.path().join("code"),
+            root.path().to_path_buf(),
+            "test".into(),
+        );
+        let src = HueyEngine::spawn(HueyDeps::new(
             root.path().to_path_buf(),
             HueyConfig::default(),
+            context,
         ));
         state.huey = Some(src.handle);
         let v = get_state(&state);
