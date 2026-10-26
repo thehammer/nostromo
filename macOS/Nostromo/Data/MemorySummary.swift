@@ -35,8 +35,9 @@ struct MemorySummary: Equatable {
 
     // MARK: - Capture
 
-    /// A summary of this process now. A walk over the VM regions (about ten thousand in a busy app,
-    /// well under ten milliseconds) and one `malloc_zone_statistics` per zone; safe on any thread.
+    /// A summary of this process now. A walk over the VM regions and one `malloc_zone_statistics` per zone; safe on any thread.
+    /// Measured at about 90 ms (median) with 3.5 million live blocks and 10,000 regions on a CI Mac
+    /// (`MemorySummaryCostTests`), and it grows with the heap: not for the main thread of a big app.
     static func capture(limit: Int = 5) -> MemorySummary {
         var stats = malloc_statistics_t()
         malloc_zone_statistics(nil, &stats)
@@ -141,5 +142,42 @@ struct MemorySummary: Equatable {
             address += size
         }
         return out
+    }
+}
+
+
+/// Cumulative counts of the places that rebuild a view tree, so a capture says which one is churning.
+///
+/// Why this exists: every new `NSTextField`, `NSImageView`, `NSButton` or `NSTextView` that is shown in a
+/// window leaves AppKit KVO records (`NSKeyValueDependency` and friends, three or more per control)
+/// behind for good, so the rate at which the app rebuilds controls is the rate at which it leaks
+/// (docs/diagnostics.md, "View-tree leak"). The 2026-10-25 heap held two million of them. A heap summary
+/// cannot say which of our views made them; this can. Fixed names and numbers only.
+enum RebuildCounters {
+    enum Site: String, CaseIterable {
+        /// `TabBarView.setFocuses` tore the sidebar down and built it again.
+        case sidebarRebuilt = "sidebarRebuilt"
+        /// `TabBarView.setFocuses` was asked for rows it already shows and did nothing.
+        case sidebarSkipped = "sidebarSkipped"
+        /// `ReplView` built a turn view (materialisation, a width change, a shed or a splice).
+        case turnViewBuilt = "turnViewBuilt"
+        /// The Perri view's PR queue list replaced every row.
+        case perriQueueListRebuilt = "perriQueueListRebuilt"
+    }
+
+    private static let lock = NSLock()
+    private static var counts: [Site: Int] = [:]
+
+    static func note(_ site: Site) {
+        lock.lock()
+        counts[site, default: 0] += 1
+        lock.unlock()
+    }
+
+    /// Every site, zero included, by its fixed name.
+    static var snapshot: [String: Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Dictionary(uniqueKeysWithValues: Site.allCases.map { ($0.rawValue, counts[$0] ?? 0) })
     }
 }

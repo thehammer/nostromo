@@ -48,6 +48,11 @@ final class MemoryWatchdog {
     /// The minimum gap before the next non-critical shed after the 1st, 2nd and 3rd-or-later consecutive
     /// shed that did not help. After one that helped (or the first of an episode) the gap is `pollInterval`.
     static let backoffSchedule: [TimeInterval] = [120, 600, 3_600]
+    /// The gap after the 1st, 2nd and 3rd-or-later consecutive shed that finished only because its
+    /// completion timed out. Smaller than `backoffSchedule` (a timed-out shed says nothing about
+    /// whether shedding helps) but never the bare `pollInterval`: a pane that cannot finish compacting
+    /// would otherwise be asked again, and the operator told again, every 30 s.
+    static let timeoutBackoffSchedule: [TimeInterval] = [60, 300, 900]
 
     /// Called when the app should shed, with a completion the receiver must call
     /// once every pane has finished compacting. Wired to every live `ReplView` and
@@ -72,6 +77,8 @@ final class MemoryWatchdog {
     var now: () -> Date = { Date(timeIntervalSinceReferenceDate: ProcessInfo.processInfo.systemUptime) }
     /// Where the memory is, for the log line and the toast when a shed did not help. Never `heap`.
     var summarize: () -> MemorySummary = { MemorySummary.capture() }
+    /// Where `summarize` runs. Off the main thread by default (see `report`); tests run it inline.
+    var summaryExecutor: (@escaping () -> Void) -> Void = { DispatchQueue.global(qos: .utility).async(execute: $0) }
 
     private var pressureSource: DispatchSourceMemoryPressure?
     private var pollTimer: DispatchSourceTimer?
@@ -83,6 +90,10 @@ final class MemoryWatchdog {
     private var unhelpfulStreak = 0
     /// The operator has been told, in this episode, that shedding does not help.
     private var toldAboutUnhelpfulShed = false
+    /// Consecutive sheds that finished only via `shedCompletionTimeout`; sets a separate, smaller gap.
+    private var timeoutStreak = 0
+    /// The operator has been told, in this episode, that a shed timed out.
+    private var toldAboutTimedOutShed = false
     /// True from the moment a shed starts until its completion (or its timeout)
     /// has run. A shed is now asynchronous, so the `lastShed` rate limit alone no
     /// longer prevents a second one starting inside the first.
@@ -124,6 +135,8 @@ final class MemoryWatchdog {
             if bytes < Self.episodeEndBytes {
                 unhelpfulStreak = 0
                 toldAboutUnhelpfulShed = false
+                timeoutStreak = 0
+                toldAboutTimedOutShed = false
             }
             if bytes >= Self.warningBytes {
                 warn(footprint: bytes, detail: "Nostromo is holding \(Self.megabytes(bytes)) MB.")
@@ -213,8 +226,11 @@ final class MemoryWatchdog {
 
             let after = self.footprint()
             if timedOut {
+                self.timeoutStreak += 1
                 self.reportInconclusive(reason: reason, before: before, after: after)
             } else {
+                self.timeoutStreak = 0
+                self.toldAboutTimedOutShed = false
                 self.report(reason: reason, before: before, after: after)
             }
         }
@@ -247,10 +263,13 @@ final class MemoryWatchdog {
         }
     }
 
-    /// The gap a non-critical shed needs since the previous one started.
+    /// The gap a non-critical shed needs since the previous one started: the longer of the two
+    /// streaks' gaps, `pollInterval` when neither has one.
     private var requiredGap: TimeInterval {
-        guard unhelpfulStreak > 0 else { return Self.pollInterval }
-        return Self.backoffSchedule[min(unhelpfulStreak, Self.backoffSchedule.count) - 1]
+        func gap(_ streak: Int, _ schedule: [TimeInterval]) -> TimeInterval {
+            streak > 0 ? schedule[min(streak, schedule.count) - 1] : Self.pollInterval
+        }
+        return max(gap(unhelpfulStreak, Self.backoffSchedule), gap(timeoutStreak, Self.timeoutBackoffSchedule))
     }
 
     /// Freed at least `helpfulBytes` and at least a tenth of what was held.
@@ -261,13 +280,17 @@ final class MemoryWatchdog {
 
     /// A shed that finished only because its completion timed out: the "after" reading may predate
     /// the compaction, so it cannot say whether the shed helped. Report the figures, claim nothing,
-    /// and leave the back-off exactly where it was.
+    /// leave the unhelpful-shed back-off where it was, and count it toward the separate (smaller)
+    /// timeout back-off. The toast is said once until a shed completes normally or the episode ends.
     private func reportInconclusive(reason: String, before: Int, after: Int) {
         let sentence = reason.prefix(1).uppercased() + reason.dropFirst()
         log.error("""
             shed did not finish in time: \(Self.megabytes(before))MB → \(Self.megabytes(after))MB \
-            (\(reason, privacy: .public)); result inconclusive
+            (\(reason, privacy: .public)); result inconclusive; \
+            next attempt in at least \(Int(self.requiredGap), privacy: .public)s
             """)
+        guard !toldAboutTimedOutShed else { return }
+        toldAboutTimedOutShed = true
         onWarn?("Shed retained content",
                 "\(sentence). The shed was still running when it was measured, so its effect is "
                 + "not known yet. Footprint \(Self.megabytes(before)) → \(Self.megabytes(after)) MB.")
@@ -300,7 +323,23 @@ final class MemoryWatchdog {
             return
         }
         toldAboutUnhelpfulShed = true
-        let summary = summarize()
+        // Where the memory is takes a VM region walk and a malloc-zone statistics call, which is about
+        // 90 ms with 3.5 million live blocks and 10,000 regions on a CI Mac (`MemorySummaryCostTests`)
+        // and grows with the heap: it is the wrong thing to do on the main thread of an app that is
+        // already at its memory limit. The toast follows when it is ready.
+        let summarize = self.summarize
+        summaryExecutor { [weak self] in
+            let summary = summarize()
+            let deliver: () -> Void = {
+                self?.announceMemoryHeldOutsideTranscript(summary: summary, reason: reason, before: before, after: after)
+            }
+            if Thread.isMainThread { deliver() } else { DispatchQueue.main.async(execute: deliver) }
+        }
+    }
+
+    private func announceMemoryHeldOutsideTranscript(summary: MemorySummary, reason: String, before: Int, after: Int) {
+        let figures = "Footprint \(Self.megabytes(before)) → \(Self.megabytes(after)) MB."
+        let sentence = reason.prefix(1).uppercased() + reason.dropFirst()
         log.error("""
             shed did not help: \(Self.megabytes(before))MB → \(Self.megabytes(after))MB \
             (\(reason, privacy: .public)); \(summary.oneLine, privacy: .public); \

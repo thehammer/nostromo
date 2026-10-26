@@ -790,6 +790,7 @@ class ReplView: NSView {
         case .unavailable(let t): hydrated = t; contentAvailable = false
         }
         session.payloadStore.pin(turn.id)
+        RebuildCounters.note(.turnViewBuilt)
 
         let state = interactions.state(for: turn.id)
         let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable, interaction: state,

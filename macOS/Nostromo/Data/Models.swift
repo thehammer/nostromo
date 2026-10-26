@@ -573,7 +573,7 @@ enum CiState: String, Codable {
 }
 
 /// One item from the perri queue cache.
-struct PRQueueItem: Identifiable, Encodable {
+struct PRQueueItem: Identifiable, Encodable, Equatable {
     var id: String { "\(repo)#\(number)" }
     let repo:        String
     let number:      Int
@@ -663,6 +663,21 @@ struct PRDetail: Decodable {
         changedFiles = (try? c.decode(Int.self,              forKey: .changedFiles)) ?? 0
         headSha      = (try? c.decode(String.self,           forKey: .headSha))      ?? ""
         error        = try? c.decodeIfPresent(String.self,   forKey: .error)
+    }
+}
+
+extension PRDetail: Equatable {
+    /// Field by field (`CiCheck` is not `Equatable` in the app target), so the store can tell a
+    /// `perri_state` frame that changed nothing from one that did.
+    static func == (l: PRDetail, r: PRDetail) -> Bool {
+        guard l.prNumber == r.prNumber, l.repo == r.repo, l.title == r.title, l.author == r.author else { return false }
+        guard l.url == r.url, l.diffTooLarge == r.diffTooLarge, l.headSha == r.headSha, l.error == r.error else { return false }
+        guard l.additions == r.additions, l.deletions == r.deletions, l.changedFiles == r.changedFiles else { return false }
+        guard l.ciChecks.count == r.ciChecks.count else { return false }
+        for (a, b) in zip(l.ciChecks, r.ciChecks) where a.name != b.name || a.state != b.state || a.detail != b.detail {
+            return false
+        }
+        return l.diff == r.diff
     }
 }
 

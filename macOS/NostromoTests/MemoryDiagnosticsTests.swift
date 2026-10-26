@@ -182,8 +182,8 @@ final class MemoryDiagnosticsTests: XCTestCase {
 
         let missing = Self.previousTopLevelKeys.subtracting(json.keys)
         XCTAssertTrue(missing.isEmpty, "the capture lost keys it had before: \(missing.sorted())")
-        XCTAssertEqual(Set(json.keys), Self.previousTopLevelKeys.union(["memory"]),
-                       "`memory` is the only key this change adds at the top level")
+        XCTAssertEqual(Set(json.keys), Self.previousTopLevelKeys.union(["memory", "viewRebuilds"]),
+                       "`memory` and `viewRebuilds` are the only keys added at the top level")
     }
 
     /// The blank capture is the reason the summary is there: a pane going blank while the app is
