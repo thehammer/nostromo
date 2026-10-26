@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::data::work::picks::shown_ids;
+use crate::data::work::untrusted::one_line;
 use crate::huey::checks::{CheckResult, Probe};
 use crate::huey::interests::InterestSection;
 use crate::huey::render::{self, words};
@@ -25,6 +26,24 @@ pub const MAX_REPORT_WORDS: usize = 600;
 pub const QUIET_BODY_WORDS: usize = 150;
 /// Words in the Also-in-the-news line: headline plus what happened (AC8).
 pub const MAX_AIN_WORDS: usize = 40;
+
+/// Per-field caps. A field over its cap is refused (the model corrects it),
+/// never shortened. Words are whitespace-separated runs of the text as it
+/// would be rendered (invisible characters gone, link targets never counted:
+/// the daemon owns the links); the character caps bound text with no spaces.
+pub const HEADLINE_WORDS: usize = 12;
+pub const NOTED_WORDS: usize = 20;
+pub const OPENER_WORDS: usize = 25;
+pub const DROP_REASON_WORDS: usize = 8;
+pub const HEADLINE_CHARS: usize = 120;
+pub const SENTENCES_CHARS: usize = 400;
+pub const CHECK_TEXT_CHARS: usize = 300;
+pub const WHATS_NEW_CHARS: usize = 300;
+pub const AIN_TEXT_CHARS: usize = 300;
+pub const NOTED_CHARS: usize = 200;
+pub const OPENER_CHARS: usize = 200;
+pub const DROP_REASON_CHARS: usize = 80;
+pub const SKIP_REASON_CHARS: usize = 120;
 
 /// Which rule a problem broke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +70,8 @@ pub enum Rule {
     AinTooLong,
     AinSkipWithoutReason,
     TooManyWords,
+    /// A field over its word or character cap.
+    FieldTooLong,
     QuietBodyTooLong,
     FollowUpUnknown,
     FollowUpWithoutWhatsNew,
@@ -164,6 +185,7 @@ pub fn validate(
     let mut add = |rule: Rule, message: String| problems.push(Problem { rule, message });
 
     caps(input, publish, &mut add);
+    field_rules(publish, &mut add);
     for (n, pick) in publish.picks.iter().enumerate() {
         pick_rules(&facts, n, pick, &mut add);
     }
@@ -216,6 +238,110 @@ fn caps(input: &CurateInput, publish: &Publish, add: &mut impl FnMut(Rule, Strin
             } else {
                 "no Also noted lines today (budget is tight); move them to dropped".into()
             },
+        );
+    }
+}
+
+/// Refuse every field over its cap, naming the field and the counts (never
+/// the text). Counted on the text as it would be rendered, so invisible
+/// characters neither hide length nor count as words.
+fn field_rules(publish: &Publish, add: &mut impl FnMut(Rule, String)) {
+    let mut check = |which: String, field: &str, text: &str, chars: usize, words: Option<usize>| {
+        let clean = one_line(text, usize::MAX);
+        let (c, w) = (clean.chars().count(), clean.split_whitespace().count());
+        if let Some(max) = words.filter(|max| w > *max) {
+            add(
+                Rule::FieldTooLong,
+                format!("{which} {field} is {w} words; at most {max}: shorten it"),
+            );
+        }
+        if c > chars {
+            add(
+                Rule::FieldTooLong,
+                format!("{which} {field} is {c} characters; at most {chars}: shorten it"),
+            );
+        }
+    };
+    check(
+        "the".into(),
+        "opener_gist",
+        &publish.opener_gist,
+        OPENER_CHARS,
+        Some(OPENER_WORDS),
+    );
+    for (n, p) in publish.picks.iter().enumerate() {
+        let which = format!("pick {}", n + 1);
+        let check_text = match &p.check {
+            PublishCheck::Checked { text, .. } | PublishCheck::ToCheck { text } => text,
+        };
+        check(
+            which.clone(),
+            "headline",
+            &p.headline,
+            HEADLINE_CHARS,
+            Some(HEADLINE_WORDS),
+        );
+        check(
+            which.clone(),
+            "what_happened",
+            &p.what_happened,
+            SENTENCES_CHARS,
+            None,
+        );
+        check(
+            which.clone(),
+            "for_line",
+            &p.for_line,
+            SENTENCES_CHARS,
+            None,
+        );
+        check(
+            which.clone(),
+            "check.text",
+            check_text,
+            CHECK_TEXT_CHARS,
+            None,
+        );
+        if let Some(new) = &p.whats_new {
+            check(which, "whats_new", new, WHATS_NEW_CHARS, None);
+        }
+    }
+    if let Some(a) = &publish.also_in_the_news {
+        let which = "Also in the news".to_string();
+        check(which.clone(), "headline", &a.headline, HEADLINE_CHARS, None);
+        check(
+            which,
+            "what_happened",
+            &a.what_happened,
+            AIN_TEXT_CHARS,
+            None,
+        );
+    }
+    if let Some(reason) = &publish.ain_skip_reason {
+        check(
+            "the".into(),
+            "ain_skip_reason",
+            reason,
+            SKIP_REASON_CHARS,
+            None,
+        );
+    }
+    for (n, noted) in publish.also_noted.iter().enumerate() {
+        check(
+            format!("Also noted {}", n + 1),
+            "line",
+            &noted.line,
+            NOTED_CHARS,
+            Some(NOTED_WORDS),
+        );
+    }
+    for (n, drop) in publish.dropped.iter().enumerate() {
+        check(
+            format!("dropped {}", n + 1),
+            "reason",
+            &drop.reason,
+            DROP_REASON_CHARS,
+            Some(DROP_REASON_WORDS),
         );
     }
 }

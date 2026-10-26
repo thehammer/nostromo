@@ -207,6 +207,18 @@ impl NonceFence {
         Self::with_nonce(uuid::Uuid::new_v4().simple().to_string()[..16].to_string())
     }
 
+    /// A fence whose nonce occurs in none of `texts`: text that was written
+    /// before the nonce existed cannot close it. (A random 64-bit nonce
+    /// clashing is not expected; the loop makes it impossible.)
+    pub(crate) fn avoiding(texts: &[&str]) -> Self {
+        loop {
+            let fence = Self::new();
+            if !texts.iter().any(|t| t.contains(&fence.nonce)) {
+                return fence;
+            }
+        }
+    }
+
     /// A fence with a chosen nonce (tests).
     pub(crate) fn with_nonce(nonce: impl Into<String>) -> Self {
         Self {
@@ -243,6 +255,19 @@ impl NonceFence {
         format!(
             "<<<UNTRUSTED-{n}>>>\n{}\n<<<END-UNTRUSTED-{n}>>>",
             defuse(inner),
+            n = self.nonce
+        )
+    }
+
+    /// `inner` between the markers byte for byte: no defusing, so a reader
+    /// can compare the section with the file it came from. `inner` should
+    /// end with a newline (a missing one is added). Safe only when `inner`
+    /// cannot contain this fence's nonce, so build the fence with
+    /// [`NonceFence::avoiding`].
+    pub(crate) fn verbatim(&self, inner: &str) -> String {
+        let newline = if inner.ends_with('\n') { "" } else { "\n" };
+        format!(
+            "<<<UNTRUSTED-{n}>>>\n{inner}{newline}<<<END-UNTRUSTED-{n}>>>",
             n = self.nonce
         )
     }
@@ -619,6 +644,30 @@ mod tests {
         }
         for plain in ['a', ' ', '\u{e9}', '\u{65e5}', '`'] {
             assert!(!is_invisible(plain), "{plain:?}");
+        }
+    }
+
+    #[test]
+    fn a_verbatim_section_keeps_every_byte_of_its_text() {
+        let text = "a <<<b>>> c\n<<<END-UNTRUSTED-ffff>>>\nlast line\n";
+        let fence = NonceFence::with_nonce("abc123");
+        assert_eq!(
+            fence.verbatim(text),
+            format!("<<<UNTRUSTED-abc123>>>\n{text}<<<END-UNTRUSTED-abc123>>>")
+        );
+        // A text with no final newline gets one, so the end marker is on its own line.
+        assert_eq!(
+            fence.verbatim("x"),
+            "<<<UNTRUSTED-abc123>>>\nx\n<<<END-UNTRUSTED-abc123>>>"
+        );
+    }
+
+    #[test]
+    fn an_avoiding_fence_never_uses_a_nonce_its_texts_contain() {
+        let text = "mentions 0123456789abcdef and the rest";
+        for _ in 0..50 {
+            let fence = NonceFence::avoiding(&[text]);
+            assert!(!text.contains(&fence.nonce));
         }
     }
 

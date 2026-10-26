@@ -91,6 +91,18 @@ pub enum Section {
     Uncurated,
 }
 
+impl Section {
+    /// The name the ledger file and the model's recent-reports list use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Section::Pick => "pick",
+            Section::Ain => "ain",
+            Section::AlsoNoted => "also_noted",
+            Section::Uncurated => "uncurated",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerEntry {
     pub item_id: String,
@@ -98,6 +110,12 @@ pub struct LedgerEntry {
     pub date: NaiveDate,
     pub version: u32,
     pub section: Section,
+    /// The headline the report showed for the item (Huey's own words for a
+    /// curated pick or line, the source's title in a headline list). Absent
+    /// in entries written before it was stored: readers fall back to the
+    /// item's own title when they have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// Every item shown anywhere in the last [`LEDGER_KEEP_DAYS`] days.
@@ -178,6 +196,10 @@ pub struct RunRecord {
     /// report). A count only, never the ids.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unknown_ids: u32,
+    /// Candidate stories and Also-in-the-news candidates left out of the
+    /// model input to keep it within its byte budget. A count only.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub trimmed: u32,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -527,6 +549,7 @@ mod tests {
             date,
             version: 1,
             section,
+            title: None,
         }
     }
 
@@ -540,6 +563,21 @@ mod tests {
         assert!(ledger.blocks_candidate("a", d(14)));
         assert!(!ledger.blocks_candidate("a", d(15)));
         assert!(!ledger.blocks_candidate("b", d(2)));
+    }
+
+    #[test]
+    fn a_ledger_written_before_titles_existed_still_reads_and_a_missing_title_is_not_written() {
+        let old = r#"{"entries":[{"item_id":"a","canonical_url":"u","date":"2026-10-01","version":1,"section":"pick"}]}"#;
+        let ledger: Ledger = serde_json::from_str(old).unwrap();
+        assert_eq!(ledger.entries.len(), 1);
+        assert_eq!(ledger.entries[0].title, None);
+        assert_eq!(serde_json::to_string(&ledger).unwrap(), old);
+
+        let mut titled = entry("b", d(2), Section::Ain);
+        titled.title = Some("A headline".into());
+        let back: LedgerEntry =
+            serde_json::from_str(&serde_json::to_string(&titled).unwrap()).unwrap();
+        assert_eq!(back.title.as_deref(), Some("A headline"));
     }
 
     #[test]
@@ -568,6 +606,7 @@ mod tests {
                 fetch_ms: 0,
                 total_ms: 0,
                 unknown_ids: 0,
+                trimmed: 0,
             })
             .is_err());
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
