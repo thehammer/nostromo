@@ -70,7 +70,7 @@ pub(crate) async fn fetch(
             None if is_new(slug) && ctx.state.baseline_done => continue, // deferred
             None => Og::default(),
         };
-        items.push(
+        items.extend(
             Draft {
                 key: slug.clone(),
                 title: og.title.unwrap_or_else(|| humanize(slug)),

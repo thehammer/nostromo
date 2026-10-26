@@ -60,7 +60,7 @@ pub(crate) async fn fetch(
             .into_iter()
             .flatten()
             .filter_map(draft)
-            .map(|d| d.into_item(src, ctx.now))
+            .filter_map(|d| d.into_item(src, ctx.now))
             .collect(),
         etag: None,
         last_modified: None,

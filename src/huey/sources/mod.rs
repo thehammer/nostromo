@@ -72,8 +72,17 @@ pub(crate) struct Draft {
 }
 
 impl Draft {
-    pub fn into_item(self, src: &SourceConfig, now: DateTime<Utc>) -> NewsItem {
-        let canonical_url = canonicalize(&self.url);
+    /// The item, or `None` when its link is not a plain http(s) URL: a
+    /// report link must never be `javascript:` or carry control characters,
+    /// whatever a feed says.
+    pub fn into_item(self, src: &SourceConfig, now: DateTime<Utc>) -> Option<NewsItem> {
+        let url = self.url.trim().to_string();
+        let plain = !url.chars().any(|c| c.is_control() || c.is_whitespace())
+            && url::Url::parse(&url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
+        if !plain {
+            return None;
+        }
+        let canonical_url = canonicalize(&url);
         let cap = match src.class {
             SourceClass::FirstParty => FIRST_PARTY_TEXT_CAP,
             _ => CURATED_TEXT_CAP,
@@ -92,18 +101,18 @@ impl Draft {
         if title.is_empty() {
             title = clean_line(&self.key, TITLE_CAP);
         }
-        NewsItem {
+        Some(NewsItem {
             id: format!("{}:{}", src.id, self.key),
             source_id: src.id.clone(),
             class: src.class,
             title,
-            url: self.url,
+            url,
             canonical_url,
             published_at: self.published_at,
             first_seen_at: now,
             text: clean_text(&self.text, cap),
             outbound_links: links,
-        }
+        })
     }
 }
 

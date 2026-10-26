@@ -78,7 +78,7 @@ pub fn parse(
     let link_base = src.link_url.as_deref().unwrap_or(&src.url);
     Ok(entries
         .into_iter()
-        .map(|e| {
+        .filter_map(|e| {
             let published_at = times
                 .get(&e.version)
                 .and_then(|t| DateTime::parse_from_rfc3339(t).ok())

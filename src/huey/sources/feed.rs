@@ -35,7 +35,7 @@ pub fn parse(
         .iter()
         .take(MAX_ENTRIES)
         .filter_map(entry_draft)
-        .map(|d| d.into_item(src, now))
+        .filter_map(|d| d.into_item(src, now))
         .collect())
 }
 
@@ -89,4 +89,25 @@ fn primary_link(links: &[Link]) -> Option<&Link> {
                 .iter()
                 .find(|l| !matches!(l.rel.as_deref(), Some("self" | "enclosure")))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::huey::sources::config::load;
+
+    #[test]
+    fn an_entry_whose_link_is_not_plain_http_is_dropped() {
+        let (cfg, _) =
+            load("[[source]]\nid = \"f\"\nkind = \"feed\"\nurl = \"https://example.test/feed\"\n");
+        let atom = r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+            <title>t</title><id>urn:f</id><updated>2026-10-25T00:00:00Z</updated>
+            <entry><id>urn:1</id><title>script</title><updated>2026-10-25T00:00:00Z</updated>
+              <link href="javascript:alert(1)"/></entry>
+            <entry><id>urn:2</id><title>fine</title><updated>2026-10-25T00:00:00Z</updated>
+              <link href="https://example.test/ok"/></entry></feed>"#;
+        let items = parse(&cfg.sources[0], atom.as_bytes(), chrono::Utc::now()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].url, "https://example.test/ok");
+    }
 }

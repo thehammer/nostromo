@@ -58,7 +58,7 @@ pub fn parse(
     Ok(releases
         .into_iter()
         .filter(|r| !r.draft && !r.tag_name.trim().is_empty())
-        .map(|r| {
+        .filter_map(|r| {
             let body = r.body.unwrap_or_default();
             let name = r.name.filter(|n| !n.trim().is_empty());
             let mut title = name.unwrap_or_else(|| r.tag_name.clone());

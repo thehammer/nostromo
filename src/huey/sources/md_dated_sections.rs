@@ -55,17 +55,15 @@ pub fn parse(
             let links = link_targets(&raw, &page);
             let url = links.first().cloned().unwrap_or_else(|| page.to_string());
             let text = strip_links(&raw);
-            Some(
-                Draft {
-                    key,
-                    title: first_line(&text),
-                    url,
-                    published_at: end_of_day(date),
-                    text,
-                    outbound_links: links,
-                }
-                .into_item(src, now),
-            )
+            Draft {
+                key,
+                title: first_line(&text),
+                url,
+                published_at: end_of_day(date),
+                text,
+                outbound_links: links,
+            }
+            .into_item(src, now)
         })
         .collect();
     if items.is_empty() {
