@@ -358,7 +358,14 @@ class MotherBrokerClient {
                     completion(.failure(.code(.internal, message: "query.list returned no job list")))
                     return
                 }
-                completion(.success(self.decodeJobListing(raw)))
+                // Decoding the whole queue is two JSON passes per job (re-serialise, then decode), once a
+                // minute, and it grows with the queue (measured at about 0.14 ms per job with plan-sized
+                // text: 83 ms for 600 jobs). It has no business on the main thread, so it runs off it and
+                // only the result comes back.
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let listing = autoreleasepool { self.decodeJobListing(raw) }
+                    DispatchQueue.main.async { completion(.success(listing)) }
+                }
             }
         }
     }
@@ -670,7 +677,11 @@ class MotherBrokerClient {
                     log.error("broker: line \(lineData.count) bytes > \(MAX_LINE_BYTES) cap — dropping")
                     continue
                 }
-                dispatch(lineData)
+                // One autorelease pool per line: this loop runs for the life of the connection, and GCD
+                // only drains a worker's pool when the block returns. Without it every parsed
+                // envelope (the 60 s `query.list` reply holds the whole job queue) is kept until the
+                // socket closes.
+                autoreleasepool { dispatch(lineData) }
             }
         }
         log.info("broker read loop ended (fd=\(sock, privacy: .public))")

@@ -272,6 +272,7 @@ final class PaneRenderWatch {
             "suppressedHits": Dictionary(uniqueKeysWithValues: suppressedHits.map { ($0.key.rawValue, $0.value) }),
             "events": recorder.eventDictionaries(now: wall),
             "app": appInfo(),
+            "memory": MemorySummary.capture().jsonObject,
             "screens": NSScreen.screens.enumerated().map { index, screen -> [String: Any] in
                 ["index": index, "frame": Self.rect(screen.frame), "scale": Double(screen.backingScaleFactor)]
             },
@@ -309,6 +310,10 @@ final class PaneRenderWatch {
     private var isVisible: Bool {
         visibilityOverride ?? subject?.isRenderVisible ?? false
     }
+
+    /// Whether the pane is on screen, as the watch judges it (honouring the test override). The memory
+    /// watchdog's shed asks it, so that a visible pane keeps what it is showing.
+    var isPaneVisible: Bool { isVisible }
 
     /// Records the pane's alpha / hidden / attachment state when it differs from the last record.
     func pollPaneState() {
