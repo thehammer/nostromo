@@ -226,8 +226,7 @@ pub fn is_due(schedule: &Schedule, now: DateTime<Utc>, tz: &dyn LocalTime, day: 
             }
         }
         Some((at, FailReason::ModelFailed))
-            if day.model_failures() == 1
-                && now - at >= Duration::minutes(RETRY_AFTER_MINUTES) =>
+            if day.model_failures() == 1 && now - at >= Duration::minutes(RETRY_AFTER_MINUTES) =>
         {
             Due::Run {
                 trigger: Trigger::Retry,
@@ -264,7 +263,10 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
         assert_eq!(sched().run_at(date, &tz), at(11, 0));
         assert_eq!(sched().ready_by(date, &tz), at(11, 30));
-        assert_eq!(sched().next_run_at(at(12, 0), &tz), at(11, 0) + Duration::days(1));
+        assert_eq!(
+            sched().next_run_at(at(12, 0), &tz),
+            at(11, 0) + Duration::days(1)
+        );
     }
 
     #[test]
@@ -349,4 +351,3 @@ mod tests {
         assert_eq!(s.next_run_at(at(12, 0), &tz), at(23, 45));
     }
 }
-

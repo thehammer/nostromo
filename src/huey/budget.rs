@@ -8,6 +8,9 @@
 //! - **normal:** everything else, including a missing file (another Nostromo
 //!   user may not run Bishop); the footer then says the posture was
 //!   unavailable.
+//! - A file that exists but is unreadable, unparseable, names an unknown
+//!   posture, lacks a usable or a past `ts`, or has wrongly typed fields is
+//!   **tight**: the budget fails safe toward fewer model calls.
 //!
 //! Reads the posture file only; writes nothing.
 
@@ -20,6 +23,8 @@ use crate::data::rate_limits::{BudgetPosture, PostureSnapshot};
 use crate::huey::config::HueyConfig;
 use crate::huey::context::collectors::{self, PostureFacts};
 
+/// Clock skew allowed before a timestamp counts as being in the future.
+const FUTURE_SKEW_MINUTES: i64 = 5;
 /// Shown in the digest's mode line and the footer when there is no posture.
 pub const POSTURE_UNAVAILABLE: &str = "budget posture unavailable";
 /// A posture file older than this is not trusted to say "normal".
@@ -78,19 +83,107 @@ impl PostureNote {
 /// Read the posture file at `path` and decide the mode. `config` names the
 /// models Huey would use (for `exhausted_models`).
 pub fn assess(path: &Path, config: &HueyConfig, now: DateTime<Utc>) -> PostureNote {
-    let snapshot = PostureSnapshot::load_from(path);
-    let facts = collectors::posture(path);
-    let (Some(snapshot), Some(facts)) = (snapshot, facts) else {
-        return PostureNote {
-            mode: Mode::Normal,
-            posture: None,
-        };
+    assess_with(path, config, now, || modified_at(path))
+}
+
+/// [`assess`] with the file's modification time injected.
+///
+/// Fails safe toward fewer model calls: only a genuinely absent file is
+/// normal. A file that exists but cannot be read or parsed, names an
+/// unrecognised posture, has no usable or a future timestamp, or has
+/// wrongly typed fields is tight.
+pub fn assess_with(
+    path: &Path,
+    config: &HueyConfig,
+    now: DateTime<Utc>,
+    mtime: impl FnOnce() -> Option<DateTime<Utc>>,
+) -> PostureNote {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        // D1: a missing file is normal (another Nostromo user may not run
+        // Bishop). This is the only branch that fails open; change it here
+        // if the decision is revisited.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return PostureNote {
+                mode: Mode::Normal,
+                posture: None,
+            };
+        }
+        Err(_) => return unreadable(),
     };
-    let written_at = snapshot.written_at.or_else(|| modified_at(path));
+    let Some(value) = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .filter(serde_json::Value::is_object)
+    else {
+        return unreadable();
+    };
+    let (Some(snapshot), Some(facts)) = (
+        PostureSnapshot::parse_json(&text),
+        collectors::posture(path),
+    ) else {
+        return unreadable();
+    };
+    let mut force_tight = !posture_word_recognised(&value) || fields_malformed(&value);
+    let written_at = match value.get("ts") {
+        None => mtime(),
+        Some(_) => snapshot.written_at,
+    };
+    match written_at {
+        // No usable timestamp, or one in the future: nothing shows the file
+        // is fresh.
+        None => force_tight = true,
+        Some(at) if at > now + Duration::minutes(FUTURE_SKEW_MINUTES) => force_tight = true,
+        Some(_) => {}
+    }
     PostureNote {
-        mode: mode_for(&snapshot, &facts, written_at, config, now),
+        mode: mode_for(&snapshot, &facts, written_at, force_tight, config, now),
         posture: Some(facts.line()),
     }
+}
+
+/// A posture file that exists but cannot be used: tight, with no numbers.
+fn unreadable() -> PostureNote {
+    PostureNote {
+        mode: Mode::Tight,
+        posture: None,
+    }
+}
+
+/// `BudgetPosture::from_str` maps unknown words to `Normal`; Huey must not.
+fn posture_word_recognised(value: &serde_json::Value) -> bool {
+    let Some(word) = value.get("posture").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let word = word.trim();
+    matches!(
+        word.to_lowercase().as_str(),
+        "flush" | "normal" | "elevated" | "conservative" | "critical"
+    ) || matches!(
+        word,
+        "Pump the brakes" | "Ease up" | "Cruise" | "Push" | "Put the hammer down"
+    )
+}
+
+/// Fields the mode depends on that are present with the wrong type.
+fn fields_malformed(value: &serde_json::Value) -> bool {
+    let wrong = |key: &str, ok: fn(&serde_json::Value) -> bool| {
+        value.get(key).is_some_and(|v| !v.is_null() && !ok(v))
+    };
+    if wrong("stale_input", serde_json::Value::is_boolean)
+        || wrong("billing_mode", serde_json::Value::is_string)
+        || wrong("ts", serde_json::Value::is_string)
+        || wrong("exhausted_models", |v| {
+            v.as_array()
+                .is_some_and(|list| list.iter().all(serde_json::Value::is_string))
+        })
+        || wrong("seven_day", serde_json::Value::is_object)
+    {
+        return true;
+    }
+    value
+        .get("seven_day")
+        .and_then(|w| w.get("used_pct"))
+        .is_some_and(|v| !v.is_null() && !v.is_number())
 }
 
 /// D1, given a parsed posture file. `written_at` is when the file was
@@ -99,12 +192,12 @@ pub fn mode_for(
     snapshot: &PostureSnapshot,
     facts: &PostureFacts,
     written_at: Option<DateTime<Utc>>,
+    force_tight: bool,
     config: &HueyConfig,
     now: DateTime<Utc>,
 ) -> Mode {
     let used = facts.seven_day_used_pct.unwrap_or(0.0);
-    let stale_file =
-        written_at.is_some_and(|at| now - at > Duration::hours(STALE_AFTER_HOURS));
+    let stale_file = written_at.is_some_and(|at| now - at > Duration::hours(STALE_AFTER_HOURS));
     let metered = snapshot
         .billing_mode
         .as_deref()
@@ -115,7 +208,8 @@ pub fn mode_for(
     ) || used >= TIGHT_USED_PCT
         || snapshot.stale_input
         || stale_file
-        || metered;
+        || metered
+        || force_tight;
     let model = if tight {
         &config.tight_model
     } else {
@@ -224,11 +318,7 @@ mod tests {
     #[test]
     fn a_missing_file_is_normal_and_says_unavailable() {
         let dir = tempfile::tempdir().unwrap();
-        let note = assess(
-            &dir.path().join("nope.json"),
-            &HueyConfig::default(),
-            now(),
-        );
+        let note = assess(&dir.path().join("nope.json"), &HueyConfig::default(), now());
         assert_eq!(note.mode, Mode::Normal);
         assert!(!note.available());
         assert_eq!(note.mode_line(), "normal (budget posture unavailable)");

@@ -625,8 +625,12 @@ mod tests {
 
     #[test]
     fn a_banner_names_the_date_and_the_reason() {
-        let b = banner_for(day() - chrono::Duration::days(1), day(), MissingReason::ModelFailed)
-            .unwrap();
+        let b = banner_for(
+            day() - chrono::Duration::days(1),
+            day(),
+            MissingReason::ModelFailed,
+        )
+        .unwrap();
         assert!(b.text.contains("Sunday, Oct 25, 2026"), "{}", b.text);
         assert!(b.text.contains("model run failed"));
         assert!(banner_for(day(), day(), MissingReason::Asleep).is_none());
