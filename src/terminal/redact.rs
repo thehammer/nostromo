@@ -1616,6 +1616,7 @@ impl Redactor {
         Self {
             inside_private_key: key_open || end_first,
             swallowed: 0,
+            curl_rows: None,
         }
     }
 
