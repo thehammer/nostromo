@@ -1,44 +1,33 @@
 # Build Huey, the morning-report agent (sequenced plan, jobs H1 to H8)
 
 **Author:** Archie, 2026-10-25.
-**Status:** Approved by Hammer on 2026-10-25, with decisions D1 to D9 resolved (below). Split into eight Mother job files under `docs/plans/huey/`. Nothing is enqueued yet: Claudia enqueues after checking them.
-**Pairs with:** `docs/prd-huey.md` (Ada, revision 3, 45 acceptance criteria; Ada is folding the accepted deviations V1 to V6 into it). The PRD defines what Huey does as the user sees it. This plan defines how it is built, and maps every criterion to a job and a test.
-**Inputs read:** the PRD; `~/.claude/notes/huey-sim-2026-10-25.md` (the hand-run proof of concept); `~/.claude/huey/interests.md` (shape only); the repo at `origin/main` `94617f7`; `docs/plan-agent-switches.md`, `docs/plan-gmail-calendar.md`, `docs/plans/backplane-sequencing.md`; live probes of the real sources on 2026-10-25 (results under "A8").
+**Status:** Approved by Hammer on 2026-10-25, with decisions D1 to D9 resolved (below). Split into eight Mother jobs (H1 to H8); see "Job order and dependencies".
+**Pairs with:** `docs/prd-huey.md` (Ada, 45 acceptance criteria; the accepted deviations V1 to V6 are folded into it). The PRD defines what Huey does as the user sees it. This plan defines how it is built, and maps every criterion to a job and a test.
+**Inputs read:** the PRD; a hand-run proof of concept of the report (two sample reports, kept in local notes); a draft interests file (shape only); the repo at `origin/main` `94617f7`; `docs/plans/backplane-sequencing.md`; live probes of the real sources on 2026-10-25 (results under "A8").
 
 ## Notation
 
-- **H*n*** is a **job**: one Mother job, one branch, one PR. Each job has its own self-contained plan file in `docs/plans/huey/`.
+- **H*n*** is a **job**: one Mother job, one branch, one PR. Each job was given its own self-contained plan file when it was enqueued.
 - **D*n*** is a **decision**, resolved by the user on 2026-10-25. Each names the job(s) it affects.
-- **V*n*** is a **deviation** from PRD revision 3, accepted by the user; Ada is updating the PRD to match.
+- **V*n*** is a **deviation** from PRD revision 3, accepted by the user and since folded into the PRD.
 - **T*n*** is a **technical acceptance criterion** (Archie's). These add to Ada's criteria; they do not replace any.
 - **AC*n*** is one of Ada's 45 PRD acceptance criteria.
 - **`[H3-4]`**-style ids are the per-job checklist items Mother counts (`mother check H3-4`).
 
-## How to enqueue (for Claudia)
+## Job order and dependencies
 
-`mother add` takes one plan file per job, with exactly one `suggested_config` block. The eight job files are:
+The plan was split into eight per-job plan files for Mother (one branch and one PR each). Each file repeated the shared sections (Context through Risks) plus its own job section, so a fresh worker needed nothing else. Those per-job files were local working copies and are not committed; this document is the source of truth. Mother holds a dependent job until each dependency has succeeded and its PR has merged, and branches are cut from `origin/main`, which by then contains the dependencies.
 
-| Job | Plan file | Branch | `--depends-on` | `--max-cost` (guidance) |
-|---|---|---|---|---|
-| H1 | `docs/plans/huey/H1-switch.md` | `feat/huey-h1-switch` | none | 15 |
-| H2 | `docs/plans/huey/H2-fetch.md` | `feat/huey-h2-fetch` | H1 | 30 |
-| H3 | `docs/plans/huey/H3-context.md` | `feat/huey-h3-context` | H1 | 35 |
-| H4 | `docs/plans/huey/H4-run.md` | `feat/huey-h4-run` | H2, H3 | 35 |
-| H5 | `docs/plans/huey/H5-curate.md` | `feat/huey-h5-curate` | H4 | 40 |
-| H6 | `docs/plans/huey/H6-surface.md` | `feat/huey-h6-surface` | H4 | 30 |
-| H7 | `docs/plans/huey/H7-mac.md` | `feat/huey-h7-mac` | H6 | 30 |
-| H8 | `docs/plans/huey/H8-eval.md` | `feat/huey-h8-eval` | H5, H7 | 15 |
-
-Each file repeats the shared sections (Context through Risks), then its own job section, so a fresh worker needs nothing else. Enqueue in the table's order, passing the earlier job ids returned by `mother add` to `--depends-on`. A dependent job stays queued until each dependency has succeeded and its PR has merged. `--base` stays the default `origin/main`, which by then contains the dependencies. Example:
-
-```
-H1=$(mother add --plan-file docs/plans/huey/H1-switch.md --repo nostromo --branch feat/huey-h1-switch --max-cost 15)
-H2=$(mother add --plan-file docs/plans/huey/H2-fetch.md  --repo nostromo --branch feat/huey-h2-fetch  --depends-on "$H1" --max-cost 30)
-...
-H8=$(mother add --plan-file docs/plans/huey/H8-eval.md   --repo nostromo --branch feat/huey-h8-eval   --depends-on "$H5,$H7" --max-cost 15)
-```
-
-`mother add` copies the plan into Mother's state when it runs, so the files only need to exist at enqueue time. They are untracked like this plan; do not commit them.
+| Job | Branch | Depends on | Cost cap (guidance) |
+|---|---|---|---|
+| H1 | `feat/huey-h1-switch` | none | 15 |
+| H2 | `feat/huey-h2-fetch` | H1 | 30 |
+| H3 | `feat/huey-h3-context` | H1 | 35 |
+| H4 | `feat/huey-h4-run` | H2, H3 | 35 |
+| H5 | `feat/huey-h5-curate` | H4 | 40 |
+| H6 | `feat/huey-h6-surface` | H4 | 30 |
+| H7 | `feat/huey-h7-mac` | H6 | 30 |
+| H8 | `feat/huey-h8-eval` | H5, H7 | 15 |
 
 ```
 H1 ──┬── H2 ──┐
@@ -512,7 +501,7 @@ Interests file format (parsed by heading text, case-insensitive; anything else i
   - New NostromoKit files are picked up by SwiftPM automatically.
 - **Tests with no network and no model.** Use `wiremock` for HTTP. Inject a fake clock (`crate::tracker::clock::FakeClock`), a posture-file path, temp state and context roots, and a fake `PicksSessionHost` that records spawn/send/stop and scripts `publish_report` calls. Fixtures go under `tests/fixtures/huey/`. They must be **public-safe** (no private names, no work context), and fixture context files carry canary strings such as `CANARY-RAW-TRACKER-7f3a` so raw-content leaks are detectable.
 - **Logging (T5):** counts, ids, states and HTTP status only.
-- **Do not touch or commit** the untracked `docs/plan-*.md`, `docs/plans/huey/*.md` and `docs/prd-huey.md` files. Plans are local artifacts.
+- **Do not edit** `docs/plan-huey.md` or `docs/prd-huey.md`; they are the spec. Do not commit per-job plan files under `docs/plans/huey/`; those are local working copies.
 - Commit messages are `feat(huey): … (H<n>)`. The PR body lists the `[H<n>-k]` checklist with evidence (test names).
 
 ---
