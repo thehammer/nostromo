@@ -1,4 +1,4 @@
-.PHONY: build release install test fmt-check python-test qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
+.PHONY: build release install daemon-restart-guard test fmt-check python-test qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
 
 build:
 	cargo build
@@ -6,7 +6,7 @@ build:
 release:
 	cargo build --release
 
-install: release
+install: daemon-restart-guard release
 	cargo install --path .
 	@# The `nostromo` TUI binary no longer exists, and `cargo install` does not remove an old ~/.cargo/bin/nostromo.
 	@echo "installed nostromd, nostromo-mcp-bridge, nostromo-activity-hook, nostromo-guard, sensitive-text-scan, nostromo-google-auth to ~/.cargo/bin"
@@ -45,6 +45,7 @@ python-test:
 	python3 -m unittest discover -s scripts/qa/tests -v
 	python3 -m unittest discover -s scripts/tracker/tests -v
 	python3 -m unittest discover -s tests/gates -v
+	python3 -m unittest discover -s tests/restart_guard -v
 
 ## Self-test of the read-only QA scripts (scripts/qa) against a fake app-control CLI.
 ## Hermetic: never touches the running app. Also part of `make python-test` (so CI).
@@ -64,6 +65,13 @@ clean:
 
 # ── daemon targets ────────────────────────────────────────────────────────────
 
+## Refuse to restart the daemon while remote (ECS) shells are open: a restart ends
+## them. `install`, `install-daemon` and `uninstall-daemon` run this first. Override
+## with FORCE=1 (or NOSTROMO_FORCE_DAEMON_RESTART=1). Crashes and a raw SIGTERM still
+## end shells; this guards only the controlled paths. See docs/terminal.md.
+daemon-restart-guard:
+	@FORCE="$(FORCE)" bin/nostromo-restart-guard
+
 ## Build the nostromd daemon binary and its production-shell guard (release).
 daemon:
 	cargo build --release --bin nostromd --bin nostromo-guard
@@ -72,7 +80,7 @@ daemon:
 ##
 ## Installs nostromd to $HOME/.local/bin/nostromd and loads it as a launchd
 ## user agent so it starts automatically at login.
-install-daemon: daemon
+install-daemon: daemon-restart-guard daemon
 	@mkdir -p "$(HOME)/.local/bin"
 	@mkdir -p "$(HOME)/Library/LaunchAgents"
 	@mkdir -p "$(HOME)/.cache/nostromd/log"
@@ -121,7 +129,7 @@ install-daemon: daemon
 	@echo "nostromd loaded — check status with: launchctl print gui/$$(id -u)/com.hammer.nostromd"
 
 ## Unload and remove the nostromd launchd agent and binary.
-uninstall-daemon:
+uninstall-daemon: daemon-restart-guard
 	launchctl bootout "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null || true
 	rm -f "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \

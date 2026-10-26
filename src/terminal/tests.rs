@@ -23,6 +23,7 @@ use tempfile::TempDir;
 use super::access::tests::cap as access_cap;
 use super::audit::{AuditEvent, AuditLog, RefusalChannel};
 use super::fanout::Fanout;
+use super::IdleState;
 use super::session::{
     InputError, SignalOps, TerminalSession, MAX_INPUT_FRAME_BYTES, MAX_INPUT_QUEUED_BYTES,
     RING_MAX_BYTES, RING_MAX_NEWLINES, SCRUBBED_ENV,
@@ -1164,6 +1165,7 @@ fn adopt(
         requested_by: requester(),
         opened_by_request: None,
         follower: None,
+        idle_closes_at: None,
     };
     let fanout = Fanout::idle(&terminal_id, Arc::new(Mutex::new(None)));
     mgr.terminals.insert(
@@ -1173,6 +1175,8 @@ fn adopt(
             session,
             fanout,
             remote: None,
+            opened_at: chrono::Utc::now(),
+            idle: IdleState::fresh(),
         },
     );
     terminal_id

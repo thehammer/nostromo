@@ -53,6 +53,18 @@ const SHUTDOWN_BUDGET: std::time::Duration = std::time::Duration::from_millis(45
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `nostromd remote-shells [--json]`: a client of the running daemon for the
+    // controlled-restart guard. It starts nothing, so it comes before logging.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("remote-shells") {
+        let code = nostromo::terminal::restart_guard::run(
+            &args[1..],
+            &nostromo::ipc::default_socket_path(),
+        )
+        .await;
+        std::process::exit(code);
+    }
+
     // ── Logging ───────────────────────────────────────────────────────────────
     let log_dir = daemon_log_dir();
     std::fs::create_dir_all(&log_dir)
@@ -207,7 +219,9 @@ async fn main() -> Result<()> {
             &config.terminal,
         ));
         terminals.reconcile();
+        terminals.set_idle_policy(nostromo::terminal::idle::IdlePolicy::from_env());
     }
+    nostromo::terminal::TerminalManager::start_idle_monitor(&terminals);
     // The real remote-shell launcher: the AWS CLI, run by argv, never through
     // a shell. It is called only after the verified app says Connect.
     {
