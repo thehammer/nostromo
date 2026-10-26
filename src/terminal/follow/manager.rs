@@ -769,7 +769,9 @@ impl FollowManager {
         // As for a delivery (see `inject`): what a sensitive focus's terminal
         // shows makes whoever reads it sensitive, so it never reaches a network
         // peer through the reader's turns.
-        if self.sensitive.tag_is_sensitive(&follow.terminal_tag) {
+        // A remote (ECS) screen also stays in the reader's transcript after the
+        // follow ends, so it marks the reader for good, before the text is returned.
+        if follow._hold.is_some() || self.sensitive.tag_is_sensitive(&follow.terminal_tag) {
             self.sensitive.mark_tag(follower_tag);
         }
         self.audit(AuditEvent::ScreenRead {

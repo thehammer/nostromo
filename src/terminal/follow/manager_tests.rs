@@ -1921,8 +1921,8 @@ async fn reading_a_remote_terminals_screen_happens_while_the_reader_is_sensitive
 
     w.follow.stop(&cap(), &t.id).unwrap();
     assert!(
-        !sensitive.tag_is_sensitive(A),
-        "the hold lapses with the follow"
+        sensitive.tag_is_sensitive(A),
+        "the read left the reader sensitive after the follow ends"
     );
     assert!(
         matches!(
@@ -1931,6 +1931,38 @@ async fn reading_a_remote_terminals_screen_happens_while_the_reader_is_sensitive
         ),
         "and with no follow there is nothing to read"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_remote_screen_read_marks_the_follower_but_a_local_one_does_not() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let local = w.local("focus-2", "");
+    w.invite(&local, B, false);
+    w.follow.read_screen_as(B, &local.id).expect("local read");
+    w.follow.stop(&cap(), &local.id).unwrap();
+    assert!(!sensitive.tag_is_sensitive(B), "local read leaves B alone");
+
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.invite(&t, A, false);
+    w.follow.stop(&cap(), &t.id).unwrap();
+    assert!(!sensitive.tag_is_sensitive(A), "no read, no mark");
+
+    w.invite(&t, A, false);
+    w.follow.read_screen_as(A, &t.id).expect("ecs read");
+    w.follow.stop(&cap(), &t.id).unwrap();
+    assert!(sensitive.tag_is_sensitive(A), "ECS read marks for good");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_screen_read_does_not_mark() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.invite(&t, A, false);
+    w.follow.stop(&cap(), &t.id).unwrap();
+    assert!(w.follow.read_screen_as(A, &t.id).is_err());
+    assert!(!sensitive.tag_is_sensitive(A));
 }
 
 // ── a selection is redacted as a fragment ─────────────────────────────────────
