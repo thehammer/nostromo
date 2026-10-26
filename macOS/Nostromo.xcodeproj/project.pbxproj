@@ -311,6 +311,8 @@
 		HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000140 /* ImageDecodePolicyTests.swift */; };
 		HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000150 /* MemoryWatchdogTests.swift */; };
 		ZZRLC00000000000000000B1 /* ReadLoopChurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */; };
+		ZZMSCST000000000000000B1 /* MemorySummaryCostTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZMSCST000000000000000R1 /* MemorySummaryCostTests.swift */; };
+		ZZQLORD000000000000000B1 /* QueryListOrderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZQLORD000000000000000R1 /* QueryListOrderingTests.swift */; };
 		ZZVTLPB000000000000000B1 /* ViewTreeLeakProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZVTLPB000000000000000R1 /* ViewTreeLeakProbeTests.swift */; };
 		ZZTAE10000000000000000B1 /* ShedKeepsVisibleViewsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */; };
 		ZZTF110000000000000000B1 /* MemoryDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZTF110000000000000000R1 /* MemoryDiagnosticsTests.swift */; };
@@ -792,6 +794,8 @@
 		HH000000000000000000140 /* ImageDecodePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDecodePolicyTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000150 /* MemoryWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdogTests.swift; sourceTree = "<group>"; };
 		ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadLoopChurnTests.swift; sourceTree = "<group>"; };
+		ZZMSCST000000000000000R1 /* MemorySummaryCostTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySummaryCostTests.swift; sourceTree = "<group>"; };
+		ZZQLORD000000000000000R1 /* QueryListOrderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryListOrderingTests.swift; sourceTree = "<group>"; };
 		ZZVTLPB000000000000000R1 /* ViewTreeLeakProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewTreeLeakProbeTests.swift; sourceTree = "<group>"; };
 		ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShedKeepsVisibleViewsTests.swift; sourceTree = "<group>"; };
 		ZZTF110000000000000000R1 /* MemoryDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryDiagnosticsTests.swift; sourceTree = "<group>"; };
@@ -1313,6 +1317,8 @@
 				HH000000000000000000140 /* ImageDecodePolicyTests.swift */,
 				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
 				ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */,
+				ZZMSCST000000000000000R1 /* MemorySummaryCostTests.swift */,
+				ZZQLORD000000000000000R1 /* QueryListOrderingTests.swift */,
 				ZZVTLPB000000000000000R1 /* ViewTreeLeakProbeTests.swift */,
 				ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */,
 				ZZTF110000000000000000R1 /* MemoryDiagnosticsTests.swift */,
@@ -1891,6 +1897,8 @@
 				HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */,
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
 				ZZRLC00000000000000000B1 /* ReadLoopChurnTests.swift in Sources */,
+				ZZMSCST000000000000000B1 /* MemorySummaryCostTests.swift in Sources */,
+				ZZQLORD000000000000000B1 /* QueryListOrderingTests.swift in Sources */,
 				ZZVTLPB000000000000000B1 /* ViewTreeLeakProbeTests.swift in Sources */,
 				ZZTAE10000000000000000B1 /* ShedKeepsVisibleViewsTests.swift in Sources */,
 				ZZTF110000000000000000B1 /* MemoryDiagnosticsTests.swift in Sources */,

@@ -1151,8 +1151,11 @@ class NostromodClient {
         // One autorelease pool per frame, not one per connection. GCD drains a worker's pool only when
         // the block it is running returns, and this block returns when the socket closes, which is
         // days. Every Foundation object a frame creates (the `JSONSerialization` tree, its readers,
-        // the decoder's temporaries) is autoreleased and was therefore kept until then: at the
-        // 2026-10-25 incident that was 67,000 `_NSJSONReader`s and the trees they produced, about 1.6 GB.
+        // the decoder's temporaries) is autoreleased and was therefore kept until then. What was
+        // measured: the 2026-10-25 heap held 67,400 `_NSJSONReader`s, and `ReadLoopChurnTests` shows
+        // roughly 64 live malloc blocks kept per frame before the fix, a few per frame after. What was
+        // NOT established is how much of that incident's 1.8 GB this loop accounts for: the same heap
+        // held about 2 million AppKit `NSKeyValueDependency` objects that no read loop creates.
         var more = true
         while more {
             more = autoreleasepool { () -> Bool in

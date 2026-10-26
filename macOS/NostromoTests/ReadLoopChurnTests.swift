@@ -6,8 +6,9 @@ import Darwin
 // block that returns only when the connection closes. GCD drains a worker's autorelease pool when
 // the block it is running returns, so every Foundation object a frame created (the
 // `JSONSerialization` tree and its `_NSJSONReader`, decoder temporaries) was kept for the life of
-// the connection: on 2026-10-25 that was 16 million malloc blocks and 1.6 GB after 14.6 hours,
-// 67,000 `_NSJSONReader`s among them, and a footprint permanently over the memory watchdog's line.
+// the connection. The 2026-10-25 heap (16 million malloc blocks, 1.8 GB after 14.6 hours) held 67,400
+// `_NSJSONReader`s; how much of that footprint this leak explains was not established (the same heap
+// held about 2 million AppKit `NSKeyValueDependency` objects, which are not created here).
 //
 // These tests push thousands of frames through the REAL read loops over a real AF_UNIX socket and
 // measure live malloc blocks while the connection is still open, which is exactly what the leak
