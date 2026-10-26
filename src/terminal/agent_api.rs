@@ -19,7 +19,7 @@ use tokio::sync::broadcast;
 
 use super::ecs::{EcsVocabulary, VocabError};
 use super::follow::manager::{pane_name, FollowGrant, FOLLOW_ALLOW, FOLLOW_DENY};
-use super::follow::{ScreenRead, ScreenReadError};
+use super::follow::{FollowError, ScreenRead, ScreenReadError};
 use super::launcher::Placement;
 use super::remote_request::{self, clean_reason, RemoteRequest, RemoteResult};
 use super::{TerminalError, TerminalManager};
@@ -255,7 +255,7 @@ impl TerminalAgentApi {
                     is_default: false,
                 },
             ],
-            None,
+            Some(info.pane_id.clone()),
         );
         if let Some(sheet) = sheet {
             let _ = broadcast.send(sheet);
@@ -284,6 +284,8 @@ impl TerminalAgentApi {
         if let Some(grant) = FollowGrant::from_decision(&outcome) {
             return match follow.invite_granted(grant, &request.terminal_id, &request.tag) {
                 Ok(()) => FollowRequestResult::Following,
+                // The app that said Allow is gone: nothing follows.
+                Err(FollowError::NoOperator) => FollowRequestResult::NoOperator,
                 Err(e) => FollowRequestResult::Refused(e.code()),
             };
         }
@@ -372,7 +374,7 @@ fn follow_prompt(info: &TerminalInfo, request: &AgentFollowRequest) -> String {
         .unwrap_or_else(|| "An agent".to_string());
     let who = format!("{agent} in {}", clean(&request.tag));
     let pane = clean(&pane_name(info));
-    match (info.kind, &info.target) {
+    let mut prompt = match (info.kind, &info.target) {
         (TerminalKind::Ecs, target) => {
             let environment = target
                 .as_ref()
@@ -384,7 +386,15 @@ fn follow_prompt(info: &TerminalInfo, request: &AgentFollowRequest) -> String {
         (TerminalKind::Local, _) => {
             format!("{who} asks to follow {pane}. Output will be sent to {agent}'s model.")
         }
+    };
+    // Allow moves the follow: the user is told whose it was.
+    if let Some(current) = &info.follower {
+        prompt.push_str(&format!(
+            " {} follows it now; allowing moves it to {agent}.",
+            clean(&current.tag)
+        ));
     }
+    prompt
 }
 
 /// A focus's place in line: one follow request waiting for the user at a time.
@@ -420,7 +430,7 @@ struct Withdraw<'a> {
 impl Withdraw<'_> {
     fn withdraw(&self) {
         // The next request queued behind this one, if any, is shown now.
-        if let Some(next) = lock(self.decisions).timeout_request(self.request_id) {
+        if let Some(next) = lock(self.decisions).withdraw(self.request_id) {
             let _ = self.broadcast.send(next);
         }
     }

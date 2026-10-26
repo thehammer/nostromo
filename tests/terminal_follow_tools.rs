@@ -51,8 +51,8 @@ use nostromo::ipc::pane_registry::PaneRegistry;
 use nostromo::ipc::peer_verify::testing::{app_info, script_info, FakePeerVerifier};
 use nostromo::ipc::peer_verify::PeerInfo;
 use nostromo::ipc::protocol::{
-    ClientMsg, DecisionResolution, FocusMeta, ServerMsg, TerminalFollower, TerminalInfo,
-    TerminalKind, TerminalStatus, PROTOCOL_VERSION,
+    ClientMsg, DecisionChoice, DecisionResolution, FocusMeta, ServerMsg, TerminalFollower,
+    TerminalInfo, TerminalKind, TerminalStatus, PROTOCOL_VERSION,
 };
 use nostromo::ipc::server::Server;
 use nostromo::ipc::session_manager::CLAUDE_BIN_ENV;
@@ -2510,6 +2510,90 @@ follow_test! {
         assert_eq!(res["error"], "follower_not_running", "{res}");
         assert_eq!(d.follower_of(&id), None);
         assert!(d.invited().is_empty());
+    }
+}
+
+follow_test! {
+    async fn an_allow_that_arrives_after_the_last_app_went_away_follows_nothing() {
+        let mut r = rig().await;
+        let id = r.id();
+        let before = r.a.count();
+        let (call, sheet) = r.ask(None).await;
+
+        // The user quits the app; the answer was already on its way.
+        drop(r.app);
+        let deadline = Instant::now() + WAIT;
+        while r.d.terminals.lock().unwrap().follow_ui_connected() {
+            assert!(Instant::now() < deadline, "the daemon never noticed the app left");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let answered = r
+            .d
+            .decisions
+            .lock()
+            .unwrap()
+            .answer(&sheet.request_id, Some("allow".into()));
+        assert!(matches!(answered, nostromo::ipc::decisions::AnswerOutcome::Answered { .. }));
+
+        let res = r.mcp.finish(call).await;
+        assert_eq!(res["error"], "no_operator", "{res}");
+        assert_eq!(r.d.follower_of(&id), None, "nobody is left to show or stop it");
+        r.a.assert_quiet_after(before, "an Allow with no app to stop it").await;
+    }
+}
+
+follow_test! {
+    async fn a_request_queued_behind_another_decision_still_times_out_and_frees_the_slot() {
+        let mut r = rig().await;
+        let id = r.id();
+        // Something else (the agent's own ask_decision, say) is on the sheet for this focus.
+        let blocker = {
+            let choices = vec![
+                DecisionChoice { id: "yes".into(), label: "Yes".into(), detail: None, is_default: false },
+                DecisionChoice { id: "no".into(), label: "No".into(), detail: None, is_default: false },
+            ];
+            let (blocker, _rx, shown) = r
+                .d
+                .decisions
+                .lock()
+                .unwrap()
+                .submit(A.into(), "something else".into(), None, choices, None);
+            drop(shown);
+            blocker
+        };
+        let started = Instant::now();
+
+        let result = r
+            .d
+            .api
+            .request_follow(
+                AgentFollowRequest {
+                    tag: A.into(),
+                    agent: Some("cody".into()),
+                    terminal_id: id.clone(),
+                    reason: None,
+                    timeout: Duration::from_millis(300),
+                },
+                &r.d.decisions,
+                &r.d.server.tx,
+            )
+            .await;
+
+        assert!(matches!(result, FollowRequestResult::TimedOut), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "it hung behind the other decision");
+        assert_eq!(r.d.decisions.lock().unwrap().queued_count(A), 0, "the queue is clean");
+        assert_eq!(
+            r.d.decisions.lock().unwrap().active_request_id(A).as_deref(),
+            Some(blocker.as_str()),
+            "the other decision is untouched"
+        );
+        assert_eq!(r.d.follower_of(&id), None);
+
+        // The slot is free: once the other decision is out of the way, a new request is asked.
+        r.d.decisions.lock().unwrap().timeout_request(&blocker);
+        let (call, fresh) = r.ask(None).await;
+        r.app.answer_sheet(&fresh.request_id, Some("deny")).await;
+        assert_eq!(r.mcp.finish(call).await["error"], "denied", "not request_pending");
     }
 }
 

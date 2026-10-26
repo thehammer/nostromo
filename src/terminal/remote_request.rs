@@ -482,8 +482,8 @@ pub(crate) async fn run(
 }
 
 /// Step 8. The user's own request ignores the follow box (nobody asked for an
-/// agent to follow it), and so does an app that cannot show who follows and
-/// stop it. A follower that is no longer there leaves the shell as it is.
+/// agent to follow it). A follower that is no longer there, or no app left to
+/// show who follows, leaves the shell as it is.
 fn invite_requester(
     manager: &Arc<Mutex<TerminalManager>>,
     request: &RemoteRequest,
@@ -496,15 +496,12 @@ fn invite_requester(
     let Some(follower) = request.requested_by.tag.as_deref() else {
         return;
     };
-    let follow = {
-        let m = lock(manager);
-        m.follow().filter(|_| m.follow_ui_connected())
-    };
     // Not under the manager's lock: following takes it.
+    let follow = lock(manager).follow();
     let Some(follow) = follow else {
-        debug!("follow box ticked but no app can show who follows: not following");
         return;
     };
+    // Refused (`no_operator`) when no app that can show who follows is left.
     if let Err(e) = follow.invite_granted(grant, &info.terminal_id, follower) {
         debug!(
             code = e.code(),

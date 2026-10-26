@@ -93,7 +93,23 @@ pub fn deliver(
 /// middle of a key (the `BEGIN` line off-screen) has no marker to recognise,
 /// and its body lines are delivered as the text they are.
 pub fn deliver_snapshot(screen: &vt100::Screen, policy: &mut DeliveryPolicy) -> Delivery {
-    deliver_lines(snapshot_lines(screen), &mut Redactor::new(), policy)
+    deliver_snapshot_in(screen, policy, false)
+}
+
+/// [`deliver_snapshot`] for a screen of a terminal whose own output may have
+/// been inside a private-key block when it was drawn (`key_open`: the
+/// terminal's [`Redactor`] says so). A screen that starts in the middle of a
+/// key (its `BEGIN` scrolled off) is redacted down to the key's `END`, or
+/// entirely when the key has not ended: it is recognised by an `END` line with
+/// no `BEGIN` above it, or by `key_open`.
+pub fn deliver_snapshot_in(
+    screen: &vt100::Screen,
+    policy: &mut DeliveryPolicy,
+    key_open: bool,
+) -> Delivery {
+    let lines = snapshot_lines(screen);
+    let mut redactor = Redactor::for_screen(&lines, key_open);
+    deliver_lines(lines, &mut redactor, policy)
 }
 
 /// [`deliver`] for lines that did not come from an assembler (a screen
@@ -152,6 +168,61 @@ mod tests {
 
     fn fresh() -> (Redactor, DeliveryPolicy) {
         (Redactor::new(), DeliveryPolicy::new())
+    }
+
+    /// A screen of `rows` rows showing `text` (lines joined by CRLF, scrolled
+    /// as a terminal would).
+    fn screen_showing(rows: u16, text: &str) -> vt100::Parser {
+        let mut parser = vt100::Parser::new(rows, 80, 0);
+        parser.process(text.replace('\n', "\r\n").as_bytes());
+        parser
+    }
+
+    fn key_lines(body_lines: usize, with_end: bool) -> String {
+        let mut lines = vec!["$ cat id_rsa".to_string()];
+        lines.push("-----BEGIN RSA PRIVATE KEY-----".into());
+        lines.extend((0..body_lines).map(|i| format!("KEYBODY{i:03}")));
+        if with_end {
+            lines.push("-----END RSA PRIVATE KEY-----".into());
+        }
+        lines.push("$ ".into());
+        lines.join("\n")
+    }
+
+    #[test]
+    fn a_key_whose_begin_scrolled_off_the_screen_is_redacted_down_to_its_end() {
+        // 30 body lines on a 10-row screen: BEGIN and most of the body are gone.
+        let parser = screen_showing(10, &key_lines(30, true));
+        let delivery = deliver_snapshot(parser.screen(), &mut DeliveryPolicy::new());
+        let text = delivery.text().unwrap();
+        assert!(!text.contains("KEYBODY"), "{text}");
+        assert!(text.contains("[redacted: private-key]"), "{text}");
+        assert!(
+            text.ends_with("$"),
+            "what follows the key is kept: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_screen_inside_a_key_that_has_not_ended_is_redacted_when_the_stream_says_so() {
+        let parser = screen_showing(10, &key_lines(30, false).replace("$ ", "more"));
+        let plain = deliver_snapshot(parser.screen(), &mut DeliveryPolicy::new());
+        // Without the stream's state, body lines alone cannot be told from text.
+        assert!(plain.text().unwrap().contains("KEYBODY"));
+        let delivery = deliver_snapshot_in(parser.screen(), &mut DeliveryPolicy::new(), true);
+        assert!(
+            !delivery.text().unwrap().contains("KEYBODY"),
+            "{delivery:?}"
+        );
+    }
+
+    #[test]
+    fn a_whole_key_on_the_screen_still_keeps_the_lines_before_it() {
+        let parser = screen_showing(40, &key_lines(5, true));
+        let delivery = deliver_snapshot(parser.screen(), &mut DeliveryPolicy::new());
+        let text = delivery.text().unwrap();
+        assert!(text.contains("$ cat id_rsa"), "{text}");
+        assert!(!text.contains("KEYBODY"), "{text}");
     }
 
     #[test]

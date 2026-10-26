@@ -1460,13 +1460,13 @@ Ask the user to let the caller follow one of **its own focus's** terminals. **Th
 
 **Input** (`additionalProperties: false`): `{ "terminal_id": "<from nostromo.list_terminals>", "reason": "why you want to follow it" }`. `terminal_id` is required; `reason` is optional, at most 200 characters, and is shown to the user (control and bidi characters stripped). Any other key is `unknown_argument` (nothing is asked).
 
-The call blocks (up to 5 minutes) on a decision sheet, answerable by the verified Nostromo app only (the decision flow's own rule: no other process can answer it). Prompt: `<agent> in <focus> asks to follow <pane>. Output will be sent to <agent>'s model.`; for a remote (`ecs`) pane it leads with `Output from <ENVIRONMENT, uppercased> will be sent to <agent>'s model.` Choices: `allow`, `deny`. Allow starts following (`via: "request"`, without the screen) from inside the call: if the call is dropped first (the agent's connection closes, or the session ends) the sheet is withdrawn and nothing follows. It is withheld from a network-driven session and the picks session, like the other terminal tools.
+The call blocks (up to 5 minutes) on a decision sheet, answerable by the verified Nostromo app only (the decision flow's own rule: no other process can answer it). Prompt: `<agent> in <focus> asks to follow <pane>. Output will be sent to <agent>'s model.`; for a remote (`ecs`) pane it leads with `Output from <ENVIRONMENT, uppercased> will be sent to <agent>'s model.` Choices: `allow`, `deny`. Allow starts following (`via: "request"`, without the screen) from inside the call: if the call is dropped first (the agent's connection closes, or the session ends) the sheet is withdrawn (also when it is still queued behind another decision of the focus) and nothing follows. If the same terminal is already followed by another focus, the sheet says so (allowing moves it). It is withheld from a network-driven session and the picks session, like the other terminal tools.
 
 **Output**: `{ "ok": true, "outcome": "following" }` (also at once, with no sheet, when the caller already follows that terminal).
 
 | `error` | Meaning |
 |---|---|
-| `no_operator` | No verified app that can show the sheet **and** declared `terminal_follow_ui` (it can show who follows and stop it) is connected. Immediate (nothing was shown, nothing queued). |
+| `no_operator` | No verified app that can show the sheet **and** declared `terminal_follow_ui` (it can show who follows and stop it) is connected. Immediate (nothing was shown, nothing queued). Also returned if the app went away between its Allow and the invitation: nothing follows with no app left to show or stop it. |
 | `denied` / `dismissed` / `timeout` / `cancelled` | The user chose Deny / dismissed the sheet / did not answer in time / the agent's session ended while it waited. Nothing follows. |
 | `request_pending` | Another follow request from this focus is waiting for the user. |
 | `unknown_terminal` | Not a terminal of the caller's focus. The same answer for another focus's terminal and for one that does not exist. |
