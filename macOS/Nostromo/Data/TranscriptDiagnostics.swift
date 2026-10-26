@@ -138,6 +138,12 @@ enum TranscriptDiagnostics {
         let layoutPassCount: Int
     }
 
+    /// One VM category's dirty bytes, named from the fixed vocabulary in `MemorySummary` (content-free).
+    struct MemoryCategory: Codable, Equatable {
+        let name: String
+        let dirtyBytes: Int
+    }
+
     struct Report: Encodable {
         let timestamp: String
         /// Which run wrote this line. See `TranscriptDiagnostics.runID`.
@@ -147,6 +153,11 @@ enum TranscriptDiagnostics {
         let pid: Int
         let physFootprintBytes: Int
         let physFootprintMB: Double
+        /// Live malloc blocks and their bytes across every zone, and the largest dirty VM categories
+        /// (`Malloc Small` first, in the 2026-10-25 incident): where the footprint is, without `heap`.
+        let mallocBlocksInUse: Int
+        let mallocBytesInUse: Int
+        let topMemoryCategories: [MemoryCategory]
         let maxMaterializedPerPane: Int
         /// `ReplView.measureBudgetSeconds` in milliseconds, carried in the
         /// stream so `transcript-load-report.py` grades against the budget the
@@ -270,7 +281,8 @@ enum TranscriptDiagnostics {
     static func registerSplit(_ split: SplitReporting) { splits.add(split) }
 
     static func snapshot() -> Report {
-        let footprint = physicalFootprint()
+        let memory = MemorySummary.capture()
+        let footprint = memory.physicalFootprintBytes
         let reports: [PaneReport] = panes.allObjects.compactMap { object in
             guard let pane = object as? Reporting else { return nil }
             let folds = pane.foldRowCounts
@@ -312,6 +324,9 @@ enum TranscriptDiagnostics {
                       pid: Int(ProcessInfo.processInfo.processIdentifier),
                       physFootprintBytes: footprint,
                       physFootprintMB: (Double(footprint) / 1_048_576 * 10).rounded() / 10,
+                      mallocBlocksInUse: memory.mallocBlocksInUse,
+                      mallocBytesInUse: memory.mallocBytesInUse,
+                      topMemoryCategories: memory.categories.map { MemoryCategory(name: $0.name, dirtyBytes: $0.dirtyBytes) },
                       maxMaterializedPerPane: TurnListVirtualizer.maxMaterialized,
                       measureBudgetMs: ReplView.measureBudgetSeconds * 1000,
                       panes: reports.sorted { $0.tag < $1.tag },

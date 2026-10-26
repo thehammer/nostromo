@@ -216,6 +216,31 @@ pub enum AuditEvent {
         tag: String,
         follower: String,
     },
+    /// A remote shell had no keystrokes for the warning time; it closes at
+    /// `closes_at` unless kept open.
+    IdleWarning {
+        terminal_id: String,
+        pane_id: String,
+        tag: String,
+        kind: TerminalKind,
+        closes_at: DateTime<Utc>,
+    },
+    /// After an idle warning the shell was kept open: `via` is `keystroke`
+    /// or `button`.
+    IdleKeptOpen {
+        terminal_id: String,
+        pane_id: String,
+        tag: String,
+        via: String,
+    },
+    /// A remote shell was closed for being idle (the `closed` line follows,
+    /// reason `idle_timeout`).
+    IdleClosed {
+        terminal_id: String,
+        pane_id: String,
+        tag: String,
+        kind: TerminalKind,
+    },
     /// One delivery into the follower's conversation: counts and sizes only.
     Delivery {
         terminal_id: String,
@@ -227,6 +252,25 @@ pub enum AuditEvent {
         bytes: usize,
         redactions: usize,
         truncated: bool,
+    },
+    /// The user sent selected text to a focus, once: counts and sizes only.
+    SelectionSent {
+        terminal_id: String,
+        /// The terminal's own focus.
+        tag: String,
+        /// The focus the selection went to.
+        target: String,
+        lines: usize,
+        bytes: usize,
+        redactions: usize,
+    },
+    /// The agent following a terminal read its screen: counts and sizes only.
+    ScreenRead {
+        terminal_id: String,
+        /// The agent's focus.
+        focus: String,
+        lines: usize,
+        bytes: usize,
     },
 }
 

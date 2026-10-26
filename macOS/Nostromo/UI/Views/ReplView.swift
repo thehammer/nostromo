@@ -977,32 +977,54 @@ class ReplView: NSView {
     }
 
     private func releaseAllTurnViews(reason: PaneFlightRecorder.Reason = .shed) {
+        releaseTurnViews(reason: reason, keeping: nil)
+    }
+
+    /// Release the materialized turn views, except those whose frame intersects `keep` (document
+    /// coordinates), which stay as they are: same views, still pinned, never blank.
+    private func releaseTurnViews(reason: PaneFlightRecorder.Reason, keeping keep: NSRect?) {
         // Unpinning matters as much as removing. `TurnPayloadStore` refuses to
         // compact a pinned turn, so a release that left the pins behind would
         // make `shedMaterializedViews()` structurally unable to compact the very
         // turns it just released — and the pinned set would grow on every window
         // resize until compaction was defeated entirely. Backwards, for a memory
         // fix.
-        let released = turnViews.count
+        var released = 0
         for (id, view) in turnViews {
+            if let keep, view.frame.intersects(keep) { continue }
             view.removeFromSuperview()
+            turnViews.removeValue(forKey: id)
+            pendingRemeasure.remove(id)
             session.payloadStore.unpin(id)
+            released += 1
         }
-        turnViews.removeAll()
-        pendingRemeasure.removeAll()
+        if keep == nil { pendingRemeasure.removeAll() }
         if released > 0 {
-            renderWatch.recorder.record(.viewsEvicted, reason: reason, Double(released), 0, Double(session.turns.count))
+            renderWatch.recorder.record(.viewsEvicted, reason: reason, Double(released),
+                                        Double(turnViews.count), Double(session.turns.count))
         }
     }
 
-    /// Release every materialized view and re-materialize only what the viewport
-    /// needs. Called by `MemoryWatchdog` on the shed path.
+    /// Release materialized views to let the transcript's retained content compact, and compact it.
+    /// Called by `MemoryWatchdog` on the shed path.
+    ///
+    /// `.offscreenOnly` is what the watchdog's own polling asks for: on a pane the operator can see,
+    /// the views in the viewport and one viewport above and below it stay (a shed that blanked the
+    /// visible transcript every 30 s was the 2026-10-25 "panes go blank and redraw" report, and it
+    /// freed nothing because the memory was elsewhere). Their payloads stay hot, since a view in use
+    /// pins its turn. A pane nobody can see has no one to blank, so it releases everything, as does
+    /// `.everything` (the OS reporting critical pressure).
     ///
     /// `completion` fires once the session's compaction has landed, so the
     /// watchdog can measure memory that is genuinely free rather than memory it
     /// has merely asked for.
-    func shedMaterializedViews(completion: @escaping () -> Void = {}) {
-        releaseAllTurnViews(reason: .shed)
+    func shedMaterializedViews(scope: MemoryWatchdog.ShedScope = .everything, completion: @escaping () -> Void = {}) {
+        if scope == .offscreenOnly, renderWatch.isPaneVisible {
+            let viewport = scrollView.contentView.bounds
+            releaseTurnViews(reason: .shed, keeping: viewport.insetBy(dx: 0, dy: -viewport.height))
+        } else {
+            releaseAllTurnViews(reason: .shed)
+        }
         shedInFlight = true
         session.shedRetainedContent { [weak self] in
             self?.shedInFlight = false

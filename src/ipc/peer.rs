@@ -767,6 +767,7 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::TerminalClosed(_)
         | ServerMsg::TerminalReplay { .. }
         | ServerMsg::TerminalOutput { .. }
+        | ServerMsg::TerminalRemoteSummary { .. }
         | ServerMsg::TerminalRefused { .. } => ServerClass::LocalOnly,
 
         // Remote shells: the vocabulary names clusters' projects and services,
@@ -1009,6 +1010,8 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::TerminalResize { .. }
         | ClientMsg::TerminalClose { .. }
         | ClientMsg::TerminalRestart { .. }
+        | ClientMsg::TerminalKeepAlive { .. }
+        | ClientMsg::TerminalRemoteSummaryRequest
         | ClientMsg::TerminalRefusalReport { .. }
         // Remote shells: ask for the vocabulary, open one, answer the confirm
         // sheet. A network peer does none of them.
@@ -1018,7 +1021,9 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         // Agent follow: invite, stop, resume. A network peer does none of them.
         | ClientMsg::TerminalFollowInvite { .. }
         | ClientMsg::TerminalFollowStop { .. }
-        | ClientMsg::TerminalFollowResume { .. } => NetworkPolicy::Refused,
+        | ClientMsg::TerminalFollowResume { .. }
+        // Send selection: terminal text to a model. A network peer never does.
+        | ClientMsg::TerminalSendSelection { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -1094,13 +1099,16 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::TerminalResize { .. }
         | ClientMsg::TerminalClose { .. }
         | ClientMsg::TerminalRestart { .. }
+        | ClientMsg::TerminalKeepAlive { .. }
+        | ClientMsg::TerminalRemoteSummaryRequest
         | ClientMsg::TerminalRefusalReport { .. }
         | ClientMsg::RemoteShellTargetsRequest
         | ClientMsg::RemoteShellOpen { .. }
         | ClientMsg::RemoteShellAnswer { .. }
         | ClientMsg::TerminalFollowInvite { .. }
         | ClientMsg::TerminalFollowStop { .. }
-        | ClientMsg::TerminalFollowResume { .. } => false,
+        | ClientMsg::TerminalFollowResume { .. }
+        | ClientMsg::TerminalSendSelection { .. } => false,
     }
 }
 
@@ -1931,6 +1939,10 @@ mod tests {
             ClientMsg::TerminalRestart {
                 terminal_id: "t".into(),
             },
+            ClientMsg::TerminalKeepAlive {
+                terminal_id: "t".into(),
+            },
+            ClientMsg::TerminalRemoteSummaryRequest,
             ClientMsg::TerminalRefusalReport {
                 terminal_id: None,
                 op: "input".into(),
@@ -1959,6 +1971,11 @@ mod tests {
             },
             ClientMsg::TerminalFollowResume {
                 terminal_id: "t".into(),
+            },
+            ClientMsg::TerminalSendSelection {
+                terminal_id: "t".into(),
+                target_tag: "x1".into(),
+                text: "selected".into(),
             },
         ]
     }
@@ -1998,7 +2015,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 58;
+    const CLIENT_MSG_VARIANTS: usize = 61;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2061,6 +2078,9 @@ mod tests {
             ClientMsg::TerminalFollowInvite { .. } => 55,
             ClientMsg::TerminalFollowStop { .. } => 56,
             ClientMsg::TerminalFollowResume { .. } => 57,
+            ClientMsg::TerminalSendSelection { .. } => 58,
+            ClientMsg::TerminalKeepAlive { .. } => 59,
+            ClientMsg::TerminalRemoteSummaryRequest => 60,
         }
     }
 
@@ -2097,8 +2117,8 @@ mod tests {
         assert_eq!(by_name("PtyAttach"), 7);
         assert_eq!(by_name("PtyDetach"), 8);
         assert_eq!(by_name("PtyList"), 9);
-        assert_eq!(CLIENT_MSG_VARIANTS, 58);
-        assert_eq!(every_client_msg().len(), 58);
+        assert_eq!(CLIENT_MSG_VARIANTS, 61);
+        assert_eq!(every_client_msg().len(), 61);
     }
 
     #[test]
@@ -4079,6 +4099,16 @@ mod tests {
                     invite_follow: true,
                 },
             ),
+            (
+                "terminal_keep_alive",
+                ClientMsg::TerminalKeepAlive {
+                    terminal_id: "t1".into(),
+                },
+            ),
+            (
+                "terminal_remote_summary_request",
+                ClientMsg::TerminalRemoteSummaryRequest,
+            ),
         ]
     }
 
@@ -4127,6 +4157,21 @@ mod tests {
                 },
             ),
             (
+                "terminal_remote_summary",
+                ServerMsg::TerminalRemoteSummary {
+                    shells: vec![crate::ipc::protocol::RemoteShellSummary {
+                        label: "admin-portal production scheduler".into(),
+                        target: TerminalTarget {
+                            project: "admin-portal".into(),
+                            environment: "production".into(),
+                            service: "scheduler".into(),
+                            shell_type: "shell".into(),
+                        },
+                        opened_at: chrono::Utc::now(),
+                    }],
+                },
+            ),
+            (
                 "remote_shell_resolved",
                 ServerMsg::RemoteShellResolved {
                     request_id: "r1".into(),
@@ -4153,6 +4198,8 @@ mod tests {
             "RemoteShellTargetsRequest",
             "RemoteShellOpen",
             "RemoteShellAnswer",
+            "TerminalKeepAlive",
+            "TerminalRemoteSummaryRequest",
         ] {
             assert!(
                 names.iter().any(|n| n == want),

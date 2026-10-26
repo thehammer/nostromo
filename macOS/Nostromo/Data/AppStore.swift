@@ -350,14 +350,16 @@ class AppStore: ObservableObject {
         // (same tag): the second `compactBatch` finds every candidate already in
         // flight, returns `false`, and its completion fires immediately — so the
         // group still balances.
-        watchdog.onShed = { [weak self] done in
+        // `scope` is the watchdog's: its own polling asks for `.offscreenOnly`, so a pane the operator
+        // is looking at keeps its views; only critical OS pressure asks for `.everything`.
+        watchdog.onShedScoped = { [weak self] scope, done in
             guard let self else { done(); return }
             let panes = self.transcriptPanes.allObjects
             guard !panes.isEmpty else { done(); return }
             let group = DispatchGroup()
             for pane in panes {
                 group.enter()
-                pane.shedMaterializedViews { group.leave() }
+                pane.shedMaterializedViews(scope: scope) { group.leave() }
             }
             group.notify(queue: .main) { done() }
         }

@@ -402,6 +402,11 @@ diagnostics report (`TranscriptDiagnostics`), the same JSON **Copy transcript
 diagnostics** puts on the pasteboard. Used by
 `macOS/scripts/transcript-load-test.sh`.
 
+Besides `physFootprintBytes`, each line carries `mallocBlocksInUse`, `mallocBytesInUse` and
+`topMemoryCategories` (the largest dirty VM categories, `Malloc Small` first in the 2026-10-25
+incident): a footprint that climbs with `mallocBlocksInUse` is a small-allocation leak, and the
+category says whether it is malloc or something else. Content-free: numbers and fixed names.
+
 ## `NOSTROMO_LOAD_BIG_TURN_BLOCKS`
 
 ```sh

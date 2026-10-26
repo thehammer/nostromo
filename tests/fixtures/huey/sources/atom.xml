@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Link Blog</title>
+  <link href="https://linkblog.example.test/" rel="alternate"/>
+  <link href="https://linkblog.example.test/atom/everything/" rel="self"/>
+  <id>https://linkblog.example.test/</id>
+  <updated>2026-10-22T18:30:00+00:00</updated>
+  <entry>
+    <id>https://linkblog.example.test/2026/Oct/22/agent-sdk-340/</id>
+    <title>Agent SDK 3.4.0 adds streaming tool results</title>
+    <link href="https://linkblog.example.test/2026/Oct/22/agent-sdk-340/" rel="alternate"/>
+    <published>2026-10-22T18:30:00+00:00</published>
+    <updated>2026-10-22T18:30:00+00:00</updated>
+    <summary type="html">&lt;p&gt;Streaming tool results in the SDK.&lt;/p&gt;</summary>
+    <content type="html">&lt;p&gt;The new &lt;a href="https://github.com/example-org/agent-sdk/releases/tag/v3.4.0"&gt;3.4.0 release&lt;/a&gt; lets tool output stream back as it is produced. I tried it against a slow shell tool and the difference is obvious.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <id>https://linkblog.example.test/2026/Oct/21/sqlite-wal-notes/</id>
+    <title>Notes on SQLite write-ahead logging</title>
+    <link href="https://linkblog.example.test/2026/Oct/21/sqlite-wal-notes/" rel="alternate"/>
+    <published>2026-10-21T10:00:00+00:00</published>
+    <updated>2026-10-21T10:00:00+00:00</updated>
+    <content type="html">&lt;p&gt;A short walkthrough of checkpoint modes, with &lt;a href="https://example.org/sqlite/wal-guide"&gt;the guide I found most useful&lt;/a&gt;.&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <id>https://linkblog.example.test/2026/Sep/30/older-post/</id>
+    <title>An older post from before the window</title>
+    <link href="https://linkblog.example.test/2026/Sep/30/older-post/" rel="alternate"/>
+    <published>2026-09-30T08:00:00+00:00</published>
+    <updated>2026-09-30T08:00:00+00:00</updated>
+    <content type="html">&lt;p&gt;Nothing to see here.&lt;/p&gt;</content>
+  </entry>
+</feed>

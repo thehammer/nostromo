@@ -703,3 +703,49 @@ async fn the_hook_is_told_when_the_crash_loop_guard_gives_up_on_a_session() {
         heard(&calls)
     );
 }
+
+// ── selections stand alone ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_selection_is_never_combined_with_a_delivery_or_another_selection() {
+    let mut mgr = busy_session("sel");
+    let key = |n: u32| format!("{SELECTION_KEY_PREFIX}{n}");
+
+    mgr.inject("sel", &delivery("t-1", "<<D1>>", 100), "t-1".into())
+        .unwrap();
+    mgr.inject("sel", "<<S1>>", key(1)).unwrap();
+    mgr.inject("sel", "<<S2>>", key(2)).unwrap();
+    mgr.inject("sel", &delivery("t-1", "<<D2>>", 100), "t-1".into())
+        .unwrap();
+    mgr.inject("sel", &delivery("t-1", "<<D3>>", 100), "t-1".into())
+        .unwrap();
+
+    let items = queued(&mgr, "sel");
+    assert_eq!(items.len(), 4, "{items:#?}");
+    assert!(items[0].contains("<<D1>>") && !items[0].contains("<<S1>>"));
+    assert_eq!(items[1], "<<S1>>");
+    assert_eq!(items[2], "<<S2>>");
+    assert!(
+        items[3].contains("<<D2>>") && items[3].contains("<<D3>>"),
+        "deliveries after a selection still combine with each other: {items:#?}"
+    );
+    mgr.stop("sel");
+}
+
+#[tokio::test]
+async fn taking_back_a_terminals_deliveries_leaves_a_queued_selection() {
+    let mut mgr = busy_session("sel-drop");
+    mgr.inject("sel-drop", &delivery("t-1", "<<D1>>", 100), "t-1".into())
+        .unwrap();
+    mgr.inject(
+        "sel-drop",
+        "<<SELECTION>>",
+        format!("{SELECTION_KEY_PREFIX}abc"),
+    )
+    .unwrap();
+
+    mgr.drop_injected("sel-drop", "t-1");
+
+    assert_eq!(queued(&mgr, "sel-drop"), vec!["<<SELECTION>>".to_string()]);
+    mgr.stop("sel-drop");
+}

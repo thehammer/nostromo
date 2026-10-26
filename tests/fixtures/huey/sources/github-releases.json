@@ -1,0 +1,32 @@
+[
+  {
+    "tag_name": "v3.5.0",
+    "name": "v3.5.0",
+    "html_url": "https://github.com/example-org/agent-sdk/releases/tag/v3.5.0",
+    "body": "Draft notes, not published yet.",
+    "created_at": "2026-10-24T09:00:00Z",
+    "published_at": null,
+    "draft": true,
+    "prerelease": false
+  },
+  {
+    "tag_name": "v3.4.0",
+    "name": "v3.4.0",
+    "html_url": "https://github.com/example-org/agent-sdk/releases/tag/v3.4.0",
+    "body": "## What's changed\n\n- Added streaming for tool results ([#412](https://github.com/example-org/agent-sdk/pull/412))\n- Fixed a retry loop when the server closes an idle connection\n\nFull changelog: https://github.com/example-org/agent-sdk/compare/v3.3.2...v3.4.0",
+    "created_at": "2026-10-22T14:40:00Z",
+    "published_at": "2026-10-22T15:00:00Z",
+    "draft": false,
+    "prerelease": false
+  },
+  {
+    "tag_name": "v3.3.2",
+    "name": "v3.3.2",
+    "html_url": "https://github.com/example-org/agent-sdk/releases/tag/v3.3.2",
+    "body": "## What's changed\n\n- Fixed a typo in an error message",
+    "created_at": "2026-10-14T10:00:00Z",
+    "published_at": "2026-10-14T10:05:00Z",
+    "draft": false,
+    "prerelease": false
+  }
+]

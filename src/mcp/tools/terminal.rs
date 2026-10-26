@@ -223,9 +223,14 @@ const CLOSE_VERBS: [&str; 7] = [
 const BARE_INPUT_NAMES: [&str; 4] = ["send_key", "sendkey", "keystroke", "stdin"];
 
 /// Real tool names the classifier would match anyway, each with the reason.
-/// Empty: `nostromo.open_terminal` matches no verb. A later tool that does
-/// must be listed here deliberately (`no_registered_tool_is_classified`).
-const EXEMPT_TOOL_NAMES: [(&str, &str); 0] = [];
+/// `nostromo.open_terminal` matches no verb; a later tool that does must be
+/// listed here deliberately (`no_registered_tool_is_classified`). Matched
+/// exactly: any other read-shaped name, `nostromo_read_terminal_screen` with
+/// underscores included, is still refused.
+const EXEMPT_TOOL_NAMES: [(&str, &str); 1] = [(
+    super::READ_TERMINAL_SCREEN_TOOL,
+    "reads only the screen of a terminal the caller was invited to follow, and refuses (audited) any other",
+)];
 
 /// Does `name` look like an attempt to write to, read from or close a
 /// terminal? A tool with such a name is never registered.

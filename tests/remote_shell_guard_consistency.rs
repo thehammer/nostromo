@@ -16,6 +16,13 @@
 //!
 //! The guard's tool-name rule is private (`tool_name_re`), so its pattern is
 //! copied below as a literal and also exercised through `evaluate`.
+//!
+//! Slice 3d re-asserts the same for the three follow tools
+//! (`nostromo.list_terminals`, `nostromo.request_follow`,
+//! `nostromo.read_terminal_screen`): the guard must allow them by name and by
+//! input, none offers a field a command could go in, and the terminal-attempt
+//! classifier must not take any registered name for a terminal write, read or
+//! close.
 
 use std::path::PathBuf;
 
@@ -34,6 +41,16 @@ const LIST: &str = "nostromo.list_remote_shell_targets";
 /// agent's tool namespace: `mcp__<server>__<tool>`).
 const REQUEST_AS_SEEN_BY_THE_AGENT: &str = "mcp__nostromo__nostromo_request_remote_shell";
 const LIST_AS_SEEN_BY_THE_AGENT: &str = "mcp__nostromo__nostromo_list_remote_shell_targets";
+
+/// The three follow tools (3d), as registered, and as an agent sees them.
+const LIST_TERMINALS: &str = "nostromo.list_terminals";
+const REQUEST_FOLLOW: &str = "nostromo.request_follow";
+const READ_SCREEN: &str = "nostromo.read_terminal_screen";
+const FOLLOW_TOOLS: [(&str, &str); 3] = [
+    (LIST_TERMINALS, "mcp__nostromo__nostromo_list_terminals"),
+    (REQUEST_FOLLOW, "mcp__nostromo__nostromo_request_follow"),
+    (READ_SCREEN, "mcp__nostromo__nostromo_read_terminal_screen"),
+];
 
 /// A copy of the guard's tool-name pattern (`approvals/guard.rs`, `tool_name_re`,
 /// with the run-task alternative included). If the guard's pattern changes,
@@ -336,4 +353,159 @@ fn neither_remote_shell_tool_looks_like_a_way_to_write_read_or_close_a_terminal(
             "{name} is classified as a terminal input/read/close attempt"
         );
     }
+}
+
+// ── the follow tools (3d) ────────────────────────────────────────────────────
+
+/// Plausible calls of each follow tool, valid and benign.
+fn follow_tool_input(registered: &str) -> Value {
+    match registered {
+        LIST_TERMINALS => json!({}),
+        REQUEST_FOLLOW => json!({
+            "terminal_id": "terminal-1a2b3c4d",
+            "reason": "check why the nightly job did not run",
+        }),
+        READ_SCREEN => json!({ "terminal_id": "terminal-1a2b3c4d" }),
+        other => panic!("not a follow tool: {other}"),
+    }
+}
+
+#[test]
+fn the_guards_tool_name_rule_does_not_match_any_follow_tool() {
+    let rule = Regex::new(GUARD_TOOL_NAME_PATTERN).unwrap();
+
+    for (registered, seen) in FOLLOW_TOOLS {
+        for name in [registered, seen] {
+            assert!(!rule.is_match(name), "{name} would be blocked by name");
+            assert_eq!(
+                blocked_by(&pre_tool_use(name, json!({}))),
+                None,
+                "{name}: the guard blocked it with an empty input"
+            );
+            assert_eq!(
+                verdict(&pre_tool_use(name, follow_tool_input(registered))),
+                GuardVerdict::Allow,
+                "{name}: the guard blocked it with a benign input"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_guard_treats_a_follow_requests_reason_as_data() {
+    for reason in [
+        "check aws ecs execute-command logs",
+        "ecs_connect is blocked for me, so I am asking you",
+        "aws ssm start-session --target i-123 is what I would have run",
+        "session-manager-plugin",
+    ] {
+        for name in [REQUEST_FOLLOW, FOLLOW_TOOLS[1].1] {
+            let payload = pre_tool_use(
+                name,
+                json!({ "terminal_id": "terminal-1a2b3c4d", "reason": reason }),
+            );
+            assert_eq!(verdict(&payload), GuardVerdict::Allow, "{name}: {reason:?}");
+        }
+    }
+}
+
+#[test]
+fn a_command_smuggled_into_a_follow_tools_input_is_caught_by_the_guard_too() {
+    // The MCP tools refuse any key beyond their own (`unknown_argument`); the
+    // guard, which sees the call first, reads `command`, `cmd` and `script`
+    // wherever they appear. Two independent layers.
+    for (registered, seen) in FOLLOW_TOOLS {
+        for key in ["command", "cmd", "script"] {
+            let mut input = follow_tool_input(registered);
+            input[key] = json!("aws ecs execute-command --cluster c --task t --command bash");
+            assert_eq!(
+                blocked_by(&pre_tool_use(seen, input)),
+                Some(RULE_COMMAND),
+                "{seen} with `{key}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_follow_tool_has_a_field_a_command_could_go_in() {
+    let tools = tool_descriptors();
+    for (registered, _) in FOLLOW_TOOLS {
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == registered)
+            .unwrap_or_else(|| panic!("{registered} is not registered"));
+        let schema = &tool["inputSchema"];
+        assert_eq!(
+            schema["additionalProperties"],
+            json!(false),
+            "{registered}: the schema must refuse extra keys"
+        );
+        let properties = schema["properties"].as_object().expect("properties");
+        for forbidden in [
+            "command", "cmd", "script", "args", "argv", "input", "keys", "text", "env", "data",
+            "view_id",
+        ] {
+            assert!(
+                !properties.contains_key(forbidden),
+                "{registered} offers a `{forbidden}` field"
+            );
+        }
+    }
+}
+
+#[test]
+fn no_follow_tool_looks_like_a_way_to_write_read_or_close_a_terminal() {
+    for (registered, _) in FOLLOW_TOOLS {
+        assert_eq!(
+            classify_terminal_attempt(registered),
+            None,
+            "{registered} is classified as a terminal input/read/close attempt"
+        );
+    }
+}
+
+#[test]
+fn no_registered_tool_is_classified_as_a_terminal_attempt() {
+    let tools = tool_descriptors();
+    assert!(!tools.is_empty());
+    for tool in &tools {
+        let name = tool["name"].as_str().expect("tool name");
+        assert_eq!(classify_terminal_attempt(name), None, "{name}");
+    }
+    for (registered, _) in FOLLOW_TOOLS {
+        assert!(
+            tools.iter().any(|t| t["name"] == registered),
+            "{registered} must be registered"
+        );
+    }
+}
+
+#[test]
+fn together_the_two_layers_still_leave_only_the_sanctioned_paths_open() {
+    let open: Vec<&str> = [
+        (
+            "Bash",
+            json!({"command": "aws ecs execute-command --cluster c --task t --command bash"}),
+        ),
+        ("mcp__nostromo__ecs_shell", json!({})),
+        (REQUEST_AS_SEEN_BY_THE_AGENT, valid_request_input()),
+        (FOLLOW_TOOLS[0].1, json!({})),
+        (FOLLOW_TOOLS[1].1, follow_tool_input(REQUEST_FOLLOW)),
+        (FOLLOW_TOOLS[2].1, follow_tool_input(READ_SCREEN)),
+    ]
+    .iter()
+    .filter(|(tool, input)| blocked_by(&pre_tool_use(tool, input.clone())).is_none())
+    .map(|(tool, _)| *tool)
+    .collect();
+
+    assert_eq!(
+        open,
+        vec![
+            REQUEST_AS_SEEN_BY_THE_AGENT,
+            FOLLOW_TOOLS[0].1,
+            FOLLOW_TOOLS[1].1,
+            FOLLOW_TOOLS[2].1
+        ]
+    );
 }

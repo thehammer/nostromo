@@ -1,0 +1,14 @@
+[package]
+name = "mother"
+version = "0.3.0"
+edition = "2021"
+description = "Background work orchestrator that runs queued jobs one at a time"
+repository = "https://example.invalid/CANARY-MANIFEST-a-4d02"
+keywords = ["CANARY-MANIFEST-a-keyword"]
+
+# CANARY-MANIFEST-a-4d02-comment
+# anthropic = "0.1"   (considered, never enabled)
+
+[dependencies]
+serde = "1"
+tokio = { version = "1", features = ["rt"] }

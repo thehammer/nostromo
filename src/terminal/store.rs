@@ -199,6 +199,7 @@ pub fn reconcile(records: Vec<TerminalRecord>, mut panes: Option<&mut PaneRegist
                     requested_by: r.requested_by,
                     opened_by_request: None,
                     follower: None,
+                    idle_closes_at: None,
                 });
             }
             TerminalKind::Ecs => {

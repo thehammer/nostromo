@@ -1,0 +1,8 @@
+{
+  "posture": "Pump the brakes",
+  "seven_day": { "used_pct": 72.4, "pace": 1.9 },
+  "five_hour": { "used_pct": 41.0 },
+  "billing_mode": "metered",
+  "stale_input": false,
+  "reason": "CANARY-POSTURE-FREETEXT-2d8c the free text must never be shown"
+}

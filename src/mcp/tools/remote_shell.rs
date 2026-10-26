@@ -15,7 +15,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::mcp::state::McpSharedState;
+use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
 use crate::terminal::agent_api::AgentRemoteRequest;
 use crate::terminal::ecs::InvalidTarget;
 use crate::terminal::remote_request::{RemoteResult, DEFAULT_TIMEOUT, MAX_REASON_CHARS};
@@ -71,13 +71,9 @@ pub async fn request_shell(
             }
         }
     }
-    let reason = match object.get("reason") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if s.chars().count() <= MAX_REASON_CHARS => Some(s.clone()),
-        Some(Value::String(_)) => {
-            return json!({ "error": "reason_too_long", "detail": format!("at most {MAX_REASON_CHARS} characters") })
-        }
-        Some(_) => return json!({ "error": "invalid_args", "detail": "reason must be a string" }),
+    let reason = match optional_reason(object.get("reason")) {
+        Ok(reason) => reason,
+        Err(refusal) => return refusal,
     };
 
     // The caller's own focus, and only that.
@@ -87,13 +83,7 @@ pub async fn request_shell(
     if !super::terminal::focus_exists(state, tag) {
         return json!({ "error": "unknown_view" });
     }
-    let agent = daemon.session_mgr.lock().ok().and_then(|m| {
-        m.focus_registry()
-            .into_iter()
-            .find(|f| f.tag == tag)
-            .map(|f| f.agent_name)
-            .filter(|a| !a.is_empty())
-    });
+    let agent = agent_name(daemon, tag);
 
     let [project, environment, service, shell_type] = words;
     let result = daemon
@@ -110,6 +100,30 @@ pub async fn request_shell(
         })
         .await;
     result_json(result)
+}
+
+/// The optional `reason` argument: absent or null, or a string within
+/// [`MAX_REASON_CHARS`]. Else the refusal to return.
+pub(super) fn optional_reason(value: Option<&Value>) -> Result<Option<String>, Value> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.chars().count() <= MAX_REASON_CHARS => Ok(Some(s.clone())),
+        Some(Value::String(_)) => Err(
+            json!({ "error": "reason_too_long", "detail": format!("at most {MAX_REASON_CHARS} characters") }),
+        ),
+        Some(_) => Err(json!({ "error": "invalid_args", "detail": "reason must be a string" })),
+    }
+}
+
+/// The name of the agent running in focus `tag`, for the sheet the user sees.
+pub(super) fn agent_name(daemon: &DaemonMcpBackend, tag: &str) -> Option<String> {
+    daemon.session_mgr.lock().ok().and_then(|m| {
+        m.focus_registry()
+            .into_iter()
+            .find(|f| f.tag == tag)
+            .map(|f| f.agent_name)
+            .filter(|a| !a.is_empty())
+    })
 }
 
 /// What each way a request can end looks like to the agent.
