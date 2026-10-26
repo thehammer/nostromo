@@ -59,13 +59,18 @@
 //! Redactions are mapped back onto the original text, so a hidden character
 //! inside a secret goes with it and the text around it is never rewritten.
 //!
-//! On the delivery path the line assembler has already dropped the filler
-//! characters, so a filler that stood in for a space is gone too and the words
-//! it separated are glued. An SSN glued to its `SSN` label is still caught; the
-//! rest of that class is not: `Bearer<filler>token` reads as one word (like
-//! `BearerTokenAuthenticationFilter`), and so do `curl<filler>-u`,
-//! `--password<filler>value` and the other rules that need a blank. Fed raw
-//! text, `Redactor::redact` covers them (it also reads a filler as a space).
+//! On the delivery path the line assembler **keeps** the invisible filler in
+//! the lines it commits (it can stand in for a space: `curl<ZWSP>-u user:pw`,
+//! `--password<ZWSP>value`, `Bearer<ZWSP>token`), so the redactor reads the
+//! same text on both paths and decides, per view, whether the filler was a
+//! separator or part of a word. [`deliver`](crate::terminal::follow::deliver)
+//! strips the filler from the text it hands out, after redaction.
+//!
+//! Homoglyphs are **not** folded: a Cyrillic `а` in `pаssword` or `ghр_` stays
+//! a different character from the Latin one, so such a name or token is not
+//! recognised. The tracker guard has the same gap; NFKC (fullwidth forms) and
+//! the dash and digit folds above are all the normalisation there is.
+//!
 //! A text with several hidden characters in different roles (one inside a
 //! keyword, one standing for the separator) is read under four fixed
 //! assumptions, not every combination.
@@ -707,24 +712,8 @@ fn find_closing_quote(text: &str, quote: char) -> Option<usize> {
 /// one. `-p` alone is not enough (`mkdir -p`, `ssh -p 22`), so the tool name
 /// has to be on the same command.
 static CLI_CREDENTIALS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    const CURL: &str = r"\bcurl\b";
-    // The flags that carry a user: `-u`, `-U` (proxy), their long forms, and
-    // the short ones behind a cluster of curl's no-argument short flags.
-    const CURL_USER_FLAG: &str =
-        r"(?:(?-i:-[#0-46aBfgGhiIjJkLlMnNOpqRsSvVZ]*[uU])[ \t]*|--(?:proxy-)?user(?:[ \t]+|=))";
     let rest = r"[^\n|;&]*?";
     [
-        // curl -u user:pass / --user user:pass / --proxy-user user:pass, also
-        // after combined short flags (`-su user:pass`) and attached (`-uuser:pass`)
-        format!(r#"(?i){CURL}{rest}[ \t]{CURL_USER_FLAG}[^\s:"']*:(?P<value>[^\s"']+)"#),
-        // the same with the credential quoted, so it may hold spaces
-        format!(r#"(?i){CURL}{rest}[ \t]{CURL_USER_FLAG}"[^\s:"]*:(?P<value>[^"\n]*)""#),
-        format!(r#"(?i){CURL}{rest}[ \t]{CURL_USER_FLAG}'[^\s:']*:(?P<value>[^'\n]*)'"#),
-        // an unterminated quote runs to the end of the line
-        format!(r#"(?im){CURL}{rest}[ \t]{CURL_USER_FLAG}"[^\s:"]*:(?P<value>[^"\n]*)$"#),
-        format!(r#"(?im){CURL}{rest}[ \t]{CURL_USER_FLAG}'[^\s:']*:(?P<value>[^'\n]*)$"#),
-        // user:"quoted password" / user:'quoted password'
-        format!(r#"(?i){CURL}{rest}[ \t]{CURL_USER_FLAG}[^\s:"']*:(?P<value>"[^"\n]*"|'[^'\n]*')"#),
         // mysql -pSECRET (the password is attached; `-p` alone prompts)
         format!(
             r#"(?i)\b(?:mysql|mysqldump|mysqladmin|mysqlcheck|mysqlimport|mysqlshow|mariadb|mariadb-dump)\b{rest}[ \t](?-i:-p)(?P<value>[^\s\-]\S*)"#
@@ -756,9 +745,153 @@ static CLI_CREDENTIALS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 });
 
 fn scan_cli_credentials(text: &str, hits: &mut Vec<Hit>) {
+    scan_curl_users(text, hits);
     for pattern in CLI_CREDENTIALS.iter() {
         scan_value_group(pattern, RedactionKind::SecretAssignment, text, hits);
     }
+}
+
+// ───────────────────────────── curl -u ───────────────────────────────────────
+
+/// The flags that carry a user: `-u`, `-U` (proxy), their long forms, and the
+/// short ones behind a cluster of curl's no-argument short flags (`-su`).
+static CURL_USER_FLAG: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"[ \t](?:(?-i:-[#0-46aBfgGhiIjJkLlMnNOpqRsSvVZ]*[uU])[ \t]*|--(?:proxy-)?user(?:[ \t]+|=))")
+});
+
+static CURL_WORD: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)\bcurl\b"));
+
+/// `curl -u user:password`, in every quoting the shell allows: bare, the whole
+/// credential quoted (it may hold spaces), a quoted user with a bare or quoted
+/// password (`-u "admin":secret`), and quotes inside the value
+/// (`-u 'admin:hun'\''ter2'`, `-u "admin:hun\"ter2"`). It fails closed: when a
+/// quote is followed by more text glued to it, or a value holds a quote, the
+/// credential runs to the end of the line. Every `-u` of one command counts.
+fn scan_curl_users(text: &str, hits: &mut Vec<Hit>) {
+    // The flags of a command are all found from its first `curl`; skipping the
+    // later ones keeps `curl curl curl …` linear.
+    let mut scanned_to = 0;
+    for curl in CURL_WORD.find_iter(text) {
+        if curl.start() < scanned_to {
+            continue;
+        }
+        let line_end = text[curl.end()..]
+            .find('\n')
+            .map_or(text.len(), |n| curl.end() + n);
+        let command_end = text[curl.end()..]
+            .find(['\n', '|', ';', '&'])
+            .map_or(text.len(), |n| curl.end() + n);
+        scanned_to = command_end;
+        let mut pos = curl.end();
+        while pos <= command_end {
+            let Some(flag) = CURL_USER_FLAG.find_at(&text[..command_end], pos) else {
+                break;
+            };
+            pos = flag.end();
+            if let Some(range) = curl_credential(text, flag.end(), line_end) {
+                pos = pos.max(range.end);
+                hits.push(Hit {
+                    range,
+                    kind: RedactionKind::SecretAssignment,
+                });
+            }
+        }
+    }
+}
+
+/// The password of the credential starting at `at` (just after the flag).
+fn curl_credential(text: &str, at: usize, line_end: usize) -> Option<Range<usize>> {
+    let rest = &text[at..line_end];
+    let first = rest.chars().next()?;
+    if matches!(first, '"' | '\'') {
+        let body = at + 1;
+        let Some(close) = closing_quote(&text[body..line_end], first) else {
+            // Unterminated: from the first colon to the end of the line.
+            let colon = text[body..line_end].find(':')?;
+            return non_empty(body + colon + 1..line_end);
+        };
+        let (close, after) = (body + close, body + close + 1);
+        if let Some(colon) = text[body..close].find(':') {
+            let end = if is_continued(text, after) {
+                line_end
+            } else {
+                close
+            };
+            return non_empty(body + colon + 1..end);
+        }
+        if text[after..].starts_with(':') {
+            return curl_password(text, after + 1, line_end);
+        }
+        // `-u 'ad'min:secret`: the quote is glued to more of the credential.
+        if is_continued(text, after) {
+            let colon = text[after..line_end].find(':')?;
+            return non_empty(after + colon + 1..line_end);
+        }
+        return None;
+    }
+    let stop = rest.find(|c: char| c == ':' || c.is_whitespace() || matches!(c, '"' | '\''))?;
+    if rest[stop..].starts_with(':') {
+        return curl_password(text, at + stop + 1, line_end);
+    }
+    if rest[stop..].starts_with(['"', '\'']) {
+        // A quote inside the user part: from the first colon to the end of the line.
+        let colon = rest[stop..]
+            .find(':')
+            .filter(|&n| stop + n < line_end - at)?;
+        return non_empty(at + stop + colon + 1..line_end);
+    }
+    None
+}
+
+/// The password at `at`: a quoted string (quotes included), or one word. A
+/// word that holds a quote, or a quoted string with more glued to it, runs to
+/// the end of the line.
+fn curl_password(text: &str, at: usize, line_end: usize) -> Option<Range<usize>> {
+    let rest = &text[at..line_end];
+    let first = rest.chars().next()?;
+    if first.is_whitespace() {
+        return None;
+    }
+    if matches!(first, '"' | '\'') {
+        let end = match closing_quote(&rest[1..], first) {
+            Some(close) => at + 1 + close + 1,
+            None => line_end,
+        };
+        return non_empty(
+            at..if is_continued(text, end) {
+                line_end
+            } else {
+                end
+            },
+        );
+    }
+    let word = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let end = if rest[..word].contains(['"', '\'']) {
+        line_end
+    } else {
+        at + word
+    };
+    non_empty(at..end)
+}
+
+/// Offset of the quote closing `text`'s start. Backslash escapes a quote inside
+/// double quotes only: single quotes have no escapes in a shell.
+fn closing_quote(text: &str, quote: char) -> Option<usize> {
+    if quote == '\'' {
+        text.find(quote)
+    } else {
+        find_closing_quote(text, quote)
+    }
+}
+
+/// Whether the character at `idx` is glued to the quote before it (not a
+/// blank, the end of the text, or a command separator).
+fn is_continued(text: &str, idx: usize) -> bool {
+    next_char(text, idx).is_some_and(|c| !c.is_whitespace() && !matches!(c, ';' | '|' | '&' | ')'))
+}
+
+fn non_empty(range: Range<usize>) -> Option<Range<usize>> {
+    (range.start < range.end).then_some(range)
 }
 
 // ───────────────────────────── PHI shapes ────────────────────────────────────
