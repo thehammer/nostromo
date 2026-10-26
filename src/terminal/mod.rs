@@ -81,6 +81,10 @@ const LOCAL_LABEL: &str = "Terminal";
 /// cannot use up the budget of local refusals.
 pub const MAX_REFUSALS_PER_WINDOW: u32 = 120;
 pub const REFUSAL_WINDOW: Duration = Duration::from_secs(60);
+/// Most (focus, code) read-refusal budgets alive at once. A key past it (a
+/// flood of distinct focus names) is charged to the MCP channel's shared
+/// budget, so the log stays bounded.
+const MAX_READ_REFUSAL_KEYS: usize = 64;
 
 /// Terminals one focus may have at once (live or ended). Each costs four
 /// threads, a 4 MiB replay ring and a 10,000-row screen model.
@@ -277,7 +281,7 @@ pub struct TerminalManager {
     /// How sessions signal their children (replaced only by tests).
     signals: SignalOps,
     shutting_down: bool,
-    refusal_budgets: Mutex<HashMap<RefusalChannel, RefusalBudget>>,
+    refusal_budgets: Mutex<HashMap<RefusalKey, RefusalBudget>>,
     /// The at-most-one remote shell request waiting for the user.
     remote_requests: RemoteRequests,
     /// Opens the remote shell once the user has clicked Connect.
@@ -308,7 +312,48 @@ impl Terminal {
     }
 }
 
-/// One channel's `refused` lines in the current window.
+/// What a `refused` line is charged to. A channel shares one budget, except
+/// the screen-read refusals of the MCP channel (`read_too_soon`, `read_limit`,
+/// `terminal_read_forbidden`): a looping follower would otherwise use up the
+/// whole channel's budget and hide a different refusal, so each (focus, code)
+/// pair has its own and the first refusal of a pair in a window is always
+/// written.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RefusalKey {
+    Channel(RefusalChannel),
+    Read { focus: Option<String>, code: String },
+}
+
+impl RefusalKey {
+    fn for_refusal(channel: RefusalChannel, code: Option<&str>, focus: Option<&str>) -> Self {
+        match code {
+            Some(code)
+                if channel == RefusalChannel::Mcp
+                    && [
+                        agent_api::READ_TOO_SOON,
+                        agent_api::READ_LIMIT,
+                        agent_api::READ_FORBIDDEN,
+                    ]
+                    .contains(&code) =>
+            {
+                Self::Read {
+                    focus: focus.map(str::to_string),
+                    code: code.to_string(),
+                }
+            }
+            _ => Self::Channel(channel),
+        }
+    }
+
+    fn channel(&self) -> RefusalChannel {
+        match self {
+            Self::Channel(channel) => *channel,
+            Self::Read { .. } => RefusalChannel::Mcp,
+        }
+    }
+}
+
+/// One budget's `refused` lines in the current window.
 struct RefusalBudget {
     started: Instant,
     written: u32,
@@ -1328,7 +1373,7 @@ impl TerminalManager {
         peer_pid: Option<i32>,
         peer_exe: Option<String>,
     ) {
-        if !self.take_refusal_budget(channel) {
+        if !self.take_refusal_budget(RefusalKey::for_refusal(channel, code, focus)) {
             return;
         }
         self.record(AuditEvent::Refused {
@@ -1356,24 +1401,31 @@ impl TerminalManager {
             .is_some_and(|panes| panes.is_terminal_leaf(tag, pane_id))
     }
 
-    /// May one more `refused` line for `channel` be written in its window?
+    /// May one more `refused` line be written to `key`'s budget in its window?
     /// The cap and the count it kept out are themselves audited.
-    fn take_refusal_budget(&self, channel: RefusalChannel) -> bool {
+    fn take_refusal_budget(&self, mut key: RefusalKey) -> bool {
         let mut budgets = self
             .refusal_budgets
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let budget = budgets.entry(channel).or_insert_with(|| RefusalBudget {
+        if matches!(key, RefusalKey::Read { .. }) && !budgets.contains_key(&key) {
+            self.forget_ended_read_budgets(&mut budgets);
+            let live = budgets
+                .keys()
+                .filter(|k| matches!(k, RefusalKey::Read { .. }))
+                .count();
+            if live >= MAX_READ_REFUSAL_KEYS {
+                key = RefusalKey::Channel(key.channel());
+            }
+        }
+        let budget = budgets.entry(key.clone()).or_insert_with(|| RefusalBudget {
             started: Instant::now(),
             written: 0,
             suppressed: 0,
         });
         if budget.started.elapsed() >= REFUSAL_WINDOW {
             if budget.suppressed > 0 {
-                self.record(AuditEvent::RefusalsSuppressed {
-                    channel,
-                    count: budget.suppressed,
-                });
+                self.record(self.suppressed_event(&key, budget.suppressed));
             }
             *budget = RefusalBudget {
                 started: Instant::now(),
@@ -1387,13 +1439,53 @@ impl TerminalManager {
         }
         if budget.suppressed == 0 {
             warn!(
-                ?channel,
+                channel = ?key.channel(),
                 "terminal refusals over the audit cap; counting the rest"
             );
-            self.record(AuditEvent::RefusalLimitReached { channel });
+            let (code, focus) = self.refusal_key_fields(&key);
+            self.record(AuditEvent::RefusalLimitReached {
+                channel: key.channel(),
+                code,
+                focus,
+            });
         }
         budget.suppressed += 1;
         false
+    }
+
+    /// Drop the read-refusal budgets whose window is over (auditing what they
+    /// suppressed), so they do not pile up.
+    fn forget_ended_read_budgets(&self, budgets: &mut HashMap<RefusalKey, RefusalBudget>) {
+        budgets.retain(|key, budget| {
+            let ended = matches!(key, RefusalKey::Read { .. })
+                && budget.started.elapsed() >= REFUSAL_WINDOW;
+            if ended && budget.suppressed > 0 {
+                self.record(self.suppressed_event(key, budget.suppressed));
+            }
+            !ended
+        });
+    }
+
+    fn suppressed_event(&self, key: &RefusalKey, count: u32) -> AuditEvent {
+        let (code, focus) = self.refusal_key_fields(key);
+        AuditEvent::RefusalsSuppressed {
+            channel: key.channel(),
+            count,
+            code,
+            focus,
+        }
+    }
+
+    /// The `code` and `focus` an audit line names for a read-refusal budget;
+    /// none for a channel's shared one.
+    fn refusal_key_fields(&self, key: &RefusalKey) -> (Option<String>, Option<String>) {
+        match key {
+            RefusalKey::Channel(_) => (None, None),
+            RefusalKey::Read { focus, code } => (
+                Some(code.clone()),
+                focus.as_deref().map(|f| self.audit_tag(f)),
+            ),
+        }
     }
 
     /// `tag` as the audit trail names it: the opaque stand-in for a
@@ -1571,12 +1663,9 @@ impl TerminalManager {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()),
         );
-        for (channel, budget) in budgets {
+        for (key, budget) in budgets {
             if budget.suppressed > 0 {
-                self.record(AuditEvent::RefusalsSuppressed {
-                    channel,
-                    count: budget.suppressed,
-                });
+                self.record(self.suppressed_event(&key, budget.suppressed));
             }
         }
         for t in self.terminals.values() {
