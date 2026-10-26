@@ -1770,10 +1770,10 @@ fn handle_client_msg(
                 // terminal opened in the focus meanwhile cannot slip between
                 // the two (manager first, registry second: the usual order).
                 let mut mgr = lock_terminals(terminals);
-                let mut follow = None;
+                // Whoever pushed it, a removed focus follows nothing.
+                let follow = mgr.follow();
                 if cap.is_some() {
                     mgr.close_focus(tag);
-                    follow = mgr.follow();
                 } else if mgr.has_terminals(tag) {
                     mgr.audit_refused(
                         TerminalRefusalChannel::Ipc,
@@ -1783,6 +1783,10 @@ fn handle_client_msg(
                         peer.map(|p| p.pid),
                         peer.map(|p| p.exe.display().to_string()),
                     );
+                    drop(mgr);
+                    if let Some(follow) = follow {
+                        follow.session_ended(tag);
+                    }
                     continue;
                 }
                 if let Some(reg) = &pane_registry {
