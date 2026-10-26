@@ -52,7 +52,11 @@ pub struct ReportMeta {
     pub posture: Option<String>,
     /// The model that curated it; `None` for an uncurated (critical) report.
     pub model: Option<String>,
+    /// Exclusive: the window is `(window_start, window_end]`.
     pub window_start: DateTime<Utc>,
+    /// When the report's items were fetched (for a regeneration on the
+    /// frozen pool, the original fetch). The next window starts here.
+    pub window_end: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub late_reason: Option<String>,
 }
@@ -298,7 +302,7 @@ impl Store {
     }
 
     /// The newest curated report dated before `date`: the report window
-    /// starts at its `generated_at` (D4). Earlier versions and uncurated
+    /// starts at its `window_end` (D4). Earlier versions and uncurated
     /// reports are skipped.
     pub fn last_curated_before(&self, date: NaiveDate) -> Option<ReportMeta> {
         self.dates()

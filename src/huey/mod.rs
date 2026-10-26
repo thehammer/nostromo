@@ -40,7 +40,7 @@ pub use setup::SetupState;
 
 use context::ContextEnv;
 use run::{NoCurator, NoLive, RunEnv};
-use schedule::{local_date, Due, LocalTime, Schedule, SystemLocalTime};
+use schedule::{Due, LocalTime, Schedule, SystemLocalTime};
 use sources::{HttpClient, HttpLimits};
 use store::Store;
 
@@ -109,9 +109,11 @@ impl HueyHandle {
         self.inner.run_lock.try_lock().is_err()
     }
 
-    /// Today, in the daemon's local time.
+    /// The report date of right now: the local date (or tomorrow, once a
+    /// start time before midnight has passed).
     pub fn today(&self) -> NaiveDate {
-        local_date(self.inner.env.clock.now(), self.local_time())
+        self.schedule()
+            .report_date(self.inner.env.clock.now(), self.local_time())
     }
 
     fn local_time(&self) -> &dyn LocalTime {
@@ -129,19 +131,20 @@ impl HueyHandle {
     /// Start a run now, unless one is running or (for a regeneration) one
     /// just finished.
     pub async fn trigger(&self, trigger: Trigger) -> Result<RunOutcome, TriggerRefused> {
-        self.trigger_with(trigger, None).await
+        self.trigger_with(trigger, None, self.inner.env.clock.now())
+            .await
     }
 
     async fn trigger_with(
         &self,
         trigger: Trigger,
         late_reason: Option<String>,
+        now: DateTime<Utc>,
     ) -> Result<RunOutcome, TriggerRefused> {
         let Ok(_guard) = self.inner.run_lock.try_lock() else {
             return Err(TriggerRefused::AlreadyRunning);
         };
         if trigger == Trigger::Regenerate {
-            let now = self.inner.env.clock.now();
             if let Some(end) = *self.inner.last_run_end.lock().unwrap() {
                 let left = REGENERATE_COOLDOWN_SECS - (now - end).num_seconds();
                 if left > 0 {
@@ -150,7 +153,7 @@ impl HueyHandle {
             }
         }
         self.bump();
-        let outcome = run::run(&self.inner.env, trigger, late_reason).await;
+        let outcome = run::run_as_of(&self.inner.env, trigger, late_reason, now).await;
         *self.inner.last_run_end.lock().unwrap() = Some(self.inner.env.clock.now());
         self.bump();
         Ok(outcome)
@@ -166,6 +169,7 @@ impl HueyHandle {
         let day = self.store().day_runs(today);
         match day.last_failure() {
             Some((_, FailReason::FetchFailed)) => MissingReason::FetchFailed,
+            Some((_, FailReason::WriteFailed)) => MissingReason::WriteFailed,
             Some((at, FailReason::ModelFailed)) => {
                 let retry_due = chrono::Duration::minutes(schedule::RETRY_AFTER_MINUTES);
                 if day.model_failures() >= 2 || now - at > retry_due + late {
@@ -327,7 +331,7 @@ async fn run_scheduler(handle: HueyHandle, tick: Duration) {
     let mut noted: Option<NaiveDate> = None;
     loop {
         let now = handle.inner.env.clock.now();
-        let today = local_date(now, handle.local_time());
+        let today = handle.schedule().report_date(now, handle.local_time());
         if handle.setup_state() != SetupState::Confirmed {
             if noted != Some(today) {
                 info!("huey: not set up");
@@ -340,7 +344,7 @@ async fn run_scheduler(handle: HueyHandle, tick: Duration) {
                 late_reason,
             } = schedule::is_due(&handle.schedule(), now, handle.local_time(), &day)
             {
-                let _ = handle.trigger_with(trigger, late_reason).await;
+                let _ = handle.trigger_with(trigger, late_reason, now).await;
             }
         }
         tokio::time::sleep(tick).await;

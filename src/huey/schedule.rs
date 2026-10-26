@@ -113,12 +113,25 @@ impl Schedule {
 
     /// The next scheduled start at or after `now`.
     pub fn next_run_at(&self, now: DateTime<Utc>, tz: &dyn LocalTime) -> DateTime<Utc> {
-        let today = local_date(now, tz);
-        let at = self.run_at(today, tz);
+        let date = self.report_date(now, tz);
+        let at = self.run_at(date, tz);
         if at >= now {
             at
         } else {
-            self.run_at(today + Duration::days(1), tz)
+            self.run_at(date + Duration::days(1), tz)
+        }
+    }
+
+    /// The date a run at `now` reports for: the local date, or tomorrow once
+    /// tomorrow's run has started (a start time that falls before midnight,
+    /// say `00:15` with a 30-minute lead).
+    pub fn report_date(&self, now: DateTime<Utc>, tz: &dyn LocalTime) -> NaiveDate {
+        let today = local_date(now, tz);
+        let tomorrow = today + Duration::days(1);
+        if self.run_at(tomorrow, tz) <= now {
+            tomorrow
+        } else {
+            today
         }
     }
 
@@ -154,6 +167,20 @@ impl DayRuns {
             .filter(|(_, r)| *r == FailReason::ModelFailed)
             .count()
     }
+
+    /// Only the failures that ended at or after `start`: a manual run
+    /// before the scheduled start does not use up the day.
+    pub fn since(&self, start: DateTime<Utc>) -> DayRuns {
+        DayRuns {
+            produced: self.produced,
+            failures: self
+                .failures
+                .iter()
+                .copied()
+                .filter(|(at, _)| *at >= start)
+                .collect(),
+        }
+    }
 }
 
 /// What the scheduler should do now.
@@ -171,17 +198,21 @@ pub enum Due {
 /// - Nothing happened today and the start time has passed: run. More than
 ///   [`LATE_AFTER_MINUTES`] past it, the run is a catch-up and says why.
 /// - Today's only attempt failed in the model: retry once,
-///   [`RETRY_AFTER_MINUTES`] later (V5).
+///   [`RETRY_AFTER_MINUTES`] after it ended (V5).
 /// - Otherwise (a report exists, a fetch failed, the retry was used): no.
+///
+/// `day` is the record for `schedule.report_date(now)`; failures from
+/// before the start time (a manual run) are not counted.
 pub fn is_due(schedule: &Schedule, now: DateTime<Utc>, tz: &dyn LocalTime, day: &DayRuns) -> Due {
     if day.produced {
         return Due::No;
     }
-    let today = local_date(now, tz);
-    let run_at = schedule.run_at(today, tz);
+    let date = schedule.report_date(now, tz);
+    let run_at = schedule.run_at(date, tz);
     if now < run_at {
         return Due::No;
     }
+    let day = day.since(run_at);
     match day.last_failure() {
         None => {
             let late = now - run_at > Duration::minutes(LATE_AFTER_MINUTES);
@@ -281,4 +312,41 @@ mod tests {
         };
         assert_eq!(is_due(&sched(), at(8, 0), &tz, &fetch), Due::No);
     }
+
+    #[test]
+    fn a_manual_failure_before_the_start_does_not_use_up_the_day() {
+        let tz = FixedLocalTime::utc();
+        let early = DayRuns {
+            produced: false,
+            failures: vec![(at(5, 50), FailReason::FetchFailed)],
+        };
+        assert_eq!(
+            is_due(&sched(), at(6, 0), &tz, &early),
+            Due::Run {
+                trigger: Trigger::Scheduled,
+                late_reason: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_start_before_midnight_reports_for_the_next_day_on_time() {
+        let tz = FixedLocalTime::utc();
+        let s = Schedule {
+            report_time: NaiveTime::from_hms_opt(0, 15, 0).unwrap(),
+            lead_minutes: 30,
+        };
+        let d26 = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        assert_eq!(s.report_date(at(23, 44), &tz), d26);
+        assert_eq!(s.report_date(at(23, 45), &tz), d26 + Duration::days(1));
+        assert_eq!(
+            is_due(&s, at(23, 45), &tz, &DayRuns::default()),
+            Due::Run {
+                trigger: Trigger::Scheduled,
+                late_reason: None
+            }
+        );
+        assert_eq!(s.next_run_at(at(12, 0), &tz), at(23, 45));
+    }
 }
+

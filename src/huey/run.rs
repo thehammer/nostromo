@@ -30,7 +30,7 @@ use crate::huey::render::{
     self, AinLine, FailedSource, Footer, FooterDrop, HeadlineLine, Link, NotedLine, Pick,
     PickCheck, Report, UncuratedList, UNCURATED_CAP,
 };
-use crate::huey::schedule::{local_date, LocalTime};
+use crate::huey::schedule::{LocalTime, Schedule};
 use crate::huey::setup::{self, SetupState};
 use crate::huey::sources::config::load_file;
 use crate::huey::sources::{
@@ -77,6 +77,8 @@ pub enum FailReason {
     /// No first-party source answered.
     FetchFailed,
     ModelFailed,
+    /// The report could not be saved.
+    WriteFailed,
     NotSetUp,
 }
 
@@ -695,7 +697,14 @@ fn ledger_entries(report: &Report, frame: &ReportFrame) -> Vec<LedgerEntry> {
         out.extend(p.item_ids.iter().map(|id| entry(id, Section::Pick)));
     }
     if let Some(a) = &report.also_in_the_news {
-        out.push(entry(&a.item_id, Section::Ain));
+        // The rule-chosen line of a critical report was never curated: it
+        // blocks only the Also-in-the-news line, like the list (D4).
+        let section = if report.is_uncurated() {
+            Section::Uncurated
+        } else {
+            Section::Ain
+        };
+        out.push(entry(&a.item_id, section));
     }
     for n in &report.also_noted {
         out.extend(n.item_ids.iter().map(|id| entry(id, Section::AlsoNoted)));
@@ -746,7 +755,9 @@ impl Attempt<'_> {
         fetch_ms: u64,
     ) {
         let rec = RunRecord {
-            at: self.now,
+            // When the attempt ended: the retry and the scheduler's guard
+            // both count from here.
+            at: self.env.clock.now(),
             date: self.date,
             trigger: self.trigger,
             mode,
@@ -771,11 +782,11 @@ impl Attempt<'_> {
         RunOutcome::Failed { reason }
     }
 
-    /// The window starts at the last curated report (D4).
+    /// The window starts where the last curated report's ended (D4).
     fn window_start(&self) -> DateTime<Utc> {
         self.store
             .last_curated_before(self.date)
-            .map(|m| m.generated_at)
+            .map(|m| m.window_end)
             .unwrap_or(self.now - Duration::days(FIRST_RUN_DAYS))
     }
 
@@ -793,10 +804,12 @@ impl Attempt<'_> {
         if !warnings.is_empty() {
             warn!(count = warnings.len(), "huey: sources.toml warnings");
         }
+        // The window is exclusive of its start: an item first seen (or
+        // clamped to) the previous run's fetch time was in that window.
         fetch_all(
             &cfg,
             &paths.state_dir(),
-            window_start,
+            window_start + Duration::nanoseconds(1),
             self.now,
             &self.env.http,
         )
@@ -962,13 +975,23 @@ fn build_frame(
 /// One attempt at today's report: window, fetch, select, digest, curate or
 /// list, persist.
 pub async fn run(env: &RunEnv, trigger: Trigger, late_reason: Option<String>) -> RunOutcome {
+    run_as_of(env, trigger, late_reason, env.clock.now()).await
+}
+
+/// One attempt, for the report date `now` belongs to. The scheduler passes
+/// the `now` it decided on, so both agree on the date near midnight.
+pub async fn run_as_of(
+    env: &RunEnv,
+    trigger: Trigger,
+    late_reason: Option<String>,
+    now: DateTime<Utc>,
+) -> RunOutcome {
     if setup::load(&env.paths).state != SetupState::Confirmed || !env.paths.root().is_dir() {
         return RunOutcome::Failed {
             reason: FailReason::NotSetUp,
         };
     }
-    let now = env.clock.now();
-    let date = local_date(now, env.local_time.as_ref());
+    let date = Schedule::from_config(&env.config).report_date(now, env.local_time.as_ref());
     let attempt = Attempt {
         env,
         trigger,
@@ -1030,13 +1053,14 @@ pub async fn run(env: &RunEnv, trigger: Trigger, late_reason: Option<String>) ->
         posture: posture.posture.clone(),
         model,
         window_start,
+        window_end: fetched.fetched_at.unwrap_or(now),
         late_reason,
     };
     if attempt
         .persist(&meta, &report, &frame, &digest_text)
         .is_err()
     {
-        return attempt.fail(Some(mode), FailReason::ModelFailed, fetch_ms);
+        return attempt.fail(Some(mode), FailReason::WriteFailed, fetch_ms);
     }
     attempt.log(Some(mode), None, Some(version), fetch_ms);
     let pruned = store.prune(date);

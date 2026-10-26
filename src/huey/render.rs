@@ -485,6 +485,8 @@ pub enum MissingReason {
     Asleep,
     FetchFailed,
     ModelFailed,
+    /// The report was made but could not be saved.
+    WriteFailed,
 }
 
 impl MissingReason {
@@ -496,6 +498,7 @@ impl MissingReason {
             }
             MissingReason::FetchFailed => "fetching the news failed",
             MissingReason::ModelFailed => "the model run failed",
+            MissingReason::WriteFailed => "the report could not be saved",
         }
     }
 

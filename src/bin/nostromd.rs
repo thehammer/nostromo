@@ -419,15 +419,15 @@ async fn main() -> Result<()> {
         }
     });
 
+    // ── Mother jobs channel (spawned early so MCP state and Huey get the live list)
+    let jobs_feed = nostromo::mother::JobsFeed::new();
+
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // A disabled agent still hands its consumers a live `watch::Receiver`:
     // a dropped sender makes `changed()` fail at once, and
     // `run_pane_source_broadcaster` exits on that error, which would also kill
     // the staleness ticker for file and ticket panes. So each disabled agent's
     // senders are parked here for the daemon's lifetime.
-    // ── Mother jobs channel (spawned early so MCP state and Huey get the live list)
-    let jobs_feed = nostromo::mother::JobsFeed::new();
-
     let mut spawner = RealAgentSpawner {
         config: config.clone(),
         session_mgr: Arc::clone(&session_mgr),

@@ -117,7 +117,23 @@ struct Entry {
 #[derive(Clone)]
 enum Feed {
     Entries(Vec<Entry>),
+    /// Atom entries with no dates at all: the source is undated.
+    Undated(Vec<(String, String)>),
     Status(u16),
+}
+
+fn undated_atom(source: &str, entries: &[(String, String)]) -> String {
+    let mut out = String::from(
+        r#"<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Test feed</title><id>urn:test-feed</id>"#,
+    );
+    for (key, title) in entries {
+        out.push_str(&format!(
+            r#"<entry><id>{key}</id><title>{title}</title><link rel="alternate" href="https://{source}.example.test/{key}"/></entry>"#,
+            title = xml(title),
+        ));
+    }
+    out.push_str("</feed>");
+    out
 }
 
 fn xml(s: &str) -> String {
@@ -155,6 +171,8 @@ impl Site {
         match self.feeds.lock().unwrap().get(source) {
             Some(Feed::Entries(entries)) => ResponseTemplate::new(200)
                 .set_body_raw(atom(source, entries), "application/atom+xml"),
+            Some(Feed::Undated(entries)) => ResponseTemplate::new(200)
+                .set_body_raw(undated_atom(source, entries), "application/atom+xml"),
             Some(Feed::Status(code)) => ResponseTemplate::new(*code),
             None => ResponseTemplate::new(404),
         }
@@ -854,10 +872,16 @@ async fn h4_2_a_model_failure_is_retried_once_ten_minutes_later() {
             Ok(publish(input, 1, false))
         }
     });
-    let _src = HueyEngine::spawn(w.deps(curator.clone(), Duration::from_millis(5)));
+    let src = HueyEngine::spawn(w.deps(curator.clone(), Duration::from_millis(5)));
 
     wait_for("the first attempt", || curator.calls() == 1).await;
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Let the failed attempt finish before moving the clock: the retry counts
+    // from when it ended.
+    let store = w.store();
+    wait_for("the first attempt to end", || {
+        store.runs().len() == 1 && !src.handle.is_running()
+    })
+    .await;
     assert!(w.store().dates().is_empty(), "the first attempt failed");
 
     // Nine minutes in: too early for the retry.
@@ -887,11 +911,21 @@ async fn h4_2_a_failed_retry_is_not_retried_again() {
         )],
     );
     let curator = Scripted::failing();
-    let _src = HueyEngine::spawn(w.deps(curator.clone(), Duration::from_millis(5)));
+    let src = HueyEngine::spawn(w.deps(curator.clone(), Duration::from_millis(5)));
+    let store = w.store();
 
     wait_for("the first attempt", || curator.calls() == 1).await;
+    // The retry counts from when the failed attempt ended: let it end first.
+    wait_for("the first attempt to end", || {
+        store.runs().len() == 1 && !src.handle.is_running()
+    })
+    .await;
     w.clock.set(ts("2026-10-26T06:10:00Z"));
     wait_for("the retry", || curator.calls() == 2).await;
+    wait_for("the retry to end", || {
+        store.runs().len() == 2 && !src.handle.is_running()
+    })
+    .await;
     w.clock.set(ts("2026-10-26T08:00:00Z"));
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(curator.calls(), 2, "one retry, no more");
@@ -1232,6 +1266,7 @@ fn h4_4_the_ledger_blocks_candidates_for_fourteen_days_and_uncurated_entries_onl
         items: vec![shown.clone()],
         recent: vec![shown.clone()],
         statuses: Vec::new(),
+        fetched_at: None,
     };
     let none = Interests::default();
 
@@ -1944,7 +1979,9 @@ async fn h4_7_the_critical_news_line_is_the_newest_anthropic_news_item_even_if_o
         .lines
         .iter()
         .all(|l| l.item_id.starts_with("vendor-news:")));
-    // The line is itself recorded, so it is not repeated for two weeks.
+    // The line is itself recorded, so it is not repeated for two weeks. Like
+    // everything in an uncurated report it is recorded as `uncurated` (D4):
+    // it blocks the line, not tomorrow's picks.
     let entry = w
         .store()
         .ledger()
@@ -1952,7 +1989,7 @@ async fn h4_7_the_critical_news_line_is_the_newest_anthropic_news_item_even_if_o
         .into_iter()
         .find(|e| e.item_id == id(ANTHROPIC.0, "a1"))
         .expect("the news line is in the ledger");
-    assert_eq!(entry.section, Section::Ain);
+    assert_eq!(entry.section, Section::Uncurated);
 }
 
 #[tokio::test]
@@ -2985,4 +3022,113 @@ async fn no_preference_state_outside_interests() {
             assert!(!holders.contains(rel), "interest text in {rel}");
         }
     }
+}
+
+// ── Review follow-ups: window edges and the uncurated line ───────────────────
+
+impl World {
+    fn undated_items(&self, source: &str, entries: &[(&str, &str)]) {
+        self.site.feeds.lock().unwrap().insert(
+            source.into(),
+            Feed::Undated(
+                entries
+                    .iter()
+                    .map(|(k, t)| (k.to_string(), t.to_string()))
+                    .collect(),
+            ),
+        );
+    }
+}
+
+#[tokio::test]
+async fn windows_do_not_overlap_so_an_undated_item_is_a_candidate_on_one_day_only() {
+    let w = world("2026-10-21T06:00:00Z").await;
+    w.sources(&[VENDOR]);
+    w.confirm();
+    w.posture("Cruise");
+    let curator = Scripted::picking(0, false);
+
+    // Day 1: the first read of an undated source is baseline.
+    w.undated_items(VN, &[("old", "Gizmo archive page")]);
+    produced(&w.run(&curator, Trigger::Scheduled).await);
+
+    // Day 2: a new undated item is first seen now, so it is in the window.
+    w.undated_items(
+        VN,
+        &[("old", "Gizmo archive page"), ("fresh", "Gizmo fresh page")],
+    );
+    w.clock.set(ts("2026-10-22T06:00:00Z"));
+    produced(&w.run(&curator, Trigger::Scheduled).await);
+    assert_eq!(candidate_ids(&curator.last()), set(&[id(VN, "fresh")]));
+
+    // Day 3: it was first seen at the instant day 2's window ended, so it is
+    // not in day 3's window as well.
+    w.clock.set(ts("2026-10-23T06:00:00Z"));
+    produced(&w.run(&curator, Trigger::Scheduled).await);
+    assert!(
+        candidate_ids(&curator.last()).is_empty(),
+        "{:?}",
+        candidate_ids(&curator.last())
+    );
+}
+
+#[tokio::test]
+async fn a_regeneration_on_the_frozen_pool_does_not_move_the_next_window_past_its_fetch() {
+    let w = world("2026-10-21T06:00:00Z").await;
+    w.sources(&[VENDOR]);
+    w.confirm();
+    w.posture("Cruise");
+    let curator = Scripted::picking(0, false);
+    w.items(VN, &[("seed", "Gizmo seed", ts("2026-10-21T05:00:00Z"))]);
+    produced(&w.run(&curator, Trigger::Scheduled).await);
+
+    // Published at noon; the 15:00 regeneration reuses the 06:00 pool and so
+    // never sees it.
+    w.items(VN, &[("noon", "Gizmo noon news", ts("2026-10-21T12:00:00Z"))]);
+    w.clock.set(ts("2026-10-21T15:00:00Z"));
+    produced(&w.run(&curator, Trigger::Regenerate).await);
+    let v2 = w.store().load_meta(oct(21), 2).unwrap();
+    assert_eq!(v2.generated_at, ts("2026-10-21T15:00:00Z"));
+    assert_eq!(v2.window_end, ts("2026-10-21T06:00:00Z"));
+    assert!(!candidate_ids(&curator.last()).contains(&id(VN, "noon")));
+
+    // So tomorrow's window starts at 06:00 today and the noon item is in it.
+    w.clock.set(ts("2026-10-22T06:00:00Z"));
+    produced(&w.run(&curator, Trigger::Scheduled).await);
+    assert!(candidate_ids(&curator.last()).contains(&id(VN, "noon")));
+}
+
+#[tokio::test]
+async fn the_rule_chosen_line_of_a_critical_report_blocks_only_the_line_not_picks() {
+    let w = world("2026-10-21T06:00:00Z").await;
+    w.sources(&[VENDOR, ANTHROPIC]);
+    w.confirm();
+    w.posture("Cruise");
+    let curator = Scripted::picking(0, false);
+    // Published before day 1's window ended, never shown on day 1.
+    w.items(
+        ANTHROPIC.0,
+        &[("launch", "Anthropic launch post", ts("2026-10-21T05:00:00Z"))],
+    );
+    w.items(VN, &[("seed", "Gizmo seed", ts("2026-10-21T05:00:00Z"))]);
+    produced(&w.run(&curator, Trigger::Scheduled).await);
+
+    // Day 2 is critical: the launch post is out of the window (so not in the
+    // list) but in the 7-day pool, so the rule picks it for the line.
+    w.clock.set(ts("2026-10-22T06:00:00Z"));
+    w.posture("critical");
+    let report = w.run_report(&curator, Trigger::Scheduled).await;
+    let launch = id(ANTHROPIC.0, "launch");
+    assert_eq!(
+        report.also_in_the_news.as_ref().map(|a| a.item_id.clone()),
+        Some(launch.clone())
+    );
+    let entry = w
+        .store()
+        .ledger()
+        .entries
+        .into_iter()
+        .find(|e| e.item_id == launch && e.date == oct(22))
+        .expect("the line is in the ledger");
+    assert_eq!(entry.section, Section::Uncurated);
 }

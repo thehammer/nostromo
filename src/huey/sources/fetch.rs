@@ -55,6 +55,10 @@ pub struct FetchOutcome {
     pub recent: Vec<NewsItem>,
     /// One per enabled source, in `sources.toml` order.
     pub statuses: Vec<SourceStatus>,
+    /// When this fetch ran: the items run up to here, so the next window
+    /// starts after it (a regeneration on the frozen pool keeps it).
+    #[serde(default)]
+    pub fetched_at: Option<DateTime<Utc>>,
 }
 
 struct SourceResult {
@@ -85,7 +89,10 @@ pub async fn fetch_all(
             .map(|src| run_source(src, state_dir, window_start, now, http)),
     )
     .await;
-    let mut out = FetchOutcome::default();
+    let mut out = FetchOutcome {
+        fetched_at: Some(now),
+        ..FetchOutcome::default()
+    };
     for r in results {
         out.items.extend(r.items);
         out.recent.extend(r.recent);
