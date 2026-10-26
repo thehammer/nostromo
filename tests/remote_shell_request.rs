@@ -825,6 +825,7 @@ async fn a_valid_request_sends_exactly_one_confirm_to_the_app_that_can_show_it_a
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sheet_names_the_command_the_profile_and_the_cluster_that_will_run() {
     let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
     let sheet = |c: &Confirm| {
         (
             c.shell_command.clone(),
@@ -834,6 +835,7 @@ async fn the_sheet_names_the_command_the_profile_and_the_cluster_that_will_run()
     };
 
     // The usual request: the user's own profile for production wins.
+    clock.advance(Duration::from_secs(600));
     let (call, confirm) = s.ask(args()).await;
     assert_eq!(
         sheet(&confirm),
@@ -847,12 +849,14 @@ async fn the_sheet_names_the_command_the_profile_and_the_cluster_that_will_run()
     s.mcp.finish(call).await;
 
     // Tinker runs its own command.
+    clock.advance(Duration::from_secs(600));
     let (call, confirm) = s.ask(args_with("shell_type", json!("tinker"))).await;
     assert_eq!(confirm.shell_command.as_deref(), Some("php artisan tinker"));
     s.app.answer(&confirm.request_id, "cancel").await;
     s.mcp.finish(call).await;
 
     // A project's own override of the shell command.
+    clock.advance(Duration::from_secs(600));
     let (call, confirm) = s
         .ask(json!({"project":"referral-monitor","environment":"production","service":"monitor","shell_type":"shell"}))
         .await;
@@ -863,12 +867,14 @@ async fn the_sheet_names_the_command_the_profile_and_the_cluster_that_will_run()
 
     // Without a personal file the shared profile is shown.
     s.d.remove_ecs("ecs-local.json");
+    clock.advance(Duration::from_secs(600));
     let (call, confirm) = s.ask(args()).await;
     assert_eq!(confirm.profile.as_deref(), Some("fake-prod-profile"));
     s.app.answer(&confirm.request_id, "cancel").await;
     s.mcp.finish(call).await;
 
     // An environment with no profile yet: the sheet has none to show.
+    clock.advance(Duration::from_secs(600));
     let (call, confirm) = s
         .ask(json!({"project":"ap","environment":"canada","service":"sched","shell_type":"shell"}))
         .await;
