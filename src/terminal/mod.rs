@@ -54,7 +54,7 @@ use store::{TerminalRecord, TerminalStore};
 use crate::ipc::pane_registry::{PaneError, PaneRegistry, SplitPosition};
 use crate::ipc::peer::SensitiveTags;
 use crate::ipc::protocol::{
-    ClientMsg, PaneContentWire, PaneTree, ServerMsg, RemoteShellSummary, TerminalClosedInfo,
+    ClientMsg, PaneContentWire, PaneTree, RemoteShellSummary, ServerMsg, TerminalClosedInfo,
     TerminalInfo, TerminalKind, TerminalRequester, TerminalStatus, TerminalTarget,
 };
 

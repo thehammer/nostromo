@@ -23,12 +23,12 @@ use tempfile::TempDir;
 use super::access::tests::cap as access_cap;
 use super::audit::{AuditEvent, AuditLog, RefusalChannel};
 use super::fanout::Fanout;
-use super::IdleState;
 use super::session::{
     InputError, SignalOps, TerminalSession, MAX_INPUT_FRAME_BYTES, MAX_INPUT_QUEUED_BYTES,
     RING_MAX_BYTES, RING_MAX_NEWLINES, SCRUBBED_ENV,
 };
 use super::store::{self, TerminalRecord, TerminalStore};
+use super::IdleState;
 use super::{
     OpenLocal, StreamBatch, Terminal, TerminalConfig, TerminalError, TerminalManager,
     MAX_AGENT_TERMINALS, MAX_AGENT_TERMINALS_PER_FOCUS, MAX_TERMINALS, MAX_TERMINALS_PER_FOCUS,
