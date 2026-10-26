@@ -67,6 +67,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     private static let staggerInterval: TimeInterval = 0.7
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DynamicFocusView.terminalPaneFactory = { tag, paneId, windowId in
+            TerminalPaneHostView(tag: tag, paneId: paneId, windowId: windowId)
+        }
         appLog.info("applicationDidFinishLaunching — pid=\(ProcessInfo.processInfo.processIdentifier, privacy: .public) screens=\(NSScreen.screens.count, privacy: .public)")
 
         // Enforce single instance: if another Nostromo process is already running,

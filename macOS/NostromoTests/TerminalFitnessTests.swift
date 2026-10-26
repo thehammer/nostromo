@@ -243,8 +243,14 @@ final class TerminalFitnessTests: XCTestCase {
 
         let after = source[routing.upperBound...]
         let branchEnd = after.range(of: "} else")?.lowerBound ?? after.endIndex
-        XCTAssertTrue(after[..<branchEnd].contains("TerminalPaneHostView"),
-                      "a terminal- pane must be built as a TerminalPaneHostView")
+        XCTAssertTrue(after[..<branchEnd].contains("terminalPaneFactory"),
+                      "a terminal- pane must be built through DynamicFocusView.terminalPaneFactory (the test bundle compiles this file and cannot link the SwiftTerm view)")
+        // ...and the app points the factory at the real host view.
+        let delegate = try Repo.read(Repo.app.appendingPathComponent("AppDelegate.swift"))
+        let wiring = try XCTUnwrap(delegate.range(of: "DynamicFocusView.terminalPaneFactory"),
+                                   "AppDelegate never sets the terminal pane factory")
+        XCTAssertTrue(delegate[wiring.upperBound...].prefix(300).contains("TerminalPaneHostView("),
+                      "the factory must build a TerminalPaneHostView")
     }
 
     // MARK: Every input path asks the guard

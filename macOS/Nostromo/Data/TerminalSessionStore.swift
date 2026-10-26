@@ -22,6 +22,10 @@ protocol TerminalByteSink: AnyObject {
     func takeKeyboardFocus()
 }
 
+/// Marks a view as a terminal pane, so code that also builds in the test bundle (`DynamicFocusView`)
+/// can recognise one without naming the SwiftTerm-linked class.
+protocol TerminalPaneLeaf: AnyObject {}
+
 /// What `TerminalSessionStore.changes` announces.
 enum TerminalChange: Equatable {
     case info(TerminalInfo)

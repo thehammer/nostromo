@@ -28,6 +28,11 @@ final class DynamicFocusView: NSView {
 
     // MARK: - Init
 
+    /// Builds the view for a `terminal-*` pane: `(focus tag, pane id, window id)`. The app sets it at
+    /// launch to `TerminalPaneHostView`; it is a seam because that view links SwiftTerm, which the
+    /// test bundle (it compiles this file) must not. Unset, a terminal pane gets the generic placeholder.
+    static var terminalPaneFactory: ((_ tag: String, _ paneId: String, _ windowId: String) -> NSView & TerminalPaneLeaf)?
+
     private let focus: Focus
     /// Stable per-window identifier (the screen index `MainLayout` was built
     /// with) — carried on every `RenderedShape` report so the daemon can tell
@@ -442,11 +447,11 @@ final class DynamicFocusView: NSView {
             let tracker = TrackerPaneView(tag: focus.sessionTag)
             leafViews[paneId] = tracker
             return tracker
-        } else if paneId.hasPrefix("terminal-") {
-            // A daemon-owned shell (1d): the host draws its bytes with SwiftTerm and takes the
-            // keyboard when this window opened it. Kept per window and reused across rebuilds
-            // like the REPL, so the screen and scrollback survive a layout change.
-            let terminal = TerminalPaneHostView(tag: focus.sessionTag, paneId: paneId, windowId: windowId)
+        } else if paneId.hasPrefix("terminal-"), let makeTerminalPane = Self.terminalPaneFactory {
+            // A daemon-owned shell (1d): the app's `TerminalPaneHostView` draws its bytes with SwiftTerm
+            // and takes the keyboard when this window opened it. Kept per window and reused across
+            // rebuilds like the REPL, so the screen and scrollback survive a layout change.
+            let terminal = makeTerminalPane(focus.sessionTag, paneId, windowId)
             leafViews[paneId] = terminal
             return terminal
         } else {
@@ -898,7 +903,7 @@ final class DynamicFocusView: NSView {
                     region.setCaption(address[paneId]?.reason, for: paneId)
                     region.noteContentPushed(for: paneId)
                 }
-            } else if leafViews[paneId] is TerminalPaneHostView {
+            } else if leafViews[paneId] is TerminalPaneLeaf {
                 // A terminal pane draws from `TerminalSessionStore`; the daemon's `terminal`
                 // pane content is only a placeholder for clients that cannot attach (iOS).
                 continue

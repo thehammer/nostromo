@@ -13,7 +13,7 @@ import SwiftTerm
 /// Every control that changes a terminal (the x, Restart, Close, and Terminal > Close Terminal
 /// Pane) asks `TerminalInputGuard.allowsControl` first. A synthetic click does nothing, and the
 /// refusal is reported to the daemon.
-final class TerminalPaneHostView: NSView, TerminalByteSink {
+final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     static let headerHeight: CGFloat = 24
     private static let overlayHeight: CGFloat = 40
