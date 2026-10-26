@@ -348,6 +348,7 @@ private class PerriPRList: NSView {
     }
 
     func update(_ items: [PRQueueItem]) {
+        RebuildCounters.note(.perriQueueListRebuilt)
         stackView.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         if items.isEmpty {
