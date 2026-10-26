@@ -41,6 +41,10 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     private var keyMonitor: Any?
     /// Restart was clicked: the new shell takes the keyboard when it appears.
     private var focusAfterRestart = false
+    /// Shown in the overlay for a few seconds after the daemon refused input (a paste it could not take).
+    private var inputNotice: String?
+    private var inputNoticeToken = 0
+    private static let inputNoticeLifetime: TimeInterval = 8
 
     init(tag: String, paneId: String, windowId: String,
          store: TerminalSessionStore = .shared, latency: TerminalLatencyStats = .shared) {
@@ -95,6 +99,11 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
             return
         }
         store.close(terminalId: id)
+    }
+
+    /// Edit > Find / Find Next: SwiftTerm's find bar (`sender` is the menu item; its tag says which).
+    func performFind(_ sender: Any?) {
+        terminalView.performFindPanelAction(sender)
     }
 
     /// The terminal view takes the keyboard.
@@ -181,6 +190,10 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     }
 
     private func handle(_ change: TerminalChange) {
+        if case .refused(let frame) = change {
+            showInputNotice(for: frame)
+            return
+        }
         guard case .info(let updated) = change, updated.paneId == paneId, updated.tag == tag else { return }
         let restarted = info.map { $0.terminalId != updated.terminalId } ?? false
         info = updated
@@ -189,6 +202,21 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         if restarted && focusAfterRestart {
             focusAfterRestart = false
             focusTerminal()
+        }
+    }
+
+    /// The daemon refused input for this terminal (too large a frame, or the program is not reading):
+    /// say so in the overlay, so a paste that did not arrive is never silent.
+    private func showInputNotice(for frame: TerminalRefusedFrame) {
+        guard let id = info?.terminalId, frame.terminalId == id, let notice = frame.overlayNotice else { return }
+        inputNotice = notice
+        inputNoticeToken += 1
+        let token = inputNoticeToken
+        render()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.inputNoticeLifetime) { [weak self] in
+            guard let self, self.inputNoticeToken == token else { return }
+            self.inputNotice = nil
+            self.render()
         }
     }
 
@@ -209,7 +237,8 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     private func render() {
         titleLabel.stringValue = info?.headerTitle() ?? "Terminal"
         let ended = info?.status == .ended
-        overlay.isHidden = !ended
+        let notice = ended ? nil : inputNotice
+        overlay.isHidden = !ended && notice == nil
         if ended {
             if let code = info?.exitCode {
                 overlayLabel.stringValue = "[process exited with code \(code)]"
@@ -217,7 +246,12 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
                 overlayLabel.stringValue = "[process ended]"
             }
             restartButton.isHidden = info?.kind != .local
+        } else if let notice {
+            overlayLabel.stringValue = notice
+            restartButton.isHidden = true
         }
+        overlayCloseButton.isHidden = notice != nil
+        overlayLabel.toolTip = overlayLabel.stringValue
         needsLayout = true
     }
 
@@ -240,6 +274,8 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         overlay.isHidden = true
         overlayLabel.font = Theme.statusFont
         overlayLabel.textColor = Theme.fg
+        // A narrow pane must not clip the message at an edge: keep both ends and drop the middle.
+        overlayLabel.lineBreakMode = .byTruncatingMiddle
         overlayLabel.setAccessibilityIdentifier("terminal-ended")
         style(restartButton, title: "Restart", identifier: "terminal-restart", label: "Restart terminal",
               action: #selector(restartTapped(_:)), filled: true)
@@ -282,7 +318,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     private func layoutOverlay() {
         let h = overlay.bounds.height
         let buttonH: CGFloat = 24
-        let closeW: CGFloat = 60
+        let closeW: CGFloat = overlayCloseButton.isHidden ? 0 : 60
         let restartW: CGFloat = restartButton.isHidden ? 0 : 72
         let gap: CGFloat = restartButton.isHidden ? 0 : 8
         var x = overlay.bounds.width - 10 - closeW

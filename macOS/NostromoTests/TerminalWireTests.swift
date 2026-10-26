@@ -107,6 +107,39 @@ final class TerminalWireTests: XCTestCase {
         XCTAssertEqual(Array(try XCTUnwrap(Data(base64Encoded: text))), bytes)
     }
 
+    // MARK: Auto replies
+
+    func testAnOrdinaryInputFrameHasNoAutoReplyKey() throws {
+        let o = try object(.input(terminalId: "t1", bytes: Array("ls\n".utf8)))
+        XCTAssertNil(o["auto_reply"], "an older daemon must see exactly the frame it always saw: \(o)")
+        let explicit = try object(.input(terminalId: "t1", bytes: Array("ls\n".utf8), autoReply: false))
+        XCTAssertNil(explicit["auto_reply"], "false is omitted, not sent as false: \(explicit)")
+        XCTAssertEqual(Set(explicit.keys), ["type", "terminal_id", "bytes"])
+    }
+
+    func testAnAutoReplyInputFrameCarriesAutoReplyTrue() throws {
+        let o = try object(.input(terminalId: "t1", bytes: Array("\u{1b}[0;0R".utf8), autoReply: true))
+        XCTAssertEqual(o["auto_reply"] as? Bool, true, "\(o)")
+        XCTAssertEqual(Set(o.keys), ["type", "terminal_id", "bytes", "auto_reply"])
+    }
+
+    func testAnAutoReplyKeepsItsTypeTerminalAndBase64Bytes() throws {
+        let message = TerminalClientMessage.input(terminalId: "t1", bytes: Array("ls\n".utf8), autoReply: true)
+        let o = try object(message)
+        XCTAssertEqual(o["type"] as? String, "terminal_input")
+        XCTAssertEqual(message.jsonObject["type"] as? String, "terminal_input")
+        XCTAssertEqual(o["terminal_id"] as? String, "t1")
+        XCTAssertEqual(o["bytes"] as? String, "bHMK")
+        XCTAssertEqual(message.jsonObject["auto_reply"] as? Bool, true)
+    }
+
+    func testAnAutoReplyIsNotEqualToTheSameBytesTypedByAPerson() {
+        XCTAssertNotEqual(TerminalClientMessage.input(terminalId: "t1", bytes: [0x61], autoReply: true),
+                          TerminalClientMessage.input(terminalId: "t1", bytes: [0x61]))
+        XCTAssertEqual(TerminalClientMessage.input(terminalId: "t1", bytes: [0x61]),
+                       TerminalClientMessage.input(terminalId: "t1", bytes: [0x61], autoReply: false))
+    }
+
     func testResizeCarriesColsAndRowsAsNumbers() throws {
         let o = try object(.resize(terminalId: "t1", cols: 120, rows: 40))
         XCTAssertEqual(o["cols"] as? Int, 120)

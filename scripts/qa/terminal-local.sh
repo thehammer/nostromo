@@ -9,10 +9,15 @@
 # keyboard in it; typing echoes; truecolor; seq 1 12000; vim and :q; 200 typed characters give latency
 # numbers; `exit 3` shows the overlay; Restart brings the shell back; `exit` removes the pane; a terminal an
 # agent opens (the QA daemon's MCP socket, Hello pty_id = a built-in focus tag) does not take the keyboard.
-# The terminal's screen text is read through its accessibility value (`nostromo-app ax NostromoTerminalView`).
+# The terminal's screen text is read through its accessibility value (`nostromo-app ax NostromoTerminalView`),
+# which carries text ONLY in a QA build with the synthetic-input relaxation (the positive run). The real app
+# (and this script's negative run) returns no screen text there: an agent reads a terminal only through
+# nostromo_read_terminal_screen.
 # Negative run (--no-synthetic): Cmd-T still opens a terminal, but synthesized `type`, the close
-# shortcut (shift-cmd-W) and the x button do nothing, and the QA daemon's audit log
-# ($QA_ROOT/home/.nostromo/audit/terminal.jsonl) holds `refused` entries with channel app_control.
+# shortcut (shift-cmd-W) and the x button do nothing, the terminal's accessibility value is empty, and the
+# QA daemon's audit log ($QA_ROOT/home/.nostromo/audit/terminal.jsonl) holds `refused` entries with channel
+# app_control. The proof that typing did not arrive is a file the typed command would have created (the
+# screen cannot be read in this mode).
 #
 # Needs a logged-in, awake display (the clone's windows must be on screen). Exits 0 PASS, 1 FAIL,
 # 3 INCONCLUSIVE (locked or asleep display, or a check this machine cannot read). Screenshots and trees go to a
@@ -91,11 +96,21 @@ wait_panes() {
   return 1
 }
 
-# The first terminal view's screen text (its accessibility value), newest 20,000 characters.
+# The first terminal view's screen text (its accessibility value), newest 20,000 characters. Empty unless
+# the instance is a QA build with the synthetic-input relaxation (see the header).
 screen_text() {
   ctl ax NostromoTerminalView 2>/dev/null | python3 -I -c 'import json,sys
 try:
     print(json.load(sys.stdin).get("value") or "")
+except ValueError:
+    pass'
+}
+
+# The role the first terminal view reports through `ax` (so an empty screen_text can be told from a failed call).
+terminal_ax_role() {
+  ctl ax NostromoTerminalView 2>/dev/null | python3 -I -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("role") or "")
 except ValueError:
     pass'
 }
@@ -238,10 +253,21 @@ if [ "$skip_negative" = 0 ]; then
   ctl key t --mod cmd >/dev/null
   if wait_panes ge 1; then pass "Cmd-T still opens a terminal without the relaxation"; else fail "Cmd-T did not open a terminal"; fi
   sleep 1.5
-  ctl type $'echo SHOULD-NOT-APPEAR\r' >/dev/null
+  # The screen cannot be read here, so prove the typing did not arrive by its effect: the command would
+  # have created this file.
+  marker="$work/synthetic-typing-reached-the-shell"
+  ctl type "touch $marker"$'\r' >/dev/null
   sleep 2
   shot "09-negative-typed"
-  if [ "$(occurrences SHOULD-NOT-APPEAR)" -eq 0 ] && ! tree_has SHOULD-NOT-APPEAR; then pass "synthesized type reached nothing (absent from the screen text and the tree)"; else fail "SHOULD-NOT-APPEAR is on screen: synthetic typing got through"; fi
+  if [ ! -e "$marker" ] && ! tree_has "$marker"; then pass "synthesized type reached nothing (the command it typed never ran)"; else fail "synthetic typing got through: $marker exists or is on screen"; fi
+  role="$(terminal_ax_role)"
+  if [ "$role" = "AXTextArea" ] && [ -z "$(screen_text)" ]; then
+    pass "the terminal's accessibility value carries no screen text (role $role)"
+  elif [ -z "$role" ]; then
+    inconc "ax NostromoTerminalView returned no element, so the empty accessibility value proves nothing"
+  else
+    fail "the terminal's accessibility value carries screen text (or an unexpected role '$role')"
+  fi
   before="$(panes)"
   ctl key w --mod cmd,shift >/dev/null
   ctl click --text "Close terminal" >/dev/null 2>&1 || ctl click --text $'×' >/dev/null 2>&1 || echo "note: could not locate the x button to click"

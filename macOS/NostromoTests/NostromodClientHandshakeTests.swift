@@ -860,6 +860,45 @@ final class NostromodClientHandshakeTests: XCTestCase {
         XCTAssertEqual(frame["bytes"] as? String, "bHMK")
     }
 
+    func testSendTerminalInputMarksAnAutoReplyOnTheSocketAndLeavesTypingUnmarked() throws {
+        let c = try connectClient(to: [.init(features: nil, operatorNonce: "nonce-term-6")])
+        waitForWelcome(connection: 0, c)
+
+        c.sendTerminal(.input(terminalId: "t1", bytes: [0x61]))
+        c.sendTerminal(.input(terminalId: "t1", bytes: [0x62], autoReply: true))
+        waitForFrame(connection: 0, type: "terminal_input", count: 2)
+
+        let frames = daemon.frames(connection: 0, ofType: "terminal_input").map(\.json)
+        XCTAssertEqual(frames.count, 2)
+        XCTAssertNil(frames[0]["auto_reply"], "typing carries no auto_reply key: \(frames[0])")
+        XCTAssertEqual(frames[1]["auto_reply"] as? Bool, true, "\(frames[1])")
+    }
+
+    func testTerminalInputsReachTheDaemonInTheOrderTheyWereSentEvenWhenLargeOnesAreWrittenOffTheCallingThread() throws {
+        let c = try connectClient(to: [.init(features: nil, operatorNonce: "nonce-term-7")])
+        waitForWelcome(connection: 0, c)
+        let large = NostromodClient.terminalInlineInputBytes * 16
+        XCTAssertGreaterThan(large, NostromodClient.terminalInlineInputBytes)
+
+        // large, small, large, small, small: a small frame sent while a large write is still pending
+        // must not overtake it.
+        let sizes = [large, 1, large + 1, 2, 3]
+        for (n, size) in sizes.enumerated() {
+            c.sendTerminal(.input(terminalId: "t1", bytes: [UInt8](repeating: UInt8(0x41 + n), count: size)))
+        }
+        waitForFrame(connection: 0, type: "terminal_input", count: sizes.count)
+
+        let frames = daemon.frames(connection: 0, ofType: "terminal_input").map(\.json)
+        XCTAssertEqual(frames.count, sizes.count)
+        let received: [(count: Int, first: UInt8?)] = frames.map { json -> (count: Int, first: UInt8?) in
+            let text = json["bytes"] as? String ?? ""
+            let bytes = [UInt8](Data(base64Encoded: text) ?? Data())
+            return (bytes.count, bytes.first)
+        }
+        XCTAssertEqual(received.map { $0.count }, sizes, "the frames arrived in the order they were sent")
+        XCTAssertEqual(received.map { $0.first }, (0..<sizes.count).map { UInt8(0x41 + $0) })
+    }
+
     func testSendTerminalBeforeAnyConnectionIsDroppedWithoutCrashing() {
         let c = NostromodClient(socketPath: "/tmp/nsfd-none-\(getpid())-\(UUID().uuidString.prefix(8)).sock")
         c.sendTerminal(.attach(terminalId: "t1"))

@@ -1051,10 +1051,43 @@ class NostromodClient {
     // MARK: - Terminal panes (1d)
 
     /// Send one terminal frame. Dropped when not connected (the store attaches again on a reconnect).
+    ///
+    /// A keystroke is written here, on the calling (main) thread. A large `terminal_input` (a paste
+    /// chunk) is encoded and written on `terminalWriteQueue` instead, so a slow socket never stalls the
+    /// UI; while any such write is pending every later terminal frame goes through the same serial
+    /// queue, so the daemon still receives them in the order they were sent.
     func sendTerminal(_ msg: TerminalClientMessage) {
+        var large = false
+        if case .input(_, let bytes, _) = msg { large = bytes.count > Self.terminalInlineInputBytes }
+        terminalWritesLock.lock()
+        let queued = large || terminalWritesPending > 0
+        if queued { terminalWritesPending += 1 }
+        terminalWritesLock.unlock()
+        guard queued else {
+            writeTerminal(msg)
+            return
+        }
+        terminalWriteQueue.async { [weak self] in
+            guard let self else { return }
+            self.writeTerminal(msg)
+            self.terminalWritesLock.lock()
+            self.terminalWritesPending -= 1
+            self.terminalWritesLock.unlock()
+        }
+    }
+
+    /// The most input bytes a terminal frame carries and still goes out on the calling thread.
+    static let terminalInlineInputBytes = 4096
+    private let terminalWriteQueue = DispatchQueue(label: "com.hammer.nostromo.ipc.terminal-write", qos: .userInitiated)
+    private let terminalWritesLock = NSLock()
+    /// Terminal frames queued on `terminalWriteQueue` and not yet written. Guarded by `terminalWritesLock`.
+    private var terminalWritesPending = 0
+
+    private func writeTerminal(_ msg: TerminalClientMessage) {
+        guard let body = msg.encoded() else { return }
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
-        guard curFd >= 0, let body = msg.encoded() else { return }
+        guard curFd >= 0 else { return }
         writeFrameLocked(body, to: curFd, type: msg.wireType, tag: nil)
     }
 

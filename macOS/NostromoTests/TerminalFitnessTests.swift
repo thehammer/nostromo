@@ -329,6 +329,74 @@ final class TerminalFitnessTests: XCTestCase {
         XCTAssertTrue(decl.body.contains("TerminalInputGuard."), "closeFromMenu must ask TerminalInputGuard first")
     }
 
+    // MARK: The emulator's own replies are not typing
+
+    private func terminalViewSource(_ name: String) throws -> (name: String, lines: [String]) {
+        try XCTUnwrap(try terminalViewSources().first { $0.name == name }, "\(name) not found in UI/Terminal")
+    }
+
+    func testTheViewOverridesTheEmulatorReplyRouteAndMarksItAsAnEmulatorReply() throws {
+        let view = try terminalViewSource("NostromoTerminalView.swift")
+        let replyRoute = declarations(in: view.name, lines: view.lines) {
+            view.lines[$0].contains("override func send(source: Terminal,")
+        }
+        let decl = try XCTUnwrap(replyRoute.first,
+                                 "NostromoTerminalView must override `func send(source: Terminal, data:)`, the route SwiftTerm uses for the emulator's own answers")
+        XCTAssertNotNil(Repo.firstMatch(#"TerminalInputGuard\.verdict\(origin:\s*\.emulatorReply"#, in: decl.body),
+                        "the emulator reply route must ask the guard with origin .emulatorReply:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("emulatorReplyDepth"),
+                      "the reply route must mark the bytes it makes as replies (emulatorReplyDepth) for the delegate")
+    }
+
+    func testTheDelegateSendDecidesTheOriginFromTheReplyMarkerNotFromTheCurrentEvent() throws {
+        let view = try terminalViewSource("NostromoTerminalView.swift")
+        let delegate = declarations(in: view.name, lines: view.lines) {
+            view.lines[$0].contains("func send(source: TerminalView")
+        }
+        let decl = try XCTUnwrap(delegate.first, "the TerminalViewDelegate `send(source: TerminalView, data:)` not found")
+        XCTAssertTrue(decl.body.contains("emulatorReplyDepth"),
+                      "the delegate send must read emulatorReplyDepth to tell a reply from typing:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("TerminalInputGuard.verdict("), "the delegate send must ask the guard")
+        XCTAssertTrue(decl.body.contains("autoReply: true"), "a reply must be sent marked autoReply")
+    }
+
+    func testTypedPathsAskTheGuardWithTheTypedOrigin() throws {
+        let view = try terminalViewSource("NostromoTerminalView.swift")
+        for entry in ["func insertText(", "func paste("] {
+            let found = declarations(in: view.name, lines: view.lines) { view.lines[$0].contains(entry) }
+            let decl = try XCTUnwrap(found.first, "`\(entry)` not found in NostromoTerminalView")
+            XCTAssertNotNil(Repo.firstMatch(#"TerminalInputGuard\.verdict\(origin:\s*\.typed"#, in: decl.body),
+                            "`\(entry)` is a person's input and must ask the guard with origin .typed")
+        }
+    }
+
+    // MARK: A terminal's screen is not readable through app-control's accessibility walk
+
+    func testTheTerminalViewsAccessibilityValueGoesThroughTheScreenAccessGate() throws {
+        let view = try terminalViewSource("NostromoTerminalView.swift")
+        let found = declarations(in: view.name, lines: view.lines) { view.lines[$0].contains("func accessibilityValue") }
+        let decl = try XCTUnwrap(found.first, "NostromoTerminalView does not override accessibilityValue")
+        let call = try XCTUnwrap(decl.body.range(of: "TerminalScreenAccess.accessibilityValue("),
+                                 "accessibilityValue must call TerminalScreenAccess.accessibilityValue(...):\n\(decl.body)")
+        XCTAssertNil(Repo.firstMatch(#"return\s+(self\.)?screenText\("#, in: decl.body),
+                     "accessibilityValue must not return the screen text directly:\n\(decl.body)")
+        if let direct = decl.body.range(of: "screenText(") {
+            XCTAssertGreaterThan(direct.lowerBound, call.lowerBound,
+                                 "screenText( may only appear inside the gate's closure:\n\(decl.body)")
+        }
+        // Whatever the override returns, it is not a bare string.
+        XCTAssertFalse(decl.body.contains("return screenText"), decl.body)
+    }
+
+    func testAppControlReadsAccessibilityOnlyThroughAppControlAX() throws {
+        let server = try Repo.read(Repo.app.appendingPathComponent("AppControl/AppControlServer.swift"))
+        let code = Repo.codeLines(server).joined(separator: "\n")
+        XCTAssertFalse(code.contains("accessibilityValue"),
+                       "AppControlServer must not read accessibility values itself; AppControlAX is the one reader (and the one the tests cover)")
+        XCTAssertTrue(code.contains("AppControlAX.hits("), "tree and find walk hosting views through AppControlAX.hits")
+        XCTAssertTrue(code.contains("AppControlAX.dump("), "ax dumps through AppControlAX.dump")
+    }
+
     // MARK: Scaffold files exist and are built into the right targets
 
     private func assertBuilt(_ files: [String], underApp: Bool, inApp: Bool, inTests: Bool,
@@ -350,7 +418,8 @@ final class TerminalFitnessTests: XCTestCase {
                      "UI/Terminal/TerminalInputGuard.swift",
                      "Data/RemoteShellWire.swift", "Data/RemoteShellStore.swift", "UI/Toast/ToastAction.swift",
                      "UI/Terminal/TerminalChromeModel.swift", "UI/Terminal/IdleCountdownModel.swift",
-                     "UI/Terminal/PastePolicy.swift", "UI/Terminal/FollowModel.swift", "Data/TurnOrigin.swift"],
+                     "UI/Terminal/PastePolicy.swift", "UI/Terminal/FollowModel.swift", "Data/TurnOrigin.swift",
+                     "AppControl/AppControlAX.swift"],
                     underApp: true, inApp: true, inTests: true, project: try Project())
     }
 
@@ -368,7 +437,8 @@ final class TerminalFitnessTests: XCTestCase {
                      "TerminalLatencyStatsTests.swift", "TerminalFitnessTests.swift",
                      "RemoteShellStoreTests.swift", "RemoteShellWireTests.swift", "ProjectDetectionTests.swift",
                      "TerminalChromeModelTests.swift", "IdleCountdownModelTests.swift", "PastePolicyTests.swift",
-                     "TerminalStoreMirrorTests.swift", "FollowModelTests.swift", "TurnOriginTests.swift"],
+                     "TerminalStoreMirrorTests.swift", "FollowModelTests.swift", "TurnOriginTests.swift",
+                     "TerminalScreenAccessTests.swift"],
                     underApp: false, inApp: false, inTests: true, project: try Project())
     }
 
@@ -419,24 +489,24 @@ final class TerminalFitnessTests: XCTestCase {
         XCTAssertEqual(close.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask), [.command, .shift])
     }
 
-    func testEditHasFindAndFindNextThatActOnTheFirstResponder() throws {
+    func testEditHasFindAndFindNextThatTheAppDelegateRoutesToATerminalPane() throws {
         _ = NSApplication.shared
         let main = MainMenu.make(target: nil)
         let edit = try XCTUnwrap(topLevelMenu("Edit", in: main)).menu
+        // Not `performFindPanelAction:`: an NSTextView (the REPL) would answer that and open a find panel.
+        let action = #selector(MainMenuActions.terminalFind(_:))
 
         let find = try XCTUnwrap(item("Find\u{2026}", in: edit), "Edit has no Find\u{2026}")
         XCTAssertEqual(find.keyEquivalent, "f")
         XCTAssertEqual(find.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask), [.command])
-        XCTAssertEqual(find.action, Selector(("performFindPanelAction:")))
+        XCTAssertEqual(find.action, action)
         XCTAssertEqual(find.tag, NSTextFinder.Action.showFindInterface.rawValue)
-        XCTAssertNil(find.target, "no target: the action goes to the first responder")
 
         let next = try XCTUnwrap(item("Find Next", in: edit), "Edit has no Find Next")
         XCTAssertEqual(next.keyEquivalent, "g")
         XCTAssertEqual(next.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask), [.command])
-        XCTAssertEqual(next.action, Selector(("performFindPanelAction:")))
+        XCTAssertEqual(next.action, action)
         XCTAssertEqual(next.tag, NSTextFinder.Action.nextMatch.rawValue)
-        XCTAssertNil(next.target)
     }
 
     func testDebugHasCopyTerminalLatencyStatsWithNoKeyEquivalent() throws {

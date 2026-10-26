@@ -862,11 +862,38 @@ impl TerminalManager {
         }
     }
 
+    /// A person's keystrokes or paste. Written to the shell; on a remote
+    /// shell it restarts the idle clock.
     pub fn input(
+        &mut self,
+        cap: &OperatorCap,
+        terminal_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), TerminalError> {
+        self.write_bytes(cap, terminal_id, bytes, true)
+    }
+
+    /// Bytes the terminal emulator sent by itself (`terminal_input` with
+    /// `auto_reply`: a cursor-position or device-attributes reply, a focus
+    /// report). Written to the shell like any input, but never activity: the
+    /// idle clock is not reset, a pending warning stands and `idle_closes_at`
+    /// is untouched, so a remote program that provokes replies cannot keep
+    /// itself open. Nothing is audited for it (input never is).
+    pub fn auto_reply(
+        &mut self,
+        cap: &OperatorCap,
+        terminal_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), TerminalError> {
+        self.write_bytes(cap, terminal_id, bytes, false)
+    }
+
+    fn write_bytes(
         &mut self,
         _cap: &OperatorCap,
         terminal_id: &str,
         bytes: &[u8],
+        is_keystroke: bool,
     ) -> Result<(), TerminalError> {
         let t = self
             .terminals
@@ -885,7 +912,7 @@ impl TerminalManager {
         });
         // Only the operator's keystrokes count as activity: this is the one
         // place (with keep-alive) the idle clock is reset.
-        if written.is_ok() {
+        if written.is_ok() && is_keystroke {
             self.reset_idle(terminal_id, "keystroke");
         }
         written

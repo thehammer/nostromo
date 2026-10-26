@@ -11,6 +11,7 @@ import AppKit
     func goToApprovalCard(_ sender: Any?)
     func newTerminal(_ sender: Any?)
     func closeTerminalPane(_ sender: Any?)
+    func terminalFind(_ sender: Any?)
     func copyTerminalLatencyStats()
 }
 
@@ -44,14 +45,18 @@ enum MainMenu {
         editMenu.addItem(.separator())
         editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
         editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
-        // Find: no target, so the action goes to the first responder only. A terminal pane shows its
-        // find bar; a view that does not take the action leaves the items disabled.
+        // Find acts on a terminal pane only: the items target the app delegate, which enables them (and
+        // forwards the action to SwiftTerm's find bar) only while a terminal pane holds the keyboard.
+        // They are not first-responder actions on purpose: an NSTextView (the REPL's input and
+        // transcript) would otherwise answer `performFindPanelAction:` and open a find panel it never had.
         editMenu.addItem(.separator())
-        let findItem = NSMenuItem(title: "Find\u{2026}", action: Selector(("performFindPanelAction:")), keyEquivalent: "f")
+        let findItem = NSMenuItem(title: "Find\u{2026}", action: #selector(MainMenuActions.terminalFind(_:)), keyEquivalent: "f")
         findItem.tag = NSTextFinder.Action.showFindInterface.rawValue
+        findItem.target = target
         editMenu.addItem(findItem)
-        let findNextItem = NSMenuItem(title: "Find Next", action: Selector(("performFindPanelAction:")), keyEquivalent: "g")
+        let findNextItem = NSMenuItem(title: "Find Next", action: #selector(MainMenuActions.terminalFind(_:)), keyEquivalent: "g")
         findNextItem.tag = NSTextFinder.Action.nextMatch.rawValue
+        findNextItem.target = target
         editMenu.addItem(findNextItem)
 
         // Terminal menu: ⌘T opens a shell in the key window's focus; ⇧⌘W closes the terminal pane that

@@ -51,6 +51,12 @@ final class TerminalSessionStore {
     /// The most bytes kept per terminal to start a late view. The oldest are dropped first, and the
     /// copy then starts at a line boundary.
     static let replayCapacity = 2 * 1024 * 1024
+    /// The most bytes one `terminal_input` frame carries. The daemon refuses a frame over 256 KiB
+    /// (`terminal_input_too_large`) and queues at most 1 MiB for a program that is not reading, so a
+    /// larger paste goes out in frames this size, in order, spaced by `inputChunkInterval`.
+    static let inputChunkBytes = 32 * 1024
+    /// The gap between two chunks of one large paste.
+    static let inputChunkInterval: TimeInterval = 0.01
     /// How long a keyboard-focus claim for a terminal this window opened waits for its view.
     static let focusClaimLifetime: TimeInterval = 10
     /// The shortest gap between two refusal reports of one kind for one terminal.
@@ -67,6 +73,10 @@ final class TerminalSessionStore {
     private(set) var lastInputWindow: [String: String] = [:]
 
     private let now: () -> Date
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+    /// Bytes copied out of a terminal's replay buffer (a late view starting, or a replay trim). Reading
+    /// a frame in does not copy the buffer: tests watch this stay flat while output streams.
+    private(set) var replayBytesMaterialized = 0
 
     private final class Binding {
         weak var sink: TerminalByteSink?
@@ -81,7 +91,9 @@ final class TerminalSessionStore {
     }
 
     private var bindings: [Binding] = []
-    private var replayCopy: [String: [UInt8]] = [:]
+    private var replayCopy: [String: ReplayBuffer] = [:]
+    /// Input frames waiting their turn behind a large paste, per terminal (oldest first).
+    private var inputBacklog: [String: [TerminalClientMessage]] = [:]
     private var attached: Set<String> = []
     private var knownSize: [String: [Int]] = [:]
     private var connected = false
@@ -93,8 +105,12 @@ final class TerminalSessionStore {
     private var lastRefusalReport: [String: Date] = [:]
 
     init(now: @escaping () -> Date = Date.init,
+         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+         },
          transport: @escaping (TerminalClientMessage) -> Void = { _ in }) {
         self.now = now
+        self.schedule = schedule
         self.transport = transport
     }
 
@@ -171,11 +187,32 @@ final class TerminalSessionStore {
 
     // MARK: - Commands from views
 
-    /// Keystrokes, a paste or a terminal's own reply. Dropped unless the terminal is running.
-    func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String) {
+    /// Keystrokes, a paste or a terminal's own reply (`autoReply`). Dropped unless the terminal is running.
+    ///
+    /// A reply is not a person at the keyboard: it is marked on the wire so the daemon does not treat it
+    /// as activity, and it does not make this window the terminal's driver.
+    ///
+    /// Bytes over `inputChunkBytes` go out in several frames, in order, a few milliseconds apart. While
+    /// they are going out, anything else for that terminal (a key, a reply) queues behind them, so a
+    /// paste is never split by what the person types next.
+    func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String, autoReply: Bool = false) {
         guard !bytes.isEmpty, terminals[terminalId]?.status == .running else { return }
-        lastInputWindow[terminalId] = windowId
-        transport(.input(terminalId: terminalId, bytes: bytes))
+        if !autoReply { lastInputWindow[terminalId] = windowId }
+        var frames: [TerminalClientMessage] = []
+        var start = 0
+        while start < bytes.count {
+            let end = min(start + Self.inputChunkBytes, bytes.count)
+            let chunk = (start == 0 && end == bytes.count) ? bytes : Array(bytes[start..<end])
+            frames.append(.input(terminalId: terminalId, bytes: chunk, autoReply: autoReply))
+            start = end
+        }
+        if inputBacklog[terminalId] == nil && frames.count == 1 {
+            transport(frames[0])
+            return
+        }
+        let draining = inputBacklog[terminalId] != nil
+        inputBacklog[terminalId, default: []].append(contentsOf: frames)
+        if !draining { drainInput(terminalId) }
     }
 
     /// The view's grid changed size. Not sent when the daemon already has that size.
@@ -216,6 +253,21 @@ final class TerminalSessionStore {
 
     // MARK: - Private
 
+    /// Send the next waiting frame of `id` and, if more wait, come back for them after a short gap.
+    private func drainInput(_ id: String) {
+        guard terminals[id]?.status == .running, var queue = inputBacklog[id], !queue.isEmpty else {
+            inputBacklog.removeValue(forKey: id)
+            return
+        }
+        transport(queue.removeFirst())
+        if queue.isEmpty {
+            inputBacklog.removeValue(forKey: id)
+            return
+        }
+        inputBacklog[id] = queue
+        schedule(Self.inputChunkInterval) { [weak self] in self?.drainInput(id) }
+    }
+
     private func liveBindings(for terminalId: String) -> [Binding] {
         bindings.filter { $0.terminalId == terminalId && $0.sink != nil }
     }
@@ -246,7 +298,9 @@ final class TerminalSessionStore {
     private func apply(replay frame: TerminalReplayFrame) {
         let id = frame.terminalId
         knownSize[id] = [frame.cols, frame.rows]
-        replayCopy[id] = Self.trimmed(frame.bytes)
+        var copy = ReplayBuffer(capacity: Self.replayCapacity)
+        copy.append(frame.bytes)
+        replayCopy[id] = copy
         for binding in liveBindings(for: id) {
             binding.sink?.reset()
             binding.sink?.apply(cols: frame.cols, rows: frame.rows)
@@ -257,7 +311,7 @@ final class TerminalSessionStore {
     private func apply(output frame: TerminalOutputFrame) {
         let id = frame.terminalId
         guard attached.contains(id) || !liveBindings(for: id).isEmpty else { return }
-        replayCopy[id] = Self.trimmed((replayCopy[id] ?? []) + frame.bytes)
+        replayCopy[id, default: ReplayBuffer(capacity: Self.replayCapacity)].append(frame.bytes)
         for binding in liveBindings(for: id) {
             binding.sink?.feed(frame.bytes)
         }
@@ -284,7 +338,11 @@ final class TerminalSessionStore {
             // A later view starts from the copy the first one has.
             sink.reset()
             if let size = knownSize[id] { sink.apply(cols: size[0], rows: size[1]) }
-            if let copy = replayCopy[id], !copy.isEmpty { sink.feed(copy) }
+            if let copy = replayCopy[id] {
+                let bytes = copy.contents()
+                replayBytesMaterialized += bytes.count
+                if !bytes.isEmpty { sink.feed(bytes) }
+            }
         }
         deliverFocusClaim(for: id)
     }
@@ -307,6 +365,7 @@ final class TerminalSessionStore {
     private func forget(_ id: String) {
         terminals.removeValue(forKey: id)
         replayCopy.removeValue(forKey: id)
+        inputBacklog.removeValue(forKey: id)
         knownSize.removeValue(forKey: id)
         attached.remove(id)
         focusClaims.removeValue(forKey: id)
@@ -326,11 +385,62 @@ final class TerminalSessionStore {
     }
 
     /// Keep the newest `replayCapacity` bytes, starting at a line boundary when one is near.
-    static func trimmed(_ bytes: [UInt8]) -> [UInt8] {
-        guard bytes.count > replayCapacity else { return bytes }
-        var out = Array(bytes.suffix(replayCapacity))
+    static func trimmed(_ bytes: [UInt8], capacity: Int = replayCapacity) -> [UInt8] {
+        guard bytes.count > capacity else { return bytes }
+        var out = Array(bytes.suffix(capacity))
         if let newline = out.prefix(4096).firstIndex(of: 0x0A) { out.removeFirst(newline + 1) }
         return out
+    }
+}
+
+/// The newest bytes of one terminal's output, kept as the frames they arrived in. Taking a frame in
+/// is O(1) (the frame's storage is shared, nothing is copied) and whole old frames are dropped from
+/// the front; the bytes are joined and trimmed to `capacity` only when a late view asks for them.
+struct ReplayBuffer {
+    let capacity: Int
+    private var chunks: [[UInt8]] = []
+    /// `chunks[..<head]` are dropped.
+    private var head = 0
+    private var held = 0
+
+    init(capacity: Int) { self.capacity = capacity }
+
+    mutating func append(_ bytes: [UInt8]) {
+        guard !bytes.isEmpty else { return }
+        chunks.append(bytes)
+        held += bytes.count
+        // Drop the oldest whole frames while what is left still covers `capacity`.
+        while head < chunks.count - 1, held - chunks[head].count >= capacity {
+            held -= chunks[head].count
+            chunks[head] = []
+            head += 1
+        }
+        if head >= 64, head * 2 >= chunks.count {
+            chunks.removeFirst(head)
+            head = 0
+        }
+    }
+
+    /// The newest `capacity` bytes, in order, starting at a line boundary when one is near.
+    func contents() -> [UInt8] {
+        var joined: [UInt8] = []
+        joined.reserveCapacity(held)
+        for chunk in chunks[head...] { joined.append(contentsOf: chunk) }
+        return TerminalSessionStore.trimmed(joined, capacity: capacity)
+    }
+}
+
+// MARK: - Refused input
+
+extension TerminalRefusedFrame {
+    /// The one message the pane's overlay shows when the daemon refused input it was sent (a paste it
+    /// could not take). Fixed text: nothing of what was typed or pasted is ever in it.
+    static let inputNotice = "[input not delivered: the terminal refused it (too large, or the program is not reading)]"
+
+    /// `inputNotice` for a refused `terminal_input`, else nil.
+    var overlayNotice: String? {
+        guard op == "input", code == "terminal_input_too_large" || code == "terminal_input_busy" else { return nil }
+        return Self.inputNotice
     }
 }
 

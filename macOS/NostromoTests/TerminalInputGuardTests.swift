@@ -117,6 +117,148 @@ final class TerminalInputGuardTests: XCTestCase {
         XCTAssertTrue(TerminalInputGuard.allowsKeystroke(event: event, allowsSynthetic: { false }))
     }
 
+    // MARK: - Verdicts: where the bytes came from decides keystroke or auto reply
+
+    private func realEvent(_ window: NSWindow, timestamp: TimeInterval = ProcessInfo.processInfo.systemUptime) -> NSEvent {
+        GestureFixtures.key(in: window, characters: "a", keyCode: 0, timestamp: timestamp)
+    }
+
+    private func verdict(_ origin: TerminalInputOrigin, _ event: NSEvent?,
+                         synthetic: Bool = false, allowsSynthetic: Bool = false) -> TerminalInputVerdict {
+        TerminalInputGuard.verdict(origin: origin, event: event, isSynthetic: { _ in synthetic },
+                                   allowsSynthetic: { allowsSynthetic })
+    }
+
+    func testAnEmulatorReplyWithNoEventIsAnAutoReply() {
+        XCTAssertEqual(verdict(.emulatorReply, nil), .autoReply)
+    }
+
+    func testAnEmulatorReplyIsAnAutoReplyEvenWhileAFreshOrStaleKeyEventIsCurrent() {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let fresh = realEvent(window)
+        let stale = realEvent(window, timestamp: ProcessInfo.processInfo.systemUptime - 60)
+
+        XCTAssertEqual(verdict(.emulatorReply, fresh), .autoReply,
+                       "a reply made while a person's key is being handled is still the emulator's")
+        XCTAssertEqual(verdict(.emulatorReply, stale), .autoReply,
+                       "NSApp.currentEvent is stale outside event dispatch; it must not turn a reply into typing")
+    }
+
+    func testAnEmulatorReplyIsNeverAKeystrokeWhateverTheEvent() throws {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let events: [NSEvent?] = [nil, realEvent(window),
+                                  realEvent(window, timestamp: 1),
+                                  GestureFixtures.mouse(.leftMouseDown, in: window),
+                                  try GestureFixtures.marked(realEvent(window))]
+        for event in events {
+            for synthetic in [false, true] {
+                for allows in [false, true] {
+                    XCTAssertNotEqual(verdict(.emulatorReply, event, synthetic: synthetic, allowsSynthetic: allows),
+                                      .keystroke, "event=\(String(describing: event)) synthetic=\(synthetic) allows=\(allows)")
+                }
+            }
+        }
+    }
+
+    func testTypedInputIsAKeystrokeForARealEventAndForNoEvent() {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+
+        XCTAssertEqual(verdict(.typed, realEvent(window)), .keystroke)
+        XCTAssertEqual(verdict(.typed, nil), .keystroke,
+                       "IME text and programmatic paste can arrive with no current event")
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .typed, event: realEvent(window), allowsSynthetic: { false }),
+                       .keystroke, "with the real synthetic check")
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .typed, event: nil, allowsSynthetic: { false }), .keystroke)
+    }
+
+    func testTypedInputIsNeverAnAutoReply() {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        for event in [nil, realEvent(window)] {
+            for synthetic in [false, true] {
+                for allows in [false, true] {
+                    XCTAssertNotEqual(verdict(.typed, event, synthetic: synthetic, allowsSynthetic: allows), .autoReply)
+                }
+            }
+        }
+    }
+
+    func testBothOriginsAreRefusedWhenTheEventIsSyntheticAndTheGateIsNotRelaxed() {
+        XCTAssertEqual(verdict(.typed, nil, synthetic: true, allowsSynthetic: false), .refused)
+        XCTAssertEqual(verdict(.emulatorReply, nil, synthetic: true, allowsSynthetic: false), .refused)
+    }
+
+    func testBothOriginsKeepTheirMeaningWhenTheBuildRelaxesTheGate() {
+        XCTAssertEqual(verdict(.typed, nil, synthetic: true, allowsSynthetic: true), .keystroke)
+        XCTAssertEqual(verdict(.emulatorReply, nil, synthetic: true, allowsSynthetic: true), .autoReply)
+    }
+
+    func testTheEventAndTheSyntheticCheckAreWhatTheVerdictAsks() {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let event = realEvent(window)
+        var seen: NSEvent?
+
+        _ = TerminalInputGuard.verdict(origin: .typed, event: event, isSynthetic: { seen = $0; return false },
+                                       allowsSynthetic: { false })
+
+        XCTAssertTrue(seen === event)
+    }
+
+    func testOnlyTheEmulatorReplyOriginIsMarkedAsAnAutoReplyAcrossEveryEvent() {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let events: [NSEvent?] = [nil, realEvent(window), realEvent(window, timestamp: 1)]
+        for event in events {
+            XCTAssertEqual(verdict(.typed, event), .keystroke)
+            XCTAssertEqual(verdict(.emulatorReply, event), .autoReply)
+        }
+    }
+
+    // MARK: - Verdicts: the real gate
+
+    func testAKeyMarkedByAppControlIsRefusedForTypingAndForReplies() throws {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let marked = try GestureFixtures.marked(realEvent(window))
+
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .typed, event: marked, allowsSynthetic: { false }), .refused)
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .emulatorReply, event: marked, allowsSynthetic: { false }), .refused)
+    }
+
+    func testAMarkedKeyIsAcceptedAgainWhenTheBuildRelaxesTheGate() throws {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let marked = try GestureFixtures.marked(realEvent(window))
+
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .typed, event: marked, allowsSynthetic: { true }), .keystroke)
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .emulatorReply, event: marked, allowsSynthetic: { true }), .autoReply)
+    }
+
+    func testTypingAndRepliesAreRefusedWhileAnAppControlRequestIsRunning() {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let event = realEvent(window)
+        beginAppControlRequest()
+
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .typed, event: event, allowsSynthetic: { false }), .refused)
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .emulatorReply, event: event, allowsSynthetic: { false }), .refused)
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .typed, event: nil, allowsSynthetic: { false }), .refused)
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .emulatorReply, event: nil, allowsSynthetic: { false }), .refused,
+                       "a reply app-control caused (a command that makes the shell ask a question) is not a person's")
+    }
+
+    func testVerdictsReturnToNormalOnceTheAppControlRequestEnds() {
+        SyntheticInputGate.begin()
+        SyntheticInputGate.end()
+
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .typed, event: nil, allowsSynthetic: { false }), .keystroke)
+        XCTAssertEqual(TerminalInputGuard.verdict(origin: .emulatorReply, event: nil, allowsSynthetic: { false }), .autoReply)
+    }
+
     // MARK: - Controls
 
     func testAFreshHumanClickInTheControlsOwnWindowIsAllowed() {

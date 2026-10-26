@@ -48,6 +48,11 @@ final class TerminalLatencyStats {
     }
 
     /// Output reached a terminal view's screen.
+    ///
+    /// The number is optimistic: any output fed while a key is waiting answers that key, whether or not
+    /// it is that key's echo (a program printing on its own, a prompt redraw, the echo of an earlier
+    /// key). It is a lower bound on the true key-to-echo time, good for spotting a slow path, not for
+    /// proving the p95 target on its own.
     func noteOutputFed() {
         let at = clock()
         pending.removeAll { at - $0 > Self.staleAfter }

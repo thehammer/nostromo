@@ -9,6 +9,15 @@ import SwiftTerm
 /// Nothing a person did not do reaches the shell. Every path that sends bytes (`send`, `insertText`,
 /// `paste`) asks `TerminalInputGuard` first; a refused one sends nothing and tells the daemon, which
 /// audits it (`terminal_refusal_report`, at most one a second per terminal).
+///
+/// Typed input and the emulator's own replies are told apart by the SwiftTerm path they take, not by
+/// `NSApp.currentEvent`. In SwiftTerm 1.18 (pinned exactly) every byte reaches `send(source:data:)`
+/// of the delegate by one of two routes: `TerminalView.send(data:)`, which keys, `insertText` and
+/// paste use, and `Terminal`'s own `send(source: Terminal, ...)`, which the cursor-position and
+/// device-attributes replies, focus reports and mouse reports use. The second is overridden below;
+/// bytes that arrive through it are marked `auto_reply` so they never count as a keystroke (the
+/// daemon's remote idle rule, 2e). `keyDown` and friends are `public override` in SwiftTerm and
+/// cannot be overridden here, which is why the reply route is the one marked.
 final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
 
     /// Lines of history kept (criterion 2).
@@ -18,6 +27,8 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
     var terminalId: String?
     let windowId: String
     private let store: TerminalSessionStore
+    /// > 0 while SwiftTerm is sending something the emulator generated (see the type's comment).
+    private var emulatorReplyDepth = 0
 
     init(windowId: String, store: TerminalSessionStore) {
         self.windowId = windowId
@@ -62,14 +73,19 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
 
     // MARK: - Accessibility
 
-    /// The terminal exposes its screen as text (VoiceOver, and the QA scripts' `nostromo-app ax`).
+    /// The terminal is a text area; its screen text is exposed only in a QA build (see `accessibilityValue`).
     override func isAccessibilityElement() -> Bool { true }
 
     override func accessibilityRole() -> NSAccessibility.Role? { .textArea }
 
     override func accessibilityLabel() -> String? { "Terminal" }
 
-    override func accessibilityValue() -> Any? { screenText(limit: 20_000) }
+    /// No screen text in the real app: `AppControlServer` reads accessibility values, and an agent may
+    /// read a terminal only through `nostromo_read_terminal_screen`. A QA build that allows synthetic
+    /// input (`SyntheticInputGate.allowsSynthetic`) still returns it for `terminal-local.sh`.
+    override func accessibilityValue() -> Any? {
+        TerminalScreenAccess.accessibilityValue(screenText: { self.screenText(limit: 20_000) })
+    }
 
     /// The active buffer as text, newest `limit` characters.
     func screenText(limit: Int) -> String {
@@ -80,7 +96,7 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
     // MARK: - Input (every path asks the guard first)
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
-        guard TerminalInputGuard.allowsKeystroke(event: NSApp.currentEvent) else {
+        guard TerminalInputGuard.verdict(origin: .typed, event: NSApp.currentEvent) != .refused else {
             refuse(.input)
             return
         }
@@ -88,20 +104,36 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
     }
 
     override func paste(_ sender: Any) {
-        guard TerminalInputGuard.allowsKeystroke(event: NSApp.currentEvent) else {
+        guard TerminalInputGuard.verdict(origin: .typed, event: NSApp.currentEvent) != .refused else {
             refuse(.paste)
             return
         }
         super.paste(sender)
     }
 
-    func send(source: TerminalView, data: ArraySlice<UInt8>) {
-        guard let terminalId else { return }
-        guard TerminalInputGuard.allowsKeystroke(event: NSApp.currentEvent) else {
+    /// The emulator answering on its own (cursor position, device attributes, focus and mouse
+    /// reports). Everything sent while this runs is an auto-reply.
+    override func send(source: Terminal, data: ArraySlice<UInt8>) {
+        guard TerminalInputGuard.verdict(origin: .emulatorReply, event: NSApp.currentEvent) != .refused else {
             refuse(.input)
             return
         }
-        store.sendInput(terminalId: terminalId, bytes: Array(data), fromWindow: windowId)
+        emulatorReplyDepth += 1
+        defer { emulatorReplyDepth -= 1 }
+        super.send(source: source, data: data)
+    }
+
+    func send(source: TerminalView, data: ArraySlice<UInt8>) {
+        guard let terminalId else { return }
+        let origin: TerminalInputOrigin = emulatorReplyDepth > 0 ? .emulatorReply : .typed
+        switch TerminalInputGuard.verdict(origin: origin, event: NSApp.currentEvent) {
+        case .refused:
+            refuse(.input)
+        case .keystroke:
+            store.sendInput(terminalId: terminalId, bytes: Array(data), fromWindow: windowId, autoReply: false)
+        case .autoReply:
+            store.sendInput(terminalId: terminalId, bytes: Array(data), fromWindow: windowId, autoReply: true)
+        }
     }
 
     // MARK: - TerminalViewDelegate

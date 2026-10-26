@@ -278,6 +278,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)?.closeFromMenu()
     }
 
+    /// Edit > Find… (⌘F) and Find Next (⌘G): the find bar of the terminal pane that holds the keyboard.
+    /// Nothing else answers them (see `MainMenu`), so a text view elsewhere behaves as it did before.
+    @objc func terminalFind(_ sender: Any?) {
+        guard let host = TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) else {
+            NSSound.beep()
+            return
+        }
+        host.performFind(sender)
+    }
+
     // MARK: - Private
 
     private func setupMenu() {
@@ -303,6 +313,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(terminalFind(_:)) {
+            return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
+        }
         if menuItem.action == #selector(closeTerminalPane(_:)) {
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
         }

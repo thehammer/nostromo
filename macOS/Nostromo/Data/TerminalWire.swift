@@ -208,7 +208,11 @@ enum TerminalClientMessage: Equatable {
     case openLocal(tag: String, relativeTo: String?, position: String?, cwd: String?, clientRequestId: String)
     case attach(terminalId: String)
     case detach(terminalId: String)
-    case input(terminalId: String, bytes: [UInt8])
+    /// `autoReply`: the terminal emulator's own answer (a cursor-position or device-attributes
+    /// reply, a focus report), not a person's typing or paste. The daemon writes it to the shell but
+    /// does not count it as activity for the remote idle rule. Omitted from the frame when false, so
+    /// an older daemon sees what it always saw (and counts every input as a keystroke).
+    case input(terminalId: String, bytes: [UInt8], autoReply: Bool = false)
     case resize(terminalId: String, cols: Int, rows: Int)
     case close(terminalId: String)
     case restart(terminalId: String)
@@ -239,9 +243,10 @@ enum TerminalClientMessage: Equatable {
             if let cwd { o["cwd"] = cwd }
         case .attach(let id), .detach(let id), .close(let id), .restart(let id):
             o["terminal_id"] = id
-        case .input(let id, let bytes):
+        case .input(let id, let bytes, let autoReply):
             o["terminal_id"] = id
             o["bytes"] = Data(bytes).base64EncodedString()
+            if autoReply { o["auto_reply"] = true }
         case .resize(let id, let cols, let rows):
             o["terminal_id"] = id
             o["cols"] = cols
