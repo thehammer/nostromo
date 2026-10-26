@@ -1,7 +1,7 @@
 # PRD: Huey, a morning report written for one person about their own work
 
 **Author:** Ada
-**Status:** Draft, revision 4 (Ada, 2026-10-25): simulation findings, Hammer's decisions and the PRD changes requested in `docs/plan-huey.md`
+**Status:** Approved by Hammer, revision 4 (Ada, 2026-10-25): simulation findings, Hammer's decisions and the PRD changes requested in `docs/plan-huey.md`
 **Slug:** `huey` (pairs with Archie's plan of the same slug)
 **Sources:** Claude Docs brief "Newsfeed: Brief for Ada" (2026-10-23); idea note `~/.claude/ideas/2026-10-24-huey-focus.md`; the user's direction change of 2026-10-25; the simulation notes `~/.claude/notes/huey-sim-2026-10-25.md` (two hand-run reports on Sendai) and the sample interests file `~/.claude/huey/interests.md` used in run 2.
 **Surface:** Huey is a new **built-in Nostromo agent**, alongside Fred, Perri and Teri, inside the Nostromo repo and under Nostromo's license. As a user sees it: a focus named **Huey** on Sendai (the personal Mac Mini), with a report pane and its own Claude session, on by default and switchable off like any built-in agent. Later, a separate instance on Kobe (the work MacBook).
@@ -268,7 +268,7 @@ anything.
 ### Iterating on the report itself
 
 The report's shape will be tuned against real output over the first weeks.
-Hammer (or Ada, with him) can ask the session to **regenerate today's report
+Hammer (or whoever is helping him tune it) can ask the session to **regenerate today's report
 now**, after changing interests or the report's instructions, and compare it
 with the earlier version. Past reports stay available by date, so a week of
 output can be read side by side.
@@ -301,9 +301,10 @@ output can be read side by side.
 
 The report on Sendai is built only from Sendai's context; Kobe's only from
 Kobe's. Neither machine's report can mention the other's projects, repos or
-items. In the unattended runs that build reports, the only thing that
-leaves the machine is the digest (and fetched public news) sent to the
-model provider; the digest is exactly what Hammer sees next to the report.
+items. In the unattended runs that build reports, the only things that
+leave the machine are the digest, the headlines of Huey's own recent
+reports, and fetched public news, sent to the model provider; all of
+the first two are what Hammer sees next to the report.
 
 The focus's drill-in session is different: it is a normal Claude session,
 like any other focus, that Hammer drives himself. The digest-only rule
@@ -335,7 +336,7 @@ picks up the change on its next connection. A disabled Huey is gone, not
 paused: no scheduled run, no fetching, no model calls, no Huey tools in
 agent sessions, no Huey sidebar entry or focus. A malformed `[agents.huey]`
 table follows the rule already in place for the other agents: it is ignored
-with a warning, and Huey stays on unless it was clearly switched off.
+with a warning, and Huey stays on.
 Turning Huey back on and restarting brings back its history of past
 reports, its setup and the interests file untouched.
 
@@ -724,7 +725,7 @@ file) and a controllable clock and budget posture.
 
 ### Open questions for Hammer
 
-None. The PRD is ready for Archie.
+None.
 
 ### Assumptions (Ada's calls; push back on any)
 

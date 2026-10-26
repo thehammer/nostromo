@@ -95,7 +95,7 @@ Under this mapping Huey runs tight today (both the posture and metered billing s
 
 The digest holds personal notes and idea titles. The backplane follow-up that brings Huey to iPhone flips this deliberately.
 
-## Deviations from PRD revision 3 (accepted; Ada is updating the PRD)
+## Deviations from PRD revision 3 (accepted and folded into PRD revision 4)
 
 - **V1. Interests file path.** The interests file is `~/.nostromo/huey/interests.md`, not `~/.claude/huey/interests.md` (D5).
 - **V2. One click before the setup step** (D6): "Set up Huey on this machine" comes before the scan and the draft.
@@ -420,7 +420,7 @@ Mode: tight (Bishop: "Pump the brakes"; 7-day 72% used, pace 1.9; billing metere
 
 - All paths derive from one `HueyPaths` rooted at the daemon's state root (`socket_path.parent()`, as the tracker does at `src/bin/nostromd.rs:427-434`). The engine has no other place to read prior state from, so two instances with different roots cannot see each other (AC34).
 - Nothing Huey writes goes under `~/.claude` (D5). Context *reads* from `~/.claude` are titles only.
-- The unattended model input is exactly: the instructions, the digest, the fenced candidate news, and the Also-in-the-news candidates; then the check results. All of it is written to `model-input.txt` **before** it is sent (T8).
+- The unattended model input is exactly: the instructions, the digest, the fenced candidate news, the Also-in-the-news candidates, and the recent-reports list (ids and headlines of Huey's own reports from the last 14 days, which carry no context beyond what earlier digests and public news already showed); then the check results. The Context pane shows the recent-reports list alongside the digest, so everything the model receives other than public news is visible to the user. All of it is written to `model-input.txt` **before** it is sent (T8).
 - Logs carry counts, ids, states and HTTP status codes only. Never digest text, interests text, titles of notes or ideas, or news text (T5).
 - The hidden session's temp working directory and its `~/.claude/projects/<dir>` transcript are deleted when the run ends, as for picks.
 
@@ -676,7 +676,7 @@ suggested_config:
 - [ ] **H3-10** Fmt, clippy and test pass in the sandbox.
 
 ### Must not touch
-`src/huey/sources/`, `items.rs` (H2), the engine loop, the session manager, MCP tools other than none, protocol, Swift. Never write under `~/.claude`.
+`src/huey/sources/`, `items.rs` (H2), the engine loop, the session manager, MCP tools, protocol, Swift. Never write under `~/.claude`.
 
 ```yaml
 suggested_config:
