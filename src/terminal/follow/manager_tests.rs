@@ -1749,7 +1749,8 @@ async fn a_moved_notice_names_a_new_follower_of_a_remote_terminal_only_by_its_op
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_remote_terminals_follower_is_sensitive_for_as_long_as_it_follows() {
+async fn a_remote_terminals_follower_is_sensitive_while_it_follows_and_for_good_once_output_reached_it(
+) {
     let mut w = World::new();
     let sensitive = w.terminals.lock().unwrap().sensitive_tags();
     let t = w.ecs("focus-1", "production · admin-portal · scheduler");
@@ -1760,11 +1761,41 @@ async fn a_remote_terminals_follower_is_sensitive_for_as_long_as_it_follows() {
         sensitive.tag_is_sensitive(A),
         "sensitive by the time the invite returns, so before the started notice is read"
     );
+    let mark = w.rec.mark();
+    w.run_and_settle(&t, "printf 'PRODTEXT\\n'").await;
+    let delivered = w.rec.deliveries_for(A, mark);
+    assert!(
+        delivered.iter().any(|d| d.contains("PRODTEXT")),
+        "the output reached A: {delivered:?}"
+    );
+    assert!(sensitive.tag_is_sensitive(A), "sensitive while following");
+
+    w.follow.stop(&cap(), &t.id).unwrap();
+    assert!(
+        sensitive.tag_is_sensitive(A),
+        "production text sits in A's conversation, so the mark outlives the follow"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_remote_follow_that_never_delivered_text_leaves_the_follower_as_it_was_once_it_stops() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+
+    w.invite(&t, A, false);
+    assert!(sensitive.tag_is_sensitive(A), "sensitive while it follows");
+    advance_ms(5_000).await;
+    assert_eq!(
+        w.rec.deliveries_for(A, 0).len(),
+        0,
+        "no terminal text was delivered, only the started notice"
+    );
 
     w.follow.stop(&cap(), &t.id).unwrap();
     assert!(
         !sensitive.tag_is_sensitive(A),
-        "once nothing follows a remote terminal the follower is as it was"
+        "only notices reached A, so once nothing follows the terminal A is as it was"
     );
 }
 
@@ -1829,6 +1860,225 @@ async fn following_a_local_terminal_never_makes_the_follower_sensitive() {
     assert!(!sensitive.tag_is_sensitive(A));
 
     w.follow.stop(&cap(), &t.id).unwrap();
+    assert!(!sensitive.tag_is_sensitive(A));
+}
+
+// ── what a remote terminal shows stays in the follower's conversation ─────────
+//
+// Production text delivered to a follower sits in its conversation after the
+// follow ends, so delivering any marks the follower for good, before the text
+// is handed to the session. A follow that only ever sent notices marks nobody.
+
+#[tokio::test(start_paused = true)]
+async fn output_delivered_from_a_remote_terminal_marks_the_follower_for_good() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.invite(&t, A, false);
+    let mark = w.rec.mark();
+
+    w.run_and_settle(&t, "printf 'PRODTEXT\\n'").await;
+    assert!(
+        w.rec
+            .deliveries_for(A, mark)
+            .iter()
+            .any(|d| d.contains("PRODTEXT")),
+        "the output reached A"
+    );
+
+    w.follow.stop(&cap(), &t.id).unwrap();
+    assert!(sensitive.tag_is_sensitive(A), "after the follow stops");
+    advance_ms(120_000).await;
+    assert!(
+        sensitive.tag_is_sensitive(A),
+        "and as time passes: it is not a timed hold"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn output_delivered_from_a_remote_terminal_keeps_marking_the_follower_after_its_session_ends()
+{
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.invite(&t, A, false);
+    w.run_and_settle(&t, "printf 'PRODTEXT\\n'").await;
+
+    w.follow.session_ended(A);
+
+    assert_eq!(w.follower(&t), None);
+    assert!(sensitive.tag_is_sensitive(A));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_follower_is_sensitive_when_the_session_is_handed_remote_output() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.rec.watch_sensitivity_of(&sensitive);
+    w.invite(&t, A, false);
+    let mark = w.rec.mark();
+
+    w.run_and_settle(&t, "printf 'PRODTEXT\\n'").await;
+
+    assert!(
+        w.rec
+            .deliveries_for(A, mark)
+            .iter()
+            .any(|d| d.contains("PRODTEXT")),
+        "the output reached A"
+    );
+    let seen = w.rec.sensitive_at_each_inject();
+    assert!(
+        seen.len() >= 2,
+        "the started notice and the output: {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|s| *s),
+        "A was sensitive at every injection, the output's included: {seen:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_invite_with_the_remote_screen_marks_the_follower_for_good() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.run(&t, "printf 'PRODSCREEN\\n'");
+
+    w.invite(&t, A, true);
+
+    let started = w.rec.notices_for(A, "started", 0);
+    assert_eq!(started.len(), 1);
+    assert!(
+        elements_in(&started[0]) == 1 && started[0].contains("PRODSCREEN"),
+        "the started message carried the screen: {}",
+        started[0]
+    );
+    w.follow.stop(&cap(), &t.id).unwrap();
+    assert!(
+        sensitive.tag_is_sensitive(A),
+        "the screen's text stays in A's conversation after the follow"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_follower_is_sensitive_when_the_session_is_handed_the_remote_screen() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.run(&t, "printf 'PRODSCREEN\\n'");
+    w.rec.watch_sensitivity_of(&sensitive);
+
+    w.invite(&t, A, true);
+
+    assert!(w.rec.texts_for(A, 0)[0].contains("PRODSCREEN"));
+    assert_eq!(w.rec.sensitive_at_each_inject(), vec![true]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_remote_invite_with_a_screen_then_output_then_a_stop_leaves_the_follower_marked_throughout(
+) {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.run(&t, "printf 'PRODSCREEN\\n'");
+    w.rec.watch_sensitivity_of(&sensitive);
+
+    w.invite(&t, A, true);
+    w.run_and_settle(&t, "printf 'PRODMORE-1\\n'").await;
+    w.run_and_settle(&t, "printf 'PRODMORE-2\\n'").await;
+    let delivered = w.rec.deliveries_for(A, 0).join("\n");
+    assert!(delivered.contains("PRODSCREEN"), "{delivered}");
+    assert!(delivered.contains("PRODMORE-1"), "{delivered}");
+    assert!(delivered.contains("PRODMORE-2"), "{delivered}");
+    w.follow.stop(&cap(), &t.id).unwrap();
+
+    let seen = w.rec.sensitive_at_each_inject();
+    assert!(seen.len() >= 4, "{seen:?}");
+    assert!(seen.iter().all(|s| *s), "every injection: {seen:?}");
+    assert!(sensitive.tag_is_sensitive(A), "and after the stop");
+}
+
+#[tokio::test(start_paused = true)]
+async fn when_a_remote_terminals_follow_moves_both_followers_that_received_text_stay_marked() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.invite(&t, A, false);
+    w.run_and_settle(&t, "printf 'PRODTEXT-FOR-A\\n'").await;
+
+    w.invite(&t, B, false);
+    assert!(
+        sensitive.tag_is_sensitive(A),
+        "A no longer follows, but production text is in its conversation"
+    );
+    let mark = w.rec.mark();
+    w.run_and_settle(&t, "printf 'PRODTEXT-FOR-B\\n'").await;
+    assert!(w
+        .rec
+        .deliveries_for(B, mark)
+        .iter()
+        .any(|d| d.contains("PRODTEXT-FOR-B")));
+    w.follow.stop(&cap(), &t.id).unwrap();
+
+    assert!(sensitive.tag_is_sensitive(A));
+    assert!(sensitive.tag_is_sensitive(B));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_follower_that_got_only_notices_before_the_follow_moved_on_is_not_marked() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.invite(&t, A, false);
+    advance_ms(5_000).await;
+
+    w.invite(&t, B, false);
+    assert!(!sensitive.tag_is_sensitive(A), "A only ever got notices");
+    assert!(sensitive.tag_is_sensitive(B), "B follows it now");
+    let mark = w.rec.mark();
+    w.run_and_settle(&t, "printf 'PRODTEXT-FOR-B\\n'").await;
+    assert!(w
+        .rec
+        .deliveries_for(B, mark)
+        .iter()
+        .any(|d| d.contains("PRODTEXT-FOR-B")));
+    w.follow.stop(&cap(), &t.id).unwrap();
+
+    assert!(!sensitive.tag_is_sensitive(A));
+    assert!(sensitive.tag_is_sensitive(B), "text reached B");
+}
+
+#[tokio::test(start_paused = true)]
+async fn output_delivered_from_a_local_terminal_never_marks_the_follower() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.local("focus-1", "");
+    w.invite(&t, A, false);
+    let mark = w.rec.mark();
+
+    w.run_and_settle(&t, "printf 'LOCALTEXT\\n'").await;
+    assert!(w
+        .rec
+        .deliveries_for(A, mark)
+        .iter()
+        .any(|d| d.contains("LOCALTEXT")));
+    w.follow.stop(&cap(), &t.id).unwrap();
+
+    assert!(!sensitive.tag_is_sensitive(A));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_invite_with_a_local_screen_never_marks_the_follower() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.local("focus-1", "printf 'LOCALSCREEN\\n'");
+
+    w.invite(&t, A, true);
+    assert!(w.rec.texts_for(A, 0)[0].contains("LOCALSCREEN"));
+    w.follow.stop(&cap(), &t.id).unwrap();
+
     assert!(!sensitive.tag_is_sensitive(A));
 }
 
@@ -1934,24 +2184,66 @@ async fn reading_a_remote_terminals_screen_happens_while_the_reader_is_sensitive
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_remote_screen_read_marks_the_follower_but_a_local_one_does_not() {
+async fn a_local_terminals_screen_read_leaves_the_reader_as_it_was() {
     let mut w = World::new();
     let sensitive = w.terminals.lock().unwrap().sensitive_tags();
     let local = w.local("focus-2", "");
     w.invite(&local, B, false);
+
     w.follow.read_screen_as(B, &local.id).expect("local read");
     w.follow.stop(&cap(), &local.id).unwrap();
-    assert!(!sensitive.tag_is_sensitive(B), "local read leaves B alone");
 
+    assert!(!sensitive.tag_is_sensitive(B));
+}
+
+#[tokio::test(start_paused = true)]
+async fn following_a_remote_terminal_without_reading_its_screen_leaves_the_follower_as_it_was_after(
+) {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+
+    w.invite(&t, A, false);
+    w.follow.stop(&cap(), &t.id).unwrap();
+
+    assert!(!sensitive.tag_is_sensitive(A), "no text, no read, no mark");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_remote_screen_read_marks_the_reader_for_good() {
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
     let t = w.ecs("focus-1", "production · admin-portal · scheduler");
     w.invite(&t, A, false);
-    w.follow.stop(&cap(), &t.id).unwrap();
-    assert!(!sensitive.tag_is_sensitive(A), "no read, no mark");
 
-    w.invite(&t, A, false);
-    w.follow.read_screen_as(A, &t.id).expect("ecs read");
+    let read = w.follow.read_screen_as(A, &t.id).expect("ecs read");
+    assert!(
+        sensitive.tag_is_sensitive(A),
+        "by the time the text is returned: {read:?}"
+    );
     w.follow.stop(&cap(), &t.id).unwrap();
-    assert!(sensitive.tag_is_sensitive(A), "ECS read marks for good");
+
+    assert!(sensitive.tag_is_sensitive(A));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_screen_read_whose_redaction_failed_returns_nothing_and_does_not_mark() {
+    use std::sync::atomic::Ordering;
+    let mut w = World::new();
+    let sensitive = w.terminals.lock().unwrap().sensitive_tags();
+    let t = w.ecs("focus-1", "production · admin-portal · scheduler");
+    w.invite(&t, A, false);
+    w.follow.withhold_screens.store(true, Ordering::SeqCst);
+
+    assert!(matches!(
+        w.follow.read_screen_as(A, &t.id),
+        Err(crate::terminal::follow::ScreenReadError::Withheld)
+    ));
+    w.follow.stop(&cap(), &t.id).unwrap();
+    assert!(
+        !sensitive.tag_is_sensitive(A),
+        "no text was returned, so the reader has nothing of production to protect"
+    );
 }
 
 #[tokio::test(start_paused = true)]

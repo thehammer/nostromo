@@ -183,10 +183,26 @@ pub enum AuditEvent {
         reason_code: String,
     },
     /// A channel hit the per-window cap on `refused` lines: until the window
-    /// ends, its refusals are counted instead of written.
-    RefusalLimitReached { channel: RefusalChannel },
-    /// How many of a channel's refusals the cap kept out of the log.
-    RefusalsSuppressed { channel: RefusalChannel, count: u32 },
+    /// ends, its refusals are counted instead of written. A cap on one focus's
+    /// read refusals of one code (they have their own budget, apart from the
+    /// channel's) names that `code` and `focus`.
+    RefusalLimitReached {
+        channel: RefusalChannel,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        focus: Option<String>,
+    },
+    /// How many of a channel's (or, with `code` and `focus`, of one focus's
+    /// read refusals of one code) refusals the cap kept out of the log.
+    RefusalsSuppressed {
+        channel: RefusalChannel,
+        count: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        focus: Option<String>,
+    },
     /// The user invited a focus to follow the terminal (`via`: `control`,
     /// `sheet` or `request`).
     FollowInvited {

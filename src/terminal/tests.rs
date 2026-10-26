@@ -1022,6 +1022,303 @@ fn a_loop_of_forbidden_screen_reads_stops_writing_audit_lines_after_the_budget()
     assert_eq!(written, MAX_REFUSALS_PER_WINDOW as usize);
 }
 
+// ── audit: read refusals have their own budget, per (focus, code) ─────────────
+//
+// An agent that loops on a refused screen read must not be able to use up the
+// MCP refusal budget (and so silence every other MCP refusal), and each
+// distinct (code, focus) pair's first refusal in a window is always written.
+// `read_too_soon` and `read_limit` are driven through `audit_refusal`, the
+// call the read path makes for them.
+
+const READ_TOOL: &str = "nostromo.read_terminal_screen";
+
+fn refusal_api() -> (TempDir, PathBuf, super::TerminalAgentApi) {
+    let (tmp, dir) = scratch_dir();
+    let path = dir.join("audit").join("terminal.jsonl");
+    let mgr = TerminalManager::new(TerminalConfig {
+        audit: AuditLog::open(&path).unwrap(),
+        ..TerminalConfig::in_memory()
+    });
+    (tmp, path, super::TerminalAgentApi::new(mgr))
+}
+
+fn max_refusals() -> usize {
+    super::MAX_REFUSALS_PER_WINDOW as usize
+}
+
+/// `refused` lines written for `code`, from `focus` when given.
+fn refused_written(path: &Path, code: &str, focus: Option<&str>) -> usize {
+    jsonl(path)
+        .iter()
+        .filter(|l| {
+            l["event"] == "refused"
+                && l["channel"] == "mcp"
+                && l["code"] == code
+                && focus.is_none_or(|f| l["focus"] == f)
+        })
+        .count()
+}
+
+/// Every `refusal_limit_reached` line on the MCP channel.
+fn mcp_limit_lines(path: &Path) -> Vec<Value> {
+    jsonl(path)
+        .into_iter()
+        .filter(|l| l["event"] == "refusal_limit_reached" && l["channel"] == "mcp")
+        .collect()
+}
+
+fn read_refusals(api: &super::TerminalAgentApi, focus: &str, code: &str, times: usize) {
+    for _ in 0..times {
+        api.audit_refusal(Some(focus), "read", READ_TOOL, code);
+    }
+}
+
+fn other_refusals(api: &super::TerminalAgentApi, focus: &str, times: usize) {
+    for _ in 0..times {
+        api.audit_refusal(Some(focus), "input", "nostromo.terminal_input", "forbidden");
+    }
+}
+
+#[test]
+fn a_loop_of_read_too_soon_refusals_is_capped_at_the_budget_for_that_focus_and_code() {
+    let (_tmp, path, api) = refusal_api();
+
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals() + 30);
+
+    assert_eq!(
+        refused_written(&path, "read_too_soon", Some("focus-1")),
+        max_refusals()
+    );
+}
+
+#[test]
+fn a_loop_of_read_limit_refusals_is_capped_at_the_budget_for_that_focus_and_code() {
+    let (_tmp, path, api) = refusal_api();
+
+    read_refusals(&api, "focus-1", "read_limit", max_refusals() + 30);
+
+    assert_eq!(
+        refused_written(&path, "read_limit", Some("focus-1")),
+        max_refusals()
+    );
+}
+
+#[test]
+fn each_read_refusal_code_has_its_own_budget_for_the_same_focus() {
+    let (_tmp, path, api) = refusal_api();
+
+    for code in ["read_too_soon", "read_limit", "terminal_read_forbidden"] {
+        read_refusals(&api, "focus-1", code, max_refusals() + 30);
+    }
+
+    for code in ["read_too_soon", "read_limit", "terminal_read_forbidden"] {
+        assert_eq!(
+            refused_written(&path, code, Some("focus-1")),
+            max_refusals(),
+            "{code}"
+        );
+    }
+}
+
+#[test]
+fn each_focus_has_its_own_read_refusal_budget_for_the_same_code() {
+    let (_tmp, path, api) = refusal_api();
+
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals() + 30);
+    read_refusals(&api, "focus-2", "read_too_soon", max_refusals() + 30);
+
+    assert_eq!(
+        refused_written(&path, "read_too_soon", Some("focus-1")),
+        max_refusals()
+    );
+    assert_eq!(
+        refused_written(&path, "read_too_soon", Some("focus-2")),
+        max_refusals(),
+        "focus-1's loop did not use up focus-2's budget"
+    );
+}
+
+#[test]
+fn a_read_refusal_loop_does_not_silence_other_mcp_refusals() {
+    let (_tmp, path, api) = refusal_api();
+
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals() + 30);
+    other_refusals(&api, "focus-2", max_refusals() + 30);
+
+    assert_eq!(
+        refused_written(&path, "forbidden", None),
+        max_refusals(),
+        "the shared MCP budget was untouched by the read loop"
+    );
+}
+
+#[test]
+fn after_a_read_too_soon_loop_a_terminal_read_forbidden_from_another_focus_is_still_written() {
+    let (_tmp, path, api) = refusal_api();
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals() + 30);
+
+    api.audit_refusal(
+        Some("focus-2"),
+        "read",
+        READ_TOOL,
+        "terminal_read_forbidden",
+    );
+
+    assert_eq!(
+        refused_written(&path, "terminal_read_forbidden", Some("focus-2")),
+        1
+    );
+}
+
+#[test]
+fn after_a_read_too_soon_loop_a_read_too_soon_from_another_focus_is_still_written() {
+    let (_tmp, path, api) = refusal_api();
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals() + 30);
+
+    api.audit_refusal(Some("focus-2"), "read", READ_TOOL, "read_too_soon");
+
+    assert_eq!(refused_written(&path, "read_too_soon", Some("focus-2")), 1);
+}
+
+#[test]
+fn after_a_read_too_soon_loop_a_different_read_code_from_the_same_focus_is_still_written() {
+    let (_tmp, path, api) = refusal_api();
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals() + 30);
+
+    api.audit_refusal(Some("focus-1"), "read", READ_TOOL, "read_limit");
+
+    assert_eq!(refused_written(&path, "read_limit", Some("focus-1")), 1);
+}
+
+#[test]
+fn a_loop_of_real_forbidden_screen_reads_does_not_silence_other_mcp_refusals() {
+    let (_tmp, path, api) = refusal_api();
+    for _ in 0..max_refusals() + 30 {
+        assert!(api
+            .read_screen_if_following("focus-1", "terminal-1")
+            .is_err());
+    }
+
+    api.audit_refusal(
+        Some("focus-2"),
+        "input",
+        "nostromo.terminal_input",
+        "forbidden",
+    );
+
+    assert_eq!(refused_written(&path, "forbidden", Some("focus-2")), 1);
+}
+
+#[test]
+fn read_refusals_are_not_charged_to_the_shared_mcp_budget() {
+    let (_tmp, path, api) = refusal_api();
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals());
+    read_refusals(&api, "focus-2", "read_limit", max_refusals());
+
+    other_refusals(&api, "focus-3", max_refusals());
+
+    assert_eq!(
+        refused_written(&path, "forbidden", Some("focus-3")),
+        max_refusals(),
+        "all of them fit: the reads used none of the shared budget"
+    );
+}
+
+#[test]
+fn the_first_read_refusal_of_each_code_and_focus_is_written_when_other_mcp_refusals_used_up_the_budget(
+) {
+    let (_tmp, path, api) = refusal_api();
+    other_refusals(&api, "focus-9", max_refusals() + 30);
+    assert_eq!(
+        refused_written(&path, "forbidden", None),
+        max_refusals(),
+        "the shared budget is used up"
+    );
+
+    for focus in ["focus-1", "focus-2"] {
+        for code in ["read_too_soon", "read_limit", "terminal_read_forbidden"] {
+            api.audit_refusal(Some(focus), "read", READ_TOOL, code);
+        }
+    }
+
+    for focus in ["focus-1", "focus-2"] {
+        for code in ["read_too_soon", "read_limit", "terminal_read_forbidden"] {
+            assert_eq!(
+                refused_written(&path, code, Some(focus)),
+                1,
+                "{code} from {focus}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_read_refusal_key_keeps_its_own_budget_after_other_mcp_refusals_used_up_the_shared_one() {
+    let (_tmp, path, api) = refusal_api();
+    other_refusals(&api, "focus-9", max_refusals() + 30);
+
+    read_refusals(&api, "focus-1", "read_too_soon", 5);
+
+    assert_eq!(
+        refused_written(&path, "read_too_soon", Some("focus-1")),
+        5,
+        "read refusals draw on their own budget, not the exhausted shared one"
+    );
+}
+
+#[test]
+fn hitting_a_read_keys_cap_is_audited_once_for_that_code() {
+    let (_tmp, path, api) = refusal_api();
+
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals() + 30);
+
+    let limits = mcp_limit_lines(&path);
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert_eq!(limits[0]["code"], "read_too_soon");
+}
+
+#[test]
+fn a_read_cap_is_not_reported_as_the_shared_mcp_budget_running_out() {
+    let (_tmp, path, api) = refusal_api();
+
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals() + 30);
+
+    assert!(
+        mcp_limit_lines(&path)
+            .iter()
+            .all(|l| l.get("code").is_some()),
+        "every limit line says which read code it is for"
+    );
+}
+
+#[test]
+fn each_read_key_that_hits_its_cap_is_audited_for_its_own_code() {
+    let (_tmp, path, api) = refusal_api();
+
+    read_refusals(&api, "focus-1", "read_too_soon", max_refusals() + 30);
+    read_refusals(&api, "focus-1", "read_limit", max_refusals() + 30);
+
+    let codes: BTreeSet<String> = mcp_limit_lines(&path)
+        .iter()
+        .map(|l| l["code"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(
+        codes,
+        ["read_limit", "read_too_soon"].map(String::from).into()
+    );
+}
+
+#[test]
+fn hitting_the_shared_mcp_cap_is_still_audited_once_without_a_read_code() {
+    let (_tmp, path, api) = refusal_api();
+
+    other_refusals(&api, "focus-1", max_refusals() + 30);
+
+    let limits = mcp_limit_lines(&path);
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert!(limits[0].get("code").is_none(), "{:?}", limits[0]);
+}
+
 // ── audit: a flood of refusals is capped per channel ─────────────────────────
 
 #[test]
