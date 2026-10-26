@@ -201,7 +201,7 @@ pub fn pool_file(pool_dir: &Path, date: NaiveDate) -> PathBuf {
 
 /// Freeze `outcome` as the pool for `date`, replacing an earlier one.
 pub fn save_pool(pool_dir: &Path, date: NaiveDate, outcome: &FetchOutcome) -> io::Result<()> {
-    state::write_json_atomic(&pool_file(pool_dir, date), outcome)
+    state::write_json_private(pool_dir.parent(), &pool_file(pool_dir, date), outcome)
 }
 
 /// The frozen pool for `date`, if there is a readable one.

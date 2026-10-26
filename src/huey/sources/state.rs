@@ -19,7 +19,11 @@ use crate::huey::items::NewsItem;
 const FORGET_AFTER_DAYS: i64 = 90;
 /// How far back `recent` keeps full items, for answering a 304 or surviving
 /// a failed fetch.
-pub const RECENT_DAYS: i64 = 14;
+///
+/// Longer than the longest plausible report window (the 7-day first-run
+/// window plus a margin), so a 304 or a failed fetch after weeks without a
+/// report does not lose items.
+pub const RECENT_DAYS: i64 = 21;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ItemState {
@@ -81,20 +85,29 @@ pub fn load(state_dir: &Path, source_id: &str) -> SourceState {
     }
 }
 
+/// Save a source's state. Nothing is created unless the Huey root (the
+/// parent of `state_dir`) already exists: a Huey that was never set up leaves
+/// no trace.
 pub fn save(state_dir: &Path, source_id: &str, state: &SourceState) -> io::Result<()> {
-    write_json_atomic(&state_file(state_dir, source_id), state)
+    write_json_private(state_dir.parent(), &state_file(state_dir, source_id), state)
 }
 
-/// Serialize to a temp file in the same directory, then rename over `path`.
-pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
-    std::fs::create_dir_all(dir)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    serde_json::to_writer(&mut tmp, value).map_err(io::Error::other)?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
+/// Serialize `value` to `path` with setup's owner-only writer (0700
+/// directories, 0600 file, fsync before the rename), but only when `root`
+/// exists. A missing root is "not set up": `NotFound`, nothing created.
+pub(crate) fn write_json_private<T: Serialize>(
+    root: Option<&Path>,
+    path: &Path,
+    value: &T,
+) -> io::Result<()> {
+    if !root.is_some_and(Path::is_dir) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "huey is not set up: no state root",
+        ));
+    }
+    let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
+    crate::huey::setup::write_atomic(path, &bytes)
 }
 
 /// The one place the window and the baseline are decided.
@@ -274,6 +287,29 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert_eq!(names, ["src.json"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_directories_are_0700_and_files_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("state");
+        save(&state_dir, "src", &SourceState::default()).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&state_dir), 0o700);
+        assert_eq!(mode(&state_dir.join("sources")), 0o700);
+        assert_eq!(mode(&state_file(&state_dir, "src")), 0o600);
+    }
+
+    #[test]
+    fn saving_without_a_huey_root_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("huey");
+        let err = save(&root.join("state"), "src", &SourceState::default()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!root.exists());
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 
     #[test]
