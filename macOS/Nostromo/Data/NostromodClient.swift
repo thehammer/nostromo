@@ -1148,12 +1148,21 @@ class NostromodClient {
     /// Blocking frame reader: 4-byte big-endian length prefix + JSON body.
     /// Runs on a background queue; on EOF/error it closes the fd and reconnects.
     private func readLoop(_ sock: Int32) {
-        while true {
-            guard let header = readN(sock, 4) else { break }
-            let length = header.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
-            guard length > 0, length <= 4 * 1024 * 1024 else { break }
-            guard let body = readN(sock, Int(length)) else { break }
-            dispatch(body, from: sock)   // hops to main internally
+        // One autorelease pool per frame, not one per connection. GCD drains a worker's pool only when
+        // the block it is running returns, and this block returns when the socket closes, which is
+        // days. Every Foundation object a frame creates (the `JSONSerialization` tree, its readers,
+        // the decoder's temporaries) is autoreleased and was therefore kept until then: at the
+        // 2026-10-25 incident that was 67,000 `_NSJSONReader`s and the trees they produced, about 1.6 GB.
+        var more = true
+        while more {
+            more = autoreleasepool { () -> Bool in
+                guard let header = readN(sock, 4) else { return false }
+                let length = header.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
+                guard length > 0, length <= 4 * 1024 * 1024 else { return false }
+                guard let body = readN(sock, Int(length)) else { return false }
+                dispatch(body, from: sock)   // hops to main internally
+                return true
+            }
         }
         log.info("read loop ended (fd=\(sock, privacy: .public)) — reconnecting")
         Darwin.close(sock)

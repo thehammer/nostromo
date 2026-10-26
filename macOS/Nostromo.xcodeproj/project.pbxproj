@@ -291,7 +291,9 @@
 		HH0000000000000000000A2 /* ImagePasteboard.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH0000000000000000000A0 /* ImagePasteboard.swift */; };
 		HH000000000000000000031 /* ThumbnailLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000030 /* ThumbnailLoader.swift */; };
 		HH000000000000000000041 /* MemoryWatchdog.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000040 /* MemoryWatchdog.swift */; };
+		ZZMSM00000000000000000B1 /* MemorySummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZMSM00000000000000000R1 /* MemorySummary.swift */; };
 		HH000000000000000000042 /* MemoryWatchdog.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000040 /* MemoryWatchdog.swift */; };
+		ZZMSM00000000000000000B2 /* MemorySummary.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZMSM00000000000000000R1 /* MemorySummary.swift */; };
 		HH000000000000000000051 /* TranscriptDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000050 /* TranscriptDiagnostics.swift */; };
 		LL0000000000000000000108 /* PaneContentDump.swift in Sources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000014 /* PaneContentDump.swift */; };
 		LL0000000000000000000109 /* PaneContentDump.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000014 /* PaneContentDump.swift */; };
@@ -308,6 +310,11 @@
 		TT000000000000000000052 /* TranscriptCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TT000000000000000000050 /* TranscriptCopyTests.swift */; };
 		HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000140 /* ImageDecodePolicyTests.swift */; };
 		HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000150 /* MemoryWatchdogTests.swift */; };
+		ZZRLC00000000000000000B1 /* ReadLoopChurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */; };
+		ZZTAE10000000000000000B1 /* ShedKeepsVisibleViewsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */; };
+		ZZTF110000000000000000B1 /* MemoryDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZTF110000000000000000R1 /* MemoryDiagnosticsTests.swift */; };
+		ZZT43E0000000000000000B1 /* MemorySummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZT43E0000000000000000R1 /* MemorySummaryTests.swift */; };
+		ZZT61B0000000000000000B1 /* MemoryWatchdogBackoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZT61B0000000000000000R1 /* MemoryWatchdogBackoffTests.swift */; };
 		II000000000000000000011 /* TurnInteractionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000010 /* TurnInteractionStore.swift */; };
 		II000000000000000000012 /* TurnInteractionStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = II000000000000000000010 /* TurnInteractionStore.swift */; };
 		II000000000000000000021 /* AskQuestionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = II000000000000000000020 /* AskQuestionView.swift */; };
@@ -769,6 +776,7 @@
 		AC0000000000000000000030 /* AppControlProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlProtocolTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000030 /* ThumbnailLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailLoader.swift; sourceTree = "<group>"; };
 		HH000000000000000000040 /* MemoryWatchdog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdog.swift; sourceTree = "<group>"; };
+		ZZMSM00000000000000000R1 /* MemorySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySummary.swift; sourceTree = "<group>"; };
 		HH000000000000000000050 /* TranscriptDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptDiagnostics.swift; sourceTree = "<group>"; };
 		LL0000000000000000000014 /* PaneContentDump.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneContentDump.swift; sourceTree = "<group>"; };
 		HH000000000000000000060 /* TranscriptLoadHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptLoadHarness.swift; sourceTree = "<group>"; };
@@ -782,6 +790,11 @@
 		TT000000000000000000050 /* TranscriptCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptCopyTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000140 /* ImageDecodePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDecodePolicyTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000150 /* MemoryWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdogTests.swift; sourceTree = "<group>"; };
+		ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadLoopChurnTests.swift; sourceTree = "<group>"; };
+		ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShedKeepsVisibleViewsTests.swift; sourceTree = "<group>"; };
+		ZZTF110000000000000000R1 /* MemoryDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryDiagnosticsTests.swift; sourceTree = "<group>"; };
+		ZZT43E0000000000000000R1 /* MemorySummaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySummaryTests.swift; sourceTree = "<group>"; };
+		ZZT61B0000000000000000R1 /* MemoryWatchdogBackoffTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdogBackoffTests.swift; sourceTree = "<group>"; };
 		II000000000000000000010 /* TurnInteractionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnInteractionStore.swift; sourceTree = "<group>"; };
 		II000000000000000000020 /* AskQuestionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskQuestionView.swift; sourceTree = "<group>"; };
 		II000000000000000000030 /* ToolResultView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolResultView.swift; sourceTree = "<group>"; };
@@ -1025,6 +1038,7 @@
 				FT0000000000000000000001 /* FollowTailPolicy.swift */,
 				HH0000000000000000000A0 /* ImagePasteboard.swift */,
 				HH000000000000000000040 /* MemoryWatchdog.swift */,
+				ZZMSM00000000000000000R1 /* MemorySummary.swift */,
 				HH000000000000000000050 /* TranscriptDiagnostics.swift */,
 				PBR000000000000000000003 /* PaneFlightRecorder.swift */,
 				LL0000000000000000000014 /* PaneContentDump.swift */,
@@ -1296,6 +1310,11 @@
 				PS00000000000000000000F0 /* ProseSelectionTests.swift */,
 				HH000000000000000000140 /* ImageDecodePolicyTests.swift */,
 				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
+				ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */,
+				ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */,
+				ZZTF110000000000000000R1 /* MemoryDiagnosticsTests.swift */,
+				ZZT43E0000000000000000R1 /* MemorySummaryTests.swift */,
+				ZZT61B0000000000000000R1 /* MemoryWatchdogBackoffTests.swift */,
 				II000000000000000000100 /* TurnInteractionTests.swift */,
 				II000000000000000000110 /* ChatSessionCompactionTests.swift */,
 				II000000000000000000120 /* LoadHarnessTargetingTests.swift */,
@@ -1604,6 +1623,7 @@
 				AP0000000000000000002241 /* ConsequencePreviewView.swift in Sources */,
 				HH0000000000000000000A1 /* ImagePasteboard.swift in Sources */,
 				HH000000000000000000041 /* MemoryWatchdog.swift in Sources */,
+				ZZMSM00000000000000000B1 /* MemorySummary.swift in Sources */,
 				HH000000000000000000051 /* TranscriptDiagnostics.swift in Sources */,
 				LL0000000000000000000108 /* PaneContentDump.swift in Sources */,
 				HH000000000000000000061 /* TranscriptLoadHarness.swift in Sources */,
@@ -1818,6 +1838,7 @@
 				HH000000000000000000012 /* TurnReconciler.swift in TestSources */,
 				HH000000000000000000022 /* TurnPayloadStore.swift in TestSources */,
 				HH000000000000000000042 /* MemoryWatchdog.swift in TestSources */,
+				ZZMSM00000000000000000B2 /* MemorySummary.swift in TestSources */,
 				HH000000000000000000072 /* TurnListVirtualizer.swift in TestSources */,
 				HH000000000000000000082 /* TurnHeightEstimator.swift in TestSources */,
 				HH000000000000000000102 /* TurnReconcilerTests.swift in Sources */,
@@ -1866,6 +1887,11 @@
 				PS00000000000000000000F1 /* ProseSelectionTests.swift in Sources */,
 				HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */,
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
+				ZZRLC00000000000000000B1 /* ReadLoopChurnTests.swift in Sources */,
+				ZZTAE10000000000000000B1 /* ShedKeepsVisibleViewsTests.swift in Sources */,
+				ZZTF110000000000000000B1 /* MemoryDiagnosticsTests.swift in Sources */,
+				ZZT43E0000000000000000B1 /* MemorySummaryTests.swift in Sources */,
+				ZZT61B0000000000000000B1 /* MemoryWatchdogBackoffTests.swift in Sources */,
 				BB00000000000000000000B2 /* MotherBrokerClientTests.swift in Sources */,
 				BB00000000000000000000B3 /* MotherBrokerClient.swift in TestSources */,
 				SH00000000000000000000A3 /* MotherJobReconciler.swift in TestSources */,

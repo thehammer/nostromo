@@ -1150,7 +1150,9 @@ final class PaneBlankDetectorTests: XCTestCase {
     private static let allowedCaptureKeys: Set<String> = Set([
         // top level
         "schema", "capturedAtUTC", "trigger", "reason", "rule", "severity", "detail", "suppressedHits", "events",
-        "app", "screens", "diagnostics", "pane", "window",
+        "app", "screens", "diagnostics", "pane", "window", "memory",
+        // memory (`MemorySummary`: numbers, and category names from a fixed vocabulary)
+        "physicalFootprintBytes", "mallocBlocksInUse", "mallocBytesInUse", "categories", "name", "dirtyBytes",
         // app, screens, window
         "uptimeSeconds", "build", "pid", "index", "frame", "scale", "x", "y", "w", "h",
         "screenIndex", "isKey", "occluded", "alpha", "fullscreen",
@@ -1199,8 +1201,10 @@ final class PaneBlankDetectorTests: XCTestCase {
             .union(["blank", "stall"])
             .union(PaneFlightRecorder.Kind.allCases.map(\.name))
             .union(["none", "scroll", "resize", "clear", "splice", "shed", "fold", "manual", "test"])
+            .union(MemorySummary.fixedCategoryNames)
         let stamp = try NSRegularExpression(pattern: #"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$"#)
         let buildString = try NSRegularExpression(pattern: #"^[0-9A-Za-z.+-]+ \([0-9A-Za-z.+-]+\)$"#)
+        let unnamedVMTag = try NSRegularExpression(pattern: #"^VM tag \d+$"#)
         let screenNames = NSScreen.screens.map(\.localizedName).filter { !$0.isEmpty }
 
         for name in files(pane) {
@@ -1215,6 +1219,7 @@ final class PaneBlankDetectorTests: XCTestCase {
                 let ok = fixedNames.contains(value)
                     || stamp.firstMatch(in: value, range: range) != nil
                     || buildString.firstMatch(in: value, range: range) != nil
+                    || unnamedVMTag.firstMatch(in: value, range: range) != nil
                 XCTAssertTrue(ok, "\(name) holds a string that is not a fixed name: '\(value)'")
             }
 
