@@ -116,6 +116,10 @@ struct Registered {
     /// Tags whose session a network peer has written to. In memory only.
     #[serde(skip)]
     network_driven: BTreeSet<String>,
+    /// Tags held sensitive for as long as a [`SensitiveHold`] lives, with how
+    /// many do. In memory only; unlike a registration, it lapses.
+    #[serde(skip)]
+    held: BTreeMap<String, usize>,
 }
 
 /// Which focus tags and Mother jobs carry Teri/Fred-derived content.
@@ -136,6 +140,24 @@ pub struct SensitiveTags {
     inner: Arc<RwLock<Registered>>,
     path: Option<Arc<PathBuf>>,
     writer: RegistryWriter,
+}
+
+/// A tag held sensitive (see [`SensitiveTags::hold_sensitive`]); released on drop.
+pub struct SensitiveHold {
+    tags: SensitiveTags,
+    tag: String,
+}
+
+impl Drop for SensitiveHold {
+    fn drop(&mut self) {
+        let mut registered = self.tags.inner.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = registered.held.get_mut(&self.tag) {
+            *count -= 1;
+            if *count == 0 {
+                registered.held.remove(&self.tag);
+            }
+        }
+    }
 }
 
 impl Default for SensitiveTags {
@@ -254,7 +276,27 @@ impl SensitiveTags {
     /// Does the focus `tag` carry (or can it act on) Teri/Fred-derived data?
     pub fn tag_is_sensitive(&self, tag: &str) -> bool {
         let registered = self.inner.read().unwrap();
-        is_teri_or_fred_agent(tag) || registered.unreadable || registered.tags.contains_key(tag)
+        is_teri_or_fred_agent(tag)
+            || registered.unreadable
+            || registered.tags.contains_key(tag)
+            || registered.held.contains_key(tag)
+    }
+
+    /// Treat `tag` as sensitive until the returned guard is dropped. Unlike
+    /// [`SensitiveTags::mark_tag`] nothing is registered or persisted, so the
+    /// tag reverts once nothing holds it.
+    pub fn hold_sensitive(&self, tag: &str) -> SensitiveHold {
+        *self
+            .inner
+            .write()
+            .unwrap()
+            .held
+            .entry(tag.to_string())
+            .or_insert(0) += 1;
+        SensitiveHold {
+            tags: self.clone(),
+            tag: tag.to_string(),
+        }
     }
 
     /// Is a focus with this `tag` running `agent_name` sensitive? A session of
@@ -1356,6 +1398,70 @@ mod tests {
         assert!(second.tag_is_sensitive("cody-core-1"));
         assert!(second.job_is_sensitive("job-9"));
         assert!(!second.tag_is_sensitive("cody-other"));
+    }
+
+    #[test]
+    fn a_held_tag_is_sensitive_until_the_hold_is_dropped() {
+        let tags = SensitiveTags::in_memory();
+        assert!(!tags.tag_is_sensitive("cody-held"));
+
+        let hold = tags.hold_sensitive("cody-held");
+        assert!(tags.tag_is_sensitive("cody-held"));
+        assert!(!tags.tag_is_sensitive("cody-other"), "only the held tag");
+
+        drop(hold);
+        assert!(!tags.tag_is_sensitive("cody-held"), "it reverts");
+    }
+
+    #[test]
+    fn a_tag_held_twice_stays_sensitive_until_both_holds_are_dropped() {
+        let tags = SensitiveTags::in_memory();
+        let first = tags.hold_sensitive("cody-held");
+        let second = tags.hold_sensitive("cody-held");
+
+        drop(first);
+        assert!(tags.tag_is_sensitive("cody-held"), "one hold remains");
+        drop(second);
+        assert!(!tags.tag_is_sensitive("cody-held"));
+    }
+
+    #[test]
+    fn a_hold_is_seen_through_clones_and_a_hold_on_a_clone_counts() {
+        let tags = SensitiveTags::in_memory();
+        let clone = tags.clone();
+        let hold = clone.hold_sensitive("cody-held");
+        assert!(tags.tag_is_sensitive("cody-held"));
+        drop(hold);
+        assert!(!tags.tag_is_sensitive("cody-held"));
+    }
+
+    #[test]
+    fn a_held_tag_is_not_registered_so_a_restart_does_not_remember_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = registry_path_beside(&dir.path().join("daemon-sessions.json"));
+        let tags = SensitiveTags::persisted(path.clone());
+        let _hold = tags.hold_sensitive("cody-held");
+        // Something that does write the registry while the hold lives.
+        tags.mark_tag("cody-registered");
+
+        let restarted = SensitiveTags::persisted(path);
+        assert!(restarted.tag_is_sensitive("cody-registered"));
+        assert!(
+            !restarted.tag_is_sensitive("cody-held"),
+            "a hold lapses; it is never persisted"
+        );
+    }
+
+    #[test]
+    fn a_held_tag_can_be_shown_to_others_under_an_opaque_stand_in() {
+        let tags = SensitiveTags::in_memory();
+        let _hold = tags.hold_sensitive("cody-held");
+
+        let opaque = tags.opaque_tag("cody-held");
+
+        assert!(!opaque.is_empty());
+        assert!(!opaque.contains("cody-held"));
+        assert_eq!(tags.opaque_tag("cody-held"), opaque, "stable");
     }
 
     #[test]
