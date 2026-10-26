@@ -34,14 +34,15 @@ use wiremock::matchers::{any, method, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use nostromo::huey::budget::{self, Mode};
+use nostromo::huey::context::collectors::{PrRecord, PrState, PrsInput};
 use nostromo::huey::context::ContextEnv;
 use nostromo::huey::interests::Interests;
 use nostromo::huey::items::{NewsItem, SourceClass};
 use nostromo::huey::paths::HueyPaths;
 use nostromo::huey::render::{self, Report};
 use nostromo::huey::run::{
-    self, CurateError, CurateInput, Curator, NoLive, Publish, PublishAin, PublishCheck,
-    PublishDrop, PublishNoted, PublishPick, RunEnv,
+    self, CurateError, CurateInput, Curator, LiveSource, NoLive, Publish, PublishAin, PublishCheck,
+    PublishDrop, PublishNoted, PublishPick, RunEnv, RunLimits,
 };
 use nostromo::huey::schedule::FixedLocalTime;
 use nostromo::huey::setup::{self, SetupRecord};
@@ -53,6 +54,7 @@ use nostromo::huey::{
     FailReason, HueyConfig, HueyDeps, HueyDocument, HueyEngine, HueySources, MissingReason,
     RunOutcome, SetupState, Trigger, TriggerRefused,
 };
+use nostromo::mother::MotherJob;
 use nostromo::tracker::clock::{Clock, FakeClock};
 
 // ── Time ─────────────────────────────────────────────────────────────────────
@@ -359,15 +361,25 @@ impl World {
     }
 
     fn run_env(&self, curator: Arc<dyn Curator>) -> RunEnv {
+        self.run_env_with(curator, Arc::new(NoLive), RunLimits::default())
+    }
+
+    fn run_env_with(
+        &self,
+        curator: Arc<dyn Curator>,
+        live: Arc<dyn LiveSource>,
+        limits: RunLimits,
+    ) -> RunEnv {
         RunEnv {
             paths: self.paths.clone(),
             config: HueyConfig::default(),
             context: self.context(),
             http: client(),
             curator,
-            live: Arc::new(NoLive),
+            live,
             clock: self.clock.clone(),
             local_time: Arc::new(FixedLocalTime::utc()),
+            limits,
         }
     }
 
@@ -1720,6 +1732,108 @@ fn h4_13_a_file_without_a_timestamp_is_judged_by_its_modification_time() {
         Mode::Tight,
         "written 25 hours ago"
     );
+}
+
+fn mode_of_text(text: &str) -> Mode {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("budget-posture.json");
+    fs::write(&path, text).unwrap();
+    budget::assess(&path, &HueyConfig::default(), now_for_posture()).mode
+}
+
+#[test]
+fn h4_13_an_unrecognised_posture_word_is_tight_not_normal() {
+    for word in ["Floor it", "", "CRUISE CONTROL", "pump the brakes"] {
+        assert_eq!(mode_of(posture_file(word)), Mode::Tight, "posture {word:?}");
+    }
+}
+
+#[test]
+fn h4_13_a_file_that_exists_but_cannot_be_parsed_is_tight() {
+    for text in [
+        "",
+        "{not json",
+        "[]",
+        "\"Cruise\"",
+        "{}",
+        r#"{"ts": "2026-10-26T05:00:00Z"}"#,
+        r#"{"ts": "2026-10-26T05:00:00Z", "posture": 7}"#,
+    ] {
+        assert_eq!(mode_of_text(text), Mode::Tight, "file {text:?}");
+    }
+}
+
+#[test]
+fn h4_13_a_file_that_cannot_be_read_is_tight() {
+    // A directory where the file should be: it exists, but reading fails.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("budget-posture.json");
+    fs::create_dir(&path).unwrap();
+    let note = budget::assess(&path, &HueyConfig::default(), now_for_posture());
+    assert_eq!(note.mode, Mode::Tight);
+    assert_eq!(note.posture, None);
+}
+
+#[test]
+fn h4_13_a_future_or_malformed_timestamp_is_tight() {
+    let mut future = posture_file("Cruise");
+    future["ts"] = "2026-10-27T05:00:00Z".into();
+    assert_eq!(mode_of(future), Mode::Tight);
+
+    let mut garbled = posture_file("Cruise");
+    garbled["ts"] = "yesterday".into();
+    assert_eq!(mode_of(garbled), Mode::Tight);
+
+    let mut typed = posture_file("Cruise");
+    typed["ts"] = 1_761_454_800.into();
+    assert_eq!(mode_of(typed), Mode::Tight);
+}
+
+#[test]
+fn h4_13_a_missing_timestamp_with_an_unreadable_mtime_is_tight() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("budget-posture.json");
+    fs::write(&path, json!({"posture": "Cruise"}).to_string()).unwrap();
+    let config = HueyConfig::default();
+    let now = now_for_posture();
+    let note = budget::assess_with(&path, &config, now, || None);
+    assert_eq!(note.mode, Mode::Tight);
+    let note = budget::assess_with(&path, &config, now, || {
+        Some(now - chrono::Duration::hours(1))
+    });
+    assert_eq!(note.mode, Mode::Normal);
+    let note = budget::assess_with(&path, &config, now, || {
+        Some(now + chrono::Duration::hours(2))
+    });
+    assert_eq!(
+        note.mode,
+        Mode::Tight,
+        "a future mtime is not trusted either"
+    );
+}
+
+#[test]
+fn h4_13_wrongly_typed_fields_are_tight() {
+    for (key, value) in [
+        ("stale_input", json!("false")),
+        ("stale_input", json!(0)),
+        ("exhausted_models", json!("sonnet")),
+        ("exhausted_models", json!([1, 2])),
+        ("billing_mode", json!(3)),
+        ("seven_day", json!("72%")),
+        ("seven_day", json!({"used_pct": "72"})),
+    ] {
+        let mut file = posture_file("Cruise");
+        file[key] = value.clone();
+        assert_eq!(mode_of(file), Mode::Tight, "{key} = {value}");
+    }
+}
+
+#[test]
+fn h4_13_malformed_does_not_mask_critical() {
+    let mut file = posture_file("critical");
+    file["stale_input"] = json!("yes");
+    assert_eq!(mode_of(file), Mode::Critical);
 }
 
 #[test]
@@ -3084,7 +3198,10 @@ async fn a_regeneration_on_the_frozen_pool_does_not_move_the_next_window_past_it
 
     // Published at noon; the 15:00 regeneration reuses the 06:00 pool and so
     // never sees it.
-    w.items(VN, &[("noon", "Gizmo noon news", ts("2026-10-21T12:00:00Z"))]);
+    w.items(
+        VN,
+        &[("noon", "Gizmo noon news", ts("2026-10-21T12:00:00Z"))],
+    );
     w.clock.set(ts("2026-10-21T15:00:00Z"));
     produced(&w.run(&curator, Trigger::Regenerate).await);
     let v2 = w.store().load_meta(oct(21), 2).unwrap();
@@ -3108,7 +3225,11 @@ async fn the_rule_chosen_line_of_a_critical_report_blocks_only_the_line_not_pick
     // Published before day 1's window ended, never shown on day 1.
     w.items(
         ANTHROPIC.0,
-        &[("launch", "Anthropic launch post", ts("2026-10-21T05:00:00Z"))],
+        &[(
+            "launch",
+            "Anthropic launch post",
+            ts("2026-10-21T05:00:00Z"),
+        )],
     );
     w.items(VN, &[("seed", "Gizmo seed", ts("2026-10-21T05:00:00Z"))]);
     produced(&w.run(&curator, Trigger::Scheduled).await);
@@ -3131,4 +3252,580 @@ async fn the_rule_chosen_line_of_a_critical_report_blocks_only_the_line_not_pick
         .find(|e| e.item_id == launch && e.date == oct(22))
         .expect("the line is in the ledger");
     assert_eq!(entry.section, Section::Uncurated);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Review fixes: context switches, deadlines, panics, attempt cap, render guards
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Append a `[context]` table to the machine's `sources.toml`.
+fn context_switches(w: &World, lines: &str) {
+    let mut text = fs::read_to_string(w.paths.sources_toml()).unwrap();
+    text.push_str("[context]\n");
+    text.push_str(lines);
+    fs::write(w.paths.sources_toml(), text).unwrap();
+}
+
+/// Counts how often the run asks for PRs and for Mother's jobs.
+#[derive(Default)]
+struct CountingLive {
+    prs_calls: AtomicUsize,
+    jobs_calls: AtomicUsize,
+    prs: Vec<PrRecord>,
+}
+
+#[async_trait]
+impl LiveSource for CountingLive {
+    async fn prs(&self, _now: DateTime<Utc>) -> PrsInput {
+        self.prs_calls.fetch_add(1, Ordering::SeqCst);
+        PrsInput::Available(self.prs.clone())
+    }
+
+    async fn jobs(&self) -> Vec<MotherJob> {
+        self.jobs_calls.fetch_add(1, Ordering::SeqCst);
+        Vec::new()
+    }
+}
+
+impl CountingLive {
+    fn prs_asked(&self) -> usize {
+        self.prs_calls.load(Ordering::SeqCst)
+    }
+
+    fn jobs_asked(&self) -> usize {
+        self.jobs_calls.load(Ordering::SeqCst)
+    }
+}
+
+/// A machine with one vendor item, `switches` in its `[context]` table (none
+/// when empty) and `prep` applied; one curated run; what the curator saw.
+async fn curated_input(
+    switches: &str,
+    live: Arc<dyn LiveSource>,
+    prep: impl FnOnce(&World),
+) -> CurateInput {
+    let w = world(MONDAY).await;
+    w.sources(&[VENDOR]);
+    if !switches.is_empty() {
+        context_switches(&w, switches);
+    }
+    w.confirm();
+    w.posture("Cruise");
+    w.items(
+        VN,
+        &[("gizmo-2", "Gizmo 2 ships batch mode", w.now() - hours(1))],
+    );
+    prep(&w);
+    let curator = Scripted::picking(0, false);
+    let env = w.run_env_with(curator.clone(), live, RunLimits::default());
+    produced(&run::run(&env, Trigger::Scheduled, None).await);
+    curator.last()
+}
+
+async fn digest_of(switches: &str, prep: impl FnOnce(&World)) -> String {
+    curated_input(switches, Arc::new(NoLive), prep)
+        .await
+        .digest
+        .text
+}
+
+#[tokio::test]
+async fn a_switched_off_pr_source_is_never_asked() {
+    let live = Arc::new(CountingLive::default());
+    let input = curated_input("prs = false\n", live.clone(), |_| {}).await;
+    assert_eq!(live.prs_asked(), 0, "no GitHub search with prs = false");
+    assert_eq!(live.jobs_asked(), 1);
+    assert!(!input.digest.text.contains("PRs unavailable"));
+
+    let live = Arc::new(CountingLive::default());
+    curated_input("", live.clone(), |_| {}).await;
+    assert_eq!(live.prs_asked(), 1, "control: on by default");
+}
+
+#[tokio::test]
+async fn a_switched_off_mother_source_is_never_asked() {
+    let live = Arc::new(CountingLive::default());
+    curated_input("mother = false\n", live.clone(), |_| {}).await;
+    assert_eq!(live.jobs_asked(), 0);
+    assert_eq!(live.prs_asked(), 1);
+
+    let live = Arc::new(CountingLive::default());
+    curated_input("", live.clone(), |_| {}).await;
+    assert_eq!(live.jobs_asked(), 1, "control: on by default");
+}
+
+#[tokio::test]
+async fn a_switch_flipped_between_runs_applies_to_the_next_run() {
+    let w = world(MONDAY).await;
+    w.sources(&[VENDOR]);
+    w.confirm();
+    w.items(
+        VN,
+        &[("gizmo-2", "Gizmo 2 ships batch mode", w.now() - hours(1))],
+    );
+    let live = Arc::new(CountingLive::default());
+    let curator = Scripted::picking(0, false);
+    let env = w.run_env_with(curator.clone(), live.clone(), RunLimits::default());
+    produced(&run::run(&env, Trigger::Scheduled, None).await);
+    assert_eq!(live.prs_asked(), 1);
+
+    context_switches(&w, "prs = false\n");
+    w.clock.set(ts("2026-10-27T06:05:00Z"));
+    w.items(
+        VN,
+        &[("gizmo-3", "Gizmo 3 ships", ts("2026-10-27T02:00:00Z"))],
+    );
+    produced(&run::run(&env, Trigger::Scheduled, None).await);
+    assert_eq!(live.prs_asked(), 1, "the second run re-read sources.toml");
+}
+
+fn write_notes_and_ideas(w: &World) {
+    let notes = w.home.join(".claude/notes");
+    fs::create_dir_all(&notes).unwrap();
+    fs::write(
+        notes.join("2026-10-25-weekly-review.md"),
+        "# Weekly review heading\n",
+    )
+    .unwrap();
+    let ideas = w.home.join(".claude/ideas");
+    fs::create_dir_all(&ideas).unwrap();
+    fs::write(ideas.join("kettle.md"), "# Kettle descaling tracker\n").unwrap();
+}
+
+#[tokio::test]
+async fn switched_off_notes_and_ideas_are_not_read() {
+    let on = digest_of("", write_notes_and_ideas).await;
+    assert!(on.contains("Weekly review heading"), "control: {on}");
+    assert!(on.contains("Kettle descaling tracker"), "control: {on}");
+
+    let off = digest_of("notes = false\n", write_notes_and_ideas).await;
+    assert!(!off.contains("Weekly review heading"));
+    assert!(off.contains("Kettle descaling tracker"));
+
+    let off = digest_of("ideas = false\n", write_notes_and_ideas).await;
+    assert!(off.contains("Weekly review heading"));
+    assert!(!off.contains("Kettle descaling tracker"));
+}
+
+fn write_todos(w: &World) {
+    fs::create_dir_all(w.home.join(".teri")).unwrap();
+    let conn = rusqlite::Connection::open(w.home.join(".teri/teri.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE todos (
+           id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, body TEXT,
+           status TEXT NOT NULL DEFAULT 'open', priority INTEGER NOT NULL DEFAULT 3,
+           due_date TEXT, jira_key TEXT, created_at TEXT NOT NULL DEFAULT '',
+           updated_at TEXT NOT NULL DEFAULT '', snoozed_until TEXT
+         );
+         INSERT INTO todos (title, status) VALUES ('Renew the signing certificate', 'open');",
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_switched_off_todo_source_is_not_read() {
+    let on = digest_of("", write_todos).await;
+    assert!(
+        on.contains("Renew the signing certificate"),
+        "control: {on}"
+    );
+    let off = digest_of("todos = false\n", write_todos).await;
+    assert!(!off.contains("Renew the signing certificate"));
+}
+
+fn lodge_with_a_pr() -> Arc<CountingLive> {
+    Arc::new(CountingLive {
+        prs: vec![PrRecord {
+            repo: "lodge".into(),
+            number: 7,
+            title: "Fix the invoice export".into(),
+            state: PrState::Open,
+            at: ts("2026-10-26T04:00:00Z"),
+        }],
+        ..CountingLive::default()
+    })
+}
+
+fn make_lodge(w: &World) {
+    make_project(
+        &w.code_root,
+        "lodge",
+        &[("README.md", "# Lodge\n")],
+        w.now() - days(1),
+    );
+}
+
+#[tokio::test]
+async fn switched_off_git_and_code_root_are_not_read() {
+    let on = curated_input("", lodge_with_a_pr(), make_lodge)
+        .await
+        .digest
+        .text;
+    assert!(on.contains("Initial import"), "control: {on}");
+    assert!(on.contains("Fix the invoice export"), "control: {on}");
+
+    // git off: the project stays in flight on the PR, but no commit subject
+    // and no git-grep profile is read.
+    let git_off = curated_input("git = false\n", lodge_with_a_pr(), make_lodge)
+        .await
+        .digest
+        .text;
+    assert!(git_off.contains("Fix the invoice export"), "{git_off}");
+    assert!(!git_off.contains("Initial import"), "{git_off}");
+    assert!(git_off.contains("git is switched off"), "{git_off}");
+
+    // code_root off: no repository is discovered at all.
+    let root_off = curated_input("code_root = false\n", lodge_with_a_pr(), make_lodge)
+        .await
+        .digest
+        .text;
+    assert!(!root_off.contains("[lodge]"), "{root_off}");
+    assert!(!root_off.contains("Initial import"), "{root_off}");
+    assert!(!root_off.contains("Fix the invoice export"), "{root_off}");
+}
+
+#[tokio::test]
+async fn a_switched_off_bishop_is_not_read() {
+    let garbage = |w: &World| {
+        fs::write(w.home.join(".claude/budget-posture.json"), "{garbage").unwrap();
+    };
+    let on = curated_input("", Arc::new(NoLive), garbage).await;
+    assert_eq!(on.mode, Mode::Tight, "control: unreadable means tight");
+    let off = curated_input("bishop = false\n", Arc::new(NoLive), garbage).await;
+    assert_eq!(off.mode, Mode::Normal, "the file was never opened");
+    assert!(!off.digest.text.contains("Budget posture:"));
+}
+
+#[tokio::test]
+async fn a_switched_off_interests_file_is_not_read() {
+    let ignore_php = |w: &World| {
+        w.interests(&fixture("runs/interests-ignore-php.md"));
+        w.items(
+            VN,
+            &[(
+                "php-9",
+                "PHP 9 released with a new engine",
+                w.now() - hours(2),
+            )],
+        );
+    };
+    let has_php = |input: &CurateInput| {
+        input
+            .candidates
+            .iter()
+            .any(|c| c.items.iter().any(|i| i.title.contains("PHP 9")))
+    };
+    let on = curated_input("", Arc::new(NoLive), ignore_php).await;
+    assert!(!has_php(&on), "control: the ignore term drops it");
+    let off = curated_input("interests = false\n", Arc::new(NoLive), ignore_php).await;
+    assert!(has_php(&off));
+}
+
+// ── Deadlines ────────────────────────────────────────────────────────────────
+
+/// A model that never answers.
+struct Hanging;
+
+#[async_trait]
+impl Curator for Hanging {
+    async fn curate(&self, _input: &CurateInput) -> Result<Publish, CurateError> {
+        std::future::pending().await
+    }
+}
+
+/// A live source whose PR search never returns.
+struct HangingLive;
+
+#[async_trait]
+impl LiveSource for HangingLive {
+    async fn prs(&self, _now: DateTime<Utc>) -> PrsInput {
+        std::future::pending().await
+    }
+
+    async fn jobs(&self) -> Vec<MotherJob> {
+        Vec::new()
+    }
+}
+
+fn limits(gather_ms: u64, curate_ms: u64, run_ms: u64) -> RunLimits {
+    RunLimits {
+        gather: Duration::from_millis(gather_ms),
+        curate: Duration::from_millis(curate_ms),
+        run: Duration::from_millis(run_ms),
+    }
+}
+
+async fn one_item_world() -> World {
+    let w = world(MONDAY).await;
+    w.sources(&[VENDOR]);
+    w.confirm();
+    w.items(
+        VN,
+        &[("gizmo-2", "Gizmo 2 ships batch mode", w.now() - hours(1))],
+    );
+    w
+}
+
+fn assert_one_fixed_failure(w: &World) {
+    let runs = w.store().runs();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].reason, Some(FailReason::ModelFailed));
+    assert!(w.store().dates().is_empty(), "no report was made");
+    assert!(w.store().versions(oct(26)).is_empty(), "no stray version");
+}
+
+#[tokio::test]
+async fn a_model_that_never_answers_ends_the_run_as_a_failure() {
+    let w = one_item_world().await;
+    let env = w.run_env_with(
+        Arc::new(Hanging),
+        Arc::new(NoLive),
+        limits(5_000, 200, 30_000),
+    );
+    let outcome = run::run(&env, Trigger::Scheduled, None).await;
+    assert_eq!(
+        outcome,
+        RunOutcome::Failed {
+            reason: FailReason::ModelFailed
+        }
+    );
+    assert_one_fixed_failure(&w);
+}
+
+#[tokio::test]
+async fn a_hung_context_gather_ends_the_run_as_a_failure() {
+    let w = one_item_world().await;
+    let curator = Scripted::picking(0, false);
+    let env = w.run_env_with(
+        curator.clone(),
+        Arc::new(HangingLive),
+        limits(200, 5_000, 30_000),
+    );
+    let outcome = run::run(&env, Trigger::Scheduled, None).await;
+    assert_eq!(
+        outcome,
+        RunOutcome::Failed {
+            reason: FailReason::ModelFailed
+        }
+    );
+    assert_eq!(curator.calls(), 0, "the model was never reached");
+    assert_one_fixed_failure(&w);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_overall_deadline_fails_the_run_and_frees_the_lock() {
+    let w = one_item_world().await;
+    // The stage deadlines are far away: only the outer one can fire.
+    let src = HueyEngine::spawn(HueyDeps {
+        limits: limits(60_000, 60_000, 300),
+        ..w.deps(Arc::new(Hanging), Duration::from_secs(3600))
+    });
+    w.clock.set(ts("2026-10-26T06:05:00Z"));
+
+    let outcome = src.handle.trigger(Trigger::RunNow).await.unwrap();
+    assert_eq!(
+        outcome,
+        RunOutcome::Failed {
+            reason: FailReason::ModelFailed
+        }
+    );
+    assert!(!src.handle.is_running(), "the run lock was released");
+    assert_one_fixed_failure(&w);
+
+    // Not wedged: the next trigger starts (and times out the same way).
+    let again = src.handle.trigger(Trigger::RunNow).await;
+    assert!(again.is_ok(), "{again:?}");
+    assert_eq!(w.store().runs().len(), 2);
+}
+
+// ── A panicking run ──────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_run_does_not_kill_the_scheduler() {
+    let w = one_item_world().await;
+    w.clock.set(ts("2026-10-26T06:00:00Z"));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let curator = Scripted::new(move |input| {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            panic!("the curator blew up");
+        }
+        Ok(publish(input, 1, false))
+    });
+    let src = HueyEngine::spawn(w.deps(curator.clone(), Duration::from_millis(5)));
+    let store = w.store();
+
+    wait_for("the panicking attempt", || curator.calls() == 1).await;
+    wait_for("the panic to be recorded", || {
+        store.runs().len() == 1 && !src.handle.is_running()
+    })
+    .await;
+    assert!(store.dates().is_empty());
+    assert_eq!(store.runs()[0].reason, Some(FailReason::ModelFailed));
+
+    // The scheduler is alive: the ordinary retry, ten minutes later, works.
+    w.clock.set(ts("2026-10-26T06:10:00Z"));
+    wait_for("the retry", || store.latest_version(oct(26)).is_some()).await;
+    assert_eq!(curator.calls(), 2);
+    assert_eq!(store.load_meta(oct(26), 1).unwrap().trigger, Trigger::Retry);
+}
+
+// ── The attempt cap ──────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unwritable_run_log_cannot_repeat_the_run_all_day() {
+    let w = one_item_world().await;
+    w.clock.set(ts("2026-10-26T06:00:00Z"));
+    // `runs.jsonl` is a directory: no attempt can ever be recorded, so
+    // nothing but the in-memory cap says "enough".
+    let store = w.store();
+    fs::create_dir_all(w.paths.state_dir()).unwrap();
+    fs::create_dir(store.runs_file()).unwrap();
+    let curator = Scripted::failing();
+    let src = HueyEngine::spawn(w.deps(curator.clone(), Duration::from_millis(5)));
+
+    let mut clock = ts("2026-10-26T06:00:00Z");
+    for attempt in 1..=4 {
+        wait_for("an attempt", || {
+            curator.calls() == attempt && !src.handle.is_running()
+        })
+        .await;
+        clock += chrono::Duration::minutes(11);
+        w.clock.set(clock);
+    }
+    // Hours more of ticks, each past the ten-minute guard: no fifth attempt.
+    for _ in 0..12 {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        clock += chrono::Duration::minutes(30);
+        w.clock.set(clock);
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(curator.calls(), 4);
+}
+
+// ── Render-side guards ───────────────────────────────────────────────────────
+
+/// A world with six vendor items `a` to `f`, then one curated run whose
+/// publish `script` builds from the ids.
+async fn guarded_report(
+    posture: &str,
+    script: impl Fn(&dyn Fn(&str) -> String) -> Publish + Send + Sync + 'static,
+) -> (World, Report) {
+    let w = world(MONDAY).await;
+    w.sources(&[VENDOR]);
+    w.confirm();
+    w.posture(posture);
+    for (n, key) in ["a", "b", "c", "d", "e", "f"].iter().enumerate() {
+        w.items(
+            VN,
+            &[(
+                key,
+                &format!("Gizmo {key} ships"),
+                w.now() - hours(1 + n as i64),
+            )],
+        );
+    }
+    let curator = Scripted::new(move |_| Ok(script(&|key| id(VN, key))));
+    let report = w.run_report(&curator, Trigger::Scheduled).await;
+    (w, report)
+}
+
+fn noted(item_ids: &[String]) -> PublishNoted {
+    PublishNoted {
+        item_ids: item_ids.to_vec(),
+        line: "A smaller thing.".into(),
+        interest: "i1".into(),
+    }
+}
+
+#[tokio::test]
+async fn the_same_item_cited_twice_appears_once() {
+    let (_w, report) = guarded_report("Cruise", |i| Publish {
+        picks: vec![
+            PublishPick {
+                item_ids: vec![i("a"), i("a")],
+                ..pick(&i("a"), 1)
+            },
+            pick(&i("a"), 2),
+            pick(&i("b"), 3),
+        ],
+        ..Publish::default()
+    })
+    .await;
+    assert_eq!(report.picks.len(), 2, "the second pick of `a` is dropped");
+    assert_eq!(report.picks[0].item_ids, vec![id(VN, "a")]);
+    assert_sane(&report);
+}
+
+#[tokio::test]
+async fn an_item_in_two_sections_stays_in_the_strongest_one() {
+    let (_w, report) = guarded_report("Cruise", |i| Publish {
+        picks: vec![pick(&i("a"), 1)],
+        also_in_the_news: Some(ain_line(&i("a"))),
+        also_noted: vec![noted(&[i("a")]), noted(&[i("b")])],
+        ..Publish::default()
+    })
+    .await;
+    assert_eq!(report.picks.len(), 1);
+    assert!(
+        report.also_in_the_news.is_none(),
+        "an Also-in-the-news item that is also a pick is dropped"
+    );
+    let noted_ids: Vec<&String> = report.also_noted.iter().flat_map(|n| &n.item_ids).collect();
+    assert_eq!(noted_ids, vec![&id(VN, "b")]);
+    assert_sane(&report);
+}
+
+#[tokio::test]
+async fn the_also_in_the_news_line_outranks_also_noted() {
+    let (_w, report) = guarded_report("Cruise", |i| Publish {
+        also_in_the_news: Some(ain_line(&i("c"))),
+        also_noted: vec![noted(&[i("c")]), noted(&[i("d")]), noted(&[i("d")])],
+        ..Publish::default()
+    })
+    .await;
+    assert_eq!(
+        report.also_in_the_news.as_ref().map(|a| a.item_id.clone()),
+        Some(id(VN, "c"))
+    );
+    let noted_ids: Vec<&String> = report.also_noted.iter().flat_map(|n| &n.item_ids).collect();
+    assert_eq!(noted_ids, vec![&id(VN, "d")], "no `c`, and `d` once");
+    assert_sane(&report);
+}
+
+#[tokio::test]
+async fn a_tight_report_has_at_most_three_picks() {
+    let (_w, report) = guarded_report("Pump the brakes", |i| Publish {
+        picks: ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .enumerate()
+            .map(|(n, key)| pick(&i(key), n + 1))
+            .collect(),
+        ..Publish::default()
+    })
+    .await;
+    assert_eq!(report.mode, Mode::Tight);
+    assert_eq!(report.picks.len(), 3);
+    assert_sane(&report);
+}
+
+#[tokio::test]
+async fn unknown_ids_are_dropped_and_counted_in_the_run_log() {
+    let (w, report) = guarded_report("Cruise", |i| Publish {
+        picks: vec![pick("nope:1", 1), pick(&i("a"), 2)],
+        also_in_the_news: Some(ain_line("nope:2")),
+        also_noted: vec![noted(&["nope:3".to_string()])],
+        dropped: vec![drop_of("nope:4", "not relevant")],
+        ..Publish::default()
+    })
+    .await;
+    assert_eq!(report.picks.len(), 1);
+    assert_eq!(report.picks[0].item_ids, vec![id(VN, "a")]);
+    assert!(report.also_in_the_news.is_none());
+    assert!(report.also_noted.is_empty());
+
+    let run = w.store().runs().pop().unwrap();
+    assert_eq!(run.unknown_ids, 4);
+    let log = fs::read_to_string(w.store().runs_file()).unwrap();
+    assert!(!log.contains("nope"), "a count, never the ids: {log}");
 }

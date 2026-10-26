@@ -174,6 +174,14 @@ pub struct RunRecord {
     pub fetch_ms: u64,
     #[serde(default)]
     pub total_ms: u64,
+    /// Ids the curator named that the run never issued (dropped from the
+    /// report). A count only, never the ids.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unknown_ids: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 // ── Verdicts ─────────────────────────────────────────────────────────────────
@@ -354,7 +362,10 @@ impl Store {
     }
 
     pub fn save_ledger(&self, ledger: &Ledger) -> io::Result<()> {
-        self.write(&self.ledger_file(), &serde_json::to_vec(ledger).map_err(io::Error::other)?)
+        self.write(
+            &self.ledger_file(),
+            &serde_json::to_vec(ledger).map_err(io::Error::other)?,
+        )
     }
 
     /// Every readable line of `runs.jsonl`, oldest first.
@@ -414,7 +425,8 @@ impl Store {
     pub fn prune(&self, today: NaiveDate) -> Pruned {
         let mut pruned = Pruned::default();
         for (date, path) in dated_entries(&self.paths.reports_dir()) {
-            if (today - date).num_days() > REPORT_KEEP_DAYS && std::fs::remove_dir_all(&path).is_ok()
+            if (today - date).num_days() > REPORT_KEEP_DAYS
+                && std::fs::remove_dir_all(&path).is_ok()
             {
                 pruned.report_dates += 1;
             }
@@ -555,6 +567,7 @@ mod tests {
                 version: None,
                 fetch_ms: 0,
                 total_ms: 0,
+                unknown_ids: 0,
             })
             .is_err());
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);

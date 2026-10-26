@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration as StdDuration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -32,13 +32,14 @@ use crate::huey::render::{
 };
 use crate::huey::schedule::{LocalTime, Schedule};
 use crate::huey::setup::{self, SetupState};
-use crate::huey::sources::config::load_file;
+use crate::huey::sources::config::{load_file, ContextSwitches, SourcesConfig};
 use crate::huey::sources::{
     fetch_all, load_pool, save_pool, FetchOutcome, HttpClient, SourceOutcome, SourceStatus,
 };
 use crate::huey::store::{
     Ledger, LedgerEntry, ReportFiles, ReportMeta, RunRecord, RunResult, Section, Store,
 };
+use crate::mother::MotherJob;
 use crate::tracker::clock::Clock;
 
 /// The first run ever looks this many days back.
@@ -234,11 +235,13 @@ impl Curator for NoCurator {
 }
 
 /// What the daemon knows that the context needs: the user's PRs and
-/// Mother's jobs.
+/// Mother's jobs. Asked separately, so a source switched off in
+/// `sources.toml` is never asked at all.
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait LiveSource: Send + Sync {
-    async fn live(&self, now: DateTime<Utc>) -> LiveInputs;
+    async fn prs(&self, now: DateTime<Utc>) -> PrsInput;
+    async fn jobs(&self) -> Vec<MotherJob>;
 }
 
 /// No PRs and no jobs.
@@ -247,11 +250,12 @@ pub struct NoLive;
 
 #[async_trait]
 impl LiveSource for NoLive {
-    async fn live(&self, _now: DateTime<Utc>) -> LiveInputs {
-        LiveInputs {
-            prs: PrsInput::Unavailable,
-            jobs: Vec::new(),
-        }
+    async fn prs(&self, _now: DateTime<Utc>) -> PrsInput {
+        PrsInput::Unavailable
+    }
+
+    async fn jobs(&self) -> Vec<MotherJob> {
+        Vec::new()
     }
 }
 
@@ -263,8 +267,8 @@ pub struct DaemonLive {
 
 #[async_trait]
 impl LiveSource for DaemonLive {
-    async fn live(&self, now: DateTime<Utc>) -> LiveInputs {
-        let prs = match crate::data::github_client::GithubClient::new(None) {
+    async fn prs(&self, now: DateTime<Utc>) -> PrsInput {
+        match crate::data::github_client::GithubClient::new(None) {
             Ok(gh) => match context::collectors::fetch_prs(
                 &reqwest::Client::new(),
                 crate::huey::sources::config::DEFAULT_GITHUB_API,
@@ -277,9 +281,33 @@ impl LiveSource for DaemonLive {
                 Err(_) => PrsInput::Unavailable,
             },
             Err(_) => PrsInput::Unavailable,
-        };
-        let jobs = self.jobs.jobs_rx().borrow().clone();
-        LiveInputs { prs, jobs }
+        }
+    }
+
+    async fn jobs(&self) -> Vec<MotherJob> {
+        self.jobs.jobs_rx().borrow().clone()
+    }
+}
+
+/// How long each stage of a run may take before it counts as failed, so a
+/// hung gather or a model that never answers cannot hold the run lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunLimits {
+    /// Reading the local context and building the digest.
+    pub gather: StdDuration,
+    /// The model pass.
+    pub curate: StdDuration,
+    /// The whole run: the last resort behind the two above.
+    pub run: StdDuration,
+}
+
+impl Default for RunLimits {
+    fn default() -> Self {
+        Self {
+            gather: StdDuration::from_secs(3 * 60),
+            curate: StdDuration::from_secs(20 * 60),
+            run: StdDuration::from_secs(30 * 60),
+        }
     }
 }
 
@@ -293,6 +321,7 @@ pub struct RunEnv {
     pub live: Arc<dyn LiveSource>,
     pub clock: Arc<dyn Clock>,
     pub local_time: Arc<dyn LocalTime>,
+    pub limits: RunLimits,
 }
 
 // ── The report frame ─────────────────────────────────────────────────────────
@@ -369,43 +398,78 @@ fn model_text(text: &str, max: usize) -> String {
     one_line(text, max)
 }
 
-/// The report a (validated) publish renders to.
+/// The report a publish renders to.
 pub fn assemble_curated(frame: &ReportFrame, publish: &Publish) -> Report {
-    let picks: Vec<Pick> = publish
-        .picks
-        .iter()
-        .filter_map(|p| {
-            let members = frame.expand(&p.item_ids);
-            let (primary, rest) = members.split_first()?;
-            Some(Pick {
-                item_ids: members.iter().map(|i| i.id.clone()).collect(),
-                headline: model_text(&p.headline, 120),
-                what_happened: model_text(&p.what_happened, 400),
-                project: p.project.clone(),
-                project_name: frame
-                    .project_names
-                    .get(&p.project)
-                    .cloned()
-                    .unwrap_or_else(|| model_text(&p.project, 64)),
-                for_line: model_text(&p.for_line, 400),
-                check: match &p.check {
-                    PublishCheck::Checked { text, .. } => PickCheck::Checked {
-                        text: model_text(text, 300),
-                    },
-                    PublishCheck::ToCheck { text } => PickCheck::ToCheck {
-                        text: model_text(text, 300),
-                    },
-                },
-                link: item_link(primary),
-                also_covered_by: rest.iter().map(|i| source_link(frame, i)).collect(),
-                follow_up_of: p.follow_up_of.clone(),
-                whats_new: p.whats_new.as_deref().map(|t| model_text(t, 300)),
-            })
-        })
-        .collect();
+    assemble_curated_counted(frame, publish).0
+}
 
+/// [`assemble_curated`], and how many ids the publish named that the run
+/// never issued (dropped from the report; the count goes in the run log).
+///
+/// These are render-side guards: whatever the curator returns, no item id
+/// appears twice, no item sits in two sections (a pick beats the
+/// Also-in-the-news line, which beats Also noted), the picks stay within
+/// the mode's cap, and an unknown id is dropped. H5's validator still owns
+/// full validation (and sends the model back with reasons); these only keep
+/// the rendered report's invariants true when the seam is trusted too far.
+pub fn assemble_curated_counted(frame: &ReportFrame, publish: &Publish) -> (Report, usize) {
+    let unknown = unknown_id_count(frame, publish);
+    let max_picks = if frame.mode == Mode::Tight {
+        TIGHT_MAX_PICKS
+    } else {
+        MAX_PICKS
+    };
+    // Every item id the report has used so far, stories expanded.
+    let mut used: BTreeSet<String> = BTreeSet::new();
+
+    let mut picks: Vec<Pick> = Vec::new();
+    for p in &publish.picks {
+        if picks.len() >= max_picks {
+            break;
+        }
+        let members = frame.expand(&p.item_ids);
+        let Some((primary, rest)) = members.split_first() else {
+            continue;
+        };
+        // The same story as an earlier pick.
+        if members.iter().any(|i| used.contains(&i.id)) {
+            continue;
+        }
+        used.extend(members.iter().map(|i| i.id.clone()));
+        picks.push(Pick {
+            item_ids: members.iter().map(|i| i.id.clone()).collect(),
+            headline: model_text(&p.headline, 120),
+            what_happened: model_text(&p.what_happened, 400),
+            project: p.project.clone(),
+            project_name: frame
+                .project_names
+                .get(&p.project)
+                .cloned()
+                .unwrap_or_else(|| model_text(&p.project, 64)),
+            for_line: model_text(&p.for_line, 400),
+            check: match &p.check {
+                PublishCheck::Checked { text, .. } => PickCheck::Checked {
+                    text: model_text(text, 300),
+                },
+                PublishCheck::ToCheck { text } => PickCheck::ToCheck {
+                    text: model_text(text, 300),
+                },
+            },
+            link: item_link(primary),
+            also_covered_by: rest.iter().map(|i| source_link(frame, i)).collect(),
+            follow_up_of: p.follow_up_of.clone(),
+            whats_new: p.whats_new.as_deref().map(|t| model_text(t, 300)),
+        });
+    }
+
+    // At most one line (the publish carries one); never an item that is
+    // already a pick.
     let also_in_the_news = publish.also_in_the_news.as_ref().and_then(|a| {
         let item = frame.items.get(&a.item_id)?;
+        if used.contains(&item.id) {
+            return None;
+        }
+        used.insert(item.id.clone());
         Some(AinLine {
             item_id: item.id.clone(),
             headline: model_text(&a.headline, 120),
@@ -421,14 +485,13 @@ pub fn assemble_curated(frame: &ReportFrame, publish: &Publish) -> Report {
             let Some(primary) = members.first() else {
                 continue;
             };
-            let ids: Vec<String> = members.iter().map(|i| i.id.clone()).collect();
-            // Chosen as the Also-in-the-news line: it moves up (AC43).
-            if also_in_the_news
-                .as_ref()
-                .is_some_and(|a| ids.contains(&a.item_id))
-            {
+            // Already a pick, the Also-in-the-news line (it moves up, AC43),
+            // or an earlier noted line.
+            if members.iter().any(|i| used.contains(&i.id)) {
                 continue;
             }
+            let ids: Vec<String> = members.iter().map(|i| i.id.clone()).collect();
+            used.extend(ids.iter().cloned());
             also_noted.push(NotedLine {
                 item_ids: ids,
                 line: model_text(&n.line, 200),
@@ -469,7 +532,27 @@ pub fn assemble_curated(frame: &ReportFrame, publish: &Publish) -> Report {
             .map(|r| model_text(r, 120))
             .filter(|r| !r.is_empty());
     }
-    report
+    (report, unknown)
+}
+
+/// How many ids the publish names that are in neither the candidate stories
+/// nor the run's items.
+fn unknown_id_count(frame: &ReportFrame, publish: &Publish) -> usize {
+    let known = |id: &String| {
+        frame.items.contains_key(id)
+            || frame
+                .clusters
+                .iter()
+                .any(|c| c.items.iter().any(|i| &i.id == id))
+    };
+    let listed = publish
+        .picks
+        .iter()
+        .flat_map(|p| p.item_ids.iter())
+        .chain(publish.also_in_the_news.iter().map(|a| &a.item_id))
+        .chain(publish.also_noted.iter().flat_map(|n| n.item_ids.iter()))
+        .chain(publish.dropped.iter().map(|d| &d.item_id));
+    listed.filter(|id| !known(id)).count()
 }
 
 /// Model drops first, then hard-ignore drops; nothing shown anywhere, no
@@ -729,6 +812,8 @@ struct Attempt<'a> {
     date: NaiveDate,
     started: Instant,
     store: Store,
+    /// The `[context]` switches of the `sources.toml` read for this run.
+    switches: ContextSwitches,
 }
 
 /// The digest, and the in-flight projects it was built from.
@@ -753,6 +838,7 @@ impl Attempt<'_> {
         reason: Option<FailReason>,
         version: Option<u32>,
         fetch_ms: u64,
+        unknown_ids: usize,
     ) {
         let rec = RunRecord {
             // When the attempt ended: the retry and the scheduler's guard
@@ -770,6 +856,7 @@ impl Attempt<'_> {
             version,
             fetch_ms,
             total_ms: self.started.elapsed().as_millis() as u64,
+            unknown_ids: unknown_ids as u32,
         };
         if self.store.append_run(&rec).is_err() {
             warn!("huey: run log could not be written");
@@ -778,7 +865,7 @@ impl Attempt<'_> {
 
     /// Log a failed attempt and say so.
     fn fail(&self, mode: Option<Mode>, reason: FailReason, fetch_ms: u64) -> RunOutcome {
-        self.log(mode, Some(reason), None, fetch_ms);
+        self.log(mode, Some(reason), None, fetch_ms, 0);
         RunOutcome::Failed { reason }
     }
 
@@ -791,7 +878,11 @@ impl Attempt<'_> {
     }
 
     /// Fetch, or reuse today's frozen pool when regenerating.
-    async fn fetch_or_pool(&self, window_start: DateTime<Utc>) -> FetchOutcome {
+    async fn fetch_or_pool(
+        &self,
+        cfg: &SourcesConfig,
+        window_start: DateTime<Utc>,
+    ) -> FetchOutcome {
         let paths = &self.env.paths;
         let frozen = match self.trigger {
             Trigger::Regenerate => load_pool(&paths.pool_dir(), self.date),
@@ -800,14 +891,10 @@ impl Attempt<'_> {
         if let Some(pool) = frozen {
             return pool;
         }
-        let (cfg, warnings) = load_file(&paths.sources_toml());
-        if !warnings.is_empty() {
-            warn!(count = warnings.len(), "huey: sources.toml warnings");
-        }
         // The window is exclusive of its start: an item first seen (or
         // clamped to) the previous run's fetch time was in that window.
         fetch_all(
-            &cfg,
+            cfg,
             &paths.state_dir(),
             window_start + Duration::nanoseconds(1),
             self.now,
@@ -816,28 +903,58 @@ impl Attempt<'_> {
         .await
     }
 
-    /// Gather the context and build the digest for this version.
+    /// Gather the context and build the digest for this version. Sources
+    /// switched off are not read. The reading is blocking work (git, files),
+    /// so it runs off the async workers, under the gather deadline. `None`
+    /// when it timed out or panicked; a timed-out read keeps its thread until
+    /// it returns, but nothing waits for it.
     async fn gather_digest(
         &self,
         interests: &Interests,
         posture: &PostureNote,
         version: u32,
-    ) -> Gathered {
-        let live = self.env.live.live(self.now).await;
-        let profiles = self.env.paths.state_dir().join("profiles");
-        let mut inputs = context::gather(
-            &self.env.context,
-            interests,
-            &live,
-            Some(&profiles),
-            self.now,
-        );
-        inputs.date = self.date;
-        inputs.version = version;
-        inputs.mode = Some(posture.mode_line());
-        Gathered {
-            digest: build_digest(&inputs),
-            projects: inputs.projects,
+    ) -> Option<Gathered> {
+        let switches = self.switches;
+        let work = async {
+            let prs = if switches.prs {
+                self.env.live.prs(self.now).await
+            } else {
+                // Not asked: nothing to report, and no "unavailable" line.
+                PrsInput::Available(Vec::new())
+            };
+            let jobs = if switches.mother {
+                self.env.live.jobs().await
+            } else {
+                Vec::new()
+            };
+            let live = LiveInputs { prs, jobs };
+            let env = self.env.context.clone();
+            let interests = interests.clone();
+            let profiles = self.env.paths.state_dir().join("profiles");
+            let (now, date, mode_line) = (self.now, self.date, posture.mode_line());
+            tokio::task::spawn_blocking(move || {
+                let mut inputs =
+                    context::gather_with(&env, &interests, &live, Some(&profiles), now, &switches);
+                inputs.date = date;
+                inputs.version = version;
+                inputs.mode = Some(mode_line);
+                Gathered {
+                    digest: build_digest(&inputs),
+                    projects: inputs.projects,
+                }
+            })
+            .await
+        };
+        match tokio::time::timeout(self.env.limits.gather, work).await {
+            Ok(Ok(gathered)) => Some(gathered),
+            Ok(Err(_)) => {
+                warn!("huey: reading the context failed");
+                None
+            }
+            Err(_) => {
+                warn!("huey: reading the context timed out");
+                None
+            }
         }
     }
 
@@ -848,7 +965,7 @@ impl Attempt<'_> {
         selection: &Selection,
         gathered: &Gathered,
         ledger: &Ledger,
-    ) -> Option<(Report, String)> {
+    ) -> Option<(Report, String, usize)> {
         let (date, version, mode) = (frame.date, frame.version, frame.mode);
         let config = &self.env.config;
         if self
@@ -888,13 +1005,23 @@ impl Attempt<'_> {
             report_dir: self.store.report_dir(date, version),
             frame: frame.clone(),
         };
-        match self.env.curator.curate(&input).await {
-            Ok(publish) => Some((assemble_curated(frame, &publish), model)),
-            Err(e) => {
+        let answer =
+            tokio::time::timeout(self.env.limits.curate, self.env.curator.curate(&input)).await;
+        match answer {
+            Ok(Ok(publish)) => {
+                let (report, unknown) = assemble_curated_counted(frame, &publish);
+                Some((report, model, unknown))
+            }
+            Ok(Err(e)) => {
                 info!(
                     unavailable = matches!(e, CurateError::Unavailable),
                     "huey: model failed"
                 );
+                self.store.discard_version(date, version);
+                None
+            }
+            Err(_) => {
+                warn!("huey: the model pass timed out");
                 self.store.discard_version(date, version);
                 None
             }
@@ -992,6 +1119,12 @@ pub async fn run_as_of(
         };
     }
     let date = Schedule::from_config(&env.config).report_date(now, env.local_time.as_ref());
+    // Re-read every run, so a switch flipped since the last one applies.
+    let (sources_cfg, warnings) = load_file(&env.paths.sources_toml());
+    if !warnings.is_empty() {
+        warn!(count = warnings.len(), "huey: sources.toml warnings");
+    }
+    let switches = sources_cfg.context;
     let attempt = Attempt {
         env,
         trigger,
@@ -999,13 +1132,14 @@ pub async fn run_as_of(
         date,
         started: Instant::now(),
         store: Store::new(env.paths.clone()),
+        switches,
     };
     let store = &attempt.store;
 
     let window_start = attempt.window_start();
 
     let fetch_started = Instant::now();
-    let fetched = attempt.fetch_or_pool(window_start).await;
+    let fetched = attempt.fetch_or_pool(&sources_cfg, window_start).await;
     let fetch_ms = fetch_started.elapsed().as_millis() as u64;
     if fetch_failed(&fetched.statuses) {
         info!(sources = fetched.statuses.len(), "huey: fetch failed");
@@ -1015,29 +1149,44 @@ pub async fn run_as_of(
         warn!("huey: pool could not be saved");
     }
 
-    let interests = std::fs::read_to_string(env.paths.interests())
-        .map(|t| interests::parse(&t))
-        .unwrap_or_default();
+    let interests = if switches.interests {
+        std::fs::read_to_string(env.paths.interests())
+            .map(|t| interests::parse(&t))
+            .unwrap_or_default()
+    } else {
+        Interests::default()
+    };
     let ledger = store.ledger();
     let selection = select(&fetched, &interests, &ledger, date);
 
-    let posture = budget::assess(&env.context.posture_file(), &env.config, now);
+    let posture = if switches.bishop {
+        budget::assess(&env.context.posture_file(), &env.config, now)
+    } else {
+        // Switched off: the file is not read, so there is no posture.
+        PostureNote {
+            mode: Mode::Normal,
+            posture: None,
+        }
+    };
     let mode = posture.mode;
     let version = store.next_version(date);
-    let gathered = attempt.gather_digest(&interests, &posture, version).await;
+    let Some(gathered) = attempt.gather_digest(&interests, &posture, version).await else {
+        return attempt.fail(Some(mode), FailReason::ModelFailed, fetch_ms);
+    };
     let frame = build_frame(
         date, version, mode, &fetched, &selection, &gathered, &posture,
     );
 
-    let (report, model) = if mode.is_curated() {
+    let (report, model, unknown_ids) = if mode.is_curated() {
         match attempt.curate(&frame, &selection, &gathered, &ledger).await {
-            Some((report, model)) => (report, Some(model)),
+            Some((report, model, unknown)) => (report, Some(model), unknown),
             None => return attempt.fail(Some(mode), FailReason::ModelFailed, fetch_ms),
         }
     } else {
         (
             assemble_uncurated(&frame, &selection.candidates, &selection.ain_eligible),
             None,
+            0,
         )
     };
 
@@ -1062,7 +1211,7 @@ pub async fn run_as_of(
     {
         return attempt.fail(Some(mode), FailReason::WriteFailed, fetch_ms);
     }
-    attempt.log(Some(mode), None, Some(version), fetch_ms);
+    attempt.log(Some(mode), None, Some(version), fetch_ms, unknown_ids);
     let pruned = store.prune(date);
     info!(
         version,
@@ -1076,5 +1225,33 @@ pub async fn run_as_of(
         date,
         version,
         mode,
+    }
+}
+
+/// Record an attempt that ended without reaching its own log line (it timed
+/// out or panicked), as a failure with the fixed reason `ModelFailed`, so the
+/// scheduler's retry rule and the missing-report banner treat it like any
+/// other failed attempt. Also removes the unfinished version directory.
+pub fn record_abandoned(env: &RunEnv, trigger: Trigger, now: DateTime<Utc>, elapsed: StdDuration) {
+    let date = Schedule::from_config(&env.config).report_date(now, env.local_time.as_ref());
+    let store = Store::new(env.paths.clone());
+    if let Some(unfinished) = store.next_version(date).checked_sub(1).filter(|v| *v > 0) {
+        // Keeps any version that has a report.
+        store.discard_version(date, unfinished);
+    }
+    let rec = RunRecord {
+        at: env.clock.now(),
+        date,
+        trigger,
+        mode: None,
+        outcome: RunResult::Failed,
+        reason: Some(FailReason::ModelFailed),
+        version: None,
+        fetch_ms: 0,
+        total_ms: elapsed.as_millis() as u64,
+        unknown_ids: 0,
+    };
+    if store.append_run(&rec).is_err() {
+        warn!("huey: run log could not be written");
     }
 }

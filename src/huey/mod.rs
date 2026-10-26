@@ -28,14 +28,14 @@ use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::tracker::clock::{Clock, SystemClock};
 
 pub use config::HueyConfig;
 pub use paths::HueyPaths;
 pub use render::{HueyDocument, MissingReason};
-pub use run::{Curator, FailReason, LiveSource, RunOutcome, Trigger};
+pub use run::{Curator, FailReason, LiveSource, RunLimits, RunOutcome, Trigger};
 pub use setup::SetupState;
 
 use context::ContextEnv;
@@ -46,6 +46,12 @@ use store::Store;
 
 /// After any run, a regeneration waits this long (T7).
 pub const REGENERATE_COOLDOWN_SECS: i64 = 120;
+
+/// The scheduler starts at most this many attempts per local day. In normal
+/// running a day needs two (the run and its one retry); the cap only matters
+/// when `runs.jsonl` cannot be written, so that no record ever says "tried",
+/// and every ten minutes would otherwise bring another run.
+pub const MAX_SCHEDULED_ATTEMPTS_PER_DAY: u32 = 4;
 
 /// Bumped on every state change, so bound panes can repaint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -68,6 +74,8 @@ struct Inner {
     /// Held for the whole of a run: one run at a time (T7).
     run_lock: tokio::sync::Mutex<()>,
     last_run_end: std::sync::Mutex<Option<DateTime<Utc>>>,
+    /// Attempts the scheduler has started, for one date (in memory only).
+    scheduled_attempts: std::sync::Mutex<(NaiveDate, u32)>,
 }
 
 /// Cheap clone handed to MCP and IPC.
@@ -153,10 +161,49 @@ impl HueyHandle {
             }
         }
         self.bump();
-        let outcome = run::run_as_of(&self.inner.env, trigger, late_reason, now).await;
-        *self.inner.last_run_end.lock().unwrap() = Some(self.inner.env.clock.now());
+        let env = &self.inner.env;
+        let started = std::time::Instant::now();
+        // The last resort behind the stage deadlines: whatever hangs, the
+        // run ends, is recorded as failed and the lock is released.
+        let outcome = match tokio::time::timeout(
+            env.limits.run,
+            run::run_as_of(env, trigger, late_reason, now),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                warn!(trigger = ?trigger, "huey: the run timed out");
+                run::record_abandoned(env, trigger, now, started.elapsed());
+                RunOutcome::Failed {
+                    reason: FailReason::ModelFailed,
+                }
+            }
+        };
+        *self.inner.last_run_end.lock().unwrap() = Some(env.clock.now());
         self.bump();
         Ok(outcome)
+    }
+
+    /// Count a scheduler-started attempt for `today`. `false` once the day's
+    /// cap is used up.
+    fn take_scheduled_attempt(&self, today: NaiveDate) -> bool {
+        let mut slot = self.inner.scheduled_attempts.lock().unwrap();
+        if slot.0 != today {
+            *slot = (today, 0);
+        }
+        if slot.1 >= MAX_SCHEDULED_ATTEMPTS_PER_DAY {
+            return false;
+        }
+        slot.1 += 1;
+        true
+    }
+
+    /// An attempt's task died (a panic) before it could log itself.
+    fn note_abandoned(&self, trigger: Trigger, now: DateTime<Utc>) {
+        run::record_abandoned(&self.inner.env, trigger, now, Duration::ZERO);
+        *self.inner.last_run_end.lock().unwrap() = Some(self.inner.env.clock.now());
+        self.bump();
     }
 
     /// Why today's report is not there (AC31). Budget is never a reason.
@@ -258,6 +305,8 @@ pub struct HueyDeps {
     pub curator: Arc<dyn Curator>,
     pub live: Arc<dyn LiveSource>,
     pub local_time: Arc<dyn LocalTime>,
+    /// Deadlines for the stages of a run.
+    pub limits: RunLimits,
 }
 
 impl HueyDeps {
@@ -275,6 +324,7 @@ impl HueyDeps {
             curator: Arc::new(NoCurator),
             live: Arc::new(NoLive),
             local_time: Arc::new(SystemLocalTime),
+            limits: RunLimits::default(),
         }
     }
 
@@ -313,10 +363,12 @@ impl HueyEngine {
                     live: deps.live,
                     clock: deps.clock,
                     local_time: deps.local_time,
+                    limits: deps.limits,
                 },
                 view_tx,
                 run_lock: tokio::sync::Mutex::new(()),
                 last_run_end: std::sync::Mutex::new(None),
+                scheduled_attempts: std::sync::Mutex::new((NaiveDate::MIN, 0)),
             }),
         };
         tokio::spawn(run_scheduler(handle.clone(), deps.tick));
@@ -329,6 +381,7 @@ impl HueyEngine {
 /// call and writes nothing.
 async fn run_scheduler(handle: HueyHandle, tick: Duration) {
     let mut noted: Option<NaiveDate> = None;
+    let mut capped: Option<NaiveDate> = None;
     loop {
         let now = handle.inner.env.clock.now();
         let today = handle.schedule().report_date(now, handle.local_time());
@@ -344,10 +397,49 @@ async fn run_scheduler(handle: HueyHandle, tick: Duration) {
                 late_reason,
             } = schedule::is_due(&handle.schedule(), now, handle.local_time(), &day)
             {
-                let _ = handle.trigger_with(trigger, late_reason, now).await;
+                if !handle.take_scheduled_attempt(today) {
+                    if capped != Some(today) {
+                        warn!(
+                            cap = MAX_SCHEDULED_ATTEMPTS_PER_DAY,
+                            "huey: no more attempts today"
+                        );
+                        capped = Some(today);
+                    }
+                } else {
+                    attempt(&handle, trigger, late_reason, now).await;
+                }
             }
         }
         tokio::time::sleep(tick).await;
+    }
+}
+
+/// One attempt in its own task, so a panic in the run (or anything it calls)
+/// ends that attempt and nothing else. Logs ids and states only.
+async fn attempt(
+    handle: &HueyHandle,
+    trigger: Trigger,
+    late_reason: Option<String>,
+    now: DateTime<Utc>,
+) {
+    let task = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.trigger_with(trigger, late_reason, now).await })
+    };
+    match task.await {
+        Ok(Ok(RunOutcome::Produced { version, mode, .. })) => {
+            info!(trigger = ?trigger, version, mode = mode.as_str(), "huey: attempt produced a report");
+        }
+        Ok(Ok(RunOutcome::Failed { reason })) => {
+            warn!(trigger = ?trigger, reason = ?reason, "huey: attempt failed");
+        }
+        Ok(Err(refused)) => {
+            warn!(trigger = ?trigger, refused = %refused, "huey: attempt refused");
+        }
+        Err(e) => {
+            warn!(trigger = ?trigger, panicked = e.is_panic(), "huey: attempt ended abnormally");
+            handle.note_abandoned(trigger, now);
+        }
     }
 }
 
