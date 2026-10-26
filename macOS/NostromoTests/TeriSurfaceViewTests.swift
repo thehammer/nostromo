@@ -204,8 +204,12 @@ final class TeriViewStateTests: XCTestCase {
         XCTAssertNil(state.selectedTab)
         XCTAssertEqual(state[.todos], TeriTabViewState())
         XCTAssertEqual(state[.sentry].sort, .newest)
+        XCTAssertEqual(state[.sentry].filter.assignees, ["me"], "Sentry starts on Mine")
+        XCTAssertEqual(state[.sentry].filter.environments, [], "and on every environment")
         var mineOnly = WorkFilter(); mineOnly.assignees = ["me"]
-        XCTAssertEqual(state[.sentry].filter, mineOnly, "Sentry starts on Mine; every other tab starts unfiltered")
+        XCTAssertEqual(state[.sentry].filter, mineOnly, "nothing else is filtered; every other tab starts unfiltered")
+        XCTAssertEqual(state[.jira].filter, WorkFilter())
+        XCTAssertEqual(state[.repoDocs].filter, WorkFilter())
         XCTAssertTrue(state[.sentry].collapsedGroups.isEmpty)
         XCTAssertNil(state[.sentry].selectedItemId)
     }
@@ -1291,5 +1295,145 @@ extension TeriSurfaceViewTests {
 
         XCTAssertTrue(buttons().contains("Send to agent…"), "\(buttons())")
         XCTAssertFalse(buttons().contains("Preparing…"))
+    }
+}
+
+// MARK: - Filter bar layout of the other tabs
+
+/// A real `WorkListView` in an offscreen window, pinned top-left at a width the test sets,
+/// with a snapshot applied so every count-bearing control has its label.
+private final class HostedTabList {
+    let window: RigWindow
+    let list: WorkListView
+
+    init(_ testCase: XCTestCase, config: WorkListConfig, width: CGFloat, snapshot: WorkListSnapshot) {
+        let window = makeRigWindow(testCase, size: NSSize(width: 900, height: 500))
+        let container = NSView(frame: window.contentView!.bounds)
+        container.autoresizingMask = [.width, .height]
+        window.contentView!.addSubview(container)
+        let list = WorkListView(config: config, scheduler: ManualScheduler().scheduler)
+        container.addSubview(list)
+        NSLayoutConstraint.activate([
+            list.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            list.topAnchor.constraint(equalTo: container.topAnchor),
+            list.heightAnchor.constraint(equalToConstant: 400),
+            list.widthAnchor.constraint(equalToConstant: width),
+        ])
+        self.window = window
+        self.list = list
+        list.apply(snapshot: snapshot, isLoading: false, placeholder: nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        list.layoutSubtreeIfNeeded()
+        rigSettle(0.05)
+        window.contentView?.layoutSubtreeIfNeeded()
+        list.layoutSubtreeIfNeeded()
+    }
+
+    /// `view`'s frame in the list's coordinate space.
+    func frame(of view: NSView) -> NSRect { list.convert(view.bounds, from: view) }
+
+    private func all<T: NSView>(_ type: T.Type) -> [T] { rigAllSubviews(of: list).compactMap { $0 as? T } }
+
+    func popup(_ label: String) -> NSPopUpButton? { all(NSPopUpButton.self).first { $0.accessibilityLabel() == label } }
+    var searchField: NSSearchField? { all(NSSearchField.self).first }
+    var segmentedControls: [NSSegmentedControl] { all(NSSegmentedControl.self) }
+
+    /// The count chips, left to right: the buttons whose accessibility label ends in "items".
+    var chips: [NSButton] {
+        all(NSButton.self)
+            .filter { ($0.accessibilityLabel() ?? "").hasSuffix(" items") }
+            .sorted { frame(of: $0).minX < frame(of: $1).minX }
+    }
+
+    func button(titled title: String) -> NSButton? { all(NSButton.self).first { $0.title == title } }
+
+    /// True when `a` lies wholly above `b` as the user sees it, whichever way the list's y axis points.
+    func isAbove(_ a: NSRect, _ b: NSRect) -> Bool {
+        list.isFlipped ? a.maxY <= b.minY + 0.5 : a.minY >= b.maxY - 0.5
+    }
+}
+
+final class TeriTabFilterBarLayoutTests: XCTestCase {
+    private let inset: CGFloat = 8
+
+    private func snapshot(_ counts: [WorkFacet: [String: Int]]) -> WorkListSnapshot {
+        WorkListSnapshot(groups: [], totalCount: 0, filteredCount: 0, facetCounts: counts)
+    }
+
+    private func makeHost(_ config: TeriTabConfig, counts: [WorkFacet: [String: Int]], width: CGFloat = 600) throws -> HostedTabList {
+        let list = try XCTUnwrap(config.list)
+        return HostedTabList(self, config: list, width: width, snapshot: snapshot(counts))
+    }
+
+    private func visibleFrame(_ view: NSView?, _ name: String, in host: HostedTabList,
+                              file: StaticString = #filePath, line: UInt = #line) throws -> NSRect {
+        let view = try XCTUnwrap(view, "no \(name)", file: file, line: line)
+        XCTAssertFalse(view.isHidden, "\(name) is hidden", file: file, line: line)
+        let frame = host.frame(of: view)
+        XCTAssertGreaterThan(frame.width, 0, "\(name) has no width", file: file, line: line)
+        return frame
+    }
+
+    /// The search field is on a row of its own, below every frame in `row`, starting at the inset.
+    private func assertSearchFieldIsOnItsOwnRowBelow(_ row: [NSRect], in host: HostedTabList,
+                                                     file: StaticString = #filePath, line: UInt = #line) throws {
+        let search = try visibleFrame(host.searchField, "search field", in: host, file: file, line: line)
+        XCTAssertFalse(row.isEmpty, "there is no first row to compare with", file: file, line: line)
+        for (index, frame) in row.enumerated() {
+            XCTAssertTrue(host.isAbove(frame, search),
+                          "control \(index) (\(frame)) is not wholly above the search field (\(search))",
+                          file: file, line: line)
+        }
+        XCTAssertEqual(search.minX, inset, accuracy: 1, "the search field starts at the inset", file: file, line: line)
+    }
+
+    func testTheTodosSearchFieldHasARowOfItsOwnBelowTheStatusChips() throws {
+        let host = try makeHost(TeriTodosTab.config, counts: [.status: ["open": 2, "in_progress": 1, "blocked": 1]])
+
+        let chips = host.chips
+        XCTAssertFalse(chips.isEmpty, "the status chips are shown")
+        try assertSearchFieldIsOnItsOwnRowBelow(chips.map { host.frame(of: $0) }, in: host)
+        XCTAssertTrue(host.segmentedControls.isEmpty, "Todos has no segmented control")
+    }
+
+    func testJirasProjectAndStatusMenusKeepTheirOrderAndLeadAtTheInsetAboveTheSearchField() throws {
+        let host = try makeHost(TeriJiraTab.config, counts: [
+            .project: ["RM": 2, "CORE": 1],
+            .status: ["In Progress": 1, "To Do": 2],
+        ])
+
+        let project = try visibleFrame(host.popup("Filter by project"), "Project menu", in: host)
+        let status = try visibleFrame(host.popup("Filter by status"), "Status menu", in: host)
+        XCTAssertEqual(project.minX, inset, accuracy: 1, "Project leads the row at the inset")
+        XCTAssertGreaterThanOrEqual(status.minX, project.maxX - 0.5, "Status follows Project")
+        XCTAssertEqual(status.midY, project.midY, accuracy: 2, "both menus share a line")
+        try assertSearchFieldIsOnItsOwnRowBelow([project, status], in: host)
+        XCTAssertTrue(host.segmentedControls.isEmpty, "Jira has no segmented control")
+    }
+
+    func testRepoDocsKeepsChipsThenSeverityToggleThenRepoMenuWithTheSortPopupTrailingMost() throws {
+        let host = try makeHost(TeriRepoDocsTab.config, counts: [
+            .kind: ["bug": 3, "feature": 1, "todo": 2],
+            .repo: ["nostromo": 4, "callimachus": 2],
+        ])
+
+        let chips = host.chips.map { host.frame(of: $0) }
+        XCTAssertFalse(chips.isEmpty, "the kind chips are shown")
+        let severity = try visibleFrame(host.button(titled: "Has severity"), "Has severity toggle", in: host)
+        let repo = try visibleFrame(host.popup("Filter by repo"), "Repo menu", in: host)
+        let sort = try visibleFrame(host.popup("Sort order"), "Sort popup", in: host)
+
+        XCTAssertEqual(chips.first?.minX ?? .nan, inset, accuracy: 2, "the chips lead the row")
+        XCTAssertLessThanOrEqual(chips.map(\.maxX).max() ?? .nan, severity.minX + 0.5, "chips come before the severity toggle")
+        XCTAssertLessThanOrEqual(severity.maxX, repo.minX + 0.5, "the severity toggle comes before the Repo menu")
+        XCTAssertLessThanOrEqual(repo.maxX, sort.minX + 0.5, "the Repo menu comes before the sort popup")
+        for frame in chips + [severity, repo] {
+            XCTAssertLessThanOrEqual(frame.maxX, sort.maxX, "the sort popup is the trailing-most control")
+        }
+        XCTAssertLessThanOrEqual(sort.maxX, host.list.bounds.maxX + 0.5, "the sort popup stays inside the list")
+        XCTAssertGreaterThanOrEqual(sort.maxX, host.list.bounds.maxX - 16, "the sort popup sits at the trailing edge")
+
+        try assertSearchFieldIsOnItsOwnRowBelow(chips + [severity, repo, sort], in: host)
+        XCTAssertTrue(host.segmentedControls.isEmpty, "Repo docs has no segmented control")
     }
 }

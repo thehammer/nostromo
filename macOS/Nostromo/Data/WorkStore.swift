@@ -23,6 +23,9 @@ struct WorkListSnapshot: Equatable {
     let filteredCount: Int
     /// Per requested facet: value → count, ignoring that facet's own filter.
     let facetCounts: [WorkFacet: [String: Int]]
+    /// Per requested facet: items matching every filter but that facet's own, including
+    /// those with no value for it (what an "All" segment shows).
+    var facetTotals: [WorkFacet: Int] = [:]
     /// Groups (repos) the source could not read: shown as a marker on the group.
     var groupErrors: [GroupError] = []
 }
@@ -136,14 +139,18 @@ final class WorkStore: ObservableObject {
         filter.sources = []   // the source is the tab, not a user filter
         let matching = WorkQuery.filter(items, filter)
         var counts: [WorkFacet: [String: Int]] = [:]
+        var totals: [WorkFacet: Int] = [:]
         for facet in facets {
-            counts[facet] = WorkQuery.facetCounts(items, filter: filter, facet: facet)
+            let result = WorkQuery.facetCountsAndTotal(items, filter: filter, facet: facet)
+            counts[facet] = result.counts
+            totals[facet] = result.total
         }
         return WorkListSnapshot(
             groups: WorkQuery.group(matching, source: source, sort: sort),
             totalCount: items.count,
             filteredCount: matching.count,
             facetCounts: counts,
+            facetTotals: totals,
             groupErrors: groupErrors)
     }
 
