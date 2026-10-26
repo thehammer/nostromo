@@ -985,6 +985,932 @@ fn the_guard_still_flags_the_corpus_lines_the_redactor_is_held_to() {
     );
 }
 
+// ───────────────────────────── invisible and look-alike evasion ──────────────
+//
+// The Redactor is called here on RAW text, with no assembler in front of it: it
+// must be robust on its own (defence in depth). It matches on a normalised view
+// (hidden characters dropped or read as a space, NFKC, dash fold, digit fold,
+// combining marks removed), keeps the ORIGINAL text around what it redacts, and
+// replaces the whole original span, hidden characters inside it included.
+
+const ZWSP: char = '\u{200b}';
+const ZWNJ: char = '\u{200c}';
+const ZWJ: char = '\u{200d}';
+const WORD_JOINER: char = '\u{2060}';
+const SOFT_HYPHEN: char = '\u{ad}';
+const BOM: char = '\u{feff}';
+
+/// Hidden characters the Redactor must see through.
+const HIDDEN: [char; 6] = [ZWSP, ZWNJ, ZWJ, WORD_JOINER, SOFT_HYPHEN, BOM];
+
+fn is_hidden(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{34f}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{feff}'
+        | '\u{e0000}'..='\u{e007f}')
+}
+
+/// The test's own view of what a reader would see: hidden characters gone,
+/// fullwidth and Arabic-Indic forms and the dash look-alikes folded to ASCII.
+/// Used only to look for leaks, never to build the expected output.
+fn fold(text: &str) -> String {
+    text.chars()
+        .filter(|c| !is_hidden(*c))
+        .map(|c| match c {
+            '\u{ff01}'..='\u{ff5e}' => char::from_u32(c as u32 - 0xfee0).unwrap_or(c),
+            '\u{3000}' => ' ',
+            '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{fe58}' | '\u{fe63}' => '-',
+            '\u{660}'..='\u{669}' => char::from_u32('0' as u32 + (c as u32 - 0x660)).unwrap_or(c),
+            '\u{6f0}'..='\u{6f9}' => char::from_u32('0' as u32 + (c as u32 - 0x6f0)).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+/// ASCII letters and digits of `text` as their fullwidth forms.
+fn wide(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                char::from_u32(c as u32 + 0xfee0).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// `text` with `hidden` inserted before byte offset `at` (ASCII text only).
+fn splice(text: &str, at: usize, hidden: char) -> String {
+    format!("{}{hidden}{}", &text[..at], &text[at..])
+}
+
+/// A case plus the folded-view leak check: a secret must not be readable in the
+/// output even after hidden characters are removed and look-alikes folded.
+fn check_folded(c: &Case) -> Vec<String> {
+    let mut failures = check(c);
+    let (out, _) = redact(&c.input);
+    let left = fold(&strip_markers(&out));
+    for secret in &c.secrets {
+        if let Some(fragment) = leaked_fragment(&left, &fold(secret)) {
+            failures.push(format!(
+                "[{}] input {:?} -> output {:?}: secret fragment {fragment:?} is readable once hidden characters are removed",
+                c.name, c.input, out
+            ));
+        }
+    }
+    failures
+}
+
+fn assert_all_redacted_folded(cases: &[Case]) {
+    let failures: Vec<String> = cases.iter().flat_map(check_folded).collect();
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases failed:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn a_token_with_a_hidden_character_inside_is_replaced_whole_and_nothing_hidden_is_left() {
+    let (token, body) = ghp_token();
+    for hidden in HIDDEN {
+        for at in [2, 4, 20] {
+            let evaded = splice(&token, at, hidden);
+            let (out, kinds) = redact(&format!("see {evaded} now"));
+            assert_eq!(
+                out, "see [redacted: api-token] now",
+                "hidden U+{:04X} at {at}",
+                hidden as u32
+            );
+            assert_eq!(kinds, [RedactionKind::ApiToken]);
+            assert!(!out.contains(&body[..12]) && !out.contains(hidden));
+        }
+    }
+}
+
+#[test]
+fn a_token_assignment_with_a_hidden_character_in_the_token_keeps_the_name() {
+    let (token, body) = ghp_token();
+    let (out, kinds) = redact(&format!("GITHUB_TOKEN={}", splice(&token, 10, ZWSP)));
+    assert_eq!(out, "GITHUB_TOKEN=[redacted: api-token]");
+    assert_eq!(kinds, [RedactionKind::ApiToken]);
+    assert!(!out.contains(&body[..12]));
+}
+
+fn ssn_text() -> String {
+    ["219", "09", "9999"].join("-")
+}
+
+#[test]
+fn an_ssn_written_with_hidden_or_look_alike_characters_is_redacted() {
+    let ssn = ssn_text();
+    let tail = "09-9999";
+    let arabic = |s: &str| -> String {
+        s.chars()
+            .map(|c| match c.to_digit(10) {
+                Some(d) => char::from_u32(0x660 + d).unwrap_or(c),
+                None => c,
+            })
+            .collect()
+    };
+    let with_combining = format!("2\u{301}{}", &ssn[1..]);
+    let variants: Vec<(&str, String)> = vec![
+        ("zwsp after the first group's dash", splice(&ssn, 4, ZWSP)),
+        ("zwsp inside the first group", splice(&ssn, 1, ZWSP)),
+        ("zwsp before the dash", splice(&ssn, 3, ZWSP)),
+        (
+            "soft hyphen inside the last group",
+            splice(&ssn, 8, SOFT_HYPHEN),
+        ),
+        ("bom inside the middle group", splice(&ssn, 5, BOM)),
+        ("zero width joiner", splice(&ssn, 4, ZWJ)),
+        ("word joiner", splice(&ssn, 4, WORD_JOINER)),
+        ("fullwidth digits", wide(&ssn)),
+        (
+            "fullwidth digits and fullwidth hyphens",
+            wide(&ssn).replace('-', "\u{ff0d}"),
+        ),
+        ("arabic-indic digits", arabic(&ssn)),
+        ("en dashes", ssn.replace('-', "\u{2013}")),
+        ("em dashes", ssn.replace('-', "\u{2014}")),
+        ("minus signs", ssn.replace('-', "\u{2212}")),
+        ("unicode hyphens", ssn.replace('-', "\u{2010}")),
+        ("non-breaking hyphens", ssn.replace('-', "\u{2011}")),
+        (
+            "mixed dash look-alikes",
+            ssn.replacen('-', "\u{2013}", 1)
+                .replacen('-', "\u{2212}", 1),
+        ),
+        ("a combining mark on a digit", with_combining),
+        (
+            "en dash and a hidden character",
+            splice(&ssn, 4, ZWSP).replace('-', "\u{2013}"),
+        ),
+    ];
+    let cases: Vec<Case> = variants
+        .iter()
+        .map(|(name, evaded)| {
+            case(
+                name,
+                &format!("SSN {evaded} on file"),
+                &[&ssn, tail, evaded],
+                &["SSN ", " on file"],
+            )
+            .of_kind(RedactionKind::Ssn)
+        })
+        .collect();
+    assert_all_redacted_folded(&cases);
+}
+
+#[test]
+fn an_ssn_whose_label_is_glued_to_it_by_a_hidden_character_is_redacted() {
+    // A hidden run may stand in for a space: `SSN<hidden>219-09-9999`.
+    let ssn = ssn_text();
+    let cases: Vec<Case> = HIDDEN
+        .iter()
+        .flat_map(|hidden| {
+            [
+                case(
+                    "label, hidden, ssn",
+                    &format!("SSN{hidden}{ssn} on file"),
+                    &[&ssn, "09-9999"],
+                    &["SSN", " on file"],
+                ),
+                case(
+                    "label, colon, hidden, ssn",
+                    &format!("SSN:{hidden}{ssn} on file"),
+                    &[&ssn, "09-9999"],
+                    &["SSN:", " on file"],
+                ),
+            ]
+        })
+        .map(|c| c.of_kind(RedactionKind::Ssn))
+        .collect();
+    assert_all_redacted_folded(&cases);
+}
+
+#[test]
+fn a_credential_name_split_or_spelled_in_fullwidth_still_redacts_its_value() {
+    let value = gen(510, MIXED, 14);
+    let wide_value = wide(&value);
+    let cases = [
+        case(
+            "zwsp inside the name",
+            &format!("pass\u{200b}word={value}"),
+            &[&value],
+            &["pass\u{200b}word="],
+        ),
+        case(
+            "zwsp inside an upper-case name",
+            &format!("PASS\u{200b}WORD={value}"),
+            &[&value],
+            &["PASS\u{200b}WORD="],
+        ),
+        case(
+            "soft hyphen inside the name, yaml style",
+            &format!("pass\u{ad}word: {value}"),
+            &[&value],
+            &["pass\u{ad}word: "],
+        ),
+        case(
+            "bom inside a prefixed name",
+            &format!("DB_PASS\u{feff}WORD={value}"),
+            &[&value],
+            &["DB_PASS\u{feff}WORD="],
+        ),
+        case(
+            "hidden character after the name",
+            &format!("password\u{200b}={value}"),
+            &[&value],
+            &["password"],
+        ),
+        case(
+            "hidden character inside the value",
+            &format!("password={}\u{200b}{}", &value[..7], &value[7..]),
+            &[&value],
+            &["password="],
+        ),
+        case(
+            "fullwidth name",
+            &format!("ｐａｓｓｗｏｒｄ={value}"),
+            &[&value],
+            &["ｐａｓｓｗｏｒｄ="],
+        ),
+        case(
+            "fullwidth upper-case name",
+            &format!("ＤＢ_ＰＡＳＳＷＯＲＤ={value}"),
+            &[&value],
+            &["ＤＢ_ＰＡＳＳＷＯＲＤ="],
+        ),
+        case(
+            "fullwidth name and fullwidth equals sign",
+            &format!("ｐａｓｓｗｏｒｄ＝{value}"),
+            &[&value],
+            &["ｐａｓｓｗｏｒｄ"],
+        ),
+        case(
+            "fullwidth name and fullwidth colon",
+            &format!("ｐａｓｓｗｏｒｄ：{value}"),
+            &[&value],
+            &["ｐａｓｓｗｏｒｄ"],
+        ),
+        case(
+            "ascii name and fullwidth equals sign",
+            &format!("password＝{value}"),
+            &[&value],
+            &["password"],
+        ),
+        case(
+            "ascii name and fullwidth colon",
+            &format!("password：{value}"),
+            &[&value],
+            &["password"],
+        ),
+        case(
+            "fullwidth value",
+            &format!("password={wide_value}"),
+            &[&wide_value, &value],
+            &["password="],
+        ),
+        case(
+            "fullwidth token name",
+            &format!("ＧＩＴＨＵＢ_ＴＯＫＥＮ={value}"),
+            &[&value],
+            &["ＧＩＴＨＵＢ_ＴＯＫＥＮ"],
+        ),
+    ];
+    assert_all_redacted_folded(&cases);
+}
+
+#[test]
+fn aws_keys_bearer_values_and_url_passwords_with_hidden_characters_are_redacted() {
+    let id = format!("AKIA{}", gen(540, UPPER_DIGITS, 16));
+    let bearer = gen(541, MIXED, 24);
+    let pw = gen(542, MIXED, 14);
+    let aws_secret = gen(543, MIXED, 40);
+    let cases = [
+        case(
+            "zwsp after the aws key prefix",
+            &format!("key {} used", splice(&id, 4, ZWSP)),
+            &[&id, &id[4..]],
+            &["key ", " used"],
+        )
+        .of_kind(RedactionKind::AwsAccessKey),
+        case(
+            "soft hyphen inside the aws key prefix",
+            &format!("key {} used", splice(&id, 2, SOFT_HYPHEN)),
+            &[&id, &id[4..]],
+            &["key ", " used"],
+        )
+        .of_kind(RedactionKind::AwsAccessKey),
+        case(
+            "bom inside the aws key body",
+            &format!("key {} used", splice(&id, 12, BOM)),
+            &[&id, &id[4..]],
+            &["key ", " used"],
+        )
+        .of_kind(RedactionKind::AwsAccessKey),
+        case(
+            "hidden character inside an aws secret value",
+            &format!("aws_secret_access_key={}", splice(&aws_secret, 20, ZWSP)),
+            &[&aws_secret],
+            &["aws_secret_access_key="],
+        )
+        .of_kind(RedactionKind::AwsSecretKey),
+        case(
+            "zwsp inside a bearer value",
+            &format!("sent Bearer {} ok", splice(&bearer, 10, ZWSP)),
+            &[&bearer, &bearer[10..]],
+            &["sent Bearer ", " ok"],
+        )
+        .of_kind(RedactionKind::BearerToken),
+        case(
+            "soft hyphen inside the word bearer",
+            &format!("sent Bear\u{ad}er {bearer} ok"),
+            &[&bearer],
+            &["sent ", " ok"],
+        ),
+        case(
+            "hidden character standing in for the space after bearer",
+            &format!("sent Bearer\u{200b}{bearer} ok"),
+            &[&bearer],
+            &["sent Bearer", " ok"],
+        ),
+        case(
+            "zwsp inside a url password",
+            &format!("postgres://app:{}@db.internal/main", splice(&pw, 6, ZWSP)),
+            &[&pw, &pw[6..]],
+            &["postgres://app:", "@db.internal/main"],
+        )
+        .of_kind(RedactionKind::UrlPassword),
+        case(
+            "soft hyphen inside a url password",
+            &format!(
+                "postgres://app:{}@db.internal/main",
+                splice(&pw, 3, SOFT_HYPHEN)
+            ),
+            &[&pw, &pw[3..]],
+            &["postgres://app:", "@db.internal/main"],
+        )
+        .of_kind(RedactionKind::UrlPassword),
+        case(
+            "bom at the start of a url password",
+            &format!("postgres://app:\u{feff}{pw}@db.internal/main"),
+            &[&pw],
+            &["postgres://app:", "@db.internal/main"],
+        )
+        .of_kind(RedactionKind::UrlPassword),
+    ];
+    assert_all_redacted_folded(&cases);
+}
+
+#[test]
+fn basic_authorization_with_hidden_characters_is_redacted() {
+    let basic = format!("{}==", gen(550, MIXED, 20));
+    let cases = [
+        case(
+            "zwsp inside the credentials",
+            &format!("Authorization: Basic {}", splice(&basic, 9, ZWSP)),
+            &[&basic, &basic[9..]],
+            &["Authorization: Basic "],
+        )
+        .of_kind(RedactionKind::BasicAuth),
+        case(
+            "soft hyphen inside the header name",
+            &format!("Auth\u{ad}orization: Basic {basic}"),
+            &[&basic],
+            &["Auth\u{ad}orization: "],
+        ),
+        case(
+            "zwsp inside the scheme word",
+            &format!("Authorization: Ba\u{200b}sic {basic}"),
+            &[&basic],
+            &["Authorization: "],
+        ),
+        case(
+            "hidden character standing in for the space after the colon",
+            &format!("Authorization:\u{200b}Basic {basic}"),
+            &[&basic],
+            &["Authorization:"],
+        ),
+        case(
+            "hidden character standing in for the space before the credentials",
+            &format!("Authorization: Basic\u{200b}{basic}"),
+            &[&basic],
+            &["Authorization: "],
+        ),
+    ];
+    assert_all_redacted_folded(&cases);
+}
+
+#[test]
+fn a_birth_date_with_hidden_or_look_alike_characters_is_redacted() {
+    let date = format!("{:02}/{}/{}", 3, 14, 1941);
+    let iso = format!("{}-{:02}-{:02}", 1941, 3, 14);
+    let cases = [
+        case(
+            "zwsp between the label and the colon",
+            &format!("Resident DOB\u{200b}: {date} on file"),
+            &[&date, "14/1941"],
+            &["Resident ", " on file"],
+        ),
+        case(
+            "zwsp inside the label",
+            &format!("Resident D\u{200b}OB: {date} on file"),
+            &[&date, "14/1941"],
+            &["Resident ", " on file"],
+        ),
+        case(
+            "soft hyphen inside date of birth",
+            &format!("Resident date of bi\u{ad}rth: {date} on file"),
+            &[&date, "14/1941"],
+            &["Resident ", " on file"],
+        ),
+        case(
+            "zwsp inside the date",
+            &format!("Resident DOB: {} on file", splice(&date, 3, ZWSP)),
+            &[&date, "14/1941"],
+            &["Resident DOB: ", " on file"],
+        ),
+        case(
+            "bom inside the year",
+            &format!("Resident DOB: {} on file", splice(&date, 8, BOM)),
+            &[&date, "14/1941", "1941"],
+            &["Resident DOB: ", " on file"],
+        ),
+        case(
+            "fullwidth label",
+            &format!("Resident ＤＯＢ: {date} on file"),
+            &[&date, "14/1941"],
+            &["Resident ", " on file"],
+        ),
+        case(
+            "fullwidth digits",
+            &format!("Resident DOB: {} on file", wide(&date)),
+            &[&date, &wide(&date)],
+            &["Resident DOB: ", " on file"],
+        ),
+        case(
+            "en dashes in an iso date",
+            &format!("Resident DOB: {} on file", iso.replace('-', "\u{2013}")),
+            &[&iso, "03-14"],
+            &["Resident DOB: ", " on file"],
+        ),
+        case(
+            "label glued to the date by a hidden character",
+            &format!("Resident born\u{200b}{date} on file"),
+            &[&date, "14/1941"],
+            &["Resident ", " on file"],
+        ),
+    ];
+    let cases: Vec<Case> = cases
+        .into_iter()
+        .map(|c| c.of_kind(RedactionKind::DateOfBirth))
+        .collect();
+    assert_all_redacted_folded(&cases);
+}
+
+#[test]
+fn ordinary_text_with_hidden_fullwidth_and_dash_characters_comes_back_byte_for_byte() {
+    let hash = gen(560, "0123456789abcdef", 64);
+    let spliced_hash = splice(&hash, 30, ZWSP);
+    let inputs: Vec<String> = [
+        "Ｒｅｐｏｒｔ ＡＢＣ is ready",
+        "range a–b and 2024–2025 — done, minus − sign, hyphen ‐ too",
+        "zero\u{200b}width\u{200b}space in prose and a\u{200d}b\u{200c}c\u{2060}d",
+        "soft\u{ad}hyphen and \u{feff}BOM at the start",
+        "caf\u{e9} cafe\u{301} \u{65e5}\u{672c}\u{8a9e} \u{1F600} naïve",
+        "ＴＯＫＥＮＩＺＥＲ=fast",
+        "Ｐａｓｓｗｏｒｄ policy: use a long phrase",
+        "call 555–1212 or ５５５-１２１２ before noon",
+        "Ｖ２ release ０１２ shipped",
+        "ref ０００-１２-３４５６ is not an ssn",
+        "pass\u{200b}ing grade and by\u{ad}pass road",
+        "\u{200b}\u{feff}",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .chain([
+        format!("sha256:{spliced_hash} layer"),
+        format!("id {}-{}", splice("123e4567", 3, ZWSP), "e89b-12d3"),
+    ])
+    .collect();
+    let refs: Vec<&str> = inputs.iter().map(String::as_str).collect();
+    assert_all_untouched(&refs);
+}
+
+#[test]
+fn text_around_a_redaction_is_never_rewritten_to_ascii() {
+    let (token, _) = ghp_token();
+    let value = gen(570, MIXED, 14);
+    let (out, kinds) = redact(&format!("ＡＢＣ a–b password={value} ｅｎｄ"));
+    assert_eq!(
+        out,
+        "ＡＢＣ a–b password=[redacted: secret-assignment] ｅｎｄ"
+    );
+    assert_eq!(kinds, [RedactionKind::SecretAssignment]);
+
+    let (out, kinds) = redact(&format!("ＡＢＣ {} a–b\u{200b}c", splice(&token, 9, ZWSP)));
+    assert_eq!(out, "ＡＢＣ [redacted: api-token] a–b\u{200b}c");
+    assert_eq!(kinds, [RedactionKind::ApiToken]);
+}
+
+#[test]
+fn two_evaded_secrets_on_one_line_are_both_redacted_in_order() {
+    let (token, body) = ghp_token();
+    let ssn = ssn_text();
+    let (out, kinds) = redact(&format!(
+        "{} then SSN {}",
+        splice(&token, 7, ZWSP),
+        ssn.replace('-', "\u{2013}")
+    ));
+    assert_eq!(out, "[redacted: api-token] then SSN [redacted: ssn]");
+    assert_eq!(kinds, [RedactionKind::ApiToken, RedactionKind::Ssn]);
+    assert!(!out.contains(&body[..12]));
+}
+
+// ───────────────────────────── curl credentials ──────────────────────────────
+
+#[test]
+fn curl_credentials_are_redacted_whatever_the_flag_spelling() {
+    let pw = gen(580, MIXED, 12);
+    let a = gen(581, MIXED, 8);
+    let b = gen(582, MIXED, 8);
+    let spaced = format!("{a} {b}");
+    let url = " https://example.com/x";
+    let cases = [
+        // Existing behaviour stays.
+        case(
+            "plain -u",
+            &format!("curl -u admin:{pw}{url}"),
+            &[&pw],
+            &["curl -u admin:", url],
+        ),
+        case(
+            "--user with a space",
+            &format!("curl --user ops:{pw}{url}"),
+            &[&pw],
+            &["curl --user ops:", url],
+        ),
+        case(
+            "--user with an equals sign",
+            &format!("curl --user=ops:{pw}{url}"),
+            &[&pw],
+            &["curl --user=ops:", url],
+        ),
+        case(
+            "--proxy-user",
+            &format!("curl --proxy-user ops:{pw}{url}"),
+            &[&pw],
+            &["curl --proxy-user ops:", url],
+        ),
+        // Flags combined in front of the u.
+        case(
+            "-su",
+            &format!("curl -su admin:{pw}{url}"),
+            &[&pw],
+            &["curl -su admin:", url],
+        ),
+        case(
+            "-sSu",
+            &format!("curl -sSu admin:{pw}{url}"),
+            &[&pw],
+            &["curl -sSu admin:", url],
+        ),
+        case(
+            "-fsSLu",
+            &format!("curl -fsSLu admin:{pw}{url}"),
+            &[&pw],
+            &["curl -fsSLu admin:", url],
+        ),
+        case(
+            "-su after another flag",
+            &format!("curl -k -su admin:{pw}{url}"),
+            &[&pw],
+            &["curl -k -su admin:", url],
+        ),
+        case(
+            "-su with the credentials after other options",
+            &format!("curl -X POST -sSu admin:{pw} -d x=1{url}"),
+            &[&pw],
+            &["curl -X POST -sSu admin:", " -d x=1", url],
+        ),
+        // Credentials attached to the flag.
+        case(
+            "attached -uadmin:pw",
+            &format!("curl -uadmin:{pw}{url}"),
+            &[&pw],
+            &["curl -uadmin:", url],
+        ),
+        case(
+            "attached after combined flags",
+            &format!("curl -suadmin:{pw}{url}"),
+            &[&pw],
+            &["curl -suadmin:", url],
+        ),
+        // Quoted values containing a space.
+        case(
+            "single-quoted value with a space",
+            &format!("curl -u 'admin:{spaced}'{url}"),
+            &[&a, &b, &spaced],
+            &["curl -u ", url],
+        ),
+        case(
+            "double-quoted value with a space",
+            &format!("curl -u \"admin:{spaced}\"{url}"),
+            &[&a, &b, &spaced],
+            &["curl -u ", url],
+        ),
+        case(
+            "combined flags and a quoted value with a space",
+            &format!("curl -su 'admin:{spaced}'{url}"),
+            &[&a, &b, &spaced],
+            &["curl -su ", url],
+        ),
+        case(
+            "--user with a quoted value with a space",
+            &format!("curl --user 'ops:{spaced}'{url}"),
+            &[&a, &b, &spaced],
+            &["curl --user ", url],
+        ),
+        case(
+            "--proxy-user with a quoted value with a space",
+            &format!("curl --proxy-user 'ops:{spaced}'{url}"),
+            &[&a, &b, &spaced],
+            &["curl --proxy-user ", url],
+        ),
+        case(
+            "quoted value, a secret-looking word after the closing quote survives",
+            &format!("curl -u 'admin:{spaced}' --max-time 5{url}"),
+            &[&a, &b],
+            &["curl -u ", " --max-time 5", url],
+        ),
+        // An unterminated quote swallows the rest of the line.
+        case(
+            "unterminated single quote",
+            &format!("curl -u 'admin:{spaced}{url}"),
+            &[&a, &b],
+            &["curl -u "],
+        ),
+        case(
+            "unterminated double quote",
+            &format!("curl -su \"admin:{spaced}{url}"),
+            &[&a, &b],
+            &["curl -su "],
+        ),
+        // -U is the proxy user.
+        case(
+            "-U proxy user",
+            &format!("curl -U proxy:{pw}{url}"),
+            &[&pw],
+            &["curl -U proxy:", url],
+        ),
+        case(
+            "-sU proxy user",
+            &format!("curl -sU proxy:{pw}{url}"),
+            &[&pw],
+            &["curl -sU proxy:", url],
+        ),
+    ];
+    assert_all_redacted(&cases);
+}
+
+#[test]
+fn a_curl_quoted_credential_is_redacted_as_one_secret_and_the_url_after_it_survives() {
+    let a = gen(590, MIXED, 8);
+    let b = gen(591, MIXED, 8);
+    let (out, kinds) = redact(&format!("curl -u 'admin:{a} {b}' https://example.com/x"));
+    assert!(out.ends_with(" https://example.com/x"), "{out:?}");
+    assert_eq!(kinds, [RedactionKind::SecretAssignment], "{out:?}");
+    assert!(!out.contains(&a) && !out.contains(&b), "{out:?}");
+}
+
+#[test]
+fn curl_without_a_credential_is_left_alone() {
+    assert_all_untouched(&[
+        "curl --upload-file x.txt https://h",
+        "curl -sS https://example.com",
+        "curl -o out -L https://h",
+        "curl -u admin https://example.com/x",
+        "curl -su admin https://example.com/x",
+        "curl -fsSL https://example.com/install.sh | sh",
+        "curl -sSL -o out.tar.gz https://example.com/a/b.tar.gz",
+        "curl -X POST -d x=1 https://example.com/u",
+    ]);
+}
+
+// ───────────────────────────── corpus: normalised variants ───────────────────
+//
+// The guard flags text after normalising it, so a secret the guard would flag
+// must not slip past the Redactor because it was dressed up in hidden or
+// look-alike characters. Variants are derived at runtime from the guard's own
+// positives; for each variant the guard still flags (same class), the
+// Redactor must change the line.
+
+/// A family of perturbations, for the "every family bites" check.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+enum Family {
+    ZwspInWord,
+    SoftHyphenInWord,
+    BomInWord,
+    ZwspInDigits,
+    FullwidthDigits,
+    FullwidthLettersInWord,
+    FullwidthEverything,
+    EnDash,
+    EmDash,
+    MinusSign,
+    UnicodeHyphen,
+}
+
+fn after_first_char(word: &str, hidden: char) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => format!("{first}{hidden}{}", chars.as_str()),
+        None => String::new(),
+    }
+}
+
+/// Replace one space-separated word of `line`.
+fn with_word(line: &str, index: usize, f: impl Fn(&str) -> String) -> String {
+    line.split(' ')
+        .enumerate()
+        .map(|(i, w)| if i == index { f(w) } else { w.to_string() })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn wide_letters(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_alphabetic() {
+                char::from_u32(c as u32 + 0xfee0).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+fn wide_digits(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_ascii_digit() {
+                char::from_u32(c as u32 + 0xfee0).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// `line` with a hidden character after the first digit of every digit run of
+/// two or more digits, one variant per run.
+fn digit_run_variants(line: &str, hidden: char) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_digit() {
+            let start = i;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i - start >= 2 {
+                let mut v: String = chars[..=start].iter().collect();
+                v.push(hidden);
+                v.extend(&chars[start + 1..]);
+                out.push(v);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn variants_of(line: &str) -> Vec<(Family, String)> {
+    let mut out = Vec::new();
+    let words = line.split(' ').count();
+    for index in 0..words {
+        for (family, hidden) in [
+            (Family::ZwspInWord, ZWSP),
+            (Family::SoftHyphenInWord, SOFT_HYPHEN),
+            (Family::BomInWord, BOM),
+        ] {
+            out.push((
+                family,
+                with_word(line, index, |w| after_first_char(w, hidden)),
+            ));
+        }
+        out.push((
+            Family::FullwidthLettersInWord,
+            with_word(line, index, wide_letters),
+        ));
+    }
+    for v in digit_run_variants(line, ZWSP) {
+        out.push((Family::ZwspInDigits, v));
+    }
+    out.push((Family::FullwidthDigits, wide_digits(line)));
+    out.push((
+        Family::FullwidthEverything,
+        wide_letters(&wide_digits(line)),
+    ));
+    out.push((Family::EnDash, line.replace('-', "\u{2013}")));
+    out.push((Family::EmDash, line.replace('-', "\u{2014}")));
+    out.push((Family::MinusSign, line.replace('-', "\u{2212}")));
+    out.push((Family::UnicodeHyphen, line.replace('-', "\u{2010}")));
+    out
+}
+
+#[test]
+fn every_normalised_variant_of_a_guard_positive_that_the_guard_still_flags_is_changed_by_the_redactor(
+) {
+    let config = GuardConfig::default();
+    let mut generated = 0usize;
+    let mut flagged = 0usize;
+    let mut per_family: std::collections::BTreeMap<Family, usize> = Default::default();
+    let mut not_pure_evasions = Vec::new();
+    let mut missed = Vec::new();
+
+    for (class, text) in guard_positives() {
+        let wanted = match class.as_str() {
+            "secret" => Class::Secret,
+            "ssn" => Class::Ssn,
+            "dob" => Class::Dob,
+            _ => continue,
+        };
+        for (family, variant) in variants_of(&text) {
+            if variant == text {
+                continue;
+            }
+            generated += 1;
+            // A variant is only an evasion if a reader sees the same text.
+            if fold(&variant) != fold(&text) {
+                not_pure_evasions.push(format!("{family:?}: {variant:?}"));
+            }
+            if !scan(&variant, &config).iter().any(|f| f.class == wanted) {
+                continue;
+            }
+            flagged += 1;
+            *per_family.entry(family).or_default() += 1;
+            let (out, kinds) = Redactor::new().redact(&variant);
+            if kinds.is_empty() || out == variant {
+                missed.push(format!("[{class}] {family:?}: {variant:?}"));
+            }
+        }
+    }
+
+    assert!(
+        not_pure_evasions.is_empty(),
+        "the variant generator changed more than hiding or look-alike characters:\n{}",
+        not_pure_evasions.join("\n")
+    );
+    assert!(
+        generated >= 2000,
+        "only {generated} variants were generated; the corpus loader or the generator is broken"
+    );
+    // The test must bite: most variants stay flagged by the guard, and every
+    // family of perturbation keeps a healthy share of them.
+    assert!(
+        flagged >= generated / 3,
+        "the guard flags only {flagged} of {generated} variants, so the test checks too little"
+    );
+    for family in [
+        Family::ZwspInWord,
+        Family::SoftHyphenInWord,
+        Family::BomInWord,
+        Family::ZwspInDigits,
+        Family::FullwidthDigits,
+        Family::FullwidthLettersInWord,
+        Family::FullwidthEverything,
+        Family::EnDash,
+        Family::EmDash,
+        Family::MinusSign,
+        Family::UnicodeHyphen,
+    ] {
+        let n = per_family.get(&family).copied().unwrap_or(0);
+        assert!(
+            n >= 20,
+            "only {n} guard-flagged variants for {family:?} ({per_family:?})"
+        );
+    }
+    assert!(
+        missed.is_empty(),
+        "the redactor left {} of {flagged} guard-flagged variants unchanged:\n{}",
+        missed.len(),
+        missed
+            .iter()
+            .take(60)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 // ───────────────────────────── order and overlap ─────────────────────────────
 
 fn ghp_token() -> (String, String) {
@@ -1035,4 +1961,59 @@ fn a_secret_assignment_wrapping_an_aws_key_leaves_neither_part() {
     assert!(!kinds.is_empty());
     assert!(!left.contains(&id[4..]), "{out:?}");
     assert!(!left.contains("pre-") && !left.contains("-post"), "{out:?}");
+}
+
+// ───────────────────────────── review round: blanks, markers, flags ──────────
+
+#[test]
+fn a_blank_that_is_not_a_plain_space_still_separates_a_value() {
+    let value = gen(520, UPPER_DIGITS, 24);
+    for blank in [
+        '\u{1680}', '\u{2028}', '\u{000b}', '\u{000c}', '\u{a0}', '\u{3000}',
+    ] {
+        let (out, kinds) = redact(&format!("sent Bearer{blank}{value} ok"));
+        assert!(
+            !out.contains(&value[..12]),
+            "U+{:04X}: {out:?}",
+            blank as u32
+        );
+        assert!(!kinds.is_empty());
+        let key = prefixed(&["-----BEGIN", &blank.to_string(), "PRIVATE KEY-----"], "");
+        let (out, _) = redact(&format!("{key}\n{value}\n"));
+        assert!(
+            !out.contains(&value[..12]),
+            "key, U+{:04X}: {out:?}",
+            blank as u32
+        );
+    }
+}
+
+#[test]
+fn curl_flag_clusters_with_p_and_b_still_find_the_user_flag() {
+    let pw = gen(521, UPPER_DIGITS, 16);
+    for flags in ["-pu", "-Bu", "-sBpu"] {
+        let (out, kinds) = redact(&format!("curl {flags} admin:{pw} https://h/x"));
+        assert!(!out.contains(&pw), "{flags}: {out:?}");
+        assert_eq!(kinds, [RedactionKind::SecretAssignment], "{flags}");
+        assert!(out.ends_with(" https://h/x"), "{out:?}");
+    }
+}
+
+#[test]
+fn a_flood_of_private_key_markers_is_redacted_in_linear_time() {
+    let block = "-----BEGIN PRIVATE KEY----- -----END PRIVATE KEY----- ";
+    let started = std::time::Instant::now();
+    for text in [block.repeat(4000), format!("\u{e9}{}", block.repeat(4000))] {
+        let (out, kinds) = redact(&text);
+        assert!(
+            !out.contains("PRIVATE KEY-----"),
+            "a marker was left readable"
+        );
+        assert!(kinds.len() >= 4000);
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
 }

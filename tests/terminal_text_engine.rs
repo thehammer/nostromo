@@ -430,6 +430,67 @@ fn ordinary_non_ascii_text_is_kept() {
     );
 }
 
+/// Characters that draw nothing: they only exist to split a secret so a
+/// pattern cannot see it. The assembler drops them before text is committed.
+fn invisible_filler() -> Vec<char> {
+    let mut chars = vec!['\u{ad}', '\u{34f}', '\u{200b}', '\u{200c}', '\u{200d}'];
+    chars.extend('\u{2060}'..='\u{2064}');
+    chars.push('\u{feff}');
+    chars
+}
+
+#[test]
+fn invisible_filler_characters_are_dropped_from_committed_lines() {
+    for c in invisible_filler() {
+        let input = format!("x{c}y\n");
+        assert_lines(input.as_bytes(), &["xy"]);
+    }
+}
+
+#[test]
+fn a_word_split_by_invisible_filler_is_one_word_again_whichever_way_the_bytes_arrive() {
+    let split: String =
+        ["pa", "ss", "wo", "rd"].join("\u{200b}\u{200d}\u{2060}\u{feff}\u{ad}\u{200c}");
+    let input = format!("{split}=value\n");
+    // `assert_lines` also feeds one byte at a time, so a character whose UTF-8
+    // sequence is cut between feeds is covered too.
+    assert_lines(input.as_bytes(), &["password=value"]);
+}
+
+#[test]
+fn a_line_of_nothing_but_invisible_filler_is_an_empty_line() {
+    assert_lines(
+        "a\n\u{200b}\u{feff}\u{2060}\nb\n".as_bytes(),
+        &["a", "", "b"],
+    );
+}
+
+#[test]
+fn invisible_filler_in_the_line_being_typed_is_not_shown_either() {
+    assert_assembled(
+        "prompt\u{200b}$ \u{feff}ls".as_bytes(),
+        &[],
+        Some("prompt$ ls"),
+    );
+}
+
+#[test]
+fn ordinary_unicode_text_survives_the_filler_filter_unchanged() {
+    let text = [
+        "caf\u{e9} na\u{ef}ve",
+        // Decomposed accents are real text, not filler.
+        "cafe\u{301} nin\u{303}o",
+        "\u{65e5}\u{672c}\u{8a9e} \u{d55c}\u{ae00} \u{5e2}\u{5d1}\u{5e8}\u{5d9}\u{5ea}",
+        "\u{1F600} \u{1F680}",
+        // Fullwidth forms and dashes are the engine's input, not its to rewrite.
+        "\u{ff21}\u{ff22}\u{ff23} a\u{2013}b \u{2014} \u{2212}",
+        // A no-break space is whitespace, not filler.
+        "a\u{a0}b",
+    ]
+    .join(" | ");
+    assert_lines(format!("{text}\n").as_bytes(), &[text.as_str()]);
+}
+
 #[test]
 fn invalid_utf8_becomes_the_replacement_character() {
     assert_lines(b"a\xffb\n", &["a\u{FFFD}b"]);

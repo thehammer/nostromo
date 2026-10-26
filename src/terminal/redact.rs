@@ -45,10 +45,30 @@
 //! ## What it deliberately does not cover
 //!
 //! A secret with no recognisable shape and no credential-looking name (a bare
-//! 40-char string in the middle of prose, a cookie, `htpasswd -b`), `-p <value>` for tools where `-p` is not known to
-//! mean "password", Unicode look-alikes and zero-width characters spliced into
-//! a token, and PHI that is not an SSN or a labelled date of birth (names,
+//! 40-char string in the middle of prose, a cookie, `htpasswd -b`), `-p <value>`
+//! for tools where `-p` is not known to mean "password", and PHI that is not an SSN or a labelled date of birth (names,
 //! MRNs, addresses). Hashes and UUIDs are never touched.
+//!
+//! ## Look-alikes and invisible characters
+//!
+//! Matching runs on a normalised view (see the `View` type): invisible
+//! characters (zero-width, soft hyphen, BOM, bidi, ...) are dropped or read as
+//! a space, fullwidth forms and any Unicode digit fold to ASCII, and the en
+//! dash, em dash and minus sign fold to `-`, exactly what the tracker guard's
+//! normaliser does, so nothing the guard sees through can hide a secret here.
+//! Redactions are mapped back onto the original text, so a hidden character
+//! inside a secret goes with it and the text around it is never rewritten.
+//!
+//! On the delivery path the line assembler has already dropped the filler
+//! characters, so a filler that stood in for a space is gone too and the words
+//! it separated are glued. An SSN glued to its `SSN` label is still caught; the
+//! rest of that class is not: `Bearer<filler>token` reads as one word (like
+//! `BearerTokenAuthenticationFilter`), and so do `curl<filler>-u`,
+//! `--password<filler>value` and the other rules that need a blank. Fed raw
+//! text, `Redactor::redact` covers them (it also reads a filler as a space).
+//! A text with several hidden characters in different roles (one inside a
+//! keyword, one standing for the separator) is read under four fixed
+//! assumptions, not every combination.
 //!
 //! ## Contract: whole lines
 //!
@@ -58,12 +78,17 @@
 //! [`deliver`](crate::terminal::follow::deliver) does: it only ever sees
 //! committed lines, never the live cursor row.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
 use std::sync::LazyLock;
 
 use regex::Regex;
+use unicode_normalization::char::is_combining_mark;
+use unicode_normalization::UnicodeNormalization;
+
+use crate::data::work::is_invisible;
 
 /// Most bytes a private-key block may swallow without showing an `END` line
 /// before the redactor gives up on it and resumes normal redaction. A real key
@@ -168,6 +193,257 @@ const VALUE: &str = r#""(?:[^"\\\n]|\\.)*"[A-Za-z0-9_.\-+/=@%~]*|\\"[^"\n]*"[A-Z
 const ARG: &str = r#""[^"\n]*"|'[^'\n]*'|\S+"#;
 
 static VALUE_AT_START: LazyLock<Regex> = LazyLock::new(|| re(&format!("^(?:{VALUE})")));
+
+// ───────────────────────────── normalised views ──────────────────────────────
+
+// The patterns are ASCII-only and run on *views* of the text, the same
+// normalisation `crate::sensitive_text` applies so that nothing the guard
+// sees through can hide from the redactor: invisible characters (zero-width,
+// soft hyphen, BOM, bidi, tag, ...) are dropped, compatibility forms
+// (fullwidth letters, digits and punctuation) are NFKC-folded, any Unicode
+// decimal digit becomes an ASCII digit, dashes and the minus sign become `-`,
+// and combining marks are removed. Spans found in a view are mapped back to
+// the original text, so the text around a redaction is never rewritten.
+//
+// A hidden run can be part of a value (`219-<ZWSP>09-9999`) or stand in for a
+// space (`SSN<ZWSP>219-09-9999`), so a text with hidden characters is also
+// scanned with those runs read as spaces (see [`Hidden`]).
+//
+// Duplicated from the guard on purpose, like the token shapes (see the module
+// docs): the guard's normaliser is private and its module is fixed.
+
+/// How a view treats hidden runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hidden {
+    /// Every hidden character is removed.
+    Dropped,
+    /// Every hidden run is one space.
+    EverySpaced,
+    /// Runs between two non-blank, non-joiner characters are one space.
+    AmbiguousSpaced,
+    /// Only ambiguous runs next to a word (a letter on one side, a non-letter
+    /// on the other) are one space (`SSN<ZWSP>2<ZWSP>19`).
+    AtWords,
+}
+
+/// A hidden character: invisible and not layout whitespace.
+fn is_hidden(c: char) -> bool {
+    is_invisible(c) && !c.is_whitespace()
+}
+
+/// Whitespace the patterns' `[ \t]` and `\s` do not all see as a blank: the
+/// vertical tab, form feed, and every non-ASCII space or line separator.
+fn is_odd_blank(c: char) -> bool {
+    c.is_whitespace() && !matches!(c, ' ' | '\t' | '\n' | '\r')
+}
+
+/// ASCII text with no hidden character or odd blank: its own view.
+fn is_plain(text: &str) -> bool {
+    text.is_ascii() && !text.chars().any(|c| is_hidden(c) || is_odd_blank(c))
+}
+
+/// One character of folded text and the original bytes it came from. A hidden
+/// character is kept (as a space) so the views can decide what it was.
+struct Piece {
+    c: char,
+    origin: (usize, usize),
+    hidden: bool,
+}
+
+fn fold(text: &str) -> Vec<Piece> {
+    let mut pieces = Vec::with_capacity(text.len());
+    for (i, c) in text.char_indices() {
+        let origin = (i, i + c.len_utf8());
+        let mut piece = |c: char, hidden: bool| pieces.push(Piece { c, origin, hidden });
+        if is_hidden(c) {
+            piece(' ', true);
+        } else if is_odd_blank(c) {
+            piece(' ', false);
+        } else if c.is_ascii() {
+            piece(c, false);
+        } else {
+            for n in std::iter::once(c).nfkc() {
+                if is_hidden(n) {
+                    piece(' ', true);
+                } else if is_odd_blank(n) {
+                    piece(' ', false);
+                } else if !is_combining_mark(n) {
+                    piece(fold_char(n), false);
+                }
+            }
+        }
+    }
+    pieces
+}
+
+/// What NFKC leaves behind: Unicode decimal digits and the dash forms.
+fn fold_char(c: char) -> char {
+    if c.is_ascii() {
+        return c;
+    }
+    match c {
+        '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{FE58}' | '\u{FE63}' => '-',
+        _ => decimal_digit_value(c).map_or(c, |d| char::from(b'0' + d)),
+    }
+}
+
+static DECIMAL_DIGIT: LazyLock<Regex> = LazyLock::new(|| re(r"^\p{Nd}$"));
+
+fn is_decimal_digit(c: char) -> bool {
+    c.is_numeric() && DECIMAL_DIGIT.is_match(c.encode_utf8(&mut [0; 4]))
+}
+
+/// Value 0-9 of a non-ASCII decimal digit: Unicode lays these out in
+/// contiguous blocks of ten from zero, so it is the distance from the start of
+/// the run of digit characters, modulo ten.
+fn decimal_digit_value(c: char) -> Option<u8> {
+    if !is_decimal_digit(c) {
+        return None;
+    }
+    let mut code = c as u32;
+    let mut back = 0u32;
+    // Blocks are ten digits; the longest unbroken run (mathematical digits) is 50.
+    while back < 64 {
+        let Some(prev) = code.checked_sub(1).and_then(char::from_u32) else {
+            break;
+        };
+        if !is_decimal_digit(prev) {
+            break;
+        }
+        code -= 1;
+        back += 1;
+    }
+    u8::try_from(back % 10).ok()
+}
+
+/// A hidden run between these two visible characters could be a space or part
+/// of a value. Beside blanks or a joiner (`-._/`) it is not a space
+/// (`219-<ZWSP>09`), and between two letters it is part of a word
+/// (`pass<ZWSP>word`).
+fn is_ambiguous(before: char, after: char) -> bool {
+    let plain = |c: char| c.is_whitespace() || matches!(c, '-' | '.' | '_' | '/');
+    !plain(before)
+        && !plain(after)
+        && !(before.is_ascii_alphabetic() && after.is_ascii_alphabetic())
+}
+
+/// Where each character of a view came from.
+struct Origins {
+    /// Byte offset in the view of each character.
+    starts: Vec<usize>,
+    /// Byte range in the original of each character.
+    ranges: Vec<(usize, usize)>,
+}
+
+/// A normalised copy of a text. `origins` is `None` for the identity view of
+/// plain ASCII text.
+struct View<'a> {
+    text: Cow<'a, str>,
+    origins: Option<Origins>,
+}
+
+impl<'a> View<'a> {
+    /// The views to scan `text` on: itself when it is plain, else the dropped
+    /// view plus the distinct space-reading views its hidden runs call for.
+    fn all(text: &'a str) -> Vec<View<'a>> {
+        if is_plain(text) {
+            return vec![View {
+                text: Cow::Borrowed(text),
+                origins: None,
+            }];
+        }
+        let pieces = fold(text);
+        let any_hidden = pieces.iter().any(|p| p.hidden);
+        let modes: &[Hidden] = if !any_hidden {
+            &[Hidden::Dropped]
+        } else {
+            &[
+                Hidden::Dropped,
+                Hidden::EverySpaced,
+                Hidden::AmbiguousSpaced,
+                Hidden::AtWords,
+            ]
+        };
+        let mut views: Vec<View<'a>> = Vec::with_capacity(modes.len());
+        for &mode in modes {
+            let view = View::from_pieces(&pieces, mode);
+            if !views.iter().any(|v| v.text == view.text) {
+                views.push(view);
+            }
+        }
+        views
+    }
+
+    fn build(text: &str, mode: Hidden) -> View<'static> {
+        View::from_pieces(&fold(text), mode)
+    }
+
+    fn from_pieces(pieces: &[Piece], mode: Hidden) -> View<'static> {
+        let mut text = String::with_capacity(pieces.len());
+        let mut starts = Vec::with_capacity(pieces.len());
+        let mut ranges = Vec::with_capacity(pieces.len());
+        let mut push = |c: char, range: (usize, usize)| {
+            starts.push(text.len());
+            ranges.push(range);
+            text.push(c);
+        };
+        let mut i = 0;
+        while let Some(piece) = pieces.get(i) {
+            if !piece.hidden {
+                push(piece.c, piece.origin);
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            while pieces.get(j).is_some_and(|p| p.hidden) {
+                j += 1;
+            }
+            let run = (
+                piece.origin.0,
+                pieces.get(j - 1).map_or(piece.origin.1, |p| p.origin.1),
+            );
+            let before = i.checked_sub(1).and_then(|k| pieces.get(k));
+            let after = pieces.get(j);
+            let space = match mode {
+                Hidden::Dropped => false,
+                Hidden::EverySpaced => true,
+                Hidden::AmbiguousSpaced | Hidden::AtWords => match (before, after) {
+                    (Some(b), Some(a)) if is_ambiguous(b.c, a.c) => {
+                        mode == Hidden::AmbiguousSpaced
+                            || b.c.is_ascii_alphabetic() != a.c.is_ascii_alphabetic()
+                    }
+                    _ => false,
+                },
+            };
+            if space {
+                push(' ', run);
+            }
+            i = j;
+        }
+        View {
+            text: Cow::Owned(text),
+            origins: Some(Origins { starts, ranges }),
+        }
+    }
+
+    /// The range of the original text covering `range` of the view.
+    fn to_original(&self, range: Range<usize>) -> Option<Range<usize>> {
+        let Some(origins) = &self.origins else {
+            return Some(range);
+        };
+        let first = origins
+            .starts
+            .partition_point(|&s| s <= range.start)
+            .checked_sub(1)?;
+        let last = origins
+            .starts
+            .partition_point(|&s| s < range.end)
+            .checked_sub(1)?;
+        let start = origins.ranges.get(first)?.0;
+        let end = origins.ranges.get(last)?.1;
+        (start < end).then_some(start..end)
+    }
+}
 
 // ───────────────────────────── helpers ───────────────────────────────────────
 
@@ -431,12 +707,24 @@ fn find_closing_quote(text: &str, quote: char) -> Option<usize> {
 /// one. `-p` alone is not enough (`mkdir -p`, `ssh -p 22`), so the tool name
 /// has to be on the same command.
 static CLI_CREDENTIALS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    const CURL: &str = r"\bcurl\b";
+    // The flags that carry a user: `-u`, `-U` (proxy), their long forms, and
+    // the short ones behind a cluster of curl's no-argument short flags.
+    const CURL_USER_FLAG: &str =
+        r"(?:(?-i:-[#0-46aBfgGhiIjJkLlMnNOpqRsSvVZ]*[uU])[ \t]*|--(?:proxy-)?user(?:[ \t]+|=))";
     let rest = r"[^\n|;&]*?";
     [
-        // curl -u user:pass / --user user:pass / --proxy-user user:pass
-        format!(
-            r#"(?i)\bcurl\b{rest}[ \t](?:-u|--user|--proxy-user)(?:[ \t]+|=)["']?[^\s:"']*:(?P<value>[^\s"']+)"#
-        ),
+        // curl -u user:pass / --user user:pass / --proxy-user user:pass, also
+        // after combined short flags (`-su user:pass`) and attached (`-uuser:pass`)
+        format!(r#"(?i){CURL}{rest}[ \t]{CURL_USER_FLAG}[^\s:"']*:(?P<value>[^\s"']+)"#),
+        // the same with the credential quoted, so it may hold spaces
+        format!(r#"(?i){CURL}{rest}[ \t]{CURL_USER_FLAG}"[^\s:"]*:(?P<value>[^"\n]*)""#),
+        format!(r#"(?i){CURL}{rest}[ \t]{CURL_USER_FLAG}'[^\s:']*:(?P<value>[^'\n]*)'"#),
+        // an unterminated quote runs to the end of the line
+        format!(r#"(?im){CURL}{rest}[ \t]{CURL_USER_FLAG}"[^\s:"]*:(?P<value>[^"\n]*)$"#),
+        format!(r#"(?im){CURL}{rest}[ \t]{CURL_USER_FLAG}'[^\s:']*:(?P<value>[^'\n]*)$"#),
+        // user:"quoted password" / user:'quoted password'
+        format!(r#"(?i){CURL}{rest}[ \t]{CURL_USER_FLAG}[^\s:"']*:(?P<value>"[^"\n]*"|'[^'\n]*')"#),
         // mysql -pSECRET (the password is attached; `-p` alone prompts)
         format!(
             r#"(?i)\b(?:mysql|mysqldump|mysqladmin|mysqlcheck|mysqlimport|mysqlshow|mariadb|mariadb-dump)\b{rest}[ \t](?-i:-p)(?P<value>[^\s\-]\S*)"#
@@ -486,8 +774,12 @@ fn scan_ssn(text: &str, hits: &mut Vec<Hit>) {
             || area.starts_with('9')
             || group == "00"
             || serial == "0000";
-        // Not one segment of a longer dashed number (`123-45-6789-12`).
-        let glued_before = prev_char(text, m.start()).is_some_and(|c| c.is_ascii_alphanumeric())
+        // Not one segment of a longer dashed number (`123-45-6789-12`), nor
+        // glued to a word. The exception is the label itself: the line
+        // assembler drops a filler that stood in for the space
+        // (`SSN<ZWSP>219-09-9999` becomes `SSN219-09-9999`).
+        let glued_before = (prev_char(text, m.start()).is_some_and(|c| c.is_ascii_alphanumeric())
+            && !glued_to_ssn_label(text, m.start()))
             || (prev_char(text, m.start()) == Some('-')
                 && prev_char(text, m.start() - 1).is_some_and(|c| c.is_ascii_digit()));
         let glued_after = next_char(text, m.end()).is_some_and(|c| c.is_ascii_alphanumeric())
@@ -500,6 +792,16 @@ fn scan_ssn(text: &str, hits: &mut Vec<Hit>) {
             });
         }
     }
+}
+
+/// Whether the text just before `start` is the word `ssn` on its own.
+fn glued_to_ssn_label(text: &str, start: usize) -> bool {
+    let Some(label_start) = start.checked_sub(3) else {
+        return false;
+    };
+    text.get(label_start..start)
+        .is_some_and(|label| label.eq_ignore_ascii_case("ssn"))
+        && !prev_char(text, label_start).is_some_and(|c| c.is_ascii_alphanumeric())
 }
 
 static DOB_LABEL: LazyLock<Regex> = LazyLock::new(|| {
@@ -708,10 +1010,56 @@ fn scan_assignments(text: &str, hits: &mut Vec<Hit>) {
 
 // ───────────────────────────── private keys ──────────────────────────────────
 
+/// The key markers are matched on the view with invisible characters dropped,
+/// where a hidden character that stood in for a space has vanished
+/// (`BEGIN<ZWSP>PRIVATE`), so the spaces between the words are optional.
 static PRIVATE_KEY_BEGIN: LazyLock<Regex> =
-    LazyLock::new(|| re(r"(?i)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?(?:-----)?"));
+    LazyLock::new(|| re(r"(?i)-----BEGIN ?[A-Z0-9 ]*PRIVATE ?KEY(?: ?BLOCK)?(?:-----)?"));
 static PRIVATE_KEY_END: LazyLock<Regex> =
-    LazyLock::new(|| re(r"(?i)-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?(?:-----)?"));
+    LazyLock::new(|| re(r"(?i)-----END ?[A-Z0-9 ]*PRIVATE ?KEY(?: ?BLOCK)?(?:-----)?"));
+static KEY_HEADER_START: LazyLock<Regex> = LazyLock::new(|| re(r"-----BEGIN"));
+
+/// A text prepared for finding private-key markers: the view with invisible
+/// characters dropped and look-alikes folded, built once so a text full of
+/// markers is scanned once, not once per marker.
+struct KeyScan<'a> {
+    text: &'a str,
+    /// `None` when `text` is plain, which is its own view.
+    view: Option<View<'static>>,
+}
+
+impl<'a> KeyScan<'a> {
+    fn new(text: &'a str) -> Self {
+        let view = (!is_plain(text)).then(|| View::build(text, Hidden::Dropped));
+        Self { text, view }
+    }
+
+    /// The first match of `pattern` inside `text[from..to]` (`from` and `to`
+    /// on character boundaries), as a range of `text`.
+    fn find(&self, pattern: &Regex, from: usize, to: usize) -> Option<Range<usize>> {
+        let Some(view) = &self.view else {
+            let window = self.text.get(from..to)?;
+            let m = pattern.find(window)?;
+            return Some(from + m.start()..from + m.end());
+        };
+        let origins = view.origins.as_ref()?;
+        // The view characters that come from `text[from..to]`.
+        let first = origins.ranges.partition_point(|r| r.0 < from);
+        let last = origins.ranges.partition_point(|r| r.1 <= to);
+        let lo = origins
+            .starts
+            .get(first)
+            .copied()
+            .unwrap_or(view.text.len());
+        let hi = origins.starts.get(last).copied().unwrap_or(view.text.len());
+        let m = pattern.find(view.text.get(lo..hi)?)?;
+        view.to_original(lo + m.start()..lo + m.end())
+    }
+
+    fn find_from(&self, pattern: &Regex, from: usize) -> Option<Range<usize>> {
+        self.find(pattern, from, self.text.len())
+    }
+}
 
 /// Marker for a private-key block that never showed an `END` line.
 const UNTERMINATED_MARKER: &str = "[redacted: private-key (no END line; output resumes)]";
@@ -755,38 +1103,40 @@ impl Redactor {
     pub fn redact(&mut self, text: &str) -> (String, Vec<RedactionKind>) {
         let mut out = String::with_capacity(text.len());
         let mut kinds = Vec::new();
-        let mut rest = text;
-        if self.inside_private_key && rest.is_empty() {
+        if self.inside_private_key && text.is_empty() {
             return (out, kinds);
         }
+        let scan = KeyScan::new(text);
+        // Everything before `pos` is done.
+        let mut pos = 0;
         loop {
             if self.inside_private_key {
                 out.push_str(&RedactionKind::PrivateKey.marker());
                 kinds.push(RedactionKind::PrivateKey);
-                match self.swallow_block(rest) {
+                match self.swallow_block(&scan, pos) {
                     Swallowed::All => return (out, kinds),
-                    Swallowed::Through(end) => rest = &rest[end..],
+                    Swallowed::Through(end) => pos = end,
                     Swallowed::GaveUp(end) => {
                         out.push_str(UNTERMINATED_MARKER);
                         kinds.push(RedactionKind::PrivateKey);
-                        rest = &rest[end..];
-                        if rest.is_empty() {
+                        pos = end;
+                        if pos >= text.len() {
                             return (out, kinds);
                         }
                         out.push('\n');
                     }
                 }
             }
-            match PRIVATE_KEY_BEGIN.find(rest) {
+            match scan.find_from(&PRIVATE_KEY_BEGIN, pos) {
                 Some(begin) => {
-                    redact_plain(&rest[..begin.start()], &mut out, &mut kinds);
+                    redact_plain(&text[pos..begin.start], &mut out, &mut kinds);
                     // The block's own marker is pushed at the top of the loop.
                     self.inside_private_key = true;
                     self.swallowed = 0;
-                    rest = &rest[begin.end()..];
+                    pos = begin.end;
                 }
                 None => {
-                    redact_plain(rest, &mut out, &mut kinds);
+                    redact_plain(&text[pos..], &mut out, &mut kinds);
                     return (out, kinds);
                 }
             }
@@ -809,33 +1159,36 @@ impl Redactor {
     pub(crate) fn assume_unredacted(&mut self, lines: &[String]) {
         if lines
             .iter()
-            .any(|l| PRIVATE_KEY_BEGIN.is_match(l) || l.contains("-----BEGIN"))
+            .any(|l| KeyScan::new(l).find_from(&KEY_HEADER_START, 0).is_some())
         {
             self.inside_private_key = true;
             self.swallowed = 0;
         }
     }
 
-    /// Consume the inside of a private-key block from the start of `rest`.
-    fn swallow_block(&mut self, rest: &str) -> Swallowed {
+    /// Consume the inside of a private-key block that starts at `from` in
+    /// the scanned text. Offsets in the result are offsets of that text.
+    fn swallow_block(&mut self, scan: &KeyScan, from: usize) -> Swallowed {
+        let text = scan.text;
+        let rest_len = text.len() - from;
         let budget = MAX_UNTERMINATED_KEY_BYTES.saturating_sub(self.swallowed);
-        let searchable = floor_boundary(rest, budget.min(rest.len()));
-        if let Some(end) = PRIVATE_KEY_END.find(&rest[..searchable]) {
+        let searchable = floor_boundary(text, from + budget.min(rest_len));
+        if let Some(end) = scan.find(&PRIVATE_KEY_END, from, searchable) {
             self.inside_private_key = false;
             self.swallowed = 0;
-            return Swallowed::Through(end.end());
+            return Swallowed::Through(end.end);
         }
-        if rest.len() <= budget {
-            self.swallowed += rest.len();
+        if rest_len <= budget {
+            self.swallowed += rest_len;
             return Swallowed::All;
         }
         // Past the bound: give up on the block at the end of the line that
         // crossed it and resume normal redaction after that line.
         self.inside_private_key = false;
         self.swallowed = 0;
-        let end = rest[searchable..]
+        let end = text[searchable..]
             .find('\n')
-            .map_or(rest.len(), |n| searchable + n + 1);
+            .map_or(text.len(), |n| searchable + n + 1);
         Swallowed::GaveUp(end)
     }
 }
@@ -860,17 +1213,17 @@ fn floor_boundary(text: &str, mut idx: usize) -> usize {
 /// was open before it. The assembler uses this on rows it has to drop, so a
 /// dropped `BEGIN` still reaches the redactor (see `LineAssembler`).
 pub(crate) fn private_key_open_after(text: &str, open: bool) -> bool {
-    let mut rest = text;
+    let scan = KeyScan::new(text);
+    let mut pos = 0;
     if open {
-        match PRIVATE_KEY_END.find(rest) {
-            Some(end) => rest = &rest[end.end()..],
+        match scan.find_from(&PRIVATE_KEY_END, pos) {
+            Some(end) => pos = end.end,
             None => return true,
         }
     }
-    while let Some(begin) = PRIVATE_KEY_BEGIN.find(rest) {
-        rest = &rest[begin.end()..];
-        match PRIVATE_KEY_END.find(rest) {
-            Some(end) => rest = &rest[end.end()..],
+    while let Some(begin) = scan.find_from(&PRIVATE_KEY_BEGIN, pos) {
+        match scan.find_from(&PRIVATE_KEY_END, begin.end) {
+            Some(end) => pos = end.end,
             None => return true,
         }
     }
@@ -897,11 +1250,19 @@ fn redact_plain(text: &str, out: &mut String, kinds: &mut Vec<RedactionKind>) {
     // end: an overlap test is one range lookup.
     let mut accepted: BTreeMap<usize, Span> = BTreeMap::new();
     let mut hits = Vec::new();
+    let views = View::all(text);
     for (priority, scan) in SCANNERS.iter().enumerate() {
-        hits.clear();
-        scan(text, &mut hits);
-        for hit in hits.drain(..) {
-            accept(&mut accepted, text, hit, priority);
+        for view in &views {
+            hits.clear();
+            scan(&view.text, &mut hits);
+            for hit in hits.drain(..) {
+                let Hit { range, kind } = hit;
+                // A span the view cannot place in the original is dropped; the
+                // other views and rules still cover the text.
+                if let Some(range) = view.to_original(range) {
+                    accept(&mut accepted, text, Hit { range, kind }, priority);
+                }
+            }
         }
     }
 

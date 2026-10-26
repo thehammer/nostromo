@@ -36,6 +36,9 @@
 //!   [`MAX_BUFFERED_CELLS`] columns are buffered between
 //!   [`LineAssembler::take_committed`] calls, and beyond that the oldest rows
 //!   are dropped and reported as one `[… N lines dropped …]` line.
+//! * Characters that render as nothing (zero-width space, joiners, word
+//!   joiner, soft hyphen, BOM) and bidi / tag controls are dropped, so a
+//!   secret cannot be split by them past the redactor.
 //! * Only `A B C D G K P` (CSI) are interpreted. Every other sequence
 //!   (`H`, `J`, `L`, scroll regions, mode switches, …) is stripped and has no
 //!   effect.
@@ -186,9 +189,9 @@ impl LineAssembler {
     /// spaces trimmed. Rows at or below the cursor row stay buffered (see the
     /// [module docs](self)); the live line is never returned.
     ///
-    /// These lines are raw: not redacted and not capped. They are the input of
-    /// [`deliver`](super::deliver), which takes them itself; do not hand them
-    /// to an agent any other way.
+    /// **These lines are raw: not redacted, not capped. Never send them to an
+    /// agent.** They are the input of [`deliver`](super::deliver), which takes
+    /// them itself and is the only path to agent text.
     ///
     /// If the buffer caps dropped rows since the last call, the first line is
     /// `[… N lines dropped …]`, followed by [`DROPPED_KEY_HEADER`] when the
@@ -217,6 +220,9 @@ impl LineAssembler {
     /// The text on the cursor's row, trailing spaces trimmed; `None` when
     /// the row is empty. This is the "prompt line" while a shell waits.
     /// Rendered on demand, not on every `feed`.
+    ///
+    /// **Raw, like [`take_committed`](Self::take_committed): not redacted, and
+    /// the live row may hold a half-typed secret. Never send it to an agent.**
     pub fn current_partial(&self) -> Option<&str> {
         self.partial
             .get_or_init(|| {
@@ -290,7 +296,7 @@ impl LineAssembler {
             '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => {
                 self.parser.state = State::Str { saw_escape: false }
             }
-            c if c.is_control() || is_spoofing(c) => {}
+            c if c.is_control() || is_spoofing(c) || is_filler(c) => {}
             c => self.put(c),
         }
     }
@@ -452,23 +458,16 @@ impl LineAssembler {
 }
 
 impl Row {
-    /// Whether the row has five dashes in a row (`-----BEGIN …`, `-----END …`),
-    /// checked on stored cells so a row of padding costs nothing.
+    /// Whether the row may hold a key marker (`-----BEGIN …`, `-----END …`):
+    /// it has at least five cells that are a dash or not ASCII (a dash
+    /// look-alike, or an invisible character spliced into the dashes). Checked
+    /// on stored cells so a row of padding costs nothing.
     fn may_hold_key_marker(&self) -> bool {
-        let mut run = 0;
-        let mut prev = None;
-        for &(col, c) in &self.cells {
-            run = match (c, prev) {
-                ('-', Some(p)) if p + 1 == col => run + 1,
-                ('-', _) => 1,
-                _ => 0,
-            };
-            if run >= 5 {
-                return true;
-            }
-            prev = (c == '-').then_some(col);
-        }
-        false
+        self.cells
+            .iter()
+            .filter(|&&(_, c)| c == '-' || !c.is_ascii())
+            .nth(4)
+            .is_some()
     }
 
     /// Columns from 0 through the last non-blank cell.
@@ -534,6 +533,17 @@ fn is_spoofing(c: char) -> bool {
     matches!(c,
         '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
         | '\u{e0000}'..='\u{e007f}')
+}
+
+/// Characters that render as nothing and so can sit inside a token or a number
+/// without changing how it looks (`ghp_<ZWSP>…`, `219-<ZWSP>09-9999`): soft
+/// hyphen, combining grapheme joiner, zero-width space / non-joiner / joiner,
+/// the word joiner and invisible operators, and the byte-order mark. They are
+/// dropped before the text is stored, so the redactor sees the line as a
+/// reader does.
+fn is_filler(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{34f}' | '\u{200b}'..='\u{200d}' | '\u{2060}'..='\u{2064}' | '\u{feff}')
 }
 
 /// Incremental UTF-8 decoder: split sequences are reassembled across calls
