@@ -12,6 +12,7 @@ pub mod daemon_diagnostics;
 pub mod fred;
 pub mod get_self;
 pub mod get_view_state;
+pub mod huey;
 pub mod list_views;
 pub mod mother;
 pub mod mother_mutators;
@@ -184,6 +185,12 @@ pub fn tool_descriptors() -> Vec<Value> {
         json!({
             "name": "mother.get_status",
             "description": "Returns the current Mother status summary: running, queued, failed, awaiting counts.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        }),
+        // ── Huey ──────────────────────────────────────────────────────────
+        json!({
+            "name": "huey.get_state",
+            "description": "Returns Huey's state on this machine: { enabled, setup_state (not_set_up | confirmed), report_time, paths: { interests, sources, reports }, last_run }.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
         // ── Phase 2: Teri ─────────────────────────────────────────────────
@@ -377,7 +384,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": REQUEST_REMOTE_SHELL_TOOL,
-            "description": "Ask the user to open a shell on a remote (ECS) service, for example a production container. Use this instead of the ecs_* shell functions or tmux panes, which are blocked for agents. You name the project, environment, service and shell type (the names from nostromo.list_remote_shell_targets; common aliases such as 'prod' or 'sched' are accepted) and may add a short reason (at most 200 characters; the user sees it). The call blocks until the user decides: Nostromo shows a confirmation sheet and the user must click Connect themselves. Nothing is opened until they do, and you cannot click it for them. Once connected the user types in the shell: you can never type into it, and you cannot see its output unless the user later invites you to follow it. There is no command, script or argument field: you cannot choose what runs, and any other key is refused. Returns { ok, outcome: 'connected', terminal_id, pane_id } when the user connected. Errors: invalid_target (detail, valid: { field, values } lists the accepted values; nothing was shown to the user), unknown_argument (any key other than the five below, including command, cmd or script), reason_too_long, invalid_args, unknown_view, remote_shells_not_configured, no_operator (the Nostromo app is not open to confirm), request_pending (another request is waiting for the user; try later), cancelled, dismissed, timeout (the user did not answer in time), connect_failed (reason, detail, remedy).",
+            "description": "Ask the user to open a shell on a remote (ECS) service, for example a production container. Use this instead of the ecs_* shell functions or tmux panes, which are blocked for agents. You name the project, environment, service and shell type (the names from nostromo.list_remote_shell_targets; common aliases such as 'prod' or 'sched' are accepted) and may add a short reason (at most 200 characters; the user sees it). The call blocks until the user decides: Nostromo shows a confirmation sheet and the user must click Connect themselves. Nothing is opened until they do, and you cannot click it for them. Once connected the user types in the shell: you can never type into it, and you cannot see its output unless the user later invites you to follow it. There is no command, script or argument field: you cannot choose what runs, and any other key is refused. Returns { ok, outcome: 'connected', terminal_id, pane_id } when the user connected. Errors: invalid_target (detail, valid: { field, values } lists the accepted values; nothing was shown to the user), unknown_argument (any key other than the five below, including command, cmd or script), reason_too_long, invalid_args, unknown_view, remote_shells_not_configured, no_operator (the Nostromo app is not open to confirm), request_pending (another request is waiting for the user; try later), request_cooldown (the user recently said no from this focus; wait before asking again), request_limit (too many requests from this focus recently), superseded (the user opened a shell request of their own while yours waited), cancelled, dismissed, timeout (the user did not answer in time), connect_failed (reason, detail, remedy).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -902,6 +909,9 @@ async fn dispatch_inner(
         }
         "fred.get_state" => fred::get_state(state),
 
+        // ── Huey ──────────────────────────────────────────────────────────
+        "huey.get_state" => huey::get_state(state),
+
         // ── Phase 2: Mother ───────────────────────────────────────────────
         "mother.list_jobs" => {
             let input = parse_args::<mother::ListJobsInput>(arguments)
@@ -1067,6 +1077,7 @@ mod tests {
         let mut state = McpSharedState::for_test();
         state.enabled_agents = crate::agents::EnabledAgents {
             fred: false,
+            huey: true,
             perri: false,
             teri: true,
         };
@@ -1083,6 +1094,19 @@ mod tests {
             assert!(shown.contains(n), "{n} should still be listed");
         }
         let r = dispatch("fred.get_state", None, &state, None).await;
+        assert!(matches!(r, ToolResult::UnknownTool(_)));
+    }
+
+    #[tokio::test]
+    async fn disabled_huey_has_no_get_state_tool() {
+        let mut state = McpSharedState::for_test();
+        assert!(tool_names(&tool_descriptors_for(&state, None).await)
+            .contains(&"huey.get_state".to_string()));
+        state.enabled_agents.huey = false;
+        assert!(!tool_names(&tool_descriptors_for(&state, None).await)
+            .iter()
+            .any(|n| n.starts_with("huey.")));
+        let r = dispatch("huey.get_state", None, &state, None).await;
         assert!(matches!(r, ToolResult::UnknownTool(_)));
     }
 

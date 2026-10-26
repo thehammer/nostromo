@@ -128,6 +128,8 @@ fn make_daemon_state_with_pr_source(pr_source: PrSource) -> Harness {
                     fred_calendar_rx: tokio::sync::watch::channel(None).1,
                     teri_todos_rx: tokio::sync::watch::channel(None).1,
                     work_hub: None,
+                    huey: None,
+                    huey_rx: tokio::sync::watch::channel(nostromo::huey::HueyView::default()).1,
                     enabled_agents: nostromo::agents::EnabledAgents::all(),
                 },
             );

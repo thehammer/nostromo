@@ -58,7 +58,7 @@ An agent can **ask** for a shell on a remote ECS service; only a human click on 
 
 1. Resolve the four words. An unknown word returns at once; no one is asked.
 2. Only operator connections that sent `capabilities: ["remote_shell_confirm"]` in their `Subscribe` can be asked. None: `no_operator` at once. A verified app that does not declare the capability, a TCP client that renders decisions and any other local process do not count.
-3. At most one request waits at a time (`request_pending`).
+3. At most one request waits at a time (`request_pending`). Two further rules hold **agent** requests (never the user's own, so they cannot lock the user out), keyed by the agent's focus tag: a *cooldown* after the user's Cancel, Dismiss or a timeout (60 s, doubling per consecutive denial up to 15 minutes, reset by a Connect, forgotten after an hour without a denial) refuses with `request_cooldown`; and at most 3 requests per focus in 10 minutes, then `request_limit`. Both refusals are content-free, send no sheet and are audited like `request_pending`. A request the **user** makes (`remote_shell_open`) while an agent's waits takes the slot: the agent's request ends as `superseded` (audited, the sheet for it is closed, it does not count as a denial).
 4. `remote_shell_confirm_request` goes to those connections and no one else.
 5. The daemon waits (300 s by default, clamped to 10-600 s) for `remote_shell_answer {decision: connect|cancel|dismiss}` from the operator app (`OperatorCap`).
 6. Only after Connect is the launcher called (`RemoteLauncher`; this daemon's is `AwsEcsLauncher`, see "Connecting" below). Before that no process, pane or terminal exists.
@@ -81,9 +81,46 @@ If the agent's MCP connection closes while the request waits, the request is aba
 
 `remote_shell_open` and `remote_shell_answer` from anyone but the verified app (even a process claiming `client_kind: "mac_app"`) get `terminal_refused {op: "control", code: "terminal_control_forbidden"}` and an audited `refused`; the request stays pending. Over TCP they are refused by FND-1 like every terminal frame. All three server frames are `LocalOnly` and never broadcast.
 
-Audit events (`terminal.jsonl`): `remote_requested {tag, requested_by, target, reason (200 chars at most)}`, `confirm_outcome {tag, target, outcome: connect|cancelled|dismissed|timed_out|abandoned|no_operator|request_pending, invite_follow?}`, `connect_started {tag, target, config_sha256, local_sha256?, argv_sha256}`, `connected {terminal_id, pane_id, tag, kind, target, config_sha256, local_sha256?, argv_sha256}` (the digests the request was pinned to), `connect_failed {reason_code}`. A connect that fails after its pane appeared also writes `closed` with the same code as its reason; the remote-shell `closed` reasons are codes, never output. `no_operator` and `request_pending` lines share the per-channel refusal budget. No command, keystroke or output text is ever written.
+Audit events (`terminal.jsonl`): `remote_requested {tag, requested_by, target, reason (200 chars at most)}`, `confirm_outcome {tag, target, outcome: connect|cancelled|dismissed|timed_out|abandoned|superseded|no_operator|request_pending|request_cooldown|request_limit, invite_follow?}`, `connect_started {tag, target, config_sha256, local_sha256?, argv_sha256}`, `connected {terminal_id, pane_id, tag, kind, target, config_sha256, local_sha256?, argv_sha256}` (the digests the request was pinned to), `connect_failed {reason_code}`. A connect that fails after its pane appeared also writes `closed` with the same code as its reason; the remote-shell `closed` reasons are codes, never output. `no_operator`, `request_pending`, `request_cooldown` and `request_limit` lines share the per-channel refusal budget. No command, keystroke or output text is ever written.
 
-MCP tools: `nostromo.list_remote_shell_targets` and `nostromo.request_remote_shell` (`docs/mcp/tools.md`).
+MCP tools: `nostromo.list_remote_shell_targets` and `nostromo.request_remote_shell` (`docs/mcp/tools.md`). The `request_remote_shell` call **blocks until the user decides** (or the request times out) and, on Connect, returns `{ok, outcome: "connected", terminal_id, pane_id}` (plan §D6), not just a request id.
+
+### Why there is no per-answer nonce
+
+`DecisionAnswer` and `ApprovalAnswer` check an operator nonce on every message. `RemoteShellAnswer` and `RemoteShellOpen` do not: they rely on the `OperatorCap` minted at `Subscribe` (only after the `Welcome` nonce was echoed and a fresh inspection still saw the verified app) plus a code-signing re-check of the peer on every message. That is equivalent: the nonce exists to prove the sender is the verified app, the cap already proves that for the connection, and the per-message re-check stops a process that replaced the app after `Subscribe` from reusing it. A per-answer nonce would add nothing an attacker without the app's identity could not also forge, and nothing a verified app does not already prove.
+
+### Where the human gesture is proved
+
+The daemon cannot tell a click from a synthetic event. The proof that a human pressed Connect lives in slice 2c's confirm sheet (the `HumanGesture` check in the Mac app); the daemon only trusts an answer from the verified app on a connection that declared `remote_shell_confirm`.
+
+### 2b must
+
+Slice 2b runs `shell_command`, and `shell_command`, `profile` and `cluster` come from `config.json` under `~/.claude/layers/...`, which an agent may be able to write. So 2b must:
+
+1. pin the resolved command when the request is made (already true: the target is resolved before the sheet is shown, and nothing is re-resolved);
+2. show the content hash of the file(s) it was read from, or record it in the audit, at Connect;
+3. never reload the file between Connect and launch.
+
+## Agent follow (slice 3b)
+
+A focus follows a terminal only when the user invites it. Output the terminal produces afterwards is delivered into the follower's conversation without any user action (`src/terminal/follow/manager.rs`).
+
+| Client → daemon | Fields |
+|---|---|
+| `terminal_follow_invite`* | `terminal_id, follower_tag, include_screen?` (needs the connection's `terminal_follow_ui` capability, else `terminal_follow_ui_required`) |
+| `terminal_follow_stop`* | `terminal_id` |
+| `terminal_follow_resume`* | `terminal_id` (only a paused follow) |
+
+Refusal codes: `terminal_control_forbidden` (not the operator app; audited), `unknown_terminal`, `follower_not_running`, `not_followed`, `not_paused`. `TerminalInfo.follower` is `{tag, paused, pause_reason?}` while a focus follows; each change is broadcast as `terminal_state`.
+
+- **One follower per terminal.** Inviting another focus moves the invitation: the previous follower is told it stopped (`moved_to <tag>`).
+- **Only output after the invite** is delivered, unless `include_screen`: then the visible screen goes first, in the same message as the `started` notice.
+- **The pump.** A reader hook queues each chunk for the follow's task, which feeds the line assembler and asks the delivery policy every 100 ms: settled output (800 ms quiet, 200 ms at a prompt) or sustained output (at most every 10 s) is redacted, capped (200 lines / 16 KiB, head and tail) and written as `<nostromo-terminal-output terminal_id pane kind lines omitted redactions>` with a fixed advisory line. A full-screen program is delivered as a screen snapshot (`kind="screen"`). `pane` is `local shell in <dir>` or the remote shell's label. Flooding pauses the follow (`too_much_output`, `too_many_deliveries`) until `terminal_follow_resume`; what arrived while paused is never delivered.
+- **Into the conversation** (`SessionManager::inject`): an idle session is written to at once and starts a turn. While a turn runs, deliveries and notices wait in the queue and are combined into one message (48 KiB at most; middle deliveries are dropped with `[… K earlier deliveries omitted …]`). A user's queued message is never combined with anything. The echoed message opens a turn whose `origin` lists each delivery (`Turn.origin`, read from the text, so a reloaded transcript has it too).
+- **Notices** (`<nostromo-terminal-follow event reason?/>` plus a sentence): `started`, `paused`, `resumed`, `stopped` with `user_stopped`, `moved_to <tag>`, `pane_closed`, `terminal_restarted`, `app_closed`.
+- **Ends** when the user stops it (output not yet delivered, buffered or still queued, is discarded), the pane closes or the terminal is restarted, the follower's session stops, restarts, starts a new session, crash-loops or its focus is removed (no notice), or the last operator-app connection goes. Nothing is persisted: a new daemon follows nothing.
+
+Audit events: `follow_invited {follower, include_screen, via}`, `follow_stopped {follower, reason}`, `follow_paused {follower, reason}`, `follow_resumed {follower}`, `delivery {follower, kind, lines, bytes, redactions, truncated}`. Counts and sizes only.
 
 ### Connecting (slice 2b)
 
@@ -136,7 +173,7 @@ Output is coalesced. A chunk goes out at once if nothing was sent in the last 8 
 
 ## Audit
 
-`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, the remote-shell events above, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
+`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, the remote-shell and follow events above, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
 
 Refused lines are capped at 120 a minute per channel (one budget for the whole MCP channel, not one per focus), so a flood over TCP neither fills the log quickly nor silences local refusals. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.
 

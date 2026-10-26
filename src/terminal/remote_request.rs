@@ -9,7 +9,10 @@
 //!    returned at once and no one is asked;
 //! 2. find the operator connections that declared `remote_shell_confirm`
 //!    (none: `NoOperator`, nothing sent);
-//! 3. register the request (a second one while it waits: `RequestPending`);
+//! 3. register the request (a second one while it waits: `RequestPending`; an
+//!    agent that was just denied, or asks too often: `RequestCooldown` /
+//!    `RequestLimit`; the user's own request ends an agent's pending one as
+//!    `Superseded`);
 //! 4. send `remote_shell_confirm_request` to those connections, and only them;
 //! 5. wait for the answer, or the timeout;
 //! 6. on Connect, and only then, call the launcher;
@@ -18,8 +21,9 @@
 //!
 //! No terminal, pane or process exists before step 6.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use tokio::sync::{mpsc, oneshot};
@@ -35,6 +39,16 @@ use crate::ipc::protocol::{
 
 /// How long a request waits for the user when the caller does not say.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+/// The first cooldown an agent's focus waits after a Cancel, Dismiss or
+/// timeout; it doubles on each further denial, up to [`MAX_COOLDOWN`], and a
+/// Connect resets it.
+pub const BASE_COOLDOWN: Duration = Duration::from_secs(60);
+pub const MAX_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+/// At most this many requests per focus in [`REQUEST_WINDOW`].
+pub const MAX_REQUESTS_PER_WINDOW: usize = 3;
+pub const REQUEST_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// A focus's denial streak is forgotten after this long without one.
+const STREAK_MEMORY: Duration = Duration::from_secs(60 * 60);
 /// The bounds a caller's timeout is clamped to.
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_TIMEOUT: Duration = Duration::from_secs(600);
@@ -73,6 +87,8 @@ pub enum RemoteOutcome {
     TimedOut,
     /// Every connection that could show the sheet is gone.
     OperatorGone,
+    /// The user's own request took the slot from an agent's.
+    Superseded,
 }
 
 impl RemoteOutcome {
@@ -84,13 +100,44 @@ impl RemoteOutcome {
             Self::Dismissed => "dismissed",
             Self::TimedOut => "timed_out",
             Self::OperatorGone => "operator_gone",
+            Self::Superseded => "superseded",
         }
     }
 }
 
-/// A request is already waiting for the user.
+/// Why a request was not registered. Each is content-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequestPending;
+pub enum SubmitRefused {
+    /// A request is already waiting for the user.
+    Pending,
+    /// The agent's focus was denied recently and must wait.
+    Cooldown,
+    /// The agent's focus has asked too often in the window.
+    Limit,
+}
+
+/// Where time comes from; tests inject their own.
+pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// What is remembered of one agent focus's requests and denials.
+#[derive(Default)]
+struct FocusHistory {
+    /// Consecutive denials (Cancel, Dismiss, timeout) since the last Connect.
+    denials: u32,
+    cooldown_until: Option<Instant>,
+    last_denial: Option<Instant>,
+    /// When requests were accepted, within [`REQUEST_WINDOW`].
+    requests: VecDeque<Instant>,
+}
+
+impl FocusHistory {
+    fn cooldown(denials: u32) -> Duration {
+        let doublings = denials.saturating_sub(1).min(16);
+        BASE_COOLDOWN
+            .saturating_mul(1u32 << doublings)
+            .min(MAX_COOLDOWN)
+    }
+}
 
 /// What the registry keeps of a pending request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,22 +157,83 @@ struct Slot {
 /// The at-most-one remote shell request waiting for the user. A request ends
 /// exactly once: the first of an answer, the timeout or an abandon wins and
 /// the rest find nothing pending.
-#[derive(Default)]
 pub struct RemoteRequests {
     pending: Option<Slot>,
+    history: HashMap<String, FocusHistory>,
+    clock: Clock,
+}
+
+impl Default for RemoteRequests {
+    fn default() -> Self {
+        Self::with_clock(Arc::new(Instant::now))
+    }
 }
 
 impl RemoteRequests {
+    pub fn with_clock(clock: Clock) -> Self {
+        Self {
+            pending: None,
+            history: HashMap::new(),
+            clock,
+        }
+    }
+
+    pub fn set_clock(&mut self, clock: Clock) {
+        self.clock = clock;
+    }
+
     /// Register a request. Its id, and a receiver for how it ends.
+    ///
+    /// Agent requests (`kind: "focus"`) are held to the focus's cooldown and
+    /// request ceiling; the user's own never are, so the rules cannot lock the
+    /// user out. A user request finding an agent's pending takes the slot and
+    /// ends the agent's as [`RemoteOutcome::Superseded`].
     pub fn submit(
         &mut self,
         requested_by: RemoteRequester,
         tag: String,
         target: TerminalTarget,
         reason: Option<String>,
-    ) -> Result<(String, oneshot::Receiver<RemoteOutcome>), RequestPending> {
-        if self.pending.is_some() {
-            return Err(RequestPending);
+    ) -> Result<(String, oneshot::Receiver<RemoteOutcome>), SubmitRefused> {
+        let now = (self.clock)();
+        let agent = requested_by.kind != "user";
+        self.history.retain(|_, h| {
+            h.last_denial
+                .is_some_and(|d| now.saturating_duration_since(d) < STREAK_MEMORY)
+                || h.requests
+                    .back()
+                    .is_some_and(|r| now.saturating_duration_since(*r) < REQUEST_WINDOW)
+        });
+        if agent {
+            if let Some(h) = self.history.get_mut(&tag) {
+                if h.cooldown_until.is_some_and(|until| now < until) {
+                    return Err(SubmitRefused::Cooldown);
+                }
+                while h
+                    .requests
+                    .front()
+                    .is_some_and(|r| now.saturating_duration_since(*r) >= REQUEST_WINDOW)
+                {
+                    h.requests.pop_front();
+                }
+                if h.requests.len() >= MAX_REQUESTS_PER_WINDOW {
+                    return Err(SubmitRefused::Limit);
+                }
+            }
+        }
+        if let Some(slot) = &self.pending {
+            if agent || slot.request.requested_by.kind == "user" {
+                return Err(SubmitRefused::Pending);
+            }
+            let id = slot.request.request_id.clone();
+            self.finish(&id, Some(RemoteOutcome::Superseded));
+        }
+        if agent {
+            self.history
+                .entry(tag.clone())
+                .or_default()
+                .requests
+                .push_back(now);
         }
         let request_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
@@ -183,6 +291,29 @@ impl RemoteRequests {
         self.pending.as_ref().map(|s| &s.request)
     }
 
+    /// A denial by the user starts (or lengthens) the agent focus's cooldown;
+    /// a Connect clears it. Anything else says nothing about the user's mind.
+    fn note_outcome(&mut self, request: &PendingRequest, outcome: RemoteOutcome) {
+        if request.requested_by.kind == "user" {
+            return;
+        }
+        let now = (self.clock)();
+        let history = self.history.entry(request.tag.clone()).or_default();
+        match outcome {
+            RemoteOutcome::Connect { .. } => {
+                history.denials = 0;
+                history.cooldown_until = None;
+                history.last_denial = None;
+            }
+            RemoteOutcome::Cancelled | RemoteOutcome::Dismissed | RemoteOutcome::TimedOut => {
+                history.denials = history.denials.saturating_add(1);
+                history.cooldown_until = Some(now + FocusHistory::cooldown(history.denials));
+                history.last_denial = Some(now);
+            }
+            RemoteOutcome::OperatorGone | RemoteOutcome::Superseded => {}
+        }
+    }
+
     fn finish(&mut self, request_id: &str, outcome: Option<RemoteOutcome>) -> bool {
         if self
             .pending
@@ -193,6 +324,7 @@ impl RemoteRequests {
         }
         let slot = self.pending.take().expect("checked above");
         if let Some(outcome) = outcome {
+            self.note_outcome(&slot.request, outcome);
             // The waiter may have gone: that is its own end of the request.
             let _ = slot.tx.send(outcome);
         }
@@ -232,6 +364,12 @@ pub enum RemoteResult {
     NoOperator,
     /// A request is already waiting for the user.
     RequestPending,
+    /// The agent's focus was denied recently and must wait. Nothing was sent.
+    RequestCooldown,
+    /// The agent's focus has asked too often. Nothing was sent.
+    RequestLimit,
+    /// The user's own request took the slot while this one waited.
+    Superseded,
     Cancelled,
     Dismissed,
     TimedOut,
@@ -305,6 +443,10 @@ pub(crate) async fn run(
         RemoteOutcome::Cancelled => (RemoteResult::Cancelled, resolved(&request_id, "cancelled")),
         RemoteOutcome::Dismissed => (RemoteResult::Dismissed, resolved(&request_id, "dismissed")),
         RemoteOutcome::TimedOut => (RemoteResult::TimedOut, resolved(&request_id, "timed_out")),
+        RemoteOutcome::Superseded => (
+            RemoteResult::Superseded,
+            resolved(&request_id, "superseded"),
+        ),
         RemoteOutcome::OperatorGone => (
             RemoteResult::NoOperator,
             ServerMsg::RemoteShellResolved {
@@ -356,9 +498,14 @@ fn ask_operators(
     );
     let (request_id, rx) = match submitted {
         Ok(ok) => ok,
-        Err(RequestPending) => {
-            m.record_unanswered(request, wire_target, reason.as_deref(), "request_pending");
-            return Err(RemoteResult::RequestPending);
+        Err(refused) => {
+            let (outcome, result) = match refused {
+                SubmitRefused::Pending => ("request_pending", RemoteResult::RequestPending),
+                SubmitRefused::Cooldown => ("request_cooldown", RemoteResult::RequestCooldown),
+                SubmitRefused::Limit => ("request_limit", RemoteResult::RequestLimit),
+            };
+            m.record_unanswered(request, wire_target, reason.as_deref(), outcome);
+            return Err(result);
         }
     };
     m.record_remote_requested(request, wire_target, reason.as_deref());
@@ -366,7 +513,11 @@ fn ask_operators(
         request_id: request_id.clone(),
         tag: Some(request.tag.clone()),
         target: wire_target.clone(),
-        requested_by: request.requested_by.clone(),
+        requested_by: RemoteRequester {
+            // Not agent-typed, but the sheet shows it: the same cleaning as the reason.
+            agent: request.requested_by.agent.as_deref().and_then(clean_reason),
+            ..request.requested_by.clone()
+        },
         reason,
         expires_at: (Utc::now() + timeout).to_rfc3339_opts(SecondsFormat::Secs, true),
         shell_command: Some(target.shell_command.clone()),
@@ -669,7 +820,7 @@ mod tests {
 
     fn submit(
         requests: &mut RemoteRequests,
-    ) -> Result<(String, oneshot::Receiver<RemoteOutcome>), RequestPending> {
+    ) -> Result<(String, oneshot::Receiver<RemoteOutcome>), SubmitRefused> {
         requests.submit(requester(), "cody-1".into(), target(), Some("why".into()))
     }
 
@@ -682,7 +833,7 @@ mod tests {
 
         let second = submit(&mut requests);
 
-        assert!(matches!(second, Err(RequestPending)));
+        assert!(matches!(second, Err(SubmitRefused::Pending)));
         let pending = requests.pending().expect("the first is still pending");
         assert_eq!(pending.request_id, first_id);
         assert_eq!(pending.tag, "cody-1");
@@ -698,7 +849,7 @@ mod tests {
     fn once_a_request_has_ended_a_new_one_is_accepted_with_a_new_id() {
         let mut requests = RemoteRequests::default();
         let (first_id, _rx) = submit(&mut requests).unwrap();
-        assert!(requests.answer(&cap(), &first_id, Decision::Cancel, false));
+        assert!(requests.answer(&cap(), &first_id, Decision::Connect, false));
 
         let (second_id, _rx2) = submit(&mut requests).expect("nothing is pending any more");
 
@@ -853,6 +1004,548 @@ mod tests {
         assert!(!requests.abandon("some-other-request"));
 
         assert_eq!(requests.pending().unwrap().request_id, id);
+    }
+
+    // ── cooldown, ceiling and preemption (injected clock) ───────────────────
+
+    const MS: Duration = Duration::from_millis(1);
+    const MIN: Duration = Duration::from_secs(60);
+
+    /// A clock the test moves by hand.
+    struct TestClock {
+        offset: Arc<Mutex<Duration>>,
+    }
+
+    impl TestClock {
+        fn new() -> (Self, RemoteRequests) {
+            let base = Instant::now();
+            let offset = Arc::new(Mutex::new(Duration::ZERO));
+            let reader = Arc::clone(&offset);
+            let clock: Clock = Arc::new(move || base + *reader.lock().unwrap());
+            (Self { offset }, RemoteRequests::with_clock(clock))
+        }
+
+        fn advance(&self, by: Duration) {
+            *self.offset.lock().unwrap() += by;
+        }
+
+        fn elapsed(&self) -> Duration {
+            *self.offset.lock().unwrap()
+        }
+    }
+
+    fn agent(tag: &str) -> RemoteRequester {
+        RemoteRequester {
+            kind: "focus".into(),
+            tag: Some(tag.into()),
+            agent: Some("cody".into()),
+        }
+    }
+
+    fn user() -> RemoteRequester {
+        RemoteRequester {
+            kind: "user".into(),
+            tag: None,
+            agent: None,
+        }
+    }
+
+    type Submitted = Result<(String, oneshot::Receiver<RemoteOutcome>), SubmitRefused>;
+
+    fn ask(requests: &mut RemoteRequests, who: RemoteRequester, tag: &str) -> Submitted {
+        requests.submit(who, tag.into(), target(), None)
+    }
+
+    fn ask_as_agent(requests: &mut RemoteRequests, tag: &str) -> Submitted {
+        ask(requests, agent(tag), tag)
+    }
+
+    fn ask_as_user(requests: &mut RemoteRequests, tag: &str) -> Submitted {
+        ask(requests, user(), tag)
+    }
+
+    fn refusal(submitted: Submitted) -> Option<SubmitRefused> {
+        submitted.err()
+    }
+
+    /// The agent asks and the user answers `decision`.
+    fn agent_asks_and_user_answers(requests: &mut RemoteRequests, tag: &str, decision: Decision) {
+        let (id, _rx) = ask_as_agent(requests, tag).expect("the request is accepted");
+        assert!(requests.answer(&cap(), &id, decision, false));
+    }
+
+    /// The agent asks and the wait times out.
+    fn agent_asks_and_times_out(requests: &mut RemoteRequests, tag: &str) {
+        let (id, _rx) = ask_as_agent(requests, tag).expect("the request is accepted");
+        assert!(requests.timeout(&id));
+    }
+
+    /// `n` consecutive denials of `tag`, each far enough after the last that
+    /// neither its cooldown nor the request ceiling is in play. The cooldown
+    /// that the last one started runs from now.
+    fn deny_n_times(clock: &TestClock, requests: &mut RemoteRequests, tag: &str, n: u32) {
+        for i in 0..n {
+            if i > 0 {
+                // Past the longest cooldown and the whole request window.
+                clock.advance(MAX_COOLDOWN + REQUEST_WINDOW);
+            }
+            agent_asks_and_user_answers(requests, tag, Decision::Cancel);
+        }
+    }
+
+    #[test]
+    fn a_denied_agent_focus_waits_a_minute_and_not_one_moment_longer() {
+        let (clock, mut requests) = TestClock::new();
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown),
+            "right after the denial"
+        );
+        clock.advance(BASE_COOLDOWN - MS);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown),
+            "a millisecond before the minute is up"
+        );
+        assert!(requests.pending().is_none(), "a refusal registers nothing");
+
+        clock.advance(MS);
+        assert!(
+            ask_as_agent(&mut requests, "cody-1").is_ok(),
+            "once the minute is up"
+        );
+    }
+
+    #[test]
+    fn cancel_dismiss_and_timeout_each_start_the_cooldown() {
+        for how in ["cancel", "dismiss", "timeout"] {
+            let (clock, mut requests) = TestClock::new();
+            match how {
+                "cancel" => agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel),
+                "dismiss" => {
+                    agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Dismiss)
+                }
+                _ => agent_asks_and_times_out(&mut requests, "cody-1"),
+            }
+
+            assert_eq!(
+                refusal(ask_as_agent(&mut requests, "cody-1")),
+                Some(SubmitRefused::Cooldown),
+                "{how}"
+            );
+            clock.advance(BASE_COOLDOWN);
+            assert!(ask_as_agent(&mut requests, "cody-1").is_ok(), "{how}");
+        }
+    }
+
+    #[test]
+    fn each_consecutive_denial_doubles_the_cooldown_up_to_fifteen_minutes() {
+        let wanted = [60u64, 120, 240, 480, 900, 900, 900];
+        for (i, secs) in wanted.into_iter().enumerate() {
+            let (clock, mut requests) = TestClock::new();
+            deny_n_times(&clock, &mut requests, "cody-1", i as u32 + 1);
+            let cooldown = Duration::from_secs(secs);
+
+            clock.advance(cooldown - MS);
+            assert_eq!(
+                refusal(ask_as_agent(&mut requests, "cody-1")),
+                Some(SubmitRefused::Cooldown),
+                "denial {} must cost {secs}s (still cooling a millisecond early)",
+                i + 1
+            );
+            clock.advance(MS);
+            assert!(
+                ask_as_agent(&mut requests, "cody-1").is_ok(),
+                "denial {} must cost no more than {secs}s",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn a_connect_resets_the_streak_so_the_next_denial_costs_a_minute_again() {
+        let (clock, mut requests) = TestClock::new();
+        deny_n_times(&clock, &mut requests, "cody-1", 3);
+        clock.advance(MAX_COOLDOWN + REQUEST_WINDOW);
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Connect);
+
+        assert!(
+            ask_as_agent(&mut requests, "cody-1").is_ok(),
+            "a Connect leaves no cooldown behind"
+        );
+    }
+
+    #[test]
+    fn after_a_connect_the_next_denial_starts_from_a_minute_not_from_where_it_was() {
+        let (clock, mut requests) = TestClock::new();
+        deny_n_times(&clock, &mut requests, "cody-1", 3);
+        clock.advance(MAX_COOLDOWN + REQUEST_WINDOW);
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Connect);
+        clock.advance(REQUEST_WINDOW);
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+
+        clock.advance(BASE_COOLDOWN - MS);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown)
+        );
+        clock.advance(MS);
+        assert!(
+            ask_as_agent(&mut requests, "cody-1").is_ok(),
+            "it would still be cooling if the streak had survived the Connect"
+        );
+    }
+
+    #[test]
+    fn the_cooldown_belongs_to_the_focus_that_was_denied() {
+        let (clock, mut requests) = TestClock::new();
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+
+        assert!(
+            ask_as_agent(&mut requests, "cody-2").is_ok(),
+            "another focus is not held up by cody-1's denial"
+        );
+        let id = requests.pending().unwrap().request_id.clone();
+        assert!(requests.answer(&cap(), &id, Decision::Connect, false));
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown),
+            "and cody-2's Connect does not clear cody-1's cooldown"
+        );
+        clock.advance(BASE_COOLDOWN);
+        assert!(ask_as_agent(&mut requests, "cody-1").is_ok());
+    }
+
+    #[test]
+    fn two_focuses_keep_separate_streaks() {
+        let (clock, mut requests) = TestClock::new();
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+        clock.advance(BASE_COOLDOWN);
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+        // cody-1 has two denials (120 s). cody-2 has one (60 s).
+        agent_asks_and_user_answers(&mut requests, "cody-2", Decision::Cancel);
+
+        clock.advance(BASE_COOLDOWN);
+        assert!(ask_as_agent(&mut requests, "cody-2").is_ok(), "60 s each");
+        let id = requests.pending().unwrap().request_id.clone();
+        requests.abandon(&id);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown),
+            "cody-1's second denial costs it 120 s"
+        );
+    }
+
+    #[test]
+    fn the_users_own_requests_are_never_held_by_a_cooldown_or_the_ceiling() {
+        let (_clock, mut requests) = TestClock::new();
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown)
+        );
+
+        // The user, on the same focus, mid-cooldown, as often as they like.
+        for _ in 0..(MAX_REQUESTS_PER_WINDOW * 2) {
+            let (id, _rx) = ask_as_user(&mut requests, "cody-1").expect("the user is never held");
+            assert!(requests.answer(&cap(), &id, Decision::Cancel, false));
+        }
+    }
+
+    #[test]
+    fn the_users_denials_do_not_start_a_cooldown_for_the_agent() {
+        let (_clock, mut requests) = TestClock::new();
+        for decision in [Decision::Cancel, Decision::Dismiss] {
+            let (id, _rx) = ask_as_user(&mut requests, "cody-1").unwrap();
+            assert!(requests.answer(&cap(), &id, decision, false));
+        }
+        let (id, _rx) = ask_as_user(&mut requests, "cody-1").unwrap();
+        assert!(requests.timeout(&id));
+
+        assert!(
+            ask_as_agent(&mut requests, "cody-1").is_ok(),
+            "the user said no to their own request, not to the agent's"
+        );
+    }
+
+    #[test]
+    fn the_users_requests_do_not_count_toward_the_agents_ceiling() {
+        let (_clock, mut requests) = TestClock::new();
+        for _ in 0..MAX_REQUESTS_PER_WINDOW {
+            let (id, _rx) = ask_as_user(&mut requests, "cody-1").unwrap();
+            assert!(requests.answer(&cap(), &id, Decision::Connect, false));
+        }
+
+        for _ in 0..MAX_REQUESTS_PER_WINDOW {
+            agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Connect);
+        }
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Limit),
+            "only the agent's own three count"
+        );
+    }
+
+    #[test]
+    fn a_users_connect_does_not_clear_the_agents_cooldown() {
+        let (_clock, mut requests) = TestClock::new();
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+        let (id, _rx) = ask_as_user(&mut requests, "cody-1").unwrap();
+        assert!(requests.answer(&cap(), &id, Decision::Connect, false));
+
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown)
+        );
+    }
+
+    #[test]
+    fn a_focus_may_make_three_requests_in_ten_minutes_and_the_fourth_is_over_the_limit() {
+        let (_clock, mut requests) = TestClock::new();
+        for n in 1..=MAX_REQUESTS_PER_WINDOW {
+            let (id, _rx) =
+                ask_as_agent(&mut requests, "cody-1").unwrap_or_else(|e| panic!("#{n}: {e:?}"));
+            assert!(requests.answer(&cap(), &id, Decision::Connect, false));
+        }
+
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Limit)
+        );
+        assert!(requests.pending().is_none(), "a refusal registers nothing");
+        assert!(
+            ask_as_agent(&mut requests, "cody-2").is_ok(),
+            "the ceiling is per focus"
+        );
+    }
+
+    #[test]
+    fn the_ceiling_window_slides_one_request_at_a_time() {
+        let (clock, mut requests) = TestClock::new();
+        // Requests at 0, 1 and 2 minutes, each connected.
+        for _ in 0..MAX_REQUESTS_PER_WINDOW {
+            agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Connect);
+            clock.advance(MIN);
+        }
+        // Now at 3 minutes.
+        clock.advance(REQUEST_WINDOW - MIN * 3 - MS);
+        assert_eq!(clock.elapsed(), REQUEST_WINDOW - MS);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Limit),
+            "a millisecond before the first request is ten minutes old"
+        );
+
+        clock.advance(MS);
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Connect);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Limit),
+            "the first has aged out; the one just made takes its place"
+        );
+
+        clock.advance(MIN);
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Connect);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Limit),
+            "one at a time: the second aged out, the one just made took its place"
+        );
+    }
+
+    #[test]
+    fn refused_attempts_do_not_count_toward_the_ceiling() {
+        let (clock, mut requests) = TestClock::new();
+        // One request waits since minute 0; at minute 2 the agent is told
+        // Pending over and over.
+        let (id, _rx) = ask_as_agent(&mut requests, "cody-1").unwrap();
+        clock.advance(2 * MIN);
+        for _ in 0..10 {
+            assert_eq!(
+                refusal(ask_as_agent(&mut requests, "cody-1")),
+                Some(SubmitRefused::Pending)
+            );
+        }
+        assert!(requests.answer(&cap(), &id, Decision::Connect, false));
+
+        // Two more are accepted at minute 2: only accepted requests were counted.
+        for _ in 2..=MAX_REQUESTS_PER_WINDOW {
+            agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Connect);
+        }
+        // At minute 5 the fourth is refused, ten times.
+        clock.advance(3 * MIN);
+        for _ in 0..10 {
+            assert_eq!(
+                refusal(ask_as_agent(&mut requests, "cody-1")),
+                Some(SubmitRefused::Limit)
+            );
+        }
+        // At minute 10 the first has aged out, and nothing else is held against the focus.
+        clock.advance(5 * MIN);
+        assert!(ask_as_agent(&mut requests, "cody-1").is_ok());
+    }
+
+    #[test]
+    fn a_users_request_takes_the_slot_from_an_agents_and_the_agent_hears_superseded() {
+        let (_clock, mut requests) = TestClock::new();
+        let (agent_id, mut agent_rx) = ask_as_agent(&mut requests, "cody-1").unwrap();
+
+        let (user_id, mut user_rx) = ask_as_user(&mut requests, "cody-1")
+            .expect("the user's request is accepted while an agent's waits");
+
+        assert_eq!(agent_rx.try_recv(), Ok(RemoteOutcome::Superseded));
+        let pending = requests
+            .pending()
+            .expect("the user's request holds the slot");
+        assert_eq!(pending.request_id, user_id);
+        assert_eq!(pending.requested_by.kind, "user");
+        assert!(matches!(user_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(
+            !requests.answer(&cap(), &agent_id, Decision::Connect, false),
+            "the superseded request can no longer be answered"
+        );
+        assert!(requests.answer(&cap(), &user_id, Decision::Connect, true));
+        assert_eq!(
+            user_rx.try_recv(),
+            Ok(RemoteOutcome::Connect {
+                invite_follow: true
+            })
+        );
+    }
+
+    #[test]
+    fn being_superseded_is_not_a_denial() {
+        let (_clock, mut requests) = TestClock::new();
+        let (_agent_id, mut agent_rx) = ask_as_agent(&mut requests, "cody-1").unwrap();
+        let (user_id, _user_rx) = ask_as_user(&mut requests, "cody-1").unwrap();
+        assert_eq!(agent_rx.try_recv(), Ok(RemoteOutcome::Superseded));
+        assert!(requests.answer(&cap(), &user_id, Decision::Cancel, false));
+
+        assert!(
+            ask_as_agent(&mut requests, "cody-1").is_ok(),
+            "no cooldown for the agent that was superseded"
+        );
+    }
+
+    #[test]
+    fn a_users_request_does_not_supersede_another_users_or_an_agent_that_arrives_later() {
+        let (_clock, mut requests) = TestClock::new();
+        let (first, mut first_rx) = ask_as_user(&mut requests, "cody-1").unwrap();
+
+        assert_eq!(
+            refusal(ask_as_user(&mut requests, "cody-1")),
+            Some(SubmitRefused::Pending),
+            "user against user"
+        );
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Pending),
+            "agent against user"
+        );
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-2")),
+            Some(SubmitRefused::Pending),
+            "another agent against user"
+        );
+        assert!(matches!(first_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(requests.pending().unwrap().request_id, first);
+    }
+
+    #[test]
+    fn an_agent_never_supersedes_another_agent() {
+        let (_clock, mut requests) = TestClock::new();
+        let (first, mut first_rx) = ask_as_agent(&mut requests, "cody-1").unwrap();
+
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-2")),
+            Some(SubmitRefused::Pending)
+        );
+        assert!(matches!(first_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(requests.pending().unwrap().request_id, first);
+    }
+
+    #[test]
+    fn an_operator_gone_or_an_abandon_is_not_a_denial() {
+        let (_clock, mut requests) = TestClock::new();
+        let (_id, mut rx) = ask_as_agent(&mut requests, "cody-1").unwrap();
+        assert!(requests.operator_gone());
+        assert_eq!(rx.try_recv(), Ok(RemoteOutcome::OperatorGone));
+        assert!(
+            ask_as_agent(&mut requests, "cody-1").is_ok(),
+            "operator gone starts no cooldown"
+        );
+        let id = requests.pending().unwrap().request_id.clone();
+        assert!(requests.abandon(&id));
+
+        assert!(
+            ask_as_agent(&mut requests, "cody-1").is_ok(),
+            "abandoning starts no cooldown"
+        );
+    }
+
+    #[test]
+    fn operator_gone_and_abandon_do_not_lengthen_a_streak_either() {
+        let (clock, mut requests) = TestClock::new();
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+        clock.advance(BASE_COOLDOWN);
+        let (_id, _rx) = ask_as_agent(&mut requests, "cody-1").unwrap();
+        assert!(requests.operator_gone());
+        let (id, _rx) = ask_as_agent(&mut requests, "cody-1").unwrap();
+        assert!(requests.abandon(&id));
+        // Out of the request window, so only the streak is in play.
+        clock.advance(REQUEST_WINDOW);
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+
+        // A second denial: 120 s, not 240 s.
+        clock.advance(2 * MIN - MS);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown)
+        );
+        clock.advance(MS);
+        assert!(ask_as_agent(&mut requests, "cody-1").is_ok());
+    }
+
+    #[test]
+    fn a_denial_streak_is_remembered_for_an_hour_and_then_forgotten() {
+        // Two denials, the second at 15 minutes.
+        let two_denials = || {
+            let (clock, mut requests) = TestClock::new();
+            agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+            clock.advance(REQUEST_WINDOW + 5 * MIN);
+            agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+            (clock, requests)
+        };
+        let hour = Duration::from_secs(60 * 60);
+
+        // A moment under an hour later the streak is still there: the third
+        // denial costs 240 s.
+        let (clock, mut requests) = two_denials();
+        clock.advance(hour - Duration::from_secs(1));
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+        clock.advance(Duration::from_secs(240) - MS);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown),
+            "remembered: the third denial costs 240 s"
+        );
+
+        // An hour after the last denial it is gone: the next costs 60 s.
+        let (clock, mut requests) = two_denials();
+        clock.advance(hour);
+        agent_asks_and_user_answers(&mut requests, "cody-1", Decision::Cancel);
+        clock.advance(BASE_COOLDOWN - MS);
+        assert_eq!(
+            refusal(ask_as_agent(&mut requests, "cody-1")),
+            Some(SubmitRefused::Cooldown)
+        );
+        clock.advance(MS);
+        assert!(
+            ask_as_agent(&mut requests, "cody-1").is_ok(),
+            "forgotten: that denial costs a minute again"
+        );
     }
 
     // ── vocabulary of the flow ───────────────────────────────────────────────

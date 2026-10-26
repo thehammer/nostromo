@@ -386,12 +386,8 @@ class MainLayout: NSView {
         let view = makeView(for: focus)
         view.translatesAutoresizingMaskIntoConstraints = false
         contentContainer.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.topAnchor.constraint(equalTo: contentContainer.topAnchor),
-            view.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor),
-            view.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
-        ])
+        // Pinned so that nothing inside the focus can make the window taller (see `VerticalDemandGuard`).
+        VerticalDemandGuard.pin(view, in: contentContainer)
         currentContentView = view
     }
 

@@ -7,6 +7,7 @@ pub mod agents;
 pub mod approvals;
 pub mod config;
 pub mod data;
+pub mod huey;
 pub mod ipc;
 pub mod markdown_blocks;
 pub mod mcp;

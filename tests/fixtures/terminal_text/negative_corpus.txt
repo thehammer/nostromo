@@ -1,0 +1,202 @@
+$ ls -la /var/www/html
+total 248
+drwxr-xr-x 14 www-data www-data   4096 Oct 25 09:12 .
+drwxr-xr-x  3 root root   4096 Sep 30 14:02 ..
+-rw-r--r--  1 www-data www-data    220 Sep 30 14:03 .editorconfig
+-rw-r--r--  1 www-data www-data   1031 Oct 20 11:40 .env.example
+drwxr-xr-x  8 www-data www-data   4096 Oct 25 09:12 .git
+-rw-r--r--  1 www-data www-data   3958 Oct 20 11:40 README.md
+drwxr-xr-x  7 www-data www-data   4096 Oct 20 11:40 app
+-rwxr-xr-x  1 www-data www-data   1686 Oct 20 11:40 artisan
+drwxr-xr-x  3 www-data www-data   4096 Oct 20 11:40 bootstrap
+-rw-r--r--  1 www-data www-data   2449 Oct 20 11:40 composer.json
+-rw-r--r--  1 www-data www-data 291534 Oct 20 11:41 composer.lock
+drwxr-xr-x  2 www-data www-data   4096 Oct 20 11:40 config
+drwxr-xr-x  5 www-data www-data   4096 Oct 20 11:40 database
+drwxr-xr-x  3 www-data www-data   4096 Oct 20 11:40 public
+drwxr-xr-x  5 www-data www-data   4096 Oct 20 11:40 resources
+drwxr-xr-x  2 www-data www-data   4096 Oct 20 11:40 routes
+drwxrwxr-x  5 www-data www-data   4096 Oct 25 09:12 storage
+drwxr-xr-x  4 www-data www-data   4096 Oct 20 11:40 tests
+drwxr-xr-x 44 www-data www-data   4096 Oct 20 11:41 vendor
+$ git log --oneline -n 25
+1197955 Fix queue worker restart on deploy
+2f22765 Add retry to the webhook sender
+6b1f533 Bump laravel/framework to 11.9
+a625406 Remove unused facility import job
+e4666a6 Fix password reset email subject
+8dc29fc Add index on referrals(status, created_at)
+555c3f9 Revert token refresh change
+dd61a9b Handle null facility in dashboard widget
+9f84ad6 Add feature flag for new onboarding
+68ee74f Speed up resident search query
+48c7489 Update README with local setup
+9e8adf5 Fix flaky ReferralSyncTest
+2e5f291 Add migration for audit_log table
+bf076bd Log request id on every exception
+90c1858 Rename ProcessReferral job
+264a36e Add nightly cleanup command
+5713aab Fix timezone bug in schedule display
+80db357 Cache facility settings for 5 minutes
+3b8d4b9 Lock composer dependencies
+011c096 Add health check endpoint
+50859d5 Fix N+1 in resident list
+08ea3f2 Tidy up service provider bindings
+43461cb Add CSV export for referrals
+5e99541 Initial import of billing module
+4f2e99c Merge branch 'main' into release/2026-10
+$ php artisan queue:work --tries=3
+
+   INFO  Processing jobs from the [default] queue.
+
+  2026-10-25 10:00:00 App\Jobs\SendWelcomeEmail ........................ 333ms DONE
+  2026-10-25 10:01:01 App\Jobs\SyncReferral ........................ 156ms DONE
+  2026-10-25 10:02:02 App\Jobs\GenerateInvoicePdf ........................ 406ms DONE
+  2026-10-25 10:03:03 App\Jobs\NotifyFacilityAdmins ........................ 668ms DONE
+  2026-10-25 10:04:04 App\Jobs\RefreshSearchIndex ........................ 51ms DONE
+  2026-10-25 10:05:05 App\Jobs\SendWelcomeEmail ........................ 76ms DONE
+  2026-10-25 10:06:06 App\Jobs\SyncReferral ........................ 842ms DONE
+  2026-10-25 10:07:07 App\Jobs\GenerateInvoicePdf ........................ 550ms DONE
+  2026-10-25 10:08:08 App\Jobs\NotifyFacilityAdmins ........................ 98ms DONE
+  2026-10-25 10:09:09 App\Jobs\RefreshSearchIndex ........................ 376ms DONE
+  2026-10-25 10:10:00 App\Jobs\SendWelcomeEmail ........................ 598ms DONE
+  2026-10-25 10:11:01 App\Jobs\SyncReferral ........................ 61ms DONE
+  2026-10-25 10:12:02 App\Jobs\GenerateInvoicePdf ........................ 521ms DONE
+  2026-10-25 10:13:03 App\Jobs\NotifyFacilityAdmins ........................ 221ms DONE
+  2026-10-25 10:14:04 App\Jobs\RefreshSearchIndex ........................ 40ms DONE
+  2026-10-25 10:15:05 App\Jobs\SendWelcomeEmail ........................ 90ms DONE
+  2026-10-25 10:16:06 App\Jobs\SyncReferral ........................ 446ms DONE
+  2026-10-25 10:17:07 App\Jobs\GenerateInvoicePdf ........................ 430ms DONE
+  2026-10-25 10:21:44 App\Jobs\SyncReferral ........................ 31ms FAIL
+[2026-10-25 10:21:44][4299b8c9-c50c-3e4e-8a06-7f448426463e] Processing: App\Jobs\SyncReferral
+[2026-10-25 10:21:44][4299b8c9-c50c-3e4e-8a06-7f448426463e] Failed:     App\Jobs\SyncReferral
+$ tail -n 60 storage/logs/laravel.log
+[2026-10-25 10:21:44] production.ERROR: SQLSTATE[HY000] [2002] Connection refused (SQL: select * from `users` where `email` = ? limit 1) {"exception":"[object] (Illuminate\\Database\\QueryException(code: 2002): SQLSTATE[HY000] [2002] Connection refused (SQL: select * from `users` where `email` = ? limit 1) at /var/www/html/vendor/laravel/framework/src/Illuminate/Database/Connection.php:760)
+[stacktrace]
+#0 /var/www/html/vendor/laravel/framework/src/Illuminate/Database/Connection.php(760): Illuminate\Database\Connection->runQueryCallback('select * from `...', Array, Object(Closure))
+#1 /var/www/html/vendor/laravel/framework/src/Illuminate/Database/Connection.php(720): Illuminate\Database\Connection->run('select * from `...', Array, Object(Closure))
+#2 /var/www/html/vendor/laravel/framework/src/Illuminate/Database/Connection.php(404): Illuminate\Database\Connection->select('select * from `...', Array, true)
+#3 /var/www/html/vendor/laravel/framework/src/Illuminate/Database/Query/Builder.php(2819): Illuminate\Database\Query\Builder->runSelect()
+#4 /var/www/html/vendor/laravel/framework/src/Illuminate/Database/Query/Builder.php(2807): Illuminate\Database\Query\Builder->get(Array)
+#5 /var/www/html/vendor/laravel/framework/src/Illuminate/Database/Eloquent/Builder.php(739): Illuminate\Database\Eloquent\Builder->getModels(Array)
+#6 /var/www/html/vendor/laravel/framework/src/Illuminate/app/Services/ReferralSyncer.php(41): App\Services\ReferralSyncer->handle()
+#7 /var/www/html/vendor/laravel/framework/src/Illuminate/Container/BoundMethod.php(36): Illuminate\Container\BoundMethod::Illuminate\Container\{closure}()
+#8 /var/www/html/vendor/laravel/framework/src/Illuminate/Queue/CallQueuedHandler.php(70): Illuminate\Queue\CallQueuedHandler->call(Object(Illuminate\Queue\Jobs\RedisJob), Array)
+#9 {main}"} 
+[2026-10-25 10:22:01] production.WARNING: Deprecated: Creation of dynamic property App\Models\Resident::$legacy_id is deprecated in /var/www/html/app/Models/Resident.php on line 88
+[2026-10-25 10:22:09] production.ERROR: Illuminate\Session\TokenMismatchException: CSRF token mismatch. in /var/www/html/vendor/laravel/framework/src/Illuminate/Foundation/Exceptions/Handler.php:410
+[2026-10-25 10:22:15] production.INFO: Referral 817441ba-46af-fe2c-37b5-a9fcea45f2a1 transitioned from pending to accepted by user 4412
+[2026-10-25 10:22:15] production.INFO: Sent 3 notifications for facility 118 in 212ms
+[2026-10-25 10:23:02] production.ERROR: Class "App\Support\LegacyFormatter" not found {"exception":"[object] (Error(code: 0): Class \"App\\Support\\LegacyFormatter\" not found at /var/www/html/app/Http/Controllers/ReportController.php:57)
+#0 /var/www/html/vendor/laravel/framework/src/Illuminate/Routing/Controller.php(54): App\Http\Controllers\ReportController->show(Object(Illuminate\Http\Request))
+#1 /var/www/html/vendor/laravel/framework/src/Illuminate/Routing/ControllerDispatcher.php(43): Illuminate\Routing\Controller->callAction('show', Array)
+#2 {main}"} 
+mysql> select id, uuid, sha256 from documents order by id limit 12;
++----+--------------------------------------+------------------------------------------------------------------+
+| id | uuid                                 | sha256                                                           |
++----+--------------------------------------+------------------------------------------------------------------+
+|  1 | e4774cdd-a079-3f86-414e-8b9140bb6db4 | 33b8a4c2584fc9f1b6dbf8da314e807cbc29efeb5b73376d1d4196f9cb25dffe |
+|  2 | 270c1b08-4f3f-146e-b578-7075158d9c53 | 83f5ad7834a9f5c5fb86daa9d68e9bcd0f457148d19a7a958d608a28c4c214f0 |
+|  3 | 532a7b8e-0328-a8d0-5a8e-6258b28b9a36 | d817ee70a2663231731f15af5567bd5439d5555c2037905ce1e3f877635d46c0 |
+|  4 | 7b8d62fd-2f0f-5b2e-3ba5-437e5b983128 | d524a84795587adfc1dc9ded31064921a90fb70f7bd7bde9ab5d4b4e10e0d123 |
+|  5 | 4d0a87b6-3b72-90cd-6440-4e2d8098dee1 | 232816909b5db2fa9a218f77a85be61d5f4f112f0b170810db1b51d603ff1431 |
+|  6 | a6a03a32-1dfc-9ab8-5c18-6fe4b38338a2 | eb0544b3879818fc4a519fd896ab4177e2972d547b70f085c8b881732f2b2b9b |
+|  7 | 6bce05df-9831-da77-99a5-edc4f7abfbec | ee4487b7a8dd3bc69b8bf26a47548e56e5ac7a17fe1a30b1d48db3c5eea1c0b6 |
+|  8 | 07739385-2be2-0e37-026d-6281827662f2 | aaf957762a8349fd539e6cff1a1fbdbf0adca6c13b26c7eeba49916d38cfdd4a |
+|  9 | 5486259f-9c01-e219-9ac7-cddcae3b383d | 898598eb999b26a0357b1d007da0c38c639bac6ed904ceb16ecad62273eec0d8 |
+| 10 | cb8232dd-ad50-acab-196b-20a2c9366463 | 24edd73921f8051691ca92be66425551c4da28ebe63117fe2d74589bc41a172e |
+| 11 | a4cb5cf0-c26c-1301-89bc-9536bd787515 | 0a5cd25263121d075acfdbe0a658865efbb4e60d04ca0f96fe2025aaf48dfd62 |
+| 12 | e2dba064-904f-7c6d-8d29-84bc722ebc9b | e4c62785962ebada2ef0bbe7e9c2136abc4124a19b55a828cd524569ab16d48e |
++----+--------------------------------------+------------------------------------------------------------------+
+12 rows in set (0.00 sec)
+$ sha256sum storage/app/exports/*.csv
+d718ed6a10fbefc28cd04d3ed1439daf5a2b33a242a25b40d3ed29df8fbbf2bb  storage/app/exports/export-2026-10-20.csv
+2e2058b92b3493e77314c9e205b2bbdbb22c55cc14b7e5ba4951aa374800df50  storage/app/exports/export-2026-10-21.csv
+92425201792467ddbc4e5089b0a575b53599c2e890e1a7b5039f225bfa156081  storage/app/exports/export-2026-10-22.csv
+e96d8d28c8512b63f749cf752f7f5c8b548f679d34ee828834e99b3a2965ae3f  storage/app/exports/export-2026-10-23.csv
+$ git rev-parse HEAD origin/main
+1a954628a960aaef81d7b2d4521929579f3541e6
+b284f94827db1fa2970d9e2014f080413b547a7e
+$ top -b -n 1 | head -20
+top - 10:25:01 up 41 days,  3:12,  1 user,  load average: 0.42, 0.37, 0.35
+Tasks: 213 total,   1 running, 212 sleeping,   0 stopped,   0 zombie
+%Cpu(s):  3.1 us,  1.2 sy,  0.0 ni, 95.4 id,  0.2 wa,  0.0 hi,  0.1 si,  0.0 st
+MiB Mem :  15894.5 total,   2210.3 free,   6120.7 used,   7563.5 buff/cache
+MiB Swap:   2048.0 total,   2048.0 free,      0.0 used.   9102.1 avail Mem
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+   1200 www-data  20   0  173248 134176   2743 S   5.0   0.2 72:17.38 php-fpm: pool www
+   1237 root      20   0  761259  40433   6727 S   5.3   0.2 28:12.81 nginx: worker process
+   1274 root      20   0  239643 159838   5433 S   1.3   0.5 39:45.97 mysqld
+   1311 www-data  20   0  289505  62030   6764 S   5.1   0.8 12:45.18 redis-server *:6379
+   1348 root      20   0  691783  39248   7070 S   1.9   2.7 54:59.50 php artisan queue:work
+   1385 root      20   0  588218 245599   4962 S   2.7   3.2 89:59.41 node /usr/bin/pm2
+   1422 www-data  20   0  185831 165417   6302 S   4.5   1.4 57:28.87 supervisord
+   1459 root      20   0  176756  69900   6193 S   3.8   3.0 19:41.63 containerd
+   1496 root      20   0  141111  48695   8263 S   5.0   3.2 40:31.98 dockerd
+   1533 www-data  20   0  467188 268400   6750 S   7.2   0.3 11:27.70 sshd: user [priv]
+   1570 root      20   0  830901  42078   2497 S   6.6   1.2 73:53.67 systemd-journald
+   1607 root      20   0  398420 210265   7477 S   3.1   3.8 45:20.88 cron
+$ docker ps
+CONTAINER ID   IMAGE               COMMAND                  CREATED        STATUS        PORTS                    NAMES
+fa9e19070c2a   redis:7-alpine      "redis-server"   1 days ago   Up 1 days   6379/tcp                 cache
+d29988fd6097   mysql:8.0           "docker-entrypoint.s…"   2 days ago   Up 2 days   0.0.0.0:3306->3306/tcp   db
+e904fe9f3a03   nginx:1.25          "/docker-entrypoint.…"   3 days ago   Up 3 days   0.0.0.0:80->80/tcp       web
+75468705b16f   myorg/portal:2026.10.24 "php-fpm"   4 days ago   Up 4 days   9000/tcp                 portal
+166abde73d82   myorg/worker:2026.10.24 "php artisan queue…"   5 days ago   Up 5 days                            worker
+caf22bd3bea4   mailhog/mailhog     "MailHog"   6 days ago   Up 6 days   0.0.0.0:8025->8025/tcp   mail
+$ env
+SHELL=/bin/bash
+PWD=/var/www/html
+LOGNAME=www-data
+HOME=/var/www
+LANG=C.UTF-8
+TERM=xterm-256color
+USER=www-data
+SHLVL=1
+APP_ENV=production
+APP_DEBUG=false
+APP_URL=https://portal.example.test
+APP_TIMEZONE=America/Chicago
+LOG_CHANNEL=stderr
+LOG_LEVEL=info
+DB_CONNECTION=mysql
+DB_HOST=db.internal
+DB_PORT=3306
+DB_DATABASE=portal
+DB_USERNAME=portal
+CACHE_DRIVER=redis
+QUEUE_CONNECTION=redis
+SESSION_DRIVER=redis
+REDIS_HOST=cache.internal
+REDIS_PORT=6379
+MAIL_MAILER=smtp
+MAIL_HOST=smtp.internal
+MAIL_PORT=587
+AWS_DEFAULT_REGION=us-east-1
+AWS_REGION=us-east-1
+PHP_VERSION=8.3.12
+PHPIZE_DEPS=autoconf dpkg-dev file g++ gcc libc-dev make pkg-config re2c
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+HOSTNAME=86dd1cf45142
+OLDPWD=/
+_=/usr/bin/env
+$ php artisan migrate --force
+  2014_10_12_000000_create_users_table ........................ 19ms DONE
+  2014_10_12_100000_create_password_resets_table ........................ 68ms DONE
+  2019_08_19_000000_create_failed_jobs_table ........................ 12ms DONE
+  2019_12_14_000001_create_personal_access_tokens_table ........................ 32ms DONE
+  2026_10_01_120000_add_status_index_to_referrals_table ........................ 41ms DONE
+$ df -h
+Filesystem      Size  Used Avail Use% Mounted on
+overlay          50G   21G   27G  44% /
+tmpfs            64M     0   64M   0% /dev
+/dev/nvme0n1p1   50G   21G   27G  44% /etc/hosts
+$ curl -s -o /dev/null -w '%{http_code}\n' https://portal.example.test/health
+200
+$ cat /etc/os-release
+PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"
+NAME="Debian GNU/Linux"
+VERSION_ID="12"
+HOME_URL="https://www.debian.org/"
+$ 

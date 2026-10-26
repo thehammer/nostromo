@@ -246,6 +246,12 @@ impl Config {
         crate::agents::resolve(self.agents.as_ref())
     }
 
+    /// Huey's optional `[agents.huey]` keys (report time, models, caps), plus
+    /// warnings naming keys only.
+    pub fn resolve_huey(&self) -> (crate::huey::HueyConfig, Vec<String>) {
+        crate::huey::config::resolve(self.agents.as_ref())
+    }
+
     /// The Fred accounts from `[[fred_accounts]]`, plus warnings (naming the
     /// entry index and the problem, never its values) for the caller to log.
     pub fn resolve_fred_accounts(&self) -> (FredAccounts, Vec<String>) {

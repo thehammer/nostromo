@@ -80,6 +80,11 @@ pub const SCRUBBED_ENV: &[&str] = &[
 /// must not call back into the session.
 pub type ReaderHook = Box<dyn FnMut(&[u8]) + Send>;
 
+/// Like [`ReaderHook`], but also given the screen model as the chunk left it.
+/// Returns `false` to be removed. Used by agent follow, which needs to know
+/// when a full-screen program is showing and what is on the screen.
+pub type ScreenHook = Box<dyn FnMut(&[u8], &vt100::Screen) -> bool + Send>;
+
 /// Called once with the exit code (`None` if it could not be read).
 pub type ExitHook = Box<dyn FnOnce(Option<i32>) + Send>;
 
@@ -131,6 +136,7 @@ struct Screen {
     ring: ScrollbackBuf,
     parser: vt100::Parser,
     hooks: Vec<ReaderHook>,
+    screen_hooks: Vec<ScreenHook>,
 }
 
 /// What a spawn adds to the defaults.
@@ -297,6 +303,7 @@ impl TerminalSession {
                 ring: ScrollbackBuf::with_limits(RING_MAX_BYTES, RING_MAX_NEWLINES),
                 parser: vt100::Parser::new(rows, cols, PARSER_SCROLLBACK_ROWS),
                 hooks: options.hooks,
+                screen_hooks: Vec::new(),
             }),
             input,
             master: Mutex::new(pair.master),
@@ -380,12 +387,17 @@ impl TerminalSession {
                 Ok(0) => break,
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    let mut screen = self.screen.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut guard = self.screen.lock().unwrap_or_else(|e| e.into_inner());
+                    let screen = &mut *guard;
                     screen.ring.push(chunk.to_vec());
                     screen.parser.process(chunk);
                     for hook in screen.hooks.iter_mut() {
                         hook(chunk);
                     }
+                    let parser = &screen.parser;
+                    screen
+                        .screen_hooks
+                        .retain_mut(|hook| hook(chunk, parser.screen()));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 // EIO once the slave side is closed: the normal end.
@@ -581,6 +593,26 @@ impl TerminalSession {
             .unwrap_or_else(|e| e.into_inner())
             .hooks
             .push(hook);
+    }
+
+    /// Look at the current screen with `start`, and add the [`ScreenHook`] it
+    /// returns, in one step: the hook gets exactly the chunks read after
+    /// `start` looked.
+    pub fn add_screen_hook<T>(&self, start: impl FnOnce(&vt100::Screen) -> (T, ScreenHook)) -> T {
+        let mut screen = self.screen.lock().unwrap_or_else(|e| e.into_inner());
+        let (value, hook) = start(screen.parser.screen());
+        screen.screen_hooks.push(hook);
+        value
+    }
+
+    /// Run `f` on the current screen model (no chunk is read meanwhile).
+    pub fn with_screen<T>(&self, f: impl FnOnce(&vt100::Screen) -> T) -> T {
+        f(self
+            .screen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .parser
+            .screen())
     }
 
     /// Run `f` with a consistent view of the screen: no chunk is read (and no

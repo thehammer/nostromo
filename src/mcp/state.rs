@@ -198,6 +198,12 @@ pub struct McpSharedState {
     /// Live Teri todos snapshot.
     pub teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
 
+    /// Huey's handle; `None` when Huey is off or outside the daemon.
+    pub huey: Option<crate::huey::HueyHandle>,
+
+    /// Bumped on every Huey state change (parked when Huey is off).
+    pub huey_rx: watch::Receiver<crate::huey::HueyView>,
+
     /// The daemon's work hub (todos, repo docs, Jira, Sentry), behind
     /// `teri.list_work_items` / `teri.get_work_item`. `None` outside the daemon.
     pub work_hub: Option<Arc<WorkHub>>,
@@ -264,6 +270,8 @@ impl McpSharedState {
             fred_mailbox_rx,
             fred_calendar_rx,
             teri_todos_rx,
+            huey: None,
+            huey_rx: watch::channel(crate::huey::HueyView::default()).1,
             work_hub: None,
             enabled_agents: crate::agents::EnabledAgents::all(),
             mother_jobs_rx,
@@ -411,6 +419,8 @@ impl McpSharedState {
         state.fred_calendar_rx = sources.fred_calendar_rx;
         state.teri_todos_rx = sources.teri_todos_rx;
         state.work_hub = sources.work_hub;
+        state.huey = sources.huey;
+        state.huey_rx = sources.huey_rx;
         state.enabled_agents = sources.enabled_agents;
         state
     }
@@ -432,6 +442,8 @@ pub struct DaemonSources {
     pub teri_todos_rx: watch::Receiver<Option<TeriTodosSnapshot>>,
     /// The work hub behind `teri.list_work_items`; `None` leaves those tools unavailable.
     pub work_hub: Option<Arc<WorkHub>>,
+    pub huey: Option<crate::huey::HueyHandle>,
+    pub huey_rx: watch::Receiver<crate::huey::HueyView>,
     /// Which switchable built-in agents the daemon runs.
     pub enabled_agents: crate::agents::EnabledAgents,
 }

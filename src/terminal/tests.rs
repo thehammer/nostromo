@@ -1163,6 +1163,7 @@ fn adopt(
         rows: 24,
         requested_by: requester(),
         opened_by_request: None,
+        follower: None,
     };
     let fanout = Fanout::idle(&terminal_id, Arc::new(Mutex::new(None)));
     mgr.terminals.insert(

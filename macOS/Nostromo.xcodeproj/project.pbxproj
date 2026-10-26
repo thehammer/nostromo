@@ -514,6 +514,12 @@
 		WCO000000000000000000021 /* DaemonDiagnostics.swift in TestSources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000002 /* DaemonDiagnostics.swift */; };
 		WCO000000000000000000022 /* DecisionPresenter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000030 /* DecisionPresenter.swift */; };
 		MDW000000000000000000002 /* MotherDetailLabelWidthTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MDW000000000000000000001 /* MotherDetailLabelWidthTests.swift */; };
+		MVC000000000000000000002 /* MotherOverviewAndCrewOverflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MVC000000000000000000001 /* MotherOverviewAndCrewOverflowTests.swift */; };
+		MVT000000000000000000002 /* FocusSplitOversizedChildTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MVT000000000000000000001 /* FocusSplitOversizedChildTests.swift */; };
+		MVS000000000000000000002 /* MotherDetailScrollTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MVS000000000000000000001 /* MotherDetailScrollTests.swift */; };
+		SSB000000000000000000002 /* SourceStateBannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SSB000000000000000000001 /* SourceStateBannerTests.swift */; };
+		MVV000000000000000000002 /* MotherDetailVerticalOverflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MVV000000000000000000001 /* MotherDetailVerticalOverflowTests.swift */; };
+		MVH000000000000000000002 /* MotherDetailHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = MVH000000000000000000001 /* MotherDetailHarness.swift */; };
 		WCO000000000000000000102 /* WindowContentOverflowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WCO000000000000000000101 /* WindowContentOverflowTests.swift */; };
 		PBT000000000000000000001 /* PaneFlightRecorderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PBT000000000000000000003 /* PaneFlightRecorderTests.swift */; };
 		PBT100000000000000000001 /* PaneBlankDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PBT100000000000000000003 /* PaneBlankDetectorTests.swift */; };
@@ -902,6 +908,12 @@
 		ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerAppearanceTests.swift; sourceTree = "<group>"; };
 		MDW000000000000000000001 /* MotherDetailLabelWidthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDetailLabelWidthTests.swift; sourceTree = "<group>"; };
+		MVC000000000000000000001 /* MotherOverviewAndCrewOverflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherOverviewAndCrewOverflowTests.swift; sourceTree = "<group>"; };
+		MVT000000000000000000001 /* FocusSplitOversizedChildTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusSplitOversizedChildTests.swift; sourceTree = "<group>"; };
+		MVS000000000000000000001 /* MotherDetailScrollTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDetailScrollTests.swift; sourceTree = "<group>"; };
+		SSB000000000000000000001 /* SourceStateBannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceStateBannerTests.swift; sourceTree = "<group>"; };
+		MVV000000000000000000001 /* MotherDetailVerticalOverflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDetailVerticalOverflowTests.swift; sourceTree = "<group>"; };
+		MVH000000000000000000001 /* MotherDetailHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDetailHarness.swift; sourceTree = "<group>"; };
 		WCO000000000000000000101 /* WindowContentOverflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowContentOverflowTests.swift; sourceTree = "<group>"; };
 		PBT000000000000000000003 /* PaneFlightRecorderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneFlightRecorderTests.swift; sourceTree = "<group>"; };
 		PBT100000000000000000003 /* PaneBlankDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneBlankDetectorTests.swift; sourceTree = "<group>"; };
@@ -1339,6 +1351,12 @@
 				XX0000000000000000000001 /* NotificationDecodeTests.swift */,
 				XX0000000000000000000002 /* MainLayoutNotificationWiringTests.swift */,
 				MDW000000000000000000001 /* MotherDetailLabelWidthTests.swift */,
+				MVC000000000000000000001 /* MotherOverviewAndCrewOverflowTests.swift */,
+				MVT000000000000000000001 /* FocusSplitOversizedChildTests.swift */,
+				MVS000000000000000000001 /* MotherDetailScrollTests.swift */,
+				SSB000000000000000000001 /* SourceStateBannerTests.swift */,
+				MVV000000000000000000001 /* MotherDetailVerticalOverflowTests.swift */,
+				MVH000000000000000000001 /* MotherDetailHarness.swift */,
 				WCO000000000000000000101 /* WindowContentOverflowTests.swift */,
 				OVC000000000000000000011 /* OverflowCaptureTests.swift */,
 				PBT000000000000000000003 /* PaneFlightRecorderTests.swift */,
@@ -1993,6 +2011,12 @@
 				XX0000000000000000000011 /* NotificationDecodeTests.swift in Sources */,
 				XX0000000000000000000012 /* MainLayoutNotificationWiringTests.swift in Sources */,
 				MDW000000000000000000002 /* MotherDetailLabelWidthTests.swift in Sources */,
+				MVC000000000000000000002 /* MotherOverviewAndCrewOverflowTests.swift in Sources */,
+				MVT000000000000000000002 /* FocusSplitOversizedChildTests.swift in Sources */,
+				MVS000000000000000000002 /* MotherDetailScrollTests.swift in Sources */,
+				SSB000000000000000000002 /* SourceStateBannerTests.swift in Sources */,
+				MVV000000000000000000002 /* MotherDetailVerticalOverflowTests.swift in Sources */,
+				MVH000000000000000000002 /* MotherDetailHarness.swift in Sources */,
 				WCO000000000000000000102 /* WindowContentOverflowTests.swift in Sources */,
 				OVC000000000000000000012 /* OverflowCaptureTests.swift in Sources */,
 				PBT000000000000000000001 /* PaneFlightRecorderTests.swift in Sources */,

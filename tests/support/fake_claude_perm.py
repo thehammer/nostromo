@@ -25,6 +25,17 @@ real CLI 2.1.296 spike captures) and models the permission-prompt flow:
                          CUES below; the turn waits for an answer only for the
                          kinds that expect one;
         runs_freely      an unprompted Bash `git status`;
+        HOLD:<abs path>  the message is echoed as usual, then the turn is held
+                         open (no further frame, the process stays alive) until
+                         that file exists (polled every ~20 ms; only its
+                         existence is checked, it is never read or written);
+                         then a short "ok" turn follows (`emit_text("ok");
+                         emit_result()`). While held the fake reads no further
+                         stdin, so anything the daemon writes meanwhile waits in
+                         the pipe: a test uses this to keep a session mid-turn.
+                         Safety nets so a forgotten hold cannot leak a process:
+                         it gives up after 120 s (and then ends the turn), and
+                         it exits at once when its parent process is gone;
         (no cue)         a short "ok" turn;
   * `control_response` answers are logged to `<logdir>/responses.jsonl`;
   * a daemon `control_request` with subtype `interrupt` is answered the way
@@ -111,6 +122,9 @@ AUTH_FAILURE_TEXT = "Failed to authenticate: OAuth session expired and could not
 AUTH_MIDTURN_CUE = "AUTH_MIDTURN"
 DIE_MIDTURN_CUE = "DIE_MIDTURN"
 HANG_MIDTURN_CUE = "HANG_MIDTURN"
+HOLD_RE = re.compile(r"\bHOLD:(/\S+)")
+HOLD_POLL_SECONDS = 0.02
+HOLD_GIVE_UP_SECONDS = 120
 
 
 def now_iso():
@@ -435,6 +449,12 @@ class FakeClaude:
             os.kill(os.getpid(), signal.SIGKILL)
         if HANG_MIDTURN_CUE in text:
             return
+        hold = HOLD_RE.search(text)
+        if hold:
+            self.hold_until_file_exists(hold.group(1))
+            self.emit_text("ok")
+            self.emit_result()
+            return
         cue = CUE_RE.search(text)
         raw = RAW_RE.search(text)
         if raw and not cue:
@@ -446,6 +466,16 @@ class FakeClaude:
         else:
             self.emit_text("ok")
             self.emit_result()
+
+    def hold_until_file_exists(self, path):
+        parent = os.getppid()
+        deadline = time.monotonic() + HOLD_GIVE_UP_SECONDS
+        while not os.path.exists(path):
+            if os.getppid() != parent:
+                os._exit(0)  # the daemon is gone: do not leak
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(HOLD_POLL_SECONDS)
 
     def load_fixture(self, name):
         path = os.path.join(FIXTURE_DIR, name + ".json")

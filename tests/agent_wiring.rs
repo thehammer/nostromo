@@ -8,6 +8,7 @@ use nostromo::agents::{
     PerriSources, TeriSources, TodosRx,
 };
 use nostromo::data::work::work_service;
+use nostromo::huey::{HueyConfig, HueyDeps, HueyEngine, HueySources};
 use tokio::sync::{mpsc, watch};
 
 /// Records which spawn methods ran; hands back receivers whose senders it
@@ -15,6 +16,8 @@ use tokio::sync::{mpsc, watch};
 #[derive(Default)]
 struct Recorder {
     calls: Vec<&'static str>,
+    /// `start_huey` calls, kept apart so the Fred/Perri/Teri call lists stay as they were.
+    huey_calls: usize,
     keep: Vec<Box<dyn std::any::Any + Send>>,
 }
 
@@ -27,6 +30,16 @@ impl Recorder {
 }
 
 impl AgentSpawner for Recorder {
+    fn start_huey(&mut self) -> HueySources {
+        self.huey_calls += 1;
+        let dir = tempfile::tempdir().unwrap();
+        let src = HueyEngine::spawn(HueyDeps::production(
+            dir.path().to_path_buf(),
+            HueyConfig::default(),
+        ));
+        self.keep.push(Box::new(dir));
+        src
+    }
     fn start_perri(&mut self) -> PerriSources {
         self.calls.push("perri");
         let (queue_refresh_tx, _r1) = mpsc::unbounded_channel();
@@ -145,12 +158,39 @@ async fn disabled_teri_spawns_nothing_parks_its_sender_and_leaves_the_null_work_
 async fn everything_disabled_spawns_nothing_and_keeps_all_receivers_open() {
     let (rec, wired) = wire(EnabledAgents {
         fred: false,
+        huey: false,
         perri: false,
         teri: false,
     });
     assert!(rec.calls.is_empty());
-    assert_eq!(wired.parked.len(), 5);
+    assert_eq!(rec.huey_calls, 0);
+    assert!(wired.huey.is_none());
+    assert_eq!(wired.parked.len(), 6);
+    assert!(wired.huey_rx.has_changed().is_ok());
     assert!(wired.perri_queue_rx.has_changed().is_ok());
     assert!(wired.teri_todos_rx.has_changed().is_ok());
     assert!(wired.fred_calendar_rx.has_changed().is_ok());
+}
+
+#[tokio::test]
+async fn huey_is_started_by_default_and_hands_out_a_live_handle() {
+    let (rec, wired) = wire(EnabledAgents::all());
+    assert_eq!(rec.huey_calls, 1);
+    assert!(wired.huey.is_some());
+    assert!(wired.parked.is_empty());
+}
+
+#[tokio::test]
+async fn disabled_huey_is_never_started_and_parks_its_receiver() {
+    let mut e = EnabledAgents::all();
+    e.huey = false;
+    let (rec, wired) = wire(e);
+    assert_eq!(rec.huey_calls, 0);
+    assert!(wired.huey.is_none());
+    assert_eq!(wired.parked.len(), 1);
+    assert!(
+        wired.huey_rx.has_changed().is_ok(),
+        "receiver must stay open"
+    );
+    assert_eq!(rec.calls.len(), 6, "the other agents still start");
 }
