@@ -275,6 +275,9 @@ fn write_recent_reports(out: &mut String, input: &CurateInput, fence: &NonceFenc
 enum RunEnd {
     Accepted(Box<Publish>),
     Exhausted,
+    /// A tool answer could not be recorded: the capture would no longer be
+    /// every byte the model was given, so the run is not kept (T8).
+    RecordFailed,
 }
 
 /// One run in progress.
@@ -286,6 +289,39 @@ struct ActiveRun {
     model_input: PathBuf,
     digest_file: PathBuf,
     done: Option<oneshot::Sender<RunEnd>>,
+}
+
+impl ActiveRun {
+    /// Published, exhausted, failed or abandoned (the curator stopped
+    /// listening): no tool call acts on it any more.
+    fn is_over(&self) -> bool {
+        self.done.as_ref().is_none_or(|d| d.is_closed())
+    }
+
+    fn finish(&mut self, end: RunEnd) {
+        if let Some(done) = self.done.take() {
+            let _ = done.send(end);
+        }
+    }
+
+    /// Append one tool call's answer to `model-input.txt`. On failure the
+    /// run ends: an unrecorded answer must not reach the model.
+    fn record(&mut self, header: &str, answer: &Value) -> bool {
+        let ok = append_synced(&self.model_input, &format!("\n--- {header}\n{answer}\n")).is_ok();
+        if !ok {
+            warn!("huey: a tool answer could not be recorded");
+            self.finish(RunEnd::RecordFailed);
+        }
+        ok
+    }
+}
+
+fn finished() -> Value {
+    json!({ "ok": false, "error": "finished", "message": "this run is over; stop now" })
+}
+
+fn not_recorded() -> Value {
+    json!({ "error": "not_recorded", "message": "the answer could not be recorded; stop now" })
 }
 
 /// The run in progress, shared by the curator and the `huey.*` MCP tools
@@ -440,6 +476,14 @@ impl CurateBridge {
         rx
     }
 
+    /// Forget the run without waiting (a cancelled curate). A check still
+    /// holding the lock finds the run over: its curator stopped listening.
+    fn abandon(&self) {
+        if let Ok(mut run) = self.active.try_lock() {
+            run.take();
+        }
+    }
+
     /// End the run; its check results.
     async fn end(&self) -> Vec<CheckResult> {
         self.active
@@ -451,50 +495,62 @@ impl CurateBridge {
     }
 
     /// `huey.check_project` for the curating session: run the probe against
-    /// one of the run's projects, record it (id `c<n>`) in `model-input.txt`
-    /// and the digest, then answer. Held for the whole check, so checks run
-    /// one at a time and the ids follow the order they were recorded in.
+    /// one of the run's projects, record the answer in `model-input.txt` and
+    /// (for a check that ran, id `c<n>`) the digest, then answer. The run
+    /// takes the check only once both are on disk (T8). Held for the whole
+    /// check, so checks run one at a time and ids follow the recorded order.
     pub async fn check_project(&self, args: &Value) -> Value {
         let mut guard = self.active.lock().await;
         let Some(run) = guard.as_mut() else {
             return no_run();
         };
-        let (project, probe) = match parse_check_args(args) {
-            Ok(parsed) => parsed,
-            Err(answer) => return answer,
+        if run.is_over() {
+            return finished();
+        }
+        let header = format!("huey_check_project {}", one_line(&args.to_string(), 600));
+        let ran = match parse_check_args(args) {
+            Err(answer) => Err(answer),
+            Ok((project, probe)) => match run.input.project_roots.get(&project).cloned() {
+                None => Err(json!({
+                    "error": "unknown_project",
+                    "message": "not a project in the digest; use a project id from \"Projects in flight\"",
+                })),
+                Some(root) => {
+                    let id = format!("c{}", run.checks.len() + 1);
+                    run_check(id, project, root, probe).await
+                }
+            },
         };
-        let Some(root) = run.input.project_roots.get(&project).cloned() else {
-            return json!({
-                "error": "unknown_project",
-                "message": "not a project in the digest; use a project id from \"Projects in flight\"",
-            });
-        };
-        let id = format!("c{}", run.checks.len() + 1);
-        let probe_kind = probe.kind();
-        let result = match run_check(id, project, root, probe).await {
+        let result = match ran {
             Ok(result) => result,
-            // A refused probe ran nothing and taught nothing: no id, no record.
-            Err(refusal) => return refusal,
+            // Refused: nothing ran and nothing was learned, so no id; the
+            // answer is still recorded as given.
+            Err(answer) => {
+                return if run.record(&header, &answer) {
+                    answer
+                } else {
+                    not_recorded()
+                };
+            }
         };
         let answer = check_answer(&result);
-        append_checks(&mut run.input.digest, std::slice::from_ref(&result));
-        run.checks.push(result);
-        // Recorded before the model sees it (T8).
-        let call = one_line(&args.to_string(), 600);
-        let recorded = append_synced(
-            &run.model_input,
-            &format!("\n--- huey_check_project {call}\n{answer}\n"),
-        )
-        .and_then(|()| write_synced(&run.digest_file, &run.input.digest.text));
-        if recorded.is_err() {
+        let mut digest = run.input.digest.clone();
+        append_checks(&mut digest, std::slice::from_ref(&result));
+        if write_synced(&run.digest_file, &digest.text).is_err() {
             warn!("huey: a check could not be recorded");
-            return json!({ "error": "check_failed", "message": "the check could not be recorded" });
+            run.finish(RunEnd::RecordFailed);
+            return not_recorded();
+        }
+        if !run.record(&header, &answer) {
+            return not_recorded();
         }
         info!(
-            kind = probe_kind,
-            checks = run.checks.len(),
+            kind = result.probe.kind(),
+            checks = run.checks.len() + 1,
             "huey: check ran"
         );
+        run.input.digest = digest;
+        run.checks.push(result);
         answer
     }
 
@@ -506,8 +562,8 @@ impl CurateBridge {
         let Some(run) = guard.as_mut() else {
             return no_run();
         };
-        if run.done.is_none() {
-            return json!({ "ok": false, "error": "finished", "message": "this run is over; stop now" });
+        if run.is_over() {
+            return finished();
         }
         run.attempts += 1;
         let verdict = judge_publish(run, args);
@@ -541,21 +597,12 @@ impl CurateBridge {
             problems = answer["problems"].as_array().map_or(0, Vec::len),
             "huey: publish"
         );
-        if append_synced(
-            &run.model_input,
-            &format!(
-                "\n--- huey_publish_report (attempt {})\n{answer}\n",
-                run.attempts
-            ),
-        )
-        .is_err()
-        {
-            warn!("huey: a publish answer could not be recorded");
+        let header = format!("huey_publish_report (attempt {})", run.attempts);
+        if !run.record(&header, &answer) {
+            return not_recorded();
         }
         if let Some(end) = end {
-            if let Some(done) = run.done.take() {
-                let _ = done.send(end);
-            }
+            run.finish(end);
         }
         answer
     }
@@ -642,6 +689,7 @@ impl SessionCurator {
                     return match end {
                         Ok(RunEnd::Accepted(publish)) => Ok(*publish),
                         Ok(RunEnd::Exhausted) => Err(failed("every publish was refused")),
+                        Ok(RunEnd::RecordFailed) => Err(failed("a tool answer could not be recorded")),
                         Err(_) => Err(failed("the run ended without a publish")),
                     };
                 }
@@ -657,6 +705,28 @@ impl SessionCurator {
     }
 }
 
+/// Ends a run's session and removes its scratch directory and transcripts
+/// when dropped: after a finished run, and equally when the curate future is
+/// cancelled (the run's outer deadline), so no session or transcript of
+/// third-party text outlives its run.
+struct RunCleanup<'a> {
+    host: &'a dyn PicksSessionHost,
+    bridge: &'a CurateBridge,
+    scratch: Option<ScratchDir>,
+    transcripts: Option<RunTranscripts>,
+}
+
+impl Drop for RunCleanup<'_> {
+    fn drop(&mut self) {
+        self.bridge.abandon();
+        self.host.stop(HUEY_RUN_TAG);
+        drop(self.scratch.take());
+        if let Some(transcripts) = self.transcripts.take() {
+            transcripts.remove();
+        }
+    }
+}
+
 #[allow(clippy::double_must_use)]
 #[async_trait]
 impl Curator for SessionCurator {
@@ -664,22 +734,25 @@ impl Curator for SessionCurator {
         let started = SystemTime::now();
         let scratch = ScratchDir::create(self.env.scratch_root.as_deref(), SCRATCH_PREFIX)
             .map_err(|_| CurateError::Failed("could not make a working directory".into()))?;
+        let cwd = scratch.path().to_path_buf();
         // Worked out while the directory exists: `claude` files transcripts
         // under its real path.
         let transcripts = self
             .env
             .projects_dir
             .as_deref()
-            .map(|p| RunTranscripts::new(p, scratch.path(), SCRATCH_PREFIX, started));
-        let outcome = self.drive(input, scratch.path()).await;
-        // No tool call acts on the run after this, and the session ends on
-        // every path.
+            .map(|p| RunTranscripts::new(p, &cwd, SCRATCH_PREFIX, started));
+        let cleanup = RunCleanup {
+            host: self.host.as_ref(),
+            bridge: &self.bridge,
+            scratch: Some(scratch),
+            transcripts,
+        };
+        let outcome = self.drive(input, &cwd).await;
+        // No tool call acts on the run after this; then the session ends and
+        // its files go, on every path.
         let checks = self.bridge.end().await;
-        self.host.stop(HUEY_RUN_TAG);
-        drop(scratch);
-        if let Some(transcripts) = transcripts {
-            transcripts.remove();
-        }
+        drop(cleanup);
         let checks_json = serde_json::to_vec_pretty(&checks).unwrap_or_default();
         if std::fs::write(input.report_dir.join("checks.json"), checks_json).is_err() {
             warn!("huey: checks.json could not be written");

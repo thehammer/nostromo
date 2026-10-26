@@ -1368,3 +1368,63 @@ fn h5_3_a_follow_up_needs_a_whats_new_line() {
         );
     }
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// One story per line, and no blank lines (review follow-ups)
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn h5_3_a_pick_naming_two_stories_is_refused() {
+    // Packing stories into one pick would sidestep the cap and the
+    // honest-pick rule (the second story gets no for_line or check).
+    refuses("pick", Rule::MixedStories, |p| {
+        p.picks[0].item_ids = vec![vn("a1"), vn("a6")]
+    });
+    refuses("also noted", Rule::MixedStories, |p| {
+        p.also_noted[0].item_ids = vec!["blog:b1".into(), vn("a6")]
+    });
+}
+
+#[test]
+fn h5_3_the_mixed_story_message_names_the_ids() {
+    let fx = fixture(Mode::Normal);
+    let mut p = base();
+    p.picks[0].item_ids = vec![vn("a1"), vn("a6")];
+    let found = problems(fx.validate(&p));
+    let text = messages_of(&found, Rule::MixedStories);
+    assert!(
+        text.contains("vendor-news:a1") && text.contains("vendor-news:a6"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn h5_3_a_blank_news_line_or_noted_line_is_refused() {
+    refuses("blank news headline", Rule::LineMissingText, |p| {
+        p.also_in_the_news.as_mut().unwrap().headline = "  ".into()
+    });
+    refuses("blank news what_happened", Rule::LineMissingText, |p| {
+        p.also_in_the_news.as_mut().unwrap().what_happened = String::new()
+    });
+    refuses("blank noted line", Rule::LineMissingText, |p| {
+        p.also_noted[0].line = " ".into()
+    });
+}
+
+#[test]
+fn h5_3_a_follow_up_is_judged_even_when_the_project_is_unknown() {
+    // Every problem in one refusal: an unknown project does not hide the
+    // follow-up problems, so the model does not spend an attempt finding them.
+    let fx = fixture(Mode::Normal);
+    let mut p = base();
+    p.picks[0].project = "nowhere".into();
+    p.picks[0].follow_up_of = Some("vendor-news:never-shown".into());
+    let found = rules(fx.validate(&p));
+    for rule in [
+        Rule::UnknownProject,
+        Rule::FollowUpUnknown,
+        Rule::FollowUpWithoutWhatsNew,
+    ] {
+        assert!(found.contains(&rule), "{rule:?} among {found:?}");
+    }
+}

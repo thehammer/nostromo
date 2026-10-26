@@ -2474,3 +2474,103 @@ async fn h5_a_machine_that_is_not_set_up_never_starts_the_session() {
     assert_eq!(host.spawn_count(), 0);
     assert_eq!(fs::read_dir(scratch_root.path()).unwrap().count(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn h5_bridge_once_the_publish_is_accepted_no_check_or_publish_acts_on_the_run() {
+    let w = orchard_world(MONDAY).await;
+    let log = Arc::new(Log::default());
+    let l = log.clone();
+    let model = script(move |run| {
+        let l = l.clone();
+        async move {
+            let before = run
+                .bridge
+                .check_project(&json!({"project": "orchard", "kind": "text", "term": "Orchard"}))
+                .await;
+            l.put("before", before);
+            l.put("accepted", publish(&run, &publish_of(&[1], None)).await);
+            // A parallel tool call landing after the acceptance.
+            let late = run
+                .bridge
+                .check_project(
+                    &json!({"project": "orchard", "kind": "dependency", "name": "serde"}),
+                )
+                .await;
+            l.put("late_check", late);
+            l.put(
+                "late_publish",
+                publish(&run, &publish_of(&[1, 2], None)).await,
+            );
+        }
+    });
+    let rig = rig(w, model).await;
+    let (date, version, _) = produced(&rig.trigger(Trigger::Scheduled).await);
+
+    assert_eq!(log.get("before")["id"], "c1");
+    assert_eq!(log.get("accepted")["ok"], true);
+    for late in ["late_check", "late_publish"] {
+        let answer = log.get(late);
+        // Either the run is over, or it has already been forgotten.
+        assert!(
+            answer["error"] == "finished" || answer["error"] == "no_run",
+            "{late}: {answer}"
+        );
+    }
+    // The shown digest holds only the check the report could have used.
+    let digest = fs::read_to_string(rig.report_dir(date, version).join("digest.md")).unwrap();
+    assert_eq!(digest.matches("\n- [c").count(), 1, "{digest}");
+    assert_eq!(
+        rig.w
+            .store()
+            .load_report(date, version)
+            .unwrap()
+            .picks
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn h5_bridge_a_refused_probe_answer_is_recorded_in_the_model_input() {
+    let w = orchard_world(MONDAY).await;
+    let model = script(move |run| async move {
+        let _ = run
+            .bridge
+            .check_project(&json!({"project": "nowhere", "kind": "text", "term": "Orchard"}))
+            .await;
+        publish(&run, &publish_of(&[1], None)).await;
+    });
+    let rig = rig(w, model).await;
+    let (date, version, _) = produced(&rig.trigger(Trigger::Scheduled).await);
+    let input = fs::read_to_string(rig.report_dir(date, version).join("model-input.txt")).unwrap();
+    assert!(
+        input.contains("unknown_project"),
+        "every answer the model got is in the capture"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn h5_10_a_cancelled_curate_still_stops_the_session_and_removes_its_files() {
+    // The first session publishes (to capture a real input); the second
+    // never answers, and its curate future is dropped part-way, as the run's
+    // outer deadline does.
+    let w = orchard_world(MONDAY).await;
+    let model = script(move |run| async move {
+        if run.attempt == 1 {
+            publish(&run, &publish_of(&[1], None)).await;
+        }
+    });
+    let rig = rig(w, model).await;
+    produced(&rig.trigger(Trigger::Scheduled).await);
+    let scratch_report = tempfile::tempdir().unwrap();
+    let mut input = rig.spy.inputs().remove(0);
+    input.report_dir = scratch_report.path().to_path_buf();
+
+    let cancelled =
+        tokio::time::timeout(Duration::from_millis(400), rig.spy.inner.curate(&input)).await;
+    assert!(cancelled.is_err(), "the curate future was cut off");
+
+    assert_eq!(rig.host.spawn_count(), 2);
+    rig.assert_cleaned_up();
+    assert!(!rig.bridge.is_active(), "the abandoned run was forgotten");
+}

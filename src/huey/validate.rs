@@ -32,6 +32,10 @@ pub enum Rule {
     TooManyPicks,
     TooManyNoted,
     PickMissingField,
+    /// An Also-in-the-news or Also-noted line with no text.
+    LineMissingText,
+    /// One pick or Also-noted line naming items of more than one story.
+    MixedStories,
     UnknownItem,
     DuplicateItem,
     IgnoredUsed,
@@ -220,6 +224,31 @@ fn blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
+/// `which` names candidate items of more than one story: a line is one
+/// story, or the cap and the honest-pick rule could be sidestepped by
+/// packing several into one.
+fn one_story_rule(
+    facts: &Facts<'_>,
+    which: &str,
+    item_ids: &[String],
+    add: &mut impl FnMut(Rule, String),
+) {
+    let stories: BTreeSet<usize> = item_ids
+        .iter()
+        .filter_map(|id| facts.story_of.get(id.as_str()).copied())
+        .collect();
+    if stories.len() > 1 {
+        add(
+            Rule::MixedStories,
+            format!(
+                "{which} names items of {} different stories ({}); one story per line",
+                stories.len(),
+                shown_ids(item_ids)
+            ),
+        );
+    }
+}
+
 /// `which` names ids that are not candidate items of this run.
 fn non_candidate_rule(
     facts: &Facts<'_>,
@@ -266,6 +295,8 @@ fn pick_rules(facts: &Facts<'_>, n: usize, pick: &PublishPick, add: &mut impl Fn
     }
 
     non_candidate_rule(facts, &which, &pick.item_ids, add);
+    one_story_rule(facts, &which, &pick.item_ids, add);
+    follow_up_rules(facts, &which, pick, add);
 
     let project = pick.project.as_str();
     if !facts.input.digest.projects.iter().any(|p| p == project) {
@@ -289,6 +320,14 @@ fn pick_rules(facts: &Facts<'_>, n: usize, pick: &PublishPick, add: &mut impl Fn
     {
         checked_rules(facts, &which, project, check_ids, f, add);
     }
+}
+
+fn follow_up_rules(
+    facts: &Facts<'_>,
+    which: &str,
+    pick: &PublishPick,
+    add: &mut impl FnMut(Rule, String),
+) {
     if let Some(of) = &pick.follow_up_of {
         if !facts.recent_ids.contains(of.as_str()) {
             add(
@@ -432,6 +471,10 @@ fn noted_rules(facts: &Facts<'_>, publish: &Publish, add: &mut impl FnMut(Rule, 
             add(Rule::UnknownItem, format!("{which} names no item"));
         }
         non_candidate_rule(facts, &which, &noted.item_ids, add);
+        one_story_rule(facts, &which, &noted.item_ids, add);
+        if blank(&noted.line) {
+            add(Rule::LineMissingText, format!("{which} has no line"));
+        }
         if !facts.allowed_interests.contains(noted.interest.as_str()) {
             add(
                 Rule::BadInterest,
@@ -527,6 +570,12 @@ fn ain_rules(facts: &Facts<'_>, publish: &Publish, add: &mut impl FnMut(Rule, St
         return;
     };
     let id = ain.item_id.as_str();
+    if blank(&ain.headline) || blank(&ain.what_happened) {
+        add(
+            Rule::LineMissingText,
+            "Also in the news needs a headline and what_happened".into(),
+        );
+    }
     if !facts.ain_ids.contains(id) || ignored.contains(id) {
         add(
             Rule::AinNotEligible,
