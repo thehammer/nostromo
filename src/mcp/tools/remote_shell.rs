@@ -71,13 +71,9 @@ pub async fn request_shell(
             }
         }
     }
-    let reason = match object.get("reason") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if s.chars().count() <= MAX_REASON_CHARS => Some(s.clone()),
-        Some(Value::String(_)) => {
-            return json!({ "error": "reason_too_long", "detail": format!("at most {MAX_REASON_CHARS} characters") })
-        }
-        Some(_) => return json!({ "error": "invalid_args", "detail": "reason must be a string" }),
+    let reason = match optional_reason(object.get("reason")) {
+        Ok(reason) => reason,
+        Err(refusal) => return refusal,
     };
 
     // The caller's own focus, and only that.
@@ -104,6 +100,19 @@ pub async fn request_shell(
         })
         .await;
     result_json(result)
+}
+
+/// The optional `reason` argument: absent or null, or a string within
+/// [`MAX_REASON_CHARS`]. Else the refusal to return.
+pub(super) fn optional_reason(value: Option<&Value>) -> Result<Option<String>, Value> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.chars().count() <= MAX_REASON_CHARS => Ok(Some(s.clone())),
+        Some(Value::String(_)) => Err(
+            json!({ "error": "reason_too_long", "detail": format!("at most {MAX_REASON_CHARS} characters") }),
+        ),
+        Some(_) => Err(json!({ "error": "invalid_args", "detail": "reason must be a string" })),
+    }
 }
 
 /// The name of the agent running in focus `tag`, for the sheet the user sees.

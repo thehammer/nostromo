@@ -16,7 +16,7 @@ use serde_json::{json, Map, Value};
 
 use crate::mcp::state::McpSharedState;
 use crate::terminal::agent_api::{AgentFollowRequest, FollowRequestResult};
-use crate::terminal::remote_request::{DEFAULT_TIMEOUT, MAX_REASON_CHARS};
+use crate::terminal::remote_request::DEFAULT_TIMEOUT;
 
 const TERMINAL_ID: &str = "terminal_id";
 const REASON: &str = "reason";
@@ -62,13 +62,9 @@ pub async fn request_follow(
         Ok(id) => id,
         Err(refusal) => return refusal,
     };
-    let reason = match args.get(REASON) {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if s.chars().count() <= MAX_REASON_CHARS => Some(s.clone()),
-        Some(Value::String(_)) => {
-            return json!({ "error": "reason_too_long", "detail": format!("at most {MAX_REASON_CHARS} characters") })
-        }
-        Some(_) => return json!({ "error": "invalid_args", "detail": "reason must be a string" }),
+    let reason = match super::remote_shell::optional_reason(args.get(REASON)) {
+        Ok(reason) => reason,
+        Err(refusal) => return refusal,
     };
     let agent = super::remote_shell::agent_name(daemon, &tag);
 

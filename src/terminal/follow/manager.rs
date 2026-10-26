@@ -691,6 +691,12 @@ impl FollowManager {
             debug!(terminal_id, "screen read withheld: redaction failed");
             return Err(ScreenReadError::Withheld);
         };
+        // As for a delivery (see `inject`): what a sensitive focus's terminal
+        // shows makes whoever reads it sensitive, so it never reaches a network
+        // peer through the reader's turns.
+        if self.sensitive.tag_is_sensitive(&follow.terminal_tag) {
+            self.sensitive.mark_tag(follower_tag);
+        }
         self.audit(AuditEvent::ScreenRead {
             terminal_id: terminal_id.to_string(),
             focus: self.audit_tag(follower_tag),

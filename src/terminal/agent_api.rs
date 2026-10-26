@@ -13,7 +13,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-
 use std::time::Duration;
 
 use tokio::sync::broadcast;
@@ -238,7 +237,7 @@ impl TerminalAgentApi {
             return FollowRequestResult::Refused("request_pending");
         };
 
-        let (request_id, rx, sheet) = lock(decisions).submit(
+        let (request_id, mut rx, sheet) = lock(decisions).submit(
             request.tag.clone(),
             follow_prompt(&info, &request),
             request.reason.as_deref().and_then(clean_reason),
@@ -268,7 +267,6 @@ impl TerminalAgentApi {
             request_id: &request_id,
             armed: true,
         };
-        let mut rx = rx;
         let outcome = match tokio::time::timeout(request.timeout, &mut rx).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => DecisionOutcome::Cancelled,
