@@ -282,9 +282,13 @@ struct Follow {
     pane: String,
     session: Arc<TerminalSession>,
     paused: Option<PauseReason>,
-    /// Keeps the follower sensitive while it follows a remote shell (whose
-    /// redacted output must not reach a network peer through the follower's
-    /// turns); released when the follow is dropped.
+    /// The terminal is a remote (ECS) shell: whatever text of it reaches the
+    /// follower marks it sensitive for good (see [`FollowManager::inject`]).
+    is_remote: bool,
+    /// Keeps the follower sensitive while it follows a remote shell, so even
+    /// its notices are named as a sensitive focus's; released when the follow
+    /// is dropped. Text delivered from the shell outlasts it, which is what
+    /// `is_remote` is for.
     _hold: Option<SensitiveHold>,
     assembler: LineAssembler,
     policy: DeliveryPolicy,
@@ -433,6 +437,10 @@ pub struct FollowManager {
     ended: Mutex<Vec<String>>,
     ended_notify: Arc<Notify>,
     runtime: Option<tokio::runtime::Handle>,
+    /// Tests only: redaction of a read screen fails (a panic in the redactor,
+    /// which nothing else can provoke).
+    #[cfg(test)]
+    pub(crate) withhold_screens: AtomicBool,
 }
 
 impl FollowManager {
@@ -455,6 +463,8 @@ impl FollowManager {
             ended: Mutex::new(Vec::new()),
             ended_notify: Arc::new(Notify::new()),
             runtime: tokio::runtime::Handle::try_current().ok(),
+            #[cfg(test)]
+            withhold_screens: AtomicBool::new(false),
         });
         mgr.set_follow(Arc::clone(&follow));
         drop(mgr);
@@ -561,8 +571,8 @@ impl FollowManager {
         }
         // Held before anything is said about the follower, so it is named
         // as a sensitive focus from the first notice on.
-        let hold =
-            (info.kind == TerminalKind::Ecs).then(|| self.sensitive.hold_sensitive(follower_tag));
+        let is_remote = info.kind == TerminalKind::Ecs;
+        let hold = is_remote.then(|| self.sensitive.hold_sensitive(follower_tag));
         {
             let mut state = self.lock_state();
             if let Some(previous) = state.follows.remove(terminal_id) {
@@ -594,6 +604,7 @@ impl FollowManager {
                 pane,
                 session,
                 paused: None,
+                is_remote,
                 _hold: hold,
                 assembler: LineAssembler::new(),
                 policy: DeliveryPolicy::new(),
@@ -639,7 +650,7 @@ impl FollowManager {
                     screen_delivery = Some(delivery);
                 }
             }
-            if self.inject(&follow, &message, terminal_id) {
+            if self.inject(&follow, &message, terminal_id, screen_delivery.is_some()) {
                 if let Some(delivery) = screen_delivery {
                     self.audit_delivery(terminal_id, &follow, DeliveryKind::Screen, &delivery);
                 }
@@ -706,7 +717,7 @@ impl FollowManager {
                     follow.pane
                 ),
             );
-            self.inject(follow, &message, terminal_id);
+            self.inject(follow, &message, terminal_id, false);
         }
         self.broadcast_state(terminal_id);
         Ok(())
@@ -756,12 +767,20 @@ impl FollowManager {
             .get(terminal_id)
             .filter(|f| f.follower == follower_tag)
             .ok_or(ScreenReadError::NotFollowing)?;
+        #[cfg(test)]
+        let screen = if self.withhold_screens.load(Ordering::SeqCst) {
+            Delivery::Withheld
+        } else {
+            redacted_screen(follow)
+        };
+        #[cfg(not(test))]
+        let screen = redacted_screen(follow);
         let Delivery::Text {
             text,
             lines_total,
             redactions,
             ..
-        } = redacted_screen(follow)
+        } = screen
         else {
             debug!(terminal_id, "screen read withheld: redaction failed");
             return Err(ScreenReadError::Withheld);
@@ -771,7 +790,7 @@ impl FollowManager {
         // peer through the reader's turns.
         // A remote (ECS) screen also stays in the reader's transcript after the
         // follow ends, so it marks the reader for good, before the text is returned.
-        if follow._hold.is_some() || self.sensitive.tag_is_sensitive(&follow.terminal_tag) {
+        if follow.is_remote || self.sensitive.tag_is_sensitive(&follow.terminal_tag) {
             self.sensitive.mark_tag(follower_tag);
         }
         self.audit(AuditEvent::ScreenRead {
@@ -1030,7 +1049,7 @@ impl FollowManager {
     fn deliver_due(&self, terminal_id: &str, follow: &mut Follow, kind: DeliveryKind) {
         let delivery = follow.take_delivery(kind);
         if let Some(element) = self.delivery_element(terminal_id, follow, kind, &delivery) {
-            if self.inject(follow, &element, terminal_id) {
+            if self.inject(follow, &element, terminal_id, true) {
                 self.audit_delivery(terminal_id, follow, kind, &delivery);
             }
         }
@@ -1057,7 +1076,7 @@ impl FollowManager {
                 pause_sentence(reason)
             ),
         );
-        self.inject(follow, &message, terminal_id);
+        self.inject(follow, &message, terminal_id, false);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -1139,7 +1158,7 @@ impl FollowManager {
                 reason.sentence()
             ),
         );
-        self.inject(follow, &message, terminal_id);
+        self.inject(follow, &message, terminal_id, false);
     }
 
     fn audit_stopped(&self, terminal_id: &str, follow: &Follow, reason: &EndReason) {
@@ -1157,8 +1176,17 @@ impl FollowManager {
     ///
     /// A sensitive focus's terminal makes its follower sensitive first, so its
     /// output never reaches a network peer through the follower's turns.
-    fn inject(&self, follow: &Follow, text: &str, terminal_id: &str) -> bool {
-        if self.sensitive.tag_is_sensitive(&follow.terminal_tag) {
+    ///
+    /// So does a remote (ECS) terminal's text, and for good: `has_output` says
+    /// `text` carries some of the terminal's output (a delivery, or the screen
+    /// in the started message). It stays in the follower's conversation after
+    /// the follow ends, so the follower is marked before it is handed over, and
+    /// the hold that lapses with the follow is not what protects it. A follow
+    /// that only ever sent notices leaves nothing of the terminal behind, so
+    /// it does not mark: the hold covers it while it lasts.
+    fn inject(&self, follow: &Follow, text: &str, terminal_id: &str, has_output: bool) -> bool {
+        if (follow.is_remote && has_output) || self.sensitive.tag_is_sensitive(&follow.terminal_tag)
+        {
             self.sensitive.mark_tag(&follow.follower);
         }
         match self.sink.inject(&follow.follower, text, terminal_id) {
