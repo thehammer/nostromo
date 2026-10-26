@@ -31,12 +31,21 @@ enum TeriTab: String, Codable, CaseIterable {
     }
 }
 
+extension TeriTab {
+    /// The assignee scope a tab starts with, until the user picks one: Sentry shows "Mine".
+    var defaultAssignees: [String] { self == .sentry ? ["me"] : [] }
+}
+
 /// What one tab remembers between visits and relaunches.
 struct TeriTabViewState: Codable, Equatable {
     var filter = WorkFilter()
     var sort: WorkSortKey = .newest
     var collapsedGroups: [String] = []
     var selectedItemId: String?
+    /// True once the user has changed this tab's filter, so an empty `filter.assignees`
+    /// means an explicit "All" rather than "never chosen" (state saved before the
+    /// Mine / Unassigned / All control existed has no assignee scope at all).
+    var filterChosen = false
 
     init() {}
 
@@ -46,6 +55,7 @@ struct TeriTabViewState: Codable, Equatable {
         sort            = try c.decodeIfPresent(WorkSortKey.self, forKey: .sort) ?? .newest
         collapsedGroups = try c.decodeIfPresent([String].self, forKey: .collapsedGroups) ?? []
         selectedItemId  = try c.decodeIfPresent(String.self, forKey: .selectedItemId)
+        filterChosen    = try c.decodeIfPresent(Bool.self, forKey: .filterChosen) ?? false
     }
 }
 
@@ -63,8 +73,15 @@ struct TeriViewState: Codable, Equatable {
     init() {}
 
     subscript(tab: TeriTab) -> TeriTabViewState {
-        get { tabs[tab] ?? TeriTabViewState() }
+        get { tabs[tab] ?? Self.initial(for: tab) }
         set { tabs[tab] = newValue }
+    }
+
+    /// What a tab shows before anything is remembered for it.
+    private static func initial(for tab: TeriTab) -> TeriTabViewState {
+        var state = TeriTabViewState()
+        state.filter.assignees = tab.defaultAssignees
+        return state
     }
 
     enum CodingKeys: String, CodingKey { case selectedTab, tabs, splitFraction }
@@ -75,7 +92,10 @@ struct TeriViewState: Codable, Equatable {
         splitFraction = try c.decodeIfPresent(Double.self, forKey: .splitFraction)
         let raw = try c.decodeIfPresent([String: TeriTabViewState].self, forKey: .tabs) ?? [:]
         for (name, state) in raw {
-            if let tab = TeriTab(rawValue: name) { tabs[tab] = state }
+            guard let tab = TeriTab(rawValue: name) else { continue }
+            var state = state
+            if !state.filterChosen { state.filter.assignees = tab.defaultAssignees }
+            tabs[tab] = state
         }
     }
 

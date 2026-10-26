@@ -384,7 +384,7 @@ final class TeriSurfaceView: NSView {
             self?.syncDetail()
         }
         list.onFilterChange = { [weak self] filter, sort in
-            self?.viewState.update { $0[tab].filter = filter; $0[tab].sort = sort }
+            self?.viewState.update { $0[tab].filter = filter; $0[tab].sort = sort; $0[tab].filterChosen = true }
             self?.reload()
         }
         list.onCollapsedGroupsChange = { [weak self] groups in

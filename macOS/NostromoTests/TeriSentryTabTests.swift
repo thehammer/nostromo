@@ -40,6 +40,7 @@ private func issue(_ n: Int,
                    environment: String? = "production",
                    events: Int? = 312,
                    users: Int? = 41,
+                   assignee: String? = "me",
                    createdAt: Date? = nil,
                    lastSeen: Date? = nil) -> WorkItem {
     var f: [String: Any] = [
@@ -50,6 +51,7 @@ private func issue(_ n: Int,
     if let rank { f["priority"] = ["label": "P\(rank)", "rank": rank] }
     if let project { f["project"] = project }
     if let environment { f["environment"] = environment }
+    if let assignee { f["assignee"] = assignee }
     var metrics: [String: Int] = [:]
     if let events { metrics["events_24h"] = events }
     if let users { metrics["users"] = users }
@@ -104,6 +106,9 @@ final class TeriSentryRowContentTests: XCTestCase {
                        "Sentry's list endpoint returns no environments, so there is nothing to filter by")
         XCTAssertEqual(config.rowRefreshInterval, 60, "relative times are re-rendered every minute")
         XCTAssertEqual(config.list?.searchPlaceholder, "Filter issues")
+        XCTAssertEqual(config.list?.scopeFacet, .assignee)
+        XCTAssertEqual(config.list?.scopeOptions.map(\.title), ["Mine", "Unassigned", "All"])
+        XCTAssertEqual(config.list?.scopeOptions.map(\.values), [["me"], ["unassigned"], []])
         XCTAssertNotNil(config.onShow)
         XCTAssertNotNil(config.onLeave)
     }
@@ -509,7 +514,7 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
     }
 
     func testTheOnlyFilterMenuIsTheProjectMenuWithCounts() {
-        XCTAssertEqual(TeriSentryTab.config.list?.facets, [.project])
+        XCTAssertEqual(TeriSentryTab.config.list?.facets, [.assignee, .project])
         let s = snapshot(WorkFilter())
         XCTAssertEqual(s.facetCounts[.project], ["portal-production": 2, "payments-production": 2])
         XCTAssertTrue((s.facetCounts[.environment] ?? [:]).isEmpty, "no Environment menu is offered, so none is counted")
@@ -520,6 +525,136 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
         let s = snapshot(f)
         XCTAssertEqual(s.facetCounts[.project], ["portal-production": 2, "payments-production": 2],
                        "project counts ignore the project filter itself")
+    }
+
+    // MARK: Mine | Unassigned | All
+
+    private func mixedItems() -> [WorkItem] {
+        let base = clock.now
+        return [
+            issue(1, "Mine A", project: "portal-production", assignee: "me", lastSeen: base.addingTimeInterval(-10)),
+            issue(2, "Mine B", project: "payments-production", assignee: "me", lastSeen: base.addingTimeInterval(-20)),
+            issue(3, "Open A", project: "portal-production", assignee: "unassigned", lastSeen: base.addingTimeInterval(-30)),
+            issue(4, "Open B", project: "portal-production", assignee: "unassigned", lastSeen: base.addingTimeInterval(-40)),
+            issue(5, "Open C", project: "payments-production", assignee: "unassigned", lastSeen: base.addingTimeInterval(-50)),
+        ]
+    }
+
+    private func sentryRig(defaults: UserDefaults? = nil, items: [WorkItem]) -> Rig {
+        let rig = makeRig(defaults: defaults, seed: { store in
+            store.apply(snapshot: .sentry, group: nil, items: items)
+            store.apply(status: SourceStatus(source: .sentry, state: .fresh, count: items.count))
+        })
+        rig.surface.select(.sentry)
+        return rig
+    }
+
+    private func scopeControl(_ rig: Rig) -> NSSegmentedControl? {
+        rigAllSubviews(of: rig.surface).compactMap { $0 as? NSSegmentedControl }.first
+    }
+
+    private func segmentLabels(_ rig: Rig) -> [String] {
+        guard let c = scopeControl(rig) else { return [] }
+        return (0..<c.segmentCount).map { c.label(forSegment: $0) ?? "" }
+    }
+
+    private func choose(_ rig: Rig, segment: Int, file: StaticString = #filePath, line: UInt = #line) {
+        guard let c = scopeControl(rig) else { return XCTFail("no scope control", file: file, line: line) }
+        c.selectedSegment = segment
+        c.sendAction(c.action, to: c.target)
+    }
+
+    private func savedDefaults(assignees: [String]?, chosen: Bool) -> UserDefaults {
+        let defaults = makeDefaults()
+        var state = TeriViewState()
+        state.selectedTab = .sentry
+        if let assignees { state[.sentry].filter.assignees = assignees }
+        state[.sentry].filterChosen = chosen
+        state.save(to: defaults)
+        return defaults
+    }
+
+    func testANewSentryTabStartsOnMineWithCountsOnEverySegment() {
+        let rig = sentryRig(items: mixedItems())
+
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 2 })
+        XCTAssertEqual(rig.surface.rowTexts.map(\.title), ["Mine A", "Mine B"])
+        XCTAssertEqual(segmentLabels(rig), ["Mine 2", "Unassigned 3", "All 5"])
+        XCTAssertEqual(scopeControl(rig)?.selectedSegment, 0)
+    }
+
+    func testChoosingUnassignedAndAllChangesTheListAndTheSelection() {
+        let rig = sentryRig(items: mixedItems())
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 2 })
+
+        choose(rig, segment: 1)
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 3 })
+        XCTAssertEqual(rig.surface.rowTexts.map(\.title), ["Open A", "Open B", "Open C"])
+        XCTAssertEqual(scopeControl(rig)?.selectedSegment, 1)
+
+        choose(rig, segment: 2)
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 5 })
+        XCTAssertEqual(scopeControl(rig)?.selectedSegment, 2)
+
+        choose(rig, segment: 0)
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 2 })
+    }
+
+    func testTheCountsFollowTheOtherFilters() {
+        var f = WorkFilter(); f.projects = ["portal-production"]
+        let store = WorkStore()
+        store.apply(snapshot: .sentry, group: nil, items: mixedItems())
+        var result: WorkListSnapshot?
+        store.computeListSnapshot(source: .sentry, filter: f, sort: .newest, facets: [.assignee]) { result = $0 }
+        XCTAssertTrue(waitUntil { result != nil })
+        XCTAssertEqual(result?.facetCounts[.assignee], ["me": 1, "unassigned": 2])
+    }
+
+    func testAnEmptyMineStaysEmptyAndNeverFallsBackToAll() {
+        let items = mixedItems().filter { $0.assignee == "unassigned" }
+        let rig = sentryRig(items: items)
+
+        XCTAssertTrue(waitUntil { self.segmentLabels(rig) == ["Mine 0", "Unassigned 3", "All 3"] })
+        XCTAssertEqual(rig.surface.rowTexts.count, 0, "no automatic fallback to All")
+        XCTAssertEqual(scopeControl(rig)?.selectedSegment, 0)
+    }
+
+    func testAnExplicitAllIsRememberedAndNotOverriddenByTheMineDefault() {
+        let rig = sentryRig(defaults: savedDefaults(assignees: [], chosen: true), items: mixedItems())
+
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 5 })
+        XCTAssertEqual(scopeControl(rig)?.selectedSegment, 2)
+    }
+
+    func testARememberedUnassignedChoiceIsRestored() {
+        let rig = sentryRig(defaults: savedDefaults(assignees: ["unassigned"], chosen: true), items: mixedItems())
+
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 3 })
+        XCTAssertEqual(scopeControl(rig)?.selectedSegment, 1)
+    }
+
+    func testStateSavedBeforeTheControlExistedStartsOnMine() {
+        let rig = sentryRig(defaults: savedDefaults(assignees: nil, chosen: false), items: mixedItems())
+
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 2 })
+        XCTAssertEqual(scopeControl(rig)?.selectedSegment, 0)
+    }
+
+    func testTheChoiceSurvivesASaveAndLoadOfTheViewState() throws {
+        var state = TeriViewState()
+        state[.sentry].filter.assignees = []
+        state[.sentry].filterChosen = true
+        let defaults = makeDefaults()
+        state.save(to: defaults)
+        let loaded = TeriViewState.load(from: defaults)
+        XCTAssertEqual(loaded[.sentry].filter.assignees, [], "an explicit All is not turned back into Mine")
+
+        // Saved by a build without the control: no assignees key and no flag.
+        defaults.set(Data(#"{"tabs": {"sentry": {"filter": {"projects": ["web"]}}}}"#.utf8), forKey: TeriViewState.defaultsKey)
+        let legacy = TeriViewState.load(from: defaults)
+        XCTAssertEqual(legacy[.sentry].filter.assignees, ["me"])
+        XCTAssertEqual(legacy[.sentry].filter.projects, ["web"])
+        XCTAssertEqual(legacy[.todos].filter.assignees, [], "only Sentry defaults to Mine")
     }
 
     // MARK: Source states

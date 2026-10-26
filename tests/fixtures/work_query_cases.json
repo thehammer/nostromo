@@ -55,6 +55,7 @@
       "title": "TypeError: undefined is not a function",
       "project": "web",
       "environment": "production",
+      "assignee": "me",
       "status": "unresolved",
       "created_at": "2026-10-05T08:00:00Z",
       "updated_at": "2026-10-09T08:00:00Z",
@@ -124,6 +125,7 @@
       "title": "ConnectionResetError talking to payments",
       "project": "api",
       "environment": "staging",
+      "assignee": "unassigned",
       "status": "unresolved",
       "updated_at": "2026-10-09T12:00:00Z",
       "metrics": {
@@ -212,6 +214,7 @@
       "title": "ChunkLoadError",
       "project": "web",
       "environment": "production",
+      "assignee": "me",
       "status": "unresolved",
       "updated_at": "2026-10-08T08:00:00Z",
       "metrics": {
@@ -272,6 +275,7 @@
       "title": "OutOfMemoryError in batch worker",
       "project": "api",
       "environment": "production",
+      "assignee": "unassigned",
       "status": "ongoing",
       "updated_at": "2026-10-07T08:00:00Z",
       "search_text": "OutOfMemoryError in batch worker"
@@ -587,6 +591,55 @@
         "jira:CORE-1",
         "jira:CORE-2"
       ]
+    },
+    {
+      "name": "assignee filter",
+      "op": "filter",
+      "filter": {
+        "assignees": [
+          "me"
+        ]
+      },
+      "expected_ids": [
+        "sentry:1001",
+        "sentry:1003"
+      ]
+    },
+    {
+      "name": "assignee filter ORs its values",
+      "op": "filter",
+      "filter": {
+        "assignees": [
+          "me",
+          "unassigned"
+        ],
+        "environments": [
+          "staging"
+        ]
+      },
+      "expected_ids": [
+        "sentry:1002"
+      ]
+    },
+    {
+      "name": "assignee counts ignore the assignee filter but respect the others",
+      "op": "facet_counts",
+      "filter": {
+        "sources": [
+          "sentry"
+        ],
+        "assignees": [
+          "me"
+        ],
+        "environments": [
+          "production"
+        ]
+      },
+      "facet": "assignee",
+      "expected_counts": {
+        "me": 2,
+        "unassigned": 1
+      }
     },
     {
       "name": "environment filter",

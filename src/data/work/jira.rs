@@ -1208,6 +1208,7 @@ fn to_work_item(issue: &Value, site: &str) -> Option<WorkItem> {
         priority,
         severity: None,
         environment: None,
+        assignee: None,
         created_at: text(&["created"]).as_deref().and_then(parse_jira_time),
         updated_at: text(&["updated"]).as_deref().and_then(parse_jira_time),
         due: text(&["duedate"])
