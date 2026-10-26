@@ -56,7 +56,7 @@ pub fn save(paths: &HueyPaths, record: &SetupRecord) -> std::io::Result<()> {
 /// go to a uniquely named temp file in the same directory, then rename over
 /// `path`, so concurrent writers never share a temp file and readers never see
 /// a partial file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -90,7 +90,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     result
 }
 
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]

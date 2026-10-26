@@ -5,7 +5,8 @@
 //! 1. take the committed lines from the [`LineAssembler`] (the live cursor row
 //!    stays in the assembler until it commits, so the redactor only ever sees
 //!    whole lines);
-//! 2. REDACT them;
+//! 2. REDACT them (invisible filler is still in the lines, because it can
+//!    stand in for a space; it is stripped from the redacted text);
 //! 3. only then apply the line and byte caps. Truncating first can cut a token
 //!    so its remaining prefix is shorter than any pattern's minimum and slips
 //!    through; the cut also re-checks its tail for such stubs.
@@ -17,7 +18,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use super::lines::LineAssembler;
+use super::lines::{strip_hidden, LineAssembler};
 use super::policy::DeliveryPolicy;
 use super::snapshot::snapshot_lines;
 use super::truncate::truncate;
@@ -141,6 +142,11 @@ pub(crate) fn deliver_with(
     }
     let delivery = catch_unwind(AssertUnwindSafe(|| {
         let (redacted, redactions) = redact(redactor, &lines);
+        // Only now: the redactor needed the filler to read a separator.
+        let redacted = redacted
+            .into_iter()
+            .map(|line| strip_hidden(&line).into_owned())
+            .collect();
         let truncated = truncate(redacted);
         Delivery::Text {
             text: truncated.text,

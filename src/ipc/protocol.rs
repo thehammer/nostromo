@@ -1630,6 +1630,16 @@ pub enum ClientMsg {
     TerminalRestart {
         terminal_id: String,
     },
+    /// Keep an idle remote shell open: resets its idle timer and clears a
+    /// pending idle warning. Operator app only.
+    TerminalKeepAlive {
+        terminal_id: String,
+    },
+    /// Ask which remote (`ecs`) shells are open: labels, targets and ages
+    /// only. Answered with a targeted `TerminalRemoteSummary`. Any local peer
+    /// may ask (the controlled-restart guard does); it carries no output and
+    /// changes nothing.
+    TerminalRemoteSummaryRequest,
     /// The app refused a synthetic/agent attempt on a terminal (for example
     /// through app-control); the daemon audits it. Operator app only.
     TerminalRefusalReport {
@@ -1992,6 +2002,18 @@ pub struct TerminalInfo {
     /// The focus following this terminal, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follower: Option<TerminalFollower>,
+    /// A remote shell with no keystrokes for a while closes at this time;
+    /// set from the idle warning until a keystroke or keep-alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_closes_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One open remote shell in `ServerMsg::TerminalRemoteSummary`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteShellSummary {
+    pub label: String,
+    pub target: TerminalTarget,
+    pub opened_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// `ServerMsg::TerminalClosed`'s fields. `reason`: `exited`, `user_closed`,
@@ -2545,6 +2567,13 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_id: Option<String>,
         code: String,
+    },
+
+    /// The open remote shells (metadata only), answering
+    /// `TerminalRemoteSummaryRequest` (targeted).
+    TerminalRemoteSummary {
+        #[serde(default)]
+        shells: Vec<RemoteShellSummary>,
     },
 
     // ── remote shells (2a; all `LocalOnly`) ───────────────────────────────────
@@ -6886,6 +6915,7 @@ mod terminal_wire_tests {
             },
             opened_by_request: Some("req-1".into()),
             follower: None,
+            idle_closes_at: None,
         }
     }
 

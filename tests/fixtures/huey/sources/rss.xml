@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Weekly Engineering Notes</title>
+    <link>https://notes.example.test/</link>
+    <description>A weekly newsletter about building with language models</description>
+    <item>
+      <title>Evaluating agents without fooling yourself</title>
+      <link>https://notes.example.test/p/evaluating-agents</link>
+      <guid isPermaLink="false">post-1001</guid>
+      <pubDate>Wed, 21 Oct 2026 12:00:00 GMT</pubDate>
+      <description>&lt;p&gt;Practical advice on building evaluation sets you can trust.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>An older issue</title>
+      <link>https://notes.example.test/p/older-issue</link>
+      <guid isPermaLink="false">post-0990</guid>
+      <pubDate>Mon, 05 Oct 2026 12:00:00 GMT</pubDate>
+      <description>&lt;p&gt;Before the window.&lt;/p&gt;</description>
+    </item>
+  </channel>
+</rss>

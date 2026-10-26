@@ -22,6 +22,9 @@
 use nostromo::sensitive_text::{scan, Class, GuardConfig};
 use nostromo::terminal::redact::{RedactionKind, Redactor};
 
+#[path = "support/redaction_shapes.rs"]
+mod shapes;
+
 // ───────────────────────────── helpers ───────────────────────────────────────
 
 fn redact(text: &str) -> (String, Vec<RedactionKind>) {
@@ -2015,5 +2018,115 @@ fn a_flood_of_private_key_markers_is_redacted_in_linear_time() {
         started.elapsed() < std::time::Duration::from_secs(5),
         "took {:?}",
         started.elapsed()
+    );
+}
+
+// ───────────────────────────── hidden separators and curl quoting ────────────
+//
+// The same shapes `terminal_text_delivery.rs` pushes through the assembler and
+// `deliver` are run here straight through `Redactor::redact`: the delivery path
+// must be at least as strong as the raw one, and the raw one must hold on its
+// own. See `tests/support/redaction_shapes.rs` for the shapes.
+
+fn shape_failures(shapes: &[shapes::Shape]) -> Vec<String> {
+    shapes
+        .iter()
+        .filter_map(|s| {
+            let (out, kinds) = redact(&s.line);
+            shapes::verdict(s, &out, kinds.len())
+                .map(|why| format!("[{}] input {:?}: {why}", s.name, s.line))
+        })
+        .collect()
+}
+
+fn assert_shapes_redacted(shapes: &[shapes::Shape]) {
+    let failures = shape_failures(shapes);
+    assert!(
+        failures.is_empty(),
+        "{} of {} shapes leaked:\n{}",
+        failures.len(),
+        shapes.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn a_hidden_character_standing_in_for_a_blank_never_hides_a_credential() {
+    let all: Vec<shapes::Shape> = shapes::separators()
+        .iter()
+        .flat_map(|(label, f)| shapes::filler_as_separator_shapes(label, f))
+        .collect();
+    assert!(all.len() >= 200, "only {} shapes", all.len());
+    assert_shapes_redacted(&all);
+}
+
+#[test]
+fn curl_credentials_are_redacted_in_every_quoting_the_shell_allows() {
+    let all = shapes::curl_quote_shapes();
+    assert!(all.len() >= 15);
+    assert_shapes_redacted(&all);
+}
+
+#[test]
+fn curl_credentials_in_every_quoting_are_redacted_behind_a_hidden_separator_too() {
+    let all: Vec<shapes::Shape> = shapes::separators()
+        .iter()
+        .flat_map(|(label, f)| {
+            shapes::curl_quote_shapes()
+                .iter()
+                .map(|s| shapes::with_filler_before_the_flag(s, label, f))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_shapes_redacted(&all);
+}
+
+#[test]
+fn well_formed_curl_quoting_redacts_the_password_and_keeps_the_url_after_it() {
+    let pw = ["Hun", "ter2", "Xyz9"].concat();
+    for (line, kept) in [
+        (
+            format!("curl -u \"admin\":{pw} https://h/x"),
+            "curl -u \"admin\":",
+        ),
+        (
+            format!("curl -u 'admin':{pw} https://h/x"),
+            "curl -u 'admin':",
+        ),
+        (
+            format!("curl -u \"admin\":\"{pw}\" https://h/x"),
+            "curl -u \"admin\":",
+        ),
+        (format!("curl -u 'admin:{pw}' https://h/x"), "curl -u "),
+    ] {
+        let (out, kinds) = redact(&line);
+        assert!(out.starts_with(kept), "{line:?} -> {out:?}");
+        assert!(out.ends_with(" https://h/x"), "{line:?} -> {out:?}");
+        assert!(!out.contains(&pw[3..]), "{line:?} -> {out:?}");
+        assert_eq!(kinds.len(), 1, "{line:?} -> {out:?}");
+    }
+}
+
+#[test]
+fn curl_without_a_password_is_left_alone_even_with_a_hidden_separator() {
+    let mut lines: Vec<String> = shapes::curl_without_password_lines()
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    for (_, f) in shapes::separators() {
+        lines.extend(shapes::ordinary_filler_lines(&f));
+    }
+    let failures: Vec<String> = lines
+        .iter()
+        .filter_map(|line| {
+            let (out, kinds) = redact(line);
+            (out != *line || !kinds.is_empty())
+                .then(|| format!("input {line:?} -> {out:?} ({kinds:?})"))
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "ordinary text was altered:\n{}",
+        failures.join("\n")
     );
 }

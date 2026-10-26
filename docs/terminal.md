@@ -31,6 +31,8 @@ Additive; `PROTOCOL_VERSION` is unchanged. Byte fields are base64. `*` means ope
 | `terminal_resize`* | `terminal_id, cols, rows` |
 | `terminal_close`* | `terminal_id` |
 | `terminal_restart`* | `terminal_id` (a local terminal that has `ended`) |
+| `terminal_keep_alive`* | `terminal_id` (a remote shell: restart its idle timer, see Idle timeout) |
+| `terminal_remote_summary_request` | none; any local peer (metadata only, changes nothing) |
 | `terminal_refusal_report`* | `terminal_id?, op, channel` (audited; ignored from anyone else) |
 
 `Subscribe` also takes `capabilities: [String]` (default empty, recorded only for the operator app) and `operator_nonce?` (the `Welcome`'s; required before any `*` verb is honoured).
@@ -45,6 +47,7 @@ Other `terminal_refused` codes: `unknown_terminal`, `terminal_not_ended`, `termi
 | `terminal_replay` | the attaching connection | `terminal_id, cols, rows, bytes` (ring, then a repaint of the screen; a large replay continues in `terminal_output` frames) |
 | `terminal_output` | attached connections | `terminal_id, bytes` |
 | `terminal_refused` | targeted | `op, terminal_id?, code` |
+| `terminal_remote_summary` | targeted, answers `terminal_remote_summary_request` | `shells: [{label, target, opened_at}]` (open `ecs` terminals; no output) |
 
 A terminal leaf's pane id is `terminal-<8 hex>`. The daemon also sends `pane_content` with `kind: "terminal"` (`terminal_id, label`, `environment` only for a remote shell) so a client that cannot attach can show a placeholder.
 
@@ -142,6 +145,22 @@ Audit events: `selection_sent {terminal_id, tag, target, lines, bytes, redaction
 
 Tests use `tests/fixtures/fake-aws` (Python standard library; modes `ok`, `expired`, `no_tasks`, `exec_disabled`, `plugin_missing`, `drop_after_connect`, `hang`, `spam`; `FAKE_AWS_MODE`, `FAKE_AWS_LOG`). The QA instance passes `NOSTROMO_AWS_CLI` through, so it drives live QA too. Never point a test or a QA run at the real AWS.
 
+### Idle timeout (slice 2e)
+
+A remote shell with no **keystrokes** for 15 minutes closes. From 13 minutes the daemon sets `TerminalInfo.idle_closes_at` (broadcast in `terminal_state`) so the app can show a countdown and a Keep open button. The clock (`src/terminal/idle.rs`, a 1 s tick) is reset **only** by `terminal_input` from the operator app (after a warning: audited `idle_kept_open {via: "keystroke"}`) and by `terminal_keep_alive` (operator app only; anyone else gets `terminal_refused` and an audit line; `via: "button"`). Output (even a flood of it), resize and attach never reset it, so an unattended shell that prints cannot keep itself open. A warning clears `idle_closes_at` again once kept open. At 15 minutes the shell is killed and `terminal_closed {reason: "idle_timeout"}` is sent. Local terminals are exempt. The clock starts when the session begins, not while it connects.
+
+Audit lines: `idle_warning {closes_at}`, `idle_kept_open {via}`, `idle_closed`, then the usual `closed {reason: "idle_timeout"}`. None carry keystrokes or output.
+
+QA: `NOSTROMO_QA_IDLE_SECS=<n>` scales the policy (warn at `n - 2n/15`, close at `n` seconds) **only** when the daemon runs with `NOSTROMO_QA_DAEMON=1`; otherwise it is ignored with a warning.
+
+### Guarded restart (slice 2e)
+
+A daemon restart ends every shell. The *controlled* restart paths therefore refuse while remote shells are open: `make install`, `make install-daemon` and `make uninstall-daemon` first run `daemon-restart-guard` (`bin/nostromo-restart-guard`), which runs `nostromd remote-shells` from the installed daemon (or `target/release/nostromd`) and, if any `ecs` terminal is open, prints it and stops with "Remote shells are open; they will be closed. Re-run with FORCE=1 to proceed." Override with `FORCE=1` or `NOSTROMO_FORCE_DAEMON_RESTART=1`. A binary that predates the subcommand is skipped (an old `nostromd` ignores arguments and would start a second daemon).
+
+`nostromd remote-shells [--json]` is a plain client of the daemon socket (`terminal_remote_summary_request`; no operator trust, metadata only). It lists each open `ecs` terminal (project, environment, service, age) and exits 0 (none open; local-only shells never count), 3 (some open) or 2 (no daemon answered, which the guard lets through).
+
+A crash or a raw SIGTERM cannot be guarded: those still end the shells, and the app shows it (`terminal_closed`, `daemon_stopped` on the next start).
+
 ## Network peers (FND-1)
 
 Every `terminal_*` client frame is `NetworkPolicy::Refused` (`src/ipc/peer.rs`): over TCP it is answered with `requires_secure_connection` before dispatch and audited with `channel: "tcp"`. Every terminal server frame is `ServerClass::LocalOnly`: a TCP peer receives none of them, not even metadata.
@@ -179,7 +198,7 @@ Output is coalesced. A chunk goes out at once if nothing was sent in the last 8 
 
 ## Audit
 
-`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, the remote-shell and follow events above, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
+`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, the remote-shell and follow events above, `idle_warning`, `idle_kept_open`, `idle_closed`, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
 
 Refused lines are capped at 120 a minute per channel (one budget for the whole MCP channel, not one per focus), so a flood over TCP neither fills the log quickly nor silences local refusals. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.
 

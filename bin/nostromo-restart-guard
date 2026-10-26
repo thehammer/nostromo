@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Refuse a controlled nostromd restart while remote (ECS) shells are open.
+#
+# Used first by `make install`, `install-daemon` and `uninstall-daemon`, which
+# restart the daemon: a restart ends every shell. Asks the running daemon
+# through `nostromd remote-shells` (exit 0: none open, 2: no daemon answers,
+# 3: some open). Open shells block unless FORCE=1 or
+# NOSTROMO_FORCE_DAEMON_RESTART=1. A crash or a raw SIGTERM cannot be guarded.
+#
+# Exit 0: go ahead. Exit 1: refused.
+#
+# NOSTROMO_RESTART_GUARD_NOSTROMD names the nostromd binary to ask (tests).
+set -u
+
+# A binary qualifies only if it knows the `remote-shells` subcommand: an older
+# nostromd ignores arguments and would start a second daemon instead.
+qualifies() {
+  [ -x "$1" ] && grep -q "remote-shells" "$1" 2>/dev/null
+}
+
+bin=""
+if [ -n "${NOSTROMO_RESTART_GUARD_NOSTROMD:-}" ]; then
+  bin="$NOSTROMO_RESTART_GUARD_NOSTROMD"
+else
+  for candidate in "${HOME}/.local/bin/nostromd" "target/release/nostromd"; do
+    if qualifies "$candidate"; then
+      bin="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -z "$bin" ]; then
+  echo "restart guard: no nostromd that supports 'remote-shells' found; not checking for open remote shells" >&2
+  exit 0
+fi
+
+out=$("$bin" remote-shells)
+rc=$?
+
+force=0
+if [ "${FORCE:-}" = "1" ] || [ "${NOSTROMO_FORCE_DAEMON_RESTART:-}" = "1" ]; then
+  force=1
+fi
+
+case "$rc" in
+  0 | 2)
+    exit 0
+    ;;
+  3)
+    printf '%s\n' "$out"
+    if [ "$force" = "1" ]; then
+      echo "Remote shells are open and will be closed (forced)." >&2
+      exit 0
+    fi
+    echo "Remote shells are open; they will be closed. Re-run with FORCE=1 to proceed." >&2
+    exit 1
+    ;;
+  *)
+    if [ "$force" = "1" ]; then
+      echo "restart guard: 'remote-shells' failed (exit $rc); proceeding (forced)." >&2
+      exit 0
+    fi
+    echo "restart guard: 'remote-shells' failed (exit $rc). Re-run with FORCE=1 to proceed." >&2
+    exit 1
+    ;;
+esac
