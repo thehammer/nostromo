@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, NaiveDate, Utc};
 
-use super::collectors::{BoardSummary, PostureFacts, PrRecord, PrState, TitleEntry};
+use super::collectors::{safe_id, BoardSummary, PostureFacts, PrRecord, PrState, TitleEntry};
 use super::projects::Commit;
 use crate::data::work::untrusted::one_line;
 use crate::huey::checks::CheckResult;
@@ -170,7 +170,7 @@ fn project_entries(p: &ProjectContext, inputs: &DigestInputs) -> Vec<Entry> {
                 board.open_titles.join("; ")
             )
         };
-        out.push(line(format!("tracker:{}", board.topic), text));
+        out.push(line(format!("tracker:{}", safe_id(&board.topic, 64)), text));
     }
     for job in &p.jobs {
         let title = if job.title.trim().is_empty() {
@@ -179,7 +179,7 @@ fn project_entries(p: &ProjectContext, inputs: &DigestInputs) -> Vec<Entry> {
             job.title.as_str()
         };
         out.push(line(
-            format!("job:{}", one_line(&job.id, 40)),
+            format!("job:{}", safe_id(&job.id, 40)),
             format!(
                 "Job \"{}\": {}",
                 one_line(title, TITLE_MAX),
@@ -317,7 +317,13 @@ fn render(entries: Vec<Entry>, interests: Interests) -> Digest {
     let entries: Vec<Entry> = entries
         .into_iter()
         .filter(|e| match e {
-            Entry::Line { text, .. } => interests.hard_term_in(text).is_none(),
+            // The id is shown too (`idea:<slug>`), so it is filtered with the text.
+            Entry::Line { id, text, .. } => {
+                interests.hard_term_in(text).is_none()
+                    && interests
+                        .hard_term_in(&id.replace(['-', '_', '.'], " "))
+                        .is_none()
+            }
             _ => true,
         })
         .collect();

@@ -17,6 +17,23 @@ pub const MAX_TITLE_CHARS: usize = 120;
 /// Open item titles shown per board.
 const BOARD_TITLES: usize = 3;
 
+/// `s` as a digest id part: lower-cased, every character outside
+/// `[a-z0-9._-]` replaced by `-`, at most `max` characters. A name carrying
+/// `] [` cannot make a confusing line.
+pub fn safe_id(s: &str, max: usize) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(max)
+        .collect()
+}
+
 // ── Tracker boards ───────────────────────────────────────────────────────────
 
 /// One tracker board: its topic, root and open item titles.
@@ -362,7 +379,7 @@ pub fn todos(db: &Path) -> Vec<TitleEntry> {
         .iter()
         .take(MAX_TITLES)
         .map(|t| TitleEntry {
-            id: format!("todo:{}", t.id),
+            id: format!("todo:{}", safe_id(&t.id.to_string(), 64)),
             title: one_line(&t.title, MAX_TITLE_CHARS),
             date: t
                 .due_date
@@ -397,7 +414,7 @@ fn markdown_titles(dir: &Path, kind: &str) -> Vec<TitleEntry> {
             let (heading, created) = head_facts(&e.path());
             let title = heading.unwrap_or_else(|| slug.replace('-', " "));
             Some(TitleEntry {
-                id: format!("{kind}:{}", one_line(&slug, 64)),
+                id: format!("{kind}:{}", safe_id(&slug, 64)),
                 title: one_line(&title, MAX_TITLE_CHARS),
                 date: created.or(file_date),
                 state: None,

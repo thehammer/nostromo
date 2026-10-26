@@ -2646,3 +2646,123 @@ fn queue_line_counts_active_jobs_by_state_and_says_idle_when_there_are_none() {
         "{line}"
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// H3 review fixes: ids, secrets, SDK names, probe confinement
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn bare_inputs(interests_text: &str) -> DigestInputs {
+    DigestInputs {
+        machine: "Test".into(),
+        date: NaiveDate::from_ymd_opt(2026, 10, 25).unwrap(),
+        version: 1,
+        mode: None,
+        interests: interests::parse(interests_text),
+        projects: Vec::new(),
+        prs_available: true,
+        posture: None,
+        mother_queue: None,
+        ideas: Vec::new(),
+        todos: Vec::new(),
+        notes: Vec::new(),
+    }
+}
+
+#[test]
+fn a_hard_term_that_appears_only_in_a_file_name_does_not_reach_the_digest() {
+    let ideas_dir = tempfile::tempdir().unwrap();
+    fs::write(
+        ideas_dir.path().join("2026-10-20-laravel-upgrade.md"),
+        "# Plan the stack move\n",
+    )
+    .unwrap();
+    fs::write(
+        ideas_dir.path().join("2026-10-21-harmless-idea.md"),
+        "# A harmless idea\n",
+    )
+    .unwrap();
+    let mut inputs = bare_inputs("## Ignore entirely\n- Anything about `Laravel`\n");
+    inputs.ideas = collectors::ideas(ideas_dir.path());
+    assert_eq!(inputs.ideas.len(), 2);
+    let d = build_digest(&inputs);
+    // (The ignore bullet itself is shown under Interests; the ideas are not.)
+    let ideas_part = d.text.split("(titles only)").nth(1).unwrap();
+    assert!(
+        !ideas_part.to_lowercase().contains("laravel"),
+        "{ideas_part}"
+    );
+    assert!(!ideas_part.contains("Plan the stack move"), "{ideas_part}");
+    assert!(!d.anchors.iter().any(|a| a.contains("laravel")));
+    assert!(d.text.contains("A harmless idea"), "{}", d.text);
+}
+
+#[test]
+fn a_multi_word_hard_term_in_a_slug_is_filtered_too() {
+    let ideas_dir = tempfile::tempdir().unwrap();
+    fs::write(
+        ideas_dir.path().join("blade-templates-rewrite.md"),
+        "# Rewrite the views\n",
+    )
+    .unwrap();
+    let mut inputs = bare_inputs("## Ignore entirely\n- `blade templates`\n");
+    inputs.ideas = collectors::ideas(ideas_dir.path());
+    let d = build_digest(&inputs);
+    assert!(!d.text.contains("Rewrite the views"), "{}", d.text);
+}
+
+#[test]
+fn digest_ids_use_only_safe_characters() {
+    let ideas_dir = tempfile::tempdir().unwrap();
+    fs::write(
+        ideas_dir.path().join("2026-10-20-x] [Evil:Id #1.md"),
+        "# Looks fine\n",
+    )
+    .unwrap();
+    let mut inputs = bare_inputs("## What I care about\n- one thing\n");
+    inputs.ideas = collectors::ideas(ideas_dir.path());
+    inputs.projects = vec![ProjectContext {
+        id: "proj".into(),
+        name: "proj".into(),
+        root: PathBuf::from("/nowhere"),
+        how_it_runs: "Rust".into(),
+        prs: Vec::new(),
+        boards: vec![BoardSummary {
+            topic: "a] [b:c d".into(),
+            root: None,
+            path: PathBuf::from("/boards/x.md"),
+            open: 1,
+            open_titles: vec!["Item".into()],
+            updated_at: None,
+        }],
+        jobs: vec![job(
+            "j] [1",
+            "running",
+            "proj",
+            "t",
+            at(2026, 10, 24, 7),
+            None,
+        )],
+        commits: Vec::new(),
+        last_activity: now(),
+    }];
+    let d = build_digest(&inputs);
+    assert!(!d.anchors.is_empty());
+    for a in &d.anchors {
+        assert!(!a.contains(['[', ']', ' ']), "{a}");
+    }
+    assert!(d.anchors.contains("tracker:a---b-c-d"), "{:?}", d.anchors);
+    assert!(d.anchors.contains("job:j---1"), "{:?}", d.anchors);
+    assert!(d.anchors.contains("idea:x---evil-id--1"), "{:?}", d.anchors);
+    // Every `- [id] ...` line carries exactly one bracketed id.
+    for line in d.text.lines().filter(|l| l.starts_with("- [")) {
+        let id = line[3..].split(']').next().unwrap();
+        assert!(d.anchors.contains(id), "{line}");
+    }
+}
+
+#[test]
+fn collector_ids_keep_only_safe_characters() {
+    assert_eq!(collectors::safe_id("A] [b:C d", 64), "a---b-c-d");
+    assert_eq!(collectors::safe_id("ok.name_1-x", 64), "ok.name_1-x");
+    assert_eq!(collectors::safe_id("abcdef", 3), "abc");
+}
