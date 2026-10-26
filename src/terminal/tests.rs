@@ -1000,6 +1000,28 @@ fn registered_terminal_leaves_are_listed_per_tag_until_unregistered() {
     assert_eq!(panes.terminal_leaves("other"), ["terminal-00000003"]);
 }
 
+#[test]
+fn a_loop_of_forbidden_screen_reads_stops_writing_audit_lines_after_the_budget() {
+    use super::{TerminalAgentApi, TerminalConfig, TerminalManager, MAX_REFUSALS_PER_WINDOW};
+    let (_tmp, dir) = scratch_dir();
+    let path = dir.join("audit").join("terminal.jsonl");
+    let mgr = TerminalManager::new(TerminalConfig {
+        audit: AuditLog::open(&path).unwrap(),
+        ..TerminalConfig::in_memory()
+    });
+    let api = TerminalAgentApi::new(mgr);
+    for _ in 0..MAX_REFUSALS_PER_WINDOW as usize + 30 {
+        assert!(api
+            .read_screen_if_following("focus-1", "terminal-1")
+            .is_err());
+    }
+    let written = jsonl(&path)
+        .iter()
+        .filter(|l| l["event"] == "refused" && l["code"] == "terminal_read_forbidden")
+        .count();
+    assert_eq!(written, MAX_REFUSALS_PER_WINDOW as usize);
+}
+
 // ── audit: a flood of refusals is capped per channel ─────────────────────────
 
 #[test]

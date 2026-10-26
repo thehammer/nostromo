@@ -39,7 +39,7 @@ pub(crate) async fn fetch(
         .await?;
     let ids: Vec<u64> = ids.into_iter().take(src.top).collect();
     let template = item_template(src);
-    let stories: Vec<Option<Story>> = futures::stream::iter(ids.iter().map(|id| {
+    let stories: Vec<Option<Story>> = futures::stream::iter(ids.iter().copied().map(|id| {
         let url = template.replace("{id}", &id.to_string());
         async move {
             ctx.http

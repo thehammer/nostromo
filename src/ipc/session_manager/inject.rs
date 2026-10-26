@@ -86,6 +86,11 @@ impl Injected {
         }
     }
 
+    /// Is this message a selection (which stands alone)?
+    fn is_selection(&self) -> bool {
+        self.parts.first().is_some_and(|p| is_selection_key(&p.key))
+    }
+
     /// Drop every part (and left-out count) of `key`. `false` when nothing is
     /// left.
     fn drop_key(&mut self, key: &str) -> bool {
@@ -225,26 +230,40 @@ impl SessionManager {
 
 /// Queue `text`: onto the last queued message when that one is injected too,
 /// else as a message of its own (refused when a sign-in pause has filled the
-/// queue).
+/// queue). A selection the user sent is always a message of its own: nothing
+/// is combined into it and it is combined into nothing.
 fn enqueue(
     pending: &mut VecDeque<PendingMessage>,
     paused: bool,
     key: String,
     text: &str,
 ) -> Result<()> {
-    if let Some(PendingMessage {
-        text: queued,
-        origin: PendingOrigin::Injected(injected),
-        ..
-    }) = pending.back_mut()
-    {
-        injected.push(key, text.to_string());
-        *queued = injected.render();
-        return Ok(());
+    if !is_selection_key(&key) {
+        if let Some(PendingMessage {
+            text: queued,
+            origin: PendingOrigin::Injected(injected),
+            ..
+        }) = pending.back_mut()
+        {
+            if !injected.is_selection() {
+                injected.push(key, text.to_string());
+                *queued = injected.render();
+                return Ok(());
+            }
+        }
     }
     if paused && pending.len() >= LOGIN_QUEUE_CAP {
         anyhow::bail!("waiting_for_sign_in: queue full");
     }
     pending.push_back(PendingMessage::injected(key, text));
     Ok(())
+}
+
+/// The coalesce key of a selection starts with this (then a unique id): a stop
+/// of a follow, which takes back what was queued under its terminal's id, can
+/// never take a selection with it.
+pub const SELECTION_KEY_PREFIX: &str = "selection:";
+
+fn is_selection_key(key: &str) -> bool {
+    key.starts_with(SELECTION_KEY_PREFIX)
 }

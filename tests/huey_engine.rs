@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::TimeZone;
+use nostromo::huey::context::ContextEnv;
 use nostromo::huey::{HueyConfig, HueyDeps, HueyEngine, SetupState};
 use nostromo::tracker::clock::FakeClock;
 
@@ -15,11 +16,16 @@ async fn an_unset_up_engine_past_its_run_time_creates_no_files() {
     let clock = Arc::new(FakeClock::new(
         chrono::Utc.with_ymd_and_hms(2026, 10, 25, 3, 0, 0).unwrap(),
     ));
+    let context = ContextEnv::for_home(
+        root.path(),
+        root.path().join("code"),
+        root.path().to_path_buf(),
+        "test".into(),
+    );
     let src = HueyEngine::spawn(HueyDeps {
-        state_root: root.path().to_path_buf(),
-        config: HueyConfig::default(),
         clock: clock.clone(),
         tick: Duration::from_millis(5),
+        ..HueyDeps::new(root.path().to_path_buf(), HueyConfig::default(), context)
     });
     // Well past 06:30 in any local time zone.
     clock.advance(chrono::Duration::hours(30));

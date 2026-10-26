@@ -471,6 +471,15 @@ impl TerminalManager {
         !self.operator_conns.is_empty()
     }
 
+    /// Is a verified operator-app connection that declared
+    /// [`TERMINAL_FOLLOW_UI`] (it can show who follows and stop it) still
+    /// connected? Nothing may start following without one.
+    pub fn follow_ui_connected(&self) -> bool {
+        self.operator_conns.values().any(|c| {
+            !c.targeted.is_closed() && c.capabilities.iter().any(|cap| cap == TERMINAL_FOLLOW_UI)
+        })
+    }
+
     /// The `TerminalList` a newly connected local client is sent.
     pub fn terminal_list_msg(&self) -> ServerMsg {
         ServerMsg::TerminalList {
@@ -1634,6 +1643,7 @@ pub fn op_of(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::TerminalFollowInvite { .. } => "follow_invite",
         ClientMsg::TerminalFollowStop { .. } => "follow_stop",
         ClientMsg::TerminalFollowResume { .. } => "follow_resume",
+        ClientMsg::TerminalSendSelection { .. } => "send_selection",
         // The remote-shell verbs are all "control" to the audit trail.
         ClientMsg::RemoteShellTargetsRequest
         | ClientMsg::RemoteShellOpen { .. }
@@ -1654,7 +1664,8 @@ pub fn terminal_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::TerminalKeepAlive { terminal_id }
         | ClientMsg::TerminalFollowInvite { terminal_id, .. }
         | ClientMsg::TerminalFollowStop { terminal_id }
-        | ClientMsg::TerminalFollowResume { terminal_id } => Some(terminal_id),
+        | ClientMsg::TerminalFollowResume { terminal_id }
+        | ClientMsg::TerminalSendSelection { terminal_id, .. } => Some(terminal_id),
         ClientMsg::TerminalRefusalReport { terminal_id, .. } => terminal_id.as_deref(),
         _ => None,
     }

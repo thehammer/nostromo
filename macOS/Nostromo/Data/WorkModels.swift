@@ -117,6 +117,8 @@ struct WorkItem: Decodable, Hashable, Identifiable {
     let priority: WorkPriority?
     let severity: String?
     let environment: String?
+    /// Sentry: which search found the issue, `me` or `unassigned`.
+    let assignee: String?
     let createdAt: Date?
     let updatedAt: Date?
     /// Calendar date, `yyyy-MM-dd`, exactly as sent.
@@ -133,7 +135,7 @@ struct WorkItem: Decodable, Hashable, Identifiable {
     let searchIndex: String
 
     enum CodingKeys: String, CodingKey {
-        case id, source, kind, title, repo, project, status, priority, severity, environment
+        case id, source, kind, title, repo, project, status, priority, severity, environment, assignee
         case due, url, path, metrics, linked, sent
         case statusCategory = "status_category"
         case createdAt      = "created_at"
@@ -154,6 +156,7 @@ struct WorkItem: Decodable, Hashable, Identifiable {
         priority       = try c.decodeIfPresent(WorkPriority.self, forKey: .priority)
         severity       = try c.decodeIfPresent(String.self, forKey: .severity)
         environment    = try c.decodeIfPresent(String.self, forKey: .environment)
+        assignee       = try c.decodeIfPresent(String.self, forKey: .assignee)
         createdAt      = try c.decodeIfPresent(Date.self, forKey: .createdAt)
         updatedAt      = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
         due            = try c.decodeIfPresent(String.self, forKey: .due)

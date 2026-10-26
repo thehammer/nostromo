@@ -26,6 +26,7 @@ pub mod set_pane;
 pub mod show;
 pub mod teri;
 pub mod terminal;
+pub mod terminal_follow;
 pub mod tracker;
 
 use serde_json::{json, Value};
@@ -398,6 +399,36 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "additionalProperties": false
             }
         }),
+        json!({
+            "name": LIST_TERMINALS_TOOL,
+            "description": "List the terminals you can see: those in your own focus, and any other focus's terminal you are following. Metadata only, never output. Takes no arguments. Returns { ok, terminals: [{ terminal_id, label, kind ('local' or 'ecs'), status ('connecting', 'running' or 'ended'), followed_by_you }] }. Errors: unknown_view, unknown_argument.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": REQUEST_FOLLOW_TOOL,
+            "description": "Ask the user to let you follow one of your own focus's terminals: while you follow it, what it prints is delivered into your conversation and you can read its current screen with nostromo.read_terminal_screen. You still cannot type into it. The call blocks until the user decides: Nostromo shows an Allow/Deny sheet (naming this terminal, and for a remote shell the environment its output comes from) that only the user can answer. Add a short reason (at most 200 characters; the user sees it). Returns { ok, outcome: 'following' } once the user allowed it (also when you already follow that terminal). Errors: denied, dismissed, timeout (no answer in time), no_operator (the Nostromo app is not open to ask; nothing was shown), cancelled, request_pending (another request of yours is waiting for the user), request_cooldown (the user recently said no or did not answer; wait before asking again, nothing was shown), request_limit (too many requests from this focus recently; nothing was shown), unknown_terminal (not a terminal of your focus), terminal_not_running, follower_not_running, reason_too_long, invalid_args, unknown_view, unknown_argument.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "terminal_id": { "type": "string", "description": "A terminal of your own focus, from nostromo.list_terminals" },
+                    "reason":      { "type": "string", "description": "Why you want to follow it, at most 200 characters; shown to the user on the sheet" }
+                },
+                "required": ["terminal_id"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": READ_TERMINAL_SCREEN_TOOL,
+            "description": "Read the current screen of a terminal you are following, as plain text with secrets redacted. Only works while you follow it (the user invited you, or allowed your nostromo.request_follow) and ends when the user stops it. Returns { ok, text, lines, redactions }. Reads are limited: at most one every 2 seconds and 240 an hour per focus. Reading is allowed while a follow is paused for too much output. Errors: terminal_read_forbidden (you do not follow that terminal; audited), read_too_soon (you read again within 2 seconds), read_limit (you used your reads for the hour), redaction_failed, invalid_args, unknown_view, unknown_argument.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "terminal_id": { "type": "string", "description": "The terminal you follow, from nostromo.list_terminals" }
+                },
+                "required": ["terminal_id"],
+                "additionalProperties": false
+            }
+        }),
         // ── Phase 3: Perri mutations ───────────────────────────────────────
         json!({
             "name": "perri.load_pr",
@@ -612,6 +643,9 @@ fn is_network_withheld_tool(name: &str) -> bool {
     name == OPEN_TERMINAL_TOOL
         || name == REQUEST_REMOTE_SHELL_TOOL
         || name == LIST_REMOTE_SHELL_TARGETS_TOOL
+        || name == LIST_TERMINALS_TOOL
+        || name == REQUEST_FOLLOW_TOOL
+        || name == READ_TERMINAL_SCREEN_TOOL
         || ["fred.", "teri.", "mother."]
             .iter()
             .any(|prefix| name.starts_with(prefix))
@@ -621,7 +655,7 @@ fn is_network_withheld_tool(name: &str) -> bool {
 /// it hangs up (the MCP connection handler drops the call). They clean up
 /// after themselves when dropped.
 pub fn cancels_on_disconnect(name: &str) -> bool {
-    name == REQUEST_REMOTE_SHELL_TOOL
+    name == REQUEST_REMOTE_SHELL_TOOL || name == REQUEST_FOLLOW_TOOL
 }
 
 /// The tool that opens a terminal pane.
@@ -630,6 +664,12 @@ const OPEN_TERMINAL_TOOL: &str = "nostromo.open_terminal";
 const REQUEST_REMOTE_SHELL_TOOL: &str = "nostromo.request_remote_shell";
 /// The tool that lists what a remote shell may be asked for.
 const LIST_REMOTE_SHELL_TARGETS_TOOL: &str = "nostromo.list_remote_shell_targets";
+/// The tool that lists the terminals a focus can see.
+const LIST_TERMINALS_TOOL: &str = "nostromo.list_terminals";
+/// The tool that asks the user to let the agent follow a terminal.
+const REQUEST_FOLLOW_TOOL: &str = "nostromo.request_follow";
+/// The tool that reads a followed terminal's screen.
+pub(crate) const READ_TERMINAL_SCREEN_TOOL: &str = crate::terminal::agent_api::READ_SCREEN_TOOL;
 
 /// `Forbidden` for `name`. A refused [`OPEN_TERMINAL_TOOL`] is also audited
 /// (`refused`, `op: "open"`, `code: "forbidden"`: the focus and tool name,
@@ -638,6 +678,9 @@ fn forbidden(state: &McpSharedState, pty_id: Option<&str>, name: &str) -> ToolRe
     let op = match name {
         OPEN_TERMINAL_TOOL => Some("open"),
         REQUEST_REMOTE_SHELL_TOOL => Some("remote_request"),
+        LIST_TERMINALS_TOOL => Some("list"),
+        REQUEST_FOLLOW_TOOL => Some("follow_request"),
+        READ_TERMINAL_SCREEN_TOOL => Some("read"),
         _ => None,
     };
     if let (Some(op), Some(daemon)) = (op, &state.daemon) {
@@ -965,6 +1008,9 @@ async fn dispatch_inner(
         OPEN_TERMINAL_TOOL => terminal::open_terminal(state, arguments, pty_id).await,
         LIST_REMOTE_SHELL_TARGETS_TOOL => remote_shell::list_targets(state, arguments).await,
         REQUEST_REMOTE_SHELL_TOOL => remote_shell::request_shell(state, arguments, pty_id).await,
+        LIST_TERMINALS_TOOL => terminal_follow::list_terminals(state, arguments, pty_id).await,
+        REQUEST_FOLLOW_TOOL => terminal_follow::request_follow(state, arguments, pty_id).await,
+        READ_TERMINAL_SCREEN_TOOL => terminal_follow::read_screen(state, arguments, pty_id).await,
         "nostromo.apply_layout" => {
             let args = arguments.cloned().unwrap_or_default();
             apply_layout::apply_layout(state, &args, pty_id).await
