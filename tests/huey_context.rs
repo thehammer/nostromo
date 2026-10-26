@@ -2766,3 +2766,20 @@ fn collector_ids_keep_only_safe_characters() {
     assert_eq!(collectors::safe_id("ok.name_1-x", 64), "ok.name_1-x");
     assert_eq!(collectors::safe_id("abcdef", 3), "abc");
 }
+
+#[test]
+fn the_projects_note_says_the_description_is_read() {
+    let m = Machine::build(Which::A);
+    let scan = setup::scan(&m.env, &m.paths, &m.live, now());
+    let note = scan
+        .context_sources
+        .iter()
+        .find(|s| s.path == m.code_root.to_string_lossy())
+        .and_then(|s| s.note.clone())
+        .expect("projects source has a note");
+    assert!(
+        note.contains("one-line description from each manifest or README"),
+        "{note}"
+    );
+    assert!(!note.contains("no file contents"), "{note}");
+}

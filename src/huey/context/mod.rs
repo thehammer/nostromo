@@ -120,7 +120,7 @@ impl ContextEnv {
             src(
                 "Projects (git repositories)",
                 show(&self.code_root),
-                Some("names, manifests, commit subjects and `git grep` counts; no file contents"),
+                Some("names, manifests, commit subjects and `git grep` counts, plus a one-line description from each manifest or README, shown in your draft"),
             ),
             src(
                 "Tracker boards",
