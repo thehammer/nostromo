@@ -62,6 +62,11 @@ struct WorkListConfig {
     var menuFacets: [WorkFacet] = []
     /// Menus (of `menuFacets`) that also get an "All" item clearing their selection.
     var menuAllItemFacets: Set<WorkFacet> = []
+    /// A single-select segmented control driven by this facet (e.g. Mine | Unassigned | All).
+    var scopeFacet: WorkFacet?
+    /// Its segments: a title, and the facet values selecting it (empty: every value, "All").
+    /// Each segment shows the number of items it would select given the other filters.
+    var scopeOptions: [(title: String, values: [String])] = []
     /// Sort choices; the popup is hidden when there are fewer than two.
     var sortOptions: [(title: String, key: WorkSortKey)] = []
     var searchPlaceholder: String = "Filter"
@@ -79,7 +84,7 @@ struct WorkListConfig {
     }
 
     /// Every facet the filter bar needs counted.
-    var facets: [WorkFacet] { (chipFacet.map { [$0] } ?? []) + menuFacets }
+    var facets: [WorkFacet] { (chipFacet.map { [$0] } ?? []) + (scopeFacet.map { [$0] } ?? []) + menuFacets }
 }
 
 // MARK: - View
@@ -100,7 +105,10 @@ final class WorkListView: NSView {
     private let config: WorkListConfig
     private let outline = WorkOutlineView()
     private let scroll = NSScrollView()
+    /// Two rows: the controls (chips, toggle, menus, sort), then the search field.
     private let filterBar = NSStackView()
+    private let controlsRow = NSStackView()
+    private let scopeControl = NSSegmentedControl()
     private let chipStack = NSStackView()
     private let searchField = NSSearchField()
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -295,27 +303,47 @@ final class WorkListView: NSView {
         sortPopup.isHidden = config.sortOptions.count < 2
         sortPopup.setAccessibilityLabel("Sort order")
 
-        filterBar.orientation = .horizontal
+        filterBar.orientation = .vertical
         filterBar.spacing = 6
-        filterBar.alignment = .centerY
+        filterBar.alignment = .width
         filterBar.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
-        filterBar.addArrangedSubview(chipStack)
+        controlsRow.orientation = .horizontal
+        controlsRow.spacing = 6
+        controlsRow.alignment = .centerY
+        controlsRow.addArrangedSubview(chipStack)
         if config.hasSeverityToggle {
             severityToggle.setButtonType(.pushOnPushOff)
             severityToggle.bezelStyle = .recessed
             severityToggle.target = self
             severityToggle.action = #selector(severityToggled(_:))
             severityToggle.setAccessibilityLabel("Has severity")
-            filterBar.addArrangedSubview(severityToggle)
+            controlsRow.addArrangedSubview(severityToggle)
         }
         for facet in config.menuFacets {
             let button = NSPopUpButton(frame: .zero, pullsDown: true)
             button.setAccessibilityLabel("Filter by \(facet.rawValue)")
             menuButtons[facet] = button
-            filterBar.addArrangedSubview(button)
+            controlsRow.addArrangedSubview(button)
         }
+        if config.scopeFacet != nil {
+            scopeControl.segmentStyle = .rounded
+            scopeControl.trackingMode = .selectOne
+            scopeControl.segmentCount = config.scopeOptions.count
+            scopeControl.target = self
+            scopeControl.action = #selector(scopeChosen(_:))
+            scopeControl.setAccessibilityLabel("Show")
+            // Its own full-width row: three count-bearing segments ("Unassigned 20")
+            // are wider than the 280 pt minimum pane leaves beside the menus, and a
+            // stack row has nothing that can shrink. Filling the width lets the
+            // segments share it and never push the row past the pane.
+            scopeControl.controlSize = .small
+            scopeControl.segmentDistribution = .fillProportionally
+            scopeControl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        controlsRow.addArrangedSubview(sortPopup)
+        filterBar.addArrangedSubview(controlsRow)
+        if config.scopeFacet != nil { filterBar.addArrangedSubview(scopeControl) }
         filterBar.addArrangedSubview(searchField)
-        filterBar.addArrangedSubview(sortPopup)
         filterBar.translatesAutoresizingMaskIntoConstraints = false
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("work"))
@@ -462,6 +490,20 @@ final class WorkListView: NSView {
             }
         }
         severityToggle.state = filter.hasSeverity == true ? .on : .off
+        // Scope segments
+        if let facet = config.scopeFacet {
+            let have = Set(values(of: facet, in: filter))
+            let facetCounts = counts[facet] ?? [:]
+            scopeControl.selectedSegment = -1
+            for (index, option) in config.scopeOptions.enumerated() {
+                let count = option.values.isEmpty
+                    ? facetCounts.values.reduce(0, +)
+                    : option.values.reduce(0) { $0 + (facetCounts[$1] ?? 0) }
+                scopeControl.setLabel("\(option.title) \(count)", forSegment: index)
+                scopeControl.setWidth(0, forSegment: index)
+                if Set(option.values) == have { scopeControl.selectedSegment = index }
+            }
+        }
         // Menus
         for (facet, button) in menuButtons {
             let selected = Set(values(of: facet, in: filter))
@@ -509,10 +551,16 @@ final class WorkListView: NSView {
         case .project:     return filter.projects
         case .status:      return filter.statuses
         case .environment: return filter.environments
+        case .assignee:    return filter.assignees
         }
     }
 
     private func toggle(_ value: String, in facet: WorkFacet) {
+        flipValue(value, in: facet)
+        onFilterChange?(filter, sort)
+    }
+
+    private func flipValue(_ value: String, in facet: WorkFacet) {
         func flip(_ list: inout [String]) {
             if let i = list.firstIndex(of: value) { list.remove(at: i) } else { list.append(value) }
         }
@@ -526,11 +574,16 @@ final class WorkListView: NSView {
         case .project:     flip(&filter.projects)
         case .status:      flip(&filter.statuses)
         case .environment: flip(&filter.environments)
+        case .assignee:    flip(&filter.assignees)
         }
-        onFilterChange?(filter, sort)
     }
 
     private func clear(_ facet: WorkFacet) {
+        clearValues(of: facet)
+        onFilterChange?(filter, sort)
+    }
+
+    private func clearValues(of facet: WorkFacet) {
         switch facet {
         case .source:      filter.sources = []
         case .kind:        filter.kinds = []
@@ -538,7 +591,14 @@ final class WorkListView: NSView {
         case .project:     filter.projects = []
         case .status:      filter.statuses = []
         case .environment: filter.environments = []
+        case .assignee:    filter.assignees = []
         }
+    }
+
+    @objc private func scopeChosen(_ sender: NSSegmentedControl) {
+        guard let facet = config.scopeFacet, config.scopeOptions.indices.contains(sender.selectedSegment) else { return }
+        clearValues(of: facet)
+        for value in config.scopeOptions[sender.selectedSegment].values { flipValue(value, in: facet) }
         onFilterChange?(filter, sort)
     }
 

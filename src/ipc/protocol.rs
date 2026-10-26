@@ -5223,6 +5223,7 @@ mod work_wire_tests {
             }),
             severity: None,
             environment: None,
+            assignee: None,
             created_at: Some(ts()),
             updated_at: Some(ts()),
             due: Some("2026-10-12".parse().unwrap()),

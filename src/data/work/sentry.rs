@@ -77,17 +77,28 @@ const TRUNCATED_REASON: &str =
 struct Search {
     query: &'static str,
     stats_period: &'static str,
+    /// The assignment bucket every issue this search returns belongs to.
+    assignee: &'static str,
 }
 
+/// `WorkItem::assignee` values. The client turns them into the Mine / Unassigned toggle.
+pub const ASSIGNEE_ME: &str = "me";
+pub const ASSIGNEE_UNASSIGNED: &str = "unassigned";
+
+// Order matters: an issue returned by more than one search keeps the assignee of
+// the FIRST (`seen.insert` dedupes), so `assigned:me` must stay ahead of the
+// unassigned search for "Mine wins".
 const SEARCHES: [Search; 2] = [
     // Assigned to me stays assigned however quiet the issue is: look far back.
     Search {
         query: "is:unresolved assigned:me",
         stats_period: "90d",
+        assignee: ASSIGNEE_ME,
     },
     Search {
         query: "is:unresolved is:unassigned level:[error,fatal] lastSeen:-24h",
         stats_period: "24h",
+        assignee: ASSIGNEE_UNASSIGNED,
     },
 ];
 
@@ -768,7 +779,7 @@ async fn fetch_issues(
                     break;
                 }
                 count += 1;
-                match to_item(issue, repos) {
+                match to_item(issue, repos, search.assignee) {
                     Some(item) => {
                         parsed += 1;
                         if seen.insert(item.id.clone()) {
@@ -861,7 +872,7 @@ fn priority_for(level: &str) -> Priority {
     }
 }
 
-fn to_item(issue: &Value, repos: &HashMap<String, String>) -> Option<WorkItem> {
+fn to_item(issue: &Value, repos: &HashMap<String, String>, assignee: &str) -> Option<WorkItem> {
     let id = text(&issue["id"]).or_else(|| number(&issue["id"]).map(|n| n.to_string()))?;
     let title = one_line(
         &text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()),
@@ -896,6 +907,7 @@ fn to_item(issue: &Value, repos: &HashMap<String, String>) -> Option<WorkItem> {
         priority: level.as_deref().map(priority_for),
         severity: level,
         environment: None,
+        assignee: Some(assignee.to_string()),
         created_at: timestamp(&issue["firstSeen"]),
         updated_at: timestamp(&issue["lastSeen"]),
         due: None,

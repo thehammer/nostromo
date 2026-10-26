@@ -91,6 +91,7 @@ fn to_work_item(todo: &TeriTodo) -> WorkItem {
         }),
         severity: None,
         environment: None,
+        assignee: None,
         created_at: None,
         updated_at: None,
         due: todo.due_date.as_deref().and_then(parse_due),

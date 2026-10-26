@@ -165,6 +165,7 @@ final class WorkQueryTests: XCTestCase {
     func testSortAndFacetNamesAreTheWireNames() {
         XCTAssertEqual([WorkSortKey.newest, .oldest, .title].map(\.rawValue), ["newest", "oldest", "title"])
         XCTAssertEqual(WorkFacet(rawValue: "environment"), .environment)
+        XCTAssertEqual(WorkFacet(rawValue: "assignee"), .assignee)
         XCTAssertEqual(WorkSortKey(rawValue: "newest"), .newest)
     }
 

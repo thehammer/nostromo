@@ -547,6 +547,7 @@ mod tests {
             }),
             severity: Some(hostile("severity")),
             environment: Some(hostile("environment")),
+            assignee: None,
             created_at: None,
             updated_at: None,
             due: None,
