@@ -460,7 +460,12 @@ impl<'a> View<'a> {
             }];
         }
         let pieces = fold(text);
-        let totals = runs_per_group(&pieces);
+        // Only a text small enough for a mask reads the runs of its groups.
+        let totals = if text.len() << 1 > VIEW_BUDGET {
+            Vec::new()
+        } else {
+            runs_per_group(&pieces)
+        };
         let any_hidden = pieces.iter().any(|p| p.hidden);
         let mut modes = vec![Hidden::Dropped];
         if any_hidden {
@@ -652,6 +657,14 @@ fn scan_value_group(pattern: &Regex, kind: RedactionKind, text: &str, hits: &mut
     }
 }
 
+/// Whether `lower` (a text in ASCII lower case) holds one of `needles`, the
+/// literals a rule's pattern cannot match without. A plain substring search is
+/// far cheaper than the pattern, so a scanner asks this first and skips its
+/// regexes on a text that has none of them (a megabyte of output rarely does).
+fn holds_any(lower: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| lower.contains(needle))
+}
+
 // ───────────────────────────── URL passwords ─────────────────────────────────
 
 /// `scheme://user:password@host`. The user stops at the first `:`; the
@@ -689,6 +702,9 @@ static AWS_SECRET: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 fn scan_aws_secret(text: &str, hits: &mut Vec<Hit>) {
+    if !holds_any(&text.to_ascii_lowercase(), &["aws"]) {
+        return;
+    }
     scan_value_group(&AWS_SECRET, RedactionKind::AwsSecretKey, text, hits);
 }
 
@@ -700,6 +716,12 @@ static AWS_KEY_ID_LOWER: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 fn scan_aws_access_key(text: &str, hits: &mut Vec<Hit>) {
+    const PREFIXES: &[&str] = &[
+        "akia", "asia", "agpa", "aida", "aroa", "anpa", "anva", "aipa",
+    ];
+    if !holds_any(&text.to_ascii_lowercase(), PREFIXES) {
+        return;
+    }
     let kind = RedactionKind::AwsAccessKey;
     scan_shape(&AWS_KEY_ID_UPPER, true, kind, text, hits);
     scan_shape(&AWS_KEY_ID_LOWER, true, kind, text, hits);
@@ -711,37 +733,64 @@ static BEARER: LazyLock<Regex> =
     LazyLock::new(|| re(r"(?i)\bbearer[ \t]+(?P<value>[A-Za-z0-9._~+/=\-]{8,})"));
 
 fn scan_bearer(text: &str, hits: &mut Vec<Hit>) {
+    if !holds_any(&text.to_ascii_lowercase(), &["bearer"]) {
+        return;
+    }
     scan_value_group(&BEARER, RedactionKind::BearerToken, text, hits);
 }
 
-/// Provider token shapes, each compiled with the anchor it needs.
-static TOKEN_SHAPES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        (r"(?i)gh[pousr]_[A-Za-z0-9]{20,}", Anchor::Open),
-        (r"(?i)github_pat_[A-Za-z0-9_]{20,}", Anchor::Open),
-        (r"(?i)glpat-[A-Za-z0-9_\-]{20,}", Anchor::NotAlnum),
-        (r"(?i)xox[abeprs]-[A-Za-z0-9\-]{10,}", Anchor::NotAlnum),
-        (r"(?i)xapp-[A-Za-z0-9\-]{10,}", Anchor::NotAlnum),
+/// Provider token shapes: the lower-case literals one of which a token holds
+/// (see [`holds_any`]), and the pattern with the anchor it needs.
+static TOKEN_SHAPES: LazyLock<Vec<(&'static [&'static str], Regex)>> = LazyLock::new(|| {
+    let shapes: [(&[&str], &str, Anchor); 11] = [
         (
+            &["ghp_", "gho_", "ghu_", "ghs_", "ghr_"],
+            r"(?i)gh[pousr]_[A-Za-z0-9]{20,}",
+            Anchor::Open,
+        ),
+        (
+            &["github_pat_"],
+            r"(?i)github_pat_[A-Za-z0-9_]{20,}",
+            Anchor::Open,
+        ),
+        (
+            &["glpat-"],
+            r"(?i)glpat-[A-Za-z0-9_\-]{20,}",
+            Anchor::NotAlnum,
+        ),
+        (
+            &["xox"],
+            r"(?i)xox[abeprs]-[A-Za-z0-9\-]{10,}",
+            Anchor::NotAlnum,
+        ),
+        (&["xapp-"], r"(?i)xapp-[A-Za-z0-9\-]{10,}", Anchor::NotAlnum),
+        (
+            &["k_live_", "k_test_", "whsec_"],
             r"(?i)(?:[sr]k_(?:live|test)|pk_live|whsec)_[A-Za-z0-9]{8,}",
             Anchor::NotAlnum,
         ),
-        (r"(?i)npm_[A-Za-z0-9]{30,}", Anchor::NotAlnum),
-        (r"AIza[A-Za-z0-9_\-]{35}", Anchor::NotAlnum),
-        (r"sk-ant-[A-Za-z0-9_\-]{8,}", Anchor::NotAlnum),
-        (r"sk-[A-Za-z0-9_\-]{20,}", Anchor::NotAlnum),
+        (&["npm_"], r"(?i)npm_[A-Za-z0-9]{30,}", Anchor::NotAlnum),
+        (&["aiza"], r"AIza[A-Za-z0-9_\-]{35}", Anchor::NotAlnum),
+        (&["sk-ant-"], r"sk-ant-[A-Za-z0-9_\-]{8,}", Anchor::NotAlnum),
+        (&["sk-"], r"sk-[A-Za-z0-9_\-]{20,}", Anchor::NotAlnum),
         (
+            &["eyj"],
             r"eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]*",
             Anchor::NotAlnum,
         ),
-    ]
-    .into_iter()
-    .map(|(pattern, anchor)| anchor.compile(pattern))
-    .collect()
+    ];
+    shapes
+        .into_iter()
+        .map(|(needles, pattern, anchor)| (needles, anchor.compile(pattern)))
+        .collect()
 });
 
 fn scan_tokens(text: &str, hits: &mut Vec<Hit>) {
-    for pattern in TOKEN_SHAPES.iter() {
+    let lower = text.to_ascii_lowercase();
+    for (needles, pattern) in TOKEN_SHAPES.iter() {
+        if !holds_any(&lower, needles) {
+            continue;
+        }
         scan_shape(pattern, false, RedactionKind::ApiToken, text, hits);
     }
 }
@@ -762,6 +811,9 @@ const TOKEN_SCHEMES: &[&str] = &["basic", "bearer", "token"];
 /// end of the line. `Bearer` values are also caught by their own rule, which
 /// wins ties.
 fn scan_authorization(text: &str, hits: &mut Vec<Hit>) {
+    if !holds_any(&text.to_ascii_lowercase(), &["authorization"]) {
+        return;
+    }
     let mut pos = 0;
     while let Some(caps) = AUTHORIZATION.captures_at(text, pos) {
         let (Some(label), quote) = (caps.get(0), caps.name("quote")) else {
@@ -839,43 +891,69 @@ fn find_closing_quote(text: &str, quote: char) -> Option<usize> {
 /// Passwords on the command line of tools where the flag is known to carry
 /// one. `-p` alone is not enough (`mkdir -p`, `ssh -p 22`), so the tool name
 /// has to be on the same command.
-static CLI_CREDENTIALS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+static CLI_CREDENTIALS: LazyLock<Vec<(&'static [&'static str], Regex)>> = LazyLock::new(|| {
     let rest = r"[^\n|;&]*?";
-    [
+    // Each pattern with the lower-case literals one of which its command holds
+    // (see [`holds_any`]).
+    let rules: [(&[&str], String); 8] = [
         // mysql -pSECRET (the password is attached; `-p` alone prompts)
-        format!(
-            r#"(?i)\b(?:mysql|mysqldump|mysqladmin|mysqlcheck|mysqlimport|mysqlshow|mariadb|mariadb-dump)\b{rest}[ \t](?-i:-p)(?P<value>[^\s\-]\S*)"#
+        (
+            &["mysql", "mariadb"],
+            format!(
+                r#"(?i)\b(?:mysql|mysqldump|mysqladmin|mysqlcheck|mysqlimport|mysqlshow|mariadb|mariadb-dump)\b{rest}[ \t](?-i:-p)(?P<value>[^\s\-]\S*)"#
+            ),
         ),
         // sshpass -p SECRET / -pSECRET
-        format!(r#"(?i)\bsshpass\b{rest}[ \t](?-i:-p)[ \t]*(?P<value>{ARG})"#),
+        (
+            &["sshpass"],
+            format!(r#"(?i)\bsshpass\b{rest}[ \t](?-i:-p)[ \t]*(?P<value>{ARG})"#),
+        ),
         // redis-cli -a SECRET
-        format!(r#"(?i)\bredis-cli\b{rest}[ \t](?-i:-a)[ \t]+(?P<value>{ARG})"#),
+        (
+            &["redis-cli"],
+            format!(r#"(?i)\bredis-cli\b{rest}[ \t](?-i:-a)[ \t]+(?P<value>{ARG})"#),
+        ),
         // unzip -P SECRET
-        format!(r#"(?i)\b(?:unzip|zip)\b{rest}[ \t](?-i:-P)[ \t]*(?P<value>{ARG})"#),
+        (
+            &["zip"],
+            format!(r#"(?i)\b(?:unzip|zip)\b{rest}[ \t](?-i:-P)[ \t]*(?P<value>{ARG})"#),
+        ),
         // 7z -pSECRET
-        format!(
-            r#"(?i)\b(?:7z|7za|7zr|rar|unrar)\b{rest}[ \t](?-i:-p)(?P<value>[^\s\-]\S*)"#
+        (
+            &["7z", "rar"],
+            format!(r#"(?i)\b(?:7z|7za|7zr|rar|unrar)\b{rest}[ \t](?-i:-p)(?P<value>[^\s\-]\S*)"#),
         ),
         // docker login -u u -p SECRET
-        format!(
-            r#"(?i)\bdocker\b{rest}\blogin\b{rest}[ \t](?-i:-p)[ \t]+(?P<value>{ARG})"#
+        (
+            &["docker"],
+            format!(r#"(?i)\bdocker\b{rest}\blogin\b{rest}[ \t](?-i:-p)[ \t]+(?P<value>{ARG})"#),
         ),
         // ldapsearch -w SECRET
-        format!(
-            r#"(?i)\bldap(?:search|modify|add|delete|compare|passwd)\b{rest}[ \t](?-i:-w)[ \t]*(?P<value>{ARG})"#
+        (
+            &["ldap"],
+            format!(
+                r#"(?i)\bldap(?:search|modify|add|delete|compare|passwd)\b{rest}[ \t](?-i:-w)[ \t]*(?P<value>{ARG})"#
+            ),
         ),
         // openssl ... -passin pass:SECRET
-        format!(r#"(?-i:-pass(?:in|out)?)[ \t]+pass:(?P<value>{ARG})"#),
-    ]
-    .iter()
-    .map(|pattern| re(pattern))
-    .collect()
+        (
+            &["-pass"],
+            format!(r#"(?-i:-pass(?:in|out)?)[ \t]+pass:(?P<value>{ARG})"#),
+        ),
+    ];
+    rules
+        .into_iter()
+        .map(|(needles, pattern)| (needles, re(&pattern)))
+        .collect()
 });
 
 fn scan_cli_credentials(text: &str, hits: &mut Vec<Hit>) {
     scan_curl_users(text, hits);
-    for pattern in CLI_CREDENTIALS.iter() {
-        scan_value_group(pattern, RedactionKind::SecretAssignment, text, hits);
+    let lower = text.to_ascii_lowercase();
+    for (needles, pattern) in CLI_CREDENTIALS.iter() {
+        if holds_any(&lower, needles) {
+            scan_value_group(pattern, RedactionKind::SecretAssignment, text, hits);
+        }
     }
 }
 
@@ -891,9 +969,30 @@ static CURL_USER_FLAG: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 
-/// ASCII word boundaries: cheaper than Unicode ones on a long text, and
-/// matching a `curl` glued to a non-ASCII letter only redacts more.
-static CURL_WORD: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)(?-u:\b)curl(?-u:\b)"));
+/// The ranges of `curl` as a word (any case) in `text`. Found by hand, not
+/// with a regex: on a megabyte of `curl;curl;…` a regex with word boundaries
+/// costs more than everything else the scan does. ASCII word boundaries, so a
+/// `curl` glued to a non-ASCII letter counts too, which only redacts more.
+fn curl_words(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let bytes = text.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        while at + 4 <= bytes.len() {
+            let start = at;
+            at += 1;
+            if bytes[start].eq_ignore_ascii_case(&b'c')
+                && bytes[start + 1..start + 4].eq_ignore_ascii_case(b"url")
+                && !start.checked_sub(1).is_some_and(|i| is_word(bytes[i]))
+                && !bytes.get(start + 4).copied().is_some_and(is_word)
+            {
+                at = start + 4;
+                return Some(start..start + 4);
+            }
+        }
+        None
+    })
+}
 
 /// `curl -u user:password`, in every quoting the shell allows: bare, the whole
 /// credential quoted (it may hold spaces), a quoted user with a bare or quoted
@@ -911,14 +1010,16 @@ fn scan_curl_users(text: &str, hits: &mut Vec<Hit>) {
     // one search serves every flag up to it: a long line of `curl;curl;…` is
     // searched once, not once per `curl`.
     let mut line_end = 0;
-    for curl in CURL_WORD.find_iter(text) {
-        if curl.start() < scanned_to {
+    for curl in curl_words(text) {
+        if curl.start < scanned_to {
             continue;
         }
-        let command_end = command_end(text, curl.end());
+        let command_end = command_end(text, curl.end);
         scanned_to = command_end;
-        let mut pos = curl.end();
-        while pos <= command_end {
+        let mut pos = curl.end;
+        // A flag starts with a dash: most commands have none, and a regex
+        // search per `curl` is the dearest thing a text full of them does.
+        while pos <= command_end && text[pos..command_end].contains('-') {
             let Some(flag) = CURL_USER_FLAG.find_at(&text[..command_end], pos) else {
                 break;
             };
@@ -1708,11 +1809,11 @@ fn open_curl_command(text: &str) -> bool {
     }
     let mut open = false;
     let mut scanned_to = 0;
-    for curl in CURL_WORD.find_iter(text) {
-        if curl.start() < scanned_to {
+    for curl in curl_words(text) {
+        if curl.start < scanned_to {
             continue;
         }
-        scanned_to = command_end(text, curl.end());
+        scanned_to = command_end(text, curl.end);
         open = scanned_to == text.len();
     }
     open
@@ -1861,14 +1962,12 @@ fn accept(accepted: &mut BTreeMap<usize, Span>, text: &str, hit: Hit, priority: 
     } else {
         range.clone()
     };
-    // Ordered by start, last first: accepted spans are disjoint.
-    let overlapped: Vec<usize> = accepted
+    // The common case, a hit beside the accepted spans, needs no list.
+    if !accepted
         .range(..range.end)
-        .rev()
-        .take_while(|(_, span)| span.end > range.start)
-        .map(|(&start, _)| start)
-        .collect();
-    let (Some(&first_start), Some(&last_start)) = (overlapped.last(), overlapped.first()) else {
+        .next_back()
+        .is_some_and(|(_, span)| span.end > range.start)
+    {
         accepted.insert(
             range.start,
             Span {
@@ -1879,6 +1978,16 @@ fn accept(accepted: &mut BTreeMap<usize, Span>, text: &str, hit: Hit, priority: 
             },
         );
         return;
+    }
+    // Ordered by start, last first: accepted spans are disjoint.
+    let overlapped: Vec<usize> = accepted
+        .range(..range.end)
+        .rev()
+        .take_while(|(_, span)| span.end > range.start)
+        .map(|(&start, _)| start)
+        .collect();
+    let (Some(&first_start), Some(&last_start)) = (overlapped.last(), overlapped.first()) else {
+        return; // Not reached: the check above found an overlapped span.
     };
 
     // Walk the hit left to right over what the overlapped spans account for.

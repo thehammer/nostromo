@@ -2291,12 +2291,20 @@ fn about_a_megabyte(unit: &str) -> String {
     unit.repeat((1 << 20) / unit.len())
 }
 
-/// The bound a megabyte must stay under in a debug build on a busy CI runner:
-/// ordinary text takes a third of it, and the quadratic scan these guard
-/// against took many times longer (tens of seconds), so it cannot slip through.
-const FAST_ENOUGH: std::time::Duration = std::time::Duration::from_secs(2);
+/// The bound a megabyte must stay under in a debug build on a busy CI runner.
+/// Ordinary text takes about a sixth of it, the slowest shape about half, and
+/// the quadratic scans these guard against took tens of seconds.
+const FAST_ENOUGH: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Held while a megabyte is timed: the tests of this file run on parallel
+/// threads, and a runner with few cores would charge each one for its
+/// neighbours' work.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn assert_fast(name: &str, text: &str) {
+    let _alone = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let started = std::time::Instant::now();
     let _ = Redactor::new().redact(text);
     let took = started.elapsed();
@@ -2366,13 +2374,14 @@ fn a_credential_at_the_end_of_a_megabyte_of_pathological_curl_text_is_still_reda
         "curl -u \"a:b\\\n",
     ] {
         let text = format!("{}\ncurl -u admin:{pw} https://h/x", about_a_megabyte(unit));
+        let alone = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let started = std::time::Instant::now();
         let (out, kinds) = redact(&text);
-        assert!(
-            started.elapsed() < FAST_ENOUGH,
-            "{unit:?}: took {:?}",
-            started.elapsed()
-        );
+        let took = started.elapsed();
+        drop(alone);
+        assert!(took < FAST_ENOUGH, "{unit:?}: took {took:?}");
         assert!(!out.contains(&pw[3..]), "{unit:?}: the password survived");
         assert!(!kinds.is_empty(), "{unit:?}: nothing redacted");
     }
