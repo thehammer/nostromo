@@ -29,7 +29,7 @@ use chrono::{SecondsFormat, Utc};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use super::audit::{AuditEvent, AuditRequester, RefusalChannel};
+use super::audit::{AuditEvent, AuditPin, AuditRequester, RefusalChannel};
 use super::ecs::{EcsTarget, EcsVocabulary, InvalidTarget};
 use super::launcher::{ConnectFailure, Placement, RemoteLauncher};
 use super::{OperatorCap, TerminalManager};
@@ -407,14 +407,16 @@ pub(crate) async fn run(
         &request.shell_type,
     ) {
         Ok(t) => t,
+        Err(invalid) if invalid.unsafe_config_code().is_some() => {
+            return RemoteResult::NotConfigured(invalid.detail())
+        }
         Err(invalid) => return RemoteResult::InvalidTarget(invalid),
     };
     let wire_target = target.terminal_target();
     let timeout = request.timeout.clamp(MIN_TIMEOUT, MAX_TIMEOUT);
 
     // 2-4. Who can be asked, the registration and the sheet.
-    let (request_id, mut rx, conns) = match ask_operators(manager, &request, &wire_target, timeout)
-    {
+    let (request_id, mut rx, conns) = match ask_operators(manager, &request, &target, timeout) {
         Ok(asked) => asked,
         Err(refused) => return refused,
     };
@@ -452,6 +454,7 @@ pub(crate) async fn run(
                 outcome: "cancelled".into(),
                 reason: Some("operator_gone".into()),
                 remedy: None,
+                detail: None,
             },
         ),
         // 6. The only place a remote shell is started: after Connect.
@@ -475,9 +478,10 @@ pub(crate) async fn run(
 fn ask_operators(
     manager: &Arc<Mutex<TerminalManager>>,
     request: &RemoteRequest,
-    wire_target: &TerminalTarget,
+    target: &EcsTarget,
     timeout: Duration,
 ) -> Result<Asked, RemoteResult> {
+    let wire_target = &target.terminal_target();
     let reason = request.reason.as_deref().and_then(clean_reason);
 
     let mut m = lock(manager);
@@ -516,6 +520,9 @@ fn ask_operators(
         },
         reason,
         expires_at: (Utc::now() + timeout).to_rfc3339_opts(SecondsFormat::Secs, true),
+        shell_command: Some(target.shell_command.clone()),
+        profile: target.profile.clone(),
+        cluster: Some(target.cluster.clone()),
     };
     for conn in &conns {
         let _ = conn.send(confirm.clone());
@@ -576,6 +583,7 @@ async fn connect(
         m.record(AuditEvent::ConnectStarted {
             tag: m.audit_tag(&request.tag),
             target: wire_target.clone(),
+            pin: pin_of(target),
         });
     }
     guard.connect_started = true;
@@ -595,6 +603,7 @@ async fn connect(
                 tag: m.audit_tag(&info.tag),
                 kind: info.kind,
                 target: wire_target.clone(),
+                pin: pin_of(target),
             });
             (
                 RemoteResult::Connected(Box::new(info)),
@@ -612,6 +621,7 @@ async fn connect(
                 outcome: "connect_failed".into(),
                 reason: Some(failure.reason_code.clone()),
                 remedy: failure.remedy.clone(),
+                detail: failure.detail.clone(),
             };
             (RemoteResult::ConnectFailed(failure), msg)
         }
@@ -648,6 +658,16 @@ fn resolved(request_id: &str, outcome: &str) -> ServerMsg {
         outcome: outcome.to_string(),
         reason: None,
         remedy: None,
+        detail: None,
+    }
+}
+
+/// What the connect is audited against: the digests the request was pinned to.
+fn pin_of(target: &EcsTarget) -> AuditPin {
+    AuditPin {
+        config_sha256: target.pin.config_sha256.clone(),
+        local_sha256: target.pin.local_sha256.clone(),
+        argv_sha256: target.pin.argv_sha256.clone(),
     }
 }
 
@@ -695,6 +715,7 @@ impl Drop for Abandon<'_> {
             outcome: "cancelled".into(),
             reason: Some("requester_gone".into()),
             remedy: None,
+            detail: None,
         };
         for conn in self.conns {
             let _ = conn.send(msg.clone());

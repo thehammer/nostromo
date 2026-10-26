@@ -261,6 +261,10 @@ pub struct Confirm {
     pub requested_by: RemoteRequester,
     pub reason: Option<String>,
     pub expires_at: String,
+    /// What will run, as the sheet shows it.
+    pub shell_command: Option<String>,
+    pub profile: Option<String>,
+    pub cluster: Option<String>,
 }
 
 /// How the sheet is told it ended.
@@ -270,6 +274,8 @@ pub struct Resolved {
     pub outcome: String,
     pub reason: Option<String>,
     pub remedy: Option<String>,
+    /// The operator-only first line of what the AWS CLI printed.
+    pub detail: Option<String>,
 }
 
 pub fn as_confirm(m: &ServerMsg) -> Option<Confirm> {
@@ -281,6 +287,9 @@ pub fn as_confirm(m: &ServerMsg) -> Option<Confirm> {
             requested_by,
             reason,
             expires_at,
+            shell_command,
+            profile,
+            cluster,
         } => Some(Confirm {
             request_id: request_id.clone(),
             tag: tag.clone(),
@@ -288,6 +297,9 @@ pub fn as_confirm(m: &ServerMsg) -> Option<Confirm> {
             requested_by: requested_by.clone(),
             reason: reason.clone(),
             expires_at: expires_at.clone(),
+            shell_command: shell_command.clone(),
+            profile: profile.clone(),
+            cluster: cluster.clone(),
         }),
         _ => None,
     }
@@ -300,11 +312,13 @@ pub fn as_resolved(m: &ServerMsg) -> Option<Resolved> {
             outcome,
             reason,
             remedy,
+            detail,
         } => Some(Resolved {
             request_id: request_id.clone(),
             outcome: outcome.clone(),
             reason: reason.clone(),
             remedy: remedy.clone(),
+            detail: detail.clone(),
         }),
         _ => None,
     }

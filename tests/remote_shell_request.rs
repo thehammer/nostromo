@@ -31,7 +31,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nostromo::data::work::picks::PICKS_TAG;
-use nostromo::ipc::protocol::{ClientMsg, ServerMsg, TerminalKind, TerminalStatus, Topic};
+use nostromo::ipc::protocol::{
+    ClientMsg, RemoteRequester, ServerMsg, TerminalKind, TerminalStatus, Topic,
+};
 use nostromo::mcp::server::TOOL_FORBIDDEN_CODE;
 use nostromo::terminal::agent_api::AgentRemoteRequest;
 use nostromo::terminal::launcher::ConnectFailure;
@@ -821,6 +823,156 @@ async fn a_valid_request_sends_exactly_one_confirm_to_the_app_that_can_show_it_a
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_sheet_names_the_command_the_profile_and_the_cluster_that_will_run() {
+    let mut s = Scene::start().await;
+    let clock = HandClock::install(&s.d);
+    let sheet = |c: &Confirm| {
+        (
+            c.shell_command.clone(),
+            c.profile.clone(),
+            c.cluster.clone(),
+        )
+    };
+
+    // The usual request: the user's own profile for production wins.
+    clock.advance(Duration::from_secs(600));
+    let (call, confirm) = s.ask(args()).await;
+    assert_eq!(
+        sheet(&confirm),
+        (
+            Some("/bin/bash".into()),
+            Some("local-fake-prod-profile".into()),
+            Some("fake-prod-ecs".into())
+        )
+    );
+    s.app.answer(&confirm.request_id, "cancel").await;
+    s.mcp.finish(call).await;
+
+    // Tinker runs its own command.
+    clock.advance(Duration::from_secs(600));
+    let (call, confirm) = s.ask(args_with("shell_type", json!("tinker"))).await;
+    assert_eq!(confirm.shell_command.as_deref(), Some("php artisan tinker"));
+    s.app.answer(&confirm.request_id, "cancel").await;
+    s.mcp.finish(call).await;
+
+    // A project's own override of the shell command.
+    clock.advance(Duration::from_secs(600));
+    let (call, confirm) = s
+        .ask(json!({"project":"referral-monitor","environment":"production","service":"monitor","shell_type":"shell"}))
+        .await;
+    assert_eq!(confirm.shell_command.as_deref(), Some("/bin/sh"));
+    assert_eq!(confirm.cluster.as_deref(), Some("fake-prod-ecs"));
+    s.app.answer(&confirm.request_id, "cancel").await;
+    s.mcp.finish(call).await;
+
+    // Without a personal file the shared profile is shown.
+    s.d.remove_ecs("ecs-local.json");
+    clock.advance(Duration::from_secs(600));
+    let (call, confirm) = s.ask(args()).await;
+    assert_eq!(confirm.profile.as_deref(), Some("fake-prod-profile"));
+    s.app.answer(&confirm.request_id, "cancel").await;
+    s.mcp.finish(call).await;
+
+    // An environment with no profile yet: the sheet has none to show.
+    clock.advance(Duration::from_secs(600));
+    let (call, confirm) = s
+        .ask(json!({"project":"ap","environment":"canada","service":"sched","shell_type":"shell"}))
+        .await;
+    assert_eq!(confirm.profile, None);
+    assert_eq!(confirm.cluster.as_deref(), Some("fake-ca-ecs"));
+    assert_eq!(confirm.shell_command.as_deref(), Some("/bin/bash"));
+    s.app.answer(&confirm.request_id, "cancel").await;
+    s.mcp.finish(call).await;
+}
+
+#[test]
+fn the_confirm_frame_leaves_out_what_will_run_when_there_is_nothing_to_say_and_resolved_leaves_out_a_missing_detail(
+) {
+    let target = canonical_target();
+    let requested_by = RemoteRequester {
+        kind: "focus".into(),
+        tag: Some(TAG.into()),
+        agent: None,
+    };
+    let bare = serde_json::to_value(ServerMsg::RemoteShellConfirmRequest {
+        request_id: "r1".into(),
+        tag: Some(TAG.into()),
+        target: target.clone(),
+        requested_by: requested_by.clone(),
+        reason: None,
+        expires_at: "2026-10-25T12:00:00Z".into(),
+        shell_command: None,
+        profile: None,
+        cluster: None,
+    })
+    .unwrap();
+    let full = serde_json::to_value(ServerMsg::RemoteShellConfirmRequest {
+        request_id: "r1".into(),
+        tag: Some(TAG.into()),
+        target,
+        requested_by,
+        reason: None,
+        expires_at: "2026-10-25T12:00:00Z".into(),
+        shell_command: Some("/bin/bash".into()),
+        profile: Some("p".into()),
+        cluster: Some("c".into()),
+    })
+    .unwrap();
+    let resolved = |detail: Option<&str>| {
+        serde_json::to_value(ServerMsg::RemoteShellResolved {
+            request_id: "r1".into(),
+            outcome: "connect_failed".into(),
+            reason: Some("aws_error".into()),
+            remedy: None,
+            detail: detail.map(String::from),
+        })
+        .unwrap()
+    };
+
+    for key in ["shell_command", "profile", "cluster"] {
+        assert!(
+            bare.get(key).is_none(),
+            "{key} is skipped when None: {bare}"
+        );
+    }
+    assert_eq!(full["shell_command"], "/bin/bash");
+    assert_eq!(full["profile"], "p");
+    assert_eq!(full["cluster"], "c");
+    assert!(resolved(None).get("detail").is_none(), "{}", resolved(None));
+    assert_eq!(resolved(Some("line"))["detail"], "line");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_configuration_value_that_is_not_safe_to_run_is_refused_as_not_configured_with_a_fixed_detail_and_nothing_is_asked(
+) {
+    let mut s = Scene::start().await;
+    s.d.edit_ecs("config.json", |c| {
+        c.replace(
+            "\"shell\": \"/bin/bash\"",
+            "\"shell\": \"/bin/bash; touch /tmp/pwned\"",
+        )
+    });
+    let from = s.app.mark();
+
+    let res = s.mcp.call(REQUEST, args()).await;
+
+    assert_eq!(
+        res,
+        json!({
+            "error": "remote_shells_not_configured",
+            "detail": "the ECS configuration for this target has an unusable value (unsafe_shell_command)"
+        })
+    );
+    assert_app_not_asked(&mut s.app, from, "an unusable configuration value").await;
+    s.d.assert_nothing_opened("an unusable configuration value");
+    assert!(
+        s.d.remote_audit().is_empty(),
+        "{:?}",
+        s.d.remote_audit_names()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn two_apps_with_the_sheet_are_both_shown_it_and_the_first_answer_decides() {
     let d = Daemon::start(&[Peer::App, Peer::App]).await;
     d.init_focus(TAG);
@@ -1259,6 +1411,7 @@ async fn a_connect_that_fails_reports_why_opens_no_pane_and_is_audited() {
         reason_code: "sso_expired".into(),
         message: "Your AWS session has expired.".into(),
         remedy: Some("Run `aws sso login --profile fake-prod-profile` and try again.".into()),
+        detail: None,
     }));
     let from = s.app.mark();
 
@@ -1268,10 +1421,16 @@ async fn a_connect_that_fails_reports_why_opens_no_pane_and_is_audited() {
 
     assert_eq!(res["error"], "connect_failed", "{res}");
     assert_eq!(res["reason"], "sso_expired");
-    assert_eq!(res["detail"], "Your AWS session has expired.");
     assert_eq!(
         res["remedy"],
         "Run `aws sso login --profile fake-prod-profile` and try again."
+    );
+    // The agent gets the code and the remedy, not the failure's own sentence.
+    assert!(res.get("detail").is_none(), "{res}");
+    assert!(res.get("message").is_none(), "{res}");
+    assert!(
+        !res.to_string().contains("Your AWS session has expired."),
+        "{res}"
     );
     assert_eq!(s.d.launcher().calls(), 1);
     assert!(s.d.list().is_empty(), "no terminal exists");
@@ -1302,6 +1461,41 @@ async fn a_connect_that_fails_reports_why_opens_no_pane_and_is_audited() {
     let (call, confirm) = s.ask(args()).await;
     s.app.answer(&confirm.request_id, "connect").await;
     assert_eq!(s.mcp.finish(call).await["ok"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_the_cli_printed_goes_to_the_operators_sheet_alone_not_the_agent_and_not_the_audit_trail(
+) {
+    let mut s = Scene::start().await;
+    s.d.launcher().set_failure(Some(ConnectFailure {
+        reason_code: "aws_error".into(),
+        message: "The AWS CLI reported an error.".into(),
+        remedy: None,
+        detail: Some("OPERATOR-ONLY-LINE (account 123456789012)".into()),
+    }));
+    let from = s.app.mark();
+
+    let (call, confirm) = s.ask(args()).await;
+    s.app.answer(&confirm.request_id, "connect").await;
+    let res = s.mcp.finish(call).await;
+
+    assert_eq!(
+        res,
+        json!({"error": "connect_failed", "reason": "aws_error", "remedy": null}),
+        "the agent is told the code and the fixed remedy and nothing else"
+    );
+    let resolved = s.app.wait_resolved(from, &confirm.request_id).await;
+    assert_eq!(
+        resolved.detail.as_deref(),
+        Some("OPERATOR-ONLY-LINE (account 123456789012)")
+    );
+    s.d.wait_audit("connect_failed", |l| l["event"] == "connect_failed")
+        .await;
+    assert!(
+        !s.d.audit_text().contains("OPERATOR-ONLY-LINE"),
+        "{}",
+        s.d.audit_text()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2498,6 +2692,7 @@ async fn the_audit_lines_carry_only_the_documented_fields() {
         reason_code: "no_running_task".into(),
         message: "no task is running".into(),
         remedy: None,
+        detail: None,
     }));
     let (call, confirm) = s.ask(a).await;
     s.app.answer(&confirm.request_id, "connect").await;
@@ -2530,15 +2725,32 @@ async fn the_audit_lines_carry_only_the_documented_fields() {
         );
         assert_eq!(line["outcome"], "connect");
     }
+    // The connect lines also carry the digests the request was pinned to:
+    // flat fields, hex only (the `local_sha256` only when there was a file).
     for line in by_event("connect_started") {
-        assert_eq!(keys(line), ["event", "tag", "target", "ts"], "{line}");
+        assert_eq!(
+            keys(line),
+            [
+                "argv_sha256",
+                "config_sha256",
+                "event",
+                "local_sha256",
+                "tag",
+                "target",
+                "ts"
+            ],
+            "{line}"
+        );
     }
     for line in by_event("connected") {
         assert_eq!(
             keys(line),
             [
+                "argv_sha256",
+                "config_sha256",
                 "event",
                 "kind",
+                "local_sha256",
                 "pane_id",
                 "tag",
                 "target",
@@ -3059,12 +3271,16 @@ async fn a_tcp_client_subscribed_to_everything_never_receives_a_remote_shell_fra
             },
             reason: Some("SECRET-REASON".into()),
             expires_at: "2026-10-25T12:00:00Z".into(),
+            shell_command: Some("SECRET-COMMAND".into()),
+            profile: Some("SECRET-PROFILE".into()),
+            cluster: Some("SECRET-CLUSTER".into()),
         },
         ServerMsg::RemoteShellResolved {
             request_id: "broadcast-1".into(),
             outcome: "connected".into(),
             reason: None,
             remedy: None,
+            detail: None,
         },
     ] {
         d.server.broadcast(msg);
@@ -3143,12 +3359,16 @@ async fn the_general_broadcast_never_carries_a_remote_shell_frame_to_any_local_c
             },
             reason: Some("SECRET-REASON".into()),
             expires_at: "2026-10-25T12:00:00Z".into(),
+            shell_command: Some("SECRET-COMMAND".into()),
+            profile: Some("SECRET-PROFILE".into()),
+            cluster: Some("SECRET-CLUSTER".into()),
         },
         ServerMsg::RemoteShellResolved {
             request_id: "broadcast-1".into(),
             outcome: "connected".into(),
             reason: None,
             remedy: None,
+            detail: None,
         },
     ] {
         d.server.broadcast(msg);

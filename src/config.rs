@@ -182,6 +182,10 @@ pub struct TerminalConfig {
     /// The layer's `ecs.sh`, read as text for its three alias tables and never
     /// run (default: next to the layer's `config.json`).
     pub ecs_aliases_script: Option<PathBuf>,
+    /// The AWS CLI a remote shell is opened with. Tried first, then
+    /// `$NOSTROMO_AWS_CLI`, then `/opt/homebrew/bin/aws`, `/usr/local/bin/aws`
+    /// and `/usr/bin/aws`.
+    pub aws_cli: Option<PathBuf>,
 }
 
 impl Default for Config {

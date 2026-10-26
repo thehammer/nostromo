@@ -25,7 +25,7 @@ use super::audit::{AuditEvent, AuditLog, RefusalChannel};
 use super::fanout::Fanout;
 use super::session::{
     InputError, SignalOps, TerminalSession, MAX_INPUT_FRAME_BYTES, MAX_INPUT_QUEUED_BYTES,
-    RING_MAX_BYTES, RING_MAX_NEWLINES,
+    RING_MAX_BYTES, RING_MAX_NEWLINES, SCRUBBED_ENV,
 };
 use super::store::{self, TerminalRecord, TerminalStore};
 use super::{
@@ -530,6 +530,78 @@ fn the_child_gets_the_terminal_environment_and_any_extra_variables() {
         )
     });
     s.kill();
+}
+
+/// The names of the variables a child that ran `/usr/bin/env` (and nothing
+/// else) printed.
+fn printed_env_names(s: &TerminalSession) -> BTreeSet<String> {
+    assert!(s.wait_exit(WAIT).is_some(), "env exits");
+    wait_until("the reader to finish", WAIT, || s.reader_finished());
+    String::from_utf8_lossy(&s.ring_bytes())
+        .lines()
+        .filter_map(|l| l.trim_end_matches('\r').split_once('='))
+        .map(|(k, _)| k.to_string())
+        .collect()
+}
+
+#[test]
+fn an_observed_session_starts_its_child_with_only_the_environment_it_was_given() {
+    // A remote shell's helper runs the AWS CLI: it must not inherit the
+    // daemon's own variables (this test process has plenty: HOME, PATH,
+    // CARGO_*, NOSTROMO_CLAUDE_BIN, ...), nor the terminal's TERM extras.
+    let (_dir, cwd) = scratch_dir();
+    let s = TerminalSession::spawn_argv_observed(
+        &argv(&["/usr/bin/env"]),
+        &cwd,
+        &[
+            ("ONLY_THIS".to_string(), "given".to_string()),
+            ("TERM".to_string(), "xterm-256color".to_string()),
+        ],
+        80,
+        24,
+        Box::new(|_| {}),
+    )
+    .expect("spawn");
+
+    let names = printed_env_names(&s);
+
+    // `SHELL` is set by the pty library itself (from the login database, not
+    // from the daemon's environment); everything else is what was given.
+    let expected: BTreeSet<String> = ["ONLY_THIS", "TERM", "SHELL"]
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    assert_eq!(names, expected, "the child's whole environment");
+}
+
+#[test]
+fn an_ordinary_terminal_still_inherits_the_daemons_environment_minus_the_scrubbed_ones() {
+    let (_dir, cwd) = scratch_dir();
+    let s = TerminalSession::spawn_argv(
+        &argv(&["/usr/bin/env"]),
+        &cwd,
+        &[("ONLY_THIS".to_string(), "given".to_string())],
+        80,
+        24,
+    )
+    .expect("spawn");
+
+    let names = printed_env_names(&s);
+
+    assert!(names.contains("ONLY_THIS"), "{names:?}");
+    for kept in ["TERM", "COLORTERM", "TERM_PROGRAM", "PATH"] {
+        assert!(
+            names.contains(kept),
+            "{kept} is set for a terminal: {names:?}"
+        );
+    }
+    assert!(
+        names.iter().any(|n| n.starts_with("CARGO_")),
+        "the rest of the daemon's environment is inherited: {names:?}"
+    );
+    for scrubbed in SCRUBBED_ENV {
+        assert!(!names.contains(*scrubbed), "{scrubbed} must be scrubbed");
+    }
 }
 
 #[test]
@@ -1100,6 +1172,7 @@ fn adopt(
             info,
             session,
             fanout,
+            remote: None,
         },
     );
     terminal_id
@@ -1398,6 +1471,28 @@ fn closing_a_terminal_ends_its_background_job_and_stops_the_reader() {
 }
 
 #[test]
+fn an_observed_session_sweeps_its_process_group_when_the_child_exits_on_its_own() {
+    // A remote shell's helper (the session-manager plugin) must not outlive the
+    // `aws` that started it, or a production session would outlive its pane.
+    let (_dir, cwd) = scratch_dir();
+    let s = TerminalSession::spawn_argv_observed(
+        &argv(&["/bin/sh", "-c", "sleep 300 & echo SLEEPER=$!; exit 0"]),
+        &cwd,
+        &[],
+        80,
+        24,
+        Box::new(|_| {}),
+    )
+    .expect("spawn");
+    let sleeper = printed_pid(&s, "SLEEPER");
+    let _guard = StrayGuard(sleeper);
+
+    assert!(s.wait_exit(WAIT).is_some(), "the shell exits by itself");
+
+    wait_until("the helper to be gone", WAIT, || process_is_gone(sleeper));
+}
+
+#[test]
 fn closing_a_terminal_sigkills_a_background_job_that_ignores_hangup() {
     let (_dir, cwd) = scratch_dir();
     // The shell dies of SIGHUP (it does not ignore it); the job does, so only a
@@ -1603,6 +1698,62 @@ fn open_in(cwd: &Path, tag: &str) -> OpenLocal {
         cwd: Some(cwd.display().to_string()),
         ..OpenLocal::default()
     }
+}
+
+#[test]
+fn a_remote_shell_is_checked_before_anything_starts() {
+    use crate::ipc::pane_registry::PaneError;
+    use crate::terminal::launcher::Placement;
+    let (_tmp, cwd) = scratch_dir();
+    let panes = Arc::new(Mutex::new(PaneRegistry::in_memory()));
+    let mgr = TerminalManager::new(TerminalConfig {
+        pane_registry: Some(Arc::clone(&panes)),
+        ..TerminalConfig::in_memory()
+    });
+    let cap = access_cap();
+    let check = |placement: &Placement| {
+        mgr.lock()
+            .unwrap()
+            .check_can_open_remote("busy-focus", placement)
+    };
+    let default = Placement::default();
+    assert_eq!(
+        check(&default),
+        Ok(()),
+        "a focus with no tree gets the default one"
+    );
+
+    panes.lock().unwrap().get_or_init("busy-focus");
+    let bad_pane = Placement {
+        relative_to: Some("no-such-pane".into()),
+        position: None,
+    };
+    let bad_position = Placement {
+        relative_to: None,
+        position: Some("sideways".into()),
+    };
+    assert_eq!(
+        check(&bad_pane),
+        Err(TerminalError::Pane(PaneError::UnknownPane))
+    );
+    assert_eq!(
+        check(&bad_position),
+        Err(TerminalError::Pane(PaneError::InvalidPosition))
+    );
+
+    for _ in 0..MAX_TERMINALS_PER_FOCUS {
+        mgr.lock()
+            .unwrap()
+            .open_local(&cap, open_in(&cwd, "busy-focus"))
+            .expect("open");
+    }
+    assert_eq!(check(&default), Err(TerminalError::TooManyTerminals));
+    assert_eq!(
+        mgr.lock()
+            .unwrap()
+            .check_can_open_remote("another-focus", &default),
+        Ok(())
+    );
 }
 
 #[test]

@@ -315,7 +315,10 @@ impl World {
             opened_by_request: None,
             follower: None,
         };
-        self.terminals.lock().unwrap().insert_live(info, session);
+        self.terminals
+            .lock()
+            .unwrap()
+            .insert_live(info, session, None);
         Term { id }
     }
 
@@ -341,6 +344,8 @@ impl World {
                         shell_type: "shell".into(),
                     },
                     label: label.to_string(),
+                    status: crate::ipc::protocol::TerminalStatus::Running,
+                    watch: None,
                 },
                 Arc::clone(&session),
             )

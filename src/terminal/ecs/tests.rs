@@ -723,6 +723,7 @@ fn explicit_terminal_config_paths_are_used_exactly() {
         ecs_config: Some(dir.join("config.json")),
         ecs_local: Some(dir.join("ecs-local.json")),
         ecs_aliases_script: Some(dir.join("ecs.sh")),
+        aws_cli: None,
     };
 
     let paths = EcsPaths::from_config(&cfg);
@@ -793,4 +794,617 @@ fn a_file_that_goes_missing_between_loads_turns_the_second_load_into_an_error() 
     std::fs::remove_file(copy.file("config.json")).unwrap();
 
     assert!(copy.load().is_err());
+}
+
+// ── the SSO session a login remedy names ─────────────────────────────────────
+
+fn sso_session_of(copy: &Copy) -> String {
+    copy.load()
+        .expect("loads")
+        .resolve("admin-portal", "production", "scheduler", "shell")
+        .expect("resolves")
+        .sso_session
+}
+
+#[test]
+fn the_sso_session_is_the_personal_one_then_the_shared_one_then_carefeed() {
+    let copy = Copy::new();
+    assert_eq!(sso_session_of(&copy), "fake-sso-session");
+
+    copy.write("ecs-local.json", r#"{"profiles": {}}"#);
+    assert_eq!(sso_session_of(&copy), "carefeed", "neither file names one");
+
+    let config = copy.read("config.json");
+    copy.write(
+        "config.json",
+        &config.replacen('{', r#"{ "sso_session": "shared-session","#, 1),
+    );
+    assert_eq!(sso_session_of(&copy), "shared-session");
+}
+
+#[test]
+fn an_sso_session_that_is_not_a_plain_name_is_ignored() {
+    let copy = Copy::new();
+    for bad in ["x`; rm -rf ~ #", "two words", "a\nb", ""] {
+        let local = serde_json::json!({ "sso_session": bad, "profiles": {} });
+        copy.write("ecs-local.json", &local.to_string());
+        assert_eq!(sso_session_of(&copy), "carefeed", "{bad:?}");
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Every value that reaches the command line is checked, and never quoted back
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The words `config.json` / `ecs-local.json` supply for one request
+/// (admin-portal, production, scheduler, shell), one place each.
+#[derive(Clone, Copy)]
+struct DataField {
+    name: &'static str,
+    /// The code `resolve` refuses it with.
+    code: &'static str,
+    /// The longest value accepted.
+    max: usize,
+    /// Whether the empty string is a value that is refused (it is not for the
+    /// profile, where empty means none, nor for the region, where an empty
+    /// one means the environment is not offered at all).
+    empty_is_unsafe: bool,
+    /// Put `value` there, in the copy's files.
+    set: fn(&Copy, &str),
+}
+
+fn edit_json(copy: &Copy, file: &str, edit: impl FnOnce(&mut serde_json::Value)) {
+    let mut doc: serde_json::Value = serde_json::from_str(&copy.read(file)).expect("valid json");
+    edit(&mut doc);
+    copy.write(file, &serde_json::to_string_pretty(&doc).unwrap());
+}
+
+fn set_at(copy: &Copy, file: &str, pointer: &str, value: &str) {
+    edit_json(copy, file, |doc| {
+        *doc.pointer_mut(pointer)
+            .unwrap_or_else(|| panic!("{pointer} is in {file}")) = serde_json::json!(value);
+    });
+}
+
+const SERVICE_AT: &str = "/projects/admin-portal/environments/production/services/scheduler";
+
+fn data_fields() -> Vec<DataField> {
+    vec![
+        DataField {
+            name: "region",
+            code: "unsafe_region",
+            max: 32,
+            empty_is_unsafe: false,
+            set: |c, v| set_at(c, "config.json", "/regions/production", v),
+        },
+        DataField {
+            name: "shared profile",
+            code: "unsafe_profile",
+            max: 128,
+            empty_is_unsafe: false,
+            set: |c, v| {
+                c.write("ecs-local.json", r#"{"profiles": {}}"#);
+                set_at(c, "config.json", "/profiles/production", v);
+            },
+        },
+        DataField {
+            name: "personal profile",
+            code: "unsafe_profile",
+            max: 128,
+            empty_is_unsafe: false,
+            set: |c, v| set_at(c, "ecs-local.json", "/profiles/production", v),
+        },
+        DataField {
+            name: "cluster",
+            code: "unsafe_cluster",
+            max: 255,
+            empty_is_unsafe: true,
+            set: |c, v| {
+                set_at(
+                    c,
+                    "config.json",
+                    "/projects/admin-portal/environments/production/cluster",
+                    v,
+                )
+            },
+        },
+        DataField {
+            name: "ECS service name",
+            code: "unsafe_service_name",
+            max: 255,
+            empty_is_unsafe: true,
+            set: |c, v| set_at(c, "config.json", &format!("{SERVICE_AT}/service"), v),
+        },
+        DataField {
+            name: "container",
+            code: "unsafe_container",
+            max: 255,
+            empty_is_unsafe: true,
+            set: |c, v| set_at(c, "config.json", &format!("{SERVICE_AT}/container"), v),
+        },
+        DataField {
+            name: "shell command",
+            code: "unsafe_shell_command",
+            max: 256,
+            empty_is_unsafe: true,
+            set: |c, v| set_at(c, "config.json", "/shell_types/shell", v),
+        },
+    ]
+}
+
+/// Values no single command-line word may have: shell syntax, a leading `-`,
+/// white space, control characters, and characters that only look right.
+fn hostile_words() -> Vec<String> {
+    [
+        ";",
+        "a;b",
+        "x; touch /tmp/pwned",
+        "|",
+        "a|b",
+        "&",
+        "a&b",
+        "a&&b",
+        "$(x)",
+        "$x",
+        "${x}",
+        "`x`",
+        "<",
+        ">",
+        "a<b",
+        "a>b",
+        "(a)",
+        "a(",
+        "'",
+        "a'b",
+        "\"",
+        "a\"b",
+        "\\",
+        "a\\b",
+        "--profile",
+        "-x",
+        "-",
+        "--",
+        " ",
+        "a b",
+        " a",
+        "a ",
+        "a\tb",
+        "a\nb",
+        "a\rb",
+        "a\0b",
+        "a\u{0b}b",
+        "*",
+        "?",
+        "[a]",
+        "~",
+        "a,b",
+        "a+b",
+        "a%b",
+        "a#b",
+        "!x",
+        "a{b}",
+        "a^b",
+        // Look-alikes and invisible characters.
+        "b\u{0430}d",
+        "\u{FF1B}",
+        "a\u{FF1B}b",
+        "a\u{202E}b",
+        "a\u{200B}b",
+        "\u{FEFF}a",
+        "caf\u{e9}",
+        "\u{65e5}\u{672c}",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// What only a command (words with single spaces between them) can get wrong,
+/// and the shapes an attacker would try for one.
+fn hostile_commands() -> Vec<String> {
+    let mut words: Vec<String> = hostile_words().into_iter().filter(|w| w != "a b").collect();
+    words.extend(
+        [
+            "a  b",
+            "a b ",
+            "  ",
+            "-c",
+            "-c /bin/bash",
+            "/bin/bash\n",
+            "/bin/bash;id",
+            "/bin/b\u{0430}sh",
+            "php  artisan tinker",
+            "/bin/bash\t-l",
+            "/bin/bash && id",
+            "/bin/bash > /tmp/x",
+            "bash -c $(id)",
+            "bash -c 'id'",
+            "bash -c `id`",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    words
+}
+
+fn assert_refused_without_quoting(
+    result: Result<EcsTarget, InvalidTarget>,
+    field: &DataField,
+    value: &str,
+) {
+    let what = format!("{} = {value:?}", field.name);
+    let err = result.expect_err(&format!("{what} must be refused"));
+    assert_eq!(err.field, TargetField::Config, "{what}");
+    assert_eq!(err.unsafe_config_code(), Some(field.code), "{what}");
+    assert_eq!(err.given, field.code, "{what}: `given` is the fixed code");
+    assert!(err.valid.is_empty(), "{what}: {:?}", err.valid);
+    assert_eq!(
+        err.detail(),
+        format!(
+            "the ECS configuration for this target has an unusable value ({})",
+            field.code
+        ),
+        "{what}"
+    );
+    // (The exact text above already shows nothing else is in it; a short
+    // value could appear in the fixed words by chance.)
+    if value.trim().chars().count() >= 4 {
+        assert!(
+            !err.given.contains(value) && !err.detail().contains(value),
+            "{what}: the value is quoted back in {err:?}"
+        );
+    }
+}
+
+fn resolve_usual(copy: &Copy) -> Result<EcsTarget, InvalidTarget> {
+    copy.load().expect("the files still load").resolve(
+        "admin-portal",
+        "production",
+        "scheduler",
+        "shell",
+    )
+}
+
+#[test]
+fn a_value_that_could_change_what_runs_is_refused_with_a_fixed_code_for_every_field_that_reaches_the_command_line(
+) {
+    for field in data_fields() {
+        let mut corpus = if field.code == "unsafe_shell_command" {
+            hostile_commands()
+        } else {
+            hostile_words()
+        };
+        corpus.push("a".repeat(field.max + 1));
+        if field.empty_is_unsafe {
+            corpus.push(String::new());
+        }
+        for value in corpus {
+            let copy = Copy::new();
+            (field.set)(&copy, &value);
+
+            assert_refused_without_quoting(resolve_usual(&copy), &field, &value);
+        }
+    }
+}
+
+#[test]
+fn a_value_of_exactly_the_longest_length_is_accepted_and_one_more_is_not() {
+    for field in data_fields() {
+        let copy = Copy::new();
+        let longest = "a".repeat(field.max);
+        (field.set)(&copy, &longest);
+        let target = resolve_usual(&copy).unwrap_or_else(|e| {
+            panic!("{}: {} characters is allowed: {e:?}", field.name, field.max)
+        });
+        let used = [
+            target.region.as_str(),
+            target.cluster.as_str(),
+            target.service_name.as_str(),
+            target.container.as_str(),
+            target.shell_command.as_str(),
+            target.profile.as_deref().unwrap_or(""),
+        ];
+        assert!(
+            used.iter().any(|v| *v == longest),
+            "{}: the value reached the target intact",
+            field.name
+        );
+
+        (field.set)(&copy, &"a".repeat(field.max + 1));
+        assert!(
+            resolve_usual(&copy).is_err(),
+            "{}: {} characters is too many",
+            field.name,
+            field.max + 1
+        );
+    }
+}
+
+#[test]
+fn the_values_real_configurations_use_still_resolve() {
+    for command in [
+        "/bin/bash",
+        "/bin/sh",
+        "php artisan tinker",
+        "php artisan tinker --env=production",
+    ] {
+        let copy = Copy::new();
+        set_at(&copy, "config.json", "/shell_types/shell", command);
+
+        let t = resolve_usual(&copy).unwrap_or_else(|e| panic!("{command}: {e:?}"));
+
+        assert_eq!(t.shell_command, command);
+    }
+    let copy = Copy::new();
+    set_at(
+        &copy,
+        "config.json",
+        "/projects/admin-portal/environments/production/cluster",
+        "arn:aws:ecs:us-east-2:123456789012:cluster/prod_ecs-1.x",
+    );
+    set_at(
+        &copy,
+        "ecs-local.json",
+        "/profiles/production",
+        "corp.sso_Prod-1@acct=x",
+    );
+    assert!(resolve_usual(&copy).is_ok());
+}
+
+#[test]
+fn every_target_the_fixture_offers_resolves_with_every_shell_type() {
+    let v = vocab();
+    let mut resolved = 0;
+    for project in v.projects() {
+        for environment in &project.environments {
+            for service in &environment.services {
+                for shell in v.shell_types() {
+                    v.resolve(&project.name, &environment.name, service, &shell)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "{}/{}/{service}/{shell} must resolve: {e:?}",
+                                project.name, environment.name
+                            )
+                        });
+                    resolved += 1;
+                }
+            }
+        }
+    }
+    assert!(resolved > 40, "the fixture offers many targets: {resolved}");
+}
+
+#[test]
+fn an_environment_with_no_profile_still_resolves_and_has_none() {
+    // CONFIGURE_ME and empty are "no profile yet", not an unusable value.
+    let copy = Copy::new();
+    std::fs::remove_file(copy.file("ecs-local.json")).unwrap();
+    for profile in ["CONFIGURE_ME", ""] {
+        set_at(&copy, "config.json", "/profiles/production", profile);
+
+        let t = resolve_usual(&copy).expect("resolves without a profile");
+
+        assert_eq!(t.profile, None, "{profile:?}");
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The pin: what the data was when the user was asked
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn usual(copy: &Copy) -> EcsTarget {
+    resolve_usual(copy).expect("the usual target resolves")
+}
+
+#[test]
+fn the_pin_holds_the_sha256_of_the_exact_bytes_of_the_two_files_that_were_read() {
+    let copy = Copy::new();
+
+    let t = usual(&copy);
+
+    assert_eq!(
+        t.pin.config_sha256,
+        sha256_hex(&std::fs::read(copy.file("config.json")).unwrap())
+    );
+    assert_eq!(
+        t.pin.local_sha256.as_deref(),
+        Some(sha256_hex(&std::fs::read(copy.file("ecs-local.json")).unwrap()).as_str())
+    );
+    for digest in [&t.pin.config_sha256, t.pin.local_sha256.as_ref().unwrap()] {
+        assert_eq!(digest.len(), 64, "{digest}");
+        assert!(
+            digest
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "lowercase hex: {digest}"
+        );
+    }
+}
+
+#[test]
+fn changing_one_byte_of_a_file_changes_its_digest_and_only_its_digest() {
+    let copy = Copy::new();
+    let before = usual(&copy);
+
+    let config = copy.read("config.json");
+    copy.write(
+        "config.json",
+        &config.replacen("fake-prod-ecs", "fake-prod-ecz", 1),
+    );
+    let after_config = usual(&copy);
+    assert_ne!(after_config.pin.config_sha256, before.pin.config_sha256);
+    assert_eq!(after_config.pin.local_sha256, before.pin.local_sha256);
+    assert_eq!(
+        after_config.pin.config_sha256,
+        sha256_hex(copy.read("config.json").as_bytes())
+    );
+
+    let local = copy.read("ecs-local.json");
+    copy.write(
+        "ecs-local.json",
+        &local.replacen("fake-sso-session", "fake-sso-sessioo", 1),
+    );
+    let after_local = usual(&copy);
+    assert_ne!(after_local.pin.local_sha256, after_config.pin.local_sha256);
+    assert_eq!(
+        after_local.pin.config_sha256,
+        after_config.pin.config_sha256
+    );
+}
+
+#[test]
+fn without_an_ecs_local_json_the_local_digest_is_none() {
+    let copy = Copy::new();
+    std::fs::remove_file(copy.file("ecs-local.json")).unwrap();
+
+    let t = usual(&copy);
+
+    assert_eq!(t.pin.local_sha256, None);
+    assert_eq!(
+        t.pin.config_sha256,
+        sha256_hex(&std::fs::read(copy.file("config.json")).unwrap())
+    );
+}
+
+#[test]
+fn a_local_file_that_exists_but_cannot_be_parsed_is_still_pinned_by_its_bytes() {
+    let copy = Copy::new();
+    copy.write("ecs-local.json", "{ this is not json");
+
+    let t = usual(&copy);
+
+    assert_eq!(
+        t.pin.local_sha256.as_deref(),
+        Some(sha256_hex(b"{ this is not json").as_str())
+    );
+}
+
+#[test]
+fn the_argv_digest_is_the_sha256_of_the_pinned_argv_joined_with_nul_and_is_stable_across_loads() {
+    let copy = Copy::new();
+
+    let first = usual(&copy);
+    let second = usual(&copy);
+
+    assert_eq!(
+        first.pin.argv_sha256,
+        sha256_hex(first.pinned_argv().join("\0").as_bytes())
+    );
+    assert_eq!(first.argv_sha256(), first.pin.argv_sha256);
+    assert_eq!(first.pin, second.pin, "the same files give the same pin");
+    // What the digest covers is what will run: the command, the profile, the
+    // cluster, the container, the region and the service that is looked up.
+    let argv = first.pinned_argv().join(" ");
+    for part in [
+        "/bin/bash",
+        "local-fake-prod-profile",
+        "fake-prod-ecs",
+        "main",
+        "us-east-2",
+        "production-fake-ap-scheduler",
+    ] {
+        assert!(argv.contains(part), "{part} is pinned: {argv}");
+    }
+}
+
+#[test]
+fn the_argv_digest_changes_with_each_thing_that_decides_what_runs() {
+    let base = usual(&Copy::new()).pin.argv_sha256;
+    type Edit = (&'static str, fn(&Copy));
+    let edits: [Edit; 6] = [
+        ("the shell command", |c| {
+            set_at(c, "config.json", "/shell_types/shell", "/bin/sh")
+        }),
+        ("the profile", |c| {
+            set_at(
+                c,
+                "ecs-local.json",
+                "/profiles/production",
+                "another-profile",
+            )
+        }),
+        ("the cluster", |c| {
+            set_at(
+                c,
+                "config.json",
+                "/projects/admin-portal/environments/production/cluster",
+                "another-cluster",
+            )
+        }),
+        ("the container", |c| {
+            set_at(
+                c,
+                "config.json",
+                &format!("{SERVICE_AT}/container"),
+                "sidecar",
+            )
+        }),
+        ("the region", |c| {
+            set_at(c, "config.json", "/regions/production", "eu-west-1")
+        }),
+        ("the ECS service name", |c| {
+            set_at(
+                c,
+                "config.json",
+                &format!("{SERVICE_AT}/service"),
+                "another-service",
+            )
+        }),
+    ];
+    let mut seen = vec![base.clone()];
+    for (what, edit) in edits {
+        let copy = Copy::new();
+        edit(&copy);
+
+        let digest = usual(&copy).pin.argv_sha256;
+
+        assert!(
+            !seen.contains(&digest),
+            "changing {what} must give a digest of its own"
+        );
+        seen.push(digest);
+    }
+}
+
+#[test]
+fn rewriting_a_file_without_changing_what_runs_changes_the_file_digest_not_the_argv_digest() {
+    let copy = Copy::new();
+    let before = usual(&copy);
+
+    edit_json(&copy, "config.json", |doc| {
+        doc["unrelated_note"] = serde_json::json!("not part of any command");
+    });
+    let after = usual(&copy);
+
+    assert_ne!(after.pin.config_sha256, before.pin.config_sha256);
+    assert_eq!(after.pin.argv_sha256, before.pin.argv_sha256);
+}
+
+#[test]
+fn a_target_whose_command_changes_after_it_was_resolved_no_longer_matches_its_pin() {
+    // The launcher refuses a target whose recomputed digest is not the pinned one.
+    let copy = Copy::new();
+    for tamper in [
+        (|t: &mut EcsTarget| t.shell_command = "/bin/sh".into()) as fn(&mut EcsTarget),
+        |t| t.cluster = "elsewhere".into(),
+        |t| t.container = "elsewhere".into(),
+        |t| t.region = "eu-west-1".into(),
+        |t| t.service_name = "elsewhere".into(),
+        |t| t.profile = Some("elsewhere".into()),
+    ] {
+        let mut t = usual(&copy);
+        assert_eq!(t.argv_sha256(), t.pin.argv_sha256);
+
+        tamper(&mut t);
+
+        assert_ne!(t.argv_sha256(), t.pin.argv_sha256);
+    }
 }

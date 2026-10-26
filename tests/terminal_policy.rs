@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 /// Words no file under `src/mcp/` may contain (`TerminalAgentApi` is the one
 /// terminal name that is allowed there).
-const FORBIDDEN: [&str; 15] = [
+const FORBIDDEN: [&str; 20] = [
     "OperatorCap",
     "TerminalManager",
     "terminal_input",
@@ -46,6 +46,13 @@ const FORBIDDEN: [&str; 15] = [
     "RemoteLauncher",
     "open_remote",
     "remote_answer",
+    // The real launcher and what it starts: an `Arc<TerminalSession>` has
+    // `write`, so code that could spawn one could also drive a production shell.
+    "AwsEcsLauncher",
+    "spawn_argv",
+    "execute_command_argv",
+    "TerminalSession",
+    "ecs::connect",
 ];
 
 /// One forbidden token found in one file.

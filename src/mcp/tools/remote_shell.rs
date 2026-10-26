@@ -133,10 +133,12 @@ fn result_json(result: RemoteResult) -> Value {
         RemoteResult::Cancelled => json!({ "error": "cancelled" }),
         RemoteResult::Dismissed => json!({ "error": "dismissed" }),
         RemoteResult::TimedOut => json!({ "error": "timeout" }),
+        // The agent gets the code and the fixed remedy for it, and nothing the
+        // AWS CLI printed (not the message, not the first line: those are for
+        // the person at the app).
         RemoteResult::ConnectFailed(failure) => json!({
             "error": "connect_failed",
             "reason": failure.reason_code,
-            "detail": failure.message,
             "remedy": failure.remedy,
         }),
     }

@@ -4015,6 +4015,9 @@ mod tests {
                     },
                     reason: Some("SECRET-REASON".into()),
                     expires_at: "2026-10-25T12:00:00Z".into(),
+                    shell_command: Some("SECRET-COMMAND".into()),
+                    profile: Some("SECRET-PROFILE".into()),
+                    cluster: Some("SECRET-CLUSTER".into()),
                 },
             ),
             (
@@ -4024,6 +4027,7 @@ mod tests {
                     outcome: "connect_failed".into(),
                     reason: Some("not_available".into()),
                     remedy: Some("restart".into()),
+                    detail: Some("SECRET-DETAIL".into()),
                 },
             ),
         ]

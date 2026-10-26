@@ -2560,6 +2560,16 @@ pub enum ServerMsg {
         reason: Option<String>,
         /// RFC 3339 UTC: when the daemon gives up waiting.
         expires_at: String,
+        /// What will run, resolved from the ECS data and pinned for this
+        /// request: the remote command, the AWS profile (absent when none is
+        /// configured) and the ECS cluster. Each is checked against a strict
+        /// character set before it is sent. Additive: an older app ignores them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell_command: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cluster: Option<String>,
     },
     /// How a confirm request ended (the sheet closes). `outcome` is
     /// `connected`, `cancelled`, `dismissed`, `timed_out` or `connect_failed`
@@ -2572,6 +2582,11 @@ pub enum ServerMsg {
         reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         remedy: Option<String>,
+        /// On `connect_failed` only, and only for the person at the app: the
+        /// first line the AWS CLI printed, stripped of escapes and control
+        /// characters and cut short. Never sent to the agent, never audited.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
 
     /// TUI-internal pseudo-event — **never produced by the daemon**.
@@ -7213,6 +7228,9 @@ mod terminal_wire_tests {
             },
             reason: Some("look at the scheduler".into()),
             expires_at: "2026-10-25T12:00:00Z".into(),
+            shell_command: Some("/bin/bash".into()),
+            profile: Some("prod-profile".into()),
+            cluster: Some("prod-ecs".into()),
         });
         assert_eq!(v["type"], "remote_shell_confirm_request");
         assert_eq!(v["request_id"], "r1");
@@ -7226,6 +7244,9 @@ mod terminal_wire_tests {
         assert_eq!(v["requested_by"]["agent"], "cody");
         assert_eq!(v["reason"], "look at the scheduler");
         assert_eq!(v["expires_at"], "2026-10-25T12:00:00Z");
+        assert_eq!(v["shell_command"], "/bin/bash");
+        assert_eq!(v["profile"], "prod-profile");
+        assert_eq!(v["cluster"], "prod-ecs");
 
         let v = round_trip_server(ServerMsg::RemoteShellConfirmRequest {
             request_id: "r2".into(),
@@ -7238,9 +7259,15 @@ mod terminal_wire_tests {
             },
             reason: None,
             expires_at: "2026-10-25T12:00:00Z".into(),
+            shell_command: None,
+            profile: None,
+            cluster: None,
         });
         assert_eq!(v["requested_by"], serde_json::json!({"kind": "user"}));
         assert!(v.get("reason").is_none(), "{v}");
+        for key in ["shell_command", "profile", "cluster"] {
+            assert!(v.get(key).is_none(), "{key} is additive: {v}");
+        }
         assert!(v.get("tag").is_none(), "{v}");
     }
 
@@ -7251,11 +7278,12 @@ mod terminal_wire_tests {
             outcome: "connected".into(),
             reason: None,
             remedy: None,
+            detail: None,
         });
         assert_eq!(v["type"], "remote_shell_resolved");
         assert_eq!(v["outcome"], "connected");
         assert!(
-            v.get("reason").is_none() && v.get("remedy").is_none(),
+            v.get("reason").is_none() && v.get("remedy").is_none() && v.get("detail").is_none(),
             "{v}"
         );
 
@@ -7264,8 +7292,10 @@ mod terminal_wire_tests {
             outcome: "connect_failed".into(),
             reason: Some("not_available".into()),
             remedy: Some("Update Nostromo".into()),
+            detail: Some("first line".into()),
         });
         assert_eq!(v["reason"], "not_available");
         assert_eq!(v["remedy"], "Update Nostromo");
+        assert_eq!(v["detail"], "first line");
     }
 }
