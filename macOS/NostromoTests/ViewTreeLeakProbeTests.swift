@@ -36,25 +36,25 @@ enum ProbeCensus {
         var zones: UnsafeMutablePointer<vm_address_t>?
         var zoneCount: UInt32 = 0
         guard malloc_get_all_zones(mach_task_self_, nil, &zones, &zoneCount) == KERN_SUCCESS, let zones else { return [:] }
-        let reader: memory_reader_t = { _, address, _, ptr in
-            ptr?.pointee = UnsafeMutableRawPointer(bitPattern: UInt(address))
-            return KERN_SUCCESS
-        }
-        let recorder: vm_range_recorder_t = { _, context, _, ranges, count in
-            guard let context, let ranges else { return }
-            let box = Unmanaged<Box>.fromOpaque(context).takeUnretainedValue()
-            for i in 0 ..< Int(count) {
-                let r = ranges[i]
-                guard r.size >= 16, let p = UnsafeRawPointer(bitPattern: UInt(r.address)) else { continue }
-                let isa = p.load(as: UInt.self)
-                if let idx = box.wanted[isa & box.mask] { box.counts[idx] += 1 }
-            }
-        }
         for z in 0 ..< Int(zoneCount) {
             guard let zone = UnsafeMutablePointer<malloc_zone_t>(bitPattern: UInt(zones[z])),
                   let introspect = zone.pointee.introspect,
                   let enumerate = introspect.pointee.enumerator else { continue }
-            _ = enumerate(mach_task_self_, ctx, UInt32(MALLOC_PTR_IN_USE_RANGE_TYPE), zones[z], reader, recorder)
+            _ = enumerate(mach_task_self_, ctx, 4 /* MALLOC_PTR_IN_USE_RANGE_TYPE */, zones[z],
+                          { _, address, _, ptr in
+                              ptr?.pointee = UnsafeMutableRawPointer(bitPattern: UInt(address))
+                              return KERN_SUCCESS
+                          },
+                          { _, context, _, ranges, count in
+                              guard let context, let ranges else { return }
+                              let box = Unmanaged<Box>.fromOpaque(context).takeUnretainedValue()
+                              for i in 0 ..< Int(count) {
+                                  let r = ranges[i]
+                                  guard r.size >= 16, let p = UnsafeRawPointer(bitPattern: UInt(r.address)) else { continue }
+                                  let isa = p.load(as: UInt.self)
+                                  if let idx = box.wanted[isa & box.mask] { box.counts[idx] += 1 }
+                              }
+                          })
         }
         var out: [String: Int] = [:]
         for (i, n) in kept.enumerated() { out[n] = box.counts[i] }
