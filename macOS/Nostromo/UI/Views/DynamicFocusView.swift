@@ -906,7 +906,7 @@ final class DynamicFocusView: NSView {
             } else if leafViews[paneId] is TerminalPaneLeaf {
                 // A terminal pane draws from `TerminalSessionStore`; the daemon's `terminal`
                 // pane content is only a placeholder for clients that cannot attach (iOS).
-                continue
+                log.debug("updateContent pane=\(paneId, privacy: .public) is a terminal: nothing to draw from pane content")
             } else {
                 // A miss here — no materialised view for a pane id `paneContent`
                 // names — means the hierarchy has already diverged from what's
