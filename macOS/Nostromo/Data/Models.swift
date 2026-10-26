@@ -752,24 +752,6 @@ struct ActivityEvent: Decodable {
     }
 }
 
-// MARK: - Rate limits
-
-struct RateLimits {
-    let pct5h:   Int
-    let reset5h: TimeInterval
-    let pct7d:   Int
-    let reset7d: TimeInterval
-
-    static func parse(_ s: String) -> RateLimits? {
-        let parts = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: ":")
-            .compactMap { Int($0) }
-        guard parts.count >= 4 else { return nil }
-        return RateLimits(pct5h: parts[0], reset5h: TimeInterval(parts[1]),
-                          pct7d: parts[2], reset7d: TimeInterval(parts[3]))
-    }
-}
-
 // MARK: - Budget posture
 
 enum BudgetPosture: String {
@@ -902,6 +884,27 @@ struct PostureSnapshot {
     let scoped:         [(label: String, window: WindowPace)]
     /// Mother-attributable agents from the `agents` map.  Empty when absent.
     let agents:         [String: AgentSpend]
+    /// Bishop's `stale_input` flag: its inputs are stale, so window numbers can't be trusted.
+    var staleInput:     Bool = false
+
+    /// One 5h/7d window as shown on the status bar.
+    struct StatusWindow: Equatable {
+        let label:     String
+        let pct:       Int
+        let remaining: String
+    }
+
+    /// 5h/7d windows for the status bar. Empty when Bishop's inputs are stale;
+    /// a window is omitted when absent or already reset. The real used
+    /// percentage is shown (not capped).
+    func statusWindows(now: TimeInterval) -> [StatusWindow] {
+        guard !staleInput else { return [] }
+        return [("5h", fiveHour), ("7d", sevenDay)].compactMap { label, w in
+            guard let w, w.resetsAt > now else { return nil }
+            return StatusWindow(label: label, pct: Int(w.usedPct.rounded()),
+                                remaining: Theme.formatReset(w.resetsAt - now))
+        }
+    }
 
     /// Each agent's share of the Mother-attributed token total for the given window
     /// ("5h" or "7d"), sorted largest-first.
@@ -935,7 +938,8 @@ struct PostureSnapshot {
             sevenDay:       parseWindowPace(json["seven_day"]),
             sonnetSevenDay: parseSonnetWindow(json["models"], elapsedPct: parseWindowPace(json["seven_day"])?.elapsedPct),
             scoped:         parseScoped(json["scoped"]),
-            agents:         parseAgents(json["agents"])
+            agents:         parseAgents(json["agents"]),
+            staleInput:     (json["stale_input"] as? Bool) ?? false
         )
     }
 
