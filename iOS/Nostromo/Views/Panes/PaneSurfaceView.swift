@@ -107,6 +107,8 @@ struct PaneSurfaceView: View {
                         Spacer()
                     }.frame(maxWidth: .infinity)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .terminal(let placeholder):
+                TerminalPlaceholderView(placeholder: placeholder)
             case .unknown(let raw):
                 ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
             // `.diff`, `.prConversation` and `.ticket` were the last honest
@@ -388,5 +390,42 @@ struct PaneSurfaceView: View {
             return "{\(pairs)}"
         }
         return "\(value)"
+    }
+}
+
+/// A terminal pane on iOS: no live content, ever (terminal frames never reach a TCP peer; the daemon
+/// sends only this placeholder in `pane_content`). A card says where the terminal is, and a remote
+/// shell carries its environment as an uppercase red badge so it is never mistaken for a local one.
+private struct TerminalPlaceholderView: View {
+    let placeholder: TerminalPlaceholder
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Spacer(minLength: 60)
+            Image(systemName: "terminal")
+                .font(.system(size: 26))
+                .foregroundStyle(.secondary)
+            Text("Terminal: open on Mac")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.primary)
+            Text(placeholder.label)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            if let environment = placeholder.environment {
+                Text(environment.uppercased())
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Color.red, in: RoundedRectangle(cornerRadius: 4))
+                    .accessibilityIdentifier("terminal-environment-badge")
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("terminal-placeholder")
     }
 }

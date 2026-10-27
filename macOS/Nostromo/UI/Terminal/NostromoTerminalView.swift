@@ -29,6 +29,12 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
     private let store: TerminalSessionStore
     /// > 0 while SwiftTerm is sending something the emulator generated (see the type's comment).
     private var emulatorReplyDepth = 0
+    /// False while this view is a mirror: it is held at the daemon's grid (`pinGrid`) and never
+    /// reports its own size.
+    private(set) var isDriver = true
+    private var pendingResize: DispatchWorkItem?
+    /// The wait before a driver's new grid goes to the daemon, so dragging a divider sends one frame.
+    static let resizeDebounce: TimeInterval = 0.05
 
     init(windowId: String, store: TerminalSessionStore) {
         self.windowId = windowId
@@ -47,6 +53,31 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
     var gridSize: (cols: Int, rows: Int) {
         let terminal = getTerminal()
         return (terminal.cols, terminal.rows)
+    }
+
+    /// Become the driver (the frame is the pane's again, set by the host) or a mirror.
+    func setDriver(_ driver: Bool) {
+        guard driver != isDriver else { return }
+        isDriver = driver
+        pendingResize?.cancel()
+        pendingResize = nil
+    }
+
+    /// Hold this view at exactly `cols` x `rows` of cells, top-left in a container `containerHeight`
+    /// tall, whatever the pane's size: the grid is set directly (SwiftTerm's own resize would soft-reset
+    /// the terminal), and the frame is the size that grid needs, so SwiftTerm's `setFrameSize` finds
+    /// nothing to recompute and no reflow happens. The extra quarter point keeps floating-point rounding
+    /// from losing the last column or row.
+    func pinGrid(cols: Int, rows: Int, containerHeight: CGFloat) {
+        let terminal = getTerminal()
+        if terminal.cols != cols || terminal.rows != rows {
+            terminal.resize(cols: cols, rows: rows)
+            needsDisplay = true
+        }
+        let optimal = getOptimalFrameSize()
+        let size = NSSize(width: optimal.width + 0.25, height: optimal.height + 0.25)
+        let frame = NSRect(x: 0, y: containerHeight - size.height, width: size.width, height: size.height)
+        if self.frame != frame { self.frame = frame }
     }
 
     /// Draw bytes from the daemon.
@@ -91,6 +122,21 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
     func screenText(limit: Int) -> String {
         let text = String(data: getTerminal().getBufferAsData(kind: .active), encoding: .utf8) ?? ""
         return String(text.suffix(limit))
+    }
+
+    // MARK: - Driving
+
+    /// A click in the terminal makes this window the one that sizes it. A click app-control made does not.
+    override func mouseDown(with event: NSEvent) {
+        claimDriver(event: event)
+        super.mouseDown(with: event)
+    }
+
+    /// A person clicked (or is about to type) in this view: it drives the terminal.
+    func claimDriver(event: NSEvent?) {
+        guard let terminalId,
+              TerminalInputGuard.verdict(origin: .typed, event: event) != .refused else { return }
+        store.claimDriver(terminalId: terminalId, fromWindow: windowId)
     }
 
     // MARK: - Input (every path asks the guard first)
@@ -138,9 +184,17 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
 
     // MARK: - TerminalViewDelegate
 
+    /// Only the driver tells the daemon its size, after a short pause (50 ms) so a drag sends one.
     func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
-        guard let terminalId else { return }
-        store.resize(terminalId: terminalId, cols: newCols, rows: newRows, fromWindow: windowId)
+        guard isDriver, terminalId != nil else { return }
+        pendingResize?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isDriver, let id = self.terminalId else { return }
+            let grid = self.gridSize
+            self.store.resize(terminalId: id, cols: grid.cols, rows: grid.rows, fromWindow: self.windowId)
+        }
+        pendingResize = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resizeDebounce, execute: work)
     }
 
     func setTerminalTitle(source: TerminalView, title: String) {}

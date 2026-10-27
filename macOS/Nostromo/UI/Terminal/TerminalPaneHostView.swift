@@ -10,6 +10,15 @@ import SwiftTerm
 /// window and has a size, and unregisters when it leaves (so a hidden pane costs no output).
 /// A refused attach is never silent: the daemon audits what the store reports.
 ///
+/// The same terminal can be open in more than one window. The window a person last typed or clicked in
+/// is the driver: its view fills the pane and its size is the terminal's (`TerminalSessionStore`
+/// decides which). Any other window is a mirror: the view is held at exactly the daemon's cols x rows
+/// in a clipping container, so it never reflows and never sends a resize (a pane smaller than the
+/// terminal shows its top-left corner). The header says so, and a click or key makes it the driver.
+///
+/// While the daemon is unreachable the pane says its shell ended and cannot be restarted; when the
+/// daemon is back it shows what the daemon says (a shell that died with it is `ended`, with Restart).
+///
 /// Every control that changes a terminal (the x, Restart, Close, and Terminal > Close Terminal
 /// Pane) asks `TerminalInputGuard.allowsControl` first. A synthetic click does nothing, and the
 /// refusal is reported to the daemon.
@@ -24,16 +33,23 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     private let store: TerminalSessionStore
     private let latency: TerminalLatencyStats
-    private let header = NSView()
+    private let header = ClickableClipView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let closeButton = NSButton()
     private let terminalView: NostromoTerminalView
+    /// Holds the terminal view and clips it: a mirror can be larger than the pane.
+    private let terminalContainer = ClickableClipView()
+    private let mirrorHint = NSTextField(labelWithString: "")
     private let overlay = NSView()
     private let overlayLabel = NSTextField(labelWithString: "")
     private let restartButton = NSButton()
     private let overlayCloseButton = NSButton()
 
     private var info: TerminalInfo?
+    /// This view is not the one that sizes the terminal.
+    private var isMirror = false
+    /// The daemon's grid for the terminal, from its last replay or state.
+    private var daemonGrid: (cols: Int, rows: Int)?
     private var changes: AnyCancellable?
     private var registered = false
     /// A replay is being fed: its bytes are not an echo of a key.
@@ -61,7 +77,16 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         setAccessibilityLabel("Terminal")
         buildHeader()
         buildOverlay()
-        addSubview(terminalView)
+        terminalContainer.addSubview(terminalView)
+        // A click on the pane (the terminal, the empty part beside a mirror, the header) takes the keyboard
+        // and, in a mirror, the size.
+        let claim: (NSEvent) -> Void = { [weak self] event in
+            self?.terminalView.claimDriver(event: event)
+            self?.focusTerminal()
+        }
+        terminalContainer.onMouseDown = claim
+        header.onMouseDown = claim
+        addSubview(terminalContainer)
         addSubview(header)
         addSubview(overlay)
         info = store.info(forPane: paneId, tag: tag)
@@ -113,6 +138,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     // MARK: - TerminalByteSink
 
+    /// The grid the pane's own size gives (read for the driver only, so the view fills the pane).
     var preferredSize: (cols: Int, rows: Int)? {
         guard terminalView.frame.width > 1, terminalView.frame.height > 1 else { return nil }
         return terminalView.gridSize
@@ -133,7 +159,22 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     }
 
     func apply(cols: Int, rows: Int) {
-        terminalView.applyGrid(cols: cols, rows: rows)
+        daemonGrid = (cols, rows)
+        if isMirror {
+            layoutTerminal()
+            render()
+        } else {
+            terminalView.applyGrid(cols: cols, rows: rows)
+        }
+    }
+
+    func setDriver(_ isDriver: Bool) {
+        guard isMirror == isDriver else { return }
+        isMirror = !isDriver
+        terminalView.setDriver(isDriver)
+        // Synchronously: the store reads `preferredSize` right after, and a driver's grid is the pane's.
+        layoutTerminal()
+        render()
     }
 
     func takeKeyboardFocus() {
@@ -147,7 +188,8 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         let h = Self.headerHeight
         header.frame = NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
         let body = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - h))
-        terminalView.frame = body
+        terminalContainer.frame = body
+        layoutTerminal()
         let overlayH = min(Self.overlayHeight, body.height)
         overlay.frame = NSRect(x: 0, y: 0, width: body.width, height: overlayH)
         layoutHeader()
@@ -168,6 +210,16 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
                 guard let self, self.window == nil else { return }
                 self.unregisterFromStore()
             }
+        }
+    }
+
+    /// The driver's view fills the pane; a mirror's is pinned to the daemon's grid.
+    private func layoutTerminal() {
+        let body = terminalContainer.bounds
+        if isMirror, let grid = daemonGrid {
+            terminalView.pinGrid(cols: grid.cols, rows: grid.rows, containerHeight: body.height)
+        } else if terminalView.frame != body {
+            terminalView.frame = body
         }
     }
 
@@ -192,6 +244,10 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     private func handle(_ change: TerminalChange) {
         if case .refused(let frame) = change {
             showInputNotice(for: frame)
+            return
+        }
+        if case .availability = change {
+            render()
             return
         }
         guard case .info(let updated) = change, updated.paneId == paneId, updated.tag == tag else { return }
@@ -236,11 +292,21 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     private func render() {
         titleLabel.stringValue = info?.headerTitle() ?? "Terminal"
+        let daemonStopped = info.map { store.isDaemonUnavailable(terminalId: $0.terminalId) } ?? false
         let ended = info?.status == .ended
-        let notice = ended ? nil : inputNotice
-        overlay.isHidden = !ended && notice == nil
-        if ended {
-            if let code = info?.exitCode {
+        let notice = (ended || daemonStopped) ? nil : inputNotice
+        overlay.isHidden = !ended && !daemonStopped && notice == nil
+        restartButton.isEnabled = !daemonStopped
+        restartButton.alphaValue = daemonStopped ? 0.4 : 1
+        if daemonStopped {
+            // Never a silent dead prompt: the shell is gone or unknown. Nothing here can act until the
+            // daemon answers again.
+            overlayLabel.stringValue = "Nostromo daemon stopped. This shell has ended."
+            restartButton.isHidden = info?.kind != .local
+        } else if ended {
+            if info?.endedReason == "daemon_stopped" {
+                overlayLabel.stringValue = "[process ended: Nostromo daemon restarted]"
+            } else if let code = info?.exitCode {
                 overlayLabel.stringValue = "[process exited with code \(code)]"
             } else {
                 overlayLabel.stringValue = "[process ended]"
@@ -250,7 +316,13 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
             overlayLabel.stringValue = notice
             restartButton.isHidden = true
         }
-        overlayCloseButton.isHidden = notice != nil
+        overlayCloseButton.isHidden = notice != nil || daemonStopped
+        if let grid = daemonGrid, isMirror, !daemonStopped, !ended {
+            mirrorHint.stringValue = "Mirroring at \(grid.cols)\u{00D7}\(grid.rows), type here to drive"
+        } else {
+            mirrorHint.stringValue = ""
+        }
+        mirrorHint.isHidden = mirrorHint.stringValue.isEmpty
         overlayLabel.toolTip = overlayLabel.stringValue
         needsLayout = true
     }
@@ -264,7 +336,13 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         titleLabel.setAccessibilityIdentifier("terminal-title")
         style(closeButton, title: "\u{00D7}", identifier: "terminal-close-x", label: "Close terminal",
               action: #selector(closeTapped(_:)), filled: false)
+        mirrorHint.font = Theme.statusFont
+        mirrorHint.textColor = Theme.fgMuted
+        mirrorHint.lineBreakMode = .byTruncatingHead
+        mirrorHint.isHidden = true
+        mirrorHint.setAccessibilityIdentifier("terminal-mirror-hint")
         header.addSubview(titleLabel)
+        header.addSubview(mirrorHint)
         header.addSubview(closeButton)
     }
 
@@ -311,8 +389,14 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         let closeWidth: CGFloat = 28
         closeButton.frame = NSRect(x: header.bounds.width - closeWidth - 2, y: 0, width: closeWidth, height: h)
         let labelSize = titleLabel.intrinsicContentSize
+        let available = max(0, header.bounds.width - closeWidth - 20)
+        // The hint keeps its width unless the pane is very narrow; the title gives way to it.
+        let hintW = mirrorHint.isHidden ? 0 : min(mirrorHint.intrinsicContentSize.width, available * 0.6)
+        let hintGap: CGFloat = mirrorHint.isHidden ? 0 : 8
+        mirrorHint.frame = NSRect(x: 10 + available - hintW, y: (h - labelSize.height) / 2,
+                                  width: hintW, height: labelSize.height)
         titleLabel.frame = NSRect(x: 10, y: (h - labelSize.height) / 2,
-                                  width: max(0, header.bounds.width - closeWidth - 20), height: labelSize.height)
+                                  width: max(0, available - hintW - hintGap), height: labelSize.height)
     }
 
     private func layoutOverlay() {
@@ -358,5 +442,26 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         }
         focusAfterRestart = true
         store.restart(terminalId: id)
+    }
+}
+
+/// Clips its subviews to its bounds (a mirrored terminal can be larger than the pane) and reports a
+/// click anywhere in it, including the part the terminal view does not cover. Subviews that take clicks
+/// themselves (the terminal, the header's buttons) still do.
+private final class ClickableClipView: NSView {
+    var onMouseDown: ((NSEvent) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("ClickableClipView is created in code")
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onMouseDown?(event)
     }
 }

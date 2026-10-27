@@ -1724,6 +1724,7 @@ class AppStore: ObservableObject {
         case .diff:           return "diff"
         case .prConversation: return "prConversation"
         case .ticket:         return "ticket"
+        case .terminal:       return "terminal"
         case .unknown:        return "unknown"
         }
     }

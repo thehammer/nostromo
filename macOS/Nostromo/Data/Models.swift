@@ -1923,8 +1923,29 @@ enum PaneContentWire {
     case prConversation(PrConversationPayload)
     /// An issue-tracker ticket (W4).
     case ticket(TicketPayload)
+    /// A terminal pane. The Mac draws it from `TerminalSessionStore` (routed by pane id), so this
+    /// content is never rendered; it exists so the daemon's placeholder decodes as what it is.
+    case terminal(TerminalPlaceholder)
     /// A future content kind not yet recognised by this client version.
     case unknown(JSONValue)
+}
+
+/// The `terminal` pane content (`PaneContentWire::Terminal` in `src/ipc/protocol.rs`): a placeholder
+/// for clients that cannot attach (iOS). macOS-local copy of `NostromoKit.TerminalPlaceholder`.
+struct TerminalPlaceholder: Decodable, Equatable {
+    let terminalId: String
+    let label: String
+    /// Nil for a local terminal.
+    let environment: String?
+
+    private enum CodingKeys: String, CodingKey { case terminalId = "terminal_id", label, environment }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        terminalId = (try? c.decode(String.self, forKey: .terminalId)) ?? ""
+        label = (try? c.decode(String.self, forKey: .label)) ?? "Terminal"
+        environment = (try? c.decodeIfPresent(String.self, forKey: .environment)) ?? nil
+    }
 }
 
 extension PaneContentWire: Decodable {
@@ -1960,6 +1981,8 @@ extension PaneContentWire: Decodable {
             self = .prConversation(try PrConversationPayload(from: decoder))
         case "ticket":
             self = .ticket(try TicketPayload(from: decoder))
+        case "terminal":
+            self = .terminal(try TerminalPlaceholder(from: decoder))
         default:
             let raw = (try? JSONValue(from: decoder)) ?? .object([:])
             self = .unknown(raw)
@@ -1994,6 +2017,8 @@ extension PaneContentWire: Equatable {
         case (.prConversation(let a), .prConversation(let b)):
             return a == b
         case (.ticket(let a), .ticket(let b)):
+            return a == b
+        case (.terminal(let a), .terminal(let b)):
             return a == b
         case (.jsonSnapshot(let a), .jsonSnapshot(let b)):
             return a == b

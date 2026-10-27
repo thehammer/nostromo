@@ -13,6 +13,7 @@ import AppKit
     func closeTerminalPane(_ sender: Any?)
     func terminalFind(_ sender: Any?)
     func copyTerminalLatencyStats()
+    func openSecondWindowQA(_ sender: Any?)
 }
 
 enum MainMenu {
@@ -112,6 +113,15 @@ enum MainMenu {
                                              keyEquivalent: "")
         terminalLatencyItem.target = target
         debugMenu.addItem(terminalLatencyItem)
+        // QA only (enabled when the bundle id is not the real app's): a second window on the main
+        // display's focus, so one terminal can be mirrored without a second display. ⌃⌥⌘N lets the
+        // QA scripts press it through app-control.
+        let secondWindowItem = NSMenuItem(title: "Open Second Window (QA)",
+                                          action: #selector(MainMenuActions.openSecondWindowQA(_:)),
+                                          keyEquivalent: "n")
+        secondWindowItem.keyEquivalentModifierMask = [.control, .option, .command]
+        secondWindowItem.target = target
+        debugMenu.addItem(secondWindowItem)
         // ⌥⇧⌘B: ⇧⌘B is the Session menu's Background Activity (BA3).
         let captureItem = NSMenuItem(title: "Capture render state now",
                                      action: #selector(MainMenuActions.captureRenderStateNow),

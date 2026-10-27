@@ -81,7 +81,7 @@ public enum TabPlan {
         case .code:             return "File"
         case .prConversation:    return "Conversation"
         case .ticket:              return "Ticket"
-        case .text, .jsonSnapshot, .loading, .error, .unknown:
+        case .text, .jsonSnapshot, .loading, .error, .terminal, .unknown:
             return "View"
         }
     }

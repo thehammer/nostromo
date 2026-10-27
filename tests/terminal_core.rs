@@ -896,6 +896,7 @@ async fn an_app_connection_opens_a_terminal_leaf_with_a_login_shell_in_the_reque
                 if tag == TAG && *p == pane_id)
         })
         .await;
+    let wire = serde_json::to_value(&content).unwrap();
     let ServerMsg::PaneContent {
         content:
             PaneContentWire::Terminal {
@@ -910,6 +911,11 @@ async fn an_app_connection_opens_a_terminal_leaf_with_a_login_shell_in_the_reque
     };
     assert!(!label.is_empty(), "the placeholder carries a label");
     assert_eq!(environment, None, "a local terminal has no environment");
+    assert_eq!(wire["content"]["kind"], "terminal");
+    assert!(
+        wire["content"].get("environment").is_none(),
+        "a local terminal's PaneContent has no environment key"
+    );
 
     // Then the state: running, answering the request, asked for by the user.
     let (i_state, state) = app
