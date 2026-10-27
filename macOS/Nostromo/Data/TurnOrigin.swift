@@ -22,6 +22,20 @@ extension ChatTurn {
     var terminalOriginTexts: [String?] {
         TerminalDeliveryText.texts(for: terminalOriginItems, in: userInput)
     }
+
+    /// Text the agent received that the blocks do not show (see
+    /// `TerminalDeliveryText.unshownText`). Nil for a genuine delivery.
+    var terminalOriginExtraText: String? {
+        guard hasTerminalOrigin else { return nil }
+        return TerminalDeliveryText.unshownText(for: terminalOriginItems, in: userInput)
+    }
+
+    /// What the bubble of a terminal-origin turn holds, nil when there is none: the extra text,
+    /// or the image-only placeholder for attachments. Never hides what the agent received.
+    var terminalOriginBubbleText: String? {
+        if let extra = terminalOriginExtraText { return extra }
+        return imageURLs.isEmpty ? nil : ChatSession.imageOnlyText
+    }
 }
 
 /// How a delivery block is addressed inside a turn, apart from the turn's own blocks.

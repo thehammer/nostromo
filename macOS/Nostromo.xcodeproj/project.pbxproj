@@ -626,6 +626,7 @@
 		TP000000000000000000T033 /* TerminalStoreMirrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */; };
 		TP000000000000000000T034 /* FollowModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F034 /* FollowModelTests.swift */; };
 		TP000000000000000000T035 /* TurnOriginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F035 /* TurnOriginTests.swift */; };
+		TP000000000000000000TH01 /* TurnOriginHiddenTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000FH01 /* TurnOriginHiddenTextTests.swift */; };
 		TP000000000000000000A036 /* AppControlAX.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F036 /* AppControlAX.swift */; };
 		TP000000000000000000T036 /* AppControlAX.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F036 /* AppControlAX.swift */; };
 		TP000000000000000000T037 /* TerminalScreenAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F037 /* TerminalScreenAccessTests.swift */; };
@@ -1054,6 +1055,7 @@
 		TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStoreMirrorTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F034 /* FollowModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowModelTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F035 /* TurnOriginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOriginTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000FH01 /* TurnOriginHiddenTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOriginHiddenTextTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F036 /* AppControlAX.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlAX.swift; sourceTree = "<group>"; };
 		TP000000000000000000F037 /* TerminalScreenAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreenAccessTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -1358,6 +1360,7 @@
 				TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */,
 				TP000000000000000000F034 /* FollowModelTests.swift */,
 				TP000000000000000000F035 /* TurnOriginTests.swift */,
+				TP000000000000000000FH01 /* TurnOriginHiddenTextTests.swift */,
 				TP000000000000000000F037 /* TerminalScreenAccessTests.swift */,
 				WK0000000000000000000059 /* WorkWireDecodingTests.swift */,
 				WK0000000000000000000061 /* WorkQueryTests.swift */,
@@ -1966,6 +1969,7 @@
 				TP000000000000000000T033 /* TerminalStoreMirrorTests.swift in Sources */,
 				TP000000000000000000T034 /* FollowModelTests.swift in Sources */,
 				TP000000000000000000T035 /* TurnOriginTests.swift in Sources */,
+				TP000000000000000000TH01 /* TurnOriginHiddenTextTests.swift in Sources */,
 				TP000000000000000000T037 /* TerminalScreenAccessTests.swift in Sources */,
 				ZZ0000000000000000M20102 /* ModelStore.swift in TestSources */,
 				ZZ0000000000000000M20112 /* ModelPresentation.swift in TestSources */,

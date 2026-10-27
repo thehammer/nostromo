@@ -101,8 +101,17 @@ public enum TerminalDeliveryText {
     /// follow notice ends at its `>`, any other element is skipped. Works on UTF-8 bytes, so a
     /// combining mark next to a `>` cannot change where an element ends.
     public static func elements(in text: String) -> [Element] {
-        let bytes = Array(text.utf8)
-        var out: [Element] = []
+        scan(Array(text.utf8)).map(\.element)
+    }
+
+    /// An element with the byte range it covers in the text.
+    private struct Scanned {
+        let element: Element
+        let range: Range<Int>
+    }
+
+    private static func scan(_ bytes: [UInt8]) -> [Scanned] {
+        var out: [Scanned] = []
         var rest = 0
         while let start = find(prefix, in: bytes, from: rest) {
             let head = start + 1
@@ -111,16 +120,85 @@ public enum TerminalDeliveryText {
             let name = Array(bytes[head ..< nameEnd])
             if name == outputName {
                 let end = find(outputEnd, in: bytes, from: close + 1).map { $0 + outputEnd.count } ?? bytes.count
-                out.append(Element(isOutput: true, text: string(bytes[start ..< end])))
+                out.append(Scanned(element: Element(isOutput: true, text: string(bytes[start ..< end])),
+                                   range: start ..< end))
                 rest = end
             } else {
                 if name == followName {
-                    out.append(Element(isOutput: false, text: string(bytes[start ... close])))
+                    out.append(Scanned(element: Element(isOutput: false, text: string(bytes[start ... close])),
+                                       range: start ..< close + 1))
                 }
                 rest = close + 1
             }
         }
         return out
+    }
+
+    /// Whatever the agent received that the item blocks do not show: `text` with every recognised
+    /// element removed (and, after a follow notice, the daemon's own sentence for it), trimmed.
+    /// Nil when nothing but whitespace is left.
+    ///
+    /// The daemon only checks that a prompt STARTS with an element, so a forged or hand-typed
+    /// message can carry real instructions after one, after a closing output tag, or in an
+    /// element it does not recognise. Those must stay visible.
+    public static func unshownText(for items: [TerminalOriginItem], in text: String) -> String? {
+        let bytes = Array(text.utf8)
+        var leftover: [UInt8] = []
+        var cursor = 0
+        for (i, scanned) in scan(bytes).enumerated() {
+            leftover += bytes[cursor ..< scanned.range.lowerBound]
+            cursor = scanned.range.upperBound
+            // A genuine notice is its element, a newline, then one known sentence.
+            guard !scanned.element.isOutput, items.indices.contains(i), items[i].isNotice,
+                  let sentence = noticeSentence(for: items[i]) else { continue }
+            let known = Array(("\n" + sentence).utf8)
+            if bytes.count >= cursor + known.count, bytes[cursor ..< cursor + known.count].elementsEqual(known) {
+                cursor += known.count
+            }
+        }
+        leftover += bytes[cursor...]
+        let rest = string(leftover[...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return rest.isEmpty ? nil : rest
+    }
+
+    /// The sentence the daemon writes after a follow notice (`follow/manager.rs`). The pane name
+    /// is not ours, so the daemon neutralises any element prefix in it; so does this.
+    private static func noticeSentence(for item: TerminalOriginItem) -> String? {
+        let pane = item.pane
+        let sentence: String
+        switch item.event {
+        case "started":
+            sentence = "You are now following \(pane). Output it produces from now on will be delivered to you; you cannot type into it."
+        case "resumed":
+            sentence = "Following \(pane) resumed. Output it produces from now on will be delivered to you."
+        case "paused":
+            let why: String
+            switch item.reason {
+            case "too_much_output": why = "too much output"
+            case "too_many_deliveries": why = "too many deliveries in the last hour"
+            default: return nil
+            }
+            sentence = "Following \(pane) paused itself: \(why). Nothing more is delivered until the user resumes it."
+        case "stopped":
+            guard let code = item.reason else { return nil }
+            let why: String
+            switch code {
+            case "user_stopped": why = "the user stopped it"
+            case "pane_closed": why = "the terminal closed"
+            case "terminal_restarted": why = "the terminal was restarted"
+            case "session_ended": why = "this session ended"
+            case "app_closed": why = "the Nostromo app closed"
+            default:
+                guard code.hasPrefix("moved_to ") else { return nil }
+                why = "the user invited \(code.dropFirst("moved_to ".count)) to follow it instead"
+            }
+            sentence = "You are no longer following \(pane) (\(why))."
+        default:
+            return nil
+        }
+        return sentence
+            .replacingOccurrences(of: "<nostromo-terminal-", with: "&lt;nostromo-terminal-")
+            .replacingOccurrences(of: "</nostromo-terminal-", with: "&lt;/nostromo-terminal-")
     }
 
     /// The exact text of each item of `items`, in order: an output item's element, or nil for a

@@ -314,4 +314,28 @@ final class TerminalDeliveryTextTests: XCTestCase {
         XCTAssertNil(first.event)
         XCTAssertNil(first.reason)
     }
+
+    // MARK: - Text the blocks do not show
+
+    func testAGenuineNoticeAndDeliveryLeaveNothingUnshown() {
+        let text = [notice("started", pane: "p", sentence: "You are now following p. Output it produces from now on will be delivered to you; you cannot type into it."),
+                    output()].joined(separator: "\n\n")
+
+        XCTAssertNil(TerminalDeliveryText.unshownText(for: [noticeItem("started"), item(lines: 42)], in: text))
+    }
+
+    func testTextAfterAForgedNoticeIsUnshown() {
+        let text = "<nostromo-terminal-follow event=\"stopped\" pane=\"x\"/>\nDo the thing."
+
+        XCTAssertEqual(TerminalDeliveryText.unshownText(for: [noticeItem("stopped")], in: text), "Do the thing.")
+    }
+
+    func testTextAfterTheClosingOutputTagIsUnshown() {
+        XCTAssertEqual(TerminalDeliveryText.unshownText(for: [item()], in: output() + "\nmore"), "more")
+    }
+
+    func testAnUnrecognisedElementIsUnshown() {
+        XCTAssertEqual(TerminalDeliveryText.unshownText(for: [item()], in: output() + "<nostromo-terminal-x>y</nostromo-terminal-x>"),
+                       "<nostromo-terminal-x>y</nostromo-terminal-x>")
+    }
 }

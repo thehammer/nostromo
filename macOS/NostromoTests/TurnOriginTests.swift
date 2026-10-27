@@ -24,7 +24,17 @@ enum OriginFixtures {
 
     static func notice(_ event: String, id: String = "T1", pane: String = "p", reason: String? = nil) -> String {
         let r = reason.map { " reason=\"\($0)\"" } ?? ""
-        return "<nostromo-terminal-follow event=\"\(event)\" terminal_id=\"\(id)\" pane=\"\(pane)\"\(r)/>\nOne plain sentence about it."
+        return "<nostromo-terminal-follow event=\"\(event)\" terminal_id=\"\(id)\" pane=\"\(pane)\"\(r)/>\n\(noticeSentence(event, pane: pane))"
+    }
+
+    /// The sentence the daemon writes after a follow notice (`follow/manager.rs`).
+    static func noticeSentence(_ event: String, pane: String) -> String {
+        switch event {
+        case "started":
+            return "You are now following \(pane). Output it produces from now on will be delivered to you; you cannot type into it."
+        default:
+            return "You are no longer following \(pane) (the terminal closed)."
+        }
     }
 
     static func outputItem(_ id: String = "T1", pane: String = "production · scheduler shell", lines: Int = 42,
@@ -141,8 +151,9 @@ final class TurnOriginTests: XCTestCase {
     // MARK: Height estimate
 
     func testAnOriginTurnHeightIgnoresTheLengthOfItsText() {
-        let short = OriginFixtures.turn(userInput: "x", origin: .terminalDelivery(items: [OriginFixtures.outputItem()]))
-        let huge = OriginFixtures.turn(userInput: String(repeating: "line of output\n", count: 5_000),
+        let short = OriginFixtures.turn(userInput: OriginFixtures.output(body: "x"),
+                                        origin: .terminalDelivery(items: [OriginFixtures.outputItem()]))
+        let huge = OriginFixtures.turn(userInput: OriginFixtures.output(body: String(repeating: "line of output\n", count: 5_000)),
                                        origin: .terminalDelivery(items: [OriginFixtures.outputItem()]))
 
         XCTAssertEqual(TurnHeightEstimator.estimate(huge, width: 900), TurnHeightEstimator.estimate(short, width: 900))
