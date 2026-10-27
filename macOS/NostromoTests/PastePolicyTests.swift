@@ -95,4 +95,24 @@ final class PastePolicyTests: XCTestCase {
         let exact = String(repeating: "x", count: 200)
         XCTAssertEqual(PastePolicy.preview(exact), exact)
     }
+
+    // A single line that carries a control or invisible character is not "just text" for a shell that is
+    // not known to be local: an escape sequence can end a bracketed paste early, Ctrl-O / Ctrl-D act on
+    // their own, and some programs treat U+2028, U+0085, VT and FF as line breaks.
+
+    func testControlAndInvisibleCharactersAskInAPaneThatIsNotKnownToBeLocal() {
+        let texts = ["ls\u{1b}[201~rm -rf x", "a\u{0F}b", "a\u{04}", "a\u{0B}b", "a\u{0C}b", "a\u{2028}b", "a\u{2029}b",
+                     "a\u{85}b", "a\u{7F}b", "a\u{202E}b"]
+        for kind in [TerminalKind.ecs, .unknown, nil] {
+            for text in texts {
+                XCTAssertEqual(PastePolicy.decide(kind: kind, text: text), .confirm(lines: PastePolicy.lineCount(text)),
+                               "kind \(String(describing: kind)), text \(text.debugDescription)")
+            }
+        }
+    }
+
+    func testATabAloneDoesNotAskAndALocalShellNeverAsksForControlCharacters() {
+        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "a\tb"), .send)
+        XCTAssertEqual(PastePolicy.decide(kind: .local, text: "a\u{1b}[31mb\u{2028}c"), .send)
+    }
 }

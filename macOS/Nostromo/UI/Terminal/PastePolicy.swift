@@ -13,12 +13,16 @@ enum PastePolicy {
     static let previewLimit = 200
     private static let previewLines = 3
 
-    /// A pane that is not known to be local asks (`kind` nil, `.ecs`, `.unknown`), for any text that
-    /// contains a newline, a trailing one included: `"rm -rf x\n"` runs the moment it lands. A local
-    /// shell never asks. `\r\n` and `\r` count as one line break each, and one trailing newline does
-    /// not make a second line.
+    /// A pane that is not known to be local asks (`kind` nil, `.ecs`, `.unknown`) for any text that
+    /// contains a newline, a trailing one included (`"rm -rf x\n"` runs the moment it lands), and for any
+    /// text with a control or invisible character other than a tab: an escape sequence can end a
+    /// bracketed paste early, Ctrl-O or Ctrl-D act on their own, and U+2028, U+0085, vertical tab and
+    /// form feed are line breaks to some programs. A local shell never asks. `\r\n` and `\r` count as one
+    /// line break each, and one trailing newline does not make a second line.
     static func decide(kind: TerminalKind?, text: String) -> PasteDecision {
-        guard kind != .local, text.contains(where: { $0 == "\n" || $0 == "\r" || $0 == "\r\n" }) else { return .send }
+        guard kind != .local, text.unicodeScalars.contains(where: { $0 != "\t" && (isInvisible($0) || isLineBreak($0)) }) else {
+            return .send
+        }
         return .confirm(lines: lineCount(text))
     }
 
@@ -49,6 +53,10 @@ enum PastePolicy {
         var normalised = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         if normalised.hasSuffix("\n") { normalised.removeLast() }
         return normalised.components(separatedBy: "\n")
+    }
+
+    private static func isLineBreak(_ scalar: Unicode.Scalar) -> Bool {
+        scalar == "\u{2028}" || scalar == "\u{2029}"
     }
 
     private static func isInvisible(_ scalar: Unicode.Scalar) -> Bool {
