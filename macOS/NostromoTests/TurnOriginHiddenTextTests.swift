@@ -16,7 +16,7 @@ final class TurnOriginHiddenTextTests: XCTestCase {
 
     private func noticeTurn(_ text: String, images: [URL] = []) -> ChatTurn {
         var turn = OriginFixtures.turn(userInput: text,
-                                       origin: .terminalFollowNotice(items: [OriginFixtures.noticeItem("stopped", pane: "x")]))
+                                       origin: .terminalFollowNotice(items: [OriginFixtures.noticeItem("stopped", pane: "x", reason: "pane_closed")]))
         turn.imageURLs = images
         return turn
     }
@@ -55,7 +55,7 @@ final class TurnOriginHiddenTextTests: XCTestCase {
 
     func testAnAttachmentTurnStillShowsItsImage() {
         let url = URL(fileURLWithPath: "/tmp/pic.png")
-        let turn = noticeTurn(OriginFixtures.notice("stopped", pane: "x"), images: [url])
+        let turn = noticeTurn(OriginFixtures.notice("stopped", pane: "x", reason: "pane_closed"), images: [url])
         let v = view(turn)
 
         XCTAssertEqual(v.userBubbleContent?.imageCount, 1)
@@ -71,13 +71,13 @@ final class TurnOriginHiddenTextTests: XCTestCase {
     }
 
     func testAGenuineNoticeWithItsKnownSentenceHasNoExtraBubble() {
-        let turn = noticeTurn(OriginFixtures.notice("stopped", pane: "x") + "\n")
+        let turn = noticeTurn(OriginFixtures.notice("stopped", pane: "x", reason: "pane_closed") + "\n")
 
         XCTAssertFalse(view(turn).hasUserBubble)
     }
 
     func testAKnownSentenceFollowedByMoreTextShowsTheMore() {
-        let turn = noticeTurn(OriginFixtures.notice("stopped", pane: "x") + " Also wire the money.")
+        let turn = noticeTurn(OriginFixtures.notice("stopped", pane: "x", reason: "pane_closed") + " Also wire the money.")
 
         XCTAssertEqual(view(turn).userBubbleContent?.text, "Also wire the money.")
     }
@@ -89,8 +89,8 @@ final class TurnOriginHiddenTextTests: XCTestCase {
     }
 
     func testAHeightEstimateAccountsForTheExtraBubble() {
-        let plain = noticeTurn(OriginFixtures.notice("stopped", pane: "x"))
-        let extra = noticeTurn(OriginFixtures.notice("stopped", pane: "x") + "\n\n" + String(repeating: "word ", count: 200))
+        let plain = noticeTurn(OriginFixtures.notice("stopped", pane: "x", reason: "pane_closed"))
+        let extra = noticeTurn(OriginFixtures.notice("stopped", pane: "x", reason: "pane_closed") + "\n\n" + String(repeating: "word ", count: 200))
 
         XCTAssertGreaterThan(TurnHeightEstimator.estimate(extra, width: 900), TurnHeightEstimator.estimate(plain, width: 900))
     }
