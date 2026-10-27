@@ -72,8 +72,17 @@ fn h8_1_the_eval_bin_is_never_referenced_by_tests_or_ci() {
             for line in text.lines() {
                 // The sandbox's dependency step stubs every `[[bin]]` path so
                 // it can cache dependencies; that list is not an invocation.
-                let is_stub_list = path.ends_with(".rwx/sandbox.yml")
-                    && line.trim_start().starts_with("for f in src/bin/");
+                // Exact shape: `for f in src/bin/<x>.rs ...; do` and nothing else on the
+                // line, so a line that also runs a command cannot hide behind it.
+                let is_stub_list = path.ends_with(".rwx/sandbox.yml") && {
+                    let t = line.trim();
+                    t.starts_with("for f in src/bin/")
+                        && t.ends_with("; do")
+                        && t.matches(';').count() == 1
+                        && !t.contains("cargo")
+                        && !t.contains("&&")
+                        && !t.contains('|')
+                };
                 for needle in needles {
                     if line.contains(needle) && !is_stub_list {
                         offenders.push(format!("{} contains {needle}", path.display()));

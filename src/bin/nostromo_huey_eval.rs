@@ -14,12 +14,14 @@
 //! subscription (two for `php-two-machines`). Nothing here is referenced by
 //! the test suite; a guard test keeps it that way. See `docs/huey.md`.
 //!
-//! It touches nothing of yours: state, home, code root and the scenario's
-//! posture file live in a temp directory, and the daemon-side MCP server it
-//! starts listens on a socket inside it. (Like `nostromd`, it refreshes
-//! `~/.nostromo/mcp-bridge.json`, the file that points sessions at
-//! `nostromo-mcp-bridge`; the bridge binary must sit beside this one, so build
-//! with `cargo build --bins`.)
+//! Huey's own state, code root and the scenario's posture file live in a temp
+//! directory, and the daemon-side MCP server it starts listens on a socket inside
+//! it. The spawned `claude` is NOT isolated from your account: it runs with this
+//! process's real environment and real HOME (it must read your login), so an
+//! `ANTHROPIC_API_KEY` in the environment reaches it. And, like `nostromd`, the eval
+//! overwrites `~/.nostromo/mcp-bridge.json`, the file that points sessions at
+//! `nostromo-mcp-bridge` (the bridge binary must sit beside this one, so build with
+//! `cargo build --bins`): a running daemon's later sessions would pick that file up.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -309,6 +311,11 @@ fn git(dir: &Path, args: &[&str], when: DateTime<Utc>) -> Result<()> {
         .args(args)
         .env("GIT_AUTHOR_DATE", &stamp)
         .env("GIT_COMMITTER_DATE", &stamp)
+        // The fixtures' repos are built with no user or system git config, so a
+        // global `core.hooksPath`, a commit hook or a signing setting never runs.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .context("running git")?;
     if !out.status.success() {
@@ -713,6 +720,14 @@ fn evaluate(c: &Checks, p: &Produced) -> Vec<Outcome> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if std::env::var_os("ANTHROPIC_API_KEY").is_some() {
+        // The spawned `claude` inherits this environment: with a key set it bills the
+        // API (up to the per-run cap, 14 runs) instead of the subscription.
+        eprintln!(
+            "warning: ANTHROPIC_API_KEY is set; the model runs will be billed to the API, not your \
+             Claude subscription (unset it to use the subscription)"
+        );
+    }
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&args.scenarios)
         .with_context(|| format!("reading {}", args.scenarios.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
