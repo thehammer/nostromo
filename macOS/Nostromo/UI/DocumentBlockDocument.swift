@@ -38,12 +38,14 @@ enum DocumentLinkPolicy {
         }
     }
 
-    /// Whether an inline `nostromo-action:` link may carry `id`: the daemon's report navigation
-    /// (`report.*`) and verdict (`verdict:<...>`) vocabulary, which is all it ever renders into a
-    /// body (`src/huey/actions.rs`, `src/huey/render.rs`). The `setup.*` ids change machine state
-    /// (scan, import, confirm), so they are reachable only from the `actions` buttons, never from
-    /// body text. Any other id is not a link at all.
+    /// Whether an inline `nostromo-action:` link may carry `id`. The daemon renders only verdict
+    /// links into a body (`verdict_paragraph` in `src/huey/render.rs`); report navigation
+    /// (`report.prev`, `report.next`, `report.today`, `report.version:<n>`) is accepted too because
+    /// it only changes which report is shown. `report.regenerate` starts a model run and the
+    /// `setup.*` ids change machine state (scan, import, confirm), so those are reachable only from
+    /// the `actions` buttons, never from body text. Any other id is not a link at all.
     static func isAllowedLinkActionID(_ id: String) -> Bool {
+        if id == "report.regenerate" { return false }
         for prefix in ["report.", "verdict:"] where id.hasPrefix(prefix) {
             return id.count > prefix.count
         }

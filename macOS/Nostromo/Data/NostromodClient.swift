@@ -1115,13 +1115,19 @@ class NostromodClient {
 
     /// Send a document pane's action (a button, or a `nostromo-action:` link) to the daemon. Carries
     /// the connection's operator nonce, like `sendClaudeLoginAction`; the answer arrives as
-    /// `ServerMsg.paneActionResult`. Returns whether the frame was written.
+    /// `ServerMsg.paneActionResult`. Returns whether the frame was written. Without a nonce for
+    /// this connection (before it arrives, an older daemon, right after a reconnect) the daemon
+    /// would refuse the frame with an `Error` the app only logs, a silent no-op, so nothing is
+    /// sent and the caller gets `false` (the pane shows its failed-send warning).
     @discardableResult
     func sendPaneAction(tag: String, paneId: String, actionId: String) -> Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
         guard curFd >= 0 else { log.debug("pane_action dropped — not connected"); return false }
-        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let nonce = operatorNonce.flatMap({ $0.sock == curFd ? $0.value : nil }) else {
+            log.debug("pane_action dropped — no operator nonce for this connection")
+            return false
+        }
         guard let body = try? encoder.encode(ClientPaneAction(tag: tag, paneId: paneId, actionId: actionId,
                                                               operatorNonce: nonce))
         else { return false }
