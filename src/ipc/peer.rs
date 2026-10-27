@@ -90,7 +90,7 @@ fn is_huey_tag(tag: &str) -> bool {
 }
 
 /// Is `name` the Huey agent? Case-insensitive, through a plugin qualifier.
-fn is_huey_agent(name: &str) -> bool {
+pub fn is_huey_agent(name: &str) -> bool {
     let bare = name.trim().rsplit(':').next().unwrap_or("").trim();
     bare.eq_ignore_ascii_case("huey")
 }

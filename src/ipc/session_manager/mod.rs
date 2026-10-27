@@ -61,7 +61,9 @@ use super::orphans::{
 use super::pane_registry::{
     PaneContentProvider, PaneRegistry, PerriStateProvider, TrackerFrameProvider,
 };
-use super::peer::{in_work_send, is_teri_or_fred_agent, registry_path_beside, SensitiveTags};
+use super::peer::{
+    in_work_send, is_huey_agent, is_teri_or_fred_agent, registry_path_beside, SensitiveTags,
+};
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo, TaskDetailMsg, TasksSnapshot};
 use super::stream_json::{
     load_scrollback, parse_line, ParsedLine, SessionState, SessionTranscript, TurnDelta,
@@ -934,7 +936,10 @@ impl SessionManager {
         // content likewise (see `peer::within_work_send`).
         // A restricted session (the picks session) reads work-item data with no
         // agent name to say so, so it is sensitive by its restriction.
+        // A Huey session holds the digest (personal notes and idea titles) and
+        // is sensitive under any tag.
         if is_teri_or_fred_agent(&agent_name)
+            || is_huey_agent(&agent_name)
             || in_work_send()
             || self.restrictions.contains_key(&tag)
         {
@@ -2204,7 +2209,7 @@ impl SessionManager {
     pub fn mark_teri_fred_focuses(&self, focuses: &[FocusMeta]) {
         for focus in focuses
             .iter()
-            .filter(|f| is_teri_or_fred_agent(&f.agent_name))
+            .filter(|f| is_teri_or_fred_agent(&f.agent_name) || is_huey_agent(&f.agent_name))
         {
             self.sensitive.mark_tag(&focus.tag);
         }
@@ -3318,7 +3323,7 @@ pub fn build_claude_args_with(
     // No name, no `--agent`: a restricted session carries its instructions in its
     // prompt, because a plugin agent's own `tools:` list overrides `--tools` and
     // leaves the session without the tools it needs.
-    if agent_name == "huey" {
+    if is_huey_agent(agent_name) {
         // Huey ships with the repo: its persona is appended to the system prompt
         // (no user-level agent file exists to name with `--agent`).
         args.extend(["--append-system-prompt".into(), crate::huey::PERSONA.into()]);
@@ -7219,6 +7224,57 @@ mod work_send_scope_tests {
     }
 
     #[tokio::test]
+    async fn a_huey_agent_session_is_sensitive_under_any_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let tags = mgr.sensitive_tags();
+        spawn_idle(&mut mgr, "scratch-a");
+        spawn_idle(&mut mgr, "scratch-b");
+
+        // Registration comes before the "already alive" early return.
+        mgr.spawn_session(
+            "scratch-a".into(),
+            "Huey".into(),
+            "V".into(),
+            None,
+            None,
+            false,
+        )
+        .expect("existing session");
+        mgr.spawn_session(
+            "scratch-b".into(),
+            "huey:huey".into(),
+            "V".into(),
+            None,
+            None,
+            false,
+        )
+        .expect("existing session");
+        assert!(tags.tag_is_sensitive("scratch-a"));
+        assert!(tags.tag_is_sensitive("scratch-b"));
+    }
+
+    #[tokio::test]
+    async fn a_focus_running_the_huey_agent_is_marked_sensitive_under_any_tag() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = manager(&dir);
+        let tags = mgr.sensitive_tags();
+
+        let mut huey = focus("scratch-huey");
+        huey.agent_name = "Huey".into();
+        mgr.mark_teri_fred_focuses(&[huey]);
+        assert!(tags.tag_is_sensitive("scratch-huey"));
+
+        let mut other = focus("scratch-other");
+        other.agent_name = "huey:huey".into();
+        mgr.add_or_update_focus(other);
+        assert!(tags.tag_is_sensitive("scratch-other"));
+
+        mgr.add_or_update_focus(focus("scratch-cody"));
+        assert!(!tags.tag_is_sensitive("scratch-cody"));
+    }
+
+    #[tokio::test]
     async fn a_send_inside_a_work_send_registers_the_tag_even_when_the_send_itself_fails() {
         let dir = tempfile::tempdir().unwrap();
         let mut mgr = manager(&dir);
@@ -8083,6 +8139,14 @@ mod huey_persona_args_tests {
         let with = build_claude_args_with("huey", "Huey", false, "sid", false, None, &guard());
         assert_eq!(plain, with);
         assert_huey_args(&with);
+    }
+
+    #[test]
+    fn h6_10_huey_is_recognised_by_agent_name_case_and_qualifier() {
+        for name in ["Huey", "HUEY", " huey ", "huey:huey"] {
+            let args = build_claude_args_with(name, "Huey", false, "sid", false, None, &guard());
+            assert_huey_args(&args);
+        }
     }
 
     #[test]
