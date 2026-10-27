@@ -93,6 +93,13 @@ enum WorkQuery {
     /// the one on `facet` itself (the standard faceted-search behaviour). Items
     /// with no value for the facet are not counted.
     static func facetCounts(_ items: [WorkItem], filter: WorkFilter, facet: WorkFacet) -> [String: Int] {
+        facetCountsAndTotal(items, filter: filter, facet: facet).counts
+    }
+
+    /// `facetCounts`, plus how many items match the relaxed filter at all,
+    /// including those with no value for the facet (what an "All" segment shows).
+    static func facetCountsAndTotal(_ items: [WorkItem], filter: WorkFilter,
+                                    facet: WorkFacet) -> (counts: [String: Int], total: Int) {
         var relaxed = filter
         switch facet {
         case .source:      relaxed.sources = []
@@ -105,7 +112,9 @@ enum WorkQuery {
         }
         let terms = searchTerms(relaxed.query)
         var counts: [String: Int] = [:]
+        var total = 0
         for item in items where matches(item, relaxed, terms) {
+            total += 1
             let value: String?
             switch facet {
             case .source:      value = item.source.rawValue
@@ -118,7 +127,7 @@ enum WorkQuery {
             }
             if let value { counts[value, default: 0] += 1 }
         }
-        return counts
+        return (counts, total)
     }
 
     // MARK: - Search text

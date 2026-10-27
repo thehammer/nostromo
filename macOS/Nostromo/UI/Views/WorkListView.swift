@@ -43,6 +43,15 @@ struct WorkRowContent: Equatable {
     }
 }
 
+/// A single-select segmented control driven by one facet (e.g. Mine | Unassigned | All).
+/// Each segment shows the number of items it would select given the other filters.
+struct WorkListScope {
+    let facet: WorkFacet
+    /// Segments: a title and the facet values selecting it (empty = All, every value).
+    let options: [(title: String, values: [String])]
+    let accessibilityLabel: String
+}
+
 /// How a tab wants its list to look and which filters it offers.
 struct WorkListConfig {
     /// Draws one row.
@@ -62,11 +71,8 @@ struct WorkListConfig {
     var menuFacets: [WorkFacet] = []
     /// Menus (of `menuFacets`) that also get an "All" item clearing their selection.
     var menuAllItemFacets: Set<WorkFacet> = []
-    /// A single-select segmented control driven by this facet (e.g. Mine | Unassigned | All).
-    var scopeFacet: WorkFacet?
-    /// Its segments: a title, and the facet values selecting it (empty: every value, "All").
-    /// Each segment shows the number of items it would select given the other filters.
-    var scopeOptions: [(title: String, values: [String])] = []
+    /// Single-select segmented controls, left to right, after the menus.
+    var scopes: [WorkListScope] = []
     /// Sort choices; the popup is hidden when there are fewer than two.
     var sortOptions: [(title: String, key: WorkSortKey)] = []
     var searchPlaceholder: String = "Filter"
@@ -84,7 +90,7 @@ struct WorkListConfig {
     }
 
     /// Every facet the filter bar needs counted.
-    var facets: [WorkFacet] { (chipFacet.map { [$0] } ?? []) + (scopeFacet.map { [$0] } ?? []) + menuFacets }
+    var facets: [WorkFacet] { (chipFacet.map { [$0] } ?? []) + scopes.map(\.facet) + menuFacets }
 }
 
 // MARK: - View
@@ -105,10 +111,12 @@ final class WorkListView: NSView {
     private let config: WorkListConfig
     private let outline = WorkOutlineView()
     private let scroll = NSScrollView()
-    /// Two rows: the controls (chips, toggle, menus, sort), then the search field.
+    /// Two rows: the controls (chips, severity toggle, menus, scopes, then sort at the
+    /// trailing edge), then the search field.
     private let filterBar = NSStackView()
     private let controlsRow = NSStackView()
-    private let scopeControl = NSSegmentedControl()
+    /// One per `config.scopes`, tagged with its index.
+    private var scopeControls: [NSSegmentedControl] = []
     private let chipStack = NSStackView()
     private let searchField = NSSearchField()
     private let sortPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -169,6 +177,8 @@ final class WorkListView: NSView {
     private struct ControlsKey: Equatable {
         let counts: [WorkFacet: [String: Int]]
         let filter: WorkFilter
+        /// Matching items per facet, including those with no value for it (the "All" segments).
+        let totals: [WorkFacet: Int]
     }
 
     // MARK: Init
@@ -310,6 +320,9 @@ final class WorkListView: NSView {
         controlsRow.orientation = .horizontal
         controlsRow.spacing = 6
         controlsRow.alignment = .centerY
+        // Everything is leading-aligned; the spacer takes the slack and pushes the sort popup trailing.
+        controlsRow.distribution = .fill
+        chipStack.isHidden = config.chipFacet == nil
         controlsRow.addArrangedSubview(chipStack)
         if config.hasSeverityToggle {
             severityToggle.setButtonType(.pushOnPushOff)
@@ -325,24 +338,38 @@ final class WorkListView: NSView {
             menuButtons[facet] = button
             controlsRow.addArrangedSubview(button)
         }
-        if config.scopeFacet != nil {
-            scopeControl.segmentStyle = .rounded
-            scopeControl.trackingMode = .selectOne
-            scopeControl.segmentCount = config.scopeOptions.count
-            scopeControl.target = self
-            scopeControl.action = #selector(scopeChosen(_:))
-            scopeControl.setAccessibilityLabel("Show")
-            // Its own full-width row: three count-bearing segments ("Unassigned 20")
-            // are wider than the 280 pt minimum pane leaves beside the menus, and a
-            // stack row has nothing that can shrink. Filling the width lets the
-            // segments share it and never push the row past the pane.
-            scopeControl.controlSize = .small
-            scopeControl.segmentDistribution = .fillProportionally
-            scopeControl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for (index, scope) in config.scopes.enumerated() {
+            let control = NSSegmentedControl()
+            control.segmentStyle = .rounded
+            control.trackingMode = .selectOne
+            control.segmentCount = scope.options.count
+            control.tag = index
+            control.target = self
+            control.action = #selector(scopeChosen(_:))
+            control.setAccessibilityLabel(scope.accessibilityLabel)
+            // Count-bearing segments ("Unassigned 20") are wider than the 280 pt minimum
+            // pane leaves beside the Project menu, and a stack row has nothing that can
+            // shrink. Letting the segments compress (below the menus' resistance) makes
+            // their labels truncate instead of pushing the row past the pane.
+            control.controlSize = .small
+            control.segmentDistribution = .fillProportionally
+            control.setContentCompressionResistancePriority(
+                NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.defaultLow.rawValue - 1), for: .horizontal)
+            // Squeezed, a control gives up its labels, never its whole width: without a floor
+            // the stack collapses whichever scope control it squeezes first to nothing.
+            let floor = control.widthAnchor.constraint(greaterThanOrEqualToConstant: 72)
+            floor.priority = NSLayoutConstraint.Priority(999)
+            floor.isActive = true
+            scopeControls.append(control)
+            controlsRow.addArrangedSubview(control)
         }
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        spacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        controlsRow.addArrangedSubview(spacer)
         controlsRow.addArrangedSubview(sortPopup)
         filterBar.addArrangedSubview(controlsRow)
-        if config.scopeFacet != nil { filterBar.addArrangedSubview(scopeControl) }
         filterBar.addArrangedSubview(searchField)
         filterBar.translatesAutoresizingMaskIntoConstraints = false
 
@@ -466,7 +493,7 @@ final class WorkListView: NSView {
     }
 
     private var currentControlsKey: ControlsKey {
-        ControlsKey(counts: snapshot?.facetCounts ?? [:], filter: filter)
+        ControlsKey(counts: snapshot?.facetCounts ?? [:], filter: filter, totals: snapshot?.facetTotals ?? [:])
     }
 
     private func rebuildFilterControls() {
@@ -491,17 +518,18 @@ final class WorkListView: NSView {
         }
         severityToggle.state = filter.hasSeverity == true ? .on : .off
         // Scope segments
-        if let facet = config.scopeFacet {
-            let have = Set(values(of: facet, in: filter))
-            let facetCounts = counts[facet] ?? [:]
-            scopeControl.selectedSegment = -1
-            for (index, option) in config.scopeOptions.enumerated() {
+        for (scope, control) in zip(config.scopes, scopeControls) {
+            let have = Set(values(of: scope.facet, in: filter))
+            let facetCounts = counts[scope.facet] ?? [:]
+            control.selectedSegment = -1
+            for (index, option) in scope.options.enumerated() {
+                // "All" counts every matching item, including those with no value for the facet.
                 let count = option.values.isEmpty
-                    ? facetCounts.values.reduce(0, +)
+                    ? key.totals[scope.facet] ?? facetCounts.values.reduce(0, +)
                     : option.values.reduce(0) { $0 + (facetCounts[$1] ?? 0) }
-                scopeControl.setLabel("\(option.title) \(count)", forSegment: index)
-                scopeControl.setWidth(0, forSegment: index)
-                if Set(option.values) == have { scopeControl.selectedSegment = index }
+                control.setLabel("\(option.title) \(count)", forSegment: index)
+                control.setWidth(0, forSegment: index)
+                if Set(option.values) == have { control.selectedSegment = index }
             }
         }
         // Menus
@@ -596,9 +624,11 @@ final class WorkListView: NSView {
     }
 
     @objc private func scopeChosen(_ sender: NSSegmentedControl) {
-        guard let facet = config.scopeFacet, config.scopeOptions.indices.contains(sender.selectedSegment) else { return }
-        clearValues(of: facet)
-        for value in config.scopeOptions[sender.selectedSegment].values { flipValue(value, in: facet) }
+        guard config.scopes.indices.contains(sender.tag) else { return }
+        let scope = config.scopes[sender.tag]
+        guard scope.options.indices.contains(sender.selectedSegment) else { return }
+        clearValues(of: scope.facet)
+        for value in scope.options[sender.selectedSegment].values { flipValue(value, in: scope.facet) }
         onFilterChange?(filter, sort)
     }
 

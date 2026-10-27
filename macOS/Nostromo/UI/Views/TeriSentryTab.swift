@@ -77,24 +77,33 @@ final class TeriSentryViewTracker {
     }
 }
 
-/// The Sentry tab: unresolved issues assigned to the user plus fresh unassigned
-/// errors, newest activity first.
+/// The Sentry tab: every unresolved Sentry issue, newest activity first.
 ///
-/// A Mine | Unassigned | All control (default Mine, remembered) narrows them.
-/// "Mine" is assigned directly to the user, not to a team, and an empty Mine shows
-/// the normal empty state rather than falling back to All.
+/// Two single-select controls narrow it, both remembered: Mine | Unassigned | All
+/// (default Mine) and Production | All (default All). "Mine" is assigned directly to
+/// the user, not to a team; "Unassigned" is the fresh unassigned errors (last 24 h);
+/// "All" is every unresolved issue the daemon lists, so it also includes older or
+/// lower-level unassigned issues (`unassigned_older`) and issues assigned to others
+/// (`other`): Mine + Unassigned + Older + Other = All. An empty Mine shows the normal empty state
+/// rather than falling back to All. "Production" means the issue had an event in
+/// the production environment in the last 14 days; an issue the daemon did not see
+/// there has no environment (which is not the same as non-production).
 ///
 /// Rows read `ERROR  TypeError in FacesheetParser … 312 events / 24 h · 41 users ·
 /// last seen 4 min ago  new`. (Sentry's issue list does not say which environment
-/// an issue is in, so there is no environment column or filter.)
+/// an issue is in, so rows still show no environment; the Production | All toggle
+/// filters on the daemon's production marker.)
 enum TeriSentryTab {
     /// Replaceable so tests can inject a clock and isolated defaults.
     static var tracker = TeriSentryViewTracker(defaults: .standard)
     static var now: () -> Date = Date.init
 
-    /// The `WorkItem.assignee` buckets the daemon tags issues with.
+    /// The `WorkItem.assignee` buckets the daemon tags issues with. `unassigned_older` and
+    /// `other` have no segment of their own: they only appear under All.
     static let mine = "me"
     static let unassigned = "unassigned"
+    /// The `WorkItem.environment` the daemon sets on issues seen in production.
+    static let production = "production"
 
     static let config = TeriTabConfig(
         tab: .sentry,
@@ -102,8 +111,14 @@ enum TeriSentryTab {
         list: WorkListConfig(
             rowContent: { rowContent(for: $0, now: now()) },
             menuFacets: [.project],
-            scopeFacet: .assignee,
-            scopeOptions: [("Mine", [mine]), ("Unassigned", [unassigned]), ("All", [])],
+            scopes: [
+                WorkListScope(facet: .assignee,
+                              options: [("Mine", [mine]), ("Unassigned", [unassigned]), ("All", [])],
+                              accessibilityLabel: "Show"),
+                WorkListScope(facet: .environment,
+                              options: [("Production", [production]), ("All", [])],
+                              accessibilityLabel: "Environment"),
+            ],
             searchPlaceholder: "Filter issues"),
         emptyMessage: "No unresolved Sentry issues.",
         onShow: { tracker.didShow() },

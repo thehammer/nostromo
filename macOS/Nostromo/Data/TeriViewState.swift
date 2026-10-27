@@ -32,8 +32,15 @@ enum TeriTab: String, Codable, CaseIterable {
 }
 
 extension TeriTab {
-    /// The assignee scope a tab starts with, until the user picks one: Sentry shows "Mine".
-    var defaultAssignees: [String] { self == .sentry ? ["me"] : [] }
+    /// The scopes a tab starts with, until the user picks one: Sentry shows "Mine" in every
+    /// environment (nothing hidden by default). If an environment default other than All is
+    /// ever introduced, it needs its own "chosen" flag: `filterChosen` is one flag for both
+    /// scope controls, so state saved before that default existed would read as an explicit All.
+    var defaultFilter: WorkFilter {
+        var filter = WorkFilter()
+        if self == .sentry { filter.assignees = ["me"] }
+        return filter
+    }
 }
 
 /// What one tab remembers between visits and relaunches.
@@ -43,8 +50,8 @@ struct TeriTabViewState: Codable, Equatable {
     var collapsedGroups: [String] = []
     var selectedItemId: String?
     /// True once the user has changed this tab's filter, so an empty `filter.assignees`
-    /// means an explicit "All" rather than "never chosen" (state saved before the
-    /// Mine / Unassigned / All control existed has no assignee scope at all).
+    /// (or `environments`) means an explicit "All" rather than "never chosen" (state saved
+    /// before the Mine / Unassigned / All control existed has no assignee scope at all).
     var filterChosen = false
 
     init() {}
@@ -80,7 +87,7 @@ struct TeriViewState: Codable, Equatable {
     /// What a tab shows before anything is remembered for it.
     private static func initial(for tab: TeriTab) -> TeriTabViewState {
         var state = TeriTabViewState()
-        state.filter.assignees = tab.defaultAssignees
+        state.filter = tab.defaultFilter
         return state
     }
 
@@ -94,7 +101,10 @@ struct TeriViewState: Codable, Equatable {
         for (name, state) in raw {
             guard let tab = TeriTab(rawValue: name) else { continue }
             var state = state
-            if !state.filterChosen { state.filter.assignees = tab.defaultAssignees }
+            if !state.filterChosen {
+                state.filter.assignees = tab.defaultFilter.assignees
+                state.filter.environments = tab.defaultFilter.environments
+            }
             tabs[tab] = state
         }
     }

@@ -26,8 +26,8 @@ use crate::ipc::protocol::ServerMsg;
 use crate::ipc::SessionManager;
 
 use super::model::{
-    SendOutcome, SendPreview, SentMarker, SourceState, SourceStatus, WorkDetail, WorkError,
-    WorkItem, WorkSource,
+    agent_visible, SendOutcome, SendPreview, SentMarker, SourceState, SourceStatus, WorkDetail,
+    WorkError, WorkItem, WorkSource,
 };
 use super::picks::{
     self, PickEntry, PicksGenerator, PicksSessionHost, PicksStore, PublishError,
@@ -415,8 +415,10 @@ impl WorkHub {
         self.picks.publish(entries, self)
     }
 
-    /// Source and title of each of `ids` the hub holds right now, together with
-    /// every source's presence, read under ONE lock so the two agree.
+    /// Source and title of each of `ids` the hub holds right now and an agent may
+    /// pick (`agent_visible`; a hidden item counts as unknown), together with
+    /// every source's presence, read under ONE lock so the two agree. Presence still
+    /// lists hidden items, so hiding one never makes a pick of it read as done.
     pub(crate) fn picks_view(
         &self,
         ids: &HashSet<&str>,
@@ -426,7 +428,7 @@ impl WorkHub {
             .slots
             .values()
             .flat_map(|slot| slot.groups.values().flatten())
-            .filter(|item| ids.contains(item.id.as_str()))
+            .filter(|item| ids.contains(item.id.as_str()) && agent_visible(item))
             .map(|item| (item.id.clone(), (item.source, item.title.clone())))
             .collect();
         (known, presence_of(&state))

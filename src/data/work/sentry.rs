@@ -1,8 +1,22 @@
 //! Sentry work source (Teri's Sentry tab).
 //!
-//! Scope: unresolved issues **assigned to the user**, plus **unassigned
-//! error/fatal issues last seen within 24 h** (still firing). Two searches on
-//! `GET {base}/organizations/{org}/issues/`, unioned by issue id.
+//! Scope: every unresolved issue the app might show, from four searches on
+//! `GET {base}/organizations/{org}/issues/`, in this order:
+//!
+//! 1. **Mine**: unresolved issues assigned to the user (90 d, bucket `me`);
+//! 2. **fresh unassigned**: unassigned error/fatal issues last seen within 24 h
+//!    (bucket `unassigned`);
+//! 3. **recent** (the app's "All"): every unresolved issue seen in the last
+//!    14 days. Unassigned ones not already found by search 2 get bucket
+//!    `unassigned_older`; ones assigned to a user or a team get `other`;
+//! 4. **production marker**: the same search as 3 restricted to the
+//!    `production` environment. It adds no rows; it only marks listed issues.
+//!
+//! Searches 1-3 are unioned by issue id (the first search to return an issue
+//! decides its assignee bucket). "Production" means the issue had an event in
+//! the `production` environment within the last 14 days. A production mark that
+//! is unset means no production event was seen in that window; it never means
+//! "not production".
 //!
 //! Auth is the static user token `SENTRY_API_TOKEN` (process environment, then
 //! `~/.claude/credentials/.env`, re-read when the file changes). The token only
@@ -50,6 +64,10 @@ const SENTRY_JSON_NAME: &str = "~/.claude/credentials/services/sentry.json";
 const PAGE_LIMIT: usize = 100;
 /// Issues kept per search; more than this is reported as truncation.
 pub const MAX_ISSUES_PER_QUERY: usize = 300;
+/// The window of the recent and production searches.
+const RECENT_WINDOW: &str = "14d";
+/// The environment name Carefeed's Sentry uses for production events.
+pub const PRODUCTION_ENVIRONMENT: &str = "production";
 const MAX_FRAMES: usize = 10;
 /// The longest a rate-limit hold is honoured for, wherever it came from.
 pub const MAX_HOLD: Duration = Duration::from_secs(3600);
@@ -69,36 +87,93 @@ pub const NOT_CONFIGURED_REASON: &str = "Sentry: no credentials found. Set SENTR
 /// What a 403 says: the token works but may lack a scope. Names the variable and the scopes, never a value.
 const MISSING_PERMISSION_REASON: &str = "Sentry accepted the token but it is missing a permission. Check SENTRY_API_TOKEN in ~/.claude/credentials/.env (scopes needed: project:read, event:read, org:read).";
 
+/// Searches 1 and 2 hit [`MAX_ISSUES_PER_QUERY`].
 const TRUNCATED_REASON: &str =
     "Showing the first 300 issues per search; Sentry has more. Narrow the search in Sentry to see the rest.";
+
+fn recent_truncated_reason() -> String {
+    format!(
+        "All shows the {MAX_ISSUES_PER_QUERY} most recently seen unresolved issues from the last {days} days; Sentry has more.",
+        days = RECENT_WINDOW.trim_end_matches('d'),
+    )
+}
+
+fn production_truncated_reason() -> String {
+    format!(
+        "Production marks cover the {MAX_ISSUES_PER_QUERY} most recently seen production issues; older issues may be missing from Production."
+    )
+}
+
+/// What a search contributes.
+#[derive(Clone, Copy, PartialEq)]
+enum Role {
+    /// Adds rows, all in the given bucket.
+    Rows(Bucket),
+    /// Adds no rows: marks listed issues as seen in production.
+    ProductionMarker,
+}
+
+/// Which kind of truncation hitting the cap on a search is reported as.
+#[derive(Clone, Copy, PartialEq)]
+enum Cut {
+    /// Searches 1 and 2.
+    Assignment,
+    Recent,
+    Production,
+}
 
 /// A search sent to the issues endpoint. `stats_period` bounds which issues the
 /// search matches (by activity in the window).
 struct Search {
     query: &'static str,
     stats_period: &'static str,
-    /// The assignment bucket every issue this search returns belongs to.
-    assignee: &'static str,
+    /// Sent as the `environment` query parameter when set.
+    environment: Option<&'static str>,
+    role: Role,
+    cut: Cut,
 }
 
-/// `WorkItem::assignee` values. The client turns them into the Mine / Unassigned toggle.
+/// `WorkItem::assignee` values. The client turns them into the Mine / Unassigned / All toggle.
 pub const ASSIGNEE_ME: &str = "me";
 pub const ASSIGNEE_UNASSIGNED: &str = "unassigned";
+/// Unassigned, but not in the fresh unassigned error list: older than 24 h
+/// and/or below error level. Only the recent (All) search produces it.
+pub const ASSIGNEE_UNASSIGNED_OLDER: &str = "unassigned_older";
+/// Assigned to another user or to a team.
+pub const ASSIGNEE_OTHER: &str = "other";
 
-// Order matters: an issue returned by more than one search keeps the assignee of
-// the FIRST (`seen.insert` dedupes), so `assigned:me` must stay ahead of the
-// unassigned search for "Mine wins".
-const SEARCHES: [Search; 2] = [
+// Order matters: an issue returned by more than one search keeps the bucket of
+// the FIRST (`seen.insert` dedupes): me, then fresh unassigned, then recent. The
+// production marker runs last and needs the listed issues.
+const SEARCHES: [Search; 4] = [
     // Assigned to me stays assigned however quiet the issue is: look far back.
     Search {
         query: "is:unresolved assigned:me",
         stats_period: "90d",
-        assignee: ASSIGNEE_ME,
+        environment: None,
+        role: Role::Rows(Bucket::Fixed(ASSIGNEE_ME)),
+        cut: Cut::Assignment,
     },
     Search {
         query: "is:unresolved is:unassigned level:[error,fatal] lastSeen:-24h",
         stats_period: "24h",
-        assignee: ASSIGNEE_UNASSIGNED,
+        environment: None,
+        role: Role::Rows(Bucket::Fixed(ASSIGNEE_UNASSIGNED)),
+        cut: Cut::Assignment,
+    },
+    Search {
+        query: "is:unresolved",
+        stats_period: RECENT_WINDOW,
+        environment: None,
+        role: Role::Rows(Bucket::NullIs(ASSIGNEE_UNASSIGNED_OLDER)),
+        cut: Cut::Recent,
+    },
+    Search {
+        query: "is:unresolved",
+        stats_period: RECENT_WINDOW,
+        environment: Some(PRODUCTION_ENVIRONMENT),
+        role: Role::ProductionMarker,
+        cut: Cut::Production,
     },
 ];
 
@@ -469,8 +544,8 @@ async fn fetch_round(
             *last_ok = Some(now);
             *items = fetched.items;
             // Unreadable issues leave the list incomplete too, but only a cut gets the banner.
-            let partial = fetched.truncated || fetched.unreadable > 0;
-            let truncated = fetched.truncated.then(|| TRUNCATED_REASON.to_string());
+            let partial = fetched.cuts.any() || fetched.unreadable > 0;
+            let truncated = fetched.cuts.reason();
             // A hold that outlasts the freshness window means the list will be
             // out of date before it can be refreshed: say so.
             let held_past_window =
@@ -731,10 +806,45 @@ fn next_cursor_in(link: &str) -> Option<String> {
     })
 }
 
+/// Which searches hit [`MAX_ISSUES_PER_QUERY`].
+#[derive(Default)]
+struct Cuts {
+    assignment: bool,
+    recent: bool,
+    production: bool,
+}
+
+impl Cuts {
+    fn set(&mut self, cut: Cut) {
+        match cut {
+            Cut::Assignment => self.assignment = true,
+            Cut::Recent => self.recent = true,
+            Cut::Production => self.production = true,
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.assignment || self.recent || self.production
+    }
+
+    /// The status reason for what was cut, or nothing when nothing was.
+    fn reason(&self) -> Option<String> {
+        let parts: Vec<String> = [
+            (self.assignment, TRUNCATED_REASON.to_string()),
+            (self.recent, recent_truncated_reason()),
+            (self.production, production_truncated_reason()),
+        ]
+        .into_iter()
+        .filter_map(|(cut, reason)| cut.then_some(reason))
+        .collect();
+        (!parts.is_empty()).then(|| parts.join(" "))
+    }
+}
+
 struct Fetched {
     items: Vec<WorkItem>,
-    /// A search had more issues than [`MAX_ISSUES_PER_QUERY`].
-    truncated: bool,
+    /// Which searches had more issues than [`MAX_ISSUES_PER_QUERY`].
+    cuts: Cuts,
     /// Issues in the responses that could not be turned into items.
     unreadable: usize,
 }
@@ -750,7 +860,8 @@ async fn fetch_issues(
     let path = format!("/organizations/{org}/issues/");
     let mut seen = HashSet::new();
     let mut items = Vec::new();
-    let mut truncated = false;
+    let mut production_ids = HashSet::new();
+    let mut cuts = Cuts::default();
     let mut unreadable = 0usize;
     for search in &SEARCHES {
         let mut cursor: Option<String> = None;
@@ -766,8 +877,12 @@ async fn fetch_issues(
                 ("statsPeriod", search.stats_period.to_string()),
                 ("groupStatsPeriod", "24h".to_string()),
                 ("limit", PAGE_LIMIT.to_string()),
+                ("sort", "date".to_string()),
                 ("query", search.query.to_string()),
             ];
+            if let Some(environment) = search.environment {
+                params.push(("environment", environment.to_string()));
+            }
             if let Some(c) = &cursor {
                 params.push(("cursor", c.clone()));
             }
@@ -775,18 +890,27 @@ async fn fetch_issues(
             let page = body.as_array().ok_or(ApiError::Malformed)?;
             for issue in page {
                 if count >= MAX_ISSUES_PER_QUERY {
-                    truncated = true;
+                    cuts.set(search.cut);
                     break;
                 }
                 count += 1;
-                match to_item(issue, repos, search.assignee) {
-                    Some(item) => {
-                        parsed += 1;
-                        if seen.insert(item.id.clone()) {
-                            items.push(item);
+                match search.role {
+                    Role::ProductionMarker => match issue_id(issue) {
+                        Some(id) => {
+                            parsed += 1;
+                            production_ids.insert(format!("sentry:{id}"));
                         }
-                    }
-                    None => unreadable += 1,
+                        None => unreadable += 1,
+                    },
+                    Role::Rows(bucket) => match to_item(issue, repos, bucket) {
+                        Some(item) => {
+                            parsed += 1;
+                            if seen.insert(item.id.clone()) {
+                                items.push(item);
+                            }
+                        }
+                        None => unreadable += 1,
+                    },
                 }
             }
             // A page of things that are not issues is a broken response, not "no issues".
@@ -798,14 +922,19 @@ async fn fetch_issues(
                 break;
             }
             if count >= MAX_ISSUES_PER_QUERY {
-                truncated = true;
+                cuts.set(search.cut);
                 break;
             }
         }
     }
+    for item in &mut items {
+        if production_ids.contains(&item.id) {
+            item.environment = Some(PRODUCTION_ENVIRONMENT.to_string());
+        }
+    }
     Ok(Fetched {
         items,
-        truncated,
+        cuts,
         unreadable,
     })
 }
@@ -872,8 +1001,30 @@ fn priority_for(level: &str) -> Priority {
     }
 }
 
-fn to_item(issue: &Value, repos: &HashMap<String, String>, assignee: &str) -> Option<WorkItem> {
-    let id = text(&issue["id"]).or_else(|| number(&issue["id"]).map(|n| n.to_string()))?;
+fn issue_id(issue: &Value) -> Option<String> {
+    text(&issue["id"]).or_else(|| number(&issue["id"]).map(|n| n.to_string()))
+}
+
+/// Where an item's assignee bucket comes from.
+#[derive(Clone, Copy, PartialEq)]
+enum Bucket {
+    Fixed(&'static str),
+    /// `assignedTo`: null or missing gets the given bucket, anything else (a user or a team) is `other`.
+    NullIs(&'static str),
+}
+
+impl Bucket {
+    fn of(self, issue: &Value) -> &'static str {
+        match self {
+            Bucket::Fixed(bucket) => bucket,
+            Bucket::NullIs(bucket) if issue["assignedTo"].is_null() => bucket,
+            Bucket::NullIs(_) => ASSIGNEE_OTHER,
+        }
+    }
+}
+
+fn to_item(issue: &Value, repos: &HashMap<String, String>, bucket: Bucket) -> Option<WorkItem> {
+    let id = issue_id(issue)?;
     let title = one_line(
         &text(&issue["title"]).unwrap_or_else(|| "(untitled issue)".into()),
         MAX_LINE_CHARS,
@@ -907,7 +1058,7 @@ fn to_item(issue: &Value, repos: &HashMap<String, String>, assignee: &str) -> Op
         priority: level.as_deref().map(priority_for),
         severity: level,
         environment: None,
-        assignee: Some(assignee.to_string()),
+        assignee: Some(bucket.of(issue).to_string()),
         created_at: timestamp(&issue["firstSeen"]),
         updated_at: timestamp(&issue["lastSeen"]),
         due: None,
