@@ -634,7 +634,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
                 // A momentarily empty topology (lid closed, no externals) closes every
                 // window but must not quit the app — see applicationShouldTerminateAfterLastWindowClosed.
                 if windowsByDisplayUUID.isEmpty { lastWindowClosedByScreenLoss = true }
-                appLog.info("screensDidChange — display \(uuid, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .public)'")
+                appLog.info("screensDidChange — display \(uuid, privacy: .public) removed, closing orphaned window '\(win.title, privacy: .private)'")
                 placementLog.log("screensDidChange", "display \(uuid) removed — closing its window")
             },
             prepareWindow: { win.prepareForDisplayRemovalClose() },

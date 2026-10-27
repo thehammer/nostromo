@@ -1,16 +1,24 @@
 import XCTest
 
+// What a paste into a terminal does before it reaches the shell. Only a pane KNOWN to be local sends a
+// multi-line paste straight through: a remote pane, a pane of a kind this app does not know and a pane
+// with no record at all (`kind` nil) all ask first. A single line without a newline is always sent.
+
 final class PastePolicyTests: XCTestCase {
 
-    func testSingleLineGoesStraightThrough() {
-        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "ls -la"), .send)
-        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: ""), .send)
+    // MARK: decide
+
+    func testSingleLineWithoutANewlineGoesStraightThroughEverywhere() {
+        for kind in [TerminalKind.ecs, .unknown, .local, nil] {
+            XCTAssertEqual(PastePolicy.decide(kind: kind, text: "ls -la"), .send, "kind \(String(describing: kind))")
+            XCTAssertEqual(PastePolicy.decide(kind: kind, text: ""), .send, "kind \(String(describing: kind))")
+        }
     }
 
-    func testOneLineWithATrailingNewlineIsStillOneLine() {
-        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "ls\n"), .send)
-        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "ls\r\n"), .send)
-        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "ls\r"), .send)
+    func testASingleLineWithATrailingNewlineAsksInARemoteShellBecauseItRunsTheMomentItLands() {
+        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "rm -rf x\n"), .confirm(lines: 1))
+        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "ls\r\n"), .confirm(lines: 1))
+        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "ls\r"), .confirm(lines: 1))
     }
 
     func testTwoLinesAsk() {
@@ -23,12 +31,68 @@ final class PastePolicyTests: XCTestCase {
         XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "a\rb\rc"), .confirm(lines: 3))
     }
 
-    func testOnlyOneTrailingNewlineIsIgnored() {
+    func testOnlyOneTrailingNewlineIsIgnoredWhenCountingLines() {
         XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "a\n\n"), .confirm(lines: 2))
+        XCTAssertEqual(PastePolicy.lineCount("rm -rf x\n"), 1)
+    }
+
+    func testAPaneOfAnUnknownKindOrNoKnownKindAsksLikeARemoteOne() {
+        for kind in [TerminalKind.unknown, nil] {
+            XCTAssertEqual(PastePolicy.decide(kind: kind, text: "a\nb\nc"), .confirm(lines: 3), "kind \(String(describing: kind))")
+            XCTAssertEqual(PastePolicy.decide(kind: kind, text: "rm -rf x\n"), .confirm(lines: 1), "kind \(String(describing: kind))")
+        }
     }
 
     func testLocalTerminalsNeverAsk() {
         XCTAssertEqual(PastePolicy.decide(kind: .local, text: "a\nb\nc"), .send)
-        XCTAssertEqual(PastePolicy.decide(kind: .unknown, text: "a\nb\nc"), .send)
+        XCTAssertEqual(PastePolicy.decide(kind: .local, text: "rm -rf x\n"), .send)
+        XCTAssertEqual(PastePolicy.decide(kind: .local, text: "a\r\nb"), .send)
+    }
+
+    // MARK: preview
+
+    func testPreviewShowsAShortTextAsItIs() {
+        XCTAssertEqual(PastePolicy.preview("ls\npwd"), "ls\npwd")
+        XCTAssertEqual(PastePolicy.preview("rm -rf x\n"), "rm -rf x")
+    }
+
+    func testPreviewShowsTheFirstThreeLinesAndSaysThereIsMore() {
+        XCTAssertEqual(PastePolicy.preview("1\n2\n3\n4\n5"), "1\n2\n3\u{2026}")
+        XCTAssertEqual(PastePolicy.preview("1\n2\n3\n"), "1\n2\n3", "exactly three lines and a trailing newline: nothing was cut")
+        XCTAssertEqual(PastePolicy.preview("1\n2\n3\n4"), "1\n2\n3\u{2026}")
+    }
+
+    func testPreviewNormalisesWindowsAndOldMacLineEndings() {
+        XCTAssertEqual(PastePolicy.preview("a\r\nb\rc"), "a\nb\nc")
+    }
+
+    func testPreviewMakesControlCharactersVisible() {
+        XCTAssertEqual(PastePolicy.preview("ls\u{1b}[31m"), "ls\u{FFFD}[31m")
+        XCTAssertEqual(PastePolicy.preview("a\u{07}b\u{00}c\u{7F}d"), "a\u{FFFD}b\u{FFFD}c\u{FFFD}d")
+    }
+
+    func testPreviewMakesC1ControlsAndInvisibleFormatCharactersVisible() {
+        XCTAssertEqual(PastePolicy.preview("a\u{85}b\u{9B}c"), "a\u{FFFD}b\u{FFFD}c")
+        // A right-to-left override can make `rm -rf` read as something else; zero-width characters hide text.
+        XCTAssertEqual(PastePolicy.preview("echo \u{202E}evil"), "echo \u{FFFD}evil")
+        XCTAssertEqual(PastePolicy.preview("a\u{200B}b\u{200D}c\u{FEFF}d"), "a\u{FFFD}b\u{FFFD}c\u{FFFD}d")
+    }
+
+    func testPreviewTurnsATabIntoASpaceAndKeepsNewlines() {
+        XCTAssertEqual(PastePolicy.preview("a\tb\nc"), "a b\nc")
+    }
+
+    func testPreviewIsCappedAtTwoHundredCharactersWithAnEllipsis() {
+        let long = String(repeating: "x", count: 500)
+        let preview = PastePolicy.preview(long + "\nsecond")
+        XCTAssertEqual(preview, String(repeating: "x", count: 200) + "\u{2026}")
+        XCTAssertEqual(PastePolicy.preview(String(repeating: "y", count: 200) + "\nz"),
+                       String(repeating: "y", count: 200) + "\u{2026}",
+                       "the cap counts the newline too, so the second line does not fit")
+    }
+
+    func testAPreviewExactlyAtTheCapIsNotMarkedAsCut() {
+        let exact = String(repeating: "x", count: 200)
+        XCTAssertEqual(PastePolicy.preview(exact), exact)
     }
 }

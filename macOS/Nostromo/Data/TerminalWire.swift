@@ -78,12 +78,15 @@ struct TerminalInfo: Codable, Equatable {
     let follower: TerminalFollower?
     /// RFC 3339, set from the idle warning until a keystroke or keep-alive (a remote shell).
     let idleClosesAt: String?
+    /// Seconds without keystrokes that brought the idle warning, set with `idleClosesAt` (an older
+    /// daemon omits it).
+    var idleWarnAfterSecs: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case terminalId = "terminal_id", tag, paneId = "pane_id", kind, label, cwd, target, status
         case exitCode = "exit_code", endedReason = "ended_reason", cols, rows
         case requestedBy = "requested_by", openedByRequest = "opened_by_request", follower
-        case idleClosesAt = "idle_closes_at"
+        case idleClosesAt = "idle_closes_at", idleWarnAfterSecs = "idle_warn_after_secs"
     }
 }
 

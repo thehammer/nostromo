@@ -238,6 +238,23 @@ final class TerminalWireTests: XCTestCase {
         XCTAssertEqual(t.idleClosesAt, "2026-10-26T20:15:00Z")
     }
 
+    func testIdleWarnAfterSecsDecodesWhenPresentAndIsNilWhenAbsent() throws {
+        let present = try info("""
+        {"terminal_id":"t2","tag":"core-1","pane_id":"p","kind":"ecs","label":"x","status":"running",
+         "cols":80,"rows":24,"requested_by":{"kind":"user"},
+         "idle_closes_at":"2026-10-26T20:15:00Z","idle_warn_after_secs":130}
+        """)
+        XCTAssertEqual(present.idleWarnAfterSecs, 130)
+        XCTAssertEqual(present.idleClosesAt, "2026-10-26T20:15:00Z")
+
+        let absent = try info("""
+        {"terminal_id":"t2","tag":"core-1","pane_id":"p","kind":"ecs","label":"x","status":"running",
+         "cols":80,"rows":24,"requested_by":{"kind":"user"},"idle_closes_at":"2026-10-26T20:15:00Z"}
+        """)
+        XCTAssertNil(absent.idleWarnAfterSecs, "an older daemon sends no figure")
+        XCTAssertEqual(absent.idleClosesAt, "2026-10-26T20:15:00Z")
+    }
+
     func testAFollowerWithoutAPauseReasonDecodes() throws {
         let t = try info("""
         {"terminal_id":"t1","tag":"core-1","pane_id":"p","kind":"local","label":"Terminal","status":"running",

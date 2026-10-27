@@ -36,6 +36,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             labelClearsAttentionDot?.isActive = needsAttention
             pillClearsAttentionDot?.isActive = needsAttention
             pillAtEdge?.isActive = !needsAttention
+            badgesClearAttentionDot?.isActive = needsAttention && !environments.isEmpty
         }
     }
 
@@ -46,7 +47,8 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             guard environments != oldValue else { return }
             environmentBadges.arrangedSubviews.forEach { environmentBadges.removeArrangedSubview($0); $0.removeFromSuperview() }
             for name in environments { environmentBadges.addArrangedSubview(Self.makeEnvironmentBadge(name)) }
-            environmentBadges.isHidden = environments.isEmpty
+            badgeClip.isHidden = environments.isEmpty
+            updateBadgeConstraints()
         }
     }
     /// The badge texts shown. Exposed for tests.
@@ -56,7 +58,17 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         didSet { updateAppearance() }
     }
 
+    /// The badges and the box that clips them: when the row is too narrow the box gives way (the
+    /// last badge is cut off), never a required constraint.
     private let environmentBadges = NSStackView()
+    private let badgeClip = NSView()
+    /// Active only while badges show: the box starts after the label, ends before the sweater dot, the
+    /// pill and the attention dot (the last two while they show), and the label never goes negative.
+    private var badgeConstraints: [NSLayoutConstraint] = []
+    private var badgesClearPill: NSLayoutConstraint?
+    private var badgesClearAttentionDot: NSLayoutConstraint?
+    /// Active while there are no badges, so the empty box is never ambiguous.
+    private var noBadgeConstraints: [NSLayoutConstraint] = []
     private let accentBar      = NSView()
     private let label          = NSTextField(labelWithString: "")
     private let dot            = NSView()
@@ -206,20 +218,47 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         labelClearsPill = label.trailingAnchor.constraint(lessThanOrEqualTo: pillBox.leadingAnchor, constant: -4)
 
-        // Environment badges (hazard red) just after the label; they give way to nothing but the label's
-        // tail, and leave room for the pill and the attention dot. Height is fixed: never changes the row's.
+        // Environment badges (hazard red) just after the label, in a box that clips them. Only the
+        // soft constraints below move when the row is narrow, in this order: the label gives way first
+        // (compression resistance 250), down to 40 pt of its text (900); then the box is cut off
+        // (800), the last badge first. The box's required edges are always satisfiable, so AppKit never
+        // has a conflict to break. Height is fixed: badges never change the row's.
+        badgeClip.wantsLayer = true
+        badgeClip.layer?.masksToBounds = true
+        badgeClip.isHidden = true
+        badgeClip.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(badgeClip)
         environmentBadges.orientation = .horizontal
         environmentBadges.spacing = 3
-        environmentBadges.isHidden = true
         environmentBadges.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(environmentBadges)
-        let badgesTrailing = environmentBadges.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -44)
+        badgeClip.addSubview(environmentBadges)
+        let labelTextWidth = ceil((displayLabel as NSString).size(withAttributes: [.font: label.font as Any]).width)
+        let wantsAllBadges = badgeClip.widthAnchor.constraint(equalTo: environmentBadges.widthAnchor)
+        wantsAllBadges.priority = NSLayoutConstraint.Priority(800)
+        let beside = badgeClip.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6)
+        beside.priority = NSLayoutConstraint.Priority(750)
+        let labelKeepsItsName = label.widthAnchor.constraint(greaterThanOrEqualToConstant: min(40, labelTextWidth))
+        labelKeepsItsName.priority = NSLayoutConstraint.Priority(900)
+        badgesClearPill = badgeClip.trailingAnchor.constraint(lessThanOrEqualTo: pillBox.leadingAnchor, constant: -4)
+        badgesClearAttentionDot = badgeClip.trailingAnchor.constraint(lessThanOrEqualTo: attentionDot.leadingAnchor, constant: -4)
         NSLayoutConstraint.activate([
-            environmentBadges.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
-            environmentBadges.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-            badgesTrailing,
+            badgeClip.heightAnchor.constraint(equalToConstant: 14),
+            badgeClip.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+            environmentBadges.leadingAnchor.constraint(equalTo: badgeClip.leadingAnchor),
+            environmentBadges.centerYAnchor.constraint(equalTo: badgeClip.centerYAnchor),
         ])
-        environmentBadges.setContentCompressionResistancePriority(.required, for: .horizontal)
+        badgeConstraints = [
+            badgeClip.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6),
+            badgeClip.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -4),
+            badgeClip.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
+            label.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
+            wantsAllBadges, beside, labelKeepsItsName,
+        ]
+        noBadgeConstraints = [
+            badgeClip.leadingAnchor.constraint(equalTo: leadingAnchor),
+            badgeClip.widthAnchor.constraint(equalToConstant: 0),
+        ]
+        NSLayoutConstraint.activate(noBadgeConstraints)
 
         let rowClick = NSClickGestureRecognizer(target: self, action: #selector(tapped))
         rowClick.delegate = self
@@ -230,6 +269,14 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    private func updateBadgeConstraints() {
+        let showing = !environments.isEmpty
+        NSLayoutConstraint.deactivate(showing ? noBadgeConstraints : badgeConstraints)
+        NSLayoutConstraint.activate(showing ? badgeConstraints : noBadgeConstraints)
+        badgesClearPill?.isActive = showing && !pillBox.isHidden
+        badgesClearAttentionDot?.isActive = showing && needsAttention
+    }
 
     private static func makeEnvironmentBadge(_ name: String) -> NSView {
         let box = NSView()
@@ -279,6 +326,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             pillBox.isHidden = true
         }
         labelClearsPill?.isActive = !pillBox.isHidden
+        badgesClearPill?.isActive = !pillBox.isHidden && !environments.isEmpty
 
         if focus.isBuiltIn, ["fred", "mother", "teri"].contains(focus.agentTag.lowercased()) {
             secondaryLabel?.stringValue = badge?.detail ?? baseSecondary ?? ""

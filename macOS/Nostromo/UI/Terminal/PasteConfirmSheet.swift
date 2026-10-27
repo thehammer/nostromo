@@ -1,9 +1,11 @@
 import AppKit
 
-/// "Paste 14 lines into PRODUCTION · admin-portal · scheduler? Each line may run as a command."
+/// "Paste 14 lines into PRODUCTION · admin-portal · scheduler? Each line may run as a command." and the
+/// first three lines of what would be pasted, so the person sees what they confirm.
 ///
-/// Shown by `NostromoTerminalView.paste` for a multi-line paste into a remote shell. Nothing has been
-/// sent when it appears; the paste happens from exactly one place, the Paste button.
+/// Shown by `NostromoTerminalView` for a paste (or dictated or replaced text) with a newline into a
+/// shell that is not known to be local. Nothing has been sent when it appears; the paste happens from
+/// exactly one place, the Paste button.
 ///
 /// - **Cancel** is the default button (`keyEquivalent = "\r"`), so Return cancels; Escape cancels too.
 /// - **Paste** has no key equivalent (Tab then Space, or a click) and asks
@@ -31,7 +33,7 @@ final class PasteConfirmSheet: NSWindowController {
 
     /// `onPaste` runs after the sheet closes, only for a human's Paste; `onRefused` when a Paste was
     /// not a human gesture (the sheet stays up).
-    init(lines: Int, targetText: String, onPaste: @escaping () -> Void, onRefused: @escaping () -> Void) {
+    init(lines: Int, preview: String, targetText: String, onPaste: @escaping () -> Void, onRefused: @escaping () -> Void) {
         self.onPaste = onPaste
         self.onRefused = onRefused
         let win = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: Self.contentWidth, height: 140),
@@ -42,16 +44,16 @@ final class PasteConfirmSheet: NSWindowController {
         win.initialFirstResponder = nil
         super.init(window: win)
         win.onCancel = { [weak self] in self?.cancelTapped(nil) }
-        build(lines: lines, targetText: targetText)
+        build(lines: lines, preview: preview, targetText: targetText)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private func build(lines: Int, targetText: String) {
+    private func build(lines: Int, preview: String, targetText: String) {
         guard let contentView = window?.contentView else { return }
         let textWidth = Self.contentWidth - 40
 
-        let title = NSTextField(wrappingLabelWithString: "Paste \(lines) lines into \(targetText)?")
+        let title = NSTextField(wrappingLabelWithString: "Paste \(lines) \(lines == 1 ? "line" : "lines") into \(targetText)?")
         title.preferredMaxLayoutWidth = textWidth
         title.font = .systemFont(ofSize: 15, weight: .bold)
         title.textColor = .white
@@ -64,6 +66,15 @@ final class PasteConfirmSheet: NSWindowController {
         detail.font = .systemFont(ofSize: 13)
         detail.textColor = .systemRed
         detail.isSelectable = false
+
+        let previewField = NSTextField(wrappingLabelWithString: preview)
+        previewField.preferredMaxLayoutWidth = textWidth
+        previewField.font = Theme.codeFont(size: 12)
+        previewField.textColor = Theme.fg
+        previewField.maximumNumberOfLines = 8
+        previewField.lineBreakMode = .byTruncatingTail
+        previewField.isSelectable = false
+        previewField.setAccessibilityIdentifier("paste-confirm-preview")
 
         cancelButton.title = "Cancel"
         cancelButton.bezelStyle = .rounded
@@ -83,7 +94,7 @@ final class PasteConfirmSheet: NSWindowController {
         escapeButton.target = self
         escapeButton.action = #selector(cancelTapped(_:))
 
-        let stack = NSStackView(views: [title, detail])
+        let stack = NSStackView(views: [title, detail, previewField])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8

@@ -610,6 +610,16 @@
 		TP000000000000000000T016 /* IdleCountdownModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F016 /* IdleCountdownModel.swift */; };
 		TP000000000000000000A017 /* PastePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F017 /* PastePolicy.swift */; };
 		TP000000000000000000T017 /* PastePolicy.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F017 /* PastePolicy.swift */; };
+		TP000000000000000000T024 /* PasteConfirmSheet.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F024 /* PasteConfirmSheet.swift */; };
+		TP000000000000000000A043 /* RemotePasteGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F043 /* RemotePasteGate.swift */; };
+		TP000000000000000000T043 /* RemotePasteGate.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F043 /* RemotePasteGate.swift */; };
+		TP000000000000000000A044 /* TerminalPaneHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F044 /* TerminalPaneHeaderView.swift */; };
+		TP000000000000000000T044 /* TerminalPaneHeaderView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F044 /* TerminalPaneHeaderView.swift */; };
+		TP000000000000000000A045 /* IdleBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F045 /* IdleBannerView.swift */; };
+		TP000000000000000000T045 /* IdleBannerView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F045 /* IdleBannerView.swift */; };
+		TP000000000000000000T046 /* RemotePasteGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F046 /* RemotePasteGateTests.swift */; };
+		TP000000000000000000T047 /* TerminalPaneHeaderViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F047 /* TerminalPaneHeaderViewTests.swift */; };
+		TP000000000000000000T048 /* IdleBannerViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F048 /* IdleBannerViewTests.swift */; };
 		TP000000000000000000A018 /* FollowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F018 /* FollowModel.swift */; };
 		TP000000000000000000T018 /* FollowModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F018 /* FollowModel.swift */; };
 		TP000000000000000000A019 /* TurnOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F019 /* TurnOrigin.swift */; };
@@ -627,6 +637,9 @@
 		TP000000000000000000T030 /* TerminalChromeModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F030 /* TerminalChromeModelTests.swift */; };
 		TP000000000000000000T031 /* IdleCountdownModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F031 /* IdleCountdownModelTests.swift */; };
 		TP000000000000000000T032 /* PastePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F032 /* PastePolicyTests.swift */; };
+		TP000000000000000000T040 /* PasteConfirmSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F040 /* PasteConfirmSheetTests.swift */; };
+		TP000000000000000000T041 /* NavTabItemEnvironmentBadgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F041 /* NavTabItemEnvironmentBadgeTests.swift */; };
+		TP000000000000000000T042 /* MainLayoutWindowTitleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F042 /* MainLayoutWindowTitleTests.swift */; };
 		TP000000000000000000T033 /* TerminalStoreMirrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */; };
 		TP000000000000000000T034 /* FollowModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F034 /* FollowModelTests.swift */; };
 		TP000000000000000000T035 /* TurnOriginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F035 /* TurnOriginTests.swift */; };
@@ -1058,6 +1071,15 @@
 		TP000000000000000000F030 /* TerminalChromeModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalChromeModelTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F031 /* IdleCountdownModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdleCountdownModelTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F032 /* PastePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PastePolicyTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F040 /* PasteConfirmSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasteConfirmSheetTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F041 /* NavTabItemEnvironmentBadgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavTabItemEnvironmentBadgeTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F042 /* MainLayoutWindowTitleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainLayoutWindowTitleTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F043 /* RemotePasteGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePasteGate.swift; sourceTree = "<group>"; };
+		TP000000000000000000F044 /* TerminalPaneHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPaneHeaderView.swift; sourceTree = "<group>"; };
+		TP000000000000000000F045 /* IdleBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdleBannerView.swift; sourceTree = "<group>"; };
+		TP000000000000000000F046 /* RemotePasteGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePasteGateTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F047 /* TerminalPaneHeaderViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPaneHeaderViewTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F048 /* IdleBannerViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdleBannerViewTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStoreMirrorTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F034 /* FollowModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowModelTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F035 /* TurnOriginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOriginTests.swift; sourceTree = "<group>"; };
@@ -1365,6 +1387,12 @@
 				TP000000000000000000F030 /* TerminalChromeModelTests.swift */,
 				TP000000000000000000F031 /* IdleCountdownModelTests.swift */,
 				TP000000000000000000F032 /* PastePolicyTests.swift */,
+				TP000000000000000000F040 /* PasteConfirmSheetTests.swift */,
+				TP000000000000000000F041 /* NavTabItemEnvironmentBadgeTests.swift */,
+				TP000000000000000000F042 /* MainLayoutWindowTitleTests.swift */,
+				TP000000000000000000F046 /* RemotePasteGateTests.swift */,
+				TP000000000000000000F047 /* TerminalPaneHeaderViewTests.swift */,
+				TP000000000000000000F048 /* IdleBannerViewTests.swift */,
 				TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */,
 				TP000000000000000000F034 /* FollowModelTests.swift */,
 				TP000000000000000000F035 /* TurnOriginTests.swift */,
@@ -1626,6 +1654,9 @@
 				TP000000000000000000F022 /* NewRemoteShellSheet.swift */,
 				TP000000000000000000F023 /* RemoteShellFailureSheet.swift */,
 				TP000000000000000000F024 /* PasteConfirmSheet.swift */,
+				TP000000000000000000F043 /* RemotePasteGate.swift */,
+				TP000000000000000000F044 /* TerminalPaneHeaderView.swift */,
+				TP000000000000000000F045 /* IdleBannerView.swift */,
 				TP000000000000000000F025 /* FollowControlView.swift */,
 			);
 			path = Terminal;
@@ -1751,6 +1782,9 @@
 				TP000000000000000000A022 /* NewRemoteShellSheet.swift in Sources */,
 				TP000000000000000000A023 /* RemoteShellFailureSheet.swift in Sources */,
 				TP000000000000000000A024 /* PasteConfirmSheet.swift in Sources */,
+				TP000000000000000000A043 /* RemotePasteGate.swift in Sources */,
+				TP000000000000000000A044 /* TerminalPaneHeaderView.swift in Sources */,
+				TP000000000000000000A045 /* IdleBannerView.swift in Sources */,
 				TP000000000000000000A025 /* FollowControlView.swift in Sources */,
 				TP000000000000000000A026 /* TerminalDeliveryBlockView.swift in Sources */,
 				ZZ0000000000000000M20101 /* ModelStore.swift in Sources */,
@@ -1967,6 +2001,10 @@
 				TP000000000000000000T015 /* TerminalChromeModel.swift in TestSources */,
 				TP000000000000000000T016 /* IdleCountdownModel.swift in TestSources */,
 				TP000000000000000000T017 /* PastePolicy.swift in TestSources */,
+				TP000000000000000000T024 /* PasteConfirmSheet.swift in TestSources */,
+				TP000000000000000000T043 /* RemotePasteGate.swift in TestSources */,
+				TP000000000000000000T044 /* TerminalPaneHeaderView.swift in TestSources */,
+				TP000000000000000000T045 /* IdleBannerView.swift in TestSources */,
 				TP000000000000000000T018 /* FollowModel.swift in TestSources */,
 				TP000000000000000000T019 /* TurnOrigin.swift in TestSources */,
 				TP000000000000000000T036 /* AppControlAX.swift in TestSources */,
@@ -1976,6 +2014,12 @@
 				TP000000000000000000T030 /* TerminalChromeModelTests.swift in Sources */,
 				TP000000000000000000T031 /* IdleCountdownModelTests.swift in Sources */,
 				TP000000000000000000T032 /* PastePolicyTests.swift in Sources */,
+				TP000000000000000000T040 /* PasteConfirmSheetTests.swift in Sources */,
+				TP000000000000000000T041 /* NavTabItemEnvironmentBadgeTests.swift in Sources */,
+				TP000000000000000000T042 /* MainLayoutWindowTitleTests.swift in Sources */,
+				TP000000000000000000T046 /* RemotePasteGateTests.swift in Sources */,
+				TP000000000000000000T047 /* TerminalPaneHeaderViewTests.swift in Sources */,
+				TP000000000000000000T048 /* IdleBannerViewTests.swift in Sources */,
 				TP000000000000000000T033 /* TerminalStoreMirrorTests.swift in Sources */,
 				TP000000000000000000T034 /* FollowModelTests.swift in Sources */,
 				TP000000000000000000T035 /* TurnOriginTests.swift in Sources */,

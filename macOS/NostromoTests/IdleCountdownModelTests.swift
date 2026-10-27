@@ -29,9 +29,24 @@ final class IdleCountdownModelTests: XCTestCase {
                        .counting(secondsLeft: 0))
     }
 
-    func testFormatting() {
-        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 119), "Closing in 1:59 (no keystrokes for 13 minutes)")
-        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 5), "Closing in 0:05 (no keystrokes for 13 minutes)")
-        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 120), "Closing in 2:00 (no keystrokes for 13 minutes)")
+    func testFormattingUsesTheDaemonsWarnFigure() {
+        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 119, warnAfterSecs: 780), "Closing in 1:59 (no keystrokes for 13 minutes)")
+        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 5, warnAfterSecs: 780), "Closing in 0:05 (no keystrokes for 13 minutes)")
+        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 120, warnAfterSecs: 780), "Closing in 2:00 (no keystrokes for 13 minutes)")
+    }
+
+    func testTheNoKeystrokeFigureIsNeverTheHardCodedThirteenMinutes() {
+        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 90, warnAfterSecs: 60), "Closing in 1:30 (no keystrokes for 1 minute)")
+        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 90, warnAfterSecs: 130), "Closing in 1:30 (no keystrokes for 2 minutes 10 seconds)")
+        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 90, warnAfterSecs: 20), "Closing in 1:30 (no keystrokes for 20 seconds)")
+        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 90, warnAfterSecs: 1), "Closing in 1:30 (no keystrokes for 1 second)")
+    }
+
+    func testAnOlderDaemonThatSendsNoFigureGetsAVagueOneNotAMadeUpNumber() {
+        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: 119, warnAfterSecs: nil), "Closing in 1:59 (no keystrokes for a while)")
+    }
+
+    func testSecondsLeftNeverShowsNegative() {
+        XCTAssertEqual(IdleCountdownModel.text(secondsLeft: -4, warnAfterSecs: 780), "Closing in 0:00 (no keystrokes for 13 minutes)")
     }
 }

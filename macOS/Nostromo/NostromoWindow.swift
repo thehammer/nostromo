@@ -142,7 +142,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         guard gaveUpOnFullScreen, !styleMask.contains(.fullScreen), !isInTransition else { return }
         gaveUpOnFullScreen = false
         startupRetries = 0
-        winLog.warning("windowDidBecomeKey — retrying full-screen once after an earlier give-up (\(self.title, privacy: .public))")
+        winLog.warning("windowDidBecomeKey — retrying full-screen once after an earlier give-up (\(self.title, privacy: .private))")
         Self.whenIdle(budget: 5) { [weak self] in
             guard let self, !self.styleMask.contains(.fullScreen), !self.isInTransition else { return }
             guard !self.isPendingScreenRemoval else { self.fullScreenDeferredByPendingRemoval = true; return }
@@ -157,7 +157,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     func windowWillEnterFullScreen(_ notification: Notification) {
         lifecycleHandler?(.willEnterFullScreen)
         Self.transitioning.insert(ObjectIdentifier(self))
-        winLog.info("windowWillEnterFullScreen — \(self.title, privacy: .public)")
+        winLog.info("windowWillEnterFullScreen — \(self.title, privacy: .private)")
         // Set directly, not through `animator()`: a fade here runs under
         // NSAnimationManager, which KVO-observes the window. Full-screen entry
         // swaps windows underneath it (and we retry entry after display
@@ -169,7 +169,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
 
     func windowDidEnterFullScreen(_ notification: Notification) {
         lifecycleHandler?(.didEnterFullScreen)
-        winLog.info("windowDidEnterFullScreen — \(self.title, privacy: .public)")
+        winLog.info("windowDidEnterFullScreen — \(self.title, privacy: .private)")
         Self.transitioning.remove(ObjectIdentifier(self))
         startupRetries = 0
         gaveUpOnFullScreen = false
@@ -187,7 +187,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
             // controller is still cleaning up; retrying immediately re-triggers
             // the _doFailedToEnterFullScreen crash. Accept the windowed state —
             // the user can swipe/Mission-Control back to full-screen if needed.
-            winLog.warning("windowDidFailToEnterFullScreen — post-exit re-entry failed, leaving windowed (\(window.title, privacy: .public))")
+            winLog.warning("windowDidFailToEnterFullScreen — post-exit re-entry failed, leaving windowed (\(window.title, privacy: .private))")
             isPostExitReentry = false
             return
         }
@@ -202,19 +202,19 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         // occasionally fails. Retry — but only a couple of times, only once no
         // sibling is mid-transition, and with a growing delay.
         guard startupRetries < Self.maxStartupRetries else {
-            winLog.warning("windowDidFailToEnterFullScreen — giving up after \(self.startupRetries) startup retries, leaving windowed until next activation (\(window.title, privacy: .public))")
+            winLog.warning("windowDidFailToEnterFullScreen — giving up after \(self.startupRetries) startup retries, leaving windowed until next activation (\(window.title, privacy: .private))")
             gaveUpOnFullScreen = true
             return
         }
         startupRetries += 1
         let delay = 1.0 * Double(startupRetries)
-        winLog.warning("windowDidFailToEnterFullScreen — startup retry \(self.startupRetries)/\(Self.maxStartupRetries) in \(delay)s (\(window.title, privacy: .public))")
+        winLog.warning("windowDidFailToEnterFullScreen — startup retry \(self.startupRetries)/\(Self.maxStartupRetries) in \(delay)s (\(window.title, privacy: .private))")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak window] in
             Self.whenIdle(budget: 5) {
                 guard let self, let window,
                       !window.styleMask.contains(.fullScreen), !self.isInTransition else { return }
                 guard !self.isPendingScreenRemoval else { self.fullScreenDeferredByPendingRemoval = true; return }
-                winLog.warning("windowDidFailToEnterFullScreen — retrying toggleFullScreen for \(window.title, privacy: .public)")
+                winLog.warning("windowDidFailToEnterFullScreen — retrying toggleFullScreen for \(window.title, privacy: .private)")
                 window.toggleFullScreen(nil)
             }
         }
@@ -223,7 +223,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
     func windowWillExitFullScreen(_ notification: Notification) {
         lifecycleHandler?(.willExitFullScreen)
         Self.transitioning.insert(ObjectIdentifier(self))
-        winLog.warning("windowWillExitFullScreen — \(self.title, privacy: .public) — will re-enter after exit completes")
+        winLog.warning("windowWillExitFullScreen — \(self.title, privacy: .private) — will re-enter after exit completes")
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
@@ -232,7 +232,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         // so the delayed re-entry below enters full-screen on the right display.
         lifecycleHandler?(.didExitFullScreen)
         Self.transitioning.remove(ObjectIdentifier(self))
-        winLog.warning("windowDidExitFullScreen — \(self.title, privacy: .public) — scheduling re-entry")
+        winLog.warning("windowDidExitFullScreen — \(self.title, privacy: .private) — scheduling re-entry")
         guard !isReenteringFullScreen else {
             winLog.warning("windowDidExitFullScreen — re-entry already in progress, skipping")
             return
@@ -240,7 +240,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         // Its display is gone and the close is waiting out the grace: entering full-screen
         // now would build a Space on a display that is about to lose this window.
         guard !isPendingScreenRemoval else {
-            winLog.warning("windowDidExitFullScreen — display removal pending, not re-entering (\(self.title, privacy: .public))")
+            winLog.warning("windowDidExitFullScreen — display removal pending, not re-entering (\(self.title, privacy: .private))")
             fullScreenDeferredByPendingRemoval = true
             return
         }
@@ -271,14 +271,14 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
                 return
             }
             guard !self.isPendingScreenRemoval else {
-                winLog.warning("windowDidExitFullScreen — display removal pending at re-entry time, not re-entering (\(self.title, privacy: .public))")
+                winLog.warning("windowDidExitFullScreen — display removal pending at re-entry time, not re-entering (\(self.title, privacy: .private))")
                 self.fullScreenDeferredByPendingRemoval = true
                 self.isReenteringFullScreen = false
                 self.isPostExitReentry      = false
                 return
             }
             guard !self.displayChangePending else {
-                winLog.warning("windowDidExitFullScreen — aborting: display change in progress (\(self.title, privacy: .public))")
+                winLog.warning("windowDidExitFullScreen — aborting: display change in progress (\(self.title, privacy: .private))")
                 self.isReenteringFullScreen = false
                 // Re-attempt after the display change settles.
                 self.scheduler.schedule(after: 2.0) { [weak self] in
@@ -292,21 +292,21 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
                         self.isPostExitReentry = false
                         return
                     }
-                    winLog.warning("windowDidExitFullScreen — follow-up re-entry after display settle (\(self.title, privacy: .public))")
+                    winLog.warning("windowDidExitFullScreen — follow-up re-entry after display settle (\(self.title, privacy: .private))")
                     self.displayChangePending = false
                     self.lifecycleHandler?(.willReenterFullScreen)
                     self.toggleFullScreen(nil)
                 }
                 return
             }
-            winLog.warning("windowDidExitFullScreen — calling toggleFullScreen to re-enter (\(self.title, privacy: .public))")
+            winLog.warning("windowDidExitFullScreen — calling toggleFullScreen to re-enter (\(self.title, privacy: .private))")
             self.lifecycleHandler?(.willReenterFullScreen)
             self.toggleFullScreen(nil)
         }
     }
 
     func windowDidFailToExitFullScreen(_ window: NSWindow) {
-        winLog.warning("windowDidFailToExitFullScreen — \(self.title, privacy: .public)")
+        winLog.warning("windowDidFailToExitFullScreen — \(self.title, privacy: .private)")
         Self.transitioning.remove(ObjectIdentifier(self))
         isReenteringFullScreen = false
         isPostExitReentry      = false
@@ -316,7 +316,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         if isOrphanedByScreenRemoval {
             // Screen disconnected — allow this window to close without terminating.
             // AppDelegate.screensDidChange handles cleanup; we just let it go.
-            winLog.info("windowShouldClose — orphaned by screen removal, allowing close (\(self.title, privacy: .public))")
+            winLog.info("windowShouldClose — orphaned by screen removal, allowing close (\(self.title, privacy: .private))")
             return true
         }
         // Traffic lights are hidden, but just in case: route close to quit.
@@ -362,7 +362,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         clearFullScreenMaskDuringTransition(logContext: logContext)
         let caught = ObjCExceptionGuard.catching { close() }
         if let caught {
-            winLog.error("closeAfterDisplayRemoval — close() raised \(caught.name, privacy: .public) and was contained (\(logContext, privacy: .public))")
+            winLog.error("closeAfterDisplayRemoval — close() raised \(caught.name, privacy: .public) and was contained (\(logContext, privacy: .private))")
         }
         return caught
     }
@@ -379,7 +379,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
             styleMask = mask
         }
         if let caught {
-            winLog.error("clearFullScreenMaskDuringTransition — raised \(caught.name, privacy: .public) and was contained (\(logContext, privacy: .public))")
+            winLog.error("clearFullScreenMaskDuringTransition — raised \(caught.name, privacy: .public) and was contained (\(logContext, privacy: .private))")
         }
     }
 
@@ -411,7 +411,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
                 self.isPostExitReentry      = false
                 return
             }
-            winLog.warning("resuming full-screen entry after a display removal was called off (\(self.title, privacy: .public))")
+            winLog.warning("resuming full-screen entry after a display removal was called off (\(self.title, privacy: .private))")
             self.lifecycleHandler?(.willReenterFullScreen)
             self.toggleFullScreen(nil)
         }

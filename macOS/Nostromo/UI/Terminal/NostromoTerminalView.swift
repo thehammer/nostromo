@@ -10,6 +10,11 @@ import SwiftTerm
 /// `paste`) asks `TerminalInputGuard` first; a refused one sends nothing and tells the daemon, which
 /// audits it (`terminal_refusal_report`, at most one a second per terminal).
 ///
+/// A paste, dictation or text replacement that contains a newline asks first unless the pane is KNOWN
+/// to be local (`PastePolicy`): an `ecs` pane, a pane of a kind this app does not know, and a pane the
+/// store has no record of all ask, and with no window to hang the confirmation on the text is refused,
+/// never sent. Nothing falls through to a plain paste.
+///
 /// Typed input and the emulator's own replies are told apart by the SwiftTerm path they take, not by
 /// `NSApp.currentEvent`. In SwiftTerm 1.18 (pinned exactly) every byte reaches `send(source:data:)`
 /// of the delegate by one of two routes: `TerminalView.send(data:)`, which keys, `insertText` and
@@ -33,14 +38,17 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
     /// reports its own size.
     private(set) var isDriver = true
     private var pendingResize: DispatchWorkItem?
-    /// The paste confirmation on screen, if any (retained while it is up).
-    private var pasteConfirm: PasteConfirmSheet?
+    /// Decides whether a paste or dictated text goes straight in, asks first or is refused.
+    private let pasteGate: RemotePasteGate
+    /// The paste confirmation on screen, if any.
+    var pasteConfirm: PasteConfirmSheet? { pasteGate.pasteConfirm }
     /// The wait before a driver's new grid goes to the daemon, so dragging a divider sends one frame.
     static let resizeDebounce: TimeInterval = 0.05
 
     init(windowId: String, store: TerminalSessionStore) {
         self.windowId = windowId
         self.store = store
+        self.pasteGate = RemotePasteGate(store: store)
         super.init(frame: .zero, font: Theme.codeFont(size: 13), options: TerminalOptions(scrollback: Self.scrollbackLines))
         terminalDelegate = self
         nativeBackgroundColor = Theme.bg
@@ -148,7 +156,11 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
             refuse(.input)
             return
         }
-        super.insertText(string, replacementRange: replacementRange)
+        // Dictation and text replacement can carry a newline: into a remote shell that asks too.
+        let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
+        pasteGate.submit(text, terminalId: terminalId, window: window, refusedOp: .input, fromClipboard: false) { [weak self] in
+            self?.insertTextConfirmed(string, replacementRange: replacementRange)
+        }
     }
 
     override func paste(_ sender: Any) {
@@ -156,29 +168,12 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
             refuse(.paste)
             return
         }
-        // A multi-line paste into a remote shell asks first; nothing is sent until Paste is clicked.
+        // SwiftTerm's paste reads the general pasteboard (and honours bracketed paste), so read the same.
         let pasteboard = NSPasteboard.general
-        guard let info = terminalId.flatMap({ store.terminals[$0] }), let target = info.target,
-              case .confirm(let lines) = PastePolicy.decide(kind: info.kind, text: pasteboard.string(forType: .string) ?? ""),
-              let window else {
-            super.paste(sender)
-            return
+        pasteGate.submit(pasteboard.string(forType: .string) ?? "", terminalId: terminalId, window: window,
+                         refusedOp: .paste, fromClipboard: true) { [weak self] in
+            self?.pasteConfirmed(sender)
         }
-        guard pasteConfirm == nil else { return }
-        let changeCount = pasteboard.changeCount
-        let sheet = PasteConfirmSheet(
-            lines: lines, targetText: TerminalChromeModel.targetText(target),
-            onPaste: { [weak self] in
-                guard let self else { return }
-                self.pasteConfirm = nil
-                // The clipboard changed while the sheet was up: what was confirmed is gone.
-                guard NSPasteboard.general.changeCount == changeCount else { return }
-                self.pasteConfirmed(sender)
-            },
-            onRefused: { [weak self] in self?.refuse(.paste) })
-        guard let sheetWindow = sheet.window else { return }
-        pasteConfirm = sheet
-        window.beginSheet(sheetWindow) { [weak self] _ in self?.pasteConfirm = nil }
     }
 
     /// The emulator answering on its own (cursor position, device attributes, focus and mouse
@@ -231,9 +226,15 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
 
     // MARK: - Private
 
-    /// SwiftTerm's own paste, after a person confirmed it (`super` cannot be named inside a closure that captures self).
+    // `super` cannot be named inside a closure that captures self.
+
+    /// SwiftTerm's own paste, after a person confirmed it.
     private func pasteConfirmed(_ sender: Any) {
         super.paste(sender)
+    }
+
+    private func insertTextConfirmed(_ string: Any, replacementRange: NSRange) {
+        super.insertText(string, replacementRange: replacementRange)
     }
 
     private func refuse(_ op: TerminalRefusedOp) {

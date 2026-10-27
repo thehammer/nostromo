@@ -433,7 +433,12 @@ final class TerminalFitnessTests: XCTestCase {
                      "Data/RemoteShellWire.swift", "Data/RemoteShellStore.swift", "UI/Toast/ToastAction.swift",
                      "UI/Terminal/TerminalChromeModel.swift", "UI/Terminal/IdleCountdownModel.swift",
                      "UI/Terminal/PastePolicy.swift", "UI/Terminal/FollowModel.swift", "Data/TurnOrigin.swift",
-                     "AppControl/AppControlAX.swift"],
+                     "AppControl/AppControlAX.swift",
+                     // Imports only AppKit; compiled into the tests so its Return/Escape/Paste behaviour is driven for real.
+                     "UI/Terminal/PasteConfirmSheet.swift",
+                     // The logic of the SwiftTerm views, split out so it can be driven in the tests.
+                     "UI/Terminal/RemotePasteGate.swift", "UI/Terminal/TerminalPaneHeaderView.swift",
+                     "UI/Terminal/IdleBannerView.swift"],
                     underApp: true, inApp: true, inTests: true, project: try Project())
     }
 
@@ -441,7 +446,7 @@ final class TerminalFitnessTests: XCTestCase {
         assertBuilt(["UI/Terminal/NostromoTerminalView.swift", "UI/Terminal/TerminalPaneHostView.swift",
                      "UI/Terminal/RemoteShellConfirmSheet.swift", "UI/Terminal/RemoteShellPresenter.swift",
                      "UI/Terminal/NewRemoteShellSheet.swift", "UI/Terminal/RemoteShellFailureSheet.swift",
-                     "UI/Terminal/PasteConfirmSheet.swift", "UI/Terminal/FollowControlView.swift",
+                     "UI/Terminal/FollowControlView.swift",
                      "UI/Views/TerminalDeliveryBlockView.swift"],
                     underApp: true, inApp: true, inTests: false, project: try Project())
     }
@@ -452,7 +457,9 @@ final class TerminalFitnessTests: XCTestCase {
                      "RemoteShellStoreTests.swift", "RemoteShellWireTests.swift", "ProjectDetectionTests.swift",
                      "TerminalChromeModelTests.swift", "IdleCountdownModelTests.swift", "PastePolicyTests.swift",
                      "TerminalStoreMirrorTests.swift", "FollowModelTests.swift", "TurnOriginTests.swift",
-                     "TerminalScreenAccessTests.swift"],
+                     "TerminalScreenAccessTests.swift", "PasteConfirmSheetTests.swift",
+                     "NavTabItemEnvironmentBadgeTests.swift", "MainLayoutWindowTitleTests.swift",
+                     "RemotePasteGateTests.swift", "TerminalPaneHeaderViewTests.swift", "IdleBannerViewTests.swift"],
                     underApp: false, inApp: false, inTests: true, project: try Project())
     }
 
@@ -766,22 +773,39 @@ final class TerminalFitnessTests: XCTestCase {
 
     // MARK: 2d: Paste, Keep open, and the audit-log menu
 
-    func testPasteAndKeepOpenAskTheControlGuard() throws {
-        let sheet = try Repo.read(Repo.app.appendingPathComponent("UI/Terminal/PasteConfirmSheet.swift"))
-        let pasteAction = try XCTUnwrap(sheet.range(of: "@objc private func pasteTapped"), "no pasteTapped")
-        XCTAssertTrue(sheet[pasteAction.upperBound...].prefix(300).contains("TerminalInputGuard.allowsControl"),
-                      "Paste must ask TerminalInputGuard.allowsControl before anything is sent")
-
+    // Paste's guard, Return = Cancel and Escape are driven for real in `PasteConfirmSheetTests`. Keep open
+    // lives in the SwiftTerm-linked host, which the tests cannot build, so its guard is read from source.
+    func testKeepOpenAsksTheControlGuard() throws {
         let host = try Repo.read(Repo.app.appendingPathComponent("UI/Terminal/TerminalPaneHostView.swift"))
         let keepOpen = try XCTUnwrap(host.range(of: "@objc private func keepOpenTapped"), "no keepOpenTapped")
         XCTAssertTrue(host[keepOpen.upperBound...].prefix(300).contains("TerminalInputGuard.allowsControl"),
                       "Keep open must ask TerminalInputGuard.allowsControl")
     }
 
-    func testPasteConfirmCancelIsTheDefaultButtonAndPasteHasNoKeyEquivalent() throws {
-        let sheet = try Repo.read(Repo.app.appendingPathComponent("UI/Terminal/PasteConfirmSheet.swift"))
-        XCTAssertTrue(sheet.contains(#"cancelButton.keyEquivalent = "\r""#), "Cancel must be the default (Return) button")
-        XCTAssertFalse(sheet.contains("pasteButton.keyEquivalent"), "Paste must have no key equivalent")
+    // `NostromoTerminalView` imports SwiftTerm, so the tests cannot build it. What it does with text is the
+    // behaviour of `RemotePasteGate` (driven in `RemotePasteGateTests`); this source-level check pins the
+    // wiring those tests rely on: a paste and inserted text reach SwiftTerm only through the gate's `send`
+    // closure, never directly.
+    func testThePasteAndInsertTextOverridesGoThroughThePasteGateAndSuperIsOnlyCalledOnceConfirmed() throws {
+        let url = Repo.app.appendingPathComponent("UI/Terminal/NostromoTerminalView.swift")
+        let lines = Repo.codeLines(try Repo.read(url))
+
+        for name in ["paste", "insertText"] {
+            let found = declarations(in: url.lastPathComponent, lines: lines) { lines[$0].contains("override func \(name)(") }
+            let decl = try XCTUnwrap(found.first, "\(name) override not found")
+            XCTAssertTrue(decl.body.contains("pasteGate.submit("), "\(name) must go through pasteGate.submit:\n\(decl.body)")
+            XCTAssertFalse(decl.body.contains("super.\(name)("), "\(name) must not call super directly:\n\(decl.body)")
+        }
+
+        let allowed = ["super.paste(": "pasteConfirmed", "super.insertText(": "insertTextConfirmed"]
+        for (call, helper) in allowed {
+            let callSites = lines.indices.filter { lines[$0].contains(call) }
+            XCTAssertEqual(callSites.count, 1, "\(call) should appear exactly once")
+            for index in callSites {
+                let owner = lines[...index].last { $0.contains("func ") } ?? ""
+                XCTAssertTrue(owner.contains("func \(helper)("), "\(call) is called from `\(owner)`, not \(helper)")
+            }
+        }
     }
 
     func testTheTerminalMenuHasTheAuditLogItemsWithoutShortcuts() throws {

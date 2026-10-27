@@ -6,11 +6,11 @@
 #   scripts/qa/terminal-hazard.sh
 #
 # The QA daemon runs the idle policy at 30 s (NOSTROMO_QA_IDLE_SECS=30: warning at 26 s, close at 30 s).
-#  1. connect to the fake "production" target: red frame, red header "PRODUCTION · admin-portal · scheduler ·
-#     shell", sidebar badge, a window title containing PRODUCTION (screenshots).
+#  1. connect to the fake "production" target: red frame, red header "PRODUCTION" then "admin-portal · scheduler ·
+#     shell", sidebar badge, a window title that starts with PRODUCTION (screenshots).
 #  2. shrink the split with nostromo.set_pane_layout: the header is still there (screenshot).
 #  3. paste: 3 lines -> the confirm sheet names PRODUCTION and "3 lines"; Return sends nothing; paste again and
-#     click Paste -> sent; a 1-line paste goes straight through.
+#     click Paste -> sent; a 1-line paste goes straight through, one with a trailing newline asks first.
 #  4. idle: the banner appears; Keep open (the QA instance relaxes the gate) clears it; then no input until the
 #     daemon closes the pane; the toast says "idle for 15 minutes".
 #  5. the QA audit has connected, idle_warning, idle_kept_open and an idle close, and none of the pasted text.
@@ -107,10 +107,10 @@ if wait_sheet "Connect to PRODUCTION"; then
   ctl key space >/dev/null
   wait "$agent_pid" || true
   if wait_screen 'remote\$'; then pass "connected: the fake shell's prompt is on screen"; else fail "no remote\$ prompt"; fi
-  ok_if "the header names PRODUCTION · admin-portal · scheduler · shell" \
-    tree_has "PRODUCTION · admin-portal · scheduler · shell"
+  ok_if "the header's environment label says PRODUCTION" tree_has "remote shell: PRODUCTION"
+  ok_if "the header names admin-portal · scheduler · shell" tree_has "admin-portal · scheduler · shell"
   ok_if "the sidebar shows a PRODUCTION badge" tree_has "remote shell open: PRODUCTION"
-  ok_if "windows reports a title containing PRODUCTION" windows_has "PRODUCTION"
+  ok_if "windows reports a title that starts with PRODUCTION" windows_has "PRODUCTION —"
   shot "1-hazard"
 else
   fail "no confirmation sheet"
@@ -126,7 +126,7 @@ except (OSError, ValueError):
 if [ -n "$pane_id" ]; then
   set_layout "{\"repl\": 0.98, \"$pane_id\": 0.02}" || inconc "set_pane_layout was refused"
   sleep 1
-  ok_if "the header is still in the tree at a tiny ratio" tree_has "PRODUCTION · admin-portal"
+  ok_if "the header is still in the tree at a tiny ratio" tree_has "remote shell: PRODUCTION"
   shot "2-tiny"
   set_layout "{\"repl\": 0.5, \"$pane_id\": 0.5}" || true
 else
@@ -154,6 +154,14 @@ fi
 ctl paste --text "echo single" >/dev/null 2>&1 || true
 sleep 1
 ok_unless "a 1-line paste is not prompted" sheet_up
+ctl paste --text $'echo single\n' >/dev/null 2>&1 || true
+if wait_sheet "1 line"; then
+  pass "a single line with a trailing newline asks first (it would run on arrival)"
+  ctl key return >/dev/null
+  sleep 1
+else
+  fail "a single line with a trailing newline did not show the confirm sheet"
+fi
 
 echo "== 4. idle: banner, Keep open, then the close =="
 if poll 60 tree_has "Closing in"; then

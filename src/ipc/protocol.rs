@@ -2071,6 +2071,11 @@ pub struct TerminalInfo {
     /// set from the idle warning until a keystroke or keep-alive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_closes_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// How long without keystrokes (seconds) brought the idle warning; set
+    /// together with `idle_closes_at`, so the app's banner names the real
+    /// figure (a QA daemon scales it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_warn_after_secs: Option<u64>,
 }
 
 /// One open remote shell in `ServerMsg::TerminalRemoteSummary`.
@@ -7003,6 +7008,7 @@ mod terminal_wire_tests {
             opened_by_request: Some("req-1".into()),
             follower: None,
             idle_closes_at: None,
+            idle_warn_after_secs: None,
         }
     }
 
