@@ -1,0 +1,8 @@
+description = "AC15: news about an SDK a project uses is a pick with a Checked line"
+date = "2026-10-25"
+
+[[run]]
+picks_min = 1
+pick_items_include = ["anthropic-news:api-version-2026-10-21"]
+pick_projects_include = ["ledgerbot"]
+checked_picks_min = 1

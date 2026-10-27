@@ -1,0 +1,8 @@
+description = "AC42: a breaking SDK release can be the Also-in-the-news line without any matching interest"
+date = "2026-10-25"
+
+[[run]]
+picks_max = 0
+ain = "present"
+ain_item = "agent-sdk-typescript:v2.0.0"
+markdown_excludes = ["notesync"]

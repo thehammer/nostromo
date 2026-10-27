@@ -1,0 +1,11 @@
+description = "AC8: a typical mixed day stays within 600 words and keeps its shape"
+date = "2026-10-25"
+
+[[run]]
+picks_min = 2
+picks_max = 5
+picks_well_formed = true
+also_noted_max = 5
+word_total_max = 600
+ain = "present"
+footer_contains = ["Looked at"]

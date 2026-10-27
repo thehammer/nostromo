@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "claude-code-changelog:2.1.331",
+      "class": "first_party",
+      "title": "Claude Code 2.1.331",
+      "url": "https://changelog.example.com/claude-code#21331",
+      "published": "2026-10-24T09:00:00Z",
+      "text": "- Added Windows ARM64 installer support\n- Improved `/vim` motions for `ge` and `gE`"
+    },
+    {
+      "id": "simon-willison:open-weights-image-model",
+      "class": "curated",
+      "title": "A new open-weights image model",
+      "url": "https://blog.example.com/open-weights-image",
+      "published": "2026-10-23T11:00:00Z",
+      "text": "A look at a new open-weights image generation model and the sample prompts it handles well."
+    },
+    {
+      "id": "hn-front-page:48001",
+      "class": "aggregator",
+      "title": "SQLite 4 alpha announced",
+      "url": "https://db.example.com/sqlite4-alpha",
+      "published": "2026-10-24T05:00:00Z",
+      "text": "The first alpha of the next major version, with a new storage format."
+    }
+  ]
+}

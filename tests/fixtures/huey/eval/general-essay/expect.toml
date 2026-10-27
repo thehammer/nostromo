@@ -1,0 +1,5 @@
+description = "AC17: a general essay with no tie to a project is not a pick"
+date = "2026-10-25"
+
+[[run]]
+pick_items_exclude = ["latent-space:agents-ate-the-ide", "simon-willison:prompt-caching-notes"]

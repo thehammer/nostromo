@@ -1,0 +1,9 @@
+description = "The 2026-10-25 hand-run simulation (synthetic stand-in for run 2's pool): the deep 'Added' lines are picks, the unused SDK news is not"
+date = "2026-10-25"
+
+[[run]]
+picks_min = 2
+pick_items_include = ["claude-code-changelog:2.1.310", "claude-code-changelog:2.1.308"]
+pick_items_exclude = ["anthropic-news:api-version-2026-10-21", "agent-sdk-python:v2.0.0"]
+picks_well_formed = true
+word_total_max = 600

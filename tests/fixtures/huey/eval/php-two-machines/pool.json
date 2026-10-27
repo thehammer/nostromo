@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "simon-willison:laravel-queue-batching",
+      "class": "curated",
+      "title": "Laravel 13 queue batching, explained",
+      "url": "https://blog.example.com/laravel-13-queue-batching",
+      "published": "2026-10-24T09:00:00Z",
+      "text": "Laravel 13 changes how queued job batches retry failed jobs: a batch can now be retried as a whole, and the failure callback runs once per batch."
+    },
+    {
+      "id": "latent-space:rust-queue-backpressure",
+      "class": "curated",
+      "title": "Backpressure in Rust job queues: what we learned",
+      "url": "https://essays.example.com/rust-queue-backpressure",
+      "published": "2026-10-24T10:00:00Z",
+      "text": "A write-up of how a Rust job queue added backpressure so that stalled workers stop accepting new jobs, with the failure modes that forced the design."
+    },
+    {
+      "id": "claude-code-changelog:2.1.340",
+      "class": "first_party",
+      "title": "Claude Code 2.1.340",
+      "url": "https://changelog.example.com/claude-code#21340",
+      "published": "2026-10-24T12:00:00Z",
+      "text": "- Improved startup time on large repositories"
+    }
+  ]
+}

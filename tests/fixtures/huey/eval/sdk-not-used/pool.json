@@ -1,0 +1,20 @@
+{
+  "items": [
+    {
+      "id": "anthropic-news:api-version-2026-10-21",
+      "class": "first_party",
+      "title": "New API version 2026-10-21 and 2.0 SDKs for Python and TypeScript",
+      "url": "https://news.example.com/anthropic/api-version-2026-10-21",
+      "published": "2026-10-21T16:00:00Z",
+      "text": "The Messages API has a new version, 2026-10-21. Tool-use content blocks now carry an explicit `status` field, and the legacy `completions` helper is removed. The 2.0 Python and TypeScript SDKs require the new API version and make `max_tokens` a required argument on every `messages` call. The previous API version stays available until the end of January. Apps that call the Messages API through an SDK should upgrade the SDK and pass the new version header."
+    },
+    {
+      "id": "agent-sdk-typescript:v2.0.0",
+      "class": "first_party",
+      "title": "Agent SDK for TypeScript v2.0.0",
+      "url": "https://releases.example.com/agent-sdk-typescript/v2.0.0",
+      "published": "2026-10-21T17:30:00Z",
+      "text": "Breaking: `query()` options are renamed. `allowedTools` becomes `tools.allow`, and `permissionMode` moves under `permissions.mode`. Sessions created with 1.x cannot be resumed. Added `onPermissionRequest` for relaying prompts."
+    }
+  ]
+}

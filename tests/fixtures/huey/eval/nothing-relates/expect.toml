@@ -1,0 +1,8 @@
+description = "AC9, AC13: a quiet day says so, stays short and names no project"
+date = "2026-10-25"
+
+[[run]]
+picks_max = 0
+markdown_contains = ["Nothing that touches your work today."]
+word_body_max = 149
+word_total_max = 600

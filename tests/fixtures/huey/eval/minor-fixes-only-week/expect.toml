@@ -1,0 +1,8 @@
+description = "AC45: only minor fixes in the week: no Also-in-the-news line, a reason in the footer, no minor fix shown"
+date = "2026-10-25"
+
+[[run]]
+picks_max = 0
+ain = "absent"
+footer_contains = ["No Also-in-the-news line"]
+shown_items_exclude = ["claude-code-changelog:2.1.350", "claude-code-changelog:2.1.351", "claude-code-changelog:2.1.352", "claude-code-changelog:2.1.353", "claude-code-changelog:2.1.354"]

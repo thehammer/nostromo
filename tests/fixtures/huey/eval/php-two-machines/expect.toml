@@ -1,0 +1,14 @@
+description = "AC34: two machines, one pool; neither report or digest shows the other machine's projects"
+date = "2026-10-25"
+
+[[run]]
+context = "machine-a"
+pick_projects_only = ["relay"]
+markdown_excludes = ["lodge"]
+digest_excludes = ["lodge", "laravel"]
+
+[[run]]
+context = "machine-b"
+pick_projects_only = ["lodge"]
+markdown_excludes = ["relay"]
+digest_excludes = ["relay", "rust"]

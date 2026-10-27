@@ -1,0 +1,12 @@
+{
+  "entries": [
+    {
+      "item_id": "claude-code-changelog:2.1.305",
+      "canonical_url": "https://changelog.example.com/claude-code",
+      "date": "2026-10-22",
+      "version": 1,
+      "section": "pick",
+      "title": "Retry watchdog for headless runs that stall before the first response"
+    }
+  ]
+}

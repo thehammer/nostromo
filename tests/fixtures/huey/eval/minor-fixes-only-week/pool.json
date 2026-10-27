@@ -1,0 +1,44 @@
+{
+  "items": [
+    {
+      "id": "claude-code-changelog:2.1.350",
+      "class": "first_party",
+      "title": "Claude Code 2.1.350",
+      "url": "https://changelog.example.com/claude-code#21350",
+      "published": "2026-10-20T09:00:00Z",
+      "text": "- Fixed a typo in `/doctor` output"
+    },
+    {
+      "id": "claude-code-changelog:2.1.351",
+      "class": "first_party",
+      "title": "Claude Code 2.1.351",
+      "url": "https://changelog.example.com/claude-code#21351",
+      "published": "2026-10-21T09:00:00Z",
+      "text": "- Fixed a flicker in the status line when the window is resized"
+    },
+    {
+      "id": "claude-code-changelog:2.1.352",
+      "class": "first_party",
+      "title": "Claude Code 2.1.352",
+      "url": "https://changelog.example.com/claude-code#21352",
+      "published": "2026-10-22T09:00:00Z",
+      "text": "- Fixed the default file name used by `/export`"
+    },
+    {
+      "id": "claude-code-changelog:2.1.353",
+      "class": "first_party",
+      "title": "Claude Code 2.1.353",
+      "url": "https://changelog.example.com/claude-code#21353",
+      "published": "2026-10-23T09:00:00Z",
+      "text": "- Fixed a spelling mistake in the onboarding text"
+    },
+    {
+      "id": "claude-code-changelog:2.1.354",
+      "class": "first_party",
+      "title": "Claude Code 2.1.354",
+      "url": "https://changelog.example.com/claude-code#21354",
+      "published": "2026-10-24T09:00:00Z",
+      "text": "- Fixed the alignment of the cost line in `/status`"
+    }
+  ]
+}

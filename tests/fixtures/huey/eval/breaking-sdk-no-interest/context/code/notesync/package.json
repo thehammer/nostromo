@@ -1,0 +1,8 @@
+{
+  "name": "notesync",
+  "version": "1.4.0",
+  "dependencies": {
+    "chokidar": "^4.0.0",
+    "zod": "^3.23.0"
+  }
+}

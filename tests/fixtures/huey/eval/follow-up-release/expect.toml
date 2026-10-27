@@ -1,0 +1,6 @@
+description = "AC11: a follow-up to an earlier pick is a pick that says what is new"
+date = "2026-10-25"
+
+[[run]]
+picks_min = 1
+follow_up_of = "claude-code-changelog:2.1.305"

@@ -1,0 +1,7 @@
+description = "AC14: news about an SDK no project uses is not a pick"
+date = "2026-10-25"
+
+[[run]]
+pick_items_exclude = ["anthropic-news:api-version-2026-10-21", "agent-sdk-typescript:v2.0.0"]
+picks_max = 0
+markdown_contains = ["Nothing that touches your work today."]

@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "claude-code-changelog:2.1.320",
+      "class": "first_party",
+      "title": "Claude Code 2.1.320",
+      "url": "https://changelog.example.com/claude-code#21320",
+      "published": "2026-10-23T10:00:00Z",
+      "text": "- Fixed a race where streamed output could drop its last line when the terminal was resized"
+    },
+    {
+      "id": "claude-code-changelog:2.1.321",
+      "class": "first_party",
+      "title": "Claude Code 2.1.321",
+      "url": "https://changelog.example.com/claude-code#21321",
+      "published": "2026-10-23T18:00:00Z",
+      "text": "- Hook commands now receive the session's working directory in the `CLAUDE_PROJECT_DIR` environment variable"
+    },
+    {
+      "id": "claude-code-changelog:2.1.322",
+      "class": "first_party",
+      "title": "Claude Code 2.1.322",
+      "url": "https://changelog.example.com/claude-code#21322",
+      "published": "2026-10-24T09:00:00Z",
+      "text": "- Improved retry behaviour for overloaded (529) responses in non-interactive mode"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "items": [
+    {
+      "id": "claude-code-changelog:2.1.310",
+      "class": "first_party",
+      "title": "Claude Code 2.1.310",
+      "url": "https://changelog.example.com/claude-code#21310",
+      "published": "2026-10-23T21:20:46Z",
+      "text": "- Fixed a rare flicker when scrolling long output\n- Improved `/config` search matching\n- Updated the bundled ripgrep\n- Fixed `/cost` rounding for very small sessions\n- Added `decider: \"person\"` to hook decision output, so a hook can say that a human must answer the permission prompt instead of allowing or denying it\n- Fixed a rare flicker when scrolling long output\n- Improved `/config` search matching"
+    },
+    {
+      "id": "claude-code-changelog:2.1.308",
+      "class": "first_party",
+      "title": "Claude Code 2.1.308",
+      "url": "https://changelog.example.com/claude-code#21308",
+      "published": "2026-10-22T18:00:00Z",
+      "text": "- Fixed a rare flicker when scrolling long output\n- Improved `/config` search matching\n- Updated the bundled ripgrep\n- Added a retry watchdog for non-interactive runs: set `CLAUDE_CODE_RETRY_WATCHDOG` to make a run that stalls mid-stream retry instead of hang\n- Fixed a rare flicker when scrolling long output\n- Improved `/config` search matching"
+    },
+    {
+      "id": "anthropic-news:api-version-2026-10-21",
+      "class": "first_party",
+      "title": "New API version 2026-10-21 and 2.0 SDKs for Python and TypeScript",
+      "url": "https://news.example.com/anthropic/api-version-2026-10-21",
+      "published": "2026-10-21T16:00:00Z",
+      "text": "The Messages API has a new version, 2026-10-21. Tool-use content blocks now carry an explicit `status` field, and the legacy `completions` helper is removed. The 2.0 Python and TypeScript SDKs require the new API version and make `max_tokens` a required argument on every `messages` call. The previous API version stays available until the end of January. Apps that call the Messages API through an SDK should upgrade the SDK and pass the new version header."
+    },
+    {
+      "id": "agent-sdk-python:v2.0.0",
+      "class": "first_party",
+      "title": "Agent SDK for Python v2.0.0",
+      "url": "https://releases.example.com/agent-sdk-python/v2.0.0",
+      "published": "2026-10-21T17:00:00Z",
+      "text": "Breaking: `ClaudeAgentOptions` fields are renamed to match the TypeScript SDK. Added `on_permission_request`."
+    },
+    {
+      "id": "claude-docs-release-notes:2026-10-22-1",
+      "class": "first_party",
+      "title": "Docs: new page on agent permission modes",
+      "url": "https://docs.example.com/release-notes#oct-22-modes",
+      "published": "2026-10-22T23:59:59Z",
+      "text": "A new reference page lists every permission mode and how each interacts with hooks."
+    },
+    {
+      "id": "simon-willison:agent-eval-notes",
+      "class": "curated",
+      "title": "Notes from a week of agent evals",
+      "url": "https://blog.example.com/agent-eval-notes",
+      "published": "2026-10-24T14:00:00Z",
+      "text": "A practitioner's notes on evaluating agent harnesses with small fixed scenarios."
+    }
+  ]
+}

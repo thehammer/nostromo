@@ -1,0 +1,8 @@
+description = "AC18, AC26: want-less items are never shown; hard-ignored items are dropped and named in the footer"
+date = "2026-10-25"
+
+[[run]]
+picks_min = 1
+pick_items_include = ["claude-code-changelog:2.1.330"]
+shown_items_exclude = ["simon-willison:laravel-13-queue", "latent-space:agent-startup-series-b"]
+footer_contains = ["ignored: Laravel"]
