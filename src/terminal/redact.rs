@@ -74,21 +74,26 @@
 //! A line can hold hidden runs in different roles (one standing for the
 //! separator, one inside the secret: `curl<ZWSP>-u admin:QWKZ<ZWSP>XBNM`). The
 //! text is read under four fixed assumptions (all runs dropped, all spaces, the
-//! ambiguous ones spaces, the ones beside a word spaces); a row group (a line,
-//! or the rows of a command continued with trailing backslashes) that holds a
-//! credential word (`curl`, `password`, `token`, ...) is read one group at a
-//! time under all four **and under every combination** of "this run is a space
-//! / this run is nothing" for its first eight runs and, for a line with more
-//! than eight, its last eight too (see `Reading`). Runs in the middle of a line
-//! with more than sixteen are only read under the fixed assumptions. The
-//! combinations are paid for per group out of one budget (`VIEW_BUDGET`), so
-//! padding before or after a line never takes them away. A group whose
-//! readings do not fit what is left of the budget is **not read with fewer
-//! views: it is redacted whole**, and nothing else of it is read. A credential
-//! that ends right before a hidden run is extended to the next real blank or
-//! the end of the line (`extend_over_hidden`): the run may have been a
-//! character of the secret that the reading which found the credential took for
-//! a space. The extra text is redacted too; leaking the tail is worse.
+//! ambiguous ones spaces, the ones beside a word spaces). A group (a line, the
+//! rows of a command continued with trailing backslashes, or the rows of a
+//! `curl` command that an open quote carries on) with two or more hidden runs
+//! that holds a credential word (a credential name, a token prefix, `Bearer`,
+//! `curl`, ...) or personal data is also read **under every combination** of
+//! "this run is a space / this run is nothing" for its first eight runs and,
+//! for a line with more than eight, its last eight too (see `Reading`); one run
+//! of a credential line is read as a space and as nothing by the fixed
+//! readings. Runs in the middle of a line with more than sixteen are only read
+//! under the fixed assumptions, and a line with more than eight never has its
+//! first and its last run both read as a space. The combinations are paid for
+//! per group out of a budget (`VIEW_BUDGET`; the groups with personal data have
+//! a budget of their own), so padding before or after a line never takes them
+//! away. A group whose readings do not fit what is left of its budget is **not
+//! read with fewer views: it is redacted whole**, and nothing else of it is
+//! read. A credential that ends right before a hidden run is extended to the
+//! next real blank or the end of the line (`extend_over_hidden`): the run may
+//! have been a character of the secret that the reading which found the
+//! credential took for a space. The extra text is redacted too; leaking the
+//! tail is worse.
 //!
 //! ## `curl` over several rows
 //!
@@ -111,11 +116,12 @@
 //! `-u` after it is not curl's here; a continuation inside the user part
 //! (`-u admin\` newline `:pw`) or a newline inside a quoted password is not
 //! followed; only the last 8 KiB of an open command's rows are carried to the
-//! next delivery, so a flag further back than that is not seen there. For the
-//! same reason (and like a private-key block whose `BEGIN` has scrolled off) a
-//! snapshot scrolled so that `curl \` is off-screen while its `-u admin:pw`
-//! row is on-screen cannot be caught: nothing on the screen says the row
-//! belongs to a `curl` command.
+//! next delivery, so a flag further back than that is not seen there, and a
+//! command that an open quote (not a trailing backslash) carries from one call
+//! to the next is not carried at all. A snapshot scrolled so that `curl \` is
+//! off-screen while its `-u admin:pw` row is on-screen cannot be caught either
+//! (like a private-key block whose `BEGIN` has scrolled off): nothing on the
+//! screen says the row belongs to a `curl` command.
 //!
 //! ## Contract: whole lines
 //!
@@ -460,47 +466,102 @@ enum Hidden {
 const MAX_MASK_RUNS: usize = 8;
 
 /// Most bytes of view text (each view also counts [`VIEW_OVERHEAD`]) one call
-/// builds to read single row groups with a credential word and hidden runs, all
-/// groups together. A group that would take more than what is left is not
-/// read: it is redacted whole (see [`Reading`]). A megabyte of such lines is
-/// therefore read for its first few hundred KiB and redacted after.
+/// builds to read the row groups that hold a credential word and hidden runs,
+/// all such groups together; the groups that hold personal data (see
+/// [`PHI_GATES`]) have a budget of their own. A group that would take more
+/// than what is left is not read: it is redacted whole (see [`Reading`]). A
+/// megabyte of such lines is therefore read for its first few hundred KiB and
+/// redacted after.
 const VIEW_BUDGET: usize = 1 << 20;
 
 /// What a view costs before its first byte, in bytes of text: a flood of short
 /// lines must not get a view each for free.
-const VIEW_OVERHEAD: usize = 256;
+const VIEW_OVERHEAD: usize = 64;
 
-/// Words in a row group that make its hidden runs worth reading in every
-/// combination, and worth redacting whole when that is too dear: the tools and
-/// names whose credentials the rules find. Lower case, matched on the text
-/// with its hidden characters dropped.
-const CREDENTIAL_WORDS: &[&str] = &[
-    "curl",
-    "--user",
-    "--proxy-user",
-    "--password",
-    "password",
-    "passwd",
-    "passphrase",
-    "pwd",
-    "secret",
-    "token",
-    "bearer",
-    "authorization",
-    "apikey",
-    "api_key",
-    "api-key",
-    "sshpass",
-    "mysql",
-    "mariadb",
-    "redis-cli",
-    "docker",
-    "ldap",
-    "zip",
-    "7z",
-    "rar",
-    "-pass",
-];
+/// Tools whose command lines hold a password, rare enough as words that their
+/// letters in a text are worth a careful reading (see
+/// [`holds_credential_word`]).
+const TOOL_WORDS: &[&str] = &["curl", "mysql", "mariadb", "sshpass", "redis-cli"];
+
+/// Tools with names that are also the end of an ordinary word (`library`,
+/// `gzip`): only at the start of a word.
+const SHORT_TOOL_WORDS: &[&str] = &["unzip", "zip", "unrar", "rar", "7z", "docker", "ldap"];
+
+/// A set of literals, found by the byte each starts with: a pass over a short
+/// text, not a search per literal.
+struct Needles {
+    by_first: Vec<Vec<&'static str>>,
+}
+
+impl Needles {
+    fn new(lists: &[&[&'static str]]) -> Needles {
+        let mut by_first = vec![Vec::new(); 256];
+        for needle in lists.iter().flat_map(|list| list.iter()) {
+            if let Some(&first) = needle.as_bytes().first() {
+                by_first[usize::from(first)].push(*needle);
+            }
+        }
+        Needles { by_first }
+    }
+
+    /// The offsets in `text` where a needle starts.
+    fn starts_in<'t>(&'t self, text: &'t str) -> impl Iterator<Item = usize> + 't {
+        let bytes = text.as_bytes();
+        (0..bytes.len()).filter(move |&at| {
+            self.by_first[usize::from(bytes[at])]
+                .iter()
+                .any(|needle| bytes[at..].starts_with(needle.as_bytes()))
+        })
+    }
+}
+
+/// The credential literals that count wherever they are: credential names,
+/// token and key id prefixes, `Bearer`, and the names of tools that are rare as
+/// words.
+static CREDENTIAL_NEEDLES: LazyLock<Needles> = LazyLock::new(|| {
+    Needles::new(&[
+        ASSIGNMENT_GATE,
+        TOKEN_GATE,
+        AWS_KEY_GATE,
+        BEARER_GATE,
+        TOOL_WORDS,
+    ])
+});
+
+static SHORT_TOOL_NEEDLES: LazyLock<Needles> = LazyLock::new(|| Needles::new(&[SHORT_TOOL_WORDS]));
+
+/// Whether a group, which reads `dropped` in ASCII lower case with its hidden
+/// characters dropped (`spaced` is the same with each run a space, built only
+/// when asked), holds a literal one of the rules that read credentials needs: a
+/// credential name, a token prefix, a key id prefix, `Bearer`, or the name of a
+/// tool whose command lines hold a password. A short tool name counts at the
+/// start of a word (`library` is not `rar`); a hidden run may be the blank
+/// before it (`xyz<ZWSP>rar`) or split the name, and then the name counts.
+fn holds_credential_word(dropped: &str, spaced: impl FnOnce() -> String) -> bool {
+    if CREDENTIAL_NEEDLES.starts_in(dropped).next().is_some() {
+        return true;
+    }
+    if SHORT_TOOL_NEEDLES.starts_in(dropped).next().is_none() {
+        return false;
+    }
+    let spaced = spaced();
+    SHORT_TOOL_WORDS.iter().any(|word| {
+        if !dropped.contains(word) {
+            return false;
+        }
+        let mut seen = false;
+        for (at, _) in spaced.match_indices(word) {
+            seen = true;
+            let glued =
+                prev_char(&spaced, at).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !glued {
+                return true;
+            }
+        }
+        // Not in the spaced text at all: a hidden run splits it.
+        !seen
+    })
+}
 
 /// A hidden character: invisible and not layout whitespace.
 fn is_hidden(c: char) -> bool {
@@ -730,16 +791,16 @@ fn runs_per_group(text: &str, pieces: &[Piece]) -> Vec<u32> {
     counts
 }
 
-/// A row group that holds hidden runs: its pieces (the newline that ends it
-/// included) and how many runs.
-struct HiddenGroup {
+/// One row group of a text (see [`RowGroup`]): its pieces, the newline that
+/// ends it included, and how many hidden runs they hold.
+struct Row {
     pieces: Range<usize>,
     runs: u32,
 }
 
-/// The row groups of `pieces` that hold a hidden run, in order.
-fn hidden_groups(text: &str, pieces: &[Piece]) -> Vec<HiddenGroup> {
-    let mut groups = Vec::new();
+/// Every row group of `pieces`, in order.
+fn row_groups(text: &str, pieces: &[Piece]) -> Vec<Row> {
+    let mut rows = Vec::new();
     let mut group = RowGroup::default();
     let (mut start, mut runs, mut in_run) = (0, 0u32, false);
     for (i, piece) in pieces.iter().enumerate() {
@@ -752,23 +813,21 @@ fn hidden_groups(text: &str, pieces: &[Piece]) -> Vec<HiddenGroup> {
         }
         in_run = false;
         if group.see_piece(text, piece) {
-            if runs > 0 {
-                groups.push(HiddenGroup {
-                    pieces: start..i + 1,
-                    runs,
-                });
-            }
+            rows.push(Row {
+                pieces: start..i + 1,
+                runs,
+            });
             start = i + 1;
             runs = 0;
         }
     }
-    if runs > 0 {
-        groups.push(HiddenGroup {
+    if start < pieces.len() {
+        rows.push(Row {
             pieces: start..pieces.len(),
             runs,
         });
     }
-    groups
+    rows
 }
 
 /// Where a stretch of a view came from: view bytes `view..` read original bytes
@@ -953,6 +1012,19 @@ impl<'a> View<'a> {
         (start < end).then_some(start..end)
     }
 
+    /// The offset in the original text that the view byte `at` reads.
+    fn source_offset(&self, at: usize) -> Option<usize> {
+        let Some(origins) = &self.origins else {
+            return Some(at);
+        };
+        let origin = &origins[origins.partition_point(|o| o.view <= at).checked_sub(1)?];
+        Some(if origin.linear {
+            origin.orig + (at - origin.view)
+        } else {
+            origin.orig
+        })
+    }
+
     /// The part of the view that reads the original bytes `from..to`, as a
     /// range of the view: the characters that lie wholly inside.
     fn view_span(&self, from: usize, to: usize) -> Range<usize> {
@@ -1030,20 +1102,21 @@ impl ViewBuilder {
 /// A hidden run can be a separator (`curl<ZWSP>-u`) or part of a word
 /// (`QWKZ<ZWSP>XBNM`), and only the reader of the text knows which, so a text
 /// with hidden characters is read under several readings: all runs dropped,
-/// all spaces, the ambiguous ones spaces, the ones beside a word spaces. A row
-/// group (a line, or the rows of a continued command) that holds a credential
-/// word is read under those **and under every combination** of "this run is a
-/// space / is nothing" for its first eight runs and, with more than eight, its
-/// last eight too: one run can be the separator and another part of the secret
-/// on the same line.
+/// all spaces, the ambiguous ones spaces, the ones beside a word spaces. A
+/// **group** (a line, the rows of a command continued with trailing
+/// backslashes, and the rows of a `curl` command that an open quote carries on)
+/// that holds a credential word and a hidden run is also read under **every
+/// combination** of "this run is a space / is nothing" for its first eight runs
+/// and, with more than eight, its last eight too: one run can be the separator
+/// and another part of the secret on the same line.
 ///
-/// The rest of the text, which holds nothing to hide a credential behind, is
-/// read as a whole, and the groups with a credential word and hidden runs are
-/// read one at a time, each paying for its own readings out of
-/// [`VIEW_BUDGET`]: padding before or after a line does not take them away,
-/// and a line without a credential word costs nothing extra.
+/// The rest of the text is read as a whole, and the groups are read one at a
+/// time, each paying for its own readings out of [`VIEW_BUDGET`] (groups with
+/// personal data and two or more hidden runs: out of a budget of their own):
+/// padding before or after a line does not take them away, and a line without
+/// a credential word costs nothing extra.
 ///
-/// A group whose readings do not fit the rest of the budget is **not read with
+/// A group whose readings do not fit the rest of its budget is **not read with
 /// fewer views**: it is redacted whole and left out of the other views.
 struct Reading<'a> {
     /// Views of the text outside the groups read one at a time.
@@ -1052,11 +1125,11 @@ struct Reading<'a> {
     lower: Lowered,
     /// The views of single groups.
     groups: Vec<GroupViews>,
-    /// Ranges of the original text redacted whole.
-    closed: Vec<Range<usize>>,
+    /// Ranges of the original text redacted whole, and as what.
+    closed: Vec<(Range<usize>, RedactionKind)>,
 }
 
-/// The views of one row group.
+/// The views of one group.
 struct GroupViews {
     /// The group in ASCII lower case, hidden characters dropped.
     lower: Lowered,
@@ -1074,50 +1147,122 @@ impl<'a> Reading<'a> {
             };
         }
         let pieces = fold(text);
-        let hidden = hidden_groups(text, &pieces);
+        let rows = row_groups(text, &pieces);
+        let hidden_rows = rows.iter().filter(|row| row.runs > 0).count();
         let mut dropped = View::from_pieces(text, &pieces, Hidden::Dropped, &[], &[]);
         let mut lower = Lowered::new(dropped.text.to_string());
         let mut groups = Vec::new();
         let mut closed = Vec::new();
-        // The groups left out of the whole-text views.
+        // The pieces of the groups left out of the whole-text views, and how
+        // many of the rows with hidden runs they hold.
         let mut skip = Vec::new();
+        let mut hidden_rows_apart = 0;
         // A text with no credential word and no personal data shape has no
-        // group to read one by one.
-        let credentials = lower.holds_any(CREDENTIAL_WORDS);
-        let personal =
-            hidden.iter().any(|g| g.runs >= 2) && PHI_GATES.iter().any(|g| g.passes(&lower));
-        if !hidden.is_empty() && (credentials || personal) {
+        // group to read one at a time.
+        let credentials = hidden_rows > 0 && possibly_holds_credential_word(&lower);
+        let personal = hidden_rows > 0 && PHI_GATES.iter().any(|g| g.passes(&lower));
+        if credentials || personal {
             let mut budget = VIEW_BUDGET;
-            let mut personal_budget = VIEW_BUDGET / 4;
+            let mut personal_budget = VIEW_BUDGET;
             let mut scratch = String::new();
-            for group in &hidden {
-                let slice = &pieces[group.pieces.clone()];
+            for group in command_groups(&rows, &pieces, &dropped, &lower.text) {
+                let several: Vec<u32>;
+                let runs: &[u32] = if group.len() == 1 {
+                    std::slice::from_ref(&rows[group.start].runs)
+                } else {
+                    several = rows[group.clone()].iter().map(|row| row.runs).collect();
+                    &several
+                };
+                let most = runs.iter().copied().max().unwrap_or(0);
+                if most == 0 {
+                    continue;
+                }
+                let span = rows[group.start].pieces.start..rows[group.end - 1].pieces.end;
+                let slice = &pieces[span.clone()];
                 scratch.clear();
                 push_dropped(&mut scratch, text, slice);
                 scratch.make_ascii_lowercase();
-                if !(credentials && holds_any(&scratch, CREDENTIAL_WORDS)) {
-                    // Personal data (an SSN, a date of birth) is read in every
-                    // combination too while there is budget for it, and is
-                    // otherwise left to the fixed readings.
-                    if group.runs >= 2 && PHI_GATES.iter().any(|g| g.passes_str(&scratch)) {
-                        let views = group_views(
-                            text,
-                            slice,
-                            group.runs,
-                            scratch.len(),
-                            Readings::Combinations,
-                            &mut personal_budget,
-                        );
-                        if let Some(views) = views {
+                let credential = holds_credential_word(&scratch, || {
+                    let mut spaced = String::new();
+                    push_spaced(&mut spaced, text, slice);
+                    spaced.make_ascii_lowercase();
+                    spaced
+                });
+                // Two runs are what a combination can tell apart from the
+                // fixed readings (one run is a space or nothing).
+                let personal = !credential
+                    && most >= 2
+                    && PHI_GATES.iter().any(|gate| gate.passes_str(&scratch));
+                if !credential && !personal {
+                    continue;
+                }
+                let each = scratch.len() + VIEW_OVERHEAD;
+                let budget = if credential {
+                    &mut budget
+                } else {
+                    &mut personal_budget
+                };
+                // A group with one run stays in the whole-text views, which
+                // read it as a space and as nothing: it pays for those two.
+                // A group with personal data stays there too, and pays for the
+                // combinations only.
+                let views = if credential && most == 1 {
+                    (each * 2 <= *budget).then(|| {
+                        *budget -= each * 2;
+                        Vec::new()
+                    })
+                } else {
+                    let readings = if credential {
+                        Readings::All
+                    } else {
+                        Readings::Combinations
+                    };
+                    group_views(text, slice, runs, scratch.len(), readings, budget)
+                };
+                let apart = credential && most >= 2;
+                match views {
+                    Some(views) if !apart => {
+                        if !views.is_empty() {
                             groups.push(GroupViews {
                                 lower: Lowered::new(scratch.clone()),
                                 views,
                             });
                         }
+                        continue;
                     }
-                    continue;
+                    Some(views) => groups.push(GroupViews {
+                        lower: Lowered::new(scratch.clone()),
+                        views,
+                    }),
+                    None => {
+                        let kind = if credential {
+                            RedactionKind::SecretAssignment
+                        } else if Gate::Any(DOB_GATE).passes_str(&scratch) {
+                            RedactionKind::DateOfBirth
+                        } else {
+                            RedactionKind::Ssn
+                        };
+                        // The newline that ends the group stays a separator.
+                        let ends_in_newline = matches!(
+                            slice.last(),
+                            Some(Piece::Char {
+                                c: '\n',
+                                hidden: false,
+                                ..
+                            })
+                        );
+                        let kept = span.start..span.end - usize::from(ends_in_newline);
+                        if !kept.is_empty() {
+                            let origin =
+                                pieces[kept.start].origin().0..pieces[kept.end - 1].origin().1;
+                            closed.push((origin, kind));
+                            skip.push(kept);
+                            hidden_rows_apart += runs.iter().filter(|&&n| n > 0).count();
+                        }
+                        continue;
+                    }
                 }
-                // The newline that ends the group stays a separator.
+                // Read one at a time: left out of the whole-text views.
                 let ends_in_newline = matches!(
                     slice.last(),
                     Some(Piece::Char {
@@ -1126,26 +1271,10 @@ impl<'a> Reading<'a> {
                         ..
                     })
                 );
-                let kept = group.pieces.start..group.pieces.end - usize::from(ends_in_newline);
-                if kept.is_empty() {
-                    continue;
-                }
-                let origin = pieces[kept.start].origin().0..pieces[kept.end - 1].origin().1;
-                skip.push(kept);
-                let views = group_views(
-                    text,
-                    slice,
-                    group.runs,
-                    scratch.len(),
-                    Readings::All,
-                    &mut budget,
-                );
-                match views {
-                    Some(views) => groups.push(GroupViews {
-                        lower: Lowered::new(scratch.clone()),
-                        views,
-                    }),
-                    None => closed.push(origin),
+                let kept = span.start..span.end - usize::from(ends_in_newline);
+                if !kept.is_empty() {
+                    skip.push(kept);
+                    hidden_rows_apart += runs.iter().filter(|&&n| n > 0).count();
                 }
             }
             if !skip.is_empty() {
@@ -1156,7 +1285,7 @@ impl<'a> Reading<'a> {
         let mut whole = vec![dropped];
         // The other readings differ from the dropped one only at hidden runs,
         // and they hold no literal it does not hold.
-        if hidden.len() > skip.len() && SCANNERS.iter().any(|s| s.gate.passes(&lower)) {
+        if hidden_rows > hidden_rows_apart && SCANNERS.iter().any(|s| s.gate.passes(&lower)) {
             for mode in FIXED_READINGS {
                 let view = View::from_pieces(text, &pieces, mode, &[], &skip);
                 if !whole.iter().any(|v| v.text == view.text) {
@@ -1200,6 +1329,72 @@ const FIXED_READINGS: [Hidden; 3] = [
     Hidden::AtWords,
 ];
 
+/// Whether a text (dropped, lower case) can hold something
+/// [`holds_credential_word`] finds: a cheap test for a megabyte, which says
+/// yes more often than the exact one.
+fn possibly_holds_credential_word(lower: &Lowered) -> bool {
+    lower.holds_any(ASSIGNMENT_GATE)
+        || lower.holds_any(TOKEN_GATE)
+        || lower.holds_any(AWS_KEY_GATE)
+        || lower.holds_any(BEARER_GATE)
+        || lower.holds_any(TOOL_WORDS)
+        || lower.holds_any(SHORT_TOOL_WORDS)
+}
+
+/// The groups of `rows` (as ranges of row numbers): the rows of one `curl`
+/// command (found on the dropped view, where an open quote carries the command
+/// over a line break, as it does for the rule), and every other row alone.
+/// `lower` is the dropped view in ASCII lower case. Every `curl` counts, even
+/// one glued to the word before it (`xyz<ZWSP>curl`): a reading with the run as
+/// a space makes it a command.
+fn command_groups(
+    rows: &[Row],
+    pieces: &[Piece],
+    dropped: &View,
+    lower: &str,
+) -> Vec<Range<usize>> {
+    let mut links: Vec<(usize, usize)> = Vec::new();
+    // Where each row starts in the original text.
+    let starts: Vec<usize> = rows
+        .iter()
+        .map(|row| pieces[row.pieces.start].origin().0)
+        .collect();
+    let row_at = |offset: usize| starts.partition_point(|&s| s <= offset).saturating_sub(1);
+    let mut scanned_to = 0;
+    for (curl, _) in lower.match_indices("curl") {
+        if curl < scanned_to {
+            continue;
+        }
+        let end = command_end(&dropped.text, curl + "curl".len());
+        scanned_to = end;
+        // A command on one line needs no looking up.
+        if !dropped.text[curl..end].contains('\n') {
+            continue;
+        }
+        let first = dropped.source_offset(curl);
+        let last = dropped.source_offset(end.saturating_sub(1).max(curl));
+        if let (Some(first), Some(last)) = (first, last) {
+            let (first, last) = (row_at(first), row_at(last));
+            if last > first {
+                links.push((first, last));
+            }
+        }
+    }
+    let mut groups = Vec::new();
+    let (mut at, mut next) = (0, 0);
+    while at < rows.len() {
+        let mut end = at + 1;
+        // A command that starts inside the group so far carries it on.
+        while let Some(&(_, last)) = links.get(next).filter(|link| link.0 < end) {
+            end = end.max(last + 1);
+            next += 1;
+        }
+        groups.push(at..end);
+        at = end;
+    }
+    groups
+}
+
 /// Append `pieces` of `text` to `out`, the hidden characters dropped.
 fn push_dropped(out: &mut String, text: &str, pieces: &[Piece]) {
     for piece in pieces {
@@ -1213,28 +1408,45 @@ fn push_dropped(out: &mut String, text: &str, pieces: &[Piece]) {
     }
 }
 
+/// Append `pieces` of `text` to `out`, each hidden run one space.
+fn push_spaced(out: &mut String, text: &str, pieces: &[Piece]) {
+    let mut in_run = false;
+    for piece in pieces {
+        match piece {
+            Piece::Ascii(range) => out.push_str(&text[range.clone()]),
+            Piece::Char {
+                c, hidden: false, ..
+            } => out.push(*c),
+            Piece::Char { .. } if !in_run => out.push(' '),
+            Piece::Char { .. } => {}
+        }
+        in_run = piece.is_hidden();
+    }
+}
+
 /// Which readings of a group to build.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Readings {
     /// The fixed readings and every combination of runs.
     All,
-    /// Every combination of runs: the text as a whole has the fixed readings.
+    /// Every combination of runs: the whole text has the fixed readings.
     Combinations,
 }
 
-/// The readings of one group (`slice`, `runs` hidden runs, `len` bytes of text
-/// with them dropped), or `None` when they would cost more than `budget`,
-/// which they then leave alone.
+/// The readings of one group (`slice`; `totals` the hidden runs of each of its
+/// rows, `len` bytes of text with them dropped). `None` when they would cost
+/// more than `budget`, which they then leave alone.
 fn group_views(
     text: &str,
     slice: &[Piece],
-    runs: u32,
+    totals: &[u32],
     len: usize,
     readings: Readings,
     budget: &mut usize,
 ) -> Option<Vec<View<'static>>> {
-    let tails = runs as usize > MAX_MASK_RUNS;
-    let reach = (runs as usize).min(MAX_MASK_RUNS);
+    let most = totals.iter().copied().max().unwrap_or(0) as usize;
+    let tails = most > MAX_MASK_RUNS;
+    let reach = most.min(MAX_MASK_RUNS);
     let full = (1u32 << reach) - 1;
     // Setting every run of a group of up to eight is the all-spaces reading.
     let heads = (1..=full).filter(move |&bits| tails || bits != full);
@@ -1262,11 +1474,10 @@ fn group_views(
         .copied()
         .chain(heads.map(Hidden::Mask))
         .chain(ends.map(Hidden::TailMask));
-    let totals = [runs];
     let mut seen = std::collections::HashSet::new();
     let mut views = Vec::new();
     for mode in modes {
-        let view = View::from_pieces(text, slice, mode, &totals, &[]);
+        let view = View::from_pieces(text, slice, mode, totals, &[]);
         if seen.insert(view.text.to_string()) {
             views.push(view);
         }
@@ -2719,11 +2930,8 @@ fn redact_plain(text: &str, stand_in: &str, out: &mut String, kinds: &mut Vec<Re
     }
 
     // Groups too dear to read are redacted whole, below every rule.
-    for range in reading.closed {
-        let hit = Hit {
-            range,
-            kind: RedactionKind::SecretAssignment,
-        };
+    for (range, kind) in reading.closed {
+        let hit = Hit { range, kind };
         accept(&mut accepted, &mut furthest, text, hit, SCANNERS.len());
     }
 

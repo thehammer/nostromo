@@ -1656,3 +1656,261 @@ pub fn benign_rows_with_hidden_runs(min_bytes: usize) -> Vec<String> {
 pub fn benign_huge_line(min_bytes: usize) -> String {
     format!("a{ZWSP}").repeat(min_bytes / 4)
 }
+
+// ───────────── review round 5: what the first version of the round 4 fix missed ──
+//
+// Each shape below leaked on a first version of the fix (found in review). z is
+// U+200B throughout. Secrets are built at runtime from `consonants`.
+
+/// A continued `curl` command whose rows are joined by an OPEN QUOTE (no
+/// backslash), with hidden runs in different rows and in different roles (a
+/// separator, a character of the user, a character of the word `curl`), and the
+/// credential in a `-u` / `--user` on a LATER row. Rows are joined with `\n`.
+pub fn continued_curl_joined_by_an_open_quote_shapes() -> Vec<Shape> {
+    let z = ZWSP;
+    let (pw_a, pw_b, pw_c) = (
+        consonants(951, 12),
+        consonants(952, 12),
+        consonants(953, 12),
+    );
+    let (pw_d, pw_e, pw_f) = (
+        consonants(954, 12),
+        consonants(955, 12),
+        consonants(956, 12),
+    );
+    vec![
+        shape(
+            "open quote: a hidden run after curl, -u on the third row",
+            format!("curl{z}-d '{{\n\"a\": 1\n}}' -u admin:{pw_a} https://h/x"),
+            &[&pw_a],
+        ),
+        shape(
+            "open quote: --user with a hidden run before the user on row two",
+            format!("curl -H 'x\ny' --user{z}admin:{pw_b}"),
+            &[&pw_b],
+        ),
+        shape(
+            "open quote: a hidden run after the quote's first character, -u on row two",
+            format!("curl -H 'x{z}\ny' -u admin:{pw_c}"),
+            &[&pw_c],
+        ),
+        shape(
+            "open quote: hidden runs as separator and inside the user on row two",
+            format!("curl -H 'x\ny'{z}-u ad{z}min:{pw_d}"),
+            &[&pw_d],
+        ),
+        shape(
+            "open quote: the command word glued to a prefix by a hidden run, mixed roles",
+            format!("xyz{z}curl -H 'x\ny'{z}-u ad{z}min:{pw_e}"),
+            &[&pw_e],
+        ),
+        shape(
+            "open quote: glued command word, hidden run on row one and -u on row two",
+            format!("xyz{z}curl -H 'x{z}\ny' -u admin:{pw_f}"),
+            &[&pw_f],
+        ),
+    ]
+}
+
+/// Anchored token shapes in a line with no credential word: the first hidden
+/// run reads as a space (it ends a word), the inner one as nothing (it sits in
+/// the token). The secrets are the token bodies.
+pub fn anchored_tokens_with_a_hidden_run_before_and_inside() -> Vec<Shape> {
+    let z = ZWSP;
+    let (b3, b4) = (consonants(961, 10), consonants(962, 10));
+    let (g1, g2) = (consonants(963, 12), consonants(964, 12));
+    let (j1, j2) = (consonants(965, 8), consonants(966, 8));
+    let (k1, k2) = (consonants(967, 8), consonants(968, 7));
+    vec![
+        shape(
+            "sk- token after a word glued to a hidden run, one inside the body",
+            format!("see a{z}sk-{b3}Q{z}{b4}"),
+            &[&b3, &b4],
+        ),
+        shape(
+            "glpat- token after a word glued to a hidden run, one inside the body",
+            format!("see a{z}glpat-{g1}Q{z}{g2}"),
+            &[&g1, &g2],
+        ),
+        shape(
+            "JWT after a word glued to a hidden run, one inside the header",
+            format!("see a{z}eyJ{j1}Q{z}{j2}.{j1}.{j2}"),
+            &[&j1, &j2],
+        ),
+        shape(
+            "AWS access key id after a digit glued to a hidden run, one inside the body",
+            format!("see 1{z}AKIA{k1}7{z}{k2}"),
+            &[&k1, &k2],
+        ),
+    ]
+}
+
+/// Credential NAMES that only a hidden-run reading sees (`aut<z>h`, `ds<z>n`,
+/// `credenti<z>al`), the value behind another hidden run.
+pub fn credential_names_split_by_a_hidden_run() -> Vec<Shape> {
+    let z = ZWSP;
+    let (pw_auth, pw_dsn, pw_cred) = (
+        consonants(971, 12),
+        consonants(972, 12),
+        consonants(973, 12),
+    );
+    vec![
+        shape(
+            "--auth with a hidden run inside the name and before the value",
+            format!("tool --aut{z}h{z}{pw_auth} --verbose"),
+            &[&pw_auth],
+        ),
+        shape(
+            "--dsn with a hidden run inside the name and before the value",
+            format!("tool --ds{z}n{z}{pw_dsn} --verbose"),
+            &[&pw_dsn],
+        ),
+        shape(
+            "--credential with a hidden run inside the name and before the value",
+            format!("tool --credenti{z}al{z}{pw_cred} --verbose"),
+            &[&pw_cred],
+        ),
+    ]
+}
+
+/// The same idea for other credential names (not part of the review's list; the
+/// code is expected to handle them too).
+pub fn more_credential_names_split_by_a_hidden_run() -> Vec<Shape> {
+    let z = ZWSP;
+    let (pw_pass, pw_key, pw_tok, pw_sec) = (
+        consonants(981, 12),
+        consonants(982, 12),
+        consonants(983, 12),
+        consonants(984, 12),
+    );
+    vec![
+        shape(
+            "--password with a hidden run inside the name and before the value",
+            format!("tool --pass{z}word{z}{pw_pass}"),
+            &[&pw_pass],
+        ),
+        shape(
+            "API_KEY with hidden runs inside the name, before the equals sign and after it",
+            format!("API_{z}KEY{z}={z}{pw_key}"),
+            &[&pw_key],
+        ),
+        shape(
+            "--token with a hidden run inside the name and before the value",
+            format!("tool --tok{z}en{z}{pw_tok} --verbose"),
+            &[&pw_tok],
+        ),
+        shape(
+            "--secret with a hidden run inside the name and before the value",
+            format!("tool --sec{z}ret{z}{pw_sec} --verbose"),
+            &[&pw_sec],
+        ),
+    ]
+}
+
+/// A row that carries two hidden runs and nothing else of interest.
+pub const TWO_HIDDEN_RUNS_ROW: &str = "1-1\u{200b}a\u{200b}b";
+
+/// `rows` rows of [`TWO_HIDDEN_RUNS_ROW`] (the rows are one line each, no
+/// newline at the end of the last).
+pub fn rows_with_two_hidden_runs(rows: usize) -> Vec<String> {
+    vec![TWO_HIDDEN_RUNS_ROW.to_string(); rows]
+}
+
+/// The SSN row of the round-5 repros: a hidden run in front (it reads as a
+/// space) and one inside the number. Built from fragments.
+pub fn ssn_row_with_two_hidden_runs() -> String {
+    cat(&["5", ZWSP, "219", "-0", ZWSP, "9", "-9999"])
+}
+
+/// The SSN of [`ssn_row_with_two_hidden_runs`] with the hidden runs taken out.
+pub fn the_ssn() -> String {
+    cat(&["219", "-09", "-9999"])
+}
+
+/// The labelled birth date row of the round-5 repros: hidden runs inside the
+/// label and the date.
+pub fn dob_row_with_hidden_runs() -> String {
+    cat(&[
+        "date",
+        ZWSP,
+        "of",
+        ZWSP,
+        "birth: 01",
+        ZWSP,
+        "/02",
+        ZWSP,
+        "/1990",
+    ])
+}
+
+/// An SSN row behind `rows` rows with two hidden runs each. Rows are joined
+/// with `\n`; the secrets are the SSN and its last four digits.
+pub fn ssn_behind_rows_with_two_hidden_runs(rows: usize) -> Shape {
+    let mut all = rows_with_two_hidden_runs(rows);
+    all.push(ssn_row_with_two_hidden_runs());
+    let ssn = the_ssn();
+    shape(
+        format!("an SSN with hidden runs behind {rows} rows with two hidden runs each"),
+        all.join("\n"),
+        &[&ssn, "9999"],
+    )
+}
+
+/// A labelled birth date behind `rows` rows with two hidden runs each. The
+/// secret is the year.
+pub fn birth_date_behind_rows_with_two_hidden_runs(rows: usize) -> Shape {
+    let mut all = rows_with_two_hidden_runs(rows);
+    all.push(dob_row_with_hidden_runs());
+    shape(
+        format!("a birth date with hidden runs behind {rows} rows with two hidden runs each"),
+        all.join("\n"),
+        &["1990"],
+    )
+}
+
+/// ONE line: `pairs` times `a<z>b<z>`, then the SSN row.
+pub fn ssn_at_the_end_of_one_line_of_hidden_runs(pairs: usize) -> Shape {
+    let z = ZWSP;
+    let ssn = the_ssn();
+    shape(
+        format!("an SSN with hidden runs at the end of one line of {pairs} a<z>b<z> pairs"),
+        format!(
+            "{}{}",
+            format!("a{z}b{z}").repeat(pairs),
+            ssn_row_with_two_hidden_runs()
+        ),
+        &[&ssn, "9999"],
+    )
+}
+
+/// Benign lines that must come back untouched however many there are: (what
+/// they are, lines). Each line carries variation selectors (emoji presentation,
+/// two on the dated lines), which are hidden runs to a reader but not
+/// credentials, and the words `library`, `token` and a date.
+pub fn benign_lines_that_must_not_be_redacted() -> Vec<(&'static str, Vec<String>)> {
+    vec![
+        (
+            "5000 library lines with an emoji presentation selector",
+            (0..5000)
+                .map(|i| format!("library \u{2764}\u{fe0f} row {i}"))
+                .collect(),
+        ),
+        (
+            "3000 `token count` lines with an emoji presentation selector",
+            (0..3000)
+                .map(|i| format!("token count \u{2764}\u{fe0f} row {i}"))
+                .collect(),
+        ),
+        (
+            "3000 dated lines with two emoji presentation selectors each",
+            dated_lines_with_two_hidden_runs(3000),
+        ),
+    ]
+}
+
+/// `2024-01-01 ✔️ ok ⚠️ {i}`: a date and two hidden runs on every line.
+pub fn dated_lines_with_two_hidden_runs(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| format!("2024-01-01 \u{2714}\u{fe0f} ok \u{26a0}\u{fe0f} {i}"))
+        .collect()
+}

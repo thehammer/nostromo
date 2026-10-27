@@ -2296,14 +2296,16 @@ fn about_a_megabyte(unit: &str) -> String {
 /// Measured (RWX sandbox, 4 vCPUs, debug build, one shape at a time):
 /// ordinary text takes 20 ms, the slowest guarded shapes (`curl -u a:b`
 /// followed by a hidden character and a newline, or by a backslash and a
-/// newline) 120-140 ms, every other guarded shape under 100 ms. With the
-/// machine kept busy (eight spinning threads on the 4 vCPUs, each test thread
-/// getting about half a core) the slowest took 330 ms, so the bound has 3x
-/// headroom there and about 7x on an idle machine. Before the scanners were
-/// gated and the views made cheap the same shapes took 0.4-0.9 s on the idle
-/// sandbox and 1.0-2.1 s on the loaded laptop where the review measured them;
-/// the quadratic scans these guard against took tens of seconds. A shape that
-/// creeps toward half the bound is a regression even though it still passes.
+/// newline) 120-155 ms, every other guarded shape under 100 ms, and the floods
+/// of keyword lines that the redactor gives up reading and redacts whole about
+/// 200 ms. With the machine kept busy (eight spinning threads on the 4 vCPUs,
+/// each test thread getting about half a core) the slowest guarded shape took
+/// 345 ms and the floods 500 ms, so the bound has 2-3x headroom there and 5-7x
+/// on an idle machine. Before the scanners were gated and the views made cheap
+/// the same shapes took 0.4-0.9 s on the idle sandbox and 1.0-2.1 s on the
+/// loaded laptop where the review measured them; the quadratic scans these
+/// guard against took tens of seconds. A shape that creeps toward half the
+/// bound is a regression even though it still passes.
 const FAST_ENOUGH: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Held while a megabyte is timed: the tests of this file run on parallel
@@ -2982,4 +2984,210 @@ fn a_megabyte_of_curl_u_lines_with_a_hidden_character_is_redacted_in_under_a_sec
         "curl -u a:b<ZWSP><newline>",
         &about_a_megabyte("curl -u a:b\u{200b}\n"),
     );
+}
+
+// ───────────── review round 5: shapes the first version of the round 4 fix missed ─
+//
+// A review found that a first version of the fix leaked in each of these. They
+// are kept as permanent regressions: rows of one curl command joined by an open
+// quote, anchored token shapes in a line with no credential word, credential
+// names only a hidden-run reading sees, and personal data behind thousands of
+// rows with hidden runs. z is U+200B.
+
+fn rows_of(s: &shapes::Shape) -> Vec<String> {
+    s.line.split('\n').map(str::to_string).collect()
+}
+
+#[test]
+fn a_curl_command_continued_by_an_open_quote_hides_nothing_with_hidden_runs_in_any_row_or_role() {
+    let all = shapes::continued_curl_joined_by_an_open_quote_shapes();
+    assert_eq!(all.len(), 6);
+    for s in &all {
+        // The repro's shape: hidden runs, an open quote closing on a later row,
+        // no backslash anywhere.
+        assert!(s.line.contains('\u{200b}'), "[{}] no hidden run", s.name);
+        assert!(s.line.contains('\''), "[{}] no quote", s.name);
+        assert!(!s.line.contains('\\'), "[{}] has a backslash", s.name);
+        assert!(rows_of(s).len() >= 2, "[{}] is one row", s.name);
+    }
+    assert_shapes_redacted(&all);
+}
+
+/// Each open-quote command with `kind` padding (over the old budget) before it,
+/// after it, and on both sides, as one call. (A command that an open quote
+/// carries from one call to the next is a known gap, see the module docs of
+/// `redact.rs`: only a trailing backslash is carried.)
+fn assert_open_quote_curl_redacted_around_padding(kind: shapes::Padding) {
+    let padding = shapes::padding_rows(kind, shapes::PADDING_BYTES);
+    let placements = [
+        ("command, then padding", false, true),
+        ("padding, then command", true, false),
+        ("padding on both sides of the command", true, true),
+    ];
+    let mut failures = Vec::new();
+    for s in &shapes::continued_curl_joined_by_an_open_quote_shapes() {
+        let command = rows_of(s);
+        for (what, padding_before, padding_after) in placements {
+            let label = format!("[{}] {what} ({})", s.name, kind.label());
+            let mut all = Vec::new();
+            if padding_before {
+                all.extend(padding.iter().cloned());
+            }
+            all.extend(command.iter().cloned());
+            if padding_after {
+                all.extend(padding.iter().cloned());
+            }
+            let text = call_text(&all);
+            assert_text_is_over_the_old_budget(&text);
+            let (out, kinds) = redact(&text);
+            if let Some(why) = shapes::verdict(s, &out, kinds.len()) {
+                failures.push(format!("{label}: {why}"));
+            }
+        }
+    }
+    assert_no_failures("open-quote curl around padding", failures);
+}
+
+#[test]
+fn a_curl_command_continued_by_an_open_quote_is_redacted_before_and_after_a_megabyte_of_plain_lines(
+) {
+    assert_open_quote_curl_redacted_around_padding(shapes::Padding::Plain);
+}
+
+#[test]
+fn a_curl_command_continued_by_an_open_quote_is_redacted_before_and_after_a_megabyte_of_lines_with_hidden_runs(
+) {
+    assert_open_quote_curl_redacted_around_padding(shapes::Padding::Hidden);
+}
+
+#[test]
+fn an_anchored_token_with_hidden_runs_before_and_inside_it_is_redacted_whole_without_a_credential_word(
+) {
+    let all = shapes::anchored_tokens_with_a_hidden_run_before_and_inside();
+    assert_eq!(all.len(), 4);
+    for s in &all {
+        // No credential word on the line: only the token's own shape can find it.
+        let reader = shapes::without_filler(&s.line).to_lowercase();
+        for word in ["token", "key", "secret", "password", "auth", "bearer"] {
+            assert!(!reader.contains(word), "[{}] has {word:?}", s.name);
+        }
+    }
+    assert_rows_redacted_every_way(&all);
+}
+
+/// `group` (one row each) before, after and on both sides of `kind` padding,
+/// as ONE call.
+fn assert_group_redacted_around_padding(group: &[shapes::Shape], kind: shapes::Padding) {
+    let rows = shapes::padding_rows(kind, shapes::PADDING_BYTES);
+    let mut failures = Vec::new();
+    for place in shapes::Place::ALL {
+        let p = shapes::padded(group, kind, &rows, place);
+        assert_text_is_over_the_old_budget(&p.shape.line);
+        let (out, kinds) = redact(&p.shape.line);
+        if let Some(why) = p.verdict(&out, kinds.len()) {
+            failures.push(format!("[{}] {why}", p.shape.name));
+        }
+    }
+    assert_no_failures("one call", failures);
+}
+
+#[test]
+fn an_anchored_token_with_hidden_runs_is_redacted_before_and_after_a_megabyte_of_plain_lines() {
+    assert_group_redacted_around_padding(
+        &shapes::anchored_tokens_with_a_hidden_run_before_and_inside(),
+        shapes::Padding::Plain,
+    );
+}
+
+#[test]
+fn an_anchored_token_with_hidden_runs_is_redacted_before_and_after_a_megabyte_of_lines_with_hidden_runs(
+) {
+    assert_group_redacted_around_padding(
+        &shapes::anchored_tokens_with_a_hidden_run_before_and_inside(),
+        shapes::Padding::Hidden,
+    );
+}
+
+#[test]
+fn a_credential_name_that_only_a_hidden_run_reading_sees_still_redacts_its_value() {
+    // --auth, --dsn and --credential, each with a hidden run inside the name.
+    let all = shapes::credential_names_split_by_a_hidden_run();
+    assert_eq!(all.len(), 3);
+    assert_rows_redacted_every_way(&all);
+}
+
+#[test]
+fn other_credential_names_split_by_a_hidden_run_still_redact_their_values() {
+    // Beyond the review's list: --password, API_KEY=, --token and --secret.
+    let all = shapes::more_credential_names_split_by_a_hidden_run();
+    assert_rows_redacted_every_way(&all);
+}
+
+/// Every one of `shapes` fails the test when its text (one call) leaks.
+fn assert_texts_redacted(all: &[shapes::Shape]) {
+    let mut failures = Vec::new();
+    for s in all {
+        for trailing_newline in [true, false] {
+            let text = if trailing_newline {
+                format!("{}\n", s.line)
+            } else {
+                s.line.clone()
+            };
+            let (out, kinds) = redact(&text);
+            if let Some(why) = shapes::verdict(s, &out, kinds.len()) {
+                failures.push(format!(
+                    "[{}] (trailing newline: {trailing_newline}): {why}",
+                    s.name
+                ));
+            }
+        }
+    }
+    assert_no_failures("personal data behind many rows", failures);
+}
+
+#[test]
+fn an_ssn_with_hidden_runs_is_redacted_behind_hundreds_or_thousands_of_rows_with_two_hidden_runs_each(
+) {
+    let all: Vec<shapes::Shape> = [400, 600, 3000, 8000]
+        .into_iter()
+        .map(shapes::ssn_behind_rows_with_two_hidden_runs)
+        .collect();
+    assert_texts_redacted(&all);
+}
+
+#[test]
+fn a_labelled_birth_date_with_hidden_runs_is_redacted_behind_thousands_of_rows_with_two_hidden_runs_each(
+) {
+    let all: Vec<shapes::Shape> = [1500, 8000]
+        .into_iter()
+        .map(shapes::birth_date_behind_rows_with_two_hidden_runs)
+        .collect();
+    assert_texts_redacted(&all);
+}
+
+#[test]
+fn an_ssn_with_hidden_runs_at_the_end_of_one_line_of_hundreds_of_thousands_of_hidden_runs_is_redacted(
+) {
+    let s = shapes::ssn_at_the_end_of_one_line_of_hidden_runs(70_000);
+    assert!(s.line.len() > 500_000 && !s.line.contains('\n'));
+    assert_texts_redacted(&[s]);
+}
+
+#[test]
+fn lines_with_emoji_presentation_selectors_come_back_untouched_however_many_there_are() {
+    for (name, lines) in shapes::benign_lines_that_must_not_be_redacted() {
+        let text = format!("{}\n", lines.join("\n"));
+        assert_comes_back_untouched_every_way(name, &text);
+    }
+}
+
+#[test]
+fn a_flood_of_twenty_thousand_dated_lines_with_hidden_runs_is_redacted_without_a_panic_in_under_a_second(
+) {
+    // Redacting some of these lines is allowed; panicking or being slow is not.
+    let text = format!(
+        "{}\n",
+        shapes::dated_lines_with_two_hidden_runs(20_000).join("\n")
+    );
+    assert_fast("20000 dated lines with two hidden runs each", &text);
 }
