@@ -237,10 +237,66 @@ pub fn repaint_bound_panes(state: &McpSharedState) {
 /// to a newly (re)connected client without `ipc` depending on `mcp`.
 pub struct McpPaneContentProvider(pub McpSharedState);
 
+#[async_trait::async_trait]
 impl PaneContentProvider for McpPaneContentProvider {
     fn bound_pane_contents(&self) -> Vec<ServerMsg> {
         bound_pane_contents(&self.0)
     }
+
+    async fn pane_action(&self, tag: &str, pane_id: &str, action_id: &str) -> ServerMsg {
+        pane_action(&self.0, tag, pane_id, action_id).await
+    }
+}
+
+/// Carry out a document pane's action. Only a pane bound to a Huey source of
+/// an enabled Huey has any; everything else is `unknown_action`.
+pub async fn pane_action(
+    state: &McpSharedState,
+    tag: &str,
+    pane_id: &str,
+    action_id: &str,
+) -> ServerMsg {
+    let result =
+        |ok: bool, message: Option<String>, open_url: Option<String>| ServerMsg::PaneActionResult {
+            tag: tag.to_string(),
+            pane_id: pane_id.to_string(),
+            action_id: action_id.to_string(),
+            ok,
+            message,
+            open_url,
+        };
+    let unknown = || result(false, Some("unknown_action".to_string()), None);
+    let (Some(daemon), Some(huey)) = (&state.daemon, &state.huey) else {
+        return unknown();
+    };
+    let binding = daemon
+        .pane_registry
+        .lock()
+        .unwrap()
+        .binding_for(tag, pane_id)
+        .cloned();
+    let Some(binding) = binding else {
+        return unknown();
+    };
+    let Some(pane) = crate::huey::HueyPane::from_source(&binding.source)
+        .filter(|_| state.source_available(&binding.source))
+    else {
+        return unknown();
+    };
+    let outcome = huey
+        .on_action(pane, binding.params.as_ref(), action_id)
+        .await;
+    if let Some(params) = outcome.rebind {
+        daemon
+            .pane_registry
+            .lock()
+            .unwrap()
+            .bind_source_with_params(tag, pane_id, &binding.source, params);
+        // The broadcaster repaints what changed, deduplicated against what it
+        // last sent.
+        huey.notify_changed();
+    }
+    result(outcome.ok, outcome.message, outcome.open_url)
 }
 
 // ── the broadcaster (D7) ─────────────────────────────────────────────────────
@@ -279,16 +335,48 @@ pub async fn run_pane_source_broadcaster(
     let mut ticker = tokio::time::interval(STALENESS_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Huey's state changes. When Huey is off the daemon hands over a parked
+    // receiver; one whose sender is gone just stops being watched, it never
+    // ends this task.
+    let mut huey_rx = state.huey_rx.clone();
+    let (mut queue_open, mut pr_open, mut huey_open) = (true, true, true);
+    // Whatever Huey's panes show now (nothing is sent twice).
+    push_huey_sources(&state, &mut last_sent);
+
     loop {
         tokio::select! {
-            result = queue_rx.changed() => {
-                if result.is_err() { break; } // sender dropped — clean exit
+            result = huey_rx.changed(), if huey_open => {
+                if result.is_err() {
+                    huey_open = false;
+                    if !(queue_open || pr_open) { break; }
+                } else {
+                    // A change in Huey (a click, a run) always repaints: forget what
+                    // was last sent, which a direct push or a closed pane may have
+                    // left stale, so a rebind can never be swallowed as a repeat.
+                    last_sent.retain(|_, (content, _, _)| {
+                        !matches!(content, PaneContentWire::Document { .. })
+                    });
+                    push_huey_sources(&state, &mut last_sent);
+                }
+            }
+            result = queue_rx.changed(), if queue_open => {
+                if result.is_err() {
+                    // Sender dropped: stop watching it. The task ends only when
+                    // every channel it watches is gone.
+                    queue_open = false;
+                    if !(pr_open || huey_open) { break; }
+                    continue;
+                }
                 // The queue is fleet-wide (W7 — D9): every focus's queue pane
                 // repaints.
                 push_for_source(&state, SOURCE_PR_QUEUE, None, &mut last_sent);
             }
-            result = pr_rx.changed() => {
-                if result.is_err() { break; }
+            result = pr_rx.changed(), if pr_open => {
+                if result.is_err() {
+                    pr_open = false;
+                    if !(queue_open || huey_open) { break; }
+                    continue;
+                }
                 // W7 — D7: repaint only the focuses whose PR actually moved.
                 // The channel now carries every focus's PR, so a pickup in one
                 // focus would otherwise re-fetch and re-diff every focus's
@@ -311,11 +399,23 @@ pub async fn run_pane_source_broadcaster(
             }
             _ = ticker.tick() => {
                 reevaluate_staleness(&state, &mut last_sent);
+                // Time alone changes Huey's missing-report banner.
+                push_huey_sources(&state, &mut last_sent);
             }
         }
     }
 
     debug!("pane source broadcaster exiting — watch channels closed");
+}
+
+/// Repaint both Huey panes (an unchanged document is not sent again).
+fn push_huey_sources(state: &McpSharedState, last_sent: &mut LastSent) {
+    for source in [
+        apply_layout::SOURCE_HUEY_REPORT,
+        apply_layout::SOURCE_HUEY_CONTEXT,
+    ] {
+        push_for_source(state, source, None, last_sent);
+    }
 }
 
 /// Re-fetch and re-broadcast content for every binding pointed at `source`,
@@ -1600,5 +1700,126 @@ mod tests {
         );
 
         handle.abort();
+    }
+}
+// ── H6-9: a disabled Huey is neither fetched, replayed nor repainted ─────────
+
+#[cfg(test)]
+mod huey_disabled_tests {
+    use super::*;
+    use crate::mcp::test_support::daemon_test_state;
+
+    fn huey_off(state: &mut McpSharedState) {
+        state.enabled_agents.huey = false;
+    }
+
+    /// A daemon state whose `huey` focus is bound, as the daemon seeds it.
+    fn seeded() -> crate::mcp::test_support::DaemonTestState {
+        let built = daemon_test_state();
+        built.pane_registry.lock().unwrap().init_focus("huey");
+        built
+    }
+
+    #[test]
+    fn h6_9_a_disabled_hueys_persisted_bindings_are_not_replayed() {
+        let mut built = seeded();
+        huey_off(&mut built.state);
+        assert!(!built.state.source_available("huey.report"));
+        assert!(!built.state.source_available("huey.context"));
+        assert!(
+            bound_pane_contents(&built.state).is_empty(),
+            "no PaneContent for a binding to a disabled agent's source"
+        );
+        // The bindings themselves are left alone, to be honoured on re-enable.
+        let reg = built.pane_registry.lock().unwrap();
+        assert!(reg.binding_for("huey", "report").is_some());
+        assert!(reg.binding_for("huey", "context").is_some());
+    }
+
+    #[test]
+    fn h6_9_a_disabled_hueys_bindings_are_not_repainted() {
+        let mut built = seeded();
+        huey_off(&mut built.state);
+        repaint_bound_panes(&built.state);
+        assert!(
+            built.bcast_rx.try_recv().is_err(),
+            "nothing is broadcast for a disabled agent's panes"
+        );
+    }
+
+    #[test]
+    fn h6_9_a_disabled_hueys_document_is_never_fetched() {
+        use std::cell::RefCell;
+        let mut built = seeded();
+        huey_off(&mut built.state);
+        let fetched: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let msgs = bound_pane_contents_with(&built.state, |_tag, source, _params| {
+            fetched.borrow_mut().push(source.to_string());
+            None
+        });
+        assert!(msgs.is_empty());
+        assert!(
+            fetched.borrow().is_empty(),
+            "fetched {:?}",
+            fetched.borrow()
+        );
+    }
+
+    #[tokio::test]
+    async fn h6_9_a_pane_action_on_a_disabled_huey_is_an_unknown_action() {
+        let mut built = seeded();
+        huey_off(&mut built.state);
+        let reply = pane_action(&built.state, "huey", "report", "report.today").await;
+        match reply {
+            ServerMsg::PaneActionResult {
+                ok,
+                message,
+                open_url,
+                ..
+            } => {
+                assert!(!ok);
+                assert_eq!(message.as_deref(), Some("unknown_action"));
+                assert_eq!(open_url, None);
+            }
+            other => panic!("expected PaneActionResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn h6_3_a_pane_action_on_a_pane_not_bound_to_huey_is_an_unknown_action() {
+        let built = daemon_test_state();
+        {
+            let mut reg = built.pane_registry.lock().unwrap();
+            reg.init_focus("perri");
+            reg.create_pane(
+                "perri",
+                "queue",
+                crate::ipc::pane_registry::SplitPosition::Right,
+                crate::ipc::pane_registry::REPL_PANE_ID,
+            )
+            .unwrap();
+            reg.bind_source("perri", "queue", "perri.list_pr_queue");
+        }
+        for (tag, pane) in [("perri", "queue"), ("perri", "nope"), ("nobody", "report")] {
+            let reply = pane_action(&built.state, tag, pane, "report.today").await;
+            let ServerMsg::PaneActionResult {
+                tag: t,
+                pane_id,
+                action_id,
+                ok,
+                message,
+                ..
+            } = reply
+            else {
+                panic!("expected PaneActionResult");
+            };
+            assert_eq!(
+                (t.as_str(), pane_id.as_str(), action_id.as_str()),
+                (tag, pane, "report.today"),
+                "the answer names what was asked"
+            );
+            assert!(!ok, "{tag}/{pane}");
+            assert_eq!(message.as_deref(), Some("unknown_action"), "{tag}/{pane}");
+        }
     }
 }

@@ -6,6 +6,7 @@
 //! until setup is confirmed (T6), and at most one run executes at a time
 //! (T7).
 
+pub mod actions;
 pub mod budget;
 pub mod checks;
 pub mod config;
@@ -33,6 +34,7 @@ use tracing::{info, warn};
 
 use crate::tracker::clock::{Clock, SystemClock};
 
+pub use actions::{ActionOutcome, HueyPane, StartError};
 pub use config::HueyConfig;
 pub use curate::{CurateBridge, SessionCurator};
 pub use paths::HueyPaths;
@@ -46,14 +48,29 @@ use schedule::{Due, LocalTime, Schedule, SystemLocalTime};
 use sources::{HttpClient, HttpLimits};
 use store::Store;
 
+/// What the Huey focus's session is told about itself. Passed with
+/// `--append-system-prompt`: no user-level agent file exists.
+pub const PERSONA: &str = include_str!("prompts/persona.md");
+
 /// After any run, a regeneration waits this long (T7).
 pub const REGENERATE_COOLDOWN_SECS: i64 = 120;
+
+/// Regenerations (runs of [`Trigger::Regenerate`]) allowed per local day. Each
+/// one costs a model pass, and the cooldown alone resets on a restart, so the
+/// count is kept on disk (`regenerations.json` under the state root).
+pub const MAX_REGENERATIONS_PER_DAY: u32 = 6;
 
 /// The scheduler starts at most this many attempts per local day. In normal
 /// running a day needs two (the run and its one retry); the cap only matters
 /// when `runs.jsonl` cannot be written, so that no record ever says "tried",
 /// and every ten minutes would otherwise bring another run.
 pub const MAX_SCHEDULED_ATTEMPTS_PER_DAY: u32 = 4;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RegenerationCount {
+    date: NaiveDate,
+    count: u32,
+}
 
 /// Bumped on every state change, so bound panes can repaint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -68,6 +85,8 @@ pub enum TriggerRefused {
     AlreadyRunning,
     #[error("a run just finished; try again in {seconds} s")]
     Cooldown { seconds: i64 },
+    #[error("today's {max} regenerations are used up")]
+    DailyCap { max: u32 },
 }
 
 struct Inner {
@@ -78,6 +97,13 @@ struct Inner {
     last_run_end: std::sync::Mutex<Option<DateTime<Utc>>>,
     /// Attempts the scheduler has started, for one date (in memory only).
     scheduled_attempts: std::sync::Mutex<(NaiveDate, u32)>,
+    /// What the setup scan found, held in memory only until the user acts on
+    /// it (D6). Never written to disk.
+    scan: std::sync::Mutex<Option<setup::SetupScan>>,
+    /// A scan is running: one at a time, repeated `setup.start` is a no-op.
+    scanning: std::sync::atomic::AtomicBool,
+    /// The last scan ran out of time (cleared by the next one that finishes).
+    scan_timed_out: std::sync::atomic::AtomicBool,
     /// The curating run in progress, for the `huey.*` tools it calls.
     bridge: CurateBridge,
 }
@@ -207,6 +233,12 @@ impl HueyHandle {
                     return Err(TriggerRefused::Cooldown { seconds: left });
                 }
             }
+            if self.regenerations_today(now) >= MAX_REGENERATIONS_PER_DAY {
+                return Err(TriggerRefused::DailyCap {
+                    max: MAX_REGENERATIONS_PER_DAY,
+                });
+            }
+            self.count_regeneration(now);
         }
         self.bump();
         let env = &self.inner.env;
@@ -231,6 +263,37 @@ impl HueyHandle {
         *self.inner.last_run_end.lock().unwrap() = Some(env.clock.now());
         self.bump();
         Ok(outcome)
+    }
+
+    fn regenerations_file(&self) -> std::path::PathBuf {
+        self.paths.root().join("regenerations.json")
+    }
+
+    /// Regenerations started on the local day of `now`, from disk (so a
+    /// restart does not clear them). A missing or unreadable file is zero.
+    pub(crate) fn regenerations_today(&self, now: DateTime<Utc>) -> u32 {
+        let today = self.local_time().to_local(now).date();
+        let Ok(bytes) = std::fs::read(self.regenerations_file()) else {
+            return 0;
+        };
+        match serde_json::from_slice::<RegenerationCount>(&bytes) {
+            Ok(c) if c.date == today => c.count,
+            _ => 0,
+        }
+    }
+
+    /// Record one more regeneration for the local day of `now`, owner-only.
+    fn count_regeneration(&self, now: DateTime<Utc>) {
+        let record = RegenerationCount {
+            date: self.local_time().to_local(now).date(),
+            count: self.regenerations_today(now) + 1,
+        };
+        let written = serde_json::to_vec(&record)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| setup::write_atomic(&self.regenerations_file(), &bytes));
+        if let Err(e) = written {
+            warn!(error = %e, "huey: could not record the regeneration count");
+        }
     }
 
     /// Count a scheduler-started attempt for `today`. `false` once the day's
@@ -323,13 +386,31 @@ impl HueyHandle {
             level: render::BannerLevel::Info,
             text: format!("This is the report from {}.", date.format("%A, %b %-d, %Y")),
         });
+        // The pane adds a version line and verdict links to the stored report.
+        let chosen = self.chosen_verdicts(date, version);
+        let extras = render::DocExtras {
+            after_opener: store
+                .load_meta(date, version)
+                .map(|m| render::version_line(version, &self.local_stamp(m.generated_at))),
+            after_pick: (1..=report.picks.len())
+                .map(|n| {
+                    Some(render::verdict_paragraph(
+                        date,
+                        version,
+                        n,
+                        chosen.get(&n).copied(),
+                    ))
+                })
+                .collect(),
+        };
         Some(HueyDocument {
             title: render::title(date, version),
             banner,
-            markdown: render::render_markdown(&report),
-            blocks: render::render_blocks(&report),
+            markdown: render::render_markdown_with(&report, &extras),
+            blocks: render::render_blocks_with(&report, &extras),
             date: Some(date),
             version: Some(version),
+            actions: self.nav_actions(date, true),
         })
     }
 }
@@ -421,6 +502,9 @@ impl HueyEngine {
                 run_lock: tokio::sync::Mutex::new(()),
                 last_run_end: std::sync::Mutex::new(None),
                 scheduled_attempts: std::sync::Mutex::new((NaiveDate::MIN, 0)),
+                scan: std::sync::Mutex::new(None),
+                scanning: std::sync::atomic::AtomicBool::new(false),
+                scan_timed_out: std::sync::atomic::AtomicBool::new(false),
                 bridge: deps.bridge,
             }),
         };
@@ -512,6 +596,40 @@ mod tests {
     use super::*;
     use crate::tracker::clock::FakeClock;
     use chrono::TimeZone;
+
+    fn flat_persona() -> String {
+        PERSONA.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn the_persona_does_not_claim_everything_is_wrapped_and_says_what_is_data() {
+        let flat = flat_persona();
+        assert!(
+            !flat.contains("Everything the tools return from them"),
+            "get_context, urls and ids are not wrapped"
+        );
+        for needle in [
+            "report text",
+            "`huey.get_context`",
+            "not wrapped in markers",
+            "everything inside the digest",
+            "URLs, item ids and the digest are not",
+            "never instructions",
+        ] {
+            assert!(flat.contains(needle), "persona lacks {needle:?}");
+        }
+    }
+
+    #[test]
+    fn the_persona_limits_regenerate_and_record_verdict_to_what_the_user_asks() {
+        assert!(
+            flat_persona().contains(
+                "Call `huey.regenerate` and `huey.record_verdict` only when the user asks you to"
+            ),
+            "{}",
+            flat_persona()
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn an_unset_up_engine_writes_nothing_past_its_run_time() {

@@ -144,6 +144,54 @@ pub struct SetupScan {
     pub interests: InterestsStatus,
 }
 
+/// Why [`confirm`] said no. Plain English, shown to the reader.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct ConfirmRefused(pub String);
+
+/// Confirm setup: needs an interests file with at least one "What I care
+/// about" bullet. On the first confirm writes the default `sources.toml`
+/// (never over an existing one), then `setup.json`. Writes only under the
+/// Huey root.
+pub fn confirm(paths: &HueyPaths, now: DateTime<Utc>) -> Result<(), ConfirmRefused> {
+    check_interests_ready(paths)?;
+    let failed = |_: std::io::Error| ConfirmRefused("Huey could not save its setup.".to_string());
+    if !paths.sources_toml().exists() {
+        write_atomic(
+            &paths.sources_toml(),
+            super::sources::config::default_toml().as_bytes(),
+        )
+        .map_err(failed)?;
+    }
+    let mut record = load(paths);
+    record.state = SetupState::Confirmed;
+    record.confirmed_at = Some(now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    save(paths, &record).map_err(failed)
+}
+
+/// The interests file exists and says what Huey's reader cares about.
+fn check_interests_ready(paths: &HueyPaths) -> Result<(), ConfirmRefused> {
+    let text = std::fs::read_to_string(paths.interests()).map_err(|_| {
+        ConfirmRefused(
+            "There is no interests file yet. Open the interests file to write a draft, \
+             edit it, then confirm."
+                .to_string(),
+        )
+    })?;
+    let has_care_bullet = interests::parse(&text)
+        .bullets
+        .iter()
+        .any(|b| b.section == InterestSection::Care);
+    if !has_care_bullet {
+        return Err(ConfirmRefused(
+            "Your interests file has nothing under \"What I care about, and why\". \
+             Add at least one bullet, then confirm."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Where an interests file from before D5 may sit.
 pub fn legacy_interests(env: &ContextEnv) -> PathBuf {
     env.claude_dir.join("huey").join("interests.md")

@@ -52,7 +52,7 @@ use nostromo::huey::sources::{
 use nostromo::huey::store::{Ledger, LedgerEntry, Section, Store, Verdict, VerdictKind};
 use nostromo::huey::{
     FailReason, HueyConfig, HueyDeps, HueyDocument, HueyEngine, HueySources, MissingReason,
-    RunOutcome, SetupState, Trigger, TriggerRefused,
+    RunOutcome, SetupState, StartError, Trigger, TriggerRefused,
 };
 use nostromo::mother::MotherJob;
 use nostromo::tracker::clock::{Clock, FakeClock};
@@ -3829,4 +3829,74 @@ async fn unknown_ids_are_dropped_and_counted_in_the_run_log() {
     assert_eq!(run.unknown_ids, 4);
     let log = fs::read_to_string(w.store().runs_file()).unwrap();
     assert!(!log.contains("nope"), "a count, never the ids: {log}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_day_allows_six_regenerations_and_a_restart_does_not_clear_the_count() {
+    let w = world("2026-10-26T05:00:00Z").await;
+    w.sources(&[VENDOR]);
+    let src = HueyEngine::spawn(w.deps(Scripted::picking(1, false), Duration::from_secs(3600)));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    w.confirm();
+    w.items(
+        VN,
+        &[(
+            "gizmo-2",
+            "Gizmo 2 ships batch mode",
+            ts("2026-10-26T01:00:00Z"),
+        )],
+    );
+    w.clock.set(ts("2026-10-26T06:05:00Z"));
+    let h = &src.handle;
+    h.trigger(Trigger::RunNow).await.unwrap();
+
+    for n in 1..=6 {
+        w.clock
+            .set(ts("2026-10-26T06:05:00Z") + chrono::Duration::minutes(3 * n));
+        let outcome = h.trigger(Trigger::Regenerate).await;
+        assert!(outcome.is_ok(), "regeneration {n}: {outcome:?}");
+    }
+    w.clock.set(ts("2026-10-26T07:00:00Z"));
+    assert_eq!(
+        h.trigger(Trigger::Regenerate).await,
+        Err(TriggerRefused::DailyCap { max: 6 }),
+        "the seventh is refused"
+    );
+    assert!(matches!(
+        h.start(Trigger::Regenerate),
+        Err(StartError::Refused(TriggerRefused::DailyCap { max: 6 }))
+    ));
+    // Not a regeneration: a plain run is not counted against the cap.
+    assert!(h.trigger(Trigger::RunNow).await.is_ok());
+
+    let cap_file = w.paths.root().join("regenerations.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&cap_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the count file is owner-only");
+    }
+
+    // A new engine on the same root (a daemon restart) has no cooldown, but
+    // still has the count.
+    let restarted =
+        HueyEngine::spawn(w.deps(Scripted::picking(1, false), Duration::from_secs(3600)));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    w.clock.set(ts("2026-10-26T08:00:00Z"));
+    assert_eq!(
+        restarted.handle.trigger(Trigger::Regenerate).await,
+        Err(TriggerRefused::DailyCap { max: 6 }),
+        "a restart does not clear the cap"
+    );
+    assert!(matches!(
+        restarted.handle.start(Trigger::Regenerate),
+        Err(StartError::Refused(TriggerRefused::DailyCap { max: 6 }))
+    ));
+
+    // The next local day starts a fresh count.
+    w.clock.set(ts("2026-10-27T07:00:00Z"));
+    assert!(!matches!(
+        restarted.handle.trigger(Trigger::Regenerate).await,
+        Err(TriggerRefused::DailyCap { .. })
+    ));
 }
