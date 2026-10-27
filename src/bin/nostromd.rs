@@ -520,6 +520,13 @@ async fn main() -> Result<()> {
                 )),
             };
 
+            // Huey on: a persisted `huey` focus gets its Report and Context
+            // panes bound (or its tree seeded, if it predates them). Off: its
+            // bindings stay as they are, unfetched and unreplayed.
+            if enabled_agents.huey {
+                pane_registry.lock().unwrap().ensure_huey_focus();
+            }
+
             let backend = DaemonMcpBackend {
                 pane_registry: Arc::clone(&pane_registry),
                 session_mgr: Arc::clone(&session_mgr),

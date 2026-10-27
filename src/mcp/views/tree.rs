@@ -272,6 +272,38 @@ pub fn default_fred_tree() -> PaneTree {
     }
 }
 
+/// The focus tag of Huey's built-in focus.
+pub const HUEY_TAG: &str = "huey";
+/// Huey's report pane id (bound to `huey.report`).
+pub const HUEY_REPORT_PANE: &str = "report";
+/// Huey's context pane id (bound to `huey.context`).
+pub const HUEY_CONTEXT_PANE: &str = "context";
+/// Share of the Huey default layout the report and context tabs take.
+pub const HUEY_DOCUMENT_RATIO: f32 = 0.62;
+
+/// Huey's default layout: the `huey` tabs region (Report, Context) above the
+/// REPL. Both panes are daemon-bound documents, not Mac-native panes, so
+/// [`native_pane_for`] has no entry for it.
+pub fn default_huey_tree() -> PaneTree {
+    PaneTree::Split {
+        direction: SplitDirection::Vertical,
+        children: vec![
+            build_tabs(
+                "huey",
+                &[
+                    (HUEY_REPORT_PANE.to_string(), "Report".to_string()),
+                    (HUEY_CONTEXT_PANE.to_string(), "Context".to_string()),
+                ],
+                0,
+            ),
+            PaneTree::Leaf {
+                pane_id: "repl".to_string(),
+            },
+        ],
+        ratios: vec![HUEY_DOCUMENT_RATIO, 0.38],
+    }
+}
+
 /// The native (Mac-hosted) pane a focus tag owns, if any.
 pub fn native_pane_for(tag: &str) -> Option<&'static str> {
     match tag {
@@ -283,13 +315,14 @@ pub fn native_pane_for(tag: &str) -> Option<&'static str> {
 }
 
 /// A focus's seeded default layout when it owns a native pane (`mother`,
-/// `teri`, `fred`); `None` for every other tag. The single place that decides
+/// `teri`, `fred`) or daemon-bound documents (`huey`); `None` for every other tag. The single place that decides
 /// which focuses start from a native tree rather than a bare REPL.
 pub fn default_native_tree(tag: &str) -> Option<PaneTree> {
     match tag {
         "mother" => Some(default_mother_tree()),
         "teri" => Some(default_teri_tree()),
         "fred" => Some(default_fred_tree()),
+        HUEY_TAG => Some(default_huey_tree()),
         _ => None,
     }
 }
@@ -770,5 +803,67 @@ mod tests {
             "a second pass must be a no-op"
         );
         assert_eq!(once, after_once);
+    }
+}
+// ── H6-4: Huey's seeded layout ───────────────────────────────────────────────
+
+#[cfg(test)]
+mod huey_tree_tests {
+    use super::*;
+
+    #[test]
+    fn h6_4_the_huey_layout_is_report_and_context_tabs_above_the_repl() {
+        let tree = default_huey_tree();
+        let PaneTree::Split {
+            direction,
+            children,
+            ratios,
+        } = &tree
+        else {
+            panic!("the Huey layout is a split: {tree:?}");
+        };
+        assert_eq!(*direction, SplitDirection::Vertical);
+        assert_eq!(children.len(), 2);
+        assert_eq!(ratios, &vec![0.62_f32, 0.38_f32]);
+
+        let PaneTree::Tabs {
+            children: tabs,
+            labels,
+            active,
+            region,
+        } = &children[0]
+        else {
+            panic!("the first child is the tabs region: {:?}", children[0]);
+        };
+        assert_eq!(region.as_deref(), Some("huey"));
+        assert_eq!(labels, &vec!["Report".to_string(), "Context".to_string()]);
+        assert_eq!(*active, 0, "the report tab is in front");
+        assert_eq!(
+            tabs,
+            &vec![
+                PaneTree::Leaf {
+                    pane_id: "report".into()
+                },
+                PaneTree::Leaf {
+                    pane_id: "context".into()
+                },
+            ]
+        );
+        assert_eq!(
+            children[1],
+            PaneTree::Leaf {
+                pane_id: "repl".into()
+            }
+        );
+    }
+
+    #[test]
+    fn h6_4_the_huey_focus_starts_from_that_layout_but_owns_no_mac_native_pane() {
+        assert_eq!(default_native_tree("huey"), Some(default_huey_tree()));
+        assert_eq!(native_pane_for("huey"), None);
+        assert_eq!(
+            default_huey_tree().pane_ids(),
+            vec!["report", "context", "repl"]
+        );
     }
 }

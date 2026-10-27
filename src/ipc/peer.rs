@@ -25,7 +25,9 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::protocol::{ClientMsg, FocusMeta, ServerMsg, TaskOutputOutcome, TaskStopOutcome, Topic};
+use super::protocol::{
+    ClientMsg, FocusMeta, PaneContentWire, ServerMsg, TaskOutputOutcome, TaskStopOutcome, Topic,
+};
 use crate::data::work::WorkResult;
 
 /// Wire transport a connection arrived on.
@@ -78,6 +80,19 @@ impl PeerTrust {
 pub fn is_teri_or_fred_agent(name: &str) -> bool {
     let bare = name.trim().rsplit(':').next().unwrap_or("").trim();
     bare.eq_ignore_ascii_case("fred") || bare.eq_ignore_ascii_case("teri")
+}
+
+/// Huey's focus tag and the tag of its hidden unattended session. Both carry
+/// the digest (personal notes and idea titles), so both are sensitive in v1.
+fn is_huey_tag(tag: &str) -> bool {
+    let tag = tag.trim();
+    tag.eq_ignore_ascii_case("huey") || tag.eq_ignore_ascii_case("huey-run")
+}
+
+/// Is `name` the Huey agent? Case-insensitive, through a plugin qualifier.
+pub fn is_huey_agent(name: &str) -> bool {
+    let bare = name.trim().rsplit(':').next().unwrap_or("").trim();
+    bare.eq_ignore_ascii_case("huey")
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -277,6 +292,7 @@ impl SensitiveTags {
     pub fn tag_is_sensitive(&self, tag: &str) -> bool {
         let registered = self.inner.read().unwrap();
         is_teri_or_fred_agent(tag)
+            || is_huey_tag(tag)
             || registered.unreadable
             || registered.tags.contains_key(tag)
             || registered.held.contains_key(tag)
@@ -302,7 +318,7 @@ impl SensitiveTags {
     /// Is a focus with this `tag` running `agent_name` sensitive? A session of
     /// the Fred/Teri agent is, whatever tag it runs under.
     pub fn focus_is_sensitive(&self, tag: &str, agent_name: &str) -> bool {
-        self.tag_is_sensitive(tag) || is_teri_or_fred_agent(agent_name)
+        self.tag_is_sensitive(tag) || is_teri_or_fred_agent(agent_name) || is_huey_agent(agent_name)
     }
 
     /// Was Mother job `job_id` created from a work item?
@@ -703,6 +719,13 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::WorkSendPreview { .. }
         | ServerMsg::WorkSendResult { .. } => ServerClass::Sensitive,
 
+        // A document pane (Huey's report and digest) holds personal notes and
+        // idea titles, whichever focus it is bound in: never to a network peer.
+        ServerMsg::PaneContent {
+            content: PaneContentWire::Document { .. },
+            ..
+        } => ServerClass::LocalOnly,
+
         // Scoped to one focus: the transcript, pane content, notifications,
         // decision prompts/details and activity of a focus can all quote
         // mail, todos or Jira text.
@@ -738,6 +761,9 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // Which sessions wait for a Claude sign-in: names tags and the claude
         // path; no content. A network peer has no use for it yet.
         ServerMsg::ClaudeLoginState { .. } => ServerClass::LocalOnly,
+        // The answer to a document action: a reason in plain English and maybe a
+        // file URL on this machine. A network peer can never send the action.
+        ServerMsg::PaneActionResult { .. } => ServerClass::LocalOnly,
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
@@ -987,6 +1013,8 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::ApprovalRefusalReport { .. }
         // Resends or drops a session's held message: it writes to a session.
         | ClientMsg::ClaudeLoginAction { .. }
+        // Acts on a document pane (Huey's setup, regenerate, verdicts): operator app only.
+        | ClientMsg::PaneAction { .. }
         | ClientMsg::RenderedShape { .. }
         | ClientMsg::WorkDetailRequest { .. }
         | ClientMsg::WorkRefresh { .. }
@@ -1059,7 +1087,8 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::SessionModelSet { tag, .. }
         | ClientMsg::SessionTaskStop { tag, .. }
         | ClientMsg::SessionTaskOutput { tag, .. }
-        | ClientMsg::ClaudeLoginAction { tag, .. } => tags.tag_is_sensitive(tag),
+        | ClientMsg::ClaudeLoginAction { tag, .. }
+        | ClientMsg::PaneAction { tag, .. } => tags.tag_is_sensitive(tag),
 
         ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
@@ -1899,6 +1928,12 @@ mod tests {
                 hold_id: Some("h".into()),
                 operator_nonce: None,
             },
+            ClientMsg::PaneAction {
+                tag: "x1".into(),
+                pane_id: "report".into(),
+                action_id: "report.today".into(),
+                operator_nonce: None,
+            },
             ClientMsg::SessionTaskStop {
                 request_id: "r".into(),
                 tag: "x1".into(),
@@ -2016,7 +2051,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 61;
+    const CLIENT_MSG_VARIANTS: usize = 62;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2082,6 +2117,7 @@ mod tests {
             ClientMsg::TerminalSendSelection { .. } => 58,
             ClientMsg::TerminalKeepAlive { .. } => 59,
             ClientMsg::TerminalRemoteSummaryRequest => 60,
+            ClientMsg::PaneAction { .. } => 61,
         }
     }
 
@@ -2118,8 +2154,9 @@ mod tests {
         assert_eq!(by_name("PtyAttach"), 7);
         assert_eq!(by_name("PtyDetach"), 8);
         assert_eq!(by_name("PtyList"), 9);
-        assert_eq!(CLIENT_MSG_VARIANTS, 61);
-        assert_eq!(every_client_msg().len(), 61);
+        // 62 since `PaneAction` (H6) was added after the retired verbs, so no ordinal moved.
+        assert_eq!(CLIENT_MSG_VARIANTS, 62);
+        assert_eq!(every_client_msg().len(), 62);
     }
 
     #[test]
@@ -4242,5 +4279,244 @@ mod tests {
         for (name, msg) in remote_client_frames() {
             assert!(!targets_sensitive_session(&msg, &tags), "{name}");
         }
+    }
+}
+// ── H6-3, H6-11: PaneAction is operator-only; Huey is withheld from the LAN ──
+
+#[cfg(test)]
+mod huey_surface_tests {
+    use super::*;
+    use crate::ipc::protocol::FocusMeta;
+
+    fn pane_action(tag: &str) -> ClientMsg {
+        ClientMsg::PaneAction {
+            tag: tag.into(),
+            pane_id: "report".into(),
+            action_id: "report.today".into(),
+            operator_nonce: None,
+        }
+    }
+
+    fn result(tag: &str) -> ServerMsg {
+        ServerMsg::PaneActionResult {
+            tag: tag.into(),
+            pane_id: "report".into(),
+            action_id: "report.today".into(),
+            ok: true,
+            message: None,
+            open_url: None,
+        }
+    }
+
+    #[test]
+    fn h6_3_a_network_peer_may_not_send_a_pane_action() {
+        assert_eq!(
+            network_policy(&pane_action("huey")),
+            NetworkPolicy::Refused,
+            "acting on a document pane is the operator app's alone"
+        );
+        assert_eq!(
+            network_policy(&pane_action("cody-core-1")),
+            NetworkPolicy::Refused
+        );
+        let tags = SensitiveTags::in_memory();
+        assert!(refused_for_network(&pane_action("cody-core-1")));
+        assert!(
+            may_receive(PeerTrust::OperatorApp, &result("huey"), &tags)
+                && may_receive(PeerTrust::LocalOther, &result("huey"), &tags),
+            "local peers are answered"
+        );
+        assert!(
+            !may_receive(PeerTrust::Tcp, &result("huey"), &tags),
+            "a network peer is never sent a pane action's result"
+        );
+    }
+
+    #[test]
+    fn h6_3_a_pane_action_targets_a_sensitive_session_exactly_when_its_tag_is_one() {
+        let tags = SensitiveTags::in_memory();
+        assert!(targets_sensitive_session(&pane_action("huey"), &tags));
+        assert!(targets_sensitive_session(&pane_action("huey-run"), &tags));
+        assert!(!targets_sensitive_session(
+            &pane_action("cody-core-1"),
+            &tags
+        ));
+        tags.mark_tag("cody-core-1");
+        assert!(targets_sensitive_session(
+            &pane_action("cody-core-1"),
+            &tags
+        ));
+    }
+
+    #[test]
+    fn h6_11_the_huey_focus_and_its_hidden_run_session_are_sensitive_whatever_the_case() {
+        let tags = SensitiveTags::in_memory();
+        for tag in ["huey", "Huey", "HUEY", "huey-run", "Huey-Run", " huey "] {
+            assert!(tags.tag_is_sensitive(tag), "{tag:?}");
+        }
+        assert!(!tags.tag_is_sensitive("hueys-notes"));
+        assert!(!tags.tag_is_sensitive("cody-core-1"));
+    }
+
+    #[test]
+    fn h6_11_a_focus_on_the_huey_tag_is_sensitive_whatever_agent_runs_in_it() {
+        let tags = SensitiveTags::in_memory();
+        assert!(tags.focus_is_sensitive("anything", "huey"));
+        assert!(tags.focus_is_sensitive("huey", "anything"));
+        assert!(tags.focus_is_sensitive("huey-run", "claude"));
+        assert!(!tags.focus_is_sensitive("cody-core-1", "cody"));
+    }
+
+    fn meta(tag: &str, agent: &str) -> FocusMeta {
+        FocusMeta {
+            initial_model: None,
+            initial_effort: None,
+            tag: tag.into(),
+            display_name: "Huey on SECRET".into(),
+            agent_name: agent.into(),
+            project_name: None,
+            org: None,
+            is_built_in: true,
+            session_summary: Some("SUMMARY".into()),
+            label: Some("LABEL".into()),
+            project_path: Some("/Users/x".into()),
+            select_for_client: None,
+        }
+    }
+
+    #[test]
+    fn h6_11_a_network_peer_sees_the_huey_focus_only_under_an_opaque_tag() {
+        let tags = SensitiveTags::in_memory();
+        let ServerMsg::FocusCreated { meta: shown } = redact_for_network(
+            ServerMsg::FocusCreated {
+                meta: meta("huey", "huey"),
+            },
+            &tags,
+        ) else {
+            panic!("expected FocusCreated");
+        };
+        assert_ne!(shown.tag, "huey", "the tag is replaced");
+        assert!(!shown.tag.to_lowercase().contains("huey"), "{}", shown.tag);
+        assert_eq!(shown.tag, tags.opaque_tag("huey"), "and stable");
+        assert_eq!(shown.display_name, "huey", "only the agent name survives");
+        assert!(
+            shown.label.is_none()
+                && shown.session_summary.is_none()
+                && shown.project_path.is_none()
+        );
+
+        let ServerMsg::FocusCreated { meta: hidden_run } = redact_for_network(
+            ServerMsg::FocusCreated {
+                meta: meta("huey-run", "claude"),
+            },
+            &tags,
+        ) else {
+            panic!("expected FocusCreated");
+        };
+        assert!(!hidden_run.tag.contains("huey"), "{}", hidden_run.tag);
+    }
+
+    #[test]
+    fn h6_11_session_and_focus_lists_for_a_network_peer_drop_or_mask_huey() {
+        use crate::ipc::protocol::SessionInfo;
+        use crate::ipc::stream_json::SessionState;
+        let info = |tag: &str, agent: &str| SessionInfo {
+            tag: tag.into(),
+            agent_name: agent.into(),
+            view_name: "v".into(),
+            session_id: None,
+            alive: true,
+            remote_control: false,
+            state: SessionState::Idle,
+            stop_reason: None,
+        };
+        let tags = SensitiveTags::in_memory();
+        let ServerMsg::SessionListResp { sessions } = redact_for_network(
+            ServerMsg::SessionListResp {
+                sessions: vec![
+                    info("huey", "huey"),
+                    info("huey-run", "claude"),
+                    info("cody-ok", "cody"),
+                ],
+            },
+            &tags,
+        ) else {
+            panic!("expected SessionListResp");
+        };
+        let kept: Vec<&str> = sessions.iter().map(|s| s.tag.as_str()).collect();
+        assert_eq!(kept, vec!["cody-ok"]);
+
+        let ServerMsg::FocusListResp { focuses } = redact_for_network(
+            ServerMsg::FocusListResp {
+                focuses: vec![meta("huey", "huey"), meta("cody-ok", "cody")],
+            },
+            &tags,
+        ) else {
+            panic!("expected FocusListResp");
+        };
+        assert!(
+            focuses.iter().all(|f| f.tag != "huey"),
+            "no entry carries the plain huey tag: {focuses:?}"
+        );
+    }
+}
+
+// ── H6-3: a document pane is never sent to a network peer ────────────────────
+
+#[cfg(test)]
+mod huey_document_delivery_tests {
+    use super::*;
+    use crate::ipc::protocol::PaneContentWire;
+
+    fn pane_content(tag: &str, content: PaneContentWire) -> ServerMsg {
+        ServerMsg::PaneContent {
+            tag: tag.into(),
+            pane_id: "report".into(),
+            content,
+            freshness: None,
+            address: None,
+        }
+    }
+
+    fn document() -> PaneContentWire {
+        PaneContentWire::Document {
+            title: "Huey, Mon Oct 26, 2026".into(),
+            banner: None,
+            blocks: vec![],
+            actions: vec![],
+        }
+    }
+
+    #[test]
+    fn h6_3_a_document_pane_is_local_only_whatever_the_tag() {
+        for tag in ["cody-1", "huey", "perri", "scratch"] {
+            let msg = pane_content(tag, document());
+            assert!(
+                matches!(classify_server_msg(&msg), ServerClass::LocalOnly),
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn h6_3_a_document_under_an_ordinary_tag_reaches_local_peers_and_not_a_network_peer() {
+        let tags = SensitiveTags::in_memory();
+        assert!(!tags.tag_is_sensitive("cody-1"), "control: an ordinary tag");
+        let msg = pane_content("cody-1", document());
+
+        assert!(!may_receive(PeerTrust::Tcp, &msg, &tags));
+        assert!(outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none());
+        for trust in [PeerTrust::OperatorApp, PeerTrust::LocalOther] {
+            assert!(may_receive(trust, &msg, &tags), "{trust:?}");
+            assert!(outbound(trust, msg.clone(), &tags).is_some(), "{trust:?}");
+        }
+    }
+
+    #[test]
+    fn h6_3_a_text_pane_under_the_same_tag_still_goes_to_a_network_peer() {
+        let tags = SensitiveTags::in_memory();
+        let msg = pane_content("cody-1", PaneContentWire::Text { text: "hi".into() });
+        assert!(may_receive(PeerTrust::Tcp, &msg, &tags));
+        assert!(outbound(PeerTrust::Tcp, msg, &tags).is_some());
     }
 }

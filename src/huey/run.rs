@@ -51,6 +51,9 @@ pub const FIRST_RUN_DAYS: i64 = 7;
 /// Picks per report, normal and tight (AC6, AC32).
 pub const MAX_PICKS: usize = 5;
 pub const TIGHT_MAX_PICKS: usize = 3;
+/// The longest a regeneration's model pass may take (T13: the whole
+/// regeneration finishes within five minutes, the fetch being skipped).
+pub const REGENERATE_CURATE_LIMIT: StdDuration = StdDuration::from_secs(4 * 60);
 /// In tight mode the model sees every first-party story plus this many others.
 pub const TIGHT_OTHER_CLUSTERS: usize = 40;
 /// The Also-in-the-news rule under critical mode (AC44): the newest eligible
@@ -452,6 +455,7 @@ pub fn assemble_curated_counted(frame: &ReportFrame, publish: &Publish) -> (Repo
                 .get(&p.project)
                 .cloned()
                 .unwrap_or_else(|| model_text(&p.project, 64)),
+            anchors: p.anchors.clone(),
             for_line: model_text(&p.for_line, validate::SENTENCES_CHARS),
             check: match &p.check {
                 PublishCheck::Checked { text, .. } => PickCheck::Checked {
@@ -1077,8 +1081,13 @@ impl Attempt<'_> {
         if trimmed > 0 {
             info!(trimmed, "huey: the model input was trimmed to its budget");
         }
-        let answer =
-            tokio::time::timeout(self.env.limits.curate, self.env.curator.curate(&input)).await;
+        // A regeneration is promised within five minutes (T13): its model
+        // pass gets four at most, whatever the engine's own limit says.
+        let limit = match self.trigger {
+            Trigger::Regenerate => self.env.limits.curate.min(REGENERATE_CURATE_LIMIT),
+            _ => self.env.limits.curate,
+        };
+        let answer = tokio::time::timeout(limit, self.env.curator.curate(&input)).await;
         match answer {
             Ok(Ok(publish)) => {
                 let (report, unknown_ids) = assemble_curated_counted(frame, &publish);

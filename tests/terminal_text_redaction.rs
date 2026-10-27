@@ -2291,40 +2291,87 @@ fn about_a_megabyte(unit: &str) -> String {
     unit.repeat((1 << 20) / unit.len())
 }
 
-/// The bound a megabyte must stay under in a debug build on a busy CI runner.
+/// How the "stays fast" guards decide.
 ///
-/// Measured (RWX sandbox, 4 vCPUs, debug build, one shape at a time):
-/// ordinary text takes 20 ms, the slowest guarded shapes (`curl -u a:b`
-/// followed by a hidden character and a newline, or by a backslash and a
-/// newline) 120-155 ms, every other guarded shape under 100 ms, and the floods
-/// of keyword lines that the redactor gives up reading and redacts whole about
-/// 200 ms. With the machine kept busy (eight spinning threads on the 4 vCPUs,
-/// each test thread getting about half a core) the slowest guarded shape took
-/// 345 ms and the floods 500 ms, so the bound has 2-3x headroom there and 5-7x
-/// on an idle machine. Before the scanners were gated and the views made cheap
-/// the same shapes took 0.4-0.9 s on the idle sandbox and 1.0-2.1 s on the
-/// loaded laptop where the review measured them; the quadratic scans these
-/// guard against took tens of seconds. A shape that creeps toward half the
-/// bound is a regression even though it still passes.
-const FAST_ENOUGH: std::time::Duration = std::time::Duration::from_secs(1);
+/// A wall-clock bound on a megabyte flaked on loaded runners and laptops (the
+/// same shape took 0.2 s on an idle machine and over a second on a busy one),
+/// and what these tests exist to catch is quadratic growth, not a slow machine.
+/// So each guard times the text and four times the text, in CPU time (wall time
+/// charges a test for its neighbours' work), in the same process a moment apart,
+/// and asserts that the larger costs at most `MAX_GROWTH` times as much as the
+/// smaller: linear is 4x, quadratic is 16x, so the limit sits well clear of both.
+/// Each size is timed several times and the fastest run counts, so a load spike
+/// that hits one run does not decide the outcome. `SMALL_FLOOR` stops a tiny,
+/// noisy measurement from making the limit meaninglessly tight, and
+/// `HANG_CEILING` is the one absolute bound: far above anything linear, far below
+/// a quadratic scan of a megabyte (which took tens of seconds).
+///
+/// Both sizes are at least a megabyte on purpose. The redactor reads a group of
+/// rows through several views only while the group fits a budget and redacts the
+/// rest whole, so the cost jumps where the budget ends. Comparing sizes on
+/// opposite sides of it would measure that step, not the growth.
+const MAX_GROWTH: u32 = 9;
+const SMALL_FLOOR: std::time::Duration = std::time::Duration::from_millis(50);
+const HANG_CEILING: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Held while a megabyte is timed: the tests of this file run on parallel
-/// threads, and a runner with few cores would charge each one for its
-/// neighbours' work.
+/// Held while a text is timed: the timed tests of this file never overlap each
+/// other. (Other tests of the file can still run beside them, which is why the
+/// decision is a ratio taken from the fastest of several runs, not a bound.)
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// CPU time this thread has used. Wall time on a busy machine charges a test
+/// for its neighbours' work; this does not, which is what makes a ratio of two
+/// timings taken a moment apart stable under load.
+fn thread_cpu_time() -> std::time::Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid, writable timespec for the whole call.
+    let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    assert_eq!(status, 0, "the thread CPU clock is unavailable");
+    std::time::Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
+
+/// The fewest CPU seconds of `runs` redactions of `text` (it runs on this thread).
+fn fastest_of(runs: usize, text: &str) -> std::time::Duration {
+    (0..runs)
+        .map(|_| {
+            let started = thread_cpu_time();
+            let _ = Redactor::new().redact(text);
+            thread_cpu_time() - started
+        })
+        .min()
+        .expect("at least one run")
+}
+
 fn assert_fast(name: &str, text: &str) {
+    assert_scaling(name, text, &text.repeat(4));
+}
+
+/// `small_text` and `text` are the same shape at one size and about four times it.
+fn assert_scaling(name: &str, small_text: &str, text: &str) {
     let _alone = ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let started = std::time::Instant::now();
-    let _ = Redactor::new().redact(text);
-    let took = started.elapsed();
-    eprintln!("{name}: {} bytes in {took:?}", text.len());
+    let small = fastest_of(3, small_text);
+    let big = fastest_of(2, text);
+    let limit = small.max(SMALL_FLOOR) * MAX_GROWTH;
+    eprintln!(
+        "{name}: {} bytes in {big:?}, {} bytes in {small:?} (limit {limit:?})",
+        text.len(),
+        small_text.len()
+    );
     assert!(
-        took < FAST_ENOUGH,
-        "{name}: {} bytes took {took:?}",
+        big < HANG_CEILING,
+        "{name}: {} bytes took {big:?}",
         text.len()
+    );
+    assert!(
+        big <= limit,
+        "{name}: {} bytes took {big:?} but {} bytes took {small:?}: more than {MAX_GROWTH}x for 4x the text is super-linear",
+        text.len(),
+        small_text.len()
     );
 }
 
@@ -2385,15 +2432,17 @@ fn a_credential_at_the_end_of_a_megabyte_of_pathological_curl_text_is_still_reda
         "curl -u 'a:b'\\\n",
         "curl -u \"a:b\\\n",
     ] {
-        let text = format!("{}\ncurl -u admin:{pw} https://h/x", about_a_megabyte(unit));
-        let alone = ONE_AT_A_TIME
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let started = std::time::Instant::now();
+        // The same shape at two sizes, each ending in the same credential line,
+        // so they differ only in length.
+        let with_credential = |bytes: usize| {
+            format!(
+                "{}\ncurl -u admin:{pw} https://h/x",
+                unit.repeat(bytes / unit.len())
+            )
+        };
+        let text = with_credential(4 << 20);
+        assert_scaling(unit, &with_credential(1 << 20), &text);
         let (out, kinds) = redact(&text);
-        let took = started.elapsed();
-        drop(alone);
-        assert!(took < FAST_ENOUGH, "{unit:?}: took {took:?}");
         assert!(!out.contains(&pw[3..]), "{unit:?}: the password survived");
         assert!(!kinds.is_empty(), "{unit:?}: nothing redacted");
     }
@@ -2897,25 +2946,8 @@ fn a_flood_of_keyword_lines_with_hidden_runs_is_redacted_on_every_line_and_stays
         .collect::<Vec<_>>()
         .join("\n");
     assert_text_is_over_the_old_budget(&text);
-    let (out, kinds, took) = {
-        let _alone = ONE_AT_A_TIME
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let started = std::time::Instant::now();
-        let (out, kinds) = redact(&text);
-        (out, kinds, started.elapsed())
-    };
-    eprintln!(
-        "flood of {} keyword lines: {} bytes in {took:?}",
-        all.len(),
-        text.len()
-    );
-    assert!(
-        took < FAST_ENOUGH,
-        "{} keyword lines ({} bytes) took {took:?}",
-        all.len(),
-        text.len()
-    );
+    assert_fast(&format!("flood of {} keyword lines", all.len()), &text);
+    let (out, kinds) = redact(&text);
     let out_lines: Vec<&str> = out.split('\n').collect();
     assert_eq!(out_lines.len(), all.len(), "the rows were merged or split");
     let failures: Vec<String> = all
