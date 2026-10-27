@@ -312,6 +312,21 @@
       "search_text": "Timeout waiting for the batch lock"
     },
     {
+      "id": "sentry:1007",
+      "source": "sentry",
+      "kind": "issue",
+      "title": "Slow query in the nightly report",
+      "project": "web",
+      "assignee": "unassigned_older",
+      "status": "unresolved",
+      "updated_at": "2026-10-05T08:00:00Z",
+      "metrics": {
+        "events_24h": 0,
+        "users": 1
+      },
+      "search_text": "Slow query in the nightly report"
+    },
+    {
       "id": "jira:CORE-6",
       "source": "jira",
       "kind": "task",
@@ -402,6 +417,7 @@
         "sentry:1004",
         "sentry:1005",
         "sentry:1006",
+        "sentry:1007",
         "jira:CORE-6",
         "todo:6",
         "doc:delta:features/backlog/2026-10-06-export.md",
@@ -439,6 +455,7 @@
         "sentry:1004",
         "sentry:1005",
         "sentry:1006",
+        "sentry:1007",
         "jira:CORE-6",
         "todo:6",
         "doc:delta:features/backlog/2026-10-06-export.md",
@@ -551,6 +568,7 @@
         "sentry:1004",
         "sentry:1005",
         "sentry:1006",
+        "sentry:1007",
         "jira:CORE-6",
         "jira:CORE-7"
       ]
@@ -733,6 +751,7 @@
         "sentry:1004",
         "sentry:1005",
         "sentry:1006",
+        "sentry:1007",
         "jira:CORE-6",
         "todo:6",
         "doc:delta:features/backlog/2026-10-06-export.md",
@@ -1013,7 +1032,8 @@
             "sentry:1001",
             "sentry:1003",
             "sentry:1004",
-            "sentry:1006"
+            "sentry:1006",
+            "sentry:1007"
           ]
         }
       ]
@@ -1168,7 +1188,7 @@
       "facet": "project",
       "expected_counts": {
         "CORE": 5,
-        "web": 3,
+        "web": 4,
         "api": 3,
         "APP": 2
       }
@@ -1215,6 +1235,18 @@
       ]
     },
     {
+      "name": "assignee filter selects the unassigned_older bucket",
+      "op": "filter",
+      "filter": {
+        "assignees": [
+          "unassigned_older"
+        ]
+      },
+      "expected_ids": [
+        "sentry:1007"
+      ]
+    },
+    {
       "name": "assignee counts include other",
       "op": "facet_counts",
       "filter": {
@@ -1226,7 +1258,8 @@
       "expected_counts": {
         "me": 2,
         "unassigned": 2,
-        "other": 2
+        "other": 2,
+        "unassigned_older": 1
       }
     },
     {
@@ -1243,7 +1276,8 @@
         "sentry:1003",
         "sentry:1004",
         "sentry:1005",
-        "sentry:1006"
+        "sentry:1006",
+        "sentry:1007"
       ]
     },
     {
@@ -1260,7 +1294,8 @@
       "expected_ids": [
         "sentry:1001",
         "sentry:1003",
-        "sentry:1005"
+        "sentry:1005",
+        "sentry:1007"
       ]
     },
     {
@@ -1277,7 +1312,8 @@
       "facet": "assignee",
       "expected_counts": {
         "me": 2,
-        "other": 1
+        "other": 1,
+        "unassigned_older": 1
       }
     },
     {
