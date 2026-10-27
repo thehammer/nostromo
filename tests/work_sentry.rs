@@ -349,6 +349,10 @@ impl Fake {
     }
 
     /// Every org-issue-list request seen so far.
+    async fn requests(&self) -> Vec<Request> {
+        self.server.received_requests().await.unwrap_or_default()
+    }
+
     async fn list_requests(&self) -> Vec<Request> {
         self.server
             .received_requests()
@@ -2896,6 +2900,18 @@ async fn mount_detail(server: &MockServer, id: u32, issue: Value, event: Value) 
     mount_latest(server, id, ResponseTemplate::new(200).set_body_json(event)).await;
 }
 
+/// A Sentry whose issue list holds `issue(id)` for each id (so the hub holds them,
+/// as `get_work_item` requires), once the hub has taken them in.
+async fn mount_list_of(server: &MockServer, ids: &[u32]) {
+    Mock::given(method("GET"))
+        .and(path("/api/0/organizations/acme/issues/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            ids.iter().map(|id| issue(*id)).collect::<Vec<_>>(),
+        ))
+        .mount(server)
+        .await;
+}
+
 fn detail_cfg(server: &MockServer, env: &Env) -> SentryConfig {
     env.config(&format!("{}/api/0", server.uri()))
 }
@@ -3402,7 +3418,9 @@ async fn a_hostile_sentry_issue_reaches_agents_as_capped_one_line_entries_inside
     );
     mount_detail(&server, 42, issue, latest_event(vec![frame(0)])).await;
     let env = Env::new(Some(TOKEN));
+    mount_list_of(&server, &[42]).await;
     let (state, _keep) = hub_state_with_sentry(detail_cfg(&server, &env)).await;
+    list_until_sentry(&state, 1).await;
 
     let d = get_work_item(&state, &json!({"id": "sentry:42"})).await;
 
@@ -3491,7 +3509,9 @@ async fn a_sentry_detail_with_tag_characters_and_forged_markers_everywhere_is_sa
     );
     mount_detail(&server, 43, issue, event).await;
     let env = Env::new(Some(TOKEN));
+    mount_list_of(&server, &[43]).await;
     let (state, _keep) = hub_state_with_sentry(detail_cfg(&server, &env)).await;
+    list_until_sentry(&state, 1).await;
 
     let d = get_work_item(&state, &json!({"id": "sentry:43"})).await;
 
@@ -3707,16 +3727,51 @@ async fn get_work_item_for_a_hidden_issue_answers_like_an_unknown_item() {
     list_until_sentry(&state, 3).await;
     let before = fake.list_requests().await.len();
 
-    for id in ["sentry:4", "sentry:5"] {
+    let mut answers = Vec::new();
+    // 4 and 5 are held and hidden; 999 was never held. All three must look the same.
+    for id in ["sentry:4", "sentry:5", "sentry:999"] {
         let d = get_work_item(&state, &json!({"id": id})).await;
         assert_eq!(d["error"], "unknown_item", "{d}");
         assert!(d.get("markdown").is_none(), "nothing about the issue leaks");
+        answers.push(d);
     }
+    assert!(
+        answers.windows(2).all(|w| w[0] == w[1]),
+        "held-and-hidden and never-held are indistinguishable: {answers:?}"
+    );
     assert_eq!(
         fake.list_requests().await.len(),
         before,
-        "a hidden issue is refused before anything is asked of Sentry"
+        "nothing is asked of Sentry for them"
     );
+    assert!(
+        fake.requests().await.iter().all(|r| {
+            let p = r.url.path();
+            !p.contains("/issues/4/") && !p.contains("/issues/5/") && !p.contains("/issues/999/")
+        }),
+        "no detail request reached Sentry for a refused id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_work_item_still_serves_held_issues_that_are_mine_or_unassigned_or_older() {
+    let (fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    for id in 1..=3u32 {
+        mount_detail(
+            &fake.server,
+            id,
+            detail_issue(id, Value::Null),
+            latest_event(vec![frame(0)]),
+        )
+        .await;
+    }
+    list_until_sentry(&state, 3).await;
+
+    // 1 is mine, 2 fresh unassigned, 3 older unassigned.
+    for id in ["sentry:1", "sentry:2", "sentry:3"] {
+        let d = get_work_item(&state, &json!({"id": id})).await;
+        assert!(d.get("error").is_none(), "{id}: {d}");
+    }
 }
 
 fn pick_entries(ids: &[&str]) -> Value {

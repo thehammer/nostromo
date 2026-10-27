@@ -306,7 +306,8 @@ fn list_status(status: &SourceStatus, fence: &NonceFence) -> Value {
 
 /// Handle `teri.get_work_item({id})`: the detail, or `{ error, message }`.
 ///
-/// A Sentry issue hidden from agents answers `unknown_item`, as if it did not exist.
+/// A Sentry issue the hub does not hold, or holds but hides from agents, answers
+/// `unknown_item` without asking Sentry.
 ///
 /// `{ item_id, links, markdown }`. `id` is as `teri.list_work_items` gave it
 /// (escaped; see [`escape_id`]). The title, the field rows, the file list and
@@ -325,8 +326,11 @@ pub async fn get_work_item(state: &McpSharedState, args: &Value) -> Value {
         return json!({ "error": "not_available", "message": "work items are not available in this process" });
     };
     let id = unescape_id(id);
-    // An item an agent may not see answers exactly like one the hub never held.
-    if hub.item(&id).is_some_and(|item| !agent_visible(&item)) {
+    // Fail closed: a Sentry issue is only for an agent when the hub holds it AND it is
+    // visible. One the hub never held (or no longer holds) is not fetched by id from
+    // Sentry, whose answer could not say whether it is assigned to someone else.
+    // Agents only name ids `list_work_items` gave them, so this costs nothing real.
+    if id.starts_with("sentry:") && !hub.item(&id).is_some_and(|item| agent_visible(&item)) {
         return json!({ "error": "unknown_item", "message": "Unknown Sentry issue" });
     }
     match hub.detail(&id).await {
