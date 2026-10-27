@@ -239,7 +239,7 @@ final class TerminalSessionStore {
               !daemonUnavailable.contains(terminalId) else { return }
         // Every window's emulator answers the same output; only the driver's reply reaches the process.
         if autoReply {
-            guard effectiveDriver(of: terminalId) == windowId else { return }
+            if let driver = effectiveDriver(of: terminalId), driver != windowId { return }
         } else {
             takeDriver(of: terminalId, window: windowId)
         }
