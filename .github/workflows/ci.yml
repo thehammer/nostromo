@@ -28,6 +28,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The runner's disk is the limit: `cargo build --all-targets` + clippy + test over ~90 test
+  # binaries with full debuginfo ran it out of space ("No space left on device"). Line tables
+  # keep backtraces readable at a fraction of the size.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   build:
