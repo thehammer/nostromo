@@ -244,6 +244,9 @@ pub struct McpSharedState {
     /// `#[allow(clippy::too_many_arguments)]`), so for the `nostromd`-hosted
     /// server its uptime is effectively daemon uptime.
     pub tool_stats: Arc<ToolStats>,
+
+    /// Live `nostromo-mcp-bridge` connections per pty id.
+    pub bridges: Arc<crate::mcp::BridgeRegistry>,
 }
 
 impl McpSharedState {
@@ -281,6 +284,34 @@ impl McpSharedState {
             rate_limits_rx,
             budget_posture_rx,
             tool_stats: Arc::new(ToolStats::new()),
+            bridges: Arc::new(crate::mcp::BridgeRegistry::default()),
+        }
+    }
+
+    /// A bridge connection for `pty_id` opened. When it is the pty's first live
+    /// one, the app is told its tools are (back) online.
+    pub fn bridge_opened(&self, pty_id: &str) {
+        if self.bridges.open(pty_id) {
+            self.announce_bridge(pty_id, true);
+        }
+    }
+
+    /// A bridge connection for `pty_id` closed. When it was the last one, the
+    /// app is told the pty's tools are offline.
+    pub fn bridge_closed(&self, pty_id: &str) {
+        if self.bridges.close(pty_id) {
+            self.announce_bridge(pty_id, false);
+        }
+    }
+
+    fn announce_bridge(&self, pty_id: &str, connected: bool) {
+        if let Some(daemon) = &self.daemon {
+            let _ = daemon
+                .broadcast_tx
+                .send(crate::ipc::protocol::ServerMsg::SessionBridge {
+                    tag: pty_id.to_owned(),
+                    connected,
+                });
         }
     }
 

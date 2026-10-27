@@ -27,6 +27,8 @@ class PaceBarsView: NSView {
 
     private var cancellables     = Set<AnyCancellable>()
     private var healthView:      SessionHealthStatusView?
+    /// "Tools offline" for the active focus; sits in the bottom-right corner, above the bars.
+    let toolsOfflineBadge = ToolsOfflineBadgeView()
 
     // MARK: - Init
 
@@ -56,6 +58,22 @@ class PaceBarsView: NSView {
         AppStore.shared.$activeFocusAgentTag
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateHealthOrBars() }
+            .store(in: &cancellables)
+
+        toolsOfflineBadge.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(toolsOfflineBadge)
+        NSLayoutConstraint.activate([
+            toolsOfflineBadge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            toolsOfflineBadge.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            // It wraps and shrinks before it can poke out of either edge.
+            toolsOfflineBadge.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4),
+            toolsOfflineBadge.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 2),
+        ])
+        Publishers.CombineLatest(AppStore.shared.$toolsOffline, AppStore.shared.$activeFocusSessionTag)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] offline, active in
+                self?.toolsOfflineBadge.apply(offline: active.map(offline.contains) ?? false)
+            }
             .store(in: &cancellables)
     }
 

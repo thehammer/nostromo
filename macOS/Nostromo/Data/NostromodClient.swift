@@ -172,6 +172,9 @@ enum ServerMsg {
     case sessionTurns(tag: String, turns: [DaemonTurn])
     case sessionTurnDelta(tag: String, delta: DaemonTurnDelta)
     case sessionState(tag: String, state: DaemonSessionState)
+    /// The session's MCP bridge (the process carrying its `mcp__nostromo__*` tools to the daemon)
+    /// connected to, or was lost from, the daemon. Absent from daemons that predate it.
+    case sessionBridge(tag: String, connected: Bool)
     case sessionPermissionRequest(tag: String, requestId: String, tool: String)
     case sessionExited(tag: String, exitCode: Int?)
     /// The session has been permanently stopped and will not auto-restart.
@@ -1518,6 +1521,11 @@ class NostromodClient {
                 return .sessionState(tag: m.tag, state: m.state)
             }
 
+        case "session_bridge":
+            if let m = try? decoder.decode(SessionBridgeResp.self, from: raw) {
+                return .sessionBridge(tag: m.tag, connected: m.connected)
+            }
+
         case "session_permission_request":
             if let m = try? decoder.decode(SessionPermResp.self, from: raw) {
                 return .sessionPermissionRequest(tag: m.tag, requestId: m.request_id, tool: m.tool)
@@ -1944,6 +1952,7 @@ private struct SessionSpawnedResp: Decodable { let tag: String; let session_id: 
 private struct SessionTurnsResp:   Decodable { let tag: String; let turns: [DaemonTurn] }
 private struct SessionTurnDeltaResp: Decodable { let tag: String; let delta: DaemonTurnDelta }
 private struct SessionStateResp:   Decodable { let tag: String; let state: DaemonSessionState }
+private struct SessionBridgeResp:  Decodable { let tag: String; let connected: Bool }
 private struct SessionPermResp:    Decodable { let tag: String; let request_id: String; let tool: String }
 private struct SessionExitedResp:  Decodable { let tag: String; let exit_code: Int? }
 private struct SessionDownResp:          Decodable { let tag: String; let reason: DaemonStopReason }

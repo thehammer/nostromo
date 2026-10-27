@@ -50,6 +50,8 @@
 //! persistence, resets on daemon restart). The tool reports per-tool call
 //! counts and p50/p95/max wall-clock durations plus process uptime.
 
+pub mod bridge;
+pub mod bridge_registry;
 pub mod command;
 pub mod instructions;
 pub mod layout_schema;
@@ -64,6 +66,7 @@ pub mod tool_stats;
 pub mod tools;
 pub mod views;
 
+pub use bridge_registry::BridgeRegistry;
 pub use command::PaneContent;
 pub use server::McpServer;
 pub use socket::{daemon_socket_path, default_socket_path, write_bridge_mcp_config};

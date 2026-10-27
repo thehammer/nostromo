@@ -24,6 +24,10 @@ use crate::mcp::state::McpSharedState;
 ///   "nostromo_version": "0.1.0"
 /// }
 /// ```
+/// The `mcp_bridge_*` fields report this caller's bridge connections (live
+/// count, and reconnects since the daemon started) for debugging a session
+/// whose `mcp__nostromo__*` tools went away.
+///
 /// Before any layout has been assembled for the tag, `pane_ids` collapses to
 /// `["repl"]` and `layout_applied` is `false` — that combination signals "no
 /// layout yet", not "the pane/tool is unavailable".
@@ -82,6 +86,9 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
             "pane_ids": pane_ids,
             "layout_applied": layout_applied,
             "pr_under_review": pr_under_review,
+            "mcp_bridge_connected": state.bridges.live(tag) > 0,
+            "mcp_bridge_connections": state.bridges.live(tag),
+            "mcp_bridge_reconnects": state.bridges.reconnects(tag),
             "nostromo_version": env!("CARGO_PKG_VERSION"),
         });
     }
@@ -116,6 +123,9 @@ pub async fn handle(state: &McpSharedState, pty_id: Option<&str>) -> Value {
         "pty_id": pty_id,
         "session_id": session_id,
         "pane_ids": pane_ids,
+        "mcp_bridge_connected": state.bridges.live(pty_id) > 0,
+        "mcp_bridge_connections": state.bridges.live(pty_id),
+        "mcp_bridge_reconnects": state.bridges.reconnects(pty_id),
         "nostromo_version": env!("CARGO_PKG_VERSION"),
     })
 }

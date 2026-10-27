@@ -558,6 +558,13 @@ async fn main() -> Result<()> {
                 },
             );
 
+            // The session manager reads the same bridge registry the MCP server
+            // writes, so session lists and attaches can report "tools offline".
+            session_mgr
+                .lock()
+                .unwrap()
+                .configure_bridge_registry(Arc::clone(&state.bridges));
+
             // ── Pane-source liveness (live-pane-sources) ────────────────────────
             // D8: a (re)connecting client is never left staring at an
             // assembled-but-empty workspace — server.rs replays this alongside

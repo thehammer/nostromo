@@ -733,6 +733,7 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::SessionTurns { tag, .. }
         | ServerMsg::SessionTurnDelta { tag, .. }
         | ServerMsg::SessionState { tag, .. }
+        | ServerMsg::SessionBridge { tag, .. }
         | ServerMsg::SessionExited { tag, .. }
         | ServerMsg::SessionDown { tag, .. }
         | ServerMsg::SessionSummaryUpdate { tag, .. }
@@ -1654,6 +1655,7 @@ mod tests {
             remote_control: false,
             state: SessionState::Idle,
             stop_reason: None,
+            mcp_bridge_connected: None,
         };
         let tags = tags_with("cody-core-1");
         let ServerMsg::SessionListResp { sessions } = redact_for_network(
@@ -4430,6 +4432,7 @@ mod huey_surface_tests {
             remote_control: false,
             state: SessionState::Idle,
             stop_reason: None,
+            mcp_bridge_connected: None,
         };
         let tags = SensitiveTags::in_memory();
         let ServerMsg::SessionListResp { sessions } = redact_for_network(
