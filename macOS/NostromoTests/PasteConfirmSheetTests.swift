@@ -23,13 +23,22 @@ final class PasteConfirmSheetTests: XCTestCase {
         var refused = 0
     }
 
+    /// Set by the sheet's completion handler: the sheet has been dismissed.
+    private final class Dismissal {
+        var done = false
+    }
+
     private struct Rig {
         let parent: NSWindow
         let sheet: PasteConfirmSheet
         let sheetWindow: NSWindow
         let calls: Calls
-        /// Fulfilled when the sheet has been dismissed.
-        let ended: XCTestExpectation
+        let dismissal: Dismissal
+    }
+
+    private func waitUntil(_ condition: @escaping () -> Bool, timeout: TimeInterval = 5) {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
+        wait(for: [expectation], timeout: timeout)
     }
 
     // MARK: Harness
@@ -51,11 +60,10 @@ final class PasteConfirmSheetTests: XCTestCase {
         let sheet = PasteConfirmSheet(lines: lines, preview: preview, targetText: target,
                                       onPaste: { calls.pasted += 1 }, onRefused: { calls.refused += 1 })
         let sheetWindow = sheet.window!
-        let ended = expectation(description: "the sheet is dismissed")
-        ended.assertForOverFulfill = false
-        parent.beginSheet(sheetWindow) { _ in ended.fulfill() }
+        let dismissal = Dismissal()
+        parent.beginSheet(sheetWindow) { _ in dismissal.done = true }
         XCTAssertTrue(parent.attachedSheet === sheetWindow, "the sheet is up")
-        return Rig(parent: parent, sheet: sheet, sheetWindow: sheetWindow, calls: calls, ended: ended)
+        return Rig(parent: parent, sheet: sheet, sheetWindow: sheetWindow, calls: calls, dismissal: dismissal)
     }
 
     private func buttons(in view: NSView) -> [NSButton] {
@@ -83,7 +91,8 @@ final class PasteConfirmSheetTests: XCTestCase {
     }
 
     private func assertSheetDismissedWithoutPasting(_ rig: Rig, file: StaticString = #filePath, line: UInt = #line) {
-        wait(for: [rig.ended], timeout: 5)
+        waitUntil { rig.dismissal.done }
+        XCTAssertTrue(rig.dismissal.done, "the sheet was dismissed", file: file, line: line)
         XCTAssertNil(rig.parent.attachedSheet, "the sheet is gone", file: file, line: line)
         XCTAssertEqual(rig.calls.pasted, 0, "nothing was pasted", file: file, line: line)
         XCTAssertEqual(rig.calls.refused, 0, "cancelling is not a refusal", file: file, line: line)
@@ -108,39 +117,52 @@ final class PasteConfirmSheetTests: XCTestCase {
     }
 
     // MARK: Return never pastes
+    //
+    // Once a sheet is attached, AppKit moves the "\r" key equivalent from the button into the window's
+    // `defaultButtonCell`, and that cell is what the window clicks when Return reaches a key window. A
+    // non-key off-screen window does not run key equivalents, so `defaultButtonCell.performClick` is the
+    // stand-in for Return.
 
-    func testReturnCancelsAndNeverPastes() throws {
+    func testReturnClicksTheDefaultButtonWhichIsCancelAndNeverPastes() throws {
         let rig = presentSheet()
-        let handled = rig.sheetWindow.performKeyEquivalent(with: returnKey(in: rig.sheetWindow))
-        XCTAssertTrue(handled, "Return is handled by the sheet: it is the default (Cancel) button")
+        let cancel = try button("paste-confirm-cancel", in: rig)
+        let defaultCell = try XCTUnwrap(rig.sheetWindow.defaultButtonCell, "the sheet has a default button")
+        XCTAssertTrue(defaultCell === cancel.cell, "the default (Return) button is Cancel")
+        defaultCell.performClick(nil)
         assertSheetDismissedWithoutPasting(rig)
     }
 
-    func testTheKeypadEnterKeyDoesNotPasteEither() throws {
+    func testReturnAndKeypadEnterKeyEventsNeverPaste() throws {
         let rig = presentSheet()
+        _ = rig.sheetWindow.performKeyEquivalent(with: returnKey(in: rig.sheetWindow))
         _ = rig.sheetWindow.performKeyEquivalent(with: returnKey(in: rig.sheetWindow, characters: "\u{3}", keyCode: 76))
         XCTAssertEqual(rig.calls.pasted, 0)
         XCTAssertEqual(rig.calls.refused, 0)
     }
 
-    func testCancelIsTheOnlyButtonWithAReturnKeyEquivalent() throws {
-        let rig = presentSheet()
-        let cancel = try button("paste-confirm-cancel", in: rig)
+    func testBeforeItIsShownCancelHasTheReturnKeyEquivalentAndNothingElseDoes() throws {
+        let calls = Calls()
+        let sheet = PasteConfirmSheet(lines: 2, preview: "a\nb", targetText: "REMOTE shell",
+                                      onPaste: { calls.pasted += 1 }, onRefused: { calls.refused += 1 })
+        let all = buttons(in: sheet.window!.contentView!)
+        let cancel = try XCTUnwrap(all.first { $0.accessibilityIdentifier() == "paste-confirm-cancel" })
+        let paste = try XCTUnwrap(all.first { $0.accessibilityIdentifier() == "paste-confirm-paste" })
         XCTAssertEqual(cancel.keyEquivalent, "\r", "Cancel is the default button")
-        for other in buttons(in: rig.sheetWindow.contentView!) where other !== cancel {
-            XCTAssertFalse(["\r", "\u{3}"].contains(other.keyEquivalent),
-                           "\(other.accessibilityIdentifier()) answers Return")
+        XCTAssertEqual(paste.keyEquivalent, "", "Paste has no key equivalent")
+        for other in all where other !== cancel {
+            XCTAssertTrue(other.keyEquivalent.isEmpty || other.keyEquivalent == "\u{1b}",
+                          "\(other.accessibilityIdentifier()) has key equivalent \(other.keyEquivalent.debugDescription)")
         }
     }
 
-    func testPasteHasNoKeyEquivalent() throws {
-        let rig = presentSheet()
-        XCTAssertEqual(try button("paste-confirm-paste", in: rig).keyEquivalent, "")
-    }
-
-    func testNoButtonOtherThanCancelAndTheHiddenEscapeHasAKeyEquivalent() throws {
+    func testOnceShownTheDefaultButtonIsCancelAndNeverPaste() throws {
         let rig = presentSheet()
         let cancel = try button("paste-confirm-cancel", in: rig)
+        let paste = try button("paste-confirm-paste", in: rig)
+        let defaultCell = try XCTUnwrap(rig.sheetWindow.defaultButtonCell)
+        XCTAssertTrue(defaultCell === cancel.cell)
+        XCTAssertFalse(defaultCell === paste.cell)
+        XCTAssertEqual(paste.keyEquivalent, "")
         for other in buttons(in: rig.sheetWindow.contentView!) where other !== cancel {
             XCTAssertTrue(other.keyEquivalent.isEmpty || other.keyEquivalent == "\u{1b}",
                           "\(other.accessibilityIdentifier()) has key equivalent \(other.keyEquivalent.debugDescription)")
@@ -187,7 +209,7 @@ final class PasteConfirmSheetTests: XCTestCase {
         let rig = presentSheet()
         try button("paste-confirm-paste", in: rig).performClick(nil)
         try button("paste-confirm-cancel", in: rig).performClick(nil)
-        wait(for: [rig.ended], timeout: 5)
+        waitUntil { rig.dismissal.done }
         XCTAssertEqual(rig.calls.pasted, 0)
         XCTAssertEqual(rig.calls.refused, 1)
         XCTAssertNil(rig.parent.attachedSheet)

@@ -274,12 +274,25 @@ final class RemotePasteGateTests: XCTestCase {
 
     func testReturnNeverSends() throws {
         describe(kind: .ecs, target: production)
+        let window = makeWindow()
+        submit("a\nb", window: window)
+        let sheetWindow = try XCTUnwrap(gate.pasteConfirm?.window)
+        // Return in a key window clicks the window's default button, which is Cancel.
+        let defaultCell = try XCTUnwrap(sheetWindow.defaultButtonCell, "the sheet has a default button")
+        XCTAssertTrue(defaultCell === sheetButton("paste-confirm-cancel")?.cell)
+        defaultCell.performClick(nil)
+        waitUntil { self.gate.pasteConfirm == nil && window.attachedSheet == nil }
+        XCTAssertNil(gate.pasteConfirm)
+        XCTAssertEqual(sendCount, 0)
+        XCTAssertEqual(refusals.count, 0)
+    }
+
+    func testReturnKeyEventsNeverSend() throws {
+        describe(kind: .ecs, target: production)
         submit("a\nb", window: makeWindow())
         let sheetWindow = try XCTUnwrap(gate.pasteConfirm?.window)
         _ = sheetWindow.performKeyEquivalent(with: GestureFixtures.key(in: sheetWindow, characters: "\r", keyCode: 36))
-        waitUntil { self.gate.pasteConfirm == nil }
         XCTAssertEqual(sendCount, 0)
-        XCTAssertEqual(refusals.count, 0)
     }
 
     func testEscapeNeverSends() throws {
