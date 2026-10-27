@@ -1016,6 +1016,18 @@ final class TerminalSessionStoreTests: XCTestCase {
         XCTAssertNil(store.terminals["t-gone"])
     }
 
+    func testATerminalMissingFromTheListAndTheClosedListIsForgottenAndPublished() {
+        state(info("t-lost", pane: "terminal-lost"))
+        var changes: [TerminalChange] = []
+        let cancel = store.changes.sink { changes.append($0) }
+        defer { cancel.cancel() }
+
+        store.ingest(.terminalList(TerminalListFrame(terminals: [info("t1", pane: "terminal-a")])))
+
+        XCTAssertNil(store.terminals["t-lost"])
+        XCTAssertTrue(changes.contains(.availability(daemonReachable: true)), "\(changes)")
+    }
+
     func testAListedTerminalIsAttachedToItsViewLikeAStateFrame() {
         store.connectionChanged(true)
         store.register(sink(), tag: "core-1", paneId: "terminal-a")
