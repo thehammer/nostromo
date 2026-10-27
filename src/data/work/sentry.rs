@@ -4,9 +4,11 @@
 //! `GET {base}/organizations/{org}/issues/`, in this order:
 //!
 //! 1. **Mine**: unresolved issues assigned to the user (90 d, bucket `me`);
-//! 2. **fresh unassigned**: unassigned error/fatal issues last seen within 24 h;
+//! 2. **fresh unassigned**: unassigned error/fatal issues last seen within 24 h
+//!    (bucket `unassigned`);
 //! 3. **recent** (the app's "All"): every unresolved issue seen in the last
-//!    14 days, assigned to anyone or to nobody;
+//!    14 days. Unassigned ones not already found by search 2 get bucket
+//!    `unassigned_older`; ones assigned to a user or a team get `other`;
 //! 4. **production marker**: the same search as 3 restricted to the
 //!    `production` environment. It adds no rows; it only marks listed issues.
 //!
@@ -105,10 +107,8 @@ fn production_truncated_reason() -> String {
 /// What a search contributes.
 #[derive(Clone, Copy, PartialEq)]
 enum Role {
-    /// Adds rows, all in the `me` bucket.
-    Mine,
-    /// Adds rows; the bucket follows `assignedTo`.
-    Listed,
+    /// Adds rows, all in the given bucket.
+    Rows(Bucket),
     /// Adds no rows: marks listed issues as seen in production.
     ProductionMarker,
 }
@@ -136,6 +136,9 @@ struct Search {
 /// `WorkItem::assignee` values. The client turns them into the Mine / Unassigned / All toggle.
 pub const ASSIGNEE_ME: &str = "me";
 pub const ASSIGNEE_UNASSIGNED: &str = "unassigned";
+/// Unassigned, but not in the fresh unassigned error list: older than 24 h
+/// and/or below error level. Only the recent (All) search produces it.
+pub const ASSIGNEE_UNASSIGNED_OLDER: &str = "unassigned_older";
 /// Assigned to another user or to a team.
 pub const ASSIGNEE_OTHER: &str = "other";
 
@@ -148,21 +151,21 @@ const SEARCHES: [Search; 4] = [
         query: "is:unresolved assigned:me",
         stats_period: "90d",
         environment: None,
-        role: Role::Mine,
+        role: Role::Rows(Bucket::Fixed(ASSIGNEE_ME)),
         cut: Cut::Assignment,
     },
     Search {
         query: "is:unresolved is:unassigned level:[error,fatal] lastSeen:-24h",
         stats_period: "24h",
         environment: None,
-        role: Role::Listed,
+        role: Role::Rows(Bucket::Fixed(ASSIGNEE_UNASSIGNED)),
         cut: Cut::Assignment,
     },
     Search {
         query: "is:unresolved",
         stats_period: RECENT_WINDOW,
         environment: None,
-        role: Role::Listed,
+        role: Role::Rows(Bucket::NullIs(ASSIGNEE_UNASSIGNED_OLDER)),
         cut: Cut::Recent,
     },
     Search {
@@ -899,11 +902,7 @@ async fn fetch_issues(
                         }
                         None => unreadable += 1,
                     },
-                    Role::Mine | Role::Listed => {
-                        let bucket = match search.role {
-                            Role::Mine => Bucket::Fixed(ASSIGNEE_ME),
-                            _ => Bucket::FromIssue,
-                        };
+                    Role::Rows(bucket) => {
                         match to_item(issue, repos, bucket) {
                             Some(item) => {
                                 parsed += 1;
@@ -1009,19 +1008,19 @@ fn issue_id(issue: &Value) -> Option<String> {
 }
 
 /// Where an item's assignee bucket comes from.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Bucket {
     Fixed(&'static str),
-    /// `assignedTo`: null or missing is unassigned, anything else (a user or a team) is someone else.
-    FromIssue,
+    /// `assignedTo`: null or missing gets the given bucket, anything else (a user or a team) is `other`.
+    NullIs(&'static str),
 }
 
 impl Bucket {
     fn of(self, issue: &Value) -> &'static str {
         match self {
             Bucket::Fixed(bucket) => bucket,
-            Bucket::FromIssue if issue["assignedTo"].is_null() => ASSIGNEE_UNASSIGNED,
-            Bucket::FromIssue => ASSIGNEE_OTHER,
+            Bucket::NullIs(bucket) if issue["assignedTo"].is_null() => bucket,
+            Bucket::NullIs(_) => ASSIGNEE_OTHER,
         }
     }
 }

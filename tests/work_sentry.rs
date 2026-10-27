@@ -927,7 +927,8 @@ async fn all_also_lists_unresolved_issues_assigned_to_others_teams_or_nobody() {
     assert_eq!(assignee_of(&first, "sentry:1").as_deref(), Some("me"));
     assert_eq!(
         assignee_of(&first, "sentry:2").as_deref(),
-        Some("unassigned")
+        Some("unassigned_older"),
+        "unassigned, but not in the fresh error list"
     );
     assert_eq!(assignee_of(&first, "sentry:3").as_deref(), Some("other"));
     assert_eq!(
@@ -937,6 +938,38 @@ async fn all_also_lists_unresolved_issues_assigned_to_others_teams_or_nobody() {
     );
     assert!(first.0.complete, "{:?}", first.0);
     assert_eq!(first.0.reason, None);
+}
+
+#[tokio::test]
+async fn a_recent_only_issue_assigned_to_nobody_is_unassigned_older_not_unassigned() {
+    let (_f, _e, _rx, _r, first) =
+        fresh_source_all(vec![], issues(1..=1), vec![issue(2)], vec![]).await;
+    assert_eq!(
+        assignee_of(&first, "sentry:1").as_deref(),
+        Some("unassigned"),
+        "the fresh unassigned search keeps the old meaning"
+    );
+    assert_eq!(
+        assignee_of(&first, "sentry:2").as_deref(),
+        Some("unassigned_older")
+    );
+}
+
+#[tokio::test]
+async fn an_issue_in_both_the_fresh_unassigned_and_recent_searches_stays_unassigned() {
+    // Both rows say "assignedTo: null"; the earlier search decides the bucket.
+    let (_f, _e, _rx, _r, first) =
+        fresh_source_all(vec![], issues(1..=1), vec![issue(1), issue(2)], vec![]).await;
+    assert_eq!(sorted_ids(&first), ids_of(1..=2), "each appears once");
+    assert_eq!(first.0.count, 2);
+    assert_eq!(
+        assignee_of(&first, "sentry:1").as_deref(),
+        Some("unassigned")
+    );
+    assert_eq!(
+        assignee_of(&first, "sentry:2").as_deref(),
+        Some("unassigned_older")
+    );
 }
 
 #[tokio::test]
@@ -1082,7 +1115,7 @@ async fn a_production_mark_does_not_change_who_the_issue_is_assigned_to() {
     assert_eq!(assignee_of(&first, "sentry:1").as_deref(), Some("other"));
     assert_eq!(
         assignee_of(&first, "sentry:2").as_deref(),
-        Some("unassigned")
+        Some("unassigned_older")
     );
     assert_eq!(
         environment_of(&first, "sentry:1").as_deref(),

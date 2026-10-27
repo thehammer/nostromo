@@ -146,7 +146,9 @@ pub struct WorkItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
     /// Sentry: who the issue is assigned to, as a bucket: `"me"`, `"unassigned"`
-    /// (`assignedTo` is null) or `"other"` (assigned to another user or a team).
+    /// (a fresh unassigned error/fatal issue, last 24 h), `"unassigned_older"`
+    /// (`assignedTo` is null but not in that fresh list: older and/or below error
+    /// level) or `"other"` (assigned to another user or a team).
     /// Other sources leave it unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
