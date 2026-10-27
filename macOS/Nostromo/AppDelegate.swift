@@ -620,9 +620,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         }
     }
 
+    private static func terminalPanes(in view: NSView?) -> [TerminalPaneHostView] {
+        guard let view else { return [] }
+        if let pane = view as? TerminalPaneHostView { return [pane] }
+        return view.subviews.flatMap { terminalPanes(in: $0) }
+    }
+
     @objc private func windowWillClose(_ notification: Notification) {
         guard let win = notification.object as? NostromoWindow else { return }
         windows.removeAll { $0 === win }
+        if qaExtraWindows.contains(where: { $0 === win }) {
+            qaExtraWindows.removeAll { $0 === win }
+            // Closing does not detach the content view, so its terminal views never see
+            // `viewDidMoveToWindow(nil)`: unregister them so the driver is re-elected.
+            Self.terminalPanes(in: win.contentView).forEach { TerminalSessionStore.shared.unregister($0) }
+        }
         TeriSentryTab.tracker.flush()
         let closedUUIDs = windowsByDisplayUUID.filter { $0.value === win }.map(\.key)
         for uuid in closedUUIDs {

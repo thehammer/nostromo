@@ -30,7 +30,7 @@ use crate::mcp::tools::apply_layout::{source_content_kind, source_is_known, Appl
 
 /// The `content_kind` names a `PaneSpec` may declare — one per
 /// `PaneContentWire` variant.
-const VALID_CONTENT_KINDS: [&str; 9] = [
+const VALID_CONTENT_KINDS: [&str; 10] = [
     "text",
     "json_snapshot",
     "pr_list",
@@ -40,6 +40,7 @@ const VALID_CONTENT_KINDS: [&str; 9] = [
     "diff",
     "pr_conversation",
     "ticket",
+    "document",
 ];
 
 /// A named, declarative pane layout: a tree shape plus per-pane data bindings.
@@ -653,13 +654,14 @@ panes:
     }
 
     #[test]
-    fn valid_content_kinds_has_exactly_nine_entries_including_ticket() {
+    fn valid_content_kinds_has_exactly_ten_entries_including_ticket_and_document() {
         assert_eq!(
             VALID_CONTENT_KINDS.len(),
-            9,
+            10,
             "adding/removing a content kind must be a deliberate, counted change"
         );
         assert!(VALID_CONTENT_KINDS.contains(&"ticket"));
+        assert!(VALID_CONTENT_KINDS.contains(&"document"));
     }
 
     #[test]
@@ -697,6 +699,64 @@ panes:
     content_kind: text
 "#;
         let err = parse(yaml).unwrap_err();
+        assert_eq!(err, ApplyLayoutError::InvalidContentKind);
+    }
+}
+// ── H6-4: the document content kind ──────────────────────────────────────────
+
+#[cfg(test)]
+mod huey_document_kind_tests {
+    use super::*;
+
+    fn layout(source: &str, kind: &str) -> String {
+        format!(
+            r#"
+name: huey-test
+tree:
+  direction: vertical
+  ratios: [0.6, 0.4]
+  children:
+    - pane: report
+    - pane: repl
+panes:
+  report:
+    source: {source}
+    content_kind: {kind}
+"#
+        )
+    }
+
+    #[test]
+    fn h6_4_document_is_a_valid_content_kind() {
+        assert!(content_kind_is_valid("document"));
+    }
+
+    #[test]
+    fn h6_4_both_huey_sources_validate_as_documents() {
+        for source in ["huey.report", "huey.context"] {
+            let schema = parse(&layout(source, "document"))
+                .unwrap_or_else(|e| panic!("{source} as a document must validate: {e:?}"));
+            assert_eq!(schema.panes["report"].content_kind, "document");
+        }
+    }
+
+    #[test]
+    fn h6_4_a_huey_source_declared_with_another_content_kind_is_rejected() {
+        for source in ["huey.report", "huey.context"] {
+            for kind in ["text", "json_snapshot", "pr_conversation"] {
+                let err = parse(&layout(source, kind)).unwrap_err();
+                assert_eq!(
+                    err,
+                    ApplyLayoutError::InvalidContentKind,
+                    "{source} as {kind}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn h6_4_a_document_kind_on_a_source_that_does_not_produce_one_is_rejected() {
+        let err = parse(&layout("perri.list_pr_queue", "document")).unwrap_err();
         assert_eq!(err, ApplyLayoutError::InvalidContentKind);
     }
 }

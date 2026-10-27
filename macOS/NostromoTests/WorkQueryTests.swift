@@ -169,6 +169,41 @@ final class WorkQueryTests: XCTestCase {
         XCTAssertEqual(WorkSortKey(rawValue: "newest"), .newest)
     }
 
+    // MARK: Facet totals
+
+    func testFacetCountsAndTotalCountsItemsWithoutAValue() {
+        func issue(_ n: Int, environment: String?, assignee: String) -> WorkItem {
+            var f: [String: Any] = ["id": "sentry:\(n)", "source": "sentry", "kind": "issue",
+                                    "title": "Issue \(n)", "search_text": "Issue \(n)", "assignee": assignee]
+            if let environment { f["environment"] = environment }
+            return WorkTestSupport.makeItem(f)
+        }
+        let items = [
+            issue(1, environment: "production", assignee: "me"),
+            issue(2, environment: nil, assignee: "me"),
+            issue(3, environment: "production", assignee: "unassigned"),
+            issue(4, environment: nil, assignee: "other"),
+        ]
+
+        let all = WorkQuery.facetCountsAndTotal(items, filter: WorkFilter(), facet: .environment)
+        XCTAssertEqual(all.counts, ["production": 2])
+        XCTAssertEqual(all.total, 4, "the total includes the two issues with no environment")
+
+        var mine = WorkFilter(); mine.assignees = ["me"]
+        let withMine = WorkQuery.facetCountsAndTotal(items, filter: mine, facet: .environment)
+        XCTAssertEqual(withMine.counts, ["production": 1], "the other filters still apply")
+        XCTAssertEqual(withMine.total, 2)
+
+        var production = WorkFilter(); production.environments = ["production"]
+        let ignoringItsOwn = WorkQuery.facetCountsAndTotal(items, filter: production, facet: .environment)
+        XCTAssertEqual(ignoringItsOwn.counts, ["production": 2], "a facet ignores its own filter")
+        XCTAssertEqual(ignoringItsOwn.total, 4)
+
+        XCTAssertEqual(WorkQuery.facetCounts(items, filter: mine, facet: .environment), withMine.counts,
+                       "facetCounts is the counts half of the pair")
+        XCTAssertEqual(WorkQuery.facetCountsAndTotal(items, filter: WorkFilter(), facet: .assignee).total, 4)
+    }
+
     // MARK: Search ergonomics beyond the shared fixture
 
     func testFilteringNeverChangesInputOrderOrDropsItemsForAnEmptyFilter() throws {

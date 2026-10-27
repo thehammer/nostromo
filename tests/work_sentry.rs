@@ -29,9 +29,10 @@ use nostromo::data::work::hub::{HubDeps, SourceUpdate, WorkHub};
 use nostromo::data::work::sentry::{
     detail_with, spawn_with, Clock, SentryConfig, FRESHNESS_WINDOW, MAX_HOLD, MAX_ISSUES_PER_QUERY,
 };
+use nostromo::data::work::WorkService;
 use nostromo::data::work::{SourceState, WorkDetail, WorkItem, WorkSource};
 use nostromo::ipc::protocol::ServerMsg;
-use nostromo::mcp::tools::teri::{get_work_item, list_work_items};
+use nostromo::mcp::tools::teri::{get_picks, get_work_item, list_work_items, publish_picks};
 use nostromo::mcp::McpSharedState;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -92,6 +93,10 @@ impl TestClock {
 enum Kind {
     Assigned,
     Unassigned,
+    /// `is:unresolved` over 14 days, no environment: the All list.
+    Recent,
+    /// `is:unresolved` over 14 days with `environment=production`: marks only.
+    Production,
 }
 
 /// A successful response that says "no quota left until `reset`".
@@ -122,6 +127,8 @@ struct State {
     base: String,
     assigned: Vec<Value>,
     unassigned: Vec<Value>,
+    recent: Vec<Value>,
+    production: Vec<Value>,
     page_size: usize,
     mode: Mode,
     /// When set, only this bearer token is accepted (others get 401).
@@ -135,11 +142,17 @@ struct State {
 
 struct Issues(Arc<Mutex<State>>);
 
-fn kind_of(query: &str) -> Kind {
-    if query.contains("is:unassigned") {
+/// Which of the four searches a request is: the environment wins, then the
+/// assignment words in the query; anything else is the plain recent search.
+fn kind_of(query: &str, environment: Option<&str>) -> Kind {
+    if environment == Some("production") {
+        Kind::Production
+    } else if query.contains("is:unassigned") {
         Kind::Unassigned
-    } else {
+    } else if query.contains("assigned:me") {
         Kind::Assigned
+    } else {
+        Kind::Recent
     }
 }
 
@@ -207,7 +220,7 @@ impl Respond for Issues {
         }
 
         let query = param("query").unwrap_or_default();
-        let kind = kind_of(&query);
+        let kind = kind_of(&query, param("environment").as_deref());
         let offset: usize = param("cursor")
             .and_then(|c| c.split(':').nth(1).and_then(|o| o.parse().ok()))
             .unwrap_or(0);
@@ -216,10 +229,11 @@ impl Respond for Issues {
             return ResponseTemplate::new(*status).set_body_string("boom");
         }
 
-        let mut all: Vec<Value> = if kind == Kind::Assigned {
-            st.assigned.clone()
-        } else {
-            st.unassigned.clone()
+        let mut all: Vec<Value> = match kind {
+            Kind::Assigned => st.assigned.clone(),
+            Kind::Unassigned => st.unassigned.clone(),
+            Kind::Recent => st.recent.clone(),
+            Kind::Production => st.production.clone(),
         };
         if st.honour_stats_period {
             let period = param("statsPeriod").and_then(|p| parse_period(&p));
@@ -294,6 +308,8 @@ impl Fake {
             base: format!("{}/api/0", server.uri()),
             assigned,
             unassigned,
+            recent: Vec::new(),
+            production: Vec::new(),
             page_size: 100,
             mode: Mode::Ok,
             required_token: None,
@@ -333,6 +349,10 @@ impl Fake {
     }
 
     /// Every org-issue-list request seen so far.
+    async fn requests(&self) -> Vec<Request> {
+        self.server.received_requests().await.unwrap_or_default()
+    }
+
     async fn list_requests(&self) -> Vec<Request> {
         self.server
             .received_requests()
@@ -347,6 +367,11 @@ impl Fake {
     }
 }
 
+/// The requests (first pages and cursor pages) that were this search.
+fn requests_of(reqs: &[Request], kind: Kind) -> Vec<&Request> {
+    reqs.iter().filter(|r| kind_of_request(r) == kind).collect()
+}
+
 fn qp(r: &Request, name: &str) -> Option<String> {
     r.url
         .query_pairs()
@@ -355,7 +380,10 @@ fn qp(r: &Request, name: &str) -> Option<String> {
 }
 
 fn kind_of_request(r: &Request) -> Kind {
-    kind_of(&qp(r, "query").unwrap_or_default())
+    kind_of(
+        &qp(r, "query").unwrap_or_default(),
+        qp(r, "environment").as_deref(),
+    )
 }
 
 // ── builders & helpers ────────────────────────────────────────────────────────
@@ -408,6 +436,24 @@ fn issue_seen(id: u32, last_seen: DateTime<Utc>) -> Value {
 fn with(mut v: Value, key: &str, val: Value) -> Value {
     v[key] = val;
     v
+}
+
+/// The issue as the list shows one assigned to a person.
+fn assigned_to(v: Value, user: &str) -> Value {
+    with(
+        v,
+        "assignedTo",
+        json!({"type": "user", "id": "7", "name": user}),
+    )
+}
+
+/// The issue as the list shows one assigned to a team.
+fn assigned_to_team(v: Value) -> Value {
+    with(
+        v,
+        "assignedTo",
+        json!({"type": "team", "id": "3", "name": "backend"}),
+    )
 }
 
 fn issues(ids: std::ops::RangeInclusive<u32>) -> Vec<Value> {
@@ -630,6 +676,34 @@ async fn fresh_source_paged(
     (fake, env, rx, refresh, first)
 }
 
+/// As [`fresh_source`] with all four searches given their own issues: Mine,
+/// fresh unassigned, recent (All) and the production marker.
+async fn fresh_source_all(
+    assigned: Vec<Value>,
+    unassigned: Vec<Value>,
+    recent: Vec<Value>,
+    production: Vec<Value>,
+) -> (
+    Fake,
+    Env,
+    watch::Receiver<SourceUpdate>,
+    Arc<Notify>,
+    SourceUpdate,
+) {
+    let fake = Fake::start(assigned, unassigned).await;
+    fake.set(|s| {
+        s.recent = recent;
+        s.production = production;
+    });
+    let env = Env::new(Some(TOKEN));
+    let (mut rx, refresh) = start(env.config(&base_of(&fake)));
+    let first = wait_for(&mut rx, "first fetch", |u| {
+        matches!(u.0.state, SourceState::Fresh | SourceState::Empty)
+    })
+    .await;
+    (fake, env, rx, refresh, first)
+}
+
 async fn fresh_source_with_token(
     token: &str,
     assigned: Vec<Value>,
@@ -703,6 +777,7 @@ async fn it_asks_sentry_for_both_queries_with_the_bearer_token() {
         assert_eq!(qp(r, "project").as_deref(), Some("-1"));
         assert_eq!(qp(r, "groupStatsPeriod").as_deref(), Some("24h"));
         assert_eq!(qp(r, "limit").as_deref(), Some("100"));
+        assert_eq!(qp(r, "sort").as_deref(), Some("date"));
         assert_eq!(
             r.headers.get("authorization").and_then(|v| v.to_str().ok()),
             Some(format!("Bearer {TOKEN}").as_str())
@@ -713,16 +788,38 @@ async fn it_asks_sentry_for_both_queries_with_the_bearer_token() {
 #[tokio::test]
 async fn assigned_issues_are_asked_for_over_90_days_and_unassigned_over_24_hours() {
     // Enough of each that every query follows a cursor: the scope has to ride
-    // along on the paged requests too.
-    let (fake, _e, _rx, _r, _first) = fresh_source(issues(1..=150), issues(1001..=1150)).await;
+    // along on the paged requests too. The recent and production searches
+    // (14 days) are given issues as well, so their requests are checked here.
+    let (fake, _e, _rx, _r, _first) = fresh_source_all(
+        issues(1..=150),
+        issues(1001..=1150),
+        issues(2001..=2150),
+        issues(2001..=2150),
+    )
+    .await;
     let reqs = fake.list_requests().await;
     assert!(
         reqs.iter().any(|r| qp(r, "cursor").is_some()),
         "the test needs paged requests"
     );
+    for kind in [
+        Kind::Assigned,
+        Kind::Unassigned,
+        Kind::Recent,
+        Kind::Production,
+    ] {
+        let paged = requests_of(&reqs, kind)
+            .into_iter()
+            .any(|r| qp(r, "cursor").is_some());
+        assert!(paged, "{kind:?}: the test needs a paged request");
+    }
     for r in &reqs {
         let kind = kind_of_request(r);
-        let want = if kind == Kind::Assigned { "90d" } else { "24h" };
+        let want = match kind {
+            Kind::Assigned => "90d",
+            Kind::Unassigned => "24h",
+            Kind::Recent | Kind::Production => "14d",
+        };
         assert_eq!(
             qp(r, "statsPeriod").as_deref(),
             Some(want),
@@ -796,6 +893,418 @@ async fn a_manual_refresh_fetches_immediately() {
         sorted_ids(u) == ids_of(1..=2)
     })
     .await;
+}
+
+// ── the All scope: recent unresolved issues whoever they are assigned to ──────
+
+const RECENT_REASON_PART: &str =
+    "All shows the 300 most recently seen unresolved issues from the last 14 days; Sentry has more.";
+const PRODUCTION_REASON_PART: &str =
+    "Production marks cover the 300 most recently seen production issues; older issues may be missing from Production.";
+const TRUNCATED_REASON_PART: &str =
+    "Showing the first 300 issues per search; Sentry has more. Narrow the search in Sentry to see the rest.";
+
+fn environment_of(u: &SourceUpdate, id: &str) -> Option<String> {
+    item(u, id).environment
+}
+
+fn assignee_of(u: &SourceUpdate, id: &str) -> Option<String> {
+    item(u, id).assignee
+}
+
+#[tokio::test]
+async fn all_also_lists_unresolved_issues_assigned_to_others_teams_or_nobody() {
+    // 1 is also mine, 2 is assigned to nobody, 3 to another person, 4 to a team.
+    let recent = vec![
+        issue(1),
+        issue(2),
+        assigned_to(issue(3), "Pat"),
+        assigned_to_team(issue(4)),
+    ];
+    let (_f, _e, _rx, _r, first) = fresh_source_all(issues(1..=1), vec![], recent, vec![]).await;
+    assert_eq!(first.0.state, SourceState::Fresh);
+    assert_eq!(
+        sorted_ids(&first),
+        ids_of(1..=4),
+        "the union of Mine and recent"
+    );
+    assert_eq!(first.0.count, 4);
+    assert_eq!(assignee_of(&first, "sentry:1").as_deref(), Some("me"));
+    assert_eq!(
+        assignee_of(&first, "sentry:2").as_deref(),
+        Some("unassigned_older"),
+        "unassigned, but not in the fresh error list"
+    );
+    assert_eq!(assignee_of(&first, "sentry:3").as_deref(), Some("other"));
+    assert_eq!(
+        assignee_of(&first, "sentry:4").as_deref(),
+        Some("other"),
+        "a team is not nobody"
+    );
+    assert!(first.0.complete, "{:?}", first.0);
+    assert_eq!(first.0.reason, None);
+}
+
+#[tokio::test]
+async fn a_recent_only_issue_assigned_to_nobody_is_unassigned_older_not_unassigned() {
+    let (_f, _e, _rx, _r, first) =
+        fresh_source_all(vec![], issues(1..=1), vec![issue(2)], vec![]).await;
+    assert_eq!(
+        assignee_of(&first, "sentry:1").as_deref(),
+        Some("unassigned"),
+        "the fresh unassigned search keeps the old meaning"
+    );
+    assert_eq!(
+        assignee_of(&first, "sentry:2").as_deref(),
+        Some("unassigned_older")
+    );
+}
+
+#[tokio::test]
+async fn an_issue_in_both_the_fresh_unassigned_and_recent_searches_stays_unassigned() {
+    // Both rows say "assignedTo: null"; the earlier search decides the bucket.
+    let (_f, _e, _rx, _r, first) =
+        fresh_source_all(vec![], issues(1..=1), vec![issue(1), issue(2)], vec![]).await;
+    assert_eq!(sorted_ids(&first), ids_of(1..=2), "each appears once");
+    assert_eq!(first.0.count, 2);
+    assert_eq!(
+        assignee_of(&first, "sentry:1").as_deref(),
+        Some("unassigned")
+    );
+    assert_eq!(
+        assignee_of(&first, "sentry:2").as_deref(),
+        Some("unassigned_older")
+    );
+}
+
+#[tokio::test]
+async fn an_issue_returned_by_several_searches_keeps_the_bucket_of_the_first() {
+    // 1: in Mine, and recent shows it assigned to someone else.
+    // 2: in fresh unassigned, and recent shows it assigned to someone else.
+    // 3: only in recent, assigned to someone else.
+    let recent = vec![
+        assigned_to(issue(1), "Pat"),
+        assigned_to(issue(2), "Pat"),
+        assigned_to(issue(3), "Pat"),
+    ];
+    let (_f, _e, _rx, _r, first) =
+        fresh_source_all(issues(1..=1), issues(2..=2), recent, vec![]).await;
+    assert_eq!(sorted_ids(&first), ids_of(1..=3), "each appears once");
+    assert_eq!(first.0.count, 3);
+    assert_eq!(
+        assignee_of(&first, "sentry:1").as_deref(),
+        Some("me"),
+        "mine wins over recent"
+    );
+    assert_eq!(
+        assignee_of(&first, "sentry:2").as_deref(),
+        Some("unassigned"),
+        "fresh unassigned wins over recent"
+    );
+    assert_eq!(assignee_of(&first, "sentry:3").as_deref(), Some("other"));
+}
+
+#[tokio::test]
+async fn the_recent_search_asks_for_unresolved_issues_over_14_days_sorted_by_last_seen() {
+    // 150 issues: the cursor request has to carry the same parameters.
+    let (fake, _e, _rx, _r, _first) =
+        fresh_source_all(vec![], vec![], issues(1..=150), vec![]).await;
+    let reqs = fake.list_requests().await;
+
+    // Every `is:unresolved` request is the recent search or the production
+    // marker; only the marker names an environment.
+    let plain: Vec<&Request> = reqs
+        .iter()
+        .filter(|r| qp(r, "query").as_deref() == Some("is:unresolved"))
+        .collect();
+    let (marker, recent): (Vec<&Request>, Vec<&Request>) = plain
+        .into_iter()
+        .partition(|r| qp(r, "environment").is_some());
+    assert_eq!(
+        marker.len(),
+        1,
+        "the production search has no issues: one request"
+    );
+    assert_eq!(
+        recent.len(),
+        2,
+        "150 issues at 100 a page: a first page and a cursor page"
+    );
+    assert!(
+        recent.iter().any(|r| qp(r, "cursor").is_some()),
+        "the test needs a paged request"
+    );
+    for r in recent {
+        assert_eq!(qp(r, "statsPeriod").as_deref(), Some("14d"));
+        assert_eq!(qp(r, "sort").as_deref(), Some("date"));
+        assert_eq!(qp(r, "project").as_deref(), Some("-1"));
+        assert_eq!(qp(r, "groupStatsPeriod").as_deref(), Some("24h"));
+        assert_eq!(qp(r, "limit").as_deref(), Some("100"));
+        assert_eq!(qp(r, "environment"), None, "cursor {:?}", qp(r, "cursor"));
+    }
+}
+
+#[tokio::test]
+async fn the_production_search_asks_with_environment_production() {
+    let (fake, _e, _rx, _r, _first) =
+        fresh_source_all(vec![], vec![], issues(1..=150), issues(1..=150)).await;
+    let reqs = fake.list_requests().await;
+    let production: Vec<&Request> = reqs
+        .iter()
+        .filter(|r| qp(r, "environment").is_some())
+        .collect();
+    assert_eq!(
+        production.len(),
+        2,
+        "150 issues at 100 a page: a first page and a cursor page"
+    );
+    assert!(
+        production.iter().any(|r| qp(r, "cursor").is_some()),
+        "the test needs a paged request"
+    );
+    for r in production {
+        assert_eq!(qp(r, "environment").as_deref(), Some("production"));
+        assert_eq!(qp(r, "query").as_deref(), Some("is:unresolved"));
+        assert_eq!(qp(r, "statsPeriod").as_deref(), Some("14d"));
+        assert_eq!(qp(r, "sort").as_deref(), Some("date"));
+        assert_eq!(qp(r, "project").as_deref(), Some("-1"));
+        assert_eq!(qp(r, "groupStatsPeriod").as_deref(), Some("24h"));
+        assert_eq!(qp(r, "limit").as_deref(), Some("100"));
+    }
+}
+
+#[tokio::test]
+async fn production_marks_tag_listed_issues_and_never_add_rows() {
+    // 1 and 2 come from Mine, 3 and 4 from recent. Production names 1 (listed
+    // by Mine), 3 (listed by recent) and 99 (listed by no search).
+    let (_f, _e, _rx, _r, first) = fresh_source_all(
+        issues(1..=2),
+        vec![],
+        issues(3..=4),
+        vec![issue(1), issue(3), issue(99)],
+    )
+    .await;
+    assert_eq!(first.0.state, SourceState::Fresh);
+    assert_eq!(
+        sorted_ids(&first),
+        ids_of(1..=4),
+        "an issue only the production search knows is not listed"
+    );
+    assert_eq!(first.0.count, 4);
+    assert_eq!(
+        environment_of(&first, "sentry:1").as_deref(),
+        Some("production")
+    );
+    assert_eq!(
+        environment_of(&first, "sentry:3").as_deref(),
+        Some("production")
+    );
+    assert_eq!(environment_of(&first, "sentry:2"), None);
+    assert_eq!(environment_of(&first, "sentry:4"), None);
+    assert!(
+        first.0.complete && first.0.reason.is_none(),
+        "{:?}",
+        first.0
+    );
+}
+
+#[tokio::test]
+async fn a_production_mark_does_not_change_who_the_issue_is_assigned_to() {
+    let (_f, _e, _rx, _r, first) = fresh_source_all(
+        vec![],
+        vec![],
+        vec![assigned_to(issue(1), "Pat"), issue(2)],
+        vec![issue(1), issue(2)],
+    )
+    .await;
+    assert_eq!(assignee_of(&first, "sentry:1").as_deref(), Some("other"));
+    assert_eq!(
+        assignee_of(&first, "sentry:2").as_deref(),
+        Some("unassigned_older")
+    );
+    assert_eq!(
+        environment_of(&first, "sentry:1").as_deref(),
+        Some("production")
+    );
+}
+
+#[tokio::test]
+async fn the_recent_search_is_capped_at_300_with_its_own_reason_and_the_list_is_not_complete() {
+    let (_f, _e, _rx, _r, first) =
+        fresh_source_all(issues(1..=5), vec![], issues(1001..=1400), vec![]).await;
+    assert_eq!(first.0.state, SourceState::Fresh);
+    let mut expected = ids_of(1..=5);
+    expected.extend(ids_of(1001..=1300));
+    expected.sort();
+    assert_eq!(
+        sorted_ids(&first),
+        expected,
+        "5 assigned to me plus the first 300 recent"
+    );
+    let reason = reason_of(&first);
+    assert!(reason.contains("300"), "{reason:?}");
+    assert!(reason.to_lowercase().contains("more"), "{reason:?}");
+    assert!(
+        reason.contains("All"),
+        "it says which view is cut: {reason:?}"
+    );
+    assert!(
+        !reason.contains("Production"),
+        "the production search was not cut: {reason:?}"
+    );
+    assert!(
+        !reason.contains("per search"),
+        "Mine and fresh unassigned were not cut: {reason:?}"
+    );
+    assert!(
+        !first.0.complete,
+        "absence from All means nothing: {:?}",
+        first.0
+    );
+}
+
+#[tokio::test]
+async fn a_capped_production_search_says_production_may_be_incomplete() {
+    // Recent holds 301 issues, so it is cut at 300 (1..=300) as well, and
+    // issue 301 is listed only because Mine has it. The production search
+    // holds the same 301, so it is cut at the same place: the marks cover
+    // 1..=300 and the listed 301st is not marked even though production has it.
+    let (_f, _e, _rx, _r, first) =
+        fresh_source_all(issues(301..=301), vec![], issues(1..=301), issues(1..=301)).await;
+    assert_eq!(first.0.state, SourceState::Fresh);
+    assert_eq!(sorted_ids(&first), ids_of(1..=301));
+    let reason = reason_of(&first);
+    assert!(
+        reason.contains("Production"),
+        "production says it may be incomplete: {reason:?}"
+    );
+    assert!(
+        reason.contains("All"),
+        "the recent search was cut too: {reason:?}"
+    );
+    assert!(!first.0.complete, "{:?}", first.0);
+
+    let marked: Vec<String> = items(&first)
+        .into_iter()
+        .filter(|i| i.environment.as_deref() == Some("production"))
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(marked.len(), 300, "only the first 300 production issues");
+    assert_eq!(
+        environment_of(&first, "sentry:300").as_deref(),
+        Some("production")
+    );
+    assert_eq!(
+        environment_of(&first, "sentry:301"),
+        None,
+        "the 301st production issue is beyond the cap"
+    );
+}
+
+#[tokio::test]
+async fn a_production_search_cut_alone_still_says_so() {
+    // Recent holds only 5, production 301: only the marker is cut.
+    let (_f, _e, _rx, _r, first) =
+        fresh_source_all(vec![], vec![], issues(1..=5), issues(1..=301)).await;
+    assert_eq!(first.0.state, SourceState::Fresh);
+    assert_eq!(sorted_ids(&first), ids_of(1..=5));
+    let reason = reason_of(&first);
+    assert!(reason.contains("Production"), "{reason:?}");
+    assert!(!reason.contains("All shows"), "{reason:?}");
+    assert!(!first.0.complete);
+    assert_eq!(
+        environment_of(&first, "sentry:5").as_deref(),
+        Some("production")
+    );
+}
+
+#[tokio::test]
+async fn when_every_cut_applies_the_reasons_come_in_order_joined_by_a_space() {
+    let (_f, _e, _rx, _r, first) = fresh_source_all(
+        issues(1..=400),
+        vec![],
+        issues(1001..=1400),
+        issues(1001..=1400),
+    )
+    .await;
+    assert_eq!(first.0.state, SourceState::Fresh);
+    assert_eq!(
+        reason_of(&first),
+        format!("{TRUNCATED_REASON_PART} {RECENT_REASON_PART} {PRODUCTION_REASON_PART}")
+    );
+    assert!(!first.0.complete);
+}
+
+#[tokio::test]
+async fn it_follows_cursors_on_the_recent_search() {
+    let (fake, _e, _rx, _r, first) =
+        fresh_source_all(vec![], vec![], issues(1..=250), vec![]).await;
+    assert_eq!(first.0.state, SourceState::Fresh);
+    assert_eq!(sorted_ids(&first), ids_of(1..=250));
+    assert_eq!(first.0.count, 250);
+    assert_eq!(first.0.reason, None, "under the cap: nothing was left out");
+    let reqs = fake.list_requests().await;
+    assert_eq!(
+        requests_of(&reqs, Kind::Recent).len(),
+        3,
+        "250 issues at 100 a page"
+    );
+}
+
+#[tokio::test]
+async fn running_out_of_quota_on_the_recent_search_holds_the_rest_of_the_round() {
+    let fake = Fake::start(issues(1..=2), vec![]).await;
+    let env = Env::new(Some(TOKEN));
+    let reset = (env.clock.now() + chrono::Duration::seconds(1800)).timestamp();
+    fake.set(|s| {
+        s.recent = issues(11..=160);
+        s.production = issues(11..=20);
+        s.rate_limit = Some(RateLimit {
+            reset,
+            kind: Some(Kind::Recent),
+            page: Some(0),
+        })
+    });
+    let (mut rx, _r) = start(env.config(&base_of(&fake)));
+    let u = wait_state(&mut rx, SourceState::RateLimited).await;
+    let retry_at = u.0.retry_at.expect("retry_at is the reset time");
+    assert!(
+        (retry_at.timestamp() - reset).abs() <= 1,
+        "retry_at {retry_at} vs reset {reset}"
+    );
+    tokio::time::sleep(SETTLE).await;
+    let reqs = fake.list_requests().await;
+    assert!(
+        requests_of(&reqs, Kind::Production).is_empty(),
+        "no request after the hold: {:?}",
+        reqs.iter().map(|r| r.url.to_string()).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn one_round_makes_one_first_page_request_per_search() {
+    let (fake, _e, _rx, _r, first) =
+        fresh_source_all(issues(1..=1), issues(2..=2), issues(3..=4), issues(3..=3)).await;
+    assert_eq!(first.0.state, SourceState::Fresh);
+    let reqs = fake.list_requests().await;
+    assert_eq!(
+        reqs.len(),
+        4,
+        "four searches, each small enough for one page: {:?}",
+        reqs.iter().map(|r| r.url.to_string()).collect::<Vec<_>>()
+    );
+    assert!(reqs.iter().all(|r| qp(r, "cursor").is_none()));
+    let order: Vec<Kind> = reqs.iter().map(kind_of_request).collect();
+    assert_eq!(
+        order,
+        vec![
+            Kind::Assigned,
+            Kind::Unassigned,
+            Kind::Recent,
+            Kind::Production
+        ],
+        "mine, fresh unassigned, recent, then the production marker"
+    );
 }
 
 // ── truncation ────────────────────────────────────────────────────────────────
@@ -1152,9 +1661,11 @@ async fn level_becomes_priority_and_severity() {
 // ── environment ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn list_items_never_carry_an_environment() {
+async fn list_payload_fields_never_become_the_environment() {
     // The list endpoint does not document `environments` or `tags`; if a
     // payload carried them anyway, they must not become the item's environment.
+    // Only the production marker search sets one (the production search is
+    // empty here, so nothing is marked).
     let documented = issue(1);
     let with_environments = with(issue(2), "environments", json!(["production"]));
     let with_tags = with(
@@ -1566,7 +2077,8 @@ async fn detail_of_a_body_that_is_not_that_issue_is_an_error() {
     }
 }
 
-/// A source whose final request of every fetch says "no quota until `reset`".
+/// A source whose final request of every fetch (the production search) says
+/// "no quota until `reset`".
 /// The fetch itself succeeds. The timer is short on purpose: it must not
 /// override the hold.
 async fn source_with_exhausted_quota(
@@ -1578,7 +2090,7 @@ async fn source_with_exhausted_quota(
     fake.set(|s| {
         s.rate_limit = Some(RateLimit {
             reset,
-            kind: Some(Kind::Unassigned),
+            kind: Some(Kind::Production),
             page: None,
         })
     });
@@ -1823,6 +2335,8 @@ fn partial_failures() -> Vec<(&'static str, Kind, usize)> {
         ("page 2 of the first query", Kind::Assigned, 1),
         ("first page of the second query", Kind::Unassigned, 0),
         ("second page of the second query", Kind::Unassigned, 1),
+        ("first page of the recent query", Kind::Recent, 0),
+        ("first page of the production query", Kind::Production, 0),
     ]
 }
 
@@ -1856,6 +2370,8 @@ async fn a_failure_part_way_through_a_later_fetch_keeps_the_previous_list_intact
         fake.set(|s| {
             s.assigned = issues(2001..=2150);
             s.unassigned = issues(3001..=3150);
+            s.recent = issues(4001..=4150);
+            s.production = issues(5001..=5150);
             s.fail_at.push((kind, page, 500));
         });
         refresh.notify_one();
@@ -2384,6 +2900,19 @@ async fn mount_detail(server: &MockServer, id: u32, issue: Value, event: Value) 
     mount_latest(server, id, ResponseTemplate::new(200).set_body_json(event)).await;
 }
 
+/// A Sentry whose issue list holds `issue(id)` for each id (so the hub holds them,
+/// as `get_work_item` requires), once the hub has taken them in.
+async fn mount_list_of(server: &MockServer, ids: &[u32]) {
+    Mock::given(method("GET"))
+        .and(path("/api/0/organizations/acme/issues/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(ids.iter().map(|id| issue(*id)).collect::<Vec<_>>()),
+        )
+        .mount(server)
+        .await;
+}
+
 fn detail_cfg(server: &MockServer, env: &Env) -> SentryConfig {
     env.config(&format!("{}/api/0", server.uri()))
 }
@@ -2890,7 +3419,9 @@ async fn a_hostile_sentry_issue_reaches_agents_as_capped_one_line_entries_inside
     );
     mount_detail(&server, 42, issue, latest_event(vec![frame(0)])).await;
     let env = Env::new(Some(TOKEN));
+    mount_list_of(&server, &[42]).await;
     let (state, _keep) = hub_state_with_sentry(detail_cfg(&server, &env)).await;
+    list_until_sentry(&state, 1).await;
 
     let d = get_work_item(&state, &json!({"id": "sentry:42"})).await;
 
@@ -2979,7 +3510,9 @@ async fn a_sentry_detail_with_tag_characters_and_forged_markers_everywhere_is_sa
     );
     mount_detail(&server, 43, issue, event).await;
     let env = Env::new(Some(TOKEN));
+    mount_list_of(&server, &[43]).await;
     let (state, _keep) = hub_state_with_sentry(detail_cfg(&server, &env)).await;
+    list_until_sentry(&state, 1).await;
 
     let d = get_work_item(&state, &json!({"id": "sentry:43"})).await;
 
@@ -3114,6 +3647,192 @@ async fn list_until_sentry(state: &McpSharedState, n: usize) -> Value {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+// ── agents never see issues assigned to others ────────────────────────────────
+
+/// 1 is mine, 2 is fresh unassigned, 3 is older unassigned, 4 is assigned to a
+/// person, 5 to a team. The Sentry source holds all five; an agent may see 1-3.
+async fn hub_with_mixed_assignees() -> (Fake, McpSharedState, HubKeepAlive, Env) {
+    let fake = Fake::start(issues(1..=1), issues(2..=2)).await;
+    fake.set(|s| {
+        s.recent = vec![
+            issue(1),
+            issue(2),
+            issue(3),
+            assigned_to(issue(4), "Pat"),
+            assigned_to_team(issue(5)),
+        ];
+    });
+    let env = Env::new(Some(TOKEN));
+    let (state, keep) = hub_state_with_sentry(env.config(&base_of(&fake))).await;
+    (fake, state, keep, env)
+}
+
+fn listed_ids(result: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = result["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_work_items_leaves_out_sentry_issues_assigned_to_others_but_keeps_mine_and_unassigned()
+{
+    let (_fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    let result = list_until_sentry(&state, 3).await;
+
+    assert_eq!(
+        listed_ids(&result),
+        ["sentry:1", "sentry:2", "sentry:3"],
+        "me, unassigned and unassigned_older stay; the person's and the team's issues go"
+    );
+    assert_eq!(result["total"], 3, "hidden issues are not counted either");
+    assert!(
+        result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i.get("assignee").is_none()),
+        "the bucket itself is never exposed"
+    );
+    // The hub (and so the Sentry tab) still holds all five.
+    let held = state
+        .work_hub
+        .as_ref()
+        .unwrap()
+        .items(&nostromo::data::work::query::WorkFilter::default());
+    assert_eq!(held.len(), 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paging_the_list_never_counts_or_skips_over_hidden_issues() {
+    let (_fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    list_until_sentry(&state, 3).await;
+
+    let page = list_work_items(&state, &json!({"source": "sentry", "limit": 2}));
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(page["total"], 3);
+    let rest = list_work_items(
+        &state,
+        &json!({"source": "sentry", "limit": 2, "offset": 2}),
+    );
+    assert_eq!(rest["items"].as_array().unwrap().len(), 1, "{rest}");
+    assert_eq!(rest["total"], 3);
+    assert!(rest.get("omitted").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_work_item_for_a_hidden_issue_answers_like_an_unknown_item() {
+    let (fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    list_until_sentry(&state, 3).await;
+    let before = fake.list_requests().await.len();
+
+    let mut answers = Vec::new();
+    // 4 and 5 are held and hidden; 999 was never held. All three must look the same.
+    for id in ["sentry:4", "sentry:5", "sentry:999"] {
+        let d = get_work_item(&state, &json!({"id": id})).await;
+        assert_eq!(d["error"], "unknown_item", "{d}");
+        assert!(d.get("markdown").is_none(), "nothing about the issue leaks");
+        answers.push(d);
+    }
+    assert!(
+        answers.windows(2).all(|w| w[0] == w[1]),
+        "held-and-hidden and never-held are indistinguishable: {answers:?}"
+    );
+    assert_eq!(
+        fake.list_requests().await.len(),
+        before,
+        "nothing is asked of Sentry for them"
+    );
+    assert!(
+        fake.requests().await.iter().all(|r| {
+            let p = r.url.path();
+            !p.contains("/issues/4/") && !p.contains("/issues/5/") && !p.contains("/issues/999/")
+        }),
+        "no detail request reached Sentry for a refused id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_work_item_still_serves_held_issues_that_are_mine_or_unassigned_or_older() {
+    let (fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    for id in 1..=3u32 {
+        mount_detail(
+            &fake.server,
+            id,
+            detail_issue(id, Value::Null),
+            latest_event(vec![frame(0)]),
+        )
+        .await;
+    }
+    list_until_sentry(&state, 3).await;
+
+    // 1 is mine, 2 fresh unassigned, 3 older unassigned.
+    for id in ["sentry:1", "sentry:2", "sentry:3"] {
+        let d = get_work_item(&state, &json!({"id": id})).await;
+        assert!(d.get("error").is_none(), "{id}: {d}");
+    }
+}
+
+fn pick_entries(ids: &[&str]) -> Value {
+    json!({"picks": ids.iter().map(|id| json!({"item_id": id, "reason": "Worth a look today."})).collect::<Vec<_>>()})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pick_of_a_hidden_issue_is_refused_like_an_unknown_id() {
+    let (_fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    list_until_sentry(&state, 3).await;
+
+    let hidden = publish_picks(&state, &pick_entries(&["sentry:1", "sentry:2", "sentry:4"]));
+    let unknown = publish_picks(
+        &state,
+        &pick_entries(&["sentry:1", "sentry:2", "sentry:999"]),
+    );
+    assert_eq!(hidden["error"], "invalid_picks", "{hidden}");
+    assert_eq!(unknown["error"], "invalid_picks", "{unknown}");
+    assert_eq!(
+        hidden["message"],
+        unknown["message"]
+            .as_str()
+            .unwrap()
+            .replace("sentry:999", "sentry:4"),
+        "same refusal, naming only the id the agent sent"
+    );
+
+    // Mine, fresh unassigned and older unassigned issues can be picked.
+    let ok = publish_picks(&state, &pick_entries(&["sentry:1", "sentry:2", "sentry:3"]));
+    assert_eq!(ok["ok"], true, "{ok}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_picked_issue_that_becomes_hidden_is_not_reported_as_done() {
+    let (fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    list_until_sentry(&state, 3).await;
+    let ok = publish_picks(&state, &pick_entries(&["sentry:1", "sentry:2", "sentry:3"]));
+    assert_eq!(ok["ok"], true, "{ok}");
+
+    // Someone takes issue 3: still unresolved and listed, just no longer the agents'.
+    fake.set(|s| s.recent[2] = assigned_to(issue(3), "Pat"));
+    let hub = state.work_hub.as_ref().unwrap();
+    hub.refresh(Some(WorkSource::Sentry), false).await.unwrap();
+    list_until_sentry(&state, 2).await;
+
+    let picks = get_picks(&state);
+    let three = picks["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["item_id"] == "sentry:3")
+        .expect("the pick is kept");
+    assert_eq!(
+        three["done_since"], false,
+        "hiding an issue from agents is not the work being done: {picks}"
+    );
 }
 
 // ── the token never leaks ─────────────────────────────────────────────────────

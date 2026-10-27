@@ -2281,6 +2281,53 @@ async fn h5_7_the_run_session_is_refused_every_other_tool() {
 }
 
 #[tokio::test]
+async fn h5_7_the_run_session_reaches_only_its_two_tools_across_every_huey_tool_name() {
+    let (_root, state) = bare_state();
+    // Every huey.* tool the daemon lists, from the unfiltered list.
+    let all: Vec<String> = names_for(&state, None)
+        .await
+        .into_iter()
+        .filter(|n| n.starts_with("huey."))
+        .collect();
+    for known in [
+        "huey.get_state",
+        "huey.get_report",
+        "huey.get_context",
+        "huey.list_reports",
+        "huey.get_item",
+        "huey.show",
+        "huey.regenerate",
+        "huey.record_verdict",
+        "huey.trial_summary",
+        "huey.check_project",
+        "huey.publish_report",
+    ] {
+        assert!(all.iter().any(|n| n == known), "{known} is not listed");
+    }
+
+    let offered = names_for(&state, Some(HUEY_RUN_TAG)).await;
+    for tool in &all {
+        let allowed = HUEY_RUN_TOOLS.contains(&tool.as_str());
+        assert_eq!(
+            offered.contains(tool),
+            allowed,
+            "{tool}: listed to the run session"
+        );
+        let r = dispatch(tool, Some(&json!({})), &state, Some(HUEY_RUN_TAG)).await;
+        assert_eq!(
+            matches!(r, ToolResult::Forbidden(_)),
+            !allowed,
+            "{tool}: dispatched for the run session (allowed: {allowed})"
+        );
+    }
+    assert_eq!(
+        HUEY_RUN_TOOLS,
+        ["huey.check_project", "huey.publish_report"],
+        "the allowed set is exactly these two"
+    );
+}
+
+#[tokio::test]
 async fn h5_7_nobody_but_the_run_session_can_publish_a_report() {
     let (_root, state) = bare_state();
     let args = serde_json::to_value(publish_of(&[1], None)).unwrap();

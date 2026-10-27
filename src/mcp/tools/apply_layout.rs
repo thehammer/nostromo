@@ -157,6 +157,13 @@ pub(crate) const SOURCE_PR_CONVERSATION: &str = "perri.get_pr_conversation";
 /// other sync-path caller already applies.
 pub(crate) const SOURCE_TICKET: &str = "nostromo.get_ticket";
 
+/// Huey's report pane (a `document`): today's report, or the one named by
+/// `params {date, version}`. Served by the daemon with no agent turn; absent
+/// while Huey is off.
+pub(crate) const SOURCE_HUEY_REPORT: &str = crate::huey::HueyPane::REPORT_SOURCE;
+/// Huey's context pane (a `document`): the digest behind the report.
+pub(crate) const SOURCE_HUEY_CONTEXT: &str = crate::huey::HueyPane::CONTEXT_SOURCE;
+
 /// Every source that renders whatever PR the daemon currently has under
 /// review, and therefore goes empty exactly when nothing is under review.
 /// `pane_sources.rs`'s `pr_rx` arm iterates this to re-push all three on a
@@ -191,6 +198,8 @@ const KNOWN_SOURCES: &[&str] = &[
     SOURCE_FILE,
     SOURCE_PR_CONVERSATION,
     SOURCE_TICKET,
+    SOURCE_HUEY_REPORT,
+    SOURCE_HUEY_CONTEXT,
 ];
 
 /// True when `source` is in the closed fetcher registry.
@@ -224,6 +233,7 @@ pub(crate) fn source_content_kind(source: &str) -> Option<&'static str> {
         SOURCE_FILE => Some("code"),
         SOURCE_PR_CONVERSATION => Some("pr_conversation"),
         SOURCE_TICKET => Some("ticket"),
+        SOURCE_HUEY_REPORT | SOURCE_HUEY_CONTEXT => Some("document"),
         _ => None,
     }
 }
@@ -469,6 +479,13 @@ pub(crate) fn fetch(
                 .get(provider, key)
                 .ok_or(ApplyLayoutError::FetchFailed)?;
             ticket_content(&ticket, params)
+        }
+        SOURCE_HUEY_REPORT | SOURCE_HUEY_CONTEXT => {
+            // Reads only what Huey already wrote: no run, no fetch, no model.
+            let pane = crate::huey::HueyPane::from_source(source)
+                .ok_or(ApplyLayoutError::UnknownSource)?;
+            let huey = state.huey.as_ref().ok_or(ApplyLayoutError::UnknownSource)?;
+            Ok(huey.pane_document(pane, args.params).into_wire())
         }
         _ => Err(ApplyLayoutError::UnknownSource),
     }

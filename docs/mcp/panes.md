@@ -924,6 +924,51 @@ most one HTTP request per window, not one per repaint.
 
 ---
 
+## `document` — daemon-rendered documents (Huey)
+
+```json
+{
+  "kind": "document",
+  "title": "Huey, Mon Oct 26, 2026 (v2)",
+  "banner": { "level": "info", "text": "This is the report from Sunday, Oct 25, 2026. ..." },
+  "blocks": [ /* MdBlock, as for pr_conversation */ ],
+  "actions": [ { "id": "report.prev", "label": "Earlier", "primary": false } ]
+}
+```
+
+`banner` (level `info` or `warning`) and `actions` are omitted when absent. `title` always carries the date of what is shown. `blocks` are built server-side like every other markdown surface. A client opens only `https:` links and `nostromo-action:<id>` links (inline actions) and ignores every other scheme. The kind is additive: `PROTOCOL_VERSION` stays 4 and an older client decodes it as `unknown`.
+
+Produced by two daemon sources, painted with no agent turn (including the attach replay, with no `Loading` frame), repainted whenever Huey's state changes (the `HueyView` watch) and every 30 s (the missing-report banner depends on the clock):
+
+| Source | Shows |
+|---|---|
+| `huey.report` | Params `{ date?, version? }`; none means "current": today's latest version, else the setup document (not set up), else the latest earlier report with a banner saying why today's is missing. |
+| `huey.context` | The digest behind a report, same params. Digest lines are escaped: they can never become a link or an action. |
+
+A `Document` frame is local-only (`ServerClass::LocalOnly`) whichever focus it is bound in, and a session a network peer is steering may not bind `huey.report` or `huey.context` (as it may not bind a ticket): the digest holds personal notes and idea titles.
+
+Both are in `KNOWN_SOURCES` with content kind `document`, so persisted bindings survive a restart with Huey disabled; while it is disabled the sources are `unknown_source` for `refresh_pane_content` and `apply_layout`, and bound panes are neither repainted nor replayed.
+
+### The `huey` focus
+
+The daemon seeds the built-in `huey` focus with a `tabs` region `huey` (`report` "Report", `context` "Context") above the REPL, 0.62 / 0.38, and binds `report` to `huey.report` and `context` to `huey.context`. A persisted tree that still holds both panes is never overridden (only missing bindings are added). `huey.show` with `compare` adds a `compare` pane beside `report`.
+
+### `PaneAction`
+
+`ClientMsg::PaneAction { tag, pane_id, action_id, operator_nonce }` is a click on a button or `nostromo-action:` link of a `document` pane. It is handled like `ClaudeLoginAction`: **operator app only**, with the connection's nonce and a fresh peer check; anyone else gets an error with no content and nothing happens. It is refused for network peers. The daemon routes it to Huey when the pane is bound to a `huey.*` source of an enabled Huey, and answers with `ServerMsg::PaneActionResult { tag, pane_id, action_id, ok, message?, open_url? }` (`unknown_action` otherwise). The Mac opens `open_url` only if it is `https:` or a `file:` URL inside `~/.nostromo/huey/`.
+
+| Action id | Effect |
+|---|---|
+| `setup.start`, `setup.rescan` | Read the context in memory (nothing is written) and show projects with their "how it runs" lines, the sources and the interests status. |
+| `setup.open_interests` | Writes the draft interests file if missing (four sections), replies with its `file:` URL. |
+| `setup.import_interests` | Copies `~/.claude/huey/interests.md` into Huey's folder, when present. |
+| `setup.confirm`, `setup.confirm_run_now` | Confirms setup (needs an interests file with a "What I care about" bullet; writes default `sources.toml`); the second also starts the first run. |
+| `report.prev`, `report.next`, `report.today`, `report.version:<n>` | Rebind the pane's params. |
+| `report.regenerate` | Starts a regeneration. |
+| `verdict:<date>:<version>:<pick>:<useful\|interesting\|meh\|hype\|wrong_project>` | Records a verdict; the chosen one shows in bold. |
+
+Before setup the report pane says "Huey is not set up on this machine. It has read nothing.", lists the context sources it would read (from config, no reads) and offers **Set up Huey on this machine**.
+
 ## Placement rules (`views.yaml`) — curated-agent-views W5
 
 `nostromo.show` (see `docs/mcp/tools.md`) is backed by a deterministic
