@@ -431,8 +431,9 @@ async fn run_once(
     let pane_registry = Arc::new(Mutex::new(PaneRegistry::with_store_path(
         work.join("panes.json"),
     )));
-    // A short path: unix socket paths are limited to about 100 bytes.
-    let socket = PathBuf::from(format!("/tmp/nhe-{}-{}.sock", std::process::id(), date));
+    // Inside the private work directory (mode 0700). Unix socket paths are
+    // limited to about 100 bytes, hence the short root made in `main`.
+    let socket = work.join("m.sock");
     let mcp_config = write_bridge_mcp_config().ok_or_else(|| anyhow!("no MCP bridge config"))?;
     session_mgr.lock().unwrap().configure_mcp_bridge(
         Arc::clone(&pane_registry),
@@ -480,7 +481,6 @@ async fn run_once(
         .await
         .map_err(|e| anyhow!("run refused: {e}"))?;
     let elapsed = started.elapsed();
-    let _ = std::fs::remove_file(&socket);
     let RunOutcome::Produced { version, mode, .. } = outcome else {
         bail!(
             "the run produced no report: {outcome:?} (for a model failure: is `claude` \
@@ -729,8 +729,14 @@ async fn main() -> Result<()> {
         }
     }
 
+    // One private (0700, randomly named) root for every run's files and
+    // socket, removed when this function ends.
+    let root = tempfile::Builder::new()
+        .prefix("nhe")
+        .tempdir_in("/tmp")
+        .context("making a private work directory")?;
     let (mut passed, mut failed) = (0usize, 0usize);
-    for dir in &dirs {
+    for (n, dir) in dirs.iter().enumerate() {
         let expect = load_expect(dir)?;
         let date: NaiveDate = expect.date.parse().context("scenario date")?;
         println!(
@@ -739,8 +745,9 @@ async fn main() -> Result<()> {
             expect.description
         );
         for planned in plan(dir, &expect) {
-            let work = PathBuf::from(format!("/tmp/nhe-{}-{}", std::process::id(), date));
-            let _ = std::fs::remove_dir_all(&work);
+            let work = root
+                .path()
+                .join(format!("{n}-{}", planned.label.replace('/', "-")));
             let result = run_once(dir, &planned.context, date, args.model.as_deref(), &work).await;
             let _ = std::fs::remove_dir_all(&work);
             match result {
@@ -776,6 +783,7 @@ async fn main() -> Result<()> {
     }
     println!("\n{passed} passed, {failed} failed");
     if failed > 0 {
+        drop(root); // `exit` would skip the cleanup
         std::process::exit(1);
     }
     Ok(())

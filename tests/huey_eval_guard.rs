@@ -69,9 +69,15 @@ fn h8_1_the_eval_bin_is_never_referenced_by_tests_or_ci() {
             let Ok(text) = fs::read_to_string(&path) else {
                 continue;
             };
-            for needle in needles {
-                if text.contains(needle) {
-                    offenders.push(format!("{} contains {needle}", path.display()));
+            for line in text.lines() {
+                // The sandbox's dependency step stubs every `[[bin]]` path so
+                // it can cache dependencies; that list is not an invocation.
+                let is_stub_list = path.ends_with(".rwx/sandbox.yml")
+                    && line.trim_start().starts_with("for f in src/bin/");
+                for needle in needles {
+                    if line.contains(needle) && !is_stub_list {
+                        offenders.push(format!("{} contains {needle}", path.display()));
+                    }
                 }
             }
         }
