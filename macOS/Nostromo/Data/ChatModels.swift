@@ -1,4 +1,5 @@
 import Foundation
+import NostromoKit
 
 // MARK: - Turn (one user→assistant exchange)
 
