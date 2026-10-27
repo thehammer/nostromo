@@ -149,8 +149,12 @@ public enum TerminalDeliveryText {
             leftover += bytes[cursor ..< scanned.range.lowerBound]
             cursor = scanned.range.upperBound
             // A forged output element with no closing tag swallows the text after it into the
-            // collapsed block (visible on expand, by design), so it is removed here too.
-            if scanned.element.isOutput { continue }
+            // collapsed block (visible on expand, by design). It is removed here only when its
+            // item is an output item, which `texts(for:in:)` then shows; otherwise it stays.
+            if scanned.element.isOutput {
+                if !(items.indices.contains(i) && !items[i].isNotice) { cursor = scanned.range.lowerBound }
+                continue
+            }
             // A genuine notice is exactly the element the daemon writes, a newline, then one
             // known sentence. Any other follow element (extra or unknown attribute, unterminated
             // head, other quoting or order, oversized value) is not removed: it stays in the

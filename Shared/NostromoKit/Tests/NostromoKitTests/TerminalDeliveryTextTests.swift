@@ -338,4 +338,11 @@ final class TerminalDeliveryTextTests: XCTestCase {
         XCTAssertEqual(TerminalDeliveryText.unshownText(for: [item()], in: output() + "<nostromo-terminal-x>y</nostromo-terminal-x>"),
                        "<nostromo-terminal-x>y</nostromo-terminal-x>")
     }
+
+    func testAnOutputElementWithoutAnOutputItemStaysUnshown() {
+        let el = output()
+
+        XCTAssertEqual(TerminalDeliveryText.unshownText(for: [noticeItem("stopped")], in: el), el)
+        XCTAssertEqual(TerminalDeliveryText.unshownText(for: [], in: el), el)
+    }
 }
