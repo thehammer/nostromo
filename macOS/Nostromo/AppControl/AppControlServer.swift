@@ -262,7 +262,7 @@ final class AppControlServer {
             var kids = v.subviews.compactMap { node($0, in: w, depth: depth + 1, maxDepth: maxDepth, visibleOnly: visibleOnly) }
             if isHostingView(v) {
                 // SwiftUI content: surface its accessibility elements as leaf nodes.
-                kids += axHits(under: v, in: w).map { h in
+                kids += AppControlAX.hits(under: v, in: w).map { h in
                     ["class": h.cls, "text": h.text ?? "",
                      "frame": AppControlGeometry.topLeftRect(viewFrameInWindow: h.rectInWindow, contentHeight: contentHeight(w))]
                 }
@@ -281,44 +281,10 @@ final class AppControlServer {
         return node(cv, in: w, depth: 0, maxDepth: req.int("depth") ?? 12, visibleOnly: true) ?? [:]
     }
 
-    /// A findable thing on screen: a real NSView, or an accessibility element
-    /// inside a SwiftUI hosting view (SwiftUI draws its own text, so there is no
-    /// NSView to find — only its accessibility tree knows what is shown).
-    private struct Hit {
-        let cls: String
-        let text: String?
-        let rectInWindow: NSRect      // AppKit window coordinates (bottom-left origin)
-    }
+    private typealias Hit = AppControlHit
 
     private func isHostingView(_ v: NSView) -> Bool {
         String(describing: type(of: v)).contains("HostingView")
-    }
-
-    /// Read an accessibility property from an element that may not formally
-    /// conform to `NSAccessibilityProtocol` (AppKit's `NSOutlineRow` row proxies
-    /// do not), via KVC on the getter of the same name.
-    private func axValue(_ e: AnyObject, _ key: String) -> Any? {
-        guard let o = e as? NSObject, o.responds(to: Selector(key)) else { return nil }
-        return o.value(forKey: key)
-    }
-
-    /// Accessibility elements under `view`, depth-limited, as Hits.
-    private func axHits(under view: NSView, in w: NSWindow) -> [Hit] {
-        var out: [Hit] = []
-        func walk(_ element: AnyObject, depth: Int) {
-            guard depth < 14 else { return }
-            let frame = (axValue(element, "accessibilityFrame") as? NSValue)?.rectValue ?? .zero
-            let strings = ["accessibilityLabel", "accessibilityTitle", "accessibilityValue"]
-                .compactMap { axValue(element, $0) as? String }.filter { !$0.isEmpty }
-            let winFrame = w.convertFromScreen(frame)
-            if !strings.isEmpty, winFrame.width > 0, winFrame.height > 0 {
-                let role = (axValue(element, "accessibilityRole") as? String) ?? "AXElement"
-                out.append(Hit(cls: "ax:" + role, text: strings.joined(separator: " — "), rectInWindow: winFrame))
-            }
-            for child in (axValue(element, "accessibilityChildren") as? [AnyObject]) ?? [] { walk(child, depth: depth + 1) }
-        }
-        for child in view.accessibilityChildren() ?? [] { if let c = child as AnyObject? { walk(c, depth: 0) } }
-        return out
     }
 
     private func hit(for v: NSView) -> Hit {
@@ -335,7 +301,7 @@ final class AppControlServer {
                 .compactMap { $0?.lowercased() }
             if v.window != nil, hay.contains(where: { $0.contains(needle) }) { out.append(hit(for: v)) }
             if isHostingView(v) {
-                out += axHits(under: v, in: w).filter { $0.text?.lowercased().contains(needle) == true }
+                out += AppControlAX.hits(under: v, in: w).filter { $0.text?.lowercased().contains(needle) == true }
             }
             v.subviews.forEach(walk)
         }
@@ -394,15 +360,7 @@ final class AppControlServer {
         func walk(_ v: NSView) { if target == nil, String(describing: type(of: v)).lowercased().contains(needle) { target = v }; v.subviews.forEach(walk) }
         if let cv = w.contentView { walk(cv) }
         guard let t = target else { throw AppControlError.notFound("no view with class containing \(needle)") }
-        func dump(_ e: Any, _ d: Int) -> [String: Any] {
-            guard let ax = e as? NSAccessibilityProtocol else { return ["raw": "\(e)"] }
-            var n: [String: Any] = ["type": "\(Swift.type(of: ax))", "role": ax.accessibilityRole()?.rawValue ?? ""]
-            if let l = ax.accessibilityLabel() { n["label"] = l }
-            if let v = ax.accessibilityValue() as? String { n["value"] = v }
-            if d < 6 { n["children"] = (ax.accessibilityChildren() ?? []).map { dump($0, d + 1) } }
-            return n
-        }
-        var o = dump(t, 0)
+        var o = AppControlAX.dump(t, 0)
         o["isAccessibilityElement"] = t.isAccessibilityElement()
         o["enhancedUI"] = NSApp.accessibilityAttributeValue(NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")) as Any
         o["cellRows"] = (t.accessibilityRows() ?? []).count

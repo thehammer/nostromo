@@ -1666,9 +1666,19 @@ pub enum ClientMsg {
         terminal_id: String,
     },
     /// Keystrokes for a terminal, base64. Operator app only.
+    ///
+    /// `auto_reply: true` marks bytes the terminal emulator sent by itself
+    /// (a cursor-position or device-attributes reply, a focus report), not a
+    /// person's typing or paste. They are written to the shell but never count
+    /// as activity for the idle rule, so a remote program that provokes them
+    /// cannot keep a production shell open. Additive: an older daemon ignores
+    /// the field and counts such input as a keystroke, so the 2e idle rule
+    /// needs a daemon that knows it.
     TerminalInput {
         terminal_id: String,
         bytes: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        auto_reply: bool,
     },
     /// Operator app only.
     TerminalResize {
@@ -7019,6 +7029,7 @@ mod terminal_wire_tests {
                 ClientMsg::TerminalInput {
                     terminal_id: "t1".into(),
                     bytes: "bHMK".into(),
+                    auto_reply: false,
                 },
                 "terminal_input",
             ),
@@ -7127,6 +7138,45 @@ mod terminal_wire_tests {
         for (msg, name) in cases {
             assert_eq!(round_trip_server(msg)["type"], name);
         }
+    }
+
+    #[test]
+    fn terminal_input_auto_reply_is_additive_on_the_wire() {
+        // A keystroke has no `auto_reply` key at all (what an older app sends).
+        let key = serde_json::to_value(ClientMsg::TerminalInput {
+            terminal_id: "t1".into(),
+            bytes: "bHMK".into(),
+            auto_reply: false,
+        })
+        .unwrap();
+        assert!(key.get("auto_reply").is_none(), "{key}");
+        // A frame without the field decodes as a keystroke.
+        let old: ClientMsg =
+            serde_json::from_str(r#"{"type":"terminal_input","terminal_id":"t1","bytes":"bHMK"}"#)
+                .unwrap();
+        assert!(matches!(
+            old,
+            ClientMsg::TerminalInput {
+                auto_reply: false,
+                ..
+            }
+        ));
+        // A reply carries it, and it round-trips.
+        let reply = ClientMsg::TerminalInput {
+            terminal_id: "t1".into(),
+            bytes: "G1syNDs4MFI=".into(),
+            auto_reply: true,
+        };
+        let v = serde_json::to_value(&reply).unwrap();
+        assert_eq!(v["auto_reply"], true, "{v}");
+        let back: ClientMsg = serde_json::from_value(v).unwrap();
+        assert!(matches!(
+            back,
+            ClientMsg::TerminalInput {
+                auto_reply: true,
+                ..
+            }
+        ));
     }
 
     #[test]

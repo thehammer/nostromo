@@ -168,6 +168,23 @@ async fn type_line(app: &mut Unix, terminal_id: &str, line: &str) {
     app.send(&ClientMsg::TerminalInput {
         terminal_id: terminal_id.into(),
         bytes: B64.encode(format!("{line}\r")),
+        auto_reply: false,
+    })
+    .await;
+}
+
+/// What a terminal emulator answers a remote program's `ESC[6n` with: a cursor
+/// position report. The app marks it `auto_reply`; it is not a person typing.
+const CURSOR_REPORT: &[u8] = b"\x1b[24;80R";
+
+async fn auto_reply<S>(c: &mut Client<S>, terminal_id: &str, bytes: &[u8])
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    c.send(&ClientMsg::TerminalInput {
+        terminal_id: terminal_id.into(),
+        bytes: B64.encode(bytes),
+        auto_reply: true,
     })
     .await;
 }
@@ -764,6 +781,82 @@ async fn a_keystroke_before_the_warning_quietly_restarts_the_clock() {
     assert_at("the close", closed_at, typed_at + CLOSE);
 }
 
+/// A remote program can print `ESC[6n` forever and the app's terminal answers
+/// each time. Those answers are written to the shell but are not keystrokes.
+#[tokio::test]
+async fn auto_replies_do_not_restart_the_clock_before_the_warning() {
+    let mut i = Idle::start(Extras::default()).await;
+    let t0 = i.t0;
+    let id = i.id.clone();
+
+    // One reply a minute for the first 12 minutes.
+    for minute in 1..=12u32 {
+        i.vt.run_to(t0 + MINUTE * minute).await;
+        auto_reply(&mut i.s.app, &id, CURSOR_REPORT).await;
+        sync(&mut i.s.app).await;
+    }
+    assert!(i.open() && !i.warned());
+
+    // The warning and the close still come on the keystroke's schedule.
+    let warned_at = i.until_warned(t0 + WARN + SLACK * 2).await;
+    assert_at("the warning", warned_at, t0 + WARN);
+    let closed_at = i.until_closed(t0 + CLOSE + SLACK * 2).await;
+    assert_at("the close", closed_at, t0 + CLOSE);
+}
+
+#[tokio::test]
+async fn auto_replies_do_not_withdraw_the_warning_but_a_keystroke_does() {
+    let mut i = Idle::start(Extras::default()).await;
+    let t0 = i.t0;
+    let id = i.id.clone();
+    let from = i.s.app.mark();
+    i.until_warned(t0 + WARN + SLACK * 2).await;
+    i.wait_app_state(from, "the warning", |c| c.is_some()).await;
+    let closes_at = i.closes_at();
+    let after_warning = i.s.app.mark();
+
+    i.vt.run_to(t0 + CLOSE - 2 * MINUTE).await;
+    auto_reply(&mut i.s.app, &id, CURSOR_REPORT).await;
+    sync(&mut i.s.app).await;
+    assert_eq!(
+        i.closes_at(),
+        closes_at,
+        "a reply must not clear idle_closes_at"
+    );
+    assert_eq!(i.idle_audit_names(), ["idle_warning"]);
+    drain(&mut i.s.app).await;
+    assert!(
+        i.s.app.log[after_warning..].iter().all(|m| !matches!(
+            m,
+            ServerMsg::TerminalState { terminal } if terminal.idle_closes_at.is_none()
+        )),
+        "no terminal_state withdrawing the warning: [{}]",
+        i.s.app.summary()
+    );
+
+    // A person's keystroke a minute later does.
+    i.vt.run_to(t0 + CLOSE - MINUTE).await;
+    type_line(&mut i.s.app, &id, "still here").await;
+    sync(&mut i.s.app).await;
+    assert!(!i.warned(), "a keystroke withdraws the warning");
+    assert_eq!(i.idle_audit_names(), ["idle_warning", "idle_kept_open"]);
+}
+
+#[tokio::test]
+async fn an_auto_reply_still_reaches_the_shell() {
+    let mut i = Idle::start(Extras::default()).await;
+    let id = i.id.clone();
+    let from = i.s.app.mark();
+    // `cat` echoes what the pty is given: the reply must have been written.
+    auto_reply(&mut i.s.app, &id, b"REPLY-7f3a\r").await;
+    sync(&mut i.s.app).await;
+    wait_frame(&mut i.s.app, from, "the echoed reply", |m| {
+        matches!(m, ServerMsg::TerminalOutput { bytes, .. }
+            if B64.decode(bytes).map(|b| String::from_utf8_lossy(&b).contains("REPLY-7f3a")).unwrap_or(false))
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn keep_open_before_the_warning_quietly_restarts_the_clock() {
     let mut i = Idle::start(Extras::default()).await;
@@ -942,8 +1035,63 @@ where
     c.send(&ClientMsg::TerminalInput {
         terminal_id: terminal_id.into(),
         bytes: B64.encode(format!("{line}\r")),
+        auto_reply: false,
     })
     .await;
+}
+
+#[tokio::test]
+async fn another_local_process_cannot_keep_a_shell_open_with_auto_replies() {
+    let mut i = Idle::start(Extras {
+        script: true,
+        ..Extras::default()
+    })
+    .await;
+    let t0 = i.t0;
+    i.vt.run_to(t0 + 10 * MINUTE).await;
+    let id = i.id.clone();
+    let mut script = i.script.take().expect("a plain local connection");
+    let from = script.mark();
+
+    auto_reply(&mut script, &id, CURSOR_REPORT).await;
+    sync(&mut script).await;
+
+    assert_eq!(
+        script.refusals_since(from),
+        vec![(
+            "input".to_string(),
+            Some(id.clone()),
+            "terminal_input_forbidden".to_string()
+        )],
+        "[{}]",
+        script.summary()
+    );
+    let warned_at = i.until_warned(t0 + WARN + SLACK * 2).await;
+    assert_at("the warning", warned_at, t0 + WARN);
+}
+
+#[tokio::test]
+async fn a_network_peer_cannot_send_auto_replies() {
+    let mut i = Idle::start(Extras {
+        tcp: true,
+        ..Extras::default()
+    })
+    .await;
+    let id = i.id.clone();
+    let mut tcp = i.tcp.take().expect("a tcp connection");
+    let from = tcp.mark();
+
+    auto_reply(&mut tcp, &id, CURSOR_REPORT).await;
+    sync(&mut tcp).await;
+
+    let errors = tcp.errors_since(from);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with("requires_secure_connection"),
+        "{errors:?}"
+    );
+    let lines = i.s.d.refused_lines("tcp");
+    assert!(lines.iter().any(|l| l["op"] == "input"), "{lines:?}");
 }
 
 #[tokio::test]

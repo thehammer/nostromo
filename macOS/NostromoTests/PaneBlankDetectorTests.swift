@@ -1150,7 +1150,9 @@ final class PaneBlankDetectorTests: XCTestCase {
     private static let allowedCaptureKeys: Set<String> = Set([
         // top level
         "schema", "capturedAtUTC", "trigger", "reason", "rule", "severity", "detail", "suppressedHits", "events",
-        "app", "screens", "diagnostics", "pane", "window", "memory",
+        "app", "screens", "diagnostics", "pane", "window", "memory", "viewRebuilds",
+        // viewRebuilds (`RebuildCounters`: fixed site names, numbers)
+        "sidebarRebuilt", "sidebarSkipped", "turnViewBuilt", "perriQueueListRebuilt",
         // memory (`MemorySummary`: numbers, and category names from a fixed vocabulary)
         "physicalFootprintBytes", "mallocBlocksInUse", "mallocBytesInUse", "categories", "name", "dirtyBytes",
         // app, screens, window

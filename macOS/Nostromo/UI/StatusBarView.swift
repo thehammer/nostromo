@@ -68,9 +68,8 @@ class StatusBarView: NSView {
 
         // Subscribe to store
         let store = AppStore.shared
-        Publishers.CombineLatest3(
+        Publishers.CombineLatest(
             store.$motherStatus,
-            store.$rateLimits,
             store.$posture
         )
         .receive(on: DispatchQueue.main)
@@ -158,32 +157,13 @@ class StatusBarView: NSView {
             out.append(colored(p.chipLabel + "  ", postureChipColor(p)))
         }
 
-        // Rate-limit windows
-        if let rl = store.rateLimits {
-            var parts: [NSAttributedString] = []
-
-            if rl.pct5h >= 0 && rl.reset5h > now {
-                let t = Theme.formatReset(rl.reset5h - now)
-                let s = NSMutableAttributedString()
-                s.append(muted("5h "))
-                s.append(colored("\(rl.pct5h)%", Theme.pctColor(rl.pct5h)))
-                s.append(muted(" · \(t)"))
-                parts.append(s)
-            }
-
-            if rl.pct7d >= 0 && rl.reset7d > now {
-                let t = Theme.formatReset(rl.reset7d - now)
-                let s = NSMutableAttributedString()
-                s.append(muted("7d "))
-                s.append(colored("\(rl.pct7d)%", Theme.pctColor(rl.pct7d)))
-                s.append(muted(" · \(t)"))
-                parts.append(s)
-            }
-
-            for (i, part) in parts.enumerated() {
-                out.append(part)
-                if i < parts.count - 1 { out.append(muted("  ")) }
-            }
+        // 5h / 7d windows from Bishop's posture (never a stale number)
+        let windows = store.posture?.statusWindows(now: now) ?? []
+        for (i, w) in windows.enumerated() {
+            out.append(muted("\(w.label) "))
+            out.append(colored("\(w.pct)%", Theme.pctColor(w.pct)))
+            out.append(muted(" · \(w.remaining)"))
+            if i < windows.count - 1 { out.append(muted("  ")) }
         }
 
         return out

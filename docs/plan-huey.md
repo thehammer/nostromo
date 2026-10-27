@@ -221,6 +221,9 @@ The model never writes URLs, footers, dates, counts or labels. It returns struct
 | Null Also-in-the-news line while candidates exist, without `ain_skip_reason` (D3) | AC44, AC45 |
 | Rendered report over 600 words (footer included); quiet report body (zero picks) at 150 words or more (D2) | AC8, AC9 |
 | `follow_up_of` names an item that is not in the 14-day ledger, or `whats_new` is empty | AC11 |
+| A field over its word or character cap (headline 12 words and 120 characters, Also-noted line 20 and 200, opener 25 and 200, drop reason 8 and 80; the other free-text fields have character caps only) | AC8 |
+
+**How words are counted.** A word is a whitespace-separated run in the text as the report renders it (control, bidi, zero-width and tag characters removed first, so they neither hide length nor count as words). URLs are not counted: the daemon owns every link, so a link target is never part of a word total. The character caps bound text with no spaces, such as an unspaced script. A field over its cap is **refused** with its name and counts, for the model to correct (refuse, not repair); the daemon never shortens model text. The same rule measures the 600-word report cap, the 150-word quiet-body cap, the 40-word Also-in-the-news line and the footer's 100.
 
 Daemon-owned rendering:
 

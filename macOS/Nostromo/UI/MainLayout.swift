@@ -343,6 +343,17 @@ class MainLayout: NSView {
     /// `DecisionPresenter` targets popups by it but never changes it.
     var activeFocusTag: String { activeFocus.sessionTag }
 
+    /// The window id `DynamicFocusView` was built with (and a pending terminal-focus token names).
+    var terminalWindowId: String { String(windowIndex) }
+
+    /// The directory a new terminal opens in: the active focus's project, else the daemon's `$HOME`.
+    var activeFocusProjectPath: String? { activeFocus.projectPath }
+
+    /// The pane of the active focus that holds `responder`, if any.
+    func activePaneId(containing responder: NSResponder?) -> String? {
+        (currentContentView as? DynamicFocusView)?.paneId(containing: responder)
+    }
+
     private func forceStart(_ focus: Focus) {
         AppStore.shared.session(
             for: focus.sessionTag,

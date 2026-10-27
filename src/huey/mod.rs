@@ -15,6 +15,7 @@ pub mod curate;
 pub mod interests;
 pub mod items;
 pub mod paths;
+pub mod prompts;
 pub mod render;
 pub mod run;
 pub mod schedule;
@@ -35,6 +36,7 @@ use crate::tracker::clock::{Clock, SystemClock};
 
 pub use actions::{ActionOutcome, HueyPane, StartError};
 pub use config::HueyConfig;
+pub use curate::{CurateBridge, SessionCurator};
 pub use paths::HueyPaths;
 pub use render::{HueyDocument, MissingReason};
 pub use run::{Curator, FailReason, LiveSource, RunLimits, RunOutcome, Trigger};
@@ -85,6 +87,8 @@ struct Inner {
     /// What the setup scan found, held in memory only until the user acts on
     /// it (D6). Never written to disk.
     scan: std::sync::Mutex<Option<setup::SetupScan>>,
+    /// The curating run in progress, for the `huey.*` tools it calls.
+    bridge: CurateBridge,
 }
 
 /// Cheap clone handed to MCP and IPC.
@@ -124,6 +128,50 @@ impl HueyHandle {
 
     pub fn is_running(&self) -> bool {
         self.inner.run_lock.try_lock().is_err()
+    }
+
+    /// The curating run in progress (what `huey.check_project` and
+    /// `huey.publish_report` act on for the `huey-run` caller).
+    pub fn curate_bridge(&self) -> &CurateBridge {
+        &self.inner.bridge
+    }
+
+    /// `huey.check_project` for any caller but the curating session (the
+    /// Huey focus): the probe runs against the project's main worktree under
+    /// the code root, and is not recorded in any report. Nothing is read
+    /// until setup is confirmed.
+    pub async fn check_project(&self, args: &serde_json::Value) -> serde_json::Value {
+        if self.setup_state() != SetupState::Confirmed {
+            return serde_json::json!({
+                "error": "not_set_up",
+                "message": "Huey is not set up on this machine; it reads nothing",
+            });
+        }
+        let (project, probe) = match curate::parse_check_args(args) {
+            Ok(parsed) => parsed,
+            Err(answer) => return answer,
+        };
+        let code_root = self.inner.env.context.code_root.clone();
+        let wanted = project.to_lowercase();
+        let root = tokio::task::spawn_blocking(move || {
+            context::projects::discover(&code_root)
+                .into_iter()
+                .find(|r| r.id == wanted)
+                .map(|r| r.root)
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(root) = root else {
+            return serde_json::json!({
+                "error": "unknown_project",
+                "message": "no project with that id under the code root",
+            });
+        };
+        match curate::run_check("check".into(), project, root, probe).await {
+            Ok(result) => curate::check_answer(&result),
+            Err(refusal) => refusal,
+        }
     }
 
     /// The report date of right now: the local date (or tomorrow, once a
@@ -334,6 +382,9 @@ pub struct HueyDeps {
     pub local_time: Arc<dyn LocalTime>,
     /// Deadlines for the stages of a run.
     pub limits: RunLimits,
+    /// Shared with the curator: how the curating session's tool calls reach
+    /// the run (a [`SessionCurator`] must be built with this same bridge).
+    pub bridge: CurateBridge,
 }
 
 impl HueyDeps {
@@ -352,6 +403,7 @@ impl HueyDeps {
             live: Arc::new(NoLive),
             local_time: Arc::new(SystemLocalTime),
             limits: RunLimits::default(),
+            bridge: CurateBridge::new(),
         }
     }
 
@@ -397,6 +449,7 @@ impl HueyEngine {
                 last_run_end: std::sync::Mutex::new(None),
                 scheduled_attempts: std::sync::Mutex::new((NaiveDate::MIN, 0)),
                 scan: std::sync::Mutex::new(None),
+                bridge: deps.bridge,
             }),
         };
         tokio::spawn(run_scheduler(handle.clone(), deps.tick));

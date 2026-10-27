@@ -573,7 +573,7 @@ enum CiState: String, Codable {
 }
 
 /// One item from the perri queue cache.
-struct PRQueueItem: Identifiable, Encodable {
+struct PRQueueItem: Identifiable, Encodable, Equatable {
     var id: String { "\(repo)#\(number)" }
     let repo:        String
     let number:      Int
@@ -666,6 +666,21 @@ struct PRDetail: Decodable {
     }
 }
 
+extension PRDetail: Equatable {
+    /// Field by field (`CiCheck` is not `Equatable` in the app target), so the store can tell a
+    /// `perri_state` frame that changed nothing from one that did.
+    static func == (l: PRDetail, r: PRDetail) -> Bool {
+        guard l.prNumber == r.prNumber, l.repo == r.repo, l.title == r.title, l.author == r.author else { return false }
+        guard l.url == r.url, l.diffTooLarge == r.diffTooLarge, l.headSha == r.headSha, l.error == r.error else { return false }
+        guard l.additions == r.additions, l.deletions == r.deletions, l.changedFiles == r.changedFiles else { return false }
+        guard l.ciChecks.count == r.ciChecks.count else { return false }
+        for (a, b) in zip(l.ciChecks, r.ciChecks) where a.name != b.name || a.state != b.state || a.detail != b.detail {
+            return false
+        }
+        return l.diff == r.diff
+    }
+}
+
 // MARK: - Teri todos (macOS-local decode types; separate from NostromoKit wire types)
 
 /// macOS-local mirror of `TeriTodo` in `src/data/teri_todos.rs`.
@@ -749,24 +764,6 @@ struct ActivityEvent: Decodable {
         case toolUseId     = "tool_use_id"
         case cwd
         case seq
-    }
-}
-
-// MARK: - Rate limits
-
-struct RateLimits {
-    let pct5h:   Int
-    let reset5h: TimeInterval
-    let pct7d:   Int
-    let reset7d: TimeInterval
-
-    static func parse(_ s: String) -> RateLimits? {
-        let parts = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: ":")
-            .compactMap { Int($0) }
-        guard parts.count >= 4 else { return nil }
-        return RateLimits(pct5h: parts[0], reset5h: TimeInterval(parts[1]),
-                          pct7d: parts[2], reset7d: TimeInterval(parts[3]))
     }
 }
 
@@ -902,6 +899,27 @@ struct PostureSnapshot {
     let scoped:         [(label: String, window: WindowPace)]
     /// Mother-attributable agents from the `agents` map.  Empty when absent.
     let agents:         [String: AgentSpend]
+    /// Bishop's `stale_input` flag: its inputs are stale, so window numbers can't be trusted.
+    var staleInput:     Bool = false
+
+    /// One 5h/7d window as shown on the status bar.
+    struct StatusWindow: Equatable {
+        let label:     String
+        let pct:       Int
+        let remaining: String
+    }
+
+    /// 5h/7d windows for the status bar. Empty when Bishop's inputs are stale;
+    /// a window is omitted when absent or already reset. The real used
+    /// percentage is shown (not capped).
+    func statusWindows(now: TimeInterval) -> [StatusWindow] {
+        guard !staleInput else { return [] }
+        return [("5h", fiveHour), ("7d", sevenDay)].compactMap { label, w in
+            guard let w, w.resetsAt > now else { return nil }
+            return StatusWindow(label: label, pct: Int(w.usedPct.rounded()),
+                                remaining: Theme.formatReset(w.resetsAt - now))
+        }
+    }
 
     /// Each agent's share of the Mother-attributed token total for the given window
     /// ("5h" or "7d"), sorted largest-first.
@@ -935,7 +953,8 @@ struct PostureSnapshot {
             sevenDay:       parseWindowPace(json["seven_day"]),
             sonnetSevenDay: parseSonnetWindow(json["models"], elapsedPct: parseWindowPace(json["seven_day"])?.elapsedPct),
             scoped:         parseScoped(json["scoped"]),
-            agents:         parseAgents(json["agents"])
+            agents:         parseAgents(json["agents"]),
+            staleInput:     (json["stale_input"] as? Bool) ?? false
         )
     }
 

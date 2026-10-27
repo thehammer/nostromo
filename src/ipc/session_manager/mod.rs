@@ -273,6 +273,9 @@ pub struct SessionRestrictions {
     pub allowed_tools: Vec<String>,
     /// Hard spend cap for the session (`--max-budget-usd`).
     pub max_budget_usd: Option<f64>,
+    /// The model the session runs on (`--model`); `None` is the CLI default.
+    /// A restricted session never takes a focus's recorded model.
+    pub model: Option<String>,
 }
 
 // ── managed session ───────────────────────────────────────────────────────────
@@ -626,10 +629,18 @@ impl SessionManager {
             // The picking session's tag is boxed in from the start, not from the
             // moment the picks host spawns it: whoever starts a session under
             // that tag (a client, a respawn) gets the same allow-list.
-            restrictions: HashMap::from([(
-                crate::data::work::picks::PICKS_TAG.to_owned(),
-                crate::data::work::picks::picks_restrictions(),
-            )]),
+            restrictions: HashMap::from([
+                (
+                    crate::data::work::picks::PICKS_TAG.to_owned(),
+                    crate::data::work::picks::picks_restrictions(),
+                ),
+                // Huey's curating session likewise; each run re-registers it
+                // with its mode's model and cap.
+                (
+                    crate::huey::curate::HUEY_RUN_TAG.to_owned(),
+                    crate::huey::curate::default_huey_run_restrictions(),
+                ),
+            ]),
             // Tests: `NOSTROMO_GUARD_BIN`, else a path that fails closed. Never
             // a binary found beside the test executable.
             guard_path: std::env::var_os(crate::approvals::guard::GUARD_BIN_ENV)
@@ -968,8 +979,16 @@ impl SessionManager {
         // A start that resumes nothing is a new focus (or one that never ran):
         // resolve its model by precedence and record it. A resumed focus keeps
         // what it has, whatever the defaults say now.
-        let (model, spawn_note) = if self.restrictions.contains_key(&tag) {
-            (None, None)
+        let (model, spawn_note) = if let Some(r) = self.restrictions.get(&tag) {
+            // A restricted session runs on the model its restrictions name, or
+            // the CLI default: never a recorded focus model.
+            (
+                r.model.as_ref().map(|m| ModelTarget {
+                    model: m.clone(),
+                    effort: None,
+                }),
+                None,
+            )
         } else {
             let declared = if resume {
                 None
@@ -3625,6 +3644,7 @@ mod tests {
                 "ToolSearch".into(),
             ],
             max_budget_usd: Some(2.0),
+            model: None,
         }
     }
 
@@ -7627,6 +7647,7 @@ mod orphan_tests {
                 builtin_tools: vec!["ToolSearch".into()],
                 allowed_tools: vec!["ToolSearch".into()],
                 max_budget_usd: Some(1.0),
+                model: None,
             },
         );
         let ready = dir.path().join("ready");

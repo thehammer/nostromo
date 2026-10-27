@@ -11,15 +11,22 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use super::collectors::{safe_id, BoardSummary, PostureFacts, PrRecord, PrState, TitleEntry};
 use super::projects::Commit;
-use crate::data::work::untrusted::one_line;
+use crate::data::work::untrusted::{escape_id, one_line};
 use crate::huey::checks::CheckResult;
 use crate::huey::interests::Interests;
 use crate::mother::MotherJob;
 
-/// Largest digest, in bytes (before "Checks Huey ran" is appended).
+/// Largest digest, in bytes, as [`build_digest`] renders it. The recent-reports
+/// section ([`MAX_RECENT_BYTES`]) and "Checks Huey ran" (at most
+/// `curate::MAX_CHECKS` lines) are appended after it, each with its own cap.
 pub const MAX_DIGEST_BYTES: usize = 16 * 1024;
 /// Heading of the section [`append_checks`] adds.
 pub const CHECKS_HEADING: &str = "## Checks Huey ran";
+/// Heading of the section [`append_recent_reports`] adds.
+pub const RECENT_HEADING: &str = "## Recent reports (last 14 days; use these ids for follow_up_of)";
+/// Most lines, and most bytes, the recent-reports section lists.
+pub const MAX_RECENT_LINES: usize = 40;
+pub const MAX_RECENT_BYTES: usize = 8 * 1024;
 /// Longest title or subject carried into the digest, in characters.
 const TITLE_MAX: usize = 120;
 /// Shown after a project's own "how it runs" line is replaced by the user's.
@@ -401,6 +408,58 @@ fn project_heading_id(heading: &str) -> Option<String> {
     Some(id.to_string())
 }
 
+/// One earlier report line for the recent-reports section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentLine {
+    /// The item id as the model must cite it in `follow_up_of`.
+    pub item_id: String,
+    pub date: NaiveDate,
+    /// `pick`, `ain`, `also_noted` or `uncurated`.
+    pub section: &'static str,
+    /// The headline that report showed, when known.
+    pub title: Option<String>,
+}
+
+/// Append the recent-reports section (items shown in the last 14 days, so
+/// the model can say what is new about a follow-up). The section is part of
+/// the digest, so the shown `digest.md` is everything the model is told
+/// about the user's context. `lines` must already be in the order to show;
+/// as many as fit in [`MAX_RECENT_LINES`] lines and [`MAX_RECENT_BYTES`]
+/// bytes are listed, the rest counted in a final "+N more". Returns how
+/// many were listed, a prefix of `lines`.
+pub fn append_recent_reports(digest: &mut Digest, lines: &[RecentLine]) -> usize {
+    digest.text.push_str(RECENT_HEADING);
+    digest.text.push('\n');
+    let start = digest.text.len();
+    let mut listed = 0;
+    for line in lines.iter().take(MAX_RECENT_LINES) {
+        let Some(id) = escape_id(&line.item_id) else {
+            break;
+        };
+        let title = line
+            .title
+            .as_deref()
+            .map(|t| one_line(t, TITLE_MAX))
+            .filter(|t| !t.is_empty())
+            .map(|t| format!(": {t}"))
+            .unwrap_or_default();
+        let rendered = format!("- [{id}] {} {}{title}\n", line.date, line.section);
+        if digest.text.len() - start + rendered.len() > MAX_RECENT_BYTES {
+            break;
+        }
+        digest.text.push_str(&rendered);
+        listed += 1;
+    }
+    if lines.is_empty() {
+        digest.text.push_str("- (none)\n");
+    } else if listed < lines.len() {
+        digest
+            .text
+            .push_str(&format!("- +{} more\n", lines.len() - listed));
+    }
+    listed
+}
+
 /// Append each check's one-line result under "Checks Huey ran" (adding the
 /// heading the first time). The anchors gain the check ids.
 pub fn append_checks(digest: &mut Digest, checks: &[CheckResult]) {
@@ -414,5 +473,75 @@ pub fn append_checks(digest: &mut Digest, checks: &[CheckResult]) {
     for check in checks {
         digest.text.push_str(&format!("- {}\n", check.line()));
         digest.anchors.insert(check.id.clone());
+    }
+}
+
+#[cfg(test)]
+mod recent_tests {
+    use super::*;
+
+    fn digest() -> Digest {
+        Digest {
+            text: "# Context\n".to_string(),
+            projects: Vec::new(),
+            anchors: BTreeSet::new(),
+            project_anchors: BTreeMap::new(),
+            interests: Interests::default(),
+        }
+    }
+
+    fn line(n: usize, title: Option<&str>) -> RecentLine {
+        RecentLine {
+            item_id: format!("src:item{n}"),
+            date: NaiveDate::from_ymd_opt(2026, 10, 20).unwrap(),
+            section: "pick",
+            title: title.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn no_recent_reports_says_none() {
+        let mut d = digest();
+        assert_eq!(append_recent_reports(&mut d, &[]), 0);
+        assert_eq!(d.text, format!("# Context\n{RECENT_HEADING}\n- (none)\n"));
+    }
+
+    #[test]
+    fn a_line_carries_its_id_date_section_and_one_line_headline() {
+        let mut d = digest();
+        let lines = [
+            line(1, Some("A  headline\nwith\u{200B} breaks")),
+            line(2, None),
+        ];
+        assert_eq!(append_recent_reports(&mut d, &lines), 2);
+        assert!(d.text.ends_with(
+            "- [src:item1] 2026-10-20 pick: A headline with breaks\n- [src:item2] 2026-10-20 pick\n"
+        ));
+        assert!(d.anchors.is_empty(), "item ids are not anchors");
+    }
+
+    #[test]
+    fn the_section_is_capped_by_lines_and_by_bytes_and_counts_the_rest() {
+        let mut d = digest();
+        let lines: Vec<RecentLine> = (0..MAX_RECENT_LINES + 5)
+            .map(|n| line(n, Some("t")))
+            .collect();
+        assert_eq!(append_recent_reports(&mut d, &lines), MAX_RECENT_LINES);
+        assert!(d.text.ends_with("- +5 more\n"), "{}", d.text);
+
+        let mut d = digest();
+        let long = "w ".repeat(60);
+        let lines: Vec<RecentLine> = (0..40)
+            .map(|n| RecentLine {
+                item_id: format!("src:{}{n}", "k".repeat(250)),
+                ..line(n, Some(&long))
+            })
+            .collect();
+        let listed = append_recent_reports(&mut d, &lines);
+        assert!(listed < 40);
+        assert!(
+            d.text.len() <= "# Context\n".len() + RECENT_HEADING.len() + 1 + MAX_RECENT_BYTES + 32
+        );
+        assert!(d.text.ends_with(&format!("- +{} more\n", 40 - listed)));
     }
 }

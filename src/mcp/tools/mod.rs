@@ -34,6 +34,7 @@ use serde_json::{json, Value};
 // `create_focus` reaches the shared helper as `super::untrusted`.
 use crate::data::work::picks::PICKS_TOOLS;
 use crate::data::work::untrusted;
+use crate::huey::curate::HUEY_RUN_TOOLS;
 use crate::ipc::peer::SensitiveTags;
 use crate::mcp::state::McpSharedState;
 
@@ -277,6 +278,38 @@ pub fn tool_descriptors() -> Vec<Value> {
                     "days": { "type": "integer", "description": "How many days back (default 14)." }
                 },
                 "required": []
+            }
+        }),
+        json!({
+            "name": "huey.check_project",
+            "description": "Asks one read-only question of a project's main worktree and answers with found / not found, counts, manifest names and at most 5 repo-relative paths, never file contents. kind: dependency (is `name` a declared dependency in any manifest?), text (do tracked files contain the fixed string `term`, 3 to 80 characters?), claude_feature (does it use `feature`: hooks, mcp, skills, plugins, agents or settings?), invocation (how does it start claude?). Returns { ok, id, found, detail, paths, line } or { error, message }. In Huey's curating session the id (c1, c2, ...) can be cited in a pick's check, and the line is added to the run's digest under \"Checks Huey ran\".",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Project id, as the digest shows it in brackets" },
+                    "kind": { "type": "string", "enum": ["dependency", "text", "claude_feature", "invocation"] },
+                    "name": { "type": "string", "description": "dependency: the package or crate name" },
+                    "term": { "type": "string", "description": "text: the fixed string to look for" },
+                    "feature": { "type": "string", "description": "claude_feature: hooks, mcp, skills, plugins, agents or settings" }
+                },
+                "required": ["project", "kind"]
+            }
+        }),
+        json!({
+            "name": "huey.publish_report",
+            "description": "Huey's curating session only: publishes this morning's report. Pass the publish object itself (opener_gist, picks, also_in_the_news, ain_skip_reason, also_noted, dropped, ignored), referring only to ids from the model input. The daemon checks every rule and renders links, labels and the footer. Returns { ok: true } or { ok: false, error: \"refused\", problems: [...], attempts_left }.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "opener_gist": { "type": "string" },
+                    "picks": { "type": "array", "items": { "type": "object" } },
+                    "also_in_the_news": { "type": ["object", "null"] },
+                    "ain_skip_reason": { "type": "string" },
+                    "also_noted": { "type": "array", "items": { "type": "object" } },
+                    "dropped": { "type": "array", "items": { "type": "object" } },
+                    "ignored": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["picks"]
             }
         }),
         // ── Phase 2: Teri ─────────────────────────────────────────────────
@@ -697,6 +730,14 @@ pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) 
         });
         return descriptors;
     }
+    if is_huey_run_session(pty_id) {
+        descriptors.retain(|d| {
+            d.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| HUEY_RUN_TOOLS.contains(&n))
+        });
+        return descriptors;
+    }
     if is_network_driven(state, pty_id) {
         descriptors.retain(|d| {
             !d.get("name")
@@ -718,6 +759,18 @@ pub async fn tool_descriptors_for(state: &McpSharedState, pty_id: Option<&str>) 
 fn is_picks_session(pty_id: Option<&str>) -> bool {
     pty_id == Some(crate::data::work::picks::PICKS_TAG)
 }
+
+/// Huey's hidden curating session reads third-party news unattended, so the
+/// daemon gives it only [`HUEY_RUN_TOOLS`], whatever its client asks for (its
+/// `--allowedTools` is a second layer).
+fn is_huey_run_session(pty_id: Option<&str>) -> bool {
+    pty_id == Some(crate::huey::curate::HUEY_RUN_TAG)
+}
+
+/// The tool only the curating session may call. Listed for everyone, like
+/// `teri.publish_picks` (the unfiltered list is a contract), and refused at
+/// dispatch to anyone else.
+const HUEY_PUBLISH_TOOL: &str = "huey.publish_report";
 
 /// The tools withheld from a session an unauthenticated network peer is
 /// steering (see `SensitiveTags::mark_network_driven`): those that reach
@@ -973,6 +1026,12 @@ async fn dispatch_inner(
     if is_picks_session(pty_id) && !PICKS_TOOLS.contains(&name) {
         return forbidden(state, pty_id, name);
     }
+    // Huey's curating session may call its two tools and nothing else, and
+    // nobody else may publish a report.
+    let huey_run = is_huey_run_session(pty_id);
+    if (huey_run && !HUEY_RUN_TOOLS.contains(&name)) || (!huey_run && name == HUEY_PUBLISH_TOOL) {
+        return forbidden(state, pty_id, name);
+    }
 
     // A session a network peer is steering gets no tool that reaches Teri/Fred
     // data or Mother jobs, whatever the operator's policy says.
@@ -1062,6 +1121,12 @@ async fn dispatch_inner(
         "huey.regenerate" => huey::regenerate(state),
         "huey.record_verdict" => huey::record_verdict(state, arguments.unwrap_or(&Value::Null)),
         "huey.trial_summary" => huey::trial_summary(state, arguments.unwrap_or(&Value::Null)),
+        "huey.check_project" => {
+            huey::check_project(state, arguments.unwrap_or(&Value::Null), pty_id).await
+        }
+        "huey.publish_report" => {
+            huey::publish_report(state, arguments.unwrap_or(&Value::Null)).await
+        }
 
         // ── Phase 2: Mother ───────────────────────────────────────────────
         "mother.list_jobs" => {

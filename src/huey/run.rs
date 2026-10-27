@@ -4,8 +4,10 @@
 //! [`run`] is one attempt. It reads its inputs, decides, and writes one
 //! report version plus the ledger and run log. Nothing runs, reads or
 //! writes until setup is confirmed. The model pass sits behind [`Curator`]:
-//! H4 ships [`NoCurator`], so every normal or tight run ends "model failed"
-//! until the hidden session lands; a critical run needs no model.
+//! the daemon runs [`crate::huey::curate::SessionCurator`] (a hidden,
+//! restricted session whose publish the validator checks); [`NoCurator`],
+//! the default without a daemon, fails every normal or tight run "model
+//! failed". A critical run needs no model.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -21,8 +23,9 @@ use crate::data::work::untrusted::one_line;
 use crate::huey::budget::{self, Mode, PostureNote};
 use crate::huey::config::HueyConfig;
 use crate::huey::context::collectors::PrsInput;
-use crate::huey::context::digest::ProjectContext;
+use crate::huey::context::digest::{append_recent_reports, ProjectContext, RecentLine};
 use crate::huey::context::{self, build_digest, ContextEnv, Digest, LiveInputs};
+use crate::huey::curate;
 use crate::huey::interests::{self, Interests};
 use crate::huey::items::{cluster, Cluster, NewsItem, SourceClass};
 use crate::huey::paths::HueyPaths;
@@ -39,6 +42,7 @@ use crate::huey::sources::{
 use crate::huey::store::{
     Ledger, LedgerEntry, ReportFiles, ReportMeta, RunRecord, RunResult, Section, Store,
 };
+use crate::huey::validate;
 use crate::mother::MotherJob;
 use crate::tracker::clock::Clock;
 
@@ -373,7 +377,7 @@ impl ReportFrame {
         out
     }
 
-    fn source_name(&self, item: &NewsItem) -> String {
+    pub(crate) fn source_name(&self, item: &NewsItem) -> String {
         self.source_names
             .get(&item.source_id)
             .cloned()
@@ -396,7 +400,9 @@ fn source_link(frame: &ReportFrame, item: &NewsItem) -> Link {
 }
 
 /// Text the model wrote, as the report carries it: one line, invisible and
-/// control characters gone, capped.
+/// control characters gone, capped. The validator refuses a field over its
+/// cap before a report is rendered, so the cap here only backstops a curator
+/// that skipped validation.
 fn model_text(text: &str, max: usize) -> String {
     one_line(text, max)
 }
@@ -441,28 +447,31 @@ pub fn assemble_curated_counted(frame: &ReportFrame, publish: &Publish) -> (Repo
         used.extend(members.iter().map(|i| i.id.clone()));
         picks.push(Pick {
             item_ids: members.iter().map(|i| i.id.clone()).collect(),
-            headline: model_text(&p.headline, 120),
-            what_happened: model_text(&p.what_happened, 400),
+            headline: model_text(&p.headline, validate::HEADLINE_CHARS),
+            what_happened: model_text(&p.what_happened, validate::SENTENCES_CHARS),
             project: p.project.clone(),
             project_name: frame
                 .project_names
                 .get(&p.project)
                 .cloned()
                 .unwrap_or_else(|| model_text(&p.project, 64)),
-            for_line: model_text(&p.for_line, 400),
             anchors: p.anchors.clone(),
+            for_line: model_text(&p.for_line, validate::SENTENCES_CHARS),
             check: match &p.check {
                 PublishCheck::Checked { text, .. } => PickCheck::Checked {
-                    text: model_text(text, 300),
+                    text: model_text(text, validate::CHECK_TEXT_CHARS),
                 },
                 PublishCheck::ToCheck { text } => PickCheck::ToCheck {
-                    text: model_text(text, 300),
+                    text: model_text(text, validate::CHECK_TEXT_CHARS),
                 },
             },
             link: item_link(primary),
             also_covered_by: rest.iter().map(|i| source_link(frame, i)).collect(),
             follow_up_of: p.follow_up_of.clone(),
-            whats_new: p.whats_new.as_deref().map(|t| model_text(t, 300)),
+            whats_new: p
+                .whats_new
+                .as_deref()
+                .map(|t| model_text(t, validate::WHATS_NEW_CHARS)),
         });
     }
 
@@ -476,8 +485,8 @@ pub fn assemble_curated_counted(frame: &ReportFrame, publish: &Publish) -> (Repo
         used.insert(item.id.clone());
         Some(AinLine {
             item_id: item.id.clone(),
-            headline: model_text(&a.headline, 120),
-            what_happened: model_text(&a.what_happened, 300),
+            headline: model_text(&a.headline, validate::HEADLINE_CHARS),
+            what_happened: model_text(&a.what_happened, validate::AIN_TEXT_CHARS),
             link: item_link(item),
         })
     });
@@ -498,7 +507,7 @@ pub fn assemble_curated_counted(frame: &ReportFrame, publish: &Publish) -> (Repo
             used.extend(ids.iter().cloned());
             also_noted.push(NotedLine {
                 item_ids: ids,
-                line: model_text(&n.line, 200),
+                line: model_text(&n.line, validate::NOTED_CHARS),
                 interest: n.interest.clone(),
                 link: item_link(primary),
             });
@@ -509,7 +518,7 @@ pub fn assemble_curated_counted(frame: &ReportFrame, publish: &Publish) -> (Repo
         date: frame.date,
         version: frame.version,
         mode: frame.mode,
-        opener_gist: model_text(&publish.opener_gist, 200),
+        opener_gist: model_text(&publish.opener_gist, validate::OPENER_CHARS),
         picks,
         also_in_the_news,
         also_noted,
@@ -524,7 +533,7 @@ pub fn assemble_curated_counted(frame: &ReportFrame, publish: &Publish) -> (Repo
             Some(FooterDrop {
                 item_id: item.id.clone(),
                 title: item.title.clone(),
-                reason: model_text(&d.reason, 80),
+                reason: model_text(&d.reason, validate::DROP_REASON_CHARS),
             })
         })
         .collect();
@@ -533,7 +542,7 @@ pub fn assemble_curated_counted(frame: &ReportFrame, publish: &Publish) -> (Repo
         report.footer.ain_skip_reason = publish
             .ain_skip_reason
             .as_deref()
-            .map(|r| model_text(r, 120))
+            .map(|r| model_text(r, validate::SKIP_REASON_CHARS))
             .filter(|r| !r.is_empty());
     }
     (report, unknown)
@@ -768,7 +777,7 @@ fn trim_for_tight(clusters: &[Cluster]) -> Vec<Cluster> {
 }
 
 fn ledger_entries(report: &Report, frame: &ReportFrame) -> Vec<LedgerEntry> {
-    let entry = |id: &str, section: Section| LedgerEntry {
+    let entry = |id: &str, section: Section, title: &str| LedgerEntry {
         item_id: id.to_string(),
         canonical_url: frame
             .items
@@ -778,10 +787,15 @@ fn ledger_entries(report: &Report, frame: &ReportFrame) -> Vec<LedgerEntry> {
         date: report.date,
         version: report.version,
         section,
+        title: Some(title.to_string()).filter(|t| !t.is_empty()),
     };
     let mut out = Vec::new();
     for p in &report.picks {
-        out.extend(p.item_ids.iter().map(|id| entry(id, Section::Pick)));
+        out.extend(
+            p.item_ids
+                .iter()
+                .map(|id| entry(id, Section::Pick, &p.headline)),
+        );
     }
     if let Some(a) = &report.also_in_the_news {
         // The rule-chosen line of a critical report was never curated: it
@@ -791,22 +805,60 @@ fn ledger_entries(report: &Report, frame: &ReportFrame) -> Vec<LedgerEntry> {
         } else {
             Section::Ain
         };
-        out.push(entry(&a.item_id, section));
+        out.push(entry(&a.item_id, section, &a.headline));
     }
     for n in &report.also_noted {
-        out.extend(n.item_ids.iter().map(|id| entry(id, Section::AlsoNoted)));
+        out.extend(
+            n.item_ids
+                .iter()
+                .map(|id| entry(id, Section::AlsoNoted, &n.line)),
+        );
     }
     if let Some(list) = &report.uncurated {
         out.extend(
             list.lines
                 .iter()
-                .map(|l| entry(&l.item_id, Section::Uncurated)),
+                .map(|l| entry(&l.item_id, Section::Uncurated, &l.link.title)),
         );
     }
     out
 }
 
 // ── The run ──────────────────────────────────────────────────────────────────
+
+/// What a finished model pass hands back to the run.
+struct Curated {
+    report: Report,
+    model: String,
+    /// Ids the publish named that the run never issued.
+    unknown_ids: usize,
+    /// Stories and Also-in-the-news candidates left out of the model input
+    /// to fit its byte budget.
+    trimmed: usize,
+}
+
+/// The ledger entries of the 14 days before `date` as the model's
+/// recent-reports list shows them: newest report first, one entry per item
+/// id, each with the headline it was shown under (the item's own title for
+/// an entry written before headlines were stored, when the run still has
+/// the item).
+fn recent_entries(ledger: &Ledger, date: NaiveDate, frame: &ReportFrame) -> Vec<LedgerEntry> {
+    let mut entries: Vec<LedgerEntry> = ledger.recent(date).cloned().collect();
+    entries.sort_by(|a, b| {
+        b.date
+            .cmp(&a.date)
+            .then(b.version.cmp(&a.version))
+            .then_with(|| a.item_id.cmp(&b.item_id))
+    });
+    let mut seen = BTreeSet::new();
+    entries.retain(|e| seen.insert(e.item_id.clone()));
+    for e in &mut entries {
+        if e.title.is_none() {
+            e.title = frame.items.get(&e.item_id).map(|i| i.title.clone());
+        }
+    }
+    entries
+}
 
 /// One attempt's fixed inputs, with the steps that need them and the run log.
 struct Attempt<'a> {
@@ -843,6 +895,7 @@ impl Attempt<'_> {
         version: Option<u32>,
         fetch_ms: u64,
         unknown_ids: usize,
+        trimmed: usize,
     ) {
         let rec = RunRecord {
             // When the attempt ended: the retry and the scheduler's guard
@@ -861,6 +914,7 @@ impl Attempt<'_> {
             fetch_ms,
             total_ms: self.started.elapsed().as_millis() as u64,
             unknown_ids: unknown_ids as u32,
+            trimmed: trimmed as u32,
         };
         if self.store.append_run(&rec).is_err() {
             warn!("huey: run log could not be written");
@@ -869,7 +923,7 @@ impl Attempt<'_> {
 
     /// Log a failed attempt and say so.
     fn fail(&self, mode: Option<Mode>, reason: FailReason, fetch_ms: u64) -> RunOutcome {
-        self.log(mode, Some(reason), None, fetch_ms, 0);
+        self.log(mode, Some(reason), None, fetch_ms, 0, 0);
         RunOutcome::Failed { reason }
     }
 
@@ -969,12 +1023,26 @@ impl Attempt<'_> {
         selection: &Selection,
         gathered: &Gathered,
         ledger: &Ledger,
-    ) -> Option<(Report, String, usize)> {
+    ) -> Option<Curated> {
         let (date, version, mode) = (frame.date, frame.version, frame.mode);
         let config = &self.env.config;
+        // The digest the model is given: the context digest, then the recent
+        // reports, so `digest.md` is everything it is told but public news.
+        let mut digest = gathered.digest.clone();
+        let mut recent_shown = recent_entries(ledger, date, frame);
+        let lines: Vec<RecentLine> = recent_shown
+            .iter()
+            .map(|e| RecentLine {
+                item_id: e.item_id.clone(),
+                date: e.date,
+                section: e.section.as_str(),
+                title: e.title.clone(),
+            })
+            .collect();
+        recent_shown.truncate(append_recent_reports(&mut digest, &lines));
         if self
             .store
-            .write_report_file(date, version, "digest.md", gathered.digest.text.as_bytes())
+            .write_report_file(date, version, "digest.md", digest.text.as_bytes())
             .is_err()
         {
             warn!("huey: digest could not be written");
@@ -985,7 +1053,7 @@ impl Attempt<'_> {
         } else {
             (config.model.clone(), config.max_budget_usd)
         };
-        let input = CurateInput {
+        let mut input = CurateInput {
             date,
             version,
             mode,
@@ -993,14 +1061,14 @@ impl Attempt<'_> {
             max_budget_usd,
             max_picks: if tight { TIGHT_MAX_PICKS } else { MAX_PICKS },
             also_noted: !tight,
-            digest: gathered.digest.clone(),
+            digest,
             candidates: if tight {
                 trim_for_tight(&frame.clusters)
             } else {
                 frame.clusters.clone()
             },
             ain_candidates: selection.ain_eligible.clone(),
-            recent_shown: ledger.recent(date).cloned().collect(),
+            recent_shown,
             project_roots: gathered
                 .projects
                 .iter()
@@ -1009,6 +1077,10 @@ impl Attempt<'_> {
             report_dir: self.store.report_dir(date, version),
             frame: frame.clone(),
         };
+        let trimmed = curate::fit_to_budget(&mut input);
+        if trimmed > 0 {
+            info!(trimmed, "huey: the model input was trimmed to its budget");
+        }
         // A regeneration is promised within five minutes (T13): its model
         // pass gets four at most, whatever the engine's own limit says.
         let limit = match self.trigger {
@@ -1018,8 +1090,13 @@ impl Attempt<'_> {
         let answer = tokio::time::timeout(limit, self.env.curator.curate(&input)).await;
         match answer {
             Ok(Ok(publish)) => {
-                let (report, unknown) = assemble_curated_counted(frame, &publish);
-                Some((report, model, unknown))
+                let (report, unknown_ids) = assemble_curated_counted(frame, &publish);
+                Some(Curated {
+                    report,
+                    model,
+                    unknown_ids,
+                    trimmed,
+                })
             }
             Ok(Err(e)) => {
                 info!(
@@ -1186,15 +1263,21 @@ pub async fn run_as_of(
         date, version, mode, &fetched, &selection, &gathered, &posture,
     );
 
-    let (report, model, unknown_ids) = if mode.is_curated() {
+    let (report, model, unknown_ids, trimmed) = if mode.is_curated() {
         match attempt.curate(&frame, &selection, &gathered, &ledger).await {
-            Some((report, model, unknown)) => (report, Some(model), unknown),
+            Some(done) => (
+                done.report,
+                Some(done.model),
+                done.unknown_ids,
+                done.trimmed,
+            ),
             None => return attempt.fail(Some(mode), FailReason::ModelFailed, fetch_ms),
         }
     } else {
         (
             assemble_uncurated(&frame, &selection.candidates, &selection.ain_eligible),
             None,
+            0,
             0,
         )
     };
@@ -1220,7 +1303,14 @@ pub async fn run_as_of(
     {
         return attempt.fail(Some(mode), FailReason::WriteFailed, fetch_ms);
     }
-    attempt.log(Some(mode), None, Some(version), fetch_ms, unknown_ids);
+    attempt.log(
+        Some(mode),
+        None,
+        Some(version),
+        fetch_ms,
+        unknown_ids,
+        trimmed,
+    );
     let pruned = store.prune(date);
     info!(
         version,
@@ -1259,6 +1349,7 @@ pub fn record_abandoned(env: &RunEnv, trigger: Trigger, now: DateTime<Utc>, elap
         fetch_ms: 0,
         total_ms: elapsed.as_millis() as u64,
         unknown_ids: 0,
+        trimmed: 0,
     };
     if store.append_run(&rec).is_err() {
         warn!("huey: run log could not be written");

@@ -2483,9 +2483,14 @@ fn handle_terminal_msg(
             mgr.detach(conn_key, &terminal_id);
             Ok(())
         }
-        ClientMsg::TerminalInput { terminal_id, bytes } => {
+        ClientMsg::TerminalInput {
+            terminal_id,
+            bytes,
+            auto_reply,
+        } => {
             use base64::Engine as _;
             match base64::engine::general_purpose::STANDARD.decode(bytes.as_bytes()) {
+                Ok(bytes) if auto_reply => mgr.auto_reply(cap, &terminal_id, &bytes),
                 Ok(bytes) => mgr.input(cap, &terminal_id, &bytes),
                 Err(_) => Err(terminal::TerminalError::InvalidBytes),
             }

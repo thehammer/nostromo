@@ -8,13 +8,20 @@
 //! - `huey.show` — point the report pane (or a `compare` pane) at a report.
 //! - `huey.regenerate`, `huey.record_verdict`, `huey.trial_summary`.
 //!
-//! There is no tool that confirms setup: only a human click can.
+//!   There is no tool that confirms setup: only a human click can.
+//! - `huey.check_project({project, kind, name|term|feature})` — one read-only
+//!   probe of a project (A5). For the curating session (`huey-run`) it acts
+//!   on the run in progress and is recorded in that run's digest; for anyone
+//!   else it answers against the code root and records nothing.
+//! - `huey.publish_report(<publish>)` — the curating session's report (A4).
+//!   Only the `huey-run` caller reaches it (the dispatch refuses everyone else).
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
 
 use crate::data::work::untrusted::NonceFence;
 use crate::huey::actions::{parse_date, parse_version};
+use crate::huey::curate::HUEY_RUN_TAG;
 use crate::huey::render::{self, Report};
 use crate::huey::store::VerdictKind;
 use crate::huey::{HueyHandle, HueyPane, StartError, Trigger, TriggerRefused};
@@ -507,6 +514,24 @@ pub fn trial_summary(state: &McpSharedState, args: &Value) -> Value {
         "useful_or_interesting_share": share(&[VerdictKind::Useful, VerdictKind::Interesting]),
         "hype_or_wrong_project_share": share(&[VerdictKind::Hype, VerdictKind::WrongProject]),
     })
+}
+
+pub async fn check_project(state: &McpSharedState, args: &Value, pty_id: Option<&str>) -> Value {
+    let Some(handle) = &state.huey else {
+        return unavailable();
+    };
+    if pty_id == Some(HUEY_RUN_TAG) {
+        handle.curate_bridge().check_project(args).await
+    } else {
+        handle.check_project(args).await
+    }
+}
+
+pub async fn publish_report(state: &McpSharedState, args: &Value) -> Value {
+    match &state.huey {
+        Some(handle) => handle.curate_bridge().publish(args).await,
+        None => unavailable(),
+    }
 }
 
 pub fn get_state(state: &McpSharedState) -> Value {

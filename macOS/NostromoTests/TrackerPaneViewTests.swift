@@ -1120,10 +1120,12 @@ final class TrackerPaneViewTests: XCTestCase {
     /// The set `setupMenu()` and `ModelShortcut` give the main menu today: ⌘Q, ⌘X/C/V/A/Z, ⇧⌘Z (written "Z"),
     /// ⇧⌘D/I/K/P/B (Debug) , ⇧⌘M (Session > model) and ⌥⌘A (Go to Approval Card).
     /// BA3 added ⇧⌘B (Session ▸ Background Activity…) and moved Debug ▸ Capture render state now
-    /// from ⇧⌘B to ⌥⇧⌘B; the tracker itself still adds nothing.
+    /// from ⇧⌘B to ⌥⇧⌘B; the tracker itself still adds nothing. The terminal pane (1d) added ⌘T and ⇧⌘W
+    /// (Terminal menu) and ⌘F and ⌘G (Edit ▸ Find…, Find Next).
     private static let pinnedKeyEquivalents: Set<String> = [
         "⌘q", "⌘x", "⌘c", "⌘v", "⌘a", "⌘z", "⌘Z",
         "⇧⌘d", "⇧⌘i", "⇧⌘k", "⇧⌘p", "⌥⇧⌘b", "⇧⌘m", "⇧⌘b", "⌥⌘a",
+        "⌘t", "⇧⌘w", "⌘f", "⌘g",
     ]
 
     private func groups(_ pattern: String, in text: String, options: NSRegularExpression.Options = []) throws -> [[String]] {
