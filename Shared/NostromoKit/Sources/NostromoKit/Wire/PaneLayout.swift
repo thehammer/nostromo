@@ -774,8 +774,85 @@ public enum PaneContentWire {
     /// A terminal pane (the Mac renders it; this client shows a placeholder, and never gets
     /// terminal bytes).
     case terminal(TerminalPlaceholder)
+    /// A daemon-rendered document (Huey's report, context and setup panes). Generic on
+    /// purpose: iOS decodes it (and shows nothing new yet), and a later client can render it with
+    /// no Huey-specific code.
+    case document(DocumentPayload)
     /// A future content kind not yet known to this client version.
     case unknown(Any)
+}
+
+/// How loudly a `DocBanner` speaks. An unknown level decodes as `.info`.
+public enum DocBannerLevel: String, Equatable, Sendable {
+    case info, warning
+}
+
+/// A line above a document's body (for example why today's report is missing).
+public struct DocBanner: Decodable, Equatable {
+    public let level: DocBannerLevel
+    public let text: String
+
+    private enum CodingKeys: String, CodingKey { case level, text }
+
+    public init(level: DocBannerLevel, text: String) {
+        self.level = level
+        self.text = text
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        let raw = (try? c.decode(String.self, forKey: .level)) ?? "info"
+        level = DocBannerLevel(rawValue: raw) ?? .info
+        text = (try? c.decode(String.self, forKey: .text)) ?? ""
+    }
+}
+
+/// One button of a document. `id` is sent back in `pane_action`.
+public struct DocAction: Decodable, Equatable {
+    public let id: String
+    public let label: String
+    public let primary: Bool
+
+    private enum CodingKeys: String, CodingKey { case id, label, primary }
+
+    public init(id: String, label: String, primary: Bool = false) {
+        self.id = id
+        self.label = label
+        self.primary = primary
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? ""
+        label = (try? c.decode(String.self, forKey: .label)) ?? ""
+        primary = (try? c.decodeIfPresent(Bool.self, forKey: .primary)) ?? false
+    }
+}
+
+/// The payload of `PaneContentWire.document`. Mirrors the `Document` variant of
+/// `PaneContentWire` in `src/ipc/protocol.rs`.
+public struct DocumentPayload: Decodable, Equatable {
+    public let title: String
+    public let banner: DocBanner?
+    public let blocks: [MdBlock]
+    public let actions: [DocAction]
+
+    private enum CodingKeys: String, CodingKey { case title, banner, blocks, actions }
+
+    public init(title: String, banner: DocBanner? = nil, blocks: [MdBlock] = [], actions: [DocAction] = []) {
+        self.title = title
+        self.banner = banner
+        self.blocks = blocks
+        self.actions = actions
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        title = (try? c.decode(String.self, forKey: .title)) ?? ""
+        banner = (try? c.decodeIfPresent(DocBanner.self, forKey: .banner)) ?? nil
+        blocks = (try? c.decode([MdBlock].self, forKey: .blocks)) ?? []
+        actions = (try? c.decode([DocAction].self, forKey: .actions)) ?? []
+    }
 }
 
 /// What a client that cannot attach to a terminal shows for a terminal pane: the pane's `kind` is
@@ -839,6 +916,8 @@ extension PaneContentWire: Decodable {
             self = .ticket(try TicketPayload(from: d))
         case "terminal":
             self = .terminal(try TerminalPlaceholder(from: d))
+        case "document":
+            self = .document(try DocumentPayload(from: d))
         default:
             let raw = try AnyDecodable(from: d)
             self = .unknown(raw.value)
@@ -873,6 +952,8 @@ extension PaneContentWire: Equatable {
         case (.ticket(let a), .ticket(let b)):
             return a == b
         case (.terminal(let a), .terminal(let b)):
+            return a == b
+        case (.document(let a), .document(let b)):
             return a == b
         case (.jsonSnapshot(let a), .jsonSnapshot(let b)):
             return jsonPayloadsEqual(a, b)

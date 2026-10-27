@@ -117,7 +117,7 @@ struct WorkItem: Decodable, Hashable, Identifiable {
     let priority: WorkPriority?
     let severity: String?
     let environment: String?
-    /// Sentry: which search found the issue, `me` or `unassigned`.
+    /// Sentry: `me`, `unassigned` (fresh unassigned errors), `unassigned_older` or `other` (see the daemon's `WorkItem.assignee`).
     let assignee: String?
     let createdAt: Date?
     let updatedAt: Date?

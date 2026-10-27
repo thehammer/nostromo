@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 // PaneFirstPaintAudit is compiled into this target directly (logic test —
 // no host app, no window, no AppKit needed). No module imports needed.
 
@@ -813,3 +814,174 @@ private func verdictFragment(of line: String) -> String {
     guard let range = line.range(of: "verdict=") else { return "" }
     return String(line[range.lowerBound...])
 }
+
+// MARK: - DocumentPaneViewTests
+
+/// A `document` pane (Huey's report, context and setup panes) as the operator sees it: built through
+/// `PaneContentNSView`, the same way `DynamicFocusView` builds every leaf. `sendPaneAction` is
+/// the pane's injected seam, so no daemon is involved.
+final class DocumentPaneViewTests: XCTestCase {
+
+    private struct Sent: Equatable { let tag: String; let paneId: String; let actionId: String }
+
+    private func makePane(sent: @escaping (Sent) -> Void = { _ in }) -> PaneContentNSView {
+        let pane = PaneContentNSView()
+        pane.focusTag = "huey"
+        pane.paneId = "report"
+        pane.sendPaneAction = { tag, paneId, actionId in sent(Sent(tag: tag, paneId: paneId, actionId: actionId)) }
+        return pane
+    }
+
+    private func document(
+        title: String = "Report for 2026-10-26",
+        banner: DocBanner? = nil,
+        actions: [DocAction] = []
+    ) -> PaneContentWire {
+        .document(DocumentPayload(title: title, banner: banner,
+                                  blocks: [.paragraph([.text("Nothing to flag today.")])], actions: actions))
+    }
+
+    // MARK: First paint
+
+    func testADocumentPaintsItsTitleAndBodyImmediatelyWithNoLoadingState() {
+        let pane = makePane()
+        pane.update(content: document(), freshness: nil)
+
+        XCTAssertFalse(pane.documentView.isHidden)
+        XCTAssertTrue(pane.documentView.renderedText.contains("Report for 2026-10-26"),
+                      "the title carries the date and must be visible")
+        XCTAssertTrue(pane.documentView.renderedText.contains("Nothing to flag today."))
+        let m = pane.currentMeasurements()
+        XCTAssertTrue(m.hasContent)
+        XCTAssertFalse(m.isLoading)
+    }
+
+    func testAWarningBannerShowsItsTextAndLevel() {
+        let pane = makePane()
+        pane.update(content: document(banner: DocBanner(level: .warning, text: "Today's report is missing.")), freshness: nil)
+        XCTAssertEqual(pane.documentView.bannerText, "Today's report is missing.")
+        XCTAssertEqual(pane.documentView.bannerLevel, .warning)
+    }
+
+    func testAnInfoBannerShowsItsTextAtInfoLevel() {
+        let pane = makePane()
+        pane.update(content: document(banner: DocBanner(level: .info, text: "Generated at 7:00.")), freshness: nil)
+        XCTAssertEqual(pane.documentView.bannerText, "Generated at 7:00.")
+        XCTAssertEqual(pane.documentView.bannerLevel, .info)
+    }
+
+    func testADocumentWithoutABannerHidesTheBannerAndARefreshRemovesAPreviousOne() {
+        let pane = makePane()
+        pane.update(content: document(), freshness: nil)
+        XCTAssertNil(pane.documentView.bannerText)
+
+        pane.update(content: document(banner: DocBanner(level: .warning, text: "Stale.")), freshness: nil)
+        XCTAssertEqual(pane.documentView.bannerText, "Stale.")
+        pane.update(content: document(), freshness: nil)
+        XCTAssertNil(pane.documentView.bannerText, "a refreshed document without a banner drops the old banner")
+    }
+
+    func testActionsBecomeButtonsInOrderAndNoActionsMeansNoButtons() {
+        let pane = makePane()
+        pane.update(content: document(actions: [DocAction(id: "report.prev", label: "Previous"),
+                                                DocAction(id: "report.regenerate", label: "Regenerate", primary: true)]),
+                    freshness: nil)
+        XCTAssertEqual(pane.documentView.actionButtons.map(\.title), ["Previous", "Regenerate"])
+
+        pane.update(content: document(), freshness: nil)
+        XCTAssertTrue(pane.documentView.actionButtons.isEmpty)
+    }
+
+    // MARK: Buttons
+
+    func testPressingAnActionButtonSendsThePanesTagPaneIdAndActionId() {
+        var sent: [Sent] = []
+        let pane = makePane { sent.append($0) }
+        pane.update(content: document(actions: [DocAction(id: "report.prev", label: "Previous"),
+                                                DocAction(id: "report.regenerate", label: "Regenerate")]),
+                    freshness: nil)
+
+        pane.documentView.actionButtons[1].performClick(nil)
+        XCTAssertEqual(sent, [Sent(tag: "huey", paneId: "report", actionId: "report.regenerate")])
+
+        pane.documentView.actionButtons[0].performClick(nil)
+        XCTAssertEqual(sent.last, Sent(tag: "huey", paneId: "report", actionId: "report.prev"))
+        XCTAssertEqual(sent.count, 2)
+    }
+
+    // MARK: Links
+
+    private func makeLinkRig() -> (view: DocumentContentView, sent: () -> [Sent], opened: () -> [URL]) {
+        var sent: [Sent] = []
+        var opened: [URL] = []
+        let pane = makePane { sent.append($0) }
+        pane.documentView.openURL = { opened.append($0) }
+        pane.update(content: document(), freshness: nil)
+        return (pane.documentView, { sent }, { opened })
+    }
+
+    func testAnActionLinkSendsItsActionToTheDaemon() {
+        let rig = makeLinkRig()
+        rig.view.handleLink(URL(string: "nostromo-action:report.prev")!)
+        XCTAssertEqual(rig.sent(), [Sent(tag: "huey", paneId: "report", actionId: "report.prev")])
+        XCTAssertTrue(rig.opened().isEmpty)
+    }
+
+    func testAnActionLinkKeepsAColonSeparatedIdIntact() {
+        let rig = makeLinkRig()
+        rig.view.handleLink(URL(string: "nostromo-action:verdict:2026-10-26:1:2:useful")!)
+        XCTAssertEqual(rig.sent().map(\.actionId), ["verdict:2026-10-26:1:2:useful"])
+    }
+
+    func testAnHttpsLinkOpensInTheBrowserAndSendsNoAction() {
+        let rig = makeLinkRig()
+        rig.view.handleLink(URL(string: "https://example.test/article")!)
+        XCTAssertEqual(rig.opened(), [URL(string: "https://example.test/article")!])
+        XCTAssertTrue(rig.sent().isEmpty)
+    }
+
+    func testOtherLinksDoNothingAtAll() {
+        let rig = makeLinkRig()
+        for raw in ["javascript:alert(1)", "file:///etc/passwd", "http://example.test/", "mailto:someone@example.test",
+                    "data:text/html,hi", "relative/path.md"] {
+            rig.view.handleLink(URL(string: raw)!)
+        }
+        XCTAssertTrue(rig.opened().isEmpty, "only https opens")
+        XCTAssertTrue(rig.sent().isEmpty, "only nostromo-action sends")
+    }
+
+    // MARK: Switching away
+
+    func testAPaneThatSwitchesFromDocumentToTextHidesAndClearsTheDocument() {
+        let pane = makePane()
+        pane.update(content: document(banner: DocBanner(level: .warning, text: "Stale."),
+                                      actions: [DocAction(id: "report.prev", label: "Previous")]),
+                    freshness: nil)
+        XCTAssertFalse(pane.documentView.isHidden)
+
+        pane.update(content: .text("plain"), freshness: nil)
+        XCTAssertTrue(pane.documentView.isHidden)
+        XCTAssertEqual(pane.documentView.renderedText, "")
+        XCTAssertNil(pane.documentView.bannerText)
+        XCTAssertTrue(pane.documentView.actionButtons.isEmpty)
+    }
+
+    func testReturningToTheSameDocumentAfterATextDetourPaintsItAgain() {
+        let pane = makePane()
+        let doc = document()
+        pane.update(content: doc, freshness: nil)
+        pane.update(content: .text("plain"), freshness: nil)
+        pane.update(content: doc, freshness: nil)
+        XCTAssertFalse(pane.documentView.isHidden)
+        XCTAssertTrue(pane.documentView.renderedText.contains("Nothing to flag today."))
+    }
+
+    func testANewDaysDocumentReplacesThePreviousOne() {
+        let pane = makePane()
+        pane.update(content: document(title: "Report for 2026-10-25"), freshness: nil)
+        pane.update(content: document(title: "Report for 2026-10-26"), freshness: nil)
+        XCTAssertTrue(pane.documentView.renderedText.contains("2026-10-26"))
+        XCTAssertFalse(pane.documentView.renderedText.contains("2026-10-25"))
+    }
+}
+

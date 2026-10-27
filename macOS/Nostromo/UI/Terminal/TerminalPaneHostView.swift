@@ -31,7 +31,8 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     static let headerHeight: CGFloat = 24
     private static let overlayHeight: CGFloat = 40
 
-    let tag: String
+    /// The focus tag (named so it does not collide with `NSView.tag`, an `Int`).
+    let focusTag: String
     let paneId: String
     let windowId: String
 
@@ -72,7 +73,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     init(tag: String, paneId: String, windowId: String,
          store: TerminalSessionStore = .shared, latency: TerminalLatencyStats = .shared) {
-        self.tag = tag
+        self.focusTag = tag
         self.paneId = paneId
         self.windowId = windowId
         self.store = store
@@ -99,7 +100,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         addSubview(connectingView)
         addSubview(header)
         addSubview(overlay)
-        info = store.info(forPane: paneId, tag: tag)
+        info = store.info(forPane: paneId, tag: focusTag)
         terminalView.terminalId = info?.terminalId
         changes = store.changes.sink { [weak self] change in self?.handle(change) }
         render()
@@ -240,7 +241,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     private func registerIfReady() {
         guard !registered, window != nil, preferredSize != nil else { return }
         registered = true
-        store.register(self, tag: tag, paneId: paneId)
+        store.register(self, tag: focusTag, paneId: paneId)
     }
 
     private func unregisterFromStore() {
@@ -262,7 +263,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
             render()
             return
         }
-        guard case .info(let updated) = change, updated.paneId == paneId, updated.tag == tag else { return }
+        guard case .info(let updated) = change, updated.paneId == paneId, updated.tag == focusTag else { return }
         let restarted = info.map { $0.terminalId != updated.terminalId } ?? false
         info = updated
         terminalView.terminalId = updated.terminalId

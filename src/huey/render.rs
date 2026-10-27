@@ -9,11 +9,18 @@
 //! Order: opener, the tight or uncurated label, picks (or the quiet line),
 //! Also in the news, Also noted, the uncurated list, footer.
 
+use std::path::Path;
+
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use crate::huey::budget::Mode;
-use crate::ipc::protocol::{MdBlock, MdSpan};
+use crate::huey::context::ContextSource;
+use crate::huey::setup::{InterestsStatus, SetupScan};
+use crate::huey::store::VerdictKind;
+use crate::ipc::protocol::{
+    DocAction, DocBanner, DocBannerLevel, MdBlock, MdSpan, PaneContentWire,
+};
 
 pub const TIGHT_LINE: &str = "Short report: budget is tight today.";
 pub const QUIET_LINE: &str = "Nothing that touches your work today.";
@@ -50,6 +57,9 @@ pub struct Pick {
     /// As the digest names it.
     pub project_name: String,
     pub for_line: String,
+    /// Digest anchor ids the pick cites (the evidence for its "For" line).
+    #[serde(default)]
+    pub anchors: Vec<String>,
     pub check: PickCheck,
     /// The best source's link.
     pub link: Link,
@@ -188,8 +198,24 @@ pub fn title(date: NaiveDate, version: u32) -> String {
     }
 }
 
+/// Extra paragraphs a document adds around the stored report: the version
+/// line after the opener, and a verdict line after each pick. Never part of
+/// `report.md`.
+#[derive(Debug, Clone, Default)]
+pub struct DocExtras {
+    /// Markdown paragraph placed right after the opener.
+    pub after_opener: Option<String>,
+    /// Markdown paragraph placed after pick `n` (index `n - 1`).
+    pub after_pick: Vec<Option<String>>,
+}
+
 /// `report.md`.
 pub fn render_markdown(report: &Report) -> String {
+    render_markdown_with(report, &DocExtras::default())
+}
+
+/// The report's markdown with a document's extra paragraphs in place.
+pub fn render_markdown_with(report: &Report, extras: &DocExtras) -> String {
     let mut out = String::new();
     let para = |out: &mut String, text: &str| {
         out.push_str(text);
@@ -202,6 +228,9 @@ pub fn render_markdown(report: &Report) -> String {
         format!("{} {}", date_prefix(report.date), esc(&report.opener_gist))
     };
     para(&mut out, &opener);
+    if let Some(line) = &extras.after_opener {
+        para(&mut out, line);
+    }
     if report.is_uncurated() {
         para(&mut out, UNCURATED_LINE);
     } else if report.mode == Mode::Tight {
@@ -237,6 +266,9 @@ pub fn render_markdown(report: &Report) -> String {
             if !pick.also_covered_by.is_empty() {
                 let others: Vec<String> = pick.also_covered_by.iter().map(link).collect();
                 para(&mut out, &format!("Also covered by {}", others.join(", ")));
+            }
+            if let Some(Some(extra)) = extras.after_pick.get(n) {
+                para(&mut out, extra);
             }
         }
     }
@@ -280,6 +312,11 @@ pub fn render_markdown(report: &Report) -> String {
     out.push_str(&esc(&footer_text(&report.footer)));
     out.push('\n');
     out
+}
+
+/// The pane's blocks for `report`, with a document's extras.
+pub fn render_blocks_with(report: &Report, extras: &DocExtras) -> Vec<MdBlock> {
+    crate::markdown_blocks::markdown_to_blocks(&render_markdown_with(report, extras))
 }
 
 /// The pane's blocks for `report`.
@@ -538,6 +575,9 @@ pub struct HueyDocument {
     /// The report shown, if any.
     pub date: Option<NaiveDate>,
     pub version: Option<u32>,
+    /// Buttons below the body. Inline `nostromo-action:` links in `markdown`
+    /// are actions too.
+    pub actions: Vec<DocAction>,
 }
 
 impl HueyDocument {
@@ -550,8 +590,43 @@ impl HueyDocument {
             blocks,
             date: None,
             version: None,
+            actions: Vec::new(),
         }
     }
+
+    /// What a `Document` pane carries on the wire.
+    pub fn into_wire(self) -> PaneContentWire {
+        PaneContentWire::Document {
+            title: self.title,
+            banner: self.banner.map(|b| DocBanner {
+                level: match b.level {
+                    BannerLevel::Info => DocBannerLevel::Info,
+                    BannerLevel::Warning => DocBannerLevel::Warning,
+                },
+                text: b.text,
+            }),
+            blocks: self.blocks,
+            actions: self.actions,
+        }
+    }
+}
+
+/// The ids of the actions a document carries (`ClientMsg::PaneAction`).
+pub mod action {
+    pub const SETUP_START: &str = "setup.start";
+    pub const SETUP_RESCAN: &str = "setup.rescan";
+    pub const SETUP_OPEN_INTERESTS: &str = "setup.open_interests";
+    pub const SETUP_IMPORT_INTERESTS: &str = "setup.import_interests";
+    pub const SETUP_CONFIRM: &str = "setup.confirm";
+    pub const SETUP_CONFIRM_RUN_NOW: &str = "setup.confirm_run_now";
+    pub const REPORT_PREV: &str = "report.prev";
+    pub const REPORT_NEXT: &str = "report.next";
+    pub const REPORT_TODAY: &str = "report.today";
+    pub const REPORT_REGENERATE: &str = "report.regenerate";
+    /// `report.version:<n>`
+    pub const REPORT_VERSION_PREFIX: &str = "report.version:";
+    /// `verdict:<date>:<version>:<pick>:<useful|interesting|meh|hype|wrong_project>`
+    pub const VERDICT_PREFIX: &str = "verdict:";
 }
 
 /// Shown before setup (H6 replaces it with the full setup document).
@@ -572,6 +647,261 @@ pub fn no_report_document(today: NaiveDate, reason: MissingReason) -> HueyDocume
             text: format!("There is no report yet: {}.", reason.text()),
         }),
         "No report yet.\n".to_string(),
+    )
+}
+
+// ── Document builders (H6) ───────────────────────────────────────────────────
+
+/// A button.
+pub fn button(id: &str, label: &str, primary: bool) -> DocAction {
+    DocAction {
+        id: id.to_string(),
+        label: label.to_string(),
+        primary,
+    }
+}
+
+/// `Version 2, generated 2026-10-26 06:41.` The time is the daemon's local
+/// time, as the caller formats it.
+pub fn version_line(version: u32, generated: &str) -> String {
+    format!("Version {version}, generated {}.", esc(generated))
+}
+
+/// The verdict kinds in the order the links appear, with their labels.
+pub const VERDICT_CHOICES: [(VerdictKind, &str, &str); 5] = [
+    (VerdictKind::Useful, "useful", "Useful"),
+    (VerdictKind::Interesting, "interesting", "Interesting"),
+    (VerdictKind::Meh, "meh", "Meh"),
+    (VerdictKind::Hype, "hype", "Hype"),
+    (VerdictKind::WrongProject, "wrong_project", "Wrong project"),
+];
+
+/// The id's last part for a verdict kind (`wrong_project`).
+pub fn verdict_slug(kind: VerdictKind) -> &'static str {
+    VERDICT_CHOICES
+        .iter()
+        .find(|(k, _, _)| *k == kind)
+        .map(|(_, slug, _)| *slug)
+        .unwrap_or("meh")
+}
+
+/// The verdict kind a slug names.
+pub fn verdict_from_slug(slug: &str) -> Option<VerdictKind> {
+    VERDICT_CHOICES
+        .iter()
+        .find(|(_, s, _)| *s == slug)
+        .map(|(k, _, _)| *k)
+}
+
+/// One paragraph of verdict links for pick `pick` (from 1) of a version. The
+/// chosen verdict, if any, is in bold. These `nostromo-action:` links are
+/// the only ones a document carries.
+pub fn verdict_paragraph(
+    date: NaiveDate,
+    version: u32,
+    pick: usize,
+    chosen: Option<VerdictKind>,
+) -> String {
+    let links: Vec<String> = VERDICT_CHOICES
+        .iter()
+        .map(|(kind, slug, label)| {
+            let link = format!(
+                "[{label}](<nostromo-action:{}{date}:{version}:{pick}:{slug}>)",
+                action::VERDICT_PREFIX
+            );
+            if chosen == Some(*kind) {
+                format!("**{link}**")
+            } else {
+                link
+            }
+        })
+        .collect();
+    format!("Verdict: {}", links.join(" · "))
+}
+
+fn bullets_of(items: impl IntoIterator<Item = String>) -> String {
+    items
+        .into_iter()
+        .map(|i| format!("- {i}\n"))
+        .collect::<String>()
+}
+
+fn source_lines(sources: &[ContextSource]) -> String {
+    bullets_of(sources.iter().map(|s| {
+        let note = s
+            .note
+            .as_deref()
+            .map(|n| format!(" ({})", esc(n)))
+            .unwrap_or_default();
+        format!("**{}**: {}{}", esc(&s.name), esc(&s.path), note)
+    }))
+}
+
+/// Before the first scan (D6): says it has read nothing, lists what it would
+/// read (from config, no reads) and offers one button.
+pub fn setup_prescan_document(sources: &[ContextSource]) -> HueyDocument {
+    setup_prescan_document_noted(sources, None)
+}
+
+/// [`setup_prescan_document`] with a plain-English `note` ahead of the rest
+/// (what went wrong with the last scan).
+pub fn setup_prescan_document_noted(sources: &[ContextSource], note: Option<&str>) -> HueyDocument {
+    let note = note.map(|n| format!("{}\n\n", esc(n))).unwrap_or_default();
+    let md = format!(
+        "{note}Huey is not set up on this machine. It has read nothing.\n\n\
+         When you press the button, Huey reads the places below, in memory only: \
+         nothing is saved, fetched or sent until you confirm.\n\n\
+         ### What it would read\n\n{}",
+        source_lines(sources)
+    );
+    let mut doc = HueyDocument::from_markdown("Huey".to_string(), None, md);
+    doc.actions = vec![button(
+        action::SETUP_START,
+        "Set up Huey on this machine",
+        true,
+    )];
+    doc
+}
+
+/// After the scan: sources, projects with their "how it runs" lines, the
+/// interests file's status, and what to do next.
+pub fn setup_scan_document(scan: &SetupScan, interests_path: &Path) -> HueyDocument {
+    let projects = if scan.projects.is_empty() {
+        "No projects in flight were found.\n".to_string()
+    } else {
+        bullets_of(scan.projects.iter().map(|p| {
+            let description = p
+                .description
+                .as_deref()
+                .map(|d| format!(" ({})", esc(d)))
+                .unwrap_or_default();
+            format!("**{}**{description}: {}", esc(&p.name), esc(&p.how_it_runs))
+        }))
+    };
+    let (interests, importable) = match &scan.interests {
+        InterestsStatus::Existing => (
+            format!(
+                "Your interests file is at {}. Edit it any time; changes apply from the next report.\n",
+                esc(&interests_path.display().to_string())
+            ),
+            false,
+        ),
+        InterestsStatus::Missing => (
+            "There is no interests file yet. Open the interests file to write a draft from the projects above, edit it, then confirm.\n".to_string(),
+            false,
+        ),
+        InterestsStatus::ImportableFrom(from) => (
+            format!(
+                "There is no interests file yet, but an older one sits at {}. Import it, or open a fresh draft, then confirm.\n",
+                esc(&from.display().to_string())
+            ),
+            true,
+        ),
+    };
+    let md = format!(
+        "Huey has read this machine ({}), in memory only. Nothing is saved until you confirm.\n\n\
+         ### Sources read\n\n{}\n### Projects in flight\n\n{projects}\n### Interests\n\n{interests}",
+        esc(&scan.machine),
+        source_lines(&scan.context_sources),
+    );
+    let mut doc = HueyDocument::from_markdown("Huey: set up".to_string(), None, md);
+    doc.actions.push(button(
+        action::SETUP_OPEN_INTERESTS,
+        "Open interests file",
+        false,
+    ));
+    if importable {
+        doc.actions.push(button(
+            action::SETUP_IMPORT_INTERESTS,
+            "Import older interests file",
+            false,
+        ));
+    }
+    doc.actions
+        .push(button(action::SETUP_RESCAN, "Scan again", false));
+    doc.actions
+        .push(button(action::SETUP_CONFIRM, "Confirm setup", true));
+    doc.actions.push(button(
+        action::SETUP_CONFIRM_RUN_NOW,
+        "Confirm and run now",
+        false,
+    ));
+    doc
+}
+
+/// A date (or version) with no report behind it.
+pub fn missing_report_document(
+    date: NaiveDate,
+    version: Option<u32>,
+    actions: Vec<DocAction>,
+) -> HueyDocument {
+    let what = match version {
+        Some(v) => format!(
+            "There is no version {v} of the report for {}.",
+            date.format("%A, %b %-d, %Y")
+        ),
+        None => format!("There is no report for {}.", date.format("%A, %b %-d, %Y")),
+    };
+    let mut doc = HueyDocument::from_markdown(
+        title(date, 1),
+        Some(Banner {
+            level: BannerLevel::Info,
+            text: what.clone(),
+        }),
+        format!("{what}\n"),
+    );
+    doc.actions = actions;
+    doc
+}
+
+/// The digest behind a report, as blocks. Digest lines hold titles from the
+/// user's own files and from the news, so every line is escaped: only the
+/// digest's own headings and bullets keep their markup, and nothing in it can
+/// become a link, an image or an action.
+pub fn context_document(date: NaiveDate, version: u32, digest: &str) -> HueyDocument {
+    let mut md = String::new();
+    for line in digest.lines() {
+        let trimmed = line.trim_start();
+        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+        if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+            md.push_str(&format!(
+                "{} {}",
+                &trimmed[..hashes],
+                esc(trimmed[hashes..].trim())
+            ));
+        } else if let Some(rest) = trimmed.strip_prefix("- ") {
+            let indent = &line[..line.len() - trimmed.len()];
+            md.push_str(&format!("{indent}- {}", esc(rest)));
+        } else {
+            md.push_str(&esc(line));
+        }
+        md.push('\n');
+    }
+    let mut doc = HueyDocument::from_markdown(
+        format!("Huey context, {}", date.format("%a %b %-d, %Y")),
+        None,
+        md,
+    );
+    doc.date = Some(date);
+    doc.version = Some(version);
+    doc
+}
+
+/// No digest to show for `date`.
+pub fn no_digest_document(date: NaiveDate) -> HueyDocument {
+    HueyDocument::from_markdown(
+        format!("Huey context, {}", date.format("%a %b %-d, %Y")),
+        None,
+        "No digest: there is no report for this date.\n".to_string(),
+    )
+}
+
+/// The Context pane before setup.
+pub fn context_not_set_up_document() -> HueyDocument {
+    HueyDocument::from_markdown(
+        "Huey context".to_string(),
+        None,
+        "Huey has read nothing on this machine yet, so there is no context to show.\n".to_string(),
     )
 }
 

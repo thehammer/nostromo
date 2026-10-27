@@ -180,7 +180,7 @@ private func orgRank(_ org: String) -> (Int, String) {
     }
 }
 
-private let builtInOrder = ["fred", "mother", "perri", "teri"]
+private let builtInOrder = ["fred", "mother", "perri", "teri", "huey"]
 
 /// Sort pathless focuses: canonical built-in order first, then remaining alphabetically.
 private func sortedPathlessFocuses(_ focuses: [Focus]) -> [Focus] {

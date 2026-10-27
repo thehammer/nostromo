@@ -32,7 +32,7 @@ struct QuickAction: Codable, Hashable {
 // MARK: - Focus
 
 struct Focus: Codable, Hashable, Identifiable {
-    var id: String           // "fred"/"mother"/"perri"/"teri" for built-ins; UUID string for dynamic
+    var id: String           // "fred"/"mother"/"perri"/"teri"/"huey" for built-ins; UUID string for dynamic
     var agentTag: String     // claude agent name e.g. "claudia", "cody"
     var projectPath: String? // nil for built-ins; absolute path e.g. "/Users/hammer/Code/admin-portal"
     var isBuiltIn: Bool
@@ -132,6 +132,8 @@ struct Focus: Codable, Hashable, Identifiable {
                   ),
               ], org: "Carefeed"),
         Focus(id: "teri",   agentTag: "teri",   projectPath: nil, isBuiltIn: true, org: "Carefeed"),
+        // Appended, so no index shifts. Huey is a personal agent: it reads the user's own work.
+        Focus(id: "huey",   agentTag: "huey",   projectPath: nil, isBuiltIn: true, org: "Personal"),
     ]
 
     /// The built-ins the daemon actually runs, in canonical order.
@@ -1953,8 +1955,84 @@ enum PaneContentWire {
     /// A terminal pane. The Mac draws it from `TerminalSessionStore` (routed by pane id), so this
     /// content is never rendered; it exists so the daemon's placeholder decodes as what it is.
     case terminal(TerminalPlaceholder)
+    /// A daemon-rendered document (Huey's report, context and setup panes): a dated title, an
+    /// optional banner, markdown blocks and the actions the reader may take.
+    case document(DocumentPayload)
     /// A future content kind not yet recognised by this client version.
     case unknown(JSONValue)
+}
+
+/// How loudly a `DocBanner` speaks. An unknown level decodes as `.info`.
+enum DocBannerLevel: String, Equatable {
+    case info, warning
+}
+
+/// A line above a document's body (for example why today's report is missing).
+struct DocBanner: Decodable, Equatable {
+    let level: DocBannerLevel
+    let text: String
+
+    private enum CodingKeys: String, CodingKey { case level, text }
+
+    init(level: DocBannerLevel, text: String) {
+        self.level = level
+        self.text = text
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = (try? c.decode(String.self, forKey: .level)) ?? "info"
+        level = DocBannerLevel(rawValue: raw) ?? .info
+        text = (try? c.decode(String.self, forKey: .text)) ?? ""
+    }
+}
+
+/// One button of a document. `id` is sent back in `pane_action`.
+struct DocAction: Decodable, Equatable {
+    let id: String
+    let label: String
+    let primary: Bool
+
+    private enum CodingKeys: String, CodingKey { case id, label, primary }
+
+    init(id: String, label: String, primary: Bool = false) {
+        self.id = id
+        self.label = label
+        self.primary = primary
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(String.self, forKey: .id)) ?? ""
+        label = (try? c.decode(String.self, forKey: .label)) ?? ""
+        primary = (try? c.decodeIfPresent(Bool.self, forKey: .primary)) ?? false
+    }
+}
+
+/// The payload of `PaneContentWire.document`. Mirrors the `Document` variant of
+/// `PaneContentWire` in `src/ipc/protocol.rs` (macOS-local copy).
+struct DocumentPayload: Decodable, Equatable {
+    let title: String
+    let banner: DocBanner?
+    let blocks: [MdBlock]
+    let actions: [DocAction]
+
+    private enum CodingKeys: String, CodingKey { case title, banner, blocks, actions }
+
+    init(title: String, banner: DocBanner? = nil, blocks: [MdBlock] = [], actions: [DocAction] = []) {
+        self.title = title
+        self.banner = banner
+        self.blocks = blocks
+        self.actions = actions
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = (try? c.decode(String.self, forKey: .title)) ?? ""
+        banner = (try? c.decodeIfPresent(DocBanner.self, forKey: .banner)) ?? nil
+        blocks = (try? c.decode([MdBlock].self, forKey: .blocks)) ?? []
+        actions = (try? c.decode([DocAction].self, forKey: .actions)) ?? []
+    }
 }
 
 /// The `terminal` pane content (`PaneContentWire::Terminal` in `src/ipc/protocol.rs`): a placeholder
@@ -2010,6 +2088,8 @@ extension PaneContentWire: Decodable {
             self = .ticket(try TicketPayload(from: decoder))
         case "terminal":
             self = .terminal(try TerminalPlaceholder(from: decoder))
+        case "document":
+            self = .document(try DocumentPayload(from: decoder))
         default:
             let raw = (try? JSONValue(from: decoder)) ?? .object([:])
             self = .unknown(raw)
@@ -2046,6 +2126,8 @@ extension PaneContentWire: Equatable {
         case (.ticket(let a), .ticket(let b)):
             return a == b
         case (.terminal(let a), .terminal(let b)):
+            return a == b
+        case (.document(let a), .document(let b)):
             return a == b
         case (.jsonSnapshot(let a), .jsonSnapshot(let b)):
             return a == b

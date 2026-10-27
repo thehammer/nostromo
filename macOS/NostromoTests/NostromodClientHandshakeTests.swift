@@ -1264,6 +1264,57 @@ final class BackgroundTaskWireDecodeTests: XCTestCase {
         }
         XCTAssertEqual(enabled, .all)
     }
+
+    func testWelcomeListingHueyEnablesHuey() {
+        guard case let .welcome(_, _, enabled) = decode(#"{"type":"welcome","protocol_version":4,"daemon_pid":7,"enabled_agents":["mother","huey"]}"#) else {
+            return XCTFail("expected .welcome")
+        }
+        XCTAssertTrue(enabled.isEnabled("huey"))
+    }
+
+    func testWelcomeOmittingHueyFromTheListDisablesHuey() {
+        guard case let .welcome(_, _, enabled) = decode(#"{"type":"welcome","protocol_version":4,"daemon_pid":7,"enabled_agents":["mother","teri"]}"#) else {
+            return XCTFail("expected .welcome")
+        }
+        XCTAssertFalse(enabled.isEnabled("huey"))
+        XCTAssertTrue(enabled.isEnabled("teri"))
+    }
+
+    func testWelcomeWithoutEnabledAgentsEnablesHueyToo() {
+        guard case let .welcome(_, _, enabled) = decode(#"{"type":"welcome","protocol_version":4,"daemon_pid":7}"#) else {
+            return XCTFail("expected .welcome")
+        }
+        XCTAssertTrue(enabled.isEnabled("huey"))
+    }
+
+    // MARK: - pane_action_result (document panes)
+
+    func testAFullPaneActionResultDecodesEveryField() {
+        guard case let .paneActionResult(r) = decode(#"{"type":"pane_action_result","tag":"huey","pane_id":"report","action_id":"report.regenerate","ok":true,"message":"Regenerating.","open_url":"https://example.test/report"}"#) else {
+            return XCTFail("expected .paneActionResult")
+        }
+        XCTAssertEqual(r.tag, "huey")
+        XCTAssertEqual(r.paneId, "report")
+        XCTAssertEqual(r.actionId, "report.regenerate")
+        XCTAssertTrue(r.ok)
+        XCTAssertEqual(r.message, "Regenerating.")
+        XCTAssertEqual(r.openURL, "https://example.test/report")
+    }
+
+    func testAPaneActionResultWithMessageAndOpenURLOmittedDecodesThemAsNil() {
+        guard case let .paneActionResult(r) = decode(#"{"type":"pane_action_result","tag":"huey","pane_id":"report","action_id":"report.prev","ok":false}"#) else {
+            return XCTFail("expected .paneActionResult")
+        }
+        XCTAssertFalse(r.ok)
+        XCTAssertNil(r.message)
+        XCTAssertNil(r.openURL)
+        XCTAssertEqual(r.actionId, "report.prev")
+    }
+
+    func testAPaneActionResultThatNamesNoPaneIsNotUsable() {
+        XCTAssertTrue(isUnknownFrame(decode(#"{"type":"pane_action_result","tag":"huey","action_id":"a","ok":true}"#)))
+    }
+
     // MARK: - session_task_stop_result / session_task_output_result (BA1)
     //
     // The same cases as `TaskWireTests` in NostromoKit, through the Mac client's decoder. The JSON
@@ -1416,5 +1467,84 @@ final class BackgroundTaskWireDecodeTests: XCTestCase {
         ] {
             XCTAssertTrue(isUnknownFrame(decode(json)), json)
         }
+    }
+}
+
+// MARK: - AppStore: pane_action_result handling
+
+/// What the app does with a document pane's `pane_action_result`: toast the message, and open the
+/// `open_url` only if `DocumentLinkPolicy` allows it. Drives the shared store through its
+/// `applyForTesting` seam, the way `ClaudeSignInCardTests` does.
+final class PaneActionResultHandlingTests: XCTestCase {
+
+    private var toasts: [(String, ToastSeverity)] = []
+    private var opened: [URL] = []
+    private var savedNotification: ((String, ToastSeverity) -> Void)?
+    private var savedOpen: ((URL) -> Void)?
+
+    override func setUp() {
+        super.setUp()
+        let store = AppStore.shared
+        savedNotification = store.onNotification
+        savedOpen = store.openExternalURL
+        toasts = []
+        opened = []
+        store.onNotification = { [weak self] message, severity in self?.toasts.append((message, severity)) }
+        store.openExternalURL = { [weak self] url in self?.opened.append(url) }
+    }
+
+    override func tearDown() {
+        AppStore.shared.onNotification = savedNotification
+        if let savedOpen { AppStore.shared.openExternalURL = savedOpen }
+        super.tearDown()
+    }
+
+    private func apply(ok: Bool = true, message: String? = nil, openURL: String? = nil) {
+        AppStore.shared.applyForTesting(.paneActionResult(PaneActionResultWire(
+            tag: "huey", paneId: "report", actionId: "report.open", ok: ok, message: message, openURL: openURL)))
+    }
+
+    func testASuccessfulResultToastsItsMessageAsInfo() {
+        apply(ok: true, message: "Regenerating today's report.")
+        XCTAssertEqual(toasts.map(\.0), ["Regenerating today's report."])
+        XCTAssertEqual(toasts.first?.1, .info)
+    }
+
+    func testAFailedResultToastsItsMessageAsAWarning() {
+        apply(ok: false, message: "Could not reach the model.")
+        XCTAssertEqual(toasts.map(\.0), ["Could not reach the model."])
+        XCTAssertEqual(toasts.first?.1, .warning)
+    }
+
+    func testAResultWithNoMessageToastsNothing() {
+        apply(ok: true)
+        XCTAssertTrue(toasts.isEmpty)
+    }
+
+    func testAnHttpsOpenURLIsOpened() {
+        apply(openURL: "https://example.test/report")
+        XCTAssertEqual(opened, [URL(string: "https://example.test/report")!])
+    }
+
+    func testAFileInsideTheHueyFolderIsOpened() {
+        let inside = DocumentLinkPolicy.hueyRoot().appendingPathComponent("reports/2026-10-26.html")
+        apply(openURL: inside.absoluteString)
+        XCTAssertEqual(opened.count, 1)
+    }
+
+    func testAnOpenURLOutsideTheAllowedSetIsNeverOpened() {
+        let elsewhere = NostromoHome.current.appendingPathComponent(".nostromo/other/secret.txt")
+        let escaping = DocumentLinkPolicy.hueyRoot().appendingPathComponent("../other/secret.txt")
+        for raw in ["http://example.test/", "javascript:alert(1)", "file:///etc/hosts", "data:text/html,hi",
+                    "nostromo-action:report.prev", "not a url", elsewhere.absoluteString, "file://" + escaping.path] {
+            apply(openURL: raw)
+        }
+        XCTAssertTrue(opened.isEmpty, "opened: \(opened)")
+    }
+
+    func testAMessageIsStillToastedWhenItsOpenURLIsRefused() {
+        apply(ok: true, message: "Opened the report.", openURL: "javascript:alert(1)")
+        XCTAssertEqual(toasts.map(\.0), ["Opened the report."])
+        XCTAssertTrue(opened.isEmpty)
     }
 }

@@ -281,6 +281,52 @@
       "search_text": "OutOfMemoryError in batch worker"
     },
     {
+      "id": "sentry:1005",
+      "source": "sentry",
+      "kind": "issue",
+      "title": "NullPointerException in session cache",
+      "project": "web",
+      "assignee": "other",
+      "status": "unresolved",
+      "updated_at": "2026-10-09T10:00:00Z",
+      "metrics": {
+        "events_24h": 5,
+        "users": 2
+      },
+      "search_text": "NullPointerException in session cache"
+    },
+    {
+      "id": "sentry:1006",
+      "source": "sentry",
+      "kind": "issue",
+      "title": "Timeout waiting for the batch lock",
+      "project": "api",
+      "environment": "production",
+      "assignee": "other",
+      "status": "unresolved",
+      "updated_at": "2026-10-06T08:00:00Z",
+      "metrics": {
+        "events_24h": 1,
+        "users": 1
+      },
+      "search_text": "Timeout waiting for the batch lock"
+    },
+    {
+      "id": "sentry:1007",
+      "source": "sentry",
+      "kind": "issue",
+      "title": "Slow query in the nightly report",
+      "project": "web",
+      "assignee": "unassigned_older",
+      "status": "unresolved",
+      "updated_at": "2026-10-05T08:00:00Z",
+      "metrics": {
+        "events_24h": 0,
+        "users": 1
+      },
+      "search_text": "Slow query in the nightly report"
+    },
+    {
       "id": "jira:CORE-6",
       "source": "jira",
       "kind": "task",
@@ -369,6 +415,9 @@
         "jira:APP-5",
         "doc:alpha:ideas/brainstorm.md",
         "sentry:1004",
+        "sentry:1005",
+        "sentry:1006",
+        "sentry:1007",
         "jira:CORE-6",
         "todo:6",
         "doc:delta:features/backlog/2026-10-06-export.md",
@@ -404,6 +453,9 @@
         "jira:APP-5",
         "doc:alpha:ideas/brainstorm.md",
         "sentry:1004",
+        "sentry:1005",
+        "sentry:1006",
+        "sentry:1007",
         "jira:CORE-6",
         "todo:6",
         "doc:delta:features/backlog/2026-10-06-export.md",
@@ -514,6 +566,9 @@
         "sentry:1003",
         "jira:APP-5",
         "sentry:1004",
+        "sentry:1005",
+        "sentry:1006",
+        "sentry:1007",
         "jira:CORE-6",
         "jira:CORE-7"
       ]
@@ -638,7 +693,8 @@
       "facet": "assignee",
       "expected_counts": {
         "me": 2,
-        "unassigned": 1
+        "unassigned": 1,
+        "other": 1
       }
     },
     {
@@ -652,7 +708,8 @@
       "expected_ids": [
         "sentry:1001",
         "sentry:1003",
-        "sentry:1004"
+        "sentry:1004",
+        "sentry:1006"
       ]
     },
     {
@@ -692,6 +749,9 @@
         "jira:APP-5",
         "doc:alpha:ideas/brainstorm.md",
         "sentry:1004",
+        "sentry:1005",
+        "sentry:1006",
+        "sentry:1007",
         "jira:CORE-6",
         "todo:6",
         "doc:delta:features/backlog/2026-10-06-export.md",
@@ -968,9 +1028,12 @@
           "key": null,
           "ids": [
             "sentry:1002",
+            "sentry:1005",
             "sentry:1001",
             "sentry:1003",
-            "sentry:1004"
+            "sentry:1004",
+            "sentry:1006",
+            "sentry:1007"
           ]
         }
       ]
@@ -1114,7 +1177,7 @@
       },
       "facet": "environment",
       "expected_counts": {
-        "production": 3,
+        "production": 4,
         "staging": 1
       }
     },
@@ -1125,8 +1188,8 @@
       "facet": "project",
       "expected_counts": {
         "CORE": 5,
-        "web": 2,
-        "api": 2,
+        "web": 4,
+        "api": 3,
         "APP": 2
       }
     },
@@ -1157,6 +1220,131 @@
         "alpha": 2,
         "beta": 1
       }
+    },
+    {
+      "name": "assignee filter selects the other bucket",
+      "op": "filter",
+      "filter": {
+        "assignees": [
+          "other"
+        ]
+      },
+      "expected_ids": [
+        "sentry:1005",
+        "sentry:1006"
+      ]
+    },
+    {
+      "name": "assignee filter selects the unassigned_older bucket",
+      "op": "filter",
+      "filter": {
+        "assignees": [
+          "unassigned_older"
+        ]
+      },
+      "expected_ids": [
+        "sentry:1007"
+      ]
+    },
+    {
+      "name": "assignee counts include other",
+      "op": "facet_counts",
+      "filter": {
+        "sources": [
+          "sentry"
+        ]
+      },
+      "facet": "assignee",
+      "expected_counts": {
+        "me": 2,
+        "unassigned": 2,
+        "other": 2,
+        "unassigned_older": 1
+      }
+    },
+    {
+      "name": "no assignee filter is the All superset",
+      "op": "filter",
+      "filter": {
+        "sources": [
+          "sentry"
+        ]
+      },
+      "expected_ids": [
+        "sentry:1001",
+        "sentry:1002",
+        "sentry:1003",
+        "sentry:1004",
+        "sentry:1005",
+        "sentry:1006",
+        "sentry:1007"
+      ]
+    },
+    {
+      "name": "All with a project filter is the sum of the bucket counts",
+      "op": "filter",
+      "filter": {
+        "sources": [
+          "sentry"
+        ],
+        "projects": [
+          "web"
+        ]
+      },
+      "expected_ids": [
+        "sentry:1001",
+        "sentry:1003",
+        "sentry:1005",
+        "sentry:1007"
+      ]
+    },
+    {
+      "name": "All with a project filter is the sum of the bucket counts (assignee counts)",
+      "op": "facet_counts",
+      "filter": {
+        "sources": [
+          "sentry"
+        ],
+        "projects": [
+          "web"
+        ]
+      },
+      "facet": "assignee",
+      "expected_counts": {
+        "me": 2,
+        "other": 1,
+        "unassigned_older": 1
+      }
+    },
+    {
+      "name": "environment counts skip items without an environment",
+      "op": "facet_counts",
+      "filter": {
+        "sources": [
+          "sentry"
+        ]
+      },
+      "facet": "environment",
+      "expected_counts": {
+        "production": 4,
+        "staging": 1
+      }
+    },
+    {
+      "name": "assignee and environment compose",
+      "op": "filter",
+      "filter": {
+        "assignees": [
+          "me"
+        ],
+        "environments": [
+          "production"
+        ]
+      },
+      "expected_ids": [
+        "sentry:1001",
+        "sentry:1003"
+      ]
     }
   ]
 }
