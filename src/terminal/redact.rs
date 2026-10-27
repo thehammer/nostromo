@@ -461,6 +461,17 @@ enum Hidden {
     TailMask(u32),
 }
 
+/// How the hidden runs of a text are numbered for [`Hidden::Mask`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Numbering {
+    /// From one at the start of each row group: bit `n` decides the `n`th run
+    /// of every row group alike (the text as a whole).
+    PerRow,
+    /// From one at the start of the text given, across its rows: the rows of
+    /// one `curl` command are one reading, each run its own bit.
+    AcrossRows,
+}
+
 /// Most hidden runs of one row group whose every combination is read (the
 /// first ones and the last ones of a longer group).
 const MAX_MASK_RUNS: usize = 8;
@@ -546,20 +557,16 @@ fn holds_credential_word(dropped: &str, spaced: impl FnOnce() -> String) -> bool
     }
     let spaced = spaced();
     SHORT_TOOL_WORDS.iter().any(|word| {
-        if !dropped.contains(word) {
-            return false;
-        }
-        let mut seen = false;
+        let (mut seen, mut at_a_word_start) = (0, false);
         for (at, _) in spaced.match_indices(word) {
-            seen = true;
+            seen += 1;
             let glued =
                 prev_char(&spaced, at).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
-            if !glued {
-                return true;
-            }
+            at_a_word_start |= !glued;
         }
-        // Not in the spaced text at all: a hidden run splits it.
-        !seen
+        // A copy in the dropped text that the spaced text lacks is split by a
+        // hidden run: it counts, and a glued copy elsewhere must not hide it.
+        at_a_word_start || dropped.matches(word).count() > seen
     })
 }
 
@@ -892,7 +899,7 @@ impl<'a> View<'a> {
         }
         let mut views: Vec<View<'a>> = Vec::with_capacity(modes.len());
         for mode in modes {
-            let view = View::from_pieces(text, &pieces, mode, &totals, &[]);
+            let view = View::from_pieces(text, &pieces, mode, &totals, &[], Numbering::PerRow);
             if !views.iter().any(|v| v.text == view.text) {
                 views.push(view);
             }
@@ -901,7 +908,7 @@ impl<'a> View<'a> {
     }
 
     fn build(text: &str, mode: Hidden) -> View<'static> {
-        View::from_pieces(text, &fold(text), mode, &[], &[])
+        View::from_pieces(text, &fold(text), mode, &[], &[], Numbering::PerRow)
     }
 
     /// The view of `pieces` (of `text`) under `mode`, leaving out the piece
@@ -912,6 +919,7 @@ impl<'a> View<'a> {
         mode: Hidden,
         totals: &[u32],
         skip: &[Range<usize>],
+        runs: Numbering,
     ) -> View<'static> {
         let mut view = ViewBuilder {
             text: String::with_capacity(text.len()),
@@ -939,7 +947,7 @@ impl<'a> View<'a> {
                     origin,
                     hidden: false,
                 } => {
-                    if group.see(*c) {
+                    if group.see(*c) && runs == Numbering::PerRow {
                         group_run = 0;
                     }
                     view.push_char(*c, *origin);
@@ -964,7 +972,11 @@ impl<'a> View<'a> {
                 Hidden::EverySpaced => true,
                 Hidden::Mask(bits) => bits.checked_shr(group_run).is_some_and(|b| b & 1 == 1),
                 Hidden::TailMask(bits) => totals
-                    .get(group.index)
+                    .get(if runs == Numbering::PerRow {
+                        group.index
+                    } else {
+                        0
+                    })
                     .and_then(|total| total.checked_sub(group_run + 1))
                     .and_then(|from_end| bits.checked_shr(from_end))
                     .is_some_and(|b| b & 1 == 1),
@@ -1149,7 +1161,8 @@ impl<'a> Reading<'a> {
         let pieces = fold(text);
         let rows = row_groups(text, &pieces);
         let hidden_rows = rows.iter().filter(|row| row.runs > 0).count();
-        let mut dropped = View::from_pieces(text, &pieces, Hidden::Dropped, &[], &[]);
+        let mut dropped =
+            View::from_pieces(text, &pieces, Hidden::Dropped, &[], &[], Numbering::PerRow);
         let mut lower = Lowered::new(dropped.text.to_string());
         let mut groups = Vec::new();
         let mut closed = Vec::new();
@@ -1166,12 +1179,18 @@ impl<'a> Reading<'a> {
             let mut personal_budget = VIEW_BUDGET;
             let mut scratch = String::new();
             for group in command_groups(&rows, &pieces, &dropped, &lower.text) {
-                let several: Vec<u32>;
+                // The rows of one command count their runs together.
+                let numbering = if group.len() == 1 {
+                    Numbering::PerRow
+                } else {
+                    Numbering::AcrossRows
+                };
+                let together: [u32; 1];
                 let runs: &[u32] = if group.len() == 1 {
                     std::slice::from_ref(&rows[group.start].runs)
                 } else {
-                    several = rows[group.clone()].iter().map(|row| row.runs).collect();
-                    &several
+                    together = [rows[group.clone()].iter().map(|row| row.runs).sum()];
+                    &together
                 };
                 let most = runs.iter().copied().max().unwrap_or(0);
                 if most == 0 {
@@ -1217,7 +1236,15 @@ impl<'a> Reading<'a> {
                     } else {
                         Readings::Combinations
                     };
-                    group_views(text, slice, runs, scratch.len(), readings, budget)
+                    group_views(
+                        text,
+                        slice,
+                        runs,
+                        numbering,
+                        scratch.len(),
+                        readings,
+                        budget,
+                    )
                 };
                 let apart = credential && most >= 2;
                 match views {
@@ -1257,7 +1284,10 @@ impl<'a> Reading<'a> {
                                 pieces[kept.start].origin().0..pieces[kept.end - 1].origin().1;
                             closed.push((origin, kind));
                             skip.push(kept);
-                            hidden_rows_apart += runs.iter().filter(|&&n| n > 0).count();
+                            hidden_rows_apart += rows[group.clone()]
+                                .iter()
+                                .filter(|row| row.runs > 0)
+                                .count();
                         }
                         continue;
                     }
@@ -1274,11 +1304,21 @@ impl<'a> Reading<'a> {
                 let kept = span.start..span.end - usize::from(ends_in_newline);
                 if !kept.is_empty() {
                     skip.push(kept);
-                    hidden_rows_apart += runs.iter().filter(|&&n| n > 0).count();
+                    hidden_rows_apart += rows[group.clone()]
+                        .iter()
+                        .filter(|row| row.runs > 0)
+                        .count();
                 }
             }
             if !skip.is_empty() {
-                dropped = View::from_pieces(text, &pieces, Hidden::Dropped, &[], &skip);
+                dropped = View::from_pieces(
+                    text,
+                    &pieces,
+                    Hidden::Dropped,
+                    &[],
+                    &skip,
+                    Numbering::PerRow,
+                );
                 lower = Lowered::new(dropped.text.to_string());
             }
         }
@@ -1287,7 +1327,7 @@ impl<'a> Reading<'a> {
         // and they hold no literal it does not hold.
         if hidden_rows > hidden_rows_apart && SCANNERS.iter().any(|s| s.gate.passes(&lower)) {
             for mode in FIXED_READINGS {
-                let view = View::from_pieces(text, &pieces, mode, &[], &skip);
+                let view = View::from_pieces(text, &pieces, mode, &[], &skip, Numbering::PerRow);
                 if !whole.iter().any(|v| v.text == view.text) {
                     whole.push(view);
                 }
@@ -1434,12 +1474,14 @@ enum Readings {
 }
 
 /// The readings of one group (`slice`; `totals` the hidden runs of each of its
-/// rows, `len` bytes of text with them dropped). `None` when they would cost
+/// rows, or of the whole group when `numbering` is across rows; `len` bytes of
+/// text with them dropped). `None` when they would cost
 /// more than `budget`, which they then leave alone.
 fn group_views(
     text: &str,
     slice: &[Piece],
     totals: &[u32],
+    numbering: Numbering,
     len: usize,
     readings: Readings,
     budget: &mut usize,
@@ -1477,7 +1519,7 @@ fn group_views(
     let mut seen = std::collections::HashSet::new();
     let mut views = Vec::new();
     for mode in modes {
-        let view = View::from_pieces(text, slice, mode, totals, &[]);
+        let view = View::from_pieces(text, slice, mode, totals, &[], numbering);
         if seen.insert(view.text.to_string()) {
             views.push(view);
         }
@@ -3231,6 +3273,34 @@ mod tests {
         // A single such line, alone, is read inside the budget.
         let (out, _) = Redactor::new().redact(&word);
         assert!(!out.contains("pw"), "{out:?}");
+    }
+
+    #[test]
+    fn the_runs_of_a_curl_command_over_several_rows_each_get_their_own_reading() {
+        // Row one needs its run read as nothing (`curl`), row two needs its
+        // run read as a space (`'` then `-u`): no reading that treats the rows'
+        // runs alike does both.
+        let z = '\u{200b}';
+        let pw = ["QWKZ", "XBNM", "VCFG"].concat();
+        let text = format!("cu{z}rl -H 'x\ny'{z}-u admin:{pw}\n");
+        let (out, kinds) = Redactor::new().redact(&text);
+        assert!(!out.contains(&pw), "{out:?}");
+        assert!(!kinds.is_empty());
+    }
+
+    #[test]
+    fn a_short_tool_name_counts_at_a_word_start_or_when_a_hidden_run_splits_it() {
+        let spaced = |s: &'static str| move || s.to_owned();
+        // `library` is not `rar`, with or without a hidden run after it.
+        assert!(!holds_credential_word("library", spaced("library ")));
+        // A hidden run before the name is the blank before it.
+        assert!(holds_credential_word("xyzrar -p x", spaced("xyz rar -p x")));
+        // A split name counts, and a glued copy elsewhere does not hide it.
+        assert!(holds_credential_word("rar", spaced("ra r")));
+        assert!(holds_credential_word(
+            "library rar -p",
+            spaced("library ra r -p")
+        ));
     }
 
     #[test]
