@@ -246,6 +246,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
 
     // MARK: - Terminal
 
+    /// The real app's bundle id: the one build that must never show QA-only controls.
+    private static let realBundleIdentifier = "com.hammer.nostromo"
+
+    private var isQAInstance: Bool { Bundle.main.bundleIdentifier != Self.realBundleIdentifier }
+
+    /// Windows `openSecondWindowQA` opened. Not in `windows`: nothing in the display-topology code
+    /// (placement, re-homing) knows about them.
+    private var qaExtraWindows: [NostromoWindow] = []
+
+    /// Debug > Open Second Window (QA): another window on the main display's focus (it reads the same
+    /// remembered focus the display's own window does), so a terminal in that focus shows in two
+    /// windows for the mirroring checks. QA instance only.
+    @objc func openSecondWindowQA(_ sender: Any?) {
+        guard isQAInstance, let screen = NSScreen.main, let display = DisplayInfo(screen: screen) else {
+            NSSound.beep()
+            return
+        }
+        let index = nextWindowIndex
+        nextWindowIndex += 1
+        let visible = display.placementFrame
+        let frame = NSRect(x: visible.minX + visible.width / 2, y: visible.minY,
+                           width: visible.width / 2, height: visible.height)
+        let win = NostromoWindow(contentRect: frame, styleMask: [.titled, .resizable, .closable],
+                                 backing: .buffered, defer: false)
+        win.isRestorable = false
+        win.backgroundColor = NSColor(calibratedWhite: 0.05, alpha: 1.0)
+        // Shown alongside a full-screen window on the same display.
+        win.collectionBehavior = [.fullScreenAuxiliary]
+        win.contentView = MainLayout(windowIndex: index, displayUUID: display.uuid)
+        win.delegate = win
+        win.orderFront(nil)
+        qaExtraWindows.append(win)
+        appLog.info("QA second window opened (index \(index, privacy: .public))")
+    }
+
     /// Debug > Copy terminal latency stats: key down to echo fed, p50 / p95 over the last 500 keys.
     @objc func copyTerminalLatencyStats() {
         let pasteboard = NSPasteboard.general
@@ -319,6 +354,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         if menuItem.action == #selector(closeTerminalPane(_:)) {
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
         }
+        if menuItem.action == #selector(openSecondWindowQA(_:)) { return isQAInstance }
         if menuItem.action == #selector(newTerminal(_:)) { return NSApp.keyWindow?.contentView is MainLayout }
         if menuItem.action == ModelShortcut.action { return !ModelShortcut.bars(in: NSApp.keyWindow).isEmpty }
         if menuItem.action == BackgroundShortcut.action { return !BackgroundShortcut.bars(in: NSApp.keyWindow).isEmpty }

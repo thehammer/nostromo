@@ -20,6 +20,13 @@ protocol TerminalByteSink: AnyObject {
     func apply(cols: Int, rows: Int)
     /// Make the terminal the window's first responder (a terminal this window just opened).
     func takeKeyboardFocus()
+    /// Whether this view sizes the terminal (the driver) or shows it at the daemon's size without
+    /// resizing it (a mirror). Told on binding and whenever the driver changes.
+    func setDriver(_ isDriver: Bool)
+}
+
+extension TerminalByteSink {
+    func setDriver(_ isDriver: Bool) {}
 }
 
 /// Marks a view as a terminal pane, so code that also builds in the test bundle (`DynamicFocusView`)
@@ -31,6 +38,9 @@ enum TerminalChange: Equatable {
     case info(TerminalInfo)
     case closed(TerminalClosedInfo)
     case refused(TerminalRefusedFrame)
+    /// The daemon became unreachable (`daemonReachable == false`: every terminal is view-only and
+    /// says its shell ended), or came back and described its terminals again.
+    case availability(daemonReachable: Bool)
 }
 
 /// Every terminal the daemon told this app about, and the views showing them.
@@ -42,7 +52,10 @@ enum TerminalChange: Equatable {
 ///   terminal, `terminal_detach` after its last. On a reconnect every terminal that still has a
 ///   sink is attached again.
 /// - Input, resize, close and restart go out through `transport`; none of them is sent for a
-///   terminal the daemon has not described.
+///   terminal the daemon has not described, or while the daemon is unreachable.
+/// - One window at a time **drives** a terminal: the one a person last typed or clicked in (until
+///   then, the first view). Only the driver's size reaches the daemon; every other view is a mirror
+///   that shows the terminal at the daemon's size and never resizes it.
 ///
 /// Main thread only (it is fed from `AppStore.handle` and called from views).
 final class TerminalSessionStore {
@@ -69,8 +82,11 @@ final class TerminalSessionStore {
     var transport: (TerminalClientMessage) -> Void
 
     private(set) var terminals: [String: TerminalInfo] = [:]
-    /// The last window that sent input to each terminal (the driver rule in a later slice reads it).
-    private(set) var lastInputWindow: [String: String] = [:]
+    /// The window a person last typed or clicked in, per terminal. A terminal nobody has used yet is
+    /// driven by its first view (`isDriver`).
+    private(set) var driverWindow: [String: String] = [:]
+    /// Terminals whose daemon connection dropped and has not described them again: view-only.
+    private var daemonUnavailable: Set<String> = []
 
     private let now: () -> Date
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
@@ -83,6 +99,8 @@ final class TerminalSessionStore {
         let tag: String
         let paneId: String
         var terminalId: String?
+        /// The role last told to the sink (nil: not told yet).
+        var isDriver: Bool?
         init(sink: TerminalByteSink, tag: String, paneId: String) {
             self.sink = sink
             self.tag = tag
@@ -126,6 +144,16 @@ final class TerminalSessionStore {
         liveBindings(for: terminalId).count
     }
 
+    /// Whether `windowId` is the window whose size `terminalId` follows.
+    func isDriver(terminalId: String, windowId: String) -> Bool {
+        effectiveDriver(of: terminalId) == windowId
+    }
+
+    /// The daemon is unreachable (or has not yet described this terminal since it came back).
+    func isDaemonUnavailable(terminalId: String) -> Bool {
+        daemonUnavailable.contains(terminalId)
+    }
+
     // MARK: - Views
 
     /// A view for `paneId` of `tag`'s tree starts showing the terminal that occupies it (now, or when
@@ -145,7 +173,10 @@ final class TerminalSessionStore {
         let leaving = bindings.filter { $0.sink == nil || $0.sink === sink }
         bindings.removeAll { $0.sink == nil || $0.sink === sink }
         for binding in leaving {
-            if let id = binding.terminalId { releaseIfUnused(id) }
+            if let id = binding.terminalId {
+                releaseIfUnused(id)
+                refreshRoles(of: id)
+            }
         }
     }
 
@@ -154,8 +185,7 @@ final class TerminalSessionStore {
     func ingest(_ msg: ServerMsg) {
         switch msg {
         case .terminalList(let frame):
-            for info in frame.terminals { apply(info) }
-            for closed in frame.closed { apply(closed: closed) }
+            apply(list: frame)
         case .terminalState(let info):
             apply(info)
         case .terminalClosed(let closed):
@@ -172,17 +202,25 @@ final class TerminalSessionStore {
         }
     }
 
-    /// The daemon connection came up or went down. A dropped connection ends every attachment; a new
-    /// one attaches again every terminal that still has a view.
+    /// The daemon connection came up or went down.
+    ///
+    /// A dropped connection ends every attachment and makes every terminal view-only
+    /// (`isDaemonUnavailable`): a shell may or may not have survived, and no pane may show a prompt
+    /// that is not known to be live. The daemon describes its terminals again when a connection comes
+    /// up (`terminal_list`); that clears the state and attaches again every running terminal that
+    /// still has a view. The first connection, before anything was lost, attaches at once.
     func connectionChanged(_ isConnected: Bool) {
         connected = isConnected
         if !isConnected {
             attached.removeAll()
+            inputBacklog.removeAll()
+            if !terminals.isEmpty, daemonUnavailable.isEmpty {
+                daemonUnavailable = Set(terminals.keys)
+                changes.send(.availability(daemonReachable: false))
+            }
             return
         }
-        for id in Set(bindings.compactMap { $0.sink == nil ? nil : $0.terminalId }) where !attached.contains(id) {
-            attach(id)
-        }
+        attachViewedTerminals()
     }
 
     // MARK: - Commands from views
@@ -196,8 +234,9 @@ final class TerminalSessionStore {
     /// they are going out, anything else for that terminal (a key, a reply) queues behind them, so a
     /// paste is never split by what the person types next.
     func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String, autoReply: Bool = false) {
-        guard !bytes.isEmpty, terminals[terminalId]?.status == .running else { return }
-        if !autoReply { lastInputWindow[terminalId] = windowId }
+        guard !bytes.isEmpty, terminals[terminalId]?.status == .running,
+              !daemonUnavailable.contains(terminalId) else { return }
+        if !autoReply { takeDriver(of: terminalId, window: windowId) }
         var frames: [TerminalClientMessage] = []
         var start = 0
         while start < bytes.count {
@@ -215,19 +254,31 @@ final class TerminalSessionStore {
         if !draining { drainInput(terminalId) }
     }
 
-    /// The view's grid changed size. Not sent when the daemon already has that size.
+    /// A person clicked in `windowId`'s view of the terminal: it drives from now on.
+    func claimDriver(terminalId: String, fromWindow windowId: String) {
+        guard terminals[terminalId] != nil,
+              liveBindings(for: terminalId).contains(where: { $0.sink?.windowId == windowId }) else { return }
+        takeDriver(of: terminalId, window: windowId)
+    }
+
+    /// The view's grid changed size. Sent only from the driver, and not when the daemon already has
+    /// that size.
     func resize(terminalId: String, cols: Int, rows: Int, fromWindow windowId: String) {
-        guard cols > 0, rows > 0, terminals[terminalId] != nil else { return }
+        guard cols > 0, rows > 0, terminals[terminalId] != nil,
+              !daemonUnavailable.contains(terminalId) else { return }
+        if let driver = effectiveDriver(of: terminalId), driver != windowId { return }
         guard knownSize[terminalId] != [cols, rows] else { return }
         knownSize[terminalId] = [cols, rows]
         transport(.resize(terminalId: terminalId, cols: cols, rows: rows))
     }
 
     func close(terminalId: String) {
+        guard !daemonUnavailable.contains(terminalId) else { return }
         transport(.close(terminalId: terminalId))
     }
 
     func restart(terminalId: String) {
+        guard !daemonUnavailable.contains(terminalId) else { return }
         transport(.restart(terminalId: terminalId))
     }
 
@@ -274,6 +325,7 @@ final class TerminalSessionStore {
 
     private func apply(_ info: TerminalInfo) {
         let id = info.terminalId
+        let sizeChanged = terminals[id].map { ($0.cols, $0.rows) != (info.cols, info.rows) } ?? false
         terminals[id] = info
         knownSize[id] = [info.cols, info.rows]
         // A restart replaces the terminal in the same pane under a new id; the old record is gone.
@@ -286,8 +338,23 @@ final class TerminalSessionStore {
         for binding in bindings where binding.tag == info.tag && binding.paneId == info.paneId && binding.sink != nil {
             bind(binding, to: info)
         }
+        if sizeChanged { showDaemonSizeInMirrors(id) }
         deliverFocusClaim(for: id)
         changes.send(.info(info))
+    }
+
+    /// The daemon described every terminal it has: that replaces what this app knew. A terminal it
+    /// no longer lists is gone, the rest are as it says (a shell that died with the daemon is
+    /// `ended`), and views of running terminals attach again.
+    private func apply(list frame: TerminalListFrame) {
+        let wasUnavailable = !daemonUnavailable.isEmpty
+        daemonUnavailable.removeAll()
+        let listed = Set(frame.terminals.map(\.terminalId))
+        for id in Array(terminals.keys) where !listed.contains(id) { forget(id) }
+        for info in frame.terminals { apply(info) }
+        for closed in frame.closed { apply(closed: closed) }
+        attachViewedTerminals()
+        if wasUnavailable { changes.send(.availability(daemonReachable: true)) }
     }
 
     private func apply(closed: TerminalClosedInfo) {
@@ -327,6 +394,8 @@ final class TerminalSessionStore {
         }
         let othersShowingIt = liveBindings(for: id)
         binding.terminalId = id
+        binding.isDriver = nil
+        refreshRoles(of: id)
         if othersShowingIt.isEmpty {
             // First view: say how big it is, then attach, so the replay is already that size.
             if let size = sink.preferredSize, knownSize[id] != [size.cols, size.rows] {
@@ -353,6 +422,70 @@ final class TerminalSessionStore {
         transport(.attach(terminalId: id))
     }
 
+    /// Attach every running terminal that has a view and is not attached yet.
+    private func attachViewedTerminals() {
+        let viewed = Set(bindings.compactMap { $0.sink == nil ? nil : $0.terminalId })
+        for id in viewed where !attached.contains(id) && !daemonUnavailable.contains(id)
+            && terminals[id]?.status == .running {
+            attach(id)
+        }
+    }
+
+    // MARK: Driver and mirrors
+
+    /// The window whose size the terminal follows: the one a person last typed or clicked in while it
+    /// still has a view, else the first view.
+    private func effectiveDriver(of id: String) -> String? {
+        let live = liveBindings(for: id)
+        if let window = driverWindow[id], live.contains(where: { $0.sink?.windowId == window }) { return window }
+        return live.first?.sink?.windowId
+    }
+
+    /// `window` now drives `id`. If that changes who drives, the new driver's size goes to the daemon
+    /// before whatever it is about to send, and the old driver's view becomes a mirror of it.
+    private func takeDriver(of id: String, window: String) {
+        let before = effectiveDriver(of: id)
+        driverWindow[id] = window
+        guard effectiveDriver(of: id) != before else { return }
+        refreshRoles(of: id)
+    }
+
+    /// Tell each view of `id` whether it drives. A view that becomes the driver after having been told
+    /// something else (a promotion) sends its own size.
+    private func refreshRoles(of id: String) {
+        let driver = effectiveDriver(of: id)
+        var promoted = false
+        for binding in liveBindings(for: id) {
+            let isDriver = binding.sink?.windowId == driver
+            guard binding.isDriver != isDriver else { continue }
+            if binding.isDriver == false && isDriver { promoted = true }
+            binding.isDriver = isDriver
+            binding.sink?.setDriver(isDriver)
+        }
+        if promoted {
+            sendDriverSize(of: id)
+            showDaemonSizeInMirrors(id)
+        }
+    }
+
+    /// The driver view's own size, if the daemon does not have it.
+    private func sendDriverSize(of id: String) {
+        guard let driver = effectiveDriver(of: id),
+              let size = liveBindings(for: id).first(where: { $0.sink?.windowId == driver })?.sink?.preferredSize,
+              size.cols > 0, size.rows > 0, knownSize[id] != [size.cols, size.rows] else { return }
+        knownSize[id] = [size.cols, size.rows]
+        transport(.resize(terminalId: id, cols: size.cols, rows: size.rows))
+    }
+
+    /// Every mirror of `id` shows it at the daemon's size.
+    private func showDaemonSizeInMirrors(_ id: String) {
+        guard let size = knownSize[id] else { return }
+        let driver = effectiveDriver(of: id)
+        for binding in liveBindings(for: id) where binding.sink?.windowId != driver {
+            binding.sink?.apply(cols: size[0], rows: size[1])
+        }
+    }
+
     /// The last view of `id` is gone: stop the daemon streaming it, and drop the copy.
     private func releaseIfUnused(_ id: String) {
         guard liveBindings(for: id).isEmpty else { return }
@@ -369,8 +502,12 @@ final class TerminalSessionStore {
         knownSize.removeValue(forKey: id)
         attached.remove(id)
         focusClaims.removeValue(forKey: id)
-        lastInputWindow.removeValue(forKey: id)
-        for binding in bindings where binding.terminalId == id { binding.terminalId = nil }
+        driverWindow.removeValue(forKey: id)
+        daemonUnavailable.remove(id)
+        for binding in bindings where binding.terminalId == id {
+            binding.terminalId = nil
+            binding.isDriver = nil
+        }
     }
 
     private func deliverFocusClaim(for id: String) {

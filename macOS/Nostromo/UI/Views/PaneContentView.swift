@@ -122,6 +122,10 @@ struct PaneContentView: View {
                 // over this hosting view (W4 — curated-agent-views). Same
                 // rationale as `.prConversation`.
                 Color.clear
+            case .terminal:
+                // A terminal pane is routed by its id to `TerminalPaneHostView` and never reaches
+                // this view; the content is only a placeholder for clients that cannot attach.
+                EmptyView()
             case .unknown(let raw):
                 jsonView(raw)
             }

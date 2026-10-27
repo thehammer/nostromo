@@ -31,6 +31,10 @@
 //     (absent emphasis, fully-valid emphasis, non-array emphasis, and a
 //     malformed anchor's isolation from its emphasis/reason siblings) are
 //     pinned so the fix can't reintroduce them.
+//   - terminal (terminal pane 1e): decodes terminal_id/label/environment, with
+//     environment absent or JSON null both yielding nil; Equatable coverage;
+//     and a JSON null nested inside an unknown-kind or json_snapshot payload
+//     no longer drops the whole pane_content frame.
 
 import XCTest
 @testable import NostromoKit
@@ -1576,5 +1580,113 @@ final class PaneContentWireTests: XCTestCase {
             because the daemon also sent an emphasis kind this client doesn't recognise yet.
             """)
         XCTAssertFalse(addr.marks(repo: "acme/web", number: 8), "marks must still be number-specific, not true for any decoded queue_row")
+    }
+
+    // MARK: - terminal (terminal pane 1e)
+
+    func testTerminalWithEnvironmentDecodesAllThreeFields() throws {
+        let wire = try decode("""
+        {"kind": "terminal", "terminal_id": "term-1", "label": "zsh", "environment": "staging"}
+        """)
+        guard case .terminal(let t) = wire else {
+            XCTFail("Expected .terminal, got \(wire)")
+            return
+        }
+        XCTAssertEqual(t.terminalId, "term-1")
+        XCTAssertEqual(t.label, "zsh")
+        XCTAssertEqual(t.environment, "staging")
+    }
+
+    func testTerminalWithoutEnvironmentKeyDecodesWithNilEnvironment() throws {
+        let wire = try decode("""
+        {"kind": "terminal", "terminal_id": "term-1", "label": "zsh"}
+        """)
+        guard case .terminal(let t) = wire else {
+            XCTFail("Expected .terminal, got \(wire)")
+            return
+        }
+        XCTAssertEqual(t.terminalId, "term-1")
+        XCTAssertNil(t.environment)
+    }
+
+    func testTerminalWithNullEnvironmentDecodesWithNilEnvironmentRatherThanThrowing() throws {
+        let wire = try decode("""
+        {"kind": "terminal", "terminal_id": "term-1", "label": "zsh", "environment": null}
+        """)
+        guard case .terminal(let t) = wire else {
+            XCTFail("Expected .terminal, got \(wire)")
+            return
+        }
+        XCTAssertNil(t.environment)
+    }
+
+    // MARK: - JSON null inside unknown / json_snapshot payloads must not drop the frame
+
+    private func paneContentFrame(content: String) -> Data {
+        Data("""
+        {"type": "pane_content", "tag": "focus1", "pane_id": "pane1", "content": \(content)}
+        """.utf8)
+    }
+
+    func testPaneContentFrameWithUnknownKindContainingNullsIsNotDropped() throws {
+        let frame = paneContentFrame(content: """
+        {"kind": "future_kind", "obj": {"a": null, "b": 1}, "arr": [1, null, "x"], "top": null}
+        """)
+        let msg = ServerMsg.decode(from: frame)
+        guard case .paneContent(let tag, let paneId, let content, _, _) = msg else {
+            XCTFail("Expected .paneContent (frame must not be dropped), got \(msg)")
+            return
+        }
+        XCTAssertEqual(tag, "focus1")
+        XCTAssertEqual(paneId, "pane1")
+        guard case .unknown = content else {
+            XCTFail("Expected .unknown content, got \(content)")
+            return
+        }
+    }
+
+    func testPaneContentFrameWithJsonSnapshotContainingNullsIsNotDropped() throws {
+        let frame = paneContentFrame(content: """
+        {"kind": "json_snapshot", "value": {"a": null, "list": [null, {"b": null}]}}
+        """)
+        let msg = ServerMsg.decode(from: frame)
+        guard case .paneContent(_, _, let content, _, _) = msg else {
+            XCTFail("Expected .paneContent (frame must not be dropped), got \(msg)")
+            return
+        }
+        guard case .jsonSnapshot = content else {
+            XCTFail("Expected .jsonSnapshot content, got \(content)")
+            return
+        }
+    }
+
+    func testBareUnknownKindWithNullsDecodesToUnknown() throws {
+        let wire = try decode("""
+        {"kind": "future_kind", "obj": {"a": null}, "arr": [null]}
+        """)
+        guard case .unknown = wire else {
+            XCTFail("Expected .unknown, got \(wire)")
+            return
+        }
+    }
+
+    // MARK: - terminal Equatable
+
+    func testTerminalCasesEqualityFollowsFields() {
+        let a = PaneContentWire.terminal(TerminalPlaceholder(terminalId: "t1", label: "zsh", environment: "prod"))
+        let b = PaneContentWire.terminal(TerminalPlaceholder(terminalId: "t1", label: "zsh", environment: "prod"))
+        let otherEnv = PaneContentWire.terminal(TerminalPlaceholder(terminalId: "t1", label: "zsh", environment: "staging"))
+        let noEnv = PaneContentWire.terminal(TerminalPlaceholder(terminalId: "t1", label: "zsh", environment: nil))
+        XCTAssertEqual(a, b)
+        XCTAssertNotEqual(a, otherEnv)
+        XCTAssertNotEqual(a, noEnv)
+    }
+
+    func testTerminalCaseNeverEqualsUnknown() throws {
+        let terminal = PaneContentWire.terminal(TerminalPlaceholder(terminalId: "t1", label: "zsh", environment: nil))
+        let unknown = try decode("""
+        {"kind": "future_kind", "terminal_id": "t1", "label": "zsh"}
+        """)
+        XCTAssertNotEqual(terminal, unknown)
     }
 }

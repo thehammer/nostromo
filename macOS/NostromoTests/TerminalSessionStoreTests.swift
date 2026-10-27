@@ -205,6 +205,7 @@ final class TerminalSessionStoreTests: XCTestCase {
         store.connectionChanged(false)
         sent.removeAll()
         store.connectionChanged(true)
+        store.ingest(.terminalList(TerminalListFrame(terminals: [info("t1", pane: "terminal-a"), info("t2", pane: "terminal-b")])))
 
         XCTAssertEqual(sent, [.attach(terminalId: "t1")], "t2 has no view, so it is not attached")
     }
@@ -408,7 +409,7 @@ final class TerminalSessionStoreTests: XCTestCase {
         store.sendInput(terminalId: "t1", bytes: Array("ls\n".utf8), fromWindow: "w-typing")
 
         XCTAssertEqual(sent, [.input(terminalId: "t1", bytes: Array("ls\n".utf8))])
-        XCTAssertEqual(store.lastInputWindow["t1"], "w-typing")
+        XCTAssertEqual(store.driverWindow["t1"], "w-typing")
     }
 
     func testInputIsDroppedForAnEndedConnectingOrUnknownTerminal() {
@@ -420,14 +421,14 @@ final class TerminalSessionStoreTests: XCTestCase {
         store.sendInput(terminalId: "nope", bytes: [0x61], fromWindow: "w1")
 
         XCTAssertTrue(sent.isEmpty, "sent: \(sent)")
-        XCTAssertNil(store.lastInputWindow["ended"])
+        XCTAssertNil(store.driverWindow["ended"])
     }
 
     func testEmptyInputIsNeverSent() {
         state(info())
         store.sendInput(terminalId: "t1", bytes: [], fromWindow: "w1")
         XCTAssertTrue(sent.isEmpty)
-        XCTAssertNil(store.lastInputWindow["t1"])
+        XCTAssertNil(store.driverWindow["t1"])
     }
 
     func testInputStopsOnceTheTerminalHasEnded() {
@@ -460,13 +461,13 @@ final class TerminalSessionStoreTests: XCTestCase {
         state(info())
 
         store.sendInput(terminalId: "t1", bytes: [0x72], fromWindow: "w-reply", autoReply: true)
-        XCTAssertNil(store.lastInputWindow["t1"], "a reply is not a person at that window")
+        XCTAssertNil(store.driverWindow["t1"], "a reply is not a person at that window")
 
         store.sendInput(terminalId: "t1", bytes: [0x61], fromWindow: "w-typing")
-        XCTAssertEqual(store.lastInputWindow["t1"], "w-typing")
+        XCTAssertEqual(store.driverWindow["t1"], "w-typing")
 
         store.sendInput(terminalId: "t1", bytes: [0x72], fromWindow: "w-reply", autoReply: true)
-        XCTAssertEqual(store.lastInputWindow["t1"], "w-typing", "a later reply from another window does not take it over")
+        XCTAssertEqual(store.driverWindow["t1"], "w-typing", "a later reply from another window does not take it over")
     }
 
     func testAnAutoReplyIsStillDroppedForATerminalThatIsNotRunning() {
