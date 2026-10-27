@@ -763,4 +763,36 @@ final class TerminalFitnessTests: XCTestCase {
         }
         XCTAssertEqual(owners, ["New Remote Shell\u{2026}"], "claimed by \(owners)")
     }
+
+    // MARK: 2d: Paste, Keep open, and the audit-log menu
+
+    func testPasteAndKeepOpenAskTheControlGuard() throws {
+        let sheet = try Repo.read(Repo.app.appendingPathComponent("UI/Terminal/PasteConfirmSheet.swift"))
+        let pasteAction = try XCTUnwrap(sheet.range(of: "@objc private func pasteTapped"), "no pasteTapped")
+        XCTAssertTrue(sheet[pasteAction.upperBound...].prefix(300).contains("TerminalInputGuard.allowsControl"),
+                      "Paste must ask TerminalInputGuard.allowsControl before anything is sent")
+
+        let host = try Repo.read(Repo.app.appendingPathComponent("UI/Terminal/TerminalPaneHostView.swift"))
+        let keepOpen = try XCTUnwrap(host.range(of: "@objc private func keepOpenTapped"), "no keepOpenTapped")
+        XCTAssertTrue(host[keepOpen.upperBound...].prefix(300).contains("TerminalInputGuard.allowsControl"),
+                      "Keep open must ask TerminalInputGuard.allowsControl")
+    }
+
+    func testPasteConfirmCancelIsTheDefaultButtonAndPasteHasNoKeyEquivalent() throws {
+        let sheet = try Repo.read(Repo.app.appendingPathComponent("UI/Terminal/PasteConfirmSheet.swift"))
+        XCTAssertTrue(sheet.contains(#"cancelButton.keyEquivalent = "\r""#), "Cancel must be the default (Return) button")
+        XCTAssertFalse(sheet.contains("pasteButton.keyEquivalent"), "Paste must have no key equivalent")
+    }
+
+    func testTheTerminalMenuHasTheAuditLogItemsWithoutShortcuts() throws {
+        _ = NSApplication.shared
+        let main = MainMenu.make(target: nil)
+        let terminal = try XCTUnwrap(topLevelMenu("Terminal", in: main), "no top-level Terminal menu").menu
+        let show = try XCTUnwrap(item("Show Terminal Audit Log", in: terminal))
+        XCTAssertEqual(show.action, #selector(MainMenuActions.showTerminalAuditLog(_:)))
+        XCTAssertEqual(show.keyEquivalent, "")
+        let reveal = try XCTUnwrap(item("Reveal Terminal Audit Log in Finder", in: terminal))
+        XCTAssertEqual(reveal.action, #selector(MainMenuActions.revealTerminalAuditLog(_:)))
+        XCTAssertEqual(reveal.keyEquivalent, "")
+    }
 }

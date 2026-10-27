@@ -33,6 +33,8 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
     /// reports its own size.
     private(set) var isDriver = true
     private var pendingResize: DispatchWorkItem?
+    /// The paste confirmation on screen, if any (retained while it is up).
+    private var pasteConfirm: PasteConfirmSheet?
     /// The wait before a driver's new grid goes to the daemon, so dragging a divider sends one frame.
     static let resizeDebounce: TimeInterval = 0.05
 
@@ -154,7 +156,29 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
             refuse(.paste)
             return
         }
-        super.paste(sender)
+        // A multi-line paste into a remote shell asks first; nothing is sent until Paste is clicked.
+        let pasteboard = NSPasteboard.general
+        guard let info = terminalId.flatMap({ store.terminals[$0] }), let target = info.target,
+              case .confirm(let lines) = PastePolicy.decide(kind: info.kind, text: pasteboard.string(forType: .string) ?? ""),
+              let window else {
+            super.paste(sender)
+            return
+        }
+        guard pasteConfirm == nil else { return }
+        let changeCount = pasteboard.changeCount
+        let sheet = PasteConfirmSheet(
+            lines: lines, targetText: TerminalChromeModel.targetText(target),
+            onPaste: { [weak self] in
+                guard let self else { return }
+                self.pasteConfirm = nil
+                // The clipboard changed while the sheet was up: what was confirmed is gone.
+                guard NSPasteboard.general.changeCount == changeCount else { return }
+                super.paste(sender)
+            },
+            onRefused: { [weak self] in self?.refuse(.paste) })
+        guard let sheetWindow = sheet.window else { return }
+        pasteConfirm = sheet
+        window.beginSheet(sheetWindow) { [weak self] _ in self?.pasteConfirm = nil }
     }
 
     /// The emulator answering on its own (cursor position, device attributes, focus and mouse

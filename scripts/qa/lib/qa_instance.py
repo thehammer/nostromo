@@ -309,7 +309,7 @@ def take_snapshot(user_home, ps_text, defaults_text, qa_root=None):
 # What the QA daemon takes from the caller's environment. The AWS CLI is the fake the terminal scenarios
 # point it at; the timeout lets a scenario watch an agent's remote-shell request expire in seconds.
 DAEMON_PASSTHROUGH = ("PATH", "TMPDIR", "LANG", "NOSTROMO_AWS_CLI", "NOSTROMO_QA_REMOTE_SHELL_TIMEOUT_SECS",
-                      "ANTHROPIC_MODEL")
+                      "NOSTROMO_QA_IDLE_SECS", "ANTHROPIC_MODEL")
 
 # Where the daemon looks for config.toml under its HOME: the `directories` crate's place on macOS and the
 # XDG-style one the docs name. Both are written, so it does not matter which this build reads.

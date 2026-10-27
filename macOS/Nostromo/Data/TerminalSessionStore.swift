@@ -305,6 +305,12 @@ final class TerminalSessionStore {
         transport(.restart(terminalId: terminalId))
     }
 
+    /// Keep an idle remote shell open (the idle banner's button).
+    func keepAlive(terminalId: String) {
+        guard !daemonUnavailable.contains(terminalId) else { return }
+        transport(.keepAlive(terminalId: terminalId))
+    }
+
     /// Tell the daemon an input that was not a person's was refused here (audited as `app_control`).
     /// At most one report per second for each kind of refusal on each terminal.
     func reportRefusal(terminalId: String?, op: TerminalRefusedOp) {

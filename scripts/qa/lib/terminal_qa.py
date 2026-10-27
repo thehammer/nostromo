@@ -36,6 +36,10 @@ def request_remote_shell(qa_root, focus_tag, project, environment, service, shel
     return call_tool(qa_root, focus_tag, REMOTE_TOOL, arguments, timeout)
 
 
+def set_pane_layout(qa_root, focus_tag, ratios, timeout=30):
+    return call_tool(qa_root, focus_tag, "nostromo.set_pane_layout", {"view_id": focus_tag, "ratios": ratios}, timeout)
+
+
 def call_tool(qa_root, focus_tag, tool, arguments, timeout):
     path = qa_instance.guard_socket_path(qa_root, os.path.join(qa_root, qa_instance.MCP_SOCKET))
     frames = [
@@ -76,6 +80,8 @@ def main(argv):
         elif command == "request-remote-shell" and len(argv) in (9, 10):
             wait = float(argv[9]) if len(argv) == 10 else 330
             outcome = request_remote_shell(argv[2], argv[3], *argv[4:9], timeout=wait)
+        elif command == "set-pane-layout" and len(argv) == 5:
+            outcome = set_pane_layout(argv[2], argv[3], json.loads(argv[4]))
         else:
             print(__doc__, file=sys.stderr)
             return 2

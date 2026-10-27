@@ -330,6 +330,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         window.beginSheet(sheetWindow) { [weak self] _ in self?.presentedNewRemoteShellSheet = nil }
     }
 
+    /// `~/.nostromo/audit/terminal.jsonl` (the QA instance's own home under QA).
+    private var terminalAuditLogURL: URL {
+        NostromoHome.current.appendingPathComponent(".nostromo/audit/terminal.jsonl")
+    }
+
+    /// Terminal > Show Terminal Audit Log: opens the trail in whatever opens `.jsonl`, else reveals it.
+    @objc func showTerminalAuditLog(_ sender: Any?) {
+        let url = terminalAuditLogURL
+        guard auditLogExists(url) else { return }
+        if NSWorkspace.shared.urlForApplication(toOpen: url) != nil, NSWorkspace.shared.open(url) { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// Terminal > Reveal Terminal Audit Log in Finder.
+    @objc func revealTerminalAuditLog(_ sender: Any?) {
+        let url = terminalAuditLogURL
+        guard auditLogExists(url) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// True when the trail exists; otherwise says so in the key window's toast.
+    private func auditLogExists(_ url: URL) -> Bool {
+        if FileManager.default.fileExists(atPath: url.path) { return true }
+        let tag = (NSApp.keyWindow?.contentView as? MainLayout)?.activeFocusTag ?? ""
+        TerminalSessionStore.shared.toasts.send(TerminalToast(tag: tag, message: "No terminal activity recorded yet",
+                                                              severity: .info, action: nil))
+        return false
+    }
+
     /// Terminal > Close Terminal Pane (⇧⌘W): the terminal pane that holds the keyboard. The pane asks
     /// `TerminalInputGuard` before it acts, so a synthetic key does nothing.
     @objc func closeTerminalPane(_ sender: Any?) {

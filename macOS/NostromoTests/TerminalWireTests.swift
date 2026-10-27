@@ -63,6 +63,7 @@ final class TerminalWireTests: XCTestCase {
             (.resize(terminalId: "t1", cols: 120, rows: 40), "terminal_resize"),
             (.close(terminalId: "t1"), "terminal_close"),
             (.restart(terminalId: "t1"), "terminal_restart"),
+            (.keepAlive(terminalId: "t1"), "terminal_keep_alive"),
             (.refusalReport(terminalId: nil, op: .input, channel: "app_control"), "terminal_refusal_report"),
         ]
         for (message, name) in cases {
@@ -150,6 +151,7 @@ final class TerminalWireTests: XCTestCase {
     func testAttachDetachCloseAndRestartNameOnlyTheTerminal() throws {
         let messages: [TerminalClientMessage] = [
             .attach(terminalId: "t9"), .detach(terminalId: "t9"), .close(terminalId: "t9"), .restart(terminalId: "t9"),
+            .keepAlive(terminalId: "t9"),
         ]
         for message in messages {
             let o = try object(message)

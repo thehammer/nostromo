@@ -164,6 +164,12 @@ class TabBarView: NSView {
             .sink { [weak self] _ in self?.updateAttention() }
             .store(in: &cancellables)
 
+        // A red environment badge on a focus that has a remote shell open, applied in place.
+        TerminalSessionStore.shared.changes
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateEnvironmentBadges() }
+            .store(in: &cancellables)
+
         // The red "needs you now" pill (pending approvals, today): applied in place, immediately.
         // A row's pill and its height never depend on whether the focus is on screen.
         AppStore.shared.$needsYou
@@ -337,6 +343,7 @@ class TabBarView: NSView {
         updateStates()
         updateSweaters()
         updateBadges()
+        updateEnvironmentBadges()
     }
 
     @objc private func renameTapped(_ sender: NSMenuItem) {
@@ -397,6 +404,14 @@ class TabBarView: NSView {
             items[focus.id]?.setBadge(badges.badge(for: focus.sessionTag))
         }
         updateAttention()
+    }
+
+    private func updateEnvironmentBadges() {
+        let terminals = Array(TerminalSessionStore.shared.terminals.values)
+        for row in currentRows {
+            guard case .focus(let focus, _, _, _) = row else { continue }
+            items[focus.id]?.environments = TerminalChromeModel.focusEnvironmentLabels(terminals, tag: focus.sessionTag)
+        }
     }
 
     private func updateAttention() {

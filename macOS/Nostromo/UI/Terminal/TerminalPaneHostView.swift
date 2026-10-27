@@ -23,13 +23,20 @@ import SwiftTerm
 /// While the daemon is unreachable the pane says its shell ended and cannot be restarted; when the
 /// daemon is back it shows what the daemon says (a shell that died with it is `ended`, with Restart).
 ///
-/// Every control that changes a terminal (the x, Restart, Close, and Terminal > Close Terminal
+/// A remote (`ecs`) pane is unmistakable in every state: a 3 pt hazard-red frame drawn by the host's
+/// own layer (the content is inset by it), and a red header, pinned to the top of the pane, that always
+/// names the environment, project, service and shell type (`TerminalChromeModel`). From the daemon's
+/// idle warning (13 minutes without a keystroke) a yellow banner under the header counts down to the
+/// close, with Keep open.
+///
+/// Every control that changes a terminal (the x, Restart, Close, Keep open, and Terminal > Close Terminal
 /// Pane) asks `TerminalInputGuard.allowsControl` first. A synthetic click does nothing, and the
 /// refusal is reported to the daemon.
 final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     static let headerHeight: CGFloat = 24
     private static let overlayHeight: CGFloat = 40
+    private static let bannerHeight: CGFloat = 24
 
     /// The focus tag (named so it does not collide with `NSView.tag`, an `Int`).
     let focusTag: String
@@ -55,6 +62,11 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     private let overlayLabel = NSTextField(labelWithString: "")
     private let restartButton = NSButton()
     private let overlayCloseButton = NSButton()
+    /// Under a remote header, from the daemon's idle warning until a keystroke or Keep open.
+    private let idleBanner = NSView()
+    private let idleLabel = NSTextField(labelWithString: "")
+    private let keepOpenButton = NSButton()
+    private var idleTimer: Timer?
 
     private var info: TerminalInfo?
     /// This view is not the one that sizes the terminal.
@@ -86,7 +98,9 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         layer?.backgroundColor = Theme.bg.cgColor
         setAccessibilityIdentifier("terminal-pane")
         setAccessibilityLabel("Terminal")
+        layer?.masksToBounds = true
         buildHeader()
+        buildIdleBanner()
         buildOverlay()
         buildConnecting()
         terminalContainer.addSubview(terminalView)
@@ -101,6 +115,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         addSubview(terminalContainer)
         addSubview(connectingView)
         addSubview(header)
+        addSubview(idleBanner)
         addSubview(overlay)
         info = store.info(forPane: paneId, tag: focusTag)
         terminalView.terminalId = info?.terminalId
@@ -113,6 +128,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     }
 
     deinit {
+        idleTimer?.invalidate()
         store.unregister(self)
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
     }
@@ -203,16 +219,25 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     override func layout() {
         super.layout()
+        // The red frame is the host layer's border; the content sits inside it. The header is pinned to
+        // the top edge at its full height whatever the pane's size (the host clips, so a pane shorter
+        // than the header shows the top of it, never spills into a neighbour).
+        let inset = isRemote ? TerminalChromeModel.frameWidth : 0
+        let content = bounds.insetBy(dx: inset, dy: inset)
         let h = Self.headerHeight
-        header.frame = NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
-        let body = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - h))
+        header.frame = NSRect(x: content.minX, y: content.maxY - h, width: content.width, height: h)
+        let bannerH = idleBanner.isHidden ? 0 : Self.bannerHeight
+        idleBanner.frame = NSRect(x: content.minX, y: content.maxY - h - bannerH, width: content.width, height: bannerH)
+        let bodyTop = content.maxY - h - bannerH
+        let body = NSRect(x: content.minX, y: content.minY, width: content.width, height: max(0, bodyTop - content.minY))
         terminalContainer.frame = body
         connectingView.frame = body
         layoutConnecting()
         layoutTerminal()
         let overlayH = min(Self.overlayHeight, body.height)
-        overlay.frame = NSRect(x: 0, y: 0, width: body.width, height: overlayH)
+        overlay.frame = NSRect(x: body.minX, y: body.minY, width: body.width, height: overlayH)
         layoutHeader()
+        layoutIdleBanner()
         layoutOverlay()
         registerIfReady()
     }
@@ -221,9 +246,12 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         super.viewDidMoveToWindow()
         if window != nil {
             installKeyMonitor()
+            updateIdleBanner()
             needsLayout = true
             registerIfReady()
         } else {
+            idleTimer?.invalidate()
+            idleTimer = nil
             // A layout rebuild detaches and re-adds a pane in one go: only a view still without a
             // window afterwards is really gone (hidden focus, closed window).
             DispatchQueue.main.async { [weak self] in
@@ -311,7 +339,9 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     // MARK: - Private: header and overlay
 
     private func render() {
-        titleLabel.stringValue = info?.headerTitle() ?? "Terminal"
+        titleLabel.stringValue = info.map { isRemote ? TerminalChromeModel.headerText(for: $0) : $0.headerTitle() } ?? "Terminal"
+        applyChrome()
+        updateIdleBanner()
         let daemonStopped = info.map { store.isDaemonUnavailable(terminalId: $0.terminalId) } ?? false
         let ended = info?.status == .ended
         let notice = (ended || daemonStopped) ? nil : inputNotice
@@ -346,6 +376,83 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         renderConnecting()
         overlayLabel.toolTip = overlayLabel.stringValue
         needsLayout = true
+    }
+
+    private var isRemote: Bool { info.map(TerminalChromeModel.isRemote) ?? false }
+
+    /// The frame and the header's colours for a remote pane (red, white bold text) or a local one.
+    private func applyChrome() {
+        let remote = isRemote
+        let frameColor = info.flatMap(TerminalChromeModel.frameColor(for:))
+        layer?.borderWidth = remote ? TerminalChromeModel.frameWidth : 0
+        layer?.borderColor = frameColor?.cgColor
+        header.layer?.backgroundColor = (remote ? Theme.hazardRed : Theme.bgBar).cgColor
+        titleLabel.textColor = remote ? Theme.hazardText : Theme.fgMuted
+        titleLabel.font = remote ? NSFont.systemFont(ofSize: 12, weight: .bold) : Theme.statusFont
+        mirrorHint.textColor = remote ? Theme.hazardText : Theme.fgMuted
+        closeButton.attributedTitle = NSAttributedString(string: "\u{00D7}", attributes: [
+            .font: NSFont.systemFont(ofSize: 16, weight: .regular),
+            .foregroundColor: remote ? Theme.hazardText : Theme.fgMuted,
+        ])
+        needsLayout = true
+    }
+
+    /// Show, update or hide the idle banner from the daemon's `idle_closes_at`.
+    private func updateIdleBanner() {
+        var state = IdleCountdownModel.State.hidden
+        if info?.status == .running, window != nil {
+            state = IdleCountdownModel.state(idleClosesAt: info?.idleClosesAt, now: Date())
+        }
+        let wasHidden = idleBanner.isHidden
+        switch state {
+        case .hidden:
+            idleBanner.isHidden = true
+            idleTimer?.invalidate()
+            idleTimer = nil
+        case .counting(let secondsLeft):
+            idleLabel.stringValue = IdleCountdownModel.text(secondsLeft: secondsLeft)
+            idleBanner.isHidden = false
+            if idleTimer == nil {
+                idleTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                    self?.updateIdleBanner()
+                }
+            }
+        }
+        if wasHidden != idleBanner.isHidden { needsLayout = true }
+    }
+
+    private func buildIdleBanner() {
+        idleBanner.wantsLayer = true
+        idleBanner.layer?.backgroundColor = Theme.idleBannerYellow.cgColor
+        idleBanner.isHidden = true
+        idleBanner.setAccessibilityIdentifier("terminal-idle-banner")
+        idleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        idleLabel.textColor = .black
+        idleLabel.lineBreakMode = .byTruncatingTail
+        idleLabel.setAccessibilityIdentifier("terminal-idle-label")
+        keepOpenButton.isBordered = false
+        keepOpenButton.target = self
+        keepOpenButton.action = #selector(keepOpenTapped(_:))
+        keepOpenButton.attributedTitle = NSAttributedString(string: "Keep open", attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.white,
+        ])
+        keepOpenButton.wantsLayer = true
+        keepOpenButton.layer?.backgroundColor = NSColor(white: 0.15, alpha: 1).cgColor
+        keepOpenButton.layer?.cornerRadius = 4
+        keepOpenButton.setAccessibilityIdentifier("terminal-keep-open")
+        keepOpenButton.setAccessibilityLabel("Keep terminal open")
+        idleBanner.addSubview(idleLabel)
+        idleBanner.addSubview(keepOpenButton)
+    }
+
+    private func layoutIdleBanner() {
+        let h = idleBanner.bounds.height
+        let buttonW: CGFloat = 76
+        let buttonH: CGFloat = 18
+        keepOpenButton.frame = NSRect(x: idleBanner.bounds.width - buttonW - 6, y: (h - buttonH) / 2, width: buttonW, height: buttonH)
+        let labelSize = idleLabel.intrinsicContentSize
+        idleLabel.frame = NSRect(x: 10, y: (h - labelSize.height) / 2,
+                                 width: max(0, idleBanner.bounds.width - buttonW - 22), height: labelSize.height)
     }
 
     private func buildHeader() {
@@ -512,6 +619,15 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
             return
         }
         store.close(terminalId: id)
+    }
+
+    @objc private func keepOpenTapped(_ sender: NSButton) {
+        guard let id = info?.terminalId else { return }
+        guard TerminalInputGuard.allowsControl(event: NSApp.currentEvent, control: sender) else {
+            store.reportRefusal(terminalId: id, op: .keepAlive)
+            return
+        }
+        store.keepAlive(terminalId: id)
     }
 
     @objc private func restartTapped(_ sender: NSButton) {

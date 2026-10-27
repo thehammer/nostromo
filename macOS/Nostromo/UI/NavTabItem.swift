@@ -39,10 +39,24 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         }
     }
 
+    /// Environments of the remote shells open in this focus (uppercased, production first): one red
+    /// badge each, next to the label.
+    var environments: [String] = [] {
+        didSet {
+            guard environments != oldValue else { return }
+            environmentBadges.arrangedSubviews.forEach { environmentBadges.removeArrangedSubview($0); $0.removeFromSuperview() }
+            for name in environments { environmentBadges.addArrangedSubview(Self.makeEnvironmentBadge(name)) }
+            environmentBadges.isHidden = environments.isEmpty
+        }
+    }
+    /// The badge texts shown. Exposed for tests.
+    var environmentBadgeTexts: [String] { environments }
+
     var sweaterColor: NSColor? = nil {
         didSet { updateAppearance() }
     }
 
+    private let environmentBadges = NSStackView()
     private let accentBar      = NSView()
     private let label          = NSTextField(labelWithString: "")
     private let dot            = NSView()
@@ -192,6 +206,21 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         labelClearsPill = label.trailingAnchor.constraint(lessThanOrEqualTo: pillBox.leadingAnchor, constant: -4)
 
+        // Environment badges (hazard red) just after the label; they give way to nothing but the label's
+        // tail, and leave room for the pill and the attention dot. Height is fixed: never changes the row's.
+        environmentBadges.orientation = .horizontal
+        environmentBadges.spacing = 3
+        environmentBadges.isHidden = true
+        environmentBadges.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(environmentBadges)
+        let badgesTrailing = environmentBadges.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -44)
+        NSLayoutConstraint.activate([
+            environmentBadges.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 6),
+            environmentBadges.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+            badgesTrailing,
+        ])
+        environmentBadges.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         let rowClick = NSClickGestureRecognizer(target: self, action: #selector(tapped))
         rowClick.delegate = self
         addGestureRecognizer(rowClick)
@@ -201,6 +230,29 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    private static func makeEnvironmentBadge(_ name: String) -> NSView {
+        let box = NSView()
+        box.wantsLayer = true
+        box.layer?.backgroundColor = Theme.hazardRed.cgColor
+        box.layer?.cornerRadius = 3
+        box.translatesAutoresizingMaskIntoConstraints = false
+        let text = NSTextField(labelWithString: name.uppercased())
+        text.font = NSFont.systemFont(ofSize: 9, weight: .bold)
+        text.textColor = Theme.hazardText
+        text.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(text)
+        NSLayoutConstraint.activate([
+            box.heightAnchor.constraint(equalToConstant: 14),
+            text.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 4),
+            text.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -4),
+            text.centerYAnchor.constraint(equalTo: box.centerYAnchor),
+        ])
+        box.setAccessibilityElement(true)
+        box.setAccessibilityRole(.staticText)
+        box.setAccessibilityLabel("remote shell open: \(name)")
+        return box
+    }
 
     @objc private func tapped() { onTap?() }
 

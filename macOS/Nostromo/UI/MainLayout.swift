@@ -332,6 +332,13 @@ class MainLayout: NSView {
             }
             .store(in: &cancellables)
 
+        // The window title (Window menu, Mission Control) names the environment while this window's
+        // focus has a remote shell open; the title bar itself is hidden.
+        TerminalSessionStore.shared.changes
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateWindowTitle() }
+            .store(in: &cancellables)
+
         // Publish the initial active focus so StatusBarView has a tag from the start.
         AppStore.shared.setActiveFocusAgentTag(activeFocus.agentTag)
         AppStore.shared.setActiveFocusSessionTag(activeFocus.sessionTag)
@@ -349,6 +356,21 @@ class MainLayout: NSView {
         AppStore.shared.setActiveFocusAgentTag(focus.agentTag)
         AppStore.shared.setActiveFocusSessionTag(focus.sessionTag)
         showContent(for: focus)
+        updateWindowTitle()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateWindowTitle()
+    }
+
+    /// "<focus label> — PRODUCTION" while the focus has a remote shell open, else the plain label.
+    private func updateWindowTitle() {
+        guard let window else { return }
+        let environments = TerminalChromeModel.focusEnvironmentLabels(
+            Array(TerminalSessionStore.shared.terminals.values), tag: activeFocus.sessionTag)
+        let title = TerminalChromeModel.windowTitle(focusLabel: activeFocus.displayName, environments: environments)
+        if window.title != title { window.title = title }
     }
 
     /// The `sessionTag` of the focus this window is showing right now. Read-only:

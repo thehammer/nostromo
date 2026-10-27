@@ -29,6 +29,12 @@ enum Theme {
     /// "Needs you now" pill background (a pending approval): an explicit dark red so the pill's
     /// white digit reads at 5.6:1 (WCAG AA needs 4.5:1). Not `redSweater`, which is too light for white text.
     static let needsYouNow = NSColor(red: 198/255, green: 40/255, blue: 40/255, alpha: 1)
+    /// A remote (ECS) terminal's frame and header background. White (`hazardText`) on it is 5.7:1,
+    /// above WCAG AA's 4.5:1 for text this size.
+    static let hazardRed   = NSColor(srgbRed: 200/255, green: 30/255, blue: 30/255, alpha: 1)
+    static let hazardText  = NSColor.white
+    /// The idle-timeout banner under a remote header (dark text on it).
+    static let idleBannerYellow = NSColor(srgbRed: 250/255, green: 204/255, blue: 21/255, alpha: 1)
     /// Cornflower — active tab / border highlight.
     static let cornflower  = NSColor(red: 100/255, green: 149/255, blue: 237/255, alpha: 1)
 
