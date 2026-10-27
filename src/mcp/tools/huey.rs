@@ -145,7 +145,7 @@ fn report_json(handle: &HueyHandle, report: &Report) -> Value {
         .load_markdown(report.date, report.version)
         .unwrap_or_else(|| render::render_markdown(report));
     let mut out = json!({
-        "notice": f.notice(),
+        "notice": f.news_notice(),
         "date": report.date.to_string(),
         "version": report.version,
         "generated_at": meta.as_ref().map(|m| time(m.generated_at)),
@@ -286,7 +286,7 @@ pub fn get_item(state: &McpSharedState, args: &Value) -> Value {
     };
     let f = NonceFence::new();
     json!({
-        "notice": f.notice(),
+        "notice": f.news_notice(),
         "id": item.id,
         "source": item.source_id,
         "class": serde_json::to_value(item.class).unwrap_or(Value::Null),
@@ -411,6 +411,11 @@ pub fn regenerate(state: &McpSharedState) -> Value {
             "error": "cooldown",
             "seconds": seconds,
             "message": format!("A run just finished. Wait {seconds} s, then try again."),
+        }),
+        Err(StartError::Refused(TriggerRefused::DailyCap { max })) => json!({
+            "error": "daily_cap",
+            "max": max,
+            "message": format!("Today's {max} regenerations are used up. Try again tomorrow."),
         }),
     }
 }

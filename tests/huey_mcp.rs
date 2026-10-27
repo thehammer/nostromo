@@ -48,11 +48,14 @@ use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use nostromo::huey::budget::Mode;
+use nostromo::huey::context::collectors::PrsInput;
 use nostromo::huey::context::ContextEnv;
 use nostromo::huey::items::{NewsItem, SourceClass};
 use nostromo::huey::paths::HueyPaths;
 use nostromo::huey::render::{self, AinLine, Footer, Link, NotedLine, Pick, PickCheck, Report};
-use nostromo::huey::run::{CurateError, CurateInput, Curator, Publish, PublishCheck, PublishPick};
+use nostromo::huey::run::{
+    CurateError, CurateInput, Curator, LiveSource, NoLive, Publish, PublishCheck, PublishPick,
+};
 use nostromo::huey::schedule::FixedLocalTime;
 use nostromo::huey::setup::{self, ConfirmRefused, SetupRecord};
 use nostromo::huey::sources::fetch::save_pool;
@@ -70,6 +73,7 @@ use nostromo::mcp::pane_sources::{
 };
 use nostromo::mcp::tools::{dispatch, huey as huey_tools, tool_descriptors_for, ToolResult};
 use nostromo::mcp::{DaemonMcpBackend, McpSharedState, PerriDaemonState};
+use nostromo::mother::MotherJob;
 use nostromo::tracker::clock::{Clock, FakeClock};
 
 // ── Time ─────────────────────────────────────────────────────────────────────
@@ -218,11 +222,21 @@ impl Machine {
     /// (before anything is confirmed) ever happens on its own; every run in a
     /// test is one the test starts.
     async fn boot(&self, curator: Arc<dyn Curator>) -> HueySources {
+        self.boot_with_live(curator, Arc::new(NoLive)).await
+    }
+
+    /// [`Machine::boot`] with a chosen live source (PRs and jobs).
+    async fn boot_with_live(
+        &self,
+        curator: Arc<dyn Curator>,
+        live: Arc<dyn LiveSource>,
+    ) -> HueySources {
         let src = HueyEngine::spawn(HueyDeps {
             clock: self.clock.clone(),
             tick: Duration::from_secs(3600),
             http: client(),
             curator,
+            live,
             local_time: Arc::new(FixedLocalTime::utc()),
             ..HueyDeps::new(
                 self.state_root.clone(),
@@ -1195,6 +1209,155 @@ async fn h6_1_setup_start_scans_in_memory_and_shows_projects_sources_and_interes
         assert_eq!(a.primary, a.id == "setup.confirm", "{}", a.id);
         assert!(!a.label.is_empty());
     }
+}
+
+/// A live source whose PR search never answers.
+#[derive(Default)]
+struct HangingLive {
+    prs_calls: AtomicUsize,
+}
+
+#[async_trait]
+impl LiveSource for HangingLive {
+    async fn prs(&self, _now: DateTime<Utc>) -> PrsInput {
+        self.prs_calls.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+
+    async fn jobs(&self) -> Vec<MotherJob> {
+        Vec::new()
+    }
+}
+
+#[tokio::test]
+async fn h6_1_a_scan_that_never_finishes_is_stopped_says_so_and_can_be_retried() {
+    let m = machine(BEFORE_RUN).await;
+    orchard(&m);
+    let live = Arc::new(HangingLive::default());
+    let src = m.boot_with_live(Scripted::new(), live.clone()).await;
+    tokio::time::pause();
+    let h = src.handle.clone();
+
+    let first = tokio::spawn({
+        let h = h.clone();
+        async move { h.on_action(HueyPane::Report, None, "setup.start").await }
+    });
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(live.prs_calls.load(Ordering::SeqCst), 1, "the scan started");
+
+    // One scan at a time: pressing the button (or rescan) again does nothing.
+    for id in ["setup.start", "setup.rescan"] {
+        let again = h.on_action(HueyPane::Report, None, id).await;
+        assert!(again.ok, "{id}: {again:?}");
+        assert!(
+            again
+                .message
+                .unwrap_or_default()
+                .contains("already running"),
+            "{id}"
+        );
+    }
+    assert_eq!(
+        live.prs_calls.load(Ordering::SeqCst),
+        1,
+        "no second scan was started"
+    );
+
+    tokio::time::advance(Duration::from_secs(91)).await;
+    let out = first.await.unwrap();
+    assert!(!out.ok, "{out:?}");
+    assert!(out.message.unwrap_or_default().contains("too long"));
+
+    let doc = h.pane_document(HueyPane::Report, None);
+    let text = plain(&doc.blocks);
+    assert!(text.contains("the scan took too long"), "{text}");
+    assert!(
+        text.contains("It has read nothing"),
+        "nothing is held from the stopped scan:\n{text}"
+    );
+    assert_eq!(
+        action_set(&doc.actions),
+        set(&["setup.start"]),
+        "the user can try again"
+    );
+
+    // The flag was released: a new scan really starts.
+    let retry = tokio::spawn({
+        let h = h.clone();
+        async move { h.on_action(HueyPane::Report, None, "setup.start").await }
+    });
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(live.prs_calls.load(Ordering::SeqCst), 2);
+    retry.abort();
+}
+
+/// Makes a directory unreadable (mode 000) and restores it on drop, so the
+/// temp dir can be removed even when an assertion fails.
+struct Unreadable(PathBuf);
+
+impl Unreadable {
+    fn new(path: PathBuf) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn h6_1_before_setup_nothing_is_read_even_where_a_read_would_fail() {
+    let m = machine(BEFORE_RUN).await;
+    plant_context(&m);
+    fs::create_dir_all(m.home.join(".claude/huey")).unwrap();
+    fs::write(
+        m.home.join(".claude/huey/interests.md"),
+        format!("## What I care about, and why\n- {CANARY_LEGACY}\n"),
+    )
+    .unwrap();
+    // The reference run, with everything readable.
+    let readable = m.boot(Scripted::new()).await;
+    let expected_report = readable.handle.pane_document(HueyPane::Report, None);
+    let expected_context = readable.handle.pane_document(HueyPane::Context, None);
+
+    // Now every place a scan would read from refuses to be read.
+    let mut locked = vec![
+        Unreadable::new(m.state_root.join("trackers")),
+        Unreadable::new(m.home.join(".claude")),
+    ];
+    for entry in fs::read_dir(&m.code_root).unwrap().flatten() {
+        locked.push(Unreadable::new(entry.path()));
+    }
+    assert!(
+        fs::read_dir(m.home.join(".claude")).is_err(),
+        "the fixture must be unreadable for this test to mean anything"
+    );
+
+    let src = m.boot(Scripted::new()).await;
+    for _ in 0..3 {
+        assert_eq!(
+            src.handle.pane_document(HueyPane::Report, None),
+            expected_report
+        );
+        assert_eq!(
+            src.handle.pane_document(HueyPane::Context, None),
+            expected_context
+        );
+    }
+    let text = plain(&src.handle.pane_document(HueyPane::Report, None).blocks);
+    assert!(text.contains("It has read nothing"), "{text}");
+    assert_eq!(src.handle.setup_state(), SetupState::NotSetUp);
+    assert_eq!(m.requests().await, 0);
+    drop(locked);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2627,6 +2790,71 @@ async fn h6_7_a_date_with_no_report_has_a_short_no_digest_document() {
     );
     assert!(text.len() < 400, "short: {text}");
     assert_eq!(snapshot(&m.state_root), before);
+}
+
+/// A digest as a run leaves it: the context, then the recent-reports section
+/// a run appends, then the checks. Full of characters markdown would eat.
+fn digest_with_recent_reports() -> String {
+    format!(
+        "# Digest for 2026-10-26 v1\n\nProjects in flight: orchard\n\n\
+         - orchard: 3 commits, *fast* and `loud` [x]\n\
+         - idea: \u{201c}Quiet_mode\u{201d} <b>not html</b>\n\n\
+         {}\n\
+         - [vendor-news:item-1] 2026-10-25 pick: Gizmo 1 ships *batch* mode\n\
+         - [blog:item-2_b] 2026-10-24 also noted: A [bracketed] title_with_underscores\n\
+         - +3 more\n\n\
+         ## Checks Huey ran\n\
+         - c1: orchard depends on gizmo: found (Cargo.toml)\n",
+        nostromo::huey::context::digest::RECENT_HEADING
+    )
+}
+
+/// What a digest line reads as once rendered: its heading or bullet marker
+/// and the markup escapes are gone.
+fn rendered_digest_lines(digest: &str) -> Vec<String> {
+    digest
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            let l = l.trim_start_matches('#').trim_start();
+            l.strip_prefix("- ").unwrap_or(l).to_string()
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn h6_7_the_context_pane_text_is_the_digest_file_recent_reports_section_included() {
+    let m = machine(BEFORE_RUN).await;
+    m.confirm();
+    m.interests(CARE_INTERESTS);
+    let digest = digest_with_recent_reports();
+    m.put_report_at(oct(26), 1, ts("2026-10-26T06:01:00Z"), two_picks(), &digest);
+    let src = m.boot(Scripted::new()).await;
+
+    // The bytes on disk are what was written, and what get_context returns.
+    let on_disk = fs::read_to_string(m.store().report_dir(oct(26), 1).join("digest.md")).unwrap();
+    assert_eq!(on_disk, digest);
+    let v = call(&state_for(&src), "huey.get_context", json!({})).await;
+    assert_eq!(v["digest"].as_str().unwrap(), on_disk);
+
+    // The pane shows the same text, line for line, unescaped.
+    let pane = doc(&src.handle, HueyPane::Context, None);
+    assert_eq!(
+        lines(&pane.blocks),
+        rendered_digest_lines(&on_disk),
+        "the Context pane differs from digest.md"
+    );
+    let text = plain(&pane.blocks);
+    assert!(
+        text.contains("Recent reports (last 14 days; use these ids for follow_up_of)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[vendor-news:item-1] 2026-10-25 pick"),
+        "{text}"
+    );
+    assert!(text.contains("+3 more"), "{text}");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -251,7 +251,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         }),
         json!({
             "name": "huey.regenerate",
-            "description": "Starts a new version of today's report (v2, v3, ...) from today's frozen news pool, using the current interests file. Returns at once; the report pane repaints when it is done (a few minutes). One run at a time, and a regeneration waits 2 minutes after any run.",
+            "description": "Starts a new version of today's report (v2, v3, ...) from today's frozen news pool, using the current interests file. Returns at once; the report pane repaints when it is done (a few minutes). One run at a time, a regeneration waits 2 minutes after any run, and at most 6 regenerations run per local day.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }),
         json!({

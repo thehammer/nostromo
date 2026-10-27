@@ -16,6 +16,20 @@ use super::setup::{self, InterestsStatus, SetupState};
 use super::store::{Verdict, VerdictKind};
 use super::{HueyHandle, Trigger, TriggerRefused};
 use crate::ipc::protocol::DocAction;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+/// The whole setup scan (live PR and job reads included) gets this long.
+const SCAN_BUDGET: Duration = Duration::from_secs(90);
+
+/// Clears the "a scan is running" flag however the scan ends.
+struct ScanningGuard<'a>(&'a AtomicBool);
+
+impl Drop for ScanningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 
 /// The two panes the daemon binds when it seeds the `huey` focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +204,14 @@ impl HueyHandle {
             if let Some(left) = self.cooldown_left() {
                 return Err(TriggerRefused::Cooldown { seconds: left }.into());
             }
+            if self.regenerations_today(self.inner.env.clock.now())
+                >= super::MAX_REGENERATIONS_PER_DAY
+            {
+                return Err(TriggerRefused::DailyCap {
+                    max: super::MAX_REGENERATIONS_PER_DAY,
+                }
+                .into());
+            }
         }
         let handle = self.clone();
         tokio::spawn(async move {
@@ -221,9 +243,13 @@ impl HueyHandle {
             let held = self.inner.scan.lock().unwrap().clone();
             return match held {
                 Some(scan) => render::setup_scan_document(&scan, &self.paths.interests()),
-                None => {
-                    render::setup_prescan_document(&self.inner.env.context.sources(&self.paths))
-                }
+                None => render::setup_prescan_document_noted(
+                    &self.inner.env.context.sources(&self.paths),
+                    self.inner
+                        .scan_timed_out
+                        .load(Ordering::SeqCst)
+                        .then_some("Huey stopped the scan because the scan took too long. Nothing was saved. Press the button to try again."),
+                ),
             };
         }
         if sel.is_empty() {
@@ -449,12 +475,41 @@ impl HueyHandle {
         if self.is_set_up() {
             return ActionOutcome::refused("Huey is already set up on this machine.");
         }
-        self.run_scan().await;
-        ActionOutcome::done("Scanned this machine. Nothing was saved.")
+        if self.inner.scanning.load(Ordering::SeqCst) {
+            return ActionOutcome::done("A scan is already running.");
+        }
+        match self.run_scan().await {
+            Some(_) => ActionOutcome::done("Scanned this machine. Nothing was saved."),
+            None if self.inner.scan_timed_out.load(Ordering::SeqCst) => {
+                ActionOutcome::refused("The scan took too long. Nothing was saved.")
+            }
+            None => ActionOutcome::done("A scan is already running."),
+        }
     }
 
-    /// Read the context in memory (D6) and hold the result.
-    async fn run_scan(&self) -> setup::SetupScan {
+    /// Read the context in memory (D6) and hold the result, within
+    /// [`SCAN_BUDGET`]. `None` when a scan is already running or this one ran
+    /// out of time (then the setup document says so).
+    async fn run_scan(&self) -> Option<setup::SetupScan> {
+        if self.inner.scanning.swap(true, Ordering::SeqCst) {
+            return None;
+        }
+        let _scanning = ScanningGuard(&self.inner.scanning);
+        match tokio::time::timeout(SCAN_BUDGET, self.scan_now()).await {
+            Ok(scan) => {
+                self.inner.scan_timed_out.store(false, Ordering::SeqCst);
+                Some(scan)
+            }
+            Err(_) => {
+                warn!("huey: the setup scan took too long and was stopped");
+                self.inner.scan_timed_out.store(true, Ordering::SeqCst);
+                self.bump();
+                None
+            }
+        }
+    }
+
+    async fn scan_now(&self) -> setup::SetupScan {
         let env = &self.inner.env;
         let now = env.clock.now();
         let live = LiveInputs {
@@ -481,7 +536,14 @@ impl HueyHandle {
             let held = self.inner.scan.lock().unwrap().clone();
             let scan = match held {
                 Some(scan) => scan,
-                None => self.run_scan().await,
+                None => match self.run_scan().await {
+                    Some(scan) => scan,
+                    None => {
+                        return ActionOutcome::refused(
+                            "Huey could not scan this machine just now. Try again.",
+                        )
+                    }
+                },
             };
             if setup::write_draft(&self.paths, &scan).is_err() {
                 return ActionOutcome::refused("Huey could not write the interests draft.");
@@ -568,6 +630,9 @@ pub(super) fn start_error_text(e: StartError) -> String {
         }
         StartError::Refused(TriggerRefused::Cooldown { seconds }) => {
             format!("A run just finished. Wait {seconds} s, then try again.")
+        }
+        StartError::Refused(TriggerRefused::DailyCap { max }) => {
+            format!("Today's {max} regenerations are used up. Try again tomorrow.")
         }
     }
 }

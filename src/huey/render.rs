@@ -740,8 +740,15 @@ fn source_lines(sources: &[ContextSource]) -> String {
 /// Before the first scan (D6): says it has read nothing, lists what it would
 /// read (from config, no reads) and offers one button.
 pub fn setup_prescan_document(sources: &[ContextSource]) -> HueyDocument {
+    setup_prescan_document_noted(sources, None)
+}
+
+/// [`setup_prescan_document`] with a plain-English `note` ahead of the rest
+/// (what went wrong with the last scan).
+pub fn setup_prescan_document_noted(sources: &[ContextSource], note: Option<&str>) -> HueyDocument {
+    let note = note.map(|n| format!("{}\n\n", esc(n))).unwrap_or_default();
     let md = format!(
-        "Huey is not set up on this machine. It has read nothing.\n\n\
+        "{note}Huey is not set up on this machine. It has read nothing.\n\n\
          When you press the button, Huey reads the places below, in memory only: \
          nothing is saved, fetched or sent until you confirm.\n\n\
          ### What it would read\n\n{}",
