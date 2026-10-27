@@ -216,16 +216,38 @@ final class TerminalStoreMirrorTests: XCTestCase {
         XCTAssertTrue(a.roles.isEmpty && b.roles.isEmpty, "unchanged roles are not re-sent")
     }
 
-    func testAnAutoReplyFromAMirrorWindowNeitherTakesOverNorSendsASize() {
+    func testAnAutoReplyFromAMirrorWindowIsDroppedAndNeitherTakesOverNorSendsASize() {
         connectedTerminal()
         let a = view("w1"), b = view("w2", size: (cols: 120, rows: 40))
         a.clear(); b.clear(); sent.removeAll()
 
         store.sendInput(terminalId: "t1", bytes: Array("\u{1b}[1;1R".utf8), fromWindow: "w2", autoReply: true)
 
-        XCTAssertEqual(sent, [.input(terminalId: "t1", bytes: Array("\u{1b}[1;1R".utf8), autoReply: true)])
+        XCTAssertEqual(sent, [])
         XCTAssertTrue(store.isDriver(terminalId: "t1", windowId: "w1"))
         XCTAssertTrue(a.roles.isEmpty && b.roles.isEmpty)
+    }
+
+    func testAnAutoReplyFromTheDriverIsForwarded() {
+        connectedTerminal()
+        view("w1"); view("w2", size: (cols: 120, rows: 40))
+        sent.removeAll()
+
+        store.sendInput(terminalId: "t1", bytes: Array("\u{1b}[1;1R".utf8), fromWindow: "w1", autoReply: true)
+
+        XCTAssertEqual(sent, [.input(terminalId: "t1", bytes: Array("\u{1b}[1;1R".utf8), autoReply: true)])
+    }
+
+    func testAPromotedMirrorsRepliesAreForwardedAndTheOldDriversAreNot() {
+        connectedTerminal()
+        view("w1"); view("w2", size: (cols: 120, rows: 40))
+        store.claimDriver(terminalId: "t1", fromWindow: "w2")
+        sent.removeAll()
+
+        store.sendInput(terminalId: "t1", bytes: [0x52], fromWindow: "w1", autoReply: true)
+        XCTAssertEqual(sent, [])
+        store.sendInput(terminalId: "t1", bytes: [0x52], fromWindow: "w2", autoReply: true)
+        XCTAssertEqual(sent, [.input(terminalId: "t1", bytes: [0x52], autoReply: true)])
     }
 
     func testAMirrorWithNoSizeYetTakesOverWithoutSendingAResize() {

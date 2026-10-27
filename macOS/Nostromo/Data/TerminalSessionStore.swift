@@ -228,7 +228,8 @@ final class TerminalSessionStore {
     /// Keystrokes, a paste or a terminal's own reply (`autoReply`). Dropped unless the terminal is running.
     ///
     /// A reply is not a person at the keyboard: it is marked on the wire so the daemon does not treat it
-    /// as activity, and it does not make this window the terminal's driver.
+    /// as activity, and it does not make this window the terminal's driver. A reply from a mirror is
+    /// dropped: the driver's emulator answers the same query, so the process hears it once.
     ///
     /// Bytes over `inputChunkBytes` go out in several frames, in order, a few milliseconds apart. While
     /// they are going out, anything else for that terminal (a key, a reply) queues behind them, so a
@@ -236,7 +237,12 @@ final class TerminalSessionStore {
     func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String, autoReply: Bool = false) {
         guard !bytes.isEmpty, terminals[terminalId]?.status == .running,
               !daemonUnavailable.contains(terminalId) else { return }
-        if !autoReply { takeDriver(of: terminalId, window: windowId) }
+        // Every window's emulator answers the same output; only the driver's reply reaches the process.
+        if autoReply {
+            if let driver = effectiveDriver(of: terminalId), driver != windowId { return }
+        } else {
+            takeDriver(of: terminalId, window: windowId)
+        }
         var frames: [TerminalClientMessage] = []
         var start = 0
         while start < bytes.count {
@@ -350,11 +356,18 @@ final class TerminalSessionStore {
         let wasUnavailable = !daemonUnavailable.isEmpty
         daemonUnavailable.removeAll()
         let listed = Set(frame.terminals.map(\.terminalId))
-        for id in Array(terminals.keys) where !listed.contains(id) { forget(id) }
+        let closedIds = Set(frame.closed.map(\.terminalId))
+        // A terminal listed nowhere is forgotten without a `.closed` to announce it: republish so its
+        // host re-reads the store instead of keeping a live-looking prompt.
+        var forgotSilently = false
+        for id in Array(terminals.keys) where !listed.contains(id) {
+            forget(id)
+            if !closedIds.contains(id) { forgotSilently = true }
+        }
         for info in frame.terminals { apply(info) }
         for closed in frame.closed { apply(closed: closed) }
         attachViewedTerminals()
-        if wasUnavailable { changes.send(.availability(daemonReachable: true)) }
+        if wasUnavailable || forgotSilently { changes.send(.availability(daemonReachable: true)) }
     }
 
     private func apply(closed: TerminalClosedInfo) {
