@@ -148,9 +148,18 @@ public enum TerminalDeliveryText {
         for (i, scanned) in scan(bytes).enumerated() {
             leftover += bytes[cursor ..< scanned.range.lowerBound]
             cursor = scanned.range.upperBound
-            // A genuine notice is its element, a newline, then one known sentence.
-            guard !scanned.element.isOutput, items.indices.contains(i), items[i].isNotice,
-                  let sentence = noticeSentence(for: items[i]) else { continue }
+            // A forged output element with no closing tag swallows the text after it into the
+            // collapsed block (visible on expand, by design), so it is removed here too.
+            if scanned.element.isOutput { continue }
+            // A genuine notice is exactly the element the daemon writes, a newline, then one
+            // known sentence. Any other follow element (extra or unknown attribute, unterminated
+            // head, other quoting or order, oversized value) is not removed: it stays in the
+            // leftover so its full text shows.
+            guard items.indices.contains(i), items[i].isNotice, isGenuine(scanned.element.text, for: items[i]) else {
+                cursor = scanned.range.lowerBound
+                continue
+            }
+            guard let sentence = noticeSentence(for: items[i]) else { continue }
             let known = Array(("\n" + sentence).utf8)
             if bytes.count >= cursor + known.count, bytes[cursor ..< cursor + known.count].elementsEqual(known) {
                 cursor += known.count
@@ -159,6 +168,40 @@ public enum TerminalDeliveryText {
         leftover += bytes[cursor...]
         let rest = string(leftover[...]).trimmingCharacters(in: .whitespacesAndNewlines)
         return rest.isEmpty ? nil : rest
+    }
+
+    /// Whether `element` is byte for byte the notice element the daemon writes for `item`
+    /// (`notice` in `follow/manager.rs`): `event`, `terminal_id`, `pane`, optional `reason`, each
+    /// value escaped as `escape_attribute` does. The values are bounded as the daemon's are (a
+    /// known event, a terminal id, a pane name), because `item` is parsed from the same text and
+    /// so cannot vouch for a value that is itself the payload.
+    private static func isGenuine(_ element: String, for item: TerminalOriginItem) -> Bool {
+        guard let event = item.event, ["started", "resumed", "paused", "stopped"].contains(event),
+              item.terminalId.utf8.count <= 64,
+              item.terminalId.utf8.allSatisfy({ isIdByte($0) }),
+              item.pane.utf8.count <= maxPaneBytes,
+              (item.reason?.utf8.count ?? 0) <= maxReasonBytes else { return false }
+        let reasonAttr = item.reason.map { " reason=\"\(escapeAttribute($0))\"" } ?? ""
+        let canonical = "<nostromo-terminal-follow event=\"\(event)\" terminal_id=\"\(escapeAttribute(item.terminalId))\""
+            + " pane=\"\(escapeAttribute(item.pane))\"\(reasonAttr)/>"
+        return element == canonical
+    }
+
+    /// A pane name past this is shown in full in the bubble rather than as a one-line notice.
+    private static let maxPaneBytes = 120
+    private static let maxReasonBytes = 80
+
+    private static func isIdByte(_ b: UInt8) -> Bool {
+        (0x30 ... 0x39).contains(b) || (0x41 ... 0x5A).contains(b) || (0x61 ... 0x7A).contains(b)
+            || b == UInt8(ascii: "-") || b == UInt8(ascii: "_")
+    }
+
+    /// `escape_attribute` in `ipc/stream_json.rs`.
+    private static func escapeAttribute(_ v: String) -> String {
+        v.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
     }
 
     /// The sentence the daemon writes after a follow notice (`follow/manager.rs`). The pane name

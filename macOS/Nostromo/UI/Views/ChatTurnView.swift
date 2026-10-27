@@ -409,7 +409,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         // Unless it holds text the blocks do not show, or attachments: then an "also sent" bubble
         // keeps what the agent received visible.
         let bubbleText = turn.hasTerminalOrigin ? turn.terminalOriginBubbleText : turn.userInput
-        if let bubbleText, !turn.userInput.contains(Self.confirmReplySentinel) {
+        // The sentinel only ever marks a confirm-card reply, which has no terminal origin: on a
+        // terminal-origin turn it is just text, and hiding it would hide what the agent received.
+        if let bubbleText, turn.hasTerminalOrigin || !turn.userInput.contains(Self.confirmReplySentinel) {
             let bubble = UserBubbleView(text: bubbleText, imageURLs: turn.imageURLs)
             self.bubble = bubble
             bubbleIsImageOnly = bubbleText == ChatSession.imageOnlyText && !turn.imageURLs.isEmpty

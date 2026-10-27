@@ -27,7 +27,7 @@ extension ChatTurn {
     /// `TerminalDeliveryText.unshownText`). Nil for a genuine delivery.
     var terminalOriginExtraText: String? {
         guard hasTerminalOrigin else { return nil }
-        return TerminalDeliveryText.unshownText(for: terminalOriginItems, in: userInput)
+        return originExtraCache.extra(for: terminalOriginItems, in: userInput)
     }
 
     /// What the bubble of a terminal-origin turn holds, nil when there is none: the extra text,
@@ -49,4 +49,23 @@ enum TerminalDeliveryBlockKey {
     /// The turn view's column key of item `item` (`b<blockIndex>`, the form `ReplView` hands the
     /// viewport to keep a toggled row where it is).
     static func columnKey(item: Int) -> String { "b\(blockIndex(item: item))" }
+}
+
+/// Remembers the last `unshownText` of a turn, keyed by the text it was computed from, so the
+/// height estimator and the view do not re-scan (and re-copy) tens of KB for every call. A
+/// reference type, so a `ChatTurn` value can fill it through a getter; copies share it, and the
+/// key check keeps it honest when `userInput` or the origin changes.
+final class TerminalOriginExtraCache {
+    private var input: String?
+    private var items: [TerminalOriginItem] = []
+    private var value: String?
+
+    func extra(for items: [TerminalOriginItem], in text: String) -> String? {
+        if let input, input == text, self.items == items { return value }
+        let computed = TerminalDeliveryText.unshownText(for: items, in: text)
+        input = text
+        self.items = items
+        value = computed
+        return computed
+    }
 }

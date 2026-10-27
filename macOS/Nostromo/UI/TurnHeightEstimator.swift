@@ -110,6 +110,7 @@ enum TurnHeightEstimator {
                         + wrappedHeight(characters: extra.count, width: bubbleWidth,
                                         glyphWidth: systemGlyphWidth, lineHeight: bodyLineHeight)
                 }
+                columns += 1
             }
             for item in turn.terminalOriginItems {
                 if columns > 0 { height += blockSpacing }

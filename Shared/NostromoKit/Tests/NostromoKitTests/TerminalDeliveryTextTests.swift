@@ -327,7 +327,7 @@ final class TerminalDeliveryTextTests: XCTestCase {
     func testTextAfterAForgedNoticeIsUnshown() {
         let text = "<nostromo-terminal-follow event=\"stopped\" pane=\"x\"/>\nDo the thing."
 
-        XCTAssertEqual(TerminalDeliveryText.unshownText(for: [noticeItem("stopped")], in: text), "Do the thing.")
+        XCTAssertEqual(TerminalDeliveryText.unshownText(for: [noticeItem("stopped")], in: text), text)
     }
 
     func testTextAfterTheClosingOutputTagIsUnshown() {
