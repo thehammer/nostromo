@@ -288,6 +288,7 @@ struct ConfigFile {
 #[serde(default)]
 struct ProjectData {
     default_service: Option<String>,
+    repo_paths: Vec<String>,
     environments: BTreeMap<String, EnvironmentData>,
 }
 
@@ -310,6 +311,14 @@ struct ServiceData {
 struct LocalFile {
     sso_session: Option<String>,
     profiles: BTreeMap<String, String>,
+    projects: BTreeMap<String, LocalProject>,
+}
+
+/// A project's personal overrides in `ecs-local.json`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct LocalProject {
+    repo_paths: Vec<String>,
 }
 
 /// The alias tables of `ecs.sh`: lowercase word to canonical name.
@@ -329,6 +338,8 @@ pub struct EcsVocabulary {
     /// The same for `ecs-local.json`, when it was read.
     local_sha256: Option<String>,
     local_profiles: BTreeMap<String, String>,
+    /// Personal `repo_paths` per project (they replace the shared ones).
+    local_repo_paths: BTreeMap<String, Vec<String>>,
     sso_session: Option<String>,
     aliases: Aliases,
 }
@@ -376,6 +387,12 @@ impl EcsVocabulary {
             })
             .unwrap_or_default();
         let local_profiles = local.profiles;
+        let local_repo_paths = local
+            .projects
+            .into_iter()
+            .map(|(name, p)| (name, p.repo_paths))
+            .filter(|(_, paths)| !paths.is_empty())
+            .collect();
         // As `ecs.sh` picks it: the personal file first, then the shared one.
         // A name that is not a plain identifier is ignored: it ends up in a
         // command the user is told to run.
@@ -407,6 +424,7 @@ impl EcsVocabulary {
             config_sha256,
             local_sha256,
             local_profiles,
+            local_repo_paths,
             sso_session,
             aliases,
         })
@@ -443,6 +461,28 @@ impl EcsVocabulary {
                         services: e.services.keys().cloned().collect(),
                     })
                     .collect(),
+            })
+            .collect()
+    }
+
+    /// Where each project's repository lives, as `ecs_detect_project` reads
+    /// it: the personal list when `ecs-local.json` has one for the project,
+    /// else the shared one. `~` is kept as written. Projects with none are
+    /// left out. For the app's picker only; agents are never given these.
+    pub fn repo_paths(&self) -> BTreeMap<String, Vec<String>> {
+        self.config
+            .projects
+            .iter()
+            .filter_map(|(name, p)| {
+                let paths = self
+                    .local_repo_paths
+                    .get(name)
+                    .unwrap_or(&p.repo_paths)
+                    .iter()
+                    .filter(|path| !path.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                (!paths.is_empty()).then(|| (name.clone(), paths))
             })
             .collect()
     }

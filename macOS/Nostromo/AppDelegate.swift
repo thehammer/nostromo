@@ -105,6 +105,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         // broadcasts no matter how many windows this launch ends up opening
         // (see DecisionPresenter's header comment for why that matters).
         DecisionPresenter.shared.start()
+        RemoteShellPresenter.shared.start()
         // Opt-in QA control socket (NOSTROMO_APP_CONTROL=1 or the AppControlEnabled default).
         AppControlServer.shared.startIfEnabled(appDelegate: self)
         TranscriptDiagnostics.startStreamingIfRequested()
@@ -251,6 +252,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
 
     private var isQAInstance: Bool { Bundle.main.bundleIdentifier != Self.realBundleIdentifier }
 
+    /// Retained while the New Remote Shell picker is on screen.
+    private var presentedNewRemoteShellSheet: NewRemoteShellSheet?
+
     /// Windows `openSecondWindowQA` opened. Not in `windows`: nothing in the display-topology code
     /// (placement, re-homing) knows about them.
     private var qaExtraWindows: [NostromoWindow] = []
@@ -307,6 +311,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
                                    clientRequestId: requestId))
     }
 
+    /// Terminal > New Remote Shell… (⇧⌘T): pick a target for the key window's focus. Submit asks the
+    /// daemon for the same "Connect to …" sheet an agent's request shows, minus the requester; nothing
+    /// connects until Connect is clicked there, so the picker itself is not gated.
+    @objc func newRemoteShell(_ sender: Any?) {
+        guard let window = NSApp.keyWindow, let layout = window.contentView as? MainLayout else {
+            NSSound.beep()
+            return
+        }
+        let store = RemoteShellStore.shared
+        // The picker shows what the daemon last sent. Ask again so the next open reflects an ECS
+        // config fixed since (the daemon reads its files on every request).
+        store.requestTargets()
+        let sheet = NewRemoteShellSheet(targets: store.targets, tag: layout.activeFocusTag,
+                                        projectPath: layout.activeFocusProjectPath)
+        guard let sheetWindow = sheet.window else { return }
+        presentedNewRemoteShellSheet = sheet
+        window.beginSheet(sheetWindow) { [weak self] _ in self?.presentedNewRemoteShellSheet = nil }
+    }
+
     /// Terminal > Close Terminal Pane (⇧⌘W): the terminal pane that holds the keyboard. The pane asks
     /// `TerminalInputGuard` before it acts, so a synthetic key does nothing.
     @objc func closeTerminalPane(_ sender: Any?) {
@@ -356,6 +379,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         }
         if menuItem.action == #selector(openSecondWindowQA(_:)) { return isQAInstance }
         if menuItem.action == #selector(newTerminal(_:)) { return NSApp.keyWindow?.contentView is MainLayout }
+        if menuItem.action == #selector(newRemoteShell(_:)) { return NSApp.keyWindow?.contentView is MainLayout }
         if menuItem.action == ModelShortcut.action { return !ModelShortcut.bars(in: NSApp.keyWindow).isEmpty }
         if menuItem.action == BackgroundShortcut.action { return !BackgroundShortcut.bars(in: NSApp.keyWindow).isEmpty }
         return true

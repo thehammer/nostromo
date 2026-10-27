@@ -2445,6 +2445,7 @@ async fn any_local_process_can_ask_for_the_vocabulary_and_only_it_is_answered() 
             problem,
             projects,
             shell_types,
+            ..
         } = targets_of(client, from)
             .unwrap_or_else(|| panic!("{who}: no answer: {}", client.summary()))
         else {
@@ -2525,6 +2526,7 @@ async fn without_a_config_json_the_vocabulary_says_it_is_not_configured_and_why(
         problem,
         projects,
         shell_types,
+        ..
     } = targets_of(&script, from).expect("an answer")
     else {
         unreachable!()
@@ -3259,6 +3261,7 @@ async fn a_tcp_client_subscribed_to_everything_never_receives_a_remote_shell_fra
             problem: None,
             projects: vec![],
             shell_types: vec![],
+            repo_paths: Default::default(),
         },
         ServerMsg::RemoteShellConfirmRequest {
             request_id: "broadcast-1".into(),
@@ -3347,6 +3350,7 @@ async fn the_general_broadcast_never_carries_a_remote_shell_frame_to_any_local_c
             problem: None,
             projects: vec![],
             shell_types: vec![],
+            repo_paths: Default::default(),
         },
         ServerMsg::RemoteShellConfirmRequest {
             request_id: "broadcast-1".into(),

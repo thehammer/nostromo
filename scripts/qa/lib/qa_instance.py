@@ -306,10 +306,39 @@ def take_snapshot(user_home, ps_text, defaults_text, qa_root=None):
     }
 
 
+# What the QA daemon takes from the caller's environment. The AWS CLI is the fake the terminal scenarios
+# point it at; the timeout lets a scenario watch an agent's remote-shell request expire in seconds.
+DAEMON_PASSTHROUGH = ("PATH", "TMPDIR", "LANG", "NOSTROMO_AWS_CLI", "NOSTROMO_QA_REMOTE_SHELL_TIMEOUT_SECS",
+                      "ANTHROPIC_MODEL")
+
+# Where the daemon looks for config.toml under its HOME: the `directories` crate's place on macOS and the
+# XDG-style one the docs name. Both are written, so it does not matter which this build reads.
+CONFIG_DIRS = (os.path.join(".config", "nostromo"), os.path.join("Library", "Application Support", "nostromo"))
+
+
+def seed_ecs_config(qa_root, fixtures_dir):
+    """Point the QA daemon's remote-shell vocabulary at a fixture directory (config.json, ecs-local.json,
+    ecs.sh inside it) through `[terminal]` in its config.toml. Must run before the daemon starts."""
+    fixtures = os.path.realpath(fixtures_dir)
+    config = os.path.join(fixtures, "config.json")
+    if not os.path.isfile(config):
+        raise RuntimeError(f"NOSTROMO_QA_ECS_FIXTURES: no config.json in {fixtures}")
+    lines = ["[terminal]"] + [
+        f"{key} = {json.dumps(os.path.join(fixtures, name))}"
+        for key, name in (("ecs_config", "config.json"), ("ecs_local", "ecs-local.json"),
+                          ("ecs_aliases_script", "ecs.sh"))
+    ]
+    for sub in CONFIG_DIRS:
+        folder = os.path.join(qa_root, "home", sub)
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "config.toml"), "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+
 def daemon_env(qa_root, base_env, fake_claude, guard_bin):
     """Environment for the QA nostromd. Nothing of the user's HOME leaks in."""
     home = os.path.join(qa_root, "home")
-    env = {k: v for k, v in base_env.items() if k in ("PATH", "TMPDIR", "LANG", "NOSTROMO_AWS_CLI", "ANTHROPIC_MODEL")}
+    env = {k: v for k, v in base_env.items() if k in DAEMON_PASSTHROUGH}
     env.update({
         "HOME": home,
         "NOSTROMOD_SOCKET": os.path.join(qa_root, "nostromd.sock"),
@@ -577,6 +606,8 @@ def cmd_start(args):
     state = {"root": qa_root, "synthetic": synthetic, "before": before}
     save_state(qa_root, state)
     try:
+        if os.environ.get("NOSTROMO_QA_ECS_FIXTURES"):
+            seed_ecs_config(qa_root, os.environ["NOSTROMO_QA_ECS_FIXTURES"])
         build()
         fake_claude = os.path.join(REPO, "scripts", "qa", "fake-claude")
         guard_bin = os.path.join(REPO, "target", "debug", "nostromo-guard")

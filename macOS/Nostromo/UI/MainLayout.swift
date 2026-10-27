@@ -320,6 +320,18 @@ class MainLayout: NSView {
             self?.toastView.showToast(message: message, severity: severity)
         }
 
+        // Terminal toasts (a remote shell closed, a request timed out) go to every window that is
+        // showing the focus they are about, so a second window on that focus sees it too.
+        // `onNotification` above is a single closure the last-built window overwrites, which is why
+        // terminal toasts do not use it.
+        TerminalSessionStore.shared.toasts
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] toast in
+                guard let self, self.activeFocusTag == toast.tag else { return }
+                self.toastView.showToast(message: toast.message, severity: toast.severity, action: toast.action)
+            }
+            .store(in: &cancellables)
+
         // Publish the initial active focus so StatusBarView has a tag from the start.
         AppStore.shared.setActiveFocusAgentTag(activeFocus.agentTag)
         AppStore.shared.setActiveFocusSessionTag(activeFocus.sessionTag)

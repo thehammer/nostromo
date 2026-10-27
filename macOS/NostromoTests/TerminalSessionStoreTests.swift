@@ -1112,3 +1112,94 @@ final class TerminalSessionStoreTests: XCTestCase {
         XCTAssertTrue(sent.isEmpty)
     }
 }
+
+// MARK: - A remote shell closing (2c): the toast, and Reconnect
+
+/// A remote shell that was running and closes says so in the window(s) showing its focus, with
+/// Reconnect (a new request, so the confirm sheet appears again). A connection that never got past
+/// `connecting` is a failure the failure sheet reports, so it gets no "closed" toast.
+final class RemoteShellClosedToastTests: XCTestCase {
+
+    private var store: TerminalSessionStore!
+    private var remote: RemoteShellStore!
+    private var sentToRemote: [RemoteShellClientMessage] = []
+    private var toasts: [TerminalToast] = []
+    private var subscription: AnyCancellable?
+
+    private let target = TerminalTarget(project: "admin-portal", environment: "production",
+                                        service: "scheduler", shellType: "shell")
+
+    override func setUp() {
+        super.setUp()
+        sentToRemote = []
+        toasts = []
+        remote = RemoteShellStore(transport: { [unowned self] in self.sentToRemote.append($0) })
+        store = TerminalSessionStore(remoteShells: remote)
+        subscription = store.toasts.sink { [unowned self] in self.toasts.append($0) }
+    }
+
+    override func tearDown() {
+        subscription = nil
+        store = nil
+        remote = nil
+        super.tearDown()
+    }
+
+    private func ecsInfo(status: TerminalStatus) -> TerminalInfo {
+        TerminalInfo(terminalId: "t9", tag: "core-1", paneId: "terminal-e", kind: .ecs, label: "production",
+                     cwd: nil, target: target, status: status, exitCode: nil, endedReason: nil, cols: 80, rows: 24,
+                     requestedBy: TerminalRequester(kind: "user", tag: nil), openedByRequest: nil,
+                     follower: nil, idleClosesAt: nil)
+    }
+
+    private func closed(kind: TerminalKind = .ecs, target: TerminalTarget? = nil, reason: String = "remote_exit",
+                        exitCode: Int? = 0) -> TerminalClosedInfo {
+        TerminalClosedInfo(terminalId: "t9", tag: "core-1", paneId: "terminal-e", label: "production",
+                           kind: kind, reason: reason, exitCode: exitCode, target: target ?? self.target)
+    }
+
+    func testARunningRemoteShellThatClosesToastsItsFocusWithTheReasonAndAReconnectAction() throws {
+        store.ingest(.terminalState(ecsInfo(status: .running)))
+
+        store.ingest(.terminalClosed(closed()))
+
+        let toast = try XCTUnwrap(toasts.first)
+        XCTAssertEqual(toasts.count, 1)
+        XCTAssertEqual(toast.tag, "core-1")
+        XCTAssertEqual(toast.message, "production \u{00B7} admin-portal \u{00B7} scheduler shell closed: remote session ended, exit 0")
+        XCTAssertEqual(toast.action?.title, "Reconnect")
+    }
+
+    func testReconnectAsksTheDaemonForTheSameTargetInTheSameFocusAndNothingElseHappensByItself() throws {
+        store.ingest(.terminalState(ecsInfo(status: .running)))
+        store.ingest(.terminalClosed(closed()))
+        XCTAssertTrue(sentToRemote.isEmpty, "nothing reconnects until Reconnect is clicked")
+
+        try XCTUnwrap(toasts.first?.action).handler()
+
+        XCTAssertEqual(sentToRemote, [.open(tag: "core-1", target: target)])
+        // A request to open, never an answer: the confirm sheet still has to be clicked through.
+        XCTAssertFalse(sentToRemote.contains { if case .answer = $0 { return true } else { return false } })
+    }
+
+    func testAShellThatNeverGotPastConnectingIsAFailedConnectionNotAClosedShell() {
+        store.ingest(.terminalState(ecsInfo(status: .connecting)))
+
+        store.ingest(.terminalClosed(closed(reason: "sso_expired", exitCode: nil)))
+
+        XCTAssertTrue(toasts.isEmpty, "the failure sheet reports it")
+    }
+
+    func testALocalTerminalClosingMakesNoRemoteShellToast() {
+        store.ingest(.terminalClosed(closed(kind: .local, reason: "exited")))
+        XCTAssertTrue(toasts.isEmpty)
+    }
+
+    func testARemoteShellThatClosedWhileTheDaemonWasStoppedStillToasts() {
+        // `terminal_list.closed`: this app never saw it running, but it was.
+        store.ingest(.terminalList(TerminalListFrame(terminals: [], closed: [closed(reason: "daemon_stopped", exitCode: nil)])))
+
+        XCTAssertEqual(toasts.first?.message,
+                       "production \u{00B7} admin-portal \u{00B7} scheduler shell closed: Nostromo daemon restarted")
+    }
+}

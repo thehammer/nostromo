@@ -4132,6 +4132,7 @@ mod tests {
                         }],
                     }],
                     shell_types: vec!["shell".into()],
+                    repo_paths: Default::default(),
                 },
             ),
             (

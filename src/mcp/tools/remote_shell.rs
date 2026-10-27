@@ -18,7 +18,7 @@ use serde_json::{json, Map, Value};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
 use crate::terminal::agent_api::AgentRemoteRequest;
 use crate::terminal::ecs::InvalidTarget;
-use crate::terminal::remote_request::{RemoteResult, DEFAULT_TIMEOUT, MAX_REASON_CHARS};
+use crate::terminal::remote_request::{agent_wait_limit_from_env, RemoteResult, MAX_REASON_CHARS};
 
 /// The keys the request accepts. Anything else is `unknown_argument`.
 const REQUEST_KEYS: [&str; 5] = ["project", "environment", "service", "shell_type", "reason"];
@@ -96,7 +96,7 @@ pub async fn request_shell(
             service: service.to_string(),
             shell_type: shell_type.to_string(),
             reason,
-            timeout: DEFAULT_TIMEOUT,
+            timeout: agent_wait_limit_from_env(),
         })
         .await;
     result_json(result)

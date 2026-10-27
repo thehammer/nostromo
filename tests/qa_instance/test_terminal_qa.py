@@ -70,6 +70,31 @@ class OpenTerminalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             terminal_qa.open_terminal(bare, "mother", timeout=1)
 
+    def test_request_remote_shell_sends_the_closed_vocabulary_and_the_reason_as_the_named_focus(self):
+        outcome = {"error": "cancelled"}
+        fake = FakeMcp(os.path.join(self.root, qa.MCP_SOCKET), outcome)
+        fake.start()
+        got = terminal_qa.request_remote_shell(self.root, "fred", "admin-portal", "production", "scheduler",
+                                               "shell", "Check stuck jobs", timeout=10)
+        fake.join(5)
+        self.assertEqual(got, outcome)
+        self.assertEqual(fake.frames[0], {"type": "hello", "pty_id": "fred"})
+        call = [f for f in fake.frames if f.get("method") == "tools/call"][0]
+        self.assertEqual(call["params"], {"name": "nostromo.request_remote_shell", "arguments": {
+            "project": "admin-portal", "environment": "production", "service": "scheduler",
+            "shell_type": "shell", "reason": "Check stuck jobs"}})
+
+    def test_main_prints_the_outcome_and_exits_nonzero_unless_ok(self):
+        fake = FakeMcp(os.path.join(self.root, qa.MCP_SOCKET), {"error": "timeout"})
+        fake.start()
+        args = ["terminal_qa.py", "request-remote-shell", self.root, "teri", "admin-portal", "production",
+                "scheduler", "shell", "why", "10"]
+        self.assertEqual(terminal_qa.main(args), 1)
+        fake.join(5)
+
+    def test_request_remote_shell_needs_all_its_words(self):
+        self.assertEqual(terminal_qa.main(["terminal_qa.py", "request-remote-shell", self.root, "teri"]), 2)
+
     def test_main_rejects_other_commands(self):
         self.assertEqual(terminal_qa.main(["terminal_qa.py", "write", self.root, "mother"]), 2)
 

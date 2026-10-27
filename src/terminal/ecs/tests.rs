@@ -355,6 +355,38 @@ fn projects_lists_each_project_with_its_default_service_environments_and_service
 }
 
 #[test]
+fn repo_paths_are_the_shared_lists_unless_the_personal_file_names_the_project() {
+    let shared = vocab().repo_paths();
+    assert_eq!(
+        shared.get("admin-portal"),
+        Some(&strings(&["~/Code/fake-admin-portal"]))
+    );
+    assert_eq!(shared.len(), 4);
+
+    // As `ecs_detect_project` reads them: a personal list replaces the shared one.
+    let copy = Copy::new();
+    edit_json(&copy, "ecs-local.json", |doc| {
+        doc["projects"] = serde_json::json!({
+            "admin-portal": {"repo_paths": ["~/work/ap", "/srv/ap"]},
+            "payments": {"repo_paths": []}
+        });
+    });
+    let personal = EcsVocabulary::load(&copy.paths)
+        .expect("loads")
+        .repo_paths();
+
+    assert_eq!(
+        personal.get("admin-portal"),
+        Some(&strings(&["~/work/ap", "/srv/ap"]))
+    );
+    assert_eq!(
+        personal.get("payments"),
+        Some(&strings(&["~/Code/fake-payments"])),
+        "an empty personal list falls back to the shared one"
+    );
+}
+
+#[test]
 fn what_is_offered_carries_no_cluster_profile_or_account() {
     let v = vocab();
     let text = serde_json::to_string(&(v.projects(), v.shell_types())).unwrap();

@@ -10,6 +10,7 @@ import AppKit
     func captureRenderStateNow()
     func goToApprovalCard(_ sender: Any?)
     func newTerminal(_ sender: Any?)
+    func newRemoteShell(_ sender: Any?)
     func closeTerminalPane(_ sender: Any?)
     func terminalFind(_ sender: Any?)
     func copyTerminalLatencyStats()
@@ -70,6 +71,12 @@ enum MainMenu {
                                          keyEquivalent: "t")
         newTerminalItem.target = target
         terminalMenu.addItem(newTerminalItem)
+        // ⇧⌘T asks the daemon for a remote shell; the "Connect to …" sheet that follows is what opens it.
+        let newRemoteShellItem = NSMenuItem(title: "New Remote Shell\u{2026}",
+                                            action: #selector(MainMenuActions.newRemoteShell(_:)), keyEquivalent: "t")
+        newRemoteShellItem.keyEquivalentModifierMask = [.command, .shift]
+        newRemoteShellItem.target = target
+        terminalMenu.addItem(newRemoteShellItem)
         let closeTerminalItem = NSMenuItem(title: "Close Terminal Pane", action: #selector(MainMenuActions.closeTerminalPane(_:)),
                                            keyEquivalent: "w")
         closeTerminalItem.keyEquivalentModifierMask = [.command, .shift]
