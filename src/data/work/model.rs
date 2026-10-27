@@ -119,6 +119,23 @@ pub struct SentMarker {
     pub nonce: Option<String>,
 }
 
+/// Sentry assignee buckets Teri's agents never see: not in `teri.list_work_items`,
+/// not through `teri.get_work_item`, and not pickable. The Sentry tab still shows
+/// them under All. To hide older unassigned issues from agents too, add
+/// `ASSIGNEE_UNASSIGNED_OLDER` here.
+pub const AGENT_HIDDEN_SENTRY_ASSIGNEES: &[&str] = &[super::sentry::ASSIGNEE_OTHER];
+
+/// May an agent (the MCP tools and Teri's picks) see this item? False for a Sentry
+/// issue in one of [`AGENT_HIDDEN_SENTRY_ASSIGNEES`]. The hub itself and the app
+/// keep every item, so hiding never reads as the work being done.
+pub fn agent_visible(item: &WorkItem) -> bool {
+    !(item.source == WorkSource::Sentry
+        && item
+            .assignee
+            .as_deref()
+            .is_some_and(|a| AGENT_HIDDEN_SENTRY_ASSIGNEES.contains(&a)))
+}
+
 /// One item in the Teri work list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkItem {

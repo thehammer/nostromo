@@ -20,7 +20,7 @@ use crate::data::work::untrusted::{
     cut_bytes, escape_id, fence, one_line, sanitize_block, unescape_id, NonceFence, MAX_ID_CHARS,
     MAX_LINE_CHARS, MAX_PATH_CHARS,
 };
-use crate::data::work::{SourceStatus, WorkDetail, WorkItem, WorkService, WorkSource};
+use crate::data::work::{agent_visible, SourceStatus, WorkDetail, WorkItem, WorkService, WorkSource};
 use crate::mcp::state::McpSharedState;
 
 /// Default and maximum page size of `teri.list_work_items`.
@@ -137,7 +137,8 @@ pub fn list_todos(state: &McpSharedState) -> Value {
 /// Handle `teri.list_work_items(args)`.
 ///
 /// `{ statuses, total, notice, items }` (plus `omitted` when items were left out);
-/// `total` counts the matches before `limit`/`offset`.
+/// `total` counts the matches before `limit`/`offset`. Sentry issues assigned to
+/// other people or teams are not listed or counted (see [`agent_visible`]).
 ///
 /// Every string in it is third-party text and is handled by the shared
 /// [`NonceFence`] helper, with ONE nonce for the whole call (named in `notice`):
@@ -176,7 +177,12 @@ pub fn list_work_items(state: &McpSharedState, args: &Value) -> Value {
     let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
 
     let fence = NonceFence::new();
-    let matching = hub.items(&filter);
+    // Hidden issues are dropped before `total`, `offset` and `limit` see them.
+    let matching: Vec<WorkItem> = hub
+        .items(&filter)
+        .into_iter()
+        .filter(agent_visible)
+        .collect();
     let total = matching.len();
     let page: Vec<&WorkItem> = matching.iter().skip(offset).take(limit).collect();
     let items: Vec<Value> = page
@@ -300,6 +306,8 @@ fn list_status(status: &SourceStatus, fence: &NonceFence) -> Value {
 
 /// Handle `teri.get_work_item({id})`: the detail, or `{ error, message }`.
 ///
+/// A Sentry issue hidden from agents answers `unknown_item`, as if it did not exist.
+///
 /// `{ item_id, links, markdown }`. `id` is as `teri.list_work_items` gave it
 /// (escaped; see [`escape_id`]). The title, the field rows, the file list and
 /// the body are all third-party text, so they travel together inside the one
@@ -316,7 +324,12 @@ pub async fn get_work_item(state: &McpSharedState, args: &Value) -> Value {
     let Some(hub) = state.work_hub.as_ref() else {
         return json!({ "error": "not_available", "message": "work items are not available in this process" });
     };
-    match hub.detail(&unescape_id(id)).await {
+    let id = unescape_id(id);
+    // An item an agent may not see answers exactly like one the hub never held.
+    if hub.item(&id).is_some_and(|item| !agent_visible(&item)) {
+        return json!({ "error": "unknown_item", "message": "Unknown Sentry issue" });
+    }
+    match hub.detail(&id).await {
         Ok(detail) => {
             let fence = NonceFence::new();
             let links: Vec<Value> = detail

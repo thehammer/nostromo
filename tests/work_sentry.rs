@@ -31,7 +31,8 @@ use nostromo::data::work::sentry::{
 };
 use nostromo::data::work::{SourceState, WorkDetail, WorkItem, WorkSource};
 use nostromo::ipc::protocol::ServerMsg;
-use nostromo::mcp::tools::teri::{get_work_item, list_work_items};
+use nostromo::data::work::WorkService;
+use nostromo::mcp::tools::teri::{get_picks, get_work_item, list_work_items, publish_picks};
 use nostromo::mcp::McpSharedState;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3625,6 +3626,150 @@ async fn list_until_sentry(state: &McpSharedState, n: usize) -> Value {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+// ── agents never see issues assigned to others ────────────────────────────────
+
+/// 1 is mine, 2 is fresh unassigned, 3 is older unassigned, 4 is assigned to a
+/// person, 5 to a team. The Sentry source holds all five; an agent may see 1-3.
+async fn hub_with_mixed_assignees() -> (Fake, McpSharedState, HubKeepAlive, Env) {
+    let fake = Fake::start(issues(1..=1), issues(2..=2)).await;
+    fake.set(|s| {
+        s.recent = vec![
+            issue(1),
+            issue(2),
+            issue(3),
+            assigned_to(issue(4), "Pat"),
+            assigned_to_team(issue(5)),
+        ];
+    });
+    let env = Env::new(Some(TOKEN));
+    let (state, keep) = hub_state_with_sentry(env.config(&base_of(&fake))).await;
+    (fake, state, keep, env)
+}
+
+fn listed_ids(result: &Value) -> Vec<String> {
+    let mut ids: Vec<String> = result["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_work_items_leaves_out_sentry_issues_assigned_to_others_but_keeps_mine_and_unassigned() {
+    let (_fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    let result = list_until_sentry(&state, 3).await;
+
+    assert_eq!(
+        listed_ids(&result),
+        ["sentry:1", "sentry:2", "sentry:3"],
+        "me, unassigned and unassigned_older stay; the person's and the team's issues go"
+    );
+    assert_eq!(result["total"], 3, "hidden issues are not counted either");
+    assert!(
+        result["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| i.get("assignee").is_none()),
+        "the bucket itself is never exposed"
+    );
+    // The hub (and so the Sentry tab) still holds all five.
+    let held = state
+        .work_hub
+        .as_ref()
+        .unwrap()
+        .items(&nostromo::data::work::query::WorkFilter::default());
+    assert_eq!(held.len(), 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paging_the_list_never_counts_or_skips_over_hidden_issues() {
+    let (_fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    list_until_sentry(&state, 3).await;
+
+    let page = list_work_items(&state, &json!({"source": "sentry", "limit": 2}));
+    assert_eq!(page["items"].as_array().unwrap().len(), 2);
+    assert_eq!(page["total"], 3);
+    let rest = list_work_items(&state, &json!({"source": "sentry", "limit": 2, "offset": 2}));
+    assert_eq!(rest["items"].as_array().unwrap().len(), 1, "{rest}");
+    assert_eq!(rest["total"], 3);
+    assert!(rest.get("omitted").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_work_item_for_a_hidden_issue_answers_like_an_unknown_item() {
+    let (fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    list_until_sentry(&state, 3).await;
+    let before = fake.list_requests().await.len();
+
+    for id in ["sentry:4", "sentry:5"] {
+        let d = get_work_item(&state, &json!({"id": id})).await;
+        assert_eq!(d["error"], "unknown_item", "{d}");
+        assert!(d.get("markdown").is_none(), "nothing about the issue leaks");
+    }
+    assert_eq!(
+        fake.list_requests().await.len(),
+        before,
+        "a hidden issue is refused before anything is asked of Sentry"
+    );
+}
+
+fn pick_entries(ids: &[&str]) -> Value {
+    json!({"picks": ids.iter().map(|id| json!({"item_id": id, "reason": "Worth a look today."})).collect::<Vec<_>>()})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pick_of_a_hidden_issue_is_refused_like_an_unknown_id() {
+    let (_fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    list_until_sentry(&state, 3).await;
+
+    let hidden = publish_picks(&state, &pick_entries(&["sentry:1", "sentry:2", "sentry:4"]));
+    let unknown = publish_picks(&state, &pick_entries(&["sentry:1", "sentry:2", "sentry:999"]));
+    assert_eq!(hidden["error"], "invalid_picks", "{hidden}");
+    assert_eq!(unknown["error"], "invalid_picks", "{unknown}");
+    assert_eq!(
+        hidden["message"],
+        unknown["message"]
+            .as_str()
+            .unwrap()
+            .replace("sentry:999", "sentry:4"),
+        "same refusal, naming only the id the agent sent"
+    );
+
+    // Mine, fresh unassigned and older unassigned issues can be picked.
+    let ok = publish_picks(&state, &pick_entries(&["sentry:1", "sentry:2", "sentry:3"]));
+    assert_eq!(ok["ok"], true, "{ok}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_picked_issue_that_becomes_hidden_is_not_reported_as_done() {
+    let (fake, state, _keep, _env) = hub_with_mixed_assignees().await;
+    list_until_sentry(&state, 3).await;
+    let ok = publish_picks(&state, &pick_entries(&["sentry:1", "sentry:2", "sentry:3"]));
+    assert_eq!(ok["ok"], true, "{ok}");
+
+    // Someone takes issue 3: still unresolved and listed, just no longer the agents'.
+    fake.set(|s| s.recent[2] = assigned_to(issue(3), "Pat"));
+    let hub = state.work_hub.as_ref().unwrap();
+    hub.refresh(Some(WorkSource::Sentry), false).await.unwrap();
+    list_until_sentry(&state, 2).await;
+
+    let picks = get_picks(&state);
+    let three = picks["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["item_id"] == "sentry:3")
+        .expect("the pick is kept");
+    assert_eq!(
+        three["done_since"], false,
+        "hiding an issue from agents is not the work being done: {picks}"
+    );
 }
 
 // ── the token never leaks ─────────────────────────────────────────────────────
