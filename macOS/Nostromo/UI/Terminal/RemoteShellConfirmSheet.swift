@@ -5,6 +5,11 @@ private let sheetLog = Logger(subsystem: "com.hammer.nostromo", category: "termi
 
 /// "Connect to PRODUCTION": the one place a production shell opens.
 ///
+/// It shows what will run (Command, Profile, Cluster, as the daemon pinned them) in a wrapping,
+/// selectable block that is never cut. Connect is off when the daemon did not send a command: nothing
+/// is authorised that the sheet does not show. An agent's name, focus and stated reason are marked as
+/// the agent's and sanitised (`RemoteShellStore.sheetModel`).
+///
 /// Nothing has contacted AWS when this appears; the daemon launches `aws` only after it receives a
 /// `connect` answer, and this sheet sends that answer from exactly one place, the Connect button.
 ///
@@ -36,6 +41,8 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
     }
 
     private static let contentWidth: CGFloat = 480
+    /// The most height the Command / Profile / Cluster block takes; a longer command scrolls inside it.
+    private static let maxDetailsHeight: CGFloat = 180
 
     let requestId: String
     private let store: RemoteShellStore
@@ -50,12 +57,15 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
 
     /// Set before anything that can close the sheet, so no later path can answer for it.
     private var resolved = false
+    /// Why Connect is off (the sheet can't show what would run). Nil when Connect is offered.
+    private let connectBlockedReason: String?
 
     init(request: RemoteShellConfirmRequest, model: RemoteShellSheetModel,
          store: RemoteShellStore = .shared, terminals: TerminalSessionStore = .shared) {
         self.requestId = request.requestId
         self.store = store
         self.terminals = terminals
+        self.connectBlockedReason = model.connectBlockedReason
 
         let win = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: Self.contentWidth, height: 220),
                               styleMask: [.titled], backing: .buffered, defer: false)
@@ -97,22 +107,41 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
         guard let contentView = window?.contentView else { return }
         let textWidth = Self.contentWidth - 40
 
-        // Largest, bold, red: what this connects to, named first.
-        let titleLabel = NSTextField(labelWithString: model.title)
+        // Largest, bold, red: what this connects to, named first. It wraps: a long name is never cut.
+        let titleLabel = NSTextField(wrappingLabelWithString: model.title)
+        titleLabel.preferredMaxLayoutWidth = textWidth
         titleLabel.font = .systemFont(ofSize: 30, weight: .heavy)
         titleLabel.textColor = .systemRed
-        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.maximumNumberOfLines = 0
+        titleLabel.isSelectable = false
         titleLabel.setAccessibilityIdentifier("remote-shell-title")
 
-        let subtitleLabel = NSTextField(labelWithString: model.subtitle)
+        // The shell type is last, so a long project or service name must not push it out of view.
+        let subtitleLabel = NSTextField(wrappingLabelWithString: model.subtitle)
+        subtitleLabel.preferredMaxLayoutWidth = textWidth
         subtitleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
         subtitleLabel.textColor = .white
-        subtitleLabel.lineBreakMode = .byTruncatingTail
+        subtitleLabel.maximumNumberOfLines = 0
+        subtitleLabel.isSelectable = false
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subtitleLabel.setAccessibilityIdentifier("remote-shell-target")
 
         var rows: [NSView] = [titleLabel, subtitleLabel]
-        if let requester = model.requesterLine {
-            let requesterLabel = NSTextField(wrappingLabelWithString: requester)
+        rows.append(makeDetailsBlock(model.details, width: textWidth))
+
+        if let blocked = connectBlockedReason {
+            let blockedLabel = NSTextField(wrappingLabelWithString: blocked)
+            blockedLabel.preferredMaxLayoutWidth = textWidth
+            blockedLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+            blockedLabel.textColor = .systemRed
+            blockedLabel.maximumNumberOfLines = 0
+            blockedLabel.setAccessibilityIdentifier("remote-shell-blocked")
+            rows.append(blockedLabel)
+        }
+
+        // Agent-supplied text: marked as such, on its own lines, never inside quote marks.
+        if let requestedBy = model.requestedBy {
+            let requesterLabel = NSTextField(wrappingLabelWithString: requestedBy)
             requesterLabel.preferredMaxLayoutWidth = textWidth
             requesterLabel.font = .systemFont(ofSize: 13)
             requesterLabel.textColor = .secondaryLabelColor
@@ -120,6 +149,22 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
             requesterLabel.isSelectable = false
             requesterLabel.setAccessibilityIdentifier("remote-shell-requester")
             rows.append(requesterLabel)
+        }
+        if let reason = model.reason {
+            let heading = NSTextField(labelWithString: "Agent's stated reason (unverified)")
+            heading.font = .systemFont(ofSize: 11, weight: .semibold)
+            heading.textColor = .tertiaryLabelColor
+            heading.setAccessibilityIdentifier("remote-shell-reason-heading")
+            rows.append(heading)
+
+            let reasonLabel = NSTextField(wrappingLabelWithString: reason)
+            reasonLabel.preferredMaxLayoutWidth = textWidth
+            reasonLabel.font = .systemFont(ofSize: 13)
+            reasonLabel.textColor = .secondaryLabelColor
+            reasonLabel.maximumNumberOfLines = 0
+            reasonLabel.isSelectable = false
+            reasonLabel.setAccessibilityIdentifier("remote-shell-reason")
+            rows.append(reasonLabel)
         }
         followSlot.setAccessibilityIdentifier("remote-shell-follow-slot")
         followSlot.translatesAutoresizingMaskIntoConstraints = false
@@ -169,6 +214,62 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
         window?.fitContent(toWidth: Self.contentWidth)
     }
 
+    /// Command, Profile and Cluster: what will run. Selectable and monospaced, wrapped at any
+    /// character (a long command has no spaces to break at) and never cut. It grows with its text up to
+    /// `maxDetailsHeight`, then scrolls inside itself.
+    private func makeDetailsBlock(_ details: [RemoteShellDetail], width: CGFloat) -> NSView {
+        let labelFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let valueFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let text = NSMutableAttributedString()
+        for (index, detail) in details.enumerated() {
+            if index > 0 { text.append(NSAttributedString(string: "\n\n")) }
+            text.append(NSAttributedString(string: detail.label.uppercased() + "\n", attributes: [
+                .font: labelFont, .foregroundColor: NSColor.secondaryLabelColor]))
+            text.append(NSAttributedString(string: detail.value, attributes: [
+                .font: valueFont, .foregroundColor: NSColor.white]))
+        }
+
+        let inset = NSSize(width: 8, height: 8)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: width, height: 0))
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.drawsBackground = true
+        textView.backgroundColor = NSColor(white: 0.12, alpha: 1)
+        textView.textContainerInset = inset
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineBreakMode = .byCharWrapping
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textStorage?.setAttributedString(text)
+        textView.setAccessibilityIdentifier("remote-shell-details")
+
+        // Lay the text out at the final width to learn how tall it needs to be.
+        let container = textView.textContainer
+        container?.containerSize = NSSize(width: width - 2 * inset.width, height: .greatestFiniteMagnitude)
+        if let container { textView.layoutManager?.ensureLayout(for: container) }
+        let used = container.flatMap { textView.layoutManager?.usedRect(for: $0).height } ?? 0
+        // A little slack for the scroll view's border, so the last line is not clipped.
+        let needed = ceil(used) + 2 * inset.height + 4
+
+        let scroll = NSScrollView(frame: .zero)
+        scroll.documentView = textView
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.borderType = .lineBorder
+        scroll.drawsBackground = true
+        scroll.backgroundColor = textView.backgroundColor
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            scroll.widthAnchor.constraint(equalToConstant: width),
+            scroll.heightAnchor.constraint(equalToConstant: min(needed, Self.maxDetailsHeight)),
+        ])
+        return scroll
+    }
+
     private func configureButtons() {
         cancelButton.title = "Cancel"
         cancelButton.bezelStyle = .rounded
@@ -181,6 +282,8 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
         connectButton.bezelStyle = .rounded
         connectButton.target = self
         connectButton.action = #selector(connectTapped(_:))
+        // Nothing may be authorised that the sheet does not show.
+        connectButton.isEnabled = connectBlockedReason == nil
         connectButton.setAccessibilityIdentifier("remote-shell-connect")
     }
 
@@ -193,6 +296,7 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
 
     /// The only thing that can open a production shell. A person's click, or Tab then Space.
     @objc private func connectTapped(_ sender: NSButton) {
+        guard connectBlockedReason == nil else { return }
         guard TerminalInputGuard.allowsControl(event: NSApp.currentEvent, control: sender) else {
             sheetLog.notice("connect refused: not a human gesture (request \(self.requestId, privacy: .public))")
             terminals.reportRefusal(terminalId: nil, op: .connect)

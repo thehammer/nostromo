@@ -424,6 +424,35 @@ final class TerminalSessionStoreTests: XCTestCase {
         XCTAssertNil(store.driverWindow["ended"])
     }
 
+    func testNothingTypedPastedOrAutoRepliedReachesAConnectingTerminalUntilItIsRunning() {
+        state(info(status: .connecting))
+        let paste = pasteBytes(TerminalSessionStore.inputChunkBytes + 1)
+
+        store.sendInput(terminalId: "t1", bytes: Array("ls\n".utf8), fromWindow: "w1")
+        store.sendInput(terminalId: "t1", bytes: Array("\u{1b}[1;1R".utf8), fromWindow: "w1", autoReply: true)
+        store.sendInput(terminalId: "t1", bytes: paste, fromWindow: "w1")
+        drainScheduled()
+
+        XCTAssertTrue(sent.isEmpty, "sent: \(sent)")
+        XCTAssertTrue(scheduled.isEmpty, "nothing may be queued for later either")
+        XCTAssertNil(store.driverWindow["t1"], "a dropped keystroke does not make a window the driver")
+
+        state(info(status: .running))
+
+        store.sendInput(terminalId: "t1", bytes: Array("ls\n".utf8), fromWindow: "w1")
+        XCTAssertEqual(sent, [.input(terminalId: "t1", bytes: Array("ls\n".utf8))])
+        XCTAssertEqual(store.driverWindow["t1"], "w1")
+
+        store.sendInput(terminalId: "t1", bytes: Array("\u{1b}[1;1R".utf8), fromWindow: "w1", autoReply: true)
+        XCTAssertEqual(inputFrames.last?.bytes, Array("\u{1b}[1;1R".utf8))
+        XCTAssertEqual(inputFrames.last?.autoReply, true)
+
+        sent = []
+        store.sendInput(terminalId: "t1", bytes: paste, fromWindow: "w1")
+        drainScheduled()
+        XCTAssertEqual(inputFrames.flatMap { $0.bytes }, paste, "the same paste goes out once the shell is running")
+    }
+
     func testEmptyInputIsNeverSent() {
         state(info())
         store.sendInput(terminalId: "t1", bytes: [], fromWindow: "w1")

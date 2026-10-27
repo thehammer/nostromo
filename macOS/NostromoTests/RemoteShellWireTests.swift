@@ -66,7 +66,7 @@ final class RemoteShellWireTests: XCTestCase {
 
     // MARK: Confirm request
 
-    func testAnAgentsConfirmRequestDecodesAndIgnoresTheAdditiveKeys() throws {
+    func testAnAgentsConfirmRequestDecodesWhatWillRun() throws {
         let request = try decode(RemoteShellConfirmRequest.self, """
         {"type":"remote_shell_confirm_request","request_id":"r1","tag":"core-1",
          "target":{"project":"admin-portal","environment":"production","service":"scheduler","shell_type":"shell"},
@@ -74,10 +74,42 @@ final class RemoteShellWireTests: XCTestCase {
          "reason":"look at the scheduler","expires_at":"2026-10-25T12:00:00Z",
          "shell_command":"/bin/bash","profile":"prod-profile","cluster":"prod-ecs"}
         """)
+        XCTAssertEqual(request.shellCommand, "/bin/bash")
+        XCTAssertEqual(request.profile, "prod-profile")
+        XCTAssertEqual(request.cluster, "prod-ecs")
+        XCTAssertEqual(request, RemoteShellConfirmRequest(
+            requestId: "r1", tag: "core-1", target: target,
+            requestedBy: RemoteShellRequester(kind: "focus", tag: "core-1", agent: "cody"),
+            reason: "look at the scheduler", expiresAt: "2026-10-25T12:00:00Z",
+            shellCommand: "/bin/bash", profile: "prod-profile", cluster: "prod-ecs"))
+    }
+
+    func testAnOlderDaemonsConfirmRequestWithoutTheWhatWillRunKeysStillDecodes() throws {
+        let request = try decode(RemoteShellConfirmRequest.self, """
+        {"type":"remote_shell_confirm_request","request_id":"r1","tag":"core-1",
+         "target":{"project":"admin-portal","environment":"production","service":"scheduler","shell_type":"shell"},
+         "requested_by":{"kind":"focus","tag":"core-1","agent":"cody"},
+         "reason":"look at the scheduler","expires_at":"2026-10-25T12:00:00Z"}
+        """)
+        XCTAssertNil(request.shellCommand)
+        XCTAssertNil(request.profile)
+        XCTAssertNil(request.cluster)
+        XCTAssertEqual(request.reason, "look at the scheduler")
         XCTAssertEqual(request, RemoteShellConfirmRequest(
             requestId: "r1", tag: "core-1", target: target,
             requestedBy: RemoteShellRequester(kind: "focus", tag: "core-1", agent: "cody"),
             reason: "look at the scheduler", expiresAt: "2026-10-25T12:00:00Z"))
+    }
+
+    func testAConfirmRequestCanCarryTheCommandWithoutAProfileOrCluster() throws {
+        let request = try decode(RemoteShellConfirmRequest.self, """
+        {"type":"remote_shell_confirm_request","request_id":"r3",
+         "target":{"project":"admin-portal","environment":"production","service":"scheduler","shell_type":"shell"},
+         "requested_by":{"kind":"user"},"expires_at":"2026-10-25T12:00:00Z","shell_command":"sh -c id"}
+        """)
+        XCTAssertEqual(request.shellCommand, "sh -c id")
+        XCTAssertNil(request.profile)
+        XCTAssertNil(request.cluster)
     }
 
     func testAUsersConfirmRequestHasNoReasonTagOrAgent() throws {

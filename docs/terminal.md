@@ -68,6 +68,17 @@ An agent can **ask** for a shell on a remote ECS service; only a human click on 
 7. `remote_shell_resolved` goes to the same connections: `connected`, `cancelled`, `dismissed`, `timed_out` or `connect_failed` (with `reason`, `remedy` and, for the person at the app only, `detail`: the first sanitised line the AWS CLI printed).
 8. Every step is audited.
 
+**The confirm sheet (Mac app, 2c).** `remote_shell_confirm_request` carries `shell_command`, `profile` and `cluster`, pinned for the request; the sheet shows all three (Command / Profile / Cluster) in a wrapping, selectable, monospaced block that is never truncated (a long command scrolls inside it). A missing profile reads "(none configured)". If the daemon sent no `shell_command` the sheet says so and Connect is disabled: nothing is authorised that is not shown. An agent's name, focus and stated reason are sanitised again in Swift (control and Unicode format characters removed, lengths capped); the reason sits on its own line under "Agent's stated reason (unverified)", with no quote marks.
+
+**Manual QA: the confirm sheet (needs a person at the keyboard; none of it runs in CI).**
+
+- Space activates Connect. Tab to Connect and press Space: the sheet connects. `HumanGesture.permit` accepts only `leftMouseUp`, `leftMouseDown` and `keyDown`, so a button that fired on Space *key-up* would be refused as synthetic; confirm it does not.
+- Return does **not** connect. With the sheet up and nothing focused, Return cancels (Cancel is the default button); Escape cancels too. Connect has no key equivalent.
+- Connect refuses a synthesised click, an Accessibility press (`AXPress`) and an app-control click: nothing connects and the daemon audits a `refused` `connect`.
+- A long command (200+ characters, or one with no spaces) wraps inside the block and is fully selectable; the sheet grows and the block scrolls past its height cap.
+- A request from an older daemon (no `shell_command`) shows the "not provided" text and a disabled Connect.
+- A pane still `connecting` takes no typing: click it and type; nothing reaches the daemon, and the keyboard goes to the terminal once the shell is running.
+
 If the agent's MCP connection closes while the request waits, the request is abandoned: the sheet is closed (`remote_shell_resolved` `cancelled`, `reason: "requester_gone"`) and the slot is freed.
 
 | Client → daemon | Fields |

@@ -80,8 +80,9 @@ struct RemoteShellRequester: Decodable, Equatable {
     }
 }
 
-/// `remote_shell_confirm_request`: show the "Connect to PRODUCTION" sheet. Keys the daemon adds for
-/// what will run (`shell_command`, `profile`, `cluster`) are not shown and are not decoded.
+/// `remote_shell_confirm_request`: show the "Connect to PRODUCTION" sheet. `shellCommand`, `profile`
+/// and `cluster` are what will run, pinned by the daemon for this request; the sheet shows all three.
+/// They are additive: an older daemon omits them (and then the sheet refuses to offer Connect).
 struct RemoteShellConfirmRequest: Decodable, Equatable {
     let requestId: String
     /// The focus the pane would open in.
@@ -90,21 +91,32 @@ struct RemoteShellConfirmRequest: Decodable, Equatable {
     let requestedBy: RemoteShellRequester
     let reason: String?
     let expiresAt: String
+    /// The remote command that will run.
+    let shellCommand: String?
+    /// The AWS profile; absent when none is configured.
+    let profile: String?
+    /// The ECS cluster.
+    let cluster: String?
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id", tag, target
         case requestedBy = "requested_by", reason
         case expiresAt = "expires_at"
+        case shellCommand = "shell_command", profile, cluster
     }
 
     init(requestId: String, tag: String? = nil, target: TerminalTarget, requestedBy: RemoteShellRequester,
-         reason: String? = nil, expiresAt: String) {
+         reason: String? = nil, expiresAt: String, shellCommand: String? = nil, profile: String? = nil,
+         cluster: String? = nil) {
         self.requestId = requestId
         self.tag = tag
         self.target = target
         self.requestedBy = requestedBy
         self.reason = reason
         self.expiresAt = expiresAt
+        self.shellCommand = shellCommand
+        self.profile = profile
+        self.cluster = cluster
     }
 }
 

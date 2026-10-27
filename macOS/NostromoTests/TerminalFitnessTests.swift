@@ -627,6 +627,113 @@ final class TerminalFitnessTests: XCTestCase {
         XCTAssertTrue(sawSheet)
     }
 
+    // The confirm sheet shows what will run (review fix-ups for PR #359): nothing the person has to
+    // decide on may be cut off, the details are selectable, and Connect is off when the daemon did not
+    // say what will run.
+
+    /// The variable a label is assigned to, found by its accessibility identifier.
+    private func variable(withId id: String, in code: String) -> String? {
+        Repo.firstMatch(#"(\w+)\.setAccessibilityIdentifier\(""# + NSRegularExpression.escapedPattern(for: id) + #""\)"#,
+                        in: code)?[1]
+    }
+
+    func testTheConfirmSheetNeverTruncatesOrClipsAnything() throws {
+        let code = try confirmSheetCode()
+        for mode in [".byTruncatingTail", ".byTruncatingMiddle", ".byTruncatingHead", ".byClipping"] {
+            XCTAssertFalse(code.contains(mode), "the sheet must show everything it says; found \(mode)")
+        }
+    }
+
+    func testTheTitleAndSubtitleWrapOnAnyNumberOfLines() throws {
+        let code = try confirmSheetCode()
+        for id in ["remote-shell-title", "remote-shell-target"] {
+            let name = try XCTUnwrap(variable(withId: id, in: code), "no label with id \(id)")
+            XCTAssertNotNil(Repo.firstMatch(#"\b"# + name + #"\.maximumNumberOfLines\s*=\s*0\b"#, in: code),
+                            "\(id) must set maximumNumberOfLines = 0")
+            XCTAssertNotNil(Repo.firstMatch(#"\b"# + name + #"\s*(:[^=\n]*)?=\s*NSTextField\(wrappingLabelWithString"#, in: code)
+                            ?? Repo.firstMatch(#"\b"# + name + #"\.lineBreakMode\s*=\s*\.by(Word|Char)Wrapping"#, in: code),
+                            "\(id) must be a wrapping label")
+        }
+    }
+
+    func testTheSubtitleCanBeSqueezedHorizontallySoItWrapsInsteadOfWideningTheSheet() throws {
+        let code = try confirmSheetCode()
+        let name = try XCTUnwrap(variable(withId: "remote-shell-target", in: code))
+        XCTAssertNotNil(
+            Repo.firstMatch(#"\b"# + name + #"\.setContentCompressionResistancePriority\(\s*(\.defaultLow|\.fittingSizeCompression|NSLayoutConstraint\.Priority\(\s*(\d{1,2}|1\d\d|2[0-4]\d|250)(\.0)?\s*\))\s*,\s*for:\s*\.horizontal"#,
+                            in: code),
+            "the subtitle needs a horizontal compression resistance of .defaultLow or lower")
+    }
+
+    func testTheSheetShowsTheDetailsInASelectableMonospacedCappedScrollingBlock() throws {
+        let code = try confirmSheetCode()
+        XCTAssertTrue(code.contains("model.details"), "the sheet must render model.details")
+        XCTAssertTrue(code.contains(#""remote-shell-details""#), "the details block needs the id remote-shell-details")
+        XCTAssertTrue(code.contains("isSelectable = true"), "the details must be selectable (copyable)")
+        XCTAssertTrue(code.contains("monospacedSystemFont"), "the details must be monospaced")
+        XCTAssertTrue(code.contains("NSScrollView"), "the details sit in a scroll view")
+        XCTAssertTrue(code.contains("maxDetailsHeight"), "the scroll view's height must be capped by maxDetailsHeight")
+        XCTAssertTrue(code.contains(".byCharWrapping"), "an unbroken command must wrap by character")
+    }
+
+    func testTheReasonHasItsOwnLabelUnderAnUnverifiedHeading() throws {
+        let code = try confirmSheetCode()
+        XCTAssertTrue(code.contains("Agent's stated reason (unverified)"), "the heading text")
+        let heading = try XCTUnwrap(variable(withId: "remote-shell-reason-heading", in: code))
+        let reason = try XCTUnwrap(variable(withId: "remote-shell-reason", in: code))
+        let requester = try XCTUnwrap(variable(withId: "remote-shell-requester", in: code))
+        XCTAssertEqual(Set([heading, reason, requester]).count, 3, "heading, reason and requester are three labels")
+        XCTAssertTrue(code.contains("model.reason"), "the reason label shows model.reason")
+        XCTAssertTrue(code.contains("model.requestedBy"), "the requester label shows model.requestedBy")
+        XCTAssertFalse(code.contains("requesterLine"), "requesterLine is gone")
+    }
+
+    func testConnectIsDisabledWhenTheModelBlocksIt() throws {
+        let lines = try confirmSheetCode().components(separatedBy: "\n")
+        let mentions = lines.indices.filter { lines[$0].contains("connectBlockedReason") }
+        XCTAssertFalse(mentions.isEmpty, "the sheet must read model.connectBlockedReason")
+        let drivesEnabled = mentions.contains { i in
+            lines[max(0, i - 3)...min(lines.count - 1, i + 3)].contains { $0.contains("connectButton.isEnabled") }
+        }
+        XCTAssertTrue(drivesEnabled, "connectBlockedReason must drive connectButton.isEnabled")
+        let code = lines.joined(separator: "\n")
+        let blocked = try XCTUnwrap(variable(withId: "remote-shell-blocked", in: code),
+                                    "the reason Connect is off is shown in a label with id remote-shell-blocked")
+        XCTAssertFalse(blocked.isEmpty)
+    }
+
+    func testConnectTappedRefusesWhenBlockedBeforeItCanSendConnect() throws {
+        let url = Repo.app.appendingPathComponent("UI/Terminal/RemoteShellConfirmSheet.swift")
+        let lines = Repo.codeLines(try Repo.read(url))
+        let found = declarations(in: url.lastPathComponent, lines: lines) { lines[$0].contains("func connectTapped(") }
+        let decl = try XCTUnwrap(found.first, "connectTapped not found")
+        XCTAssertNotNil(Repo.firstMatch(#"(?s)connectBlockedReason.*?\breturn\b.*?decision:\s*\.connect"#, in: decl.body),
+                        "connectTapped must check connectBlockedReason and return before it can answer .connect:\n\(decl.body)")
+    }
+
+    // MARK: Connecting overlay takes the keyboard away from the terminal
+
+    private func paneHostDeclarations(_ name: String) throws -> Declaration {
+        let host = try XCTUnwrap(try terminalViewSources().first { $0.name == "TerminalPaneHostView.swift" })
+        let found = declarations(in: host.name, lines: host.lines) { host.lines[$0].contains("func \(name)(") }
+        return try XCTUnwrap(found.first, "TerminalPaneHostView.\(name) not found")
+    }
+
+    func testShowingTheConnectingOverlayResignsTheTerminalsKeyboardFocus() throws {
+        let decl = try paneHostDeclarations("renderConnecting")
+        XCTAssertTrue(decl.body.contains("makeFirstResponder(nil)"), "connecting must give up first responder:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("firstResponder") && decl.body.contains("terminalView"),
+                      "only when the terminal view is the first responder:\n\(decl.body)")
+    }
+
+    func testFocusTerminalDoesNotHandTheKeyboardToAConnectingTerminal() throws {
+        let decl = try paneHostDeclarations("focusTerminal")
+        let status = try XCTUnwrap(decl.body.range(of: ".connecting"), "focusTerminal must check for .connecting:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("info?.status") || decl.body.contains("info.status"), decl.body)
+        let focus = try XCTUnwrap(decl.body.range(of: "makeFirstResponder(terminalView)"))
+        XCTAssertLessThan(status.lowerBound, focus.lowerBound, "the connecting check comes before taking the keyboard")
+    }
+
     func testTheRemoteShellSheetFilesExist() {
         for name in ["RemoteShellPresenter.swift", "NewRemoteShellSheet.swift", "RemoteShellFailureSheet.swift"] {
             XCTAssertTrue(FileManager.default.fileExists(

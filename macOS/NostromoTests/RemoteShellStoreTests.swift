@@ -19,10 +19,12 @@ final class RemoteShellStoreTests: XCTestCase {
 
     private func request(id: String = "r1", tag: String? = nil, target: TerminalTarget? = nil,
                          kind: String = "user", requesterTag: String? = nil, agent: String? = nil,
-                         reason: String? = nil) -> RemoteShellConfirmRequest {
+                         reason: String? = nil, shellCommand: String? = nil, profile: String? = nil,
+                         cluster: String? = nil) -> RemoteShellConfirmRequest {
         RemoteShellConfirmRequest(requestId: id, tag: tag, target: target ?? self.target,
                                   requestedBy: RemoteShellRequester(kind: kind, tag: requesterTag, agent: agent),
-                                  reason: reason, expiresAt: "2026-10-25T12:00:00Z")
+                                  reason: reason, expiresAt: "2026-10-25T12:00:00Z",
+                                  shellCommand: shellCommand, profile: profile, cluster: cluster)
     }
 
     private func model(_ r: RemoteShellConfirmRequest,
@@ -52,67 +54,248 @@ final class RemoteShellStoreTests: XCTestCase {
         }
     }
 
-    func testAUserRequestHasNoRequesterLineEvenWithAReason() {
-        XCTAssertNil(model(request(kind: "user")).requesterLine)
-        XCTAssertNil(model(request(kind: "user", reason: "because")).requesterLine)
+    func testAUserRequestHasNoRequestedByAndNoReasonEvenWithOne() {
+        XCTAssertNil(model(request(kind: "user")).requestedBy)
+        XCTAssertNil(model(request(kind: "user", reason: "because")).requestedBy)
+        XCTAssertNil(model(request(kind: "user", reason: "because")).reason)
     }
 
-    func testAnAgentRequestNamesTheAgentTheFocusAndTheReason() {
-        XCTAssertEqual(model(agentRequest(reason: "Check stuck jobs on the scheduler")).requesterLine,
-                       "Requested by cody in Core: \"Check stuck jobs on the scheduler\"")
+    func testAnAgentRequestNamesTheAgentAndTheFocusWithoutTheReason() {
+        let m = model(agentRequest(reason: "Check stuck jobs on the scheduler"))
+        XCTAssertEqual(m.requestedBy, "Requested by cody in Core")
+        XCTAssertEqual(m.reason, "Check stuck jobs on the scheduler")
     }
 
-    func testAnAgentRequestWithoutAReasonOmitsTheSuffix() {
-        XCTAssertEqual(model(agentRequest(reason: nil)).requesterLine, "Requested by cody in Core")
-        XCTAssertEqual(model(agentRequest(reason: "")).requesterLine, "Requested by cody in Core")
-        XCTAssertEqual(model(agentRequest(reason: " \n\t ")).requesterLine, "Requested by cody in Core")
+    func testAnAgentRequestWithoutAUsableReasonHasNoReason() {
+        for reason in [nil, "", " \n\t "] as [String?] {
+            let m = model(agentRequest(reason: reason))
+            XCTAssertEqual(m.requestedBy, "Requested by cody in Core")
+            XCTAssertNil(m.reason, "reason: \(String(describing: reason))")
+        }
     }
 
     func testTheFocusLabelFallsBackToTheRawTagThenToAFocus() {
-        XCTAssertEqual(model(agentRequest(reason: nil), labels: [:]).requesterLine, "Requested by cody in core-1")
-        XCTAssertEqual(model(request(kind: "focus", agent: "cody")).requesterLine, "Requested by cody in a focus")
+        XCTAssertEqual(model(agentRequest(reason: nil), labels: [:]).requestedBy, "Requested by cody in core-1")
+        XCTAssertEqual(model(request(kind: "focus", agent: "cody")).requestedBy, "Requested by cody in a focus")
     }
 
     func testTheRequestsTagIsPreferredOverTheRequestersTag() {
         let r = request(tag: "core-1", kind: "focus", requesterTag: "other-9", agent: "cody")
-        XCTAssertEqual(model(r, labels: ["core-1": "Core", "other-9": "Other"]).requesterLine, "Requested by cody in Core")
+        XCTAssertEqual(model(r, labels: ["core-1": "Core", "other-9": "Other"]).requestedBy, "Requested by cody in Core")
         let onlyRequester = request(kind: "focus", requesterTag: "other-9", agent: "cody")
-        XCTAssertEqual(model(onlyRequester, labels: ["other-9": "Other"]).requesterLine, "Requested by cody in Other")
+        XCTAssertEqual(model(onlyRequester, labels: ["other-9": "Other"]).requestedBy, "Requested by cody in Other")
     }
 
     func testAMissingAgentNameIsAnAgent() {
         let r = request(tag: "core-1", kind: "focus")
-        XCTAssertEqual(model(r).requesterLine, "Requested by an agent in Core")
+        XCTAssertEqual(model(r).requestedBy, "Requested by an agent in Core")
+    }
+
+    func testAnAgentNameThatIsEmptyOrOnlyInvisibleCharactersIsAnAgent() {
+        for name in ["", "   ", "\n", "\u{200B}\u{202E} \u{FEFF}"] {
+            let r = request(tag: "core-1", kind: "focus", agent: name)
+            XCTAssertEqual(model(r).requestedBy, "Requested by an agent in Core", "agent: \(name.debugDescription)")
+        }
     }
 
     func testTheAgentNameIsShownVerbatim() {
         let r = request(tag: "core-1", kind: "focus", agent: "Cody <b>X</b>")
-        XCTAssertEqual(model(r).requesterLine, "Requested by Cody <b>X</b> in Core")
+        XCTAssertEqual(model(r).requestedBy, "Requested by Cody <b>X</b> in Core")
+    }
+
+    func testAnAgentNameWithANewlineCannotBreakTheRequestedByLineApart() {
+        let r = request(tag: "core-1", kind: "focus", agent: "cody\nin Prod\u{2028}Requested by root\u{2029}x")
+        let line = model(r).requestedBy
+        XCTAssertEqual(line, "Requested by cody in Prod Requested by root x in Core")
+        XCTAssertFalse(line?.contains(where: { $0.isNewline }) ?? true, "the line must be one line")
+    }
+
+    func testAnAgentNameWithAQuoteStaysOnOneLineBetweenTheFixedWords() throws {
+        let r = request(tag: "core-1", kind: "focus", agent: "co\"dy\"")
+        let line = try XCTUnwrap(model(r).requestedBy)
+        XCTAssertTrue(line.hasPrefix("Requested by "), line)
+        XCTAssertTrue(line.hasSuffix(" in Core"), line)
+        XCTAssertFalse(line.contains(where: { $0.isNewline }), line)
+    }
+
+    func testFormatCharactersAreRemovedFromTheAgentName() {
+        let r = request(tag: "core-1", kind: "focus", agent: "co\u{202E}dy\u{200B}\u{FEFF}")
+        XCTAssertEqual(model(r).requestedBy, "Requested by cody in Core")
+    }
+
+    func testAnAgentNameOverFortyCharactersIsCutToFortyEndingInAnEllipsis() {
+        XCTAssertEqual(RemoteShellStore.agentNameLimit, 40)
+        let r = request(tag: "core-1", kind: "focus", agent: String(repeating: "n", count: 50))
+        XCTAssertEqual(model(r).requestedBy, "Requested by \(String(repeating: "n", count: 39))\u{2026} in Core")
+    }
+
+    func testAnAgentNameOfExactlyFortyCharactersIsNotCut() {
+        let exact = String(repeating: "n", count: RemoteShellStore.agentNameLimit)
+        let r = request(tag: "core-1", kind: "focus", agent: exact)
+        XCTAssertEqual(model(r).requestedBy, "Requested by \(exact) in Core")
+    }
+
+    func testFormatCharactersAreRemovedFromTheFocusName() {
+        let m = model(agentRequest(reason: nil), labels: ["core-1": "Co\u{202E}re\u{200B}\u{FEFF}"])
+        XCTAssertEqual(m.requestedBy, "Requested by cody in Core")
+    }
+
+    func testAFocusNameWithNewlinesStaysOnOneLine() {
+        let m = model(agentRequest(reason: nil), labels: ["core-1": "Co\nre"])
+        XCTAssertEqual(m.requestedBy, "Requested by cody in Co re")
+    }
+
+    func testAFocusNameOverSixtyCharactersIsCutToSixtyEndingInAnEllipsis() {
+        XCTAssertEqual(RemoteShellStore.focusNameLimit, 60)
+        let m = model(agentRequest(reason: nil), labels: ["core-1": String(repeating: "f", count: 80)])
+        XCTAssertEqual(m.requestedBy, "Requested by cody in \(String(repeating: "f", count: 59))\u{2026}")
+    }
+
+    func testAFocusNameOfExactlySixtyCharactersIsNotCut() {
+        let exact = String(repeating: "f", count: RemoteShellStore.focusNameLimit)
+        let m = model(agentRequest(reason: nil), labels: ["core-1": exact])
+        XCTAssertEqual(m.requestedBy, "Requested by cody in \(exact)")
+    }
+
+    func testAFocusNameThatIsEmptyAfterSanitisingFallsBackToTheRawTag() {
+        for label in ["", "  \n ", "\u{200B}\u{202E}"] {
+            let m = model(agentRequest(reason: nil), labels: ["core-1": label])
+            XCTAssertEqual(m.requestedBy, "Requested by cody in core-1", "label: \(label.debugDescription)")
+        }
     }
 
     func testALongReasonIsCutToTwoHundredCharactersEndingInAnEllipsis() throws {
-        let line = try XCTUnwrap(model(agentRequest(reason: String(repeating: "a", count: 300))).requesterLine)
-        let quoted = String(line.drop(while: { $0 != "\"" }))
-        let reason = String(quoted.dropFirst().dropLast())
+        let reason = try XCTUnwrap(model(agentRequest(reason: String(repeating: "a", count: 300))).reason)
+        XCTAssertEqual(RemoteShellStore.reasonLimit, 200)
         XCTAssertEqual(reason.count, RemoteShellStore.reasonLimit)
         XCTAssertEqual(reason, String(repeating: "a", count: 199) + "\u{2026}")
     }
 
-    func testAReasonOfExactlyTheLimitIsNotCut() throws {
+    func testAReasonOfExactlyTheLimitIsNotCut() {
         let exact = String(repeating: "b", count: RemoteShellStore.reasonLimit)
-        let line = try XCTUnwrap(model(agentRequest(reason: exact)).requesterLine)
-        XCTAssertTrue(line.hasSuffix("\"\(exact)\""), line)
-        XCTAssertFalse(line.contains("\u{2026}"))
+        XCTAssertEqual(model(agentRequest(reason: exact)).reason, exact)
     }
 
-    func testNewlinesAndControlCharactersBecomeSingleSpaces() {
-        let line = model(agentRequest(reason: "  look\n\nat   the\tscheduler\u{1b}[31m now\r\n ")).requesterLine
-        XCTAssertEqual(line, "Requested by cody in Core: \"look at the scheduler [31m now\"")
+    func testNewlinesAndControlCharactersInAReasonBecomeSingleSpaces() {
+        let m = model(agentRequest(reason: "  look\n\nat   the\tscheduler\u{1b}[31m now\r\n \u{2028}\u{2029}x "))
+        XCTAssertEqual(m.reason, "look at the scheduler [31m now x")
     }
 
     func testMarkupInAReasonStaysVerbatim() {
-        XCTAssertEqual(model(agentRequest(reason: "<b>x</b> and **x**")).requesterLine,
-                       "Requested by cody in Core: \"<b>x</b> and **x**\"")
+        XCTAssertEqual(model(agentRequest(reason: "<b>x</b> and **x**")).reason, "<b>x</b> and **x**")
+    }
+
+    func testAReasonContainingQuotesIsReturnedUnmodified() {
+        XCTAssertEqual(model(agentRequest(reason: "say \"hi\" then \"bye\"")).reason, "say \"hi\" then \"bye\"")
+    }
+
+    func testFormatCharactersAreRemovedFromAReason() {
+        XCTAssertEqual(model(agentRequest(reason: "pay\u{202E}load\u{200B}x\u{FEFF}")).reason, "payloadx")
+        XCTAssertEqual(model(agentRequest(reason: "a \u{200B} b \u{2066}c\u{061C}")).reason, "a b c")
+    }
+
+    func testAReasonThatIsOnlyFormatCharactersHasNoReason() {
+        XCTAssertNil(model(agentRequest(reason: "\u{202E}\u{200B}\u{FEFF}")).reason)
+        XCTAssertNil(model(agentRequest(reason: " \u{200B} \n\u{202E} ")).reason)
+    }
+
+    func testTheTitleAndSubtitleAreNeverTruncatedByTheModel() {
+        let longName = String(repeating: "x", count: 120)
+        let t = TerminalTarget(project: longName, environment: String(repeating: "e", count: 90),
+                               service: "service " + longName, shellType: "shell")
+        let m = model(request(target: t))
+        XCTAssertEqual(m.title, "Connect to \(String(repeating: "E", count: 90))")
+        XCTAssertEqual(m.subtitle, "\(longName) \u{00B7} service \(longName) \u{00B7} shell")
+        XCTAssertFalse(m.title.contains("\u{2026}") || m.subtitle.contains("\u{2026}"))
+    }
+
+    // MARK: What will run (details)
+
+    func testTheDetailsAreAlwaysCommandProfileClusterInThatOrder() {
+        let m = model(request(shellCommand: "/bin/bash -l", profile: "prod-profile", cluster: "prod-ecs"))
+        XCTAssertEqual(m.details, [
+            RemoteShellDetail(label: "Command", value: "/bin/bash -l"),
+            RemoteShellDetail(label: "Profile", value: "prod-profile"),
+            RemoteShellDetail(label: "Cluster", value: "prod-ecs"),
+        ])
+    }
+
+    func testTheDetailsTextHoldsTheCommandProfileAndClusterTogether() {
+        let m = model(request(shellCommand: "php artisan tinker", profile: "prod-profile", cluster: "prod-ecs"))
+        let text = m.details.map { "\($0.label) \($0.value)" }.joined(separator: "\n")
+        XCTAssertTrue(text.contains("php artisan tinker"), text)
+        XCTAssertTrue(text.contains("prod-profile"), text)
+        XCTAssertTrue(text.contains("prod-ecs"), text)
+    }
+
+    func testThereAreThreeDetailRowsForEveryRequesterKindAndEnvironment() {
+        for kind in ["user", "focus"] {
+            for env in ["production", "canada", "demo"] {
+                let t = TerminalTarget(project: "p", environment: env, service: "s", shellType: "shell")
+                let m = model(request(target: t, kind: kind, shellCommand: "sh"))
+                XCTAssertEqual(m.details.map(\.label), ["Command", "Profile", "Cluster"], "\(kind)/\(env)")
+            }
+        }
+    }
+
+    func testAMissingOrEmptyProfileSaysNoneConfigured() {
+        XCTAssertEqual(RemoteShellStore.profileMissingText, "(none configured)")
+        for profile in [nil, ""] as [String?] {
+            let m = model(request(shellCommand: "sh", profile: profile, cluster: "c"))
+            XCTAssertEqual(m.details[1], RemoteShellDetail(label: "Profile", value: "(none configured)"))
+        }
+    }
+
+    func testAMissingOrEmptyClusterSaysNotProvided() {
+        XCTAssertEqual(RemoteShellStore.clusterMissingText, "(not provided)")
+        for cluster in [nil, ""] as [String?] {
+            let m = model(request(shellCommand: "sh", profile: "p", cluster: cluster))
+            XCTAssertEqual(m.details[2], RemoteShellDetail(label: "Cluster", value: "(not provided)"))
+        }
+    }
+
+    func testALongCommandWithNoSpacesIsShownWholeAndVerbatim() {
+        let command = String(repeating: "c", count: 1_000)
+        let m = model(request(shellCommand: command))
+        XCTAssertEqual(m.details[0], RemoteShellDetail(label: "Command", value: command))
+        XCTAssertEqual(m.details[0].value.count, 1_000)
+    }
+
+    func testALongMultiWordCommandIsShownWholeAndVerbatim() {
+        let command = (0..<150).map { "--flag-\($0)=value-\($0)" }.joined(separator: " ")
+        XCTAssertGreaterThan(command.count, 1_000)
+        let m = model(request(shellCommand: command))
+        XCTAssertEqual(m.details[0].value, command)
+        XCTAssertFalse(m.details[0].value.contains("\u{2026}"))
+    }
+
+    func testAMissingCommandIsSaidSoAndBlocksConnecting() {
+        XCTAssertEqual(RemoteShellStore.commandMissingText, "(not provided by the daemon)")
+        for command in [nil, "", "   ", " \n\t "] as [String?] {
+            let m = model(request(shellCommand: command))
+            XCTAssertEqual(m.details[0], RemoteShellDetail(label: "Command", value: "(not provided by the daemon)"),
+                           "command: \(String(describing: command))")
+            let blocked = m.connectBlockedReason
+            XCTAssertNotNil(blocked, "command: \(String(describing: command))")
+            XCTAssertFalse(blocked?.isEmpty ?? true)
+            XCTAssertTrue(blocked?.lowercased().contains("command") ?? false, blocked ?? "")
+        }
+    }
+
+    func testAKnownCommandDoesNotBlockConnecting() {
+        XCTAssertNil(model(request(shellCommand: "/bin/bash")).connectBlockedReason)
+        XCTAssertNil(model(request(tag: "core-1", kind: "focus", agent: "cody", reason: "why",
+                                   shellCommand: "/bin/bash")).connectBlockedReason)
+    }
+
+    func testAMissingCommandBlocksEveryEnvironmentAndRequesterKind() {
+        for kind in ["user", "focus"] {
+            for env in ["production", "canada", "demo", "staging"] {
+                let t = TerminalTarget(project: "p", environment: env, service: "s", shellType: "shell")
+                XCTAssertNotNil(model(request(target: t, kind: kind)).connectBlockedReason, "\(kind)/\(env)")
+                XCTAssertNil(model(request(target: t, kind: kind, shellCommand: "sh")).connectBlockedReason, "\(kind)/\(env)")
+            }
+        }
     }
 
     // MARK: Phrases

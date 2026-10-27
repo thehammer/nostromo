@@ -46,6 +46,8 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     private let terminalContainer = ClickableClipView()
     private let mirrorHint = NSTextField(labelWithString: "")
     /// Shown instead of the terminal while a remote shell connects.
+    /// Someone asked for the keyboard (or had it) while the pane was still connecting.
+    private var focusWhenConnected = false
     private let connectingView = NSView()
     private let connectingLabel = NSTextField(labelWithString: "")
     private let connectingSpinner = NSProgressIndicator()
@@ -144,6 +146,11 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     /// The terminal view takes the keyboard.
     func focusTerminal() {
+        // A pane still connecting shows its overlay; the hidden terminal view must not take the keyboard.
+        guard info?.status != .connecting else {
+            focusWhenConnected = true
+            return
+        }
         window?.makeFirstResponder(terminalView)
     }
 
@@ -366,6 +373,12 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         terminalContainer.isHidden = connecting
         connectingView.isHidden = !connecting
         if connecting {
+            // Hiding a view does not take the keyboard from it: let go, so nothing is typed into a
+            // shell that is not there yet (the store drops that input too).
+            if let window, window.firstResponder === terminalView {
+                window.makeFirstResponder(nil)
+                focusWhenConnected = true
+            }
             if let target = info?.target {
                 connectingLabel.stringValue = RemoteShellStore.connectingMessage(for: target)
             } else {
@@ -374,6 +387,11 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
             connectingSpinner.startAnimation(nil)
         } else {
             connectingSpinner.stopAnimation(nil)
+            // The keyboard was held back while connecting: hand it over now the shell is there.
+            if focusWhenConnected, info?.status == .running {
+                focusWhenConnected = false
+                window?.makeFirstResponder(terminalView)
+            }
         }
     }
 

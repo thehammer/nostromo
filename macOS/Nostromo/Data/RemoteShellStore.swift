@@ -16,8 +16,20 @@ struct RemoteShellSheetModel: Equatable {
     let environment: String
     /// "admin-portal · scheduler · shell": project, service, shell type.
     let subtitle: String
-    /// `Requested by cody in Core: "why"`. Nil for a shell the user opened themselves.
-    let requesterLine: String?
+    /// "Requested by cody in Core". Nil for a shell the user opened themselves.
+    let requestedBy: String?
+    /// The agent's stated reason as plain text (no quote marks added). Nil when there is none.
+    let reason: String?
+    /// What will run, never shortened: Command, Profile, Cluster, in that order.
+    let details: [RemoteShellDetail]
+    /// Why Connect is off, when the sheet can't show what would run. Nil when Connect may be offered.
+    let connectBlockedReason: String?
+}
+
+/// One labelled fact about what will run.
+struct RemoteShellDetail: Equatable {
+    let label: String
+    let value: String
 }
 
 /// What the failure sheet says when a connection could not be made.
@@ -51,6 +63,13 @@ final class RemoteShellStore {
 
     /// The longest reason shown (an agent's text, so bounded and plain).
     static let reasonLimit = 200
+    /// The longest agent name shown.
+    static let agentNameLimit = 40
+    /// The longest focus display name shown.
+    static let focusNameLimit = 60
+    static let profileMissingText = "(none configured)"
+    static let clusterMissingText = "(not provided)"
+    static let commandMissingText = "(not provided by the daemon)"
     /// How many finished request ids are remembered, so a late duplicate answer is still refused.
     private static let doneCapacity = 64
 
@@ -127,9 +146,20 @@ final class RemoteShellStore {
         let environment = request.target.environment.uppercased()
         let subtitle = [request.target.project, request.target.service, request.target.shellType]
             .joined(separator: " \u{00B7} ")
-        return RemoteShellSheetModel(title: "Connect to \(environment)", environment: environment,
-                                     subtitle: subtitle,
-                                     requesterLine: requesterLine(for: request, focusLabel: focusLabel))
+        let isAgent = request.requestedBy.kind != "user"
+        let command = nonBlank(request.shellCommand)
+        return RemoteShellSheetModel(
+            title: "Connect to \(environment)", environment: environment, subtitle: subtitle,
+            requestedBy: isAgent ? requestedByLine(for: request, focusLabel: focusLabel) : nil,
+            reason: isAgent ? plainText(request.reason, limit: reasonLimit) : nil,
+            details: [
+                RemoteShellDetail(label: "Command", value: command ?? commandMissingText),
+                RemoteShellDetail(label: "Profile", value: nonEmpty(request.profile) ?? profileMissingText),
+                RemoteShellDetail(label: "Cluster", value: nonEmpty(request.cluster) ?? clusterMissingText),
+            ],
+            connectBlockedReason: command == nil
+                ? "The daemon did not say which command would run, so this shell can't be authorised. Cancel and try again."
+                : nil)
     }
 
     /// The reason a connection failed, in words. `code` is the daemon's failure code.
@@ -192,29 +222,34 @@ final class RemoteShellStore {
         return "Couldn't connect to \(target.environment.uppercased()) \u{00B7} \(target.project) \u{00B7} \(target.service)"
     }
 
-    private static func requesterLine(for request: RemoteShellConfirmRequest,
-                                      focusLabel: (String) -> String?) -> String? {
-        guard request.requestedBy.kind != "user" else { return nil }
-        let agent = request.requestedBy.agent ?? "an agent"
+    private static func requestedByLine(for request: RemoteShellConfirmRequest,
+                                         focusLabel: (String) -> String?) -> String {
+        let agent = plainText(request.requestedBy.agent, limit: agentNameLimit) ?? "an agent"
         let tag = request.tag ?? request.requestedBy.tag
-        let focus = tag.flatMap { focusLabel($0) ?? $0 } ?? "a focus"
-        var line = "Requested by \(agent) in \(focus)"
-        if let reason = plainReason(request.reason), !reason.isEmpty {
-            line += ": \"\(reason)\""
-        }
-        return line
+        let focus = tag.flatMap { plainText(focusLabel($0), limit: focusNameLimit) ?? plainText($0, limit: focusNameLimit) }
+            ?? "a focus"
+        return "Requested by \(agent) in \(focus)"
     }
 
-    /// An agent's reason as plain text: control characters and newlines become spaces, runs of
-    /// spaces collapse, and anything past `reasonLimit` is cut (the last character is "…").
-    private static func plainReason(_ reason: String?) -> String? {
-        guard let reason else { return nil }
-        let spaced = String(String.UnicodeScalarView(reason.unicodeScalars.map {
-            CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) ? " " : $0
+    /// Agent-supplied text as plain text: format characters (bidi overrides, zero-width, BOM) are
+    /// dropped, control characters and newlines become spaces, runs of spaces collapse, and anything
+    /// past `limit` is cut (the last character is "…"). Nil when nothing is left.
+    private static func plainText(_ text: String?, limit: Int) -> String? {
+        guard let text else { return nil }
+        let spaced = String(String.UnicodeScalarView(text.unicodeScalars.compactMap { scalar -> Unicode.Scalar? in
+            if scalar.properties.generalCategory == .format { return nil }
+            return CharacterSet.controlCharacters.contains(scalar) || CharacterSet.newlines.contains(scalar)
+                ? " " : scalar
         }))
         let collapsed = spaced.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
-        guard collapsed.count > reasonLimit else { return collapsed }
-        return String(collapsed.prefix(reasonLimit - 1)) + "\u{2026}"
+        guard !collapsed.isEmpty else { return nil }
+        guard collapsed.count > limit else { return collapsed }
+        return String(collapsed.prefix(limit - 1)) + "\u{2026}"
+    }
+
+    private static func nonBlank(_ text: String?) -> String? {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return text
     }
 
     private static func nonEmpty(_ text: String?) -> String? {
