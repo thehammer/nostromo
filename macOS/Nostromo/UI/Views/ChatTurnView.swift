@@ -406,10 +406,15 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         // Suppress the bubble when the reply was injected by the confirm card — the
         // card's own chosen-state visuals already acknowledge the selection. A turn the daemon
         // wrote for a followed terminal (`origin`) is no bubble either: it is the blocks below.
-        if !turn.hasTerminalOrigin && !turn.userInput.contains(Self.confirmReplySentinel) {
-            let bubble = UserBubbleView(text: turn.userInput, imageURLs: turn.imageURLs)
+        // Unless it holds text the blocks do not show, or attachments: then an "also sent" bubble
+        // keeps what the agent received visible.
+        let bubbleText = turn.hasTerminalOrigin ? turn.terminalOriginBubbleText : turn.userInput
+        // The sentinel only ever marks a confirm-card reply, which has no terminal origin: on a
+        // terminal-origin turn it is just text, and hiding it would hide what the agent received.
+        if let bubbleText, turn.hasTerminalOrigin || !turn.userInput.contains(Self.confirmReplySentinel) {
+            let bubble = UserBubbleView(text: bubbleText, imageURLs: turn.imageURLs)
             self.bubble = bubble
-            bubbleIsImageOnly = turn.userInput == ChatSession.imageOnlyText && !turn.imageURLs.isEmpty
+            bubbleIsImageOnly = bubbleText == ChatSession.imageOnlyText && !turn.imageURLs.isEmpty
             bubbleWidthConstraint = attachIsland(bubble,
                                                  width: Self.bubbleWidth(paneWidth: islandWidth, imageOnly: bubbleIsImageOnly))
         }
@@ -451,6 +456,11 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
 
     /// Whether the turn shows the user's message as a bubble.
     var hasUserBubble: Bool { bubble != nil }
+
+    /// The text and attachment count the user bubble shows (nil without a bubble).
+    var userBubbleContent: (text: String, imageCount: Int)? {
+        bubble.map { ($0.shownText, $0.imageCount) }
+    }
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -1386,6 +1396,9 @@ class UserBubbleView: NSView {
     private let label: NSTextField
     private let stack = NSStackView()
     private var imageURLs: [URL]
+
+    var shownText: String { label.stringValue }
+    var imageCount: Int { imageURLs.count }
 
     init(text: String, imageURLs: [URL] = []) {
         self.imageURLs = imageURLs
