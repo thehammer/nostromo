@@ -104,16 +104,44 @@ pub fn verdict(shape: &Shape, output: &str, redactions: usize) -> Option<String>
     let view = reader_view(output);
     for secret in &shape.secrets {
         if let Some(piece) = readable_piece(&view, secret) {
-            return Some(format!("{piece:?} is readable in {output:?}"));
+            return Some(format!(
+                "{piece:?} is readable in {}",
+                excerpt(output, &view, &piece)
+            ));
         }
     }
     if !output.contains("[redacted: ") {
-        return Some(format!("no [redacted: ] marker in {output:?}"));
+        return Some(format!(
+            "no [redacted: ] marker in {}",
+            excerpt(output, output, "")
+        ));
     }
     if redactions == 0 {
-        return Some(format!("no redaction reported for {output:?}"));
+        return Some(format!(
+            "no redaction reported for {}",
+            excerpt(output, output, "")
+        ));
     }
     None
+}
+
+/// `output` as a failure message shows it: all of it when it is short, else the
+/// part of `view` around `around` (a megabyte of output must not end up in a
+/// panic message).
+fn excerpt(output: &str, view: &str, around: &str) -> String {
+    const SHORT: usize = 600;
+    if output.len() <= SHORT {
+        return format!("{output:?}");
+    }
+    let at = view.find(around).unwrap_or(0);
+    let before: Vec<char> = view[..at].chars().rev().take(200).collect();
+    let before: String = before.into_iter().rev().collect();
+    let after: String = view[at..].chars().take(400).collect();
+    format!(
+        "...{:?}... ({} bytes of output in all)",
+        before + &after,
+        output.len()
+    )
 }
 
 // ───────────────────────────── hidden separators ─────────────────────────────
@@ -412,4 +440,1477 @@ pub fn with_filler_before_the_flag(shape: &Shape, label: &str, f: &str) -> Shape
         line: shape.line.replacen("curl ", &format!("curl{f}"), 1),
         secrets: shape.secrets.clone(),
     }
+}
+
+// ───────────────────── separator filler plus in-secret filler ────────────────
+//
+// One line can hold hidden text in two roles: one run standing where a blank
+// would be (`curl<ZWSP>-u`) and another inside the secret
+// (`admin:QWKZ<ZWSP>XBNM`). Neither reading alone ("every run is a space",
+// "no run is anything") finds the credential, so each template below is run
+// with the separator filler in every slot that could hold one, crossed with the
+// filler inside the secret at several places.
+
+/// Fillers that sit inside a secret: (name, text).
+pub fn secret_fillers() -> Vec<(String, String)> {
+    vec![
+        ("ZWSP".into(), "\u{200b}".into()),
+        ("ZWJ".into(), "\u{200d}".into()),
+        ("a soft hyphen".into(), "\u{ad}".into()),
+        ("a BOM".into(), "\u{feff}".into()),
+        (
+            "a run of mixed filler".into(),
+            "\u{200b}\u{2060}\u{ad}\u{200c}".into(),
+        ),
+    ]
+}
+
+/// A command with its places marked: `\x01` is a blank (a separator filler can
+/// stand in for it), `\x02` is a place where no blank is written but a hidden
+/// separator could still sit (between user and colon, after `=`), `\x03` is the
+/// secret.
+struct Template {
+    name: &'static str,
+    pattern: &'static str,
+    secret_len: usize,
+}
+
+const BLANK: char = '\x01';
+const NOTHING: char = '\x02';
+const SECRET: char = '\x03';
+
+fn templates() -> Vec<Template> {
+    let t = |name, pattern, secret_len| Template {
+        name,
+        pattern,
+        secret_len,
+    };
+    vec![
+        t(
+            "curl -u",
+            "curl\x01-u\x01admin\x02:\x02\x03 https://h/x",
+            12,
+        ),
+        t(
+            "curl --user",
+            "curl\x01--user\x01admin\x02:\x02\x03 https://h/x",
+            12,
+        ),
+        t(
+            "curl --proxy-user",
+            "curl\x01--proxy-user\x01ops\x02:\x02\x03 https://h/x",
+            12,
+        ),
+        t(
+            "curl -su",
+            "curl\x01-su\x01admin\x02:\x02\x03 https://h/x",
+            12,
+        ),
+        t(
+            "curl --user=",
+            "curl\x01--user=\x02admin\x02:\x02\x03 https://h/x",
+            12,
+        ),
+        t(
+            "curl -u with a double-quoted user",
+            "curl\x01-u\x01\"admin\"\x02:\x02\x03 https://h/x",
+            12,
+        ),
+        t(
+            "curl -u with a single-quoted user",
+            "curl\x01-u\x01'admin'\x02:\x02\x03 https://h/x",
+            12,
+        ),
+        t("--password", "tool\x01--password\x01\x03 run", 12),
+        t("--token", "tool\x01--token\x01\x03 run", 12),
+        t("Bearer", "sent\x01Bearer\x01\x03 ok", 24),
+        t(
+            "Authorization: Basic",
+            "Authorization:\x01Basic\x01\x03==",
+            20,
+        ),
+        t("mysql -p", "mysql\x01-u root\x01-p\x03 appdb", 10),
+        t("sshpass -p", "sshpass\x01-p\x01\x03 ssh deploy@host", 10),
+        t(
+            "docker login -p",
+            "docker\x01login\x01-u user\x01-p\x01\x03",
+            12,
+        ),
+        t("redis-cli -a", "redis-cli\x01-a\x01\x03", 12),
+        t("unzip -P", "unzip\x01-P\x01\x03 a.zip", 10),
+        t("ldapsearch -w", "ldapsearch\x01-w\x01\x03 -b dc=x", 10),
+        t("7z -p", "7z\x01-p\x03 x a.7z", 10),
+        t("export NAME=", "export\x01PASSWORD=\x02\x03", 12),
+    ]
+}
+
+/// Where the filler inside the secret goes (char offsets into the secret).
+fn secret_filler_places(len: usize) -> Vec<(&'static str, Vec<usize>)> {
+    vec![
+        ("after two characters", vec![2]),
+        ("in the middle", vec![len / 2]),
+        ("near the end", vec![len - 2]),
+        ("three runs", vec![2, len / 2, len - 2]),
+    ]
+}
+
+fn splice_at(secret: &str, places: &[usize], f: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in secret.chars().enumerate() {
+        if places.contains(&i) {
+            out.push_str(f);
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Every template with the separator filler `sep` in each slot that can hold
+/// one (and in all of them at once) and the filler `inner` inside the secret at
+/// each place. The secrets are the whole secret and every tail that starts at
+/// the filler (the tail is the part a half-done fix leaks), except a tail that
+/// the command's own text already contains.
+pub fn separator_and_secret_filler_shapes(
+    sep_label: &str,
+    sep: &str,
+    inner_label: &str,
+    inner: &str,
+) -> Vec<Shape> {
+    let mut out = Vec::new();
+    for (index, t) in templates().iter().enumerate() {
+        let secret = consonants(900 + index as u64, t.secret_len);
+        let slots = t
+            .pattern
+            .chars()
+            .filter(|c| *c == BLANK || *c == NOTHING)
+            .count();
+        let skeleton: String = reader_view(
+            &t.pattern
+                .chars()
+                .filter(|c| *c != SECRET && *c != NOTHING)
+                .map(|c| if c == BLANK { ' ' } else { c })
+                .collect::<String>(),
+        );
+        for chosen in 0..=slots {
+            for (place_name, places) in secret_filler_places(t.secret_len) {
+                let in_secret = splice_at(&secret, &places, inner);
+                let mut line = String::new();
+                let mut slot = 0;
+                for c in t.pattern.chars() {
+                    match c {
+                        BLANK | NOTHING => {
+                            if chosen == slots || chosen == slot {
+                                line.push_str(sep);
+                            } else if c == BLANK {
+                                line.push(' ');
+                            }
+                            slot += 1;
+                        }
+                        SECRET => line.push_str(&in_secret),
+                        other => line.push(other),
+                    }
+                }
+                let mut secrets = vec![secret.clone()];
+                for &at in &places {
+                    let tail: String = secret.chars().skip(at).collect();
+                    if !skeleton.contains(&tail) && !secrets.contains(&tail) {
+                        secrets.push(tail);
+                    }
+                }
+                let which = if chosen == slots {
+                    "every slot".to_string()
+                } else {
+                    format!("slot {chosen}")
+                };
+                out.push(Shape {
+                    name: format!(
+                        "{}: {sep_label} in {which}, {inner_label} {place_name} of the secret",
+                        t.name
+                    ),
+                    line,
+                    secrets,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// A deterministic sample of about one shape in `one_in`, chosen by the text of
+/// the shape (so the choice survives reordering).
+pub fn sample(all: Vec<Shape>, one_in: u64) -> Vec<Shape> {
+    all.into_iter()
+        .filter(|s| {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in s.name.bytes().chain(s.line.bytes()) {
+                h = (h ^ b as u64).wrapping_mul(0x0100_0000_01b3);
+            }
+            (h >> 17).is_multiple_of(one_in)
+        })
+        .collect()
+}
+
+/// The four lines the review named: a hidden character as the separator and
+/// another inside the secret.
+pub fn two_filler_role_examples(f: &str) -> Vec<Shape> {
+    let pw = consonants(801, 12);
+    let (head, tail) = pw.split_at(4);
+    let user_pw = consonants(802, 8);
+    let (uhead, utail) = user_pw.split_at(3);
+    vec![
+        shape(
+            "curl, filler before -u and inside the password",
+            format!("curl{f}-u admin:{head}{f}{tail} https://h/x"),
+            &[&pw, tail],
+        ),
+        shape(
+            "--password, filler before the value and inside it",
+            format!("tool{f}--password {head}{f}{tail} run"),
+            &[&pw, tail],
+        ),
+        shape(
+            "--proxy-user, filler before the user and inside the password",
+            format!("curl --proxy-user{f}admin:{head}{f}{tail} https://h/x"),
+            &[&pw, tail],
+        ),
+        shape(
+            "quoted user, filler before the colon and inside the password",
+            format!("curl{f}-u \"admin\"{f}:{uhead}{f}{utail}"),
+            &[&user_pw, utail],
+        ),
+        shape(
+            "filler before -u, before the colon and inside the password",
+            format!("curl{f}-u admin{f}:{head}{f}{tail} https://h/x"),
+            &[&pw, tail],
+        ),
+    ]
+}
+
+/// Ordinary commands with `sep` standing where a blank would be and `inner`
+/// inside a word. No secret: they come back as they are, minus the filler.
+pub fn ordinary_two_role_filler_lines(sep: &str, inner: &str) -> Vec<String> {
+    vec![
+        format!("curl{sep}-X GET https://exam{inner}ple.com"),
+        format!("curl{sep}-u admin https://ex{inner}ample.com"),
+        format!("curl{sep}-u 'admin' https://exam{inner}ple.com/x"),
+        format!("curl{sep}https://exam{inner}ple.com/a:b"),
+        format!("mkdir{sep}-p out/di{inner}r"),
+        format!("ssh{sep}-p 22 deploy@ho{inner}st"),
+        format!("export{sep}PATH=/usr/b{inner}in:/bin"),
+        format!("docker{sep}login -u us{inner}er"),
+    ]
+}
+
+/// Lines whose credential has hidden runs past the ninth on the line: nine
+/// hidden runs of `f` come first, then the credential with `f` inside the
+/// secret (the separator in front of the flag is a plain blank).
+pub fn credential_after_many_hidden_runs(f: &str) -> Vec<Shape> {
+    let pw = consonants(811, 12);
+    let (head, tail) = pw.split_at(5);
+    let bearer = consonants(812, 24);
+    let (bhead, btail) = bearer.split_at(9);
+    let flood = format!("a{f}b{f}c{f}d{f}e{f}f{f}g{f}h{f}i{f}j ");
+    vec![
+        shape(
+            "curl -u after nine hidden runs",
+            format!("{flood}curl -u admin:{head}{f}{tail} https://h/x"),
+            &[&pw, tail],
+        ),
+        shape(
+            "--password after nine hidden runs",
+            format!("{flood}tool --password {head}{f}{tail} run"),
+            &[&pw, tail],
+        ),
+        shape(
+            "Bearer after nine hidden runs",
+            format!("{flood}sent Bearer {bhead}{f}{btail} ok"),
+            &[&bearer, btail],
+        ),
+        shape(
+            "export after nine hidden runs",
+            format!("{flood}export PASSWORD={head}{f}{tail}"),
+            &[&pw, tail],
+        ),
+    ]
+}
+
+/// Like [`credential_after_many_hidden_runs`] but the separator in front of the
+/// flag is hidden text too, so it is past the eighth run as well.
+pub fn separator_after_many_hidden_runs(f: &str) -> Vec<Shape> {
+    let pw = consonants(821, 12);
+    let (head, tail) = pw.split_at(5);
+    let flood = format!("a{f}b{f}c{f}d{f}e{f}f{f}g{f}h{f}i{f}j ");
+    vec![
+        shape(
+            "curl, hidden separator and hidden secret filler after nine runs",
+            format!("{flood}curl{f}-u admin:{head}{f}{tail} https://h/x"),
+            &[&pw, tail],
+        ),
+        shape(
+            "--password, hidden separator and hidden secret filler after nine runs",
+            format!("{flood}tool{f}--password{f}{head}{f}{tail} run"),
+            &[&pw, tail],
+        ),
+    ]
+}
+
+// ───────────────────────── curl escapes and metacharacters ───────────────────
+
+/// `curl -u` passwords with a backslash-escaped blank, in a bare word.
+pub fn curl_escaped_blank_shapes() -> Vec<Shape> {
+    let a = consonants(711, 6);
+    let b = consonants(712, 6);
+    let c = consonants(713, 6);
+    let pw = consonants(714, 12);
+    vec![
+        shape(
+            "escaped blank in a bare password",
+            format!("curl -u admin:{a}\\ {b} https://h/x"),
+            &[&a, &b],
+        ),
+        shape(
+            "two escaped blanks in a bare password",
+            format!("curl -u admin:{a}\\ {b}\\ {c} https://h/x"),
+            &[&a, &b, &c],
+        ),
+        shape(
+            "escaped blank in a bare password, --user",
+            format!("curl --user admin:{a}\\ {b} https://h/x"),
+            &[&a, &b],
+        ),
+        shape(
+            "escaped blank in a bare password, end of line",
+            format!("curl -u admin:{a}\\ {b}"),
+            &[&a, &b],
+        ),
+        shape(
+            "escaped blank in a bare password, glued -u",
+            format!("curl -uadmin:{a}\\ {b} https://h/x"),
+            &[&a, &b],
+        ),
+        shape(
+            "escaped blank in the user part",
+            format!("curl -u ad\\ min:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "escaped blank in the user part and in the password",
+            format!("curl -u ad\\ min:{a}\\ {b} https://h/x"),
+            &[&a, &b],
+        ),
+        shape(
+            "password ending in an escaped blank at the end of the line",
+            format!("curl -u admin:{a}\\ "),
+            &[&a],
+        ),
+        shape(
+            "password ending in a backslash at the end of the line",
+            format!("curl -u admin:{a}\\"),
+            &[&a],
+        ),
+        shape(
+            "three backslashes make the blank escaped again",
+            format!("curl -u admin:{a}\\\\\\ {b} https://h/x"),
+            &[&a, &b],
+        ),
+    ]
+}
+
+/// A password that ends in an even run of backslashes ends there: the blank
+/// after it is real, so the rest of the command stays readable
+/// ([`KEPT_AFTER_EVEN_BACKSLASHES`]).
+pub const KEPT_AFTER_EVEN_BACKSLASHES: &str = " https://h/x";
+
+pub fn curl_even_backslash_shapes() -> Vec<Shape> {
+    let a = consonants(721, 12);
+    vec![
+        shape(
+            "two backslashes before the blank",
+            format!("curl -u admin:{a}\\\\ https://h/x"),
+            &[&a],
+        ),
+        shape(
+            "four backslashes before the blank",
+            format!("curl -u admin:{a}\\\\\\\\ https://h/x"),
+            &[&a],
+        ),
+        shape(
+            "two backslashes before the blank, --user",
+            format!("curl --user admin:{a}\\\\ https://h/x"),
+            &[&a],
+        ),
+    ]
+}
+
+/// `curl` commands with `&`, `;` or `|` inside quotes (or escaped) before the
+/// credential flag. The quoted text does not end the command.
+pub fn curl_metacharacter_shapes() -> Vec<Shape> {
+    let pw = consonants(731, 12);
+    let user_pw = consonants(732, 12);
+    let n = |what: &str| format!("{what} before the flag");
+    vec![
+        shape(
+            n("single-quoted & in a URL"),
+            format!("curl 'https://h/?a=1&b=2' -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("single-quoted ; in a header"),
+            format!("curl -H 'X: a;b' -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("single-quoted | in a header"),
+            format!("curl -H 'X: a|b' -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("double-quoted & in a URL, --user"),
+            format!("curl \"https://h/?a=1&b=2\" --user admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("double-quoted ; in a header"),
+            format!("curl -H \"X: a;b\" -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("double-quoted | in a URL"),
+            format!("curl \"https://h/?a=1|b\" -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("double-quoted ; after an escaped quote"),
+            format!("curl -H \"X: \\\"a;b\\\"\" -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("backslash-escaped ;"),
+            format!("curl https://h/a\\;b -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("backslash-escaped & and |"),
+            format!("curl https://h/a\\&b\\|c -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("two quoted headers"),
+            format!("curl -H 'X: a;b' -H \"Y: c&d\" -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            n("single-quoted & in a URL, --user="),
+            format!("curl 'https://h/?a=1&b=2' --user=admin:{user_pw}"),
+            &[&user_pw],
+        ),
+        shape(
+            n("single-quoted & in a URL, -u with a quoted credential"),
+            format!("curl 'https://h/?a=1&b=2' -u 'admin:{pw}'"),
+            &[&pw],
+        ),
+        shape(
+            "single-quoted ; before the flag, with a URL after the credential",
+            format!("curl -H 'X: a;b' -u admin:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "multi-line single-quoted JSON body before the flag",
+            format!("curl -X POST -d '{{\n  \"a\": 1\n}}' -u admin:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "multi-line single-quoted JSON body holding ; & |, then the flag",
+            format!(
+                "curl -X POST -d '{{\n  \"a\": \"x;y\",\n  \"b\": \"p&q|r\"\n}}' --user admin:{pw}"
+            ),
+            &[&pw],
+        ),
+    ]
+}
+
+/// A `curl` that a real (unquoted) break ends, then another command whose own
+/// `-u user:pw` is not curl's. Nothing here is a secret.
+pub fn after_a_real_break_lines() -> Vec<String> {
+    vec![
+        "curl https://h/x; ls -u foo:bar".into(),
+        "curl https://h/x | sort -u a:b".into(),
+        "curl https://h/x && ls -u foo:bar".into(),
+        "curl https://h/x & ls -u foo:bar".into(),
+        "curl 'https://h/?a=1&b=2'; ls -u foo:bar".into(),
+        "curl -H 'X: a;b' https://h/x | sort -u a:b".into(),
+    ]
+}
+
+// ─────────────────────────── backslash continuation ──────────────────────────
+
+/// One command over several rows (`\n` between rows) whose credential flag
+/// starts a row or sits inside one. Each row on its own is harmless.
+pub fn curl_continuation_shapes() -> Vec<Shape> {
+    let pw = consonants(741, 12);
+    vec![
+        shape(
+            "-u on the row after a trailing backslash",
+            format!("curl \\\n  -u admin:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "--user on the row after a trailing backslash",
+            format!("curl -s \\\n--user admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "three rows, the flag on the last",
+            format!("curl -s \\\n  -H 'X: 1' \\\n  -u admin:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "three rows, --user= on the last",
+            format!("curl https://h/x \\\n  -s \\\n  --user=admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "quoted credential on the continued row",
+            format!("curl \\\n -u 'admin:{pw}'"),
+            &[&pw],
+        ),
+        shape(
+            "double-quoted user on the continued row",
+            format!("curl \\\n -u \"admin\":{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "blanks after the backslash",
+            format!("curl \\  \n  -u admin:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "CRLF after the backslash",
+            format!("curl \\\r\n  -u admin:{pw} https://h/x"),
+            &[&pw],
+        ),
+    ]
+}
+
+/// Continuations where the VALUE is on the row after the flag or after a
+/// password's trailing backslash.
+pub fn curl_value_on_next_row_shapes() -> Vec<Shape> {
+    let pw = consonants(751, 12);
+    let a = consonants(752, 6);
+    let b = consonants(753, 6);
+    vec![
+        shape(
+            "the credential on the row after -u and a backslash",
+            format!("curl -u \\\nadmin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "the credential indented on the row after --user and a backslash",
+            format!("curl -s --user \\\n   admin:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "the rest of a password on the row after its trailing backslash",
+            format!("curl -u admin:{a}\\\n{b} https://h/x"),
+            &[&a, &b],
+        ),
+    ]
+}
+
+// ───────────── review round 3: many hidden runs, rows with two readings, ─────────
+// ───────────── quoting forms, clipped rows, long carried continuations ───────────
+
+const ZWSP: &str = "\u{200b}";
+
+/// A credential with hidden runs standing in different roles, with padding
+/// (`a<ZWSP>` repeated 8, 12 and 20 times) BEFORE it and, separately, AFTER it.
+/// The first eight and the last eight hidden runs of a line are read in every
+/// combination, so the credential's own runs are always among them.
+pub fn credential_among_many_hidden_runs_shapes() -> Vec<Shape> {
+    let z = ZWSP;
+    let pw = consonants(831, 12);
+    let (h1, h2) = pw.split_at(6);
+    let pw2 = consonants(832, 12);
+    let user_form = format!("curl --user{z}ad{z}min:{h1}{z}{h2} https://h/x");
+    let quoted_form = format!("curl{z}-u \"admin\"{z}:{pw2}");
+    let mut out = Vec::new();
+    for n in [8, 12, 20] {
+        let pad = format!("a{z}").repeat(n);
+        out.push(shape(
+            format!("--user with hidden runs in the user and password, {n} hidden runs before"),
+            format!("{pad} {user_form}"),
+            &[&pw, h1, h2],
+        ));
+        out.push(shape(
+            format!("--user with hidden runs in the user and password, {n} hidden runs after"),
+            format!("{user_form} {pad}"),
+            &[&pw, h1, h2],
+        ));
+    }
+    for n in [8, 12] {
+        let pad = format!("a{z}").repeat(n);
+        out.push(shape(
+            format!(
+                "-u with a quoted user and a hidden run before the colon, {n} hidden runs before"
+            ),
+            format!("{pad} {quoted_form}"),
+            &[&pw2],
+        ));
+        out.push(shape(
+            format!(
+                "-u with a quoted user and a hidden run before the colon, {n} hidden runs after"
+            ),
+            format!("{quoted_form} {pad}"),
+            &[&pw2],
+        ));
+    }
+    out
+}
+
+/// A continued `curl` command (rows joined with `\n`) with a hidden run on each
+/// row, the two needing different readings: a separator on row one
+/// (`curl<ZWSP>-u`) and a character of the user on row two (`ad<ZWSP>min`).
+pub fn continued_curl_with_hidden_runs_on_both_rows() -> Vec<Shape> {
+    let z = ZWSP;
+    let pw = consonants(841, 12);
+    vec![
+        shape(
+            "-u, separator on row one, user split on row two",
+            format!("curl{z}-u \\\nad{z}min:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "--user, separators on row one, user split on row two",
+            format!("curl{z}--user{z}\\\nadm{z}in:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "-u, separator on row one, user split on row two, URL after",
+            format!("curl{z}-u \\\nad{z}min:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "--user, separators on row one, user split on row two, URL after",
+            format!("curl{z}--user{z}\\\nadm{z}in:{pw} https://h/x"),
+            &[&pw],
+        ),
+    ]
+}
+
+/// `$'...'` strings have backslash escapes (an escaped `'` does not close
+/// them) and can hold `;`, `&` and `|`.
+pub fn dollar_quote_shapes() -> Vec<Shape> {
+    let pw = consonants(851, 12);
+    vec![
+        shape(
+            "$'..' with an escaped quote and ; before -u",
+            format!("curl $'a\\'b;c' -u admin:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "$'..' with an escaped quote and & before --user",
+            format!("curl $'a\\'b&c' --user admin:{pw} https://h/x"),
+            &[&pw],
+        ),
+        shape(
+            "$'..' with an escaped quote and | before a quoted credential",
+            format!("curl $'a\\'b|c' -u 'admin:{pw}'"),
+            &[&pw],
+        ),
+        shape(
+            "$'..' header with two escaped quotes around ;",
+            format!("curl -H $'X: \\'a;b\\'' -u admin:{pw}"),
+            &[&pw],
+        ),
+    ]
+}
+
+/// A password that goes on over a backslash at the end of the row, quoted or
+/// not: the glued-together rows are one word, so neither half may be readable.
+pub fn credential_continued_onto_the_next_row_shapes() -> Vec<Shape> {
+    let pw = consonants(861, 12);
+    let (h1, h2) = pw.split_at(6);
+    vec![
+        shape(
+            "single-quoted credential, then a continuation, URL after",
+            format!("curl -u 'admin:{h1}'\\\n{h2} https://h/x"),
+            &[&pw, h1, h2],
+        ),
+        shape(
+            "single-quoted credential, then a continuation, end of text",
+            format!("curl -u 'admin:{h1}'\\\n{h2}"),
+            &[&pw, h1, h2],
+        ),
+        shape(
+            "unquoted password, then a continuation, URL after",
+            format!("curl -u admin:{h1}\\\n{h2} https://h/x"),
+            &[&pw, h1, h2],
+        ),
+        shape(
+            "unquoted password, then a continuation, end of text",
+            format!("curl -u admin:{h1}\\\n{h2}"),
+            &[&pw, h1, h2],
+        ),
+    ]
+}
+
+/// Several continuations in a row between the flag and its value.
+pub fn repeated_continuations_before_the_value_shapes() -> Vec<Shape> {
+    let pw = consonants(871, 12);
+    vec![
+        shape(
+            "a row of just a backslash between the flag and the value",
+            format!("curl -u \\\n\\\nadmin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "indented rows of just a backslash, the value indented",
+            format!("curl -u \\\n  \\\n  admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "three backslash-only rows, --user, URL after",
+            format!("curl --user \\\n\\\n  \\\n\\\nadmin:{pw} https://h/x"),
+            &[&pw],
+        ),
+    ]
+}
+
+/// A double-quoted password that is never closed and whose row ends in a
+/// backslash: the next row continues it.
+pub fn unterminated_double_quote_continuation_shapes() -> Vec<Shape> {
+    let pw = consonants(881, 12);
+    let (h1, h2) = pw.split_at(6);
+    vec![
+        shape(
+            "double-quoted password continued onto the row that closes it",
+            format!("curl -u \"admin:{h1}\\\n{h2}\""),
+            &[&pw, h1, h2],
+        ),
+        shape(
+            "double-quoted password continued onto the row that closes it, URL after",
+            format!("curl -u \"admin:{h1}\\\n{h2}\" https://h/x"),
+            &[&pw, h1, h2],
+        ),
+    ]
+}
+
+/// A row that ends in the line assembler's clip mark `…` (written by hand: the
+/// raw redactor never sees an assembler). The cut-off rest of the row may have
+/// held the flag, so the next row is part of the command.
+pub fn rows_ending_in_the_clip_mark_shapes() -> Vec<Shape> {
+    let pw = consonants(891, 12);
+    let long = "x".repeat(4090);
+    vec![
+        shape(
+            "a short curl row ending in the clip mark",
+            format!("curl https://h/x…\n-u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "a curl row with an unclosed single quote and the clip mark",
+            format!("curl -H 'hhhhhhhhhh…\n  -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "a curl row of 4096 characters ending in the clip mark",
+            format!("curl {long}…\n-u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "a clipped curl row, the value on the row after -u",
+            format!("curl -u …\nadmin:{pw}"),
+            &[&pw],
+        ),
+    ]
+}
+
+/// Rows wider than the assembler allows, so IT clips the first one (4096
+/// columns, ended with `…`). The text carries a trailing backslash after the
+/// cut, which the clip drops; the row still continues the command.
+pub fn rows_the_assembler_clips_shapes() -> Vec<Shape> {
+    let pw = consonants(895, 12);
+    let hs = "h".repeat(4200);
+    let xs = "x".repeat(4200);
+    vec![
+        shape(
+            "a clipped curl row with an unclosed quote, the flag on the next row",
+            format!("curl -H '{hs}' \\\n  -u admin:{pw}"),
+            &[&pw],
+        ),
+        shape(
+            "a clipped curl row without a quote, the flag on the next row",
+            format!("curl {xs} \\\n-u admin:{pw}"),
+            &[&pw],
+        ),
+    ]
+}
+
+/// How many `e \` rows follow `curl \` in [`long_continued_curl_rows`].
+pub const CARRIED_ROWS: usize = 3000;
+
+/// The rows of a `curl` command that goes on for thousands of rows, each ending
+/// in a backslash: `curl \` and then `e \` repeated.
+pub fn long_continued_curl_rows() -> Vec<String> {
+    let mut rows = vec!["curl \\".to_string()];
+    rows.extend((0..CARRIED_ROWS).map(|_| "e \\".to_string()));
+    rows
+}
+
+/// The rows as one text, with or without a newline after the last one.
+pub fn long_continued_curl_text(trailing_newline: bool) -> String {
+    let mut text = long_continued_curl_rows().join("\n");
+    if trailing_newline {
+        text.push('\n');
+    }
+    text
+}
+
+/// What arrives in the next delivery after [`long_continued_curl_rows`]: the
+/// flag and its credential.
+pub fn credential_after_a_long_continued_curl() -> Shape {
+    let pw = consonants(899, 12);
+    shape(
+        "-u on the first row after thousands of continued rows",
+        format!("-u admin:{pw}"),
+        &[&pw],
+    )
+}
+
+/// Multi-row texts (rows joined with `\n`) that hold no credential: `curl`
+/// appears, then a quote with no mate or a `-u` of another command. They must
+/// come back unchanged with nothing redacted.
+pub fn curl_lookalike_negative_texts() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "a curl error message, then a docker command",
+            "curl: (7) Failed to connect to localhost port 80 after 0 ms: Couldn't connect to server\n$ docker run -u 1000:1000 nginx"
+                .to_string(),
+        ),
+        (
+            "a sentence with an apostrophe after curl, then ls -u",
+            "curl isn't installed\nls -u foo:bar".to_string(),
+        ),
+    ]
+}
+
+/// `curl` and a double quote with no mate anywhere, then other commands. The
+/// quote is an ordinary character, so the rows after it are not curl's.
+pub fn unmatched_quote_negative_text() -> String {
+    "curl \"https://h/x\nls\ndocker run -u 1000:1000 nginx".to_string()
+}
+
+// ───────────── review round 4: the combination budget is per row group ───────────
+//
+// Every hidden-run combination is read for each row group (a line, or the rows
+// of a continued command), however much other text the call carries: a
+// credential on a LATER line of a big call is read exactly as it is alone. A
+// group that is too big to read in every combination, or too many such groups in
+// one call, is redacted from its credential keyword to the end of the line.
+
+const ZWJ: &str = "\u{200d}";
+
+/// Credential lines with hidden runs at several seams of one line (the
+/// separator, the colon, inside the password). Each one is a single row.
+pub fn credentials_with_several_hidden_runs() -> Vec<Shape> {
+    let z = ZWSP;
+    let split = |seed: u64, at: usize| {
+        let pw = consonants(seed, 12);
+        let (head, tail) = (pw[..at].to_string(), pw[at..].to_string());
+        (pw, head, tail)
+    };
+    let (pw1, h1, t1) = split(911, 2);
+    let (pw2, h2, t2) = split(912, 4);
+    let (pw3, h3, t3) = split(913, 6);
+    let (pw4, h4, t4) = split(914, 3);
+    let (pw5, h5, t5) = split(915, 5);
+    let mut out = vec![
+        shape(
+            "--proxy-user with a hidden run at every seam",
+            format!("curl{z}--proxy-user{z}ops{z}:{z}{h1}{ZWJ}{t1} https://h/x"),
+            &[&pw1, &t1],
+        ),
+        shape(
+            "-u with a double-quoted user and a hidden run at every seam",
+            format!("curl{z}-u{z}\"admin\"{z}:{z}{h2}{ZWJ}{t2} https://h/x"),
+            &[&pw2, &t2],
+        ),
+        shape(
+            "--user with a single-quoted user and a hidden run at every seam",
+            format!("curl{z}--user{z}'ops'{z}:{z}{h3}{ZWJ}{t3} https://h/x"),
+            &[&pw3, &t3],
+        ),
+        shape(
+            "--password with a hidden run before and inside the value",
+            format!("tool{z}--password{z}{h4}{ZWJ}{t4} run"),
+            &[&pw4, &t4],
+        ),
+        shape(
+            "password= with a hidden run after the equals sign and inside the value",
+            format!("password={z}{h5}{ZWJ}{t5}"),
+            &[&pw5, &t5],
+        ),
+    ];
+    out.extend(credential_among_many_hidden_runs_shapes());
+    out.extend(credential_after_many_hidden_runs(z));
+    out.extend(separator_after_many_hidden_runs(z));
+    out
+}
+
+/// A continued `curl` command (rows joined with `\n`, two rows) whose rows both
+/// hold several hidden runs.
+pub fn continued_curl_with_several_hidden_runs_shapes() -> Vec<Shape> {
+    let z = ZWSP;
+    let pw = consonants(921, 12);
+    let (head, tail) = pw.split_at(4);
+    let pw2 = consonants(922, 12);
+    let (head2, tail2) = pw2.split_at(4);
+    vec![
+        shape(
+            "--user continued, hidden runs on both rows",
+            format!("curl{z}--user{z}\\\nad{z}min{z}:{z}{head}{ZWJ}{tail} https://h/x"),
+            &[&pw, tail],
+        ),
+        shape(
+            "-u continued, double-quoted user, hidden runs on both rows",
+            format!("curl{z}-u{z}\\\n\"admin\"{z}:{z}{head2}{ZWJ}{tail2}"),
+            &[&pw2, tail2],
+        ),
+    ]
+}
+
+/// What a block of padding rows is made of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Padding {
+    /// Ordinary ASCII lines.
+    Plain,
+    /// `ok<ZWSP>ok<ZWSP>...` rows: twenty hidden runs a row.
+    Hidden,
+    /// A thousand four-byte emoji a row (what a hostile program can emit in one
+    /// delivery: the assembler keeps 512K cells).
+    Emoji,
+    /// Emoji with a hidden character after each one.
+    EmojiHidden,
+}
+
+impl Padding {
+    pub fn label(self) -> &'static str {
+        match self {
+            Padding::Plain => "plain ASCII lines",
+            Padding::Hidden => "lines with hidden characters",
+            Padding::Emoji => "rows of emoji",
+            Padding::EmojiHidden => "rows of emoji with hidden characters",
+        }
+    }
+
+    /// Row `i` of the padding (no credential keyword, no secret).
+    pub fn row(self, i: usize) -> String {
+        match self {
+            Padding::Plain => format!("step {i}: compiled module m{i} with no warnings"),
+            Padding::Hidden => format!("ok{ZWSP}").repeat(20),
+            Padding::Emoji => "\u{1f600}".repeat(1000),
+            Padding::EmojiHidden => format!("\u{1f600}{ZWSP}").repeat(500),
+        }
+    }
+}
+
+/// Padding for the raw redactor: 1.25 MiB, so `text.len() << 1` is two and a
+/// half times the old budget (`1 << 20`).
+pub const PADDING_BYTES: usize = 5 << 18;
+
+/// Padding for one delivery. The assembler keeps at most 8192 rows and 512K
+/// cells, so this is as much as a plain or hidden-character row can add while
+/// everything stays buffered; it is still a third above the old budget's
+/// threshold (`text.len() << 1 > 1 << 20`, text over 512 KiB).
+pub const DELIVERY_PADDING_BYTES: usize = 700_000;
+
+/// Rows of `kind` until they hold at least `min_bytes` (a newline counts).
+pub fn padding_rows(kind: Padding, min_bytes: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    while bytes < min_bytes {
+        let row = kind.row(rows.len());
+        bytes += row.len() + 1;
+        rows.push(row);
+    }
+    rows
+}
+
+/// Where the credential rows go relative to the padding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    Before,
+    After,
+    Both,
+}
+
+impl Place {
+    pub const ALL: [Place; 3] = [Place::Before, Place::After, Place::Both];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Place::Before => "before the padding",
+            Place::After => "after the padding",
+            Place::Both => "before and after the padding",
+        }
+    }
+
+    pub fn before(self) -> bool {
+        matches!(self, Place::Before | Place::Both)
+    }
+
+    pub fn after(self) -> bool {
+        matches!(self, Place::After | Place::Both)
+    }
+}
+
+/// Credential rows and padding rows. `shape` is all of them as one text (rows
+/// joined with `\n`) with every secret in it, so [`verdict`] reads the output.
+pub struct Padded {
+    pub shape: Shape,
+    pub credentials: Vec<String>,
+    pub padding: Vec<String>,
+    pub place: Place,
+}
+
+/// The credential lines of `group` (one row each) placed by `place` around
+/// `padding` (rows of `kind`).
+pub fn padded(group: &[Shape], kind: Padding, padding: &[String], place: Place) -> Padded {
+    let mut credentials = Vec::new();
+    let mut secrets: Vec<String> = Vec::new();
+    for s in group {
+        assert!(!s.line.contains('\n'), "[{}] is not one row", s.name);
+        credentials.push(s.line.clone());
+        for secret in &s.secrets {
+            if !secrets.contains(secret) {
+                secrets.push(secret.clone());
+            }
+        }
+    }
+    let mut out = Padded {
+        shape: Shape {
+            name: format!(
+                "{} credential row(s) {} {}",
+                group.len(),
+                place.label(),
+                kind.label()
+            ),
+            line: String::new(),
+            secrets,
+        },
+        credentials,
+        padding: padding.to_vec(),
+        place,
+    };
+    out.shape.line = out.rows().join("\n");
+    out
+}
+
+/// `rows` cut into rounds of at least `round_bytes` each. A short remainder (under
+/// half a round) joins the round before it, so every round but a lone one is
+/// big.
+fn split_into_rounds(rows: &[String], round_bytes: usize) -> Vec<Vec<String>> {
+    let mut rounds: Vec<Vec<String>> = Vec::new();
+    let mut round = Vec::new();
+    let mut bytes = 0;
+    for row in rows {
+        bytes += row.len() + 1;
+        round.push(row.clone());
+        if bytes >= round_bytes {
+            rounds.push(std::mem::take(&mut round));
+            bytes = 0;
+        }
+    }
+    if !round.is_empty() {
+        match rounds.last_mut() {
+            Some(last) if bytes < round_bytes / 2 => last.extend(round),
+            _ => rounds.push(round),
+        }
+    }
+    rounds
+}
+
+impl Padded {
+    /// Every row in order.
+    pub fn rows(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        if self.place.before() {
+            rows.extend(self.credentials.iter().cloned());
+        }
+        rows.extend(self.padding.iter().cloned());
+        if self.place.after() {
+            rows.extend(self.credentials.iter().cloned());
+        }
+        rows
+    }
+
+    /// The rows as separate calls or deliveries: the padding cut into rounds of
+    /// about `round_bytes`, and the credential rows either in a round of their
+    /// own before and/or after them (`apart`) or riding along in the first and/or
+    /// last round of padding.
+    pub fn rounds(&self, round_bytes: usize, apart: bool) -> Vec<Vec<String>> {
+        let mut rounds = split_into_rounds(&self.padding, round_bytes);
+        if apart {
+            if self.place.before() {
+                rounds.insert(0, self.credentials.clone());
+            }
+            if self.place.after() {
+                rounds.push(self.credentials.clone());
+            }
+            return rounds;
+        }
+        if self.place.after() {
+            if let Some(last) = rounds.last_mut() {
+                last.extend(self.credentials.iter().cloned());
+            }
+        }
+        if self.place.before() {
+            if let Some(first) = rounds.first_mut() {
+                first.splice(0..0, self.credentials.iter().cloned());
+            }
+        }
+        rounds
+    }
+
+    /// Credential rows in the text.
+    pub fn credential_row_count(&self) -> usize {
+        self.credentials.len()
+            * (usize::from(self.place.before()) + usize::from(self.place.after()))
+    }
+
+    /// Why `output` (the redacted text of all rows) is not good enough, if it
+    /// isn't: [`verdict`], and a marker for every credential row. Only for
+    /// outputs that still hold every credential row (a delivery's cap keeps the
+    /// first fifty and last hundred lines, and the credential rows are there).
+    pub fn verdict(&self, output: &str, redactions: usize) -> Option<String> {
+        if let Some(why) = verdict(&self.shape, output, redactions) {
+            return Some(why);
+        }
+        let markers = output.matches("[redacted: ").count();
+        let rows = self.credential_row_count();
+        (markers < rows).then(|| format!("{markers} markers for {rows} credential rows"))
+    }
+}
+
+/// Keyword lines with nine hidden runs each, enough of them to hold at least
+/// `min_bytes`. Every line has its own secret.
+pub fn flood_of_keyword_lines(min_bytes: usize) -> Vec<Shape> {
+    let z = ZWSP;
+    let mut out = Vec::new();
+    let mut bytes = 0;
+    while bytes < min_bytes {
+        let i = out.len();
+        let pw = consonants(10_000 + i as u64, 12);
+        let (head, tail) = pw.split_at(5);
+        let line = format!(
+            "x{z}y{z}z{z}curl{z}--proxy-user{z}ops{z}:{z}{head}{ZWJ}{tail} https://h/x{z}done"
+        );
+        bytes += line.len() + 1;
+        out.push(shape(format!("flood line {i}"), line, &[&pw, tail]));
+    }
+    out
+}
+
+/// ONE line of at least `min_bytes` (`a<ZWSP>` repeated) with a credential in
+/// the middle: one row group, however it is read.
+pub fn one_huge_line_with_a_credential_in_the_middle(min_bytes: usize) -> Vec<Shape> {
+    let z = ZWSP;
+    let side = format!("a{z}").repeat(min_bytes / 8);
+    let pw = consonants(931, 12);
+    let (head, tail) = pw.split_at(2);
+    let pw2 = consonants(932, 12);
+    let (head2, tail2) = pw2.split_at(5);
+    vec![
+        shape(
+            "curl --proxy-user in the middle of one huge line",
+            format!("{side} curl{z}--proxy-user{z}ops{z}:{z}{head}{ZWJ}{tail} https://h/x {side}"),
+            &[&pw, tail],
+        ),
+        shape(
+            "password= in the middle of one huge line",
+            format!("{side} password={z}{head2}{ZWJ}{tail2} {side}"),
+            &[&pw2, tail2],
+        ),
+    ]
+}
+
+/// Rows with many hidden runs (three sentences of eight) and no credential
+/// keyword, at least `min_bytes`. About 230 bytes a row, so a delivery of them
+/// stays under the assembler's 8192 rows.
+pub fn benign_rows_with_hidden_runs(min_bytes: usize) -> Vec<String> {
+    let z = ZWSP;
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    while bytes < min_bytes {
+        let i = rows.len();
+        let sentence =
+            format!("compiled{z}module{z}m{i}{z}ok{z}in{z}{i}{z}ms{z}with{z}no{z}warnings");
+        let row = [sentence.as_str(); 3].join(" ");
+        bytes += row.len() + 1;
+        rows.push(row);
+    }
+    rows
+}
+
+/// ONE line of at least `min_bytes` (`a<ZWSP>` repeated) and no keyword.
+pub fn benign_huge_line(min_bytes: usize) -> String {
+    format!("a{ZWSP}").repeat(min_bytes / 4)
+}
+
+// ───────────── review round 5: what the first version of the round 4 fix missed ──
+//
+// Each shape below leaked on a first version of the fix (found in review). z is
+// U+200B throughout. Secrets are built at runtime from `consonants`.
+
+/// A continued `curl` command whose rows are joined by an OPEN QUOTE (no
+/// backslash), with hidden runs in different rows and in different roles (a
+/// separator, a character of the user, a character of the word `curl`), and the
+/// credential in a `-u` / `--user` on a LATER row. Rows are joined with `\n`.
+pub fn continued_curl_joined_by_an_open_quote_shapes() -> Vec<Shape> {
+    let z = ZWSP;
+    let (pw_a, pw_b, pw_c) = (
+        consonants(951, 12),
+        consonants(952, 12),
+        consonants(953, 12),
+    );
+    let (pw_d, pw_e, pw_f) = (
+        consonants(954, 12),
+        consonants(955, 12),
+        consonants(956, 12),
+    );
+    vec![
+        shape(
+            "open quote: a hidden run after curl, -u on the third row",
+            format!("curl{z}-d '{{\n\"a\": 1\n}}' -u admin:{pw_a} https://h/x"),
+            &[&pw_a],
+        ),
+        shape(
+            "open quote: --user with a hidden run before the user on row two",
+            format!("curl -H 'x\ny' --user{z}admin:{pw_b}"),
+            &[&pw_b],
+        ),
+        shape(
+            "open quote: a hidden run after the quote's first character, -u on row two",
+            format!("curl -H 'x{z}\ny' -u admin:{pw_c}"),
+            &[&pw_c],
+        ),
+        shape(
+            "open quote: hidden runs as separator and inside the user on row two",
+            format!("curl -H 'x\ny'{z}-u ad{z}min:{pw_d}"),
+            &[&pw_d],
+        ),
+        shape(
+            "open quote: the command word glued to a prefix by a hidden run, mixed roles",
+            format!("xyz{z}curl -H 'x\ny'{z}-u ad{z}min:{pw_e}"),
+            &[&pw_e],
+        ),
+        shape(
+            "open quote: glued command word, hidden run on row one and -u on row two",
+            format!("xyz{z}curl -H 'x{z}\ny' -u admin:{pw_f}"),
+            &[&pw_f],
+        ),
+    ]
+}
+
+/// Anchored token shapes in a line with no credential word: the first hidden
+/// run reads as a space (it ends a word), the inner one as nothing (it sits in
+/// the token). The secrets are the token bodies.
+pub fn anchored_tokens_with_a_hidden_run_before_and_inside() -> Vec<Shape> {
+    let z = ZWSP;
+    let (b3, b4) = (consonants(961, 10), consonants(962, 10));
+    let (g1, g2) = (consonants(963, 12), consonants(964, 12));
+    let (j1, j2) = (consonants(965, 8), consonants(966, 8));
+    let (k1, k2) = (consonants(967, 8), consonants(968, 7));
+    vec![
+        shape(
+            "sk- token after a word glued to a hidden run, one inside the body",
+            format!("see a{z}sk-{b3}Q{z}{b4}"),
+            &[&b3, &b4],
+        ),
+        shape(
+            "glpat- token after a word glued to a hidden run, one inside the body",
+            format!("see a{z}glpat-{g1}Q{z}{g2}"),
+            &[&g1, &g2],
+        ),
+        shape(
+            "JWT after a word glued to a hidden run, one inside the header",
+            format!("see a{z}eyJ{j1}Q{z}{j2}.{j1}.{j2}"),
+            &[&j1, &j2],
+        ),
+        shape(
+            "AWS access key id after a digit glued to a hidden run, one inside the body",
+            format!("see 1{z}AKIA{k1}7{z}{k2}"),
+            &[&k1, &k2],
+        ),
+    ]
+}
+
+/// Credential NAMES that only a hidden-run reading sees (`aut<z>h`, `ds<z>n`,
+/// `credenti<z>al`), the value behind another hidden run.
+pub fn credential_names_split_by_a_hidden_run() -> Vec<Shape> {
+    let z = ZWSP;
+    let (pw_auth, pw_dsn, pw_cred) = (
+        consonants(971, 12),
+        consonants(972, 12),
+        consonants(973, 12),
+    );
+    vec![
+        shape(
+            "--auth with a hidden run inside the name and before the value",
+            format!("tool --aut{z}h{z}{pw_auth} --verbose"),
+            &[&pw_auth],
+        ),
+        shape(
+            "--dsn with a hidden run inside the name and before the value",
+            format!("tool --ds{z}n{z}{pw_dsn} --verbose"),
+            &[&pw_dsn],
+        ),
+        shape(
+            "--credential with a hidden run inside the name and before the value",
+            format!("tool --credenti{z}al{z}{pw_cred} --verbose"),
+            &[&pw_cred],
+        ),
+    ]
+}
+
+/// The same idea for other credential names (not part of the review's list; the
+/// code is expected to handle them too).
+pub fn more_credential_names_split_by_a_hidden_run() -> Vec<Shape> {
+    let z = ZWSP;
+    let (pw_pass, pw_key, pw_tok, pw_sec) = (
+        consonants(981, 12),
+        consonants(982, 12),
+        consonants(983, 12),
+        consonants(984, 12),
+    );
+    vec![
+        shape(
+            "--password with a hidden run inside the name and before the value",
+            format!("tool --pass{z}word{z}{pw_pass}"),
+            &[&pw_pass],
+        ),
+        shape(
+            "API_KEY with hidden runs inside the name, before the equals sign and after it",
+            format!("API_{z}KEY{z}={z}{pw_key}"),
+            &[&pw_key],
+        ),
+        shape(
+            "--token with a hidden run inside the name and before the value",
+            format!("tool --tok{z}en{z}{pw_tok} --verbose"),
+            &[&pw_tok],
+        ),
+        shape(
+            "--secret with a hidden run inside the name and before the value",
+            format!("tool --sec{z}ret{z}{pw_sec} --verbose"),
+            &[&pw_sec],
+        ),
+    ]
+}
+
+/// A row that carries two hidden runs and nothing else of interest.
+pub const TWO_HIDDEN_RUNS_ROW: &str = "1-1\u{200b}a\u{200b}b";
+
+/// `rows` rows of [`TWO_HIDDEN_RUNS_ROW`] (the rows are one line each, no
+/// newline at the end of the last).
+pub fn rows_with_two_hidden_runs(rows: usize) -> Vec<String> {
+    vec![TWO_HIDDEN_RUNS_ROW.to_string(); rows]
+}
+
+/// The SSN row of the round-5 repros: a hidden run in front (it reads as a
+/// space) and one inside the number. Built from fragments.
+pub fn ssn_row_with_two_hidden_runs() -> String {
+    cat(&["5", ZWSP, "219", "-0", ZWSP, "9", "-9999"])
+}
+
+/// The SSN of [`ssn_row_with_two_hidden_runs`] with the hidden runs taken out.
+pub fn the_ssn() -> String {
+    cat(&["219", "-09", "-9999"])
+}
+
+/// The labelled birth date row of the round-5 repros: hidden runs inside the
+/// label and the date.
+pub fn dob_row_with_hidden_runs() -> String {
+    cat(&[
+        "date",
+        ZWSP,
+        "of",
+        ZWSP,
+        "birth: 01",
+        ZWSP,
+        "/02",
+        ZWSP,
+        "/1990",
+    ])
+}
+
+/// An SSN row behind `rows` rows with two hidden runs each. Rows are joined
+/// with `\n`; the secrets are the SSN and its last four digits.
+pub fn ssn_behind_rows_with_two_hidden_runs(rows: usize) -> Shape {
+    let mut all = rows_with_two_hidden_runs(rows);
+    all.push(ssn_row_with_two_hidden_runs());
+    let ssn = the_ssn();
+    shape(
+        format!("an SSN with hidden runs behind {rows} rows with two hidden runs each"),
+        all.join("\n"),
+        &[&ssn, "9999"],
+    )
+}
+
+/// A labelled birth date behind `rows` rows with two hidden runs each. The
+/// secret is the year.
+pub fn birth_date_behind_rows_with_two_hidden_runs(rows: usize) -> Shape {
+    let mut all = rows_with_two_hidden_runs(rows);
+    all.push(dob_row_with_hidden_runs());
+    shape(
+        format!("a birth date with hidden runs behind {rows} rows with two hidden runs each"),
+        all.join("\n"),
+        &["1990"],
+    )
+}
+
+/// ONE line: `pairs` times `a<z>b<z>`, then the SSN row.
+pub fn ssn_at_the_end_of_one_line_of_hidden_runs(pairs: usize) -> Shape {
+    let z = ZWSP;
+    let ssn = the_ssn();
+    shape(
+        format!("an SSN with hidden runs at the end of one line of {pairs} a<z>b<z> pairs"),
+        format!(
+            "{}{}",
+            format!("a{z}b{z}").repeat(pairs),
+            ssn_row_with_two_hidden_runs()
+        ),
+        &[&ssn, "9999"],
+    )
+}
+
+/// Benign lines that must come back untouched however many there are: (what
+/// they are, lines). Each line carries variation selectors (emoji presentation,
+/// two on the dated lines), which are hidden runs to a reader but not
+/// credentials, and the words `library`, `token` and a date.
+pub fn benign_lines_that_must_not_be_redacted() -> Vec<(&'static str, Vec<String>)> {
+    vec![
+        (
+            "5000 library lines with an emoji presentation selector",
+            (0..5000)
+                .map(|i| format!("library \u{2764}\u{fe0f} row {i}"))
+                .collect(),
+        ),
+        (
+            "3000 `token count` lines with an emoji presentation selector",
+            (0..3000)
+                .map(|i| format!("token count \u{2764}\u{fe0f} row {i}"))
+                .collect(),
+        ),
+        (
+            "3000 dated lines with two emoji presentation selectors each",
+            dated_lines_with_two_hidden_runs(3000),
+        ),
+    ]
+}
+
+/// `2024-01-01 ✔️ ok ⚠️ {i}`: a date and two hidden runs on every line.
+pub fn dated_lines_with_two_hidden_runs(n: usize) -> Vec<String> {
+    (0..n)
+        .map(|i| format!("2024-01-01 \u{2714}\u{fe0f} ok \u{26a0}\u{fe0f} {i}"))
+        .collect()
 }

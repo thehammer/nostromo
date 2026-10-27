@@ -1441,3 +1441,1042 @@ fn curl_without_a_password_and_ordinary_text_with_filler_are_delivered_intact_mi
         failures.join("\n")
     );
 }
+
+// ───────────────────── two filler roles on one line ──────────────────────────
+//
+// The same shapes as in `terminal_text_redaction.rs`, through the delivery
+// path: a hidden character as the separator and another inside the secret.
+
+#[test]
+fn a_hidden_separator_and_a_hidden_character_inside_the_secret_on_one_line_are_both_handled_on_the_delivery_path(
+) {
+    let all: Vec<shapes::Shape> = shapes::separators()
+        .iter()
+        .flat_map(|(_, f)| shapes::two_filler_role_examples(f))
+        .collect();
+    assert!(all.len() >= 50, "only {} shapes", all.len());
+    assert_shapes_delivered_redacted(&all);
+}
+
+#[test]
+fn every_credential_shape_survives_a_separator_filler_plus_a_different_filler_inside_the_secret_on_the_delivery_path(
+) {
+    let mut all = Vec::new();
+    for (sep_label, sep) in shapes::separators() {
+        for (in_label, inner) in shapes::secret_fillers() {
+            all.extend(shapes::separator_and_secret_filler_shapes(
+                &sep_label, &sep, &in_label, &inner,
+            ));
+        }
+    }
+    let total = all.len();
+    // Each shape runs twice (whole and byte by byte): a thinner sample than on
+    // the raw redactor keeps the run short.
+    let sampled = shapes::sample(all, 20);
+    assert!(total >= 10_000, "only {total} shapes in the product");
+    assert!(sampled.len() >= 300, "only {} sampled", sampled.len());
+    assert_shapes_delivered_redacted(&sampled);
+}
+
+#[test]
+fn the_same_filler_in_both_roles_is_redacted_on_the_delivery_path() {
+    // A thin slice of the diagonal; the redactor test runs all of it.
+    let mut all = Vec::new();
+    for (label, f) in shapes::secret_fillers() {
+        all.extend(shapes::separator_and_secret_filler_shapes(
+            &label, &f, &label, &f,
+        ));
+    }
+    let sampled = shapes::sample(all, 4);
+    assert!(sampled.len() >= 200, "only {} sampled", sampled.len());
+    assert_shapes_delivered_redacted(&sampled);
+}
+
+#[test]
+fn ordinary_lines_with_a_hidden_separator_and_a_hidden_character_inside_a_word_are_delivered_intact_minus_the_filler(
+) {
+    let mut failures = Vec::new();
+    for (_, sep) in shapes::separators() {
+        for (_, inner) in shapes::secret_fillers() {
+            for line in shapes::ordinary_two_role_filler_lines(&sep, &inner) {
+                let expected = shapes::without_filler(&line);
+                for bytewise in [false, true] {
+                    let out = deliver_one(&line, bytewise);
+                    if out.text != expected || !out.redactions.is_empty() {
+                        failures.push(format!(
+                            "input {line:?} -> {:?} ({:?}), expected {expected:?}",
+                            out.text, out.redactions
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ordinary text was altered:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn a_credential_past_many_hidden_runs_on_its_line_is_delivered_redacted_whole() {
+    let all: Vec<shapes::Shape> = shapes::secret_fillers()
+        .iter()
+        .flat_map(|(_, f)| shapes::credential_after_many_hidden_runs(f))
+        .collect();
+    assert_shapes_delivered_redacted(&all);
+}
+
+#[test]
+fn a_hidden_separator_and_a_hidden_secret_character_both_past_many_hidden_runs_are_delivered_redacted_whole(
+) {
+    let all: Vec<shapes::Shape> = shapes::secret_fillers()
+        .iter()
+        .flat_map(|(_, f)| shapes::separator_after_many_hidden_runs(f))
+        .collect();
+    assert_shapes_delivered_redacted(&all);
+}
+
+// ───────────────────── curl: escaped blanks and quoted metacharacters ────────
+
+#[test]
+fn a_backslash_escaped_blank_in_a_bare_curl_password_does_not_end_the_password_on_the_delivery_path(
+) {
+    let all = shapes::curl_escaped_blank_shapes();
+    assert!(all.len() >= 10);
+    assert_shapes_delivered_redacted(&all);
+}
+
+#[test]
+fn a_curl_password_ending_in_an_even_run_of_backslashes_ends_there_and_the_url_stays_readable_on_the_delivery_path(
+) {
+    for s in shapes::curl_even_backslash_shapes() {
+        for bytewise in [false, true] {
+            let out = deliver_one(&s.line, bytewise);
+            assert_eq!(
+                shapes::verdict(&s, &out.text, out.redactions.len()),
+                None,
+                "[{}] {:?} (bytewise: {bytewise})",
+                s.name,
+                s.line
+            );
+            assert!(
+                out.text.ends_with(shapes::KEPT_AFTER_EVEN_BACKSLASHES),
+                "[{}] the text after the password was swallowed: {:?} -> {:?}",
+                s.name,
+                s.line,
+                out.text
+            );
+        }
+    }
+}
+
+#[test]
+fn a_quoted_or_escaped_ampersand_semicolon_or_pipe_before_u_does_not_hide_the_curl_credential_on_the_delivery_path(
+) {
+    // Includes the multi-line JSON body: its rows reach the redactor as
+    // separate lines of one delivery.
+    let all = shapes::curl_metacharacter_shapes();
+    assert!(all.len() >= 12);
+    assert_shapes_delivered_redacted(&all);
+}
+
+#[test]
+fn after_a_real_command_break_another_commands_u_flag_is_not_curls_on_the_delivery_path() {
+    for line in shapes::after_a_real_break_lines() {
+        for bytewise in [false, true] {
+            let out = deliver_one(&line, bytewise);
+            assert_eq!(out.text, line, "(bytewise: {bytewise})");
+            assert!(
+                out.redactions.is_empty(),
+                "{line:?} reported {:?}",
+                out.redactions
+            );
+        }
+    }
+}
+
+// ───────────────────── curl over several rows ────────────────────────────────
+
+#[test]
+fn a_curl_flag_on_the_row_after_a_trailing_backslash_is_redacted_whole_and_byte_by_byte() {
+    let all = shapes::curl_continuation_shapes();
+    assert!(all.len() >= 8);
+    assert_shapes_delivered_redacted(&all);
+    assert_shapes_delivered_redacted(&shapes::curl_value_on_next_row_shapes());
+}
+
+#[test]
+fn the_rows_of_a_continued_curl_command_fed_as_separate_lines_are_redacted() {
+    for s in shapes::curl_continuation_shapes() {
+        let rows: Vec<&str> = s.line.split('\n').collect();
+        let out = deliver_lines(&rows);
+        assert_eq!(
+            shapes::verdict(&s, &out.text, out.redactions.len()),
+            None,
+            "[{}] rows {rows:?}",
+            s.name
+        );
+    }
+}
+
+/// Every row fed and delivered on its own through one rig (one assembler and
+/// one redactor), as separate deliveries are. The texts are joined with `\n`.
+fn deliver_rows_in_turn(rows: &[&str], bytewise: bool) -> (Vec<String>, usize) {
+    let mut rig = Rig::new();
+    let mut texts = Vec::new();
+    let mut redactions = 0;
+    for row in rows {
+        if bytewise {
+            for byte in row.as_bytes() {
+                rig.feed(std::slice::from_ref(byte));
+            }
+            rig.feed(b"\n");
+        } else {
+            rig.feed_lines(&[row]);
+        }
+        let out = rig.deliver();
+        redactions += out.redactions.len();
+        texts.push(out.text);
+    }
+    (texts, redactions)
+}
+
+#[test]
+fn a_curl_flag_in_the_next_delivery_after_a_row_ending_in_a_backslash_is_redacted_on_the_delivery_path(
+) {
+    let mut failures = Vec::new();
+    for s in shapes::curl_continuation_shapes() {
+        let rows: Vec<&str> = s.line.split('\n').collect();
+        for bytewise in [false, true] {
+            let (texts, redactions) = deliver_rows_in_turn(&rows, bytewise);
+            if let Some(why) = shapes::verdict(&s, &texts.join("\n"), redactions) {
+                failures.push(format!(
+                    "[{}] rows {rows:?} (bytewise: {bytewise}): {why}",
+                    s.name
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "leaked:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn a_curl_flag_opening_the_next_delivery_is_redacted_and_the_url_after_it_stays_readable_on_the_delivery_path(
+) {
+    let pw = ["Hun", "ter2", "Xyz9"].concat();
+    let mut rig = Rig::new();
+    rig.feed_lines(&["curl -s https://h/x \\"]);
+    let first = rig.deliver();
+    rig.feed_lines(&[format!("  -u admin:{pw} https://h/y")]);
+    let second = rig.deliver();
+    assert!(
+        first.text.contains("curl -s https://h/x"),
+        "{:?}",
+        first.text
+    );
+    assert!(first.redactions.is_empty());
+    assert!(!second.text.contains(&pw[3..]), "{:?}", second.text);
+    assert!(second.text.ends_with(" https://h/y"), "{:?}", second.text);
+    assert_eq!(second.redactions.len(), 1, "{:?}", second.text);
+}
+
+#[test]
+fn the_value_of_a_curl_flag_on_the_next_deliverys_first_row_is_redacted_on_the_delivery_path() {
+    // `-u \` ends one delivery and the credential opens the next.
+    let mut failures = Vec::new();
+    for s in shapes::curl_value_on_next_row_shapes() {
+        let rows: Vec<&str> = s.line.split('\n').collect();
+        for bytewise in [false, true] {
+            let (texts, redactions) = deliver_rows_in_turn(&rows, bytewise);
+            if let Some(why) = shapes::verdict(&s, &texts.join("\n"), redactions) {
+                failures.push(format!(
+                    "[{}] rows {rows:?} (bytewise: {bytewise}): {why}",
+                    s.name
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "leaked:\n{}", failures.join("\n"));
+}
+
+#[test]
+fn a_continuation_that_has_completed_leaves_later_deliveries_alone() {
+    let cases: [&[&str]; 4] = [
+        &["curl \\", "-s https://h/x", "ls -u foo:bar"],
+        &[
+            "curl -s \\",
+            "  -H 'X: 1' \\",
+            "  https://h/x",
+            "ls -u foo:bar",
+        ],
+        &["curl \\", "-s https://h/x", "echo done", "ls -u foo:bar"],
+        &["echo hi", "ls -u foo:bar"],
+    ];
+    for rows in cases {
+        for bytewise in [false, true] {
+            let (texts, redactions) = deliver_rows_in_turn(rows, bytewise);
+            assert_eq!(texts.last().unwrap(), "ls -u foo:bar", "rows {rows:?}");
+            assert_eq!(redactions, 0, "rows {rows:?} -> {texts:?}");
+        }
+    }
+}
+
+#[test]
+fn a_delivery_ending_in_a_backslash_that_is_not_curl_carries_nothing_to_the_next_delivery() {
+    for first in ["echo hi \\", "ls -l \\"] {
+        for next in ["ls -u foo:bar", "-u foo:bar", "sort -u a:b"] {
+            for bytewise in [false, true] {
+                let (texts, redactions) = deliver_rows_in_turn(&[first, next], bytewise);
+                assert_eq!(texts, vec![first.to_string(), next.to_string()]);
+                assert_eq!(redactions, 0, "after {first:?}: {next:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_completed_continuation_still_redacts_its_own_credential_and_then_forgets_it_on_the_delivery_path(
+) {
+    let pw = ["Hun", "ter2", "Xyz9"].concat();
+    let rows = [
+        "curl -s \\".to_string(),
+        format!("-u admin:{pw} https://h/x"),
+        "ls -u foo:bar".to_string(),
+    ];
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let (texts, _) = deliver_rows_in_turn(&rows, false);
+    assert_eq!(texts[0], "curl -s \\");
+    assert!(!texts[1].contains(&pw[3..]), "{:?}", texts[1]);
+    assert!(texts[1].contains("[redacted: "), "{:?}", texts[1]);
+    assert_eq!(texts[2], "ls -u foo:bar");
+}
+
+// ───────────── review round 3: many runs, two readings across rows, quoting ──────
+
+/// Each shape fed whole and byte by byte as one chunk of rows, then as separate
+/// lines of one delivery, then one delivery per row.
+fn assert_rows_delivered_redacted_every_way(all: &[shapes::Shape]) {
+    assert_shapes_delivered_redacted(all);
+    let mut failures = Vec::new();
+    for s in all {
+        let rows: Vec<&str> = s.line.split('\n').collect();
+        let out = deliver_lines(&rows);
+        if let Some(why) = shapes::verdict(s, &out.text, out.redactions.len()) {
+            failures.push(format!("[{}] rows as lines of one delivery: {why}", s.name));
+        }
+        for bytewise in [false, true] {
+            let (texts, redactions) = deliver_rows_in_turn(&rows, bytewise);
+            if let Some(why) = shapes::verdict(s, &texts.join("\n"), redactions) {
+                failures.push(format!(
+                    "[{}] one delivery per row (bytewise: {bytewise}): {why}",
+                    s.name
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "leaked on the delivery path:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn a_credential_among_more_than_eight_hidden_runs_is_delivered_redacted_whole_before_or_after_the_padding(
+) {
+    let all = shapes::credential_among_many_hidden_runs_shapes();
+    assert!(all.len() >= 10, "only {} shapes", all.len());
+    assert_shapes_delivered_redacted(&all);
+}
+
+#[test]
+fn a_continued_curl_with_hidden_runs_on_both_rows_is_delivered_redacted_in_every_reading() {
+    let all = shapes::continued_curl_with_hidden_runs_on_both_rows();
+    assert_rows_delivered_redacted_every_way(&all);
+}
+
+#[test]
+fn a_dollar_quoted_string_with_an_escaped_quote_before_u_does_not_hide_the_curl_credential_on_the_delivery_path(
+) {
+    let all = shapes::dollar_quote_shapes();
+    assert_rows_delivered_redacted_every_way(&all);
+}
+
+#[test]
+fn a_curl_password_continued_onto_the_next_row_is_delivered_redacted_whole_quoted_or_not() {
+    let all = shapes::credential_continued_onto_the_next_row_shapes();
+    assert_rows_delivered_redacted_every_way(&all);
+}
+
+#[test]
+fn several_continuations_in_a_row_before_the_curl_value_are_followed_on_the_delivery_path() {
+    let all = shapes::repeated_continuations_before_the_value_shapes();
+    assert_rows_delivered_redacted_every_way(&all);
+}
+
+#[test]
+fn an_unterminated_double_quoted_curl_password_continued_by_a_backslash_is_delivered_redacted_whole(
+) {
+    let all = shapes::unterminated_double_quote_continuation_shapes();
+    assert_rows_delivered_redacted_every_way(&all);
+}
+
+#[test]
+fn a_curl_row_the_assembler_clipped_continues_into_the_next_row_in_the_same_delivery_and_the_next_one(
+) {
+    let all = shapes::rows_the_assembler_clips_shapes();
+    for s in &all {
+        // The first row really is clipped by the assembler.
+        let first = s.line.split('\n').next().unwrap();
+        assert!(first.chars().count() > MAX_LINE_COLUMNS, "[{}]", s.name);
+        let out = deliver_one(first, false);
+        assert!(
+            out.text.ends_with('…') && out.text.chars().count() <= MAX_LINE_COLUMNS,
+            "[{}] the row was not clipped: {} chars",
+            s.name,
+            out.text.chars().count()
+        );
+    }
+    // Same delivery (whole and byte by byte), then one delivery per row.
+    assert_rows_delivered_redacted_every_way(&all);
+}
+
+#[test]
+fn a_flag_after_thousands_of_continued_rows_is_still_redacted_in_the_next_delivery() {
+    let s = shapes::credential_after_a_long_continued_curl();
+    let rows = shapes::long_continued_curl_rows();
+    assert_eq!(rows.len(), shapes::CARRIED_ROWS + 1);
+    for bytewise in [false, true] {
+        let mut rig = Rig::new();
+        if bytewise {
+            for row in &rows {
+                for byte in row.as_bytes() {
+                    rig.feed(std::slice::from_ref(byte));
+                }
+                rig.feed(b"\n");
+            }
+        } else {
+            rig.feed_lines(&rows);
+        }
+        let first = rig.deliver();
+        assert!(first.redactions.is_empty(), "{:?}", first.redactions);
+        rig.feed_lines(&[&s.line]);
+        let second = rig.deliver();
+        assert_eq!(
+            shapes::verdict(&s, &second.text, second.redactions.len()),
+            None,
+            "(bytewise: {bytewise}) {:?}",
+            s.line
+        );
+    }
+}
+
+/// `text` is delivered as it is, nothing redacted: whole, byte by byte, and one
+/// delivery per row.
+fn assert_delivered_untouched_every_way(name: &str, text: &str) {
+    let rows: Vec<&str> = text.split('\n').collect();
+    for bytewise in [false, true] {
+        let out = deliver_one(text, bytewise);
+        assert_eq!(out.text, text, "[{name}] (bytewise: {bytewise})");
+        assert!(
+            out.redactions.is_empty(),
+            "[{name}] reported {:?}",
+            out.redactions
+        );
+        let (texts, redactions) = deliver_rows_in_turn(&rows, bytewise);
+        assert_eq!(texts, rows, "[{name}] one delivery per row");
+        assert_eq!(redactions, 0, "[{name}] one delivery per row");
+    }
+}
+
+#[test]
+fn text_after_curl_with_an_unmatched_apostrophe_and_other_commands_u_flags_is_delivered_untouched()
+{
+    for (name, text) in shapes::curl_lookalike_negative_texts() {
+        assert_delivered_untouched_every_way(name, &text);
+    }
+}
+
+#[test]
+fn an_unmatched_double_quote_after_curl_is_an_ordinary_character_and_later_commands_are_delivered_untouched(
+) {
+    assert_delivered_untouched_every_way(
+        "curl with an unmatched double quote",
+        &shapes::unmatched_quote_negative_text(),
+    );
+}
+
+// ───────────── review round 4: the combination budget is per row group ───────────
+//
+// A program can emit about 130K non-ASCII cells (a few hundred KB of text) in
+// front of a credential in one delivery, and the assembler keeps up to 512K
+// cells and 8192 rows. The credential's hidden runs are read in every
+// combination whatever else the delivery carries.
+//
+// The padding here is as big as the assembler's caps leave room for. Plain ASCII
+// rows cannot get a delivery clearly past the old budget (512K cells is about
+// 512 KB of text), so they are covered by the raw-path tests in
+// `terminal_text_redaction.rs`.
+
+const DELIVERY_PADDINGS: [shapes::Padding; 3] = [
+    shapes::Padding::Hidden,
+    shapes::Padding::Emoji,
+    shapes::Padding::EmojiHidden,
+];
+
+/// Fails with every one of `failures` (one per line) if there are any.
+fn assert_no_failures(what: &str, failures: Vec<String>) {
+    assert!(
+        failures.is_empty(),
+        "{what}: {} failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// One delivery of `rows` (each with its newline) from a fresh rig. Every row
+/// must have been kept: a row the assembler dropped would make a test pass for
+/// nothing.
+fn deliver_all_rows(rows: &[String]) -> Out {
+    let out = deliver_lines(rows);
+    assert_eq!(out.lines_total, rows.len(), "the assembler dropped rows");
+    out
+}
+
+#[test]
+fn a_credential_after_150_rows_of_a_thousand_emoji_is_delivered_redacted() {
+    // 150 rows of 1000 four-byte characters: 600 KB, past the old budget.
+    let rows: Vec<String> = (0..150).map(|i| shapes::Padding::Emoji.row(i)).collect();
+    let credentials = shapes::credentials_with_several_hidden_runs();
+    let p = shapes::padded(
+        &credentials[..1],
+        shapes::Padding::Emoji,
+        &rows,
+        shapes::Place::After,
+    );
+    assert!(p.shape.line.len() > 600_000);
+    let out = deliver_all_rows(&p.rows());
+    assert_eq!(
+        p.verdict(&out.text, out.redactions.len()),
+        None,
+        "{} lines delivered",
+        out.lines_total
+    );
+}
+
+/// Every placement of the credential rows around padding of `kind`, ONE delivery:
+/// the headline repro alone, then all the credential rows at once.
+fn assert_padded_rows_delivered_redacted(kind: shapes::Padding) {
+    let rows = shapes::padding_rows(kind, shapes::DELIVERY_PADDING_BYTES);
+    let credentials = shapes::credentials_with_several_hidden_runs();
+    let mut failures = Vec::new();
+    for place in shapes::Place::ALL {
+        for group in [&credentials[..1], &credentials[..]] {
+            let p = shapes::padded(group, kind, &rows, place);
+            assert!(p.shape.line.len() > 600_000, "[{}] too small", p.shape.name);
+            let out = deliver_all_rows(&p.rows());
+            if let Some(why) = p.verdict(&out.text, out.redactions.len()) {
+                failures.push(format!("[{}] {why}", p.shape.name));
+            }
+        }
+    }
+    assert_no_failures("one delivery", failures);
+}
+
+#[test]
+fn a_credential_with_several_hidden_runs_is_delivered_redacted_around_rows_of_emoji() {
+    assert_padded_rows_delivered_redacted(shapes::Padding::Emoji);
+}
+
+#[test]
+fn a_credential_with_several_hidden_runs_is_delivered_redacted_around_rows_of_emoji_with_hidden_characters(
+) {
+    assert_padded_rows_delivered_redacted(shapes::Padding::EmojiHidden);
+}
+
+#[test]
+fn a_credential_with_several_hidden_runs_is_delivered_redacted_around_lines_with_hidden_characters()
+{
+    assert_padded_rows_delivered_redacted(shapes::Padding::Hidden);
+}
+
+/// The rounds one after another, each fed and delivered (one rig). The texts are
+/// joined with `\n`; the count is every redaction reported.
+fn deliver_rounds(rounds: &[Vec<String>]) -> (String, usize) {
+    let mut rig = Rig::new();
+    let mut texts = Vec::new();
+    let mut redactions = 0;
+    for round in rounds {
+        rig.feed_lines(round);
+        let out = rig.deliver();
+        assert_eq!(out.lines_total, round.len(), "the assembler dropped rows");
+        redactions += out.redactions.len();
+        texts.push(out.text);
+    }
+    (texts.join("\n"), redactions)
+}
+
+/// `kind` padding cut into deliveries of `round_bytes`, with the credential rows
+/// in a delivery of their own (`apart`) or riding along.
+fn assert_padded_deliveries_redacted(kind: shapes::Padding, round_bytes: usize, apart: bool) {
+    let rows = shapes::padding_rows(kind, shapes::PADDING_BYTES);
+    let credentials = shapes::credentials_with_several_hidden_runs();
+    let mut failures = Vec::new();
+    for place in shapes::Place::ALL {
+        let p = shapes::padded(&credentials, kind, &rows, place);
+        let rounds = p.rounds(round_bytes, apart);
+        assert!(rounds.len() >= 2, "only {} deliveries", rounds.len());
+        if !apart {
+            for round in &rounds {
+                let bytes: usize = round.iter().map(|r| r.len() + 1).sum();
+                assert!(bytes > 600_000, "a delivery is too small");
+            }
+        }
+        let (text, redactions) = deliver_rounds(&rounds);
+        if let Some(why) = p.verdict(&text, redactions) {
+            failures.push(format!(
+                "[{}] {} deliveries (credentials apart: {apart}): {why}",
+                p.shape.name,
+                rounds.len()
+            ));
+        }
+    }
+    assert_no_failures("split deliveries", failures);
+}
+
+#[test]
+fn a_credential_delivered_after_the_padding_is_redacted_whatever_the_padding_is_made_of() {
+    for kind in DELIVERY_PADDINGS {
+        assert_padded_deliveries_redacted(kind, 200_000, true);
+    }
+}
+
+#[test]
+fn a_credential_delivered_with_more_than_half_a_megabyte_of_padding_is_redacted_when_the_padding_came_in_several_deliveries(
+) {
+    for kind in DELIVERY_PADDINGS {
+        assert_padded_deliveries_redacted(kind, 640_000, false);
+    }
+}
+
+#[test]
+fn a_credential_fed_byte_by_byte_after_padding_fed_in_one_chunk_is_delivered_redacted() {
+    let credentials = shapes::credentials_with_several_hidden_runs();
+    let mut failures = Vec::new();
+    for kind in DELIVERY_PADDINGS {
+        let rows = shapes::padding_rows(kind, shapes::DELIVERY_PADDING_BYTES);
+        for place in shapes::Place::ALL {
+            let p = shapes::padded(&credentials, kind, &rows, place);
+            let mut rig = Rig::new();
+            let feed_credentials = |rig: &mut Rig| {
+                for row in &p.credentials {
+                    for byte in row.as_bytes() {
+                        rig.feed(std::slice::from_ref(byte));
+                    }
+                    rig.feed(b"\n");
+                }
+            };
+            if place.before() {
+                feed_credentials(&mut rig);
+            }
+            // The padding in one feed.
+            rig.feed((p.padding.join("\n") + "\n").as_bytes());
+            if place.after() {
+                feed_credentials(&mut rig);
+            }
+            let out = rig.deliver();
+            assert_eq!(
+                out.lines_total,
+                p.rows().len(),
+                "the assembler dropped rows"
+            );
+            if let Some(why) = p.verdict(&out.text, out.redactions.len()) {
+                failures.push(format!(
+                    "[{}] credentials byte by byte: {why}",
+                    p.shape.name
+                ));
+            }
+        }
+    }
+    assert_no_failures("byte-by-byte credentials", failures);
+}
+
+/// A continued `curl` command whose two rows both hold several hidden runs,
+/// delivered next to padding of `kind` in the three ways the rows can fall.
+fn assert_continued_command_delivered_redacted_around_padding(kind: shapes::Padding) {
+    let rows = shapes::padding_rows(kind, shapes::DELIVERY_PADDING_BYTES);
+    let mut all = shapes::continued_curl_with_several_hidden_runs_shapes();
+    all.extend(shapes::continued_curl_with_hidden_runs_on_both_rows());
+    let mut failures = Vec::new();
+    for s in &all {
+        let (first, second) = s.line.split_once('\n').expect("two rows");
+        let mut padding_then_first = rows.clone();
+        padding_then_first.push(first.to_string());
+        let mut second_then_padding = vec![second.to_string()];
+        second_then_padding.extend(rows.iter().cloned());
+        let cases = [
+            (
+                "padding and row one, then row two",
+                vec![padding_then_first.clone(), vec![second.to_string()]],
+            ),
+            (
+                "row one, then row two and padding",
+                vec![vec![first.to_string()], second_then_padding.clone()],
+            ),
+            (
+                "padding and row one, then row two and padding",
+                vec![padding_then_first, second_then_padding],
+            ),
+        ];
+        for (what, rounds) in cases {
+            let (text, redactions) = deliver_rounds(&rounds);
+            if let Some(why) = shapes::verdict(s, &text, redactions) {
+                failures.push(format!("[{}] {what}: {why}", s.name));
+            }
+        }
+    }
+    assert_no_failures("continued command", failures);
+}
+
+#[test]
+fn a_continued_curl_delivered_in_two_deliveries_is_redacted_next_to_rows_of_emoji() {
+    assert_continued_command_delivered_redacted_around_padding(shapes::Padding::Emoji);
+}
+
+#[test]
+fn a_continued_curl_delivered_in_two_deliveries_is_redacted_next_to_lines_with_hidden_characters() {
+    assert_continued_command_delivered_redacted_around_padding(shapes::Padding::Hidden);
+}
+
+// ───────────── too much to read in every combination: fail closed ────────────────
+
+#[test]
+fn a_flood_of_keyword_lines_with_hidden_runs_is_delivered_redacted_on_every_line() {
+    // 600 KB of lines (under the assembler's 8192 rows), nine hidden runs each.
+    let all = shapes::flood_of_keyword_lines(600_000);
+    assert!(all.len() < 8000, "{} rows", all.len());
+    let lines: Vec<&str> = all.iter().map(|s| s.line.as_str()).collect();
+    let out = deliver_all_rows(&lines.iter().map(|l| l.to_string()).collect::<Vec<_>>());
+    assert_clean(&out.text, None, "flood of keyword lines");
+    let shown: Vec<&str> = out
+        .text
+        .split('\n')
+        .filter(|l| !l.starts_with("[… "))
+        .collect();
+    assert!(shown.len() >= 100, "only {} lines shown", shown.len());
+    let unmarked: Vec<&&str> = shown
+        .iter()
+        .filter(|l| !l.contains("[redacted: "))
+        .take(5)
+        .collect();
+    assert!(unmarked.is_empty(), "lines with no redaction: {unmarked:?}");
+    assert!(
+        out.redactions.len() >= shown.len(),
+        "{}",
+        out.redactions.len()
+    );
+}
+
+#[test]
+fn lines_with_hidden_runs_and_no_credential_keyword_are_delivered_untouched_whatever_their_number()
+{
+    let mut cases: Vec<(String, Vec<String>)> = DELIVERY_PADDINGS
+        .iter()
+        .map(|kind| {
+            (
+                kind.label().to_string(),
+                shapes::padding_rows(*kind, shapes::DELIVERY_PADDING_BYTES),
+            )
+        })
+        .collect();
+    cases.push((
+        "rows with many hidden runs each".into(),
+        shapes::benign_rows_with_hidden_runs(600_000),
+    ));
+    for (name, rows) in cases {
+        let out = deliver_all_rows(&rows);
+        assert!(
+            out.redactions.is_empty(),
+            "[{name}] reported {:?}",
+            out.redactions
+        );
+        assert!(
+            !out.text.contains("[redacted: "),
+            "[{name}] redacted something"
+        );
+    }
+}
+
+// ───────────── review round 5: shapes the first version of the round 4 fix missed ─
+//
+// The same shapes as in `terminal_text_redaction.rs` (rows of one curl command
+// joined by an open quote, anchored tokens in a line with no credential word,
+// credential names only a hidden-run reading sees, personal data behind many rows
+// with hidden runs), through bytes -> assembler -> `deliver`. z is U+200B.
+
+fn rows_of(s: &shapes::Shape) -> Vec<String> {
+    s.line.split('\n').map(str::to_string).collect()
+}
+
+/// `rows` fed whole (`bytewise` false) or a byte at a time, then ONE delivery
+/// from a fresh rig. No row may have been dropped.
+fn deliver_rows_in_one_delivery(rows: &[String], bytewise: bool) -> Out {
+    let mut rig = Rig::new();
+    for row in rows {
+        if bytewise {
+            for byte in row.as_bytes() {
+                rig.feed(std::slice::from_ref(byte));
+            }
+            rig.feed(b"\n");
+        } else {
+            rig.feed_lines(std::slice::from_ref(row));
+        }
+    }
+    let out = rig.deliver();
+    assert_eq!(out.lines_total, rows.len(), "the assembler dropped rows");
+    out
+}
+
+#[test]
+fn a_curl_command_continued_by_an_open_quote_hides_nothing_with_hidden_runs_in_any_row_or_role_on_the_delivery_path(
+) {
+    let all = shapes::continued_curl_joined_by_an_open_quote_shapes();
+    assert_eq!(all.len(), 6);
+    // As one chunk (whole and byte by byte) and as the lines of one delivery.
+    assert_shapes_delivered_redacted(&all);
+    let mut failures = Vec::new();
+    for s in &all {
+        for bytewise in [false, true] {
+            let out = deliver_rows_in_one_delivery(&rows_of(s), bytewise);
+            if let Some(why) = shapes::verdict(s, &out.text, out.redactions.len()) {
+                failures.push(format!(
+                    "[{}] rows of one delivery (bytewise: {bytewise}): {why}",
+                    s.name
+                ));
+            }
+        }
+    }
+    assert_no_failures("open-quote curl in one delivery", failures);
+}
+
+/// Each open-quote command next to `kind` padding (as much as the assembler's
+/// caps leave room for) in three placements: command then padding, padding then
+/// command, and the command at both ends of the padding (a delivery keeps only
+/// its first 50 and last 100 lines, so a command in the middle of the padding
+/// would not be in the text to check). Fed as one delivery in lines, as one
+/// delivery with the command a byte at a time. (A command that an open quote
+/// carries from one delivery to the next is a known gap, see the module docs of
+/// `redact.rs`.)
+fn assert_open_quote_curl_delivered_redacted_around_padding(kind: shapes::Padding) {
+    let padding = shapes::padding_rows(kind, shapes::DELIVERY_PADDING_BYTES);
+    let placements = [
+        ("command, then padding", true, false),
+        ("padding, then command", false, true),
+        ("the command at both ends of the padding", true, true),
+    ];
+    let mut failures = Vec::new();
+    for s in &shapes::continued_curl_joined_by_an_open_quote_shapes() {
+        let command = rows_of(s);
+        for (what, command_first, command_last) in placements {
+            let label = format!("[{}] {what} ({})", s.name, kind.label());
+            let mut rows = Vec::new();
+            if command_first {
+                rows.extend(command.iter().cloned());
+            }
+            rows.extend(padding.iter().cloned());
+            if command_last {
+                rows.extend(command.iter().cloned());
+            }
+            let out = deliver_all_rows(&rows);
+            if let Some(why) = shapes::verdict(s, &out.text, out.redactions.len()) {
+                failures.push(format!("{label}, one delivery: {why}"));
+            }
+
+            // The padding in one feed, the command a byte at a time.
+            let mut rig = Rig::new();
+            let feed_command = |rig: &mut Rig| {
+                for row in &command {
+                    for byte in row.as_bytes() {
+                        rig.feed(std::slice::from_ref(byte));
+                    }
+                    rig.feed(b"\n");
+                }
+            };
+            if command_first {
+                feed_command(&mut rig);
+            }
+            rig.feed((padding.join("\n") + "\n").as_bytes());
+            if command_last {
+                feed_command(&mut rig);
+            }
+            let out = rig.deliver();
+            assert_eq!(out.lines_total, rows.len(), "the assembler dropped rows");
+            if let Some(why) = shapes::verdict(s, &out.text, out.redactions.len()) {
+                failures.push(format!("{label}, command byte by byte: {why}"));
+            }
+        }
+    }
+    assert_no_failures("open-quote curl around padding", failures);
+}
+
+#[test]
+fn a_curl_command_continued_by_an_open_quote_is_delivered_redacted_around_lines_with_hidden_runs() {
+    assert_open_quote_curl_delivered_redacted_around_padding(shapes::Padding::Hidden);
+}
+
+#[test]
+fn a_curl_command_continued_by_an_open_quote_is_delivered_redacted_around_rows_of_emoji() {
+    assert_open_quote_curl_delivered_redacted_around_padding(shapes::Padding::Emoji);
+}
+
+#[test]
+fn an_anchored_token_with_hidden_runs_before_and_inside_it_is_delivered_redacted_whole() {
+    let all = shapes::anchored_tokens_with_a_hidden_run_before_and_inside();
+    assert_eq!(all.len(), 4);
+    assert_rows_delivered_redacted_every_way(&all);
+}
+
+#[test]
+fn an_anchored_token_with_hidden_runs_is_delivered_redacted_around_padding_of_every_kind() {
+    let group = shapes::anchored_tokens_with_a_hidden_run_before_and_inside();
+    let mut failures = Vec::new();
+    for kind in DELIVERY_PADDINGS {
+        let rows = shapes::padding_rows(kind, shapes::DELIVERY_PADDING_BYTES);
+        for place in shapes::Place::ALL {
+            let p = shapes::padded(&group, kind, &rows, place);
+            let out = deliver_all_rows(&p.rows());
+            if let Some(why) = p.verdict(&out.text, out.redactions.len()) {
+                failures.push(format!("[{}] {why}", p.shape.name));
+            }
+        }
+    }
+    assert_no_failures("anchored tokens around padding", failures);
+}
+
+#[test]
+fn a_credential_name_that_only_a_hidden_run_reading_sees_still_redacts_its_value_on_the_delivery_path(
+) {
+    // --auth, --dsn and --credential, each with a hidden run inside the name.
+    let all = shapes::credential_names_split_by_a_hidden_run();
+    assert_eq!(all.len(), 3);
+    assert_rows_delivered_redacted_every_way(&all);
+}
+
+#[test]
+fn other_credential_names_split_by_a_hidden_run_still_redact_their_values_on_the_delivery_path() {
+    // Beyond the review's list: --password, API_KEY=, --token and --secret.
+    let all = shapes::more_credential_names_split_by_a_hidden_run();
+    assert_rows_delivered_redacted_every_way(&all);
+}
+
+/// Each of `all` (rows joined with `\n`) as one delivery, fed in lines and a
+/// byte at a time.
+fn assert_rows_of_personal_data_delivered_redacted(all: &[shapes::Shape]) {
+    let mut failures = Vec::new();
+    for s in all {
+        let rows = rows_of(s);
+        for bytewise in [false, true] {
+            let out = deliver_rows_in_one_delivery(&rows, bytewise);
+            if let Some(why) = shapes::verdict(s, &out.text, out.redactions.len()) {
+                failures.push(format!("[{}] (bytewise: {bytewise}): {why}", s.name));
+            }
+        }
+    }
+    assert_no_failures("personal data behind many rows", failures);
+}
+
+#[test]
+fn an_ssn_with_hidden_runs_after_700_rows_with_two_hidden_runs_each_is_delivered_redacted() {
+    let s = shapes::ssn_behind_rows_with_two_hidden_runs(700);
+    assert_eq!(rows_of(&s).len(), 701);
+    assert_rows_of_personal_data_delivered_redacted(&[s]);
+}
+
+#[test]
+fn a_labelled_birth_date_with_hidden_runs_after_700_rows_with_two_hidden_runs_each_is_delivered_redacted(
+) {
+    let s = shapes::birth_date_behind_rows_with_two_hidden_runs(700);
+    assert_eq!(rows_of(&s).len(), 701);
+    assert_rows_of_personal_data_delivered_redacted(&[s]);
+}
+
+#[test]
+fn an_ssn_with_hidden_runs_at_the_end_of_a_line_of_hundreds_of_hidden_runs_is_delivered_redacted() {
+    // 900 `a<z>b<z>` pairs and the SSN: one line, under the assembler's line width.
+    let s = shapes::ssn_at_the_end_of_one_line_of_hidden_runs(900);
+    assert!(!s.line.contains('\n') && s.line.chars().count() < MAX_LINE_COLUMNS);
+    assert_rows_of_personal_data_delivered_redacted(&[s]);
+}
+
+/// `lines` come back untouched: nothing redacted, and the text is what was
+/// fed, minus the hidden characters the delivery always strips
+/// (`shapes::without_filler`).
+fn assert_benign_lines_delivered_untouched(name: &str, lines: &[String]) {
+    let expected: Vec<String> = lines.iter().map(|l| shapes::without_filler(l)).collect();
+    let (head, tail) = (DeliveryPolicy::HEAD, DeliveryPolicy::TAIL);
+    // The delivery cap applies to this many lines: the first HEAD and the last
+    // TAIL lines come back around a marker. Redaction sees every line first, so
+    // nothing redacted anywhere shows in `redactions`.
+    assert!(
+        expected.len() > head + tail,
+        "[{name}] is under the line cap"
+    );
+    for bytewise in [false, true] {
+        let out = deliver_rows_in_one_delivery(lines, bytewise);
+        assert!(
+            out.redactions.is_empty(),
+            "[{name}] (bytewise: {bytewise}) reported {} redactions, first {:?}",
+            out.redactions.len(),
+            out.redactions.first()
+        );
+        assert!(
+            !out.text.contains("[redacted: "),
+            "[{name}] (bytewise: {bytewise}) redacted something"
+        );
+        let omitted = expected.len() - head - tail;
+        assert_eq!(out.omitted, omitted, "[{name}] (bytewise: {bytewise})");
+        let shown: Vec<&str> = out.text.split('\n').collect();
+        assert_eq!(
+            shown.len(),
+            head + 1 + tail,
+            "[{name}] (bytewise: {bytewise})"
+        );
+        assert_eq!(&shown[..head], &expected[..head], "[{name}] head");
+        assert_eq!(
+            shown[head],
+            format!("[… {omitted} lines omitted …]"),
+            "[{name}] marker"
+        );
+        assert_eq!(
+            &shown[head + 1..],
+            &expected[expected.len() - tail..],
+            "[{name}] tail"
+        );
+    }
+    // One delivery per row: no cap applies, every row comes back as it is.
+    let rows: Vec<&str> = lines.iter().map(String::as_str).collect();
+    for bytewise in [false, true] {
+        let (texts, redactions) = deliver_rows_in_turn(&rows, bytewise);
+        assert_eq!(redactions, 0, "[{name}] one delivery per row");
+        let changed: Vec<(&String, &String)> = texts
+            .iter()
+            .zip(&expected)
+            .filter(|(got, want)| got != want)
+            .take(3)
+            .collect();
+        assert!(
+            texts.len() == expected.len() && changed.is_empty(),
+            "[{name}] (bytewise: {bytewise}) one delivery per row: {} texts, first changed {changed:?}",
+            texts.len()
+        );
+    }
+}
+
+#[test]
+fn lines_with_emoji_presentation_selectors_are_delivered_untouched_however_many_there_are() {
+    for (name, lines) in shapes::benign_lines_that_must_not_be_redacted() {
+        assert_benign_lines_delivered_untouched(name, &lines);
+    }
+}
