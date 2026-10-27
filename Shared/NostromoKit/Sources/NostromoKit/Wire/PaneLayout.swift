@@ -850,9 +850,17 @@ public struct DocumentPayload: Decodable, Equatable {
         let c = try d.container(keyedBy: CodingKeys.self)
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
         banner = (try? c.decodeIfPresent(DocBanner.self, forKey: .banner)) ?? nil
-        blocks = (try? c.decode([MdBlock].self, forKey: .blocks)) ?? []
-        actions = (try? c.decode([DocAction].self, forKey: .actions)) ?? []
+        // Element-wise: one malformed block or action is skipped, never the whole array.
+        blocks = ((try? c.decode([LossyElement<MdBlock>].self, forKey: .blocks)) ?? []).compactMap(\.value)
+        actions = ((try? c.decode([LossyElement<DocAction>].self, forKey: .actions)) ?? [])
+            .compactMap(\.value).filter { !$0.id.isEmpty && !$0.label.isEmpty }
     }
+}
+
+/// One array element that decodes to nil instead of failing the whole array.
+private struct LossyElement<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws { value = try? T(from: decoder) }
 }
 
 /// What a client that cannot attach to a terminal shows for a terminal pane: the pane's `kind` is

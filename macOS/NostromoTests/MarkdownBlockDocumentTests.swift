@@ -326,6 +326,29 @@ final class MarkdownBlockDocumentTests: XCTestCase {
         }
     }
 
+    // MARK: DocumentLinkPolicy action-id allowlist
+
+    func testBodyLinksAcceptTheReportAndVerdictVocabulary() {
+        for id in ["report.prev", "report.next", "report.today", "report.version:2",
+                   "verdict:2026-10-26:1:2:useful"] {
+            XCTAssertEqual(DocumentLinkPolicy.disposition(for: "nostromo-action:\(id)"), .action(id), id)
+        }
+    }
+
+    func testBodyLinksWithAnyOtherActionIdAreIgnored() {
+        for id in ["setup.confirm", "setup.confirm_run_now", "setup.start", "delete_everything", "report.", "verdict:",
+                   "REPORT.prev", "xreport.prev", "report.regenerate"] {
+            XCTAssertEqual(DocumentLinkPolicy.disposition(for: "nostromo-action:\(id)"), .ignore, id)
+        }
+    }
+
+    func testASetupConfirmBodyLinkIsStrippedToInertText() {
+        let doc = DocumentBlockDocument(payload: linkPayload("nostromo-action:setup.confirm", text: "Confirm"))
+        XCTAssertNil(linkAttribute(in: doc, at: "Confirm"), "a body link must not carry a setup action")
+        XCTAssertTrue(doc.attributedString.string.contains("before Confirm after"))
+        XCTAssertTrue(doc.actionLinks.isEmpty)
+    }
+
     // MARK: DocumentLinkPolicy.disposition
 
     func testDispositionForEachScheme() {

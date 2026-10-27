@@ -965,6 +965,29 @@ final class PaneContentWireEqualityTests: XCTestCase {
         XCTAssertTrue(d.actions.isEmpty)
     }
 
+    func testADocumentShapedFrameOfAnUnrecognisedKindLandsInUnknown() throws {
+        let wire = try decode("""
+        {"kind": "document_v2", "title": "Report", "banner": {"level": "info", "text": "b"},
+         "blocks": [{"kind": "paragraph", "spans": [{"kind": "text", "text": "Body."}]}],
+         "actions": [{"id": "report.prev", "label": "Previous"}]}
+        """)
+        guard case .unknown = wire else { return XCTFail("Expected .unknown, got \(wire)") }
+    }
+
+    func testDocumentDecodingSkipsOneBadActionOrBlockWithoutDroppingTheRest() throws {
+        let wire = try decode("""
+        {"kind": "document", "title": "T",
+         "blocks": [{"kind": "paragraph", "spans": [{"kind": "text", "text": "A"}]}, "garbage", 7,
+                    {"kind": "paragraph", "spans": [{"kind": "text", "text": "B"}]}],
+         "actions": [{"id": "report.prev", "label": "Previous"}, "garbage", null,
+                     {"id": "", "label": "No id"}, {"id": "report.next", "label": ""}, {"label": "Missing id"},
+                     {"id": "report.next", "label": "Next"}]}
+        """)
+        guard case .document(let d) = wire else { return XCTFail("Expected .document, got \(wire)") }
+        XCTAssertEqual(d.blocks, [.paragraph([.text("A")]), .paragraph([.text("B")])])
+        XCTAssertEqual(d.actions.map(\.id), ["report.prev", "report.next"])
+    }
+
     func testDocumentBannerWithUnknownLevelDecodesAsInfo() throws {
         let wire = try decode(#"{"kind": "document", "title": "T", "banner": {"level": "loud", "text": "x"}, "blocks": []}"#)
         guard case .document(let d) = wire else { return XCTFail("Expected .document, got \(wire)") }
