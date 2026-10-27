@@ -170,3 +170,14 @@ jobs:
           path: ${{ runner.temp }}/launch-smoke-artifacts
           if-no-files-found: warn
           retention-days: 14
+
+      # A FAIL verdict (exit 1) must turn the check red, not just annotate it:
+      # merge tooling reads the check's conclusion, and an annotation on a
+      # green check let a non-compiling app merge (PR #345). INCONCLUSIVE (2)
+      # and any other code stay green-with-warning: the check is advisory only
+      # for flaky launch problems. Last, so diagnostics are uploaded first.
+      - name: Fail the check on a FAIL verdict
+        if: always() && steps.smoke.outputs.exit_code == '1'
+        run: |
+          echo "::error::launch smoke FAIL: failing the check (INCONCLUSIVE stays advisory)"
+          exit 1
