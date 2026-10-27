@@ -57,6 +57,9 @@ struct ChatTurn: Identifiable {
     /// match `.text(let s)` stay as they are; use `removeLeadingBlocks` to drop blocks from
     /// the front, which keeps the indices honest.
     var subagentTextParents: [Int: String] = [:]
+    /// What opened this turn when the user did not type it: output from a terminal the agent
+    /// follows, or a follow notice (`TurnOrigin.swift`). Such a turn shows blocks, not a bubble.
+    var origin: TurnOriginWire? = nil
 
     /// Character counts for a turn whose text has been compressed away.
     struct TruncatedLengths {
@@ -90,8 +93,10 @@ struct ChatTurn: Identifiable {
          daemonId: String? = nil,
          epoch: Int = 0,
          marker: Marker? = nil,
-         subagentTextParents: [Int: String] = [:]) {
+         subagentTextParents: [Int: String] = [:],
+         origin: TurnOriginWire? = nil) {
         self.subagentTextParents = subagentTextParents
+        self.origin       = origin
         self.id           = id
         self.userInput    = userInput
         self.timestamp    = timestamp

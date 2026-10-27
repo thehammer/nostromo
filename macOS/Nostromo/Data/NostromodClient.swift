@@ -522,8 +522,24 @@ struct DaemonTurn: Decodable {
     let timestamp: String?
     let blocks: [DaemonTurnBlock]
     let isComplete: Bool
+    /// What opened the turn when the user did not type it (terminal output, a follow notice).
+    /// Absent from an older daemon's wire; an origin kind this app does not know decodes to nil.
+    var origin: TurnOriginWire? = nil
     enum CodingKeys: String, CodingKey {
-        case id, userInput = "user_input", timestamp, blocks, isComplete = "is_complete"
+        case id, userInput = "user_input", timestamp, blocks, isComplete = "is_complete", origin
+    }
+}
+
+extension DaemonTurn {
+    // In an extension, so the memberwise initializer (`origin` optional) stays.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try c.decode(String.self, forKey: .id),
+                  userInput: try c.decode(String.self, forKey: .userInput),
+                  timestamp: try c.decodeIfPresent(String.self, forKey: .timestamp),
+                  blocks: try c.decode([DaemonTurnBlock].self, forKey: .blocks),
+                  isComplete: try c.decode(Bool.self, forKey: .isComplete),
+                  origin: (try? c.decodeIfPresent(TurnOriginWire.self, forKey: .origin)) ?? nil)
     }
 }
 
