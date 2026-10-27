@@ -20,7 +20,9 @@ use crate::data::work::untrusted::{
     cut_bytes, escape_id, fence, one_line, sanitize_block, unescape_id, NonceFence, MAX_ID_CHARS,
     MAX_LINE_CHARS, MAX_PATH_CHARS,
 };
-use crate::data::work::{agent_visible, SourceStatus, WorkDetail, WorkItem, WorkService, WorkSource};
+use crate::data::work::{
+    agent_visible, SourceStatus, WorkDetail, WorkItem, WorkService, WorkSource,
+};
 use crate::mcp::state::McpSharedState;
 
 /// Default and maximum page size of `teri.list_work_items`.

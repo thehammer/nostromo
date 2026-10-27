@@ -29,9 +29,9 @@ use nostromo::data::work::hub::{HubDeps, SourceUpdate, WorkHub};
 use nostromo::data::work::sentry::{
     detail_with, spawn_with, Clock, SentryConfig, FRESHNESS_WINDOW, MAX_HOLD, MAX_ISSUES_PER_QUERY,
 };
+use nostromo::data::work::WorkService;
 use nostromo::data::work::{SourceState, WorkDetail, WorkItem, WorkSource};
 use nostromo::ipc::protocol::ServerMsg;
-use nostromo::data::work::WorkService;
 use nostromo::mcp::tools::teri::{get_picks, get_work_item, list_work_items, publish_picks};
 use nostromo::mcp::McpSharedState;
 use serde_json::{json, Value};
@@ -2905,9 +2905,10 @@ async fn mount_detail(server: &MockServer, id: u32, issue: Value, event: Value) 
 async fn mount_list_of(server: &MockServer, ids: &[u32]) {
     Mock::given(method("GET"))
         .and(path("/api/0/organizations/acme/issues/"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            ids.iter().map(|id| issue(*id)).collect::<Vec<_>>(),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(ids.iter().map(|id| issue(*id)).collect::<Vec<_>>()),
+        )
         .mount(server)
         .await;
 }
@@ -3680,7 +3681,8 @@ fn listed_ids(result: &Value) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_work_items_leaves_out_sentry_issues_assigned_to_others_but_keeps_mine_and_unassigned() {
+async fn list_work_items_leaves_out_sentry_issues_assigned_to_others_but_keeps_mine_and_unassigned()
+{
     let (_fake, state, _keep, _env) = hub_with_mixed_assignees().await;
     let result = list_until_sentry(&state, 3).await;
 
@@ -3715,7 +3717,10 @@ async fn paging_the_list_never_counts_or_skips_over_hidden_issues() {
     let page = list_work_items(&state, &json!({"source": "sentry", "limit": 2}));
     assert_eq!(page["items"].as_array().unwrap().len(), 2);
     assert_eq!(page["total"], 3);
-    let rest = list_work_items(&state, &json!({"source": "sentry", "limit": 2, "offset": 2}));
+    let rest = list_work_items(
+        &state,
+        &json!({"source": "sentry", "limit": 2, "offset": 2}),
+    );
     assert_eq!(rest["items"].as_array().unwrap().len(), 1, "{rest}");
     assert_eq!(rest["total"], 3);
     assert!(rest.get("omitted").is_none());
@@ -3784,7 +3789,10 @@ async fn a_pick_of_a_hidden_issue_is_refused_like_an_unknown_id() {
     list_until_sentry(&state, 3).await;
 
     let hidden = publish_picks(&state, &pick_entries(&["sentry:1", "sentry:2", "sentry:4"]));
-    let unknown = publish_picks(&state, &pick_entries(&["sentry:1", "sentry:2", "sentry:999"]));
+    let unknown = publish_picks(
+        &state,
+        &pick_entries(&["sentry:1", "sentry:2", "sentry:999"]),
+    );
     assert_eq!(hidden["error"], "invalid_picks", "{hidden}");
     assert_eq!(unknown["error"], "invalid_picks", "{unknown}");
     assert_eq!(

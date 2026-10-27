@@ -902,17 +902,15 @@ async fn fetch_issues(
                         }
                         None => unreadable += 1,
                     },
-                    Role::Rows(bucket) => {
-                        match to_item(issue, repos, bucket) {
-                            Some(item) => {
-                                parsed += 1;
-                                if seen.insert(item.id.clone()) {
-                                    items.push(item);
-                                }
+                    Role::Rows(bucket) => match to_item(issue, repos, bucket) {
+                        Some(item) => {
+                            parsed += 1;
+                            if seen.insert(item.id.clone()) {
+                                items.push(item);
                             }
-                            None => unreadable += 1,
                         }
-                    }
+                        None => unreadable += 1,
+                    },
                 }
             }
             // A page of things that are not issues is a broken response, not "no issues".

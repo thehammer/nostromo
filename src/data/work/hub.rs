@@ -26,8 +26,8 @@ use crate::ipc::protocol::ServerMsg;
 use crate::ipc::SessionManager;
 
 use super::model::{
-    agent_visible, SendOutcome, SendPreview, SentMarker, SourceState, SourceStatus, WorkDetail, WorkError,
-    WorkItem, WorkSource,
+    agent_visible, SendOutcome, SendPreview, SentMarker, SourceState, SourceStatus, WorkDetail,
+    WorkError, WorkItem, WorkSource,
 };
 use super::picks::{
     self, PickEntry, PicksGenerator, PicksSessionHost, PicksStore, PublishError,
