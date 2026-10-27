@@ -389,8 +389,12 @@ final class TerminalDeliveryScrollSafetyTests: XCTestCase {
     /// above it.
     func testExpandingADeliveryInTheMiddleOfTheViewDoesNotMoveTheRowsAboveIt() {
         let (rig, delivery) = rigWithDeliveryAtIndex3()
-        rig.userScroll(to: rig.virtualizer.offset(of: 3) - 60)
+        rig.userScroll(to: rig.virtualizer.offset(of: 3))
         rig.followTail.setPinned(false, cause: .harness)
+        rig.settle()
+        // Measured heights have replaced the estimates by now: back up from where the delivery
+        // really is, so the end of the previous turn shows above it.
+        rig.userScroll(to: max(rig.clip.bounds.minY - 60, 0))
         rig.settle()
 
         var block: TerminalDeliveryBlockView?
@@ -403,8 +407,12 @@ final class TerminalDeliveryScrollSafetyTests: XCTestCase {
 
     func testCollapsingAnExpandedDeliveryInTheMiddleOfTheViewDoesNotMoveTheRowsAboveIt() {
         let (rig, delivery) = rigWithDeliveryAtIndex3()
-        rig.userScroll(to: rig.virtualizer.offset(of: 3) - 60)
+        rig.userScroll(to: rig.virtualizer.offset(of: 3))
         rig.followTail.setPinned(false, cause: .harness)
+        rig.settle()
+        // Measured heights have replaced the estimates by now: back up from where the delivery
+        // really is, so the end of the previous turn shows above it.
+        rig.userScroll(to: max(rig.clip.bounds.minY - 60, 0))
         rig.settle()
         toggleDelivery(rig, turn: delivery)
         rig.settle()
