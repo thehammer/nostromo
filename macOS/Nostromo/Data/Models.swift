@@ -901,6 +901,17 @@ struct PostureSnapshot {
     let agents:         [String: AgentSpend]
     /// Bishop's `stale_input` flag: its inputs are stale, so window numbers can't be trusted.
     var staleInput:     Bool = false
+    /// When Bishop wrote this snapshot (epoch seconds): the file's own `ts`, else its mtime.
+    /// nil means unknown, which is treated as stale.
+    var writtenAt:      TimeInterval? = nil
+
+    /// Bishop refreshes every 60 s; anything older than this is from a dead Bishop.
+    static let staleAfter: TimeInterval = 300
+
+    func isStale(now: TimeInterval) -> Bool {
+        guard let writtenAt else { return true }
+        return now - writtenAt > Self.staleAfter
+    }
 
     /// One 5h/7d window as shown on the status bar.
     struct StatusWindow: Equatable {
@@ -909,14 +920,15 @@ struct PostureSnapshot {
         let remaining: String
     }
 
-    /// 5h/7d windows for the status bar. Empty when Bishop's inputs are stale;
-    /// a window is omitted when absent or already reset. The real used
-    /// percentage is shown (not capped).
+    /// 5h/7d windows for the status bar. Empty when Bishop's inputs are stale or
+    /// the snapshot itself is older than `staleAfter`; a window is omitted when
+    /// absent or already reset. The real used percentage is shown (not capped),
+    /// floored so 99.6% never reads as 100%.
     func statusWindows(now: TimeInterval) -> [StatusWindow] {
-        guard !staleInput else { return [] }
+        guard !staleInput, !isStale(now: now) else { return [] }
         return [("5h", fiveHour), ("7d", sevenDay)].compactMap { label, w in
             guard let w, w.resetsAt > now else { return nil }
-            return StatusWindow(label: label, pct: Int(w.usedPct.rounded()),
+            return StatusWindow(label: label, pct: Int(w.usedPct.rounded(.down)),
                                 remaining: Theme.formatReset(w.resetsAt - now))
         }
     }
@@ -942,7 +954,12 @@ struct PostureSnapshot {
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
+        return parse(json: json, fileModified: mtime)
+    }
 
+    /// Parses a decoded budget-posture.json. `fileModified` is the fallback when `ts` is missing.
+    static func parse(json: [String: Any], fileModified: Date?) -> PostureSnapshot? {
         guard let ps = json["posture"] as? String,
               let posture = BudgetPosture.from(string: ps)
         else { return nil }
@@ -954,8 +971,18 @@ struct PostureSnapshot {
             sonnetSevenDay: parseSonnetWindow(json["models"], elapsedPct: parseWindowPace(json["seven_day"])?.elapsedPct),
             scoped:         parseScoped(json["scoped"]),
             agents:         parseAgents(json["agents"]),
-            staleInput:     (json["stale_input"] as? Bool) ?? false
+            staleInput:     (json["stale_input"] as? Bool) ?? false,
+            writtenAt:      parseTimestamp(json["ts"]) ?? fileModified?.timeIntervalSince1970
         )
+    }
+
+    static func parseTimestamp(_ raw: Any?) -> TimeInterval? {
+        guard let str = raw as? String else { return nil }
+        let plain = ISO8601DateFormatter()
+        if let d = plain.date(from: str) { return d.timeIntervalSince1970 }
+        let frac = ISO8601DateFormatter()
+        frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return frac.date(from: str)?.timeIntervalSince1970
     }
 
     /// Parses bishop's `scoped[]`: `[{model, used_pct, elapsed_pct, pace?, resets_at?, severity}]`.

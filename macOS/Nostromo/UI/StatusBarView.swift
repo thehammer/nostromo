@@ -17,6 +17,7 @@ class StatusBarView: NSView {
     // MARK: - State
 
     private var cancellables = Set<AnyCancellable>()
+    private var refreshTimer: Timer?
 
     // MARK: - Init
 
@@ -83,6 +84,16 @@ class StatusBarView: NSView {
             .store(in: &cancellables)
 
         render()
+
+        // Coarse tick so a passed reset or a stale snapshot disappears without a file change.
+        // The block captures self weakly, so the run loop's timer does not retain the view.
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in self?.render() }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
+    }
+
+    deinit {
+        refreshTimer?.invalidate()
     }
 
     // MARK: - Rendering
@@ -139,9 +150,13 @@ class StatusBarView: NSView {
         let store = AppStore.shared
         let now = Date().timeIntervalSince1970
 
+        // A snapshot from a dead Bishop shows no numbers and no posture chip.
+        let fresh = store.posture.map { !$0.isStale(now: now) } ?? false
+
         // Per-tab agent attribution — shown when the active focus's agent tag
         // appears in the agents map.  Shows share of Mother-attributed tokens only.
-        if let tag  = store.activeFocusAgentTag,
+        if fresh,
+           let tag  = store.activeFocusAgentTag,
            let snap = store.posture,
            !snap.agents.isEmpty {
             let windowKey = snap.sevenDay != nil ? "7d" : "5h"
@@ -153,7 +168,7 @@ class StatusBarView: NSView {
         }
 
         // Budget posture chip — hidden when normal
-        if let p = store.posture?.posture, !p.isHidden {
+        if fresh, let p = store.posture?.posture, !p.isHidden {
             out.append(colored(p.chipLabel + "  ", postureChipColor(p)))
         }
 
