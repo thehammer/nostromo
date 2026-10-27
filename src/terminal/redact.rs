@@ -1179,20 +1179,11 @@ impl<'a> Reading<'a> {
             let mut personal_budget = VIEW_BUDGET;
             let mut scratch = String::new();
             for group in command_groups(&rows, &pieces, &dropped, &lower.text) {
-                // The rows of one command count their runs together.
-                let numbering = if group.len() == 1 {
-                    Numbering::PerRow
-                } else {
-                    Numbering::AcrossRows
-                };
-                let together: [u32; 1];
-                let runs: &[u32] = if group.len() == 1 {
-                    std::slice::from_ref(&rows[group.start].runs)
-                } else {
-                    together = [rows[group.clone()].iter().map(|row| row.runs).sum()];
-                    &together
-                };
-                let most = runs.iter().copied().max().unwrap_or(0);
+                // The hidden runs of each row, and of the whole group: the rows
+                // of one command are read with their runs numbered on their
+                // own and together (see [`Numbering`]).
+                let runs: Vec<u32> = rows[group.clone()].iter().map(|row| row.runs).collect();
+                let most: u32 = runs.iter().sum();
                 if most == 0 {
                     continue;
                 }
@@ -1236,15 +1227,7 @@ impl<'a> Reading<'a> {
                     } else {
                         Readings::Combinations
                     };
-                    group_views(
-                        text,
-                        slice,
-                        runs,
-                        numbering,
-                        scratch.len(),
-                        readings,
-                        budget,
-                    )
+                    group_views(text, slice, &runs, scratch.len(), readings, budget)
                 };
                 let apart = credential && most >= 2;
                 match views {
@@ -1473,26 +1456,24 @@ enum Readings {
     Combinations,
 }
 
-/// The readings of one group (`slice`; `totals` the hidden runs of each of its
-/// rows, or of the whole group when `numbering` is across rows; `len` bytes of
-/// text with them dropped). `None` when they would cost
-/// more than `budget`, which they then leave alone.
+/// The readings of one group (`slice`; `rows` the hidden runs of each of its
+/// rows, `len` bytes of text with them dropped). A group of several rows (a
+/// `curl` command) is read with the runs numbered per row and numbered across
+/// the rows, so that every run is in some family of combinations and rows can
+/// choose differently. `None` when the readings would cost more than `budget`,
+/// which they then leave alone.
 fn group_views(
     text: &str,
     slice: &[Piece],
-    totals: &[u32],
-    numbering: Numbering,
+    rows: &[u32],
     len: usize,
     readings: Readings,
     budget: &mut usize,
 ) -> Option<Vec<View<'static>>> {
-    let most = totals.iter().copied().max().unwrap_or(0) as usize;
-    let tails = most > MAX_MASK_RUNS;
-    let reach = most.min(MAX_MASK_RUNS);
-    let full = (1u32 << reach) - 1;
-    // Setting every run of a group of up to eight is the all-spaces reading.
-    let heads = (1..=full).filter(move |&bits| tails || bits != full);
-    let ends = (1..=full).filter(move |_| tails);
+    let mut families = vec![(Numbering::PerRow, rows.to_vec())];
+    if rows.len() > 1 {
+        families.push((Numbering::AcrossRows, vec![rows.iter().sum()]));
+    }
     let fixed: &[Hidden] = if readings == Readings::All {
         &[
             Hidden::Dropped,
@@ -1503,25 +1484,49 @@ fn group_views(
     } else {
         &[]
     };
+    // The combinations of one family: the first runs (all but the all-spaces
+    // reading, for up to eight) and, with more, the last ones.
+    let combinations = |totals: &[u32]| {
+        let most = totals.iter().copied().max().unwrap_or(0) as usize;
+        let tails = most > MAX_MASK_RUNS;
+        let full = (1u32 << most.min(MAX_MASK_RUNS)) - 1;
+        (full, tails)
+    };
     // Counted before any is built: a flood of groups too dear to read must not
     // cost a list of modes each.
-    let count =
-        fixed.len() + full as usize - usize::from(!tails) + if tails { full as usize } else { 0 };
+    let count = fixed.len()
+        + families
+            .iter()
+            .map(|(_, totals)| {
+                let (full, tails) = combinations(totals);
+                full as usize - usize::from(!tails) + if tails { full as usize } else { 0 }
+            })
+            .sum::<usize>();
     let each = len + VIEW_OVERHEAD;
     if count.saturating_mul(each) > *budget {
         return None;
     }
-    let modes = fixed
-        .iter()
-        .copied()
-        .chain(heads.map(Hidden::Mask))
-        .chain(ends.map(Hidden::TailMask));
     let mut seen = std::collections::HashSet::new();
     let mut views = Vec::new();
-    for mode in modes {
+    let mut add = |mode: Hidden, totals: &[u32], numbering: Numbering| {
         let view = View::from_pieces(text, slice, mode, totals, &[], numbering);
         if seen.insert(view.text.to_string()) {
             views.push(view);
+        }
+    };
+    for mode in fixed {
+        add(*mode, rows, Numbering::PerRow);
+    }
+    for (numbering, totals) in &families {
+        let (full, tails) = combinations(totals);
+        // Setting every run of a group of up to eight is the all-spaces reading.
+        for bits in (1..=full).filter(|&bits| tails || bits != full) {
+            add(Hidden::Mask(bits), totals, *numbering);
+        }
+        if tails {
+            for bits in 1..=full {
+                add(Hidden::TailMask(bits), totals, *numbering);
+            }
         }
     }
     *budget -= views.len() * each;
