@@ -31,11 +31,23 @@ enum DocumentLinkPolicy {
         case "https":
             return (url.host?.isEmpty == false) ? .openInBrowser(url) : .ignore
         case actionScheme:
-            guard let id = actionID(from: url) else { return .ignore }
+            guard let id = actionID(from: url), isAllowedLinkActionID(id) else { return .ignore }
             return .action(id)
         default:
             return .ignore
         }
+    }
+
+    /// Whether an inline `nostromo-action:` link may carry `id`: the daemon's report navigation
+    /// (`report.*`) and verdict (`verdict:<...>`) vocabulary, which is all it ever renders into a
+    /// body (`src/huey/actions.rs`, `src/huey/render.rs`). The `setup.*` ids change machine state
+    /// (scan, import, confirm), so they are reachable only from the `actions` buttons, never from
+    /// body text. Any other id is not a link at all.
+    static func isAllowedLinkActionID(_ id: String) -> Bool {
+        for prefix in ["report.", "verdict:"] where id.hasPrefix(prefix) {
+            return id.count > prefix.count
+        }
+        return false
     }
 
     /// The action id carried by a `nostromo-action:<id>` URL, or nil when it carries none.
