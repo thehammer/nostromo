@@ -163,7 +163,11 @@ public enum TerminalDeliveryText {
                 cursor = scanned.range.lowerBound
                 continue
             }
-            guard let sentence = noticeSentence(for: items[i]) else { continue }
+            // Never consume an element the notice view will not explain: leave it visible.
+            guard let sentence = noticeSentence(for: items[i]) else {
+                cursor = scanned.range.lowerBound
+                continue
+            }
             let known = Array(("\n" + sentence).utf8)
             if bytes.count >= cursor + known.count, bytes[cursor ..< cursor + known.count].elementsEqual(known) {
                 cursor += known.count
@@ -184,16 +188,37 @@ public enum TerminalDeliveryText {
               item.terminalId.utf8.count <= 64,
               item.terminalId.utf8.allSatisfy({ isIdByte($0) }),
               item.pane.utf8.count <= maxPaneBytes,
-              (item.reason?.utf8.count ?? 0) <= maxReasonBytes else { return false }
+              isDaemonReason(item.reason, event: event) else { return false }
         let reasonAttr = item.reason.map { " reason=\"\(escapeAttribute($0))\"" } ?? ""
         let canonical = "<nostromo-terminal-follow event=\"\(event)\" terminal_id=\"\(escapeAttribute(item.terminalId))\""
             + " pane=\"\(escapeAttribute(item.pane))\"\(reasonAttr)/>"
         return element == canonical
     }
 
-    /// A pane name past this is shown in full in the bubble rather than as a one-line notice.
-    private static let maxPaneBytes = 120
-    private static let maxReasonBytes = 80
+    /// A pane name past this is shown in full in the bubble rather than truncated in the
+    /// one-line notice (a narrow notice line fits far fewer bytes, so keep this small).
+    private static let maxPaneBytes = 48
+    private static let maxTagBytes = 64
+
+    /// The reasons the daemon writes (`EndReason::code`, `pause_code` in `follow/manager.rs`):
+    /// only on `paused` and `stopped`; `moved_to ` takes a focus tag (`[A-Za-z0-9._-]`).
+    private static func isDaemonReason(_ reason: String?, event: String) -> Bool {
+        guard let reason else { return event == "started" || event == "resumed" }
+        switch event {
+        case "paused":
+            return ["too_much_output", "too_many_deliveries"].contains(reason)
+        case "stopped":
+            if ["user_stopped", "pane_closed", "terminal_restarted", "session_ended", "app_closed"].contains(reason) {
+                return true
+            }
+            guard reason.hasPrefix("moved_to ") else { return false }
+            let tag = Array(reason.utf8.dropFirst("moved_to ".utf8.count))
+            return !tag.isEmpty && tag.count <= maxTagBytes && tag != [0x2E] && tag != [0x2E, 0x2E]
+                && tag.allSatisfy { isIdByte($0) || $0 == UInt8(ascii: ".") }
+        default:
+            return false
+        }
+    }
 
     private static func isIdByte(_ b: UInt8) -> Bool {
         (0x30 ... 0x39).contains(b) || (0x41 ... 0x5A).contains(b) || (0x61 ... 0x7A).contains(b)
