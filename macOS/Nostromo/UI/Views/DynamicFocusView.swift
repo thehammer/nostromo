@@ -1275,8 +1275,15 @@ final class PaneContentNSView: NSView {
 
     /// Sends a document action (`tag`, `paneId`, `actionId`) to the daemon. A test seam; the default
     /// writes `pane_action` on the app's daemon connection.
-    var sendPaneAction: (String, String, String) -> Void = { tag, paneId, actionId in
+    /// Returns whether the frame was written (false when not connected).
+    var sendPaneAction: (String, String, String) -> Bool = { tag, paneId, actionId in
         AppStore.shared.client.sendPaneAction(tag: tag, paneId: paneId, actionId: actionId)
+    }
+
+    /// Told when a click's action could not be sent, so the click is never silent. A test seam; the
+    /// default raises the same toast the daemon's `pane_action_result` messages use.
+    var onSendFailure: (String) -> Void = { message in
+        AppStore.shared.onNotification?(message, .warning)
     }
 
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is loaded.
@@ -1334,7 +1341,9 @@ final class PaneContentNSView: NSView {
         addFullBleedHiddenSibling(documentView)
         documentView.onAction = { [weak self] actionId in
             guard let self else { return }
-            self.sendPaneAction(self.focusTag, self.paneId, actionId)
+            if !self.sendPaneAction(self.focusTag, self.paneId, actionId) {
+                self.onSendFailure("Couldn't send that action: Nostromo isn't connected to the daemon.")
+            }
         }
 
         // Force dark appearance explicitly rather than relying on inheritance —

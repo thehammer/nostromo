@@ -824,12 +824,78 @@ final class DocumentPaneViewTests: XCTestCase {
 
     private struct Sent: Equatable { let tag: String; let paneId: String; let actionId: String }
 
-    private func makePane(sent: @escaping (Sent) -> Void = { _ in }) -> PaneContentNSView {
+    private func makePane(sendSucceeds: Bool = true, sent: @escaping (Sent) -> Void = { _ in }) -> PaneContentNSView {
         let pane = PaneContentNSView()
         pane.focusTag = "huey"
         pane.paneId = "report"
-        pane.sendPaneAction = { tag, paneId, actionId in sent(Sent(tag: tag, paneId: paneId, actionId: actionId)) }
+        pane.sendPaneAction = { tag, paneId, actionId in
+            sent(Sent(tag: tag, paneId: paneId, actionId: actionId))
+            return sendSucceeds
+        }
         return pane
+    }
+
+    // MARK: Rendering sends nothing
+
+    func testRenderingAndReRenderingADocumentWithActionsAndActionLinksSendsNothing() {
+        var sent: [Sent] = []
+        let pane = makePane { sent.append($0) }
+        func doc(_ extra: String) -> PaneContentWire {
+            .document(DocumentPayload(
+                title: "Report for 2026-10-26",
+                blocks: [.paragraph([.text("Was it useful? "),
+                                     .link(spans: [.text("Useful")], url: "nostromo-action:verdict:2026-10-26:1:2:useful"),
+                                     .text(extra)])],
+                actions: [DocAction(id: "report.prev", label: "Previous"),
+                          DocAction(id: "report.regenerate", label: "Regenerate", primary: true)]))
+        }
+        pane.update(content: doc(""), freshness: nil)
+        XCTAssertTrue(sent.isEmpty, "rendering must never fire an action")
+        pane.update(content: doc(""), freshness: nil)
+        pane.update(content: doc(" again"), freshness: nil)
+        XCTAssertTrue(sent.isEmpty, "a replay or a re-render must never fire an action")
+    }
+
+    // MARK: Failed sends
+
+    func testAClickThatCannotBeSentRaisesFeedbackForButtonsAndLinksAlike() {
+        var failures: [String] = []
+        let pane = makePane(sendSucceeds: false)
+        pane.onSendFailure = { failures.append($0) }
+        pane.update(content: document(actions: [DocAction(id: "report.prev", label: "Previous")]), freshness: nil)
+
+        pane.documentView.actionButtons[0].performClick(nil)
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertFalse(failures[0].isEmpty)
+
+        pane.documentView.handleLink(URL(string: "nostromo-action:report.next")!)
+        XCTAssertEqual(failures.count, 2)
+    }
+
+    func testASuccessfulSendRaisesNoFailureFeedback() {
+        var failures: [String] = []
+        let pane = makePane()
+        pane.onSendFailure = { failures.append($0) }
+        pane.update(content: document(actions: [DocAction(id: "report.prev", label: "Previous")]), freshness: nil)
+        pane.documentView.actionButtons[0].performClick(nil)
+        XCTAssertTrue(failures.isEmpty)
+    }
+
+    // MARK: Action vocabulary
+
+    func testSetupConfirmWorksAsADaemonButtonButNotAsABodyLink() {
+        var sent: [Sent] = []
+        let pane = makePane { sent.append($0) }
+        pane.update(content: .document(DocumentPayload(
+            title: "Setup",
+            blocks: [.paragraph([.link(spans: [.text("Confirm")], url: "nostromo-action:setup.confirm")])],
+            actions: [DocAction(id: "setup.confirm", label: "Confirm setup", primary: true)])), freshness: nil)
+
+        pane.documentView.handleLink(URL(string: "nostromo-action:setup.confirm")!)
+        XCTAssertTrue(sent.isEmpty, "a body link cannot send a setup action")
+
+        pane.documentView.actionButtons[0].performClick(nil)
+        XCTAssertEqual(sent, [Sent(tag: "huey", paneId: "report", actionId: "setup.confirm")])
     }
 
     private func document(
