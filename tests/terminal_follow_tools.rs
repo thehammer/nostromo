@@ -763,6 +763,7 @@ impl Unix {
         self.send(&ClientMsg::TerminalInput {
             terminal_id: terminal_id.into(),
             bytes: B64.encode(bytes),
+            auto_reply: false,
         })
         .await;
     }

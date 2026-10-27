@@ -580,6 +580,9 @@ class AppStore: ObservableObject {
             .sink { [weak self] _ in self?.pushFocusRegistry() }
             .store(in: &cancellables)
 
+        // Terminal frames go out through this app's one daemon connection.
+        TerminalSessionStore.shared.transport = { [client] in client.sendTerminal($0) }
+
         // The work store holds what one connection pushed. When it drops, requests
         // still waiting for an answer can never get one; when a connection comes
         // up, whatever the previous one left behind is stale (the daemon re-sends
@@ -594,6 +597,8 @@ class AppStore: ObservableObject {
                 // asks for the model catalogue and the per-agent defaults.
                 ModelStore.shared.connectionChanged(connected)
                 BackgroundTaskStore.shared.tasksSupported = connected && self?.client.daemonAdvertisesTasks == true
+                // Terminal views attach again after a reconnect, and are told when the daemon is gone.
+                TerminalSessionStore.shared.connectionChanged(connected)
                 if connected {
                     WorkStore.shared.reset()
                 } else {
@@ -1672,6 +1677,10 @@ class AppStore: ObservableObject {
         // A session waiting for a Claude sign-in (CL2): `ClaudeLoginStore` keeps it, the card shows it.
         case .claudeLoginState(let frame):
             claudeLoginEvents.send(frame)
+
+        // Terminal panes (1d): `TerminalSessionStore` keeps them, every window's pane view shows them.
+        case .terminalList, .terminalState, .terminalClosed, .terminalReplay, .terminalOutput, .terminalRefused:
+            TerminalSessionStore.shared.ingest(msg)
 
         case .pong, .unknown:
             break
