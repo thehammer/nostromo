@@ -197,6 +197,31 @@ jobs:
       - name: make mac-test
         run: make mac-test
 
+      # Compile gate for the app target. `make mac-test` builds only the
+      # NostromoTests bundle, which does not include app-only sources such as
+      # TerminalPaneHostView (they link SwiftTerm), so a non-compiling app could
+      # pass it (PR #345). Same DerivedData as the test step above, so SwiftTerm
+      # and the shared sources are already built. Debug only: it compiles the
+      # same sources as Release. This is the real "the app builds" gate;
+      # "Launch smoke (advisory)" green does not imply it.
+      - name: Build Mac app (compile gate)
+        run: |
+          set -o pipefail
+          xcodebuild -project macOS/Nostromo.xcodeproj -scheme Nostromo \
+            -configuration Debug -derivedDataPath macOS/build \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build \
+            2>&1 | tee "$RUNNER_TEMP/mac-app-build.log" | grep -E "error:|\*\* BUILD"
+          if grep -q "error:" "$RUNNER_TEMP/mac-app-build.log"; then exit 1; fi
+
+      - name: Upload app build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-app-build-log
+          path: ${{ runner.temp }}/mac-app-build.log
+          if-no-files-found: warn
+          retention-days: 14
+
       # The Makefile filters xcodebuild's output down to a few lines, so the
       # .xcresult bundle is where the per-test failure detail lives.
       - name: Upload test results

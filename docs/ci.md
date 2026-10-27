@@ -57,6 +57,20 @@ failure are the same failure.
   not depend on a particular display setup, on wall-clock run-loop pump
   durations, or on fonts that are not installed by the workflow.
 
+### The app-build compile gate
+
+`Swift tests (Mac app)` also runs a `Build Mac app (compile gate)` step:
+`xcodebuild -scheme Nostromo -configuration Debug CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build`,
+failing on a non-zero exit or any `error:` line. `make mac-test` builds only the
+`NostromoTests` bundle, which excludes app-only sources (e.g.
+`TerminalPaneHostView`, which links SwiftTerm), so without this step a
+non-compiling app passed every required check (PR #345). It shares the test
+step's DerivedData (`macOS/build`), so it only compiles what the tests did not.
+It lives inside the already-required job, so no branch-protection change is
+needed. **`Launch smoke (advisory)` green does not mean the app built**: the
+smoke is path-filtered and advisory, and its INCONCLUSIVE verdict (including a
+failed build) stays green. The app-build step is the compile gate.
+
 ### Making a check required
 
 Required status checks are a repo setting (Settings → Branches → branch
@@ -202,8 +216,10 @@ annotation, visible on the PR's Checks/Files tabs without opening the log.
 | INCONCLUSIVE | 2 | `::warning::` | The check could not reach a verdict — its own cause is named verbatim (build failed, a prerequisite was missing, multi-pane layout was never reached, another instance took the launch, or it timed out before the app came up). | Read the named cause. Usually an environment flake — re-run the job. If it recurs on the same PR, treat it as a real signal, not noise. |
 | anything else | any other code | `::warning::`, "driver exited unexpectedly (code N)" | Never treated as success. | Investigate — this means the driver itself broke, not the app under test. |
 
-The check is **advisory**: it is not in branch protection, and neither FAIL
-nor INCONCLUSIVE blocks a merge. See "Promotion to required" below.
+The check is **advisory**: it is not in branch protection. A FAIL verdict
+(exit 1) makes the check's conclusion `failure` so merge tooling that reads
+check conclusions sees it; INCONCLUSIVE stays green with a warning. Branch
+protection itself is unchanged (it does not require this check). See "Promotion to required" below.
 
 ### Reproducing a CI failure locally
 
