@@ -273,6 +273,7 @@ final class PaneRenderWatch {
             "events": recorder.eventDictionaries(now: wall),
             "app": appInfo(),
             "memory": MemorySummary.capture().jsonObject,
+            "viewRebuilds": RebuildCounters.snapshot,
             "screens": NSScreen.screens.enumerated().map { index, screen -> [String: Any] in
                 ["index": index, "frame": Self.rect(screen.frame), "scale": Double(screen.backingScaleFactor)]
             },

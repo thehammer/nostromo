@@ -499,6 +499,7 @@ impl Unix {
         self.send(&ClientMsg::TerminalInput {
             terminal_id: terminal_id.into(),
             bytes: b64(bytes),
+            auto_reply: false,
         })
         .await;
     }
@@ -895,6 +896,7 @@ async fn an_app_connection_opens_a_terminal_leaf_with_a_login_shell_in_the_reque
                 if tag == TAG && *p == pane_id)
         })
         .await;
+    let wire = serde_json::to_value(&content).unwrap();
     let ServerMsg::PaneContent {
         content:
             PaneContentWire::Terminal {
@@ -909,6 +911,11 @@ async fn an_app_connection_opens_a_terminal_leaf_with_a_login_shell_in_the_reque
     };
     assert!(!label.is_empty(), "the placeholder carries a label");
     assert_eq!(environment, None, "a local terminal has no environment");
+    assert_eq!(wire["content"]["kind"], "terminal");
+    assert!(
+        wire["content"].get("environment").is_none(),
+        "a local terminal's PaneContent has no environment key"
+    );
 
     // Then the state: running, answering the request, asked for by the user.
     let (i_state, state) = app
@@ -1449,6 +1456,7 @@ fn attacks(terminal_id: &str) -> Vec<(&'static str, ClientMsg, &'static str, Opt
             ClientMsg::TerminalInput {
                 terminal_id: terminal_id.into(),
                 bytes: b64(b"echo FORBIDDEN-INPUT\r"),
+                auto_reply: false,
             },
             "terminal_input_forbidden",
             id(),
@@ -1691,6 +1699,7 @@ async fn requests_naming_an_unknown_terminal_are_refused_and_change_nothing() {
             ClientMsg::TerminalInput {
                 terminal_id: ghost.into(),
                 bytes: b64(b"x"),
+                auto_reply: false,
             },
         ),
         (
@@ -1771,6 +1780,7 @@ async fn every_terminal_frame_over_tcp_is_refused_with_no_effect_and_audited() {
             ClientMsg::TerminalInput {
                 terminal_id: tid.clone(),
                 bytes: b64(b"echo TCP-FORBIDDEN\r"),
+                auto_reply: false,
             },
         ),
         (

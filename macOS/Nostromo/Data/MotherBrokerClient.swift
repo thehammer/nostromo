@@ -27,6 +27,9 @@ enum BrokerError: Error {
     case code(BrokerErrorCode, message: String)
     case timeout
     case disconnected
+    /// A `query.list` reply whose decode finished after a newer reply had already been delivered:
+    /// applying it would put an older queue over a newer one. Nothing to tell the operator.
+    case superseded
 
     /// Human-readable message safe to surface in the UI.
     var userFacingMessage: String {
@@ -35,6 +38,8 @@ enum BrokerError: Error {
             return "Mother is busy, try again."
         case .disconnected:
             return "Mother broker is offline."
+        case .superseded:
+            return "Superseded by a newer reading."
         case .code(let code, let message):
             switch code {
             case .noSuchJob:
@@ -62,6 +67,7 @@ extension BrokerError {
         switch self {
         case .timeout: return .timeout
         case .disconnected: return .disconnected
+        case .superseded: return .other
         case .code(let code, _):
             switch code {
             case .noSuchJob: return .noSuchJob
@@ -346,8 +352,19 @@ class MotherBrokerClient {
         }
     }
 
+    /// Test seam: runs on the decode thread, before a `query.list` reply is decoded.
+    var listingDecodeHook: (([[String: Any]]) -> Void)?
+    /// Main thread only. The order replies arrived in (the broker answers on one socket, in order),
+    /// and the newest one already handed to a caller.
+    private var listingsReceived = 0
+    private var listingsDelivered = 0
+
     /// Read the whole queue (`query.list`, no filter). Tolerant like the snapshot: one unreadable
     /// job never loses the others.
+    ///
+    /// Decoding runs off the main thread, so two replies can finish out of order (a minute-resync
+    /// reply close to a reconnect one). A listing that finishes after a newer one was delivered is
+    /// dropped: the completion gets `.superseded` and applies nothing.
     func queryList(completion: @escaping (Result<MotherJobListing, BrokerError>) -> Void) {
         sendRaw(type: "query.list", jobId: "", extra: [:]) { [weak self] result in
             switch result {
@@ -358,13 +375,24 @@ class MotherBrokerClient {
                     completion(.failure(.code(.internal, message: "query.list returned no job list")))
                     return
                 }
+                self.listingsReceived += 1
+                let sequence = self.listingsReceived
                 // Decoding the whole queue is two JSON passes per job (re-serialise, then decode), once a
                 // minute, and it grows with the queue (measured at about 0.14 ms per job with plan-sized
                 // text: 83 ms for 600 jobs). It has no business on the main thread, so it runs off it and
                 // only the result comes back.
                 DispatchQueue.global(qos: .userInitiated).async {
+                    self.listingDecodeHook?(raw)
                     let listing = autoreleasepool { self.decodeJobListing(raw) }
-                    DispatchQueue.main.async { completion(.success(listing)) }
+                    DispatchQueue.main.async {
+                        guard sequence > self.listingsDelivered else {
+                            log.info("broker: dropped a stale query.list reply (\(sequence, privacy: .public) after \(self.listingsDelivered, privacy: .public))")
+                            completion(.failure(.superseded))
+                            return
+                        }
+                        self.listingsDelivered = sequence
+                        completion(.success(listing))
+                    }
                 }
             }
         }

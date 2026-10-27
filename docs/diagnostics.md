@@ -538,3 +538,46 @@ file/hunk/line counts and byte lengths, never content. Cross-referencing this
 against the client's `codepane` log or a `NOSTROMO_PANE_DUMP` capture is what
 turns "the daemon probably didn't send something empty" into "the daemon
 logged N rows and the client received exactly N rows."
+
+## View-tree leak (AppKit KVO records)
+
+The 2026-10-25 heap (1.8 GB after 14.6 h) held about two million each of `NSKeyValueDependency`,
+`NSKeyValueDependencyContext`, `__NSMallocBlock__` and `__NSExactBlockVariable__` (and 446,000
+`NSISRestrictedToNonNegativeVariable`). The JSON read loops (`ReadLoopChurnTests`) do not create them.
+
+**Mechanism, measured in CI (macOS 26.6.2, `/usr/bin/heap` run against the test host, 300-500 iterations each):**
+
+| What is created and shown in a window | KVO objects left behind, per instance |
+|---|---|
+| a bare `NSTextField` label, added and removed | 3 each of `NSKeyValueDependency`, `NSKeyValueDependencyContext`, `__NSMallocBlock__`, `__NSExactBlockVariable__` (the incident's 1:1:1:1 ratio) |
+| the same, after it has also been laid out and drawn | about 10 |
+| `NSImageView` | the same as the label |
+| `CopyMenuTextField` (our selectable label) | 6-7 `NSKeyValueDependency` plus dictionaries and arrays: its field editor is an `NSTextView` |
+| `NSTextView` | 3-4 plus `NSKeyValueDependencyInfo`, dictionaries, arrays |
+| a plain `NSView` | none |
+| the same label instance added and removed again | none |
+| a control that is created and never shown | none |
+
+They are not freed when the control, its superview or its window goes away (measured: destroying the host
+window afterwards freed nothing), and none of `cell.controlView = nil`, an explicit `appearance`,
+`wantsLayer`, `controlSize`, or a custom cell class changes it. So the leak rate is the rate at which the app
+creates new controls: not scrolling or resizing alone, but any code that rebuilds a view tree on a timer or on
+every data publish.
+
+**What was fixed.** The daemon sends a `perri_state` frame per focus on every 60 s queue poll, changed or not
+(a `tokio::watch::send` always notifies). `AppStore` wrote `perriQueue` and `perriDetailByTag` for each one, and
+an `@Published` write publishes even when the value is equal, so each frame made `TabBarView.setFocuses` rebuild
+every sidebar row (tens of labels and badges) and the Perri view rebuild its queue list. With F focuses that is F
+rebuilds a minute for as long as the app runs. `AppStore` now writes only a changed value and `setFocuses`
+returns early when it would build the rows it already shows (`SidebarRebuildChurnTests`).
+
+**What was not shown.** That this is the *dominant* source of the incident's two million records is not
+established: the numbers fit (F frames a minute for 14.6 h is the right order of magnitude) but nobody measured
+the running app. Other paths that build controls from data that arrive unattended were read and found to diff
+before they rebuild (`MotherJobDetail.update`, `StatusBarView`, `ActivityTickerView`, `PaceBarsView`,
+`TrackerPaneView`, `ElapsedTicker`); `FredSurfaceView` and `TeriSurfaceView` were not measured.
+
+**Next capture.** The pane-blank capture now carries `viewRebuilds` (`RebuildCounters`, see
+docs/pane-blank-capture.md): rebuild counts for the sidebar, turn views and the Perri queue list, by fixed
+name. With `app.uptime` that is a rate per site; after this change `sidebarSkipped` should grow every minute
+and `sidebarRebuilt` should not.

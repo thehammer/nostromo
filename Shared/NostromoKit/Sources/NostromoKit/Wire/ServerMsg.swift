@@ -283,6 +283,20 @@ public struct DaemonTurn: Decodable {
     public let timestamp:   String?
     public let blocks:      [DaemonTurnBlock]
     public let isComplete:  Bool
+    /// What opened the turn when it was not something the user typed (output from a followed
+    /// terminal, a follow notice). Nil for an ordinary turn, for an older daemon, and for an
+    /// origin kind this client does not know: an unknown kind never costs the whole turn.
+    public let origin:      TurnOriginWire?
+
+    public init(id: String, userInput: String, timestamp: String?, blocks: [DaemonTurnBlock],
+                isComplete: Bool, origin: TurnOriginWire? = nil) {
+        self.id = id
+        self.userInput = userInput
+        self.timestamp = timestamp
+        self.blocks = blocks
+        self.isComplete = isComplete
+        self.origin = origin
+    }
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -290,6 +304,17 @@ public struct DaemonTurn: Decodable {
         case timestamp
         case blocks
         case isComplete = "is_complete"
+        case origin
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(id: try c.decode(String.self, forKey: .id),
+                  userInput: try c.decode(String.self, forKey: .userInput),
+                  timestamp: try c.decodeIfPresent(String.self, forKey: .timestamp),
+                  blocks: try c.decode([DaemonTurnBlock].self, forKey: .blocks),
+                  isComplete: try c.decode(Bool.self, forKey: .isComplete),
+                  origin: (try? c.decodeIfPresent(TurnOriginWire.self, forKey: .origin)) ?? nil)
     }
 }
 
@@ -297,13 +322,105 @@ extension DaemonTurn {
     /// Return a copy with `block` appended to `blocks`.
     func appending(_ block: DaemonTurnBlock) -> DaemonTurn {
         DaemonTurn(id: id, userInput: userInput, timestamp: timestamp,
-                   blocks: blocks + [block], isComplete: isComplete)
+                   blocks: blocks + [block], isComplete: isComplete, origin: origin)
     }
 
     /// Return a copy with `isComplete` set to `true`.
     func completed() -> DaemonTurn {
         DaemonTurn(id: id, userInput: userInput, timestamp: timestamp,
-                   blocks: blocks, isComplete: true)
+                   blocks: blocks, isComplete: true, origin: origin)
+    }
+}
+
+/// Mirrors `stream_json::TurnOrigin` — tagged by `type` (`terminal_delivery`,
+/// `terminal_follow_notice`).
+///
+/// Both kinds carry the same item shape here: a follow notice's items decode with `kind`
+/// `"notice"`, as the daemon's own delivery items do for a notice sent with output. Decoding an
+/// unknown `type` throws; `DaemonTurn` turns that into a nil origin.
+public enum TurnOriginWire: Decodable, Equatable {
+    /// Output from followed terminals, plus any notices sent with it, in the order the message
+    /// has them.
+    case terminalDelivery(items: [TerminalOriginItem])
+    /// Follow notices only (following started, stopped, paused, resumed).
+    case terminalFollowNotice(items: [TerminalOriginItem])
+
+    private enum K: String, CodingKey { case type, items }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        switch try c.decode(String.self, forKey: .type) {
+        case "terminal_delivery":
+            self = .terminalDelivery(items: try c.decode([TerminalOriginItem].self, forKey: .items))
+        case "terminal_follow_notice":
+            let items = try c.decode([TerminalOriginItem].self, forKey: .items)
+            self = .terminalFollowNotice(items: items.map { $0.asNotice })
+        case let other:
+            throw DecodingError.dataCorruptedError(forKey: .type, in: c,
+                debugDescription: "unknown TurnOrigin type: \(other)")
+        }
+    }
+
+    public var items: [TerminalOriginItem] {
+        switch self {
+        case .terminalDelivery(let items), .terminalFollowNotice(let items): return items
+        }
+    }
+}
+
+/// One element of a terminal delivery message: a `<nostromo-terminal-output>` (kind `lines`,
+/// `screen` or `selection`) or a `<nostromo-terminal-follow/>` notice (kind `notice`, with
+/// `event` and maybe `reason`). Mirrors `DeliveryItem` / `NoticeItem` in Rust; a count the wire
+/// omits is 0.
+public struct TerminalOriginItem: Decodable, Equatable {
+    public let terminalId:  String
+    public let pane:        String
+    public let kind:        String
+    public let lines:       Int
+    public let omitted:     Int
+    public let redactions:  Int
+    public let event:       String?
+    public let reason:      String?
+
+    public static let noticeKind = "notice"
+
+    public var isNotice: Bool { kind == Self.noticeKind }
+
+    public init(terminalId: String, pane: String, kind: String, lines: Int = 0, omitted: Int = 0,
+                redactions: Int = 0, event: String? = nil, reason: String? = nil) {
+        self.terminalId = terminalId
+        self.pane = pane
+        self.kind = kind
+        self.lines = lines
+        self.omitted = omitted
+        self.redactions = redactions
+        self.event = event
+        self.reason = reason
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case terminalId = "terminal_id"
+        case pane, kind, lines, omitted, redactions, event, reason
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let event = try c.decodeIfPresent(String.self, forKey: .event)
+        self.init(terminalId: try c.decodeIfPresent(String.self, forKey: .terminalId) ?? "",
+                  pane: try c.decodeIfPresent(String.self, forKey: .pane) ?? "",
+                  // A follow notice's item has an `event` and no `kind`; an output element's
+                  // kind defaults to `lines`, as the daemon reads it.
+                  kind: try c.decodeIfPresent(String.self, forKey: .kind) ?? (event == nil ? "lines" : Self.noticeKind),
+                  lines: try c.decodeIfPresent(Int.self, forKey: .lines) ?? 0,
+                  omitted: try c.decodeIfPresent(Int.self, forKey: .omitted) ?? 0,
+                  redactions: try c.decodeIfPresent(Int.self, forKey: .redactions) ?? 0,
+                  event: event,
+                  reason: try c.decodeIfPresent(String.self, forKey: .reason))
+    }
+
+    fileprivate var asNotice: TerminalOriginItem {
+        TerminalOriginItem(terminalId: terminalId, pane: pane, kind: Self.noticeKind,
+                           event: event, reason: reason)
     }
 }
 

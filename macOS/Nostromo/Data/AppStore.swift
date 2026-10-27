@@ -46,7 +46,6 @@ class AppStore: ObservableObject {
     @Published private(set) var motherDaemon:       MotherDaemonState = .unknown
 
     // Budget
-    @Published private(set) var rateLimits: RateLimits?     = nil
     @Published private(set) var posture:    PostureSnapshot? = nil
 
     // Activity — one assembled ActivityStreamModel per focus tag (keyed by
@@ -74,8 +73,8 @@ class AppStore: ObservableObject {
     @Published private(set) var perriQueueLoading:   Bool           = true
     private var perriHealth = PerriQueueHealth() {
         didSet {
-            perriQueueStale   = perriHealth.stale
-            perriQueueLoading = perriHealth.loading
+            if perriQueueStale != perriHealth.stale { perriQueueStale = perriHealth.stale }
+            if perriQueueLoading != perriHealth.loading { perriQueueLoading = perriHealth.loading }
         }
     }
 
@@ -487,12 +486,7 @@ class AppStore: ObservableObject {
             .sink { [weak self] in self?.handle($0) }
             .store(in: &cancellables)
 
-        // File-backed data (rate limits, posture, perri queue)
-        FileWatchers.shared.rateLimits
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] in self?.rateLimits = $0 }
-            .store(in: &cancellables)
-
+        // File-backed data (posture, perri queue)
         FileWatchers.shared.posture
             .receive(on: DispatchQueue.main)
             .sink { [weak self] in self?.posture = $0 }
@@ -586,6 +580,9 @@ class AppStore: ObservableObject {
             .sink { [weak self] _ in self?.pushFocusRegistry() }
             .store(in: &cancellables)
 
+        // Terminal frames go out through this app's one daemon connection.
+        TerminalSessionStore.shared.transport = { [client] in client.sendTerminal($0) }
+
         // The work store holds what one connection pushed. When it drops, requests
         // still waiting for an answer can never get one; when a connection comes
         // up, whatever the previous one left behind is stale (the daemon re-sends
@@ -600,6 +597,8 @@ class AppStore: ObservableObject {
                 // asks for the model catalogue and the per-agent defaults.
                 ModelStore.shared.connectionChanged(connected)
                 BackgroundTaskStore.shared.tasksSupported = connected && self?.client.daemonAdvertisesTasks == true
+                // Terminal views attach again after a reconnect, and are told when the daemon is gone.
+                TerminalSessionStore.shared.connectionChanged(connected)
                 if connected {
                     WorkStore.shared.reset()
                 } else {
@@ -1459,11 +1458,17 @@ class AppStore: ObservableObject {
             // Daemon push is an additive, lower-latency source feeding the same
             // publishers the file-watchers already drive.  The file-watcher path
             // is preserved (not removed) in this wedge.
-            perriQueue      = queue
-            perriQueueError = nil
+            //
+            // The daemon sends one of these per focus on every queue poll (60 s), whether or not
+            // anything changed, and an `@Published` write publishes even when the value is equal.
+            // Each publish rebuilt the sidebar and the Perri queue list, whose new `NSTextField`s
+            // leave AppKit KVO records behind for good (docs/diagnostics.md, "View-tree leak"). So
+            // only a real change is written.
+            if perriQueue != queue { perriQueue = queue }
+            if perriQueueError != nil { perriQueueError = nil }
             perriHealth.frameArrived()
             // `current` is already decoded as PRDetail? from the wire shape.
-            if let current { perriDetail = current }
+            if let current, perriDetail != current { perriDetail = current }
 
             // Per-focus PR under review (W8) — a frame for one focus must
             // never clobber another's entry, and clearing a focus's PR must
@@ -1474,8 +1479,8 @@ class AppStore: ObservableObject {
             // nothing removes again. Only a live focus may hold one, so an
             // entry's lifetime really is its focus's.
             if let current, FocusStore.shared.focuses.contains(where: { $0.sessionTag == tag }) {
-                perriDetailByTag[tag] = current
-            } else {
+                if perriDetailByTag[tag] != current { perriDetailByTag[tag] = current }
+            } else if perriDetailByTag[tag] != nil {
                 perriDetailByTag.removeValue(forKey: tag)
             }
 
@@ -1673,6 +1678,10 @@ class AppStore: ObservableObject {
         case .claudeLoginState(let frame):
             claudeLoginEvents.send(frame)
 
+        // Terminal panes (1d): `TerminalSessionStore` keeps them, every window's pane view shows them.
+        case .terminalList, .terminalState, .terminalClosed, .terminalReplay, .terminalOutput, .terminalRefused:
+            TerminalSessionStore.shared.ingest(msg)
+
         case .pong, .unknown:
             break
         }
@@ -1715,6 +1724,7 @@ class AppStore: ObservableObject {
         case .diff:           return "diff"
         case .prConversation: return "prConversation"
         case .ticket:         return "ticket"
+        case .terminal:       return "terminal"
         case .unknown:        return "unknown"
         }
     }

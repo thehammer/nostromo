@@ -394,7 +394,9 @@ file) and a controllable clock and budget posture.
    Also-in-the-news line and 5 Also-noted items) is at most 600 words
    counting the whole rendered report, footer included, and is readable in
    about three minutes. The Also-in-the-news line alone is at most 40
-   words, and the footer alone is at most 100 words on every report.
+   words, and the footer alone is at most 100 words on every report. A word
+   is a whitespace-separated run in the rendered text, URLs excluded (the
+   character caps bound unspaced scripts).
 9. A fixture day whose items match nothing in context or interests produces a
    report that says nothing touches current work, with no picks, whose body
    (opener, the "nothing today" line, any Also-in-the-news line and Also

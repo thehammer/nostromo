@@ -9,7 +9,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::data::work::untrusted::one_line;
+use crate::data::work::untrusted::{escape_id, one_line};
 use crate::huey::context::profile::{self, FEATURES};
 
 /// Most paths a `text` probe returns.
@@ -91,6 +91,14 @@ pub enum CheckRefused {
     Unreadable,
 }
 
+/// A repo-relative path as a result may carry it. File names come from the
+/// project's repository, so they are untrusted: escaped to a safe charset
+/// (`escape_id`: a space is `%20`, anything unusual `%XX`), so a hostile name
+/// cannot put a sentence or a marker into a check line.
+fn safe_path(path: &str) -> String {
+    escape_id(path).unwrap_or_else(|| "(path too long)".to_string())
+}
+
 fn printable_one_line(s: &str) -> bool {
     !s.chars().any(|c| c.is_control() || is_bidi(c))
 }
@@ -135,7 +143,7 @@ pub fn check(
             let manifests: Vec<String> = profile::dependencies(root)
                 .into_iter()
                 .filter(|d| profile::dependency_matches(&d.name, name))
-                .map(|d| d.manifest)
+                .map(|d| safe_path(&d.manifest))
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect();
@@ -168,11 +176,8 @@ pub fn check(
                     Vec::new(),
                 ))
             } else {
-                let shown: Vec<String> = files
-                    .iter()
-                    .take(MAX_PATHS)
-                    .map(|p| one_line(p, 200))
-                    .collect();
+                let shown: Vec<String> =
+                    files.iter().take(MAX_PATHS).map(|p| safe_path(p)).collect();
                 Ok(result(
                     true,
                     format!(

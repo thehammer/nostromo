@@ -1927,6 +1927,7 @@ mod tests {
             ClientMsg::TerminalInput {
                 terminal_id: "t".into(),
                 bytes: "bHMK".into(),
+                auto_reply: false,
             },
             ClientMsg::TerminalResize {
                 terminal_id: "t".into(),

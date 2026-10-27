@@ -67,6 +67,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     private static let staggerInterval: TimeInterval = 0.7
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DynamicFocusView.terminalPaneFactory = { tag, paneId, windowId in
+            TerminalPaneHostView(tag: tag, paneId: paneId, windowId: windowId)
+        }
         appLog.info("applicationDidFinishLaunching — pid=\(ProcessInfo.processInfo.processIdentifier, privacy: .public) screens=\(NSScreen.screens.count, privacy: .public)")
 
         // Enforce single instance: if another Nostromo process is already running,
@@ -241,6 +244,85 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         appLog.info("pane diagnostics copied to pasteboard")
     }
 
+    // MARK: - Terminal
+
+    /// The real app's bundle id: the one build that must never show QA-only controls.
+    private static let realBundleIdentifier = "com.hammer.nostromo"
+
+    private var isQAInstance: Bool { Bundle.main.bundleIdentifier != Self.realBundleIdentifier }
+
+    /// Windows `openSecondWindowQA` opened. Not in `windows`: nothing in the display-topology code
+    /// (placement, re-homing) knows about them.
+    private var qaExtraWindows: [NostromoWindow] = []
+
+    /// Debug > Open Second Window (QA): another window on the main display's focus (it reads the same
+    /// remembered focus the display's own window does), so a terminal in that focus shows in two
+    /// windows for the mirroring checks. QA instance only.
+    @objc func openSecondWindowQA(_ sender: Any?) {
+        guard isQAInstance, let screen = NSScreen.main, let display = DisplayInfo(screen: screen) else {
+            NSSound.beep()
+            return
+        }
+        let index = nextWindowIndex
+        nextWindowIndex += 1
+        let visible = display.placementFrame
+        let frame = NSRect(x: visible.minX + visible.width / 2, y: visible.minY,
+                           width: visible.width / 2, height: visible.height)
+        let win = NostromoWindow(contentRect: frame, styleMask: [.titled, .resizable, .closable],
+                                 backing: .buffered, defer: false)
+        win.isRestorable = false
+        win.backgroundColor = NSColor(calibratedWhite: 0.05, alpha: 1.0)
+        // Shown alongside a full-screen window on the same display.
+        win.collectionBehavior = [.fullScreenAuxiliary]
+        win.contentView = MainLayout(windowIndex: index, displayUUID: display.uuid)
+        win.delegate = win
+        win.orderFront(nil)
+        qaExtraWindows.append(win)
+        appLog.info("QA second window opened (index \(index, privacy: .public))")
+    }
+
+    /// Debug > Copy terminal latency stats: key down to echo fed, p50 / p95 over the last 500 keys.
+    @objc func copyTerminalLatencyStats() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(TerminalLatencyStats.shared.report(), forType: .string)
+    }
+
+    /// Terminal > New Terminal (⌘T): a login shell in the key window's focus, in its project directory,
+    /// split below the pane that holds the keyboard (the REPL by default). That window's terminal takes
+    /// the keyboard when the daemon reports it; an agent-opened terminal never does.
+    @objc func newTerminal(_ sender: Any?) {
+        guard let window = NSApp.keyWindow, let layout = window.contentView as? MainLayout,
+              AppStore.shared.client.hasConnection else {
+            NSSound.beep()
+            return
+        }
+        let requestId = UUID().uuidString
+        let store = TerminalSessionStore.shared
+        store.expectKeyboardFocus(clientRequestId: requestId, windowId: layout.terminalWindowId)
+        store.transport(.openLocal(tag: layout.activeFocusTag,
+                                   relativeTo: layout.activePaneId(containing: window.firstResponder) ?? "repl",
+                                   position: "split_below",
+                                   cwd: layout.activeFocusProjectPath,
+                                   clientRequestId: requestId))
+    }
+
+    /// Terminal > Close Terminal Pane (⇧⌘W): the terminal pane that holds the keyboard. The pane asks
+    /// `TerminalInputGuard` before it acts, so a synthetic key does nothing.
+    @objc func closeTerminalPane(_ sender: Any?) {
+        TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)?.closeFromMenu()
+    }
+
+    /// Edit > Find… (⌘F) and Find Next (⌘G): the find bar of the terminal pane that holds the keyboard.
+    /// Nothing else answers them (see `MainMenu`), so a text view elsewhere behaves as it did before.
+    @objc func terminalFind(_ sender: Any?) {
+        guard let host = TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) else {
+            NSSound.beep()
+            return
+        }
+        host.performFind(sender)
+    }
+
     // MARK: - Private
 
     private func setupMenu() {
@@ -266,6 +348,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(terminalFind(_:)) {
+            return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
+        }
+        if menuItem.action == #selector(closeTerminalPane(_:)) {
+            return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
+        }
+        if menuItem.action == #selector(openSecondWindowQA(_:)) { return isQAInstance }
+        if menuItem.action == #selector(newTerminal(_:)) { return NSApp.keyWindow?.contentView is MainLayout }
         if menuItem.action == ModelShortcut.action { return !ModelShortcut.bars(in: NSApp.keyWindow).isEmpty }
         if menuItem.action == BackgroundShortcut.action { return !BackgroundShortcut.bars(in: NSApp.keyWindow).isEmpty }
         return true

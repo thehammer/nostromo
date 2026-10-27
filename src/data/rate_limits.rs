@@ -1,8 +1,8 @@
 //! Claude rate-limit and budget-posture data types with on-disk loaders.
 //!
-//! Rate limits are written to `/tmp/.claude-rate-limits` by external agents in
-//! the format `p5h:reset5h_epoch:p7d:reset7d_epoch` (colon-delimited integers).
-//! Percentages are 0–100, or -1 for unknown.  Reset epochs are Unix timestamps.
+//! `RateLimits` is a plain snapshot type (percentages 0–100, or -1 for unknown;
+//! reset epochs are Unix timestamps). Nothing reads it from disk: the 5h/7d
+//! windows come from the budget posture file below.
 //!
 //! Budget posture is written to `~/.claude/budget-posture.json` as
 //! `{"posture": "<flush|normal|elevated|conservative|critical>"}`.
@@ -25,33 +25,6 @@ pub struct RateLimits {
     pub pct_7d: i32,
     /// Unix epoch when the 7-day window resets.
     pub reset_7d: i64,
-}
-
-impl RateLimits {
-    /// Load from `/tmp/.claude-rate-limits`.
-    ///
-    /// Returns `None` if the file is absent or cannot be parsed.
-    pub fn load() -> Option<Self> {
-        let content = std::fs::read_to_string("/tmp/.claude-rate-limits").ok()?;
-        Self::parse(content.trim())
-    }
-
-    fn parse(s: &str) -> Option<Self> {
-        let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() < 4 {
-            return None;
-        }
-        let pct_5h = parts[0].parse::<i32>().ok()?;
-        let reset_5h = parts[1].parse::<i64>().ok()?;
-        let pct_7d = parts[2].parse::<i32>().ok()?;
-        let reset_7d = parts[3].parse::<i64>().ok()?;
-        Some(Self {
-            pct_5h,
-            reset_5h,
-            pct_7d,
-            reset_7d,
-        })
-    }
 }
 
 // ── BudgetPosture ─────────────────────────────────────────────────────────────
@@ -495,22 +468,6 @@ fn parse_window_pace(v: &serde_json::Value, key: &str) -> Option<WindowPace> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_rate_limits_valid() {
-        let rl = RateLimits::parse("85:1715200000:42:1715800000").unwrap();
-        assert_eq!(rl.pct_5h, 85);
-        assert_eq!(rl.reset_5h, 1715200000);
-        assert_eq!(rl.pct_7d, 42);
-        assert_eq!(rl.reset_7d, 1715800000);
-    }
-
-    #[test]
-    fn parse_rate_limits_malformed_returns_none() {
-        assert!(RateLimits::parse("").is_none());
-        assert!(RateLimits::parse("85:abc:42").is_none());
-        assert!(RateLimits::parse("85:1715200000:42").is_none()); // only 3 fields
-    }
 
     #[test]
     fn parse_budget_posture_elevated() {

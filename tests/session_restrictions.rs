@@ -29,6 +29,7 @@ fn restrictions() -> SessionRestrictions {
             "ToolSearch".into(),
         ],
         max_budget_usd: Some(1.5),
+        model: None,
     }
 }
 

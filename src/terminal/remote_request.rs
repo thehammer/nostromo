@@ -853,7 +853,7 @@ impl TerminalManager {
         } else {
             RefusalChannel::Mcp
         };
-        if !self.take_refusal_budget(channel) {
+        if !self.take_refusal_budget(super::RefusalKey::Channel(channel)) {
             return;
         }
         self.record_remote_requested(request, target, reason);

@@ -633,6 +633,7 @@ fn a_restricted_session_keeps_the_arguments_it_had_and_never_sends_prompts_to_th
                 builtin_tools: vec!["Read".into()],
                 allowed_tools: vec!["Read".into()],
                 max_budget_usd: Some(1.5),
+                model: None,
             };
             w.mgr.restrict_tag("restricted-1", restrictions.clone());
             let fake = w.spawn("restricted-1", false);

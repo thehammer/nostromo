@@ -17,6 +17,7 @@ class StatusBarView: NSView {
     // MARK: - State
 
     private var cancellables = Set<AnyCancellable>()
+    private var refreshTimer: Timer?
 
     // MARK: - Init
 
@@ -68,9 +69,8 @@ class StatusBarView: NSView {
 
         // Subscribe to store
         let store = AppStore.shared
-        Publishers.CombineLatest3(
+        Publishers.CombineLatest(
             store.$motherStatus,
-            store.$rateLimits,
             store.$posture
         )
         .receive(on: DispatchQueue.main)
@@ -84,6 +84,16 @@ class StatusBarView: NSView {
             .store(in: &cancellables)
 
         render()
+
+        // Coarse tick so a passed reset or a stale snapshot disappears without a file change.
+        // The block captures self weakly, so the run loop's timer does not retain the view.
+        let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in self?.render() }
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTimer = timer
+    }
+
+    deinit {
+        refreshTimer?.invalidate()
     }
 
     // MARK: - Rendering
@@ -140,9 +150,13 @@ class StatusBarView: NSView {
         let store = AppStore.shared
         let now = Date().timeIntervalSince1970
 
+        // A snapshot from a dead Bishop shows no numbers and no posture chip.
+        let fresh = store.posture.map { !$0.isStale(now: now) } ?? false
+
         // Per-tab agent attribution — shown when the active focus's agent tag
         // appears in the agents map.  Shows share of Mother-attributed tokens only.
-        if let tag  = store.activeFocusAgentTag,
+        if fresh,
+           let tag  = store.activeFocusAgentTag,
            let snap = store.posture,
            !snap.agents.isEmpty {
             let windowKey = snap.sevenDay != nil ? "7d" : "5h"
@@ -154,36 +168,17 @@ class StatusBarView: NSView {
         }
 
         // Budget posture chip — hidden when normal
-        if let p = store.posture?.posture, !p.isHidden {
+        if fresh, let p = store.posture?.posture, !p.isHidden {
             out.append(colored(p.chipLabel + "  ", postureChipColor(p)))
         }
 
-        // Rate-limit windows
-        if let rl = store.rateLimits {
-            var parts: [NSAttributedString] = []
-
-            if rl.pct5h >= 0 && rl.reset5h > now {
-                let t = Theme.formatReset(rl.reset5h - now)
-                let s = NSMutableAttributedString()
-                s.append(muted("5h "))
-                s.append(colored("\(rl.pct5h)%", Theme.pctColor(rl.pct5h)))
-                s.append(muted(" · \(t)"))
-                parts.append(s)
-            }
-
-            if rl.pct7d >= 0 && rl.reset7d > now {
-                let t = Theme.formatReset(rl.reset7d - now)
-                let s = NSMutableAttributedString()
-                s.append(muted("7d "))
-                s.append(colored("\(rl.pct7d)%", Theme.pctColor(rl.pct7d)))
-                s.append(muted(" · \(t)"))
-                parts.append(s)
-            }
-
-            for (i, part) in parts.enumerated() {
-                out.append(part)
-                if i < parts.count - 1 { out.append(muted("  ")) }
-            }
+        // 5h / 7d windows from Bishop's posture (never a stale number)
+        let windows = store.posture?.statusWindows(now: now) ?? []
+        for (i, w) in windows.enumerated() {
+            out.append(muted("\(w.label) "))
+            out.append(colored("\(w.pct)%", Theme.pctColor(w.pct)))
+            out.append(muted(" · \(w.remaining)"))
+            if i < windows.count - 1 { out.append(muted("  ")) }
         }
 
         return out

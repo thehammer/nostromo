@@ -404,8 +404,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         widthConstraint.isActive = true
 
         // Suppress the bubble when the reply was injected by the confirm card — the
-        // card's own chosen-state visuals already acknowledge the selection.
-        if !turn.userInput.contains(Self.confirmReplySentinel) {
+        // card's own chosen-state visuals already acknowledge the selection. A turn the daemon
+        // wrote for a followed terminal (`origin`) is no bubble either: it is the blocks below.
+        if !turn.hasTerminalOrigin && !turn.userInput.contains(Self.confirmReplySentinel) {
             let bubble = UserBubbleView(text: turn.userInput, imageURLs: turn.imageURLs)
             self.bubble = bubble
             bubbleIsImageOnly = turn.userInput == ChatSession.imageOnlyText && !turn.imageURLs.isEmpty
@@ -422,8 +423,34 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         if !contentAvailable {
             appendColumnView(Self.makeTruncationBanner(), key: "banner")
         }
+        if turn.hasTerminalOrigin { appendDeliveryBlocks(for: turn) }
         render(turn, live: false)
     }
+
+    /// The blocks of a terminal delivery turn: one per item, as the first columns (under the
+    /// banner, above the agent's answer), where the user bubble would have been.
+    private func appendDeliveryBlocks(for turn: ChatTurn) {
+        let texts = turn.terminalOriginTexts
+        for (i, item) in turn.terminalOriginItems.enumerated() {
+            let index = TerminalDeliveryBlockKey.blockIndex(item: i)
+            let view = TerminalDeliveryBlockView(item: item, text: texts[i],
+                                                 startExpanded: interaction.expandedBlocks.contains(index))
+            view.onExpansionChange = { [weak self, weak view] isExpanded in
+                guard let self, let view else { return }
+                self.noteBlockExpansion(index, isExpanded)
+                self.columnChangedHeight(view)
+            }
+            appendColumnView(view, key: TerminalDeliveryBlockKey.columnKey(item: i))
+        }
+    }
+
+    /// The terminal delivery blocks of this turn, in order (empty for an ordinary turn).
+    var deliveryBlockViews: [TerminalDeliveryBlockView] {
+        columnViews.compactMap { $0 as? TerminalDeliveryBlockView }
+    }
+
+    /// Whether the turn shows the user's message as a bubble.
+    var hasUserBubble: Bool { bubble != nil }
 
     required init?(coder: NSCoder) { fatalError() }
 

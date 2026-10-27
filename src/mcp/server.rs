@@ -359,9 +359,15 @@ fn handle_initialize(
 
 /// The `instructions` for this connection: only for a session the daemon
 /// spawned (its Hello `pty_id` is a focus tag the daemon knows), and never for
-/// the picks session, which cannot call the tracker. Everyone else gets today's
+/// the picks session, which cannot call the tracker. Huey's curating session
+/// gets [`crate::mcp::instructions::HUEY_RUN_NOTE`]. Everyone else gets today's
 /// response unchanged.
 fn initialize_instructions(state: &McpSharedState, pty_id: Option<&str>) -> Option<String> {
+    // Huey's curating session gets a one-line note instead of the tracker
+    // paragraph (it is never in the focus registry).
+    if pty_id == Some(crate::huey::curate::HUEY_RUN_TAG) {
+        return Some(crate::mcp::instructions::HUEY_RUN_NOTE.to_string());
+    }
     let tag = pty_id.filter(|t| !t.is_empty() && *t != crate::data::work::picks::PICKS_TAG)?;
     let daemon = state.daemon.as_ref()?;
     let known = daemon

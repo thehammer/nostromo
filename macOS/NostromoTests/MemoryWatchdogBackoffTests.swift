@@ -27,6 +27,11 @@ import XCTest
 ///  4. The toast keeps its title; an unhelpful shed adds the "held outside the transcript" sentence
 ///     and the largest memory category, and only the first unhelpful shed of an episode toasts.
 ///
+///  5. A shed that finishes only because its completion timed out is inconclusive: it does not count
+///     as unhelpful, but it has its own, smaller back-off (`timeoutBackoffSchedule`: 60 s, 300 s,
+///     900 s), the gap used is the longer of the two streaks', and the operator hears about it once
+///     per episode (or until a shed completes normally), not every 30 s.
+///
 /// Nothing here inspects `isShedding`, `lastShed`, `hasWarned` or any failure counter: back-off is
 /// observed as "did `onShed` / `onShedScoped` get called", and reporting as "what reached `onWarn`".
 final class MemoryWatchdogBackoffTests: XCTestCase {
@@ -77,8 +82,13 @@ final class MemoryWatchdogBackoffTests: XCTestCase {
             self.level = level
             watchdog.now = { [unowned self] in self.base.addingTimeInterval(self.clockSeconds) }
             watchdog.footprint = { [unowned self] in self.level }
-            watchdog.relievePressure = {}
+            // Called exactly once per finished shed, whether it completed or timed out: the tests
+            // use it to know, without sleeping, that a shed has run to its end.
+            watchdog.relievePressure = { [unowned self] in self.finishedSheds += 1 }
             watchdog.summarize = { MemoryWatchdogBackoffTests.incidentSummary }
+            // The real watchdog summarizes off the main thread (`testTheMemorySummaryIsTakenOffTheMainThread...`);
+            // these tests read the toast straight after the shed, so they run it inline.
+            watchdog.summaryExecutor = { $0() }
             watchdog.onWarn = { [unowned self] title, detail in self.toasts.append((title, detail)) }
             // Long enough that a stray timeout never finishes anything inside a test.
             watchdog.shedCompletionTimeout = 60
@@ -96,6 +106,7 @@ final class MemoryWatchdogBackoffTests: XCTestCase {
         }
 
         private(set) var legacyShedCount = 0
+        private(set) var finishedSheds = 0
 
         /// How many times the app was asked to shed, by either callback.
         var shedCount: Int { scopes.count + legacyShedCount }
@@ -125,6 +136,27 @@ final class MemoryWatchdogBackoffTests: XCTestCase {
             let before = shedCount
             watchdog.poll()
             return shedCount > before
+        }
+
+        /// Runs `start` (which may start a shed) and, if it did, lets the real run loop turn until that
+        /// shed has finished. With `holdCompletions` set and a short `shedCompletionTimeout` that is the
+        /// timeout finishing it; otherwise the shed has already finished and this returns at once.
+        @discardableResult
+        func settled(file: StaticString = #filePath, line: UInt = #line, _ start: () -> Bool) -> Bool {
+            let finishedBefore = finishedSheds
+            guard start() else { return false }
+            let deadline = Date().addingTimeInterval(5)
+            while finishedSheds == finishedBefore, Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            }
+            XCTAssertGreaterThan(finishedSheds, finishedBefore, "the shed never finished", file: file, line: line)
+            return true
+        }
+
+        /// `poll(at:)`, then wait for the shed it started (if any) to finish.
+        @discardableResult
+        func pollSettled(at seconds: TimeInterval, file: StaticString = #filePath, line: UInt = #line) -> Bool {
+            settled(file: file, line: line) { poll(at: seconds) }
         }
 
         @discardableResult
@@ -584,21 +616,277 @@ final class MemoryWatchdogBackoffTests: XCTestCase {
         XCTAssertTrue(rig.poll(at: 121))
     }
 
-    /// A shed that finishes only via the completion timeout was measured on a stale "after": it
-    /// is neither counted as unhelpful nor described as "held outside the transcript".
-    func testAShedThatFinishesViaTheTimeoutIsInconclusiveAndDoesNotBackOff() {
+    // MARK: - Timed-out sheds: inconclusive, but not free
+
+    private static let timeoutGaps = MemoryWatchdog.timeoutBackoffSchedule
+    private static let inconclusivePhrase = "still running when it was measured"
+
+    /// A rig whose sheds hang until their (short) completion timeout finishes them.
+    private func hangingRig() -> Rig {
         let rig = Rig()
         rig.holdCompletions = true
         rig.watchdog.shedCompletionTimeout = 0.05
-        XCTAssertTrue(rig.poll(at: 0))
+        return rig
+    }
 
-        let settled = expectation(description: "the timeout finished the shed")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { settled.fulfill() }
-        wait(for: [settled], timeout: 5)
+    /// A shed that finishes only via the completion timeout was measured on a stale "after": it
+    /// is not counted as unhelpful and not described as "held outside the transcript". It is not
+    /// free either: the next shed needs the first step of the timeout schedule, not just 30 s.
+    func testAShedThatFinishesViaTheTimeoutIsInconclusiveAndOnlyBacksOffOnTheTimeoutSchedule() {
+        let rig = hangingRig()
+        XCTAssertEqual(Self.timeoutGaps.first, 60, "precondition: the first timeout step is a minute")
+        XCTAssertTrue(rig.pollSettled(at: 0))
 
         XCTAssertEqual(rig.shedToasts.count, 1)
         XCTAssertFalse(rig.shedToasts[0].detail.contains(Self.heldOutsidePhrase))
+        XCTAssertTrue(rig.shedToasts[0].detail.contains(Self.inconclusivePhrase), rig.shedToasts[0].detail)
+
+        XCTAssertFalse(rig.pollSettled(at: 30), "30 s is no longer enough after a timed-out shed")
+        XCTAssertFalse(rig.pollSettled(at: 40))
+        XCTAssertFalse(rig.pollSettled(at: Self.timeoutGaps[0] - 1), "one second short of the first timeout step")
+        XCTAssertEqual(rig.shedCount, 1)
+        XCTAssertTrue(rig.pollSettled(at: Self.timeoutGaps[0] + 1), "the timeout step has passed")
+        XCTAssertEqual(rig.shedCount, 2)
+    }
+
+    /// The incident shape for timeouts: a pane that never finishes compacting keeps the footprint
+    /// over the line, and every 30 s poll used to start a shed and toast again. Over an hour of 30 s
+    /// polls the operator is told once, and sheds are spaced by at least the timeout schedule.
+    func testAShedThatKeepsTimingOutIsNeitherRepeatedNorAnnouncedEveryThirtySeconds() {
+        let rig = hangingRig()
+        var starts: [TimeInterval] = []
+
+        for t in stride(from: 0.0, through: 3_600, by: 30) {
+            if rig.pollSettled(at: t) { starts.append(t) }
+        }
+
+        XCTAssertEqual(rig.shedToasts.count, 1,
+                       "a repeated timeout must not repeat the toast: \(rig.shedToasts.map { $0.detail })")
+        XCTAssertGreaterThanOrEqual(starts.count, 4, "the watchdog still tries again, it is not wedged: \(starts)")
+        XCTAssertLessThanOrEqual(starts.count, 8, "an hour of polls produced \(starts.count) sheds: \(starts)")
+        for (index, pair) in zip(starts, starts.dropFirst()).enumerated() {
+            let step = Self.timeoutGaps[min(index, Self.timeoutGaps.count - 1)]
+            XCTAssertGreaterThan(pair.1 - pair.0, step,
+                                 "shed \(index + 2) started \(pair.1 - pair.0) s after the previous one; "
+                                 + "the schedule asks for more than \(step) s. Starts: \(starts)")
+        }
+    }
+
+    /// 60 s, 300 s, then 900 s for the third and every later consecutive timeout, measured from when
+    /// the previous shed started. Probed a second either side of each step.
+    func testConsecutiveTimedOutShedsBackOffOnTheTimeoutSchedule() {
+        let rig = hangingRig()
+        XCTAssertEqual(Self.timeoutGaps, [60, 300, 900], "precondition: the documented schedule")
+
+        XCTAssertTrue(rig.pollSettled(at: 0))
+
+        // 1st timeout: 60 s.
+        XCTAssertFalse(rig.pollSettled(at: 59))
+        XCTAssertTrue(rig.pollSettled(at: 61))
+
+        // 2nd consecutive timeout: 300 s from the shed that started at 61.
+        XCTAssertFalse(rig.pollSettled(at: 61 + 61), "the 60 s step no longer applies")
+        XCTAssertFalse(rig.pollSettled(at: 61 + 299))
+        XCTAssertTrue(rig.pollSettled(at: 61 + 301))
+        XCTAssertEqual(rig.shedCount, 3)
+
+        // 3rd consecutive timeout: 900 s from the shed that started at 362.
+        let third = 61.0 + 301
+        XCTAssertFalse(rig.pollSettled(at: third + 301), "the 300 s step no longer applies")
+        XCTAssertFalse(rig.pollSettled(at: third + 899))
+        XCTAssertTrue(rig.pollSettled(at: third + 901))
+        XCTAssertEqual(rig.shedCount, 4)
+
+        // 4th and later: still 900 s, never longer.
+        let fourth = third + 901
+        XCTAssertFalse(rig.pollSettled(at: fourth + 899))
+        XCTAssertTrue(rig.pollSettled(at: fourth + 901))
+        XCTAssertEqual(rig.shedCount, 5)
+    }
+
+    /// A timed-out shed says nothing about whether shedding helps, so it must not push the
+    /// unhelpful-shed back-off up its 120 s / 600 s / 3600 s ladder: after three timeouts, one shed
+    /// that completes and frees nothing is the FIRST unhelpful one and earns 120 s.
+    func testTimedOutShedsDoNotCountTowardTheUnhelpfulStreak() {
+        let rig = hangingRig()
+        XCTAssertTrue(rig.pollSettled(at: 0))
+        XCTAssertTrue(rig.pollSettled(at: 61))
+        XCTAssertTrue(rig.pollSettled(at: 61 + 301))
+        let lastTimeout = 61.0 + 301
+
         rig.holdCompletions = false
-        XCTAssertTrue(rig.poll(at: 40), "no streak was recorded, so only the 30 s gap applies")
+        rig.freedByNextShed = 0
+        XCTAssertTrue(rig.pollSettled(at: lastTimeout + 901), "the 900 s timeout step has passed")
+        let unhelpful = lastTimeout + 901
+
+        XCTAssertFalse(rig.pollSettled(at: unhelpful + 119))
+        XCTAssertTrue(rig.pollSettled(at: unhelpful + 121),
+                      "one unhelpful shed earns 120 s, not the ten minutes or hour that three timeouts would")
+        XCTAssertEqual(rig.shedCount, 5)
+    }
+
+    /// Both streaks can be live at once. The gap is the longer of the two, so a short timeout step
+    /// never shortens an unhelpful-shed back-off, and a long one is not cut short by it.
+    func testTheLongerOfTheUnhelpfulAndTimeoutGapsApplies() {
+        let rig = hangingRig()
+        rig.holdCompletions = false
+        XCTAssertTrue(rig.pollSettled(at: 0), "a normal shed that frees nothing: 120 s")
+
+        rig.holdCompletions = true
+        XCTAssertFalse(rig.pollSettled(at: 119))
+        XCTAssertTrue(rig.pollSettled(at: 121), "shed 2 times out")
+        // Timeout step 1 is 60 s but the unhelpful streak still asks for 120 s: the longer wins.
+        XCTAssertFalse(rig.pollSettled(at: 121 + 61), "60 s is not enough while 120 s is owed")
+        XCTAssertFalse(rig.pollSettled(at: 121 + 119))
+        XCTAssertTrue(rig.pollSettled(at: 121 + 121), "shed 3 times out")
+        // Timeout step 2 is 300 s, longer than the unhelpful 120 s: now the timeout streak wins.
+        XCTAssertFalse(rig.pollSettled(at: 242 + 121), "120 s is not enough once the timeout step is 300 s")
+        XCTAssertFalse(rig.pollSettled(at: 242 + 299))
+        XCTAssertTrue(rig.pollSettled(at: 242 + 301), "shed 4 times out")
+        // Timeout step 3 is 900 s.
+        XCTAssertFalse(rig.pollSettled(at: 543 + 899))
+        XCTAssertTrue(rig.pollSettled(at: 543 + 901))
+        XCTAssertEqual(rig.shedCount, 5)
+    }
+
+    /// A shed that completes normally ends the timeout streak and re-arms the toast: the next
+    /// timeout is told again, and the gap that follows is the short, first-step one.
+    func testAShedThatCompletesNormallyResetsTheTimeoutBackOffAndTheToast() throws {
+        let rig = hangingRig()
+        XCTAssertTrue(rig.pollSettled(at: 0))
+        XCTAssertTrue(rig.pollSettled(at: 61))
+        XCTAssertEqual(rig.shedToasts.count, 1, "precondition: two timeouts, one toast")
+
+        // 300 s have passed; this shed completes normally and frees nothing (first unhelpful one).
+        rig.holdCompletions = false
+        rig.freedByNextShed = 0
+        XCTAssertTrue(rig.pollSettled(at: 61 + 301))
+        XCTAssertEqual(rig.shedToasts.count, 2, "a normal completion reports as it always did")
+        XCTAssertTrue(rig.shedToasts[1].detail.contains(Self.heldOutsidePhrase), rig.shedToasts[1].detail)
+        let normal = 61.0 + 301
+
+        // The timeout streak is gone: only the unhelpful 120 s is owed (300 s would mean it survived).
+        XCTAssertFalse(rig.pollSettled(at: normal + 119))
+        rig.holdCompletions = true
+        XCTAssertTrue(rig.pollSettled(at: normal + 121), "only the 120 s unhelpful gap applies")
+        XCTAssertEqual(rig.shedToasts.count, 3, "the first timeout after a normal shed is told again")
+        let detail = try XCTUnwrap(rig.shedToasts.last).detail
+        XCTAssertTrue(detail.contains(Self.inconclusivePhrase), detail)
+        XCTAssertFalse(detail.contains(Self.heldOutsidePhrase), detail)
+        let timedOut = normal + 121
+
+        // And that timeout is the 1st of a new streak: the gap is the larger of 120 s (unhelpful) and 60 s.
+        XCTAssertFalse(rig.pollSettled(at: timedOut + 119))
+        XCTAssertTrue(rig.pollSettled(at: timedOut + 121))
+    }
+
+    /// A shed that completes normally AND helps ends both streaks: the next one is a plain 30 s away.
+    func testAHelpfulShedAfterTimeoutsLeavesOnlyTheThirtySecondGap() {
+        let rig = hangingRig()
+        XCTAssertTrue(rig.pollSettled(at: 0))
+        XCTAssertTrue(rig.pollSettled(at: 61))
+        XCTAssertFalse(rig.pollSettled(at: 61 + 200), "precondition: 300 s are owed after two timeouts")
+
+        rig.holdCompletions = false
+        rig.freedByNextShed = 1_200 * Self.mb
+        XCTAssertTrue(rig.pollSettled(at: 61 + 301))
+        XCTAssertEqual(rig.level, 800 * Self.mb, "precondition: that shed freed 1200 MB")
+
+        rig.level = 2_000 * Self.mb
+        rig.freedByNextShed = 0
+        XCTAssertFalse(rig.pollSettled(at: 61 + 301 + 20))
+        XCTAssertTrue(rig.pollSettled(at: 61 + 301 + 31), "no streak is left: 30 s is enough")
+    }
+
+    /// Falling clearly below the line ends the episode: the timeout back-off and the toast start over.
+    func testEndingTheEpisodeResetsTheTimeoutBackOffAndTheToast() throws {
+        let rig = hangingRig()
+        XCTAssertTrue(rig.pollSettled(at: 0))
+        XCTAssertTrue(rig.pollSettled(at: 61))
+        XCTAssertEqual(rig.shedToasts.count, 1, "precondition: two timeouts, one toast")
+
+        rig.level = 900 * Self.mb
+        XCTAssertFalse(rig.pollSettled(at: 70), "the episode ends here: nothing to shed")
+        rig.level = 2_000 * Self.mb
+
+        // Only 39 s after the last shed: a 300 s back-off would refuse, a clean slate allows it.
+        XCTAssertTrue(rig.pollSettled(at: 100), "a new episode has only the 30 s gap")
+        XCTAssertEqual(rig.shedToasts.count, 2, "a new episode is told again")
+        let detail = try XCTUnwrap(rig.shedToasts.last).detail
+        XCTAssertTrue(detail.contains(Self.inconclusivePhrase), detail)
+
+        // And the schedule starts over from its first step.
+        XCTAssertFalse(rig.pollSettled(at: 100 + 59))
+        XCTAssertTrue(rig.pollSettled(at: 100 + 61))
+    }
+
+    /// A footprint that merely hovers under the line (1.5 GB, above the episode-end mark) is still
+    /// one episode: the timeout back-off and the "already told" state survive it.
+    func testDippingJustUnderTheLineKeepsTheTimeoutBackOffAndThePriorToast() {
+        let rig = hangingRig()
+        XCTAssertTrue(rig.pollSettled(at: 0))
+        XCTAssertTrue(rig.pollSettled(at: 61))
+
+        rig.level = 1_500 * Self.mb
+        XCTAssertFalse(rig.pollSettled(at: 70))
+        rig.level = 2_000 * Self.mb
+        XCTAssertFalse(rig.pollSettled(at: 100), "same episode: 300 s are still owed")
+        XCTAssertTrue(rig.pollSettled(at: 61 + 301))
+        XCTAssertEqual(rig.shedToasts.count, 1, "and the operator is not told a second time")
+    }
+
+    /// Critical OS pressure ignores the timeout back-off (it keeps only the 30 s minimum gap).
+    func testACriticalShedIgnoresTheTimeoutBackOff() {
+        let rig = hangingRig()
+        XCTAssertTrue(rig.pollSettled(at: 0))
+        XCTAssertFalse(rig.pollSettled(at: 40), "precondition: the poll path owes 60 s")
+
+        XCTAssertTrue(rig.settled { rig.criticalShed(at: 40) }, "critical pressure is not held back by the back-off")
+        XCTAssertEqual(rig.scopes, [.offscreenOnly, .everything])
+        XCTAssertFalse(rig.settled { rig.criticalShed(at: 50) }, "the 30 s minimum gap still applies")
+        XCTAssertTrue(rig.settled { rig.criticalShed(at: 71) })
+    }
+
+    // MARK: - The memory summary is not taken on the main thread
+
+    /// Summarizing walks the VM regions and the malloc zones, which grows with the heap: the wrong
+    /// work for the main thread of an app that is already over its limit. With the real executor the
+    /// summary is taken elsewhere, and the toast still reaches the operator on the main thread.
+    func testTheMemorySummaryIsTakenOffTheMainThreadAndTheToastStillArrivesOnMain() throws {
+        let rig = Rig()
+        rig.watchdog.summaryExecutor = { DispatchQueue.global(qos: .utility).async(execute: $0) }
+
+        let lock = NSLock()
+        var summarizeRanOnMain: [Bool] = []
+        var warnings: [(title: String, detail: String, onMain: Bool)] = []
+        rig.watchdog.summarize = {
+            lock.lock(); summarizeRanOnMain.append(Thread.isMainThread); lock.unlock()
+            return MemoryWatchdogBackoffTests.incidentSummary
+        }
+        rig.watchdog.onWarn = { title, detail in
+            lock.lock(); warnings.append((title, detail, Thread.isMainThread)); lock.unlock()
+        }
+
+        XCTAssertTrue(rig.poll(at: 0), "a shed that frees nothing")
+
+        func heldOutsideToasts() -> [(title: String, detail: String, onMain: Bool)] {
+            lock.lock(); defer { lock.unlock() }
+            return warnings.filter { $0.detail.contains(Self.heldOutsidePhrase) }
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while heldOutsideToasts().isEmpty, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+
+        let toasts = heldOutsideToasts()
+        let toast = try XCTUnwrap(toasts.first, "the 'held outside the transcript' toast never arrived")
+        XCTAssertEqual(toasts.count, 1)
+        XCTAssertEqual(toast.title, Self.toastTitle)
+        XCTAssertTrue(toast.detail.contains("Malloc Small 1678 MB"), toast.detail)
+        XCTAssertTrue(toast.detail.contains("Footprint 2000 → 2000 MB."), toast.detail)
+        XCTAssertTrue(toast.onMain, "the operator-facing callback must run on the main thread")
+
+        lock.lock(); let ranOnMain = summarizeRanOnMain; lock.unlock()
+        XCTAssertEqual(ranOnMain, [false], "the summary must be taken once, and not on the main thread")
     }
 }

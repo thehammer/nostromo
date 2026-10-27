@@ -216,10 +216,6 @@ class TabBarView: NSView {
         }
         currentFocuses = focuses
 
-        // Clear previous content
-        documentView.subviews.forEach { $0.removeFromSuperview() }
-        items = [:]
-
         let perriDetailByTag = AppStore.shared.perriDetailByTag
         let branches = BranchProvider.shared.branches
         let rows = buildNavRows(
@@ -231,6 +227,22 @@ class TabBarView: NSView {
             branchFor: { $0.projectPath.flatMap { branches[$0] } },
             badgeDetailFor: { [badges] in badges.badge(for: $0)?.detail }
         )
+        // The same rows again builds the same views again. That used to happen on every publish of
+        // `perriDetailByTag` (the daemon sends a `perri_state` frame per focus every queue poll, and a
+        // dictionary write publishes even when nothing changed), and every rebuild created new
+        // `NSTextField`s, each of which leaves AppKit KVO records behind for good
+        // (docs/diagnostics.md, "View-tree leak"). Badges, attention and the active highlight are
+        // applied in place and do not depend on a rebuild.
+        guard rows != currentRows else {
+            RebuildCounters.note(.sidebarSkipped)
+            return
+        }
+        RebuildCounters.note(.sidebarRebuilt)
+
+        // Clear previous content
+        documentView.subviews.forEach { $0.removeFromSuperview() }
+        items = [:]
+
         currentRows = rows
         var prev: NSView? = nil
         var isFirstOrg = true

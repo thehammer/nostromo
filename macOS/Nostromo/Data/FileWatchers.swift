@@ -15,7 +15,6 @@ private let log = Logger(subsystem: "com.hammer.nostromo", category: "files")
 class FileWatchers {
     static let shared = FileWatchers()
 
-    let rateLimits   = CurrentValueSubject<RateLimits?,      Never>(nil)
     let posture      = CurrentValueSubject<PostureSnapshot?,  Never>(nil)
 
     /// Fires when any file in the pr-cache/ directory changes (add/update).
@@ -27,7 +26,6 @@ class FileWatchers {
     let thresholdEvents = PassthroughSubject<PostureThresholdEvent, Never>()
 
     private var timer:          Timer?
-    private var lastRateLimits: String?
     private var lastPosture:    String?
 
     // FSEvent watcher for pr-cache/ directory
@@ -61,17 +59,7 @@ class FileWatchers {
     // MARK: - Polling
 
     private func poll() {
-        pollRateLimits()
         pollPosture()
-    }
-
-    private func pollRateLimits() {
-        let content = try? String(contentsOfFile: "/tmp/.claude-rate-limits", encoding: .utf8)
-        guard content != lastRateLimits else { return }
-        lastRateLimits = content
-        let parsed = content.flatMap { RateLimits.parse($0) }
-        log.debug("rate-limits changed: \(parsed == nil ? "nil" : "5h=\(parsed!.pct5h)% 7d=\(parsed!.pct7d)%", privacy: .public)")
-        rateLimits.send(parsed)
     }
 
     private func pollPosture() {

@@ -311,6 +311,9 @@
 		HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000140 /* ImageDecodePolicyTests.swift */; };
 		HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000150 /* MemoryWatchdogTests.swift */; };
 		ZZRLC00000000000000000B1 /* ReadLoopChurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */; };
+		ZZSBRCH000000000000000B1 /* SidebarRebuildChurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZSBRCH000000000000000R1 /* SidebarRebuildChurnTests.swift */; };
+		ZZMSCST000000000000000B1 /* MemorySummaryCostTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZMSCST000000000000000R1 /* MemorySummaryCostTests.swift */; };
+		ZZQLORD000000000000000B1 /* QueryListOrderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZQLORD000000000000000R1 /* QueryListOrderingTests.swift */; };
 		ZZTAE10000000000000000B1 /* ShedKeepsVisibleViewsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */; };
 		ZZTF110000000000000000B1 /* MemoryDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZTF110000000000000000R1 /* MemoryDiagnosticsTests.swift */; };
 		ZZT43E0000000000000000B1 /* MemorySummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZT43E0000000000000000R1 /* MemorySummaryTests.swift */; };
@@ -400,6 +403,7 @@
 		PP000000000000000000009 /* ActivityStreamModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000008 /* ActivityStreamModelTests.swift */; };
 		PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000010 /* ActivityTickerWiringTests.swift */; };
 		PP000000000000000000013 /* StatusBarActivityRemovalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */; };
+		PP0000000000000000005B2 /* StatusBarPostureWindowsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP0000000000000000005B1 /* StatusBarPostureWindowsTests.swift */; };
 		PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = PP0000000000000000000001 /* TicketBlockDocumentTests.swift */; };
 
 		ZP0000000000000000000011 /* DisplayIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZP0000000000000000000001 /* DisplayIdentity.swift */; };
@@ -575,6 +579,57 @@
 		ZZ0000000000000000TK2601 /* TrackerRowHoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2600 /* TrackerRowHoldTests.swift */; };
 		ZZ0000000000000000TK2701 /* TrackerRowHoldReleaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2700 /* TrackerRowHoldReleaseTests.swift */; };
 		ZZ0000000000000000TK2801 /* TrackerRowHoldMouseDownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000TK2800 /* TrackerRowHoldMouseDownTests.swift */; };
+		TP000000000000000000A001 /* TerminalWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F001 /* TerminalWire.swift */; };
+		TP000000000000000000T001 /* TerminalWire.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F001 /* TerminalWire.swift */; };
+		TP000000000000000000A002 /* TerminalSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F002 /* TerminalSessionStore.swift */; };
+		TP000000000000000000T002 /* TerminalSessionStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F002 /* TerminalSessionStore.swift */; };
+		TP000000000000000000A003 /* TerminalLatencyStats.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F003 /* TerminalLatencyStats.swift */; };
+		TP000000000000000000T003 /* TerminalLatencyStats.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F003 /* TerminalLatencyStats.swift */; };
+		TP000000000000000000A004 /* TerminalInputGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F004 /* TerminalInputGuard.swift */; };
+		TP000000000000000000T004 /* TerminalInputGuard.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F004 /* TerminalInputGuard.swift */; };
+		TP000000000000000000A005 /* NostromoTerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F005 /* NostromoTerminalView.swift */; };
+		TP000000000000000000A006 /* TerminalPaneHostView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F006 /* TerminalPaneHostView.swift */; };
+		TP000000000000000000T007 /* TerminalWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F007 /* TerminalWireTests.swift */; };
+		TP000000000000000000T008 /* TerminalSessionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F008 /* TerminalSessionStoreTests.swift */; };
+		TP000000000000000000T009 /* TerminalInputGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F009 /* TerminalInputGuardTests.swift */; };
+		TP000000000000000000T010 /* TerminalLatencyStatsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F010 /* TerminalLatencyStatsTests.swift */; };
+		TP000000000000000000T011 /* TerminalFitnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F011 /* TerminalFitnessTests.swift */; };
+		TP000000000000000000A012 /* RemoteShellWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F012 /* RemoteShellWire.swift */; };
+		TP000000000000000000T012 /* RemoteShellWire.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F012 /* RemoteShellWire.swift */; };
+		TP000000000000000000A013 /* RemoteShellStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F013 /* RemoteShellStore.swift */; };
+		TP000000000000000000T013 /* RemoteShellStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F013 /* RemoteShellStore.swift */; };
+		TP000000000000000000A014 /* ToastAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F014 /* ToastAction.swift */; };
+		TP000000000000000000T014 /* ToastAction.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F014 /* ToastAction.swift */; };
+		TP000000000000000000A015 /* TerminalChromeModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F015 /* TerminalChromeModel.swift */; };
+		TP000000000000000000T015 /* TerminalChromeModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F015 /* TerminalChromeModel.swift */; };
+		TP000000000000000000A016 /* IdleCountdownModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F016 /* IdleCountdownModel.swift */; };
+		TP000000000000000000T016 /* IdleCountdownModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F016 /* IdleCountdownModel.swift */; };
+		TP000000000000000000A017 /* PastePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F017 /* PastePolicy.swift */; };
+		TP000000000000000000T017 /* PastePolicy.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F017 /* PastePolicy.swift */; };
+		TP000000000000000000A018 /* FollowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F018 /* FollowModel.swift */; };
+		TP000000000000000000T018 /* FollowModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F018 /* FollowModel.swift */; };
+		TP000000000000000000A019 /* TurnOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F019 /* TurnOrigin.swift */; };
+		TP000000000000000000T019 /* TurnOrigin.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F019 /* TurnOrigin.swift */; };
+		TP000000000000000000A020 /* RemoteShellConfirmSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F020 /* RemoteShellConfirmSheet.swift */; };
+		TP000000000000000000A021 /* RemoteShellPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F021 /* RemoteShellPresenter.swift */; };
+		TP000000000000000000A022 /* NewRemoteShellSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F022 /* NewRemoteShellSheet.swift */; };
+		TP000000000000000000A023 /* RemoteShellFailureSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F023 /* RemoteShellFailureSheet.swift */; };
+		TP000000000000000000A024 /* PasteConfirmSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F024 /* PasteConfirmSheet.swift */; };
+		TP000000000000000000A025 /* FollowControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F025 /* FollowControlView.swift */; };
+		TP000000000000000000A026 /* TerminalDeliveryBlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F026 /* TerminalDeliveryBlockView.swift */; };
+		TP000000000000000000T027 /* RemoteShellStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F027 /* RemoteShellStoreTests.swift */; };
+		TP000000000000000000T028 /* RemoteShellWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F028 /* RemoteShellWireTests.swift */; };
+		TP000000000000000000T029 /* ProjectDetectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F029 /* ProjectDetectionTests.swift */; };
+		TP000000000000000000T030 /* TerminalChromeModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F030 /* TerminalChromeModelTests.swift */; };
+		TP000000000000000000T031 /* IdleCountdownModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F031 /* IdleCountdownModelTests.swift */; };
+		TP000000000000000000T032 /* PastePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F032 /* PastePolicyTests.swift */; };
+		TP000000000000000000T033 /* TerminalStoreMirrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */; };
+		TP000000000000000000T034 /* FollowModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F034 /* FollowModelTests.swift */; };
+		TP000000000000000000T035 /* TurnOriginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F035 /* TurnOriginTests.swift */; };
+		TP000000000000000000A036 /* AppControlAX.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F036 /* AppControlAX.swift */; };
+		TP000000000000000000T036 /* AppControlAX.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F036 /* AppControlAX.swift */; };
+		TP000000000000000000T037 /* TerminalScreenAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F037 /* TerminalScreenAccessTests.swift */; };
+		TP000000000000000000B001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = TP000000000000000000P002 /* SwiftTerm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -791,6 +846,9 @@
 		HH000000000000000000140 /* ImageDecodePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageDecodePolicyTests.swift; sourceTree = "<group>"; };
 		HH000000000000000000150 /* MemoryWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdogTests.swift; sourceTree = "<group>"; };
 		ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadLoopChurnTests.swift; sourceTree = "<group>"; };
+		ZZSBRCH000000000000000R1 /* SidebarRebuildChurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarRebuildChurnTests.swift; sourceTree = "<group>"; };
+		ZZMSCST000000000000000R1 /* MemorySummaryCostTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySummaryCostTests.swift; sourceTree = "<group>"; };
+		ZZQLORD000000000000000R1 /* QueryListOrderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryListOrderingTests.swift; sourceTree = "<group>"; };
 		ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShedKeepsVisibleViewsTests.swift; sourceTree = "<group>"; };
 		ZZTF110000000000000000R1 /* MemoryDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryDiagnosticsTests.swift; sourceTree = "<group>"; };
 		ZZT43E0000000000000000R1 /* MemorySummaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySummaryTests.swift; sourceTree = "<group>"; };
@@ -855,6 +913,7 @@
 		PP000000000000000000008 /* ActivityStreamModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityStreamModelTests.swift; sourceTree = "<group>"; };
 		PP000000000000000000010 /* ActivityTickerWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityTickerWiringTests.swift; sourceTree = "<group>"; };
 		PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarActivityRemovalTests.swift; sourceTree = "<group>"; };
+		PP0000000000000000005B1 /* StatusBarPostureWindowsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarPostureWindowsTests.swift; sourceTree = "<group>"; };
 		OO0000000000000000000001 /* TicketBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocument.swift; sourceTree = "<group>"; };
 		OO0000000000000000000002 /* TicketContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketContentView.swift; sourceTree = "<group>"; };
 
@@ -960,6 +1019,43 @@
 		ZZ0000000000000000TK2600 /* TrackerRowHoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerRowHoldTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2700 /* TrackerRowHoldReleaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerRowHoldReleaseTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000TK2800 /* TrackerRowHoldMouseDownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrackerRowHoldMouseDownTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F001 /* TerminalWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWire.swift; sourceTree = "<group>"; };
+		TP000000000000000000F002 /* TerminalSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionStore.swift; sourceTree = "<group>"; };
+		TP000000000000000000F003 /* TerminalLatencyStats.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalLatencyStats.swift; sourceTree = "<group>"; };
+		TP000000000000000000F004 /* TerminalInputGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalInputGuard.swift; sourceTree = "<group>"; };
+		TP000000000000000000F005 /* NostromoTerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NostromoTerminalView.swift; sourceTree = "<group>"; };
+		TP000000000000000000F006 /* TerminalPaneHostView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPaneHostView.swift; sourceTree = "<group>"; };
+		TP000000000000000000F007 /* TerminalWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalWireTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F008 /* TerminalSessionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSessionStoreTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F009 /* TerminalInputGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalInputGuardTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F010 /* TerminalLatencyStatsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalLatencyStatsTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F011 /* TerminalFitnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalFitnessTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F012 /* RemoteShellWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellWire.swift; sourceTree = "<group>"; };
+		TP000000000000000000F013 /* RemoteShellStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellStore.swift; sourceTree = "<group>"; };
+		TP000000000000000000F014 /* ToastAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastAction.swift; sourceTree = "<group>"; };
+		TP000000000000000000F015 /* TerminalChromeModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalChromeModel.swift; sourceTree = "<group>"; };
+		TP000000000000000000F016 /* IdleCountdownModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdleCountdownModel.swift; sourceTree = "<group>"; };
+		TP000000000000000000F017 /* PastePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PastePolicy.swift; sourceTree = "<group>"; };
+		TP000000000000000000F018 /* FollowModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowModel.swift; sourceTree = "<group>"; };
+		TP000000000000000000F019 /* TurnOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOrigin.swift; sourceTree = "<group>"; };
+		TP000000000000000000F020 /* RemoteShellConfirmSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellConfirmSheet.swift; sourceTree = "<group>"; };
+		TP000000000000000000F021 /* RemoteShellPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellPresenter.swift; sourceTree = "<group>"; };
+		TP000000000000000000F022 /* NewRemoteShellSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewRemoteShellSheet.swift; sourceTree = "<group>"; };
+		TP000000000000000000F023 /* RemoteShellFailureSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellFailureSheet.swift; sourceTree = "<group>"; };
+		TP000000000000000000F024 /* PasteConfirmSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasteConfirmSheet.swift; sourceTree = "<group>"; };
+		TP000000000000000000F025 /* FollowControlView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowControlView.swift; sourceTree = "<group>"; };
+		TP000000000000000000F026 /* TerminalDeliveryBlockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalDeliveryBlockView.swift; sourceTree = "<group>"; };
+		TP000000000000000000F027 /* RemoteShellStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellStoreTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F028 /* RemoteShellWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellWireTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F029 /* ProjectDetectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectDetectionTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F030 /* TerminalChromeModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalChromeModelTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F031 /* IdleCountdownModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdleCountdownModelTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F032 /* PastePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PastePolicyTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStoreMirrorTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F034 /* FollowModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowModelTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F035 /* TurnOriginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOriginTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F036 /* AppControlAX.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlAX.swift; sourceTree = "<group>"; };
+		TP000000000000000000F037 /* TerminalScreenAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreenAccessTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -968,6 +1064,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CC00000100000000000000AB /* NostromoKit in Frameworks */,
+				TP000000000000000000B001 /* SwiftTerm in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1020,6 +1117,12 @@
 		AA0000020000000000000010 /* Data */ = {
 			isa = PBXGroup;
 			children = (
+				TP000000000000000000F001 /* TerminalWire.swift */,
+				TP000000000000000000F002 /* TerminalSessionStore.swift */,
+				TP000000000000000000F003 /* TerminalLatencyStats.swift */,
+				TP000000000000000000F012 /* RemoteShellWire.swift */,
+				TP000000000000000000F013 /* RemoteShellStore.swift */,
+				TP000000000000000000F019 /* TurnOrigin.swift */,
 				WK0000000000000000000001 /* WorkModels.swift */,
 				WK0000000000000000000004 /* WorkStore.swift */,
 				WK0000000000000000000095 /* WorkScheduler.swift */,
@@ -1107,6 +1210,7 @@
 			children = (
 				AC0000000000000000000010 /* AppControlProtocol.swift */,
 				AC0000000000000000000020 /* AppControlServer.swift */,
+				TP000000000000000000F036 /* AppControlAX.swift */,
 				ZZ0000000000000000BA1300 /* AppControlTasks.swift */,
 				ZZ0000000000000000BA1400 /* TranscriptAnchorProbe.swift */,
 				ZZ0000000000000000TK1300 /* AppControlTracker.swift */,
@@ -1118,6 +1222,8 @@
 		AA0000020000000000000011 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				TP000000000000000000G001 /* Terminal */,
+				TP000000000000000000G002 /* Toast */,
 				WK0000000000000000000046 /* SendToAgentSheet.swift */,
 				WK0000000000000000000049 /* FocusBadges.swift */,
 				WK0000000000000000000090 /* SidebarBadgeModel.swift */,
@@ -1195,6 +1301,7 @@
 		AA0000020000000000000021 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				TP000000000000000000F026 /* TerminalDeliveryBlockView.swift */,
 				WK0000000000000000000013 /* TeriSurfaceView.swift */,
 				WK0000000000000000000016 /* WorkListView.swift */,
 				WK0000000000000000000019 /* WorkDetailView.swift */,
@@ -1237,6 +1344,21 @@
 		BB00000000000000000000C1 /* NostromoTests */ = {
 			isa = PBXGroup;
 			children = (
+				TP000000000000000000F007 /* TerminalWireTests.swift */,
+				TP000000000000000000F008 /* TerminalSessionStoreTests.swift */,
+				TP000000000000000000F009 /* TerminalInputGuardTests.swift */,
+				TP000000000000000000F010 /* TerminalLatencyStatsTests.swift */,
+				TP000000000000000000F011 /* TerminalFitnessTests.swift */,
+				TP000000000000000000F027 /* RemoteShellStoreTests.swift */,
+				TP000000000000000000F028 /* RemoteShellWireTests.swift */,
+				TP000000000000000000F029 /* ProjectDetectionTests.swift */,
+				TP000000000000000000F030 /* TerminalChromeModelTests.swift */,
+				TP000000000000000000F031 /* IdleCountdownModelTests.swift */,
+				TP000000000000000000F032 /* PastePolicyTests.swift */,
+				TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */,
+				TP000000000000000000F034 /* FollowModelTests.swift */,
+				TP000000000000000000F035 /* TurnOriginTests.swift */,
+				TP000000000000000000F037 /* TerminalScreenAccessTests.swift */,
 				WK0000000000000000000059 /* WorkWireDecodingTests.swift */,
 				WK0000000000000000000061 /* WorkQueryTests.swift */,
 				WK0000000000000000000063 /* WorkStoreTests.swift */,
@@ -1311,6 +1433,9 @@
 				HH000000000000000000140 /* ImageDecodePolicyTests.swift */,
 				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
 				ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */,
+				ZZSBRCH000000000000000R1 /* SidebarRebuildChurnTests.swift */,
+				ZZMSCST000000000000000R1 /* MemorySummaryCostTests.swift */,
+				ZZQLORD000000000000000R1 /* QueryListOrderingTests.swift */,
 				ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */,
 				ZZTF110000000000000000R1 /* MemoryDiagnosticsTests.swift */,
 				ZZT43E0000000000000000R1 /* MemorySummaryTests.swift */,
@@ -1361,6 +1486,7 @@
 				PP000000000000000000008 /* ActivityStreamModelTests.swift */,
 				PP000000000000000000010 /* ActivityTickerWiringTests.swift */,
 				PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */,
+				PP0000000000000000005B1 /* StatusBarPostureWindowsTests.swift */,
 				PP0000000000000000000001 /* TicketBlockDocumentTests.swift */,
 				RR0000000000000000000003 /* PRDetailCacheTests.swift */,
 				TT0000000000000000000000 /* ChatSessionDetachTests.swift */,
@@ -1474,6 +1600,34 @@
 			path = Tracker;
 			sourceTree = "<group>";
 		};
+		TP000000000000000000G001 /* Terminal */ = {
+			isa = PBXGroup;
+			children = (
+				TP000000000000000000F004 /* TerminalInputGuard.swift */,
+				TP000000000000000000F005 /* NostromoTerminalView.swift */,
+				TP000000000000000000F006 /* TerminalPaneHostView.swift */,
+				TP000000000000000000F015 /* TerminalChromeModel.swift */,
+				TP000000000000000000F016 /* IdleCountdownModel.swift */,
+				TP000000000000000000F017 /* PastePolicy.swift */,
+				TP000000000000000000F018 /* FollowModel.swift */,
+				TP000000000000000000F020 /* RemoteShellConfirmSheet.swift */,
+				TP000000000000000000F021 /* RemoteShellPresenter.swift */,
+				TP000000000000000000F022 /* NewRemoteShellSheet.swift */,
+				TP000000000000000000F023 /* RemoteShellFailureSheet.swift */,
+				TP000000000000000000F024 /* PasteConfirmSheet.swift */,
+				TP000000000000000000F025 /* FollowControlView.swift */,
+			);
+			path = Terminal;
+			sourceTree = "<group>";
+		};
+		TP000000000000000000G002 /* Toast */ = {
+			isa = PBXGroup;
+			children = (
+				TP000000000000000000F014 /* ToastAction.swift */,
+			);
+			path = Toast;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -1492,6 +1646,7 @@
 			name = Nostromo;
 			packageProductDependencies = (
 				CC00000100000000000000AA /* NostromoKit */,
+				TP000000000000000000P002 /* SwiftTerm */,
 			);
 			productName = Nostromo;
 			productReference = AA0000000000000000000006 /* Nostromo.app */;
@@ -1540,6 +1695,7 @@
 			projectRoot = "";
 			packageReferences = (
 				CC00000100000000000000A9 /* XCLocalSwiftPackageReference "../Shared/NostromoKit" */,
+				TP000000000000000000P001 /* XCRemoteSwiftPackageReference "SwiftTerm" */,
 			);
 			targets = (
 				AA0000000000000000000040 /* Nostromo */,
@@ -1564,6 +1720,28 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				TP000000000000000000A001 /* TerminalWire.swift in Sources */,
+				TP000000000000000000A002 /* TerminalSessionStore.swift in Sources */,
+				TP000000000000000000A003 /* TerminalLatencyStats.swift in Sources */,
+				TP000000000000000000A004 /* TerminalInputGuard.swift in Sources */,
+				TP000000000000000000A005 /* NostromoTerminalView.swift in Sources */,
+				TP000000000000000000A006 /* TerminalPaneHostView.swift in Sources */,
+				TP000000000000000000A012 /* RemoteShellWire.swift in Sources */,
+				TP000000000000000000A013 /* RemoteShellStore.swift in Sources */,
+				TP000000000000000000A014 /* ToastAction.swift in Sources */,
+				TP000000000000000000A015 /* TerminalChromeModel.swift in Sources */,
+				TP000000000000000000A016 /* IdleCountdownModel.swift in Sources */,
+				TP000000000000000000A017 /* PastePolicy.swift in Sources */,
+				TP000000000000000000A018 /* FollowModel.swift in Sources */,
+				TP000000000000000000A019 /* TurnOrigin.swift in Sources */,
+				TP000000000000000000A036 /* AppControlAX.swift in Sources */,
+				TP000000000000000000A020 /* RemoteShellConfirmSheet.swift in Sources */,
+				TP000000000000000000A021 /* RemoteShellPresenter.swift in Sources */,
+				TP000000000000000000A022 /* NewRemoteShellSheet.swift in Sources */,
+				TP000000000000000000A023 /* RemoteShellFailureSheet.swift in Sources */,
+				TP000000000000000000A024 /* PasteConfirmSheet.swift in Sources */,
+				TP000000000000000000A025 /* FollowControlView.swift in Sources */,
+				TP000000000000000000A026 /* TerminalDeliveryBlockView.swift in Sources */,
 				ZZ0000000000000000M20101 /* ModelStore.swift in Sources */,
 				ZZ0000000000000000M20111 /* ModelPresentation.swift in Sources */,
 				ZZ0000000000000000M20121 /* ModelChip.swift in Sources */,
@@ -1761,6 +1939,34 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				TP000000000000000000T001 /* TerminalWire.swift in TestSources */,
+				TP000000000000000000T002 /* TerminalSessionStore.swift in TestSources */,
+				TP000000000000000000T003 /* TerminalLatencyStats.swift in TestSources */,
+				TP000000000000000000T004 /* TerminalInputGuard.swift in TestSources */,
+				TP000000000000000000T007 /* TerminalWireTests.swift in Sources */,
+				TP000000000000000000T008 /* TerminalSessionStoreTests.swift in Sources */,
+				TP000000000000000000T009 /* TerminalInputGuardTests.swift in Sources */,
+				TP000000000000000000T010 /* TerminalLatencyStatsTests.swift in Sources */,
+				TP000000000000000000T011 /* TerminalFitnessTests.swift in Sources */,
+				TP000000000000000000T012 /* RemoteShellWire.swift in TestSources */,
+				TP000000000000000000T013 /* RemoteShellStore.swift in TestSources */,
+				TP000000000000000000T014 /* ToastAction.swift in TestSources */,
+				TP000000000000000000T015 /* TerminalChromeModel.swift in TestSources */,
+				TP000000000000000000T016 /* IdleCountdownModel.swift in TestSources */,
+				TP000000000000000000T017 /* PastePolicy.swift in TestSources */,
+				TP000000000000000000T018 /* FollowModel.swift in TestSources */,
+				TP000000000000000000T019 /* TurnOrigin.swift in TestSources */,
+				TP000000000000000000T036 /* AppControlAX.swift in TestSources */,
+				TP000000000000000000T027 /* RemoteShellStoreTests.swift in Sources */,
+				TP000000000000000000T028 /* RemoteShellWireTests.swift in Sources */,
+				TP000000000000000000T029 /* ProjectDetectionTests.swift in Sources */,
+				TP000000000000000000T030 /* TerminalChromeModelTests.swift in Sources */,
+				TP000000000000000000T031 /* IdleCountdownModelTests.swift in Sources */,
+				TP000000000000000000T032 /* PastePolicyTests.swift in Sources */,
+				TP000000000000000000T033 /* TerminalStoreMirrorTests.swift in Sources */,
+				TP000000000000000000T034 /* FollowModelTests.swift in Sources */,
+				TP000000000000000000T035 /* TurnOriginTests.swift in Sources */,
+				TP000000000000000000T037 /* TerminalScreenAccessTests.swift in Sources */,
 				ZZ0000000000000000M20102 /* ModelStore.swift in TestSources */,
 				ZZ0000000000000000M20112 /* ModelPresentation.swift in TestSources */,
 				ZZ0000000000000000M20122 /* ModelChip.swift in TestSources */,
@@ -1888,6 +2094,9 @@
 				HH000000000000000000142 /* ImageDecodePolicyTests.swift in Sources */,
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
 				ZZRLC00000000000000000B1 /* ReadLoopChurnTests.swift in Sources */,
+				ZZSBRCH000000000000000B1 /* SidebarRebuildChurnTests.swift in Sources */,
+				ZZMSCST000000000000000B1 /* MemorySummaryCostTests.swift in Sources */,
+				ZZQLORD000000000000000B1 /* QueryListOrderingTests.swift in Sources */,
 				ZZTAE10000000000000000B1 /* ShedKeepsVisibleViewsTests.swift in Sources */,
 				ZZTF110000000000000000B1 /* MemoryDiagnosticsTests.swift in Sources */,
 				ZZT43E0000000000000000B1 /* MemorySummaryTests.swift in Sources */,
@@ -2026,6 +2235,7 @@
 				PP000000000000000000009 /* ActivityStreamModelTests.swift in Sources */,
 				PP000000000000000000011 /* ActivityTickerWiringTests.swift in Sources */,
 				PP000000000000000000013 /* StatusBarActivityRemovalTests.swift in Sources */,
+				PP0000000000000000005B2 /* StatusBarPostureWindowsTests.swift in Sources */,
 				PP0000000000000000000101 /* TicketBlockDocumentTests.swift in Sources */,
 				RR0000000000000000000102 /* PRDetailCache.swift in TestSources */,
 				RR0000000000000000000301 /* PRDetailCacheTests.swift in Sources */,
@@ -2334,11 +2544,27 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		TP000000000000000000P001 /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			requirement = {
+				kind = exactVersion;
+				version = 1.18.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		CC00000100000000000000AA /* NostromoKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = CC00000100000000000000A9 /* XCLocalSwiftPackageReference "../Shared/NostromoKit" */;
 			productName = NostromoKit;
+		};
+		TP000000000000000000P002 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = TP000000000000000000P001 /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
 		};
 /* End XCSwiftPackageProductDependency section */
 

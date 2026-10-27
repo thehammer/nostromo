@@ -573,7 +573,7 @@ enum CiState: String, Codable {
 }
 
 /// One item from the perri queue cache.
-struct PRQueueItem: Identifiable, Encodable {
+struct PRQueueItem: Identifiable, Encodable, Equatable {
     var id: String { "\(repo)#\(number)" }
     let repo:        String
     let number:      Int
@@ -666,6 +666,21 @@ struct PRDetail: Decodable {
     }
 }
 
+extension PRDetail: Equatable {
+    /// Field by field (`CiCheck` is not `Equatable` in the app target), so the store can tell a
+    /// `perri_state` frame that changed nothing from one that did.
+    static func == (l: PRDetail, r: PRDetail) -> Bool {
+        guard l.prNumber == r.prNumber, l.repo == r.repo, l.title == r.title, l.author == r.author else { return false }
+        guard l.url == r.url, l.diffTooLarge == r.diffTooLarge, l.headSha == r.headSha, l.error == r.error else { return false }
+        guard l.additions == r.additions, l.deletions == r.deletions, l.changedFiles == r.changedFiles else { return false }
+        guard l.ciChecks.count == r.ciChecks.count else { return false }
+        for (a, b) in zip(l.ciChecks, r.ciChecks) where a.name != b.name || a.state != b.state || a.detail != b.detail {
+            return false
+        }
+        return l.diff == r.diff
+    }
+}
+
 // MARK: - Teri todos (macOS-local decode types; separate from NostromoKit wire types)
 
 /// macOS-local mirror of `TeriTodo` in `src/data/teri_todos.rs`.
@@ -749,24 +764,6 @@ struct ActivityEvent: Decodable {
         case toolUseId     = "tool_use_id"
         case cwd
         case seq
-    }
-}
-
-// MARK: - Rate limits
-
-struct RateLimits {
-    let pct5h:   Int
-    let reset5h: TimeInterval
-    let pct7d:   Int
-    let reset7d: TimeInterval
-
-    static func parse(_ s: String) -> RateLimits? {
-        let parts = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            .split(separator: ":")
-            .compactMap { Int($0) }
-        guard parts.count >= 4 else { return nil }
-        return RateLimits(pct5h: parts[0], reset5h: TimeInterval(parts[1]),
-                          pct7d: parts[2], reset7d: TimeInterval(parts[3]))
     }
 }
 
@@ -902,6 +899,39 @@ struct PostureSnapshot {
     let scoped:         [(label: String, window: WindowPace)]
     /// Mother-attributable agents from the `agents` map.  Empty when absent.
     let agents:         [String: AgentSpend]
+    /// Bishop's `stale_input` flag: its inputs are stale, so window numbers can't be trusted.
+    var staleInput:     Bool = false
+    /// When Bishop wrote this snapshot (epoch seconds): the file's own `ts`, else its mtime.
+    /// nil means unknown, which is treated as stale.
+    var writtenAt:      TimeInterval? = nil
+
+    /// Bishop refreshes every 60 s; anything older than this is from a dead Bishop.
+    static let staleAfter: TimeInterval = 300
+
+    func isStale(now: TimeInterval) -> Bool {
+        guard let writtenAt else { return true }
+        return now - writtenAt > Self.staleAfter
+    }
+
+    /// One 5h/7d window as shown on the status bar.
+    struct StatusWindow: Equatable {
+        let label:     String
+        let pct:       Int
+        let remaining: String
+    }
+
+    /// 5h/7d windows for the status bar. Empty when Bishop's inputs are stale or
+    /// the snapshot itself is older than `staleAfter`; a window is omitted when
+    /// absent or already reset. The real used percentage is shown (not capped),
+    /// floored so 99.6% never reads as 100%.
+    func statusWindows(now: TimeInterval) -> [StatusWindow] {
+        guard !staleInput, !isStale(now: now) else { return [] }
+        return [("5h", fiveHour), ("7d", sevenDay)].compactMap { label, w in
+            guard let w, w.resetsAt > now else { return nil }
+            return StatusWindow(label: label, pct: Int(w.usedPct.rounded(.down)),
+                                remaining: Theme.formatReset(w.resetsAt - now))
+        }
+    }
 
     /// Each agent's share of the Mother-attributed token total for the given window
     /// ("5h" or "7d"), sorted largest-first.
@@ -924,7 +954,12 @@ struct PostureSnapshot {
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
+        return parse(json: json, fileModified: mtime)
+    }
 
+    /// Parses a decoded budget-posture.json. `fileModified` is the fallback when `ts` is missing.
+    static func parse(json: [String: Any], fileModified: Date?) -> PostureSnapshot? {
         guard let ps = json["posture"] as? String,
               let posture = BudgetPosture.from(string: ps)
         else { return nil }
@@ -935,8 +970,19 @@ struct PostureSnapshot {
             sevenDay:       parseWindowPace(json["seven_day"]),
             sonnetSevenDay: parseSonnetWindow(json["models"], elapsedPct: parseWindowPace(json["seven_day"])?.elapsedPct),
             scoped:         parseScoped(json["scoped"]),
-            agents:         parseAgents(json["agents"])
+            agents:         parseAgents(json["agents"]),
+            staleInput:     (json["stale_input"] as? Bool) ?? false,
+            writtenAt:      parseTimestamp(json["ts"]) ?? fileModified?.timeIntervalSince1970
         )
+    }
+
+    static func parseTimestamp(_ raw: Any?) -> TimeInterval? {
+        guard let str = raw as? String else { return nil }
+        let plain = ISO8601DateFormatter()
+        if let d = plain.date(from: str) { return d.timeIntervalSince1970 }
+        let frac = ISO8601DateFormatter()
+        frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return frac.date(from: str)?.timeIntervalSince1970
     }
 
     /// Parses bishop's `scoped[]`: `[{model, used_pct, elapsed_pct, pace?, resets_at?, severity}]`.
@@ -1904,8 +1950,29 @@ enum PaneContentWire {
     case prConversation(PrConversationPayload)
     /// An issue-tracker ticket (W4).
     case ticket(TicketPayload)
+    /// A terminal pane. The Mac draws it from `TerminalSessionStore` (routed by pane id), so this
+    /// content is never rendered; it exists so the daemon's placeholder decodes as what it is.
+    case terminal(TerminalPlaceholder)
     /// A future content kind not yet recognised by this client version.
     case unknown(JSONValue)
+}
+
+/// The `terminal` pane content (`PaneContentWire::Terminal` in `src/ipc/protocol.rs`): a placeholder
+/// for clients that cannot attach (iOS). macOS-local copy of `NostromoKit.TerminalPlaceholder`.
+struct TerminalPlaceholder: Decodable, Equatable {
+    let terminalId: String
+    let label: String
+    /// Nil for a local terminal.
+    let environment: String?
+
+    private enum CodingKeys: String, CodingKey { case terminalId = "terminal_id", label, environment }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        terminalId = (try? c.decode(String.self, forKey: .terminalId)) ?? ""
+        label = (try? c.decode(String.self, forKey: .label)) ?? "Terminal"
+        environment = (try? c.decodeIfPresent(String.self, forKey: .environment)) ?? nil
+    }
 }
 
 extension PaneContentWire: Decodable {
@@ -1941,6 +2008,8 @@ extension PaneContentWire: Decodable {
             self = .prConversation(try PrConversationPayload(from: decoder))
         case "ticket":
             self = .ticket(try TicketPayload(from: decoder))
+        case "terminal":
+            self = .terminal(try TerminalPlaceholder(from: decoder))
         default:
             let raw = (try? JSONValue(from: decoder)) ?? .object([:])
             self = .unknown(raw)
@@ -1975,6 +2044,8 @@ extension PaneContentWire: Equatable {
         case (.prConversation(let a), .prConversation(let b)):
             return a == b
         case (.ticket(let a), .ticket(let b)):
+            return a == b
+        case (.terminal(let a), .terminal(let b)):
             return a == b
         case (.jsonSnapshot(let a), .jsonSnapshot(let b)):
             return a == b

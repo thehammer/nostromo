@@ -771,8 +771,39 @@ public enum PaneContentWire {
     case prConversation(PrConversationPayload)
     /// An issue-tracker ticket (W4).
     case ticket(TicketPayload)
+    /// A terminal pane (the Mac renders it; this client shows a placeholder, and never gets
+    /// terminal bytes).
+    case terminal(TerminalPlaceholder)
     /// A future content kind not yet known to this client version.
     case unknown(Any)
+}
+
+/// What a client that cannot attach to a terminal shows for a terminal pane: the pane's `kind` is
+/// `"terminal"`, with the terminal's id and label, and the remote environment (`production`, ...)
+/// when it is a remote shell. Mirrors `PaneContentWire::Terminal` in `src/ipc/protocol.rs`.
+public struct TerminalPlaceholder: Decodable, Equatable {
+    public let terminalId: String
+    public let label: String
+    /// Nil for a local terminal (the daemon leaves the key out).
+    public let environment: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case terminalId = "terminal_id", label, environment
+    }
+
+    public init(terminalId: String, label: String, environment: String?) {
+        self.terminalId = terminalId
+        self.label = label
+        self.environment = environment
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        terminalId = (try? c.decode(String.self, forKey: .terminalId)) ?? ""
+        label = (try? c.decode(String.self, forKey: .label)) ?? "Terminal"
+        // `try?` over `decodeIfPresent`: a `null` or a wrong type is "no environment", never a lost frame.
+        environment = (try? c.decodeIfPresent(String.self, forKey: .environment)) ?? nil
+    }
 }
 
 extension PaneContentWire: Decodable {
@@ -806,6 +837,8 @@ extension PaneContentWire: Decodable {
             self = .prConversation(try PrConversationPayload(from: d))
         case "ticket":
             self = .ticket(try TicketPayload(from: d))
+        case "terminal":
+            self = .terminal(try TerminalPlaceholder(from: d))
         default:
             let raw = try AnyDecodable(from: d)
             self = .unknown(raw.value)
@@ -838,6 +871,8 @@ extension PaneContentWire: Equatable {
         case (.prConversation(let a), .prConversation(let b)):
             return a == b
         case (.ticket(let a), .ticket(let b)):
+            return a == b
+        case (.terminal(let a), .terminal(let b)):
             return a == b
         case (.jsonSnapshot(let a), .jsonSnapshot(let b)):
             return jsonPayloadsEqual(a, b)
@@ -1157,6 +1192,9 @@ private struct AnyDecodable: Decodable {
 
     init(from d: Decoder) throws {
         if let c = try? d.singleValueContainer() {
+            // A JSON null: an unknown payload may carry one (a future optional field). Without this
+            // branch the unkeyed/keyed fallbacks below throw and the whole `pane_content` frame is lost.
+            if c.decodeNil() { value = NSNull(); return }
             if let s = try? c.decode(String.self)  { value = s; return }
             if let b = try? c.decode(Bool.self)    { value = b; return }
             if let i = try? c.decode(Int.self)     { value = i; return }
