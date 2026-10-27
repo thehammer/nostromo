@@ -81,8 +81,10 @@ final class TeriSentryViewTracker {
 ///
 /// Two single-select controls narrow it, both remembered: Mine | Unassigned | All
 /// (default Mine) and Production | All (default All). "Mine" is assigned directly to
-/// the user, not to a team; "All" is every unresolved issue the daemon lists,
-/// including issues assigned to others. An empty Mine shows the normal empty state
+/// the user, not to a team; "Unassigned" is the fresh unassigned errors (last 24 h);
+/// "All" is every unresolved issue the daemon lists, so it also includes older or
+/// lower-level unassigned issues (`unassigned_older`) and issues assigned to others
+/// (`other`): Mine + Unassigned + Older + Other = All. An empty Mine shows the normal empty state
 /// rather than falling back to All. "Production" means the issue had an event in
 /// the production environment in the last 14 days; an issue the daemon did not see
 /// there has no environment (which is not the same as non-production).
@@ -96,7 +98,8 @@ enum TeriSentryTab {
     static var tracker = TeriSentryViewTracker(defaults: .standard)
     static var now: () -> Date = Date.init
 
-    /// The `WorkItem.assignee` buckets the daemon tags issues with.
+    /// The `WorkItem.assignee` buckets the daemon tags issues with. `unassigned_older` and
+    /// `other` have no segment of their own: they only appear under All.
     static let mine = "me"
     static let unassigned = "unassigned"
     /// The `WorkItem.environment` the daemon sets on issues seen in production.

@@ -538,8 +538,10 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
 
     // MARK: Mine | Unassigned | All and Production | All
 
-    /// Seven issues: two of mine, three unassigned, two assigned to others. Four are in
-    /// production (Mine A, Open A, Open C, Other A); the rest carry no environment, on purpose.
+    /// Nine issues: two of mine, three fresh unassigned, two older unassigned
+    /// (`unassigned_older`, only in All) and two assigned to others. Four are in production
+    /// (Mine A, Open A, Open C, Other A); the rest carry no environment, on purpose.
+    /// Mine + Unassigned + Older + Other = All.
     private func mixedItems() -> [WorkItem] {
         let base = clock.now
         return [
@@ -557,6 +559,10 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
                   lastSeen: base.addingTimeInterval(-60)),
             issue(7, "Other B", project: "payments-production", environment: nil, assignee: "other",
                   lastSeen: base.addingTimeInterval(-70)),
+            issue(8, "Older A", project: "portal-production", environment: nil, assignee: "unassigned_older",
+                  lastSeen: base.addingTimeInterval(-80)),
+            issue(9, "Older B", project: "payments-production", environment: nil, assignee: "unassigned_older",
+                  lastSeen: base.addingTimeInterval(-90)),
         ]
     }
 
@@ -617,8 +623,8 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
         XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 2 })
         XCTAssertEqual(rig.surface.rowTexts.map(\.title), ["Mine A", "Mine B"],
                        "Mine, in every environment: the issue with no environment is not hidden")
-        XCTAssertEqual(segmentLabels(rig, label: Self.assigneeLabel), ["Mine 2", "Unassigned 3", "All 7"],
-                       "All is every issue, including the two assigned to others")
+        XCTAssertEqual(segmentLabels(rig, label: Self.assigneeLabel), ["Mine 2", "Unassigned 3", "All 9"],
+                       "All = Mine + Unassigned + Older + Other: the 2 older unassigned and 2 assigned to others are only in All")
         // Counted with Mine applied: my one production issue, and both of mine in All.
         XCTAssertEqual(segmentLabels(rig, label: Self.environmentLabel), ["Production 1", "All 2"])
         XCTAssertEqual(selectedSegment(rig, label: Self.assigneeLabel), 0)
@@ -635,10 +641,10 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
         XCTAssertEqual(selectedSegment(rig, label: Self.assigneeLabel), 1)
 
         choose(rig, label: Self.assigneeLabel, segment: 2)
-        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 7 })
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 9 })
         XCTAssertEqual(rig.surface.rowTexts.map(\.title),
-                       ["Mine A", "Mine B", "Open A", "Open B", "Open C", "Other A", "Other B"],
-                       "All includes the issues assigned to others")
+                       ["Mine A", "Mine B", "Open A", "Open B", "Open C", "Other A", "Other B", "Older A", "Older B"],
+                       "All includes older unassigned issues and the issues assigned to others")
         XCTAssertEqual(selectedSegment(rig, label: Self.assigneeLabel), 2)
 
         choose(rig, label: Self.assigneeLabel, segment: 0)
@@ -665,7 +671,7 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
         XCTAssertEqual(rig.surface.rowTexts.map(\.title), ["Mine A", "Open A", "Open C", "Other A"],
                        "every production issue, whoever it is assigned to")
         XCTAssertEqual(selectedSegment(rig, label: Self.environmentLabel), 0, "choosing a person keeps Production")
-        XCTAssertTrue(waitUntil { self.segmentLabels(rig, label: Self.environmentLabel) == ["Production 4", "All 7"] },
+        XCTAssertTrue(waitUntil { self.segmentLabels(rig, label: Self.environmentLabel) == ["Production 4", "All 9"] },
                       "\(segmentLabels(rig, label: Self.environmentLabel))")
     }
 
@@ -700,20 +706,20 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
         var f = WorkFilter(); f.projects = ["portal-production"]   // Mine A, Open A, Open B, Other A
         let s = facetSnapshot(f)
 
-        XCTAssertEqual(s.facetCounts[.assignee], ["me": 1, "unassigned": 2, "other": 1])
-        XCTAssertEqual(s.facetTotals[.assignee], 4, "All = Mine + Unassigned + Other")
+        XCTAssertEqual(s.facetCounts[.assignee], ["me": 1, "unassigned": 2, "other": 1, "unassigned_older": 1])
+        XCTAssertEqual(s.facetTotals[.assignee], 5, "All = Mine + Unassigned + Older + Other")
         XCTAssertEqual(s.facetCounts[.environment], ["production": 3])
-        XCTAssertEqual(s.facetTotals[.environment], 4, "Open B has no environment but is in All")
+        XCTAssertEqual(s.facetTotals[.environment], 5, "Open B and Older A have no environment but are in All")
     }
 
     func testTheCountsFollowAProjectFilterAndASearchQueryTogether() {
-        var f = WorkFilter(); f.projects = ["portal-production"]; f.query = "a"   // Mine A, Open A, Other A
+        var f = WorkFilter(); f.projects = ["portal-production"]; f.query = "a"   // Mine A, Open A, Other A, Older A
         let s = facetSnapshot(f)
 
-        XCTAssertEqual(s.facetCounts[.assignee], ["me": 1, "unassigned": 1, "other": 1])
-        XCTAssertEqual(s.facetTotals[.assignee], 3, "All = Mine + Unassigned + Other")
+        XCTAssertEqual(s.facetCounts[.assignee], ["me": 1, "unassigned": 1, "other": 1, "unassigned_older": 1])
+        XCTAssertEqual(s.facetTotals[.assignee], 4, "All = Mine + Unassigned + Older + Other")
         XCTAssertEqual(s.facetCounts[.environment], ["production": 3])
-        XCTAssertEqual(s.facetTotals[.environment], 3)
+        XCTAssertEqual(s.facetTotals[.environment], 4, "Older A has no environment but is in All")
 
         f.query = "open"                                                           // Open A, Open B
         let narrower = facetSnapshot(f)
@@ -728,7 +734,7 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
         let s = facetSnapshot(f)
 
         XCTAssertEqual(s.facetCounts[.assignee], ["me": 1, "unassigned": 2, "other": 1],
-                       "assignee counts keep the Production filter and ignore the assignee one")
+                       "the older unassigned issues have no environment, so Production drops them; assignee counts keep the Production filter and ignore the assignee one")
         XCTAssertEqual(s.facetTotals[.assignee], 4)
         XCTAssertEqual(s.facetCounts[.environment], ["production": 1], "environment counts keep Mine; Mine B has none")
         XCTAssertEqual(s.facetTotals[.environment], 2)
@@ -749,7 +755,7 @@ final class TeriSentryTabSurfaceTests: XCTestCase {
     func testAnExplicitAllIsRememberedAndNotOverriddenByTheMineDefault() {
         let rig = sentryRig(defaults: savedDefaults(assignees: [], chosen: true), items: mixedItems())
 
-        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 7 })
+        XCTAssertTrue(waitUntil { rig.surface.rowTexts.count == 9 })
         XCTAssertEqual(selectedSegment(rig, label: Self.assigneeLabel), 2)
     }
 
@@ -1810,17 +1816,17 @@ private final class HostedList {
 final class TeriSentryFilterBarLayoutTests: XCTestCase {
     private let inset: CGFloat = 8
 
-    /// Counts for every control on the Sentry bar: Mine 2 | Unassigned 3 | All 7, Production 4 | All 7.
+    /// Counts for every control on the Sentry bar: Mine 2 | Unassigned 3 | All 9, Production 4 | All 9.
     private func snapshot() -> WorkListSnapshot {
         WorkListSnapshot(
             groups: [WorkGroup(key: nil, items: [issue(1), issue(2)])],
-            totalCount: 7, filteredCount: 2,
+            totalCount: 9, filteredCount: 2,
             facetCounts: [
-                .assignee: ["me": 2, "unassigned": 3, "other": 2],
+                .assignee: ["me": 2, "unassigned": 3, "unassigned_older": 2, "other": 2],
                 .environment: ["production": 4],
                 .project: ["portal-production": 4, "payments-production": 3],
             ],
-            facetTotals: [.assignee: 7, .environment: 7, .project: 7])
+            facetTotals: [.assignee: 9, .environment: 9, .project: 9])
     }
 
     private func makeHost(width: CGFloat) throws -> HostedList {
