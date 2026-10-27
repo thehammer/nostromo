@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "claude-code-changelog:2.1.330",
+      "class": "first_party",
+      "title": "Claude Code 2.1.330",
+      "url": "https://changelog.example.com/claude-code#21330",
+      "published": "2026-10-24T10:00:00Z",
+      "text": "- Added a `session_id` field to the first message of `--output-format stream-json` output, so callers can resume the right session"
+    },
+    {
+      "id": "simon-willison:laravel-13-queue",
+      "class": "curated",
+      "title": "Laravel 13 ships queue improvements",
+      "url": "https://blog.example.com/laravel-13-queue",
+      "published": "2026-10-24T08:00:00Z",
+      "text": "Laravel 13 adds batch retries and a new queue worker mode."
+    },
+    {
+      "id": "latent-space:agent-startup-series-b",
+      "class": "curated",
+      "title": "Agent startup raises $400M Series B at a $4B valuation",
+      "url": "https://essays.example.com/series-b",
+      "published": "2026-10-24T07:00:00Z",
+      "text": "A funding round for an agent infrastructure startup, with the valuation and the investors named."
+    }
+  ]
+}

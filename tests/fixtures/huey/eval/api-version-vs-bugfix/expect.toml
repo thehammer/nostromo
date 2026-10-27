@@ -1,0 +1,7 @@
+description = "AC44: the Also-in-the-news line is the most significant item, not the newest"
+date = "2026-10-25"
+
+[[run]]
+picks_max = 0
+ain = "present"
+ain_item = "anthropic-news:api-version-2026-10-21"

@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "agent-sdk-typescript:v2.0.0",
+      "class": "first_party",
+      "title": "Agent SDK for TypeScript v2.0.0",
+      "url": "https://releases.example.com/agent-sdk-typescript/v2.0.0",
+      "published": "2026-10-21T17:30:00Z",
+      "text": "Breaking: `query()` options are renamed. `allowedTools` becomes `tools.allow`, and `permissionMode` moves under `permissions.mode`. Sessions created with 1.x cannot be resumed. Added `onPermissionRequest` for relaying prompts."
+    }
+  ]
+}

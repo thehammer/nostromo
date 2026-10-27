@@ -1,0 +1,76 @@
+{
+  "items": [
+    {
+      "id": "claude-code-changelog:2.1.332",
+      "class": "first_party",
+      "title": "Claude Code 2.1.332",
+      "url": "https://changelog.example.com/claude-code#21332",
+      "published": "2026-10-24T09:00:00Z",
+      "text": "- Added a `session_id` field to the first message of `--output-format stream-json` output\n- Fixed a crash when `--resume` is given an unknown id"
+    },
+    {
+      "id": "claude-code-changelog:2.1.333",
+      "class": "first_party",
+      "title": "Claude Code 2.1.333",
+      "url": "https://changelog.example.com/claude-code#21333",
+      "published": "2026-10-24T15:00:00Z",
+      "text": "- Hook commands now time out after 30 seconds by default (was 60). Set `timeout` on a hook to change it"
+    },
+    {
+      "id": "claude-code-changelog:2.1.334",
+      "class": "first_party",
+      "title": "Claude Code 2.1.334",
+      "url": "https://changelog.example.com/claude-code#21334",
+      "published": "2026-10-25T01:00:00Z",
+      "text": "- Non-interactive (`-p`) runs that stall mid-stream are now retried by a watchdog instead of hanging"
+    },
+    {
+      "id": "anthropic-news:api-version-2026-10-21",
+      "class": "first_party",
+      "title": "New API version 2026-10-21 and 2.0 SDKs for Python and TypeScript",
+      "url": "https://news.example.com/anthropic/api-version-2026-10-21",
+      "published": "2026-10-21T16:00:00Z",
+      "text": "The Messages API has a new version, 2026-10-21. Tool-use content blocks now carry an explicit `status` field, and the legacy `completions` helper is removed. The 2.0 Python and TypeScript SDKs require the new API version and make `max_tokens` a required argument on every `messages` call. The previous API version stays available until the end of January. Apps that call the Messages API through an SDK should upgrade the SDK and pass the new version header."
+    },
+    {
+      "id": "claude-docs-release-notes:2026-10-22-0",
+      "class": "first_party",
+      "title": "Docs: prompt caching now supports 1-hour entries",
+      "url": "https://docs.example.com/release-notes#oct-22",
+      "published": "2026-10-22T23:59:59Z",
+      "text": "Prompt caching entries can now be kept for one hour at a higher write price."
+    },
+    {
+      "id": "simon-willison:human-in-the-loop-patterns",
+      "class": "curated",
+      "title": "Patterns for keeping a human in the loop of coding agents",
+      "url": "https://blog.example.com/human-in-the-loop",
+      "published": "2026-10-24T13:00:00Z",
+      "text": "Five patterns for approval flows in agent harnesses: batch approvals, scoped allow lists, delayed review, escalation and audit trails."
+    },
+    {
+      "id": "latent-space:agent-startup-series-b",
+      "class": "curated",
+      "title": "Agent startup raises $400M Series B",
+      "url": "https://essays.example.com/series-b",
+      "published": "2026-10-24T07:00:00Z",
+      "text": "A funding round for an agent infrastructure startup."
+    },
+    {
+      "id": "latent-space:leaderboard-shuffle",
+      "class": "curated",
+      "title": "The leaderboard shuffled again this week",
+      "url": "https://essays.example.com/leaderboard",
+      "published": "2026-10-23T07:00:00Z",
+      "text": "Another week, another benchmark reshuffle, with three models trading places."
+    },
+    {
+      "id": "hn-front-page:48002",
+      "class": "aggregator",
+      "title": "Show: a tiny queue with exactly-once delivery",
+      "url": "https://queue.example.com/show",
+      "published": "2026-10-24T04:00:00Z",
+      "text": "A small queue library that claims exactly-once delivery, with the caveats listed."
+    }
+  ]
+}

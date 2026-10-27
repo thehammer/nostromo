@@ -1,0 +1,4 @@
+[project]
+name = "ledgerbot"
+version = "0.2.0"
+dependencies = ["anthropic>=0.40", "httpx"]

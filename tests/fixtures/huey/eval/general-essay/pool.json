@@ -1,0 +1,20 @@
+{
+  "items": [
+    {
+      "id": "latent-space:agents-ate-the-ide",
+      "class": "curated",
+      "title": "The year agents ate the IDE: a long view",
+      "url": "https://essays.example.com/agents-ate-the-ide",
+      "published": "2026-10-24T12:00:00Z",
+      "text": "A long essay on where software tooling is heading. It argues that editors, terminals and chat will merge, that people will supervise rather than type, and that the interesting product questions are about trust. No specific product, version or API is discussed."
+    },
+    {
+      "id": "simon-willison:prompt-caching-notes",
+      "class": "curated",
+      "title": "Notes on prompt caching",
+      "url": "https://blog.example.com/prompt-caching-notes",
+      "published": "2026-10-23T20:00:00Z",
+      "text": "Some general notes on how prompt caching works across providers and why cache hit rates matter for long conversations."
+    }
+  ]
+}

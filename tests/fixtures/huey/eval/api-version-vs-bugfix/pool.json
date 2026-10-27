@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "id": "anthropic-news:api-version-2026-10-21",
+      "class": "first_party",
+      "title": "New API version 2026-10-21 and 2.0 SDKs for Python and TypeScript",
+      "url": "https://news.example.com/anthropic/api-version-2026-10-21",
+      "published": "2026-10-21T16:00:00Z",
+      "text": "The Messages API has a new version, 2026-10-21. Tool-use content blocks now carry an explicit `status` field, and the legacy `completions` helper is removed. The 2.0 Python and TypeScript SDKs require the new API version and make `max_tokens` a required argument on every `messages` call. The previous API version stays available until the end of January. Apps that call the Messages API through an SDK should upgrade the SDK and pass the new version header."
+    },
+    {
+      "id": "claude-code-changelog:2.1.329",
+      "class": "first_party",
+      "title": "Claude Code 2.1.329",
+      "url": "https://changelog.example.com/claude-code#21329",
+      "published": "2026-10-24T08:00:00Z",
+      "text": "- Fixed a typo in the `/help` footer"
+    },
+    {
+      "id": "claude-code-changelog:2.1.330",
+      "class": "first_party",
+      "title": "Claude Code 2.1.330",
+      "url": "https://changelog.example.com/claude-code#21330",
+      "published": "2026-10-24T16:00:00Z",
+      "text": "- Fixed the status line alignment on very narrow terminals"
+    }
+  ]
+}

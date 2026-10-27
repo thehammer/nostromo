@@ -46,6 +46,8 @@ changing it.
 
 ### Agents
 
+[Huey](docs/huey.md) writes a short morning report of the news that affects the projects you have in flight (setup, interests, sources, budget modes and privacy are in that doc).
+
 Every built-in agent (Fred, Huey, Perri, Teri) is on by default, and Mother cannot be
 turned off. To switch one off, give it a table in `config.toml`:
 

@@ -1,0 +1,10 @@
+{
+  "ts": "2026-10-25T02:00:00Z",
+  "posture": "Cruise",
+  "seven_day": {
+    "used_pct": 41.0,
+    "pace": 1.0
+  },
+  "billing_mode": "subscription",
+  "stale_input": false
+}

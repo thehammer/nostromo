@@ -27,6 +27,10 @@ name = "nostromo-google-auth"
 path = "src/bin/nostromo_google_auth.rs"
 
 [[bin]]
+name = "nostromo-huey-eval"
+path = "src/bin/nostromo_huey_eval.rs"
+
+[[bin]]
 name = "nostromo-guard"
 path = "src/bin/nostromo_guard.rs"
 

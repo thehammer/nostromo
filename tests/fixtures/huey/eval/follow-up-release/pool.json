@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "claude-code-changelog:2.1.312",
+      "class": "first_party",
+      "title": "Claude Code 2.1.312",
+      "url": "https://changelog.example.com/claude-code#21312",
+      "published": "2026-10-24T11:00:00Z",
+      "text": "- Added `CLAUDE_CODE_RETRY_WATCHDOG_SECS` to tune the retry watchdog introduced in 2.1.305. The watchdog now also covers `claude -p` runs that stall mid-stream, not only runs that stall before the first response"
+    }
+  ]
+}

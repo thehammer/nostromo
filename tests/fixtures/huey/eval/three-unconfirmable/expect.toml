@@ -1,0 +1,7 @@
+description = "AC16: at most one To check pick when several cannot be confirmed"
+date = "2026-10-25"
+
+[[run]]
+picks_min = 1
+picks_max = 5
+to_check_max = 1
