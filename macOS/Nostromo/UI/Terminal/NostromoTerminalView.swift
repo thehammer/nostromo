@@ -173,7 +173,7 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
                 self.pasteConfirm = nil
                 // The clipboard changed while the sheet was up: what was confirmed is gone.
                 guard NSPasteboard.general.changeCount == changeCount else { return }
-                super.paste(sender)
+                self.pasteConfirmed(sender)
             },
             onRefused: { [weak self] in self?.refuse(.paste) })
         guard let sheetWindow = sheet.window else { return }
@@ -230,6 +230,11 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
     func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
 
     // MARK: - Private
+
+    /// SwiftTerm's own paste, after a person confirmed it (`super` cannot be named inside a closure that captures self).
+    private func pasteConfirmed(_ sender: Any) {
+        super.paste(sender)
+    }
 
     private func refuse(_ op: TerminalRefusedOp) {
         store.reportRefusal(terminalId: terminalId, op: op)
