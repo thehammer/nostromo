@@ -3,9 +3,11 @@
 //! A session whose `nostromo-mcp-bridge` lost its connection to the daemon keeps
 //! running but cannot call any `mcp__nostromo__*` tool. The daemon tells the app:
 //!
-//!   * `session_bridge {tag, connected}` is broadcast when a tag's live bridge
-//!     count goes 0 -> 1 or 1 -> 0 (never for the transitions in between, never
-//!     for an unidentified caller);
+//!   * `session_bridge {tag, connected}` is broadcast when a tag's last live
+//!     bridge is lost (`connected:false`) and when a bridge comes back for a tag
+//!     that had lost them all (`connected:true`). The first bridge a tag ever has
+//!     is NOT announced (the app holds no "offline" to clear and learns the state
+//!     on attach), nor are the transitions in between, nor an unidentified caller;
 //!   * `session_list_resp` entries carry `mcp_bridge_connected` once a bridge has
 //!     ever identified as that tag, and omit it otherwise (wire additivity);
 //!   * attaching to a session replays the current `session_bridge` when known;
@@ -178,20 +180,23 @@ fn frame(tag: &str, connected: bool) -> (String, bool) {
 }
 
 #[test]
-fn the_first_bridge_for_a_pty_announces_tools_online() {
+fn the_first_bridge_for_a_pty_announces_nothing() {
     let mut d = daemon_state();
     d.state.bridge_opened("cody-a");
-    assert_eq!(drain_bridge_frames(&mut d.rx), vec![frame("cody-a", true)]);
+    assert!(
+        drain_bridge_frames(&mut d.rx).is_empty(),
+        "the app has no offline state to clear for a pty's first bridge"
+    );
+    assert_eq!(d.state.bridges.connected("cody-a"), Some(true));
 }
 
 #[test]
 fn a_second_concurrent_bridge_for_the_same_pty_announces_nothing() {
     let mut d = daemon_state();
     d.state.bridge_opened("cody-a");
-    drain_bridge_frames(&mut d.rx);
-
     d.state.bridge_opened("cody-a");
     assert!(drain_bridge_frames(&mut d.rx).is_empty());
+    assert_eq!(d.state.bridges.live("cody-a"), 2);
 }
 
 #[test]
@@ -221,17 +226,55 @@ fn the_last_bridge_closing_announces_tools_offline() {
 }
 
 #[test]
-fn a_bridge_that_reconnects_announces_online_again() {
+fn a_lone_bridge_closing_announces_tools_offline() {
+    let mut d = daemon_state();
+    d.state.bridge_opened("cody-a");
+    d.state.bridge_closed("cody-a");
+    assert_eq!(drain_bridge_frames(&mut d.rx), vec![frame("cody-a", false)]);
+}
+
+#[test]
+fn a_bridge_that_reconnects_after_loss_announces_online_again() {
     let mut d = daemon_state();
     d.state.bridge_opened("cody-a");
     d.state.bridge_closed("cody-a");
     d.state.bridge_opened("cody-a");
     assert_eq!(
         drain_bridge_frames(&mut d.rx),
+        vec![frame("cody-a", false), frame("cody-a", true)],
+        "loss is announced, the first-ever open is not, the return is"
+    );
+}
+
+#[test]
+fn a_second_bridge_alongside_a_reconnected_one_announces_nothing() {
+    let mut d = daemon_state();
+    d.state.bridge_opened("cody-a");
+    d.state.bridge_closed("cody-a");
+    d.state.bridge_opened("cody-a");
+    drain_bridge_frames(&mut d.rx);
+
+    d.state.bridge_opened("cody-a");
+    assert!(drain_bridge_frames(&mut d.rx).is_empty());
+}
+
+#[test]
+fn every_loss_and_return_cycle_is_announced() {
+    let mut d = daemon_state();
+    d.state.bridge_opened("cody-a");
+    for _ in 0..3 {
+        d.state.bridge_closed("cody-a");
+        d.state.bridge_opened("cody-a");
+    }
+    assert_eq!(
+        drain_bridge_frames(&mut d.rx),
         vec![
+            frame("cody-a", false),
             frame("cody-a", true),
             frame("cody-a", false),
-            frame("cody-a", true)
+            frame("cody-a", true),
+            frame("cody-a", false),
+            frame("cody-a", true),
         ]
     );
 }
@@ -244,12 +287,17 @@ fn bridges_of_different_ptys_are_announced_independently() {
     d.state.bridge_closed("cody-a");
     assert_eq!(
         drain_bridge_frames(&mut d.rx),
-        vec![
-            frame("cody-a", true),
-            frame("cody-b", true),
-            frame("cody-a", false)
-        ]
+        vec![frame("cody-a", false)],
+        "b's first bridge is not announced and a's loss does not involve b"
     );
+
+    // a's return is announced; b, still connected, is untouched by it.
+    d.state.bridge_opened("cody-a");
+    assert_eq!(drain_bridge_frames(&mut d.rx), vec![frame("cody-a", true)]);
+
+    // b losing its bridge and a staying up: only b is announced.
+    d.state.bridge_closed("cody-b");
+    assert_eq!(drain_bridge_frames(&mut d.rx), vec![frame("cody-b", false)]);
 }
 
 #[test]
@@ -457,6 +505,34 @@ impl Harness {
     }
 }
 
+/// Poll until the daemon's registry reports `expected` for `tag`, bounded. A
+/// bridge's first open is not broadcast, so this is how a test knows the daemon
+/// has registered (or lost) it.
+async fn wait_for_bridge_state(h: &Harness, tag: &str, expected: Option<bool>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while h.state.bridges.connected(tag) != expected {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for bridge state {expected:?} for `{tag}`, have {:?}",
+            h.state.bridges.connected(tag)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Poll until `tag` has exactly `live` live bridge connections, bounded.
+async fn wait_for_live_bridges(h: &Harness, tag: &str, live: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while h.state.bridges.live(tag) != live {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {live} live bridges for `{tag}`, have {}",
+            h.state.bridges.live(tag)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 struct BridgeConn {
     _reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     _writer: tokio::net::unix::OwnedWriteHalf,
@@ -581,17 +657,34 @@ fn bridge_of(sessions: &[SessionInfo], tag: &str) -> Option<bool> {
 }
 
 #[tokio::test]
-async fn an_app_hears_when_a_sessions_bridge_connects_and_when_it_is_lost() {
+async fn an_app_hears_when_a_sessions_bridge_is_lost() {
     let h = spawn_harness().await;
     let mut app = h.unix().await;
 
     let bridge = h.connect_bridge(Some("cody-e2e")).await;
-    let seen = recv_until(&mut app, |m| is_bridge(m, "cody-e2e", true)).await;
-    assert!(is_bridge(seen.last().unwrap(), "cody-e2e", true));
+    wait_for_bridge_state(&h, "cody-e2e", Some(true)).await;
 
     drop(bridge);
     let seen = recv_until(&mut app, |m| is_bridge(m, "cody-e2e", false)).await;
     assert!(is_bridge(seen.last().unwrap(), "cody-e2e", false));
+    assert_eq!(
+        bridge_frames_for(&seen, "cody-e2e").len(),
+        1,
+        "the first connect is not announced; only the loss is: {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_sessions_first_bridge_connecting_is_not_announced_to_the_app() {
+    let h = spawn_harness().await;
+    let mut app = h.unix().await;
+
+    let _bridge = h.connect_bridge(Some("cody-e2e")).await;
+    wait_for_bridge_state(&h, "cody-e2e", Some(true)).await;
+
+    h.broadcast(ServerMsg::Pong);
+    let seen = recv_until(&mut app, |m| matches!(m, ServerMsg::Pong)).await;
+    assert!(bridge_frames_for(&seen, "cody-e2e").is_empty(), "{seen:?}");
 }
 
 #[tokio::test]
@@ -600,12 +693,13 @@ async fn a_bridge_reconnecting_tells_the_app_the_tools_are_back() {
     let mut app = h.unix().await;
 
     let first = h.connect_bridge(Some("cody-e2e")).await;
-    recv_until(&mut app, |m| is_bridge(m, "cody-e2e", true)).await;
+    wait_for_bridge_state(&h, "cody-e2e", Some(true)).await;
     drop(first);
     recv_until(&mut app, |m| is_bridge(m, "cody-e2e", false)).await;
 
     let _second = h.connect_bridge(Some("cody-e2e")).await;
-    recv_until(&mut app, |m| is_bridge(m, "cody-e2e", true)).await;
+    let seen = recv_until(&mut app, |m| is_bridge(m, "cody-e2e", true)).await;
+    assert!(is_bridge(seen.last().unwrap(), "cody-e2e", true));
 }
 
 #[tokio::test]
@@ -614,14 +708,15 @@ async fn a_bridge_is_only_lost_when_its_last_connection_goes() {
     let mut app = h.unix().await;
 
     let first = h.connect_bridge(Some("cody-e2e")).await;
-    recv_until(&mut app, |m| is_bridge(m, "cody-e2e", true)).await;
     let second = h.connect_bridge(Some("cody-e2e")).await;
+    wait_for_live_bridges(&h, "cody-e2e", 2).await;
 
     drop(first);
-    // Control: another tag's frame proves the stream is flowing, and that the
-    // first drop (already processed or not) produced no "offline" for this tag.
-    let _other = h.connect_bridge(Some("cody-other")).await;
-    let seen = recv_until(&mut app, |m| is_bridge(m, "cody-other", true)).await;
+    // Wait until the daemon has processed the hang-up, then use an ordered
+    // control frame: nothing for this tag may have been announced before it.
+    wait_for_live_bridges(&h, "cody-e2e", 1).await;
+    h.broadcast(ServerMsg::Pong);
+    let seen = recv_until(&mut app, |m| matches!(m, ServerMsg::Pong)).await;
     assert!(
         bridge_frames_for(&seen, "cody-e2e").is_empty(),
         "one connection is still live: {seen:?}"
@@ -639,18 +734,18 @@ async fn a_connection_that_never_identifies_is_never_announced() {
 
     let anonymous = h.connect_bridge(None).await;
     drop(anonymous);
-    // Control: a real bridge afterwards; everything before its frame is what
-    // the anonymous connection (wrongly) caused.
-    let _real = h.connect_bridge(Some("cody-real")).await;
-    let seen = recv_until(&mut app, |m| is_bridge(m, "cody-real", true)).await;
-    let bridge_frames: Vec<_> = seen
-        .iter()
-        .filter(|m| matches!(m, ServerMsg::SessionBridge { .. }))
-        .collect();
-    assert_eq!(
-        bridge_frames.len(),
-        1,
-        "only the identified bridge may be announced: {seen:?}"
+    // Control: a real bridge that is then lost; everything the app sees up to
+    // and past that loss is what the anonymous connection (wrongly) caused.
+    let real = h.connect_bridge(Some("cody-real")).await;
+    wait_for_bridge_state(&h, "cody-real", Some(true)).await;
+    drop(real);
+    recv_until(&mut app, |m| is_bridge(m, "cody-real", false)).await;
+    h.broadcast(ServerMsg::Pong);
+    let rest = recv_until(&mut app, |m| matches!(m, ServerMsg::Pong)).await;
+    assert!(
+        rest.iter()
+            .all(|m| !matches!(m, ServerMsg::SessionBridge { .. })),
+        "only the identified bridge may be announced: {rest:?}"
     );
 }
 
@@ -667,7 +762,7 @@ async fn the_session_list_says_which_sessions_have_lost_their_tools() {
     assert_eq!(bridge_of(&sessions, "cody-no-bridge"), None);
 
     let bridge = h.connect_bridge(Some("cody-has-bridge")).await;
-    recv_until(&mut app, |m| is_bridge(m, "cody-has-bridge", true)).await;
+    wait_for_bridge_state(&h, "cody-has-bridge", Some(true)).await;
     let sessions = h.list(&mut app).await;
     assert_eq!(bridge_of(&sessions, "cody-has-bridge"), Some(true));
     assert_eq!(
@@ -707,7 +802,7 @@ async fn attaching_replays_the_current_bridge_state_only_when_it_is_known() {
     spawn_session(&mut app, "cody-unknown").await;
 
     let bridge = h.connect_bridge(Some("cody-known")).await;
-    recv_until(&mut app, |m| is_bridge(m, "cody-known", true)).await;
+    wait_for_bridge_state(&h, "cody-known", Some(true)).await;
     drop(bridge);
     recv_until(&mut app, |m| is_bridge(m, "cody-known", false)).await;
 

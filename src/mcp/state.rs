@@ -288,10 +288,13 @@ impl McpSharedState {
         }
     }
 
-    /// A bridge connection for `pty_id` opened. When it is the pty's first live
-    /// one, the app is told its tools are (back) online.
+    /// A bridge connection for `pty_id` opened. When it brings back a pty whose last
+    /// bridge was lost, the app is told its tools are online again. The first bridge a
+    /// pty ever has is not announced: the app holds no "offline" for it to clear, and
+    /// learns the state on attach.
     pub fn bridge_opened(&self, pty_id: &str) {
-        if self.bridges.open(pty_id) {
+        let was_lost = self.bridges.connected(pty_id) == Some(false);
+        if self.bridges.open(pty_id) && was_lost {
             self.announce_bridge(pty_id, true);
         }
     }
