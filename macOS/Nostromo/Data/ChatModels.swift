@@ -58,6 +58,8 @@ struct ChatTurn: Identifiable {
     /// match `.text(let s)` stay as they are; use `removeLeadingBlocks` to drop blocks from
     /// the front, which keeps the indices honest.
     var subagentTextParents: [Int: String] = [:]
+    /// Memo for `terminalOriginExtraText` (see `TurnOrigin.swift`).
+    let originExtraCache = TerminalOriginExtraCache()
     /// What opened this turn when the user did not type it: output from a terminal the agent
     /// follows, or a follow notice (`TurnOrigin.swift`). Such a turn shows blocks, not a bubble.
     var origin: TurnOriginWire? = nil

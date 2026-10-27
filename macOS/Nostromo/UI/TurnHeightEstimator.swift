@@ -67,9 +67,11 @@ enum TurnHeightEstimator {
     /// `AskQuestionView`: header chip, question, divider, and 36 pt per option.
     static let questionChrome: CGFloat      = 46
     static let questionOptionHeight: CGFloat = 36
-    /// `TerminalDeliveryBlockView` collapsed: laid out like a collapsed `ToolResultView`.
+    /// `TerminalDeliveryBlockView` collapsed: laid out like a collapsed `ToolResultView`. Also
+    /// used for a block restored expanded (`TurnInteractionState.expandedBlocks`): harmless, the
+    /// measured height replaces the estimate once the row is laid out.
     static let deliveryCollapsed: CGFloat   = 32
-    /// `TerminalDeliveryBlockView` as a follow notice: one 14 pt muted line, 4+4 padding.
+    /// `TerminalDeliveryBlockView` as a follow notice: one muted 10 pt line, 4+4 padding.
     static let deliveryNotice: CGFloat      = 22
     /// `ChatTurnView` pins the blocks stack to 82 % of the pane width.
     static let blocksWidthFraction: CGFloat = 0.82
@@ -96,9 +98,20 @@ enum TurnHeightEstimator {
 
         let blockWidth = paneWidth * blocksWidthFraction - 14
         var columns = 0
+        let bubbleWidth = paneWidth * bubbleWidthFraction - 24
         if turn.hasTerminalOrigin {
             // A terminal delivery is blocks, not a bubble: its text length (up to tens of KB) is
-            // collapsed away, so only the number of blocks counts.
+            // collapsed away, so only the number of blocks counts. A bubble appears only for
+            // attachments or text the blocks do not show.
+            if let extra = turn.terminalOriginBubbleText {
+                height += CGFloat(turn.imageURLs.count) * (UserBubbleView.imageSize.height + 6)
+                if extra != ChatSession.imageOnlyText {
+                    height += bubbleChrome
+                        + wrappedHeight(characters: extra.count, width: bubbleWidth,
+                                        glyphWidth: systemGlyphWidth, lineHeight: bodyLineHeight)
+                }
+                columns += 1
+            }
             for item in turn.terminalOriginItems {
                 if columns > 0 { height += blockSpacing }
                 height += item.isNotice ? deliveryNotice : deliveryCollapsed
@@ -108,7 +121,6 @@ enum TurnHeightEstimator {
             // User bubble — suppressed for confirm-card replies, but estimating it
             // anyway costs one wrong turn's worth of correction and keeps this
             // function free of `ReplView`'s rendering rules.
-            let bubbleWidth = paneWidth * bubbleWidthFraction - 24
             if !turn.imageURLs.isEmpty {
                 height += CGFloat(turn.imageURLs.count) * (UserBubbleView.imageSize.height + 6)
             }
