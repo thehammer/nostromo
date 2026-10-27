@@ -1732,9 +1732,16 @@ mod tests {
     fn the_qa_timeout_override_applies_only_to_a_qa_daemon_and_only_when_it_is_a_positive_number() {
         assert_eq!(agent_wait_limit(true, None), DEFAULT_TIMEOUT);
         assert_eq!(agent_wait_limit(true, Some("12")), Duration::from_secs(12));
-        assert_eq!(agent_wait_limit(true, Some(" 12 ")), Duration::from_secs(12));
+        assert_eq!(
+            agent_wait_limit(true, Some(" 12 ")),
+            Duration::from_secs(12)
+        );
         for bad in ["0", "-3", "soon", ""] {
-            assert_eq!(agent_wait_limit(true, Some(bad)), DEFAULT_TIMEOUT, "{bad:?}");
+            assert_eq!(
+                agent_wait_limit(true, Some(bad)),
+                DEFAULT_TIMEOUT,
+                "{bad:?}"
+            );
         }
         // The real daemon never honours it.
         assert_eq!(agent_wait_limit(false, Some("12")), DEFAULT_TIMEOUT);
