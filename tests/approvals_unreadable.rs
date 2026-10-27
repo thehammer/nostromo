@@ -1244,6 +1244,7 @@ fn a_restarted_restricted_session_still_never_gets_the_prompt_flag() {
             builtin_tools: vec!["Read".into()],
             allowed_tools: vec!["Read".into()],
             max_budget_usd: Some(1.5),
+            model: None,
         };
         w.mgr.restrict_tag("restricted-1", restrictions.clone());
         let fake = w.spawn("restricted-1");

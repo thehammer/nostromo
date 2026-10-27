@@ -102,6 +102,7 @@ pub fn picks_restrictions() -> SessionRestrictions {
             .map(|t| t.to_string())
             .collect(),
         max_budget_usd: Some(PICKS_MAX_BUDGET_USD),
+        model: None,
     }
 }
 
@@ -239,7 +240,7 @@ impl fmt::Display for PublishError {
 
 /// Ids as an error message may echo them: escaped to the safe charset and cut,
 /// because an id is text the caller chose and the message goes back to an agent.
-fn shown_ids(ids: &[String]) -> String {
+pub(crate) fn shown_ids(ids: &[String]) -> String {
     const MAX_SHOWN_ID_CHARS: usize = 80;
     ids.iter()
         .map(|id| {
@@ -618,7 +619,7 @@ impl PicksSessionHost for SessionManagerHost {
         mgr.spawn_session(
             tag.into(),
             String::new(),
-            "Teri picks".into(),
+            session_label(tag).into(),
             Some(cwd.to_path_buf()),
             None,
             false,
@@ -640,6 +641,15 @@ impl PicksSessionHost for SessionManagerHost {
     fn stop(&self, tag: &str) {
         // Kills the child's whole process group, drops the entry and forgets the saved session id.
         self.mgr().new_session(tag);
+    }
+}
+
+/// The view name a hidden session runs under (`claude -n`).
+fn session_label(tag: &str) -> &'static str {
+    if tag == crate::huey::curate::HUEY_RUN_TAG {
+        "Huey run"
+    } else {
+        "Teri picks"
     }
 }
 
@@ -845,10 +855,15 @@ impl PicksGenerator {
         publishes: watch::Receiver<u64>,
     ) {
         let started = SystemTime::now();
-        let scratch = ScratchDir::create(self.env.scratch_root.as_deref());
+        let scratch = ScratchDir::create(self.env.scratch_root.as_deref(), SCRATCH_PREFIX);
         // Worked out while the directory exists: `claude` files transcripts under its real path.
         let transcripts = match (&self.env.projects_dir, &scratch) {
-            (Some(projects), Ok(dir)) => Some(RunTranscripts::new(projects, dir.path(), started)),
+            (Some(projects), Ok(dir)) => Some(RunTranscripts::new(
+                projects,
+                dir.path(),
+                SCRATCH_PREFIX,
+                started,
+            )),
             _ => None,
         };
         let outcome = match &scratch {
@@ -937,16 +952,24 @@ const SWEEP_READ_BYTES: u64 = 1 << 20;
 /// beginning AND has a transcript naming this run's scratch directory (the
 /// name alone proves nothing: it may be another project's). Anything that does
 /// not carry the run's unique token is never touched.
-struct RunTranscripts {
+pub(crate) struct RunTranscripts {
     projects: PathBuf,
     derived: PathBuf,
-    /// `nostromo-picks-<uuid>`: unique to the run.
+    /// `<prefix><uuid>` (e.g. `nostromo-picks-<uuid>`): unique to the run.
     token: String,
+    /// The scratch directory's name prefix; a token without it is never swept.
+    prefix: &'static str,
     started: SystemTime,
 }
 
 impl RunTranscripts {
-    fn new(projects: &Path, scratch: &Path, started: SystemTime) -> Self {
+    /// The transcripts of a run in `scratch` (a [`ScratchDir`] made with `prefix`).
+    pub(crate) fn new(
+        projects: &Path,
+        scratch: &Path,
+        prefix: &'static str,
+        started: SystemTime,
+    ) -> Self {
         let token = scratch
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -955,13 +978,14 @@ impl RunTranscripts {
             projects: projects.to_path_buf(),
             derived: transcript_dir_for(projects, scratch),
             token,
+            prefix,
             started,
         }
     }
 
     /// Best effort; never fails the run.
-    fn remove(&self) {
-        if !self.token.starts_with(SCRATCH_PREFIX) {
+    pub(crate) fn remove(&self) {
+        if self.prefix.is_empty() || !self.token.starts_with(self.prefix) {
             return;
         }
         let derived_name = self
@@ -1018,16 +1042,17 @@ impl RunTranscripts {
     }
 }
 
-/// An empty, private temp directory the picking session runs in (so it never
+/// An empty, private temp directory a hidden session runs in (so it never
 /// starts in `$HOME`), removed when dropped.
-struct ScratchDir(PathBuf);
+pub(crate) struct ScratchDir(PathBuf);
 
 impl ScratchDir {
-    fn create(root: Option<&Path>) -> std::io::Result<Self> {
+    /// `<root or $TMPDIR>/<prefix><uuid>`, mode 0700.
+    pub(crate) fn create(root: Option<&Path>, prefix: &str) -> std::io::Result<Self> {
         let root = root
             .map(Path::to_path_buf)
             .unwrap_or_else(std::env::temp_dir);
-        let path = root.join(format!("{SCRATCH_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+        let path = root.join(format!("{prefix}{}", uuid::Uuid::new_v4().simple()));
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
@@ -1038,7 +1063,7 @@ impl ScratchDir {
         Ok(Self(path))
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.0
     }
 }

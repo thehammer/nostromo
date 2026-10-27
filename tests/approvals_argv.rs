@@ -17,6 +17,7 @@ fn restrictions() -> SessionRestrictions {
         builtin_tools: vec!["Read".into(), "Grep".into()],
         allowed_tools: vec!["Read".into()],
         max_budget_usd: Some(2.0),
+        model: None,
     }
 }
 

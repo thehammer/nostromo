@@ -21,6 +21,12 @@ patient names, dates of birth, medical record numbers, diagnoses, contact detail
 on a tracker. Staged commands are display-only; the human runs them. \
 Update items one at a time, read deltas with op:\"read\", and never re-send the board.";
 
+/// The whole of the instructions Huey's hidden curating session gets: it
+/// cannot call the tracker, and nothing about the user's setup belongs in an
+/// unattended run that reads third-party news (A3).
+pub const HUEY_RUN_NOTE: &str = "You are Huey's unattended curating session in Nostromo: \
+use only huey_check_project and huey_publish_report, as the first message says.";
+
 /// The instructions for a Nostromo-spawned session. `open_topic` is the topic
 /// of the board bound to the caller's focus, when there is one.
 pub fn nostromo_instructions(open_topic: Option<&str>) -> String {

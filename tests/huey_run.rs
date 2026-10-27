@@ -734,6 +734,7 @@ fn ledger_entry(item_id: &str, date: NaiveDate, section: Section) -> LedgerEntry
         date,
         version: 1,
         section,
+        title: None,
     }
 }
 
