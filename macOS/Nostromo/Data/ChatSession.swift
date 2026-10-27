@@ -677,7 +677,8 @@ class ChatSession: ObservableObject {
                         isComplete:   t.isComplete,
                         daemonId:     t.id,
                         epoch:        epoch,
-                        subagentTextParents: textParents)
+                        subagentTextParents: textParents,
+                        origin:       t.origin)
     }
 
     /// A turn's wire blocks as GUI blocks, plus which subagent said each `.text`. Every
