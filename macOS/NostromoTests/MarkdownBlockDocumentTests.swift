@@ -267,4 +267,176 @@ final class MarkdownBlockDocumentTests: XCTestCase {
 
         XCTAssertNotEqual(doc1, doc2)
     }
+
+    // MARK: - DocumentBlockDocument (Huey document panes)
+
+    private func linkPayload(_ url: String, text: String = "go") -> DocumentPayload {
+        DocumentPayload(title: "Report for 2026-10-26",
+                        blocks: [.paragraph([.text("before "), .link(spans: [.text(text)], url: url), .text(" after")])])
+    }
+
+    private func linkAttribute(in doc: DocumentBlockDocument, at needle: String) -> Any? {
+        let range = (doc.attributedString.string as NSString).range(of: needle)
+        XCTAssertNotEqual(range.location, NSNotFound, "\(needle) must be rendered")
+        guard range.location != NSNotFound else { return nil }
+        return doc.attributedString.attribute(.link, at: range.location, effectiveRange: nil)
+    }
+
+    func testDocumentRendersItsTitleAndItsBlocks() {
+        let doc = DocumentBlockDocument(payload: DocumentPayload(
+            title: "Report for 2026-10-26",
+            blocks: [.paragraph([.text("Nothing to flag today.")]), .codeBlock(lang: nil, text: "let x = 1")]))
+        let text = doc.attributedString.string
+        XCTAssertTrue(text.contains("Report for 2026-10-26"), "the title carries the date and must be visible")
+        XCTAssertTrue(text.contains("Nothing to flag today."))
+        XCTAssertTrue(text.contains("let x = 1"))
+        XCTAssertLessThan((text as NSString).range(of: "Report for").location,
+                          (text as NSString).range(of: "Nothing to flag").location, "title comes first")
+        XCTAssertTrue(doc.actionLinks.isEmpty)
+    }
+
+    func testDocumentWithAnEmptyTitleRendersOnlyItsBlocks() {
+        let doc = DocumentBlockDocument(payload: DocumentPayload(title: "", blocks: [.paragraph([.text("Body")])]))
+        XCTAssertTrue(doc.attributedString.string.contains("Body"))
+    }
+
+    func testAnActionLinkYieldsOneActionAtItsRangeWithTheWholeIdIntact() {
+        let id = "verdict:2026-10-26:1:2:useful"
+        let doc = DocumentBlockDocument(payload: linkPayload("nostromo-action:\(id)", text: "Useful"))
+        XCTAssertEqual(doc.actionLinks.count, 1)
+        let expected = (doc.attributedString.string as NSString).range(of: "Useful")
+        XCTAssertEqual(doc.actionLinks.first, DocumentBlockDocument.ActionLink(range: expected, actionID: id))
+        XCTAssertEqual(doc.actionID(atCharacterIndex: expected.location), id)
+        XCTAssertNil(doc.actionID(atCharacterIndex: 0), "the title is not an action")
+    }
+
+    func testHttpsLinksKeepTheirLinkAttributeAndYieldNoAction() {
+        let doc = DocumentBlockDocument(payload: linkPayload("https://example.test/a?b=1"))
+        XCTAssertEqual((linkAttribute(in: doc, at: "go") as? URL)?.absoluteString, "https://example.test/a?b=1")
+        XCTAssertTrue(doc.actionLinks.isEmpty)
+    }
+
+    func testLinksWithDisallowedSchemesAreStrippedToPlainTextAndYieldNoAction() {
+        for url in ["javascript:alert(1)", "file:///etc/passwd", "http://example.test/", "data:text/html,hi",
+                    "reports/2026-10-25.md", "mailto:someone@example.test"] {
+            let doc = DocumentBlockDocument(payload: linkPayload(url))
+            XCTAssertNil(linkAttribute(in: doc, at: "go"), "\(url) must not stay a link")
+            XCTAssertTrue(doc.attributedString.string.contains("before go after"), "the text itself stays: \(url)")
+            XCTAssertTrue(doc.actionLinks.isEmpty, url)
+        }
+    }
+
+    // MARK: DocumentLinkPolicy.disposition
+
+    func testDispositionForEachScheme() {
+        let https = URL(string: "https://example.test/x")!
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: https), .openInBrowser(https))
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: URL(string: "nostromo-action:report.prev")!), .action("report.prev"))
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: URL(string: "nostromo-action:verdict:2026-10-26:1:2:useful")!),
+                       .action("verdict:2026-10-26:1:2:useful"))
+        for ignored in ["javascript:alert(1)", "file:///etc/passwd", "http://example.test/", "data:text/html,hi",
+                        "mailto:someone@example.test", "relative/path", "nostromo-action:", "https:"] {
+            XCTAssertEqual(DocumentLinkPolicy.disposition(for: URL(string: ignored)!), .ignore, ignored)
+        }
+    }
+
+    func testDispositionAcceptsStringsAsWellAsURLs() {
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: "https://example.test/x"),
+                       .openInBrowser(URL(string: "https://example.test/x")!))
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: "nostromo-action:report.prev"), .action("report.prev"))
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: "javascript:alert(1)"), .ignore)
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: "http://example.test/"), .ignore)
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: "file:///etc/passwd"), .ignore)
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: 42), .ignore)
+    }
+
+    func testDispositionSchemeMatchIsCaseInsensitive() {
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: "HTTPS://example.test/x"),
+                       .openInBrowser(URL(string: "HTTPS://example.test/x")!))
+        XCTAssertEqual(DocumentLinkPolicy.disposition(for: "Nostromo-Action:report.prev"), .action("report.prev"))
+    }
+
+    // MARK: DocumentLinkPolicy.allowedOpenURL
+
+    /// A temp "huey root" holding one report, plus a sibling folder outside it.
+    private func makeHueyRoot() throws -> (root: URL, inside: URL, outside: URL) {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("huey-policy-\(UUID().uuidString)", isDirectory: true)
+        let root = base.appendingPathComponent("huey", isDirectory: true)
+        let outsideDir = base.appendingPathComponent("elsewhere", isDirectory: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("reports"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        let inside = root.appendingPathComponent("reports/2026-10-26.html")
+        let outside = outsideDir.appendingPathComponent("secret.txt")
+        try "<html></html>".write(to: inside, atomically: true, encoding: .utf8)
+        try "secret".write(to: outside, atomically: true, encoding: .utf8)
+        addTeardownBlock { try? FileManager.default.removeItem(at: base) }
+        return (root, inside, outside)
+    }
+
+    func testAllowedOpenURLAllowsHttps() throws {
+        let (root, _, _) = try makeHueyRoot()
+        let url = DocumentLinkPolicy.allowedOpenURL("https://example.test/report", hueyRoot: root)
+        XCTAssertEqual(url?.absoluteString, "https://example.test/report")
+    }
+
+    func testAllowedOpenURLAllowsAFileInsideTheHueyRoot() throws {
+        let (root, inside, _) = try makeHueyRoot()
+        XCTAssertEqual(DocumentLinkPolicy.allowedOpenURL(inside.absoluteString, hueyRoot: root), URL(string: inside.absoluteString))
+    }
+
+    func testAllowedOpenURLAllowsAFileInsideTheRootThatDoesNotExistYet() throws {
+        let (root, _, _) = try makeHueyRoot()
+        let future = root.appendingPathComponent("reports/next.html")
+        XCTAssertNotNil(DocumentLinkPolicy.allowedOpenURL(future.absoluteString, hueyRoot: root))
+    }
+
+    func testAllowedOpenURLRefusesAFileOutsideTheHueyRoot() throws {
+        let (root, _, outside) = try makeHueyRoot()
+        XCTAssertNil(DocumentLinkPolicy.allowedOpenURL(outside.absoluteString, hueyRoot: root))
+        XCTAssertNil(DocumentLinkPolicy.allowedOpenURL("file:///etc/hosts", hueyRoot: root))
+    }
+
+    func testAllowedOpenURLRefusesASiblingFolderThatMerelySharesTheRootsNamePrefix() throws {
+        let (root, _, _) = try makeHueyRoot()
+        let sibling = root.deletingLastPathComponent().appendingPathComponent("huey-evil", isDirectory: true)
+        try FileManager.default.createDirectory(at: sibling, withIntermediateDirectories: true)
+        let file = sibling.appendingPathComponent("x.html")
+        try "x".write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertNil(DocumentLinkPolicy.allowedOpenURL(file.absoluteString, hueyRoot: root))
+    }
+
+    func testAllowedOpenURLRefusesADotDotEscapeFromTheRoot() throws {
+        let (root, _, outside) = try makeHueyRoot()
+        let escaping = "file://" + root.path + "/reports/../../elsewhere/secret.txt"
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path), "precondition: the escape lands on a real file")
+        XCTAssertNil(DocumentLinkPolicy.allowedOpenURL(escaping, hueyRoot: root))
+    }
+
+    func testAllowedOpenURLRefusesASymlinkInsideTheRootThatPointsOutside() throws {
+        let (root, _, outside) = try makeHueyRoot()
+        let link = root.appendingPathComponent("reports/shortcut.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+        XCTAssertNil(DocumentLinkPolicy.allowedOpenURL(link.absoluteString, hueyRoot: root))
+
+        let dirLink = root.appendingPathComponent("dirlink")
+        try FileManager.default.createSymbolicLink(at: dirLink, withDestinationURL: outside.deletingLastPathComponent())
+        XCTAssertNil(DocumentLinkPolicy.allowedOpenURL(dirLink.appendingPathComponent("secret.txt").absoluteString, hueyRoot: root))
+    }
+
+    func testAllowedOpenURLRefusesTheRootItself() throws {
+        let (root, _, _) = try makeHueyRoot()
+        XCTAssertNil(DocumentLinkPolicy.allowedOpenURL(root.absoluteString, hueyRoot: root))
+        XCTAssertNil(DocumentLinkPolicy.allowedOpenURL("file://" + root.path, hueyRoot: root))
+        XCTAssertNil(DocumentLinkPolicy.allowedOpenURL("file://" + root.path + "/", hueyRoot: root))
+    }
+
+    func testAllowedOpenURLRefusesOtherSchemesGarbageAndForeignHosts() throws {
+        let (root, inside, _) = try makeHueyRoot()
+        for raw in ["javascript:alert(1)", "http://example.test/", "data:text/html,hi", "mailto:a@example.test",
+                    "nostromo-action:report.prev", "not a url", "", "/just/a/path", "https://",
+                    "file://otherhost" + inside.path] {
+            XCTAssertNil(DocumentLinkPolicy.allowedOpenURL(raw, hueyRoot: root), "must refuse \(raw)")
+        }
+    }
 }

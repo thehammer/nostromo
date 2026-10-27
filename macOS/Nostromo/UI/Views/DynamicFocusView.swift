@@ -943,6 +943,7 @@ final class DynamicFocusView: NSView {
         case .prConversation: return "prConversation"
         case .ticket:         return "ticket"
         case .terminal:       return "terminal"
+        case .document:       return "document"
         case .unknown:        return "unknown"
         }
     }
@@ -1268,6 +1269,15 @@ final class PaneContentNSView: NSView {
     /// The `ticket` renderer (W4 — curated-agent-views). Same
     /// persistent-sibling discipline as `codeView`/`conversationView`.
     private let ticketView = TicketContentView()
+    /// The `document` renderer (Huey's report, context and setup panes). Same persistent-sibling
+    /// discipline as the others.
+    let documentView = DocumentContentView()
+
+    /// Sends a document action (`tag`, `paneId`, `actionId`) to the daemon. A test seam; the default
+    /// writes `pane_action` on the app's daemon connection.
+    var sendPaneAction: (String, String, String) -> Void = { tag, paneId, actionId in
+        AppStore.shared.client.sendPaneAction(tag: tag, paneId: paneId, actionId: actionId)
+    }
 
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is loaded.
     var onLoadPR: (String, Int) -> Void = { _, _ in } {
@@ -1321,6 +1331,11 @@ final class PaneContentNSView: NSView {
         addFullBleedHiddenSibling(codeView)
         addFullBleedHiddenSibling(conversationView)
         addFullBleedHiddenSibling(ticketView)
+        addFullBleedHiddenSibling(documentView)
+        documentView.onAction = { [weak self] actionId in
+            guard let self else { return }
+            self.sendPaneAction(self.focusTag, self.paneId, actionId)
+        }
 
         // Force dark appearance explicitly rather than relying on inheritance —
         // `hosting` above gets the same forced .darkAqua, and a mismatch here
@@ -1446,6 +1461,13 @@ final class PaneContentNSView: NSView {
             ticketView.isHidden = true
             ticketView.clearContent()
         }
+        if DocumentContentView.handles(content) {
+            documentView.isHidden = false
+            documentView.update(content: content)
+        } else {
+            documentView.isHidden = true
+            documentView.clearContent()
+        }
         // Freshness and address are cheap to always re-assign — neither ever
         // rebuilds anything; freshness toggles the footnote below, and
         // address's `reason` is read by the caller (`DynamicFocusView`) to
@@ -1534,7 +1556,7 @@ final class PaneContentNSView: NSView {
         return """
             pane=\(paneId) focus=\(focusTag) kind=\(kindLabel) \
             codeHidden=\(codeView.isHidden) conversationHidden=\(conversationView.isHidden) \
-            ticketHidden=\(ticketView.isHidden) \(PaneFirstPaintAudit.summary(of: currentMeasurements()))
+            ticketHidden=\(ticketView.isHidden) documentHidden=\(documentView.isHidden) \(PaneFirstPaintAudit.summary(of: currentMeasurements()))
             """
     }
 }

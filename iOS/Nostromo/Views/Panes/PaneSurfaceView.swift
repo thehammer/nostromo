@@ -109,6 +109,15 @@ struct PaneSurfaceView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .terminal(let placeholder):
                 TerminalPlaceholderView(placeholder: placeholder)
+            case .document:
+                // Decoded so the frame is not lost; iOS shows nothing new for it yet (Huey is
+                // hidden from network clients in v1, and a later client renders the generic kind).
+                ScrollView {
+                    Text("This view is not shown on iPhone yet.")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .padding(16)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             case .unknown(let raw):
                 ScrollView { jsonView(raw) }.frame(maxWidth: .infinity, maxHeight: .infinity)
             // `.diff`, `.prConversation` and `.ticket` were the last honest

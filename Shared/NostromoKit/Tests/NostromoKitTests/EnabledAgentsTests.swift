@@ -19,7 +19,7 @@ final class EnabledAgentsTests: XCTestCase {
     func testMotherIsNeverDisabled() {
         let e = EnabledAgents(wireValue: ["fred"])
         XCTAssertTrue(e.isEnabled("mother"))
-        XCTAssertEqual(e.disabled, ["perri", "teri"])
+        XCTAssertEqual(e.disabled, ["perri", "teri", "huey"])
     }
 
     func testMalformedValuesMeanEverythingEnabled() {
@@ -42,5 +42,34 @@ final class EnabledAgentsTests: XCTestCase {
         let without = ServerMsg.decode(from: Data(#"{"type":"welcome","protocol_version":4,"daemon_pid":7}"#.utf8))
         guard case let .welcome(_, _, all) = without else { return XCTFail("expected .welcome") }
         XCTAssertEqual(all, .all)
+    }
+
+    // MARK: - Huey
+
+    func testHueyIsASwitchableAgent() {
+        XCTAssertTrue(EnabledAgents.switchable.contains("huey"))
+    }
+
+    func testAWelcomeListWithoutHueyReadsHueyAsDisabled() {
+        let e = EnabledAgents(wireValue: ["mother", "fred", "perri", "teri"])
+        XCTAssertFalse(e.isEnabled("huey"))
+        XCTAssertTrue(e.disabled.contains("huey"))
+        XCTAssertTrue(e.isEnabled("fred"))
+    }
+
+    func testAWelcomeListContainingHueyReadsHueyAsEnabled() {
+        let e = EnabledAgents(wireValue: ["mother", "huey"])
+        XCTAssertTrue(e.isEnabled("huey"))
+        XCTAssertFalse(e.disabled.contains("huey"))
+        XCTAssertFalse(e.isEnabled("fred"))
+    }
+
+    func testNoListMeansHueyIsEnabledToo() {
+        XCTAssertTrue(EnabledAgents(wireValue: nil).isEnabled("huey"))
+        XCTAssertTrue(EnabledAgents.all.isEnabled("huey"))
+    }
+
+    func testHueyMatchesCaseInsensitivelyOnTheWire() {
+        XCTAssertTrue(EnabledAgents(wireValue: ["HUEY"]).isEnabled("huey"))
     }
 }

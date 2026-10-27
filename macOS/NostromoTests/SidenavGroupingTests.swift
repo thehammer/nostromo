@@ -31,7 +31,33 @@ final class SidenavGroupingTests: XCTestCase {
     func testDisabledBuiltInsGetNoRows() {
         let rows = buildNavRows(Focus.builtIns(enabled: EnabledAgents(disabled: ["fred", "perri"])))
         let ids: [String] = rows.compactMap { if case .focus(let f, _, _, _) = $0 { return f.id } else { return nil } }
-        XCTAssertEqual(ids, ["mother", "teri"])
+        XCTAssertEqual(ids, ["mother", "teri", "huey"])
+    }
+
+    func testDisabledHueyGetsNoRowAndNoPersonalHeader() {
+        let rows = buildNavRows(Focus.builtIns(enabled: EnabledAgents(disabled: ["huey"])))
+        let ids: [String] = rows.compactMap { if case .focus(let f, _, _, _) = $0 { return f.id } else { return nil } }
+        XCTAssertEqual(ids, ["fred", "mother", "perri", "teri"])
+        XCTAssertFalse(rows.contains(.orgHeader("PERSONAL")))
+    }
+
+    func testHueyRowAppearsUnderThePersonalHeaderAfterTheCarefeedBuiltIns() {
+        let rows = buildNavRows(Focus.builtIns)
+        guard let personal = rows.firstIndex(of: .orgHeader("PERSONAL")) else {
+            return XCTFail("expected a PERSONAL org header")
+        }
+        guard let carefeed = rows.firstIndex(of: .orgHeader("CAREFEED")) else {
+            return XCTFail("expected a CAREFEED org header")
+        }
+        XCTAssertLessThan(carefeed, personal, "Carefeed sorts before Personal")
+        guard case let .focus(f, label: label, secondary: secondary, indented: indented) = rows[personal + 1] else {
+            return XCTFail("the row after PERSONAL should be Huey's focus row")
+        }
+        XCTAssertEqual(f.agentTag, "huey")
+        XCTAssertEqual(label, "Huey")
+        XCTAssertNotNil(secondary)
+        XCTAssertFalse(indented)
+        XCTAssertEqual(rows.count, personal + 2, "Huey is the only Personal row")
     }
 
     // MARK: - Test 1: Built-ins in CAREFEED org appear in canonical order
@@ -39,14 +65,17 @@ final class SidenavGroupingTests: XCTestCase {
     func testBuiltIns_carefeedOrgHeader_andCanonicalOrder() {
         let rows = buildNavRows(Focus.builtIns)
 
-        XCTAssertEqual(rows.count, 5,
-                       "4 built-ins + 1 org header = 5 rows")
+        XCTAssertEqual(rows.count, 7,
+                       "5 built-ins + 2 org headers (CAREFEED, PERSONAL) = 7 rows")
 
         // First row must be the org header
         XCTAssertEqual(rows[0], .orgHeader("CAREFEED"),
                        "first row must be CAREFEED org header")
 
         // Remaining rows must be fred → mother → perri → teri
+        XCTAssertEqual(rows[5], .orgHeader("PERSONAL"),
+                       "Huey is a Personal built-in, so a PERSONAL header follows the Carefeed ones")
+
         let expectedAgents = ["fred", "mother", "perri", "teri"]
         for (index, expected) in expectedAgents.enumerated() {
             let row = rows[index + 1]
@@ -475,8 +504,8 @@ final class SidenavGroupingTests: XCTestCase {
         let all = Focus.builtIns + [custom1, custom2]
         let rows = buildNavRows(all)
 
-        // Rows: orgHeader, fred, mother, perri, teri, bob, zara
-        XCTAssertEqual(rows.count, 7)
+        // Rows: CAREFEED, fred, mother, perri, teri, bob, zara, PERSONAL, huey
+        XCTAssertEqual(rows.count, 9)
 
         guard case let .focus(fifthFocus, label: _, secondary: _, indented: _) = rows[5],
               case let .focus(sixthFocus, label: _, secondary: _, indented: _) = rows[6] else {

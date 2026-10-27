@@ -35,12 +35,41 @@ final class PerFocusEvictionWiringTests: XCTestCase {
 
     private func builtInIDs(_ s: FocusStore) -> [String] { s.focuses.filter(\.isBuiltIn).map(\.id) }
 
-    func testDefaultStoreHasAllFourBuiltIns() {
-        XCTAssertEqual(builtInIDs(tmpStore()), ["fred", "mother", "perri", "teri"])
+    func testDefaultStoreHasAllFiveBuiltIns() {
+        XCTAssertEqual(builtInIDs(tmpStore()), ["fred", "mother", "perri", "teri", "huey"])
     }
 
     func testStoreBuiltWithDisabledAgentsOmitsThem() {
-        XCTAssertEqual(builtInIDs(tmpStore(EnabledAgents(disabled: ["fred", "perri"]))), ["mother", "teri"])
+        XCTAssertEqual(builtInIDs(tmpStore(EnabledAgents(disabled: ["fred", "perri"]))), ["mother", "teri", "huey"])
+    }
+
+    func testStoreWithAllAgentsEnabledContainsTheHueyBuiltIn() {
+        let huey = tmpStore().focuses.first { $0.id == "huey" }
+        XCTAssertEqual(huey?.agentTag, "huey")
+        XCTAssertEqual(huey?.isBuiltIn, true)
+        XCTAssertEqual(huey?.org, "Personal")
+    }
+
+    func testDisablingHueyHidesItAndAnnouncesExactlyOneRemovalForIt() {
+        let store = tmpStore()
+        var removed: [String] = []
+        let c = store.focusRemovals.sink { removed.append($0.id) }
+        store.applyEnabledAgents(EnabledAgents(disabled: ["huey"]))
+        XCTAssertEqual(removed, ["huey"])
+        XCTAssertFalse(builtInIDs(store).contains("huey"))
+        XCTAssertEqual(builtInIDs(store), ["fred", "mother", "perri", "teri"])
+        c.cancel()
+    }
+
+    func testApplyingAllRestoresHueyWithoutARemoval() {
+        let store = tmpStore(EnabledAgents(disabled: ["huey"]))
+        XCTAssertFalse(builtInIDs(store).contains("huey"))
+        var removed = 0
+        let c = store.focusRemovals.sink { _ in removed += 1 }
+        store.applyEnabledAgents(.all)
+        XCTAssertTrue(builtInIDs(store).contains("huey"))
+        XCTAssertEqual(removed, 0)
+        c.cancel()
     }
 
     func testApplyingEnabledAgentsHidesAnAgentAndAnnouncesOneRemoval() {
@@ -52,7 +81,7 @@ final class PerFocusEvictionWiringTests: XCTestCase {
         let c = store.focusRemovals.sink { removed.append($0.id) }
         store.applyEnabledAgents(EnabledAgents(disabled: ["fred"]))
         XCTAssertEqual(removed, ["fred"])
-        XCTAssertEqual(builtInIDs(store), ["mother", "perri", "teri"])
+        XCTAssertEqual(builtInIDs(store), ["mother", "perri", "teri", "huey"])
         XCTAssertEqual(store.focuses.filter { !$0.isBuiltIn }.map(\.id), ["d1", "d2"])
         c.cancel()
     }

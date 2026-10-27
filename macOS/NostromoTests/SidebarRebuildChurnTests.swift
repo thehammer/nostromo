@@ -60,7 +60,7 @@ final class SidebarRebuildChurnTests: XCTestCase {
     }
 
     /// A mix of built-ins and dynamic focuses in three orgs, two of the repos shared by two focuses
-    /// (so repo headers appear), 10 focuses in all.
+    /// (so repo headers appear), 11 focuses in all (5 built-ins, 6 dynamic).
     private func makeFocuses() -> [Focus] {
         func dynamic(_ id: String, _ agent: String, _ repo: String, org: String) -> Focus {
             Focus(id: id, agentTag: agent, projectPath: "/tmp/sbrch-nonexistent/\(repo)",
@@ -166,7 +166,7 @@ final class SidebarRebuildChurnTests: XCTestCase {
         let sidebar = makeSidebar(focuses: makeFocuses())
         let rowsBefore = try rowViews(sidebar)
         XCTAssertGreaterThan(rowsBefore.count, 10, "precondition: org headers, repo headers and focus rows are on screen")
-        XCTAssertEqual(try focusItems(sidebar).count, 10, "precondition: one item per focus")
+        XCTAssertEqual(try focusItems(sidebar).count, 11, "precondition: one item per focus")
         let queue = queueItems()
         let tags = ["perri", "fred", "ghost-tag"]
 
@@ -258,16 +258,16 @@ final class SidebarRebuildChurnTests: XCTestCase {
     func testChangingTheFocusListStillRebuildsTheSidebarRows() throws {
         let focuses = makeFocuses()
         let sidebar = makeSidebar(focuses: focuses)
-        XCTAssertEqual(try focusItems(sidebar).count, 10)
+        XCTAssertEqual(try focusItems(sidebar).count, 11)
 
         sidebar.tabBar.setFocuses(Array(focuses.dropLast()))
         settle(sidebar.window)
-        XCTAssertEqual(try focusItems(sidebar).count, 9, "a removed focus loses its row")
+        XCTAssertEqual(try focusItems(sidebar).count, 10, "a removed focus loses its row")
         XCTAssertFalse(try focusItems(sidebar).contains { $0.focus.id == "sbrch-6" })
 
         sidebar.tabBar.setFocuses(focuses)
         settle(sidebar.window)
-        XCTAssertEqual(try focusItems(sidebar).count, 10, "and gets it back")
+        XCTAssertEqual(try focusItems(sidebar).count, 11, "and gets it back")
         XCTAssertTrue(try focusItems(sidebar).contains { $0.focus.id == "sbrch-6" })
     }
 

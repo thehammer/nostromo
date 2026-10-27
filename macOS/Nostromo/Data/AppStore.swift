@@ -1674,6 +1674,10 @@ class AppStore: ObservableObject {
         case .approvalPending:
             break
 
+        // A document pane's action was answered: toast the message, open the URL if it is allowed.
+        case .paneActionResult(let result):
+            handlePaneActionResult(result)
+
         // A session waiting for a Claude sign-in (CL2): `ClaudeLoginStore` keeps it, the card shows it.
         case .claudeLoginState(let frame):
             claudeLoginEvents.send(frame)
@@ -1685,6 +1689,21 @@ class AppStore: ObservableObject {
         case .pong, .unknown:
             break
         }
+    }
+
+    /// Where a `pane_action_result`'s `open_url` goes once it passes `DocumentLinkPolicy`. A test seam.
+    var openExternalURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+
+    /// Show a `pane_action_result`'s message as a toast, and open its `open_url` only if it is an
+    /// `https:` URL or a `file:` URL inside `~/.nostromo/huey/`. Anything else is dropped silently.
+    func handlePaneActionResult(_ result: PaneActionResultWire) {
+        if let message = result.message, !message.isEmpty {
+            onNotification?(message, result.ok ? .info : .warning)
+        }
+        guard result.ok, let raw = result.openURL,
+              let url = DocumentLinkPolicy.allowedOpenURL(raw)
+        else { return }
+        openExternalURL(url)
     }
 
     /// Update `sessionHealth` for `tag`. `.healthy` entries are removed to keep
@@ -1725,6 +1744,7 @@ class AppStore: ObservableObject {
         case .prConversation: return "prConversation"
         case .ticket:         return "ticket"
         case .terminal:       return "terminal"
+        case .document:       return "document"
         case .unknown:        return "unknown"
         }
     }

@@ -387,8 +387,11 @@
 		MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
 		MM0000000000000000000102 /* ConversationContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000002 /* ConversationContentView.swift */; };
 		OO0000000000000000000101 /* TicketBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000001 /* TicketBlockDocument.swift */; };
+		HY0000000000000000000101 /* DocumentBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = HY0000000000000000000001 /* DocumentBlockDocument.swift */; };
 		OO0000000000000000000201 /* TicketBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000001 /* TicketBlockDocument.swift */; };
+		HY0000000000000000000201 /* DocumentBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HY0000000000000000000001 /* DocumentBlockDocument.swift */; };
 		OO0000000000000000000102 /* TicketContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000002 /* TicketContentView.swift */; };
+		HY0000000000000000000102 /* DocumentContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = HY0000000000000000000002 /* DocumentContentView.swift */; };
 		NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */; };
 		MG0000000000000000000A1 /* MotherJobGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = MG0000000000000000000A0 /* MotherJobGrouping.swift */; };
 		MG0000000000000000000A2 /* MotherJobGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MG0000000000000000000A0 /* MotherJobGrouping.swift */; };
@@ -521,6 +524,7 @@
 		WCO000000000000000000017 /* TabBarView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000006 /* TabBarView.swift */; };
 		WCO000000000000000000018 /* TeriBindings.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000055 /* TeriBindings.swift */; };
 		WCO000000000000000000019 /* TicketContentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000002 /* TicketContentView.swift */; };
+		HY0000000000000000000202 /* DocumentContentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HY0000000000000000000002 /* DocumentContentView.swift */; };
 		WCO000000000000000000020 /* TranscriptDiagnostics.swift in TestSources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000050 /* TranscriptDiagnostics.swift */; };
 		WCO000000000000000000021 /* DaemonDiagnostics.swift in TestSources */ = {isa = PBXBuildFile; fileRef = JJ0000000000000000000002 /* DaemonDiagnostics.swift */; };
 		WCO000000000000000000022 /* DecisionPresenter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000030 /* DecisionPresenter.swift */; };
@@ -915,7 +919,9 @@
 		PP000000000000000000012 /* StatusBarActivityRemovalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarActivityRemovalTests.swift; sourceTree = "<group>"; };
 		PP0000000000000000005B1 /* StatusBarPostureWindowsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarPostureWindowsTests.swift; sourceTree = "<group>"; };
 		OO0000000000000000000001 /* TicketBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketBlockDocument.swift; sourceTree = "<group>"; };
+		HY0000000000000000000001 /* DocumentBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentBlockDocument.swift; sourceTree = "<group>"; };
 		OO0000000000000000000002 /* TicketContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TicketContentView.swift; sourceTree = "<group>"; };
+		HY0000000000000000000002 /* DocumentContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DocumentContentView.swift; sourceTree = "<group>"; };
 
 		ZP0000000000000000000001 /* DisplayIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayIdentity.swift; sourceTree = "<group>"; };
 		ZP0000000000000000000005 /* DisplayTopology.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayTopology.swift; sourceTree = "<group>"; };
@@ -1264,6 +1270,7 @@
 				LL0000000000000000000012 /* CodePaneRenderAudit.swift */,
 				MM0000000000000000000001 /* MarkdownBlockDocument.swift */,
 				OO0000000000000000000001 /* TicketBlockDocument.swift */,
+				HY0000000000000000000001 /* DocumentBlockDocument.swift */,
 				KK0000000000000000000001 /* LayoutChangeClassifier.swift */,
 				QQ0000000000000000000001 /* PaneRenderPlan.swift */,
 				QQ0000000000000000000002 /* RatioSolver.swift */,
@@ -1336,6 +1343,7 @@
 				LL0000000000000000000005 /* CodeContentView.swift */,
 				MM0000000000000000000002 /* ConversationContentView.swift */,
 				OO0000000000000000000002 /* TicketContentView.swift */,
+				HY0000000000000000000002 /* DocumentContentView.swift */,
 				ZZ0000000000000000TF0200 /* ToolGroupView.swift */,
 			);
 			path = Views;
@@ -1863,7 +1871,9 @@
 				MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */,
 				MM0000000000000000000102 /* ConversationContentView.swift in Sources */,
 				OO0000000000000000000101 /* TicketBlockDocument.swift in Sources */,
+				HY0000000000000000000101 /* DocumentBlockDocument.swift in Sources */,
 				OO0000000000000000000102 /* TicketContentView.swift in Sources */,
+				HY0000000000000000000102 /* DocumentContentView.swift in Sources */,
 				FF00000000000000000000A2 /* SidenavGrouping.swift in Sources */,
 				GG00000000000000000000A2 /* ProcessRunner.swift in Sources */,
 				RO00000000000000000000A2 /* RepoOrg.swift in Sources */,
@@ -2125,6 +2135,7 @@
 				LL0000000000000000000206 /* CodePaneRenderAudit.swift in TestSources */,
 				MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */,
 				OO0000000000000000000201 /* TicketBlockDocument.swift in TestSources */,
+				HY0000000000000000000201 /* DocumentBlockDocument.swift in TestSources */,
 				LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */,
 				LL0000000000000000000302 /* DiffDocumentTests.swift in Sources */,
 				LL0000000000000000000303 /* ScrollDecisionTests.swift in Sources */,
@@ -2300,6 +2311,7 @@
 				WCO000000000000000000017 /* TabBarView.swift in TestSources */,
 				WCO000000000000000000018 /* TeriBindings.swift in TestSources */,
 				WCO000000000000000000019 /* TicketContentView.swift in TestSources */,
+				HY0000000000000000000202 /* DocumentContentView.swift in TestSources */,
 				WCO000000000000000000020 /* TranscriptDiagnostics.swift in TestSources */,
 				WCO000000000000000000021 /* DaemonDiagnostics.swift in TestSources */,
 				WCO000000000000000000022 /* DecisionPresenter.swift in TestSources */,
