@@ -200,6 +200,8 @@ enum TerminalBase64 {
 /// What a refused attempt was trying to do (`terminal_refusal_report.op`).
 enum TerminalRefusedOp: String, Equatable {
     case input, close, restart, paste, resize, open
+    /// The Connect button on a remote shell's confirm sheet.
+    case connect
 }
 
 /// Every terminal frame this app sends. `encoded()` is the JSON body the daemon reads; the optional

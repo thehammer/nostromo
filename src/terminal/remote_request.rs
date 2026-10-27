@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use tokio::sync::{mpsc, oneshot};
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::audit::{AuditEvent, AuditPin, AuditRequester, RefusalChannel};
@@ -41,6 +41,36 @@ use crate::ipc::protocol::{
 
 /// How long a request waits for the user when the caller does not say.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+/// QA only: shortens how long an agent's request waits for the person at the
+/// app, so a scenario can watch one time out without waiting five minutes.
+pub const QA_TIMEOUT_ENV: &str = "NOSTROMO_QA_REMOTE_SHELL_TIMEOUT_SECS";
+
+/// How long an agent's request waits: [`DEFAULT_TIMEOUT`], unless this is a QA
+/// daemon (`qa_daemon`, `NOSTROMO_QA_DAEMON=1`) and `override_secs` is a
+/// positive number of seconds. Anywhere else the override is ignored loudly.
+/// The daemon still clamps the wait to [`MIN_TIMEOUT`]..=[`MAX_TIMEOUT`].
+pub fn agent_wait_limit(qa_daemon: bool, override_secs: Option<&str>) -> Duration {
+    let Some(raw) = override_secs else {
+        return DEFAULT_TIMEOUT;
+    };
+    if !qa_daemon {
+        warn!("{QA_TIMEOUT_ENV} ignored: it is honoured only when NOSTROMO_QA_DAEMON=1");
+        return DEFAULT_TIMEOUT;
+    }
+    match raw.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => Duration::from_secs(secs),
+        _ => {
+            warn!("{QA_TIMEOUT_ENV}={raw:?} is not a positive number of seconds; ignored");
+            DEFAULT_TIMEOUT
+        }
+    }
+}
+
+/// [`agent_wait_limit`] from the process environment.
+pub fn agent_wait_limit_from_env() -> Duration {
+    let qa = std::env::var("NOSTROMO_QA_DAEMON").is_ok_and(|v| v == "1");
+    agent_wait_limit(qa, std::env::var(QA_TIMEOUT_ENV).ok().as_deref())
+}
 /// The first cooldown an agent's focus waits after a Cancel, Dismiss or
 /// timeout; it doubles on each further denial, up to [`MAX_COOLDOWN`], and a
 /// Connect resets it.
@@ -874,12 +904,14 @@ pub fn remote_targets_msg(paths: &super::ecs::EcsPaths) -> ServerMsg {
             problem: None,
             projects: vocabulary.projects(),
             shell_types: vocabulary.shell_types(),
+            repo_paths: vocabulary.repo_paths(),
         },
         Err(e) => ServerMsg::RemoteShellTargets {
             configured: false,
             problem: Some(e.problem),
             projects: Vec::new(),
             shell_types: Vec::new(),
+            repo_paths: Default::default(),
         },
     }
 }
@@ -1696,6 +1728,25 @@ mod tests {
         assert_eq!(MAX_REASON_CHARS, 200);
     }
 
+    #[test]
+    fn the_qa_timeout_override_applies_only_to_a_qa_daemon_and_only_when_it_is_a_positive_number() {
+        assert_eq!(agent_wait_limit(true, None), DEFAULT_TIMEOUT);
+        assert_eq!(agent_wait_limit(true, Some("12")), Duration::from_secs(12));
+        assert_eq!(
+            agent_wait_limit(true, Some(" 12 ")),
+            Duration::from_secs(12)
+        );
+        for bad in ["0", "-3", "soon", ""] {
+            assert_eq!(
+                agent_wait_limit(true, Some(bad)),
+                DEFAULT_TIMEOUT,
+                "{bad:?}"
+            );
+        }
+        // The real daemon never honours it.
+        assert_eq!(agent_wait_limit(false, Some("12")), DEFAULT_TIMEOUT);
+    }
+
     // ── the targets frame ────────────────────────────────────────────────────
 
     fn fixture_paths() -> EcsPaths {
@@ -1714,6 +1765,7 @@ mod tests {
             problem,
             projects,
             shell_types,
+            repo_paths,
         } = remote_targets_msg(&fixture_paths())
         else {
             panic!("expected a remote_shell_targets frame");
@@ -1732,6 +1784,12 @@ mod tests {
             ]
         );
         assert_eq!(shell_types, ["console", "shell", "tinker"]);
+        // The picker preselects the project a focus's directory belongs to.
+        assert_eq!(
+            repo_paths.get("admin-portal"),
+            Some(&vec!["~/Code/fake-admin-portal".to_string()])
+        );
+        assert_eq!(repo_paths.len(), 4);
     }
 
     #[test]
@@ -1748,6 +1806,7 @@ mod tests {
             problem,
             projects,
             shell_types,
+            ..
         } = remote_targets_msg(&paths)
         else {
             panic!("expected a remote_shell_targets frame");

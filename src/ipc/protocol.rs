@@ -2668,6 +2668,12 @@ pub enum ServerMsg {
         projects: Vec<RemoteShellProject>,
         #[serde(default)]
         shell_types: Vec<String>,
+        /// Each project's repository directories (`~` kept as written), so the
+        /// app can preselect the project a focus's directory belongs to. For
+        /// the operator's picker only: the agent-facing list leaves them out.
+        /// Additive: absent when there are none.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        repo_paths: std::collections::BTreeMap<String, Vec<String>>,
     },
     /// An agent (or the user) asks to open a remote shell; the app shows the
     /// confirm sheet. Targeted to operator-app connections that declared
@@ -7321,6 +7327,12 @@ mod terminal_wire_tests {
                 ],
             }],
             shell_types: vec!["shell".into(), "console".into(), "tinker".into()],
+            repo_paths: [(
+                "admin-portal".to_string(),
+                vec!["~/Code/admin-portal".to_string()],
+            )]
+            .into_iter()
+            .collect(),
         });
         assert_eq!(v["type"], "remote_shell_targets");
         assert_eq!(v["configured"], true);
@@ -7336,16 +7348,25 @@ mod terminal_wire_tests {
             v["shell_types"],
             serde_json::json!(["shell", "console", "tinker"])
         );
+        assert_eq!(
+            v["repo_paths"],
+            serde_json::json!({"admin-portal": ["~/Code/admin-portal"]})
+        );
 
         let v = round_trip_server(ServerMsg::RemoteShellTargets {
             configured: false,
             problem: Some("no ECS config.json found".into()),
             projects: vec![],
             shell_types: vec![],
+            repo_paths: Default::default(),
         });
         assert_eq!(v["configured"], false);
         assert_eq!(v["problem"], "no ECS config.json found");
         assert_eq!(v["projects"], serde_json::json!([]));
+        assert!(
+            v.get("repo_paths").is_none(),
+            "absent when there are none: {v}"
+        );
 
         let v = round_trip_server(ServerMsg::RemoteShellTargets {
             configured: true,
@@ -7356,6 +7377,7 @@ mod terminal_wire_tests {
                 environments: vec![],
             }],
             shell_types: vec![],
+            repo_paths: Default::default(),
         });
         assert!(v["projects"][0].get("default_service").is_none(), "{v}");
     }
@@ -7371,10 +7393,11 @@ mod terminal_wire_tests {
                 problem,
                 projects,
                 shell_types,
+                repo_paths,
             } => {
                 assert!(!configured);
                 assert_eq!(problem, None);
-                assert!(projects.is_empty() && shell_types.is_empty());
+                assert!(projects.is_empty() && shell_types.is_empty() && repo_paths.is_empty());
             }
             other => panic!("expected RemoteShellTargets, got {other:?}"),
         }

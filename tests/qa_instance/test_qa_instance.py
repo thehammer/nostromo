@@ -3,7 +3,7 @@
 Run with:  python3 -m unittest discover -s tests/qa_instance -v
 Never starts an app, a daemon or any real instance.
 """
-import ast, hashlib, importlib.machinery, importlib.util, json, os, re, struct, subprocess, sys, tempfile, unittest, zlib
+import ast, hashlib, importlib.machinery, importlib.util, json, os, re, shutil, struct, subprocess, sys, tempfile, unittest, zlib
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts", "qa", "lib"))
@@ -253,6 +253,33 @@ class EnvTests(unittest.TestCase):
         env = qa.daemon_env(self.ROOT_DIR, self.BASE, "f", "g")
         self.assertEqual(env["NOSTROMO_OPERATOR_APP_PATH"],
                          self.ROOT_DIR + "/Nostromo.app/Contents/MacOS/Nostromo")
+
+    def test_daemon_env_passes_the_fake_aws_cli_and_the_qa_request_timeout_through(self):
+        base = dict(self.BASE, NOSTROMO_AWS_CLI="/r/fake-aws", NOSTROMO_QA_REMOTE_SHELL_TIMEOUT_SECS="10")
+        env = qa.daemon_env(self.ROOT_DIR, base, "f", "g")
+        self.assertEqual(env["NOSTROMO_AWS_CLI"], "/r/fake-aws")
+        self.assertEqual(env["NOSTROMO_QA_REMOTE_SHELL_TIMEOUT_SECS"], "10")
+
+    def test_seed_ecs_config_points_the_daemon_at_the_fixture_vocabulary_in_both_config_places(self):
+        root = tempfile.mkdtemp(prefix="qa-seed-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, root, True)
+        fixtures = tempfile.mkdtemp(prefix="qa-fix-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, fixtures, True)
+        open(os.path.join(fixtures, "config.json"), "w").write("{}")
+        qa.seed_ecs_config(root, fixtures)
+        real = os.path.realpath(fixtures)
+        for sub in qa.CONFIG_DIRS:
+            text = open(os.path.join(root, "home", sub, "config.toml")).read()
+            self.assertIn("[terminal]", text)
+            self.assertIn('ecs_config = "%s/config.json"' % real, text)
+            self.assertIn('ecs_local = "%s/ecs-local.json"' % real, text)
+            self.assertIn('ecs_aliases_script = "%s/ecs.sh"' % real, text)
+
+    def test_seed_ecs_config_refuses_a_directory_without_config_json(self):
+        root = tempfile.mkdtemp(prefix="qa-seed-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, root, True)
+        with self.assertRaises(RuntimeError):
+            qa.seed_ecs_config(root, root)
 
     def test_app_env_synthetic_on(self):
         env = qa.app_env(self.ROOT_DIR, self.BASE, synthetic=True)

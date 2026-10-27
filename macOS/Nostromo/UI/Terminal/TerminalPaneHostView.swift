@@ -16,6 +16,10 @@ import SwiftTerm
 /// in a clipping container, so it never reflows and never sends a resize (a pane smaller than the
 /// terminal shows its top-left corner). The header says so, and a click or key makes it the driver.
 ///
+/// A remote shell that is still `connecting` shows "Connecting to production · admin-portal · scheduler…"
+/// with a spinner and no terminal view at all, so there is never a prompt, local or otherwise, before the
+/// session begins; the terminal view appears when the daemon says `running`.
+///
 /// While the daemon is unreachable the pane says its shell ended and cannot be restarted; when the
 /// daemon is back it shows what the daemon says (a shell that died with it is `ended`, with Restart).
 ///
@@ -41,6 +45,12 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     /// Holds the terminal view and clips it: a mirror can be larger than the pane.
     private let terminalContainer = ClickableClipView()
     private let mirrorHint = NSTextField(labelWithString: "")
+    /// Someone asked for the keyboard (or had it) while the pane was still connecting.
+    private var focusWhenConnected = false
+    /// Shown instead of the terminal while a remote shell connects.
+    private let connectingView = NSView()
+    private let connectingLabel = NSTextField(labelWithString: "")
+    private let connectingSpinner = NSProgressIndicator()
     private let overlay = NSView()
     private let overlayLabel = NSTextField(labelWithString: "")
     private let restartButton = NSButton()
@@ -78,6 +88,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         setAccessibilityLabel("Terminal")
         buildHeader()
         buildOverlay()
+        buildConnecting()
         terminalContainer.addSubview(terminalView)
         // A click on the pane (the terminal, the empty part beside a mirror, the header) takes the keyboard
         // and, in a mirror, the size.
@@ -88,6 +99,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         terminalContainer.onMouseDown = claim
         header.onMouseDown = claim
         addSubview(terminalContainer)
+        addSubview(connectingView)
         addSubview(header)
         addSubview(overlay)
         info = store.info(forPane: paneId, tag: focusTag)
@@ -134,6 +146,11 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     /// The terminal view takes the keyboard.
     func focusTerminal() {
+        // A pane still connecting shows its overlay; the hidden terminal view must not take the keyboard.
+        guard info?.status != .connecting else {
+            focusWhenConnected = true
+            return
+        }
         window?.makeFirstResponder(terminalView)
     }
 
@@ -190,6 +207,8 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         header.frame = NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
         let body = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - h))
         terminalContainer.frame = body
+        connectingView.frame = body
+        layoutConnecting()
         layoutTerminal()
         let overlayH = min(Self.overlayHeight, body.height)
         overlay.frame = NSRect(x: 0, y: 0, width: body.width, height: overlayH)
@@ -324,6 +343,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
             mirrorHint.stringValue = ""
         }
         mirrorHint.isHidden = mirrorHint.stringValue.isEmpty
+        renderConnecting()
         overlayLabel.toolTip = overlayLabel.stringValue
         needsLayout = true
     }
@@ -345,6 +365,65 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         header.addSubview(titleLabel)
         header.addSubview(mirrorHint)
         header.addSubview(closeButton)
+    }
+
+    /// The terminal view gives way to the connecting message until the shell is running.
+    private func renderConnecting() {
+        let connecting = info?.status == .connecting
+        terminalContainer.isHidden = connecting
+        connectingView.isHidden = !connecting
+        if connecting {
+            // Hiding a view does not take the keyboard from it: let go, so nothing is typed into a
+            // shell that is not there yet (the store drops that input too).
+            if let window, window.firstResponder === terminalView {
+                window.makeFirstResponder(nil)
+                focusWhenConnected = true
+            }
+            if let target = info?.target {
+                connectingLabel.stringValue = RemoteShellStore.connectingMessage(for: target)
+            } else {
+                connectingLabel.stringValue = "Connecting\u{2026}"
+            }
+            connectingSpinner.startAnimation(nil)
+        } else {
+            connectingSpinner.stopAnimation(nil)
+            // The keyboard was held back while connecting: hand it over now the shell is there.
+            if focusWhenConnected, info?.status == .running {
+                focusWhenConnected = false
+                window?.makeFirstResponder(terminalView)
+            }
+        }
+    }
+
+    private func buildConnecting() {
+        connectingView.wantsLayer = true
+        connectingView.layer?.backgroundColor = Theme.bg.cgColor
+        connectingView.isHidden = true
+        connectingView.setAccessibilityIdentifier("terminal-connecting")
+        connectingLabel.font = Theme.statusFont
+        connectingLabel.textColor = Theme.fg
+        connectingLabel.lineBreakMode = .byTruncatingMiddle
+        connectingLabel.alignment = .center
+        connectingLabel.setAccessibilityIdentifier("terminal-connecting-label")
+        connectingSpinner.style = .spinning
+        connectingSpinner.controlSize = .small
+        connectingSpinner.isIndeterminate = true
+        connectingView.addSubview(connectingSpinner)
+        connectingView.addSubview(connectingLabel)
+    }
+
+    /// The spinner above the message, both centred in the pane.
+    private func layoutConnecting() {
+        let bounds = connectingView.bounds
+        let spinnerSize: CGFloat = 16
+        let labelSize = connectingLabel.intrinsicContentSize
+        let labelWidth = min(labelSize.width, max(0, bounds.width - 20))
+        let totalHeight = spinnerSize + 8 + labelSize.height
+        let top = (bounds.height + totalHeight) / 2
+        connectingSpinner.frame = NSRect(x: (bounds.width - spinnerSize) / 2, y: top - spinnerSize,
+                                         width: spinnerSize, height: spinnerSize)
+        connectingLabel.frame = NSRect(x: (bounds.width - labelWidth) / 2, y: top - totalHeight,
+                                       width: labelWidth, height: labelSize.height)
     }
 
     private func buildOverlay() {

@@ -289,6 +289,19 @@ final class TerminalFitnessTests: XCTestCase {
         return sources
     }
 
+    /// Actions that need no input-guard check because none of them can open, change or write to a terminal:
+    ///  - `cancelTapped`, `dismissTapped`, `okTapped`: close a sheet; they answer nothing that connects.
+    ///  - `copyTapped`: copies the failure text to the pasteboard.
+    ///  - `submitTapped`: only asks the daemon to show the confirm sheet; the connection itself still
+    ///    needs the human's Connect click (`connectTapped`, which is NOT exempt).
+    ///  - `popupChanged`, `projectChanged`, `environmentChanged`, `serviceChanged`, `shellTypeChanged`:
+    ///    picker popups that change a form selection only.
+    /// Every other action, `connectTapped` included, must ask `TerminalInputGuard`.
+    private let guardExemptActions: [String] = [
+        "cancelTapped", "dismissTapped", "okTapped", "copyTapped", "submitTapped",
+        "popupChanged", "projectChanged", "environmentChanged", "serviceChanged", "shellTypeChanged",
+    ]
+
     func testEveryObjcActionInTheTerminalViewsAsksTheInputGuard() throws {
         var actions: [Declaration] = []
         for source in try terminalViewSources() {
@@ -300,6 +313,7 @@ final class TerminalFitnessTests: XCTestCase {
         }
         XCTAssertGreaterThanOrEqual(actions.count, 3, "the host's close/overlay-close/restart actions should be found")
         for action in actions {
+            if guardExemptActions.contains(where: { action.header.contains("func \($0)(") }) { continue }
             XCTAssertTrue(action.body.contains("TerminalInputGuard."),
                           "\(action.file): `\(action.header)` is an action that changes a terminal and must ask TerminalInputGuard first")
         }
@@ -536,5 +550,217 @@ final class TerminalFitnessTests: XCTestCase {
                       Chord(key: "f", mask: command.rawValue), Chord(key: "g", mask: command.rawValue)] {
             XCTAssertEqual(owners[chord]?.count, 1, "\(chord.key) is claimed by \(owners[chord] ?? [])")
         }
+    }
+
+    // MARK: Remote shell confirm sheet (2c)
+
+    private func confirmSheetCode() throws -> String {
+        let url = Repo.app.appendingPathComponent("UI/Terminal/RemoteShellConfirmSheet.swift")
+        return Repo.codeLines(try Repo.read(url)).joined(separator: "\n")
+    }
+
+    func testTheConfirmSheetHasCancelAndConnectButtons() throws {
+        let code = try confirmSheetCode()
+        XCTAssertTrue(code.contains("cancelButton"))
+        XCTAssertTrue(code.contains("connectButton"))
+    }
+
+    func testConnectIsAKeyViewButtonSubclassSoTabReachesIt() throws {
+        let code = try confirmSheetCode()
+        XCTAssertNotNil(Repo.firstMatch(#"(?s)final class ConnectButton:\s*NSButton.*?override var canBecomeKeyView:\s*Bool\s*\{\s*(return\s+)?true\b"#, in: code),
+                        "ConnectButton must be a final NSButton subclass whose canBecomeKeyView is true")
+        XCTAssertNotNil(Repo.firstMatch(#"connectButton\s*(:[^=\n]*)?=\s*ConnectButton\("#, in: code),
+                        "connectButton must be a ConnectButton")
+    }
+
+    func testReturnIsCancelAndConnectNeverHasAKeyEquivalent() throws {
+        let code = try confirmSheetCode()
+        XCTAssertTrue(code.contains(#"cancelButton.keyEquivalent = "\r""#), "Return must trigger Cancel")
+        XCTAssertFalse(code.contains("connectButton.keyEquivalent"), "Connect must never have a key equivalent")
+        let lines = code.components(separatedBy: "\n")
+        for line in lines where line.contains("keyEquivalent") {
+            XCTAssertFalse(line.contains("connectTapped") || line.contains("connectButton"), line)
+            XCTAssertTrue(line.contains("cancelButton") || line.contains(#"\u{1b}"#) || line.contains("cancel"),
+                          "only Cancel (Return) and the hidden Escape path may set a keyEquivalent: \(line)")
+        }
+    }
+
+    func testEscapeIsASecondPathToCancel() throws {
+        let code = try confirmSheetCode()
+        let lines = code.components(separatedBy: "\n")
+        XCTAssertTrue(code.contains("cancelOperation") || code.contains(#""\u{1b}""#),
+                      "the sheet needs a hidden Escape path")
+        if let cancelOp = lines.firstIndex(where: { $0.contains("cancelOperation") }) {
+            let window = lines[cancelOp..<min(cancelOp + 6, lines.count)].joined(separator: "\n")
+            XCTAssertTrue(window.lowercased().contains("cancel"), "Escape (cancelOperation) must cancel:\n\(window)")
+        } else if let esc = lines.firstIndex(where: { $0.contains(#""\u{1b}""#) }) {
+            let window = lines[max(0, esc - 4)..<min(esc + 5, lines.count)].joined(separator: "\n")
+            XCTAssertTrue(window.contains("cancelTapped") || window.contains("cancelButton"),
+                          "the Escape key equivalent must target Cancel:\n\(window)")
+        }
+    }
+
+    func testConnectTappedAsksTheInputGuardAndReportsARefusal() throws {
+        let url = Repo.app.appendingPathComponent("UI/Terminal/RemoteShellConfirmSheet.swift")
+        let lines = Repo.codeLines(try Repo.read(url))
+        let found = declarations(in: url.lastPathComponent, lines: lines) { lines[$0].contains("func connectTapped(") }
+        let decl = try XCTUnwrap(found.first, "connectTapped not found")
+        XCTAssertTrue(decl.header.contains("connectTapped("))
+        XCTAssertTrue(decl.body.contains("TerminalInputGuard.allowsControl("),
+                      "connectTapped must ask the input guard:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("reportRefusal"), "a refused Connect must be reported:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("connect"), decl.body)
+    }
+
+    func testOnlyTheConfirmSheetEverSendsAConnectDecision() throws {
+        var sawSheet = false
+        for url in Repo.swiftFiles(under: Repo.app) {
+            let code = Repo.codeLines(try Repo.read(url)).joined(separator: "\n")
+            if url.lastPathComponent == "RemoteShellConfirmSheet.swift" {
+                sawSheet = true
+                XCTAssertTrue(code.contains("decision: .connect"), "the sheet's Connect sends the connect decision")
+            } else {
+                XCTAssertFalse(code.contains("decision: .connect"),
+                               "\(url.lastPathComponent) sends a connect decision; only RemoteShellConfirmSheet's Connect button may")
+            }
+        }
+        XCTAssertTrue(sawSheet)
+    }
+
+    // The confirm sheet shows what will run (review fix-ups for PR #359): nothing the person has to
+    // decide on may be cut off, the details are selectable, and Connect is off when the daemon did not
+    // say what will run.
+
+    /// The variable a label is assigned to, found by its accessibility identifier.
+    private func variable(withId id: String, in code: String) -> String? {
+        Repo.firstMatch(#"(\w+)\.setAccessibilityIdentifier\(""# + NSRegularExpression.escapedPattern(for: id) + #""\)"#,
+                        in: code)?[1]
+    }
+
+    func testTheConfirmSheetNeverTruncatesOrClipsAnything() throws {
+        let code = try confirmSheetCode()
+        for mode in [".byTruncatingTail", ".byTruncatingMiddle", ".byTruncatingHead", ".byClipping"] {
+            XCTAssertFalse(code.contains(mode), "the sheet must show everything it says; found \(mode)")
+        }
+    }
+
+    func testTheTitleAndSubtitleWrapOnAnyNumberOfLines() throws {
+        let code = try confirmSheetCode()
+        for id in ["remote-shell-title", "remote-shell-target"] {
+            let name = try XCTUnwrap(variable(withId: id, in: code), "no label with id \(id)")
+            XCTAssertNotNil(Repo.firstMatch(#"\b"# + name + #"\.maximumNumberOfLines\s*=\s*0\b"#, in: code),
+                            "\(id) must set maximumNumberOfLines = 0")
+            XCTAssertNotNil(Repo.firstMatch(#"\b"# + name + #"\s*(:[^=\n]*)?=\s*NSTextField\(wrappingLabelWithString"#, in: code)
+                            ?? Repo.firstMatch(#"\b"# + name + #"\.lineBreakMode\s*=\s*\.by(Word|Char)Wrapping"#, in: code),
+                            "\(id) must be a wrapping label")
+        }
+    }
+
+    func testTheSubtitleCanBeSqueezedHorizontallySoItWrapsInsteadOfWideningTheSheet() throws {
+        let code = try confirmSheetCode()
+        let name = try XCTUnwrap(variable(withId: "remote-shell-target", in: code))
+        XCTAssertNotNil(
+            Repo.firstMatch(#"\b"# + name + #"\.setContentCompressionResistancePriority\(\s*(\.defaultLow|\.fittingSizeCompression|NSLayoutConstraint\.Priority\(\s*(\d{1,2}|1\d\d|2[0-4]\d|250)(\.0)?\s*\))\s*,\s*for:\s*\.horizontal"#,
+                            in: code),
+            "the subtitle needs a horizontal compression resistance of .defaultLow or lower")
+    }
+
+    func testTheSheetShowsTheDetailsInASelectableMonospacedCappedScrollingBlock() throws {
+        let code = try confirmSheetCode()
+        XCTAssertTrue(code.contains("model.details"), "the sheet must render model.details")
+        XCTAssertTrue(code.contains(#""remote-shell-details""#), "the details block needs the id remote-shell-details")
+        XCTAssertTrue(code.contains("isSelectable = true"), "the details must be selectable (copyable)")
+        XCTAssertTrue(code.contains("monospacedSystemFont"), "the details must be monospaced")
+        XCTAssertTrue(code.contains("NSScrollView"), "the details sit in a scroll view")
+        XCTAssertTrue(code.contains("maxDetailsHeight"), "the scroll view's height must be capped by maxDetailsHeight")
+        XCTAssertTrue(code.contains(".byCharWrapping"), "an unbroken command must wrap by character")
+    }
+
+    func testTheReasonHasItsOwnLabelUnderAnUnverifiedHeading() throws {
+        let code = try confirmSheetCode()
+        XCTAssertTrue(code.contains("Agent's stated reason (unverified)"), "the heading text")
+        let heading = try XCTUnwrap(variable(withId: "remote-shell-reason-heading", in: code))
+        let reason = try XCTUnwrap(variable(withId: "remote-shell-reason", in: code))
+        let requester = try XCTUnwrap(variable(withId: "remote-shell-requester", in: code))
+        XCTAssertEqual(Set([heading, reason, requester]).count, 3, "heading, reason and requester are three labels")
+        XCTAssertTrue(code.contains("model.reason"), "the reason label shows model.reason")
+        XCTAssertTrue(code.contains("model.requestedBy"), "the requester label shows model.requestedBy")
+        XCTAssertFalse(code.contains("requesterLine"), "requesterLine is gone")
+    }
+
+    func testConnectIsDisabledWhenTheModelBlocksIt() throws {
+        let lines = try confirmSheetCode().components(separatedBy: "\n")
+        let mentions = lines.indices.filter { lines[$0].contains("connectBlockedReason") }
+        XCTAssertFalse(mentions.isEmpty, "the sheet must read model.connectBlockedReason")
+        let drivesEnabled = mentions.contains { i in
+            lines[max(0, i - 3)...min(lines.count - 1, i + 3)].contains { $0.contains("connectButton.isEnabled") }
+        }
+        XCTAssertTrue(drivesEnabled, "connectBlockedReason must drive connectButton.isEnabled")
+        let code = lines.joined(separator: "\n")
+        let blocked = try XCTUnwrap(variable(withId: "remote-shell-blocked", in: code),
+                                    "the reason Connect is off is shown in a label with id remote-shell-blocked")
+        XCTAssertFalse(blocked.isEmpty)
+    }
+
+    func testConnectTappedRefusesWhenBlockedBeforeItCanSendConnect() throws {
+        let url = Repo.app.appendingPathComponent("UI/Terminal/RemoteShellConfirmSheet.swift")
+        let lines = Repo.codeLines(try Repo.read(url))
+        let found = declarations(in: url.lastPathComponent, lines: lines) { lines[$0].contains("func connectTapped(") }
+        let decl = try XCTUnwrap(found.first, "connectTapped not found")
+        XCTAssertNotNil(Repo.firstMatch(#"(?s)connectBlockedReason.*?\breturn\b.*?decision:\s*\.connect"#, in: decl.body),
+                        "connectTapped must check connectBlockedReason and return before it can answer .connect:\n\(decl.body)")
+    }
+
+    // MARK: Connecting overlay takes the keyboard away from the terminal
+
+    private func paneHostDeclarations(_ name: String) throws -> Declaration {
+        let host = try XCTUnwrap(try terminalViewSources().first { $0.name == "TerminalPaneHostView.swift" })
+        let found = declarations(in: host.name, lines: host.lines) { host.lines[$0].contains("func \(name)(") }
+        return try XCTUnwrap(found.first, "TerminalPaneHostView.\(name) not found")
+    }
+
+    func testShowingTheConnectingOverlayResignsTheTerminalsKeyboardFocus() throws {
+        let decl = try paneHostDeclarations("renderConnecting")
+        XCTAssertTrue(decl.body.contains("makeFirstResponder(nil)"), "connecting must give up first responder:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("firstResponder") && decl.body.contains("terminalView"),
+                      "only when the terminal view is the first responder:\n\(decl.body)")
+    }
+
+    func testFocusTerminalDoesNotHandTheKeyboardToAConnectingTerminal() throws {
+        let decl = try paneHostDeclarations("focusTerminal")
+        let status = try XCTUnwrap(decl.body.range(of: ".connecting"), "focusTerminal must check for .connecting:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("info?.status") || decl.body.contains("info.status"), decl.body)
+        let focus = try XCTUnwrap(decl.body.range(of: "makeFirstResponder(terminalView)"))
+        XCTAssertLessThan(status.lowerBound, focus.lowerBound, "the connecting check comes before taking the keyboard")
+    }
+
+    func testTheRemoteShellSheetFilesExist() {
+        for name in ["RemoteShellPresenter.swift", "NewRemoteShellSheet.swift", "RemoteShellFailureSheet.swift"] {
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: Repo.app.appendingPathComponent("UI/Terminal/\(name)").path), "\(name) is missing")
+        }
+    }
+
+    func testTheTerminalMenuHasNewRemoteShellOnShiftCommandT() throws {
+        _ = NSApplication.shared
+        let main = MainMenu.make(target: nil)
+        let terminal = try XCTUnwrap(topLevelMenu("Terminal", in: main), "no top-level Terminal menu").menu
+        let entry = try XCTUnwrap(item("New Remote Shell\u{2026}", in: terminal))
+        XCTAssertEqual(entry.keyEquivalent.lowercased(), "t")
+        XCTAssertEqual(entry.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask), [.command, .shift])
+        XCTAssertEqual(entry.action, #selector(MainMenuActions.newRemoteShell(_:)))
+    }
+
+    func testShiftCommandTIsClaimedByExactlyOneMenuItem() throws {
+        _ = NSApplication.shared
+        let main = MainMenu.make(target: nil)
+        var owners: [String] = []
+        for top in main.items {
+            for entry in top.submenu?.items ?? [] where entry.keyEquivalent.lowercased() == "t" {
+                let mask = entry.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask)
+                if mask == [.command, .shift] { owners.append(entry.title) }
+            }
+        }
+        XCTAssertEqual(owners, ["New Remote Shell\u{2026}"], "claimed by \(owners)")
     }
 }

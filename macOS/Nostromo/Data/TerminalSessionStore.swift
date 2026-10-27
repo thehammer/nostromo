@@ -43,6 +43,14 @@ enum TerminalChange: Equatable {
     case availability(daemonReachable: Bool)
 }
 
+/// A toast about a terminal, for the window(s) showing the focus `tag`.
+struct TerminalToast {
+    let tag: String
+    let message: String
+    let severity: ToastSeverity
+    let action: ToastAction?
+}
+
 /// Every terminal the daemon told this app about, and the views showing them.
 ///
 /// - One `TerminalInfo` per `terminal_id` (the latest), and a `TerminalByteSink` registry per pane.
@@ -77,6 +85,10 @@ final class TerminalSessionStore {
 
     /// Announces every `terminal_state`, `terminal_closed` and `terminal_refused`.
     let changes = PassthroughSubject<TerminalChange, Never>()
+
+    /// Toasts about terminals (a remote shell closed, a request timed out). Every window's
+    /// `MainLayout` subscribes and shows the ones for the focus it displays.
+    let toasts = PassthroughSubject<TerminalToast, Never>()
 
     /// Sends one frame to the daemon (`AppStore` points it at the client; dropped when not connected).
     var transport: (TerminalClientMessage) -> Void
@@ -122,14 +134,19 @@ final class TerminalSessionStore {
     private var focusClaims: [String: (windowId: String, at: Date)] = [:]
     private var lastRefusalReport: [String: Date] = [:]
 
+    /// Where Reconnect on a closed remote shell sends its request.
+    private let remoteShells: RemoteShellStore
+
     init(now: @escaping () -> Date = Date.init,
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          },
-         transport: @escaping (TerminalClientMessage) -> Void = { _ in }) {
+         transport: @escaping (TerminalClientMessage) -> Void = { _ in },
+         remoteShells: RemoteShellStore = .shared) {
         self.now = now
         self.schedule = schedule
         self.transport = transport
+        self.remoteShells = remoteShells
     }
 
     // MARK: - Queries
@@ -371,8 +388,12 @@ final class TerminalSessionStore {
     }
 
     private func apply(closed: TerminalClosedInfo) {
+        // A shell that never got past `connecting` was a failed connection, which the failure sheet
+        // reports (the daemon closes its pane with the failure's code as the reason).
+        let neverConnected = terminals[closed.terminalId]?.status == .connecting
         forget(closed.terminalId)
         changes.send(.closed(closed))
+        if !neverConnected { announceClosedRemoteShell(closed) }
     }
 
     private func apply(replay frame: TerminalReplayFrame) {
@@ -395,6 +416,17 @@ final class TerminalSessionStore {
         for binding in liveBindings(for: id) {
             binding.sink?.feed(frame.bytes)
         }
+    }
+
+    /// A remote shell closed: say so in the window(s) showing its focus, with Reconnect. Reconnect is a
+    /// new request, so the confirm sheet appears again; nothing reconnects by itself.
+    private func announceClosedRemoteShell(_ closed: TerminalClosedInfo) {
+        guard let message = RemoteShellStore.closedToastMessage(for: closed), let target = closed.target else { return }
+        let tag = closed.tag
+        let reconnect = ToastAction(title: "Reconnect") { [remoteShells] in
+            remoteShells.open(tag: tag, target: target)
+        }
+        toasts.send(TerminalToast(tag: tag, message: message, severity: .warning, action: reconnect))
     }
 
     /// Start showing `info` in `binding`'s view.

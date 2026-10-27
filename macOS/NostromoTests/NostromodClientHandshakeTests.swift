@@ -794,7 +794,7 @@ final class NostromodClientHandshakeTests: XCTestCase {
 
         let later = subs[1]
         XCTAssertTrue(later.topics.contains("terminal"), "topics: \(later.topics)")
-        XCTAssertEqual(later.json["capabilities"] as? [String], ["terminal_ui"], "\(later.json)")
+        XCTAssertEqual(later.json["capabilities"] as? [String], ["terminal_ui", "remote_shell_confirm"], "\(later.json)")
         XCTAssertEqual(later.json["operator_nonce"] as? String, "nonce-term-1", "\(later.json)")
         XCTAssertEqual(subs.count, 2, "exactly one follow-up subscribe")
     }

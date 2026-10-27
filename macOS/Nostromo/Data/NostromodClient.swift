@@ -308,6 +308,15 @@ enum ServerMsg {
     /// A terminal request was refused or failed; nothing changed.
     case terminalRefused(TerminalRefusedFrame)
 
+    // ── remote shells (2c) ────────────────────────────────────────────────────
+    /// What the picker offers: projects, environments, services, shell types.
+    case remoteShellTargets(RemoteShellTargets)
+    /// Show the "Connect to PRODUCTION" sheet. Sent only to a verified app that declared
+    /// `remote_shell_confirm`.
+    case remoteShellConfirmRequest(RemoteShellConfirmRequest)
+    /// How a confirm request ended: the sheet closes, and a failed connection says why.
+    case remoteShellResolved(RemoteShellResolved)
+
     case unknown
 }
 
@@ -925,7 +934,7 @@ class NostromodClient {
         guard !extra.isEmpty || approvals || terminals else { return }
         send(ClientSubscribe(topics: NostromodClient.baseTopics + extra + (terminals ? [NostromodClient.terminalTopic] : []),
                              rendersApprovals: approvals,
-                             capabilities: terminals ? [NostromodClient.terminalUICapability] : [],
+                             capabilities: terminals ? NostromodClient.operatorCapabilities : [],
                              operatorNonce: nonce),
              type: "subscribe")
     }
@@ -934,6 +943,12 @@ class NostromodClient {
     static let terminalTopic = "terminal"
     /// The client capability that says this app draws terminal panes.
     static let terminalUICapability = "terminal_ui"
+    /// The client capability that says this app shows the remote-shell confirm sheet. The daemon sends
+    /// a confirm request only to a verified app that declared it, and answers an agent's request with
+    /// `no_operator` when none has.
+    static let remoteShellConfirmCapability = "remote_shell_confirm"
+    /// What a connection the daemon verified as the operator app declares.
+    static let operatorCapabilities = [terminalUICapability, remoteShellConfirmCapability]
 
     /// Clean, unambiguous round-trip probe: no side effects, no fan-out
     /// ambiguity (unlike `session_send`, which is answered by a broadcast
@@ -1182,6 +1197,18 @@ class NostromodClient {
     private var terminalWritesPending = 0
 
     private func writeTerminal(_ msg: TerminalClientMessage) {
+        guard let body = msg.encoded() else { return }
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { return }
+        writeFrameLocked(body, to: curFd, type: msg.wireType, tag: nil)
+    }
+
+    // MARK: - Remote shells (2c)
+
+    /// Send one remote-shell frame (the vocabulary request, a New Remote Shell request, or the answer
+    /// to a confirm sheet). Dropped when not connected.
+    func sendRemoteShell(_ msg: RemoteShellClientMessage) {
         guard let body = msg.encoded() else { return }
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
@@ -1788,6 +1815,27 @@ class NostromodClient {
                 return .terminalRefused(m)
             } else {
                 log.error("failed to decode terminal_refused")
+            }
+
+        case "remote_shell_targets":
+            if let m = try? decoder.decode(RemoteShellTargets.self, from: raw) {
+                return .remoteShellTargets(m)
+            } else {
+                log.error("failed to decode remote_shell_targets")
+            }
+
+        case "remote_shell_confirm_request":
+            if let m = try? decoder.decode(RemoteShellConfirmRequest.self, from: raw) {
+                return .remoteShellConfirmRequest(m)
+            } else {
+                log.error("failed to decode remote_shell_confirm_request")
+            }
+
+        case "remote_shell_resolved":
+            if let m = try? decoder.decode(RemoteShellResolved.self, from: raw) {
+                return .remoteShellResolved(m)
+            } else {
+                log.error("failed to decode remote_shell_resolved")
             }
 
         default:

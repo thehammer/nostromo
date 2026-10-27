@@ -179,6 +179,11 @@ class AppStore: ObservableObject {
     // session, or a second connected client).
     let decisionRequests = PassthroughSubject<PendingDecision, Never>()
     let decisionResolutions = PassthroughSubject<ResolvedDecision, Never>()
+    /// Remote-shell confirm requests (2c): one event per `remote_shell_confirm_request` and per
+    /// `remote_shell_resolved`. `RemoteShellPresenter` is the only subscriber; the state lives in
+    /// `RemoteShellStore`.
+    let remoteShellRequests = PassthroughSubject<RemoteShellConfirmRequest, Never>()
+    let remoteShellResolutions = PassthroughSubject<RemoteShellResolved, Never>()
     /// Permission requests (AP2a): one event per `approval_request`, `approvals_snapshot`,
     /// `approval_resolved` and `approval_answer_refused` frame. Deliberately not `@Published`,
     /// like decisions: a request is an event, and `ApprovalStore` owns what it means.
@@ -582,6 +587,7 @@ class AppStore: ObservableObject {
 
         // Terminal frames go out through this app's one daemon connection.
         TerminalSessionStore.shared.transport = { [client] in client.sendTerminal($0) }
+        RemoteShellStore.shared.transport = { [client] in client.sendRemoteShell($0) }
 
         // The work store holds what one connection pushed. When it drops, requests
         // still waiting for an answer can never get one; when a connection comes
@@ -600,6 +606,8 @@ class AppStore: ObservableObject {
                 // Terminal views attach again after a reconnect, and are told when the daemon is gone.
                 TerminalSessionStore.shared.connectionChanged(connected)
                 if connected {
+                    // What the New Remote Shell picker offers (read from the user's ECS data per request).
+                    RemoteShellStore.shared.requestTargets()
                     WorkStore.shared.reset()
                 } else {
                     WorkStore.shared.failPendingRequests(reason: "The daemon connection was lost")
@@ -1685,6 +1693,14 @@ class AppStore: ObservableObject {
         // Terminal panes (1d): `TerminalSessionStore` keeps them, every window's pane view shows them.
         case .terminalList, .terminalState, .terminalClosed, .terminalReplay, .terminalOutput, .terminalRefused:
             TerminalSessionStore.shared.ingest(msg)
+
+        // Remote shells (2c): the store keeps the vocabulary; `RemoteShellPresenter` shows the sheets.
+        case .remoteShellTargets(let targets):
+            RemoteShellStore.shared.setTargets(targets)
+        case .remoteShellConfirmRequest(let request):
+            remoteShellRequests.send(request)
+        case .remoteShellResolved(let resolved):
+            remoteShellResolutions.send(resolved)
 
         case .pong, .unknown:
             break
