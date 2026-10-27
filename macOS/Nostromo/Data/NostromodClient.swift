@@ -284,6 +284,10 @@ enum ServerMsg {
     /// The answer to a `session_task_output` of this connection. Local only.
     case sessionTaskOutputResult(SessionTaskOutputResultWire)
 
+    // ── document panes ────────────────────────────────────────────────────────
+    /// The answer to a `pane_action` of this connection. Local only.
+    case paneActionResult(PaneActionResultWire)
+
     // ── agent tracker ─────────────────────────────────────────────────────────
     /// The whole board of one focus (full snapshot). Local clients only.
     case trackerBoard(TrackerBoardFrameWire)
@@ -658,6 +662,62 @@ private struct DecisionAnswerMsg: Encodable {
         try c.encode(requestId, forKey: .requestId)
         try c.encode(choiceId, forKey: .choiceId)
         try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
+    }
+}
+
+/// `pane_action`: the reader pressed a button, or followed a `nostromo-action:` link, in a document
+/// pane. The daemon applies it only from the verified app, echoing the connection's operator nonce.
+private struct ClientPaneAction: Encodable {
+    let type_ = "pane_action"
+    let tag: String
+    let paneId: String
+    let actionId: String
+    /// Omitted when nil.
+    let operatorNonce: String?
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", tag, paneId = "pane_id", actionId = "action_id", operatorNonce = "operator_nonce"
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encode(tag, forKey: .tag)
+        try c.encode(paneId, forKey: .paneId)
+        try c.encode(actionId, forKey: .actionId)
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
+    }
+}
+
+/// `pane_action_result`: what came of a `pane_action`. `message` is plain English for the reader;
+/// `open_url` is for the Mac to open, and only if `DocumentLinkPolicy` allows it.
+struct PaneActionResultWire: Decodable, Equatable {
+    let tag: String
+    let paneId: String
+    let actionId: String
+    let ok: Bool
+    let message: String?
+    let openURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case tag, paneId = "pane_id", actionId = "action_id", ok, message, openURL = "open_url"
+    }
+
+    init(tag: String, paneId: String, actionId: String, ok: Bool, message: String? = nil, openURL: String? = nil) {
+        self.tag = tag
+        self.paneId = paneId
+        self.actionId = actionId
+        self.ok = ok
+        self.message = message
+        self.openURL = openURL
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tag = try c.decode(String.self, forKey: .tag)
+        paneId = try c.decode(String.self, forKey: .paneId)
+        actionId = try c.decode(String.self, forKey: .actionId)
+        ok = (try? c.decode(Bool.self, forKey: .ok)) ?? false
+        message = (try? c.decodeIfPresent(String.self, forKey: .message)) ?? nil
+        openURL = (try? c.decodeIfPresent(String.self, forKey: .openURL)) ?? nil
     }
 }
 
@@ -1051,6 +1111,22 @@ class NostromodClient {
                                                                      operatorNonce: nonce))
         else { return }
         writeFrameLocked(body, to: curFd, type: "claude_login_action", tag: tag)
+    }
+
+    /// Send a document pane's action (a button, or a `nostromo-action:` link) to the daemon. Carries
+    /// the connection's operator nonce, like `sendClaudeLoginAction`; the answer arrives as
+    /// `ServerMsg.paneActionResult`. Returns whether the frame was written.
+    @discardableResult
+    func sendPaneAction(tag: String, paneId: String, actionId: String) -> Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("pane_action dropped — not connected"); return false }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(ClientPaneAction(tag: tag, paneId: paneId, actionId: actionId,
+                                                              operatorNonce: nonce))
+        else { return false }
+        writeFrameLocked(body, to: curFd, type: "pane_action", tag: tag)
+        return true
     }
 
     /// Tell the daemon an input that was not a person's was refused at an approval control.
@@ -1612,6 +1688,13 @@ class NostromodClient {
                 return .claudeLoginState(m)
             } else {
                 log.error("failed to decode claude_login_state")
+            }
+
+        case "pane_action_result":
+            if let m = try? decoder.decode(PaneActionResultWire.self, from: raw) {
+                return .paneActionResult(m)
+            } else {
+                log.error("failed to decode pane_action_result")
             }
 
         case "session_tasks":

@@ -4,7 +4,7 @@ import Foundation
 /// Stored as the *disabled* switchable agents so anything unknown --
 /// mother, dynamic agents, a future built-in -- is enabled.
 public struct EnabledAgents: Equatable, Hashable, Sendable {
-    public static let switchable: Set<String> = ["fred", "perri", "teri"]
+    public static let switchable: Set<String> = ["fred", "perri", "teri", "huey"]
 
     public let disabled: Set<String>
 

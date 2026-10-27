@@ -1689,4 +1689,76 @@ final class PaneContentWireTests: XCTestCase {
         """)
         XCTAssertNotEqual(terminal, unknown)
     }
+
+    // MARK: - document (Huey)
+
+    func testDocumentWithOnlyTitleAndBlocksDecodesWithNoBannerAndNoActions() throws {
+        let wire = try decode("""
+        {"kind": "document", "title": "Report for 2026-10-26",
+         "blocks": [{"kind": "paragraph", "spans": [{"kind": "text", "text": "Nothing to flag."}]}]}
+        """)
+        guard case .document(let d) = wire else {
+            XCTFail("Expected .document, got \(wire)")
+            return
+        }
+        XCTAssertEqual(d.title, "Report for 2026-10-26")
+        XCTAssertNil(d.banner)
+        XCTAssertEqual(d.blocks, [.paragraph([.text("Nothing to flag.")])])
+        XCTAssertTrue(d.actions.isEmpty)
+    }
+
+    func testDocumentWithBannerAndActionsDecodesEveryField() throws {
+        let wire = try decode("""
+        {"kind": "document", "title": "Setup",
+         "banner": {"level": "warning", "text": "Today's report is missing."},
+         "blocks": [{"kind": "rule"}],
+         "actions": [{"id": "report.regenerate", "label": "Regenerate", "primary": true},
+                     {"id": "report.prev", "label": "Previous"}]}
+        """)
+        guard case .document(let d) = wire else {
+            XCTFail("Expected .document, got \(wire)")
+            return
+        }
+        XCTAssertEqual(d.banner, DocBanner(level: .warning, text: "Today's report is missing."))
+        XCTAssertEqual(d.blocks, [.rule])
+        XCTAssertEqual(d.actions, [
+            DocAction(id: "report.regenerate", label: "Regenerate", primary: true),
+            DocAction(id: "report.prev", label: "Previous", primary: false),
+        ])
+    }
+
+    func testDocumentBannerWithAnUnknownLevelDecodesAsInfo() throws {
+        let wire = try decode("""
+        {"kind": "document", "title": "T", "banner": {"level": "catastrophic", "text": "hm"}, "blocks": []}
+        """)
+        guard case .document(let d) = wire else {
+            XCTFail("Expected .document, got \(wire)")
+            return
+        }
+        XCTAssertEqual(d.banner?.level, .info)
+        XCTAssertEqual(d.banner?.text, "hm")
+    }
+
+    func testDocumentCasesEqualityFollowsEveryField() {
+        func doc(title: String = "T", banner: DocBanner? = nil, actions: [DocAction] = []) -> PaneContentWire {
+            .document(DocumentPayload(title: title, banner: banner,
+                                      blocks: [.paragraph([.text("body")])], actions: actions))
+        }
+        let a = doc(banner: DocBanner(level: .info, text: "b"), actions: [DocAction(id: "x", label: "X")])
+        let b = doc(banner: DocBanner(level: .info, text: "b"), actions: [DocAction(id: "x", label: "X")])
+        XCTAssertEqual(a, b)
+        XCTAssertNotEqual(a, doc(title: "Other", banner: DocBanner(level: .info, text: "b"), actions: [DocAction(id: "x", label: "X")]))
+        XCTAssertNotEqual(a, doc(banner: DocBanner(level: .warning, text: "b"), actions: [DocAction(id: "x", label: "X")]))
+        XCTAssertNotEqual(a, doc(banner: nil, actions: [DocAction(id: "x", label: "X")]))
+        XCTAssertNotEqual(a, doc(banner: DocBanner(level: .info, text: "b"), actions: [DocAction(id: "y", label: "X")]))
+        XCTAssertNotEqual(a, doc(banner: DocBanner(level: .info, text: "b"), actions: []))
+    }
+
+    func testDocumentCaseNeverEqualsUnknown() throws {
+        let document = PaneContentWire.document(DocumentPayload(title: "T"))
+        let unknown = try decode("""
+        {"kind": "future_kind", "title": "T"}
+        """)
+        XCTAssertNotEqual(document, unknown)
+    }
 }
