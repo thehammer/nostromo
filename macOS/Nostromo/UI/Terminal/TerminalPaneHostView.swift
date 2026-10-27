@@ -45,9 +45,9 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     /// Holds the terminal view and clips it: a mirror can be larger than the pane.
     private let terminalContainer = ClickableClipView()
     private let mirrorHint = NSTextField(labelWithString: "")
-    /// Shown instead of the terminal while a remote shell connects.
     /// Someone asked for the keyboard (or had it) while the pane was still connecting.
     private var focusWhenConnected = false
+    /// Shown instead of the terminal while a remote shell connects.
     private let connectingView = NSView()
     private let connectingLabel = NSTextField(labelWithString: "")
     private let connectingSpinner = NSProgressIndicator()

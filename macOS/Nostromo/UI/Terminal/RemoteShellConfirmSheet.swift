@@ -42,7 +42,9 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
 
     private static let contentWidth: CGFloat = 480
     /// The most height the Command / Profile / Cluster block takes; a longer command scrolls inside it.
-    private static let maxDetailsHeight: CGFloat = 180
+    /// Tall enough for the longest command the daemon accepts (256 characters, about four wrapped
+    /// lines) plus the Profile and Cluster rows, so the last row is never cut off.
+    private static let maxDetailsHeight: CGFloat = 260
 
     let requestId: String
     private let store: RemoteShellStore
@@ -258,7 +260,8 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
         scroll.documentView = textView
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
+        // Always visible: if the block ever does scroll, the user can see there is more below.
+        scroll.autohidesScrollers = false
         scroll.borderType = .lineBorder
         scroll.drawsBackground = true
         scroll.backgroundColor = textView.backgroundColor
