@@ -384,26 +384,32 @@ final class TerminalDeliveryScrollSafetyTests: XCTestCase {
         XCTAssertNotNil(block?.expandedText)
     }
 
-    func testExpandingADeliveryAboveTheViewDoesNotMoveTheRowsBelowIt() {
+    /// The operator can only click a block that is on screen, so the case is a delivery in the
+    /// middle of the view with the end of the previous turn above it: expanding it moves nothing
+    /// above it.
+    func testExpandingADeliveryInTheMiddleOfTheViewDoesNotMoveTheRowsAboveIt() {
         let (rig, delivery) = rigWithDeliveryAtIndex3()
-        rig.userScroll(to: rig.virtualizer.offset(of: 4) + 40)
+        rig.userScroll(to: rig.virtualizer.offset(of: 3) - 60)
         rig.followTail.setPinned(false, cause: .harness)
         rig.settle()
 
-        rig.assertNoMove("expand delivery above the view", following: false) {
-            self.toggleDelivery(rig, turn: delivery)
+        var block: TerminalDeliveryBlockView?
+        rig.assertNoMove("expand delivery below the first visible row", following: false) {
+            block = self.toggleDelivery(rig, turn: delivery)
         }
+
+        XCTAssertEqual(block?.isExpanded, true)
     }
 
-    func testCollapsingAnExpandedDeliveryAboveTheViewDoesNotMoveTheRowsBelowIt() {
+    func testCollapsingAnExpandedDeliveryInTheMiddleOfTheViewDoesNotMoveTheRowsAboveIt() {
         let (rig, delivery) = rigWithDeliveryAtIndex3()
-        rig.userScroll(to: rig.virtualizer.offset(of: 4) + 40)
+        rig.userScroll(to: rig.virtualizer.offset(of: 3) - 60)
         rig.followTail.setPinned(false, cause: .harness)
         rig.settle()
         toggleDelivery(rig, turn: delivery)
         rig.settle()
 
-        rig.assertNoMove("collapse delivery above the view", following: false) {
+        rig.assertNoMove("collapse delivery below the first visible row", following: false) {
             self.toggleDelivery(rig, turn: delivery)
         }
     }
