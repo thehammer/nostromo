@@ -36,10 +36,13 @@ public enum TerminalDeliveryText {
         case "resumed":
             return "Following resumed: \(item.pane)"
         case "stopped":
-            let why = item.reason.flatMap(stopReason).map { " (\($0))" } ?? ""
+            let why = item.reason.flatMap { stopReason($0) }.map { " (\($0))" } ?? ""
             return "Following stopped: \(item.pane)\(why)"
         case "paused":
-            return "Following paused: \(item.reason.flatMap(pauseReason) ?? item.pane)"
+            // The pane is shown too: a genuine notice is only treated as one when every field it
+            // carries is displayed (or is a bounded, meaningless value such as a UUID).
+            let why = item.reason.flatMap(pauseReason).map { " (\($0))" } ?? ""
+            return "Following paused: \(item.pane)\(why)"
         default:
             return "Following \(item.event ?? "changed"): \(item.pane)"
         }
@@ -67,7 +70,9 @@ public enum TerminalDeliveryText {
         case "app_closed":         return "app closed"
         default:
             // `moved_to <tag>`: another agent was invited to follow it instead.
-            return code.hasPrefix("moved_to") ? "another agent follows it now" : nil
+            // The tag is shown: it is a field of the notice the bubble would otherwise swallow.
+            guard code.hasPrefix("moved_to ") else { return nil }
+            return "another agent (\(code.dropFirst("moved_to ".count))) follows it now"
         }
     }
 
@@ -185,9 +190,9 @@ public enum TerminalDeliveryText {
     /// so cannot vouch for a value that is itself the payload.
     private static func isGenuine(_ element: String, for item: TerminalOriginItem) -> Bool {
         guard let event = item.event, ["started", "resumed", "paused", "stopped"].contains(event),
-              item.terminalId.utf8.count <= 64,
-              item.terminalId.utf8.allSatisfy({ isIdByte($0) }),
+              isUUIDShape(item.terminalId),
               item.pane.utf8.count <= maxPaneBytes,
+              !item.pane.utf8.contains(where: { isControl($0) }),
               isDaemonReason(item.reason, event: event) else { return false }
         let reasonAttr = item.reason.map { " reason=\"\(escapeAttribute($0))\"" } ?? ""
         let canonical = "<nostromo-terminal-follow event=\"\(event)\" terminal_id=\"\(escapeAttribute(item.terminalId))\""
@@ -219,6 +224,25 @@ public enum TerminalDeliveryText {
             return false
         }
     }
+
+    /// A terminal id is shown nowhere in the transcript, so a genuine notice may carry only the
+    /// shape the daemon writes (`Uuid::new_v4().to_string()`): 8-4-4-4-12 hex. Any other value
+    /// could be text meant for the agent, so the element is shown instead.
+    private static func isUUIDShape(_ id: String) -> Bool {
+        let bytes = Array(id.utf8)
+        guard bytes.count == 36 else { return false }
+        for (i, b) in bytes.enumerated() {
+            if [8, 13, 18, 23].contains(i) {
+                if b != UInt8(ascii: "-") { return false }
+            } else if !((0x30 ... 0x39).contains(b) || (0x41 ... 0x46).contains(b) || (0x61 ... 0x66).contains(b)) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Line breaks and other control characters: a one-line notice would show only the first line.
+    private static func isControl(_ b: UInt8) -> Bool { b < 0x20 || b == 0x7F }
 
     private static func isIdByte(_ b: UInt8) -> Bool {
         (0x30 ... 0x39).contains(b) || (0x41 ... 0x5A).contains(b) || (0x61 ... 0x7A).contains(b)
