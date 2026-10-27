@@ -1126,7 +1126,7 @@ final class TrackerPaneViewTests: XCTestCase {
     private static let pinnedKeyEquivalents: Set<String> = [
         "⌘q", "⌘x", "⌘c", "⌘v", "⌘a", "⌘z", "⌘Z",
         "⇧⌘d", "⇧⌘i", "⇧⌘k", "⇧⌘p", "⌥⇧⌘b", "⇧⌘m", "⇧⌘b", "⌥⌘a",
-        "⌘t", "⇧⌘w", "⌘f", "⌘g", "⌃⌥⌘n",
+        "⌘t", "⇧⌘t", "⇧⌘w", "⌘f", "⌘g", "⌃⌥⌘n",
     ]
 
     private func groups(_ pattern: String, in text: String, options: NSRegularExpression.Options = []) throws -> [[String]] {
