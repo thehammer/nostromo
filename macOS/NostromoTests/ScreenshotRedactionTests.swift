@@ -27,9 +27,8 @@ import AppKit
 // The server writes only the Data `pngData` returns, and only after it returns (see the source-policy
 // test), so "the unredacted image is never written" reduces to `pngData` creating no file itself.
 //
-// Assumptions beyond the API note, called out in the hand-off: the label colour inside the block is low
-// saturation; stand-ins never override `terminalPixelArea` with anything other than a view inside the
-// pane unless a test is about refusal.
+// Assumption: the label drawn inside the block is low saturation (grey / white), so the "loud" canary
+// detector never mistakes it for terminal pixels.
 
 // MARK: - Palette
 

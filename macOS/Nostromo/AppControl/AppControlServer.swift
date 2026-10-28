@@ -748,8 +748,12 @@ final class AppControlServer {
     private func screenshot(_ req: AppControlRequest) throws -> Any {
         let w = try window(req)
         guard let cv = w.contentView else { throw AppControlError.failed("no content view") }
+        // The terminal areas are read from the view tree, the picture from the window server: commit
+        // layout and drawing first so both describe the same frame (a pane resized a moment ago must not
+        // sit at its old place in the picture while its block is painted at the new one).
         cv.layoutSubtreeIfNeeded()
         w.displayIfNeeded()
+        CATransaction.flush()
         let path = req.string("path") ?? NSTemporaryDirectory() + "nostromo-window-\(req.int("window") ?? 0).png"
 
         typealias CreateImage = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?

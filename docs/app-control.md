@@ -187,6 +187,11 @@ accessibility value (read by `tree`, `find` and `ax`) is empty in the real app (
 The pane header's text (shell, directory, environment) and the ended/connecting messages are chrome, not
 screen content.
 
+The window-server picture is a snapshot of what the compositor drew last, the blocks come from the view
+tree as it is now: `screenshot` lays the window out, draws it and flushes Core Animation first so the two
+agree. A pane that is mid-resize in the same instant is the one case that can leave a sliver of its old
+position unpainted; take the screenshot once the layout has settled.
+
 The coordinate mapping: the capture covers the whole window frame (window-server path) or the content
 view (the `cacheDisplay` fallback, used when the window server returns a flat image); `ScreenshotRedaction` converts each terminal area to window
 coordinates and from there to pixels (scale from the image size, y flipped, rounded outward).
