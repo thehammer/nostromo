@@ -1131,3 +1131,5 @@ fn assignment_value_is_secret(value: &str) -> bool {
     // `xxxxxxxx`, `********`, `........`: redaction, not a value.
     !v.chars().all(|c| c == first)
 }
+
+// throwaway: rust-only path-gate proof
