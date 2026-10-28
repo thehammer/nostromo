@@ -36,6 +36,7 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -46,9 +47,11 @@ pub const QUEUE_MAX_FRAMES: usize = 256;
 pub const QUEUE_MAX_BYTES: usize = 1024 * 1024;
 
 /// JSON-RPC error code and text a client gets for a request the dropped
-/// connection could not answer.
+/// connection could not answer. The bridge cannot tell "never reached the
+/// daemon" from "ran, but the response was lost", so the text must not invite
+/// a blind retry.
 pub const LOST_CODE: i64 = -32000;
-pub const LOST_MESSAGE: &str = "nostromo daemon connection lost; retry";
+pub const LOST_MESSAGE: &str = "nostromo daemon connection lost; the outcome of this call is unknown; check state before retrying";
 
 const DEFAULT_BACKOFF_MIN: Duration = Duration::from_millis(100);
 const DEFAULT_BACKOFF_MAX: Duration = Duration::from_secs(5);
@@ -62,15 +65,40 @@ const STABLE_AFTER: Duration = Duration::from_secs(1);
 
 // ── configuration ─────────────────────────────────────────────────────────────
 
+/// A source of jitter values in `[0, 1)`.
+pub type JitterSource = Arc<dyn Fn() -> f64 + Send + Sync>;
+/// Told `(attempt, delay)` each time a reconnect is scheduled.
+pub type ScheduleObserver = Arc<dyn Fn(u32, Duration) + Send + Sync>;
+
 pub struct BridgeConfig {
     pub socket_path: PathBuf,
     pub pty_id: String,
     pub backoff: Backoff,
     /// Where to write `mcp-bridge-<pid>.log`; `None` disables logging.
     pub log_dir: Option<PathBuf>,
+    /// Jitter for the backoff schedule (production: random).
+    pub jitter: JitterSource,
+    /// Observes every scheduled reconnect delay (production: none).
+    pub on_schedule: Option<ScheduleObserver>,
 }
 
 impl BridgeConfig {
+    pub fn new(
+        socket_path: PathBuf,
+        pty_id: String,
+        backoff: Backoff,
+        log_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            socket_path,
+            pty_id,
+            backoff,
+            log_dir,
+            jitter: Arc::new(backoff::random_unit),
+            on_schedule: None,
+        }
+    }
+
     /// `NOSTROMO_MCP_SOCKET`, `NOSTROMO_PTY_ID`, and the test hooks
     /// `NOSTROMO_MCP_BRIDGE_BACKOFF_MIN_MS` / `..._MAX_MS`.
     pub fn from_env() -> Self {
@@ -89,15 +117,15 @@ impl BridgeConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map_or(default, Duration::from_millis)
         };
-        Self {
+        Self::new(
             socket_path,
-            pty_id: std::env::var("NOSTROMO_PTY_ID").unwrap_or_default(),
-            backoff: Backoff::new(
+            std::env::var("NOSTROMO_PTY_ID").unwrap_or_default(),
+            Backoff::new(
                 millis("NOSTROMO_MCP_BRIDGE_BACKOFF_MIN_MS", DEFAULT_BACKOFF_MIN),
                 millis("NOSTROMO_MCP_BRIDGE_BACKOFF_MAX_MS", DEFAULT_BACKOFF_MAX),
             ),
-            log_dir: home.map(|h| h.join(".nostromo").join("logs")),
-        }
+            home.map(|h| h.join(".nostromo").join("logs")),
+        )
     }
 }
 
@@ -466,7 +494,10 @@ impl<W: Write> Proxy<W> {
         let delay = self
             .config
             .backoff
-            .jittered(attempt, backoff::random_unit());
+            .jittered(attempt, (self.config.jitter)());
+        if let Some(observe) = &self.config.on_schedule {
+            observe(attempt, delay);
+        }
         self.next_attempt = Instant::now() + delay;
     }
 
@@ -597,6 +628,13 @@ impl<W: Write> Proxy<W> {
             Kind::Notification { method } if method == "notifications/initialized" => {
                 self.initialized.delivered = true;
             }
+            Kind::Notification { method } if method == "notifications/cancelled" => {
+                // The daemon never answers a cancelled request: stop tracking
+                // it so a later drop does not send the client a stray error.
+                if let Some(id) = cancelled_request_id(&frame) {
+                    self.in_flight.remove(&id.to_string());
+                }
+            }
             _ => {}
         }
         if self.write_socket(&frame).is_err() {
@@ -631,6 +669,9 @@ impl<W: Write> Proxy<W> {
                 Err(_) => return self.connection_lost("replay_failed"),
                 Ok(value) => {
                     if value.get("id") == Some(&init_id) && value.get("method").is_none() {
+                        if value.get("error").is_some() {
+                            self.log("replay_init_error", None);
+                        }
                         return self.replay_acknowledged();
                     }
                 }
@@ -704,6 +745,16 @@ impl ClientFrame for Value {
     fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_default()
     }
+}
+
+/// `params.requestId` of a `notifications/cancelled` frame (string or number).
+fn cancelled_request_id(frame: &[u8]) -> Option<Value> {
+    let value: Value = serde_json::from_slice(frame).ok()?;
+    value
+        .get("params")?
+        .get("requestId")
+        .filter(|v| v.is_string() || v.is_number())
+        .cloned()
 }
 
 fn lost_error(id: &Value) -> Value {

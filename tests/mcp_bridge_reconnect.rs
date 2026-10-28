@@ -20,7 +20,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -30,7 +30,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use nostromo::mcp::bridge::{Backoff, BridgeLog, MAX_LOG_BYTES, MAX_LOG_FILES};
+use nostromo::mcp::bridge::{
+    run_with, Backoff, BridgeConfig, BridgeLog, MAX_LOG_BYTES, MAX_LOG_FILES,
+};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -42,12 +44,15 @@ const WAIT: Duration = Duration::from_secs(10);
 /// Window for "nothing more should arrive" checks.
 const QUIET: Duration = Duration::from_millis(300);
 
+/// Larger than any real pid_max, so `kill(pid, 0)` always says "no such process".
+const DEAD_PID_BASE: u64 = 2_000_000_000;
 const PTY: &str = "pty-bridge-test";
 const CANARY: &str = "CANARY-7f3a";
 
 const INIT_REQ: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
 const INITIALIZED: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
-const LOST: &str = "nostromo daemon connection lost; retry";
+const LOST: &str =
+    "nostromo daemon connection lost; the outcome of this call is unknown; check state before retrying";
 
 fn init_resp(marker: &str) -> String {
     format!(
@@ -1093,7 +1098,6 @@ fn non_utf8_and_non_json_lines_pass_through_unchanged_in_both_directions() {
 fn a_frame_split_across_several_stdin_writes_reaches_the_daemon_whole() {
     let s = established();
     s.bridge.send(br#"{"jsonrpc":"2.0","id":91,"#);
-    thread::sleep(Duration::from_millis(50)); // let the first chunk land on its own
     s.bridge.send(br#""method":"ping"}"#);
     s.bridge.send(b"\n");
     s.conn
@@ -1181,33 +1185,71 @@ fn log_records_connect_failed_with_the_pty_id_when_the_socket_does_not_exist() {
     assert!(bridge.log().contains("stdin_closed"));
 }
 
-// ── observed backoff ──────────────────────────────────────────────────────────
+// ── backoff schedule (deterministic) ─────────────────────────────────────────
 
-fn mean_ms(gaps: &[Duration]) -> f64 {
-    gaps.iter().map(|g| g.as_secs_f64() * 1000.0).sum::<f64>() / gaps.len() as f64
+/// A `Read` fed from a channel; EOF when the sender is dropped.
+struct ChannelReader(Receiver<Vec<u8>>, Vec<u8>);
+
+impl std::io::Read for ChannelReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.1.is_empty() {
+            match self.0.recv() {
+                Ok(bytes) => self.1 = bytes,
+                Err(_) => return Ok(0),
+            }
+        }
+        let n = self.1.len().min(buf.len());
+        buf[..n].copy_from_slice(&self.1[..n]);
+        self.1.drain(..n);
+        Ok(n)
+    }
 }
 
-/// Loose shape check for 7 gaps produced with min=50ms, max=400ms: nominal
-/// delays 50,100,200,400,400,400,400 jittered to 50-100%.
-fn assert_backoff_shape(gaps: &[Duration]) {
-    assert_eq!(gaps.len(), 7);
-    let early = mean_ms(&gaps[0..2]); // nominal 50, 100 -> 25..100 ms
-    let late = mean_ms(&gaps[4..7]); // nominal 400 -> 200..400 ms
-    assert!(
-        late >= early * 2.0,
-        "delays must grow: early mean {early:.0} ms, late mean {late:.0} ms, gaps {gaps:?}"
+/// Run the bridge in-process with jitter fixed at 0 (so each delay is exactly
+/// half its nominal) and collect the first `want` scheduled `(attempt, delay)`
+/// pairs from the production schedule. `feed` is written to stdin first.
+fn observed_schedule(
+    socket: &Path,
+    feed: &str,
+    want: usize,
+    on_ready: impl FnOnce(),
+) -> Vec<(u32, Duration)> {
+    let seen: Arc<Mutex<Vec<(u32, Duration)>>> = Arc::default();
+    let seen2 = seen.clone();
+    let mut config = BridgeConfig::new(
+        socket.to_path_buf(),
+        PTY.to_string(),
+        Backoff::new(Duration::from_millis(2), Duration::from_millis(16)),
+        None,
     );
-    for g in &gaps[4..7] {
-        assert!(
-            *g >= Duration::from_millis(150),
-            "a capped-out gap should be near the max, got {g:?} (gaps {gaps:?})"
-        );
+    config.jitter = Arc::new(|| 0.0);
+    config.on_schedule = Some(Arc::new(move |a, d| seen2.lock().unwrap().push((a, d))));
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    if !feed.is_empty() {
+        tx.send(feed.as_bytes().to_vec()).unwrap();
     }
-    for g in gaps {
-        assert!(
-            *g <= Duration::from_millis(400 + 600),
-            "gap {g:?} exceeds the cap by far too much (gaps {gaps:?})"
-        );
+    let handle =
+        thread::spawn(move || run_with(config, ChannelReader(rx, Vec::new()), std::io::sink()));
+    on_ready();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while seen.lock().unwrap().len() < want {
+        assert!(Instant::now() < deadline, "too few reconnect attempts");
+        thread::sleep(Duration::from_millis(1));
+    }
+    drop(tx);
+    assert_eq!(handle.join().unwrap(), 0);
+    let mut got = seen.lock().unwrap().clone();
+    got.truncate(want);
+    got
+}
+
+fn assert_schedule(got: &[(u32, Duration)]) {
+    // min 2 ms, max 16 ms, jitter 0 -> 50% of nominal 2,4,8,16,16,...
+    let want_ms = [1u64, 2, 4, 8, 8, 8, 8];
+    assert_eq!(got.len(), want_ms.len());
+    for (i, ((attempt, delay), ms)) in got.iter().zip(want_ms).enumerate() {
+        assert_eq!(*attempt as usize, i, "attempt numbers: {got:?}");
+        assert_eq!(*delay, Duration::from_millis(ms), "delays: {got:?}");
     }
 }
 
@@ -1215,24 +1257,8 @@ fn assert_backoff_shape(gaps: &[Duration]) {
 fn connect_failures_back_off_exponentially_up_to_the_configured_max() {
     let dir = short_tempdir();
     let sock = dir.path().join("never.sock");
-    let bridge = Bridge::spawn_with(&sock, PTY, 50, 400);
-
-    let mut stamps: Vec<Instant> = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while stamps.len() < 8 {
-        assert!(
-            Instant::now() < deadline,
-            "too few connect attempts; log:\n{}",
-            bridge.log()
-        );
-        let n = bridge.log_count("connect_failed");
-        while stamps.len() < n && stamps.len() < 8 {
-            stamps.push(Instant::now());
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-    let gaps: Vec<Duration> = stamps.windows(2).map(|w| w[1] - w[0]).collect();
-    assert_backoff_shape(&gaps);
+    let got = observed_schedule(&sock, "", 7, || {});
+    assert_schedule(&got);
 }
 
 #[test]
@@ -1240,28 +1266,24 @@ fn repeated_replay_failures_back_off_exponentially_up_to_the_configured_max() {
     let dir = short_tempdir();
     let sock = dir.path().join("d.sock");
     let daemon = FakeDaemon::start(&sock);
-    let bridge = Bridge::spawn_with(&sock, PTY, 50, 400);
-
-    let c1 = daemon.accept();
-    c1.expect_hello(PTY);
-    bridge.send_line(INIT_REQ);
-    c1.expect_exact(INIT_REQ);
-    c1.send_line(&init_resp("one"));
-    bridge.expect();
-    c1.close();
-
-    // From now on every replay attempt is cut short by the daemon. Attempts
-    // keep coming, each after a longer delay.
-    let mut stamps: Vec<Instant> = Vec::new();
-    for _ in 0..8 {
-        let c = daemon.accept();
-        stamps.push(Instant::now());
-        c.expect_hello(PTY);
-        c.expect_exact(INIT_REQ);
-        c.close();
-    }
-    let gaps: Vec<Duration> = stamps.windows(2).map(|w| w[1] - w[0]).collect();
-    assert_backoff_shape(&gaps);
+    // First connection: handshake succeeds, then the daemon drops it. Every
+    // replay attempt after that is cut short by the daemon.
+    let got = observed_schedule(&sock, &format!("{INIT_REQ}\n"), 8, || {
+        let c1 = daemon.accept();
+        c1.expect_hello(PTY);
+        c1.expect_exact(INIT_REQ);
+        c1.send_line(&init_resp("one"));
+        c1.close();
+        for _ in 0..8 {
+            let c = daemon.accept();
+            c.expect_hello(PTY);
+            c.expect_exact(INIT_REQ);
+            c.close();
+        }
+    });
+    // The healthy first connection's drop restarts the schedule at attempt 0;
+    // the failures after it climb to the cap.
+    assert_schedule(&got[1..]);
 }
 
 // ── Backoff (library API) ─────────────────────────────────────────────────────
@@ -1369,7 +1391,9 @@ fn opening_a_log_creates_the_directory_and_a_private_pid_named_file() {
 fn opening_a_log_keeps_only_the_twenty_newest_bridge_logs_including_its_own() {
     let dir = tempfile::tempdir().unwrap();
     for i in 0..25u64 {
-        let p = dir.path().join(format!("mcp-bridge-{}.log", 1000 + i));
+        let p = dir
+            .path()
+            .join(format!("mcp-bridge-{}.log", DEAD_PID_BASE + i));
         fs::write(&p, "old\n").unwrap();
         OpenOptions::new()
             .write(true)
@@ -1395,14 +1419,14 @@ fn opening_a_log_keeps_only_the_twenty_newest_bridge_logs_including_its_own() {
         bridge_logs.contains(&"mcp-bridge-99.log".to_string()),
         "own file must survive"
     );
-    // 26 files, keep 20 -> the 6 oldest (pids 1000..=1005) are gone.
-    for pid in 1000..=1005 {
+    // 26 files, keep 20 -> the 6 oldest (pids DEAD_PID_BASE..=DEAD_PID_BASE + 5) are gone.
+    for pid in DEAD_PID_BASE..=DEAD_PID_BASE + 5 {
         assert!(
             !bridge_logs.contains(&format!("mcp-bridge-{pid}.log")),
             "oldest log {pid} should have been pruned: {bridge_logs:?}"
         );
     }
-    for pid in 1006..=1024 {
+    for pid in DEAD_PID_BASE + 6..=DEAD_PID_BASE + 24 {
         assert!(
             bridge_logs.contains(&format!("mcp-bridge-{pid}.log")),
             "newer log {pid} must be kept: {bridge_logs:?}"
@@ -1449,4 +1473,191 @@ fn a_log_file_never_grows_beyond_the_cap_and_keeps_the_newest_whole_lines() {
             "torn line: {l:?}"
         );
     }
+}
+
+// ── cancelled requests leave in_flight ────────────────────────────────────────
+
+fn cancelled(request_id: Value) -> String {
+    json!({"jsonrpc":"2.0","method":"notifications/cancelled",
+           "params":{"requestId":request_id,"reason":"user"}})
+    .to_string()
+}
+
+fn tool_call(id: Value) -> String {
+    json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+           "params":{"name":"nostromo.get_self","arguments":{}}})
+    .to_string()
+}
+
+#[test]
+fn a_cancelled_request_is_not_errored_when_the_connection_later_drops() {
+    let s = established();
+    // One numeric id, one string id, one numeric-looking string id, and one
+    // request that stays outstanding.
+    for id in [json!(7), json!("abc"), json!("8"), json!(9)] {
+        let call = tool_call(id);
+        s.bridge.send_line(&call);
+        s.conn.expect_exact(&call);
+    }
+    for id in [json!(7), json!("abc"), json!("8")] {
+        let note = cancelled(id);
+        s.bridge.send_line(&note);
+        s.conn.expect_exact(&note); // still forwarded to the daemon
+    }
+    s.conn.close();
+
+    // Only the request nobody cancelled is errored.
+    assert_eq!(s.bridge.expect_json(), lost_error(json!(9)));
+
+    let c2 = s.daemon.accept();
+    c2.serve_replay(PTY, INIT_REQ, "z");
+    let frames = s.bridge.fence(&c2, 50);
+    assert_eq!(frames.len(), 2, "no stray errors expected: {frames:?}");
+    assert_eq!(count_list_changed(&frames), 1);
+}
+
+#[test]
+fn cancelling_a_string_id_does_not_cancel_the_numeric_id_with_the_same_digits() {
+    let s = established();
+    let call = tool_call(json!(5));
+    s.bridge.send_line(&call);
+    s.conn.expect_exact(&call);
+    let note = cancelled(json!("5"));
+    s.bridge.send_line(&note);
+    s.conn.expect_exact(&note);
+    s.conn.close();
+    assert_eq!(s.bridge.expect_json(), lost_error(json!(5)));
+}
+
+#[test]
+fn a_request_cancelled_while_queued_is_still_tracked_until_its_cancel_is_forwarded() {
+    let mut s = established();
+    s.conn.close();
+    let c2 = s.daemon.accept();
+    c2.expect_hello(PTY); // reconnected, replay pending
+    let call = tool_call(json!(31));
+    let note = cancelled(json!(31));
+    s.bridge.send_line(&call);
+    s.bridge.send_line(&note);
+    c2.expect_exact(INIT_REQ);
+    c2.send_line(&init_resp("again"));
+    c2.expect_exact(INITIALIZED);
+    c2.expect_exact(&call);
+    c2.expect_exact(&note);
+    c2.close();
+    // list_changed arrives first; no -32000 for the cancelled id follows.
+    let frames = [s.bridge.expect_json()];
+    assert_eq!(frames[0], list_changed());
+    assert!(s.bridge.recv(QUIET).is_none(), "stray frame after cancel");
+    s.bridge.close_stdin();
+}
+
+// ── log pruning and opening ───────────────────────────────────────────────────
+
+fn set_mtime(p: &Path, secs: u64) {
+    OpenOptions::new()
+        .write(true)
+        .open(p)
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+        .unwrap();
+}
+
+#[test]
+fn pruning_never_deletes_the_log_of_a_still_running_bridge() {
+    let dir = tempfile::tempdir().unwrap();
+    // A quiet live bridge (this very process): the oldest file by far.
+    let live = dir
+        .path()
+        .join(format!("mcp-bridge-{}.log", std::process::id()));
+    fs::write(&live, "quiet\n").unwrap();
+    set_mtime(&live, 1_000);
+    for i in 0..25u64 {
+        let p = dir
+            .path()
+            .join(format!("mcp-bridge-{}.log", DEAD_PID_BASE + i));
+        fs::write(&p, "old\n").unwrap();
+        set_mtime(&p, 1_000_000 + i * 10);
+    }
+    let _log = BridgeLog::open(dir.path(), 99).expect("open");
+    assert!(live.exists(), "a live bridge's log must survive pruning");
+    // Dead logs are still pruned down to the cap.
+    let dead = (0..25u64)
+        .filter(|i| {
+            dir.path()
+                .join(format!("mcp-bridge-{}.log", DEAD_PID_BASE + i))
+                .exists()
+        })
+        .count();
+    assert!(dead <= MAX_LOG_FILES, "dead logs kept: {dead}");
+}
+
+#[test]
+fn a_symlink_at_the_log_path_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("victim");
+    fs::write(&target, "secret\n").unwrap();
+    let logs = dir.path().join("logs");
+    fs::create_dir(&logs).unwrap();
+    fs::set_permissions(&logs, fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(&target, logs.join("mcp-bridge-4242.log")).unwrap();
+
+    assert!(
+        BridgeLog::open(&logs, 4242).is_err(),
+        "symlink must be refused"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "secret\n");
+}
+
+#[test]
+fn the_bridge_still_runs_without_logging_when_its_log_path_is_a_symlink() {
+    let dir = short_tempdir();
+    let logs = dir.path().join("logs");
+    fs::create_dir(&logs).unwrap();
+    let target = dir.path().join("victim");
+    fs::write(&target, "secret\n").unwrap();
+    symlink(
+        &target,
+        logs.join(format!("mcp-bridge-{}.log", std::process::id())),
+    )
+    .unwrap();
+
+    let sock = dir.path().join("d.sock");
+    let daemon = FakeDaemon::start(&sock);
+    let config = BridgeConfig::new(
+        sock.clone(),
+        PTY.to_string(),
+        Backoff::new(Duration::from_millis(5), Duration::from_millis(20)),
+        Some(logs),
+    );
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    let handle =
+        thread::spawn(move || run_with(config, ChannelReader(rx, Vec::new()), std::io::sink()));
+    let c = daemon.accept();
+    c.expect_hello(PTY);
+    tx.send(format!("{}\n", ping(1)).into_bytes()).unwrap();
+    c.expect_exact(&ping(1));
+    drop(tx);
+    assert_eq!(handle.join().unwrap(), 0);
+    assert_eq!(fs::read_to_string(&target).unwrap(), "secret\n");
+}
+
+#[test]
+fn an_existing_loose_log_directory_is_tightened_to_0700() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    fs::create_dir(&logs).unwrap();
+    fs::set_permissions(&logs, fs::Permissions::from_mode(0o755)).unwrap();
+    let _log = BridgeLog::open(&logs, 4243).expect("open");
+    assert_eq!(mode_of(&logs), 0o700);
+}
+
+#[test]
+fn a_log_directory_that_is_a_symlink_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let link = dir.path().join("logs");
+    symlink(&real, &link).unwrap();
+    assert!(BridgeLog::open(&link, 4244).is_err());
 }

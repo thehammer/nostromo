@@ -5,7 +5,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 /// How many `mcp-bridge-*.log` files are kept (newest by mtime).
@@ -26,12 +26,14 @@ impl BridgeLog {
             .recursive(true)
             .mode(0o700)
             .create(dir)?;
+        secure_dir(dir)?;
         let name = format!("mcp-bridge-{pid}.log");
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(dir.join(&name))?;
         let size = file.metadata()?.len();
         prune(dir, &name);
@@ -77,8 +79,42 @@ impl BridgeLog {
     }
 }
 
+/// The log directory must be a real directory we own, closed to group and
+/// other: tighten it if it already existed with a looser mode.
+fn secure_dir(dir: &Path) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(dir)?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "log directory is not a directory we own",
+        ));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Whether `name` (`mcp-bridge-<pid>.log`) belongs to a running process.
+fn owner_alive(name: &str) -> bool {
+    let pid = name
+        .strip_prefix("mcp-bridge-")
+        .and_then(|n| n.strip_suffix(".log"))
+        .and_then(|n| n.parse::<i32>().ok());
+    match pid {
+        Some(pid) if pid > 0 => {
+            // SAFETY: signal 0 only checks that the process exists.
+            let rc = unsafe { libc::kill(pid, 0) };
+            rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+        _ => false,
+    }
+}
+
 /// Remove all but the newest [`MAX_LOG_FILES`] `mcp-bridge-*.log` files in
-/// `dir`; `keep` (our own file) is never removed.
+/// `dir`; `keep` (our own file) and logs of still-running bridges are never
+/// removed (a quiet live bridge's mtime is old, but it is still writing).
 fn prune(dir: &Path, keep: &str) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -97,7 +133,14 @@ fn prune(dir: &Path, keep: &str) {
     logs.sort_by(|a, b| b.cmp(a)); // newest first
     let mut kept = 0;
     for (_, name) in logs {
-        if name == keep || kept < MAX_LOG_FILES {
+        if name == keep {
+            kept += 1;
+            continue;
+        }
+        if owner_alive(&name) {
+            continue;
+        }
+        if kept < MAX_LOG_FILES {
             kept += 1;
             continue;
         }

@@ -26,6 +26,8 @@ struct ToolsOfflinePolicy {
     /// process dies, so its "lost" report can arrive after the session ended and must not be
     /// held against a session that is not running.
     private var ended: Set<String> = []
+    /// Bound on `ended`; past it the set is dropped (a late "lost" report may then count).
+    private static let maxEnded = 1024
 
     /// The daemon reported `connected` for `tag`'s bridge.
     mutating func bridgeChanged(tag: String, connected: Bool, now: Date) {
@@ -40,6 +42,7 @@ struct ToolsOfflinePolicy {
     /// The session is no longer running (exited, stopped or crashed): there is nothing to be
     /// offline. A new process will report its own bridge.
     mutating func sessionEnded(tag: String) {
+        if ended.count >= Self.maxEnded { ended.removeAll() }
         ended.insert(tag)
         lostAt.removeValue(forKey: tag)
     }
