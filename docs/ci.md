@@ -271,3 +271,5 @@ actually caught. Do not flip it on just because the streak is met.
   multi-pane split for the observation window," not "the GUI is correct."**
 - No retry logic exists anywhere in the workflow. A flaky INCONCLUSIVE is
   re-run by a human, on purpose, one job at a time — never automatically.
+
+(throwaway: docs-only path-gate proof)
