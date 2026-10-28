@@ -48,7 +48,11 @@ const SERVER_NAME: &str = "nostromo";
 /// Hard cap on one newline-delimited frame. A longer frame is discarded up to
 /// its newline and answered with a JSON-RPC error; it never closes the
 /// connection.
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+///
+/// 2 MiB, not 1: tool arguments may legitimately be ~1 MiB of text (the
+/// remote-shell hardening suite sends 1 MiB strings and expects the tool's own
+/// validator to refuse them by name), and JSON wrapping adds to that.
+pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 /// JSON-RPC error code for a tool the operator's policy withdraws from this
 /// caller (W5 — curated-agent-views). In the implementation-defined server
