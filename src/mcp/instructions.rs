@@ -94,7 +94,10 @@ mod tests {
             "nostromo.list_remote_shell_targets",
         ];
         for name in terminal_tools {
-            assert!(registered.iter().any(|r| r == name), "{name} not registered");
+            assert!(
+                registered.iter().any(|r| r == name),
+                "{name} not registered"
+            );
             assert!(t.contains(name), "instructions miss {name}");
         }
         // Every `nostromo.<word>` the text mentions must be a registered tool.

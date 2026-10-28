@@ -4,8 +4,8 @@ use nostromo::mcp::tools::tool_descriptors;
 
 #[test]
 fn every_tool_named_in_the_agent_quick_guide_is_registered() {
-    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/terminal.md"))
-        .unwrap();
+    let doc =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/terminal.md")).unwrap();
     let guide = doc
         .split("## Agent quick guide")
         .nth(1)
