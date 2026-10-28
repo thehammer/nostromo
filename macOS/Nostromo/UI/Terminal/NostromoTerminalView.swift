@@ -158,8 +158,11 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
         }
         // Dictation and text replacement can carry a newline: into a remote shell that asks too.
         let text = (string as? String) ?? (string as? NSAttributedString)?.string ?? ""
-        pasteGate.submit(text, terminalId: terminalId, window: window, refusedOp: .input, fromClipboard: false) { [weak self] in
-            self?.insertTextConfirmed(string, replacementRange: replacementRange)
+        let target = terminalId
+        pasteGate.submit(text, terminalId: target, window: window, refusedOp: .input, fromClipboard: false) { [weak self] in
+            // The sheet named `target`: if the view was rebound while it was up, nothing is sent.
+            guard let self, self.terminalId == target else { return }
+            self.insertTextConfirmed(string, replacementRange: replacementRange)
         }
     }
 
@@ -170,9 +173,12 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
         }
         // SwiftTerm's paste reads the general pasteboard (and honours bracketed paste), so read the same.
         let pasteboard = NSPasteboard.general
-        pasteGate.submit(pasteboard.string(forType: .string) ?? "", terminalId: terminalId, window: window,
+        let target = terminalId
+        pasteGate.submit(pasteboard.string(forType: .string) ?? "", terminalId: target, window: window,
                          refusedOp: .paste, fromClipboard: true) { [weak self] in
-            self?.pasteConfirmed(sender)
+            // The sheet named `target`: if the view was rebound while it was up, nothing is sent.
+            guard let self, self.terminalId == target else { return }
+            self.pasteConfirmed(sender)
         }
     }
 

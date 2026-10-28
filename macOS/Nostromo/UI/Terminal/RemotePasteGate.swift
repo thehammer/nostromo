@@ -65,7 +65,12 @@ final class RemotePasteGate {
             forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
             self?.clear()
         }
-        window.beginSheet(sheetWindow) { [weak self] _ in self?.clear() }
+        // The completion block keeps the sheet's controller alive while the sheet is up, even if the
+        // view that owns this gate goes away: its buttons' targets are weak, and a sheet nobody owns
+        // could not be dismissed.
+        window.beginSheet(sheetWindow) { [weak self, sheet] _ in
+            withExtendedLifetime(sheet) { self?.clear() }
+        }
     }
 
     private func clear() {
