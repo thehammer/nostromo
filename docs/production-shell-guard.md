@@ -154,6 +154,15 @@ guard would block every agent tool call). The guard only takes effect for sessio
 after that.
 `install-daemon` restarts the daemon, which ends every daemon session.
 
+`install-daemon` also builds and installs `nostromo-mcp-bridge` the same way (staged, signed
+with identifier `nostromo-mcp-bridge`, then moved over the real file that
+`~/.local/bin/nostromo-mcp-bridge` resolves to, normally `~/.cargo/bin/nostromo-mcp-bridge`;
+the symlink is created if missing). It is staged and signed with the other binaries before
+anything is replaced. Running agent sessions keep their old bridge until restarted. To confirm:
+`ls -la ~/.cargo/bin/nostromo-mcp-bridge` shows a fresh mtime, and a new session writes
+`mcp-bridge-<pid>.log` in `~/.nostromo/logs`. A session on the new bridge reconnects across
+later daemon restarts.
+
 `NOSTROMO_GUARD_BIN` overrides the path (tests). `NOSTROMO_APPROVALS_DIR` moves the audit
 directory (tests). Neither changes what is blocked.
 

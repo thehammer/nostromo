@@ -337,6 +337,32 @@ class MakefileWiringTests(unittest.TestCase):
             "\n".join(recipe("python-test")),
         )
 
+    def test_daemon_builds_the_mcp_bridge(self):
+        out = self.dry_run("daemon")
+        self.assertIn("cargo build --release", out)
+        self.assertIn("--bin nostromo-mcp-bridge", out)
+
+    def test_install_daemon_stages_signs_and_moves_the_bridge_after_the_other_checks(self):
+        out = self.dry_run("install-daemon")
+        stage = out.index('cp target/release/nostromo-mcp-bridge "$stage_bridge"')
+        sign = out.index("--identifier nostromo-mcp-bridge")
+        move = out.index('mv "$stage_bridge" "$bridge"')
+        self.assertLess(out.index("--identifier nostromd"), stage)
+        self.assertLess(out.index("--identifier nostromo-guard"), stage)
+        self.assertLess(stage, sign)
+        # every binary is staged and signed before any replacement
+        self.assertLess(sign, out.index("rm -f \"$bridge\""))
+        self.assertLess(sign, out.index('mv "$stage_guard"'))
+        self.assertLess(sign, out.index('mv "$stage_daemon"'))
+        self.assertLess(stage, move)
+        self.assertIn("Installed nostromo-mcp-bridge to", out)
+        self.assertIn("reconnects across later daemon restarts", out)
+
+    def test_install_daemon_never_copies_the_bridge_over_its_destination_in_place(self):
+        out = self.dry_run("install-daemon")
+        self.assertNotIn('cp target/release/nostromo-mcp-bridge "$bridge"', out)
+        self.assertNotIn('cp target/release/nostromo-mcp-bridge "$bdest"', out)
+
 
 if __name__ == "__main__":
     unittest.main()
