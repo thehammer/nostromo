@@ -1345,6 +1345,8 @@ Source: `src/mcp/tool_policy.rs`, `src/mcp/server.rs` (`TOOL_FORBIDDEN_CODE`),
 
 ## Terminals
 
+Agent-facing summary and safety rules: [`../terminal.md`](../terminal.md#agent-quick-guide).
+
 ### `nostromo.open_terminal`
 
 Open a terminal pane (the user's login shell) in the caller's own focus. The user types into it; **no MCP tool can write to, read from or close a terminal**.

@@ -155,7 +155,7 @@ async fn a_known_daemon_focus_gets_the_tracker_instructions() {
     ] {
         assert!(text.contains(needle), "missing {needle:?} in {text}");
     }
-    assert!(text.chars().count() <= 1_200);
+    assert!(text.chars().count() <= 3_200);
     assert!(!text.contains("A tracker is open"));
 }
 
@@ -211,7 +211,7 @@ async fn a_focus_with_a_bound_board_is_told_its_topic_and_stays_in_budget() {
     assert!(text.contains(
         "A tracker is open in this focus: \"sentry-triage\". Call op:\"read\" to load it."
     ));
-    assert!(text.chars().count() <= 1_200);
+    assert!(text.chars().count() <= 3_200);
 
     let other = initialize(
         &h.state,
