@@ -19,6 +19,8 @@ private let followLog = Logger(subsystem: "com.hammer.nostromo", category: "term
 final class FollowControlView: NSView {
 
     private static let contentWidth: CGFloat = 320
+    /// What the stack leaves for a label: the content width less its 16 pt side insets.
+    private static let innerWidth: CGFloat = contentWidth - 32
 
     private enum Mode { case invite, manage }
 
@@ -84,13 +86,11 @@ final class FollowControlView: NSView {
     }
 
     private func buildInviteForm() {
-        let innerWidth = Self.contentWidth - 32
-        let heading = makeLabel(model.state == .notShared ? "Let an agent follow this terminal" : "Move this terminal to another agent",
+        let heading = makeLabel(model.inviteHeading,
                             font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor, id: "terminal-follow-heading")
         stack.addArrangedSubview(heading)
 
-        // A Move is to another focus: the one that follows already is not offered.
-        let offered = model.focuses.filter { $0.tag != model.info.follower?.tag }
+        let offered = model.inviteFocuses
         picker.removeAllItems()
         for option in offered {
             picker.addItem(withTitle: option.name)
@@ -112,9 +112,10 @@ final class FollowControlView: NSView {
         includeScreenCheckbox.setAccessibilityIdentifier("terminal-follow-include-screen")
         stack.addArrangedSubview(includeScreenCheckbox)
 
-        warningLabel.font = .systemFont(ofSize: 12, weight: TerminalChromeModel.isRemote(model.info) ? .semibold : .regular)
-        warningLabel.textColor = TerminalChromeModel.isRemote(model.info) ? .systemRed : .secondaryLabelColor
-        warningLabel.preferredMaxLayoutWidth = innerWidth
+        let isRemote = TerminalChromeModel.isRemote(model.info)
+        warningLabel.font = .systemFont(ofSize: 12, weight: isRemote ? .semibold : .regular)
+        warningLabel.textColor = isRemote ? .systemRed : .secondaryLabelColor
+        warningLabel.preferredMaxLayoutWidth = Self.innerWidth
         warningLabel.maximumNumberOfLines = 0
         warningLabel.isSelectable = false
         warningLabel.setAccessibilityIdentifier("terminal-follow-warning")
@@ -160,7 +161,7 @@ final class FollowControlView: NSView {
         let field = NSTextField(wrappingLabelWithString: text)
         field.font = font
         field.textColor = color
-        field.preferredMaxLayoutWidth = Self.contentWidth - 32
+        field.preferredMaxLayoutWidth = Self.innerWidth
         field.maximumNumberOfLines = 0
         field.isSelectable = false
         field.setAccessibilityIdentifier(id)

@@ -36,6 +36,7 @@ struct FollowModel: Equatable {
     }
 
     static let notSharedText = "Not shared"
+    static let notSharedDescription = "No agent is following this terminal"
     /// The invite popover's checkbox. Off by default (the screen's current contents go out only when ticked).
     static let includeScreenTitle = "Include what's on screen now"
     static let includeScreenDefault = false
@@ -82,7 +83,7 @@ struct FollowModel: Equatable {
     var badgeDescription: String {
         switch state {
         case .notShared:
-            return "No agent is following this terminal"
+            return Self.notSharedDescription
         case .followed(let label):
             return "Output from this terminal is being sent to \(label)'s model"
         case .paused(let label, let reason):
@@ -111,6 +112,16 @@ struct FollowModel: Equatable {
     }
 
     // MARK: - Invite
+
+    /// The invite popover's title: an invite on a pane nobody follows, a Move on one that is followed.
+    var inviteHeading: String {
+        state == .notShared ? "Let an agent follow this terminal" : "Move this terminal to another agent"
+    }
+
+    /// The focuses the picker lists. A Move is to another focus: the one that follows already is not offered.
+    var inviteFocuses: [FollowFocusOption] {
+        focuses.filter { $0.tag != info.follower?.tag }
+    }
 
     /// The focus the invite popover starts on: the one that owns the pane, or, for a remote pane an
     /// agent asked for, the agent that asked. When that focus already follows (a Move), the next

@@ -148,7 +148,7 @@ final class TerminalPaneHeaderView: NSView {
     private func applyBadge(_ follow: FollowModel?) {
         let text = follow?.badgeText ?? FollowModel.notSharedText
         let color = follow?.badgeColor ?? Theme.fgMuted
-        let description = follow?.badgeDescription ?? "No agent is following this terminal"
+        let description = follow?.badgeDescription ?? FollowModel.notSharedDescription
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byTruncatingTail
