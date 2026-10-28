@@ -214,12 +214,14 @@ final class PerFocusEvictionWiringTests: XCTestCase {
 
     func testMainLayoutFocusesSinkPrunesViewCache() throws {
         let source = try Self.mainLayoutSource()
-        guard let start = source.range(of: "FocusStore.shared.$focuses") else {
+        // MainLayout reads the store through its `focusStore` seam (`FocusStore.shared` in the app).
+        guard source.contains("focusStore: FocusStore = .shared"),
+              let start = source.range(of: "focusStore.$focuses") else {
             XCTFail("MainLayout.swift no longer subscribes to FocusStore.shared.$focuses")
             return
         }
         guard let storeRange = source.range(of: ".store(in:", range: start.upperBound..<source.endIndex) else {
-            XCTFail("could not find the end of the FocusStore.shared.$focuses sink (.store(in:) not found after it)")
+            XCTFail("could not find the end of the focusStore.$focuses sink (.store(in:) not found after it)")
             return
         }
         let sinkBody = String(source[start.upperBound..<storeRange.lowerBound])

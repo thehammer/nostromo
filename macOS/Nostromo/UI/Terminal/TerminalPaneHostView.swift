@@ -2,7 +2,8 @@ import AppKit
 import Combine
 import SwiftTerm
 
-/// One terminal pane: a 24 pt header band (the shell and its directory, and a close x), the
+/// One terminal pane: a 24 pt header band (the shell and its directory, and a close x; shorter only in a
+/// pane that is itself shorter), the
 /// terminal below it, and, once the process has ended, an overlay with its exit code and
 /// Restart / Close. Routed from `DynamicFocusView.makeLeafView` for pane ids `terminal-*`.
 ///
@@ -23,13 +24,23 @@ import SwiftTerm
 /// While the daemon is unreachable the pane says its shell ended and cannot be restarted; when the
 /// daemon is back it shows what the daemon says (a shell that died with it is `ended`, with Restart).
 ///
-/// Every control that changes a terminal (the x, Restart, Close, and Terminal > Close Terminal
+/// A remote (`ecs`) pane is unmistakable in every state: a 3 pt hazard-red frame drawn by the host's
+/// own layer (the content is inset by it), and a red header, pinned to the top of the pane, that always
+/// names the environment, project, service and shell type (`TerminalChromeModel`). The environment is
+/// its own fixed label on the left (never truncated, its font shrinks before it clips); the rest of the
+/// header truncates, the mirror hint first. A pane of a kind this app does not know, or an `ecs` one the
+/// daemon sent no target for, is red too and says REMOTE. From the daemon's
+/// idle warning (13 minutes without a keystroke) a yellow banner under the header counts down to the
+/// close, with Keep open.
+///
+/// Every control that changes a terminal (the x, Restart, Close, Keep open, and Terminal > Close Terminal
 /// Pane) asks `TerminalInputGuard.allowsControl` first. A synthetic click does nothing, and the
 /// refusal is reported to the daemon.
 final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
-    static let headerHeight: CGFloat = 24
+    static let headerHeight = TerminalPaneHeaderView.height
     private static let overlayHeight: CGFloat = 40
+    private static let bannerHeight = IdleBannerView.height
 
     /// The focus tag (named so it does not collide with `NSView.tag`, an `Int`).
     let focusTag: String
@@ -38,13 +49,10 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     private let store: TerminalSessionStore
     private let latency: TerminalLatencyStats
-    private let header = ClickableClipView()
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let closeButton = NSButton()
+    private let header = TerminalPaneHeaderView()
     private let terminalView: NostromoTerminalView
     /// Holds the terminal view and clips it: a mirror can be larger than the pane.
     private let terminalContainer = ClickableClipView()
-    private let mirrorHint = NSTextField(labelWithString: "")
     /// Someone asked for the keyboard (or had it) while the pane was still connecting.
     private var focusWhenConnected = false
     /// Shown instead of the terminal while a remote shell connects.
@@ -55,6 +63,8 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     private let overlayLabel = NSTextField(labelWithString: "")
     private let restartButton = NSButton()
     private let overlayCloseButton = NSButton()
+    /// Under a remote header, from the daemon's idle warning until a keystroke or Keep open.
+    private let idleBanner = IdleBannerView()
 
     private var info: TerminalInfo?
     /// This view is not the one that sizes the terminal.
@@ -87,6 +97,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         setAccessibilityIdentifier("terminal-pane")
         setAccessibilityLabel("Terminal")
         buildHeader()
+        buildIdleBanner()
         buildOverlay()
         buildConnecting()
         terminalContainer.addSubview(terminalView)
@@ -101,6 +112,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         addSubview(terminalContainer)
         addSubview(connectingView)
         addSubview(header)
+        addSubview(idleBanner)
         addSubview(overlay)
         info = store.info(forPane: paneId, tag: focusTag)
         terminalView.terminalId = info?.terminalId
@@ -203,16 +215,23 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
 
     override func layout() {
         super.layout()
-        let h = Self.headerHeight
-        header.frame = NSRect(x: 0, y: bounds.height - h, width: bounds.width, height: h)
-        let body = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - h))
+        // The red frame is the host layer's border; the content sits inside it. The header is pinned to
+        // the top edge, 24 pt tall or the whole content when the pane is shorter (the host clips a remote
+        // pane, so nothing spills into a neighbour).
+        let inset = isRemote ? TerminalChromeModel.frameWidth : 0
+        let content = bounds.insetBy(dx: inset, dy: inset)
+        let h = min(Self.headerHeight, max(0, content.height))
+        header.frame = NSRect(x: content.minX, y: content.maxY - h, width: content.width, height: h)
+        let bannerH = idleBanner.isHidden ? 0 : Self.bannerHeight
+        idleBanner.frame = NSRect(x: content.minX, y: content.maxY - h - bannerH, width: content.width, height: bannerH)
+        let bodyTop = content.maxY - h - bannerH
+        let body = NSRect(x: content.minX, y: content.minY, width: content.width, height: max(0, bodyTop - content.minY))
         terminalContainer.frame = body
         connectingView.frame = body
         layoutConnecting()
         layoutTerminal()
         let overlayH = min(Self.overlayHeight, body.height)
-        overlay.frame = NSRect(x: 0, y: 0, width: body.width, height: overlayH)
-        layoutHeader()
+        overlay.frame = NSRect(x: body.minX, y: body.minY, width: body.width, height: overlayH)
         layoutOverlay()
         registerIfReady()
     }
@@ -311,7 +330,8 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     // MARK: - Private: header and overlay
 
     private func render() {
-        titleLabel.stringValue = info?.headerTitle() ?? "Terminal"
+        applyChrome()
+        idleBanner.update(info: info)
         let daemonStopped = info.map { store.isDaemonUnavailable(terminalId: $0.terminalId) } ?? false
         let ended = info?.status == .ended
         let notice = (ended || daemonStopped) ? nil : inputNotice
@@ -337,34 +357,37 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
             restartButton.isHidden = true
         }
         overlayCloseButton.isHidden = notice != nil || daemonStopped
+        var hint = ""
         if let grid = daemonGrid, isMirror, !daemonStopped, !ended {
-            mirrorHint.stringValue = "Mirroring at \(grid.cols)\u{00D7}\(grid.rows), type here to drive"
-        } else {
-            mirrorHint.stringValue = ""
+            hint = "Mirroring at \(grid.cols)\u{00D7}\(grid.rows), type here to drive"
         }
-        mirrorHint.isHidden = mirrorHint.stringValue.isEmpty
+        header.apply(info: info, mirrorHint: hint)
         renderConnecting()
         overlayLabel.toolTip = overlayLabel.stringValue
         needsLayout = true
     }
 
+    private var isRemote: Bool { info.map { TerminalChromeModel.isRemote($0) } ?? false }
+
+    /// The red frame (the layer's border) of a remote pane. Only a remote pane needs the host to clip
+    /// (a local pane's children are all inside it).
+    private func applyChrome() {
+        let remote = isRemote
+        layer?.borderWidth = remote ? TerminalChromeModel.frameWidth : 0
+        layer?.borderColor = info.flatMap(TerminalChromeModel.frameColor(for:))?.cgColor
+        layer?.masksToBounds = remote
+        needsLayout = true
+    }
+
+    private func buildIdleBanner() {
+        idleBanner.keepOpenButton.target = self
+        idleBanner.keepOpenButton.action = #selector(keepOpenTapped(_:))
+        idleBanner.onVisibilityChange = { [weak self] in self?.needsLayout = true }
+    }
+
     private func buildHeader() {
-        header.wantsLayer = true
-        header.layer?.backgroundColor = Theme.bgBar.cgColor
-        titleLabel.font = Theme.statusFont
-        titleLabel.textColor = Theme.fgMuted
-        titleLabel.lineBreakMode = .byTruncatingMiddle
-        titleLabel.setAccessibilityIdentifier("terminal-title")
-        style(closeButton, title: "\u{00D7}", identifier: "terminal-close-x", label: "Close terminal",
-              action: #selector(closeTapped(_:)), filled: false)
-        mirrorHint.font = Theme.statusFont
-        mirrorHint.textColor = Theme.fgMuted
-        mirrorHint.lineBreakMode = .byTruncatingHead
-        mirrorHint.isHidden = true
-        mirrorHint.setAccessibilityIdentifier("terminal-mirror-hint")
-        header.addSubview(titleLabel)
-        header.addSubview(mirrorHint)
-        header.addSubview(closeButton)
+        header.closeButton.target = self
+        header.closeButton.action = #selector(closeTapped(_:))
     }
 
     /// The terminal view gives way to the connecting message until the shell is running.
@@ -464,21 +487,6 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         button.setAccessibilityLabel(label)
     }
 
-    private func layoutHeader() {
-        let h = Self.headerHeight
-        let closeWidth: CGFloat = 28
-        closeButton.frame = NSRect(x: header.bounds.width - closeWidth - 2, y: 0, width: closeWidth, height: h)
-        let labelSize = titleLabel.intrinsicContentSize
-        let available = max(0, header.bounds.width - closeWidth - 20)
-        // The hint keeps its width unless the pane is very narrow; the title gives way to it.
-        let hintW = mirrorHint.isHidden ? 0 : min(mirrorHint.intrinsicContentSize.width, available * 0.6)
-        let hintGap: CGFloat = mirrorHint.isHidden ? 0 : 8
-        mirrorHint.frame = NSRect(x: 10 + available - hintW, y: (h - labelSize.height) / 2,
-                                  width: hintW, height: labelSize.height)
-        titleLabel.frame = NSRect(x: 10, y: (h - labelSize.height) / 2,
-                                  width: max(0, available - hintW - hintGap), height: labelSize.height)
-    }
-
     private func layoutOverlay() {
         let h = overlay.bounds.height
         let buttonH: CGFloat = 24
@@ -512,6 +520,15 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
             return
         }
         store.close(terminalId: id)
+    }
+
+    @objc private func keepOpenTapped(_ sender: NSButton) {
+        guard let id = info?.terminalId else { return }
+        guard TerminalInputGuard.allowsControl(event: NSApp.currentEvent, control: sender) else {
+            store.reportRefusal(terminalId: id, op: .keepAlive)
+            return
+        }
+        store.keepAlive(terminalId: id)
     }
 
     @objc private func restartTapped(_ sender: NSButton) {

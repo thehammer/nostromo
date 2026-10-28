@@ -12,6 +12,8 @@ import AppKit
     func newTerminal(_ sender: Any?)
     func newRemoteShell(_ sender: Any?)
     func closeTerminalPane(_ sender: Any?)
+    func showTerminalAuditLog(_ sender: Any?)
+    func revealTerminalAuditLog(_ sender: Any?)
     func terminalFind(_ sender: Any?)
     func copyTerminalLatencyStats()
     func openSecondWindowQA(_ sender: Any?)
@@ -82,6 +84,16 @@ enum MainMenu {
         closeTerminalItem.keyEquivalentModifierMask = [.command, .shift]
         closeTerminalItem.target = target
         terminalMenu.addItem(closeTerminalItem)
+        // The daemon's trail of terminal events (no keystrokes, no output). No shortcuts.
+        terminalMenu.addItem(.separator())
+        let showAuditItem = NSMenuItem(title: "Show Terminal Audit Log",
+                                       action: #selector(MainMenuActions.showTerminalAuditLog(_:)), keyEquivalent: "")
+        showAuditItem.target = target
+        terminalMenu.addItem(showAuditItem)
+        let revealAuditItem = NSMenuItem(title: "Reveal Terminal Audit Log in Finder",
+                                         action: #selector(MainMenuActions.revealTerminalAuditLog(_:)), keyEquivalent: "")
+        revealAuditItem.target = target
+        terminalMenu.addItem(revealAuditItem)
 
         // Debug menu — the app's answer to "is it holding more than it should?"
         // without attaching a debugger. Several acceptance criteria for the

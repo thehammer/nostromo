@@ -510,6 +510,12 @@ async fn an_unattended_remote_shell_warns_at_13_minutes_and_closes_at_15_and_not
         closes_at >= w0 + fifteen - slack && closes_at <= w1 + fifteen + slack,
         "idle_closes_at {closes_at} is not the keystroke ({w0} .. {w1}) plus 15 minutes"
     );
+    // It says how long without keystrokes brought the warning, so the banner never hardcodes it.
+    assert_eq!(
+        i.info().and_then(|t| t.idle_warn_after_secs),
+        Some(WARN.as_secs()),
+        "idle_warn_after_secs is the warn threshold"
+    );
     // The app is told, with the same time; the shell is still running.
     let told = i
         .wait_app_state(from, "the warning terminal_state", |c| c.is_some())

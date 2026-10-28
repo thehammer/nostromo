@@ -63,6 +63,7 @@ final class TerminalWireTests: XCTestCase {
             (.resize(terminalId: "t1", cols: 120, rows: 40), "terminal_resize"),
             (.close(terminalId: "t1"), "terminal_close"),
             (.restart(terminalId: "t1"), "terminal_restart"),
+            (.keepAlive(terminalId: "t1"), "terminal_keep_alive"),
             (.refusalReport(terminalId: nil, op: .input, channel: "app_control"), "terminal_refusal_report"),
         ]
         for (message, name) in cases {
@@ -150,6 +151,7 @@ final class TerminalWireTests: XCTestCase {
     func testAttachDetachCloseAndRestartNameOnlyTheTerminal() throws {
         let messages: [TerminalClientMessage] = [
             .attach(terminalId: "t9"), .detach(terminalId: "t9"), .close(terminalId: "t9"), .restart(terminalId: "t9"),
+            .keepAlive(terminalId: "t9"),
         ]
         for message in messages {
             let o = try object(message)
@@ -234,6 +236,23 @@ final class TerminalWireTests: XCTestCase {
         XCTAssertEqual(t.openedByRequest, "req-9")
         XCTAssertEqual(t.follower, TerminalFollower(tag: "cody-1", paused: true, pauseReason: "too_much_output"))
         XCTAssertEqual(t.idleClosesAt, "2026-10-26T20:15:00Z")
+    }
+
+    func testIdleWarnAfterSecsDecodesWhenPresentAndIsNilWhenAbsent() throws {
+        let present = try info("""
+        {"terminal_id":"t2","tag":"core-1","pane_id":"p","kind":"ecs","label":"x","status":"running",
+         "cols":80,"rows":24,"requested_by":{"kind":"user"},
+         "idle_closes_at":"2026-10-26T20:15:00Z","idle_warn_after_secs":130}
+        """)
+        XCTAssertEqual(present.idleWarnAfterSecs, 130)
+        XCTAssertEqual(present.idleClosesAt, "2026-10-26T20:15:00Z")
+
+        let absent = try info("""
+        {"terminal_id":"t2","tag":"core-1","pane_id":"p","kind":"ecs","label":"x","status":"running",
+         "cols":80,"rows":24,"requested_by":{"kind":"user"},"idle_closes_at":"2026-10-26T20:15:00Z"}
+        """)
+        XCTAssertNil(absent.idleWarnAfterSecs, "an older daemon sends no figure")
+        XCTAssertEqual(absent.idleClosesAt, "2026-10-26T20:15:00Z")
     }
 
     func testAFollowerWithoutAPauseReasonDecodes() throws {

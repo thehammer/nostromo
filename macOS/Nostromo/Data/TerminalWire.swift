@@ -78,12 +78,15 @@ struct TerminalInfo: Codable, Equatable {
     let follower: TerminalFollower?
     /// RFC 3339, set from the idle warning until a keystroke or keep-alive (a remote shell).
     let idleClosesAt: String?
+    /// Seconds without keystrokes that brought the idle warning, set with `idleClosesAt` (an older
+    /// daemon omits it).
+    var idleWarnAfterSecs: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case terminalId = "terminal_id", tag, paneId = "pane_id", kind, label, cwd, target, status
         case exitCode = "exit_code", endedReason = "ended_reason", cols, rows
         case requestedBy = "requested_by", openedByRequest = "opened_by_request", follower
-        case idleClosesAt = "idle_closes_at"
+        case idleClosesAt = "idle_closes_at", idleWarnAfterSecs = "idle_warn_after_secs"
     }
 }
 
@@ -200,6 +203,8 @@ enum TerminalBase64 {
 /// What a refused attempt was trying to do (`terminal_refusal_report.op`).
 enum TerminalRefusedOp: String, Equatable {
     case input, close, restart, paste, resize, open
+    /// The Keep open button on a remote shell's idle banner.
+    case keepAlive = "keep_alive"
     /// The Connect button on a remote shell's confirm sheet.
     case connect
 }
@@ -218,6 +223,8 @@ enum TerminalClientMessage: Equatable {
     case resize(terminalId: String, cols: Int, rows: Int)
     case close(terminalId: String)
     case restart(terminalId: String)
+    /// Keep an idle remote shell open (resets its idle timer, clears the warning).
+    case keepAlive(terminalId: String)
     case refusalReport(terminalId: String?, op: TerminalRefusedOp, channel: String)
 
     var wireType: String {
@@ -229,6 +236,7 @@ enum TerminalClientMessage: Equatable {
         case .resize:        return "terminal_resize"
         case .close:         return "terminal_close"
         case .restart:       return "terminal_restart"
+        case .keepAlive:     return "terminal_keep_alive"
         case .refusalReport: return "terminal_refusal_report"
         }
     }
@@ -243,7 +251,7 @@ enum TerminalClientMessage: Equatable {
             if let relativeTo { o["relative_to"] = relativeTo }
             if let position { o["position"] = position }
             if let cwd { o["cwd"] = cwd }
-        case .attach(let id), .detach(let id), .close(let id), .restart(let id):
+        case .attach(let id), .detach(let id), .close(let id), .restart(let id), .keepAlive(let id):
             o["terminal_id"] = id
         case .input(let id, let bytes, let autoReply):
             o["terminal_id"] = id

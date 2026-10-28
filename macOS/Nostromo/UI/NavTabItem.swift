@@ -36,13 +36,47 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             labelClearsAttentionDot?.isActive = needsAttention
             pillClearsAttentionDot?.isActive = needsAttention
             pillAtEdge?.isActive = !needsAttention
+            updateBadgeReserve()
         }
     }
+
+    /// Environments of the remote shells open in this focus (uppercased, production first): one red
+    /// badge each, next to the label.
+    var environments: [String] = [] {
+        didSet {
+            guard environments != oldValue else { return }
+            badgeBoxes.forEach { $0.removeFromSuperview() }
+            badgeBoxes = environments.map(Self.makeEnvironmentBadge)
+            var x: CGFloat = 0
+            for box in badgeBoxes {
+                box.frame.origin = NSPoint(x: x, y: 0)
+                badgeClip.addSubview(box)
+                x += box.frame.width + Self.badgeSpacing
+            }
+            badgesWidth = max(0, x - Self.badgeSpacing)
+            badgeClip.isHidden = environments.isEmpty
+            updateBadgeReserve()
+            needsLayout = true
+        }
+    }
+    /// The badge texts shown. Exposed for tests.
+    var environmentBadgeTexts: [String] { environments }
 
     var sweaterColor: NSColor? = nil {
         didSet { updateAppearance() }
     }
 
+    /// The badges sit in a box that clips them, placed by hand in `layout()` from where the label, the
+    /// count pill and the dots actually are: no constraint ties them to anything, so no layout can have a
+    /// conflict to break. Only the label yields (a soft constraint at priority 800, above the label's own
+    /// resistance to being squeezed), down to 40 pt of its text (900); then the last badge is cut off.
+    private let badgeClip = NSView()
+    private var badgeBoxes: [NSView] = []
+    private var badgesWidth: CGFloat = 0
+    private var labelYieldsToBadges: NSLayoutConstraint?
+    private var labelKeepsItsName: NSLayoutConstraint?
+    private static let badgeSpacing: CGFloat = 3
+    private static let badgeHeight: CGFloat = 14
     private let accentBar      = NSView()
     private let label          = NSTextField(labelWithString: "")
     private let dot            = NSView()
@@ -192,6 +226,20 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         labelClearsPill = label.trailingAnchor.constraint(lessThanOrEqualTo: pillBox.leadingAnchor, constant: -4)
 
+        // Environment badges (hazard red) just after the label: see `badgeClip`. These two constraints are
+        // soft (800 and 900) and active only while badges show; the required ones above are untouched.
+        badgeClip.wantsLayer = true
+        badgeClip.layer?.masksToBounds = true
+        badgeClip.isHidden = true
+        addSubview(badgeClip)
+        let yields = label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -60)
+        yields.priority = NSLayoutConstraint.Priority(800)
+        labelYieldsToBadges = yields
+        let labelTextWidth = ceil((displayLabel as NSString).size(withAttributes: [.font: label.font as Any]).width)
+        let keeps = label.widthAnchor.constraint(greaterThanOrEqualToConstant: min(40, labelTextWidth))
+        keeps.priority = NSLayoutConstraint.Priority(900)
+        labelKeepsItsName = keeps
+
         let rowClick = NSClickGestureRecognizer(target: self, action: #selector(tapped))
         rowClick.delegate = self
         addGestureRecognizer(rowClick)
@@ -201,6 +249,54 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// How far from the trailing edge the label should stop to leave room for the badges: the sweater
+    /// dot, the pill and the attention dot (each while it shows), a gap, the badges, a gap. Only the
+    /// label's soft constraint reads it; where the badges really go is decided in `layout()`.
+    private func updateBadgeReserve() {
+        let showing = !environments.isEmpty
+        labelYieldsToBadges?.isActive = showing
+        labelKeepsItsName?.isActive = showing
+        guard showing else { return }
+        var column: CGFloat = 14
+        if needsAttention { column = max(column, 15) }
+        if !pillBox.isHidden {
+            let pillWidth = max(14, pillLabel.intrinsicContentSize.width + 10)
+            column = max(column, (needsAttention ? 19 : 8) + pillWidth)
+        }
+        labelYieldsToBadges?.constant = -(column + 4 + badgesWidth + 6)
+    }
+
+    override func layout() {
+        super.layout()
+        // The badges start after the label and end before the sweater dot, the pill and the attention
+        // dot; what does not fit is cut off (the last badge first).
+        guard !environments.isEmpty else { return }
+        var limit = dot.frame.minX - 4
+        if !pillBox.isHidden { limit = min(limit, pillBox.frame.minX - 4) }
+        if !attentionDot.isHidden { limit = min(limit, attentionDot.frame.minX - 4) }
+        let x = label.frame.maxX + 6
+        let width = min(badgesWidth, limit - x)
+        badgeClip.isHidden = width < 4
+        badgeClip.frame = NSRect(x: x, y: label.frame.midY - Self.badgeHeight / 2, width: max(0, width), height: Self.badgeHeight)
+    }
+
+    private static func makeEnvironmentBadge(_ name: String) -> NSView {
+        let text = NSTextField(labelWithString: name.uppercased())
+        text.font = NSFont.systemFont(ofSize: 9, weight: .bold)
+        text.textColor = Theme.hazardText
+        let size = text.intrinsicContentSize
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: ceil(size.width) + 8, height: badgeHeight))
+        box.wantsLayer = true
+        box.layer?.backgroundColor = Theme.hazardRed.cgColor
+        box.layer?.cornerRadius = 3
+        text.frame = NSRect(x: 4, y: (badgeHeight - size.height) / 2, width: ceil(size.width), height: size.height)
+        box.addSubview(text)
+        box.setAccessibilityElement(true)
+        box.setAccessibilityRole(.staticText)
+        box.setAccessibilityLabel("remote shell open: \(name)")
+        return box
+    }
 
     @objc private func tapped() { onTap?() }
 
@@ -227,6 +323,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             pillBox.isHidden = true
         }
         labelClearsPill?.isActive = !pillBox.isHidden
+        updateBadgeReserve()
 
         if focus.isBuiltIn, ["fred", "mother", "teri"].contains(focus.agentTag.lowercased()) {
             secondaryLabel?.stringValue = badge?.detail ?? baseSecondary ?? ""

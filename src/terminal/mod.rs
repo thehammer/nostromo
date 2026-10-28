@@ -766,6 +766,7 @@ impl TerminalManager {
             opened_by_request: req.client_request_id,
             follower: None,
             idle_closes_at: None,
+            idle_warn_after_secs: None,
         };
         self.insert_live(info.clone(), session, remote);
         self.persist();
@@ -997,6 +998,7 @@ impl TerminalManager {
             return;
         }
         t.info.idle_closes_at = None;
+        t.info.idle_warn_after_secs = None;
         let info = t.info.clone();
         self.record(AuditEvent::IdleKeptOpen {
             terminal_id: info.terminal_id.clone(),
@@ -1063,6 +1065,7 @@ impl TerminalManager {
 
     fn idle_warn(&mut self, terminal_id: &str) {
         let close_after = self.idle_policy.close_after;
+        let warn_after = self.idle_policy.warn_after;
         let Some(t) = self.terminals.get_mut(terminal_id) else {
             return;
         };
@@ -1070,6 +1073,7 @@ impl TerminalManager {
         let closes_at = t.idle.last_keystroke_utc
             + chrono::Duration::from_std(close_after).unwrap_or(chrono::Duration::zero());
         t.info.idle_closes_at = Some(closes_at);
+        t.info.idle_warn_after_secs = Some(warn_after.as_secs());
         let info = t.info.clone();
         self.record(AuditEvent::IdleWarning {
             terminal_id: info.terminal_id.clone(),
@@ -1241,6 +1245,7 @@ impl TerminalManager {
             opened_by_request: None,
             follower: None,
             idle_closes_at: None,
+            idle_warn_after_secs: None,
             ..old.info
         };
         self.insert_live(info.clone(), session, None);

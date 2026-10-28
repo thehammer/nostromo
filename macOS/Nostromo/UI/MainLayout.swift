@@ -37,6 +37,7 @@ class MainLayout: NSView {
     /// (see `DisplayFocusKeys`), so it follows the display across reconnects.
     private let displayUUID: String
     private var activeFocus: Focus
+    private let focusStore: FocusStore
     private var udKey: String { DisplayFocusKeys.activeTabKey(displayUUID: displayUUID) }
 
     private var cancellables = Set<AnyCancellable>()
@@ -166,12 +167,14 @@ class MainLayout: NSView {
 
     // MARK: - Init
 
-    init(windowIndex: Int, displayUUID: String) {
+    /// `focusStore` is the app's (`FocusStore.shared`) except in tests, which pass one backed by a temp file.
+    init(windowIndex: Int, displayUUID: String, focusStore: FocusStore = .shared) {
         self.windowIndex = windowIndex
         self.displayUUID = displayUUID
+        self.focusStore = focusStore
         // Restore active focus by ID from UserDefaults; fall back to mother
         let savedId = UserDefaults.standard.string(forKey: DisplayFocusKeys.activeTabKey(displayUUID: displayUUID))
-        let allFocuses = FocusStore.shared.focuses
+        let allFocuses = focusStore.focuses
         self.activeFocus = allFocuses.first { $0.id == savedId } ?? allFocuses.first { $0.id == "mother" } ?? Focus.mother
         super.init(frame: .zero)
         setup()
@@ -272,12 +275,16 @@ class MainLayout: NSView {
         // while B's content view, if it was showing that focus, stayed on
         // screen — and B's cached `NSView` kept its `ChatSession` reachable
         // no matter what `AppStore.evictPerFocusState` did.
-        FocusStore.shared.$focuses
+        focusStore.$focuses
             .receive(on: DispatchQueue.main)
             .sink { [weak self] focuses in
                 guard let self else { return }
+                // A rename (or any edit) of this window's focus: take the current copy, so the window
+                // title below names it.
+                if let current = focuses.first(where: { $0.id == self.activeFocus.id }) { self.activeFocus = current }
                 self.tabBar.setFocuses(focuses)
                 self.tabBar.activeFocus = self.activeFocus
+                self.updateWindowTitle()
                 // This window's active focus was removed — fall back to
                 // Mother, exactly like a click-to-close used to for the one
                 // window that initiated it.
@@ -332,6 +339,13 @@ class MainLayout: NSView {
             }
             .store(in: &cancellables)
 
+        // The window title (Window menu, Mission Control) names the environment while this window's
+        // focus has a remote shell open; the title bar itself is hidden.
+        TerminalSessionStore.shared.changes
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateWindowTitle() }
+            .store(in: &cancellables)
+
         // Publish the initial active focus so StatusBarView has a tag from the start.
         AppStore.shared.setActiveFocusAgentTag(activeFocus.agentTag)
         AppStore.shared.setActiveFocusSessionTag(activeFocus.sessionTag)
@@ -349,6 +363,22 @@ class MainLayout: NSView {
         AppStore.shared.setActiveFocusAgentTag(focus.agentTag)
         AppStore.shared.setActiveFocusSessionTag(focus.sessionTag)
         showContent(for: focus)
+        updateWindowTitle()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateWindowTitle()
+    }
+
+    /// "PRODUCTION — <focus label>" while the focus has a remote shell open, else the plain label. Runs on
+    /// terminal changes, focus switches, focus renames and when the view gets its window.
+    private func updateWindowTitle() {
+        guard let window else { return }
+        let environments = TerminalChromeModel.focusEnvironmentLabels(
+            Array(TerminalSessionStore.shared.terminals.values), tag: activeFocus.sessionTag)
+        let title = TerminalChromeModel.windowTitle(focusLabel: activeFocus.displayName, environments: environments)
+        if window.title != title { window.title = title }
     }
 
     /// The `sessionTag` of the focus this window is showing right now. Read-only:
@@ -383,7 +413,7 @@ class MainLayout: NSView {
         // was clicked. `FocusStore.remove` is the one thing that has to
         // happen here: everything else follows from its `focusRemovals`/
         // `$focuses` announcements.
-        FocusStore.shared.remove(focus)
+        focusStore.remove(focus)
     }
 
     // MARK: - Content switching
@@ -418,9 +448,10 @@ class MainLayout: NSView {
 
     private func presentRenameSheet(for focus: Focus) {
         guard let window else { return }
-        let sheet = RenameFocusSheet(currentLabel: focus.label) { label in
-            if FocusStore.shared.rename(id: focus.id, label: label),
-               let renamed = FocusStore.shared.focuses.first(where: { $0.id == focus.id }) {
+        let sheet = RenameFocusSheet(currentLabel: focus.label) { [weak self] label in
+            guard let store = self?.focusStore else { return }
+            if store.rename(id: focus.id, label: label),
+               let renamed = store.focuses.first(where: { $0.id == focus.id }) {
                 AppStore.shared.updateSessionLabel(tag: renamed.sessionTag, displayName: renamed.displayName)
             }
         }
@@ -434,7 +465,7 @@ class MainLayout: NSView {
         guard let window else { return }
         let sheet = CreateFocusSheet { [weak self] focus in
             guard let self else { return }
-            FocusCreation.commit(focus, store: FocusStore.shared,
+            FocusCreation.commit(focus, store: self.focusStore,
                                  flushRegistry: { AppStore.shared.pushFocusRegistry() }) { self.switchFocus($0) }
             self.presentedSheet = nil
         }

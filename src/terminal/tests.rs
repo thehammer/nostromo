@@ -1485,6 +1485,7 @@ fn adopt(
         opened_by_request: None,
         follower: None,
         idle_closes_at: None,
+        idle_warn_after_secs: None,
     };
     let fanout = Fanout::idle(&terminal_id, Arc::new(Mutex::new(None)));
     mgr.terminals.insert(

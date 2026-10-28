@@ -356,6 +356,7 @@ impl World {
             opened_by_request: None,
             follower: None,
             idle_closes_at: None,
+            idle_warn_after_secs: None,
         };
         self.terminals
             .lock()
