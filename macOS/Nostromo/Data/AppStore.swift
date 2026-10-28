@@ -162,6 +162,11 @@ class AppStore: ObservableObject {
     // An entry's lifetime now ends with its focus, via `evictPerFocusState`.
     @Published private(set) var sessionHealth: [String: SessionHealth] = [:]
 
+    /// Session tags whose MCP bridge has been gone for longer than `ToolsOfflinePolicy.grace`: the
+    /// session runs but cannot call `mcp__nostromo__*` tools. Empty for a tag that never had a bridge.
+    @Published private(set) var toolsOffline: Set<String> = []
+    private var toolsOfflinePolicy = ToolsOfflinePolicy()
+
     // Daemon-driven decision modal (multi-window decision-sheet fix). Plain
     // `PassthroughSubject`s, NOT `@Published` — deliberately. `@Published`
     // replays its CURRENT value to every new subscriber, which is exactly
@@ -617,6 +622,9 @@ class AppStore: ObservableObject {
                     TrackerStore.shared.daemonDisconnected()
                     // A sign-in card from a dropped connection is stale until the daemon says again.
                     ClaudeLoginStore.shared.reset()
+                    // Whether each bridge is up is known only from the live connection.
+                    self?.toolsOfflinePolicy.reset()
+                    self?.refreshToolsOffline()
                 }
             }
             .store(in: &cancellables)
@@ -682,6 +690,8 @@ class AppStore: ObservableObject {
         focusLayouts.removeValue(forKey: tag)
         sessionRegistry.removeValue(forKey: tag)?.detach()
         sessionHealth.removeValue(forKey: tag)
+        toolsOfflinePolicy.sessionEnded(tag: tag)
+        refreshToolsOffline()
         perriDetailByTag.removeValue(forKey: tag)
         ModelStore.shared.forget(tag: tag)
         TranscriptFoldStore.shared.removeFocus(tag: tag)
@@ -1450,7 +1460,12 @@ class AppStore: ObservableObject {
                 applySessionHealth(.healthy, for: tag)
             case .crashed:
                 applySessionHealth(.recovering, for: tag)
+                sessionStoppedRunning(tag: tag)
             }
+
+        case .sessionBridge(let tag, let connected):
+            toolsOfflinePolicy.bridgeChanged(tag: tag, connected: connected, now: Date())
+            refreshToolsOffline()
 
         case .sessionDown(let tag, let reason):
             if reason == .user {
@@ -1458,6 +1473,7 @@ class AppStore: ObservableObject {
             } else {
                 applySessionHealth(.permanentlyDown(reason), for: tag)
             }
+            sessionStoppedRunning(tag: tag)
 
         case .sessionSummaryUpdate(let tag, let summary):
             FocusStore.shared.updateSummary(tag: tag, summary: summary)
@@ -1499,8 +1515,13 @@ class AppStore: ObservableObject {
         case .teriState(let snap):
             teriTodos = snap
 
-        case .sessionSpawned, .sessionTurns, .sessionTurnDelta,
-             .sessionPermissionRequest, .sessionExited:
+        case .sessionExited(let tag, _):
+            sessionStoppedRunning(tag: tag)
+
+        case .sessionSpawned(let tag, _):
+            toolsOfflinePolicy.sessionStarted(tag: tag)
+
+        case .sessionTurns, .sessionTurnDelta, .sessionPermissionRequest:
             break
 
         // ── agent-authored pane layout (Phase 1) ─────────────────────────────
@@ -1724,6 +1745,25 @@ class AppStore: ObservableObject {
 
     /// Update `sessionHealth` for `tag`. `.healthy` entries are removed to keep
     /// the map sparse (healthy is the default / zero value).
+    /// The session's process is gone: it has no bridge to be missing.
+    private func sessionStoppedRunning(tag: String) {
+        toolsOfflinePolicy.sessionEnded(tag: tag)
+        refreshToolsOffline()
+    }
+
+    /// Publish which sessions are offline long enough to show, and arrange to look again when
+    /// the next one crosses the grace period.
+    private func refreshToolsOffline() {
+        let now = Date()
+        let offline = toolsOfflinePolicy.offlineTags(now: now)
+        if offline != toolsOffline { toolsOffline = offline }
+        if let deadline = toolsOfflinePolicy.nextDeadline(now: now) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + deadline.timeIntervalSince(now) + 0.1) { [weak self] in
+                self?.refreshToolsOffline()
+            }
+        }
+    }
+
     private func applySessionHealth(_ health: SessionHealth, for tag: String) {
         if health == .healthy {
             sessionHealth.removeValue(forKey: tag)

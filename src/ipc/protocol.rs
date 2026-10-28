@@ -395,6 +395,11 @@ pub struct SessionInfo {
     /// intentional so older peers decode it as `null` without breaking.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub stop_reason: Option<StopReason>,
+    /// Whether this session's `nostromo-mcp-bridge` is connected to the
+    /// daemon's MCP socket. Absent when unknown (no bridge has ever
+    /// identified as this tag). Additive: older peers ignore it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mcp_bridge_connected: Option<bool>,
 }
 
 /// Daemon-serveable projection of a Mac-side `Focus`. No absolute filesystem
@@ -2219,6 +2224,15 @@ pub enum ServerMsg {
         state: SessionState,
     },
 
+    /// The session's `nostromo-mcp-bridge` connected to (or was lost from) the
+    /// daemon's MCP socket. A session whose bridge is gone has lost its
+    /// `mcp__nostromo__*` tools until the client reconnects it. Sent on every
+    /// transition and on attach; never for a tag that never had a bridge.
+    SessionBridge {
+        tag: String,
+        connected: bool,
+    },
+
     /// Never constructed (superseded by `ApprovalRequest`; a test pins that).
     /// Classified `LocalOnly`, so even a stray one never reaches a network peer.
     SessionPermissionRequest {
@@ -2845,6 +2859,7 @@ mod tests {
                 remote_control: false,
                 state: SessionState::Idle,
                 stop_reason: None,
+                mcp_bridge_connected: None,
             }],
         });
     }
@@ -3710,6 +3725,7 @@ mod tests {
                 remote_control: false,
                 state: SessionState::Idle,
                 stop_reason: Some(StopReason::CrashLoopGuard),
+                mcp_bridge_connected: None,
             }],
         });
         // With no stop_reason.
@@ -3723,6 +3739,7 @@ mod tests {
                 remote_control: false,
                 state: SessionState::Idle,
                 stop_reason: None,
+                mcp_bridge_connected: None,
             }],
         });
     }

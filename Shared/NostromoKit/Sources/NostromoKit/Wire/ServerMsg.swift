@@ -23,6 +23,9 @@ public enum ServerMsg {
     case sessionSpawned(tag: String, sessionId: String?)
     /// Session lifecycle state changed.
     case sessionState(tag: String, state: SessionState)
+    /// The session's MCP bridge connected to (`true`) or was lost from
+    /// (`false`) the daemon.
+    case sessionBridge(tag: String, connected: Bool)
     /// The session has been permanently stopped.
     case sessionDown(tag: String, reason: StopReason)
     /// Auto-generated one-line summary for this session.
@@ -235,6 +238,10 @@ public struct SessionInfo: Decodable {
     public let remoteControl: Bool
     public let state:         SessionState
     public let stopReason:    StopReason?
+    /// Whether the session's `nostromo-mcp-bridge` is connected to the daemon.
+    /// `nil` when the daemon does not say (an older daemon, or a session that
+    /// never had a bridge): absence is never read as "offline".
+    public let mcpBridgeConnected: Bool?
 
     enum CodingKeys: String, CodingKey {
         case tag
@@ -245,6 +252,7 @@ public struct SessionInfo: Decodable {
         case remoteControl = "remote_control"
         case state
         case stopReason    = "stop_reason"
+        case mcpBridgeConnected = "mcp_bridge_connected"
     }
 }
 
@@ -669,6 +677,7 @@ extension ServerMsg {
     private struct SessionListRespWrapper:   Decodable { let sessions: [SessionInfo] }
     private struct SessionSpawnedWrapper:    Decodable { let tag: String; let session_id: String? }
     private struct SessionStateWrapper:      Decodable { let tag: String; let state: SessionState }
+    private struct SessionBridgeWrapper:     Decodable { let tag: String; let connected: Bool }
     private struct SessionDownWrapper:       Decodable { let tag: String; let reason: StopReason }
     private struct SessionSummaryWrapper:    Decodable { let tag: String; let summary: String }
     private struct SessionTurnsWrapper:      Decodable { let tag: String; let turns: [DaemonTurn] }
@@ -749,6 +758,11 @@ extension ServerMsg {
         case "session_state":
             if let m = try? dec.decode(SessionStateWrapper.self, from: data) {
                 return .sessionState(tag: m.tag, state: m.state)
+            }
+
+        case "session_bridge":
+            if let m = try? dec.decode(SessionBridgeWrapper.self, from: data) {
+                return .sessionBridge(tag: m.tag, connected: m.connected)
             }
 
         case "session_down":

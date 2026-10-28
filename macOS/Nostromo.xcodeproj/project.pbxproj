@@ -100,6 +100,8 @@
 		WK0000000000000000000048 /* SendToAgentSheet.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000046 /* SendToAgentSheet.swift */; };
 		WK0000000000000000000050 /* FocusBadges.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000049 /* FocusBadges.swift */; };
 		WK0000000000000000000051 /* FocusBadges.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000049 /* FocusBadges.swift */; };
+		TF000000000000000000A001 /* ToolsOfflineBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = TF000000000000000000A000 /* ToolsOfflineBadge.swift */; };
+		TF000000000000000000A002 /* ToolsOfflineBadge.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TF000000000000000000A000 /* ToolsOfflineBadge.swift */; };
 		WK0000000000000000000091 /* SidebarBadgeModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000090 /* SidebarBadgeModel.swift */; };
 		WK0000000000000000000092 /* SidebarBadgeModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000090 /* SidebarBadgeModel.swift */; };
 		WK0000000000000000000053 /* FocusDeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000052 /* FocusDeepLink.swift */; };
@@ -123,6 +125,7 @@
 		WK0000000000000000000078 /* FredSurfaceViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000077 /* FredSurfaceViewTests.swift */; };
 		WK00000000000000000000B2 /* FredDetailHardeningTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK00000000000000000000B1 /* FredDetailHardeningTests.swift */; };
 		WK0000000000000000000080 /* FocusBadgesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000079 /* FocusBadgesTests.swift */; };
+		TF000000000000000000A011 /* ToolsOfflineBadgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TF000000000000000000A010 /* ToolsOfflineBadgeTests.swift */; };
 		WK0000000000000000000094 /* SidebarBadgeModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000093 /* SidebarBadgeModelTests.swift */; };
 		WK0000000000000000000082 /* TeriFredWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WK0000000000000000000081 /* TeriFredWiringTests.swift */; };
 		SC00000000000000000000F1 /* TranscriptSelectionColorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */; };
@@ -703,6 +706,7 @@
 		WK0000000000000000000043 /* FredDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredDetailView.swift; sourceTree = "<group>"; };
 		WK0000000000000000000046 /* SendToAgentSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendToAgentSheet.swift; sourceTree = "<group>"; };
 		WK0000000000000000000049 /* FocusBadges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusBadges.swift; sourceTree = "<group>"; };
+		TF000000000000000000A000 /* ToolsOfflineBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolsOfflineBadge.swift; sourceTree = "<group>"; };
 		WK0000000000000000000090 /* SidebarBadgeModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarBadgeModel.swift; sourceTree = "<group>"; };
 		WK0000000000000000000052 /* FocusDeepLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusDeepLink.swift; sourceTree = "<group>"; };
 		WK0000000000000000000055 /* TeriBindings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriBindings.swift; sourceTree = "<group>"; };
@@ -724,6 +728,7 @@
 		WK0000000000000000000077 /* FredSurfaceViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredSurfaceViewTests.swift; sourceTree = "<group>"; };
 		WK00000000000000000000B1 /* FredDetailHardeningTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FredDetailHardeningTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000079 /* FocusBadgesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusBadgesTests.swift; sourceTree = "<group>"; };
+		TF000000000000000000A010 /* ToolsOfflineBadgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolsOfflineBadgeTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000093 /* SidebarBadgeModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarBadgeModelTests.swift; sourceTree = "<group>"; };
 		WK0000000000000000000081 /* TeriFredWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TeriFredWiringTests.swift; sourceTree = "<group>"; };
 		SC00000000000000000000F0 /* TranscriptSelectionColorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptSelectionColorTests.swift; sourceTree = "<group>"; };
@@ -1256,6 +1261,7 @@
 				TP000000000000000000G002 /* Toast */,
 				WK0000000000000000000046 /* SendToAgentSheet.swift */,
 				WK0000000000000000000049 /* FocusBadges.swift */,
+				TF000000000000000000A000 /* ToolsOfflineBadge.swift */,
 				WK0000000000000000000090 /* SidebarBadgeModel.swift */,
 				WK0000000000000000000052 /* FocusDeepLink.swift */,
 				HH000000000000000000070 /* TurnListVirtualizer.swift */,
@@ -1415,6 +1421,7 @@
 				WK0000000000000000000077 /* FredSurfaceViewTests.swift */,
 				WK00000000000000000000B1 /* FredDetailHardeningTests.swift */,
 				WK0000000000000000000079 /* FocusBadgesTests.swift */,
+				TF000000000000000000A010 /* ToolsOfflineBadgeTests.swift */,
 				WK0000000000000000000093 /* SidebarBadgeModelTests.swift */,
 				WK0000000000000000000081 /* TeriFredWiringTests.swift */,
 				LL0000000000000000000006 /* CodeDocumentTests.swift */,
@@ -1812,6 +1819,7 @@
 				WK0000000000000000000044 /* FredDetailView.swift in Sources */,
 				WK0000000000000000000047 /* SendToAgentSheet.swift in Sources */,
 				WK0000000000000000000050 /* FocusBadges.swift in Sources */,
+				TF000000000000000000A001 /* ToolsOfflineBadge.swift in Sources */,
 				WK0000000000000000000091 /* SidebarBadgeModel.swift in Sources */,
 				WK0000000000000000000053 /* FocusDeepLink.swift in Sources */,
 				WK0000000000000000000056 /* TeriBindings.swift in Sources */,
@@ -2078,6 +2086,7 @@
 				WK0000000000000000000045 /* FredDetailView.swift in TestSources */,
 				WK0000000000000000000048 /* SendToAgentSheet.swift in TestSources */,
 				WK0000000000000000000051 /* FocusBadges.swift in TestSources */,
+				TF000000000000000000A002 /* ToolsOfflineBadge.swift in TestSources */,
 				WK0000000000000000000092 /* SidebarBadgeModel.swift in TestSources */,
 				WK0000000000000000000054 /* FocusDeepLink.swift in TestSources */,
 				WK0000000000000000000060 /* WorkWireDecodingTests.swift in Sources */,
@@ -2097,6 +2106,7 @@
 				WK0000000000000000000078 /* FredSurfaceViewTests.swift in Sources */,
 				WK00000000000000000000B2 /* FredDetailHardeningTests.swift in Sources */,
 				WK0000000000000000000080 /* FocusBadgesTests.swift in Sources */,
+				TF000000000000000000A011 /* ToolsOfflineBadgeTests.swift in Sources */,
 				WK0000000000000000000094 /* SidebarBadgeModelTests.swift in Sources */,
 				WK0000000000000000000082 /* TeriFredWiringTests.swift in Sources */,
 				HH000000000000000000012 /* TurnReconciler.swift in TestSources */,

@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -44,6 +44,15 @@ use crate::mcp::{state::McpSharedState, tools};
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "nostromo";
+
+/// Hard cap on one newline-delimited frame. A longer frame is discarded up to
+/// its newline and answered with a JSON-RPC error; it never closes the
+/// connection.
+///
+/// 2 MiB, not 1: tool arguments may legitimately be ~1 MiB of text (the
+/// remote-shell hardening suite sends 1 MiB strings and expects the tool's own
+/// validator to refuse them by name), and JSON wrapping adds to that.
+pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
 /// JSON-RPC error code for a tool the operator's policy withdraws from this
 /// caller (W5 — curated-agent-views). In the implementation-defined server
@@ -114,12 +123,10 @@ async fn accept_loop(listener: UnixListener, state: McpSharedState) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                debug!("MCP: accepted connection");
+                info!("MCP: accepted connection");
                 let state = state.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_connection(stream, state).await {
-                        debug!("MCP connection closed: {e:#}");
-                    }
+                    serve_connection(stream, state).await;
                 });
             }
             Err(e) => {
@@ -132,39 +139,157 @@ async fn accept_loop(listener: UnixListener, state: McpSharedState) {
 
 // ── connection handler ────────────────────────────────────────────────────────
 
-async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<()> {
+/// Why a connection ended. Logged (with the pty id, never frame contents) on
+/// every close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseReason {
+    /// The peer closed its end.
+    PeerEof,
+    /// Writing a response failed because the peer is gone.
+    PeerGone,
+    /// Reading from the socket failed.
+    ReadError,
+}
+
+impl CloseReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::PeerEof => "peer_eof",
+            Self::PeerGone => "peer_gone",
+            Self::ReadError => "read_error",
+        }
+    }
+}
+
+/// One frame read off the socket.
+enum Frame {
+    /// A complete line, newline removed. May be anything: UTF-8 or not, JSON
+    /// or not.
+    Line(Vec<u8>),
+    /// A line longer than [`MAX_FRAME_BYTES`]; it was discarded unread.
+    TooLong,
+}
+
+/// Counts this connection as one of its pty's live bridges until dropped.
+struct BridgeGuard {
+    state: McpSharedState,
+    pty_id: String,
+}
+
+impl BridgeGuard {
+    fn open(state: &McpSharedState, pty_id: &str) -> Option<Self> {
+        if pty_id.is_empty() {
+            return None;
+        }
+        state.bridge_opened(pty_id);
+        Some(Self {
+            state: state.clone(),
+            pty_id: pty_id.to_owned(),
+        })
+    }
+}
+
+impl Drop for BridgeGuard {
+    fn drop(&mut self) {
+        self.state.bridge_closed(&self.pty_id);
+    }
+}
+
+/// Read the next newline-terminated frame, buffering at most
+/// [`MAX_FRAME_BYTES`]: a longer frame is skipped to its newline and reported
+/// as [`Frame::TooLong`]. `None` at end of stream. A final frame with no
+/// newline is still a frame.
+async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> std::io::Result<Option<Frame>> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut too_long = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(if too_long {
+                Some(Frame::TooLong)
+            } else if buf.is_empty() {
+                None
+            } else {
+                Some(Frame::Line(buf))
+            });
+        }
+        let newline = available.iter().position(|b| *b == b'\n');
+        let chunk = newline.unwrap_or(available.len());
+        if !too_long {
+            if buf.len() + chunk > MAX_FRAME_BYTES {
+                too_long = true;
+                buf = Vec::new();
+            } else {
+                buf.extend_from_slice(&available[..chunk]);
+            }
+        }
+        reader.consume(chunk + usize::from(newline.is_some()));
+        if newline.is_some() {
+            return Ok(Some(if too_long {
+                Frame::TooLong
+            } else {
+                Frame::Line(buf)
+            }));
+        }
+    }
+}
+
+async fn serve_connection(stream: UnixStream, state: McpSharedState) {
+    let mut pty_id: Option<String> = None;
+    let reason = run_connection(stream, &state, &mut pty_id).await;
+    info!(
+        pty_id = pty_id.as_deref().unwrap_or(""),
+        reason = reason.code(),
+        "MCP connection closed"
+    );
+}
+
+async fn run_connection(
+    stream: UnixStream,
+    state: &McpSharedState,
+    pty_id_out: &mut Option<String>,
+) -> CloseReason {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
 
-    // Step 1: read the Hello frame.
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .await
-        .context("read Hello frame")?;
-
-    let hello: Value = serde_json::from_str(line.trim()).unwrap_or(json!({}));
+    // Step 1: read the Hello frame. One that is missing, over-long, not UTF-8
+    // or not JSON leaves the caller unidentified; it does not end the
+    // connection.
+    let hello = match read_frame(&mut reader).await {
+        Ok(Some(Frame::Line(bytes))) => {
+            serde_json::from_slice::<Value>(&bytes).unwrap_or(json!({}))
+        }
+        Ok(Some(Frame::TooLong)) => json!({}),
+        Ok(None) => return CloseReason::PeerEof,
+        Err(e) => {
+            warn!("MCP: read Hello failed: {e}");
+            return CloseReason::ReadError;
+        }
+    };
     let pty_id: Option<String> = hello
         .get("pty_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    *pty_id_out = pty_id.clone();
 
     debug!(pty_id = ?pty_id, "MCP: received Hello");
+    let _bridge = pty_id
+        .as_deref()
+        .and_then(|id| BridgeGuard::open(state, id));
+    let state = state.clone();
 
     // Step 2: JSON-RPC 2.0 loop.
     //
     // The socket is read by a task of its own and the frames come through a
     // channel, so a tool call that waits for a person can still see the
     // agent hang up (or cancel) while it waits.
-    let (line_tx, mut lines) = mpsc::channel::<std::io::Result<String>>(LINE_QUEUE);
+    let (line_tx, mut lines) = mpsc::channel::<std::io::Result<Frame>>(LINE_QUEUE);
     let _reader = AbortOnDrop(tokio::spawn(async move {
         loop {
-            let mut next = String::new();
-            let read = reader.read_line(&mut next).await.map(|n| (n, next));
-            match read {
-                Ok((0, _)) => break, // EOF
-                Ok((_, next)) => {
-                    if line_tx.send(Ok(next)).await.is_err() {
+            match read_frame(&mut reader).await {
+                Ok(None) => break, // EOF
+                Ok(Some(frame)) => {
+                    if line_tx.send(Ok(frame)).await.is_err() {
                         break;
                     }
                 }
@@ -176,29 +301,61 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
         }
     }));
     // Frames that arrived while a call was running: served next, in order.
-    let mut queued: VecDeque<String> = VecDeque::new();
+    let mut queued: VecDeque<Frame> = VecDeque::new();
     loop {
-        line = match queued.pop_front() {
+        let frame = match queued.pop_front() {
             Some(queued) => queued,
             None => match lines.recv().await {
-                Some(read) => read.context("read JSON-RPC frame")?,
-                None => break, // EOF
+                Some(Ok(frame)) => frame,
+                Some(Err(e)) => {
+                    warn!("MCP: read failed: {e}");
+                    return CloseReason::ReadError;
+                }
+                None => return CloseReason::PeerEof,
             },
         };
-        let trimmed = line.trim();
+        let line = match frame {
+            Frame::Line(line) => line,
+            Frame::TooLong => {
+                warn!("MCP: frame over {MAX_FRAME_BYTES} bytes discarded");
+                let err = json_rpc_error(None, -32600, "Invalid Request: frame too large");
+                if !reply(&mut write_half, &err).await {
+                    return CloseReason::PeerGone;
+                }
+                continue;
+            }
+        };
+        let trimmed = line.trim_ascii();
         if trimmed.is_empty() {
             continue;
         }
 
-        let req: Value = match serde_json::from_str(trimmed) {
+        let Ok(text) = std::str::from_utf8(trimmed) else {
+            warn!("MCP: frame is not valid UTF-8");
+            let err = json_rpc_error(None, -32700, "Parse error: frame is not valid UTF-8");
+            if !reply(&mut write_half, &err).await {
+                return CloseReason::PeerGone;
+            }
+            continue;
+        };
+        let req: Value = match serde_json::from_str(text) {
             Ok(v) => v,
             Err(e) => {
                 warn!("MCP: invalid JSON frame: {e}");
                 let err = json_rpc_error(None, -32700, "Parse error");
-                write_frame(&mut write_half, &err).await?;
+                if !reply(&mut write_half, &err).await {
+                    return CloseReason::PeerGone;
+                }
                 continue;
             }
         };
+        if !req.is_object() {
+            let err = json_rpc_error(None, -32600, "Invalid Request");
+            if !reply(&mut write_half, &err).await {
+                return CloseReason::PeerGone;
+            }
+            continue;
+        }
 
         let id = req.get("id").cloned();
 
@@ -216,7 +373,9 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
                 TERMINAL_FORBIDDEN_CODE,
                 &format!("{}: {}", frame.op.forbidden_code(), frame.name),
             );
-            write_frame(&mut write_half, &err).await?;
+            if !reply(&mut write_half, &err).await {
+                return CloseReason::PeerGone;
+            }
             continue;
         }
 
@@ -240,7 +399,7 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
                         CallEnd::Cancelled => None,
                         // The caller hung up: the call was dropped, and with
                         // it whatever it was waiting for.
-                        CallEnd::HungUp => break,
+                        CallEnd::HungUp(reason) => return reason,
                     }
                 } else {
                     Some(call.await)
@@ -253,11 +412,11 @@ async fn serve_connection(stream: UnixStream, state: McpSharedState) -> Result<(
         };
 
         if let Some(resp) = response {
-            write_frame(&mut write_half, &resp).await?;
+            if !reply(&mut write_half, &resp).await {
+                return CloseReason::PeerGone;
+            }
         }
     }
-
-    Ok(())
 }
 
 /// Frames read ahead of the one being served.
@@ -277,8 +436,8 @@ enum CallEnd {
     Response(Value),
     /// The client sent `notifications/cancelled` for this call.
     Cancelled,
-    /// The client closed its end.
-    HungUp,
+    /// The client closed its end, or reading from it failed.
+    HungUp(CloseReason),
 }
 
 /// Run `call`, but drop it if the caller closes its end or cancels it first.
@@ -288,8 +447,8 @@ enum CallEnd {
 async fn run_until_cancelled<F>(
     call: F,
     request_id: Option<&Value>,
-    lines: &mut mpsc::Receiver<std::io::Result<String>>,
-    queued: &mut VecDeque<String>,
+    lines: &mut mpsc::Receiver<std::io::Result<Frame>>,
+    queued: &mut VecDeque<Frame>,
 ) -> CallEnd
 where
     F: std::future::Future<Output = Value>,
@@ -301,20 +460,21 @@ where
             // Stop reading ahead once the queue is full: the channel's own
             // bound then holds the client back.
             read = lines.recv(), if queued.len() < LINE_QUEUE => match read {
-                None | Some(Err(_)) => return CallEnd::HungUp,
-                Some(Ok(line)) if cancels(&line, request_id) => return CallEnd::Cancelled,
-                Some(Ok(line)) => queued.push_back(line),
+                None => return CallEnd::HungUp(CloseReason::PeerEof),
+                Some(Err(_)) => return CallEnd::HungUp(CloseReason::ReadError),
+                Some(Ok(frame)) if cancels(&frame, request_id) => return CallEnd::Cancelled,
+                Some(Ok(frame)) => queued.push_back(frame),
             },
         }
     }
 }
 
-/// Is `line` `notifications/cancelled` for the request `request_id`?
-fn cancels(line: &str, request_id: Option<&Value>) -> bool {
-    let Some(request_id) = request_id else {
+/// Is `frame` `notifications/cancelled` for the request `request_id`?
+fn cancels(frame: &Frame, request_id: Option<&Value>) -> bool {
+    let (Some(request_id), Frame::Line(bytes)) = (request_id, frame) else {
         return false;
     };
-    let Ok(frame) = serde_json::from_str::<Value>(line.trim()) else {
+    let Ok(frame) = serde_json::from_slice::<Value>(bytes.trim_ascii()) else {
         return false;
     };
     frame.get("method").and_then(Value::as_str) == Some("notifications/cancelled")
@@ -452,14 +612,33 @@ async fn handle_tools_call(
 // ── framing helpers ───────────────────────────────────────────────────────────
 
 /// Write a JSON value as a newline-terminated frame.
-async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
-    let mut bytes = serde_json::to_vec(value).context("serialise JSON-RPC frame")?;
+async fn write_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    value: &Value,
+) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     bytes.push(b'\n');
-    writer
-        .write_all(&bytes)
-        .await
-        .context("write JSON-RPC frame")?;
-    Ok(())
+    writer.write_all(&bytes).await
+}
+
+/// Write one response. Returns false only when the peer is really gone
+/// (`BrokenPipe`, `ConnectionReset`, `UnexpectedEof`); any other write error
+/// is logged and the connection carries on.
+async fn reply<W: AsyncWriteExt + Unpin>(writer: &mut W, value: &Value) -> bool {
+    match write_frame(writer, value).await {
+        Ok(()) => true,
+        Err(e) if peer_is_gone(&e) => false,
+        Err(e) => {
+            warn!("MCP: response write failed, connection kept: {e}");
+            true
+        }
+    }
+}
+
+fn peer_is_gone(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionReset, UnexpectedEof};
+    matches!(e.kind(), BrokenPipe | ConnectionReset | UnexpectedEof)
 }
 
 fn json_rpc_error(id: Option<Value>, code: i64, message: &str) -> Value {

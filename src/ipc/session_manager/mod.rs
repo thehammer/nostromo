@@ -435,6 +435,8 @@ impl ManagedSession {
             remote_control: self.remote_control,
             state: self.state(),
             stop_reason: self.stop_reason,
+            // Known only to the manager (it holds the bridge registry).
+            mcp_bridge_connected: None,
         }
     }
 }
@@ -454,6 +456,9 @@ pub struct SessionManager {
     ledger: Arc<ChildLedger>,
     /// Mac-pushed focus registry; served to all clients and broadcast on change.
     focus_registry: Vec<FocusMeta>,
+    /// Live MCP bridge connections per tag; `None` until the daemon wires the
+    /// MCP server in (tests, or a daemon without one).
+    bridges: Option<Arc<crate::mcp::BridgeRegistry>>,
     /// Tags this daemon created itself, via `nostromo.create_focus`, that no
     /// client has acknowledged yet (W7 — D8b).
     ///
@@ -612,6 +617,7 @@ impl SessionManager {
             ledger: Arc::new(ChildLedger::new(ledger_path_beside(&store_path))),
             store_path,
             focus_registry: Vec::new(),
+            bridges: None,
             network_clients: HashSet::new(),
             daemon_created_tags: HashSet::new(),
             pending_departures: HashSet::new(),
@@ -721,6 +727,18 @@ impl SessionManager {
     /// the Arc through every accept-loop call site.
     pub fn pane_registry(&self) -> Option<Arc<Mutex<PaneRegistry>>> {
         self.pane_registry.clone()
+    }
+
+    /// Wire the registry of live MCP bridge connections, so session lists and
+    /// attaches can say whether a session's `mcp__nostromo__*` tools are online.
+    pub fn configure_bridge_registry(&mut self, bridges: Arc<crate::mcp::BridgeRegistry>) {
+        self.bridges = Some(bridges);
+    }
+
+    /// `Some(connected)` once a bridge has identified as `tag`; `None` when
+    /// none ever has (or no registry is wired).
+    fn bridge_connected(&self, tag: &str) -> Option<bool> {
+        self.bridges.as_ref().and_then(|b| b.connected(tag))
     }
 
     /// Wire the [`PaneContentProvider`] the daemon exposes over its
@@ -1492,6 +1510,15 @@ impl SessionManager {
                 state,
             },
         );
+        if let Some(connected) = self.bridge_connected(tag) {
+            self.send_to_client(
+                client_id,
+                ServerMsg::SessionBridge {
+                    tag: tag.to_string(),
+                    connected,
+                },
+            );
+        }
 
         // The tasks as they are now, then the live events (subscribed above,
         // so nothing between is lost; a snapshot replaces the previous one).
@@ -2031,7 +2058,14 @@ impl SessionManager {
     }
 
     pub fn list(&self) -> Vec<SessionInfo> {
-        self.sessions.values().map(|s| s.info()).collect()
+        self.sessions
+            .values()
+            .map(|s| {
+                let mut info = s.info();
+                info.mcp_bridge_connected = self.bridge_connected(&info.tag);
+                info
+            })
+            .collect()
     }
 
     /// Replace the focus registry with the Mac-pushed snapshot. Returns the new

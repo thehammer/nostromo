@@ -307,7 +307,8 @@ public final class DaemonStore: ObservableObject {
                 alive:         state != .crashed,
                 remoteControl: info.remoteControl,
                 state:         state,
-                stopReason:    info.stopReason
+                stopReason:    info.stopReason,
+                mcpBridgeConnected: info.mcpBridgeConnected
             )
             sessions[tag] = info
 
@@ -321,7 +322,8 @@ public final class DaemonStore: ObservableObject {
                 alive:         false,
                 remoteControl: info.remoteControl,
                 state:         .idle,
-                stopReason:    reason
+                stopReason:    reason,
+                mcpBridgeConnected: info.mcpBridgeConnected
             )
             sessions[tag] = info
 
@@ -335,7 +337,25 @@ public final class DaemonStore: ObservableObject {
                 alive:         false,
                 remoteControl: info.remoteControl,
                 state:         .idle,
-                stopReason:    info.stopReason
+                stopReason:    info.stopReason,
+                mcpBridgeConnected: info.mcpBridgeConnected
+            )
+            sessions[tag] = info
+
+        case .sessionBridge(let tag, let connected):
+            // Additive health signal: whether the session's MCP bridge is
+            // connected to the daemon. Ignored for a tag we hold no session for.
+            guard var info = sessions[tag] else { return }
+            info = SessionInfo(
+                tag:           info.tag,
+                agentName:     info.agentName,
+                viewName:      info.viewName,
+                sessionId:     info.sessionId,
+                alive:         info.alive,
+                remoteControl: info.remoteControl,
+                state:         info.state,
+                stopReason:    info.stopReason,
+                mcpBridgeConnected: connected
             )
             sessions[tag] = info
 
@@ -349,7 +369,8 @@ public final class DaemonStore: ObservableObject {
                     alive:         true,
                     remoteControl: info.remoteControl,
                     state:         info.state,
-                    stopReason:    nil
+                    stopReason:    nil,
+                    mcpBridgeConnected: info.mcpBridgeConnected
                 )
                 sessions[tag] = info
             }
