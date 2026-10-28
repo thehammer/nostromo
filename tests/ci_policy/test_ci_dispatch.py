@@ -295,8 +295,28 @@ def check_required_check_is_the_aggregate_of_the_rust_parts(text):
     for part in RUST_PARTS:
         if "needs.%s.result" % part not in block:
             violations.append("job `build` never reads `needs.%s.result`" % part)
-    if not re.search(r'\[ "\$\w+" = success \] && \[ "\$\w+" = success \] && \[ "\$\w+" = success \]', block):
-        violations.append("job `build` does not test that all three part results equal `success`")
+    # Each part's result must be bound to its own env var, and the step's command must be
+    # exactly the conjunction of `[ "$VAR" = success ]` over those vars (no var tested
+    # twice, none missing), so a copy-paste slip cannot leave a part unchecked.
+    bound = dict(
+        (m.group(2), m.group(1))
+        for m in re.finditer(r"(?m)^\s+(\w+):\s*\$\{\{\s*needs\.([a-z-]+)\.result\s*\}\}\s*$", block)
+    )
+    if sorted(bound) != sorted(RUST_PARTS):
+        violations.append("job `build` binds results for %r, expected exactly %r" % (sorted(bound), sorted(RUST_PARTS)))
+    commands = re.findall(r"(?m)^\s+run:[ \t]*\|?[ \t]*\n?(?:\s*echo[^\n]*\n)?\s*(\[ [^\n]*)$", block)
+    tested = re.findall(r'\[ "\$(\w+)" = success \]', commands[0]) if commands else []
+    rest = re.sub(r'\[ "\$\w+" = success \]', "", commands[0]).replace("&&", "").strip() if commands else "?"
+    if not commands or rest or sorted(tested) != sorted(bound.values()):
+        violations.append(
+            "job `build` must test exactly `[ \"$VAR\" = success ]` for each bound result var %r (tests %r, leftover %r)"
+            % (sorted(bound.values()), sorted(tested), rest)
+        )
+    if re.search(r"(?m)^\s+continue-on-error:", text):
+        violations.append("`continue-on-error` is present in the workflow; a part that fails would report success")
+    for step in _steps_of(block):
+        if re.search(r"(?m)^        if:", step):
+            violations.append("job `build` has a step-level `if:`; the aggregate check must always evaluate")
     for key, raw_block in blocks.items():
         if key == "build":
             continue
@@ -357,10 +377,10 @@ def check_swift_jobs_wait_for_the_path_classifier(text):
                 continue
             m = re.search(r"(?m)^        if:[ \t]*(.*?)[ \t]*$", step)
             cond = m.group(1) if m else ""
-            if SWIFT_GATE not in cond:
+            if cond not in (SWIFT_GATE, SWIFT_GATE + " && failure()"):
                 violations.append(
-                    "job `%s` step %r is not gated on `%s` (its `if:` is %r)"
-                    % (key, first.strip(), SWIFT_GATE, cond)
+                    "job `%s` step %r `if:` is %r; it must be exactly `%s` (optionally `&& failure()`)"
+                    % (key, first.strip(), cond, SWIFT_GATE)
                 )
     for key in blocks:
         if key not in SWIFT_JOBS and key != CHANGES_JOB[0] and "needs.changes" in blocks[key]:
@@ -508,12 +528,10 @@ def good_workflow(
                 "        run: |",
                 '          [ "$FMT" = success ] && [ "$CLIPPY" = success ] && [ "$TEST" = success ]',
             ]
-        out += [
-            "      - name: Build & Lint inside a step",
-            "        if: %s" % (SWIFT_GATE + " && failure()" if key in SWIFT_JOBS else "failure()"),
-            "        run: true",
-            "",
-        ]
+        out += ["      - name: Build & Lint inside a step"]
+        if key != "build":  # the aggregate's steps must be unconditional
+            out.append("        if: %s" % (SWIFT_GATE + " && failure()" if key in SWIFT_JOBS else "failure()"))
+        out += ["        run: true", ""]
     return "\n".join(out)
 
 
@@ -749,6 +767,22 @@ class RequiredCheckAggregateTests(unittest.TestCase):
         text = good_workflow().replace('"$CLIPPY" = success', '"$CLIPPY" != failure')
         self.assertTrue(self._check(text))
 
+    def test_bites_when_the_wrong_variable_is_tested(self):
+        # `$TEST` (rust-test) is never checked: a failing test suite would pass.
+        text = good_workflow().replace('"$TEST" = success', '"$FMT" = success')
+        self.assertTrue(self._check(text))
+
+    def test_bites_on_continue_on_error(self):
+        text = good_workflow().replace("  rust-test:\n    name:", "  rust-test:\n    continue-on-error: true\n    name:", 1)
+        self.assertIn("continue-on-error", text)
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_the_aggregate_step_is_conditional(self):
+        text = good_workflow().replace(
+            "      - name: Every Rust part must have succeeded\n",
+            "      - name: Every Rust part must have succeeded\n        if: false\n", 1)
+        self.assertTrue(self._check(text))
+
     def test_bites_when_a_part_job_takes_the_required_name(self):
         text = good_workflow(names={"rust-test": "Build & Lint"})
         self.assertTrue(self._check(text))
@@ -780,6 +814,10 @@ class SwiftJobsPathGateTests(unittest.TestCase):
 
     def test_bites_when_a_failure_only_step_forgets_the_gate(self):
         text = good_workflow().replace("if: %s && failure()" % SWIFT_GATE, "if: failure()", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_bites_when_the_gate_is_or_ed_with_true(self):
+        text = good_workflow().replace(SWIFT_GATE, SWIFT_GATE + " || true", 1)
         self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
 
     def test_bites_when_the_gate_is_compared_loosely(self):

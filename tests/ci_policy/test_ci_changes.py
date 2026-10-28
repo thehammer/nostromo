@@ -7,23 +7,27 @@ classifier is DEFAULT-RUN: `swift_jobs_needed` returns False only when EVERY
 changed path is provably irrelevant to Swift. A path is skippable only if it is:
 
   1. under `docs/` or `.claude/`
-  2. under `src/` EXCEPT exactly `src/activity/store.rs`
-     (macOS/NostromoTests/ActivityStreamModelTests.swift reads that file)
-  3. a `.rs` file under `tests/` that is NOT under `tests/fixtures/`
+  2. a `.rs` file under `tests/` that is NOT under `tests/fixtures/`
      (Swift tests read tests/fixtures/**)
-  4. exactly `Cargo.toml`, `Cargo.lock` or `rust-toolchain.toml`
+  3. exactly `Cargo.toml`, `Cargo.lock` or `rust-toolchain.toml`
+
+`src/**` is NOT skippable, at all: Swift Mac tests read the Rust sources
+(ActivityStreamModelTests reads src/activity/store.rs, and
+StatusBarPostureWindowsTests walks every `.rs` file under `src/`), so any
+change under `src/` can change a Swift test's verdict.
 
 Anything else, an empty list, or any odd-looking path (`..` segment, leading
 `/` or `./`, backslash, empty string) means the Swift jobs run.
 
-RED phase: `scripts/ci_changes.py` does not exist yet, so every test here
-fails (module load error) until Cody implements it. The module is loaded lazily
-via importlib so each test fails clearly rather than one collection error.
+The module is loaded lazily via importlib so a load failure fails each test
+clearly rather than as one collection error.
 
 `SwiftSourcesDoNotReadSkippablePathsTests` is a drift guard: it scans the Swift
-sources for repo-relative reads that point into the skippable set. It must
-pass once the classifier exists, and a companion "bites" test proves the
-scanner can fail.
+sources for repo-relative reads that point into the skippable set (string
+literals passed to appendingPathComponent / URL(fileURLWithPath:), plus bare
+"docs" / "tests" / ".claude" literals in `for x in [...]` directory walks). It
+must pass against the real tree, and companion "bites" tests prove the scanner
+can fail.
 
 Run with:
     python3 -m unittest discover -s tests/ci_policy -p 'test_ci_changes.py' -v
@@ -88,12 +92,6 @@ class SkippablePathsTests(unittest.TestCase):
     def test_claude_dir_only_change_skips_swift(self):
         self.assertIs(swift_needed([".claude/prds/ci-speedup.md"]), False)
 
-    def test_rust_source_under_src_skips_swift(self):
-        self.assertIs(swift_needed(["src/ipc/protocol.rs"]), False)
-
-    def test_non_rust_file_under_src_skips_swift(self):
-        self.assertIs(swift_needed(["src/schema/queries.sql"]), False)
-
     def test_rust_integration_test_skips_swift(self):
         self.assertIs(swift_needed(["tests/terminal_pane.rs"]), False)
 
@@ -105,9 +103,9 @@ class SkippablePathsTests(unittest.TestCase):
             swift_needed(["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]), False
         )
 
-    def test_mixed_docs_src_and_cargo_lock_skip_swift(self):
+    def test_mixed_docs_cargo_lock_and_rust_test_skip_swift(self):
         self.assertIs(
-            swift_needed(["docs/a.md", "src/lib.rs", "Cargo.lock"]), False
+            swift_needed(["docs/a.md", "Cargo.lock", "tests/foo.rs"]), False
         )
 
 
@@ -202,24 +200,39 @@ class DefaultRunTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# The one file under src/ that Swift reads.
+# src/** is never skippable: Swift tests read the Rust sources.
 # ---------------------------------------------------------------------------
-class ActivityStoreExceptionTests(unittest.TestCase):
-    def test_activity_store_rs_alone_runs_swift(self):
-        self.assertIs(swift_needed(["src/activity/store.rs"]), True)
+class SrcIsNotSkippableTests(unittest.TestCase):
+    def test_every_path_under_src_runs_swift(self):
+        for path in [
+            "src/activity/store.rs",
+            "src/activity/mod.rs",
+            "src/activity/store.rs.bak",
+            "src/store.rs",
+            "src/lib.rs",
+            "src/ipc/protocol.rs",
+            "src/schema/queries.sql",
+            "src/anything",
+            "src/ünï/mod.rs",
+        ]:
+            with self.subTest(path=path):
+                self.assertIs(swift_needed([path]), True)
 
-    def test_activity_store_rs_among_skippable_paths_runs_swift(self):
+    def test_src_only_change_runs_swift(self):
+        self.assertIs(swift_needed(["src/lib.rs"]), True)
+
+    def test_src_among_otherwise_skippable_paths_runs_swift(self):
         self.assertIs(
-            swift_needed(["docs/a.md", "src/lib.rs", "src/activity/store.rs"]), True
+            swift_needed(["docs/a.md", "src/lib.rs", "Cargo.lock"]), True
         )
 
-    def test_only_the_exact_store_file_is_excluded(self):
-        # `src/activity/store.rs.bak` and `src/activity/mod.rs` are under src/
-        # and are NOT the exact excluded file, so they are skippable and the
-        # answer is False. Only `src/activity/store.rs` itself is carved out.
-        self.assertIs(swift_needed(["src/activity/store.rs.bak"]), False)
-        self.assertIs(swift_needed(["src/activity/mod.rs"]), False)
-        self.assertIs(swift_needed(["src/store.rs"]), False)
+    def test_rust_change_under_src_runs_swift_because_status_bar_test_walks_src(self):
+        # Regression: macOS/NostromoTests/StatusBarPostureWindowsTests.swift
+        # (testNoSourceReferencesTheTmuxRateLimitsFile, ~line 105) walks EVERY
+        # `.rs` file under `src/` and fails if one mentions the tmux
+        # rate-limits file. A PR touching only `src/foo.rs` can therefore flip
+        # that Mac test, so the Mac test job must run.
+        self.assertIs(swift_needed(["src/foo.rs"]), True)
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +313,7 @@ class MixedChangeTests(unittest.TestCase):
         )
 
     def test_relevant_path_first_runs_swift(self):
-        self.assertIs(swift_needed(["Makefile", "docs/a.md", "src/lib.rs"]), True)
+        self.assertIs(swift_needed(["Makefile", "docs/a.md", "tests/foo.rs"]), True)
 
     def test_mixed_change_with_fixture_runs_swift(self):
         self.assertIs(
@@ -323,9 +336,9 @@ class MixedChangeTests(unittest.TestCase):
         self.assertIs(swift_needed(["docs/old.md", "docs/new.md"]), False)
 
     def test_input_list_is_not_mutated(self):
-        paths = ["docs/a.md", "src/lib.rs"]
+        paths = ["docs/a.md", "tests/foo.rs"]
         swift_needed(paths)
-        self.assertEqual(paths, ["docs/a.md", "src/lib.rs"])
+        self.assertEqual(paths, ["docs/a.md", "tests/foo.rs"])
 
 
 class UnicodeAndScaleTests(unittest.TestCase):
@@ -333,7 +346,7 @@ class UnicodeAndScaleTests(unittest.TestCase):
         for path in [
             "docs/résumé 日本語.md",
             "docs/with space/a b.md",
-            "src/ünï/mod.rs",
+            "tests/ünï/mod.rs",
             ".claude/notes/\U0001f680 launch.md",
         ]:
             with self.subTest(path=path):
@@ -408,7 +421,10 @@ class CliTests(unittest.TestCase):
         self.assert_cli(nul("docs/a.md"), "swift=false")
 
     def test_skippable_mix_without_trailing_nul_prints_swift_false(self):
-        self.assert_cli(b"docs/a.md\0src/lib.rs\0Cargo.lock", "swift=false")
+        self.assert_cli(b"docs/a.md\0tests/foo.rs\0Cargo.lock", "swift=false")
+
+    def test_src_input_prints_swift_true(self):
+        self.assert_cli(nul("docs/a.md", "src/lib.rs"), "swift=true")
 
     def test_mac_app_input_prints_swift_true(self):
         self.assert_cli(nul("macOS/Nostromo/Data/AppStore.swift"), "swift=true")
@@ -426,9 +442,9 @@ class CliTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Drift guard: Swift sources must not read repo files the classifier skips.
 #
-# If a Swift test starts reading e.g. `src/ipc/protocol.rs` or `docs/x.md`, a
+# If a Swift test starts reading e.g. `docs/x.md` or `tests/helper.rs`, a
 # change to that file would be classified skippable and the Swift job that reads
-# it would silently not run. This scans the Swift sources for repo-relative
+# it would silently not run. (`src/` reads are fine: src/** is not skippable.) This scans the Swift sources for repo-relative
 # reads and asserts the classifier treats each one as NOT skippable.
 # ---------------------------------------------------------------------------
 SWIFT_ROOTS = ["macOS", "iOS", "Shared"]
@@ -441,7 +457,16 @@ READ_LITERAL_RE = re.compile(
     re.DOTALL,
 )
 
+# `src` is listed so the scanner still sees src reads (and the vacuity guard can
+# prove it scans), but the classifier treats every src path as needing Swift, so
+# they never become violations.
+# `.claude` is deliberately absent here: Swift legitimately reads `.claude/...`
+# under the user's home directory (not the repo), so only the narrower
+# `for x in [...]` walk heuristic below treats a bare ".claude" as a repo read.
 SKIPPABLE_DIR_NAMES = ("src", "tests", "docs")
+# Bare directory names that, inside `for x in [...]`, mean a directory walk.
+WALKED_DIR_NAMES = ("docs", "tests", ".claude")
+STRING_LITERAL_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 SKIPPABLE_FILE_NAMES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
 
 
@@ -455,15 +480,31 @@ def _candidates(value):
     """Concrete repo paths to ask the classifier about for one literal."""
     if value.endswith("/"):
         directory = value.rstrip("/")
-        return [directory, directory + "/x"]
-    if value in SKIPPABLE_DIR_NAMES:
-        return [value, value + "/x"]
+        return [directory, directory + "/x", directory + "/x.rs"]
+    if value in SKIPPABLE_DIR_NAMES or value in WALKED_DIR_NAMES:
+        return [value, value + "/x", value + "/x.rs"]
     return [value]
 
 
+def find_directory_walk_literals(swift_text):
+    """Bare "docs" / "tests" / ".claude" literals inside an array literal on a
+    `for ... in [` line: the shape of a directory walk such as
+    `for dir in ["macOS/Nostromo", "src"]`."""
+    found = []
+    for line in swift_text.splitlines():
+        if "for " not in line or " in [" not in line:
+            continue
+        array_part = line[line.index(" in [") + len(" in ["):]
+        for match in STRING_LITERAL_RE.finditer(array_part):
+            if match.group(1) in WALKED_DIR_NAMES:
+                found.append(match.group(1))
+    return found
+
+
 def find_repo_relative_reads(swift_text):
-    """Literals in `swift_text` that point into src/, tests/, docs/ or the Cargo
-    / toolchain files. Interpolations are cut at the first `\\(`."""
+    """Literals in `swift_text` that point into src/, tests/, docs/, .claude/ or
+    the Cargo / toolchain files, plus bare directory names in `for ... in [`
+    walks. Interpolations are cut at the first `\\(`."""
     reads = []
     for match in READ_LITERAL_RE.finditer(swift_text):
         value = match.group(1)
@@ -472,6 +513,7 @@ def find_repo_relative_reads(swift_text):
             value = value[:cut]
         if _literal_targets_skippable_area(value):
             reads.append(value)
+    reads.extend(find_directory_walk_literals(swift_text))
     return reads
 
 
@@ -539,15 +581,23 @@ class SwiftReadScannerBitesTests(unittest.TestCase):
     def violations(self, snippet):
         return find_violations(snippet, _mod().swift_jobs_needed)
 
-    def test_reports_read_of_skippable_rust_source(self):
-        snippet = 'let u = root.appendingPathComponent("src/ipc/protocol.rs")\n'
+    def test_reports_read_of_skippable_docs_file(self):
+        snippet = 'let u = root.appendingPathComponent("docs/ci.md")\n'
+        self.assertEqual(len(self.violations(snippet)), 1)
+
+    def test_reports_read_of_skippable_rust_test_helper(self):
+        snippet = 'let u = root.appendingPathComponent("tests/helper.rs")\n'
+        self.assertEqual(len(self.violations(snippet)), 1)
+
+    def test_reports_read_of_cargo_manifest(self):
+        snippet = 'let u = root.appendingPathComponent("Cargo.toml")\n'
         self.assertEqual(len(self.violations(snippet)), 1)
 
     def test_reports_read_when_literal_is_on_the_following_line(self):
         snippet = (
             "let u = root\n"
             "    .appendingPathComponent(\n"
-            '        "src/ipc/protocol.rs"\n'
+            '        "docs/ci.md"\n'
             "    )\n"
         )
         self.assertEqual(len(self.violations(snippet)), 1)
@@ -557,16 +607,42 @@ class SwiftReadScannerBitesTests(unittest.TestCase):
         self.assertEqual(len(self.violations(snippet)), 1)
 
     def test_reports_read_of_skippable_directory(self):
-        snippet = 'let d = root.appendingPathComponent("src/")\n'
+        snippet = 'let d = root.appendingPathComponent("docs/")\n'
         self.assertEqual(len(self.violations(snippet)), 1)
+
+    def test_reports_read_of_skippable_directory_without_trailing_slash(self):
+        snippet = 'let d = root.appendingPathComponent("tests")\n'
+        self.assertEqual(len(self.violations(snippet)), 1)
+
+    def test_reports_bare_skippable_directory_in_for_in_array_walk(self):
+        for name in ["docs", "tests", ".claude"]:
+            with self.subTest(name=name):
+                snippet = f'for dir in ["macOS/Nostromo", "{name}"] {{\n'
+                self.assertEqual(len(self.violations(snippet)), 1)
+
+    def test_does_not_report_src_in_for_in_array_walk(self):
+        # The StatusBarPostureWindowsTests pattern: src/** is not skippable.
+        snippet = '        for dir in ["macOS/Nostromo", "src"] {\n'
+        self.assertEqual(self.violations(snippet), [])
+
+    def test_does_not_report_bare_directory_literal_outside_a_for_in_walk(self):
+        snippet = 'let names = ["docs", "tests"]\n'
+        self.assertEqual(self.violations(snippet), [])
 
     def test_does_not_report_read_of_mac_app_source(self):
         snippet = 'let u = root.appendingPathComponent("macOS/Nostromo/Data/AppStore.swift")\n'
         self.assertEqual(self.violations(snippet), [])
 
-    def test_does_not_report_known_carved_out_reads(self):
+    def test_does_not_report_src_reads(self):
         snippet = (
             'a.appendingPathComponent("src/activity/store.rs")\n'
+            'b.appendingPathComponent("src/ipc/protocol.rs")\n'
+            'c.appendingPathComponent("src/")\n'
+        )
+        self.assertEqual(self.violations(snippet), [])
+
+    def test_does_not_report_known_carved_out_reads(self):
+        snippet = (
             'b.appendingPathComponent("tests/fixtures/tracker/\\(name)")\n'
             'c.appendingPathComponent("tests/fixtures/mother-contract")\n'
         )

@@ -121,10 +121,17 @@ It is default-run, not default-skip. The Swift jobs are skipped **only if every
 changed path** is on a short allow-list:
 
 - `docs/**` and `.claude/**`
-- `src/**` (the Rust daemon) **except `src/activity/store.rs`**, which a Mac
-  test reads
 - `tests/**/*.rs` outside `tests/fixtures/` (Swift tests read the fixtures)
 - `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`
+
+**`src/**` (the Rust daemon) is deliberately not on the list.** Two Mac tests
+read the Rust sources: `ActivityStreamModelTests` reads
+`src/activity/store.rs`, and `StatusBarPostureWindowsTests`
+(`testNoSourceReferencesTheTmuxRateLimitsFile`) walks every `.rs` file under
+`src/` looking for a forbidden string, so any Rust source change can change a
+Swift test's verdict. A Rust PR that touches `src/` therefore still runs the
+Swift jobs. Moving that one scan into a Rust test would let `src/**` join the
+allow-list; that is a follow-up, not part of this change.
 
 Everything else runs the Swift jobs: anything under `macOS/`, `iOS/`,
 `Shared/` (including `NostromoKit`), `project.pbxproj`, the `Makefile`,
@@ -140,6 +147,10 @@ a required `Swift tests (Mac app)` would stay "Expected" and block the PR.
 Merge tooling (`merge-when-green.sh`) treats SUCCESS, SKIPPED and NEUTRAL as
 green, so either would pass it; the step gate is the one that is also correct
 for branch protection. The cost is a macOS runner started for a few seconds.
+If `Detect changed paths` itself fails, the three Swift jobs are skipped at job
+level (they `need` it) and `Detect changed paths` is red: if the Swift checks
+are ever required, they stay "Expected" and block the PR, which is the safe
+direction.
 
 Drift guard: `tests/ci_policy/test_ci_changes.py` scans every Swift source for
 repo-relative reads (`appendingPathComponent("src/...")`, `tests/...`, `docs/...`)

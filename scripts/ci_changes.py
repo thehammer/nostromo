@@ -16,10 +16,14 @@ therefore never silently skips the Mac compile gate.
 
 Skippable paths (none can be read by a Swift build or test):
   * `docs/**` and `.claude/**`
-  * `src/**` (the Rust daemon), except `src/activity/store.rs`, which a Mac test
-    reads (ActivityStreamModelTests)
   * `tests/**/*.rs` outside `tests/fixtures/` (Swift tests read the fixtures)
   * `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`
+
+`src/**` is deliberately NOT skippable. Two Mac tests read the Rust sources:
+ActivityStreamModelTests reads `src/activity/store.rs`, and
+StatusBarPostureWindowsTests walks every `.rs` file under `src/` looking for a
+forbidden string, so any Rust source change can change a Swift test's verdict.
+Move that scan into a Rust test and `src/**` can join the allow-list.
 
 `tests/ci_policy/test_ci_changes.py` scans the Swift sources and fails if one
 starts reading a repo-relative path this allow-list would skip, so the list
@@ -35,8 +39,6 @@ import sys
 
 _SKIPPABLE_PREFIXES = ("docs/", ".claude/")
 _SKIPPABLE_FILES = frozenset(("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"))
-# Files under a skippable prefix that Swift tests nevertheless read.
-_READ_BY_SWIFT = frozenset(("src/activity/store.rs",))
 _FIXTURES_PREFIX = "tests/fixtures/"
 
 
@@ -65,8 +67,6 @@ def _is_skippable(path):
         return True
     if path.startswith(_SKIPPABLE_PREFIXES):
         return True
-    if path.startswith("src/"):
-        return path not in _READ_BY_SWIFT
     if path.startswith("tests/"):
         return path.endswith(".rs") and not path.startswith(_FIXTURES_PREFIX)
     return False
