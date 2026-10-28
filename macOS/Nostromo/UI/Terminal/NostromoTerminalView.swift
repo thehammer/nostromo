@@ -28,7 +28,7 @@ import SwiftTerm
 /// bytes that arrive through it are marked `auto_reply` so they never count as a keystroke (the
 /// daemon's remote idle rule, 2e). `keyDown` and friends are `public override` in SwiftTerm and
 /// cannot be overridden here, which is why the reply route is the one marked.
-final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
+final class NostromoTerminalView: TerminalView, TerminalViewDelegate, TerminalPixelSource {
 
     /// Lines of history kept (criterion 2).
     static let scrollbackLines = 10_000

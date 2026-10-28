@@ -648,8 +648,11 @@
 		TP000000000000000000T035 /* TurnOriginTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F035 /* TurnOriginTests.swift */; };
 		TP000000000000000000TH01 /* TurnOriginHiddenTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000FH01 /* TurnOriginHiddenTextTests.swift */; };
 		TP000000000000000000A036 /* AppControlAX.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F036 /* AppControlAX.swift */; };
+		SR0000000000000000000A01 /* ScreenshotRedaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = SR0000000000000000000F01 /* ScreenshotRedaction.swift */; };
+		SR0000000000000000000A02 /* ScreenshotRedaction.swift in TestSources */ = {isa = PBXBuildFile; fileRef = SR0000000000000000000F01 /* ScreenshotRedaction.swift */; };
 		TP000000000000000000T036 /* AppControlAX.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F036 /* AppControlAX.swift */; };
 		TP000000000000000000T037 /* TerminalScreenAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F037 /* TerminalScreenAccessTests.swift */; };
+		SR0000000000000000000A03 /* ScreenshotRedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SR0000000000000000000F02 /* ScreenshotRedactionTests.swift */; };
 		TP000000000000000000B001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = TP000000000000000000P002 /* SwiftTerm */; };
 /* End PBXBuildFile section */
 
@@ -1090,7 +1093,9 @@
 		TP000000000000000000F035 /* TurnOriginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOriginTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000FH01 /* TurnOriginHiddenTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOriginHiddenTextTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F036 /* AppControlAX.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlAX.swift; sourceTree = "<group>"; };
+		SR0000000000000000000F01 /* ScreenshotRedaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotRedaction.swift; sourceTree = "<group>"; };
 		TP000000000000000000F037 /* TerminalScreenAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreenAccessTests.swift; sourceTree = "<group>"; };
+		SR0000000000000000000F02 /* ScreenshotRedactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotRedactionTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -1246,6 +1251,7 @@
 				AC0000000000000000000010 /* AppControlProtocol.swift */,
 				AC0000000000000000000020 /* AppControlServer.swift */,
 				TP000000000000000000F036 /* AppControlAX.swift */,
+				SR0000000000000000000F01 /* ScreenshotRedaction.swift */,
 				ZZ0000000000000000BA1300 /* AppControlTasks.swift */,
 				ZZ0000000000000000BA1400 /* TranscriptAnchorProbe.swift */,
 				ZZ0000000000000000TK1300 /* AppControlTracker.swift */,
@@ -1404,6 +1410,7 @@
 				TP000000000000000000F035 /* TurnOriginTests.swift */,
 				TP000000000000000000FH01 /* TurnOriginHiddenTextTests.swift */,
 				TP000000000000000000F037 /* TerminalScreenAccessTests.swift */,
+				SR0000000000000000000F02 /* ScreenshotRedactionTests.swift */,
 				WK0000000000000000000059 /* WorkWireDecodingTests.swift */,
 				WK0000000000000000000061 /* WorkQueryTests.swift */,
 				WK0000000000000000000063 /* WorkStoreTests.swift */,
@@ -1784,6 +1791,7 @@
 				TP000000000000000000A018 /* FollowModel.swift in Sources */,
 				TP000000000000000000A019 /* TurnOrigin.swift in Sources */,
 				TP000000000000000000A036 /* AppControlAX.swift in Sources */,
+				SR0000000000000000000A01 /* ScreenshotRedaction.swift in Sources */,
 				TP000000000000000000A020 /* RemoteShellConfirmSheet.swift in Sources */,
 				TP000000000000000000A021 /* RemoteShellPresenter.swift in Sources */,
 				TP000000000000000000A022 /* NewRemoteShellSheet.swift in Sources */,
@@ -2016,6 +2024,7 @@
 				TP000000000000000000T018 /* FollowModel.swift in TestSources */,
 				TP000000000000000000T019 /* TurnOrigin.swift in TestSources */,
 				TP000000000000000000T036 /* AppControlAX.swift in TestSources */,
+				SR0000000000000000000A02 /* ScreenshotRedaction.swift in TestSources */,
 				TP000000000000000000T027 /* RemoteShellStoreTests.swift in Sources */,
 				TP000000000000000000T028 /* RemoteShellWireTests.swift in Sources */,
 				TP000000000000000000T029 /* ProjectDetectionTests.swift in Sources */,
@@ -2033,6 +2042,7 @@
 				TP000000000000000000T035 /* TurnOriginTests.swift in Sources */,
 				TP000000000000000000TH01 /* TurnOriginHiddenTextTests.swift in Sources */,
 				TP000000000000000000T037 /* TerminalScreenAccessTests.swift in Sources */,
+				SR0000000000000000000A03 /* ScreenshotRedactionTests.swift in Sources */,
 				ZZ0000000000000000M20102 /* ModelStore.swift in TestSources */,
 				ZZ0000000000000000M20112 /* ModelPresentation.swift in TestSources */,
 				ZZ0000000000000000M20122 /* ModelChip.swift in TestSources */,

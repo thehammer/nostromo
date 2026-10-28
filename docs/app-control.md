@@ -47,7 +47,7 @@ screenshot or the `tree` dump can be passed straight to `click`.
 | `key` / `type` | key event through `NSApp.sendEvent` (menu shortcuts fire) / insert text at the first responder |
 | `paste` | put an image or text on the clipboard and send `paste:` |
 | `drop` | deliver a file drop to the registered drag destination under a point |
-| `screenshot` | PNG of a window's content view (no Screen Recording permission needed) |
+| `screenshot` | PNG of a window (no Screen Recording permission needed). **In the real app every terminal pane is hidden**: see "Screenshots hide terminals" below. The reply carries `terminalsHidden` (true in the real app) |
 
 ## Mouse events and the tracking loop
 
@@ -157,6 +157,44 @@ at all) is in [`operator-app-trust.md`](operator-app-trust.md).
 **QA-only switch.** An isolated QA build may accept synthetic input on those
 controls when it is launched with `NOSTROMO_QA_ALLOW_SYNTHETIC_INPUT=1` **and**
 its bundle id is not `com.hammer.nostromo`. The user's app never honours it.
+
+## Screenshots hide terminals
+
+A terminal's screen is read through `nostromo.read_terminal_screen` only (it needs a follow and
+is redacted by the daemon). A picture of the window would bypass that, so `screenshot` does not
+show terminal pixels in the real app (`com.hammer.nostromo`, where
+`SyntheticInputGate.allowsSynthetic` is false):
+
+- Every terminal pane's body (everything under its header: the terminal, a mirror's clipped
+  overflow, the connecting message and the ended overlay) is painted over with one opaque block
+  labelled `terminal hidden from app-control`. The header, the red remote frame and the environment
+  label stay visible, so layout QA still works. Every window's screenshot hides the terminals in
+  that window, mirrors included.
+- The capture is made in memory and painted over **before** the PNG is encoded. The unredacted image
+  is never written to disk, not even to a temp file (`ScreenshotRedaction.pngData`; the server writes
+  only what it returns).
+- If a terminal's area cannot be placed in the capture (not in the window, no finite frame, a capture
+  that does not match its window), the screenshot is **refused** with `screenshot refused: ...`, and
+  nothing is written.
+- A QA build (`NOSTROMO_QA_ALLOW_SYNTHETIC_INPUT=1`, bundle id other than `com.hammer.nostromo`)
+  gets the unchanged picture, so `terminal-local.sh`-style QA still sees what the terminal drew.
+
+`screenshot` is the only app-control command that returns pixels or image data (`paste --image` and
+`drop` read a file you name; they return nothing). The other commands carry no terminal text: `windows`
+returns window metadata and the first responder's class name; `tree`, `find` and `hittest` report class,
+frame, label and the text of text fields, buttons and text views, and a terminal view is none of those; its
+accessibility value (read by `tree`, `find` and `ax`) is empty in the real app (`TerminalScreenAccess`).
+The pane header's text (shell, directory, environment) and the ended/connecting messages are chrome, not
+screen content.
+
+The window-server picture is a snapshot of what the compositor drew last, the blocks come from the view
+tree as it is now: `screenshot` lays the window out, draws it and flushes Core Animation first so the two
+agree. A pane that is mid-resize in the same instant is the one case that can leave a sliver of its old
+position unpainted; take the screenshot once the layout has settled.
+
+The coordinate mapping: the capture covers the whole window frame (window-server path) or the content
+view (the `cacheDisplay` fallback, used when the window server returns a flat image); `ScreenshotRedaction` converts each terminal area to window
+coordinates and from there to pixels (scale from the image size, y flipped, rounded outward).
 
 ## Isolated QA instance
 

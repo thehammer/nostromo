@@ -41,7 +41,7 @@ import SwiftTerm
 /// Every control that changes a terminal (the x, Restart, Close, Keep open, and Terminal > Close Terminal
 /// Pane) asks `TerminalInputGuard.allowsControl` first. A synthetic click does nothing, and the
 /// refusal is reported to the daemon.
-final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
+final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, TerminalPixelSource {
 
     static let headerHeight = TerminalPaneHeaderView.height
     private static let overlayHeight: CGFloat = 40
@@ -142,6 +142,13 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         store.unregister(self)
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
     }
+
+    // MARK: - TerminalPixelSource
+
+    /// The whole body under the header: the terminal (a mirror's view can be larger than the pane and is
+    /// clipped to this), the connecting message and, along the bottom, the ended overlay (translucent, so
+    /// the terminal shows through it). An app-control screenshot paints over all of it.
+    var terminalPixelArea: NSView { terminalContainer }
 
     // MARK: - Lookup (menus)
 
