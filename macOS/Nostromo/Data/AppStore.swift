@@ -2006,3 +2006,5 @@ enum NeedsYouRouting {
 }
 
 extension MotherJob: MotherJobLike {}
+
+// throwaway: mixed path-gate proof
