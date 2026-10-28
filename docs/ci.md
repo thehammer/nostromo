@@ -18,7 +18,7 @@ instead; see "Skipping the Swift jobs" below.
 | `Rust tests` | ubuntu-latest | `cargo test` (compiles and links the lib, the bins and every test binary) | same | see "Where the time goes" |
 | `Detect changed paths` | ubuntu-latest | `scripts/ci_changes.py` over the PR's changed paths | n/a | ~10 s |
 | `Python tooling tests` | macos-latest | `make python-test` (fails on any skip) | `make python-test` | ~4 min |
-| `Swift tests (Mac app)` | macos-26 | build-for-testing, then the `NostromoTests` scheme as a parallel phase plus a serial phase (`macOS/scripts/mac-test-ci.sh`), then the compile gate; ~5,800 tests | `make mac-test` (fully serial) | see "Where the time goes" |
+| `Swift tests (Mac app)` | macos-26 | `make mac-test` (the `NostromoTests` scheme, ~5,800 tests, fully serial), then the compile gate | `make mac-test` | see "Where the time goes" |
 | `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~2.5 min |
 | `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.7 min |
 | `Launch smoke (advisory)` | macos-26 | see below (path-filtered, advisory) | `make mac-smoke` | ~5 min |
@@ -26,10 +26,9 @@ instead; see "Skipping the Swift jobs" below.
 Every job except the advisory launch smoke can also be dispatched by hand on a
 branch, alone or in groups; see "Running CI on a branch (dispatch)" below.
 
-`make mac-test` and `make kit-test` remain the local commands. `make mac-test`
-is fully serial and is the reference: a CI failure in the parallel phase that
-does not reproduce there is a parallel-safety problem. Fix it by adding the
-class to `SERIAL_CLASSES` in `macOS/scripts/mac-test-ci.sh`, not by rerunning.
+`make mac-test` and `make kit-test` remain the local commands; the Swift jobs
+run exactly those Makefile targets, so a local failure and a PR-checks failure
+are the same failure.
 
 ### The Swift jobs
 
@@ -63,18 +62,6 @@ class to `SERIAL_CLASSES` in `macOS/scripts/mac-test-ci.sh`, not by rerunning.
   SwiftTerm 1.19+ has a build-tool plugin that command-line
   `xcodebuild` rejects without `-skipPackagePluginValidation`: do not upgrade
   it without deciding that flag's place in `make mac`, CI and the smoke.
-- The Mac tests run as `build-for-testing` once, then a **parallel phase** (every
-  class except the serial list, 3 workers = the runner's cores) and a **serial
-  phase** (the classes in `SERIAL_CLASSES`). The two are exact complements
-  (`-skip-testing` / `-only-testing` over the same list), so every test runs
-  once; the script prints both phases' results and fails if a serial class did
-  not run. Serial classes are the layout goldens (`ChatTurnViewLayoutTests`,
-  the Tracker and `TurnHeightEstimator` classes, `MarkdownCodeBlockTests`,
-  `AppControlTrackerTests`) and the real-window classes that wait on
-  wall-clock budgets (`MotherDetail*`, `WindowContentOverflowTests`, ...),
-  which flaked under CPU contention in the parallel phase (measured: below).
-  More than 3 workers on the 3-core runner made those flakes worse (4 and 6
-  workers each failed), so the count stays at the core count.
 - On failure the jobs upload the `.xcresult` bundle (`swift-tests-mac-xcresult`),
   the NostromoKit log (`swift-tests-kit-log`) or the iOS build log
   (`ios-simulator-build-log`) for 14 days. The Makefile filters

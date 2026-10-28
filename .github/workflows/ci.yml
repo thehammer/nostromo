@@ -329,12 +329,12 @@ jobs:
             -scheme NostromoTests -derivedDataPath macOS/build \
             -onlyUsePackageVersionsFromResolvedFile
 
-      # Same suite as `make mac-test` (the `NostromoTests` scheme), run as one
-      # build, a parallel phase and a serial phase for the layout-golden
-      # classes. See macOS/scripts/mac-test-ci.sh for the split and why.
-      - name: Mac tests (parallel + serial layout goldens)
+      # The same command a developer runs locally (the `NostromoTests` scheme).
+      # Fully serial: see docs/ci.md ("Deliberately not done") for why parallel
+      # testing is not enabled.
+      - name: make mac-test
         if: needs.changes.outputs.swift == 'true'
-        run: macOS/scripts/mac-test-ci.sh
+        run: make mac-test
 
       # Compile gate for the app target. `make mac-test` builds only the
       # NostromoTests bundle, which does not include app-only sources such as
@@ -362,18 +362,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # The test script prints a filtered view; the full phase logs and the
-      # .xcresult bundles are where the per-test failure detail lives.
+      # The Makefile filters xcodebuild's output down to a few lines, so the
+      # .xcresult bundle is where the per-test failure detail lives.
       - name: Upload test results
         if: needs.changes.outputs.swift == 'true' && failure()
         uses: actions/upload-artifact@v4
         with:
           name: swift-tests-mac-xcresult
-          path: |
-            macOS/build/Logs/Test
-            ${{ runner.temp }}/mac-build.log
-            ${{ runner.temp }}/mac-parallel.log
-            ${{ runner.temp }}/mac-serial.log
+          path: macOS/build/Logs/Test
           if-no-files-found: warn
           retention-days: 14
 
