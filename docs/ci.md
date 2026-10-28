@@ -44,18 +44,14 @@ are the same failure.
   bump the font, update the version and checksum in `ci.yml` together.
 - Concurrency is per job, event and ref; a newer push to a PR cancels the older
   run (pushes to `main` and dispatches are never cancelled).
-- The only cache is the SwiftPM **source checkouts** of the Mac job
-  (`macOS/build/SourcePackages`). The Mac app has one remote package,
-  SwiftTerm, pinned exactly to 1.18.0 in the project and in
+- **There is no dependency cache.** The Mac app has one remote package, SwiftTerm,
+  pinned exactly to 1.18.0 in the project and in
   `macOS/Nostromo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`
-  (plus swift-argument-parser). The cache key is the hash of that
-  `Package.resolved` plus the Xcode version, with **no `restore-keys`**, so a
-  miss is a clean fetch and a hit is exactly the pinned revisions. The cache
-  holds fetched source only: every run still compiles SwiftTerm, the shared
-  sources and the app from scratch (`Resolve SwiftPM packages` is its own step,
-  run with `-onlyUsePackageVersionsFromResolvedFile`), so a hit cannot make a
-  stale build pass. NostromoKit is a local SwiftPM package with no remote
-  dependency, so `Swift tests (NostromoKit)` has nothing to cache.
+  (plus swift-argument-parser); NostromoKit is a local package with nothing to
+  fetch. A cache of the SwiftPM source checkouts was built and measured and did
+  not help (33 s with a hit, 19-45 s without: the time is `xcodebuild` resolving
+  the package graph, not the download), so it was removed. See "Measured and not
+  shipped" below.
 - **There is deliberately no DerivedData cache.** Restoring stale DerivedData
   could let a stale build product mask a failure, which is the failure class
   that let #345 through.
@@ -72,6 +68,39 @@ are the same failure.
   (shared, sometimes loaded) machine, and no user-installed fonts. Tests must
   not depend on a particular display setup, on wall-clock run-loop pump
   durations, or on fonts that are not installed by the workflow.
+
+### Where the time goes (measured 2026-10-28)
+
+From main run 40720495299 (`40f95ba4`) and the same source after the Rust split
+(dispatch run 40741191261):
+
+| Job | Before | After | What dominates |
+|---|---|---|---|
+| `Build & Lint` | 848 s | ~650 s (aggregate) | Before: cargo cache restore 59-295 s of a 7.6 GB target dir, build 218 s, clippy 76 s, tests 483 s. After: `Rust format` 14 s, clippy 112 s and tests 643 s run as parallel jobs; `Build & Lint` is now an aggregate job that depends on them. |
+| `Swift tests (Mac app)` | 1,322 s | 1,322 s (unchanged) | `make mac-test` 1,245 s = about 197 s build + 1,048 s executing 5,836 tests; the compile gate is 59 s. |
+
+The required check name `Build & Lint` is unchanged (it is the aggregate job), so
+branch protection needs no change.
+
+### Measured and not shipped
+
+- **SwiftPM source cache:** no faster (33 s hit, 19-45 s miss), removed.
+- **Parallel Mac testing** (3 workers, layout goldens kept serial) cut the Mac job
+  to 675-1,014 s but failed the five-consecutive-green bar: 8 of 10 runs green,
+  both reds were `MotherDetailScrollTests.testDataBelowTheReaderOrInsideTheLogLeavesTheScrollPositionAlone`
+  (once in the parallel phase, once in the serial phase). Not shipped; the
+  implementation is in branch history at `c44722a1` (`macOS/scripts/mac-test-ci.sh`).
+  Revisit after that test is made deterministic.
+- **DerivedData cache and test sharding:** deliberately not done. A restored
+  DerivedData can let a stale build product pass a test the current source would
+  fail, which is how #345 got through; sharding needs the parallel-safety above.
+- **Path gate:** docs, `.claude`, `tests/*.rs` and Cargo-file-only changes skip the
+  Swift jobs. `src/` is **not** skippable because `StatusBarPostureWindowsTests`
+  scans `src/**/*.rs`. Verified on throwaway PRs #370-#372 (closed).
+- **Compile-gate proof:** a throwaway commit that breaks an app-only file
+  (`TerminalPaneHostView.swift`) made the compile gate fail while all 5,836
+  `NostromoTests` passed (run 40745683225). The revert is in the history; the
+  final head compiles.
 
 ### The app-build compile gate
 

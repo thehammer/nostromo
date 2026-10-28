@@ -251,15 +251,13 @@ jobs:
   #     suffixed names never match a required check.
   #   * `push` stays `main`-only: pushing a feature branch triggers nothing until
   #     a PR is opened or someone dispatches.
-  #   * The only cache is the SwiftPM *source checkouts* of the Mac job
-  #     (`macOS/build/SourcePackages`: SwiftTerm and swift-argument-parser),
-  #     keyed on the hash of Package.resolved plus the Xcode version, with NO
-  #     restore-keys. It holds fetched source at pinned revisions and nothing
-  #     compiled: every run still compiles every package and every app source
-  #     from scratch, so a cache hit cannot make a stale build pass. There is
-  #     deliberately no DerivedData cache: restoring stale DerivedData could
-  #     make a stale build product pass a test the current source would fail,
-  #     which is how #345 got through.
+  #   * No dependency or DerivedData cache. The only remote SwiftPM packages
+  #     (SwiftTerm, swift-argument-parser) fetch in ~20-45 s, and caching their
+  #     source checkouts measured no faster (33 s with a cache hit, 30 s without:
+  #     the time is xcodebuild resolving the package graph, not the download);
+  #     see docs/ci.md. Restoring DerivedData would be worse: it could make a
+  #     stale build product pass a test the current source would fail, which is
+  #     how #345 got through.
   # ---------------------------------------------------------------------------
   swift-tests-mac:
     needs: changes
@@ -305,29 +303,6 @@ jobs:
           mkdir -p "$HOME/Library/Fonts"
           unzip -q -o "$RUNNER_TEMP/FiraCode.zip" 'FiraCodeNerdFont-*.ttf' -d "$HOME/Library/Fonts"
           ls "$HOME/Library/Fonts"
-
-      - name: Xcode version (cache key)
-        if: needs.changes.outputs.swift == 'true'
-        id: xcode
-        run: echo "version=$(xcodebuild -version | tr -c 'A-Za-z0-9.\n' '-' | tr '\n' '_')" >> "$GITHUB_OUTPUT"
-
-      # Source checkouts only; see the shared-decisions note above.
-      - name: Cache SwiftPM packages (resolved sources only)
-        if: needs.changes.outputs.swift == 'true'
-        uses: actions/cache@v4
-        with:
-          path: macOS/build/SourcePackages
-          key: swiftpm-${{ runner.os }}-${{ steps.xcode.outputs.version }}-${{ hashFiles('macOS/Nostromo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
-
-      # Its own step so the fetch is timed (and a cache hit is visible). Pinned
-      # to Package.resolved: no re-resolution, so a cache can never serve a
-      # version the repo does not pin.
-      - name: Resolve SwiftPM packages
-        if: needs.changes.outputs.swift == 'true'
-        run: |
-          xcodebuild -resolvePackageDependencies -project macOS/Nostromo.xcodeproj \
-            -scheme NostromoTests -derivedDataPath macOS/build \
-            -onlyUsePackageVersionsFromResolvedFile
 
       # The same command a developer runs locally (the `NostromoTests` scheme).
       # Fully serial: see docs/ci.md ("Deliberately not done") for why parallel
