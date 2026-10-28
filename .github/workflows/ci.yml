@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, ci/exp-gate-base]
   # Manual run on any pushed branch, with an optional job selector. Used by
   # `make ci-remote` (scripts/ci_remote.py) so a job can run CI before it has a
   # PR. GitHub only offers this trigger once it exists on the default branch.
