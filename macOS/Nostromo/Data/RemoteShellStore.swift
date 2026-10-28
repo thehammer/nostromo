@@ -260,8 +260,8 @@ final class RemoteShellStore {
     }
 
     /// Not format characters (so `generalCategory == .format` misses them) but they draw nothing: Hangul
-    /// filler (U+3164, U+115F, U+1160) and braille blank (U+2800).
-    private static let invisibleFillers: Set<UInt32> = [0x3164, 0x115F, 0x1160, 0x2800]
+    /// filler (U+3164, U+115F, U+1160, U+FFA0), the combining grapheme joiner (U+034F) and braille blank (U+2800).
+    private static let invisibleFillers: Set<UInt32> = [0x3164, 0x115F, 0x1160, 0xFFA0, 0x034F, 0x2800]
 
     /// Text with something visible in it: whitespace, format characters and the fillers do not count.
     private static func nonBlank(_ text: String?) -> String? {
