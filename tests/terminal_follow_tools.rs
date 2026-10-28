@@ -2065,14 +2065,20 @@ follow_test! {
 
         let detail = sheet.detail.clone().expect("the reason is shown as the detail");
         assert!(detail.contains("Check") && detail.contains("logs"), "{detail:?}");
-        for c in detail.chars() {
+        // The detail is the fixed label, one newline, then the agent's reason: only the REASON
+        // may not carry a control character (the label's own newline is the daemon's).
+        let (label, reason) = detail
+            .split_once('\n')
+            .expect("a label line, then the reason on its own line");
+        assert_eq!(label, "Agent's stated reason (unverified)");
+        for c in reason.chars() {
             assert!(
                 !c.is_control()
                     && !('\u{202a}'..='\u{202e}').contains(&c)
                     && !('\u{2066}'..='\u{2069}').contains(&c)
                     && c != '\u{200e}'
                     && c != '\u{200f}',
-                "{c:?} survived in {detail:?}"
+                "{c:?} survived in {reason:?}"
             );
         }
         r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
