@@ -218,13 +218,17 @@ jobs:
   # Shared decisions (kept here once rather than repeated per job):
   #   * No workflow-level `paths:` filter. A workflow whose `paths:` filter does
   #     not match never starts, so a required check from it stays "Expected"
-  #     forever. The only skipping is the job-level `if:` on `changes` (above),
-  #     which makes the Swift jobs report "skipped", and a skipped job counts as
-  #     passing for branch protection and for merge tooling. It skips on a
-  #     pull request only when EVERY changed path is on the short allow-list in
+  #     forever. The Swift jobs are gated by the `changes` job instead, and the
+  #     gate is on each STEP (`needs.changes.outputs.swift == 'true'`), not on
+  #     the job. A job skipped by a job-level `if:` posts its check under the
+  #     raw, unevaluated `name:` expression (measured: PR #370), so a required
+  #     `Swift tests (Mac app)` would stay "Expected" and block the PR. With
+  #     step-level gating the job still starts, reports success under its real
+  #     name in seconds and does none of the work. The gate skips only on a pull
+  #     request whose EVERY changed path is on the short allow-list in
   #     scripts/ci_changes.py; anything unknown, an empty diff or a classifier
   #     failure runs the jobs. Pushes to `main` and dispatches always run them.
-  #     `Build & Lint` and `Python tooling tests` are never skipped.
+  #     `Build & Lint` and `Python tooling tests` are never gated.
   #   * `macos-26` + an explicitly selected Xcode, same pins as
   #     macos-launch-smoke.yml, so a runner-image rollover shows up as a diff
   #     here rather than as an unexplained red.
@@ -259,7 +263,7 @@ jobs:
   # ---------------------------------------------------------------------------
   swift-tests-mac:
     needs: changes
-    if: needs.changes.outputs.swift == 'true' && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only))
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (Mac app) (dispatch)' || 'Swift tests (Mac app)' }}
     runs-on: macos-26
     timeout-minutes: 45
@@ -271,9 +275,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
+        if: needs.changes.outputs.swift == 'true'
         run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
 
       - name: Log toolchain, OS and display state
+        if: needs.changes.outputs.swift == 'true'
         run: |
           xcodebuild -version
           sw_vers
@@ -287,6 +293,7 @@ jobs:
       # goldens were recorded with, pinned by version and checksum, so the
       # font can neither drift under the tests nor be swapped by a bad download.
       - name: Install Fira Code Nerd Font (pinned)
+        if: needs.changes.outputs.swift == 'true'
         env:
           FIRA_VERSION: v3.4.0
           FIRA_SHA256: 7cc4ffd8f7a1fc914cdab7b149808298165ff7a7f40e40d82dea9ebe41e8ca0b
@@ -300,11 +307,13 @@ jobs:
           ls "$HOME/Library/Fonts"
 
       - name: Xcode version (cache key)
+        if: needs.changes.outputs.swift == 'true'
         id: xcode
         run: echo "version=$(xcodebuild -version | tr -c 'A-Za-z0-9.\n' '-' | tr '\n' '_')" >> "$GITHUB_OUTPUT"
 
       # Source checkouts only; see the shared-decisions note above.
       - name: Cache SwiftPM packages (resolved sources only)
+        if: needs.changes.outputs.swift == 'true'
         uses: actions/cache@v4
         with:
           path: macOS/build/SourcePackages
@@ -314,6 +323,7 @@ jobs:
       # to Package.resolved: no re-resolution, so a cache can never serve a
       # version the repo does not pin.
       - name: Resolve SwiftPM packages
+        if: needs.changes.outputs.swift == 'true'
         run: |
           xcodebuild -resolvePackageDependencies -project macOS/Nostromo.xcodeproj \
             -scheme NostromoTests -derivedDataPath macOS/build \
@@ -323,6 +333,7 @@ jobs:
       # build, a parallel phase and a serial phase for the layout-golden
       # classes. See macOS/scripts/mac-test-ci.sh for the split and why.
       - name: Mac tests (parallel + serial layout goldens)
+        if: needs.changes.outputs.swift == 'true'
         run: macOS/scripts/mac-test-ci.sh
 
       # Compile gate for the app target. `make mac-test` builds only the
@@ -333,6 +344,7 @@ jobs:
       # same sources as Release. This is the real "the app builds" gate;
       # "Launch smoke (advisory)" green does not imply it.
       - name: Build Mac app (compile gate)
+        if: needs.changes.outputs.swift == 'true'
         run: |
           set -o pipefail
           xcodebuild -project macOS/Nostromo.xcodeproj -scheme Nostromo \
@@ -342,7 +354,7 @@ jobs:
           if grep -q "error:" "$RUNNER_TEMP/mac-app-build.log"; then exit 1; fi
 
       - name: Upload app build log
-        if: failure()
+        if: needs.changes.outputs.swift == 'true' && failure()
         uses: actions/upload-artifact@v4
         with:
           name: mac-app-build-log
@@ -353,7 +365,7 @@ jobs:
       # The test script prints a filtered view; the full phase logs and the
       # .xcresult bundles are where the per-test failure detail lives.
       - name: Upload test results
-        if: failure()
+        if: needs.changes.outputs.swift == 'true' && failure()
         uses: actions/upload-artifact@v4
         with:
           name: swift-tests-mac-xcresult
@@ -367,7 +379,7 @@ jobs:
 
   swift-tests-kit:
     needs: changes
-    if: needs.changes.outputs.swift == 'true' && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","kit"]'), inputs.only))
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","kit"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (NostromoKit) (dispatch)' || 'Swift tests (NostromoKit)' }}
     runs-on: macos-26
     timeout-minutes: 30
@@ -379,21 +391,24 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
+        if: needs.changes.outputs.swift == 'true'
         run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
 
       - name: Log toolchain and OS versions
+        if: needs.changes.outputs.swift == 'true'
         run: |
           swift --version
           sw_vers
 
       # The same command a developer runs locally.
       - name: make kit-test
+        if: needs.changes.outputs.swift == 'true'
         run: |
           set -o pipefail
           make kit-test 2>&1 | tee "$RUNNER_TEMP/kit-test.log"
 
       - name: Upload test log
-        if: failure()
+        if: needs.changes.outputs.swift == 'true' && failure()
         uses: actions/upload-artifact@v4
         with:
           name: swift-tests-kit-log
@@ -403,7 +418,7 @@ jobs:
 
   ios-simulator-build:
     needs: changes
-    if: needs.changes.outputs.swift == 'true' && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only))
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && 'iOS simulator build (dispatch)' || 'iOS simulator build' }}
     runs-on: macos-26
     timeout-minutes: 30
@@ -415,9 +430,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
+        if: needs.changes.outputs.swift == 'true'
         run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
 
       - name: Log toolchain and OS versions
+        if: needs.changes.outputs.swift == 'true'
         run: |
           xcodebuild -version
           sw_vers
@@ -425,6 +442,7 @@ jobs:
       # Compile check only: no device, no signing, no tests. Catches iOS
       # compile breaks (the iOS app is not part of `make mac-test`).
       - name: Build for iOS Simulator
+        if: needs.changes.outputs.swift == 'true'
         run: |
           set -o pipefail
           cd iOS
@@ -434,7 +452,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/ios-build.log" | grep -E "error:|warning:|\*\* BUILD"
 
       - name: Upload build log
-        if: failure()
+        if: needs.changes.outputs.swift == 'true' && failure()
         uses: actions/upload-artifact@v4
         with:
           name: ios-simulator-build-log

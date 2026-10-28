@@ -25,24 +25,27 @@ CI_YML_PATH = os.path.join(REPO_ROOT, ".github", "workflows", "ci.yml")
 ONLY_OPTIONS = ["all", "rust", "python", "swift", "mac", "kit", "ios"]
 
 # job key -> (original display name, selector set that must run it, condition wrapper).
-# wrapper None: the `if:` is exactly the dispatch selector. "swift": the job is skipped
-# on a pull request that only touches paths irrelevant to Swift (scripts/ci_changes.py
-# decides, via the `changes` job). "always": the aggregate required check, which must
-# run even when a part failed or was cancelled.
+# wrapper None: the `if:` is exactly the dispatch selector. "always": the aggregate
+# required check, which must run even when a part failed or was cancelled.
+# The Swift jobs are NOT skipped by a job-level `if:` on the path classifier: a job skipped
+# that way posts its check under the raw, unevaluated `name:` expression, so a required
+# `Swift tests (Mac app)` would stay "Expected" and block the PR. They are gated per step
+# instead (see check_swift_jobs_wait_for_the_path_classifier), so they report success under
+# their real names.
 JOBS = {
     "rust-fmt": ("Rust format", {"all", "rust"}, None),
     "rust-clippy": ("Rust clippy", {"all", "rust"}, None),
     "rust-test": ("Rust tests", {"all", "rust"}, None),
     "build": ("Build & Lint", {"all", "rust"}, "always"),
     "python-tooling": ("Python tooling tests", {"all", "python"}, None),
-    "swift-tests-mac": ("Swift tests (Mac app)", {"all", "swift", "mac"}, "swift"),
-    "swift-tests-kit": ("Swift tests (NostromoKit)", {"all", "swift", "kit"}, "swift"),
-    "ios-simulator-build": ("iOS simulator build", {"all", "swift", "ios"}, "swift"),
+    "swift-tests-mac": ("Swift tests (Mac app)", {"all", "swift", "mac"}, None),
+    "swift-tests-kit": ("Swift tests (NostromoKit)", {"all", "swift", "kit"}, None),
+    "ios-simulator-build": ("iOS simulator build", {"all", "swift", "ios"}, None),
 }
 WRAPPER_PREFIX = {
     "always": "always()",
-    "swift": "needs.changes.outputs.swift == 'true'",
 }
+SWIFT_GATE = "needs.changes.outputs.swift == 'true'"
 CHANGES_JOB = ("changes", "Detect changed paths")
 # The only job whose display name may be the required check's name.
 REQUIRED_CHECK_NAME = "Build & Lint"
@@ -305,23 +308,63 @@ def check_required_check_is_the_aggregate_of_the_rust_parts(text):
     return violations
 
 
+def _steps_of(block):
+    """List of step blocks (text) in a job block."""
+    steps, current = [], None
+    in_steps = False
+    for l in block.splitlines():
+        if l == "    steps:":
+            in_steps = True
+            continue
+        if not in_steps:
+            continue
+        if re.match(r"^      - ", l):
+            current = [l]
+            steps.append(current)
+        elif current is not None:
+            current.append(l)
+    return ["\n".join(c) for c in steps]
+
+
 def check_swift_jobs_wait_for_the_path_classifier(text):
+    """The Swift jobs depend on `changes` and gate every step (but checkout) on its output,
+    never the whole job (a job-level skip posts the check under an unevaluated name)."""
     blocks = _job_blocks(text)
     violations = []
     changes = blocks.get(CHANGES_JOB[0])
     if changes is None:
         return ["job `changes` is missing"]
     if _job_level(changes, "if") is not None:
-        violations.append("job `changes` has an `if:`; it must run on every event so skipped Swift jobs are explained")
+        violations.append("job `changes` has an `if:`; it must run on every event")
     for key in SWIFT_JOBS:
         if key not in blocks:
             violations.append("job `%s` is missing" % key)
-        elif _needs_of(blocks[key]) != ["changes"]:
-            violations.append("job `%s` needs %r, expected ['changes']" % (key, _needs_of(blocks[key])))
+            continue
+        block = blocks[key]
+        if _needs_of(block) != ["changes"]:
+            violations.append("job `%s` needs %r, expected ['changes']" % (key, _needs_of(block)))
+        if "needs.changes" in (_job_level(block, "if") or ""):
+            violations.append(
+                "job `%s` is skipped by a job-level `if:` on the classifier; that posts the check "
+                "under the raw name expression. Gate the steps instead." % key
+            )
+        steps = _steps_of(block)
+        if not steps:
+            violations.append("job `%s` has no steps" % key)
+        for step in steps:
+            first = step.splitlines()[0]
+            if "actions/checkout" in first:
+                continue
+            m = re.search(r"(?m)^        if:[ \t]*(.*?)[ \t]*$", step)
+            cond = m.group(1) if m else ""
+            if SWIFT_GATE not in cond:
+                violations.append(
+                    "job `%s` step %r is not gated on `%s` (its `if:` is %r)"
+                    % (key, first.strip(), SWIFT_GATE, cond)
+                )
     for key in blocks:
         if key not in SWIFT_JOBS and key != CHANGES_JOB[0] and "needs.changes" in blocks[key]:
             violations.append("job `%s` is gated on the path classifier; only the Swift jobs may be" % key)
-    # Rust and Python always run, whatever the paths.
     return violations
 
 
@@ -446,6 +489,15 @@ def good_workflow(
         if extra_job_lines:
             out.append(extra_job_lines)
         out += ["    steps:", "      - uses: actions/checkout@v4"]
+        if key in SWIFT_JOBS:
+            out += [
+                "      - name: Select Xcode",
+                "        if: %s" % SWIFT_GATE,
+                "        run: true",
+                "      - name: Upload log",
+                "        if: %s && failure()" % SWIFT_GATE,
+                "        run: true",
+            ]
         if key == "build":
             out += [
                 "      - name: Every Rust part must have succeeded",
@@ -458,7 +510,7 @@ def good_workflow(
             ]
         out += [
             "      - name: Build & Lint inside a step",
-            "        if: failure()",
+            "        if: %s" % (SWIFT_GATE + " && failure()" if key in SWIFT_JOBS else "failure()"),
             "        run: true",
             "",
         ]
@@ -580,8 +632,8 @@ class JobIfTests(unittest.TestCase):
         self.assertTrue(check_job_if_selects_by_only_input(good_workflow(ifs={"build": bad})))
 
     def test_selector_order_does_not_matter(self):
-        ok = ("needs.changes.outputs.swift == 'true' && (github.event_name != 'workflow_dispatch' || "
-              "contains(fromJSON('[\"mac\",\"all\",\"swift\"]'), inputs.only))")
+        ok = ("github.event_name != 'workflow_dispatch' || "
+              "contains(fromJSON('[\"mac\",\"all\",\"swift\"]'), inputs.only)")
         self.assertEqual(
             check_job_if_selects_by_only_input(good_workflow(ifs={"swift-tests-mac": ok})), [])
 
@@ -722,21 +774,32 @@ class SwiftJobsPathGateTests(unittest.TestCase):
         text = good_workflow().replace("    needs: changes\n", "", 1)
         self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
 
-    def test_bites_when_a_swift_job_ignores_the_classifier_output(self):
-        text = good_workflow().replace("needs.changes.outputs.swift == 'true' && (", "(", 1)
-        self.assertTrue(check_job_if_selects_by_only_input(text))
+    def test_bites_when_a_step_is_not_gated(self):
+        text = good_workflow().replace("        if: %s\n" % SWIFT_GATE, "", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
 
-    def test_bites_when_the_classifier_output_is_compared_loosely(self):
+    def test_bites_when_a_failure_only_step_forgets_the_gate(self):
+        text = good_workflow().replace("if: %s && failure()" % SWIFT_GATE, "if: failure()", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_bites_when_the_gate_is_compared_loosely(self):
         # `!= 'false'` would also be true if the output went missing; the gate must demand 'true'.
-        text = good_workflow().replace("outputs.swift == 'true'", "outputs.swift != 'false'", 1)
-        self.assertTrue(check_job_if_selects_by_only_input(text))
+        text = good_workflow().replace(SWIFT_GATE, "needs.changes.outputs.swift != 'false'", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
 
-    def test_bites_when_rust_is_gated_on_the_classifier(self):
-        text = good_workflow().replace(
-            "if: github.event_name != 'workflow_dispatch' || contains(fromJSON('[\"all\", \"rust\"]'), inputs.only)",
-            "if: needs.changes.outputs.swift == 'true'", 1)
+    def test_bites_when_the_whole_job_is_skipped_by_the_classifier(self):
+        # A job-level skip posts the check under the raw name expression.
+        text = good_workflow(ifs={"swift-tests-mac": "%s && (github.event_name != 'workflow_dispatch' || "
+                                  "contains(fromJSON('[\"all\",\"swift\",\"mac\"]'), inputs.only))" % SWIFT_GATE})
         self.assertTrue(
             check_swift_jobs_wait_for_the_path_classifier(text) or check_job_if_selects_by_only_input(text))
+
+    def test_bites_when_rust_is_gated_on_the_classifier(self):
+        text = good_workflow().replace("    needs: [rust-fmt, rust-clippy, rust-test]\n",
+                                       "    needs: [rust-fmt, rust-clippy, rust-test, changes]\n", 1)
+        text = text.replace("needs.rust-fmt.result", "needs.changes.outputs.swift", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text)
+                        or check_required_check_is_the_aggregate_of_the_rust_parts(text))
 
     def test_bites_without_the_changes_job(self):
         text = good_workflow().replace("  changes:\n", "  changes-renamed:\n")
