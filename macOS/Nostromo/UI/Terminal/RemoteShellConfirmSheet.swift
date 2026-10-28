@@ -184,6 +184,16 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
             followCheckbox.widthAnchor.constraint(lessThanOrEqualToConstant: textWidth).isActive = true
             followCheckbox.setAccessibilityIdentifier("remote-shell-follow")
             rows.append(followCheckbox)
+            if let warning = model.followWarning {
+                let warningLabel = NSTextField(wrappingLabelWithString: warning)
+                warningLabel.preferredMaxLayoutWidth = textWidth
+                warningLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+                warningLabel.textColor = Theme.hazardText
+                warningLabel.maximumNumberOfLines = 0
+                warningLabel.isSelectable = false
+                warningLabel.setAccessibilityIdentifier("remote-shell-follow-warning")
+                rows.append(warningLabel)
+            }
         }
 
         let stack = NSStackView(views: rows)

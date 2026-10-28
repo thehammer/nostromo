@@ -1972,7 +1972,7 @@ follow_test! {
                 ("deny".to_string(), "Deny".to_string())
             ]
         );
-        assert_eq!(sheet.detail.as_deref(), Some("Check why the deploy hung"));
+        assert_eq!(sheet.detail.as_deref(), Some("Agent's stated reason (unverified)\nCheck why the deploy hung"));
         assert_eq!(r.d.follower_of(&id), None, "asking follows nothing");
 
         r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
@@ -2019,6 +2019,43 @@ follow_test! {
 }
 
 follow_test! {
+    async fn the_follow_sheet_labels_the_reason_on_its_own_line_and_shortens_the_agent_name() {
+        let mut r = rig().await;
+        let id = r.id();
+        let from = r.app.mark();
+        let long_name = "x".repeat(150);
+        let api = r.d.api.clone();
+        let decisions = Arc::clone(&r.d.decisions);
+        let tx = r.d.server.tx.clone();
+        let call = tokio::spawn(async move {
+            api.request_follow(
+                AgentFollowRequest {
+                    tag: A.into(),
+                    agent: Some(long_name),
+                    terminal_id: id,
+                    reason: Some("Look at the logs".into()),
+                    timeout: Duration::from_secs(20),
+                },
+                &decisions,
+                &tx,
+            )
+            .await
+        });
+
+        let sheet = r.app.wait_sheet(from).await;
+
+        assert_eq!(
+            sheet.detail.as_deref(),
+            Some("Agent's stated reason (unverified)\nLook at the logs")
+        );
+        assert!(sheet.prompt.contains(&format!("{}'s model", "x".repeat(40))), "{:?}", sheet.prompt);
+        assert!(!sheet.prompt.contains(&"x".repeat(41)), "{:?}", sheet.prompt);
+        r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
+        let _ = call.await;
+    }
+}
+
+follow_test! {
     async fn the_reason_reaches_the_sheet_without_control_or_bidi_characters() {
         let mut r = rig().await;
 
@@ -2028,14 +2065,20 @@ follow_test! {
 
         let detail = sheet.detail.clone().expect("the reason is shown as the detail");
         assert!(detail.contains("Check") && detail.contains("logs"), "{detail:?}");
-        for c in detail.chars() {
+        // The detail is the fixed label, one newline, then the agent's reason: only the REASON
+        // may not carry a control character (the label's own newline is the daemon's).
+        let (label, reason) = detail
+            .split_once('\n')
+            .expect("a label line, then the reason on its own line");
+        assert_eq!(label, "Agent's stated reason (unverified)");
+        for c in reason.chars() {
             assert!(
                 !c.is_control()
                     && !('\u{202a}'..='\u{202e}').contains(&c)
                     && !('\u{2066}'..='\u{2069}').contains(&c)
                     && c != '\u{200e}'
                     && c != '\u{200f}',
-                "{c:?} survived in {detail:?}"
+                "{c:?} survived in {reason:?}"
             );
         }
         r.app.answer_sheet(&sheet.request_id, Some("deny")).await;

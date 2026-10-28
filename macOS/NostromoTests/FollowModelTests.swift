@@ -238,6 +238,20 @@ final class FollowModelTests: XCTestCase {
 
     // MARK: Send selection
 
+    func testASelectionOverTheDaemonsLimitIsTooLargeAndOneAtTheLimitIsNot() {
+        XCTAssertEqual(FollowModel.selectionLimitBytes, 16 * 1024)
+        XCTAssertFalse(FollowModel.selectionIsTooLarge(String(repeating: "a", count: 16 * 1024)))
+        XCTAssertTrue(FollowModel.selectionIsTooLarge(String(repeating: "a", count: 16 * 1024 + 1)))
+        // Bytes, not characters: 8193 two-byte characters are over.
+        XCTAssertTrue(FollowModel.selectionIsTooLarge(String(repeating: "é", count: 8 * 1024 + 1)))
+    }
+
+    func testTheSendSelectionTooltipAndRefusalSayWhatTheDaemonDoes() {
+        XCTAssertTrue(FollowModel.sendSelectionTooltip.contains("redacts"))
+        XCTAssertTrue(FollowModel.sendSelectionTooltip.contains("caps"))
+        XCTAssertTrue(FollowModel.selectionTooLargeMessage.contains("too large"))
+    }
+
     func testSendSelectionOffersTheOwnerFirst() {
         XCTAssertEqual(model(info(tag: "claudia-1")).defaultSelectionTag, "claudia-1")
     }

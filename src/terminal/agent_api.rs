@@ -319,7 +319,11 @@ impl TerminalAgentApi {
         let (request_id, mut rx, sheet) = lock(decisions).submit(
             request.tag.clone(),
             follow_prompt(&info, &request),
-            request.reason.as_deref().and_then(clean_reason),
+            request
+                .reason
+                .as_deref()
+                .and_then(clean_reason)
+                .map(|reason| follow_detail(&reason)),
             vec![
                 DecisionChoice {
                     id: FOLLOW_ALLOW.into(),
@@ -531,6 +535,26 @@ impl ScreenReadRefused {
     }
 }
 
+/// The longest agent name the follow sheet repeats in its own sentences. A crafted
+/// name stays too short to imitate the system's wording.
+const MAX_AGENT_NAME_CHARS: usize = 40;
+
+/// The label the follow sheet puts over the agent's reason.
+pub const FOLLOW_REASON_LABEL: &str = "Agent's stated reason (unverified)";
+
+fn short_agent_name(name: &str) -> String {
+    name.chars()
+        .take(MAX_AGENT_NAME_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// The sheet's detail: the label, then the reason on its own line.
+fn follow_detail(reason: &str) -> String {
+    format!("{FOLLOW_REASON_LABEL}\n{reason}")
+}
+
 /// What the user is asked: who asks, for which pane, and where the output goes.
 /// A remote pane's sheet leads with the environment in capitals.
 fn follow_prompt(info: &TerminalInfo, request: &AgentFollowRequest) -> String {
@@ -539,6 +563,7 @@ fn follow_prompt(info: &TerminalInfo, request: &AgentFollowRequest) -> String {
         .agent
         .as_deref()
         .and_then(clean_reason)
+        .map(|name| short_agent_name(&name))
         .unwrap_or_else(|| "An agent".to_string());
     let who = format!("{agent} in {}", clean(&request.tag));
     let pane = clean(&pane_name(info));

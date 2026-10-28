@@ -170,15 +170,22 @@ final class TerminalPaneHeaderView: NSView {
         var width = min(Self.badgeMaxWidth, max(FollowModel.badgeMinWidth, wanted))
         if isRemote {
             // First the badge gives up room down to its minimum, so the token keeps its full size...
-            environmentLabel.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-            let fullToken = environmentLabel.intrinsicContentSize.width
+            let fullToken = tokenWidth(fontSize: 12)
             width = min(width, max(FollowModel.badgeMinWidth, available - fullToken - Self.gap))
             // ...then, only when even the smallest token would not fit, below it.
-            environmentLabel.font = NSFont.systemFont(ofSize: 6, weight: .bold)
-            let smallestToken = environmentLabel.intrinsicContentSize.width
+            let smallestToken = tokenWidth(fontSize: 6)
             width = min(width, available - smallestToken - Self.gap)
         }
         return max(Self.badgeFloorWidth, min(width, max(Self.badgeFloorWidth, available)))
+    }
+
+    /// The width the environment token takes at `fontSize` (bold), measured on a scratch label so the real
+    /// one's font is only ever set by `fitEnvironmentLabel`.
+    private func tokenWidth(fontSize: CGFloat) -> CGFloat {
+        let scratch = NSTextField(labelWithString: environmentLabel.stringValue)
+        scratch.lineBreakMode = environmentLabel.lineBreakMode
+        scratch.font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
+        return scratch.intrinsicContentSize.width
     }
 
     /// The environment label's size in the largest bold font (12 pt down to 6 pt) that fits `width` x `height`.

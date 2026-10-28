@@ -82,6 +82,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
     private var registered = false
     /// The Follow popover on screen, and the state it was opened for (it closes when that changes).
     private var followPopover: NSPopover?
+    private weak var followContent: FollowControlView?
     private var followStateWhenOpened: (state: FollowModel.State, actions: [FollowAction])?
     /// A replay is being fed: its bytes are not an echo of a key.
     private var feedingReplay = false
@@ -439,6 +440,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
     /// invite landed, the agent paused, the shell ended), the popover goes away rather than offer buttons that no longer apply.
     private func closeFollowPopoverIfStale(_ model: FollowModel?) {
         guard let popover = followPopover else { return }
+        defer { if let model, followPopover != nil { followContent?.update(model: model) } }
         guard popover.isShown else {
             followPopover = nil
             return
@@ -582,6 +584,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
         popover.contentSize = content.frame.size
         popover.contentViewController = controller
         followPopover = popover
+        followContent = content
         followStateWhenOpened = (model.state, model.actions)
         popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
     }

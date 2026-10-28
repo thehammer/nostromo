@@ -876,6 +876,21 @@ final class TerminalFitnessTests: XCTestCase {
                                   call: "store.sendSelection(")
     }
 
+    func testTheInvitePickerAsksTheGuardFromTheMenuBecauseAPopupActionCarriesTheMenusEvent() throws {
+        let body = try funcBody("followFocusChanged", in: "FollowControlView.swift")
+        let guardAt = try XCTUnwrap(body.range(of: "TerminalInputGuard.allowsControl("))
+        XCTAssertTrue(body[guardAt.lowerBound...].prefix(160).contains("fromMenu: true"), "the picker asks with fromMenu: true:\n\(body)")
+    }
+
+    func testAnOpenInvitePopoverRefreshesItsFocusNamesWhenTheFocusesChange() throws {
+        // The view is not in the unit-test target, so this reads the source.
+        let host = try funcBody("closeFollowPopoverIfStale", in: "TerminalPaneHostView.swift")
+        XCTAssertTrue(host.contains("followContent?.update(model:"), "the host must hand the open popover the current model:\n\(host)")
+        let update = try funcBody("update", in: "FollowControlView.swift")
+        XCTAssertTrue(update.contains("fillPicker(keeping:"), "update(model:) must refill the picker, keeping the choice:\n\(update)")
+        XCTAssertFalse(update.contains("store."), "refreshing names sends nothing:\n\(update)")
+    }
+
     func testOnlyTheInvitePopoverButtonStartsFollowingFromTheApp() throws {
         var sites: [String] = []
         for file in Repo.swiftFiles(under: Repo.app) {

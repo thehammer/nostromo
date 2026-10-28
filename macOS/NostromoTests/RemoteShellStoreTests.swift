@@ -395,6 +395,13 @@ final class RemoteShellStoreTests: XCTestCase {
         XCTAssertEqual(m.followCheckboxTitle, "Let cody follow this shell's output")
     }
 
+    func testTheFollowBoxIsAccompaniedByTheSentenceNamingTheEnvironmentInCapitalsAndTheAgent() {
+        let m = model(request(tag: "core-1", kind: "focus", requesterTag: "core-1", agent: "cody"))
+        let environment = target.environment.uppercased()
+        XCTAssertEqual(m.followWarning, "Output from \(environment) will be sent to cody's model.")
+        XCTAssertNil(model(request(kind: "user", agent: "cody")).followWarning)
+    }
+
     func testARequestTheUserOpenedOffersNoFollowBox() {
         XCTAssertNil(model(request(kind: "user")).followCheckboxTitle)
         XCTAssertNil(model(request(kind: "user", agent: "cody")).followCheckboxTitle)
