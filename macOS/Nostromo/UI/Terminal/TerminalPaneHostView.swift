@@ -631,3 +631,6 @@ private final class ClickableClipView: NSView {
         onMouseDown?(event)
     }
 }
+
+// THROWAWAY (CI stale-build proof): must fail the compile gate; reverted in the next commit.
+let ciStaleBuildProof: Int = "this is not an Int"
