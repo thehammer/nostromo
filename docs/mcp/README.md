@@ -100,15 +100,17 @@ Returns identity information about the calling PTY session.
 ## Bridge reconnect and the "tools offline" signal
 
 `nostromo-mcp-bridge` is a long-lived proxy: when its daemon connection drops it answers in-flight
-requests with JSON-RPC `-32000` ("nostromo daemon connection lost; retry"), reconnects with jittered
+requests with JSON-RPC `-32000` ("nostromo daemon connection lost; the outcome of this call is unknown; check state before retrying" — the
+bridge cannot tell a call that never arrived from one that ran with its response lost, so do not blindly retry), reconnects with jittered
 exponential backoff (100 ms doubling to 5 s, never giving up while stdin is open), re-sends the same
 Hello frame, replays `initialize` / `notifications/initialized`, and sends the client
 `notifications/tools/list_changed`. Frames sent while disconnected are queued (256 frames / 1 MiB).
 It exits (code 0) only when stdin closes. Events are logged, without frame contents, to
-`~/.nostromo/logs/mcp-bridge-<pid>.log` (0600, newest 20 files, 256 KiB each).
+`~/.nostromo/logs/mcp-bridge-<pid>.log` (0600, newest 20 files, 256 KiB each; logs of still-running bridges are never pruned; the directory is 0700
+and the log is opened with `O_NOFOLLOW`).
 
 The daemon never closes a connection for a bad frame: non-UTF-8 or malformed frames get `-32700`,
-non-object or over-1-MiB frames `-32600` (id `null`), and the connection carries on. Every accept and
+non-object or over-2-MiB frames `-32600` (id `null`), and the connection carries on. Every accept and
 close is logged (`reason`: `peer_eof`, `peer_gone`, `read_error`).
 
 The daemon counts live bridge connections per pty id. `nostromo_get_self` reports
