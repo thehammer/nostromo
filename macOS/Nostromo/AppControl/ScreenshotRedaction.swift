@@ -44,7 +44,7 @@ enum ScreenshotRedaction {
         if allowsSynthetic {
             image = rep
         } else {
-            image = try redacted(rep, areas: try terminalAreas(in: window), captureRect: captureRect)
+            image = try redacted(rep, areas: try terminalTargets(in: window), captureRect: captureRect)
         }
         guard let png = image.representation(using: .png, properties: [:]) else {
             throw ScreenshotRedactionError(description: "png encode failed")
@@ -56,13 +56,31 @@ enum ScreenshotRedaction {
     /// assumed about what is on screen). Throws when an area can't be placed: not in this window, or a
     /// frame that is not a finite rectangle.
     static func terminalAreas(in window: NSWindow) throws -> [NSRect] {
+        try terminalTargets(in: window).map(\.rect)
+    }
+
+    /// Pixels added to every side of every block (clamped to the image). The picture is the compositor's
+    /// last frame while the blocks come from the live view tree, and the aspect guard tolerates up to 2 px
+    /// of vertical mismatch; the margin covers both so no sliver of terminal survives at a block's edge.
+    static let padding = 2
+
+    /// A terminal's area and whether it is hidden (itself or an ancestor): a hidden one is not on screen,
+    /// so one that falls outside the image is skipped; a visible one that does is a refusal.
+    struct Target {
+        let rect: NSRect
+        let isHidden: Bool
+    }
+
+    static func terminalTargets(in window: NSWindow) throws -> [Target] {
         guard let content = window.contentView else {
             throw ScreenshotRedactionError(description: "window has no content view")
         }
-        var areas: [NSRect] = []
+        var areas: [Target] = []
         func walk(_ view: NSView) throws {
             if let source = view as? TerminalPixelSource {
-                areas.append(try area(of: source.terminalPixelArea, in: window))
+                let view = source.terminalPixelArea
+                areas.append(Target(rect: try area(of: view, in: window),
+                                    isHidden: source.isHiddenOrHasHiddenAncestor || view.isHiddenOrHasHiddenAncestor))
                 return   // everything below it is covered by its area
             }
             for sub in view.subviews { try walk(sub) }
@@ -89,7 +107,7 @@ enum ScreenshotRedaction {
     }
 
     /// A copy of `rep` with `areas` (window base coordinates) painted over. The source is only read.
-    private static func redacted(_ rep: NSBitmapImageRep, areas: [NSRect], captureRect: NSRect) throws -> NSBitmapImageRep {
+    private static func redacted(_ rep: NSBitmapImageRep, areas: [Target], captureRect: NSRect) throws -> NSBitmapImageRep {
         let pixelsWide = rep.pixelsWide, pixelsHigh = rep.pixelsHigh
         guard isFinite(captureRect), captureRect.width > 0, captureRect.height > 0, pixelsWide > 0, pixelsHigh > 0 else {
             throw ScreenshotRedactionError(description: "the capture's size is unknown, so terminals can't be hidden")
@@ -110,7 +128,8 @@ enum ScreenshotRedaction {
         context.draw(source, in: CGRect(x: 0, y: 0, width: pixelsWide, height: pixelsHigh))
 
         let fill = fillColor.usingColorSpace(.sRGB) ?? fillColor
-        for area in areas {
+        for target in areas {
+            let area = target.rect
             // Window coordinates run up from the bottom; the image runs down from the top. Round outward.
             // Clamped as numbers first: an area far outside the image must not overflow `Int`.
             func pixel(_ value: CGFloat, upTo limit: Int, _ rule: FloatingPointRoundingRule) -> Int {
@@ -120,8 +139,18 @@ enum ScreenshotRedaction {
             let right = pixel((area.maxX - captureRect.minX) * scale, upTo: pixelsWide, .up)
             let top = pixel((captureRect.maxY - area.maxY) * scale, upTo: pixelsHigh, .down)
             let bottom = pixel((captureRect.maxY - area.minY) * scale, upTo: pixelsHigh, .up)
-            guard right > left, bottom > top else { continue }
-            let block = CGRect(x: left, y: pixelsHigh - bottom, width: right - left, height: bottom - top)
+            guard right > left, bottom > top else {
+                // Nothing to hide: collapsed, or hidden and off the picture. A visible terminal that maps
+                // outside the image means the mapping is wrong, and it would be left unpainted.
+                if !target.isHidden, area.width > 0, area.height > 0 {
+                    throw ScreenshotRedactionError(description: "a visible terminal is outside the capture, so it can't be hidden")
+                }
+                continue
+            }
+            let pad = padding
+            let l = max(0, left - pad), r = min(pixelsWide, right + pad)
+            let t = max(0, top - pad), b = min(pixelsHigh, bottom + pad)
+            let block = CGRect(x: l, y: pixelsHigh - b, width: r - l, height: b - t)
             context.setBlendMode(.copy)
             context.setShouldAntialias(false)
             context.setFillColor(red: fill.redComponent, green: fill.greenComponent, blue: fill.blueComponent, alpha: 1)

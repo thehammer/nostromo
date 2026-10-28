@@ -192,6 +192,12 @@ tree as it is now: `screenshot` lays the window out, draws it and flushes Core A
 agree. A pane that is mid-resize in the same instant is the one case that can leave a sliver of its old
 position unpainted; take the screenshot once the layout has settled.
 
+Known limit: the picture can still lag the view tree by one frame (`CATransaction.flush()` does not
+guarantee the window server has the new frame). Every block is therefore padded by 2 px on each side
+(clamped to the image), which also covers the up-to-2 px vertical mismatch the aspect-ratio check tolerates. A
+visible terminal whose area does not intersect the image at all is refused; one that is hidden (itself or an
+ancestor) and off the picture is skipped.
+
 The coordinate mapping: the capture covers the whole window frame (window-server path) or the content
 view (the `cacheDisplay` fallback, used when the window server returns a flat image); `ScreenshotRedaction` converts each terminal area to window
 coordinates and from there to pixels (scale from the image size, y flipped, rounded outward).
@@ -220,4 +226,4 @@ reports `alpha` and `visible`).
 
 Drags are delivered to the destination view directly rather than through the
 window server, so cross-app drag mechanics (promised files, drag images) are
-not exercised. Screenshots render the view hierarchy, not the compositor.
+not exercised. Screenshots are the window server's last composited frame (or a `cacheDisplay` render as fallback), with terminal panes painted over from the live view tree; see "Screenshots hide terminals" for the one-frame-lag limit and the 2 px padding.
