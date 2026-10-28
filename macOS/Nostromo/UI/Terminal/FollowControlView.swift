@@ -10,8 +10,9 @@ private let followLog = Logger(subsystem: "com.hammer.nostromo", category: "term
 /// Following starts from exactly one place here, **Invite**, and a person's gesture is required for
 /// every button that changes anything (Invite, Stop following, Resume): each asks
 /// `TerminalInputGuard.allowsControl` first, so a synthetic click, a marked key or an Accessibility
-/// press does nothing, is reported to the daemon, and leaves the popover up. Picking a focus, ticking
-/// the box and Move to… only change what the form shows, so they need no gesture.
+/// press does nothing, is reported to the daemon, and leaves the popover up. Picking a focus and ticking
+/// the box ask too (a synthetic change is undone), so a person only ever invites what they chose; Move to…
+/// only swaps the buttons for the form and sends nothing.
 ///
 /// Nothing is ticked and nothing is sent until Invite: the "Include what's on screen now" box starts off
 /// and the warning line names where the output would go (the environment, in capitals, for a remote pane).
@@ -31,6 +32,8 @@ final class FollowControlView: NSView {
     var onSizeChange: ((NSSize) -> Void)?
 
     private let picker = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// The picker's last choice a person made (or the default), restored when a synthetic change is refused.
+    private var pickedIndex = 0
     private let includeScreenCheckbox = NSButton(checkboxWithTitle: FollowModel.includeScreenTitle, target: nil, action: nil)
     private let warningLabel = NSTextField(wrappingLabelWithString: "")
     private let stack = NSStackView()
@@ -96,6 +99,7 @@ final class FollowControlView: NSView {
         if let tag = model.defaultInviteTag, let index = offered.firstIndex(where: { $0.tag == tag }) {
             picker.selectItem(at: index)
         }
+        pickedIndex = max(0, picker.indexOfSelectedItem)
         picker.target = self
         picker.action = #selector(followFocusChanged(_:))
         picker.setAccessibilityIdentifier("terminal-follow-picker")
@@ -103,6 +107,8 @@ final class FollowControlView: NSView {
         stack.addArrangedSubview(picker)
 
         includeScreenCheckbox.state = FollowModel.includeScreenDefault ? .on : .off
+        includeScreenCheckbox.target = self
+        includeScreenCheckbox.action = #selector(includeScreenToggled(_:))
         includeScreenCheckbox.setAccessibilityIdentifier("terminal-follow-include-screen")
         stack.addArrangedSubview(includeScreenCheckbox)
 
@@ -179,9 +185,26 @@ final class FollowControlView: NSView {
 
     // MARK: - Actions
 
-    /// Changes which focus the warning names. Sends nothing.
+    /// Changes which focus the warning names. Only a person's choice counts: a synthetic one is undone and
+    /// reported, so the form never holds a focus a person did not pick. Sends nothing.
     @objc private func followFocusChanged(_ sender: NSPopUpButton) {
+        guard TerminalInputGuard.allowsControl(event: NSApp.currentEvent, control: sender) else {
+            picker.selectItem(at: pickedIndex)
+            store.reportRefusal(terminalId: model.info.terminalId, op: .followInvite)
+            updateWarning()
+            return
+        }
+        pickedIndex = picker.indexOfSelectedItem
         updateWarning()
+    }
+
+    /// The "Include what's on screen now" box: a person's tick only. A synthetic one is undone and reported.
+    @objc private func includeScreenToggled(_ sender: NSButton) {
+        guard TerminalInputGuard.allowsControl(event: NSApp.currentEvent, control: sender) else {
+            sender.state = FollowModel.includeScreenDefault ? .on : .off
+            store.reportRefusal(terminalId: model.info.terminalId, op: .followInvite)
+            return
+        }
     }
 
     /// Shows the invite form for a followed pane. Sends nothing; the Invite button still has to be pressed.

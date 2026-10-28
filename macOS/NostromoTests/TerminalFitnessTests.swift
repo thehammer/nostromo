@@ -296,15 +296,16 @@ final class TerminalFitnessTests: XCTestCase {
     ///    needs the human's Connect click (`connectTapped`, which is NOT exempt).
     ///  - `popupChanged`, `projectChanged`, `environmentChanged`, `serviceChanged`, `shellTypeChanged`:
     ///    picker popups that change a form selection only.
-    ///  - `followBadgeTapped` (host), `followFocusChanged` and `moveTapped` (Follow popover): they only
-    ///    open the Follow popover, change which focus its warning names, or switch it to the invite form.
-    ///    They send nothing and start nothing. `inviteTapped`, `stopTapped` and `resumeTapped` are NOT
-    ///    exempt: each changes what the daemon does and must ask `TerminalInputGuard`.
+    ///  - `followBadgeTapped` (host) and `moveTapped` (Follow popover): they only open the Follow popover
+    ///    or switch it to the invite form. They send nothing and start nothing. Everything that changes
+    ///    what the daemon does (`inviteTapped`, `stopTapped`, `resumeTapped`) or the form's state (the
+    ///    focus picker `followFocusChanged`, `includeScreenToggled`, the confirm sheet's `followToggled`)
+    ///    is NOT exempt: it must ask `TerminalInputGuard`.
     /// Every other action, `connectTapped` included, must ask `TerminalInputGuard`.
     private let guardExemptActions: [String] = [
         "cancelTapped", "dismissTapped", "okTapped", "copyTapped", "submitTapped",
         "popupChanged", "projectChanged", "environmentChanged", "serviceChanged", "shellTypeChanged",
-        "followBadgeTapped", "followFocusChanged", "moveTapped",
+        "followBadgeTapped", "moveTapped",
     ]
 
     func testEveryObjcActionInTheTerminalViewsAsksTheInputGuard() throws {
@@ -952,5 +953,34 @@ final class TerminalFitnessTests: XCTestCase {
         XCTAssertTrue(finish[answer.lowerBound...].contains("inviteFollow:"), "finish passes inviteFollow: on the answer")
         let lines = try confirmSheetLines()
         XCTAssertEqual(lines.filter { $0.contains("store.answer(") }.count, 1, "every answer goes through finish")
+    }
+
+    // MARK: Form state changes only by a person's gesture
+
+    /// `name` asks the guard; on refusal it puts `reset` back and reports a refused follow, all before it returns.
+    private func assertFormChangeIsGated(_ name: String, in file: String, reset: String, line: UInt = #line) throws {
+        let body = try funcBody(name, in: file)
+        let guardAt = try XCTUnwrap(body.range(of: "TerminalInputGuard.allowsControl("), "\(name) must ask the guard", line: line)
+        let refusal = try XCTUnwrap(body.range(of: "reportRefusal(", options: [], range: guardAt.upperBound..<body.endIndex),
+                                    "\(name) must report a refusal", line: line)
+        XCTAssertTrue(body[refusal.lowerBound...].prefix(120).contains("op: .followInvite"), "\(name) reports .followInvite", line: line)
+        let resetAt = try XCTUnwrap(body.range(of: reset, options: [], range: guardAt.upperBound..<body.endIndex),
+                                    "\(name) must reset the form with `\(reset)` when refused", line: line)
+        let returnAt = try XCTUnwrap(body.range(of: "return", options: [], range: guardAt.upperBound..<body.endIndex),
+                                     "\(name): the refusal branch must return", line: line)
+        XCTAssertLessThan(resetAt.lowerBound, returnAt.lowerBound, "\(name): reset before returning", line: line)
+        XCTAssertLessThan(refusal.lowerBound, returnAt.lowerBound, "\(name): report before returning", line: line)
+    }
+
+    func testTheFollowPopoversPickerAndScreenBoxChangeOnlyByAPersonAndSnapBackWhenRefused() throws {
+        try assertFormChangeIsGated("followFocusChanged", in: "FollowControlView.swift", reset: "picker.selectItem(at: pickedIndex)")
+        try assertFormChangeIsGated("includeScreenToggled", in: "FollowControlView.swift", reset: "FollowModel.includeScreenDefault")
+    }
+
+    func testTheConfirmSheetsFollowBoxChangesOnlyByAPersonAndSnapsBackToOffWhenRefused() throws {
+        try assertFormChangeIsGated("followToggled", in: "RemoteShellConfirmSheet.swift", reset: "sender.state = .off")
+        let lines = try confirmSheetLines()
+        XCTAssertTrue(lines.contains { $0.contains("followCheckbox.action = #selector(followToggled(_:))") },
+                      "the follow box's action must be the gated followToggled")
     }
 }

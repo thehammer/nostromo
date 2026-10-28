@@ -176,6 +176,8 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
             followCheckbox.title = title
             // Never on until a person ticks it.
             followCheckbox.state = .off
+            followCheckbox.target = self
+            followCheckbox.action = #selector(followToggled(_:))
             // A long agent name wraps; the sheet never cuts what it says.
             followCheckbox.lineBreakMode = .byWordWrapping
             followCheckbox.translatesAutoresizingMaskIntoConstraints = false
@@ -317,6 +319,17 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
             return
         }
         finish(decision: .connect)
+    }
+
+    /// The follow box. Only a person may tick it: a synthetic click or key, or an Accessibility press, puts
+    /// it back to unticked and is reported, so the box never holds a state a person did not choose.
+    @objc private func followToggled(_ sender: NSButton) {
+        guard TerminalInputGuard.allowsControl(event: NSApp.currentEvent, control: sender) else {
+            sheetLog.notice("follow box refused: not a human gesture (request \(self.requestId, privacy: .public))")
+            sender.state = .off
+            terminals.reportRefusal(terminalId: nil, op: .followInvite)
+            return
+        }
     }
 
     // MARK: - Private
