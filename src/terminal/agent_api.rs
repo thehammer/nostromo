@@ -543,7 +543,11 @@ const MAX_AGENT_NAME_CHARS: usize = 40;
 pub const FOLLOW_REASON_LABEL: &str = "Agent's stated reason (unverified)";
 
 fn short_agent_name(name: &str) -> String {
-    name.chars().take(MAX_AGENT_NAME_CHARS).collect::<String>().trim_end().to_string()
+    name.chars()
+        .take(MAX_AGENT_NAME_CHARS)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 /// The sheet's detail: the label, then the reason on its own line.
