@@ -10,12 +10,19 @@
 # The two class selections are exact complements (`-skip-testing` vs
 # `-only-testing` over the same list), so every test runs exactly once.
 #
-# SERIAL_CLASSES are the classes that pin rendered pixel/point heights or
-# layout goldens (recorded against Fira Code on a single process) or read
-# AppKit state that another process would disturb. They stay serial because
-# a golden that depends on timing or on a sibling process's windows is a
-# flake, not a verdict. A class goes on this list when it records goldens or
-# rendered metrics; it comes off it only with a proof that it is parallel-safe.
+# SERIAL_CLASSES stay on one process, on purpose:
+#   * the layout goldens: classes that pin rendered heights or layout against
+#     goldens recorded on a single process with Fira Code;
+#   * real-window layout tests that wait on wall-clock budgets (the Mother
+#     detail rig, window overflow, oversized-child splits): measured on the
+#     3-core runner, MotherDetailScrollTests failed in 1 of 5 parallel runs
+#     (and in a 6-worker run) because a test that pumps a real window for a
+#     fixed time slice is a flake under CPU contention, not a verdict;
+#   * MotherBrokerClientTests, which failed once in a 4-worker run for the
+#     same reason (timer-driven, 15 s budget).
+# A class goes on this list when it records goldens or waits on wall-clock
+# time against real windows; it comes off only with 5 consecutive green
+# parallel runs on the runner.
 #
 # `make mac-test` is unchanged and stays fully serial: it is what a developer
 # runs, and a serial failure is the reference for a CI failure.
@@ -37,6 +44,12 @@ SERIAL_CLASSES=(
   TrackerPaneClockTests
   AppControlTrackerTests
   MarkdownCodeBlockTests
+  MotherDetailScrollTests
+  MotherDetailVerticalOverflowTests
+  MotherOverviewAndCrewOverflowTests
+  FocusSplitOversizedChildTests
+  WindowContentOverflowTests
+  MotherBrokerClientTests
 )
 
 BASE=(-project Nostromo.xcodeproj -scheme NostromoTests -destination 'platform=macOS' -derivedDataPath build)
