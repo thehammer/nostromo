@@ -80,9 +80,9 @@ RESTART_GUARD = FORCE="$(FORCE)" bin/nostromo-restart-guard
 daemon-restart-guard:
 	@$(RESTART_GUARD)
 
-## Build the nostromd daemon binary and its production-shell guard (release).
+## Build the nostromd daemon binary, its production-shell guard and the MCP bridge (release).
 daemon:
-	cargo build --release --bin nostromd --bin nostromo-guard
+	cargo build --release --bin nostromd --bin nostromo-guard --bin nostromo-mcp-bridge
 
 ## Install the daemon binary and register the launchd agent.
 ##
@@ -104,22 +104,31 @@ install-daemon: daemon
 	@# leave a new nostromd beside a missing or stale guard (missing, every agent tool call is
 	@# blocked). The guard is moved into place BEFORE nostromd, so there is never a new daemon
 	@# beside a stale guard.
+	@# The MCP bridge (what agent sessions spawn to reach the daemon) is installed the same way,
+	@# at the path ~/.local/bin/nostromo-mcp-bridge resolves to (a symlink into ~/.cargo/bin);
+	@# if that file is missing it goes beside nostromd and the symlink is created.
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
 	  guard="$$(dirname "$$real")/nostromo-guard"; \
-	  stage_daemon="$$real.new.$$$$"; stage_guard="$$guard.new.$$$$"; \
-	  rm -f "$$stage_daemon" "$$stage_guard"; \
+	  bdest="$(HOME)/.local/bin/nostromo-mcp-bridge"; bridge=$$(readlink "$$bdest" 2>/dev/null || true); \
+	  if [ -z "$$bridge" ]; then if [ -e "$$bdest" ]; then bridge="$$bdest"; else bridge="$$(dirname "$$real")/nostromo-mcp-bridge"; fi; fi; \
+	  stage_daemon="$$real.new.$$$$"; stage_guard="$$guard.new.$$$$"; stage_bridge="$$bridge.new.$$$$"; \
+	  rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
 	  if cp target/release/nostromd "$$stage_daemon" && codesign --force -s - --identifier nostromd "$$stage_daemon" \
-	      && cp target/release/nostromo-guard "$$stage_guard" && codesign --force -s - --identifier nostromo-guard "$$stage_guard"; then :; \
+	      && cp target/release/nostromo-guard "$$stage_guard" && codesign --force -s - --identifier nostromo-guard "$$stage_guard" \
+	      && cp target/release/nostromo-mcp-bridge "$$stage_bridge" && codesign --force -s - --identifier nostromo-mcp-bridge "$$stage_bridge"; then :; \
 	  else \
-	    rm -f "$$stage_daemon" "$$stage_guard"; \
-	    echo "install-daemon: could not copy and sign nostromd and nostromo-guard; nothing was replaced" >&2; exit 1; \
+	    rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
+	    echo "install-daemon: could not copy and sign nostromd, nostromo-guard and nostromo-mcp-bridge; nothing was replaced" >&2; exit 1; \
 	  fi; \
-	  if rm -f "$$guard" && mv "$$stage_guard" "$$guard" && rm -f "$$real" && mv "$$stage_daemon" "$$real"; then :; \
+	  if rm -f "$$bridge" && mv "$$stage_bridge" "$$bridge" && { [ -e "$$bdest" ] || [ -L "$$bdest" ] || ln -s "$$bridge" "$$bdest"; } \
+	      && rm -f "$$guard" && mv "$$stage_guard" "$$guard" && rm -f "$$real" && mv "$$stage_daemon" "$$real"; then :; \
 	  else \
-	    rm -f "$$stage_daemon" "$$stage_guard"; \
+	    rm -f "$$stage_daemon" "$$stage_guard" "$$stage_bridge"; \
 	    echo "install-daemon: could not move the new binaries into place; reinstall with make install-daemon" >&2; exit 1; \
 	  fi; \
-	  echo "Installed nostromd to $$real"; echo "Installed nostromo-guard to $$guard"
+	  echo "Installed nostromd to $$real"; echo "Installed nostromo-guard to $$guard"; \
+	  echo "Installed nostromo-mcp-bridge to $$bridge"; \
+	  echo "Note: running agent sessions keep their old bridge until restarted; a session whose bridge is the new one reconnects across later daemon restarts."
 	sed \
 		-e 's|__PREFIX__|$(HOME)/.local|g' \
 		-e 's|__HOME__|$(HOME)|g' \
@@ -143,7 +152,8 @@ uninstall-daemon:
 	launchctl bootout "gui/$$(id -u)/com.hammer.nostromd" 2>/dev/null || true
 	rm -f "$(HOME)/Library/LaunchAgents/com.hammer.nostromd.plist"
 	@dest="$(HOME)/.local/bin/nostromd"; real=$$(readlink "$$dest" 2>/dev/null || echo "$$dest"); \
-	  rm -f "$$(dirname "$$real")/nostromo-guard"
+	  rm -f "$$(dirname "$$real")/nostromo-guard" "$$(dirname "$$real")/nostromo-mcp-bridge"; \
+	  rm -f "$(HOME)/.local/bin/nostromo-mcp-bridge"
 	rm -f "$(HOME)/.local/bin/nostromd"
 	@echo "nostromd uninstalled"
 
