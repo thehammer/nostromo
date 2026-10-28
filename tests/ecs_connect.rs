@@ -463,13 +463,25 @@ impl Rig {
             .collect()
     }
 
-    /// Every `execute-command` process that started has ended.
+    /// Waits (up to `STARTED_DEADLINE`) until the fake CLI has recorded its pid. Call this
+    /// BEFORE aborting the agent's call or closing the pane: the fake spawns its child
+    /// asynchronously, so the pid file can lag the `Connecting` state.
+    async fn wait_aws_started(&self, what: &str) {
+        let deadline = Instant::now() + STARTED_DEADLINE;
+        while self.started_pids().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "{what}: no execute-command process ever started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Every `execute-command` process that started has ended. Never started is a failure
+    /// (the wait tolerates a slow launch; see `wait_aws_started` to wait before a teardown).
     async fn assert_aws_processes_gone(&self, what: &str) {
+        self.wait_aws_started(what).await;
         let pids = self.started_pids();
-        assert!(
-            !pids.is_empty(),
-            "{what}: no execute-command process ever started"
-        );
         eventually(&format!("{what}: the aws process to be gone"), || {
             pids.iter().all(|p| !alive(*p))
         })
@@ -593,6 +605,9 @@ impl Rig {
 }
 
 // ── small utilities ──────────────────────────────────────────────────────────
+
+/// How long the fake CLI gets to record its pid after the pane reads `Connecting`.
+const STARTED_DEADLINE: Duration = Duration::from_secs(10);
 
 fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
@@ -1461,6 +1476,7 @@ async fn closing_the_pane_while_it_connects_fails_the_request_and_leaves_nothing
     let (call, confirm) = r.s.ask(args()).await;
     r.s.app.answer(&confirm.request_id, "connect").await;
     let t = r.wait_connecting().await;
+    r.wait_aws_started("before closing a connecting pane").await;
 
     r.s.app
         .send(&ClientMsg::TerminalClose {
@@ -1501,12 +1517,8 @@ async fn when_the_agent_goes_away_while_the_session_starts_the_pane_and_the_aws_
     let confirm = r.s.app.wait_confirm(from).await;
     r.s.app.answer(&confirm.request_id, "connect").await;
     let t = r.wait_connecting().await;
-    // The fake CLI records its pid as it starts: abort only once it has, so the
-    // "no process ever started" check cannot race the launch.
-    eventually("the fake aws process to have started", || {
-        !r.started_pids().is_empty()
-    })
-    .await;
+    // Abort only once the fake CLI has recorded its pid, so the teardown cannot race the launch.
+    r.wait_aws_started("before the agent went away").await;
 
     asking.abort();
     let _ = asking.await;
