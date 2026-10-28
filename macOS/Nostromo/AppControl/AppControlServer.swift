@@ -740,15 +740,23 @@ final class AppControlServer {
         return true
     }
 
+    /// In the real app every terminal pane is painted over before the PNG exists (`ScreenshotRedaction`):
+    /// a picture of a terminal would bypass `nostromo_read_terminal_screen`'s follow and redaction. The
+    /// capture lives only in memory until then; a terminal that can't be placed in it refuses the
+    /// screenshot. A QA build that allows synthetic input (`SyntheticInputGate.allowsSynthetic`) gets the
+    /// unchanged picture. Nothing else in app-control returns pixels.
     private func screenshot(_ req: AppControlRequest) throws -> Any {
         let w = try window(req)
         guard let cv = w.contentView else { throw AppControlError.failed("no content view") }
+        cv.layoutSubtreeIfNeeded()
         w.displayIfNeeded()
         let path = req.string("path") ?? NSTemporaryDirectory() + "nostromo-window-\(req.int("window") ?? 0).png"
 
         typealias CreateImage = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
         var method = "cgwindow"
         var rep: NSBitmapImageRep?
+        // Where the image sits in window base coordinates: the whole frame for a window-server capture.
+        var captureRect = NSRect(origin: .zero, size: w.frame.size)
         if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") {   // RTLD_DEFAULT
             let create = unsafeBitCast(sym, to: CreateImage.self)
             // .optionIncludingWindow = 1<<3, boundsIgnoreFraming = 1<<0
@@ -765,12 +773,18 @@ final class AppControlServer {
             guard let r = cv.bitmapImageRepForCachingDisplay(in: cv.bounds) else { throw AppControlError.failed("cannot capture window") }
             cv.cacheDisplay(in: cv.bounds, to: r)
             rep = r
+            captureRect = cv.convert(cv.bounds, to: nil)
         }
-        guard let out = rep, let png = out.representation(using: .png, properties: [:]) else {
-            throw AppControlError.failed("png encode failed")
+        guard let out = rep else { throw AppControlError.failed("png encode failed") }
+        let png: Data
+        do {
+            png = try ScreenshotRedaction.pngData(of: out, window: w, captureRect: captureRect)
+        } catch let e as ScreenshotRedactionError {
+            throw AppControlError.failed("screenshot refused: \(e.description)")
         }
         try png.write(to: URL(fileURLWithPath: path))
-        return ["path": path, "width": out.pixelsWide, "height": out.pixelsHigh, "windowNumber": w.windowNumber, "method": method]
+        return ["path": path, "width": out.pixelsWide, "height": out.pixelsHigh, "windowNumber": w.windowNumber, "method": method,
+                "terminalsHidden": !SyntheticInputGate.allowsSynthetic]
     }
 }
 
