@@ -202,6 +202,7 @@ jobs:
         run: |
           set -o pipefail
           cd macOS
+          sysctl -n hw.ncpu hw.memsize
           date -u +%T
           xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests -destination 'platform=macOS' \
             -derivedDataPath build build-for-testing 2>&1 | tee "$RUNNER_TEMP/build.log" | grep -E "error:|\*\* TEST BUILD"
@@ -209,7 +210,7 @@ jobs:
 
       - name: parallel tests
         env:
-          WORKERS: "3"
+          WORKERS: "4"
         run: |
           set -o pipefail
           cd macOS
@@ -225,6 +226,7 @@ jobs:
             -skip-testing:NostromoTests/TurnHeightEstimatorFoldTests \
             2>&1 | tee "$RUNNER_TEMP/par.log" | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST"
           date -u +%T
+          xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/par.xcresult" | tee "$RUNNER_TEMP/par-summary.json" | head -40
 
       - name: serial tests
         run: |
@@ -242,6 +244,7 @@ jobs:
             -only-testing:NostromoTests/TurnHeightEstimatorFoldTests \
             2>&1 | tee "$RUNNER_TEMP/ser.log" | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST"
           date -u +%T
+          xcrun xcresulttool get test-results summary --path "$RUNNER_TEMP/ser.xcresult" | tee "$RUNNER_TEMP/ser-summary.json" | head -40
 
       - name: Upload logs
         if: always()
@@ -252,6 +255,8 @@ jobs:
             ${{ runner.temp }}/par.log
             ${{ runner.temp }}/ser.log
             ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/par-summary.json
+            ${{ runner.temp }}/ser-summary.json
           retention-days: 3
 
       # Compile gate for the app target. `make mac-test` builds only the
