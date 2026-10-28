@@ -183,7 +183,7 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
             let alert = NSAlert()
             alert.messageText = FollowModel.selectionTooLargeMessage
             alert.addButton(withTitle: "OK")
-            if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+            if let window { alert.beginSheetModal(for: window) } else { NSSound.beep() }
             return
         }
         store.sendSelection(terminalId: terminalId, targetTag: tag, text: text)
