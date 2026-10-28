@@ -33,6 +33,11 @@ import SwiftTerm
 /// idle warning (13 minutes without a keystroke) a yellow banner under the header counts down to the
 /// close, with Keep open.
 ///
+/// Every pane has a Follow badge in its header (`FollowModel`: "Not shared", "Followed by Claudia",
+/// "Paused, too much output"), in every window that shows the pane. Clicking it opens `FollowControlView`
+/// in a popover: invite, stop, move or resume. Agent follow is invitation-only, so none of that happens
+/// without a person's gesture.
+///
 /// Every control that changes a terminal (the x, Restart, Close, Keep open, and Terminal > Close Terminal
 /// Pane) asks `TerminalInputGuard.allowsControl` first. A synthetic click does nothing, and the
 /// refusal is reported to the daemon.
@@ -72,7 +77,12 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     /// The daemon's grid for the terminal, from its last replay or state.
     private var daemonGrid: (cols: Int, rows: Int)?
     private var changes: AnyCancellable?
+    /// A rename or a new focus changes what the badge and the popover call things.
+    private var focusChanges: AnyCancellable?
     private var registered = false
+    /// The Follow popover on screen, and the state it was opened for (it closes when that changes).
+    private var followPopover: NSPopover?
+    private var followStateWhenOpened: (state: FollowModel.State, actions: [FollowAction])?
     /// A replay is being fed: its bytes are not an echo of a key.
     private var feedingReplay = false
     private var keyMonitor: Any?
@@ -117,6 +127,10 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         info = store.info(forPane: paneId, tag: focusTag)
         terminalView.terminalId = info?.terminalId
         changes = store.changes.sink { [weak self] change in self?.handle(change) }
+        // `@Published` announces before it changes: look again on the next turn of the main queue.
+        focusChanges = FocusStore.shared.$focuses
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.render() }
         render()
     }
 
@@ -149,6 +163,15 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
             return
         }
         store.close(terminalId: id)
+    }
+
+    /// Whether the terminal has selected text (Terminal > Send Selection to…).
+    var hasSelection: Bool { terminalView.selectionActive }
+
+    /// Terminal > Send Selection to…: the same list of focuses as the context menu, at the pane's
+    /// top-left. Choosing one asks `TerminalInputGuard` (`NostromoTerminalView.sendSelectionTapped`).
+    func showSendSelectionMenu() {
+        terminalView.showSendSelectionMenu()
     }
 
     /// Edit > Find / Find Next: SwiftTerm's find bar (`sender` is the menu item; its tag says which).
@@ -361,7 +384,9 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         if let grid = daemonGrid, isMirror, !daemonStopped, !ended {
             hint = "Mirroring at \(grid.cols)\u{00D7}\(grid.rows), type here to drive"
         }
-        header.apply(info: info, mirrorHint: hint)
+        let follow = followModel()
+        header.apply(info: info, mirrorHint: hint, follow: follow)
+        closeFollowPopoverIfStale(follow)
         renderConnecting()
         overlayLabel.toolTip = overlayLabel.stringValue
         needsLayout = true
@@ -388,6 +413,27 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     private func buildHeader() {
         header.closeButton.target = self
         header.closeButton.action = #selector(closeTapped(_:))
+        header.followButton.target = self
+        header.followButton.action = #selector(followBadgeTapped(_:))
+    }
+
+    /// What the Follow badge and its popover say: nil until the daemon has described the pane.
+    private func followModel() -> FollowModel? {
+        info.map { FollowModel(info: $0, focuses: FollowModel.options(from: FocusStore.shared.focuses)) }
+    }
+
+    /// The popover is for the state (and the buttons) it was opened with: once the daemon changes them (an
+    /// invite landed, the agent paused, the shell ended), the popover goes away rather than offer buttons that no longer apply.
+    private func closeFollowPopoverIfStale(_ model: FollowModel?) {
+        guard let popover = followPopover else { return }
+        guard popover.isShown else {
+            followPopover = nil
+            return
+        }
+        if model?.state != followStateWhenOpened?.state || model?.actions != followStateWhenOpened?.actions {
+            popover.close()
+            followPopover = nil
+        }
     }
 
     /// The terminal view gives way to the connecting message until the shell is running.
@@ -503,6 +549,29 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
     }
 
     // MARK: - Actions (each asks the guard first)
+
+    /// Opens (or closes) the Follow popover. Harmless: it only shows the choices; Invite, Stop following
+    /// and Resume are in the popover and each of them asks `TerminalInputGuard`.
+    @objc private func followBadgeTapped(_ sender: NSButton) {
+        if let popover = followPopover, popover.isShown {
+            popover.close()
+            followPopover = nil
+            return
+        }
+        guard let model = followModel() else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = false
+        let content = FollowControlView(model: model, store: store) { [weak popover] in popover?.close() }
+        content.onSizeChange = { [weak popover] size in popover?.contentSize = size }
+        let controller = NSViewController()
+        controller.view = content
+        popover.contentSize = content.frame.size
+        popover.contentViewController = controller
+        followPopover = popover
+        followStateWhenOpened = (model.state, model.actions)
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+    }
 
     @objc private func closeTapped(_ sender: NSButton) {
         guard let id = info?.terminalId else { return }

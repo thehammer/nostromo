@@ -1,14 +1,20 @@
 import AppKit
 
 /// The band at the top of a terminal pane: the environment of a remote shell, then what it is (project,
-/// service, shell, or a local shell's directory), the mirror hint, and a close x. No SwiftTerm, so the
-/// tests lay it out directly.
+/// service, shell, or a local shell's directory), the mirror hint, the Follow badge and a close x. No
+/// SwiftTerm, so the tests lay it out directly.
 ///
 /// A pane that is not known to be local is red whatever its kind says. The environment ("PRODUCTION", or
 /// "REMOTE" when the daemon sent no target) is its own label on the left: it is never truncated and its
 /// font shrinks (down to 6 pt) before it would clip, whatever the width or height. Only the rest
 /// truncates, and the mirror hint gives way first. The header is 24 pt tall, or the pane's whole height
 /// when that is less (the host gives it what it has).
+///
+/// The Follow badge ("Not shared", "Followed by Claudia", "Paused, too much output") sits left of the
+/// close x in every pane, local or remote, and is never hidden: the title and the hint give way to it,
+/// and it keeps at least `FollowModel.badgeMinWidth` unless the pane is so narrow that the remote token
+/// would otherwise not fit (then it shrinks to a coloured pill; the tooltip and accessibility label always
+/// carry the whole sentence). It is a filled pill with dark text, so it reads on the red header too.
 final class TerminalPaneHeaderView: NSView {
 
     static let height: CGFloat = 24
@@ -17,6 +23,8 @@ final class TerminalPaneHeaderView: NSView {
     var onMouseDown: ((NSEvent) -> Void)?
     /// The host wires its action here.
     let closeButton = NSButton()
+    /// The Follow badge. The host wires its action (it opens the invite or manage popover).
+    let followButton = NSButton()
 
     private let environmentLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
@@ -25,6 +33,12 @@ final class TerminalPaneHeaderView: NSView {
 
     private static let closeWidth: CGFloat = 28
     private static let gap: CGFloat = 8
+    /// The widest the badge asks for: a long focus name truncates (the tooltip has it all).
+    private static let badgeMaxWidth: CGFloat = 200
+    /// The narrowest a squeezed badge gets: still a visible, coloured pill.
+    private static let badgeFloorWidth: CGFloat = 20
+    private static let badgePadding: CGFloat = 12
+    private static let badgeMaxHeight: CGFloat = 18
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -46,7 +60,12 @@ final class TerminalPaneHeaderView: NSView {
         mirrorHint.lineBreakMode = .byTruncatingHead
         mirrorHint.isHidden = true
         mirrorHint.setAccessibilityIdentifier("terminal-mirror-hint")
-        for view in [environmentLabel, titleLabel, mirrorHint, closeButton] { addSubview(view) }
+        followButton.isBordered = false
+        followButton.wantsLayer = true
+        followButton.layer?.cornerRadius = 4
+        followButton.lineBreakMode = .byTruncatingTail
+        followButton.setAccessibilityIdentifier("terminal-follow")
+        for view in [environmentLabel, titleLabel, mirrorHint, followButton, closeButton] { addSubview(view) }
         apply(info: nil, mirrorHint: "")
     }
 
@@ -60,7 +79,9 @@ final class TerminalPaneHeaderView: NSView {
 
     /// Set the texts and colours from the daemon's description of the pane (nil: not known yet, shown
     /// as a plain "Terminal"). `mirrorHint` is empty unless this window is a mirror.
-    func apply(info: TerminalInfo?, mirrorHint hint: String) {
+    ///
+    /// `follow` is what the Follow badge says; nil (no pane information yet) shows "Not shared".
+    func apply(info: TerminalInfo?, mirrorHint hint: String, follow: FollowModel? = nil) {
         isRemote = info.map { TerminalChromeModel.isRemote($0) } ?? false
         if let info, isRemote {
             environmentLabel.stringValue = TerminalChromeModel.environmentToken(for: info)
@@ -82,6 +103,7 @@ final class TerminalPaneHeaderView: NSView {
             .font: NSFont.systemFont(ofSize: 16, weight: .regular),
             .foregroundColor: isRemote ? Theme.hazardText : Theme.fgMuted,
         ])
+        applyBadge(follow)
         needsLayout = true
     }
 
@@ -91,9 +113,14 @@ final class TerminalPaneHeaderView: NSView {
         closeButton.frame = NSRect(x: bounds.width - Self.closeWidth - 2, y: 0, width: Self.closeWidth, height: h)
         let labelSize = titleLabel.intrinsicContentSize
         let textEnd = max(10, bounds.width - Self.closeWidth - 10)
+        let badgeW = badgeWidth(available: textEnd - 10)
+        let badgeH = min(h, Self.badgeMaxHeight)
+        followButton.frame = NSRect(x: textEnd - badgeW, y: (h - badgeH) / 2, width: badgeW, height: badgeH)
+        // Everything else lives left of the badge.
+        let contentEnd = max(10, followButton.frame.minX - Self.gap)
         guard isRemote else {
             // The hint keeps its width unless the pane is very narrow; the title gives way to it.
-            let available = textEnd - 10
+            let available = contentEnd - 10
             let hintW = mirrorHint.isHidden ? 0 : min(mirrorHint.intrinsicContentSize.width, available * 0.6)
             let gap = mirrorHint.isHidden ? 0 : Self.gap
             mirrorHint.frame = NSRect(x: 10 + available - hintW, y: (h - labelSize.height) / 2, width: hintW, height: labelSize.height)
@@ -102,10 +129,10 @@ final class TerminalPaneHeaderView: NSView {
         }
         // The environment is laid out first, at its full width; then the title; the mirror hint gets only
         // what the title does not need.
-        let envSize = fitEnvironmentLabel(width: textEnd - 10, height: h)
+        let envSize = fitEnvironmentLabel(width: contentEnd - 10, height: h)
         environmentLabel.frame = NSRect(x: 10, y: (h - envSize.height) / 2, width: envSize.width, height: envSize.height)
         let restStart = 10 + envSize.width + Self.gap
-        let rest = max(0, textEnd - restStart)
+        let rest = max(0, contentEnd - restStart)
         var hintW: CGFloat = 0
         if !mirrorHint.isHidden {
             hintW = min(mirrorHint.intrinsicContentSize.width, max(0, rest - labelSize.width - Self.gap))
@@ -114,7 +141,44 @@ final class TerminalPaneHeaderView: NSView {
         let gap = hintW > 0 ? Self.gap : 0
         let y = (h - labelSize.height) / 2
         titleLabel.frame = NSRect(x: restStart, y: y, width: max(0, rest - hintW - gap), height: labelSize.height)
-        mirrorHint.frame = NSRect(x: textEnd - hintW, y: y, width: hintW, height: labelSize.height)
+        mirrorHint.frame = NSRect(x: contentEnd - hintW, y: y, width: hintW, height: labelSize.height)
+    }
+
+    /// The badge's text, colour and description. A pill filled with the model's colour, dark text on it.
+    private func applyBadge(_ follow: FollowModel?) {
+        let text = follow?.badgeText ?? FollowModel.notSharedText
+        let color = follow?.badgeColor ?? Theme.fgMuted
+        let description = follow?.badgeDescription ?? "No agent is following this terminal"
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byTruncatingTail
+        followButton.attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+            .foregroundColor: Theme.bg,
+            .paragraphStyle: paragraph,
+        ])
+        followButton.layer?.backgroundColor = color.cgColor
+        followButton.toolTip = description
+        followButton.setAccessibilityLabel("Follow: \(text). \(description)")
+    }
+
+    /// How wide the badge is: what its text wants (at least `FollowModel.badgeMinWidth`, at most
+    /// `badgeMaxWidth`), squeezed when the pane is narrow. A remote header's token is never cut, so the
+    /// badge may shrink to `badgeFloorWidth` to leave the token its smallest size; it never vanishes.
+    private func badgeWidth(available: CGFloat) -> CGFloat {
+        let wanted = followButton.attributedTitle.size().width + Self.badgePadding
+        var width = min(Self.badgeMaxWidth, max(FollowModel.badgeMinWidth, wanted))
+        if isRemote {
+            // First the badge gives up room down to its minimum, so the token keeps its full size...
+            environmentLabel.font = NSFont.systemFont(ofSize: 12, weight: .bold)
+            let fullToken = environmentLabel.intrinsicContentSize.width
+            width = min(width, max(FollowModel.badgeMinWidth, available - fullToken - Self.gap))
+            // ...then, only when even the smallest token would not fit, below it.
+            environmentLabel.font = NSFont.systemFont(ofSize: 6, weight: .bold)
+            let smallestToken = environmentLabel.intrinsicContentSize.width
+            width = min(width, available - smallestToken - Self.gap)
+        }
+        return max(Self.badgeFloorWidth, min(width, max(Self.badgeFloorWidth, available)))
     }
 
     /// The environment label's size in the largest bold font (12 pt down to 6 pt) that fits `width` x `height`.

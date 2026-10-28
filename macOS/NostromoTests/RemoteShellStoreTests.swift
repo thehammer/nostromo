@@ -378,6 +378,41 @@ final class RemoteShellStoreTests: XCTestCase {
         XCTAssertEqual(store.targets, t)
     }
 
+    // MARK: Follow checkbox (3c)
+
+    func testAnAgentsRequestOffersToLetThatAgentFollow() {
+        let m = model(request(tag: "core-1", kind: "focus", requesterTag: "core-1", agent: "cody"))
+        XCTAssertEqual(m.followCheckboxTitle, "Let cody follow this shell's output")
+    }
+
+    func testARequestTheUserOpenedOffersNoFollowBox() {
+        XCTAssertNil(model(request(kind: "user")).followCheckboxTitle)
+        XCTAssertNil(model(request(kind: "user", agent: "cody")).followCheckboxTitle)
+    }
+
+    func testNoOtherKindOfRequesterOffersAFollowBox() {
+        for kind in ["system", "", "agent", "Focus", "unknown"] {
+            XCTAssertNil(model(request(kind: kind, agent: "cody")).followCheckboxTitle, "kind: \(kind)")
+        }
+    }
+
+    func testTheFollowBoxNamesTheAgentSanitisedAndLimitedLikeTheRequesterLine() {
+        let long = String(repeating: "n", count: 50)
+        XCTAssertEqual(model(request(kind: "focus", agent: long)).followCheckboxTitle,
+                       "Let \(String(repeating: "n", count: 39))\u{2026} follow this shell's output")
+        XCTAssertEqual(model(request(kind: "focus", agent: "co\u{202E}dy\u{200B}")).followCheckboxTitle,
+                       "Let cody follow this shell's output")
+        let multi = model(request(kind: "focus", agent: "cody\nfollow\u{2028}x")).followCheckboxTitle ?? ""
+        XCTAssertFalse(multi.contains(where: { $0.isNewline }), "the title must be one line: \(multi.debugDescription)")
+    }
+
+    func testTheFollowBoxCallsAnUnnamedAgentTheAgent() {
+        for name in [nil, "", "  ", "\u{200B}\u{202E}"] as [String?] {
+            XCTAssertEqual(model(request(kind: "focus", agent: name)).followCheckboxTitle,
+                           "Let the agent follow this shell's output", "agent: \(String(describing: name))")
+        }
+    }
+
     // MARK: Answer once
 
     func testEachDecisionProducesItsAnswerFrame() {
@@ -391,6 +426,32 @@ final class RemoteShellStoreTests: XCTestCase {
             XCTAssertEqual(v?["decision"] as? String, decision.rawValue)
             XCTAssertEqual(v?["invite_follow"] as? Bool, false)
         }
+    }
+
+    func testConnectWithTheFollowBoxTickedInvitesAFollow() {
+        XCTAssertTrue(store.answer(requestId: "r1", decision: .connect, inviteFollow: true))
+        XCTAssertEqual(sent, [.answer(requestId: "r1", decision: .connect, inviteFollow: true)])
+    }
+
+    func testConnectWithoutTheFollowBoxNeverInvitesAFollow() {
+        XCTAssertTrue(store.answer(requestId: "r1", decision: .connect))
+        XCTAssertTrue(store.answer(requestId: "r2", decision: .connect, inviteFollow: false))
+        XCTAssertEqual(sent, [.answer(requestId: "r1", decision: .connect, inviteFollow: false),
+                              .answer(requestId: "r2", decision: .connect, inviteFollow: false)])
+    }
+
+    func testCancelAndDismissNeverCarryAnInviteEvenIfAskedTo() {
+        XCTAssertTrue(store.answer(requestId: "r1", decision: .cancel, inviteFollow: true))
+        XCTAssertTrue(store.answer(requestId: "r2", decision: .dismiss, inviteFollow: true))
+        XCTAssertEqual(sent, [.answer(requestId: "r1", decision: .cancel, inviteFollow: false),
+                              .answer(requestId: "r2", decision: .dismiss, inviteFollow: false)])
+    }
+
+    func testAnAnswerWithTheFollowBoxStillOnlyGoesOnce() {
+        XCTAssertTrue(store.answer(requestId: "r1", decision: .connect, inviteFollow: true))
+        XCTAssertFalse(store.answer(requestId: "r1", decision: .connect, inviteFollow: true))
+        XCTAssertFalse(store.answer(requestId: "r1", decision: .cancel, inviteFollow: true))
+        XCTAssertEqual(sent, [.answer(requestId: "r1", decision: .connect, inviteFollow: true)])
     }
 
     func testAnsweringConnectTwiceSendsOneFrame() {

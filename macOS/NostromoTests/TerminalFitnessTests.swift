@@ -296,10 +296,15 @@ final class TerminalFitnessTests: XCTestCase {
     ///    needs the human's Connect click (`connectTapped`, which is NOT exempt).
     ///  - `popupChanged`, `projectChanged`, `environmentChanged`, `serviceChanged`, `shellTypeChanged`:
     ///    picker popups that change a form selection only.
+    ///  - `followBadgeTapped` (host), `followFocusChanged` and `moveTapped` (Follow popover): they only
+    ///    open the Follow popover, change which focus its warning names, or switch it to the invite form.
+    ///    They send nothing and start nothing. `inviteTapped`, `stopTapped` and `resumeTapped` are NOT
+    ///    exempt: each changes what the daemon does and must ask `TerminalInputGuard`.
     /// Every other action, `connectTapped` included, must ask `TerminalInputGuard`.
     private let guardExemptActions: [String] = [
         "cancelTapped", "dismissTapped", "okTapped", "copyTapped", "submitTapped",
         "popupChanged", "projectChanged", "environmentChanged", "serviceChanged", "shellTypeChanged",
+        "followBadgeTapped", "followFocusChanged", "moveTapped",
     ]
 
     func testEveryObjcActionInTheTerminalViewsAsksTheInputGuard() throws {
@@ -818,5 +823,134 @@ final class TerminalFitnessTests: XCTestCase {
         let reveal = try XCTUnwrap(item("Reveal Terminal Audit Log in Finder", in: terminal))
         XCTAssertEqual(reveal.action, #selector(MainMenuActions.revealTerminalAuditLog(_:)))
         XCTAssertEqual(reveal.keyEquivalent, "")
+    }
+
+    func testTheTerminalMenuHasSendSelectionWithoutAShortcut() throws {
+        _ = NSApplication.shared
+        let main = MainMenu.make(target: nil)
+        let terminal = try XCTUnwrap(topLevelMenu("Terminal", in: main), "no top-level Terminal menu").menu
+        let send = try XCTUnwrap(item("Send Selection to\u{2026}", in: terminal))
+        XCTAssertEqual(send.action, #selector(MainMenuActions.terminalSendSelection(_:)))
+        XCTAssertEqual(send.keyEquivalent, "", "no key equivalent: only a person's click may choose where text goes")
+    }
+
+    // MARK: Agent follow (3c): starting it needs a person, and only Invite starts it
+
+    /// The body of the one func called `name` in the UI/Terminal file `file` (code lines only).
+    private func funcBody(_ name: String, in file: String) throws -> String {
+        let source = try terminalViewSource(file)
+        let found = declarations(in: source.name, lines: source.lines) { source.lines[$0].contains("func \(name)(") }
+        XCTAssertEqual(found.count, 1, "\(file) should declare exactly one `\(name)`")
+        return try XCTUnwrap(found.first, "\(file): \(name) not found").body
+    }
+
+    private func assertGuardedThenActs(_ name: String, in file: String, refusedOp: String, call: String,
+                                       line: UInt = #line) throws {
+        let body = try funcBody(name, in: file)
+        let guardAt = try XCTUnwrap(body.range(of: "TerminalInputGuard.allowsControl("), "\(name) must call TerminalInputGuard.allowsControl(", line: line)
+        let refusal = try XCTUnwrap(body.range(of: "reportRefusal("), "\(name) must report a refusal to the daemon", line: line)
+        XCTAssertTrue(body[refusal.lowerBound...].prefix(120).contains("op: .\(refusedOp)"),
+                      "\(name) must report .\(refusedOp):\n\(body)", line: line)
+        let action = try XCTUnwrap(body.range(of: call), "\(name) must call \(call)", line: line)
+        XCTAssertLessThan(guardAt.lowerBound, action.lowerBound, "\(name): the guard must be asked before \(call)", line: line)
+        XCTAssertLessThan(guardAt.lowerBound, refusal.lowerBound, line: line)
+        XCTAssertLessThan(refusal.lowerBound, action.lowerBound,
+                          "\(name): a refused gesture reports and returns before \(call)", line: line)
+        // The refusal branch must leave the function.
+        let refusedBranch = body[guardAt.upperBound..<action.lowerBound]
+        XCTAssertTrue(refusedBranch.contains("return"), "\(name): a refused gesture must return before \(call)", line: line)
+    }
+
+    func testInviteStopAndResumeEachAskTheGuardReportARefusalAndOnlyThenAct() throws {
+        try assertGuardedThenActs("inviteTapped", in: "FollowControlView.swift", refusedOp: "followInvite", call: "store.inviteFollow(")
+        try assertGuardedThenActs("stopTapped", in: "FollowControlView.swift", refusedOp: "followStop", call: "store.stopFollow(")
+        try assertGuardedThenActs("resumeTapped", in: "FollowControlView.swift", refusedOp: "followResume", call: "store.resumeFollow(")
+    }
+
+    func testSendSelectionAsksTheGuardFromTheMenuBeforeSendingAndReportsARefusal() throws {
+        let body = try funcBody("sendSelectionTapped", in: "NostromoTerminalView.swift")
+        let guardAt = try XCTUnwrap(body.range(of: "TerminalInputGuard.allowsControl("))
+        XCTAssertTrue(body[guardAt.lowerBound...].prefix(200).contains("fromMenu: true"), "a menu choice asks with fromMenu: true:\n\(body)")
+        try assertGuardedThenActs("sendSelectionTapped", in: "NostromoTerminalView.swift", refusedOp: "sendSelection",
+                                  call: "store.sendSelection(")
+    }
+
+    func testOnlyTheInvitePopoverButtonStartsFollowingFromTheApp() throws {
+        var sites: [String] = []
+        for file in Repo.swiftFiles(under: Repo.app) {
+            for line in Repo.codeLines(try Repo.read(file)) where line.contains(".inviteFollow(") {
+                sites.append(file.lastPathComponent)
+            }
+        }
+        XCTAssertEqual(sites, ["FollowControlView.swift"], "following may start only from Invite in the Follow popover; found \(sites)")
+        let owner = try funcBody("inviteTapped", in: "FollowControlView.swift")
+        XCTAssertTrue(owner.contains(".inviteFollow("), "the one call site is FollowControlView.inviteTapped")
+    }
+
+    func testSendSelectionNeverStartsFollowing() throws {
+        let view = try terminalViewSource("NostromoTerminalView.swift")
+        XCTAssertFalse(view.lines.contains { $0.contains("inviteFollow") || $0.contains("followInvite") },
+                       "NostromoTerminalView sends selected text only; it must never invite a follower")
+    }
+
+    func testTheFollowPopoverIsBuiltOnlyWhereTheBadgeIsTapped() throws {
+        var sites: [String] = []
+        for file in Repo.swiftFiles(under: Repo.app) {
+            for line in Repo.codeLines(try Repo.read(file)) where line.contains("FollowControlView(") && !line.contains("class FollowControlView") {
+                sites.append(file.lastPathComponent)
+            }
+        }
+        XCTAssertEqual(sites, ["TerminalPaneHostView.swift"], "\(sites)")
+        XCTAssertTrue(try funcBody("followBadgeTapped", in: "TerminalPaneHostView.swift").contains("FollowControlView("),
+                      "the popover is opened in followBadgeTapped")
+    }
+
+    func testTheHostDrawsTheBadgeThroughTheHeaderWithTheFollowModel() throws {
+        let host = try terminalViewSource("TerminalPaneHostView.swift")
+        XCTAssertTrue(host.lines.contains { $0.contains("header.apply(info: info, mirrorHint: hint, follow:") },
+                      "the host must render the badge via header.apply(info:mirrorHint:follow:)")
+    }
+
+    // MARK: The confirm sheet's follow box
+
+    private func confirmSheetLines() throws -> [String] {
+        try Repo.codeLines(Repo.read(Repo.app.appendingPathComponent("UI/Terminal/RemoteShellConfirmSheet.swift")))
+    }
+
+    func testTheConfirmSheetsFollowBoxStartsOffAndNothingEverTicksItForThePerson() throws {
+        let lines = try confirmSheetLines()
+        let assignments = lines.flatMap { Repo.matches(#"followCheckbox\.state\s*=(?!=)\s*(\S+)"#, in: $0) }
+        XCTAssertFalse(assignments.isEmpty, "the box's initial state must be set explicitly")
+        for match in assignments {
+            XCTAssertEqual(match[1], ".off", "the sheet may only ever set the follow box off: \(match[0])")
+        }
+        XCTAssertFalse(lines.contains { Repo.firstMatch(#"\.state\s*=(?!=)\s*\.on"#, in: $0) != nil },
+                       "no checkbox in the confirm sheet may be switched on by code")
+        XCTAssertFalse(lines.contains { $0.contains("allowsMixedState") && $0.contains("true") })
+    }
+
+    func testTheConfirmSheetAddsTheFollowBoxOnlyWhenTheModelHasATitle() throws {
+        let lines = try confirmSheetLines()
+        let adds = lines.indices.filter {
+            lines[$0].contains("append(followCheckbox") || lines[$0].contains("addSubview(followCheckbox")
+                || lines[$0].contains("addArrangedSubview(followCheckbox")
+        }
+        XCTAssertEqual(adds.count, 1, "the follow box is added to the sheet in exactly one place")
+        let open = try XCTUnwrap(lines.firstIndex { $0.contains("if let title = model.followCheckboxTitle") },
+                                 "the box must be added inside `if let title = model.followCheckboxTitle`")
+        func indent(_ line: String) -> Int { line.prefix { $0 == " " }.count }
+        let close = try XCTUnwrap(((open + 1)..<lines.count).first { indent(lines[$0]) <= indent(lines[open]) })
+        let add = try XCTUnwrap(adds.first)
+        XCTAssertTrue(add > open && add < close, "the follow box is added outside the `if let title` block")
+    }
+
+    func testTheConfirmSheetInvitesOnlyForAConnectAndOnlyThroughFinish() throws {
+        let finish = try funcBody("finish", in: "RemoteShellConfirmSheet.swift")
+        let connect = try XCTUnwrap(finish.range(of: "decision == .connect"), "finish must tie the invite to .connect")
+        let answer = try XCTUnwrap(finish.range(of: "store.answer("))
+        XCTAssertLessThan(connect.lowerBound, answer.lowerBound)
+        XCTAssertTrue(finish[answer.lowerBound...].contains("inviteFollow:"), "finish passes inviteFollow: on the answer")
+        let lines = try confirmSheetLines()
+        XCTAssertEqual(lines.filter { $0.contains("store.answer(") }.count, 1, "every answer goes through finish")
     }
 }

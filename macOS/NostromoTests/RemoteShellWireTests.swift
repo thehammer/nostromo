@@ -58,6 +58,20 @@ final class RemoteShellWireTests: XCTestCase {
         }
     }
 
+    func testAConnectAnswerCanInviteAFollowAndSaysSoOnTheWire() throws {
+        let v = try object(.answer(requestId: "r1", decision: .connect, inviteFollow: true))
+        XCTAssertEqual(v["decision"] as? String, "connect")
+        XCTAssertEqual(v["invite_follow"] as? Bool, true)
+        XCTAssertEqual(Set(v.keys), ["type", "request_id", "decision", "invite_follow"])
+    }
+
+    func testAnAnswerWithoutSayingSoNeverInvitesAFollow() throws {
+        XCTAssertEqual(RemoteShellClientMessage.answer(requestId: "r1", decision: .connect),
+                       .answer(requestId: "r1", decision: .connect, inviteFollow: false))
+        let v = try object(.answer(requestId: "r1", decision: .connect))
+        XCTAssertEqual(v["invite_follow"] as? Bool, false)
+    }
+
     func testJsonObjectAndEncodedAgree() throws {
         let message = RemoteShellClientMessage.answer(requestId: "r9", decision: .cancel)
         let fromData = try object(message)

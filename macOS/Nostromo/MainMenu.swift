@@ -12,6 +12,7 @@ import AppKit
     func newTerminal(_ sender: Any?)
     func newRemoteShell(_ sender: Any?)
     func closeTerminalPane(_ sender: Any?)
+    func terminalSendSelection(_ sender: Any?)
     func showTerminalAuditLog(_ sender: Any?)
     func revealTerminalAuditLog(_ sender: Any?)
     func terminalFind(_ sender: Any?)
@@ -84,6 +85,12 @@ enum MainMenu {
         closeTerminalItem.keyEquivalentModifierMask = [.command, .shift]
         closeTerminalItem.target = target
         terminalMenu.addItem(closeTerminalItem)
+        // Lists the focuses; choosing one sends the selected text there once (a person's click or key
+        // is required, and it never starts following). No shortcut.
+        let sendSelectionItem = NSMenuItem(title: "Send Selection to\u{2026}",
+                                           action: #selector(MainMenuActions.terminalSendSelection(_:)), keyEquivalent: "")
+        sendSelectionItem.target = target
+        terminalMenu.addItem(sendSelectionItem)
         // The daemon's trail of terminal events (no keystrokes, no output). No shortcuts.
         terminalMenu.addItem(.separator())
         let showAuditItem = NSMenuItem(title: "Show Terminal Audit Log",

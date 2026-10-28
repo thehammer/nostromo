@@ -950,8 +950,11 @@ class NostromodClient {
     /// a confirm request only to a verified app that declared it, and answers an agent's request with
     /// `no_operator` when none has.
     static let remoteShellConfirmCapability = "remote_shell_confirm"
+    /// The client capability that says this app shows who follows a terminal and can stop it (the header's
+    /// Follow control). The daemon accepts an invite, and an agent's follow request, only with it.
+    static let terminalFollowUICapability = "terminal_follow_ui"
     /// What a connection the daemon verified as the operator app declares.
-    static let operatorCapabilities = [terminalUICapability, remoteShellConfirmCapability]
+    static let operatorCapabilities = [terminalUICapability, remoteShellConfirmCapability, terminalFollowUICapability]
 
     /// Clean, unambiguous round-trip probe: no side effects, no fan-out
     /// ambiguity (unlike `session_send`, which is answered by a broadcast

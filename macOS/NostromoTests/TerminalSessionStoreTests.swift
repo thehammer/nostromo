@@ -1147,6 +1147,72 @@ final class TerminalSessionStoreTests: XCTestCase {
         XCTAssertEqual(changes, [.info(i), .closed(closed), .refused(refused)])
     }
 
+    // MARK: - Agent follow (3c)
+
+    func testInvitingAFollowerSendsTheInviteWithTheScreenChoice() {
+        attachedTerminal()
+        sent.removeAll()
+
+        store.inviteFollow(terminalId: "t1", followerTag: "claudia-1", includeScreen: false)
+        store.inviteFollow(terminalId: "t1", followerTag: "cody-1", includeScreen: true)
+
+        XCTAssertEqual(sent, [.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: false),
+                              .followInvite(terminalId: "t1", followerTag: "cody-1", includeScreen: true)])
+    }
+
+    func testStoppingAndResumingAFollowSendEachFrame() {
+        attachedTerminal()
+        sent.removeAll()
+
+        store.stopFollow(terminalId: "t1")
+        store.resumeFollow(terminalId: "t1")
+
+        XCTAssertEqual(sent, [.followStop(terminalId: "t1"), .followResume(terminalId: "t1")])
+    }
+
+    func testSendingASelectionSendsItOnceToTheTargetWithItsTextVerbatim() {
+        attachedTerminal()
+        sent.removeAll()
+
+        store.sendSelection(terminalId: "t1", targetTag: "claudia-1", text: "  error: boom\n")
+
+        XCTAssertEqual(sent, [.sendSelection(terminalId: "t1", targetTag: "claudia-1", text: "  error: boom\n")])
+    }
+
+    func testAnEmptySelectionSendsNothing() {
+        attachedTerminal()
+        sent.removeAll()
+
+        store.sendSelection(terminalId: "t1", targetTag: "claudia-1", text: "")
+
+        XCTAssertTrue(sent.isEmpty, "sent: \(sent)")
+    }
+
+    func testNoFollowFrameIsSentWhileTheDaemonIsUnavailable() {
+        attachedTerminal()
+        store.connectionChanged(false)
+        sent.removeAll()
+
+        store.inviteFollow(terminalId: "t1", followerTag: "claudia-1", includeScreen: true)
+        store.stopFollow(terminalId: "t1")
+        store.resumeFollow(terminalId: "t1")
+        store.sendSelection(terminalId: "t1", targetTag: "claudia-1", text: "boom")
+
+        XCTAssertTrue(sent.isEmpty, "sent: \(sent)")
+    }
+
+    func testFollowFramesGoOutAgainOnceTheDaemonIsBack() {
+        attachedTerminal()
+        store.connectionChanged(false)
+        store.connectionChanged(true)
+        store.ingest(.terminalList(TerminalListFrame(terminals: [info()])))
+        sent.removeAll()
+
+        store.stopFollow(terminalId: "t1")
+
+        XCTAssertEqual(sent, [.followStop(terminalId: "t1")])
+    }
+
     func testAFrameThatIsNotATerminalFrameIsIgnored() {
         store.ingest(.unknown)
         XCTAssertTrue(changes.isEmpty)

@@ -22,6 +22,10 @@ private let sheetLog = Logger(subsystem: "com.hammer.nostromo", category: "termi
 /// - Any other way the sheet goes away without an answer (the window closed) counts as dismissed.
 ///   `closeWithoutAnswering` (the daemon resolved the request) sends nothing.
 ///
+/// For a shell an agent (a focus) asked for there is one more choice, "Let <agent> follow this shell's
+/// output", **unticked** every time the sheet appears. Connect sends it as `invite_follow`; no other
+/// answer does, and a shell the user opened (or reconnected from a toast) has no checkbox and sends `false`.
+///
 /// Presented with `beginSheet` by `RemoteShellPresenter`, never run modally (see `DecisionSheet`).
 final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
 
@@ -54,8 +58,8 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
     private let connectButton = ConnectButton(frame: .zero)
     /// Invisible, so Escape has a key equivalent without a second visible button.
     private let escapeButton = NSButton(frame: .zero)
-    /// Room for slice 3c's "let the agent follow" checkbox. There is none yet.
-    private let followSlot = NSView(frame: .zero)
+    /// "Let <agent> follow this shell's output": present only for an agent's request, unticked.
+    private let followCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
 
     /// Set before anything that can close the sheet, so no later path can answer for it.
     private var resolved = false
@@ -168,10 +172,17 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
             reasonLabel.setAccessibilityIdentifier("remote-shell-reason")
             rows.append(reasonLabel)
         }
-        followSlot.setAccessibilityIdentifier("remote-shell-follow-slot")
-        followSlot.translatesAutoresizingMaskIntoConstraints = false
-        followSlot.heightAnchor.constraint(equalToConstant: 0).isActive = true
-        rows.append(followSlot)
+        if let title = model.followCheckboxTitle {
+            followCheckbox.title = title
+            // Never on until a person ticks it.
+            followCheckbox.state = .off
+            // A long agent name wraps; the sheet never cuts what it says.
+            followCheckbox.lineBreakMode = .byWordWrapping
+            followCheckbox.translatesAutoresizingMaskIntoConstraints = false
+            followCheckbox.widthAnchor.constraint(lessThanOrEqualToConstant: textWidth).isActive = true
+            followCheckbox.setAccessibilityIdentifier("remote-shell-follow")
+            rows.append(followCheckbox)
+        }
 
         let stack = NSStackView(views: rows)
         stack.orientation = .vertical
@@ -315,9 +326,12 @@ final class RemoteShellConfirmSheet: NSWindowController, NSWindowDelegate {
     private func finish(decision: RemoteShellDecision) {
         guard !resolved else { return }
         resolved = true
+        // Read before the sheet closes. Only a Connect on a sheet that offered the box, with it ticked,
+        // invites the agent.
+        let invite = decision == .connect && followCheckbox.superview != nil && followCheckbox.state == .on
         disableButtons()
         endSheetIfPresented(completion: nil)
-        _ = store.answer(requestId: requestId, decision: decision)
+        _ = store.answer(requestId: requestId, decision: decision, inviteFollow: invite)
     }
 
     private func disableButtons() {

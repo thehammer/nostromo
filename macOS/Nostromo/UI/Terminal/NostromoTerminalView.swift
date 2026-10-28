@@ -15,6 +15,11 @@ import SwiftTerm
 /// store has no record of all ask, and with no window to hang the confirmation on the text is refused,
 /// never sent. Nothing falls through to a plain paste.
 ///
+/// Send selection: the context menu (and Terminal > Send Selection to…) offers "Send selection to <focus>"
+/// for the selected text, the pane's owning focus first and the other focuses in a submenu. It is on only
+/// with a selection, asks `TerminalInputGuard.allowsControl` first, sends the text once and never starts
+/// following (`FollowModel` words the titles).
+///
 /// Typed input and the emulator's own replies are told apart by the SwiftTerm path they take, not by
 /// `NSApp.currentEvent`. In SwiftTerm 1.18 (pinned exactly) every byte reaches `send(source:data:)`
 /// of the delegate by one of two routes: `TerminalView.send(data:)`, which keys, `insertText` and
@@ -147,6 +152,64 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
         guard let terminalId,
               TerminalInputGuard.verdict(origin: .typed, event: event) != .refused else { return }
         store.claimDriver(terminalId: terminalId, fromWindow: windowId)
+    }
+
+    // MARK: - Send selection
+
+    /// Right-click: "Send selection to <focus>", and a submenu of the other focuses. Both are off while
+    /// nothing is selected. Never anything for a pane the daemon has not described yet.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        sendSelectionMenu()
+    }
+
+    /// Pops the Send selection list up at the view's top-left (Terminal > Send Selection to…).
+    func showSendSelectionMenu() {
+        guard let menu = sendSelectionMenu() else {
+            NSSound.beep()
+            return
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 8, y: bounds.height - 8), in: self)
+    }
+
+    /// A person chose a focus. Sends the text selected now, once, to the focus the item carries.
+    @objc private func sendSelectionTapped(_ sender: NSMenuItem) {
+        guard TerminalInputGuard.allowsControl(event: NSApp.currentEvent, control: self, fromMenu: true) else {
+            store.reportRefusal(terminalId: terminalId, op: .sendSelection)
+            return
+        }
+        guard let terminalId, let tag = sender.representedObject as? String,
+              let text = getSelection(), !text.isEmpty else { return }
+        store.sendSelection(terminalId: terminalId, targetTag: tag, text: text)
+    }
+
+    private func sendSelectionMenu() -> NSMenu? {
+        guard let terminalId, let info = store.terminals[terminalId] else { return nil }
+        let model = FollowModel(info: info, focuses: FollowModel.options(from: FocusStore.shared.focuses))
+        let enabled = selectionActive
+        let menu = NSMenu(title: "Terminal")
+        menu.autoenablesItems = false
+        func item(_ option: FollowFocusOption) -> NSMenuItem {
+            let entry = NSMenuItem(title: FollowModel.sendSelectionTitle(to: option),
+                                   action: #selector(sendSelectionTapped(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = option.tag
+            entry.isEnabled = enabled
+            return entry
+        }
+        if let tag = model.defaultSelectionTag, let option = model.focuses.first(where: { $0.tag == tag }) {
+            menu.addItem(item(option))
+        }
+        let others = model.otherSelectionFocuses
+        if !others.isEmpty {
+            let submenu = NSMenu(title: "Send selection to\u{2026}")
+            submenu.autoenablesItems = false
+            others.forEach { submenu.addItem(item($0)) }
+            let parent = NSMenuItem(title: "Send selection to\u{2026}", action: nil, keyEquivalent: "")
+            parent.submenu = submenu
+            parent.isEnabled = enabled
+            menu.addItem(parent)
+        }
+        return menu.items.isEmpty ? nil : menu
     }
 
     // MARK: - Input (every path asks the guard first)

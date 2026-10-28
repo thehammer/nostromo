@@ -33,6 +33,9 @@ enum Theme {
     /// above WCAG AA's 4.5:1 for text this size.
     static let hazardRed   = NSColor(srgbRed: 200/255, green: 30/255, blue: 30/255, alpha: 1)
     static let hazardText  = NSColor.white
+    /// The Follow badge of a followed terminal: a blue that reads on the plain and the red header alike,
+    /// and is never red. Dark text (`bg`) on it is about 8:1.
+    static let followBlue  = NSColor(srgbRed: 96/255, green: 165/255, blue: 250/255, alpha: 1)
     /// The idle-timeout banner under a remote header (dark text on it).
     static let idleBannerYellow = NSColor(srgbRed: 250/255, green: 204/255, blue: 21/255, alpha: 1)
     /// Cornflower — active tab / border highlight.

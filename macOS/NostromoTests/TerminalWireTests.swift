@@ -180,6 +180,63 @@ final class TerminalWireTests: XCTestCase {
         XCTAssertEqual(TerminalRefusedOp.paste.rawValue, "paste")
         XCTAssertEqual(TerminalRefusedOp.resize.rawValue, "resize")
         XCTAssertEqual(TerminalRefusedOp.open.rawValue, "open")
+        XCTAssertEqual(TerminalRefusedOp.followInvite.rawValue, "follow_invite")
+        XCTAssertEqual(TerminalRefusedOp.followStop.rawValue, "follow_stop")
+        XCTAssertEqual(TerminalRefusedOp.followResume.rawValue, "follow_resume")
+        XCTAssertEqual(TerminalRefusedOp.sendSelection.rawValue, "send_selection")
+    }
+
+    // MARK: Agent follow (3c)
+
+    func testTheFollowMessagesCarryTheirWireNames() throws {
+        let cases: [(TerminalClientMessage, String)] = [
+            (.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: false), "terminal_follow_invite"),
+            (.followStop(terminalId: "t1"), "terminal_follow_stop"),
+            (.followResume(terminalId: "t1"), "terminal_follow_resume"),
+            (.sendSelection(terminalId: "t1", targetTag: "claudia-1", text: "ls"), "terminal_send_selection"),
+        ]
+        for (message, name) in cases {
+            XCTAssertEqual(message.wireType, name)
+            XCTAssertEqual(try object(message)["type"] as? String, name)
+        }
+    }
+
+    func testAFollowInviteCarriesTheTerminalTheFollowerAndWhetherToIncludeTheScreen() throws {
+        for include in [true, false] {
+            let o = try object(.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: include))
+            XCTAssertEqual(Set(o.keys), ["type", "terminal_id", "follower_tag", "include_screen"], "\(o)")
+            XCTAssertEqual(o["terminal_id"] as? String, "t1")
+            XCTAssertEqual(o["follower_tag"] as? String, "claudia-1")
+            XCTAssertEqual(o["include_screen"] as? Bool, include)
+        }
+    }
+
+    func testFollowStopAndResumeNameOnlyTheTerminal() throws {
+        for message in [TerminalClientMessage.followStop(terminalId: "t9"), .followResume(terminalId: "t9")] {
+            let o = try object(message)
+            XCTAssertEqual(Set(o.keys), ["type", "terminal_id"], "\(o)")
+            XCTAssertEqual(o["terminal_id"] as? String, "t9")
+        }
+    }
+
+    func testSendSelectionCarriesTheTerminalTheTargetAndTheTextVerbatim() throws {
+        let text = "line one\nline \"two\" \u{2014} caf\u{00E9}"
+        let o = try object(.sendSelection(terminalId: "t1", targetTag: "cody-1", text: text))
+        XCTAssertEqual(Set(o.keys), ["type", "terminal_id", "target_tag", "text"], "\(o)")
+        XCTAssertEqual(o["terminal_id"] as? String, "t1")
+        XCTAssertEqual(o["target_tag"] as? String, "cody-1")
+        XCTAssertEqual(o["text"] as? String, text)
+    }
+
+    func testTheFollowMessagesEncodeWithSortedKeys() throws {
+        let data = try XCTUnwrap(TerminalClientMessage.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: true).encoded())
+        XCTAssertEqual(String(decoding: data, as: UTF8.self),
+                       #"{"follower_tag":"claudia-1","include_screen":true,"terminal_id":"t1","type":"terminal_follow_invite"}"#)
+    }
+
+    func testARefusalReportCanNameAFollowOp() throws {
+        let o = try object(.refusalReport(terminalId: "t1", op: .followInvite, channel: "app_control"))
+        XCTAssertEqual(o["op"] as? String, "follow_invite")
     }
 
     // MARK: terminal_state / TerminalInfo

@@ -203,6 +203,9 @@ enum TerminalBase64 {
 /// What a refused attempt was trying to do (`terminal_refusal_report.op`).
 enum TerminalRefusedOp: String, Equatable {
     case input, close, restart, paste, resize, open
+    /// The Invite, Stop following, Resume and Send selection controls (3c).
+    case followInvite = "follow_invite", followStop = "follow_stop", followResume = "follow_resume"
+    case sendSelection = "send_selection"
     /// The Keep open button on a remote shell's idle banner.
     case keepAlive = "keep_alive"
     /// The Connect button on a remote shell's confirm sheet.
@@ -226,6 +229,15 @@ enum TerminalClientMessage: Equatable {
     /// Keep an idle remote shell open (resets its idle timer, clears the warning).
     case keepAlive(terminalId: String)
     case refusalReport(terminalId: String?, op: TerminalRefusedOp, channel: String)
+    /// Invite focus `followerTag` to follow a terminal (moves the invitation if another focus follows).
+    /// `includeScreen` also delivers what is on the screen now.
+    case followInvite(terminalId: String, followerTag: String, includeScreen: Bool)
+    /// Stop following at once.
+    case followStop(terminalId: String)
+    /// Resume a following that paused itself.
+    case followResume(terminalId: String)
+    /// Send the user's selected `text` to focus `targetTag`, once. It never starts following.
+    case sendSelection(terminalId: String, targetTag: String, text: String)
 
     var wireType: String {
         switch self {
@@ -238,6 +250,10 @@ enum TerminalClientMessage: Equatable {
         case .restart:       return "terminal_restart"
         case .keepAlive:     return "terminal_keep_alive"
         case .refusalReport: return "terminal_refusal_report"
+        case .followInvite:  return "terminal_follow_invite"
+        case .followStop:    return "terminal_follow_stop"
+        case .followResume:  return "terminal_follow_resume"
+        case .sendSelection: return "terminal_send_selection"
         }
     }
 
@@ -251,7 +267,8 @@ enum TerminalClientMessage: Equatable {
             if let relativeTo { o["relative_to"] = relativeTo }
             if let position { o["position"] = position }
             if let cwd { o["cwd"] = cwd }
-        case .attach(let id), .detach(let id), .close(let id), .restart(let id), .keepAlive(let id):
+        case .attach(let id), .detach(let id), .close(let id), .restart(let id), .keepAlive(let id),
+             .followStop(let id), .followResume(let id):
             o["terminal_id"] = id
         case .input(let id, let bytes, let autoReply):
             o["terminal_id"] = id
@@ -265,6 +282,14 @@ enum TerminalClientMessage: Equatable {
             if let id { o["terminal_id"] = id }
             o["op"] = op.rawValue
             o["channel"] = channel
+        case .followInvite(let id, let followerTag, let includeScreen):
+            o["terminal_id"] = id
+            o["follower_tag"] = followerTag
+            o["include_screen"] = includeScreen
+        case .sendSelection(let id, let targetTag, let text):
+            o["terminal_id"] = id
+            o["target_tag"] = targetTag
+            o["text"] = text
         }
         return o
     }
