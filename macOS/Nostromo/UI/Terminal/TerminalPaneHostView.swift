@@ -392,6 +392,12 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf {
         needsLayout = true
     }
 
+    /// False while `info` is nil, on purpose: a host with no `info` has no `terminalId`, so there is no shell
+    /// behind it (input and output are dropped for want of an id) and nothing a red frame could warn about;
+    /// the frame appears with the first `info` that is not `.local`. The host is built from a tag alone, so
+    /// it cannot know before then that its pane will be remote. The gates that act on text stay closed
+    /// meanwhile: `TerminalChromeModel.isRemote(kind: nil)` is true and `PastePolicy.decide(kind: nil, ...)`
+    /// asks (`TerminalChromeModelTests.testUnknownKindFailsTowardTheWarningAndTheConfirmation`).
     private var isRemote: Bool { info.map { TerminalChromeModel.isRemote($0) } ?? false }
 
     /// The red frame (the layer's border) of a remote pane. Only a remote pane needs the host to clip

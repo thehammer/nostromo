@@ -324,8 +324,8 @@ final class MemoryWatchdog {
         }
         toldAboutUnhelpfulShed = true
         // Where the memory is takes a VM region walk and a malloc-zone statistics call, which is about
-        // 90 ms with 3.5 million live blocks and 10,000 regions on a CI Mac (`MemorySummaryCostTests`)
-        // and grows with the heap: it is the wrong thing to do on the main thread of an app that is
+        // 36.9 ms median with 2.0 million live blocks and 10,000 regions on a CI Mac (`MemorySummaryCostTests`;
+        // the incident's 16 million block heap was never measured) and grows with the heap: it is the wrong thing to do on the main thread of an app that is
         // already at its memory limit. The toast follows when it is ready.
         let summarize = self.summarize
         summaryExecutor { [weak self] in

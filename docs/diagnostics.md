@@ -545,7 +545,7 @@ The 2026-10-25 heap (1.8 GB after 14.6 h) held about two million each of `NSKeyV
 `NSKeyValueDependencyContext`, `__NSMallocBlock__` and `__NSExactBlockVariable__` (and 446,000
 `NSISRestrictedToNonNegativeVariable`). The JSON read loops (`ReadLoopChurnTests`) do not create them.
 
-**Mechanism, measured in CI (macOS 26.6.2, `/usr/bin/heap` run against the test host, 300-500 iterations each):**
+**Mechanism (macOS 26.6.2, `/usr/bin/heap` run against the test host, 300-500 iterations each). Not reproduced: no CI run or log carrying this table was retained, so treat the numbers as an unverified observation until it is re-measured:**
 
 | What is created and shown in a window | KVO objects left behind, per instance |
 |---|---|

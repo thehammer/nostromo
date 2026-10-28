@@ -92,7 +92,14 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     private var pillClearsAttentionDot: NSLayoutConstraint?
     /// Keeps the title out from under the pill; active only while the pill shows.
     private var labelClearsPill: NSLayoutConstraint?
-    private let displayOverride: String
+    /// The row's text. Renaming it in place re-measures the width the label keeps (`labelKeepsItsName`).
+    var displayOverride: String {
+        didSet {
+            guard displayOverride != oldValue else { return }
+            updateKeptNameWidth()
+            updateAppearance()
+        }
+    }
     /// Top-level rows (not nested under a repo header) use the repo-header look.
     private let isTopLevel: Bool
     private let baseSecondary: String?
@@ -235,8 +242,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         let yields = label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -60)
         yields.priority = NSLayoutConstraint.Priority(800)
         labelYieldsToBadges = yields
-        let labelTextWidth = ceil((displayLabel as NSString).size(withAttributes: [.font: label.font as Any]).width)
-        let keeps = label.widthAnchor.constraint(greaterThanOrEqualToConstant: min(40, labelTextWidth))
+        let keeps = label.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.keptNameWidth(displayLabel, font: label.font))
         keeps.priority = NSLayoutConstraint.Priority(900)
         labelKeepsItsName = keeps
 
@@ -249,6 +255,14 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    private static func keptNameWidth(_ text: String, font: NSFont?) -> CGFloat {
+        min(40, ceil((text as NSString).size(withAttributes: [.font: font as Any]).width))
+    }
+
+    private func updateKeptNameWidth() {
+        labelKeepsItsName?.constant = Self.keptNameWidth(displayOverride, font: label.font)
+    }
 
     /// How far from the trailing edge the label should stop to leave room for the badges: the sweater
     /// dot, the pill and the attention dot (each while it shows), a gap, the badges, a gap. Only the
