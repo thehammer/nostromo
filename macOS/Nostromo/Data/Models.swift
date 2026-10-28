@@ -671,6 +671,7 @@ struct PRDetail: Decodable {
 extension PRDetail: Equatable {
     /// Field by field (`CiCheck` is not `Equatable` in the app target), so the store can tell a
     /// `perri_state` frame that changed nothing from one that did.
+    /// Hand-written: a field added to `PRDetail` must be added here too, or a change to it is never seen.
     static func == (l: PRDetail, r: PRDetail) -> Bool {
         guard l.prNumber == r.prNumber, l.repo == r.repo, l.title == r.title, l.author == r.author else { return false }
         guard l.url == r.url, l.diffTooLarge == r.diffTooLarge, l.headSha == r.headSha, l.error == r.error else { return false }

@@ -56,6 +56,12 @@ final class TerminalChromeModelTests: XCTestCase {
         XCTAssertTrue(TerminalChromeModel.isRemote(kind: nil), "no pane information yet is not a reason to look safe")
     }
 
+    func testUnknownKindFailsTowardTheWarningAndTheConfirmation() {
+        XCTAssertTrue(TerminalChromeModel.isRemote(kind: nil))
+        XCTAssertEqual(PastePolicy.decide(kind: nil, text: "rm -rf x\n"), .confirm(lines: 1))
+        XCTAssertEqual(PastePolicy.decide(kind: .local, text: "ls\n"), .send)
+    }
+
     func testEnvironmentTokenIsTheUppercasedEnvironmentOrRemote() {
         XCTAssertEqual(TerminalChromeModel.environmentToken(for: info(environment: "production")), "PRODUCTION")
         XCTAssertEqual(TerminalChromeModel.environmentToken(for: info(environment: "canada")), "CANADA")

@@ -143,7 +143,7 @@ final class MemorySummaryCostTests: XCTestCase {
                             median, worst, Self.timedRuns,
                             samples.map { String(format: "%.1f", $0) }.joined(separator: ", "),
                             Self.mappedPages, Self.mappedPages * 2, last.mallocBlocksInUse)
-        print("MEMORY-CAPTURE-COST \(report)")
+        NSLog("MEMORY-CAPTURE-COST %@", report)
 
         XCTAssertGreaterThanOrEqual(last.mallocBlocksInUse, 1_500_000, "capture() missed the synthetic heap: \(report)")
         XCTAssertFalse(last.categories.isEmpty, report)

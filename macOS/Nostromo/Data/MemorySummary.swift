@@ -36,8 +36,12 @@ struct MemorySummary: Equatable {
     // MARK: - Capture
 
     /// A summary of this process now. A walk over the VM regions and one `malloc_zone_statistics` per zone; safe on any thread.
-    /// Measured at about 90 ms (median) with 3.5 million live blocks and 10,000 regions on a CI Mac
-    /// (`MemorySummaryCostTests`), and it grows with the heap: not for the main thread of a big app.
+    /// Measured at 36.9 ms (median) with 2.0 million live blocks and 10,000 regions on a CI Mac
+    /// (`MemorySummaryCostTests`); the incident's 16 million block heap was never measured. It grows with
+    /// the heap: not for the main thread of a big app. Known exceptions, accepted because each runs once per
+    /// rare event, not on a hot path: `PaneRenderWatch.report` (a pane-blank capture, built on the main thread
+    /// at the draw that detected the blank, so the report shows the pane as it was) and
+    /// `TranscriptDiagnostics.snapshot` (the on-demand diagnostics report and its sample stream).
     static func capture(limit: Int = 5) -> MemorySummary {
         var stats = malloc_statistics_t()
         malloc_zone_statistics(nil, &stats)
