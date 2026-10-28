@@ -149,6 +149,9 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
     /// The whole body under the header: the terminal (a mirror's view can be larger than the pane and is
     /// clipped to this), the connecting message and, along the bottom, the ended overlay (translucent, so
     /// the terminal shows through it). An app-control screenshot paints over all of it.
+    /// Pinned to `terminalContainer` by `ScreenshotRedactionTests` (a source-level check: SwiftTerm can't be
+    /// linked into the test bundle, so the real pane can't be built there). The terminal view alone would
+    /// leave the overlays and a mirror's clipped overflow visible.
     var terminalPixelArea: NSView { terminalContainer }
 
     // MARK: - Lookup (menus)

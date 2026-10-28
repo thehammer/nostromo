@@ -516,9 +516,20 @@ final class ScreenshotRedactionTests: XCTestCase {
             XCTAssertGreaterThan(share, 0.8, "\(name): the block must cover the region (a label is small), got \(share)", file: file, line: line)
         }
 
-        let ring = r.regions.map { $0.expanded(by: 1, width: r.output.width, height: r.output.height) }
+        // Every block is the region plus `ScreenshotRedaction.padding` px on each side (clamped to the image).
+        let pad = ScreenshotRedaction.padding
+        for (i, region) in r.regions.enumerated() {
+            let block = region.expanded(by: pad, width: r.output.width, height: r.output.height)
+            let edges = [(block.x0, block.y0), (block.x1 - 1, block.y0), (block.x0, block.y1 - 1), (block.x1 - 1, block.y1 - 1),
+                         (block.x0, (block.y0 + block.y1) / 2), (block.x1 - 1, (block.y0 + block.y1) / 2),
+                         ((block.x0 + block.x1) / 2, block.y0), ((block.x0 + block.x1) / 2, block.y1 - 1)]
+            for (x, y) in edges {
+                XCTAssertTrue(r.output.isFill(x, y), "terminal \(i): padded block \(block) edge (\(x),\(y)) is not the redaction colour", file: file, line: line)
+            }
+        }
+        let ring = r.regions.map { $0.expanded(by: pad + 1, width: r.output.width, height: r.output.height) }
         XCTAssertEqual(r.output.mismatches(against: r.baseline, excluding: ring), 0,
-                       "pixels outside the terminal regions must be untouched", file: file, line: line)
+                       "pixels outside the padded terminal regions must be untouched", file: file, line: line)
         let interior = SRPixelRect(x0: 0, y0: r.ignoreTopRows, x1: r.output.width, y1: r.output.height)
         XCTAssertEqual(r.output.loudCount(in: interior), 0, "no canary pixel may remain anywhere in the image", file: file, line: line)
     }
@@ -712,6 +723,60 @@ final class ScreenshotRedactionTests: XCTestCase {
             XCTAssertEqual(decoded.pixelsWide, cap.rep.pixelsWide, "allowsSynthetic \(allows)")
             XCTAssertEqual(decoded.pixelsHigh, cap.rep.pixelsHigh, "allowsSynthetic \(allows)")
         }
+    }
+
+    // MARK: Padding, mismatch and visibility
+
+    func test_a_two_pixel_vertical_mismatch_between_picture_and_view_tree_leaves_no_terminal_pixel_at_the_edges() throws {
+        // The aspect guard tolerates 2 px of vertical drift; the y-mapping then lands the block up to 2 px
+        // off. The padding must still cover every terminal pixel, whichever way the drift goes.
+        for drift in [CGFloat(2), CGFloat(-2)] {
+            let rig = makeRig()
+            let pane = rig.addPane(column: 0)
+            let cap = try rig.capture(rig.cv, pixelScale: 1)
+            XCTAssertEqual(cap.scale, 1, accuracy: 0.001, "harness: expected a 1x capture")
+            let baseline = try XCTUnwrap(SRPixels(rep: cap.rep))
+            let area = pane.terminalPixelArea
+            let region = cap.pixelRect(of: area.convert(area.bounds, to: nil))
+            XCTAssertEqual(baseline.loudBounds(in: region.expanded(by: 4, width: baseline.width, height: baseline.height)), region,
+                           "harness: the canary fills the terminal area exactly")
+            let drifted = NSRect(origin: cap.rect.origin, size: NSSize(width: cap.rect.width, height: cap.rect.height + drift))
+            let data = try ScreenshotRedaction.pngData(of: cap.rep, window: rig.window, captureRect: drifted, allowsSynthetic: false)
+            let output = try XCTUnwrap(SRPixels(png: data))
+            XCTAssertEqual(output.loudCount(in: output.fullRect), 0, "drift \(drift): terminal pixels survive, e.g. at a block edge")
+        }
+    }
+
+    func test_a_visible_terminal_that_does_not_intersect_the_image_is_refused() throws {
+        let rig = makeRig()
+        rig.addPane(column: 0)
+        let cap = try rig.capture(rig.cv)
+        let elsewhere = NSRect(origin: NSPoint(x: cap.rect.origin.x + 5000, y: cap.rect.origin.y), size: cap.rect.size)
+        assertRefused(attempt(rig, cap.with(rect: elsewhere)), "visible terminal mapped outside the image")
+    }
+
+    func test_a_hidden_terminal_that_does_not_intersect_the_image_is_skipped() throws {
+        let rig = makeRig()
+        let pane = rig.addPane(column: 0)
+        let cap = try rig.capture(rig.cv)
+        let elsewhere = NSRect(origin: NSPoint(x: cap.rect.origin.x + 5000, y: cap.rect.origin.y), size: cap.rect.size)
+        pane.isHidden = true
+        XCTAssertNoThrow(try ScreenshotRedaction.pngData(of: cap.rep, window: rig.window, captureRect: elsewhere, allowsSynthetic: false))
+        pane.isHidden = false
+        pane.superview?.isHidden = true   // hidden by an ancestor
+        XCTAssertNoThrow(try ScreenshotRedaction.pngData(of: cap.rep, window: rig.window, captureRect: elsewhere, allowsSynthetic: false))
+    }
+
+    func test_the_real_pane_hides_its_whole_body_container_not_just_the_terminal_view() throws {
+        // `TerminalPaneHostView` links SwiftTerm, which cannot be built into this test bundle, so the real
+        // class can't be instantiated here. Pin its area choice in source instead: switching it to
+        // `terminalView` would hide less than the container (a mirror's clipped overflow, the connecting
+        // and ended overlays) and every stand-in test above would still pass.
+        let text = try SRSource.read("UI/Terminal/TerminalPaneHostView.swift")
+        XCTAssertNotNil(text.range(of: "var terminalPixelArea: NSView \\{ terminalContainer \\}", options: .regularExpression),
+                        "TerminalPaneHostView.terminalPixelArea must return terminalContainer")
+        XCTAssertNil(text.range(of: "terminalPixelArea: NSView \\{[^}]*terminalView", options: .regularExpression),
+                     "TerminalPaneHostView.terminalPixelArea must not return the terminal view")
     }
 
     // MARK: Refusals: never leak what can't be placed
