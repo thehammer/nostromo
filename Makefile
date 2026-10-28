@@ -183,7 +183,7 @@ mac:
 mac-test:
 	set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
 	  -destination 'platform=macOS' -derivedDataPath build test \
-	  2>&1 | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST"
+	  2>&1 | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST|MEMORY-CAPTURE-COST"
 
 ## Measure the bounded-transcript acceptance criteria against a Release build.
 ## Takes several minutes; drives synthetic traffic through the real code path.

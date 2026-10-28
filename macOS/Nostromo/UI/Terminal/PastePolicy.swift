@@ -51,6 +51,7 @@ enum PastePolicy {
 
     private static func normalisedLines(_ text: String) -> [String] {
         var normalised = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n").replacingOccurrences(of: "\u{2029}", with: "\n")
         if normalised.hasSuffix("\n") { normalised.removeLast() }
         return normalised.components(separatedBy: "\n")
     }

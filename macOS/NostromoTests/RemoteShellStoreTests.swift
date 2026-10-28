@@ -45,6 +45,16 @@ final class RemoteShellStoreTests: XCTestCase {
         XCTAssertEqual(m.subtitle, "admin-portal \u{00B7} scheduler \u{00B7} shell")
     }
 
+    func testInvisibleFillersAreStrippedFromAgentTextAndCfOnlyTextIsBlank() {
+        let m = model(agentRequest(reason: "a\u{3164}b\u{2800}c\u{115F}d\u{1160}e"))
+        XCTAssertEqual(m.reason, "abcde")
+        XCTAssertNil(model(agentRequest(reason: "\u{3164}\u{2800}\u{200B}")).reason)
+        XCTAssertNil(model(request(shellCommand: "\u{200B}\u{202E}")).details.first { $0.label == "Command" }
+            .flatMap { $0.value == RemoteShellStore.commandMissingText ? nil : $0.value })
+        XCTAssertNotNil(model(request(shellCommand: "\u{200B}")).connectBlockedReason)
+        XCTAssertNil(model(request(shellCommand: "ls")).connectBlockedReason)
+    }
+
     func testEveryEnvironmentIsUppercasedInItsOwnName() {
         for env in ["production", "canada", "demo", "staging"] {
             let t = TerminalTarget(project: "p", environment: env, service: "s", shellType: "shell")

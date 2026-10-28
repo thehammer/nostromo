@@ -21,6 +21,14 @@ final class PastePolicyTests: XCTestCase {
         XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "ls\r"), .confirm(lines: 1))
     }
 
+    func testUnicodeLineAndParagraphSeparatorsCountAsLineBreaks() {
+        XCTAssertEqual(PastePolicy.lineCount("a\u{2028}b"), 2)
+        XCTAssertEqual(PastePolicy.lineCount("a\u{2029}b\u{2028}c"), 3)
+        XCTAssertEqual(PastePolicy.lineCount("a\u{2028}"), 1, "one trailing break does not make a second line")
+        XCTAssertEqual(PastePolicy.preview("a\u{2028}b"), "a\nb")
+        XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "a\u{2029}b"), .confirm(lines: 2))
+    }
+
     func testTwoLinesAsk() {
         XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "a\nb"), .confirm(lines: 2))
         XCTAssertEqual(PastePolicy.decide(kind: .ecs, text: "a\nb\n"), .confirm(lines: 2))
