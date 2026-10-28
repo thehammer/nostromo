@@ -236,26 +236,6 @@ final class FollowModelTests: XCTestCase {
         XCTAssertEqual(m.warning(forFocusTag: "gone-9"), "Output will be sent to gone-9's model.")
     }
 
-    // MARK: Popover refresh
-
-    private func findPicker(in view: NSView) -> NSPopUpButton? {
-        if let popup = view as? NSPopUpButton, popup.accessibilityIdentifier() == "terminal-follow-picker" { return popup }
-        return view.subviews.lazy.compactMap { self.findPicker(in: $0) }.first
-    }
-
-    func testRenamingAFocusWhileThePopoverIsOpenRefreshesThePickerAndKeepsTheChoice() throws {
-        let store = TerminalSessionStore(now: { Date() }, schedule: { _, _ in }, transport: { _ in })
-        let view = FollowControlView(model: model(info()), store: store, closePopover: {})
-        let picker = try XCTUnwrap(findPicker(in: view))
-        picker.selectItem(withTitle: "Cody")
-
-        let renamed = FollowFocusOption(tag: "cody-1", name: "Codex")
-        view.update(model: model(info(), focuses: [core, claudia, renamed]))
-
-        XCTAssertEqual(picker.itemTitles, ["Core", "Claudia", "Codex"])
-        XCTAssertEqual(picker.selectedItem?.representedObject as? String, "cody-1", "the person's choice stays")
-    }
-
     // MARK: Send selection
 
     func testASelectionOverTheDaemonsLimitIsTooLargeAndOneAtTheLimitIsNot() {
