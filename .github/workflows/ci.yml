@@ -12,7 +12,7 @@ on:
     inputs:
       only:
         description: >-
-          Which jobs to run. all = every job; rust = Build & Lint; python = Python
+          Which jobs to run. all = every job; rust = Build & Lint (and its three parts); python = Python
           tooling tests; swift = Mac app + NostromoKit + iOS simulator build; mac =
           Swift tests (Mac app); kit = Swift tests (NostromoKit); ios = iOS simulator
           build.
@@ -32,12 +32,69 @@ env:
   # binaries with full debuginfo ran it out of space ("No space left on device"). Line tables
   # keep backtraces readable at a fraction of the size.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: "0"
 
 jobs:
-  build:
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
-    name: ${{ github.event_name == 'workflow_dispatch' && 'Build & Lint (dispatch)' || 'Build & Lint' }}
+  # Decides whether the Swift jobs below can be skipped. They are skipped only
+  # on a pull request whose every changed path is provably irrelevant to Swift
+  # (see scripts/ci_changes.py: default-run, short allow-list). Push and
+  # dispatch events always run them. The job always succeeds, so it never
+  # blocks a merge by itself; if the classification fails for any reason the
+  # output is `true` and the Swift jobs run.
+  changes:
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Detect changed paths (dispatch)' || 'Detect changed paths' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      swift: ${{ steps.classify.outputs.swift }}
+
+    steps:
+      # The pull_request checkout is the merge commit of the PR head into the
+      # base, so its first parent is the base tip and `HEAD^1..HEAD` is exactly
+      # what the PR changes. Depth 2 fetches both parents.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Classify changed paths
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          swift=true
+          if [ "$EVENT_NAME" = pull_request ] && git rev-parse --verify --quiet 'HEAD^2' >/dev/null; then
+            # --no-renames lists both sides of a rename; -z keeps odd filenames unquoted.
+            if out=$(git diff -z --no-renames --name-only 'HEAD^1' HEAD | python3 scripts/ci_changes.py) \
+               && [ "$out" = "swift=false" ]; then
+              swift=false
+            fi
+          fi
+          echo "swift=$swift" >> "$GITHUB_OUTPUT"
+          echo "Swift jobs needed: $swift"
+          git diff --no-renames --name-only 'HEAD^1' HEAD 2>/dev/null | head -50 || true
+
+  # ---------------------------------------------------------------------------
+  # Rust. Three independent jobs run in parallel and `Build & Lint` (the
+  # required status check) is the aggregate of them: it succeeds only if all
+  # three did.
+  #
+  # No cargo cache, on purpose. The old job cached `target` plus the registry
+  # under a key with a restore-keys fallback: the cache was ~7.6 GB, restoring
+  # it took 250-295 s and saving it 40-135 s, while compiling every dependency
+  # from scratch takes ~45 s (the workspace crate, which no cache can help, is
+  # the other ~165 s) and downloading the crates ~2 s. See docs/ci.md for the
+  # measurements. CARGO_INCREMENTAL=0 because a cold build has nothing to be
+  # incremental against.
+  #
+  # `cargo build --all-targets` is gone: `clippy --all-targets` type-checks
+  # every target (lib, bins, tests; the repo has no examples or benches) and
+  # `cargo test` compiles and links the lib, the bins and every test binary.
+  # ---------------------------------------------------------------------------
+  rust-fmt:
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Rust format (dispatch)' || 'Rust format' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -45,30 +102,63 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          components: rustfmt
 
       - name: Format
         run: cargo fmt --check
 
-      - name: Build
-        run: cargo build --all-targets
+  rust-clippy:
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Rust clippy (dispatch)' || 'Rust clippy' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+  rust-test:
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Rust tests (dispatch)' || 'Rust tests' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Test
         run: cargo test
+
+  # The required status check. Its name is the same as before the split, so
+  # branch protection needs no change. `always()` makes it run (and fail) when a
+  # part failed or was cancelled instead of being skipped, and a skipped
+  # required check counts as passing: do not weaken the `success` test below.
+  build:
+    if: always() && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only))
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Build & Lint (dispatch)' || 'Build & Lint' }}
+    needs: [rust-fmt, rust-clippy, rust-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Every Rust part must have succeeded
+        env:
+          FMT: ${{ needs.rust-fmt.result }}
+          CLIPPY: ${{ needs.rust-clippy.result }}
+          TEST: ${{ needs.rust-test.result }}
+        run: |
+          echo "rust-fmt=$FMT rust-clippy=$CLIPPY rust-test=$TEST"
+          [ "$FMT" = success ] && [ "$CLIPPY" = success ] && [ "$TEST" = success ]
 
   python-tooling:
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","python"]'), inputs.only)
@@ -126,9 +216,15 @@ jobs:
   # green while breaking the Mac app or NostromoKit.
   #
   # Shared decisions (kept here once rather than repeated per job):
-  #   * No path filters. A path-filtered job that is skipped reports as
-  #     "skipped", which a required check treats as passing — the exact silent
-  #     gap these jobs exist to close.
+  #   * No workflow-level `paths:` filter. A workflow whose `paths:` filter does
+  #     not match never starts, so a required check from it stays "Expected"
+  #     forever. The only skipping is the job-level `if:` on `changes` (above),
+  #     which makes the Swift jobs report "skipped", and a skipped job counts as
+  #     passing for branch protection and for merge tooling. It skips on a
+  #     pull request only when EVERY changed path is on the short allow-list in
+  #     scripts/ci_changes.py; anything unknown, an empty diff or a classifier
+  #     failure runs the jobs. Pushes to `main` and dispatches always run them.
+  #     `Build & Lint` and `Python tooling tests` are never skipped.
   #   * `macos-26` + an explicitly selected Xcode, same pins as
   #     macos-launch-smoke.yml, so a runner-image rollover shows up as a diff
   #     here rather than as an unexplained red.
@@ -151,13 +247,19 @@ jobs:
   #     suffixed names never match a required check.
   #   * `push` stays `main`-only: pushing a feature branch triggers nothing until
   #     a PR is opened or someone dispatches.
-  #   * No dependency or DerivedData cache. The project has no remote SwiftPM
-  #     dependencies (NostromoKit is a local package), so there is nothing to
-  #     cache safely, and restoring stale DerivedData could make a stale build
-  #     product pass a test the current source would fail.
+  #   * The only cache is the SwiftPM *source checkouts* of the Mac job
+  #     (`macOS/build/SourcePackages`: SwiftTerm and swift-argument-parser),
+  #     keyed on the hash of Package.resolved plus the Xcode version, with NO
+  #     restore-keys. It holds fetched source at pinned revisions and nothing
+  #     compiled: every run still compiles every package and every app source
+  #     from scratch, so a cache hit cannot make a stale build pass. There is
+  #     deliberately no DerivedData cache: restoring stale DerivedData could
+  #     make a stale build product pass a test the current source would fail,
+  #     which is how #345 got through.
   # ---------------------------------------------------------------------------
   swift-tests-mac:
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only)
+    needs: changes
+    if: needs.changes.outputs.swift == 'true' && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only))
     name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (Mac app) (dispatch)' || 'Swift tests (Mac app)' }}
     runs-on: macos-26
     timeout-minutes: 45
@@ -197,9 +299,31 @@ jobs:
           unzip -q -o "$RUNNER_TEMP/FiraCode.zip" 'FiraCodeNerdFont-*.ttf' -d "$HOME/Library/Fonts"
           ls "$HOME/Library/Fonts"
 
-      # The same command a developer runs locally (the `NostromoTests` scheme).
-      - name: make mac-test
-        run: make mac-test
+      - name: Xcode version (cache key)
+        id: xcode
+        run: echo "version=$(xcodebuild -version | tr -c 'A-Za-z0-9.\n' '-' | tr '\n' '_')" >> "$GITHUB_OUTPUT"
+
+      # Source checkouts only; see the shared-decisions note above.
+      - name: Cache SwiftPM packages (resolved sources only)
+        uses: actions/cache@v4
+        with:
+          path: macOS/build/SourcePackages
+          key: swiftpm-${{ runner.os }}-${{ steps.xcode.outputs.version }}-${{ hashFiles('macOS/Nostromo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+
+      # Its own step so the fetch is timed (and a cache hit is visible). Pinned
+      # to Package.resolved: no re-resolution, so a cache can never serve a
+      # version the repo does not pin.
+      - name: Resolve SwiftPM packages
+        run: |
+          xcodebuild -resolvePackageDependencies -project macOS/Nostromo.xcodeproj \
+            -scheme NostromoTests -derivedDataPath macOS/build \
+            -onlyUsePackageVersionsFromResolvedFile
+
+      # Same suite as `make mac-test` (the `NostromoTests` scheme), run as one
+      # build, a parallel phase and a serial phase for the layout-golden
+      # classes. See macOS/scripts/mac-test-ci.sh for the split and why.
+      - name: Mac tests (parallel + serial layout goldens)
+        run: macOS/scripts/mac-test-ci.sh
 
       # Compile gate for the app target. `make mac-test` builds only the
       # NostromoTests bundle, which does not include app-only sources such as
@@ -226,19 +350,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # The Makefile filters xcodebuild's output down to a few lines, so the
-      # .xcresult bundle is where the per-test failure detail lives.
+      # The test script prints a filtered view; the full phase logs and the
+      # .xcresult bundles are where the per-test failure detail lives.
       - name: Upload test results
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: swift-tests-mac-xcresult
-          path: macOS/build/Logs/Test
+          path: |
+            macOS/build/Logs/Test
+            ${{ runner.temp }}/mac-build.log
+            ${{ runner.temp }}/mac-parallel.log
+            ${{ runner.temp }}/mac-serial.log
           if-no-files-found: warn
           retention-days: 14
 
   swift-tests-kit:
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","kit"]'), inputs.only)
+    needs: changes
+    if: needs.changes.outputs.swift == 'true' && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","kit"]'), inputs.only))
     name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (NostromoKit) (dispatch)' || 'Swift tests (NostromoKit)' }}
     runs-on: macos-26
     timeout-minutes: 30
@@ -273,7 +402,8 @@ jobs:
           retention-days: 14
 
   ios-simulator-build:
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only)
+    needs: changes
+    if: needs.changes.outputs.swift == 'true' && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only))
     name: ${{ github.event_name == 'workflow_dispatch' && 'iOS simulator build (dispatch)' || 'iOS simulator build' }}
     runs-on: macos-26
     timeout-minutes: 30
