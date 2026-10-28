@@ -4,25 +4,31 @@
 
 "PR checks" are the GitHub jobs that run on every pull request against `main`
 and on every push to `main`. They are defined in `.github/workflows/ci.yml`
-(workflow name `CI`) plus the advisory launch smoke workflow below. None of
-the jobs in `ci.yml` has a `paths:` filter, on purpose: a filtered job that is
-skipped reports as "skipped", which a required check treats as passing.
+(workflow name `CI`) plus the advisory launch smoke workflow below. `ci.yml`
+has no workflow-level `paths:` filter, on purpose: a workflow that a path filter
+stops from starting never reports its checks, so a required check from it stays
+"Expected" and blocks the PR. The Swift jobs are skipped by a *step-level* gate
+instead; see "Skipping the Swift jobs" below.
 
 | Check name | Runner | What it runs | Local equivalent | Typical runtime |
 |---|---|---|---|---|
-| `Build & Lint` | ubuntu-latest | `cargo build`, `cargo clippy -D warnings`, `cargo test` | `cargo test` | ~4.5 min |
-| `Python tooling tests` | macos-latest | `make python-test` (fails on any skip) | `make python-test` | ~70 s |
-| `Swift tests (Mac app)` | macos-26 | `make mac-test` — the `NostromoTests` scheme, ~1,230 tests | `make mac-test` | ~3–4.5 min |
-| `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~1.5 min |
-| `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.5 min |
+| `Build & Lint` | ubuntu-latest | **the aggregate of the three Rust jobs below**: succeeds only if all three did. This is the required status check. | fmt, clippy and test together | the slowest of the three |
+| `Rust format` | ubuntu-latest | `cargo fmt --check` | same | ~15 s |
+| `Rust clippy` | ubuntu-latest | `cargo clippy --all-targets -- -D warnings` | same | ~2.5 min |
+| `Rust tests` | ubuntu-latest | `cargo test` (compiles and links the lib, the bins and every test binary) | same | see "Where the time goes" |
+| `Detect changed paths` | ubuntu-latest | `scripts/ci_changes.py` over the PR's changed paths | n/a | ~10 s |
+| `Python tooling tests` | macos-latest | `make python-test` (fails on any skip) | `make python-test` | ~4 min |
+| `Swift tests (Mac app)` | macos-26 | `make mac-test` (the `NostromoTests` scheme, ~5,800 tests, fully serial), then the compile gate | `make mac-test` | see "Where the time goes" |
+| `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~2.5 min |
+| `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.7 min |
 | `Launch smoke (advisory)` | macos-26 | see below (path-filtered, advisory) | `make mac-smoke` | ~5 min |
 
 Every job except the advisory launch smoke can also be dispatched by hand on a
 branch, alone or in groups; see "Running CI on a branch (dispatch)" below.
 
-`make mac-test` and `make kit-test` remain the local commands; the Swift
-jobs run exactly those Makefile targets, so a local failure and a PR-checks
-failure are the same failure.
+`make mac-test` and `make kit-test` remain the local commands; the Swift jobs
+run exactly those Makefile targets, so a local failure and a PR-checks failure
+are the same failure.
 
 ### The Swift jobs
 
@@ -38,12 +44,18 @@ failure are the same failure.
   bump the font, update the version and checksum in `ci.yml` together.
 - Concurrency is per job, event and ref; a newer push to a PR cancels the older
   run (pushes to `main` and dispatches are never cancelled).
-- Nothing is cached. NostromoKit is a local SwiftPM package, and the Mac app
-  has one remote package, SwiftTerm, pinned exactly to 1.18.0 in the project
-  and in `macOS/Nostromo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`
-  (so every job resolves and builds it fresh; it adds a minute or so to a Mac
-  build). Restoring stale DerivedData could let a stale build product mask a
-  failure. SwiftTerm 1.19+ has a build-tool plugin that command-line
+- **There is no dependency cache.** The Mac app has one remote package, SwiftTerm,
+  pinned exactly to 1.18.0 in the project and in
+  `macOS/Nostromo.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`
+  (plus swift-argument-parser); NostromoKit is a local package with nothing to
+  fetch. A cache of the SwiftPM source checkouts was built and measured and did
+  not help (33 s with a hit, 19-45 s without: the time is `xcodebuild` resolving
+  the package graph, not the download), so it was removed. See "Measured and not
+  shipped" below.
+- **There is deliberately no DerivedData cache.** Restoring stale DerivedData
+  could let a stale build product mask a failure, which is the failure class
+  that let #345 through.
+  SwiftTerm 1.19+ has a build-tool plugin that command-line
   `xcodebuild` rejects without `-skipPackagePluginValidation`: do not upgrade
   it without deciding that flag's place in `make mac`, CI and the smoke.
 - On failure the jobs upload the `.xcresult` bundle (`swift-tests-mac-xcresult`),
@@ -56,6 +68,39 @@ failure are the same failure.
   (shared, sometimes loaded) machine, and no user-installed fonts. Tests must
   not depend on a particular display setup, on wall-clock run-loop pump
   durations, or on fonts that are not installed by the workflow.
+
+### Where the time goes (measured 2026-10-28)
+
+From main run 40720495299 (`40f95ba4`) and the same source after the Rust split
+(dispatch run 40741191261):
+
+| Job | Before | After | What dominates |
+|---|---|---|---|
+| `Build & Lint` | 848 s | ~650 s (aggregate) | Before: cargo cache restore 59-295 s of a 7.6 GB target dir, build 218 s, clippy 76 s, tests 483 s. After: `Rust format` 14 s, clippy 112 s and tests 643 s run as parallel jobs; `Build & Lint` is now an aggregate job that depends on them. |
+| `Swift tests (Mac app)` | 1,322 s | 1,322 s (unchanged) | `make mac-test` 1,245 s = about 197 s build + 1,048 s executing 5,836 tests; the compile gate is 59 s. |
+
+The required check name `Build & Lint` is unchanged (it is the aggregate job), so
+branch protection needs no change.
+
+### Measured and not shipped
+
+- **SwiftPM source cache:** no faster (33 s hit, 19-45 s miss), removed.
+- **Parallel Mac testing** (3 workers, layout goldens kept serial) cut the Mac job
+  to 675-1,014 s but failed the five-consecutive-green bar: 8 of 10 runs green,
+  both reds were `MotherDetailScrollTests.testDataBelowTheReaderOrInsideTheLogLeavesTheScrollPositionAlone`
+  (once in the parallel phase, once in the serial phase). Not shipped; the
+  implementation is in branch history at `c44722a1` (`macOS/scripts/mac-test-ci.sh`).
+  Revisit after that test is made deterministic.
+- **DerivedData cache and test sharding:** deliberately not done. A restored
+  DerivedData can let a stale build product pass a test the current source would
+  fail, which is how #345 got through; sharding needs the parallel-safety above.
+- **Path gate:** docs, `.claude`, `tests/*.rs` and Cargo-file-only changes skip the
+  Swift jobs. `src/` is **not** skippable because `StatusBarPostureWindowsTests`
+  scans `src/**/*.rs`. Verified on throwaway PRs #370-#372 (closed).
+- **Compile-gate proof:** a throwaway commit that breaks an app-only file
+  (`TerminalPaneHostView.swift`) made the compile gate fail while all 5,836
+  `NostromoTests` passed (run 40745683225). The revert is in the history; the
+  final head compiles.
 
 ### The app-build compile gate
 
@@ -80,6 +125,67 @@ names above: `Swift tests (Mac app)`, `Swift tests (NostromoKit)` and
 `iOS simulator build` (and `Build & Lint` / `Python tooling tests` if they
 are not already required). Keep `Launch smoke (advisory)` out of the
 required set; see its promotion criteria below.
+
+**The required check did not change.** Today the only required context on
+`main` is `Build & Lint`. After the Rust job was split into `Rust format`,
+`Rust clippy` and `Rust tests`, `Build & Lint` is an aggregate job with the
+same name that depends on all three and succeeds only if each result is
+`success` (a failed, cancelled or skipped part fails it). So branch protection
+needs **no change** and there is nothing for the owner to update. Do not add the
+three part names as required: they add nothing the aggregate does not already
+enforce, and a rename of a part would then block every PR. If the owner later
+makes the Swift checks required, nothing changes for them either: the gated
+Swift jobs always start and report success under their real names (next section).
+
+### Skipping the Swift jobs
+
+A `changes` job (`Detect changed paths`) runs `scripts/ci_changes.py` on the
+paths a pull request changes (`git diff -z --no-renames --name-only HEAD^1 HEAD`
+on the merge commit; both sides of a rename are listed). Every step of the three
+Swift jobs after checkout is gated on its `swift` output, so a PR that cannot
+affect Swift does none of their work: the jobs start, report **success** in
+seconds under their real names, and skip the rest.
+
+It is default-run, not default-skip. The Swift jobs are skipped **only if every
+changed path** is on a short allow-list:
+
+- `docs/**` and `.claude/**`
+- `tests/**/*.rs` outside `tests/fixtures/` (Swift tests read the fixtures)
+- `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`
+
+**`src/**` (the Rust daemon) is deliberately not on the list.** Two Mac tests
+read the Rust sources: `ActivityStreamModelTests` reads
+`src/activity/store.rs`, and `StatusBarPostureWindowsTests`
+(`testNoSourceReferencesTheTmuxRateLimitsFile`) walks every `.rs` file under
+`src/` looking for a forbidden string, so any Rust source change can change a
+Swift test's verdict. A Rust PR that touches `src/` therefore still runs the
+Swift jobs. Moving that one scan into a Rust test would let `src/**` join the
+allow-list; that is a follow-up, not part of this change.
+
+Everything else runs the Swift jobs: anything under `macOS/`, `iOS/`,
+`Shared/` (including `NostromoKit`), `project.pbxproj`, the `Makefile`,
+`.github/` (so any change to this workflow), `scripts/`, `bin/`, every unknown
+or new path, an empty or unreadable diff, a path with `..`, a leading `/` or
+`./`, or a backslash, and any non-PR event (pushes to `main`, dispatches). The
+Mac compile gate therefore runs whenever the app could have changed. Any
+classifier error prints `swift=true`.
+
+Why steps and not the job: a job skipped by a job-level `if:` posts its check
+under the unevaluated `name:` expression text (measured on a throwaway PR), so
+a required `Swift tests (Mac app)` would stay "Expected" and block the PR.
+Merge tooling (`merge-when-green.sh`) treats SUCCESS, SKIPPED and NEUTRAL as
+green, so either would pass it; the step gate is the one that is also correct
+for branch protection. The cost is a macOS runner started for a few seconds.
+If `Detect changed paths` itself fails, the three Swift jobs are skipped at job
+level (they `need` it) and `Detect changed paths` is red: if the Swift checks
+are ever required, they stay "Expected" and block the PR, which is the safe
+direction.
+
+Drift guard: `tests/ci_policy/test_ci_changes.py` scans every Swift source for
+repo-relative reads (`appendingPathComponent("src/...")`, `tests/...`, `docs/...`)
+and fails if one falls under the skip list. If a Swift test starts reading a
+new Rust or docs file, that test fails until the file is added to the
+exclusions in `scripts/ci_changes.py`.
 
 ## Running CI on a branch (dispatch)
 
@@ -112,14 +218,14 @@ own `permissions:` stay `contents: read`).
 | `ONLY` | Jobs that run |
 |---|---|
 | `all` (default) | every job |
-| `rust` | `Build & Lint` |
+| `rust` | `Build & Lint` and its three parts (`Rust format`, `Rust clippy`, `Rust tests`) |
 | `python` | `Python tooling tests` |
 | `swift` | `Swift tests (Mac app)`, `Swift tests (NostromoKit)`, `iOS simulator build` |
 | `mac` | `Swift tests (Mac app)` |
 | `kit` | `Swift tests (NostromoKit)` |
 | `ios` | `iOS simulator build` |
 
-Push and pull-request events always run every job.
+Push and pull-request events always run every job (on a pull request the Swift jobs still start but skip their work when `Detect changed paths` says so; a dispatch never skips them).
 
 ### Check names carry a `(dispatch)` suffix
 

@@ -24,14 +24,33 @@ CI_YML_PATH = os.path.join(REPO_ROOT, ".github", "workflows", "ci.yml")
 
 ONLY_OPTIONS = ["all", "rust", "python", "swift", "mac", "kit", "ios"]
 
-# job key -> (original display name, selector set that must run it)
+# job key -> (original display name, selector set that must run it, condition wrapper).
+# wrapper None: the `if:` is exactly the dispatch selector. "always": the aggregate
+# required check, which must run even when a part failed or was cancelled.
+# The Swift jobs are NOT skipped by a job-level `if:` on the path classifier: a job skipped
+# that way posts its check under the raw, unevaluated `name:` expression, so a required
+# `Swift tests (Mac app)` would stay "Expected" and block the PR. They are gated per step
+# instead (see check_swift_jobs_wait_for_the_path_classifier), so they report success under
+# their real names.
 JOBS = {
-    "build": ("Build & Lint", {"all", "rust"}),
-    "python-tooling": ("Python tooling tests", {"all", "python"}),
-    "swift-tests-mac": ("Swift tests (Mac app)", {"all", "swift", "mac"}),
-    "swift-tests-kit": ("Swift tests (NostromoKit)", {"all", "swift", "kit"}),
-    "ios-simulator-build": ("iOS simulator build", {"all", "swift", "ios"}),
+    "rust-fmt": ("Rust format", {"all", "rust"}, None),
+    "rust-clippy": ("Rust clippy", {"all", "rust"}, None),
+    "rust-test": ("Rust tests", {"all", "rust"}, None),
+    "build": ("Build & Lint", {"all", "rust"}, "always"),
+    "python-tooling": ("Python tooling tests", {"all", "python"}, None),
+    "swift-tests-mac": ("Swift tests (Mac app)", {"all", "swift", "mac"}, None),
+    "swift-tests-kit": ("Swift tests (NostromoKit)", {"all", "swift", "kit"}, None),
+    "ios-simulator-build": ("iOS simulator build", {"all", "swift", "ios"}, None),
 }
+WRAPPER_PREFIX = {
+    "always": "always()",
+}
+SWIFT_GATE = "needs.changes.outputs.swift == 'true'"
+CHANGES_JOB = ("changes", "Detect changed paths")
+# The only job whose display name may be the required check's name.
+REQUIRED_CHECK_NAME = "Build & Lint"
+RUST_PARTS = ("rust-fmt", "rust-clippy", "rust-test")
+SWIFT_JOBS = ("swift-tests-mac", "swift-tests-kit", "ios-simulator-build")
 
 DISPATCH_NAME_RE = re.compile(
     r"^\s*\$\{\{\s*github\.event_name\s*==\s*'workflow_dispatch'\s*&&\s*'(?P<dispatch>[^']*)'"
@@ -165,7 +184,9 @@ def check_dispatch_trigger_and_only_input(text):
 def check_job_names_carry_dispatch_suffix(text):
     blocks = _job_blocks(text)
     violations = []
-    for key, (original, _) in JOBS.items():
+    names = {k: v[0] for k, v in JOBS.items()}
+    names[CHANGES_JOB[0]] = CHANGES_JOB[1]
+    for key, original in names.items():
         if key not in blocks:
             violations.append("job `%s` is missing" % key)
             continue
@@ -196,7 +217,7 @@ def check_job_names_carry_dispatch_suffix(text):
 def check_job_if_selects_by_only_input(text):
     blocks = _job_blocks(text)
     violations = []
-    for key, (_, selectors) in JOBS.items():
+    for key, (_, selectors, wrapper) in JOBS.items():
         if key not in blocks:
             violations.append("job `%s` is missing" % key)
             continue
@@ -208,6 +229,16 @@ def check_job_if_selects_by_only_input(text):
         wrapped = re.match(r"^\$\{\{\s*(.*?)\s*\}\}$", expr)
         if wrapped:
             expr = wrapped.group(1)
+        if wrapper is not None:
+            prefix = WRAPPER_PREFIX[wrapper]
+            m = re.match(r"^(?P<prefix>.+?)\s*&&\s*\((?P<inner>.*)\)$", expr)
+            if m is None or m.group("prefix").strip() != prefix:
+                violations.append(
+                    "job `%s` `if:` is %r; expected `%s && (<dispatch selector>)`"
+                    % (key, raw, prefix)
+                )
+                continue
+            expr = m.group("inner").strip()
         m = IF_RE.match(expr)
         if m is None:
             violations.append(
@@ -226,6 +257,134 @@ def check_job_if_selects_by_only_input(text):
                 "job `%s` selectors are %r, expected exactly %r"
                 % (key, sorted(got), sorted(selectors))
             )
+    return violations
+
+
+def _needs_of(block):
+    """The job's `needs:` as a list (inline `[a, b]`, a bare scalar, or a block list)."""
+    m = re.search(r"(?m)^    needs:[ \t]*(.*?)[ \t]*$", block)
+    if m is None:
+        return None
+    value = m.group(1)
+    if value.startswith("["):
+        return [n.strip().strip("'\"") for n in value.strip("[]").split(",") if n.strip()]
+    if value:
+        return [value.strip("'\"")]
+    after = block[m.end():].splitlines()[1:]
+    out = []
+    for l in after:
+        item = re.match(r"^      -\s*['\"]?([A-Za-z0-9_-]+)['\"]?\s*$", l)
+        if not item:
+            break
+        out.append(item.group(1))
+    return out
+
+
+def check_required_check_is_the_aggregate_of_the_rust_parts(text):
+    """`Build & Lint` is the required status check. It must stay one job with exactly that
+    name, depend on every Rust part, and succeed only if each part's result is `success`
+    (a skipped or cancelled part is not success). No other job may carry that name."""
+    blocks = _job_blocks(text)
+    violations = []
+    if "build" not in blocks:
+        return ["job `build` (the required `%s` check) is missing" % REQUIRED_CHECK_NAME]
+    needs = _needs_of(blocks["build"])
+    if needs is None or sorted(needs) != sorted(RUST_PARTS):
+        violations.append("job `build` needs %r, expected exactly %r" % (needs, sorted(RUST_PARTS)))
+    block = blocks["build"]
+    for part in RUST_PARTS:
+        if "needs.%s.result" % part not in block:
+            violations.append("job `build` never reads `needs.%s.result`" % part)
+    # Each part's result must be bound to its own env var, and the step's command must be
+    # exactly the conjunction of `[ "$VAR" = success ]` over those vars (no var tested
+    # twice, none missing), so a copy-paste slip cannot leave a part unchecked.
+    bound = dict(
+        (m.group(2), m.group(1))
+        for m in re.finditer(r"(?m)^\s+(\w+):\s*\$\{\{\s*needs\.([a-z-]+)\.result\s*\}\}\s*$", block)
+    )
+    if sorted(bound) != sorted(RUST_PARTS):
+        violations.append("job `build` binds results for %r, expected exactly %r" % (sorted(bound), sorted(RUST_PARTS)))
+    commands = re.findall(r"(?m)^\s+run:[ \t]*\|?[ \t]*\n?(?:\s*echo[^\n]*\n)?\s*(\[ [^\n]*)$", block)
+    tested = re.findall(r'\[ "\$(\w+)" = success \]', commands[0]) if commands else []
+    rest = re.sub(r'\[ "\$\w+" = success \]', "", commands[0]).replace("&&", "").strip() if commands else "?"
+    if not commands or rest or sorted(tested) != sorted(bound.values()):
+        violations.append(
+            "job `build` must test exactly `[ \"$VAR\" = success ]` for each bound result var %r (tests %r, leftover %r)"
+            % (sorted(bound.values()), sorted(tested), rest)
+        )
+    if re.search(r"(?m)^\s+continue-on-error:", text):
+        violations.append("`continue-on-error` is present in the workflow; a part that fails would report success")
+    for step in _steps_of(block):
+        if re.search(r"(?m)^        if:", step):
+            violations.append("job `build` has a step-level `if:`; the aggregate check must always evaluate")
+    for key, raw_block in blocks.items():
+        if key == "build":
+            continue
+        name = _job_level(raw_block, "name") or ""
+        if REQUIRED_CHECK_NAME in name:
+            violations.append(
+                "job `%s` is named %r; only `build` may carry the required check's name" % (key, name)
+            )
+    return violations
+
+
+def _steps_of(block):
+    """List of step blocks (text) in a job block."""
+    steps, current = [], None
+    in_steps = False
+    for l in block.splitlines():
+        if l == "    steps:":
+            in_steps = True
+            continue
+        if not in_steps:
+            continue
+        if re.match(r"^      - ", l):
+            current = [l]
+            steps.append(current)
+        elif current is not None:
+            current.append(l)
+    return ["\n".join(c) for c in steps]
+
+
+def check_swift_jobs_wait_for_the_path_classifier(text):
+    """The Swift jobs depend on `changes` and gate every step (but checkout) on its output,
+    never the whole job (a job-level skip posts the check under an unevaluated name)."""
+    blocks = _job_blocks(text)
+    violations = []
+    changes = blocks.get(CHANGES_JOB[0])
+    if changes is None:
+        return ["job `changes` is missing"]
+    if _job_level(changes, "if") is not None:
+        violations.append("job `changes` has an `if:`; it must run on every event")
+    for key in SWIFT_JOBS:
+        if key not in blocks:
+            violations.append("job `%s` is missing" % key)
+            continue
+        block = blocks[key]
+        if _needs_of(block) != ["changes"]:
+            violations.append("job `%s` needs %r, expected ['changes']" % (key, _needs_of(block)))
+        if "needs.changes" in (_job_level(block, "if") or ""):
+            violations.append(
+                "job `%s` is skipped by a job-level `if:` on the classifier; that posts the check "
+                "under the raw name expression. Gate the steps instead." % key
+            )
+        steps = _steps_of(block)
+        if not steps:
+            violations.append("job `%s` has no steps" % key)
+        for step in steps:
+            first = step.splitlines()[0]
+            if "actions/checkout" in first:
+                continue
+            m = re.search(r"(?m)^        if:[ \t]*(.*?)[ \t]*$", step)
+            cond = m.group(1) if m else ""
+            if cond not in (SWIFT_GATE, SWIFT_GATE + " && failure()"):
+                violations.append(
+                    "job `%s` step %r `if:` is %r; it must be exactly `%s` (optionally `&& failure()`)"
+                    % (key, first.strip(), cond, SWIFT_GATE)
+                )
+    for key in blocks:
+        if key not in SWIFT_JOBS and key != CHANGES_JOB[0] and "needs.changes" in blocks[key]:
+            violations.append("job `%s` is gated on the path classifier; only the Swift jobs may be" % key)
     return violations
 
 
@@ -316,20 +475,31 @@ def good_workflow(
         "",
         "jobs:",
     ]
-    for key, (original, selectors) in JOBS.items():
+    out.append("  %s:" % CHANGES_JOB[0])
+    out.append(
+        "    name: ${{ github.event_name == 'workflow_dispatch' && '%s (dispatch)' || '%s' }}"
+        % (CHANGES_JOB[1], CHANGES_JOB[1])
+    )
+    out += ["    runs-on: ubuntu-latest", "    steps:", "      - uses: actions/checkout@v4", ""]
+    for key, (original, selectors, wrapper) in JOBS.items():
         name = names.get(
             key,
             "${{ github.event_name == 'workflow_dispatch' && '%s (dispatch)' || '%s' }}"
             % (original, original),
         )
-        cond = ifs.get(
-            key,
-            "github.event_name != 'workflow_dispatch' || contains(fromJSON('%s'), inputs.only)"
-            % json.dumps(sorted(selectors)),
+        cond = "github.event_name != 'workflow_dispatch' || contains(fromJSON('%s'), inputs.only)" % (
+            json.dumps(sorted(selectors)),
         )
+        if wrapper is not None:
+            cond = "%s && (%s)" % (WRAPPER_PREFIX[wrapper], cond)
+        cond = ifs.get(key, cond)
         out.append("  %s:" % key)
         if name is not None:
             out.append("    name: %s" % name)
+        if key in SWIFT_JOBS:
+            out.append("    needs: changes")
+        if key == "build":
+            out.append("    needs: [%s]" % ", ".join(RUST_PARTS))
         if cond is not None:
             out.append("    if: %s" % cond)
         out.append("    runs-on: ubuntu-latest")
@@ -338,14 +508,30 @@ def good_workflow(
         out.append("      cancel-in-progress: %s" % cancel)
         if extra_job_lines:
             out.append(extra_job_lines)
-        out += [
-            "    steps:",
-            "      - uses: actions/checkout@v4",
-            "      - name: Build & Lint inside a step",
-            "        if: failure()",
-            "        run: true",
-            "",
-        ]
+        out += ["    steps:", "      - uses: actions/checkout@v4"]
+        if key in SWIFT_JOBS:
+            out += [
+                "      - name: Select Xcode",
+                "        if: %s" % SWIFT_GATE,
+                "        run: true",
+                "      - name: Upload log",
+                "        if: %s && failure()" % SWIFT_GATE,
+                "        run: true",
+            ]
+        if key == "build":
+            out += [
+                "      - name: Every Rust part must have succeeded",
+                "        env:",
+                "          FMT: ${{ needs.rust-fmt.result }}",
+                "          CLIPPY: ${{ needs.rust-clippy.result }}",
+                "          TEST: ${{ needs.rust-test.result }}",
+                "        run: |",
+                '          [ "$FMT" = success ] && [ "$CLIPPY" = success ] && [ "$TEST" = success ]',
+            ]
+        out += ["      - name: Build & Lint inside a step"]
+        if key != "build":  # the aggregate's steps must be unconditional
+            out.append("        if: %s" % (SWIFT_GATE + " && failure()" if key in SWIFT_JOBS else "failure()"))
+        out += ["        run: true", ""]
     return "\n".join(out)
 
 
@@ -372,11 +558,13 @@ class SyntheticBaselineTests(unittest.TestCase):
             check_concurrency_is_per_event_and_cancels_only_prs,
             check_permissions_are_read_only,
             check_no_path_filters,
+            check_required_check_is_the_aggregate_of_the_rust_parts,
+            check_swift_jobs_wait_for_the_path_classifier,
         ):
             self.assertEqual(check(text), [], check.__name__)
 
-    def test_job_block_splitter_finds_all_five_jobs(self):
-        self.assertEqual(sorted(_job_blocks(good_workflow())), sorted(JOBS))
+    def test_job_block_splitter_finds_every_job(self):
+        self.assertEqual(sorted(_job_blocks(good_workflow())), sorted(list(JOBS) + [CHANGES_JOB[0]]))
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +744,107 @@ class NoPathFilterTests(unittest.TestCase):
 
     def test_real_ci_yml_has_no_path_filters(self):
         self.assertEqual(check_no_path_filters(_real_ci_yml()), [])
+
+
+# ---------------------------------------------------------------------------
+# 7. `Build & Lint` stays the required check, as the aggregate of the Rust parts
+# ---------------------------------------------------------------------------
+
+class RequiredCheckAggregateTests(unittest.TestCase):
+    def _check(self, text):
+        return check_required_check_is_the_aggregate_of_the_rust_parts(text)
+
+    def test_bites_when_a_part_is_not_a_dependency(self):
+        text = good_workflow().replace("needs: [rust-fmt, rust-clippy, rust-test]", "needs: [rust-fmt, rust-test]")
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_a_part_result_is_never_read(self):
+        text = good_workflow().replace("needs.rust-clippy.result", "needs.rust-fmt.result")
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_success_is_not_required(self):
+        # `!= failure` would let a skipped or cancelled part pass.
+        text = good_workflow().replace('"$CLIPPY" = success', '"$CLIPPY" != failure')
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_the_wrong_variable_is_tested(self):
+        # `$TEST` (rust-test) is never checked: a failing test suite would pass.
+        text = good_workflow().replace('"$TEST" = success', '"$FMT" = success')
+        self.assertTrue(self._check(text))
+
+    def test_bites_on_continue_on_error(self):
+        text = good_workflow().replace("  rust-test:\n    name:", "  rust-test:\n    continue-on-error: true\n    name:", 1)
+        self.assertIn("continue-on-error", text)
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_the_aggregate_step_is_conditional(self):
+        text = good_workflow().replace(
+            "      - name: Every Rust part must have succeeded\n",
+            "      - name: Every Rust part must have succeeded\n        if: false\n", 1)
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_a_part_job_takes_the_required_name(self):
+        text = good_workflow(names={"rust-test": "Build & Lint"})
+        self.assertTrue(self._check(text))
+
+    def test_bites_without_the_aggregate_job(self):
+        text = good_workflow().replace("  build:\n", "  build-renamed:\n")
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_the_aggregate_is_not_always_run(self):
+        text = good_workflow().replace("if: always() && (", "if: (")
+        self.assertTrue(check_job_if_selects_by_only_input(text))
+
+    def test_real_ci_yml_required_check_is_the_aggregate(self):
+        self.assertEqual(self._check(_real_ci_yml()), [])
+
+
+# ---------------------------------------------------------------------------
+# 8. The Swift jobs may be skipped only through the path classifier
+# ---------------------------------------------------------------------------
+
+class SwiftJobsPathGateTests(unittest.TestCase):
+    def test_bites_when_a_swift_job_does_not_need_changes(self):
+        text = good_workflow().replace("    needs: changes\n", "", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_bites_when_a_step_is_not_gated(self):
+        text = good_workflow().replace("        if: %s\n" % SWIFT_GATE, "", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_bites_when_a_failure_only_step_forgets_the_gate(self):
+        text = good_workflow().replace("if: %s && failure()" % SWIFT_GATE, "if: failure()", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_bites_when_the_gate_is_or_ed_with_true(self):
+        text = good_workflow().replace(SWIFT_GATE, SWIFT_GATE + " || true", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_bites_when_the_gate_is_compared_loosely(self):
+        # `!= 'false'` would also be true if the output went missing; the gate must demand 'true'.
+        text = good_workflow().replace(SWIFT_GATE, "needs.changes.outputs.swift != 'false'", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_bites_when_the_whole_job_is_skipped_by_the_classifier(self):
+        # A job-level skip posts the check under the raw name expression.
+        text = good_workflow(ifs={"swift-tests-mac": "%s && (github.event_name != 'workflow_dispatch' || "
+                                  "contains(fromJSON('[\"all\",\"swift\",\"mac\"]'), inputs.only))" % SWIFT_GATE})
+        self.assertTrue(
+            check_swift_jobs_wait_for_the_path_classifier(text) or check_job_if_selects_by_only_input(text))
+
+    def test_bites_when_rust_is_gated_on_the_classifier(self):
+        text = good_workflow().replace("    needs: [rust-fmt, rust-clippy, rust-test]\n",
+                                       "    needs: [rust-fmt, rust-clippy, rust-test, changes]\n", 1)
+        text = text.replace("needs.rust-fmt.result", "needs.changes.outputs.swift", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text)
+                        or check_required_check_is_the_aggregate_of_the_rust_parts(text))
+
+    def test_bites_without_the_changes_job(self):
+        text = good_workflow().replace("  changes:\n", "  changes-renamed:\n")
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_real_ci_yml_swift_jobs_wait_for_the_classifier(self):
+        self.assertEqual(check_swift_jobs_wait_for_the_path_classifier(_real_ci_yml()), [])
 
 
 # ---------------------------------------------------------------------------
