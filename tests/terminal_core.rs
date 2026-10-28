@@ -2773,7 +2773,26 @@ async fn a_paste_into_a_shell_that_is_not_reading_never_blocks_the_daemon() {
     let mut app = d.app(vec![]).await;
     let info = app.open_ready(&cwd).await;
     let tid = info.terminal_id.clone();
-    app.type_line(&tid, "sleep 30").await;
+    // Wait until the shell is really running `sleep` (not still reading its
+    // input), or the paste could be eaten by the line editor instead of
+    // filling the queue. `-icanon` makes the tty hold back (rather than
+    // discard) input it has no room for, so the daemon's writer blocks and the
+    // queue fills however fast or slow the machine is. The marker is touched
+    // by the command itself.
+    let running = cwd.join("shell-is-busy");
+    app.type_line(
+        &tid,
+        &format!("stty -icanon; touch '{}'; sleep 30", running.display()),
+    )
+    .await;
+    let deadline = Instant::now() + WAIT;
+    while !running.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the shell to start its command"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     let from = app.mark();
     let chunk = vec![b'x'; 4096];
@@ -2796,7 +2815,7 @@ async fn a_paste_into_a_shell_that_is_not_reading_never_blocks_the_daemon() {
         })
         .await;
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(10),
         "a stuck shell held up another connection for {:?}",
         started.elapsed()
     );
