@@ -210,7 +210,7 @@ jobs:
 
       - name: parallel tests
         env:
-          WORKERS: "4"
+          WORKERS: "3"
         run: |
           set -o pipefail
           cd macOS
