@@ -198,8 +198,61 @@ jobs:
           ls "$HOME/Library/Fonts"
 
       # The same command a developer runs locally (the `NostromoTests` scheme).
-      - name: make mac-test
-        run: make mac-test
+      - name: build-for-testing
+        run: |
+          set -o pipefail
+          cd macOS
+          date -u +%T
+          xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests -destination 'platform=macOS' \
+            -derivedDataPath build build-for-testing 2>&1 | tee "$RUNNER_TEMP/build.log" | grep -E "error:|\*\* TEST BUILD"
+          date -u +%T
+
+      - name: parallel tests
+        env:
+          WORKERS: "3"
+        run: |
+          set -o pipefail
+          cd macOS
+          date -u +%T
+          xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests -destination 'platform=macOS' \
+            -derivedDataPath build test-without-building -resultBundlePath "$RUNNER_TEMP/par.xcresult" \
+            -parallel-testing-enabled YES -parallel-testing-worker-count "$WORKERS" \
+            -skip-testing:NostromoTests/ChatTurnViewLayoutTests \
+            -skip-testing:NostromoTests/TrackerPaneViewTests -skip-testing:NostromoTests/TrackerRowLayoutTests \
+            -skip-testing:NostromoTests/TrackerLargeBoardTests -skip-testing:NostromoTests/TrackerHostileTextTests \
+            -skip-testing:NostromoTests/TrackerPaneClockTests -skip-testing:NostromoTests/AppControlTrackerTests \
+            -skip-testing:NostromoTests/MarkdownCodeBlockTests -skip-testing:NostromoTests/TurnHeightEstimatorTests \
+            -skip-testing:NostromoTests/TurnHeightEstimatorFoldTests \
+            2>&1 | tee "$RUNNER_TEMP/par.log" | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST"
+          date -u +%T
+
+      - name: serial tests
+        run: |
+          set -o pipefail
+          cd macOS
+          date -u +%T
+          xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests -destination 'platform=macOS' \
+            -derivedDataPath build test-without-building -resultBundlePath "$RUNNER_TEMP/ser.xcresult" \
+            -parallel-testing-enabled NO \
+            -only-testing:NostromoTests/ChatTurnViewLayoutTests \
+            -only-testing:NostromoTests/TrackerPaneViewTests -only-testing:NostromoTests/TrackerRowLayoutTests \
+            -only-testing:NostromoTests/TrackerLargeBoardTests -only-testing:NostromoTests/TrackerHostileTextTests \
+            -only-testing:NostromoTests/TrackerPaneClockTests -only-testing:NostromoTests/AppControlTrackerTests \
+            -only-testing:NostromoTests/MarkdownCodeBlockTests -only-testing:NostromoTests/TurnHeightEstimatorTests \
+            -only-testing:NostromoTests/TurnHeightEstimatorFoldTests \
+            2>&1 | tee "$RUNNER_TEMP/ser.log" | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST"
+          date -u +%T
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exp-logs
+          path: |
+            ${{ runner.temp }}/par.log
+            ${{ runner.temp }}/ser.log
+            ${{ runner.temp }}/build.log
+          retention-days: 3
 
       # Compile gate for the app target. `make mac-test` builds only the
       # NostromoTests bundle, which does not include app-only sources such as
