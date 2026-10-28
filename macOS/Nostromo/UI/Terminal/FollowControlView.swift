@@ -24,7 +24,7 @@ final class FollowControlView: NSView {
 
     private enum Mode { case invite, manage }
 
-    private let model: FollowModel
+    private var model: FollowModel
     private let store: TerminalSessionStore
     /// Closes the popover this view is in.
     private let closePopover: () -> Void
@@ -90,16 +90,7 @@ final class FollowControlView: NSView {
                             font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor, id: "terminal-follow-heading")
         stack.addArrangedSubview(heading)
 
-        let offered = model.inviteFocuses
-        picker.removeAllItems()
-        for option in offered {
-            picker.addItem(withTitle: option.name)
-            picker.lastItem?.representedObject = option.tag
-        }
-        if let tag = model.defaultInviteTag, let index = offered.firstIndex(where: { $0.tag == tag }) {
-            picker.selectItem(at: index)
-        }
-        pickedIndex = max(0, picker.indexOfSelectedItem)
+        fillPicker(keeping: nil)
         picker.target = self
         picker.action = #selector(followFocusChanged(_:))
         picker.setAccessibilityIdentifier("terminal-follow-picker")
@@ -176,6 +167,32 @@ final class FollowControlView: NSView {
         return button
     }
 
+    /// Lists the focuses the model offers, selecting `tag` when it is still offered, else the model's default.
+    private func fillPicker(keeping tag: String?) {
+        let offered = model.inviteFocuses
+        picker.removeAllItems()
+        for option in offered {
+            picker.addItem(withTitle: option.name)
+            picker.lastItem?.representedObject = option.tag
+        }
+        let wanted = [tag, model.defaultInviteTag].compactMap { $0 }
+        if let index = wanted.lazy.compactMap({ t in offered.firstIndex(where: { $0.tag == t }) }).first {
+            picker.selectItem(at: index)
+        }
+        pickedIndex = max(0, picker.indexOfSelectedItem)
+    }
+
+    /// A focus was renamed, added or removed while the popover is open: the picker shows the current names
+    /// and keeps the person's choice. Sends nothing.
+    func update(model newModel: FollowModel) {
+        guard newModel.focuses != model.focuses else { return }
+        let chosen = selectedTag
+        model = newModel
+        guard mode == .invite else { return }
+        fillPicker(keeping: chosen)
+        updateWarning()
+    }
+
     private var selectedTag: String? {
         picker.selectedItem?.representedObject as? String
     }
@@ -189,7 +206,8 @@ final class FollowControlView: NSView {
     /// Changes which focus the warning names. Only a person's choice counts: a synthetic one is undone and
     /// reported, so the form never holds a focus a person did not pick. Sends nothing.
     @objc private func followFocusChanged(_ sender: NSPopUpButton) {
-        guard TerminalInputGuard.allowsControl(event: NSApp.currentEvent, control: sender) else {
+        // A popup's action carries the mouse event that tracked its menu, which belongs to the menu's window.
+        guard TerminalInputGuard.allowsControl(event: NSApp.currentEvent, control: sender, fromMenu: true) else {
             picker.selectItem(at: pickedIndex)
             store.reportRefusal(terminalId: model.info.terminalId, op: .followInvite)
             updateWarning()

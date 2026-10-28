@@ -353,6 +353,25 @@ final class TerminalInputGuardTests: XCTestCase {
         XCTAssertFalse(control(GestureFixtures.mouse(.leftMouseUp, in: other), button, fromMenu: true))
     }
 
+    /// The invite popover's focus picker is an NSPopUpButton: its action runs with the mouse event that
+    /// tracked the popup's menu, which belongs to the menu's window, not the popover's.
+    func testAPopupSelectionDeliveredThroughTheMenuTrackingEventIsPermittedButASyntheticOneIsNot() throws {
+        let window = GestureFixtures.offscreenWindow()
+        addTeardownBlock { window.close() }
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 120, height: 24), pullsDown: false)
+        popup.addItems(withTitles: ["Claudia", "Cody"])
+        window.contentView?.addSubview(popup)
+        let menuWindow = GestureFixtures.offscreenWindow()
+        addTeardownBlock { menuWindow.close() }
+        let tracking = GestureFixtures.mouse(.leftMouseUp, in: menuWindow)
+
+        XCTAssertFalse(control(tracking, popup, fromMenu: false), "without fromMenu a person's pick is refused")
+        XCTAssertTrue(control(tracking, popup, fromMenu: true), "a human pick through the menu is permitted")
+
+        let synthetic = try GestureFixtures.marked(GestureFixtures.mouse(.leftMouseUp, in: menuWindow))
+        XCTAssertFalse(control(synthetic, popup, fromMenu: true), "a synthetic pick is still refused")
+    }
+
     func testAMenuSelectionStillRefusesAStaleEvent() {
         let (_, button) = windowAndControl()
         let other = GestureFixtures.offscreenWindow()

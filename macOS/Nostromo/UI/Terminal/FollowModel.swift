@@ -161,6 +161,20 @@ struct FollowModel: Equatable {
     }
 
     /// "Send selection to Claudia".
+    /// The most selected text one Send selection carries: the daemon's per-delivery byte cap
+    /// (`DeliveryPolicy::CAP_BYTES`). More is refused here, with `selectionTooLargeMessage`.
+    static let selectionLimitBytes = 16 * 1024
+
+    /// The menu items' tooltip: what happens to the text on its way.
+    static let sendSelectionTooltip = "The daemon redacts secrets from the selection and caps it at 16 KB before the agent's model sees it."
+
+    /// What a person is told when the selection is over the limit.
+    static let selectionTooLargeMessage = "That selection is too large to send (the limit is 16 KB). Select less and try again."
+
+    static func selectionIsTooLarge(_ text: String) -> Bool {
+        text.utf8.count > selectionLimitBytes
+    }
+
     static func sendSelectionTitle(to option: FollowFocusOption) -> String {
         "Send selection to \(option.name)"
     }

@@ -27,6 +27,9 @@ struct RemoteShellSheetModel: Equatable {
     /// The follow checkbox's title ("Let cody follow this shell's output"), only for a shell an agent
     /// (a focus) asked for. Nil for a shell the user opened themselves: nobody to invite.
     let followCheckboxTitle: String?
+    /// The sentence shown beside the follow box ("Output from PRODUCTION will be sent to cody's model."),
+    /// so where the output goes is stated where the box is ticked. Present exactly when the box is.
+    let followWarning: String?
 }
 
 /// One labelled fact about what will run.
@@ -165,13 +168,20 @@ final class RemoteShellStore {
             connectBlockedReason: command == nil
                 ? "The daemon did not say which command would run, so this shell can't be authorised. Cancel and try again."
                 : nil,
-            followCheckboxTitle: request.requestedBy.kind == "focus" ? followCheckboxTitle(for: request) : nil)
+            followCheckboxTitle: request.requestedBy.kind == "focus" ? followCheckboxTitle(for: request) : nil,
+            followWarning: request.requestedBy.kind == "focus" ? followWarning(for: request) : nil)
     }
 
     /// "Let cody follow this shell's output". The agent's name is the agent's text: plain, bounded.
     static func followCheckboxTitle(for request: RemoteShellConfirmRequest) -> String {
         let agent = plainText(request.requestedBy.agent, limit: agentNameLimit) ?? "the agent"
         return "Let \(agent) follow this shell's output"
+    }
+
+    /// "Output from PRODUCTION will be sent to cody's model." The environment is the target's, in capitals.
+    static func followWarning(for request: RemoteShellConfirmRequest) -> String {
+        let agent = plainText(request.requestedBy.agent, limit: agentNameLimit) ?? "the agent"
+        return "Output from \(request.target.environment.uppercased()) will be sent to \(agent)'s model."
     }
 
     /// The reason a connection failed, in words. `code` is the daemon's failure code.

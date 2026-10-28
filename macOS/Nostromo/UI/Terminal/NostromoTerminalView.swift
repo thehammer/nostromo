@@ -179,6 +179,13 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
         }
         guard let terminalId, let tag = sender.representedObject as? String,
               let text = getSelection(), !text.isEmpty else { return }
+        guard !FollowModel.selectionIsTooLarge(text) else {
+            let alert = NSAlert()
+            alert.messageText = FollowModel.selectionTooLargeMessage
+            alert.addButton(withTitle: "OK")
+            if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+            return
+        }
         store.sendSelection(terminalId: terminalId, targetTag: tag, text: text)
     }
 
@@ -193,6 +200,7 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate {
                                    action: #selector(sendSelectionTapped(_:)), keyEquivalent: "")
             entry.target = self
             entry.representedObject = option.tag
+            entry.toolTip = FollowModel.sendSelectionTooltip
             entry.isEnabled = enabled
             return entry
         }

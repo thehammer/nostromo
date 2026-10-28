@@ -876,6 +876,12 @@ final class TerminalFitnessTests: XCTestCase {
                                   call: "store.sendSelection(")
     }
 
+    func testTheInvitePickerAsksTheGuardFromTheMenuBecauseAPopupActionCarriesTheMenusEvent() throws {
+        let body = try funcBody("followFocusChanged", in: "FollowControlView.swift")
+        let guardAt = try XCTUnwrap(body.range(of: "TerminalInputGuard.allowsControl("))
+        XCTAssertTrue(body[guardAt.lowerBound...].prefix(160).contains("fromMenu: true"), "the picker asks with fromMenu: true:\n\(body)")
+    }
+
     func testOnlyTheInvitePopoverButtonStartsFollowingFromTheApp() throws {
         var sites: [String] = []
         for file in Repo.swiftFiles(under: Repo.app) {
