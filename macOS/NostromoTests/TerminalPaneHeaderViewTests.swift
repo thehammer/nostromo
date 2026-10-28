@@ -188,4 +188,165 @@ final class TerminalPaneHeaderViewTests: XCTestCase {
         let header = makeHeader(info(kind: .ecs, target: shortTarget), width: 600, mirrorHint: "")
         XCTAssertTrue(try label("terminal-mirror-hint", in: header).isHidden)
     }
+
+    // MARK: The Follow badge
+
+    private let claudia = FollowFocusOption(tag: "claudia-1", name: "Claudia")
+
+    private func followInfo(kind: TerminalKind = .local, target: TerminalTarget? = nil,
+                            follower: TerminalFollower? = nil) -> TerminalInfo {
+        TerminalInfo(terminalId: "t1", tag: "core-1", paneId: "terminal-a", kind: kind, label: "zsh", cwd: nil, target: target,
+                     status: .running, exitCode: nil, endedReason: nil, cols: 80, rows: 24,
+                     requestedBy: TerminalRequester(kind: "user", tag: nil), openedByRequest: nil, follower: follower, idleClosesAt: nil)
+    }
+
+    private func followModel(_ info: TerminalInfo) -> FollowModel {
+        FollowModel(info: info, focuses: [claudia])
+    }
+
+    private func makeFollowHeader(_ info: TerminalInfo, width: CGFloat, mirrorHint: String = "") -> TerminalPaneHeaderView {
+        let header = TerminalPaneHeaderView()
+        header.frame = NSRect(x: 0, y: 0, width: width, height: TerminalPaneHeaderView.height)
+        header.apply(info: info, mirrorHint: mirrorHint, follow: followModel(info))
+        header.layoutSubtreeIfNeeded()
+        return header
+    }
+
+    private var followedByClaudia: TerminalFollower { TerminalFollower(tag: "claudia-1", paused: false, pauseReason: nil) }
+    private var pausedClaudia: TerminalFollower { TerminalFollower(tag: "claudia-1", paused: true, pauseReason: "too_much_output") }
+
+    func testTheBadgeIsAlwaysVisibleInsideTheHeaderAndClearOfEverythingElseAtEveryWidth() throws {
+        let infos = [followInfo(), followInfo(kind: .ecs, target: longTarget), followInfo(follower: followedByClaudia),
+                     followInfo(kind: .ecs, target: longTarget, follower: pausedClaudia)]
+        for info in infos {
+            for width in [100.0, 110, 120, 160, 240, 400, 700] {
+                let header = makeFollowHeader(info, width: width, mirrorHint: hint)
+                let badge = header.followButton
+                let context = "\(info.kind) follower \(info.follower != nil) width \(Int(width))"
+                XCTAssertFalse(badge.isHidden, context)
+                XCTAssertGreaterThanOrEqual(badge.frame.width, 20, "the badge never vanishes: \(context)")
+                XCTAssertGreaterThan(badge.frame.height, 0, context)
+                XCTAssertTrue(header.bounds.insetBy(dx: -0.5, dy: -0.5).contains(badge.frame), "inside the header: \(context)")
+
+                let close = try XCTUnwrap(descendants(header).compactMap { $0 as? NSButton }.first { $0.accessibilityIdentifier() == "terminal-close-x" })
+                var others: [(String, NSRect)] = [("close button", close.frame)]
+                let title = try label("terminal-title", in: header)
+                let mirror = try label("terminal-mirror-hint", in: header)
+                if title.frame.width > 0.5 { others.append(("title", title.frame)) }
+                if !mirror.isHidden, mirror.frame.width > 0.5 { others.append(("hint", mirror.frame)) }
+                // Below ~120 pt a remote header cannot hold even the smallest token next to a 20 pt badge.
+                if info.kind == .local || width >= 120 {
+                    let env = try label("terminal-environment", in: header)
+                    if !env.isHidden { others.append(("environment token", env.frame)) }
+                }
+                for (name, other) in others {
+                    XCTAssertFalse(overlaps(badge.frame, other), "the badge overlaps the \(name): \(context)")
+                }
+            }
+        }
+    }
+
+    func testTheBadgeHasItsMinimumWidthWhereThereIsRoom() {
+        for info in [followInfo(), followInfo(follower: followedByClaudia), followInfo(follower: pausedClaudia)] {
+            for width in [300.0, 400, 700] {
+                let header = makeFollowHeader(info, width: width, mirrorHint: hint)
+                XCTAssertGreaterThanOrEqual(header.followButton.frame.width, FollowModel.badgeMinWidth - 0.5, "local width \(Int(width))")
+            }
+        }
+        for info in [followInfo(kind: .ecs, target: shortTarget), followInfo(kind: .ecs, target: shortTarget, follower: followedByClaudia)] {
+            for width in [300.0, 400, 700] {
+                let header = makeFollowHeader(info, width: width, mirrorHint: hint)
+                XCTAssertGreaterThanOrEqual(header.followButton.frame.width, FollowModel.badgeMinWidth - 0.5, "remote width \(Int(width))")
+            }
+        }
+    }
+
+    func testARemoteHeaderWithABadgeStillShowsTheTokenWholeLeftAlignedAndClearOfTheBadge() throws {
+        for follower in [nil, followedByClaudia, pausedClaudia] as [TerminalFollower?] {
+            for width in [300.0, 400, 700] {
+                let header = makeFollowHeader(followInfo(kind: .ecs, target: longTarget, follower: follower), width: width, mirrorHint: hint)
+                let env = try label("terminal-environment", in: header)
+                let context = "follower \(follower != nil) width \(Int(width))"
+                XCTAssertFalse(env.isHidden, context)
+                XCTAssertEqual(env.stringValue, "PRODUCTION", context)
+                XCTAssertEqual(env.lineBreakMode, .byClipping, context)
+                XCTAssertEqual(env.frame.width, env.intrinsicContentSize.width, accuracy: 1, "not cut: \(context)")
+                XCTAssertEqual(env.frame.minX, 10, accuracy: 0.5, context)
+                XCTAssertFalse(overlaps(env.frame, header.followButton.frame), "token and badge overlap: \(context)")
+                XCTAssertLessThanOrEqual(env.frame.maxX, header.followButton.frame.minX + 0.5, context)
+            }
+        }
+    }
+
+    func testTheTokenKeepsItsFullSizeBesideAShortBadgeWhereThereIsRoom() throws {
+        // The badge gives up room (down to its minimum) before the token's font shrinks.
+        let header = makeFollowHeader(followInfo(kind: .ecs, target: shortTarget), width: 300)
+        let env = try label("terminal-environment", in: header)
+        XCTAssertEqual(env.font?.pointSize ?? 0, 12, accuracy: 0.01)
+    }
+
+    func testTheBadgeShowsWhatTheFollowModelSays() {
+        let cases: [(TerminalFollower?, String)] = [(nil, "Not shared"), (followedByClaudia, "Followed by Claudia"),
+                                                    (pausedClaudia, "Paused, too much output")]
+        for kind in [TerminalKind.local, .ecs] {
+            for (follower, text) in cases {
+                let info = followInfo(kind: kind, target: kind == .ecs ? shortTarget : nil, follower: follower)
+                let header = makeFollowHeader(info, width: 500)
+                XCTAssertEqual(header.followButton.attributedTitle.string, text, "\(kind)")
+            }
+        }
+    }
+
+    func testTheBadgeSaysNotSharedWhenThePaneIsNotDescribedYet() {
+        let header = makeHeader(nil, width: 400)
+        XCTAssertFalse(header.followButton.isHidden)
+        XCTAssertEqual(header.followButton.attributedTitle.string, "Not shared")
+    }
+
+    func testTheBadgeIsFilledWithTheModelsColourNeverTheHeadersRed() throws {
+        for kind in [TerminalKind.local, .ecs] {
+            for follower in [nil, followedByClaudia, pausedClaudia] as [TerminalFollower?] {
+                let info = followInfo(kind: kind, target: kind == .ecs ? shortTarget : nil, follower: follower)
+                let header = makeFollowHeader(info, width: 500)
+                let fill = header.followButton.layer?.backgroundColor
+                sameColor(fill, followModel(info).badgeColor)
+                let a = try XCTUnwrap(fill.flatMap { NSColor(cgColor: $0)?.usingColorSpace(.sRGB) })
+                let red = Theme.hazardRed.usingColorSpace(.sRGB)!
+                let distance = abs(a.redComponent - red.redComponent) + abs(a.greenComponent - red.greenComponent)
+                    + abs(a.blueComponent - red.blueComponent)
+                XCTAssertGreaterThan(distance, 0.3, "the badge must not look like the red header: \(kind)")
+            }
+        }
+    }
+
+    func testTheBadgeColourFollowsTheState() {
+        let info = followInfo()
+        let header = makeFollowHeader(info, width: 500)
+        sameColor(header.followButton.layer?.backgroundColor, Theme.fgMuted)
+        let followed = followInfo(follower: followedByClaudia)
+        header.apply(info: followed, mirrorHint: "", follow: followModel(followed))
+        sameColor(header.followButton.layer?.backgroundColor, Theme.followBlue)
+        XCTAssertEqual(header.followButton.attributedTitle.string, "Followed by Claudia")
+        let paused = followInfo(follower: pausedClaudia)
+        header.apply(info: paused, mirrorHint: "", follow: followModel(paused))
+        sameColor(header.followButton.layer?.backgroundColor, Theme.amber)
+    }
+
+    func testTheTooltipAndAccessibilityLabelCarryTheWholeSentenceEvenWhenTheBadgeIsSqueezed() {
+        for width in [100.0, 500] {
+            for follower in [nil, followedByClaudia, pausedClaudia] as [TerminalFollower?] {
+                let info = followInfo(kind: .ecs, target: longTarget, follower: follower)
+                let model = followModel(info)
+                let header = makeFollowHeader(info, width: width)
+                XCTAssertEqual(header.followButton.toolTip, model.badgeDescription, "width \(Int(width))")
+                let spoken = header.followButton.accessibilityLabel() ?? ""
+                XCTAssertTrue(spoken.contains(model.badgeText), spoken)
+                XCTAssertTrue(spoken.contains(model.badgeDescription), spoken)
+            }
+        }
+    }
+
+    func testTheBadgeHasItsAccessibilityIdentifier() {
+        XCTAssertEqual(TerminalPaneHeaderView().followButton.accessibilityIdentifier(), "terminal-follow")
+    }
 }

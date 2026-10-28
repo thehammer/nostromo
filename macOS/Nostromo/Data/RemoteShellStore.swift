@@ -24,6 +24,9 @@ struct RemoteShellSheetModel: Equatable {
     let details: [RemoteShellDetail]
     /// Why Connect is off, when the sheet can't show what would run. Nil when Connect may be offered.
     let connectBlockedReason: String?
+    /// The follow checkbox's title ("Let cody follow this shell's output"), only for a shell an agent
+    /// (a focus) asked for. Nil for a shell the user opened themselves: nobody to invite.
+    let followCheckboxTitle: String?
 }
 
 /// One labelled fact about what will run.
@@ -104,12 +107,14 @@ final class RemoteShellStore {
     /// Send `decision` for `requestId`, once. The first call for an id sends the frame and returns
     /// true; any later call for that id (the same decision or another one, such as Connect after
     /// Cancel) and any call for an id the daemon already resolved sends nothing and returns false.
+    /// `inviteFollow` is the confirm sheet's follow box; it only means anything with `.connect`.
     @discardableResult
-    func answer(requestId: String, decision: RemoteShellDecision) -> Bool {
+    func answer(requestId: String, decision: RemoteShellDecision, inviteFollow: Bool = false) -> Bool {
         guard !done.contains(requestId) else { return false }
         remember(requestId)
         if pending?.requestId == requestId { pending = nil }
-        transport(.answer(requestId: requestId, decision: decision))
+        transport(.answer(requestId: requestId, decision: decision,
+                          inviteFollow: inviteFollow && decision == .connect))
         return true
     }
 
@@ -159,7 +164,14 @@ final class RemoteShellStore {
             ],
             connectBlockedReason: command == nil
                 ? "The daemon did not say which command would run, so this shell can't be authorised. Cancel and try again."
-                : nil)
+                : nil,
+            followCheckboxTitle: request.requestedBy.kind == "focus" ? followCheckboxTitle(for: request) : nil)
+    }
+
+    /// "Let cody follow this shell's output". The agent's name is the agent's text: plain, bounded.
+    static func followCheckboxTitle(for request: RemoteShellConfirmRequest) -> String {
+        let agent = plainText(request.requestedBy.agent, limit: agentNameLimit) ?? "the agent"
+        return "Let \(agent) follow this shell's output"
     }
 
     /// The reason a connection failed, in words. `code` is the daemon's failure code.

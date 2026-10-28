@@ -151,12 +151,13 @@ enum RemoteShellDecision: String, Equatable {
     case connect, cancel, dismiss
 }
 
-/// Every remote-shell frame this app sends. `invite_follow` is always `false` here: the follow box
-/// is slice 3c's.
+/// Every remote-shell frame this app sends. `invite_follow` is the confirm sheet's follow box: `false`
+/// unless a person ticked it on an agent's request (it is unticked by default, and a Reconnect from a
+/// toast, which has no requesting agent, never ticks it).
 enum RemoteShellClientMessage: Equatable {
     case targetsRequest
     case open(tag: String, target: TerminalTarget)
-    case answer(requestId: String, decision: RemoteShellDecision)
+    case answer(requestId: String, decision: RemoteShellDecision, inviteFollow: Bool = false)
 
     var wireType: String {
         switch self {
@@ -178,10 +179,10 @@ enum RemoteShellClientMessage: Equatable {
             o["environment"] = target.environment
             o["service"] = target.service
             o["shell_type"] = target.shellType
-        case .answer(let requestId, let decision):
+        case .answer(let requestId, let decision, let inviteFollow):
             o["request_id"] = requestId
             o["decision"] = decision.rawValue
-            o["invite_follow"] = false
+            o["invite_follow"] = inviteFollow
         }
         return o
     }

@@ -365,6 +365,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)?.closeFromMenu()
     }
 
+    /// Terminal > Send Selection to…: lists the focuses for the selected text of the terminal pane that holds
+    /// the keyboard. Listing sends nothing; choosing a focus is what asks `TerminalInputGuard` and sends.
+    @objc func terminalSendSelection(_ sender: Any?) {
+        guard let host = TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder), host.hasSelection else {
+            NSSound.beep()
+            return
+        }
+        host.showSendSelectionMenu()
+    }
+
     /// Edit > Find… (⌘F) and Find Next (⌘G): the find bar of the terminal pane that holds the keyboard.
     /// Nothing else answers them (see `MainMenu`), so a text view elsewhere behaves as it did before.
     @objc func terminalFind(_ sender: Any?) {
@@ -402,6 +412,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(terminalFind(_:)) {
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
+        }
+        if menuItem.action == #selector(terminalSendSelection(_:)) {
+            return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)?.hasSelection ?? false
         }
         if menuItem.action == #selector(closeTerminalPane(_:)) {
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil

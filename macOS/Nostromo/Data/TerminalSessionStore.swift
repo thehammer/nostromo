@@ -311,6 +311,32 @@ final class TerminalSessionStore {
         transport(.keepAlive(terminalId: terminalId))
     }
 
+    // MARK: - Agent follow (3c). Each is a person's act; the caller has asked `TerminalInputGuard` first.
+
+    /// Invite focus `followerTag` to follow `terminalId` (moves the invitation when another focus follows).
+    func inviteFollow(terminalId: String, followerTag: String, includeScreen: Bool) {
+        guard !daemonUnavailable.contains(terminalId) else { return }
+        transport(.followInvite(terminalId: terminalId, followerTag: followerTag, includeScreen: includeScreen))
+    }
+
+    /// Stop the following at once.
+    func stopFollow(terminalId: String) {
+        guard !daemonUnavailable.contains(terminalId) else { return }
+        transport(.followStop(terminalId: terminalId))
+    }
+
+    /// Resume a following that paused itself.
+    func resumeFollow(terminalId: String) {
+        guard !daemonUnavailable.contains(terminalId) else { return }
+        transport(.followResume(terminalId: terminalId))
+    }
+
+    /// Send the selected `text` to focus `targetTag` once. Never starts following. Empty text sends nothing.
+    func sendSelection(terminalId: String, targetTag: String, text: String) {
+        guard !text.isEmpty, !daemonUnavailable.contains(terminalId) else { return }
+        transport(.sendSelection(terminalId: terminalId, targetTag: targetTag, text: text))
+    }
+
     /// Tell the daemon an input that was not a person's was refused here (audited as `app_control`).
     /// At most one report per second for each kind of refusal on each terminal.
     func reportRefusal(terminalId: String?, op: TerminalRefusedOp) {
