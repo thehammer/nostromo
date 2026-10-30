@@ -1019,7 +1019,7 @@ final class StagingDrawerViewTests: XCTestCase {
     }
 
     func testTheCommandIsDrawnLeftToRightWithAnOverrideWhateverLettersItHolds() throws {
-        let expected = NSNumber(value: NSWritingDirection.leftToRight.rawValue | NSTextWritingDirection.override.rawValue)
+        let expected = NSNumber(value: NSWritingDirection.leftToRight.rawValue | (1 << 1))
         for (name, command) in awkwardCommands {
             let attributed = StagingRowView.commandText(command, dimmed: false)
             let style = try XCTUnwrap(attributed.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle, name)
