@@ -187,6 +187,89 @@ final class MotherJobAnnotationTests: XCTestCase {
         }
     }
 
+    // MARK: - A bad key costs only that key
+
+    private func decodeAnnotation(_ json: String) throws -> MotherJobAnnotation {
+        try JSONDecoder().decode(MotherJobAnnotation.self, from: Data(json.utf8))
+    }
+
+    func testAWrongTypedNotifyKeepsAValidOrigin() throws {
+        for notify in ["7", "true", "[\"quiet\"]", "{\"level\": \"quiet\"}", "1.5"] {
+            let annotation = try decodeAnnotation(
+                #"{"origin":{"kind":"focus","focus_tag":"t","name_snapshot":"Fix login"},"notify":\#(notify)}"#
+            )
+            let origin = try XCTUnwrap(annotation.origin, "notify \(notify) must not cost the origin")
+            XCTAssertEqual(origin.kind, .focus, "notify \(notify)")
+            XCTAssertEqual(origin.focusTag, "t", "notify \(notify)")
+            XCTAssertEqual(origin.nameSnapshot, "Fix login", "notify \(notify)")
+            XCTAssertNil(annotation.notify, "a notify of the wrong type reads as none: \(notify)")
+        }
+    }
+
+    func testAWrongShapedOriginKeepsAValidNotify() throws {
+        for origin in ["\"oops\"", "{\"kind\": 5}", "7", "[1, 2]", "{\"closed\": \"yes\"}"] {
+            let annotation = try decodeAnnotation(#"{"origin":\#(origin),"notify":"quiet"}"#)
+            XCTAssertNil(annotation.origin, "origin \(origin) is malformed and reads as none")
+            XCTAssertEqual(annotation.notify, "quiet", "origin \(origin) must not cost the notify")
+        }
+    }
+
+    func testABadKeyAlongsideAGoodOneStillLeavesAnAnnotationOnTheJob() throws {
+        var notifyBad = try goldenJobObjects()[3]
+        notifyBad["nostromo"] = ["origin": ["kind": "focus", "focus_tag": "t"], "notify": 7] as [String: Any]
+        let first = try decodeJob(notifyBad)
+        XCTAssertEqual(first.nostromo?.origin?.kind, .focus)
+        XCTAssertEqual(first.nostromo?.origin?.focusTag, "t")
+        XCTAssertNil(first.nostromo?.notify)
+
+        var notifyAsArray = try goldenJobObjects()[3]
+        notifyAsArray["nostromo"] = ["origin": ["kind": "you"], "notify": ["quiet"]] as [String: Any]
+        let second = try decodeJob(notifyAsArray)
+        XCTAssertEqual(second.nostromo?.origin?.kind, .you)
+        XCTAssertNil(second.nostromo?.notify)
+
+        var originBad = try goldenJobObjects()[3]
+        originBad["nostromo"] = ["origin": "oops", "notify": "quiet"] as [String: Any]
+        let third = try decodeJob(originBad)
+        XCTAssertNotNil(third.nostromo, "a valid notify keeps the annotation")
+        XCTAssertNil(third.nostromo?.origin)
+        XCTAssertEqual(third.nostromo?.notify, "quiet")
+
+        var originBadKind = try goldenJobObjects()[3]
+        originBadKind["nostromo"] = ["origin": ["kind": 5], "notify": "quiet"] as [String: Any]
+        let fourth = try decodeJob(originBadKind)
+        XCTAssertNil(fourth.nostromo?.origin)
+        XCTAssertEqual(fourth.nostromo?.notify, "quiet")
+    }
+
+    func testAFrameWithPartlyBadAnnotationsKeepsEveryJobAndEachGoodKey() throws {
+        var notifyBad = try goldenJobObjects()[3]
+        notifyBad["id"] = "p-notify-bad"
+        notifyBad["nostromo"] = ["origin": ["kind": "focus", "focus_tag": "t"], "notify": 7] as [String: Any]
+        var originBad = try goldenJobObjects()[3]
+        originBad["id"] = "p-origin-bad"
+        originBad["nostromo"] = ["origin": ["kind": 5], "notify": "quiet"] as [String: Any]
+        var fine = try goldenJobObjects()[3]
+        fine["id"] = "p-fine"
+        fine["nostromo"] = ["origin": ["kind": "you"], "notify": "off"] as [String: Any]
+        let data = try JSONSerialization.data(
+            withJSONObject: ["type": "mother_jobs", "jobs": [notifyBad, originBad, fine]] as [String: Any]
+        )
+
+        guard case .motherJobs(let jobs) = ServerMsg.decode(from: data) else {
+            return XCTFail("a frame with partly bad annotations is still a mother_jobs message")
+        }
+
+        XCTAssertEqual(jobs.map(\.id), ["p-notify-bad", "p-origin-bad", "p-fine"], "no job is dropped or reordered")
+        XCTAssertEqual(jobs[0].nostromo?.origin?.kind, .focus)
+        XCTAssertEqual(jobs[0].nostromo?.origin?.focusTag, "t")
+        XCTAssertNil(jobs[0].nostromo?.notify)
+        XCTAssertNil(jobs[1].nostromo?.origin)
+        XCTAssertEqual(jobs[1].nostromo?.notify, "quiet")
+        XCTAssertEqual(jobs[2].nostromo?.origin?.kind, .you)
+        XCTAssertEqual(jobs[2].nostromo?.notify, "off")
+    }
+
     // MARK: - The whole frame, the way the apps decode it
 
     func testAWholeMotherJobsFrameDecodesEveryJobEvenWithMalformedAnnotations() throws {

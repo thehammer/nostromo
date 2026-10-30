@@ -533,7 +533,12 @@ fn cli_timeout() -> Duration {
 /// A `mother` command that can never block on the terminal (stdin is closed,
 /// so a confirmation prompt sees EOF) and dies with its future.
 fn mother_command() -> tokio::process::Command {
-    let mut cmd = Command::new(mother_bin());
+    mother_command_at(mother_bin())
+}
+
+/// [`mother_command`] for the binary at `bin`.
+fn mother_command_at(bin: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut cmd = Command::new(bin);
     cmd.stdin(Stdio::null()).kill_on_drop(true);
     cmd
 }

@@ -635,7 +635,7 @@ async fn queue_mother_job(
     let plan_file = write_brief(&slug, &brief)
         .map_err(|e| CreateFocusError::MotherFailed(format!("could not write the brief: {e}")))?;
 
-    let job = AddJobRequest {
+    let mut job = AddJobRequest {
         plan_file: plan_file.clone(),
         repo: repo_name,
         repo_path: Some(repo.to_string_lossy().into_owned()),
@@ -646,8 +646,10 @@ async fn queue_mother_job(
         depends_on: Vec::new(),
         ..Default::default()
     };
-    let mut job = job;
     let stamp = job_origin(daemon, &req, &mut job).await;
+    // Mother lists the job before it is stamped: until then it is undecided,
+    // not unverified.
+    let in_flight = stamp.as_ref().map(|(book, _)| book.begin_enqueue());
     let added = crate::mother::add_job(job).await;
     // The brief holds work-item text. Mother keeps its own copy of an accepted
     // plan; a job that never existed has no use for the file either.
@@ -656,6 +658,7 @@ async fn queue_mother_job(
     if let Some((book, stamp)) = stamp {
         book.stamp(&job_id, stamp);
     }
+    drop(in_flight);
 
     record_sent(
         req.source_item.as_ref(),

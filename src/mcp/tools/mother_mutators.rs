@@ -56,12 +56,16 @@ pub async fn enqueue_job(state: &McpSharedState, args: &Value, pty_id: Option<&s
     if let Some(caller) = &caller {
         apply_origin(&mut req, caller).await;
     }
+    let book = state.mother_feed.as_ref().and_then(|f| f.origins());
+    // Mother lists the job before it is stamped: until then it is undecided,
+    // not unverified.
+    let in_flight = caller.as_ref().and(book).map(|b| b.begin_enqueue());
     match mother::add_job(req).await {
         Ok(id) => {
-            let book = state.mother_feed.as_ref().and_then(|f| f.origins());
             if let (Some(caller), Some(book)) = (&caller, book) {
                 book.stamp(&id, caller.stamp(Via::Mcp, notify));
             }
+            drop(in_flight);
             rebroadcast_jobs(state).await;
             let mut result = json!({ "id": id });
             if let Some(caller) = &caller {

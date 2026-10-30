@@ -208,12 +208,11 @@ impl SessionHistory {
         store_path.with_file_name("focus-session-history.json")
     }
 
-    /// The history stored at `path` (empty when it is missing or unreadable).
+    /// The history stored at `path`: empty when it is missing, or when it
+    /// cannot be read (see [`load_json`]: the bad file is kept as a `.bak`
+    /// before anything can write over it).
     pub fn open(path: PathBuf) -> Self {
-        let tags = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let tags = load_json(&path);
         Self {
             inner: Arc::new(Mutex::new(HistoryState {
                 path: Some(path),
@@ -279,6 +278,25 @@ impl SessionHistory {
                 .get(tag)
                 .is_some_and(|seen| seen.iter().any(|s| s.sid == sid))
     }
+
+    /// The one tag the daemon spawned session `sid` for. `None` when no tag
+    /// has it, or when more than one does (a session id belongs to one focus;
+    /// an ambiguous one vouches for nobody).
+    pub fn tag_of(&self, sid: &str) -> Option<String> {
+        if sid.is_empty() {
+            return None;
+        }
+        let state = lock(&self.inner);
+        let mut owners = state
+            .tags
+            .iter()
+            .filter(|(_, seen)| seen.iter().any(|s| s.sid == sid))
+            .map(|(tag, _)| tag);
+        match (owners.next(), owners.next()) {
+            (Some(tag), None) => Some(tag.clone()),
+            _ => None,
+        }
+    }
 }
 
 // ── the origin book ──────────────────────────────────────────────────────────
@@ -311,15 +329,21 @@ pub struct OriginCaller {
     pub name: Option<String>,
     /// The Claude session id the focus is running.
     pub session: Option<String>,
+    /// The focus carries Teri/Fred-derived content: its name is not written
+    /// into Mother's record or argv (the daemon's own book keeps it, and a
+    /// network peer never sees it).
+    pub sensitive: bool,
 }
 
 impl OriginCaller {
     /// The `--origin-session` / `--origin-focus-name` values: the session id
-    /// as is, the name sanitised and not starting with `-`.
+    /// as is, the name sanitised and not starting with `-`; no name at all for
+    /// a sensitive focus.
     pub fn flag_values(&self) -> (Option<String>, Option<String>) {
         let name = self
             .name
             .as_deref()
+            .filter(|_| !self.sensitive)
             .and_then(clean_name)
             .map(|n| n.trim_start_matches('-').trim_start().to_owned())
             .filter(|n| !n.is_empty());
@@ -393,11 +417,21 @@ struct FocusDirectory {
     pushed: bool,
     /// Every registered tag with its (unsanitised) display name.
     names: HashMap<String, String>,
+    /// Tags a push lacked that may still exist: one the session manager is
+    /// waiting for a second push to confirm gone (departures are debounced), or
+    /// one the daemon created that the Mac has not acknowledged yet.
+    retained: HashSet<String>,
 }
 
 impl FocusDirectory {
     fn name_of(&self, tag: &str) -> Option<String> {
         self.names.get(tag).and_then(|n| clean_name(n))
+    }
+
+    /// Is `tag` in the registry, or in the grace the session manager gives a
+    /// tag missing from one push?
+    fn may_exist(&self, tag: &str) -> bool {
+        self.names.contains_key(tag) || self.retained.contains(tag)
     }
 }
 
@@ -405,6 +439,21 @@ struct BookState {
     path: Option<PathBuf>,
     entries: BTreeMap<String, OriginEntry>,
     focuses: FocusDirectory,
+    /// Enqueues in flight (see [`OriginBook::begin_enqueue`]).
+    enqueues_in_flight: usize,
+}
+
+/// Held by an enqueue from `mother add` until its job is stamped: a job the
+/// poller sees in that gap is not decided yet.
+pub struct EnqueueGuard {
+    state: Arc<Mutex<BookState>>,
+}
+
+impl Drop for EnqueueGuard {
+    fn drop(&mut self) {
+        let mut state = lock(&self.state);
+        state.enqueues_in_flight = state.enqueues_in_flight.saturating_sub(1);
+    }
 }
 
 /// The daemon's record of every job's origin. Cheap to clone; clones share it.
@@ -421,12 +470,11 @@ impl OriginBook {
         store_path.with_file_name("mother-origins.json")
     }
 
-    /// The book stored at `path` (empty when it is missing or unreadable).
+    /// The book stored at `path`: empty when it is missing, or when it cannot
+    /// be read (see [`load_json`]: the bad file is kept as a `.bak` before
+    /// anything can write over it).
     pub fn open(path: PathBuf, history: SessionHistory, audit: MotherAudit) -> Self {
-        let entries = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
+        let entries = load_json(&path);
         Self::with_state(Some(path), entries, history, audit)
     }
 
@@ -446,6 +494,7 @@ impl OriginBook {
                 path,
                 entries,
                 focuses: FocusDirectory::default(),
+                enqueues_in_flight: 0,
             })),
             history,
             audit,
@@ -466,10 +515,18 @@ impl OriginBook {
     /// missing tag was closed (an empty one is what a client sends before it
     /// has loaded anything).
     pub fn note_registry_push(&self, focuses: &[FocusMeta]) {
+        self.note_registry_push_retaining(focuses, HashSet::new());
+    }
+
+    /// [`OriginBook::note_registry_push`] for a manager that debounces
+    /// departures: a tag in `retained` is absent from this push but has not
+    /// been confirmed gone (a second push must agree), so it is not `closed`.
+    pub fn note_registry_push_retaining(&self, focuses: &[FocusMeta], retained: HashSet<String>) {
         let mut state = lock(&self.state);
         state.focuses = FocusDirectory {
             pushed: !focuses.is_empty(),
             names: names_of(focuses),
+            retained,
         };
     }
 
@@ -477,6 +534,19 @@ impl OriginBook {
     /// follow, but this is no evidence about which focuses are closed.
     pub fn note_registry_update(&self, focuses: &[FocusMeta]) {
         lock(&self.state).focuses.names = names_of(focuses);
+    }
+
+    /// An enqueue through `mother add` is about to start: take this before it
+    /// and drop it after [`OriginBook::stamp`]. Mother lists the new job before
+    /// the daemon has stamped it, so while a guard lives a job the book has not
+    /// seen is shown without an origin and **not recorded or audited**: the
+    /// next poll decides it, from the stamp. (Without this a poll in the gap
+    /// could audit `job_origin_unverified` for the daemon's own enqueue.)
+    pub fn begin_enqueue(&self) -> EnqueueGuard {
+        lock(&self.state).enqueues_in_flight += 1;
+        EnqueueGuard {
+            state: Arc::clone(&self.state),
+        }
     }
 
     /// Record who queued `job_id`, from a connection's own identity. Returns
@@ -552,6 +622,14 @@ impl OriginBook {
                     }
                     None => {
                         let entry = self.evaluate(job, &state.focuses, now);
+                        if state.enqueues_in_flight > 0
+                            && matches!(entry.kind, OriginKind::Unverified | OriginKind::Unknown)
+                        {
+                            // Maybe the daemon's own enqueue, not stamped yet:
+                            // show it undecided, leave no entry and no audit.
+                            job.nostromo = Some(JobAnnotation::default());
+                            continue;
+                        }
                         if entry.kind == OriginKind::Unverified && validate_job_id(&job.id).is_ok()
                         {
                             unverified.push(MotherAuditEvent::JobOriginUnverified {
@@ -605,24 +683,30 @@ impl OriginBook {
             evaluated_at_ms: now,
             last_seen_ms: now,
         };
-        let Some(claimed) = claim else {
-            return entry(OriginKind::Unknown, None, None, None);
-        };
-        let tag = is_tag_like(claimed).then(|| claimed.to_owned());
-        let name = tag.as_deref().and_then(|t| focuses.name_of(t)).or_else(|| {
-            origin
-                .and_then(|o| o.focus_name.as_deref())
-                .and_then(clean_name)
-        });
         let session = origin
             .and_then(|o| o.session.as_deref())
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let Some(claimed) = claim else {
+            // No focus claimed. A session id alone (an older `mother`, or the
+            // daemon's own enqueue without `--origin-focus`) still says which
+            // focus it is when exactly one focus's history has it.
+            if let Some((sid, tag)) = session.and_then(|sid| Some((sid, self.history.tag_of(sid)?)))
+            {
+                let name = focuses.name_of(&tag);
+                return entry(OriginKind::Focus, Some(tag), name, session_prefix(sid));
+            }
+            return entry(OriginKind::Unknown, None, None, None);
+        };
+        let tag = is_tag_like(claimed).then(|| claimed.to_owned());
         match (tag, session) {
             (Some(tag), Some(sid)) if self.history.contains(&tag, sid) => {
+                let name = focuses.name_of(&tag).or_else(|| claimed_name(origin));
                 entry(OriginKind::Focus, Some(tag), name, session_prefix(sid))
             }
-            (tag, _) => entry(OriginKind::Unverified, tag, name, None),
+            // Only what was claimed: the registry's name for a tag nobody
+            // vouched for would lend the claim a real focus's face.
+            (tag, _) => entry(OriginKind::Unverified, tag, claimed_name(origin), None),
         }
     }
 }
@@ -637,6 +721,12 @@ impl BookState {
     }
 }
 
+fn claimed_name(origin: Option<&crate::mother::MotherJobOrigin>) -> Option<String> {
+    origin
+        .and_then(|o| o.focus_name.as_deref())
+        .and_then(clean_name)
+}
+
 fn names_of(focuses: &[FocusMeta]) -> HashMap<String, String> {
     focuses
         .iter()
@@ -646,12 +736,13 @@ fn names_of(focuses: &[FocusMeta]) -> HashMap<String, String> {
 
 fn view_of(entry: &OriginEntry, focuses: &FocusDirectory) -> OriginView {
     let tag = entry.focus_tag.as_deref();
-    let names_apply = matches!(entry.kind, OriginKind::Focus | OriginKind::Unverified);
-    let focus_name = tag.filter(|_| names_apply).and_then(|t| focuses.name_of(t));
+    // The registry speaks only for a focus the daemon vouched for; an
+    // unverified claim shows what was claimed (its snapshot), flagged by kind.
+    let focus_name = tag
+        .filter(|_| entry.kind == OriginKind::Focus)
+        .and_then(|t| focuses.name_of(t));
     let closed = match tag {
-        Some(t) if entry.kind == OriginKind::Focus && focuses.pushed => {
-            Some(!focuses.names.contains_key(t))
-        }
+        Some(t) if entry.kind == OriginKind::Focus && focuses.pushed => Some(!focuses.may_exist(t)),
         _ => None,
     };
     OriginView {
@@ -694,6 +785,52 @@ fn now_ms() -> i64 {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Read the JSON file at `path`. A missing file is an empty value. A file that
+/// exists but cannot be read or parsed is **never silently replaced**: the next
+/// write would overwrite it, so its bytes are first copied to `<file>.bak` (or
+/// `<file>.bak.<ms>` when a `.bak` already exists) and a warning says so. The
+/// warning carries the path and the byte count, never a byte of the content
+/// (it holds session ids and focus names).
+fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error_kind = ?e.kind(),
+                "a Mother origin file could not be read; starting empty"
+            );
+            keep_backup(path);
+            return T::default();
+        }
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            let backup = keep_backup(path);
+            tracing::warn!(
+                path = %path.display(),
+                bytes = bytes.len(),
+                backed_up = backup.is_some(),
+                "a Mother origin file could not be parsed; starting empty (the file is kept as a backup)"
+            );
+            T::default()
+        }
+    }
+}
+
+/// Copy `path` to a `.bak` beside it that nothing overwrites. `None` when the
+/// copy failed.
+fn keep_backup(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let mut backup = path.with_file_name(format!("{name}.bak"));
+    if backup.exists() {
+        backup = path.with_file_name(format!("{name}.bak.{}", now_ms()));
+    }
+    std::fs::copy(path, &backup).ok().map(|_| backup)
 }
 
 /// Write `value` as JSON to `path`, atomically (a temp file in the same
@@ -749,7 +886,7 @@ pub async fn supports_origin_focus() -> bool {
     if !reprobe_due(cached, Instant::now()) {
         return cached.is_some_and(|(supported, _)| supported);
     }
-    let supported = probe_help().await;
+    let supported = probe_help(super::mother_command(), PROBE_TIMEOUT).await;
     lock(cache).insert(bin, (supported, Instant::now()));
     supported
 }
@@ -763,10 +900,12 @@ fn reprobe_due(cached: Option<(bool, Instant)>, now: Instant) -> bool {
     }
 }
 
-async fn probe_help() -> bool {
-    let mut cmd = super::mother_command();
+/// Run `cmd add --help` for at most `limit`. `cmd` must kill its child when
+/// dropped ([`super::mother_command`] does): a timeout drops the future that
+/// owns the child, so a hung `mother` is killed, not left running.
+async fn probe_help(mut cmd: tokio::process::Command, limit: Duration) -> bool {
     cmd.args(["add", "--help"]);
-    let Ok(Ok(out)) = tokio::time::timeout(PROBE_TIMEOUT, cmd.output()).await else {
+    let Ok(Ok(out)) = tokio::time::timeout(limit, cmd.output()).await else {
         return false;
     };
     // An old `mother` rejects `--help` as an unknown flag: whatever it prints
@@ -1045,5 +1184,260 @@ mod tests {
         assert_eq!(a.origin.name_snapshot.as_deref(), Some(SENSITIVE_NAME));
         assert!(a.notice.is_none());
         assert_eq!(a.notify, Some(NotifyLevel::Wake));
+    }
+
+    // ── EnqueueGuard: a job whose enqueue has not answered is undecided ──────
+
+    /// A book whose audit file is read back by the test.
+    fn audited_book() -> (OriginBook, SessionHistory, PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit").join("mother.jsonl");
+        let history = SessionHistory::in_memory();
+        let book = OriginBook::in_memory(history.clone(), MotherAudit::open(&path).unwrap());
+        (book, history, path, dir)
+    }
+
+    fn audited(path: &Path, event: &str) -> usize {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["event"] == event)
+            .count()
+    }
+
+    fn annotation_of(book: &OriginBook, j: &MotherJob) -> JobAnnotation {
+        let mut jobs = vec![j.clone()];
+        book.annotate(&mut jobs);
+        jobs.remove(0).nostromo.expect("annotated")
+    }
+
+    #[test]
+    fn while_an_enqueue_is_in_flight_an_unstamped_job_is_undecided_and_leaves_no_entry_or_audit() {
+        let (b, _history, audit, _dir) = audited_book();
+        let forged = job("forged", Some(claim("claudia-1", "never-spawned")));
+        let bare = job("bare", None);
+        let guard = b.begin_enqueue();
+
+        for j in [&forged, &bare] {
+            for _ in 0..3 {
+                assert_eq!(
+                    annotation_of(&b, j),
+                    JobAnnotation::default(),
+                    "{}: shown without an origin",
+                    j.id
+                );
+            }
+            assert!(b.entry(&j.id).is_none(), "{}: not recorded", j.id);
+        }
+        assert_eq!(audited(&audit, "job_origin_unverified"), 0);
+
+        // Once the enqueue is over the next poll decides them.
+        drop(guard);
+        let o = annotation_of(&b, &forged).origin;
+        assert_eq!(
+            (o.kind, o.focus_tag.as_deref()),
+            (OriginKind::Unverified, Some("claudia-1"))
+        );
+        assert_eq!(annotation_of(&b, &bare).origin.kind, OriginKind::Unknown);
+        assert_eq!(
+            b.entry("forged").map(|e| e.kind),
+            Some(OriginKind::Unverified)
+        );
+        assert_eq!(b.entry("bare").map(|e| e.kind), Some(OriginKind::Unknown));
+        annotation_of(&b, &forged);
+        assert_eq!(audited(&audit, "job_origin_unverified"), 1, "once, as ever");
+    }
+
+    #[test]
+    fn a_job_is_decided_only_after_every_nested_enqueue_has_finished() {
+        let (b, _history, audit, _dir) = audited_book();
+        let forged = job("forged", Some(claim("claudia-1", "never-spawned")));
+        let first = b.begin_enqueue();
+        let second = b.clone().begin_enqueue();
+
+        assert_eq!(annotation_of(&b, &forged), JobAnnotation::default());
+        drop(first);
+        assert_eq!(
+            annotation_of(&b, &forged),
+            JobAnnotation::default(),
+            "one enqueue is still in flight"
+        );
+        assert!(b.entry("forged").is_none());
+        drop(second);
+
+        assert_eq!(
+            annotation_of(&b, &forged).origin.kind,
+            OriginKind::Unverified
+        );
+        assert_eq!(audited(&audit, "job_origin_unverified"), 1);
+    }
+
+    #[test]
+    fn a_claim_the_history_vouches_for_is_recorded_even_while_an_enqueue_is_in_flight() {
+        let (b, history, audit, _dir) = audited_book();
+        history.record("claudia-1", "sid-aaaaaaaa-1");
+        let _guard = b.begin_enqueue();
+
+        let o = annotation_of(&b, &job("v", Some(claim("claudia-1", "sid-aaaaaaaa-1")))).origin;
+
+        assert_eq!(
+            (o.kind, o.focus_tag.as_deref()),
+            (OriginKind::Focus, Some("claudia-1"))
+        );
+        assert_eq!(
+            b.entry("v").map(|e| (e.kind, e.via)),
+            Some((OriginKind::Focus, Via::Shell))
+        );
+        assert_eq!(audited(&audit, "job_origin_unverified"), 0);
+    }
+
+    #[test]
+    fn a_stamped_job_shows_its_origin_while_another_enqueue_is_in_flight() {
+        let (b, _history, _audit, _dir) = audited_book();
+        assert!(b.stamp(
+            "mine",
+            Stamp::focus("claudia-1", Some("One"), None, Via::Mcp, None)
+        ));
+        let _guard = b.begin_enqueue();
+
+        let o = annotation_of(&b, &job("mine", None)).origin;
+
+        assert_eq!(
+            (o.kind, o.focus_tag.as_deref()),
+            (OriginKind::Focus, Some("claudia-1"))
+        );
+    }
+
+    // ── tag_of ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn tag_of_names_the_one_focus_that_spawned_the_session() {
+        let h = SessionHistory::in_memory();
+        h.record("claudia-1", "sid-one");
+        h.record("claudia-2", "sid-two");
+        h.record("claudia-2", "sid-two-b");
+
+        assert_eq!(h.tag_of("sid-one").as_deref(), Some("claudia-1"));
+        assert_eq!(h.tag_of("sid-two-b").as_deref(), Some("claudia-2"));
+    }
+
+    #[test]
+    fn tag_of_names_nobody_for_an_ambiguous_unknown_or_empty_session() {
+        let h = SessionHistory::in_memory();
+        h.record("claudia-1", "shared");
+        h.record("claudia-2", "shared");
+        h.record("claudia-1", "mine");
+
+        assert_eq!(h.tag_of("shared"), None, "two focuses have it");
+        assert_eq!(h.tag_of("never-spawned"), None);
+        assert_eq!(h.tag_of(""), None);
+        h.record("claudia-3", "");
+        assert_eq!(h.tag_of(""), None, "an empty id is never in the history");
+        assert_eq!(h.tag_of("mine").as_deref(), Some("claudia-1"));
+    }
+
+    // ── probe_help ───────────────────────────────────────────────────────────
+
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Is `pid` a live process? A zombie (killed, not reaped yet) is not.
+    fn is_running(pid: u32) -> bool {
+        if Path::new("/proc/self/stat").exists() {
+            return match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => !matches!(
+                    stat.rsplit(')')
+                        .next()
+                        .and_then(|rest| rest.trim_start().chars().next()),
+                    Some('Z' | 'X')
+                ),
+                Err(_) => false,
+            };
+        }
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        !state.is_empty() && !state.starts_with('Z')
+    }
+
+    #[tokio::test]
+    async fn a_mother_that_hangs_on_help_is_answered_no_at_the_limit_and_the_process_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mother = script(
+            dir.path(),
+            "mother",
+            &format!("echo $$ > '{}'\nexec sleep 30", pid_file.display()),
+        );
+        let started = Instant::now();
+
+        let supported = probe_help(
+            super::super::mother_command_at(&mother),
+            Duration::from_millis(500),
+        )
+        .await;
+
+        assert!(!supported, "a probe that timed out is a no");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the probe returned at its limit, not when the child finished: {:?}",
+            started.elapsed()
+        );
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("the fake mother started")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while is_running(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "the hung `mother` (pid {pid}) is still running after the probe gave up"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_probe_says_yes_only_when_add_help_names_the_origin_focus_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let named = script(
+            dir.path(),
+            "named",
+            "echo 'usage: mother add --plan-file PATH [--origin-session SID] [--origin-focus TAG]'",
+        );
+        let old = script(
+            dir.path(),
+            "old",
+            "echo 'add: unknown flag: --help' >&2\nexit 2",
+        );
+        let session_only = script(
+            dir.path(),
+            "session-only",
+            "echo 'usage: mother add --plan-file PATH [--origin-session SID]'",
+        );
+        let limit = Duration::from_secs(20);
+
+        assert!(probe_help(super::super::mother_command_at(&named), limit).await);
+        assert!(!probe_help(super::super::mother_command_at(&old), limit).await);
+        assert!(
+            !probe_help(super::super::mother_command_at(&session_only), limit).await,
+            "--origin-session is not --origin-focus"
+        );
+        assert!(
+            !probe_help(
+                super::super::mother_command_at(dir.path().join("no-such-mother")),
+                limit
+            )
+            .await,
+            "a mother that cannot start is a no"
+        );
     }
 }

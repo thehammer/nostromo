@@ -993,6 +993,11 @@ impl SessionManager {
         self.session_reverse
             .insert(effective_id.clone(), tag.clone());
 
+        // Note the id in the history Mother jobs' claimed sessions are checked
+        // against *before* the child exists: a `mother add` it runs at once
+        // must already find it.
+        self.session_history.record(&tag, &effective_id);
+
         let program = resolve_claude()?;
         let mut args = build_claude_args_with(
             &agent_name,
@@ -1071,11 +1076,12 @@ impl SessionManager {
             }
         }
 
-        // Persist the (possibly freshly generated) id for the tag, and note it
-        // in the history Mother jobs' claimed sessions are checked against.
+        // Persist the (possibly freshly generated) id for the tag.
         save_id(&self.store_path, &tag, Some(&effective_id));
-        self.session_history.record(&tag, &effective_id);
-        info!(tag, session_id = %effective_id, resume, "session spawned");
+        // The id is a credential: Mother jobs claiming a session are verified
+        // against it, and it is exported as `MOTHER_ORIGIN_SESSION`. It is
+        // never logged.
+        info!(tag, resume, "session spawned");
         Ok(Some(effective_id))
     }
 
@@ -2301,14 +2307,13 @@ impl SessionManager {
         if tag.is_empty() || !self.knows_focus(tag) {
             return None;
         }
+        let meta = self.focus_registry.iter().find(|f| f.tag == tag);
+        let agent = meta.map_or("", |f| f.agent_name.as_str());
         Some(OriginCaller {
             tag: tag.to_owned(),
-            name: self
-                .focus_registry
-                .iter()
-                .find(|f| f.tag == tag)
-                .map(|f| f.display_name.clone()),
+            name: meta.map(|f| f.display_name.clone()),
             session: self.current_session_id(tag),
+            sensitive: self.sensitive.focus_is_sensitive(tag, agent),
         })
     }
 
@@ -2317,7 +2322,16 @@ impl SessionManager {
     fn note_origin_registry(&self, pushed: bool) {
         if let Some(book) = &self.origin_book {
             if pushed {
-                book.note_registry_push(&self.focus_registry);
+                // A tag one push lacked is not closed until a second push
+                // agrees (the departure debounce), nor is a daemon-created one
+                // the Mac has not acknowledged.
+                let retained = self
+                    .pending_departures
+                    .iter()
+                    .chain(self.daemon_created_tags.iter())
+                    .cloned()
+                    .collect();
+                book.note_registry_push_retaining(&self.focus_registry, retained);
             } else {
                 book.note_registry_update(&self.focus_registry);
             }
@@ -4037,15 +4051,31 @@ mod tests {
         std::env::set_var(CLAUDE_BIN_ENV, &script);
     }
 
-    /// Wait (condition, not clock) until the probe has written its line.
+    /// Wait (condition, not clock) until the probe has written its line. A
+    /// stub that never writes fails the test after 30 s instead of hanging it.
     fn probe_output(out: &Path) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             if let Ok(text) = std::fs::read_to_string(out) {
                 if !text.is_empty() {
                     return text;
                 }
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the stub claude never wrote {} within 30 s",
+                out.display()
+            );
             std::thread::yield_now();
+        }
+    }
+
+    /// Puts `CLAUDE_BIN_ENV` back (unset) when a test ends, passed or not.
+    struct ClaudeBinGuard;
+
+    impl Drop for ClaudeBinGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(CLAUDE_BIN_ENV);
         }
     }
 
@@ -4081,6 +4111,93 @@ mod tests {
         let seen = probe_output(&out);
         std::env::remove_var(CLAUDE_BIN_ENV);
         assert_eq!(seen, "cody-env|sid-for-the-env-test|cody-env");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_session_gets_the_id_the_daemon_minted_and_spawn_session_returns_it() {
+        let _env = CLAUDE_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = ClaudeBinGuard;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("env.out");
+        env_probe_claude(dir.path(), &out);
+        let mut mgr = SessionManager::with_store_path(dir.path().join("daemon-sessions.json"));
+        mgr.configure_mcp_bridge(
+            Arc::new(Mutex::new(PaneRegistry::with_store_path(
+                dir.path().join("panes.json"),
+            ))),
+            dir.path().join("mcp.sock"),
+            dir.path().join("mcp.json"),
+        );
+
+        // No id given and none stored: the daemon mints one.
+        let sid = mgr
+            .spawn_session(
+                "cody-fresh".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                None,
+                false,
+            )
+            .unwrap()
+            .expect("the minted session id");
+
+        assert_eq!(sid.len(), 36, "a freshly minted uuid: {sid}");
+        assert_eq!(
+            probe_output(&out),
+            format!("cody-fresh|{sid}|cody-fresh"),
+            "the session is told exactly the id spawn_session returned"
+        );
+        assert!(
+            mgr.session_history().contains("cody-fresh", &sid),
+            "and the history vouches for it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_gets_the_id_from_the_daemons_store_and_spawn_session_returns_it() {
+        let _env = CLAUDE_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _restore = ClaudeBinGuard;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("env.out");
+        env_probe_claude(dir.path(), &out);
+        let store = dir.path().join("daemon-sessions.json");
+        let mut mgr = SessionManager::with_store_path(store.clone());
+        mgr.configure_mcp_bridge(
+            Arc::new(Mutex::new(PaneRegistry::with_store_path(
+                dir.path().join("panes.json"),
+            ))),
+            dir.path().join("mcp.sock"),
+            dir.path().join("mcp.json"),
+        );
+        // The focus ran before: its session id is in the daemon's store.
+        save_id(&store, "cody-resume", Some("sid-from-the-store"));
+
+        let sid = mgr
+            .spawn_session(
+                "cody-resume".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                None,
+                false,
+            )
+            .unwrap()
+            .expect("the stored session id");
+
+        assert_eq!(sid, "sid-from-the-store", "a resume returns the stored id");
+        assert_eq!(
+            probe_output(&out),
+            "cody-resume|sid-from-the-store|cody-resume",
+            "the resumed session is told the id it resumes"
+        );
+        assert!(mgr
+            .session_history()
+            .contains("cody-resume", "sid-from-the-store"));
     }
 
     #[tokio::test]

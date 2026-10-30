@@ -790,7 +790,8 @@ Enqueue a plan file as a new Mother job (`mother add`).
 its name at that moment, and its current Claude session id, whatever the
 arguments say. It passes `--origin-session <sid>` to `mother add`, and
 `--origin-focus` / `--origin-focus-name` too when the installed `mother`
-supports them (see [`docs/mother-focus.md`](../mother-focus.md)). A caller that
+supports them (see [`docs/mother-focus.md`](../mother-focus.md); a sensitive
+focus's name is never passed). A caller that
 is not a focus the daemon knows stamps nothing, and the call behaves as it did
 before. Arguments that name another origin (`origin`, `origin_focus`,
 `origin_focus_name`, `origin_session`, `focus`) are ignored; they are not part

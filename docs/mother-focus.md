@@ -17,9 +17,14 @@ A job's origin (`nostromo.origin.kind` on the job) is one of:
 | `unknown` | The record makes no claim (for example `mother add` from a terminal outside Nostromo). |
 
 Whether a `focus` origin is still open is decided at display time: `closed: true` appears once the
-daemon has received a non-empty focus registry from the app and the tag is not in it. Until then the
-field is absent. `focus_name` is the focus's current name (from the registry); `name_snapshot` is its
-name when the job was queued.
+daemon has received a non-empty focus registry from the app and the tag is gone. "Gone" follows the
+session manager's departure debounce: a tag missing from a single push is not closed yet (an empty
+or partial push is normal on reconnect), only one missing from two consecutive pushes is, and a focus
+the daemon created stays open until the app has acknowledged it. Until a registry has been pushed the
+field is absent. `focus_name` is the focus's current name (from the registry, for a `focus` origin only); `name_snapshot`
+is its name when the job was queued. An `unverified` origin shows only what the record claimed: the
+claimed tag and the claimed name as `name_snapshot`, never the registry's name for that tag, so a
+forged claim cannot borrow a real focus's face.
 
 ## How an origin is decided
 
@@ -35,14 +40,33 @@ name when the job was queued.
    session it starts (next to `NOSTROMO_FOCUS_TAG`), so a `mother add` in that session's shell records
    the right `origin.session`. A record that claims focus F (`origin.focus`, from Mother) is checked
    against the daemon's session history for F: the claimed session id must be one the daemon spawned
-   for F. Match: `focus` (via `shell`). Anything else: `unverified`.
+   for F. Match: `focus` (via `shell`). Anything else: `unverified`. A record with a session id but no
+   focus claim (an older `mother` that took only `--origin-session`, or MF1 running without MF0) is
+   verified by **session match**: when exactly one focus's history holds that session id, the job is
+   `focus` for that tag; otherwise it is `unknown`.
 4. A job the daemon has never seen is evaluated **once** when it first appears in the job feed, and the
-   result is frozen. The only change allowed later is an **upgrade**: an MCP or app stamp for the same
+   result is frozen. The exception is the daemon's own enqueue: Mother lists a new job before the daemon
+   has stamped it, so while an enqueue is in flight a job not yet in the book is shown without an origin
+   and neither recorded nor audited; the next poll decides it (from the stamp). The only change allowed later is an **upgrade**: an MCP or app stamp for the same
    job replaces `unknown` or `unverified`. A `focus` or `you` entry is never changed.
 
 Verification compares the claimed session id with the daemon's per-focus session history. It stops
-accidental and casual mis-claims, not a determined process of the same user: the session ids are also
-in files that user can read.
+accidental and casual mis-claims, not a determined process of the same user. What can still be beaten
+(plan index Q4), stated plainly:
+
+- **Replaying a session id forges a verified job.** The id is the credential, and it is readable by the
+  user's other processes: from Mother's own job records (`origin.session` is stored there), from `ps eww`
+  (the environment of a running session, and `--origin-session` on a `mother add` command line), from
+  `~/.nostromo/daemon-sessions.json` and from `~/.nostromo/focus-session-history.json`. Any process of
+  the user that reads one and runs `mother add --origin-focus <tag> --origin-session <sid>` gets a
+  `focus` job. The daemon never logs the id (a test drives a real spawn to prove it), but that does not
+  hide it from the user's own processes.
+- **The MCP stamp trusts the hello's `pty_id`.** An MCP call is attributed to the focus its connection
+  says it is, the same trust every per-focus tool already places in it. The `pty_id` is not checked
+  against the session history.
+- **A recreated focus tag gets its old jobs back (Q7).** Origins are keyed on the focus tag. If a
+  focus is closed and a new one is created under the same tag, the old jobs read as that focus's
+  again (`closed: false`), and the history for the tag still verifies the old sessions.
 
 `mother.enqueue_job` also takes an optional `notify` (`wake`, `quiet` or `off`). It is stored with the
 origin and shown as `nostromo.notify`; the notice slice acts on it.
@@ -51,11 +75,17 @@ origin and shown as `nostromo.notify`; the notice slice acts on it.
 
 | File | What |
 |---|---|
-| `~/.nostromo/focus-session-history.json` | Per focus tag, the Claude session ids the daemon spawned for it: `{sid, first_seen_ms}`, newest 64 per tag, entries unseen for 90 days dropped. Departed tags are kept so old jobs can still be verified. Beside the session store (`daemon-sessions.json`). |
+| `~/.nostromo/focus-session-history.json` | Per focus tag, the Claude session ids the daemon spawned for it: `{sid, first_seen_ms, last_seen_ms}`, newest 64 per tag. `last_seen_ms` is refreshed each time the daemon spawns that session again (a resume), and entries are aged out by it: not seen for 90 days is dropped, so a long-lived focus's current session is never aged out by its first spawn. A file written before `last_seen_ms` existed ages by `first_seen_ms`. Departed tags are kept so old jobs can still be verified. Beside the session store (`daemon-sessions.json`). |
 | `~/.nostromo/mother-origins.json` | The origin book: per job id, `{kind, focus_tag?, name_snapshot?, session_prefix?, via, notify?, evaluated_at_ms}`. Entries for jobs absent from the feed for more than 30 days are dropped. |
 | `~/.nostromo/audit/mother.jsonl` | The content-free audit (below). Rotated at 10 MiB, twelve rotated files kept. |
 
 Both JSON files are written atomically at mode `0600`; the audit directory is `0700` and its file `0600`.
+
+A history or book file that exists but cannot be read or parsed is never silently overwritten. The daemon
+starts with an empty one, copies the bad file to `<file>.bak` (`<file>.bak.<ms>` when a `.bak` is already
+there) before any write can replace it, and logs one warning with the path and the byte count only, never
+any of the content. Jobs whose sessions were in a lost history read as `unverified` or `unknown` until
+the file is restored from the `.bak`.
 
 ## On the wire
 
@@ -75,7 +105,11 @@ id (`origin.session`) are read from Mother's record but never serialised.
 
 **Network peers** get the kind and the names but not `focus_tag` or `session_prefix`. When the origin
 focus is sensitive, `focus_name` and `name_snapshot` become `a sensitive focus` and any `notice` is
-removed. Work-send jobs and sensitive jobs are withheld from them entirely, as before.
+removed. Sensitivity is asked of the tag, and a tag registered as sensitive stays so after its focus is
+closed (registration is permanent), so a closed sensitive focus's name snapshot is still withheld. A
+sensitive focus's display name is also not written into Mother's record or argv
+(`--origin-focus-name` is omitted); the daemon's own book keeps the snapshot, which only the local
+Mac sees. Work-send jobs and sensitive jobs are withheld from them entirely, as before.
 
 **iOS and the shared Kit** decode `nostromo` tolerantly: an origin kind they do not know becomes
 `.other`, and a malformed `nostromo` object reads as none, so one bad annotation never costs a job

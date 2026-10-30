@@ -27,6 +27,7 @@ use std::time::Duration;
 use nostromo::data::work::sent::{install_ledger, SentLedger};
 use nostromo::ipc::pane_registry::PaneRegistry;
 use nostromo::ipc::protocol::{FocusMeta, ServerMsg};
+use nostromo::ipc::session_manager::CLAUDE_BIN_ENV;
 use nostromo::ipc::SessionManager;
 use nostromo::mcp::tools::create_focus::{
     create_focus, create_focus_core, CreateFocusRequest, Destination, OutcomeKind, SourceItemRef,
@@ -65,7 +66,10 @@ enum Mother {
 /// Every call's argv is logged one line each, the arguments joined by the ASCII
 /// unit separator (so a value with spaces survives). `add` mints `job1`,
 /// `job2`, ... and `list` prints every minted job (titled from the `title`
-/// file when there is one).
+/// file when there is one, with the `origin` claim `add` was given: the
+/// `--origin-focus` / `--origin-session` values). When a `hold` file exists,
+/// `add` mints the job and then waits for a `release` file before it answers;
+/// when a `fail` file exists, `add` exits 1 before it mints anything.
 const FAKE_MOTHER: &str = r#"#!/bin/sh
 here="$(dirname "$0")"
 for a in "$@"; do printf '%s\037' "$a"; done >> "$here/argv.log"
@@ -86,17 +90,37 @@ case "$sub" in
     done
     vflags=" --plan-file --repo --branch --repo-path --base --max-cost --depends-on --title --format --label --origin-session "
     if [ -e "$here/new" ]; then vflags="$vflags--origin-focus --origin-focus-name "; fi
+    ofocus=""
+    osession=""
     while [ $# -gt 0 ]; do
       case "$vflags" in
         *" $1 "*)
           [ $# -ge 2 ] || { echo "add: flag needs an argument: $1" >&2; exit 2; }
+          [ "$1" = "--origin-focus" ] && ofocus="$2"
+          [ "$1" = "--origin-session" ] && osession="$2"
           shift 2 ;;
         *) echo "add: unknown flag: $1" >&2; exit 2 ;;
       esac
     done
+    if [ -e "$here/fail" ]; then echo "add: boom" >&2; exit 1; fi
     n=$(wc -l < "$here/ids" | tr -d ' ')
     n=$((n+1))
+    # What the job record claims, as `mother list` shows it (written before the
+    # job is listed).
+    if [ -n "$ofocus" ] || [ -n "$osession" ]; then
+      sep=""
+      printf '{' > "$here/origin.job$n"
+      if [ -n "$ofocus" ]; then printf '"focus":"%s"' "$ofocus" >> "$here/origin.job$n"; sep=","; fi
+      if [ -n "$osession" ]; then printf '%s"session":"%s"' "$sep" "$osession" >> "$here/origin.job$n"; fi
+      printf '}' >> "$here/origin.job$n"
+    fi
     echo "job$n" >> "$here/ids"
+    # With a `hold` file the job exists (it is listed) but `add` has not
+    # answered yet: it waits for a `release` file (at most two minutes).
+    if [ -e "$here/hold" ]; then
+      i=0
+      while [ ! -e "$here/release" ] && [ $i -lt 2400 ]; do sleep 0.05; i=$((i+1)); done
+    fi
     echo "job$n" ;;
   list)
     title="Fake title"
@@ -106,7 +130,9 @@ case "$sub" in
     while IFS= read -r id; do
       [ $first = 1 ] || printf ','
       first=0
-      printf '{"id":"%s","state":"queued","title":"%s"}' "$id" "$title"
+      printf '{"id":"%s","state":"queued","title":"%s"' "$id" "$title"
+      if [ -e "$here/origin.$id" ]; then printf ',"origin":%s' "$(cat "$here/origin.$id")"; fi
+      printf '}'
     done < "$here/ids"
     printf ']\n' ;;
   *) echo "mother: unknown command: $sub" >&2; exit 2 ;;
@@ -256,6 +282,21 @@ impl Rig {
         self.store_session(tag, sid);
     }
 
+    /// [`Rig::add_focus`] for a focus running `agent` (a Teri or Fred focus is
+    /// sensitive from the moment it is registered).
+    fn add_focus_as(&self, tag: &str, name: &str, sid: &str, agent: &str) {
+        self.mgr
+            .lock()
+            .unwrap()
+            .add_or_update_focus(focus_meta_for(tag, name, agent));
+        self.store_session(tag, sid);
+    }
+
+    /// The manager's own registry of sensitive focuses (a shared handle).
+    fn sensitive_tags(&self) -> nostromo::ipc::peer::SensitiveTags {
+        self.mgr.lock().unwrap().sensitive_tags()
+    }
+
     /// The daemon's `tag -> session id` store, as the daemon wrote it.
     fn store_session(&self, tag: &str, sid: &str) {
         let mut map: serde_json::Map<String, Value> = std::fs::read(&self.store_path)
@@ -387,6 +428,25 @@ fn focus_meta(tag: &str, name: &str) -> FocusMeta {
         select_for_client: None,
         initial_model: None,
         initial_effort: None,
+    }
+}
+
+fn focus_meta_for(tag: &str, name: &str, agent: &str) -> FocusMeta {
+    FocusMeta {
+        agent_name: agent.into(),
+        ..focus_meta(tag, name)
+    }
+}
+
+/// Wait for `condition` (polled, with the hang guard as the deadline).
+async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + HANG_GUARD;
+    while !condition() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "gave up waiting for {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -1433,7 +1493,34 @@ async fn the_session_managers_registry_feeds_closed_and_the_current_name() {
         "the snapshot is the name at enqueue: {o}"
     );
 
-    // A later push no longer has it.
+    // One push that lacks it is not enough: a client can push a partial
+    // registry (the session manager waits for a second push before it believes
+    // a focus is gone), so the job still says the focus is open.
+    rig.push_registry(vec![focus_meta("claudia-OTHER000", "Other")]);
+    rig.feed.refresh().await.unwrap();
+    let o = origin(&c.get_job("job1").await);
+    assert_eq!(
+        o["closed"], false,
+        "one push without the tag is not a close: {o}"
+    );
+
+    // A push that names it again starts the count over: lacking it once more
+    // is, again, not a close.
+    rig.push_registry(vec![
+        focus_meta(FOCUS, "Renamed in the app"),
+        focus_meta("claudia-OTHER000", "Other"),
+    ]);
+    rig.feed.refresh().await.unwrap();
+    assert_eq!(origin(&c.get_job("job1").await)["closed"], false);
+    rig.push_registry(vec![focus_meta("claudia-OTHER000", "Other")]);
+    rig.feed.refresh().await.unwrap();
+    let o = origin(&c.get_job("job1").await);
+    assert_eq!(
+        o["closed"], false,
+        "a push that named it in between reset the count: {o}"
+    );
+
+    // A second consecutive push without it: the focus is closed.
     rig.push_registry(vec![focus_meta("claudia-OTHER000", "Other")]);
     rig.feed.refresh().await.unwrap();
     let o = origin(&c.get_job("job1").await);
@@ -2071,4 +2158,1076 @@ fn the_golden_is_a_mother_jobs_frame_with_every_kind_a_malformed_annotation_and_
     assert!(jobs.iter().any(|j| j["nostromo"] == "oops"));
     assert!(jobs.iter().any(|j| j["nostromo"]["origin"] == 7));
     assert!(jobs.iter().any(|j| j["nostromo"]["notify"].is_string()));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// review fix-ups
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── the registry push debounce ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_focus_the_daemon_created_that_the_app_has_not_acknowledged_is_never_reported_closed() {
+    let rig = Rig::new(Mother::New).await;
+    rig.add_focus(FOCUS, FOCUS_NAME, FOCUS_SID);
+    let mut c = rig.client(FOCUS).await;
+    c.enqueue(&rig.plan(), json!({})).await;
+
+    // The app's pushes do not know the focus yet (it may not have heard of it):
+    // no number of them says it is gone.
+    for push in 1..=4 {
+        rig.push_registry(vec![focus_meta("claudia-OTHER000", "Other")]);
+        rig.feed.refresh().await.unwrap();
+        let o = c.get_job("job1").await["nostromo"]["origin"].clone();
+        assert_eq!(o["closed"], false, "push {push}: {o}");
+    }
+}
+
+// ── a session id is never logged, on the real spawn path ─────────────────────
+
+#[tokio::test]
+async fn the_session_id_never_reaches_the_logs_or_an_error_through_the_real_spawn_path() {
+    // Four ids: one handed in, one minted, one found in the daemon's store (a
+    // resume), one for a spawn that fails. The first eight characters are what
+    // Mother jobs legitimately show, and are as telling as the id in a log.
+    const EXPLICIT: &str = "SPAWNCNR-1111-2222-3333";
+    const RESUMED: &str = "SPAWNRSM-4444-5555-6666";
+    const FAILING: &str = "SPAWNERR-7777-8888-9999";
+    let logs = captured_logs();
+
+    let mut rig = Rig::new(Mother::New).await;
+    // A claude that exits at once. The env var is put back by the rig on drop,
+    // whether or not an assertion below fails.
+    let stub = rig.dir.path().join("claude-stub");
+    std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    rig.saved
+        .push((CLAUDE_BIN_ENV, std::env::var_os(CLAUDE_BIN_ENV)));
+    std::env::set_var(CLAUDE_BIN_ENV, &stub);
+    let spawn = |tag: &str, sid: Option<&str>| {
+        rig.mgr.lock().unwrap().spawn_session(
+            tag.into(),
+            "cody".into(),
+            "Cody".into(),
+            None,
+            sid.map(str::to_owned),
+            false,
+        )
+    };
+
+    let explicit = spawn("spawn-explicit", Some(EXPLICIT))
+        .expect("spawns")
+        .expect("an id");
+    assert_eq!(explicit, EXPLICIT);
+
+    let minted = spawn("spawn-fresh", None).expect("spawns").expect("an id");
+    assert_ne!(minted, EXPLICIT);
+    assert_eq!(minted.len(), 36, "the daemon minted a uuid: {minted}");
+
+    rig.store_session("spawn-resume", RESUMED);
+    assert!(!rig.history.contains("spawn-resume", RESUMED));
+    let resumed = spawn("spawn-resume", None).expect("spawns").expect("an id");
+    assert_eq!(resumed, RESUMED, "a resume keeps the stored id");
+
+    std::env::set_var(CLAUDE_BIN_ENV, rig.dir.path().join("no-such-dir/claude"));
+    let failure = spawn("spawn-missing", Some(FAILING)).expect_err("no claude binary to run");
+    let failure_text = format!("{failure:#} / {failure:?}");
+    assert!(failure_text.contains("failed to spawn"), "{failure_text}");
+
+    // The real path ran: each id the daemon spawned is in the focus's history.
+    assert!(rig.history.contains("spawn-explicit", EXPLICIT));
+    assert!(rig.history.contains("spawn-fresh", &minted));
+    assert!(rig.history.contains("spawn-resume", RESUMED));
+
+    let log_text = logs.text();
+    for tag in ["spawn-explicit", "spawn-fresh", "spawn-resume"] {
+        assert!(
+            log_text
+                .lines()
+                .any(|l| l.contains("session spawned") && l.contains(tag)),
+            "the capture is live and saw `{tag}` spawn:\n{log_text}"
+        );
+    }
+    for (what, id) in [
+        ("an explicit id", EXPLICIT),
+        ("a minted id", minted.as_str()),
+        ("a stored id", RESUMED),
+        ("the id of a failed spawn", FAILING),
+    ] {
+        for secret in [id, &id[..8]] {
+            assert!(
+                !log_text.contains(secret),
+                "{what} ({secret}) reached the logs:\n{log_text}"
+            );
+            assert!(
+                !failure_text.contains(secret),
+                "{what} ({secret}) reached the spawn error: {failure_text}"
+            );
+        }
+    }
+}
+
+/// Does this source line print a `Command`? A `{:?}` of a std or tokio
+/// `Command` shows the program, the arguments and the environment it was given,
+/// and the session manager's commands carry the session id in `MOTHER_ORIGIN_SESSION`.
+fn prints_a_command(line: &str) -> bool {
+    let line = line.trim_start();
+    if line.starts_with("//") {
+        return false;
+    }
+    let mentions = |word: &str| {
+        line.match_indices(word).any(|(at, _)| {
+            let before = line[..at].chars().next_back();
+            let after = line[at + word.len()..].chars().next();
+            let is_ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            !is_ident(before) && !is_ident(after)
+        })
+    };
+    let names_a_command = mentions("cmd") || mentions("command");
+    let debug_inline = ["{cmd:?}", "{command:?}", "{cmd:#?}", "{command:#?}"]
+        .iter()
+        .any(|p| line.contains(p));
+    let debug_field = ["?cmd", "?command", "?&cmd", "?&command"].iter().any(|p| {
+        line.match_indices(p).any(|(at, _)| {
+            let after = line[at + p.len()..].chars().next();
+            !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+        })
+    });
+    let macros = [
+        "info!",
+        "warn!",
+        "debug!",
+        "error!",
+        "trace!",
+        "format!",
+        "anyhow!",
+        "println!",
+        "eprintln!",
+        "dbg!",
+    ];
+    let in_a_macro = macros.iter().any(|m| line.contains(m));
+    let debug_arg = (line.contains("{:?}") || line.contains("{:#?}")) && names_a_command;
+    debug_inline || debug_field || (in_a_macro && debug_arg)
+}
+
+#[test]
+fn no_source_line_of_the_session_manager_prints_a_command() {
+    // The runtime test above covers the paths it drives; this one guards every
+    // other line, cheaply: nothing in the session manager formats a command
+    // variable with `{:?}`, in a log line or in an error message.
+    for leaks in [
+        r#"info!("spawning {cmd:?}");"#,
+        r#"warn!("could not start {:?}", cmd);"#,
+        r#"let e = anyhow!("failed: {:#?}", command);"#,
+        r#"debug!(?command, "starting");"#,
+        r#"tracing::trace!(cmd = ?cmd, "x");"#,
+    ] {
+        assert!(prints_a_command(leaks), "the detector misses: {leaks}");
+    }
+    for fine in [
+        r#"info!(tag, resume, "session spawned");"#,
+        "let mut cmd = Command::new(&program);",
+        r#"let e = anyhow!("failed to spawn {}: {e}", program.display());"#,
+        r#"warn!("args {:?}", args);"#,
+        r#"// info!("{cmd:?}") would leak"#,
+        r#"debug!("{:?}", recommended);"#,
+    ] {
+        assert!(!prints_a_command(fine), "the detector flags: {fine}");
+    }
+
+    fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/ipc/session_manager");
+    let mut files = Vec::new();
+    rust_files(&root, &mut files);
+    assert!(
+        files.iter().any(|f| f.ends_with("mod.rs")),
+        "the scan found the session manager: {files:?}"
+    );
+    let mut offenders = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(file).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            if prints_a_command(line) {
+                offenders.push(format!("{}:{}: {}", file.display(), n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a command (its environment holds the session id) is printed:\n{}",
+        offenders.join("\n")
+    );
+}
+
+// ── a poll between `mother add` and the stamp ────────────────────────────────
+
+fn minted(rig: &Rig, job_id: &str) -> bool {
+    std::fs::read_to_string(rig.mother_dir.join("ids"))
+        .unwrap_or_default()
+        .lines()
+        .any(|l| l == job_id)
+}
+
+fn count_audits(audit: &[Value], event: &str) -> usize {
+    audit.iter().filter(|l| l["event"] == event).count()
+}
+
+/// While a daemon enqueue's `mother add` has not answered, poll the feed: the
+/// job is listed (its record claims `FOCUS` and a session the daemon has not
+/// got in its history, so a poll that judged it would call it unverified), and
+/// it is not judged. Then `add` answers, the stamp is written, and the job is
+/// the focus's, via mcp. `start` begins the enqueue.
+async fn poll_in_the_gap<F, Fut>(rig: &Rig, start: F) -> Fut::Output
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    std::fs::write(rig.mother_dir.join("hold"), "").unwrap();
+    let enqueue = start();
+    let poller = async {
+        wait_until("the fake mother to mint the job", || minted(rig, "job1")).await;
+
+        let listed = rig.feed.refresh().await.expect("list");
+
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        let origin = &listed[0].nostromo.as_ref().expect("annotated").origin;
+        assert_eq!(
+            (origin.kind, origin.focus_tag.as_deref()),
+            (OriginKind::Unknown, None),
+            "a job whose enqueue has not answered is undecided"
+        );
+        assert!(
+            rig.book.entry("job1").is_none(),
+            "an undecided job is not recorded"
+        );
+        assert_eq!(
+            count_audits(&rig.audit(), "job_origin_unverified"),
+            0,
+            "the daemon's own enqueue was audited as a forgery: {:?}",
+            rig.audit()
+        );
+
+        std::fs::write(rig.mother_dir.join("release"), "").unwrap();
+    };
+    let (out, ()) = tokio::join!(enqueue, poller);
+
+    rig.feed.refresh().await.expect("list");
+    let entry = rig.book.entry("job1").expect("the book holds the job now");
+    assert_eq!(
+        (entry.kind, entry.focus_tag.as_deref(), entry.via),
+        (OriginKind::Focus, Some(FOCUS), Via::Mcp)
+    );
+    let audit = rig.audit();
+    assert_eq!(count_audits(&audit, "job_origin_stamped"), 1, "{audit:?}");
+    assert_eq!(
+        count_audits(&audit, "job_origin_unverified"),
+        0,
+        "{audit:?}"
+    );
+    let shown = rig.feed.jobs_rx().borrow()[0].nostromo.clone().unwrap();
+    assert_eq!(shown.origin.kind, OriginKind::Focus);
+    assert_eq!(shown.origin.focus_tag.as_deref(), Some(FOCUS));
+    out
+}
+
+/// A job whose record claims a focus the daemon never spawned that session for,
+/// listed with nothing in flight: audited as unverified, once.
+fn assert_a_forged_claim_is_still_audited_once(rig: &Rig) {
+    let forged = vec![job("forged", Some(claim(FOCUS, "never-spawned-session")))];
+    for _ in 0..3 {
+        let published = rig.feed.publish_jobs(forged.clone());
+        assert_eq!(kind_of(&published[0]), OriginKind::Unverified);
+    }
+    let audit = rig.audit();
+    let forged_audits = audit
+        .iter()
+        .filter(|l| l["event"] == "job_origin_unverified" && l["job"] == "forged")
+        .count();
+    assert_eq!(forged_audits, 1, "{audit:?}");
+}
+
+#[tokio::test]
+async fn a_poll_between_mother_add_and_the_stamp_does_not_judge_the_daemons_own_enqueue() {
+    let rig = Rig::new(Mother::New).await;
+    rig.add_focus(FOCUS, FOCUS_NAME, FOCUS_SID);
+    assert!(
+        !rig.history.contains(FOCUS, FOCUS_SID),
+        "the session is not in the history: a poll that judged the claim would not verify it"
+    );
+    let mut c = rig.client(FOCUS).await;
+    let plan = rig.plan();
+
+    let res = poll_in_the_gap(&rig, || c.enqueue(&plan, json!({}))).await;
+
+    assert_eq!(res["id"], "job1", "{res}");
+    assert_a_forged_claim_is_still_audited_once(&rig);
+}
+
+#[tokio::test]
+async fn a_poll_between_mother_add_and_the_stamp_does_not_judge_a_create_focus_job_either() {
+    let rig = Rig::new(Mother::New).await;
+    rig.add_focus(FOCUS, FOCUS_NAME, FOCUS_SID);
+    let repo = rig.repo();
+    let args = mother_job_args(&repo, "todo:mf1-gap");
+
+    let out = poll_in_the_gap(&rig, || create_focus(&rig.state, &args, Some(FOCUS))).await;
+
+    assert_eq!(out["kind"], "queued", "{out}");
+    assert_eq!(out["job_id"], "job1", "{out}");
+    assert_a_forged_claim_is_still_audited_once(&rig);
+}
+
+#[tokio::test]
+async fn a_failed_enqueue_does_not_leave_later_forgeries_unjudged() {
+    let rig = Rig::new(Mother::New).await;
+    rig.add_focus(FOCUS, FOCUS_NAME, FOCUS_SID);
+    std::fs::write(rig.mother_dir.join("fail"), "").unwrap();
+    let mut c = rig.client(FOCUS).await;
+
+    let res = c.enqueue(&rig.plan(), json!({})).await;
+
+    assert!(res.get("id").is_none(), "mother add failed: {res}");
+    assert!(res.get("error").is_some(), "{res}");
+    assert_a_forged_claim_is_still_audited_once(&rig);
+}
+
+#[tokio::test]
+async fn a_failed_create_focus_job_does_not_leave_later_forgeries_unjudged() {
+    let rig = Rig::new(Mother::New).await;
+    rig.add_focus(FOCUS, FOCUS_NAME, FOCUS_SID);
+    std::fs::write(rig.mother_dir.join("fail"), "").unwrap();
+    let repo = rig.repo();
+
+    let out = create_focus(
+        &rig.state,
+        &mother_job_args(&repo, "todo:mf1-fail"),
+        Some(FOCUS),
+    )
+    .await;
+
+    assert_ne!(out["kind"], "queued", "mother add failed: {out}");
+    assert_a_forged_claim_is_still_audited_once(&rig);
+}
+
+// ── a sensitive focus's name ─────────────────────────────────────────────────
+
+const SECRET_NAME: &str = "Payroll fix";
+const SECRET_FOCUS: &str = "claudia-5ECRE700";
+const SECRET_SID: &str = "5ec0e700-aaaa-4bbb-8ccc-1234567890ab";
+const PLAIN_FOCUS: &str = "claudia-91A1D000";
+const PLAIN_NAME: &str = "Marketing plan";
+const PLAIN_SID: &str = "91a1d000-aaaa-4bbb-8ccc-1234567890ab";
+
+/// How a focus comes to be sensitive.
+#[derive(Clone, Copy, Debug)]
+enum Sensitivity {
+    /// Registered as sensitive (it received Teri/Fred-derived content).
+    Marked,
+    /// It runs the Teri or Fred agent.
+    Agent(&'static str),
+}
+
+const EVERY_SENSITIVITY: [Sensitivity; 3] = [
+    Sensitivity::Marked,
+    Sensitivity::Agent("teri"),
+    Sensitivity::Agent("fred"),
+];
+
+/// Register `SECRET_FOCUS` ("Payroll fix") as sensitive in the manager, and
+/// `PLAIN_FOCUS` ("Marketing plan") as an ordinary focus.
+fn add_a_sensitive_and_a_plain_focus(rig: &Rig, how: Sensitivity) {
+    match how {
+        Sensitivity::Marked => {
+            rig.add_focus(SECRET_FOCUS, SECRET_NAME, SECRET_SID);
+            rig.sensitive_tags().mark_tag(SECRET_FOCUS);
+        }
+        Sensitivity::Agent(agent) => rig.add_focus_as(SECRET_FOCUS, SECRET_NAME, SECRET_SID, agent),
+    }
+    rig.add_focus(PLAIN_FOCUS, PLAIN_NAME, PLAIN_SID);
+}
+
+#[tokio::test]
+async fn a_closed_sensitive_focus_shows_a_network_peer_neither_its_name_nor_its_snapshot() {
+    for how in EVERY_SENSITIVITY {
+        let rig = Rig::new(Mother::New).await;
+        add_a_sensitive_and_a_plain_focus(&rig, how);
+        rig.client(SECRET_FOCUS)
+            .await
+            .enqueue(&rig.plan(), json!({}))
+            .await;
+        rig.client(PLAIN_FOCUS)
+            .await
+            .enqueue(&rig.plan_named("plan-2.md"), json!({}))
+            .await;
+
+        // The app acknowledges both focuses, then two pushes in a row lack them.
+        let secret = focus_meta_for(
+            SECRET_FOCUS,
+            SECRET_NAME,
+            match how {
+                Sensitivity::Marked => "claudia",
+                Sensitivity::Agent(agent) => agent,
+            },
+        );
+        rig.push_registry(vec![
+            secret,
+            focus_meta(PLAIN_FOCUS, PLAIN_NAME),
+            focus_meta("claudia-OTHER000", "Other"),
+        ]);
+        for _ in 0..2 {
+            rig.push_registry(vec![focus_meta("claudia-OTHER000", "Other")]);
+        }
+        let mut listed = rig.feed.refresh().await.expect("list");
+        for j in &mut listed {
+            let annotation = j.nostromo.as_mut().unwrap();
+            assert_eq!(
+                annotation.origin.closed,
+                Some(true),
+                "{how:?}: {} is closed",
+                j.id
+            );
+            assert_eq!(
+                annotation.origin.focus_name, None,
+                "{how:?}: a closed focus has no name now"
+            );
+            // The notice is MF2's; it must not reach a network peer for a
+            // sensitive focus whatever it holds.
+            annotation.notice = Some(json!({ "status": "told" }));
+        }
+        let tags = rig.sensitive_tags();
+        assert!(tags.tag_is_sensitive(SECRET_FOCUS), "{how:?}");
+        assert!(!tags.tag_is_sensitive(PLAIN_FOCUS), "{how:?}");
+
+        let frame =
+            nostromo::ipc::peer::redact_for_network(ServerMsg::MotherJobs { jobs: listed }, &tags);
+
+        let wire = serde_json::to_string(&frame).unwrap();
+        let ServerMsg::MotherJobs { jobs } = frame else {
+            panic!("still a MotherJobs frame");
+        };
+        let origin_of = |id: &str| {
+            jobs.iter()
+                .find(|j| j.id == id)
+                .unwrap_or_else(|| panic!("{how:?}: {id} is listed"))
+                .nostromo
+                .clone()
+                .expect("annotated")
+        };
+        let secret_job = origin_of("job1");
+        for (what, shown) in [
+            ("name_snapshot", &secret_job.origin.name_snapshot),
+            ("focus_name", &secret_job.origin.focus_name),
+        ] {
+            assert_eq!(
+                shown.as_deref(),
+                Some(nostromo::mother::origin::SENSITIVE_NAME),
+                "{how:?}: {what}"
+            );
+        }
+        assert_eq!(secret_job.origin.focus_tag, None, "{how:?}");
+        assert_eq!(secret_job.origin.session_prefix, None, "{how:?}");
+        assert_eq!(secret_job.notice, None, "{how:?}: the notice is removed");
+        assert_eq!(secret_job.origin.closed, Some(true), "{how:?}");
+        for leak in [SECRET_NAME, SECRET_FOCUS, "5ec0e700"] {
+            assert!(
+                !wire.contains(leak),
+                "{how:?}: {leak} reached a network peer: {wire}"
+            );
+        }
+
+        // An ordinary focus that is closed keeps what the job says it was.
+        let plain_job = origin_of("job2");
+        assert_eq!(plain_job.origin.name_snapshot.as_deref(), Some(PLAIN_NAME));
+        assert_eq!(plain_job.origin.focus_tag, None, "{how:?}");
+        assert!(wire.contains(PLAIN_NAME), "{how:?}: {wire}");
+        assert!(
+            plain_job.notice.is_some(),
+            "{how:?}: an ordinary focus keeps its notice"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_sensitive_focus_enqueues_without_its_name_in_mothers_record_and_the_daemon_keeps_it() {
+    for how in EVERY_SENSITIVITY {
+        let rig = Rig::new(Mother::New).await;
+        add_a_sensitive_and_a_plain_focus(&rig, how);
+
+        rig.client(SECRET_FOCUS)
+            .await
+            .enqueue(&rig.plan(), json!({}))
+            .await;
+
+        let add = rig.the_add();
+        assert_eq!(
+            flag(&add, "--origin-session"),
+            Some(SECRET_SID),
+            "{how:?}: {add:?}"
+        );
+        assert_eq!(
+            flag(&add, "--origin-focus"),
+            Some(SECRET_FOCUS),
+            "{how:?}: {add:?}"
+        );
+        assert_eq!(
+            flag(&add, "--origin-focus-name"),
+            None,
+            "{how:?}: a sensitive focus's name is not handed to mother: {add:?}"
+        );
+        assert!(
+            !add.join(" ").contains(SECRET_NAME),
+            "{how:?}: the name is nowhere in the arguments: {add:?}"
+        );
+        let entry = rig.book.entry("job1").expect("the daemon's own book");
+        assert_eq!(
+            (entry.kind, entry.focus_tag.as_deref(), entry.via),
+            (OriginKind::Focus, Some(SECRET_FOCUS), Via::Mcp),
+            "{how:?}"
+        );
+        assert_eq!(
+            entry.name_snapshot.as_deref(),
+            Some(SECRET_NAME),
+            "{how:?}: the daemon keeps the name it never lets out"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_plain_focus_still_passes_its_name_to_mother_beside_a_sensitive_one() {
+    let rig = Rig::new(Mother::New).await;
+    add_a_sensitive_and_a_plain_focus(&rig, Sensitivity::Agent("teri"));
+
+    rig.client(PLAIN_FOCUS)
+        .await
+        .enqueue(&rig.plan(), json!({}))
+        .await;
+
+    let add = rig.the_add();
+    assert_eq!(
+        flag(&add, "--origin-focus-name"),
+        Some(PLAIN_NAME),
+        "{add:?}"
+    );
+    assert_eq!(flag(&add, "--origin-focus"), Some(PLAIN_FOCUS), "{add:?}");
+}
+
+#[tokio::test]
+async fn a_create_focus_job_from_a_sensitive_focus_carries_no_name_either() {
+    for how in EVERY_SENSITIVITY {
+        let rig = Rig::new(Mother::New).await;
+        add_a_sensitive_and_a_plain_focus(&rig, how);
+        let repo = rig.repo();
+
+        let out = create_focus(
+            &rig.state,
+            &mother_job_args(&repo, "todo:mf1-sensitive"),
+            Some(SECRET_FOCUS),
+        )
+        .await;
+
+        assert_eq!(out["kind"], "queued", "{how:?}: {out}");
+        let add = rig.the_add();
+        assert_eq!(
+            flag(&add, "--origin-focus"),
+            Some(SECRET_FOCUS),
+            "{how:?}: {add:?}"
+        );
+        assert_eq!(
+            flag(&add, "--origin-session"),
+            Some(SECRET_SID),
+            "{how:?}: {add:?}"
+        );
+        assert_eq!(flag(&add, "--origin-focus-name"), None, "{how:?}: {add:?}");
+        assert!(!add.join(" ").contains(SECRET_NAME), "{how:?}: {add:?}");
+        assert_eq!(
+            rig.book
+                .entry("job1")
+                .and_then(|e| e.name_snapshot)
+                .as_deref(),
+            Some(SECRET_NAME),
+            "{how:?}: the daemon's book keeps the name"
+        );
+    }
+
+    // And an ordinary focus's create_focus job still names itself.
+    let rig = Rig::new(Mother::New).await;
+    add_a_sensitive_and_a_plain_focus(&rig, Sensitivity::Marked);
+    let repo = rig.repo();
+    let out = create_focus(
+        &rig.state,
+        &mother_job_args(&repo, "todo:mf1-plain"),
+        Some(PLAIN_FOCUS),
+    )
+    .await;
+    assert_eq!(out["kind"], "queued", "{out}");
+    assert_eq!(
+        flag(&rig.the_add(), "--origin-focus-name"),
+        Some(PLAIN_NAME)
+    );
+}
+
+// ── an unverified claim never borrows the registry's name ────────────────────
+
+#[test]
+fn an_unverified_claim_shows_the_name_it_claimed_never_the_registrys_for_that_tag() {
+    let r = feed_rig();
+    r.book.note_registry_push(&[focus_meta(FOCUS, "Real Name")]);
+    let claimed = |name: Option<&str>| {
+        let mut o = claim(FOCUS, "a-forged-session");
+        if let Some(n) = name {
+            o["focus_name"] = json!(n);
+        }
+        o
+    };
+
+    let published = r.feed.publish_jobs(vec![
+        job("with-name", Some(claimed(Some("Claimed Name")))),
+        job("no-name", Some(claimed(None))),
+    ]);
+
+    for (i, expected_snapshot) in [(0, Some("Claimed Name")), (1, None)] {
+        let origin = &published[i].nostromo.as_ref().unwrap().origin;
+        assert_eq!(origin.kind, OriginKind::Unverified, "job {i}");
+        assert_eq!(origin.focus_tag.as_deref(), Some(FOCUS), "job {i}");
+        assert_eq!(
+            origin.focus_name, None,
+            "job {i}: the registry does not speak for a claim nobody vouched for"
+        );
+        assert_eq!(
+            origin.name_snapshot.as_deref(),
+            expected_snapshot,
+            "job {i}"
+        );
+    }
+    let wire = serde_json::to_string(&published).unwrap();
+    assert!(!wire.contains("Real Name"), "{wire}");
+}
+
+#[test]
+fn a_verified_job_for_the_same_tag_still_gets_the_registrys_current_name() {
+    let r = feed_rig();
+    r.history.record(FOCUS, FOCUS_SID);
+    r.book.note_registry_push(&[focus_meta(FOCUS, "Real Name")]);
+    let mut verified = claim(FOCUS, FOCUS_SID);
+    verified["focus_name"] = json!("Claimed Name");
+
+    let published = r.feed.publish_jobs(vec![
+        job("verified", Some(verified)),
+        job("forged", Some(claim(FOCUS, "a-forged-session"))),
+    ]);
+
+    let good = &published[0].nostromo.as_ref().unwrap().origin;
+    assert_eq!(good.kind, OriginKind::Focus);
+    assert_eq!(good.focus_name.as_deref(), Some("Real Name"));
+    assert_eq!(good.name_snapshot.as_deref(), Some("Real Name"));
+    let bad = &published[1].nostromo.as_ref().unwrap().origin;
+    assert_eq!(
+        (bad.kind, bad.focus_name.as_deref()),
+        (OriginKind::Unverified, None)
+    );
+}
+
+#[test]
+fn a_verified_claim_for_a_tag_the_registry_lacks_keeps_the_name_it_claimed_as_its_snapshot() {
+    let r = feed_rig();
+    r.history.record(FOCUS, FOCUS_SID);
+    let mut verified = claim(FOCUS, FOCUS_SID);
+    verified["focus_name"] = json!("Claimed Name");
+
+    let published = r.feed.publish_jobs(vec![job("verified", Some(verified))]);
+
+    let origin = &published[0].nostromo.as_ref().unwrap().origin;
+    assert_eq!(origin.kind, OriginKind::Focus);
+    assert_eq!(origin.name_snapshot.as_deref(), Some("Claimed Name"));
+    assert_eq!(origin.focus_name, None, "no registry has named the focus");
+}
+
+// ── "by session match": a record with only a session ─────────────────────────
+
+const OTHER_TAG: &str = "claudia-BBBB2222";
+
+#[test]
+fn a_record_with_only_a_session_that_one_focus_spawned_is_that_focus_via_shell() {
+    let r = feed_rig();
+    r.history.record(FOCUS, FOCUS_SID);
+    r.history
+        .record(OTHER_TAG, "bbbbbbbb-0000-4000-8000-000000000000");
+    r.book
+        .note_registry_push(&[focus_meta(FOCUS, "Registry Name")]);
+
+    let published = r.feed.publish_jobs(vec![
+        job("no-focus-key", Some(json!({ "session": FOCUS_SID }))),
+        job(
+            "empty-focus",
+            Some(json!({ "focus": "", "session": FOCUS_SID })),
+        ),
+        job(
+            "blank-focus",
+            Some(json!({ "focus": "  ", "session": FOCUS_SID })),
+        ),
+    ]);
+
+    for j in &published {
+        let origin = &j.nostromo.as_ref().unwrap().origin;
+        assert_eq!(origin.kind, OriginKind::Focus, "{}", j.id);
+        assert_eq!(origin.focus_tag.as_deref(), Some(FOCUS), "{}", j.id);
+        assert_eq!(
+            origin.session_prefix.as_deref(),
+            Some("5f3c9a10"),
+            "{}",
+            j.id
+        );
+        assert_eq!(
+            origin.focus_name.as_deref(),
+            Some("Registry Name"),
+            "{}",
+            j.id
+        );
+        assert_eq!(origin.closed, Some(false), "{}", j.id);
+        let entry = r.book.entry(&j.id).expect("recorded");
+        assert_eq!(
+            (entry.kind, entry.via),
+            (OriginKind::Focus, Via::Shell),
+            "{}",
+            j.id
+        );
+        assert_eq!(r.unverified_audits_of(&j.id), 0, "{}", j.id);
+    }
+}
+
+#[test]
+fn a_record_with_only_a_session_two_focuses_spawned_vouches_for_nobody() {
+    let r = feed_rig();
+    r.history.record(FOCUS, FOCUS_SID);
+    r.history.record(OTHER_TAG, FOCUS_SID);
+
+    let published = r.feed.publish_jobs(vec![job(
+        "ambiguous",
+        Some(json!({ "session": FOCUS_SID })),
+    )]);
+
+    let origin = &published[0].nostromo.as_ref().unwrap().origin;
+    assert_eq!(
+        (origin.kind, origin.focus_tag.as_deref()),
+        (OriginKind::Unknown, None)
+    );
+    assert_eq!(origin.session_prefix, None);
+    assert!(r.audit().is_empty(), "{:?}", r.audit());
+}
+
+#[test]
+fn a_record_with_only_a_session_nobody_spawned_is_unknown_and_not_called_a_forgery() {
+    let r = feed_rig();
+    r.history.record(FOCUS, FOCUS_SID);
+
+    let list = vec![
+        job(
+            "stranger",
+            Some(json!({ "session": "a-session-the-daemon-never-spawned" })),
+        ),
+        job("blank", Some(json!({ "session": "  " }))),
+        job("neither", Some(json!({ "label": "nightly" }))),
+        job("bare", None),
+    ];
+    for _ in 0..3 {
+        let published = r.feed.publish_jobs(list.clone());
+        for j in &published {
+            assert_eq!(kind_of(j), OriginKind::Unknown, "{}", j.id);
+        }
+    }
+
+    assert!(
+        r.audit().is_empty(),
+        "nothing here is audited: {:?}",
+        r.audit()
+    );
+}
+
+#[test]
+fn a_focus_claim_is_never_rescued_by_the_session_lookup() {
+    let r = feed_rig();
+    // The session is a real one, but of another focus than the one claimed.
+    r.history.record(FOCUS, FOCUS_SID);
+
+    let published = r
+        .feed
+        .publish_jobs(vec![job("mismatch", Some(claim(OTHER_TAG, FOCUS_SID)))]);
+
+    let origin = &published[0].nostromo.as_ref().unwrap().origin;
+    assert_eq!(origin.kind, OriginKind::Unverified);
+    assert_eq!(origin.focus_tag.as_deref(), Some(OTHER_TAG));
+    assert_eq!(r.unverified_audits_of("mismatch"), 1);
+}
+
+// ── a file that cannot be read is kept, not written over ─────────────────────
+
+/// Bytes that are no JSON, `len` of them, with `canary` inside.
+fn corrupt_bytes(canary: &str, len: usize) -> Vec<u8> {
+    let mut bytes = format!("{{\"t\":[{{\"sid\":\"{canary}\" ~garbage").into_bytes();
+    assert!(bytes.len() < len);
+    bytes.resize(len, b'~');
+    bytes
+}
+
+/// The extra backups beside `path` (`<file>.bak.<ms>`).
+fn numbered_backups(path: &Path) -> Vec<PathBuf> {
+    let prefix = format!("{}.bak.", path.file_name().unwrap().to_string_lossy());
+    let mut found: Vec<PathBuf> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+fn backup_of(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        "{}.bak",
+        path.file_name().unwrap().to_string_lossy()
+    ))
+}
+
+/// The warnings the capture holds about `path`.
+fn warnings_about(logs: &LogBuf, path: &Path) -> Vec<String> {
+    let path = path.display().to_string();
+    logs.text()
+        .lines()
+        .filter(|l| l.contains(&path) && l.contains("WARN"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_corrupt_history_file_opens_empty_is_kept_as_a_backup_and_its_content_is_never_logged() {
+    const CANARY: &str = "CORRUPT-CANARY-SID-123";
+    let logs = captured_logs();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("focus-session-history.json");
+    let original = corrupt_bytes(CANARY, 1234);
+    std::fs::write(&path, &original).unwrap();
+
+    let history = SessionHistory::open(path.clone());
+
+    assert!(!history.contains(FOCUS, FOCUS_SID), "opens empty");
+    assert_eq!(
+        std::fs::read(backup_of(&path)).unwrap(),
+        original,
+        "the unreadable file is kept exactly"
+    );
+    let warned = warnings_about(logs, &path);
+    assert_eq!(warned.len(), 1, "one warning naming the file: {warned:?}");
+    assert!(
+        warned[0].contains("1234"),
+        "it says how many bytes: {}",
+        warned[0]
+    );
+    assert!(
+        !logs.text().contains(CANARY),
+        "the file's content reached the logs"
+    );
+
+    // Writing afterwards leaves the backup alone, and the file valid.
+    history.record(FOCUS, FOCUS_SID);
+    assert_eq!(std::fs::read(backup_of(&path)).unwrap(), original);
+    serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap())
+        .expect("the history file is valid JSON again");
+    assert!(SessionHistory::open(path.clone()).contains(FOCUS, FOCUS_SID));
+    assert!(numbered_backups(&path).is_empty());
+
+    // A second corruption does not overwrite the backup of the first.
+    let second = corrupt_bytes("CORRUPT-CANARY-SID-456", 2345);
+    std::fs::write(&path, &second).unwrap();
+    SessionHistory::open(path.clone());
+    assert_eq!(
+        std::fs::read(backup_of(&path)).unwrap(),
+        original,
+        "the first backup is still the first file"
+    );
+    let extra = numbered_backups(&path);
+    assert_eq!(extra.len(), 1, "{extra:?}");
+    assert_eq!(std::fs::read(&extra[0]).unwrap(), second);
+    assert!(
+        warnings_about(logs, &path)
+            .iter()
+            .any(|w| w.contains("2345")),
+        "the second warning counts its own bytes"
+    );
+    assert!(!logs.text().contains("CORRUPT-CANARY-SID-456"));
+
+    // A file that does not exist is an empty history, not a corrupt one.
+    let missing = dir
+        .path()
+        .join("missing")
+        .join("focus-session-history.json");
+    std::fs::create_dir_all(missing.parent().unwrap()).unwrap();
+    let empty = SessionHistory::open(missing.clone());
+    assert!(!empty.contains(FOCUS, FOCUS_SID));
+    assert!(!backup_of(&missing).exists());
+    assert!(numbered_backups(&missing).is_empty());
+    assert!(warnings_about(logs, &missing).is_empty());
+}
+
+#[test]
+fn a_corrupt_origin_book_opens_empty_is_kept_as_a_backup_and_its_content_is_never_logged() {
+    const CANARY: &str = "CORRUPT-CANARY-JOB-456";
+    let logs = captured_logs();
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("mother-origins.json");
+    let original = corrupt_bytes(CANARY, 1234);
+    std::fs::write(&path, &original).unwrap();
+
+    let book = OriginBook::open(
+        path.clone(),
+        SessionHistory::in_memory(),
+        MotherAudit::disabled(),
+    );
+
+    assert!(book.entry("job1").is_none(), "opens empty");
+    assert_eq!(std::fs::read(backup_of(&path)).unwrap(), original);
+    let warned = warnings_about(logs, &path);
+    assert_eq!(warned.len(), 1, "one warning naming the file: {warned:?}");
+    assert!(
+        warned[0].contains("1234"),
+        "it says how many bytes: {}",
+        warned[0]
+    );
+    assert!(
+        !logs.text().contains(CANARY),
+        "the file's content reached the logs"
+    );
+
+    // The next stamp rewrites the book; the backup stays what it was.
+    assert!(book.stamp("job1", Stamp::you(None)));
+    assert_eq!(std::fs::read(backup_of(&path)).unwrap(), original);
+    let written: Value = serde_json::from_slice(&std::fs::read(&path).unwrap())
+        .expect("the book is valid JSON again");
+    assert!(written.get("job1").is_some(), "{written}");
+    let reopened = OriginBook::open(
+        path.clone(),
+        SessionHistory::in_memory(),
+        MotherAudit::disabled(),
+    );
+    assert_eq!(
+        reopened.entry("job1").map(|e| e.kind),
+        Some(OriginKind::You)
+    );
+    assert!(numbered_backups(&path).is_empty());
+
+    // A second corruption does not overwrite the first backup.
+    let second = corrupt_bytes("CORRUPT-CANARY-JOB-789", 2345);
+    std::fs::write(&path, &second).unwrap();
+    OriginBook::open(
+        path.clone(),
+        SessionHistory::in_memory(),
+        MotherAudit::disabled(),
+    );
+    assert_eq!(std::fs::read(backup_of(&path)).unwrap(), original);
+    let extra = numbered_backups(&path);
+    assert_eq!(extra.len(), 1, "{extra:?}");
+    assert_eq!(std::fs::read(&extra[0]).unwrap(), second);
+    assert!(warnings_about(logs, &path)
+        .iter()
+        .any(|w| w.contains("2345")));
+    assert!(!logs.text().contains("CORRUPT-CANARY-JOB-789"));
+
+    // A missing file is an empty book and no backup.
+    let missing = dir.path().join("missing").join("mother-origins.json");
+    std::fs::create_dir_all(missing.parent().unwrap()).unwrap();
+    let empty = OriginBook::open(
+        missing.clone(),
+        SessionHistory::in_memory(),
+        MotherAudit::disabled(),
+    );
+    assert!(empty.entry("job1").is_none());
+    assert!(!backup_of(&missing).exists());
+    assert!(numbered_backups(&missing).is_empty());
+    assert!(warnings_about(logs, &missing).is_empty());
+}
+
+// ── the history ages a session by when it was last spawned ───────────────────
+
+const NOW_MS: i64 = 1_800_000_000_000;
+const DAY: i64 = 24 * 60 * 60 * 1000;
+
+#[test]
+fn a_session_first_spawned_long_ago_but_resumed_recently_is_still_vouched_for() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("history.json");
+    let h = SessionHistory::open(path.clone());
+    h.record_at("t", "abandoned", NOW_MS - 100 * DAY);
+    h.record_at("t", "long-lived", NOW_MS - 100 * DAY);
+    h.record_at("t", "long-lived", NOW_MS - 10 * DAY);
+
+    // Any later record is when old entries are dropped.
+    h.record_at("other", "x", NOW_MS);
+
+    assert!(
+        h.contains("t", "long-lived"),
+        "aged by last spawn, not first"
+    );
+    assert!(!h.contains("t", "abandoned"), "unseen for 100 days is gone");
+    assert!(
+        SessionHistory::open(path).contains("t", "long-lived"),
+        "and the file agrees"
+    );
+}
+
+#[test]
+fn a_history_file_from_before_last_seen_loads_and_ages_by_when_each_session_was_first_seen() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("history.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "t": [{ "sid": "old", "first_seen_ms": NOW_MS - 100 * DAY }],
+            "u": [{ "sid": "recent", "first_seen_ms": NOW_MS - 10 * DAY }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let h = SessionHistory::open(path.clone());
+    assert!(
+        h.contains("t", "old") && h.contains("u", "recent"),
+        "it loads"
+    );
+    assert!(
+        !backup_of(&path).exists(),
+        "an older file is not a corrupt one"
+    );
+
+    h.record_at("z", "new", NOW_MS);
+
+    assert!(
+        !h.contains("t", "old"),
+        "100 days old by its first sighting"
+    );
+    assert!(h.contains("u", "recent"), "10 days old stays");
+    assert!(h.contains("z", "new"));
+    let written: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        written["z"][0]["last_seen_ms"], NOW_MS,
+        "the file records when each session was last seen: {written}"
+    );
+    assert_eq!(
+        written["u"][0]["first_seen_ms"],
+        NOW_MS - 10 * DAY,
+        "{written}"
+    );
+    assert!(written.get("t").is_none(), "{written}");
 }

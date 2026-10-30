@@ -111,8 +111,10 @@ public struct MotherJobAnnotation: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        origin = try c.decodeIfPresent(MotherOriginView.self, forKey: .origin)
-        notify = try c.decodeIfPresent(String.self, forKey: .notify)
+        // Each key on its own: a wrong-typed `notify` must not cost a valid
+        // `origin` (nor the other way round).
+        origin = (try? c.decodeIfPresent(MotherOriginView.self, forKey: .origin)) ?? nil
+        notify = (try? c.decodeIfPresent(String.self, forKey: .notify)) ?? nil
         notice = (try? c.decodeIfPresent(MotherJSON.self, forKey: .notice)) ?? nil
     }
 
