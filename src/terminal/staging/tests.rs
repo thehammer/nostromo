@@ -258,6 +258,8 @@ fn remote_shell_starters_are_refused_and_an_inert_mention_is_not() {
         ["aws ecs ", "exec", "ute\\-command --task t"].concat(),
         ["aws 'ecs' \"exec", "ute-command\" --task t"].concat(),
         ["eval \"$(ecs_build", "_command ap production scheduler)\""].concat(),
+        // a command word built from expansions the guard cannot evaluate
+        ["a=ecs_; b=conn", "ect; $a$b ap production scheduler"].concat(),
     ] {
         assert_eq!(
             code_of(validate_command(&starter)),

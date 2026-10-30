@@ -925,7 +925,25 @@ pub(crate) fn remote_shell_marker(text: &str) -> Option<String> {
         Err(TooLarge) => Some(TOO_LARGE_DETAIL.to_owned()),
         Ok(analysis) => match analysis.marker(text) {
             Marker::Blocked(detail) => Some(detail),
-            Marker::Inert | Marker::Clear => None,
+            Marker::Inert => None,
+            // `a=ecs_; b=connect; $a$b`: assigned values are not tracked, so a
+            // command word built from expansions is not run blind (the same
+            // rule `evaluate_command` applies per command, which needs no tmux).
+            Marker::Clear => analysis
+                .parsed
+                .commands
+                .iter()
+                .find_map(|c| {
+                    shell::command_word_index(&c.words)
+                        .map(|i| &c.words[i])
+                        .filter(|w| built_from_expansions(w))
+                })
+                .map(|w| {
+                    format!(
+                        "command word `{}` is built from expansions the guard can't evaluate",
+                        snippet(&w.text)
+                    )
+                }),
         },
     }
 }
