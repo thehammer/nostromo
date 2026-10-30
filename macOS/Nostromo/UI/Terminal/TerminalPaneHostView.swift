@@ -70,6 +70,12 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
     private let overlayCloseButton = NSButton()
     /// Under a remote header, from the daemon's idle warning until a keystroke or Keep open.
     private let idleBanner = IdleBannerView()
+    /// The staged-commands drawer and its insert flow (nil until `init` finishes; the drawer hides itself
+    /// while the store has no list for the terminal).
+    private var drawer: StagingDrawerView?
+    private var stagingController: StagingInsertController?
+    /// The last alternate-screen state pushed to the drawer.
+    private var lastAlternateScreen = false
 
     private var info: TerminalInfo?
     /// This view is not the one that sizes the terminal.
@@ -125,8 +131,10 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
         addSubview(header)
         addSubview(idleBanner)
         addSubview(overlay)
+        buildDrawer()
         info = store.info(forPane: paneId, tag: focusTag)
         terminalView.terminalId = info?.terminalId
+        drawer?.bind()
         changes = store.changes.sink { [weak self] change in self?.handle(change) }
         // `@Published` announces before it changes: look again on the next turn of the main queue.
         focusChanges = FocusStore.shared.$focuses
@@ -142,6 +150,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
     deinit {
         store.unregister(self)
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        drawer?.onLayoutChange = nil
     }
 
     // MARK: - TerminalPixelSource
@@ -200,6 +209,14 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
         window?.makeFirstResponder(terminalView)
     }
 
+    /// Whether the drawer has a staged list to show (Terminal > Focus Staged Commands is on only then).
+    var hasStagedCommands: Bool { drawer?.hasList ?? false }
+
+    /// Terminal > Focus Staged Commands (⇧⌘J): the keyboard goes to the drawer. Focus only.
+    func focusStagedCommands() -> Bool {
+        drawer?.focusRows() ?? false
+    }
+
     // MARK: - TerminalByteSink
 
     /// The grid the pane's own size gives (read for the driver only, so the view fills the pane).
@@ -210,6 +227,13 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
 
     func feed(_ bytes: [UInt8]) {
         terminalView.display(bytes)
+        // A full-screen program starting or ending turns the drawer's rows off or on: read the flag here,
+        // after the bytes that change it (no timer, no polling).
+        let alternate = terminalView.isAlternateScreen
+        if alternate != lastAlternateScreen {
+            lastAlternateScreen = alternate
+            drawer?.refresh()
+        }
         if feedingReplay {
             feedingReplay = false
         } else {
@@ -259,7 +283,13 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
         let bannerH = idleBanner.isHidden ? 0 : Self.bannerHeight
         idleBanner.frame = NSRect(x: content.minX, y: content.maxY - h - bannerH, width: content.width, height: bannerH)
         let bodyTop = content.maxY - h - bannerH
-        let body = NSRect(x: content.minX, y: content.minY, width: content.width, height: max(0, bodyTop - content.minY))
+        let paneBody = NSRect(x: content.minX, y: content.minY, width: content.width, height: max(0, bodyTop - content.minY))
+        // The drawer takes the bottom of the body (inside the remote frame); the terminal and the connecting
+        // message shrink by its height, and the ended overlay sits at the bottom of what is left, above it.
+        let drawerH = drawer?.preferredHeight(forBodyHeight: paneBody.height, width: paneBody.width) ?? 0
+        drawer?.frame = NSRect(x: paneBody.minX, y: paneBody.minY, width: paneBody.width, height: drawerH)
+        let body = NSRect(x: paneBody.minX, y: paneBody.minY + drawerH, width: paneBody.width,
+                          height: max(0, paneBody.height - drawerH))
         terminalContainer.frame = body
         connectingView.frame = body
         layoutConnecting()
@@ -325,8 +355,11 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
         }
         guard case .info(let updated) = change, updated.paneId == paneId, updated.tag == focusTag else { return }
         let restarted = info.map { $0.terminalId != updated.terminalId } ?? false
+        let newTerminal = info?.terminalId != updated.terminalId
         info = updated
         terminalView.terminalId = updated.terminalId
+        // The staged list belongs to the terminal id: a first description or a restart is a new one.
+        if newTerminal { drawer?.bind() }
         render()
         if restarted && focusAfterRestart {
             focusAfterRestart = false
@@ -400,6 +433,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
         closeFollowPopoverIfStale(follow)
         renderConnecting()
         overlayLabel.toolTip = overlayLabel.stringValue
+        drawer?.refresh()
         needsLayout = true
     }
 
@@ -419,6 +453,22 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
         layer?.borderColor = info.flatMap(TerminalChromeModel.frameColor(for:))?.cgColor
         layer?.masksToBounds = remote
         needsLayout = true
+    }
+
+    private func buildDrawer() {
+        let controller = StagingInsertController(target: terminalView, context: { [weak self] in self?.stagingContext() })
+        let drawer = StagingDrawerView(controller: controller, paneKey: paneId)
+        drawer.onLayoutChange = { [weak self] in self?.needsLayout = true }
+        drawer.onReturnToTerminal = { [weak self] in self?.focusTerminal() }
+        stagingController = controller
+        self.drawer = drawer
+        addSubview(drawer)
+    }
+
+    /// What the staging flow needs to know about this pane and window, read fresh at every decision.
+    private func stagingContext() -> StagingContext? {
+        guard let info else { return nil }
+        return StagingContext(terminalId: info.terminalId, kind: info.kind, status: info.status, isMirror: isMirror)
     }
 
     private func buildIdleBanner() {

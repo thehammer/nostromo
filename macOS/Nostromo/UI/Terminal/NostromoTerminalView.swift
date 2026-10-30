@@ -318,3 +318,27 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate, TerminalPi
         store.reportRefusal(terminalId: terminalId, op: op)
     }
 }
+
+// MARK: - Staged commands
+
+/// The staging drawer places a staged command through this view, and only after `StagingInsertController`
+/// saw a person's gesture. The bytes go out like the user's own typing (`autoReply: false`), so the daemon
+/// counts them as activity. No line break is ever added here or there: only the user's Enter runs it.
+extension NostromoTerminalView: StagingInsertTarget {
+
+    var isAlternateScreen: Bool { getTerminal().isCurrentBufferAlternate }
+
+    var bracketedPasteMode: Bool { getTerminal().bracketedPasteMode }
+
+    func sendStagedBytes(_ bytes: [UInt8]) {
+        guard let terminalId, TerminalInputGuard.verdict(origin: .typed, event: NSApp.currentEvent) == .keystroke else {
+            refuse(.stageInsert)
+            return
+        }
+        store.sendInput(terminalId: terminalId, bytes: bytes, fromWindow: windowId, autoReply: false)
+    }
+
+    func focusTerminal() {
+        window?.makeFirstResponder(self)
+    }
+}

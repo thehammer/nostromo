@@ -310,6 +310,9 @@ enum ServerMsg {
     case terminalOutput(TerminalOutputFrame)
     /// A terminal request was refused or failed; nothing changed.
     case terminalRefused(TerminalRefusedFrame)
+    /// The commands an agent that follows a terminal has staged (S1). Local clients that declared
+    /// `terminal_staging_ui` only.
+    case terminalStagingList(TerminalStagingList)
 
     // ── remote shells (2c) ────────────────────────────────────────────────────
     /// What the picker offers: projects, environments, services, shell types.
@@ -954,7 +957,11 @@ class NostromodClient {
     /// Follow control). The daemon accepts an invite, and an agent's follow request, only with it.
     static let terminalFollowUICapability = "terminal_follow_ui"
     /// What a connection the daemon verified as the operator app declares.
-    static let operatorCapabilities = [terminalUICapability, remoteShellConfirmCapability, terminalFollowUICapability]
+    /// The client capability that says this app shows the staging drawer. Until an app declares it, every
+    /// `nostromo.terminal_staging` call is refused `no_operator`.
+    static let terminalStagingUICapability = "terminal_staging_ui"
+    static let operatorCapabilities = [terminalUICapability, remoteShellConfirmCapability, terminalFollowUICapability,
+                                       terminalStagingUICapability]
 
     /// Clean, unambiguous round-trip probe: no side effects, no fan-out
     /// ambiguity (unlike `session_send`, which is answered by a broadcast
@@ -1826,6 +1833,12 @@ class NostromodClient {
                 return .terminalRefused(m)
             } else {
                 log.error("failed to decode terminal_refused")
+            }
+
+        case "terminal_staging_list":
+            // Never logged: a frame carries text an agent chose.
+            if let m = try? decoder.decode(TerminalStagingList.self, from: raw) {
+                return .terminalStagingList(m)
             }
 
         case "remote_shell_targets":

@@ -171,6 +171,11 @@ final class TerminalSessionStore {
         daemonUnavailable.contains(terminalId)
     }
 
+    /// A large paste is still going out in frames: anything else for this terminal queues behind it.
+    func isSendingInput(terminalId: String) -> Bool {
+        !(inputBacklog[terminalId]?.isEmpty ?? true)
+    }
+
     // MARK: - Views
 
     /// A view for `paneId` of `tag`'s tree starts showing the terminal that occupies it (now, or when

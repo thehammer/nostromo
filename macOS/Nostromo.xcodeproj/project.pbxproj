@@ -625,6 +625,26 @@
 		TP000000000000000000T048 /* IdleBannerViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F048 /* IdleBannerViewTests.swift */; };
 		TP000000000000000000A018 /* FollowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F018 /* FollowModel.swift */; };
 		TP000000000000000000T018 /* FollowModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F018 /* FollowModel.swift */; };
+		TS000000000000000000A001 /* TerminalStagingWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F001 /* TerminalStagingWire.swift */; };
+		TS000000000000000000T001 /* TerminalStagingWire.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F001 /* TerminalStagingWire.swift */; };
+		TS000000000000000000A002 /* TerminalStagingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F002 /* TerminalStagingStore.swift */; };
+		TS000000000000000000T002 /* TerminalStagingStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F002 /* TerminalStagingStore.swift */; };
+		TS000000000000000000A003 /* AgentDisplayText.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F003 /* AgentDisplayText.swift */; };
+		TS000000000000000000T003 /* AgentDisplayText.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F003 /* AgentDisplayText.swift */; };
+		TS000000000000000000A004 /* StagingDrawerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F004 /* StagingDrawerModel.swift */; };
+		TS000000000000000000T004 /* StagingDrawerModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F004 /* StagingDrawerModel.swift */; };
+		TS000000000000000000A005 /* StagingInsertController.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F005 /* StagingInsertController.swift */; };
+		TS000000000000000000T005 /* StagingInsertController.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F005 /* StagingInsertController.swift */; };
+		TS000000000000000000A006 /* StagingDrawerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F006 /* StagingDrawerView.swift */; };
+		TS000000000000000000T006 /* StagingDrawerView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F006 /* StagingDrawerView.swift */; };
+		TS000000000000000000A007 /* StagingRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F007 /* StagingRowView.swift */; };
+		TS000000000000000000T007 /* StagingRowView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F007 /* StagingRowView.swift */; };
+		TS000000000000000000T008 /* TerminalStagingWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F008 /* TerminalStagingWireTests.swift */; };
+		TS000000000000000000T009 /* TerminalStagingStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F009 /* TerminalStagingStoreTests.swift */; };
+		TS000000000000000000T010 /* StagingDrawerModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F010 /* StagingDrawerModelTests.swift */; };
+		TS000000000000000000T011 /* StagingInsertControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F011 /* StagingInsertControllerTests.swift */; };
+		TS000000000000000000T012 /* StagingDrawerViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F012 /* StagingDrawerViewTests.swift */; };
+		TS000000000000000000T013 /* AgentDisplayTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F013 /* AgentDisplayTextTests.swift */; };
 		TP000000000000000000A019 /* TurnOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F019 /* TurnOrigin.swift */; };
 		TP000000000000000000T019 /* TurnOrigin.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F019 /* TurnOrigin.swift */; };
 		TP000000000000000000A020 /* RemoteShellConfirmSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F020 /* RemoteShellConfirmSheet.swift */; };
@@ -1065,6 +1085,19 @@
 		TP000000000000000000F016 /* IdleCountdownModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdleCountdownModel.swift; sourceTree = "<group>"; };
 		TP000000000000000000F017 /* PastePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PastePolicy.swift; sourceTree = "<group>"; };
 		TP000000000000000000F018 /* FollowModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowModel.swift; sourceTree = "<group>"; };
+		TS000000000000000000F001 /* TerminalStagingWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStagingWire.swift; sourceTree = "<group>"; };
+		TS000000000000000000F002 /* TerminalStagingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStagingStore.swift; sourceTree = "<group>"; };
+		TS000000000000000000F003 /* AgentDisplayText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentDisplayText.swift; sourceTree = "<group>"; };
+		TS000000000000000000F004 /* StagingDrawerModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingDrawerModel.swift; sourceTree = "<group>"; };
+		TS000000000000000000F005 /* StagingInsertController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingInsertController.swift; sourceTree = "<group>"; };
+		TS000000000000000000F006 /* StagingDrawerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingDrawerView.swift; sourceTree = "<group>"; };
+		TS000000000000000000F007 /* StagingRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingRowView.swift; sourceTree = "<group>"; };
+		TS000000000000000000F008 /* TerminalStagingWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStagingWireTests.swift; sourceTree = "<group>"; };
+		TS000000000000000000F009 /* TerminalStagingStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStagingStoreTests.swift; sourceTree = "<group>"; };
+		TS000000000000000000F010 /* StagingDrawerModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingDrawerModelTests.swift; sourceTree = "<group>"; };
+		TS000000000000000000F011 /* StagingInsertControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingInsertControllerTests.swift; sourceTree = "<group>"; };
+		TS000000000000000000F012 /* StagingDrawerViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingDrawerViewTests.swift; sourceTree = "<group>"; };
+		TS000000000000000000F013 /* AgentDisplayTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentDisplayTextTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F019 /* TurnOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOrigin.swift; sourceTree = "<group>"; };
 		TP000000000000000000F020 /* RemoteShellConfirmSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellConfirmSheet.swift; sourceTree = "<group>"; };
 		TP000000000000000000F021 /* RemoteShellPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteShellPresenter.swift; sourceTree = "<group>"; };
@@ -1158,6 +1191,9 @@
 			isa = PBXGroup;
 			children = (
 				TP000000000000000000F001 /* TerminalWire.swift */,
+				TS000000000000000000F001 /* TerminalStagingWire.swift */,
+				TS000000000000000000F002 /* TerminalStagingStore.swift */,
+				TS000000000000000000F003 /* AgentDisplayText.swift */,
 				TP000000000000000000F002 /* TerminalSessionStore.swift */,
 				TP000000000000000000F003 /* TerminalLatencyStats.swift */,
 				TP000000000000000000F012 /* RemoteShellWire.swift */,
@@ -1407,6 +1443,12 @@
 				TP000000000000000000F048 /* IdleBannerViewTests.swift */,
 				TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */,
 				TP000000000000000000F034 /* FollowModelTests.swift */,
+				TS000000000000000000F008 /* TerminalStagingWireTests.swift */,
+				TS000000000000000000F009 /* TerminalStagingStoreTests.swift */,
+				TS000000000000000000F010 /* StagingDrawerModelTests.swift */,
+				TS000000000000000000F011 /* StagingInsertControllerTests.swift */,
+				TS000000000000000000F012 /* StagingDrawerViewTests.swift */,
+				TS000000000000000000F013 /* AgentDisplayTextTests.swift */,
 				TP000000000000000000F035 /* TurnOriginTests.swift */,
 				TP000000000000000000FH01 /* TurnOriginHiddenTextTests.swift */,
 				TP000000000000000000F037 /* TerminalScreenAccessTests.swift */,
@@ -1663,6 +1705,10 @@
 				TP000000000000000000F016 /* IdleCountdownModel.swift */,
 				TP000000000000000000F017 /* PastePolicy.swift */,
 				TP000000000000000000F018 /* FollowModel.swift */,
+				TS000000000000000000F004 /* StagingDrawerModel.swift */,
+				TS000000000000000000F005 /* StagingInsertController.swift */,
+				TS000000000000000000F006 /* StagingDrawerView.swift */,
+				TS000000000000000000F007 /* StagingRowView.swift */,
 				TP000000000000000000F020 /* RemoteShellConfirmSheet.swift */,
 				TP000000000000000000F021 /* RemoteShellPresenter.swift */,
 				TP000000000000000000F022 /* NewRemoteShellSheet.swift */,
@@ -1789,6 +1835,13 @@
 				TP000000000000000000A016 /* IdleCountdownModel.swift in Sources */,
 				TP000000000000000000A017 /* PastePolicy.swift in Sources */,
 				TP000000000000000000A018 /* FollowModel.swift in Sources */,
+				TS000000000000000000A001 /* TerminalStagingWire.swift in Sources */,
+				TS000000000000000000A002 /* TerminalStagingStore.swift in Sources */,
+				TS000000000000000000A003 /* AgentDisplayText.swift in Sources */,
+				TS000000000000000000A004 /* StagingDrawerModel.swift in Sources */,
+				TS000000000000000000A005 /* StagingInsertController.swift in Sources */,
+				TS000000000000000000A006 /* StagingDrawerView.swift in Sources */,
+				TS000000000000000000A007 /* StagingRowView.swift in Sources */,
 				TP000000000000000000A019 /* TurnOrigin.swift in Sources */,
 				TP000000000000000000A036 /* AppControlAX.swift in Sources */,
 				SR0000000000000000000A01 /* ScreenshotRedaction.swift in Sources */,
@@ -2022,6 +2075,19 @@
 				TP000000000000000000T044 /* TerminalPaneHeaderView.swift in TestSources */,
 				TP000000000000000000T045 /* IdleBannerView.swift in TestSources */,
 				TP000000000000000000T018 /* FollowModel.swift in TestSources */,
+				TS000000000000000000T001 /* TerminalStagingWire.swift in TestSources */,
+				TS000000000000000000T002 /* TerminalStagingStore.swift in TestSources */,
+				TS000000000000000000T003 /* AgentDisplayText.swift in TestSources */,
+				TS000000000000000000T004 /* StagingDrawerModel.swift in TestSources */,
+				TS000000000000000000T005 /* StagingInsertController.swift in TestSources */,
+				TS000000000000000000T006 /* StagingDrawerView.swift in TestSources */,
+				TS000000000000000000T007 /* StagingRowView.swift in TestSources */,
+				TS000000000000000000T008 /* TerminalStagingWireTests.swift in Sources */,
+				TS000000000000000000T009 /* TerminalStagingStoreTests.swift in Sources */,
+				TS000000000000000000T010 /* StagingDrawerModelTests.swift in Sources */,
+				TS000000000000000000T011 /* StagingInsertControllerTests.swift in Sources */,
+				TS000000000000000000T012 /* StagingDrawerViewTests.swift in Sources */,
+				TS000000000000000000T013 /* AgentDisplayTextTests.swift in Sources */,
 				TP000000000000000000T019 /* TurnOrigin.swift in TestSources */,
 				TP000000000000000000T036 /* AppControlAX.swift in TestSources */,
 				SR0000000000000000000A02 /* ScreenshotRedaction.swift in TestSources */,

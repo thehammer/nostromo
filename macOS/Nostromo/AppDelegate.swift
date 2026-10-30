@@ -375,6 +375,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         host.showSendSelectionMenu()
     }
 
+    /// Terminal > Focus Staged Commands (⇧⌘J): the keyboard moves into the drawer of the terminal pane that
+    /// holds it. Focus only: nothing is inserted here.
+    @objc func focusStagedCommands(_ sender: Any?) {
+        guard let host = TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder), host.focusStagedCommands() else {
+            NSSound.beep()
+            return
+        }
+    }
+
     /// Edit > Find… (⌘F) and Find Next (⌘G): the find bar of the terminal pane that holds the keyboard.
     /// Nothing else answers them (see `MainMenu`), so a text view elsewhere behaves as it did before.
     @objc func terminalFind(_ sender: Any?) {
@@ -415,6 +424,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         }
         if menuItem.action == #selector(terminalSendSelection(_:)) {
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)?.hasSelection ?? false
+        }
+        if menuItem.action == #selector(focusStagedCommands(_:)) {
+            return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)?.hasStagedCommands ?? false
         }
         if menuItem.action == #selector(closeTerminalPane(_:)) {
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
