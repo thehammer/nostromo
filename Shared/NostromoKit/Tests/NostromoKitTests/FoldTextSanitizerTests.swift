@@ -608,7 +608,7 @@ final class FoldTextSanitizerDocumentTextTests: XCTestCase {
         XCTAssertEqual(inline(plain), plain.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " "))
         XCTAssertEqual(inline(""), "")
         XCTAssertEqual(multi(""), "")
-        let big = String(repeating: "plain text and \u{00E9}\u{65E5} \u{1F680}\n", count: 30_000)
+        let big = String(repeating: "plain text and \u{00E9}\u{65E5} \u{1F680}\n", count: 40_000)
         XCTAssertGreaterThan(big.utf8.count, 900_000)
         XCTAssertEqual(multi(big), big)
     }
