@@ -162,7 +162,8 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         if let previous = lastCount, isCollapsed, list.entries.count > previous { pulse() }
         lastCount = list.entries.count
         guard changed else { updateTimer(); return }
-        if list.revision != lastRevision { notice = nil }
+        // A refusal's reason stays only until what it was about changes (a revision, a row's state).
+        if list.revision != lastRevision || models != lastModels { notice = nil }
         self.list = list
         self.env = env
         lastRevision = list.revision

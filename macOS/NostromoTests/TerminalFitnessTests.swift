@@ -301,11 +301,17 @@ final class TerminalFitnessTests: XCTestCase {
     ///    what the daemon does (`inviteTapped`, `stopTapped`, `resumeTapped`) or the form's state (the
     ///    focus picker `followFocusChanged`, `includeScreenToggled`, the confirm sheet's `followToggled`)
     ///    is NOT exempt: it must ask `TerminalInputGuard`.
+    ///  - `copyStagedCommand`, `removeStagedCommand`, `clearAllStaged` (the staging drawer's menus) and
+    ///    `focusStagedCommands` (Terminal > Focus Staged Commands): the gate is asked inside
+    ///    `StagingInsertController`, proven by `StagingInsertControllerTests` and pinned below
+    ///    (`testTheStagingMenuActionsGoThroughTheControllerWhichAsksTheGateFirst`); `focusStagedCommands` moves
+    ///    keyboard focus only and inserts nothing.
     /// Every other action, `connectTapped` included, must ask `TerminalInputGuard`.
     private let guardExemptActions: [String] = [
         "cancelTapped", "dismissTapped", "okTapped", "copyTapped", "submitTapped",
         "popupChanged", "projectChanged", "environmentChanged", "serviceChanged", "shellTypeChanged",
         "followBadgeTapped", "moveTapped",
+        "focusStagedCommands", "copyStagedCommand", "removeStagedCommand", "clearAllStaged",
     ]
 
     func testEveryObjcActionInTheTerminalViewsAsksTheInputGuard() throws {
@@ -326,11 +332,14 @@ final class TerminalFitnessTests: XCTestCase {
     }
 
     func testEveryPathThatSendsBytesAsksTheInputGuard() throws {
-        let entryPoints = ["func send(source", "func insertText(", "func paste("]
+        let entryPoints = ["func send(source", "func insertText(", "func paste(", "func sendStagedBytes"]
         var found: [Declaration] = []
         for source in try terminalViewSources() {
             found += declarations(in: source.name, lines: source.lines) { i in
-                entryPoints.contains { source.lines[i].contains($0) }
+                // `StagingInsertTarget` declares `func sendStagedBytes` with no body; only an implementation counts.
+                entryPoints.contains { entry in
+                    source.lines[i].contains(entry) && (entry != "func sendStagedBytes" || source.lines[i].contains("{"))
+                }
             }
         }
         for entry in entryPoints {
@@ -444,7 +453,11 @@ final class TerminalFitnessTests: XCTestCase {
                      "UI/Terminal/PasteConfirmSheet.swift",
                      // The logic of the SwiftTerm views, split out so it can be driven in the tests.
                      "UI/Terminal/RemotePasteGate.swift", "UI/Terminal/TerminalPaneHeaderView.swift",
-                     "UI/Terminal/IdleBannerView.swift"],
+                     "UI/Terminal/IdleBannerView.swift",
+                     // Command staging (S1b): the drawer is AppKit only, so it is driven for real in the tests.
+                     "Data/TerminalStagingWire.swift", "Data/TerminalStagingStore.swift", "Data/AgentDisplayText.swift",
+                     "UI/Terminal/StagingDrawerModel.swift", "UI/Terminal/StagingInsertController.swift",
+                     "UI/Terminal/StagingDrawerView.swift", "UI/Terminal/StagingRowView.swift"],
                     underApp: true, inApp: true, inTests: true, project: try Project())
     }
 
@@ -465,7 +478,9 @@ final class TerminalFitnessTests: XCTestCase {
                      "TerminalStoreMirrorTests.swift", "FollowModelTests.swift", "TurnOriginTests.swift",
                      "TerminalScreenAccessTests.swift", "PasteConfirmSheetTests.swift",
                      "NavTabItemEnvironmentBadgeTests.swift", "MainLayoutWindowTitleTests.swift",
-                     "RemotePasteGateTests.swift", "TerminalPaneHeaderViewTests.swift", "IdleBannerViewTests.swift"],
+                     "RemotePasteGateTests.swift", "TerminalPaneHeaderViewTests.swift", "IdleBannerViewTests.swift",
+                     "TerminalStagingWireTests.swift", "TerminalStagingStoreTests.swift", "AgentDisplayTextTests.swift",
+                     "StagingDrawerModelTests.swift", "StagingInsertControllerTests.swift", "StagingDrawerViewTests.swift"],
                     underApp: false, inApp: false, inTests: true, project: try Project())
     }
 
@@ -997,5 +1012,154 @@ final class TerminalFitnessTests: XCTestCase {
         let lines = try confirmSheetLines()
         XCTAssertTrue(lines.contains { $0.contains("followCheckbox.action = #selector(followToggled(_:))") },
                       "the follow box's action must be the gated followToggled")
+    }
+    // MARK: Command staging (S1b)
+
+    // The drawer places text at a shell's prompt, so the rules that keep that safe are pinned in source as
+    // well as driven in `StagingInsertControllerTests` / `StagingDrawerViewTests`: one door to the shell, asked
+    // of the guard; the menu actions go through the gated controller; nothing staged is logged; nothing in
+    // the drawer answers to a key; none of it imports SwiftTerm.
+
+    private func stagingFiles() throws -> [(name: String, text: String, code: String)] {
+        var urls = Repo.swiftFiles(under: Repo.app.appendingPathComponent("UI/Terminal"))
+            .filter { $0.lastPathComponent.hasPrefix("Staging") }
+        urls += Repo.swiftFiles(under: Repo.app.appendingPathComponent("Data"))
+            .filter { $0.lastPathComponent.hasPrefix("TerminalStaging") || $0.lastPathComponent == "AgentDisplayText.swift" }
+        XCTAssertEqual(urls.count, 7, "the staging files should be found: \(urls.map { $0.lastPathComponent })")
+        return try urls.map { url in
+            let text = try Repo.read(url)
+            return (name: url.lastPathComponent, text: text, code: Repo.codeLines(text).joined(separator: "\n"))
+        }
+    }
+
+    func testNoStagingFileLogsAnything() throws {
+        let forbidden: [(String, String)] = [(#"(?<![A-Za-z0-9_])print\("#, "print("), (#"(?<![A-Za-z0-9_])debugPrint\("#, "debugPrint("),
+                                             (#"\bNSLog\("#, "NSLog("), (#"\bos_log\b"#, "os_log"), (#"\bLogger\("#, "Logger("),
+                                             (#"(?m)^\s*import\s+os\b"#, "import os"), (#"\bdump\("#, "dump(")]
+        for file in try stagingFiles() {
+            for (pattern, name) in forbidden {
+                XCTAssertNil(Repo.firstMatch(pattern, in: file.code), "\(file.name) uses \(name): what an agent staged must never be logged")
+            }
+        }
+    }
+
+    func testNoStagingFileSetsAKeyEquivalentOrAFocusDefault() throws {
+        for file in try stagingFiles() {
+            for pattern in [#"\.keyEquivalent\b"#, "keyEquivalentModifierMask", "performKeyEquivalent", "setAccessibility\\w*keyEquivalent",
+                            "defaultButton", "isDefault"] {
+                XCTAssertNil(Repo.firstMatch(pattern, in: file.code), "\(file.name) matches `\(pattern)`: nothing staged may answer to a key")
+            }
+            // The only allowed use of the word is an item built with an empty key.
+            for line in file.code.components(separatedBy: "\n") where line.contains("keyEquivalent") {
+                XCTAssertTrue(line.contains(#"keyEquivalent: """#), "\(file.name): \(line.trimmingCharacters(in: .whitespaces))")
+            }
+        }
+    }
+
+    func testNoStagingFileImportsSwiftTerm() throws {
+        for file in try stagingFiles() {
+            XCTAssertFalse(Repo.importsSwiftTerm(file.text), "\(file.name) imports SwiftTerm; it is built into the test target")
+        }
+    }
+
+    func testStagingNeverWritesToAShellExceptThroughTheTargetsOneDoor() throws {
+        var callSites: [String] = []
+        for file in try stagingFiles() {
+            XCTAssertFalse(file.code.contains("sendInput("), "\(file.name) sends input itself")
+            XCTAssertNil(Repo.firstMatch(#"\.input\(terminalId"#, in: file.code), "\(file.name) builds a terminal_input frame")
+            XCTAssertFalse(file.code.contains("feed("), file.name)
+            for line in file.code.components(separatedBy: "\n") where line.contains(".sendStagedBytes(") { callSites.append(file.name) }
+        }
+        XCTAssertEqual(callSites, ["StagingInsertController.swift"], "one call site: the controller, after the gate")
+
+        let controller = try terminalViewSource("StagingInsertController.swift")
+        let insert = declarations(in: controller.name, lines: controller.lines) { controller.lines[$0].contains("func insert(") }
+        XCTAssertTrue(try XCTUnwrap(insert.first).body.contains("target.sendStagedBytes("), "the call is inside insert")
+    }
+
+    func testTheTerminalViewsStagedInsertAsksTheGuardAndGoesOutAsTheUsersOwnTyping() throws {
+        let view = try terminalViewSource("NostromoTerminalView.swift")
+        let found = declarations(in: view.name, lines: view.lines) { view.lines[$0].contains("func sendStagedBytes") && view.lines[$0].contains("{") }
+        let decl = try XCTUnwrap(found.first, "NostromoTerminalView must implement sendStagedBytes")
+        XCTAssertEqual(found.count, 1)
+        XCTAssertNotNil(Repo.firstMatch(#"TerminalInputGuard\.verdict\(origin:\s*\.typed"#, in: decl.body),
+                        "a staged insert is a person's input and must ask the guard with origin .typed:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("autoReply: false"), "the bytes go out as the user's own typing, so the daemon counts them as activity:\n\(decl.body)")
+        XCTAssertFalse(decl.body.contains("autoReply: true"), decl.body)
+        XCTAssertTrue(decl.body.contains("refuse(.stageInsert)"), "a refused insert is reported:\n\(decl.body)")
+        XCTAssertTrue(decl.body.contains("store.sendInput("), decl.body)
+        XCTAssertFalse(decl.body.contains("\\r") || decl.body.contains("\\n"), "no line break is ever added:\n\(decl.body)")
+
+        let guardAt = try XCTUnwrap(decl.body.range(of: "TerminalInputGuard.verdict("))
+        let sendAt = try XCTUnwrap(decl.body.range(of: "store.sendInput("))
+        XCTAssertLessThan(guardAt.lowerBound, sendAt.lowerBound, "the guard is asked before anything is sent")
+
+        // The paste and insertText overrides are unchanged: each still reaches SwiftTerm's own through one helper.
+        let code = view.lines.joined(separator: "\n")
+        XCTAssertEqual(code.components(separatedBy: "super.paste(").count - 1, 1)
+        XCTAssertEqual(code.components(separatedBy: "super.insertText(").count - 1, 1)
+    }
+
+    func testTheStagingMenuActionsGoThroughTheControllerWhichAsksTheGateFirst() throws {
+        let row = try terminalViewSource("StagingRowView.swift")
+        let drawer = try terminalViewSource("StagingDrawerView.swift")
+        let controller = try terminalViewSource("StagingInsertController.swift")
+
+        func body(_ name: String, in source: (name: String, lines: [String])) throws -> String {
+            let found = declarations(in: source.name, lines: source.lines) { source.lines[$0].contains("func \(name)(") }
+            XCTAssertEqual(found.count, 1, "\(source.name) should declare exactly one `\(name)`")
+            return try XCTUnwrap(found.first, "\(source.name): \(name) not found").body
+        }
+
+        XCTAssertTrue(try body("copyStagedCommand", in: row).contains("controller?.copy("))
+        XCTAssertTrue(try body("removeStagedCommand", in: row).contains("controller?.remove("))
+        XCTAssertTrue(try body("clearAllStaged", in: drawer).contains("controller.clearAll("))
+
+        // In the controller, the gate is asked before anything is copied, removed, cleared or placed.
+        let acts: [(String, String)] = [("insert", "target.sendStagedBytes("), ("copy", "pasteboard.clearContents("),
+                                        ("remove", "staging.remove("), ("clearAll", "staging.clear(")]
+        for (name, action) in acts {
+            let text = try body(name, in: controller)
+            let gate = try XCTUnwrap(text.range(of: "gate("), "\(name) must ask the gate:\n\(text)")
+            let act = try XCTUnwrap(text.range(of: action), "\(name) must call \(action)")
+            XCTAssertLessThan(gate.lowerBound, act.lowerBound, "\(name): the gate is asked before \(action)")
+            XCTAssertTrue(text.contains("reportRefusal("), "\(name): a refusal is reported to the daemon")
+        }
+        // `fromMenu` is true for the three menu actions and false for a click or Space.
+        XCTAssertTrue(try body("insert", in: controller).contains("gate(event, control, false)"))
+        for name in ["copy", "remove", "clearAll"] {
+            XCTAssertTrue(try body(name, in: controller).contains("gate(event, control, true)"), "\(name) is a menu choice")
+        }
+        // The default gate is the real guard.
+        XCTAssertTrue(controller.lines.joined(separator: "\n").contains("TerminalInputGuard.allowsControl(event: $0, control: $1, fromMenu: $2)"))
+    }
+
+    func testAppControlsTreeAndFindTreatTheStagingDrawerAsOneWithheldEntry() throws {
+        let server = try Repo.read(Repo.app.appendingPathComponent("AppControl/AppControlServer.swift"))
+        let code = Repo.codeLines(server).joined(separator: "\n")
+        for function in ["private func node(", "private func matches("] {
+            let start = try XCTUnwrap(code.range(of: function), "\(function) not found")
+            let rest = code[start.upperBound...]
+            let end = rest.range(of: "private func ")?.lowerBound ?? rest.endIndex
+            let text = String(rest[..<end])
+            XCTAssertTrue(text.contains("v is StagingDrawerView"), "\(function) must stop at a staging drawer:\n\(text)")
+            XCTAssertTrue(text.contains("AppControlAX.isWithheld(v)"), "\(function) must use the one rule:\n\(text)")
+            XCTAssertTrue(text.contains("stagedHiddenText"), "\(function) must answer with the fixed text:\n\(text)")
+        }
+        XCTAssertTrue(code.contains("if AppControlAX.isWithheld(t) { return o }"), "`ax` must not add view properties for a withheld view")
+    }
+
+    func testEveryStagingProjectIdIsUniqueAndTwentyFourCharacters() throws {
+        let project = try Project()
+
+        let tokens = Repo.matches(#"\bTS0000[A-Za-z0-9]*\b"#, in: project.text).map { $0[0] }
+        XCTAssertGreaterThanOrEqual(tokens.count, 40, "the slice's ids should be found")
+        for token in Set(tokens) {
+            XCTAssertEqual(token.count, 24, "\(token) is not 24 characters long")
+        }
+        let definitions = Repo.matches(#"(?m)^\t\t(TS0000\w*) /\*.*?\*/ = \{"#, in: project.text).map { $0[1] }
+        XCTAssertGreaterThanOrEqual(definitions.count, 25, "the staging build files and file references should be found")
+        XCTAssertEqual(definitions.count, Set(definitions).count,
+                       "an id is defined twice: \(Dictionary(grouping: definitions, by: { $0 }).filter { $1.count > 1 }.keys.sorted())")
     }
 }
