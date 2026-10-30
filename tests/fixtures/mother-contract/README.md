@@ -6,8 +6,8 @@ Rust tests (`tests/mother_contract_fixtures.rs`), the Kit tests (`MotherCrewWire
 broker read. The contract itself is Mother's `docs/design.md`, "Headless crew contract (Phase 1)".
 
 **Recordings.** Since Mother's HC-16 (#76) these are recordings of real runs
-(`scripts/record-contract-fixtures.sh`: timestamps monotonic, `updated_at` increasing, real `crew` shape),
-not hand-written. Pinned to Mother `6712f38ecb28` (see `MANIFEST.json`). Since `15513946b0e5` the only change is Mother #98's
+(recorded by Mother's `record-contract-fixtures.sh`: timestamps monotonic, `updated_at` increasing, real `crew` shape),
+not hand-written. Pinned to Mother `83e46ca5223c` (see `MANIFEST.json`; the fixture bytes last changed at `6712f38ecb28`). Since `15513946b0e5` the only change is Mother #98's
 additive job-record key `base_sha` (string or null; placeholder `0000000000000000000000000000000000000001` in
 `queued` event data and snapshot jobs). Clients must ignore it if unknown; Nostromo has no use for it. What changed from `0ca8b700`:
 

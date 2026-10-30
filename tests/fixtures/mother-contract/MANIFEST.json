@@ -1,7 +1,7 @@
 {
   "mother_repo": "thehammer/mother",
   "mother_path": "plugins/mother/tests/fixtures/contract",
-  "mother_commit": "6712f38ecb28edf6bcd4fa2eacd9c7d383937247",
+  "mother_commit": "83e46ca5223c617b7094b7f1f9fc8e6781882bd1",
   "files": {
     "gates_fix_pass.ndjson": "7aed615f9f3562474232f0e66436dd7dca155f8c28abf5d65975fa6c63569839",
     "lens_wave.ndjson": "65bc4852ae0b57d23917180f52ce822b68e626fd7aff8cf280ae4b9741f58979",
