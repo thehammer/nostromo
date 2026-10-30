@@ -98,6 +98,20 @@ enum PlanDisplayLimits {
     static let maxCharactersPerRow = 60_000
     /// Lines of one code block, or rows of one table.
     static let maxLinesPerScrollRow = 1_500
+    /// Bytes of markdown handed to the parser. Foundation's parser grows faster than the input on tables
+    /// (100,000 rows took 7 s to parse on a quiet Mac, 20 s on a CI runner), so the parse is bounded by
+    /// this, not by the 1 MiB file cap; the rest of the file is the "truncated for display" row's.
+    static let maxParsedBytes = 262_144
+
+    /// `text` cut to `maxParsedBytes` at a line break (so no character is split), and whether it was cut.
+    static func parsedPrefix(of text: String) -> (text: String, wasCut: Bool) {
+        let utf8 = text.utf8
+        guard utf8.count > maxParsedBytes else { return (text, false) }
+        let end = utf8.index(utf8.startIndex, offsetBy: maxParsedBytes)
+        var prefix = text[..<end]
+        if let lineBreak = prefix.unicodeScalars.lastIndex(of: "\n") { prefix = prefix[..<lineBreak] }
+        return (String(prefix), true)
+    }
 }
 
 // MARK: - Styles
@@ -1181,11 +1195,13 @@ final class PlanDocumentView: NSView {
             let generation = parseGeneration
             let loaderGeneration = loader.generation
             parseQueue.async { [weak self] in
-                let parsed = PlanMarkdown.parse(text)
+                // The parse is bounded; the checklist (cheap, one pass) counts the whole file.
+                let shown = PlanDisplayLimits.parsedPrefix(of: text)
+                let parsed = PlanMarkdown.parse(shown.text)
                 let checklist = PlanChecklist.parse(text)
                 DispatchQueue.main.async {
                     guard let self, self.parseGeneration == generation, self.loader.generation == loaderGeneration else { return }
-                    self.apply(text: text, document: parsed, checklist: checklist)
+                    self.apply(text: text, document: parsed, checklist: checklist, cutInput: shown.wasCut)
                 }
             }
         default:
@@ -1198,7 +1214,7 @@ final class PlanDocumentView: NSView {
         }
     }
 
-    private func apply(text: String, document newDocument: PlanDocument, checklist: [PlanChecklistItem]) {
+    private func apply(text: String, document newDocument: PlanDocument, checklist: [PlanChecklistItem], cutInput: Bool) {
         let anchor = state == .document ? captureAnchor() : nil
         let hadDocument = state == .document
         shownText = text
@@ -1207,6 +1223,7 @@ final class PlanDocumentView: NSView {
         findCursor = nil
         var builder = PlanSpecBuilder(renderer: PlanSpanRenderer(planDirectory: planDirectory))
         builder.add(newDocument.blocks, leading: 0, quoteDepth: 0)
+        if cutInput { builder.noteInputWasCut() }
         builder.finish(copyPath: { [weak self] in self?.copyThePath() })
         flow.setSpecs(builder.specs)
         isTruncatedForDisplay = builder.isTruncated
@@ -1371,6 +1388,9 @@ private struct PlanSpecBuilder {
             add(block, leading: leading, quoteDepth: quoteDepth)
         }
     }
+
+    /// The file had more than was parsed.
+    mutating func noteInputWasCut() { isTruncated = true }
 
     /// The last row, when something was left out.
     mutating func finish(copyPath: @escaping () -> Void) {

@@ -392,8 +392,35 @@ final class PlanDisplayLimitsTests: XCTestCase {
         cut.rig.view.buildAllRows()
         XCTAssertTrue(cut.rig.view.isTruncatedForDisplay)
         let text = try XCTUnwrap(cut.rig.view.textViews.first).string
-        XCTAssertEqual(text.utf16.count, Limits.maxCharactersPerRow + 1, "the limit, and an ellipsis")
+        XCTAssertEqual(text.utf16.count, Limits.maxCharactersPerRow, "the limit, the ellipsis included")
         XCTAssertTrue(text.hasSuffix("…"), "the ellipsis shows it was cut")
+    }
+
+    func testTheParserIsHandedNoMoreThanItsByteLimitCutAtALineBreakWithoutSplittingACharacter() {
+        let small = "# Title\n\nbody é日本\n"
+        XCTAssertEqual(Limits.parsedPrefix(of: small).text, small)
+        XCTAssertFalse(Limits.parsedPrefix(of: small).wasCut)
+
+        let exact = String(repeating: "x", count: Limits.maxParsedBytes)
+        XCTAssertFalse(Limits.parsedPrefix(of: exact).wasCut, "exactly the limit is not cut")
+
+        // Three-byte characters, so the limit falls inside one; a line break every 100 characters.
+        let line = String(repeating: "日", count: 99) + "\n"
+        let big = String(repeating: line, count: 2_000)
+        let cut = Limits.parsedPrefix(of: big)
+        XCTAssertTrue(cut.wasCut)
+        XCTAssertLessThanOrEqual(cut.text.utf8.count, Limits.maxParsedBytes)
+        XCTAssertGreaterThan(cut.text.utf8.count, Limits.maxParsedBytes - line.utf8.count - 1, "as much as fits")
+        XCTAssertTrue(cut.text.hasPrefix(line) && big.hasPrefix(cut.text), "a prefix of the file")
+        XCTAssertFalse(cut.text.hasSuffix("\n"), "cut before the last line break")
+        XCTAssertFalse(cut.text.contains("\u{FFFD}"), "no character was split")
+
+        // No line break at all: still cut, still valid text.
+        let noBreaks = String(repeating: "日", count: 200_000)
+        let flat = Limits.parsedPrefix(of: noBreaks)
+        XCTAssertTrue(flat.wasCut)
+        XCTAssertLessThanOrEqual(flat.text.utf8.count, Limits.maxParsedBytes)
+        XCTAssertFalse(flat.text.contains("\u{FFFD}"))
     }
 
     func testACodeBlockOfExactlyTheLineLimitIsShownWholeAndOneLineMoreIsCut() throws {
