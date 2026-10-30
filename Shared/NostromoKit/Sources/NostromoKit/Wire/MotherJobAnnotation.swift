@@ -111,9 +111,10 @@ public struct MotherJobAnnotation: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        // Each key on its own: a wrong-typed `notify` must not cost a valid
-        // `origin` (nor the other way round).
-        origin = (try? c.decodeIfPresent(MotherOriginView.self, forKey: .origin)) ?? nil
+        // A malformed `origin` is a malformed annotation (it throws, and the job
+        // reads `nostromo == nil`); a wrong-typed `notify` costs only itself, so
+        // it can never drop a valid `origin`.
+        origin = try c.decodeIfPresent(MotherOriginView.self, forKey: .origin)
         notify = (try? c.decodeIfPresent(String.self, forKey: .notify)) ?? nil
         notice = (try? c.decodeIfPresent(MotherJSON.self, forKey: .notice)) ?? nil
     }

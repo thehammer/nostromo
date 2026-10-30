@@ -206,11 +206,12 @@ final class MotherJobAnnotationTests: XCTestCase {
         }
     }
 
-    func testAWrongShapedOriginKeepsAValidNotify() throws {
+    func testAWrongShapedOriginIsAMalformedAnnotationNotAHalfOne() throws {
         for origin in ["\"oops\"", "{\"kind\": 5}", "7", "[1, 2]", "{\"closed\": \"yes\"}"] {
-            let annotation = try decodeAnnotation(#"{"origin":\#(origin),"notify":"quiet"}"#)
-            XCTAssertNil(annotation.origin, "origin \(origin) is malformed and reads as none")
-            XCTAssertEqual(annotation.notify, "quiet", "origin \(origin) must not cost the notify")
+            XCTAssertThrowsError(
+                try decodeAnnotation(#"{"origin":\#(origin),"notify":"quiet"}"#),
+                "origin \(origin) is malformed: the annotation does not decode (the job reads none)"
+            )
         }
     }
 
@@ -231,18 +232,17 @@ final class MotherJobAnnotationTests: XCTestCase {
         var originBad = try goldenJobObjects()[3]
         originBad["nostromo"] = ["origin": "oops", "notify": "quiet"] as [String: Any]
         let third = try decodeJob(originBad)
-        XCTAssertNotNil(third.nostromo, "a valid notify keeps the annotation")
-        XCTAssertNil(third.nostromo?.origin)
-        XCTAssertEqual(third.nostromo?.notify, "quiet")
+        XCTAssertNil(third.nostromo, "a malformed origin is a malformed annotation; the job survives")
+        XCTAssertEqual(third.id, "j-unknown")
 
         var originBadKind = try goldenJobObjects()[3]
         originBadKind["nostromo"] = ["origin": ["kind": 5], "notify": "quiet"] as [String: Any]
         let fourth = try decodeJob(originBadKind)
-        XCTAssertNil(fourth.nostromo?.origin)
-        XCTAssertEqual(fourth.nostromo?.notify, "quiet")
+        XCTAssertNil(fourth.nostromo)
+        XCTAssertEqual(fourth.id, "j-unknown")
     }
 
-    func testAFrameWithPartlyBadAnnotationsKeepsEveryJobAndEachGoodKey() throws {
+    func testAFrameWithBadAnnotationKeysKeepsEveryJobAndEveryValidOrigin() throws {
         var notifyBad = try goldenJobObjects()[3]
         notifyBad["id"] = "p-notify-bad"
         notifyBad["nostromo"] = ["origin": ["kind": "focus", "focus_tag": "t"], "notify": 7] as [String: Any]
@@ -264,8 +264,7 @@ final class MotherJobAnnotationTests: XCTestCase {
         XCTAssertEqual(jobs[0].nostromo?.origin?.kind, .focus)
         XCTAssertEqual(jobs[0].nostromo?.origin?.focusTag, "t")
         XCTAssertNil(jobs[0].nostromo?.notify)
-        XCTAssertNil(jobs[1].nostromo?.origin)
-        XCTAssertEqual(jobs[1].nostromo?.notify, "quiet")
+        XCTAssertNil(jobs[1].nostromo, "a malformed origin reads the annotation as none")
         XCTAssertEqual(jobs[2].nostromo?.origin?.kind, .you)
         XCTAssertEqual(jobs[2].nostromo?.notify, "off")
     }

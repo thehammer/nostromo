@@ -112,7 +112,7 @@ sensitive focus's display name is also not written into Mother's record or argv
 Mac sees. Work-send jobs and sensitive jobs are withheld from them entirely, as before.
 
 **iOS and the shared Kit** decode `nostromo` tolerantly: an origin kind they do not know becomes
-`.other`, and a malformed `nostromo` object reads as none, so one bad annotation never costs a job
+`.other`, a malformed `nostromo` object (including a malformed `origin`) reads as none, a wrong-typed `notify` costs only the notify and never a valid `origin`, so one bad annotation never costs a job
 (iOS decodes a whole `mother_jobs` message all-or-nothing). The golden frame is
 `tests/fixtures/mother-v2/mother-jobs-annotated.json`, written by `tests/mother_origin.rs` with
 `UPDATE_GOLDEN=1` and read by the Kit tests.
