@@ -186,7 +186,9 @@ final class StagingRowView: NSView {
         style.alignment = .left
         style.baseWritingDirection = .leftToRight
         style.lineBreakMode = .byCharWrapping
-        let override = NSNumber(value: NSWritingDirection.leftToRight.rawValue | NSTextWritingDirection.override.rawValue)
+        // Left-to-right OVERRIDE (what U+202D does, as an attribute so the command's own text is untouched):
+        // the direction in the low bits, NSTextWritingDirectionOverride (1 << 1) on top.
+        let override = NSNumber(value: NSWritingDirection.leftToRight.rawValue | (1 << 1))
         return NSAttributedString(string: command, attributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
             .foregroundColor: dimmed ? Theme.fgMuted : Theme.fg,

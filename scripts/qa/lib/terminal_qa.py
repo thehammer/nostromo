@@ -4,6 +4,7 @@
     terminal_qa.py request-remote-shell QA_ROOT FOCUS_TAG PROJECT ENVIRONMENT SERVICE SHELL_TYPE REASON [WAIT_SECS]
     terminal_qa.py list-terminals QA_ROOT FOCUS_TAG
     terminal_qa.py request-follow QA_ROOT FOCUS_TAG TERMINAL_ID REASON [WAIT_SECS]
+    terminal_qa.py stage QA_ROOT FOCUS_TAG TERMINAL_ID OP [ARGS_JSON]
 
 Acts as an agent in the focus FOCUS_TAG (the Hello `pty_id`, a built-in focus tag such as `mother`).
 `open-terminal` calls `nostromo.open_terminal`: the daemon opens a terminal pane in that focus, which must
@@ -15,6 +16,9 @@ on `ok`. WAIT_SECS (default 330) is how long this client waits for the reply.
 `list-terminals` calls `nostromo.list_terminals` (the terminals of FOCUS_TAG's own focus, ids included).
 `request-follow` calls `nostromo.request_follow`: the person at the app answers a decision sheet; the outcome
 is {ok, outcome: "following"} or {error: denied | dismissed | timeout | no_operator | ...}.
+`stage` calls `nostromo.terminal_staging` for a terminal FOCUS_TAG follows: OP is list, stage, replace, remove or
+clear and ARGS_JSON holds its other arguments (`{"command": "ls -la"}`, `{"entry_id": "s-00000001", "command": "pwd"}`).
+It only fills the user's drawer: nothing it does can put a byte into the shell.
 
 The socket path is checked with `qa_instance.guard_socket_path`: anything outside the QA root, or under
 the user's `~/.nostromo`, is refused.
@@ -48,6 +52,11 @@ def list_terminals(qa_root, focus_tag, timeout=30):
 def request_follow(qa_root, focus_tag, terminal_id, reason, timeout=330):
     return call_tool(qa_root, focus_tag, "nostromo.request_follow",
                      {"terminal_id": terminal_id, "reason": reason}, timeout)
+
+
+def stage(qa_root, focus_tag, terminal_id, op, args=None, timeout=30):
+    return call_tool(qa_root, focus_tag, "nostromo.terminal_staging",
+                     {**(args or {}), "terminal_id": terminal_id, "op": op}, timeout)
 
 
 def set_pane_layout(qa_root, focus_tag, ratios, timeout=30):
@@ -99,6 +108,8 @@ def main(argv):
         elif command == "request-follow" and len(argv) in (6, 7):
             wait = float(argv[6]) if len(argv) == 7 else 330
             outcome = request_follow(argv[2], argv[3], argv[4], argv[5], timeout=wait)
+        elif command == "stage" and len(argv) in (6, 7):
+            outcome = stage(argv[2], argv[3], argv[4], argv[5], json.loads(argv[6]) if len(argv) == 7 else None)
         elif command == "set-pane-layout" and len(argv) == 5:
             outcome = set_pane_layout(argv[2], argv[3], json.loads(argv[4]))
         else:
