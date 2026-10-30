@@ -27,6 +27,7 @@ pub mod show;
 pub mod teri;
 pub mod terminal;
 pub mod terminal_follow;
+pub mod terminal_staging;
 pub mod tracker;
 
 use serde_json::{json, Value};
@@ -547,6 +548,7 @@ pub fn tool_descriptors() -> Vec<Value> {
                 "additionalProperties": false
             }
         }),
+        terminal_staging::descriptor(),
         // ── Phase 3: Perri mutations ───────────────────────────────────────
         json!({
             "name": "perri.load_pr",
@@ -784,6 +786,7 @@ fn is_network_withheld_tool(name: &str) -> bool {
         || name == LIST_TERMINALS_TOOL
         || name == REQUEST_FOLLOW_TOOL
         || name == READ_TERMINAL_SCREEN_TOOL
+        || name == TERMINAL_STAGING_TOOL
         || ["fred.", "teri.", "mother.", "huey."]
             .iter()
             .any(|prefix| name.starts_with(prefix))
@@ -821,6 +824,8 @@ const LIST_TERMINALS_TOOL: &str = "nostromo.list_terminals";
 const REQUEST_FOLLOW_TOOL: &str = "nostromo.request_follow";
 /// The tool that reads a followed terminal's screen.
 pub(crate) const READ_TERMINAL_SCREEN_TOOL: &str = crate::terminal::agent_api::READ_SCREEN_TOOL;
+/// The tool that edits the staging list of a followed terminal.
+pub(crate) const TERMINAL_STAGING_TOOL: &str = terminal_staging::NAME;
 
 /// `Forbidden` for `name`. A refused [`OPEN_TERMINAL_TOOL`] is also audited
 /// (`refused`, `op: "open"`, `code: "forbidden"`: the focus and tool name,
@@ -832,6 +837,7 @@ fn forbidden(state: &McpSharedState, pty_id: Option<&str>, name: &str) -> ToolRe
         LIST_TERMINALS_TOOL => Some("list"),
         REQUEST_FOLLOW_TOOL => Some("follow_request"),
         READ_TERMINAL_SCREEN_TOOL => Some("read"),
+        TERMINAL_STAGING_TOOL => Some("staging"),
         _ => None,
     };
     if let (Some(op), Some(daemon)) = (op, &state.daemon) {
@@ -1184,6 +1190,7 @@ async fn dispatch_inner(
         LIST_TERMINALS_TOOL => terminal_follow::list_terminals(state, arguments, pty_id).await,
         REQUEST_FOLLOW_TOOL => terminal_follow::request_follow(state, arguments, pty_id).await,
         READ_TERMINAL_SCREEN_TOOL => terminal_follow::read_screen(state, arguments, pty_id).await,
+        TERMINAL_STAGING_TOOL => terminal_staging::handle(state, arguments, pty_id).await,
         "nostromo.apply_layout" => {
             let args = arguments.cloned().unwrap_or_default();
             apply_layout::apply_layout(state, &args, pty_id).await

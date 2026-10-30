@@ -1780,6 +1780,29 @@ pub enum ClientMsg {
         target_tag: String,
         text: String,
     },
+
+    // ── command staging (S1a; every one refused over TCP) ─────────────────────
+    /// The app placed a staged entry's text at the prompt itself (through its
+    /// own `terminal_input`) and reports it. Carries no text: the daemon never
+    /// writes to the terminal because of it. Operator app only.
+    TerminalStagingInserted {
+        terminal_id: String,
+        entry_id: String,
+        /// How many bytes the app inserted.
+        bytes: u32,
+        /// The user confirmed a warning before inserting (S2; false in S1).
+        #[serde(default)]
+        confirmed: bool,
+    },
+    /// The user removed a staged entry. Operator app only.
+    TerminalStagingRemove {
+        terminal_id: String,
+        entry_id: String,
+    },
+    /// The user cleared the staging list. Operator app only.
+    TerminalStagingClear {
+        terminal_id: String,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -2081,6 +2104,35 @@ pub struct TerminalInfo {
     /// figure (a QA daemon scales it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_warn_after_secs: Option<u64>,
+}
+
+/// The state of a staging list in `ServerMsg::TerminalStagingList`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalStagingState {
+    /// Its follower can still stage, edit and clear.
+    Active,
+    /// The follow ended: kept for the user, no agent can change it.
+    Frozen,
+    /// No list: no drawer.
+    #[serde(rename = "none")]
+    NoList,
+}
+
+/// One staged command in `ServerMsg::TerminalStagingList`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedEntryWire {
+    pub id: String,
+    /// 1-based position, recomputed on every change.
+    pub number: u32,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub staged_at: chrono::DateTime<chrono::Utc>,
+    pub changed_at: chrono::DateTime<chrono::Utc>,
+    pub inserted_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_inserted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One open remote shell in `ServerMsg::TerminalRemoteSummary`.
@@ -2673,6 +2725,23 @@ pub enum ServerMsg {
     TerminalRemoteSummary {
         #[serde(default)]
         shells: Vec<RemoteShellSummary>,
+    },
+
+    // ── command staging (S1a; `LocalOnly`, targeted) ──────────────────────────
+    /// A terminal's staging list, whole, sent on every change and, for every
+    /// list, to a connection that declares `terminal_staging_ui` when it
+    /// subscribes. `state` is `active`, `frozen` (the follow ended: the list
+    /// is kept, no agent can change it) or `none` (no list: no drawer; then
+    /// `entries` is empty). Targeted to operator-app connections that declared
+    /// `terminal_staging_ui`, and to no one else.
+    TerminalStagingList {
+        terminal_id: String,
+        pane_id: String,
+        state: TerminalStagingState,
+        owner_tag: String,
+        agent_name: String,
+        revision: u64,
+        entries: Vec<StagedEntryWire>,
     },
 
     // ── remote shells (2a; all `LocalOnly`) ───────────────────────────────────

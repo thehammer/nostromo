@@ -1378,7 +1378,12 @@ fn handle_client_msg(
         | ClientMsg::TerminalClose { .. }
         | ClientMsg::TerminalRestart { .. }
         | ClientMsg::TerminalKeepAlive { .. }
-        | ClientMsg::TerminalRefusalReport { .. }) => {
+        | ClientMsg::TerminalRefusalReport { .. }
+        // Command staging: the user's removals and the app's insert report.
+        // Operator app only; none of them writes to a terminal.
+        | ClientMsg::TerminalStagingInserted { .. }
+        | ClientMsg::TerminalStagingRemove { .. }
+        | ClientMsg::TerminalStagingClear { .. }) => {
             handle_terminal_msg(msg, cap, peer, conn_key, terminals, targeted_tx);
         }
 
@@ -2503,6 +2508,17 @@ fn handle_terminal_msg(
         ClientMsg::TerminalClose { terminal_id } => mgr.close(cap, &terminal_id),
         ClientMsg::TerminalRestart { terminal_id } => mgr.restart(cap, &terminal_id).map(|_| ()),
         ClientMsg::TerminalKeepAlive { terminal_id } => mgr.keep_alive(cap, &terminal_id),
+        ClientMsg::TerminalStagingInserted {
+            terminal_id,
+            entry_id,
+            bytes,
+            confirmed,
+        } => mgr.staging_inserted(cap, &terminal_id, &entry_id, bytes, confirmed),
+        ClientMsg::TerminalStagingRemove {
+            terminal_id,
+            entry_id,
+        } => mgr.staging_remove(cap, &terminal_id, &entry_id),
+        ClientMsg::TerminalStagingClear { terminal_id } => mgr.staging_clear(cap, &terminal_id),
         ClientMsg::TerminalRefusalReport {
             terminal_id,
             op,
@@ -3438,7 +3454,10 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         | ServerMsg::TerminalReplay { .. }
         | ServerMsg::TerminalRefused { .. }
         | ServerMsg::TerminalRemoteSummary { .. }
-        | ServerMsg::TerminalList { .. } => false,
+        | ServerMsg::TerminalList { .. }
+        // A staging list is targeted to connections that declared
+        // `terminal_staging_ui`, never broadcast.
+        | ServerMsg::TerminalStagingList { .. } => false,
         // Remote shell frames name a production target and the agent's reason:
         // each goes to chosen connections only, never to everyone.
         ServerMsg::RemoteShellTargets { .. }

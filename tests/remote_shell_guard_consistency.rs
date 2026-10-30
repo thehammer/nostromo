@@ -286,11 +286,36 @@ fn no_terminal_or_shell_tool_has_a_field_a_command_could_go_in() {
         for forbidden in [
             "command", "cmd", "script", "args", "argv", "input", "keys", "text", "env",
         ] {
+            // The one documented exception: staging's display text (see
+            // `tests/no_shell_surface.rs` for the reason).
+            if (name, forbidden) == STAGING_COMMAND_EXCEPTION {
+                continue;
+            }
             assert!(
                 !properties.contains_key(forbidden),
                 "{name} offers a `{forbidden}` field"
             );
         }
+    }
+}
+
+/// `(tool, property)`: `command` on the staging tool is display text only:
+/// single-line, printable, at most 1,000 characters; the app inserts it only on
+/// a human click and never adds a line break.
+const STAGING_COMMAND_EXCEPTION: (&str, &str) = ("nostromo.terminal_staging", "command");
+
+#[test]
+fn only_the_staging_tool_has_a_command_property_among_terminal_and_shell_tools() {
+    for tool in terminal_or_shell_tools() {
+        let name = tool["name"].as_str().unwrap();
+        let has_command = tool["inputSchema"]["properties"]
+            .as_object()
+            .is_some_and(|p| p.contains_key("command"));
+        assert_eq!(
+            has_command,
+            name == STAGING_COMMAND_EXCEPTION.0,
+            "{name}: `command` is allowed on the staging tool and nowhere else"
+        );
     }
 }
 

@@ -10990,3 +10990,122 @@ async fn a_local_client_receives_the_tracker_board_live_and_on_attach_for_every_
         assert_eq!(frames_of(&replay, "tracker_summary", tag).len(), 1, "{tag}");
     }
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Command staging (S1a): the staging list and its client frames never cross to
+// the network, and no local process but the verified app can use them.
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn staging_list_frame(state: &str, command: &str) -> ServerMsg {
+    ServerMsg::TerminalStagingList {
+        terminal_id: "t-staging".into(),
+        pane_id: "terminal-00000001".into(),
+        state: serde_json::from_value(serde_json::json!(state)).unwrap(),
+        owner_tag: "cody-staging".into(),
+        agent_name: "Cody".into(),
+        revision: 3,
+        entries: vec![nostromo::ipc::protocol::StagedEntryWire {
+            id: "s-00000001".into(),
+            number: 1,
+            command: command.into(),
+            note: None,
+            staged_at: chrono::Utc::now(),
+            changed_at: chrono::Utc::now(),
+            inserted_count: 1,
+            last_inserted_at: None,
+        }],
+    }
+}
+
+fn staging_client_frames() -> Vec<(&'static str, ClientMsg)> {
+    vec![
+        (
+            "terminal_staging_inserted",
+            ClientMsg::TerminalStagingInserted {
+                terminal_id: "t-staging".into(),
+                entry_id: "s-00000001".into(),
+                bytes: 4,
+                confirmed: false,
+            },
+        ),
+        (
+            "terminal_staging_remove",
+            ClientMsg::TerminalStagingRemove {
+                terminal_id: "t-staging".into(),
+                entry_id: "s-00000001".into(),
+            },
+        ),
+        (
+            "terminal_staging_clear",
+            ClientMsg::TerminalStagingClear {
+                terminal_id: "t-staging".into(),
+            },
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_tcp_client_subscribed_to_everything_never_receives_a_terminal_staging_list() {
+    const CANARY: &str = "staging-canary-8c2f";
+    let h = spawn_server().await;
+    let (mut tcp, mut seen) = h.tcp(vec![]).await;
+
+    // Even broadcast by a buggy daemon, the list stays off the network.
+    for state in ["active", "frozen", "none"] {
+        h.broadcast(staging_list_frame(state, &format!("echo {CANARY}")));
+    }
+    h.broadcast(focus_registry_updated());
+    seen.extend(
+        recv_until(&mut tcp, |m| {
+            matches!(m, ServerMsg::FocusRegistryUpdated { .. })
+        })
+        .await,
+    );
+
+    assert_eq!(
+        count(&seen, |m| matches!(
+            m,
+            ServerMsg::TerminalStagingList { .. }
+        )),
+        0,
+        "a staging list reached a network peer: {seen:?}"
+    );
+    assert!(!json_of(&seen).contains(CANARY));
+}
+
+#[tokio::test]
+async fn a_tcp_client_s_staging_frames_are_refused_with_requires_secure_connection() {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    for (name, msg) in staging_client_frames() {
+        let frames = attack(&mut tcp, msg).await;
+        assert_refused(&frames, name);
+    }
+}
+
+#[tokio::test]
+async fn a_local_script_s_staging_frames_are_refused_and_change_nothing() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+
+    for (name, msg) in staging_client_frames() {
+        let frames = attack(&mut script, msg).await;
+        let refused = frames.iter().any(|m| {
+            matches!(m, ServerMsg::TerminalRefused { op, code, .. }
+                if op == name.trim_start_matches("terminal_") && code == "terminal_control_forbidden")
+        });
+        assert!(
+            refused,
+            "{name}: expected a terminal_refused, got {frames:?}"
+        );
+        assert_eq!(
+            count(&frames, |m| matches!(
+                m,
+                ServerMsg::TerminalStagingList { .. }
+            )),
+            0,
+            "{name}: a refused frame sent a list"
+        );
+    }
+}

@@ -49,11 +49,14 @@ use crate::terminal::audit::{AuditEvent, AuditLog};
 use crate::terminal::redact::Redactor;
 use crate::terminal::remote_request::RemoteOutcome;
 use crate::terminal::session::{ScreenHook, TerminalSession};
+use crate::terminal::staging::{text::sanitize_agent_name, StagingStore};
 use crate::terminal::{OperatorCap, TerminalManager};
 use uuid::Uuid;
 
 /// How often a follow's pump asks its policy what to do.
 pub const TICK: Duration = Duration::from_millis(100);
+/// Staged-insert notices a follow keeps for its next delivery (a list holds at most 12).
+const MAX_PENDING_STAGED: usize = 12;
 /// Chunks a follow's pump may fall behind by before the follow pauses itself
 /// (the reader outran it: that much output is a flood anyway).
 const CHUNK_QUEUE: usize = 256;
@@ -293,6 +296,10 @@ struct Follow {
     assembler: LineAssembler,
     policy: DeliveryPolicy,
     redactor: Redactor,
+    /// Staged entries (by number) the user placed at the prompt since the last
+    /// delivery: each is told to the follower ahead of the next one. At most
+    /// [`MAX_PENDING_STAGED`], no number twice; gone with the follow.
+    pending_staged: Vec<u8>,
     /// A full-screen program is showing.
     alt_screen: bool,
     /// The screen changed since the policy last saw it.
@@ -432,6 +439,10 @@ pub struct FollowManager {
     sink: Arc<dyn FollowSink>,
     audit: AuditLog,
     sensitive: SensitiveTags,
+    /// The staging lists: a leaf lock, taken under `state` (see
+    /// [`crate::terminal::staging`]); the frames it leaves are flushed after
+    /// `state` is let go.
+    staging: Arc<StagingStore>,
     /// Focus tags whose session ended, not yet acted on (the session
     /// manager's end hook fills it; a leaf lock).
     ended: Mutex<Vec<String>>,
@@ -460,6 +471,7 @@ impl FollowManager {
             sink,
             audit: mgr.audit().clone(),
             sensitive: mgr.sensitive_tags(),
+            staging: mgr.staging(),
             ended: Mutex::new(Vec::new()),
             ended_notify: Arc::new(Notify::new()),
             runtime: tokio::runtime::Handle::try_current().ok(),
@@ -609,6 +621,7 @@ impl FollowManager {
                 assembler: LineAssembler::new(),
                 policy: DeliveryPolicy::new(),
                 redactor: Redactor::new(),
+                pending_staged: Vec::new(),
                 alt_screen,
                 screen_dirty: false,
                 unreported: 0,
@@ -655,6 +668,17 @@ impl FollowManager {
                     self.audit_delivery(terminal_id, &follow, DeliveryKind::Screen, &delivery);
                 }
             }
+            // A new local follower starts with an empty staging list (the
+            // store's lock is a leaf: held only inside this call). A remote
+            // terminal gets none: staging into one is opened deliberately later.
+            if info.kind == TerminalKind::Local {
+                self.staging.follow_started(
+                    terminal_id,
+                    &info.pane_id,
+                    follower_tag,
+                    &sanitize_agent_name(None, follower_tag),
+                );
+            }
             state.follows.insert(terminal_id.to_string(), follow);
             self.spawn_pump(terminal_id, id, receiver);
         }
@@ -681,6 +705,16 @@ impl FollowManager {
             follow.end();
             self.sink.drop_injected(&follow.follower, terminal_id);
             self.ended_with_notice(terminal_id, &follow, reason);
+            match reason {
+                // The user kept the list; no agent may change it now.
+                EndReason::UserStopped | EndReason::SessionEnded => {
+                    self.staging.follow_ended(terminal_id)
+                }
+                EndReason::AppClosed => self.staging.drop_list(terminal_id, "app_closed"),
+                // Replaced by the new follower's list; or the terminal is gone
+                // (the terminal manager removes the list).
+                EndReason::MovedTo(_) | EndReason::PaneClosed | EndReason::TerminalRestarted => {}
+            }
         }
         self.broadcast_state(terminal_id);
         Ok(())
@@ -925,17 +959,43 @@ impl FollowManager {
         let ended: Vec<String> = {
             let mut state = self.lock_state();
             let follows: Vec<(String, Follow)> = state.follows.drain().collect();
-            follows
+            let ended: Vec<String> = follows
                 .into_iter()
                 .map(|(terminal_id, follow)| {
                     follow.end();
                     self.ended_with_notice(&terminal_id, &follow, &EndReason::AppClosed);
                     terminal_id
                 })
-                .collect()
+                .collect();
+            // No one is left to see a list, frozen or not.
+            self.staging.app_closed();
+            ended
         };
-        for terminal_id in ended {
-            self.broadcast_state(&terminal_id);
+        for terminal_id in &ended {
+            self.broadcast_state(terminal_id);
+        }
+        // Audits of lists nobody followed any more (no frame has a recipient).
+        if let Some(tm) = self.terminals.upgrade() {
+            lock(&tm).flush_staging();
+        }
+    }
+
+    /// The app reported inserting staged entry `number` of `terminal_id`'s list
+    /// (owned by `owner`): if `owner` still follows, it is told at the next
+    /// delivery. The terminal manager calls this under its lock.
+    pub(crate) fn note_staged_insert(&self, terminal_id: &str, owner: &str, number: u8) {
+        let mut state = self.lock_state();
+        let Some(follow) = state
+            .follows
+            .get_mut(terminal_id)
+            .filter(|f| f.follower == owner)
+        else {
+            return;
+        };
+        if !follow.pending_staged.contains(&number)
+            && follow.pending_staged.len() < MAX_PENDING_STAGED
+        {
+            follow.pending_staged.push(number);
         }
     }
 
@@ -967,6 +1027,7 @@ impl FollowManager {
             if let Some(follow) = state.follows.remove(id) {
                 follow.end();
                 self.audit_stopped(id, &follow, &EndReason::SessionEnded);
+                self.staging.follow_ended(id);
             }
         }
         ids
@@ -1049,7 +1110,18 @@ impl FollowManager {
     fn deliver_due(&self, terminal_id: &str, follow: &mut Follow, kind: DeliveryKind) {
         let delivery = follow.take_delivery(kind);
         if let Some(element) = self.delivery_element(terminal_id, follow, kind, &delivery) {
-            if self.inject(follow, &element, terminal_id, true) {
+            // Entries the user placed at the prompt are told first, in the
+            // same message (so the same coalesce key as the delivery). They are
+            // forgotten only once the session has taken the message: one it
+            // could not take leaves them for the next delivery.
+            let mut message = String::new();
+            for number in &follow.pending_staged {
+                message.push_str(&staged_inserted_notice(terminal_id, &follow.pane, *number));
+                message.push_str("\n\n");
+            }
+            message.push_str(&element);
+            if self.inject(follow, &message, terminal_id, true) {
+                follow.pending_staged.clear();
                 self.audit_delivery(terminal_id, follow, kind, &delivery);
             }
         }
@@ -1205,7 +1277,10 @@ impl FollowManager {
     /// Tell clients the terminal's follower changed. Never under `state`.
     fn broadcast_state(&self, terminal_id: &str) {
         if let Some(tm) = self.terminals.upgrade() {
-            lock(&tm).send_state(terminal_id);
+            let tm = lock(&tm);
+            tm.send_state(terminal_id);
+            // Whatever the follow ending or starting did to a staging list.
+            tm.flush_staging();
         }
     }
 
@@ -1303,6 +1378,21 @@ fn notice(
         escape_attribute(pane),
         // The sentence names the pane, whose text (a directory) is not ours.
         neutralize_elements(sentence),
+    )
+}
+
+/// The notice that the user placed staged entry `number` at the prompt of
+/// `pane`: the element, then one plain sentence. The Mac's transcript parser
+/// matches these bytes. It says the text was *placed*, never that it ran.
+pub(crate) fn staged_inserted_notice(terminal_id: &str, pane: &str, number: u8) -> String {
+    notice(
+        terminal_id,
+        pane,
+        "staged_inserted",
+        Some(&format!("entry_{number}")),
+        &format!(
+            "The user placed staged entry {number} at the prompt of {pane}. Only the user's Enter runs it; any output arrives as usual."
+        ),
     )
 }
 

@@ -24,6 +24,8 @@ use super::launcher::Placement;
 use super::remote_request::{
     self, clean_reason, Clock, FocusLimits, LimitRefused, RemoteRequest, RemoteResult,
 };
+use super::staging::text::sanitize_agent_name;
+use super::staging::{StagingError, StagingList, StagingTextCode, MAX_ENTRIES};
 use super::{TerminalError, TerminalManager};
 use crate::ipc::decisions::{DecisionOutcome, DecisionRegistry};
 use crate::ipc::protocol::{
@@ -444,6 +446,130 @@ impl TerminalAgentApi {
         }
     }
 
+    /// An agent's call on the staging list of a terminal it follows. The only
+    /// way from MCP to the store, and it can only edit a display list: nothing
+    /// here (or in the store) writes a byte to a terminal, and this handle holds
+    /// no [`super::OperatorCap`].
+    ///
+    /// Checks run in this order and a refused call changes nothing (no list
+    /// change, no frame, no revision): `not_following` (no such terminal, not
+    /// followed by the caller, a former follower of a frozen list; another
+    /// focus's terminal is never revealed), `terminal_not_running`,
+    /// `no_operator` (no app that can show the drawer is connected),
+    /// `staging_disabled` (anything but a local terminal in S1), `rate_limited`
+    /// (changes only), then the content's own codes (text, position, entry,
+    /// `list_full`). A refusal is audited as `staging_refused` (code only).
+    pub fn staging(
+        &self,
+        focus_tag: &str,
+        request: StagingRequest,
+    ) -> Result<StagingOutcome, StagingRefusal> {
+        let result = self.staging_checked(focus_tag, &request);
+        {
+            let manager = self.lock();
+            if let Err(refusal) = &result {
+                manager.audit_staging_refused(
+                    Some(&request.terminal_id),
+                    focus_tag,
+                    request.op.name(),
+                    refusal.code,
+                );
+            }
+            // Frames and audit notes of whatever the call changed.
+            manager.flush_staging();
+        }
+        result
+    }
+
+    fn staging_checked(
+        &self,
+        focus_tag: &str,
+        request: &StagingRequest,
+    ) -> Result<StagingOutcome, StagingRefusal> {
+        let terminal_id = request.terminal_id.as_str();
+        let (follow, store) = {
+            let m = self.lock();
+            (m.follow(), m.staging())
+        };
+        if !follow
+            .as_ref()
+            .is_some_and(|f| f.is_follower(focus_tag, terminal_id))
+        {
+            return Err(StagingRefusal::new("not_following"));
+        }
+        let (info, ui_connected) = {
+            let m = self.lock();
+            (m.info(terminal_id), m.staging_ui_connected())
+        };
+        let Some(info) = info else {
+            return Err(StagingRefusal::new("not_following"));
+        };
+        if info.status != TerminalStatus::Running {
+            return Err(StagingRefusal::new("terminal_not_running"));
+        }
+        if !ui_connected {
+            return Err(StagingRefusal::new("no_operator")
+                .detail("the Nostromo app is not open to show the staging drawer"));
+        }
+        if info.kind != TerminalKind::Local {
+            return Err(StagingRefusal::new("staging_disabled")
+                .detail("staging into remote shells is not available yet"));
+        }
+        if request.op.is_change() {
+            store
+                .take_change(focus_tag, (self.clock)())
+                .map_err(|wait| StagingRefusal::new("rate_limited").retry_after(wait))?;
+        }
+        let name = sanitize_agent_name(request.agent_name.as_deref(), focus_tag);
+        match &request.op {
+            StagingOp::List => store
+                .list(focus_tag, terminal_id, &name)
+                .map(StagingOutcome::List),
+            StagingOp::Stage {
+                command,
+                note,
+                position,
+            } => store
+                .stage(
+                    focus_tag,
+                    terminal_id,
+                    &name,
+                    command,
+                    note.as_deref(),
+                    *position,
+                )
+                .map(|(entry_id, number, entries)| StagingOutcome::Staged {
+                    entry_id,
+                    number,
+                    entries,
+                }),
+            StagingOp::Replace {
+                entry_id,
+                command,
+                note,
+            } => store
+                .replace(
+                    focus_tag,
+                    terminal_id,
+                    &name,
+                    entry_id,
+                    command.as_deref(),
+                    note.as_deref(),
+                )
+                .map(|number| StagingOutcome::Replaced {
+                    entry_id: entry_id.clone(),
+                    number,
+                }),
+            StagingOp::Remove { entry_id } => store
+                .remove(focus_tag, terminal_id, &name, entry_id)
+                .map(|entries| StagingOutcome::Removed { entries }),
+            StagingOp::Clear => store
+                .clear(focus_tag, terminal_id, &name)
+                .map(|()| StagingOutcome::Cleared),
+        }
+        .map_err(StagingRefusal::from)
+    }
+
     /// Is `pane_id` in `tag` a registered terminal leaf?
     ///
     /// Takes the manager's lock, so call it before locking the pane registry,
@@ -531,6 +657,125 @@ impl ScreenReadRefused {
             Self::Withheld => "redaction_failed",
             Self::TooSoon => READ_TOO_SOON,
             Self::Limit => READ_LIMIT,
+        }
+    }
+}
+
+/// What an agent asks of a terminal's staging list.
+#[derive(Debug, Clone)]
+pub struct StagingRequest {
+    pub terminal_id: String,
+    /// The agent's name as its focus declares it (sanitised before it is shown).
+    pub agent_name: Option<String>,
+    pub op: StagingOp,
+}
+
+/// One staging operation. A text is display text: it is never run.
+#[derive(Debug, Clone)]
+pub enum StagingOp {
+    List,
+    Stage {
+        command: String,
+        note: Option<String>,
+        /// Insert before the entry at this number (1 to count + 1); else append.
+        position: Option<usize>,
+    },
+    Replace {
+        entry_id: String,
+        command: Option<String>,
+        /// `Some("")` clears the note.
+        note: Option<String>,
+    },
+    Remove {
+        entry_id: String,
+    },
+    Clear,
+}
+
+impl StagingOp {
+    /// The op's name, as the tool and the audit trail say it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Stage { .. } => "stage",
+            Self::Replace { .. } => "replace",
+            Self::Remove { .. } => "remove",
+            Self::Clear => "clear",
+        }
+    }
+
+    fn is_change(&self) -> bool {
+        !matches!(self, Self::List)
+    }
+}
+
+/// What a staging call did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagingOutcome {
+    List(StagingList),
+    Staged {
+        entry_id: String,
+        number: usize,
+        entries: usize,
+    },
+    Replaced {
+        entry_id: String,
+        number: usize,
+    },
+    Removed {
+        entries: usize,
+    },
+    Cleared,
+}
+
+/// Why a staging call changed nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagingRefusal {
+    pub code: &'static str,
+    pub detail: Option<String>,
+    /// Whole seconds (at least one) until a `rate_limited` call may be tried again.
+    pub retry_after: Option<u64>,
+}
+
+impl StagingRefusal {
+    fn new(code: &'static str) -> Self {
+        Self {
+            code,
+            detail: None,
+            retry_after: None,
+        }
+    }
+
+    fn detail(mut self, detail: &str) -> Self {
+        self.detail = Some(detail.to_string());
+        self
+    }
+
+    fn retry_after(mut self, seconds: u64) -> Self {
+        self.retry_after = Some(seconds);
+        self
+    }
+}
+
+impl From<StagingError> for StagingRefusal {
+    fn from(e: StagingError) -> Self {
+        match e {
+            StagingError::NotFollowing => Self::new("not_following"),
+            StagingError::Text(code, field) => {
+                let detail = match code {
+                    StagingTextCode::LooksLikeSecret => field,
+                    other => other.detail(),
+                };
+                Self::new(code.code()).detail(detail)
+            }
+            StagingError::InvalidPosition => Self::new("invalid_position").detail(
+                "position is the number of the entry to insert before, 1 to the entry count plus one",
+            ),
+            StagingError::UnknownEntry => {
+                Self::new("unknown_entry").detail("no entry has that entry_id; call list")
+            }
+            StagingError::ListFull => Self::new("list_full")
+                .detail(&format!("at most {MAX_ENTRIES} entries; remove one first")),
         }
     }
 }
