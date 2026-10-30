@@ -273,6 +273,11 @@ Returns Mother's job list.
 
 **Output**: `{ "jobs": [ { "id", "title", "status", "created_at", "updated_at" }, ... ] }`
 
+In `nostromd` every job (here and in `mother.get_job`) also carries
+`nostromo`, the daemon's own note on the job: `nostromo.origin` (`kind` `focus`,
+`unverified`, `you` or `unknown`, with the focus tag, name and `closed` flag)
+and `nostromo.notify`. See [`docs/mother-focus.md`](../mother-focus.md).
+
 Source: `src/mcp/tools/mother.rs`
 
 ---
@@ -283,7 +288,7 @@ Returns a single Mother job by id.
 
 **Input**: `{ "id": "job-id" }`
 
-**Output**: job object or `null`.
+**Output**: job object (with `nostromo`, as in `mother.list_jobs`) or `null`.
 
 Source: `src/mcp/tools/mother.rs`
 
@@ -763,7 +768,8 @@ Enqueue a plan file as a new Mother job (`mother add`).
   "base": "origin/main",
   "max_cost": 10,
   "label": "my-label",
-  "depends_on": ["ab12cd34"]
+  "depends_on": ["ab12cd34"],
+  "notify": "quiet"
 }
 ```
 
@@ -775,7 +781,24 @@ Enqueue a plan file as a new Mother job (`mother add`).
 - `repo`, `branch`, `repo_path`, `base`, `label` and every `depends_on` entry
   are rejected (`invalid_args`) if they start with `-`.
 
-**Output**: `{ "id": "job-id" }` .
+- `notify` is optional: `wake`, `quiet` or `off`; anything else is
+  `invalid_args` (and `mother add` never runs). It lowers, never raises, how
+  this focus is told about the job. It is kept in the daemon's origin book and
+  appears as `nostromo.notify` on the job.
+
+**Origin.** The daemon records the calling focus as the job's origin: its tag,
+its name at that moment, and its current Claude session id, whatever the
+arguments say. It passes `--origin-session <sid>` to `mother add`, and
+`--origin-focus` / `--origin-focus-name` too when the installed `mother`
+supports them (see [`docs/mother-focus.md`](../mother-focus.md)). A caller that
+is not a focus the daemon knows stamps nothing, and the call behaves as it did
+before. Arguments that name another origin (`origin`, `origin_focus`,
+`origin_focus_name`, `origin_session`, `focus`) are ignored; they are not part
+of the schema, and the result says so with `origin_overridden`.
+
+**Output**: `{ "id": "job-id", "origin": { "kind": "focus", "focus_tag": "claudia-C9D6B773" }, "origin_overridden": true }`.
+`origin` is present when the caller is a focus; `origin_overridden` only when an
+origin argument was sent.
 Errors: `invalid_args`, `plan_not_found`, `mother_cli_error` (carries the CLI's
 stderr; includes CLI timeouts — every daemon-side `mother` call is bounded at
 30 s, stdin closed, process killed on timeout; override with

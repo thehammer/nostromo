@@ -1,0 +1,212 @@
+{
+  "jobs": [
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-focus",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": {
+        "notice": {
+          "status": "told"
+        },
+        "notify": "quiet",
+        "origin": {
+          "closed": false,
+          "focus_name": "Fix the login flow",
+          "focus_tag": "claudia-C9D6B773",
+          "kind": "focus",
+          "name_snapshot": "Fix login",
+          "session_prefix": "5f3c9a10"
+        }
+      },
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "running",
+      "title": "Fix the login flow"
+    },
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-unverified",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": {
+        "origin": {
+          "focus_tag": "claudia-D00DFEED",
+          "kind": "unverified",
+          "name_snapshot": "Claimed name"
+        }
+      },
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "queued",
+      "title": "Claims a focus"
+    },
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-you",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": {
+        "notify": "off",
+        "origin": {
+          "kind": "you"
+        }
+      },
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "awaiting",
+      "title": "Sent from the app"
+    },
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-unknown",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": {
+        "origin": {
+          "kind": "unknown"
+        }
+      },
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "succeeded",
+      "title": "Queued from a shell"
+    },
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-robot",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": {
+        "notify": "wake",
+        "origin": {
+          "focus_name": "Future focus",
+          "focus_tag": "claudia-CAFE0001",
+          "kind": "robot",
+          "name_snapshot": "Future focus"
+        }
+      },
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "succeeded",
+      "title": "From a future daemon"
+    },
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-bad-string",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": "oops",
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "succeeded",
+      "title": "Annotation is a string"
+    },
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-bad-origin",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": {
+        "notify": "wake",
+        "origin": 7
+      },
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "succeeded",
+      "title": "Origin is a number"
+    }
+  ],
+  "type": "mother_jobs"
+}

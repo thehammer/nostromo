@@ -157,6 +157,7 @@ async fn send_once(hub: &WorkHub, request: SendRequest) -> Result<SendOutcome, W
         destination,
         select_for_client: request.client_id,
         caller: None,
+        queued_by_app: true,
         model: None,
         effort: None,
     };

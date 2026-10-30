@@ -28,6 +28,16 @@ pub const KEEP_ROTATED: usize = 12;
 const LIVE_STEM: &str = "terminal";
 const SUFFIX: &str = ".jsonl";
 
+/// The stem rotated files are named after: the live file's own stem
+/// (`terminal` for the terminal audit, `mother` for the Mother audit, which
+/// reuses this writer).
+fn stem_of(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(LIVE_STEM)
+        .to_owned()
+}
+
 /// The live file under the user's home: `~/.nostromo/audit/terminal.jsonl`.
 pub fn default_path() -> PathBuf {
     dirs_next::home_dir()
@@ -302,17 +312,18 @@ pub struct AuditPin {
 }
 
 #[derive(Serialize)]
-struct Line<'a> {
+struct Line<'a, E: Serialize> {
     ts: String,
     #[serde(flatten)]
-    event: &'a AuditEvent,
+    event: &'a E,
 }
 
 /// The clock stamped on each line. Injectable for tests.
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
-/// Appends [`AuditEvent`]s to one JSONL file. Cheap to clone; clones share
-/// the append lock.
+/// Appends audit events to one JSONL file (the terminal's [`AuditEvent`]s, or
+/// another subsystem's closed event enum: see `crate::mother::audit`). Cheap
+/// to clone; clones share the append lock.
 #[derive(Clone)]
 pub struct AuditLog {
     path: Option<PathBuf>,
@@ -405,7 +416,7 @@ impl AuditLog {
 
     /// Append one event as one line, rotating first if the line would push
     /// the live file past the threshold.
-    pub fn append(&self, event: &AuditEvent) -> io::Result<()> {
+    pub fn append<E: Serialize>(&self, event: &E) -> io::Result<()> {
         if self.unavailable {
             return Err(io::Error::other("audit log unavailable"));
         }
@@ -413,7 +424,7 @@ impl AuditLog {
             return Ok(());
         };
         let now = (self.clock)();
-        let mut line = serde_json::to_vec(&Line {
+        let mut line = serde_json::to_vec(&Line::<E> {
             ts: now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             event,
         })
@@ -433,11 +444,12 @@ impl AuditLog {
     /// rotated files beyond `keep`.
     fn rotate(&self, path: &Path, now: DateTime<Utc>) -> io::Result<()> {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let stem = stem_of(path);
         let stamp = now.format("%Y%m%dT%H%M%S").to_string();
-        let mut target = dir.join(format!("{LIVE_STEM}-{stamp}{SUFFIX}"));
+        let mut target = dir.join(format!("{stem}-{stamp}{SUFFIX}"));
         let mut n = 1;
         while target.exists() {
-            target = dir.join(format!("{LIVE_STEM}-{stamp}-{n}{SUFFIX}"));
+            target = dir.join(format!("{stem}-{stamp}-{n}{SUFFIX}"));
             n += 1;
         }
         fs::rename(path, &target)?;
@@ -446,7 +458,7 @@ impl AuditLog {
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                rotated_order(&name).map(|key| (key, e.path()))
+                rotated_order(&stem, &name).map(|key| (key, e.path()))
             })
             .collect();
         // Oldest first: by stamp, then by collision suffix.
@@ -475,9 +487,9 @@ fn open_live(path: &Path) -> io::Result<fs::File> {
 
 /// `terminal-<stamp>[-N].jsonl` → `(stamp, N)` (0 without a suffix); `None`
 /// for any other file.
-fn rotated_order(name: &str) -> Option<(String, u32)> {
+fn rotated_order(stem: &str, name: &str) -> Option<(String, u32)> {
     let rest = name
-        .strip_prefix(LIVE_STEM)?
+        .strip_prefix(stem)?
         .strip_prefix('-')?
         .strip_suffix(SUFFIX)?;
     let (stamp, n) = match rest.split_once('-') {

@@ -19,6 +19,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use super::mother_mutators::apply_origin;
 use super::untrusted::{
     one_line, sanitize_instruction, unescape_id, NonceFence, MAX_FENCED_TITLE_CHARS, MAX_LINE_CHARS,
 };
@@ -27,7 +28,8 @@ use crate::data::work::sent;
 use crate::ipc::protocol::{FocusMeta, PaneTree, ServerMsg};
 use crate::ipc::SessionManager;
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
-use crate::mother::AddJobRequest;
+use crate::mother::origin::{Stamp, Via};
+use crate::mother::{AddJobRequest, OriginBook};
 
 /// The work item a focus or job was started from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +81,9 @@ pub struct CreateFocusRequest {
     /// MCP pty id of the calling session (its focus tag), so a focus spawned
     /// by a sensitive (Teri/Fred) or network-driven session inherits that.
     pub caller: Option<String>,
+    /// Queued by the user in the app (Send to agent), not by an agent: a
+    /// Mother job's origin is then recorded as "you" (`via: app`).
+    pub queued_by_app: bool,
     /// The model for the new focus. Parsed and validated only: not applied until
     /// M5 adds upgrade approval for tool-created focuses, so a tool-created
     /// focus resolves per-agent default > declared > CLI default.
@@ -263,7 +268,9 @@ async fn create(
 
     match req.destination {
         Destination::Focus => create_focus_session(&daemon, req, label).await,
-        Destination::MotherJob { max_cost } => queue_mother_job(req, max_cost, label).await,
+        Destination::MotherJob { max_cost } => {
+            queue_mother_job(&daemon, req, max_cost, label).await
+        }
     }
 }
 
@@ -587,6 +594,7 @@ fn announce_focus(daemon: &FocusHost, meta: FocusMeta) {
 }
 
 async fn queue_mother_job(
+    daemon: &FocusHost,
     req: CreateFocusRequest,
     max_cost: Option<f64>,
     label: String,
@@ -636,12 +644,18 @@ async fn queue_mother_job(
         max_cost: Some(max_cost.unwrap_or(DEFAULT_MOTHER_MAX_COST)),
         label: Some(crate::mother::WORK_SEND_JOB_LABEL.to_owned()),
         depends_on: Vec::new(),
+        ..Default::default()
     };
+    let mut job = job;
+    let stamp = job_origin(daemon, &req, &mut job).await;
     let added = crate::mother::add_job(job).await;
     // The brief holds work-item text. Mother keeps its own copy of an accepted
     // plan; a job that never existed has no use for the file either.
     let _ = std::fs::remove_file(&plan_file);
     let job_id = added.map_err(|e| CreateFocusError::MotherFailed(e.to_string()))?;
+    if let Some((book, stamp)) = stamp {
+        book.stamp(&job_id, stamp);
+    }
 
     record_sent(
         req.source_item.as_ref(),
@@ -656,6 +670,30 @@ async fn queue_mother_job(
         job_id: Some(job_id),
         label,
     })
+}
+
+/// Who queued this Mother job, for the origin book, and the origin fields of
+/// its `mother add` request. An MCP caller the daemon knows as a focus is that
+/// focus (`via: mcp`); the app's Send to agent is "you" (`via: app`); anything
+/// else records nothing, as before.
+async fn job_origin(
+    daemon: &FocusHost,
+    req: &CreateFocusRequest,
+    job: &mut AddJobRequest,
+) -> Option<(OriginBook, Stamp)> {
+    let (book, caller) = {
+        let mgr = daemon.session_mgr.lock().unwrap();
+        let caller = req.caller.as_deref().and_then(|tag| mgr.origin_caller(tag));
+        (mgr.origin_book(), caller)
+    };
+    if let Some(caller) = caller {
+        apply_origin(job, &caller).await;
+        return book.map(|b| (b, caller.stamp(Via::Mcp, None)));
+    }
+    if req.queued_by_app && req.caller.is_none() {
+        return book.map(|b| (b, Stamp::you(None)));
+    }
+    None
 }
 
 /// Remember that `item` was sent (no item, nothing to key it on).
@@ -1037,6 +1075,7 @@ fn parse_request(
         destination,
         select_for_client: None,
         caller: pty_id.map(str::to_owned),
+        queued_by_app: false,
         model: string("model")?.filter(|s| !s.is_empty()),
         effort: string("effort")?.filter(|s| !s.is_empty()),
     })

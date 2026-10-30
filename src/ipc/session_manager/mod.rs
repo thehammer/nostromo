@@ -73,6 +73,8 @@ use crate::model::hub::ModelHub;
 use crate::model::notes::{self, NoteKind};
 use crate::model::store as model_store;
 use crate::model::{Actor, ModelPaths, ModelTarget};
+use crate::mother::origin::OriginCaller;
+use crate::mother::{OriginBook, SessionHistory};
 
 mod control;
 mod inject;
@@ -451,6 +453,12 @@ pub struct SessionManager {
     client_senders: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ServerMsg>>>>,
     /// Path to the daemon-owned `tag -> session_id` store.
     store_path: PathBuf,
+    /// Every session id this daemon has spawned for each tag (beside the
+    /// store): what a Mother job's claimed session is checked against.
+    session_history: SessionHistory,
+    /// Who queued each Mother job, when the daemon wires one in. Fed the
+    /// focus registry here so a focus's current name and `closed` follow it.
+    origin_book: Option<OriginBook>,
     /// Every CLI this daemon has spawned, on disk beside the store, so the next
     /// start can reap what this one could not.
     ledger: Arc<ChildLedger>,
@@ -615,6 +623,8 @@ impl SessionManager {
             sessions: HashMap::new(),
             client_senders: Arc::new(Mutex::new(HashMap::new())),
             ledger: Arc::new(ChildLedger::new(ledger_path_beside(&store_path))),
+            session_history: SessionHistory::open(SessionHistory::path_beside(&store_path)),
+            origin_book: None,
             store_path,
             focus_registry: Vec::new(),
             bridges: None,
@@ -1061,8 +1071,10 @@ impl SessionManager {
             }
         }
 
-        // Persist the (possibly freshly generated) id for the tag.
+        // Persist the (possibly freshly generated) id for the tag, and note it
+        // in the history Mother jobs' claimed sessions are checked against.
         save_id(&self.store_path, &tag, Some(&effective_id));
+        self.session_history.record(&tag, &effective_id);
         info!(tag, session_id = %effective_id, resume, "session spawned");
         Ok(Some(effective_id))
     }
@@ -1138,6 +1150,11 @@ impl SessionManager {
                 // with the owning focus tag directly, with no session-id
                 // reverse lookup needed on the fast path.
                 cmd.env("NOSTROMO_FOCUS_TAG", &tag);
+                // The session id this daemon spawned with: a `mother add` in
+                // the session's shell records it as `origin.session` with no
+                // flags, and the daemon can verify the claim against its
+                // per-focus session history.
+                cmd.env("MOTHER_ORIGIN_SESSION", &session_id);
                 cmd.arg("--mcp-config").arg(config);
             }
         }
@@ -2092,6 +2109,7 @@ impl SessionManager {
             self.focus_registry = focuses;
             self.pending_departures.clear();
             self.non_empty_pushes_seen = 0;
+            self.note_origin_registry(true);
             return (self.focus_registry.clone(), Vec::new());
         }
 
@@ -2138,6 +2156,7 @@ impl SessionManager {
             self.focus_nonces.remove(tag);
         }
         self.focus_registry = focuses;
+        self.note_origin_registry(true);
         (self.focus_registry.clone(), departed)
     }
 
@@ -2254,6 +2273,57 @@ impl SessionManager {
         self.focus_registry.clone()
     }
 
+    /// The history of session ids this daemon has spawned for each focus tag.
+    pub fn session_history(&self) -> SessionHistory {
+        self.session_history.clone()
+    }
+
+    /// Use `history` instead of the one beside the session store.
+    pub fn configure_session_history(&mut self, history: SessionHistory) {
+        self.session_history = history;
+    }
+
+    /// Hand the daemon's origin book the focus registry from now on (and now).
+    pub fn configure_origin_book(&mut self, book: OriginBook) {
+        book.note_registry_update(&self.focus_registry);
+        self.origin_book = Some(book);
+    }
+
+    /// The origin book, when the daemon wired one in.
+    pub fn origin_book(&self) -> Option<OriginBook> {
+        self.origin_book.clone()
+    }
+
+    /// Who `tag` is for the purpose of stamping a Mother job it queues: its
+    /// registry name now and the Claude session it is running. `None` for a
+    /// tag the daemon does not know as a focus (nothing is stamped for it).
+    pub fn origin_caller(&self, tag: &str) -> Option<OriginCaller> {
+        if tag.is_empty() || !self.knows_focus(tag) {
+            return None;
+        }
+        Some(OriginCaller {
+            tag: tag.to_owned(),
+            name: self
+                .focus_registry
+                .iter()
+                .find(|f| f.tag == tag)
+                .map(|f| f.display_name.clone()),
+            session: self.current_session_id(tag),
+        })
+    }
+
+    /// Tell the origin book the registry changed; `pushed` when the Mac pushed
+    /// it (the only evidence a missing tag is closed).
+    fn note_origin_registry(&self, pushed: bool) {
+        if let Some(book) = &self.origin_book {
+            if pushed {
+                book.note_registry_push(&self.focus_registry);
+            } else {
+                book.note_registry_update(&self.focus_registry);
+            }
+        }
+    }
+
     /// Whether `tag` currently has a live (non-exited) session child.
     /// The working directory `tag`'s session was spawned in, if it has one.
     ///
@@ -2353,6 +2423,7 @@ impl SessionManager {
         } else {
             self.focus_registry.push(meta);
         }
+        self.note_origin_registry(false);
         self.focus_registry.clone()
     }
 
@@ -3947,6 +4018,160 @@ mod tests {
             "restart must keep the reverse index resolvable for the (possibly reused) session id"
         );
         std::env::remove_var(CLAUDE_BIN_ENV);
+    }
+
+    /// A stand-in `claude` that writes the identity variables it was started
+    /// with to `out` and exits.
+    fn env_probe_claude(dir: &Path, out: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("claude-probe");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s|%s|%s' \"$NOSTROMO_FOCUS_TAG\" \"$MOTHER_ORIGIN_SESSION\" \"$NOSTROMO_PTY_ID\" > '{}'\n",
+                out.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var(CLAUDE_BIN_ENV, &script);
+    }
+
+    /// Wait (condition, not clock) until the probe has written its line.
+    fn probe_output(out: &Path) -> String {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(out) {
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_with_the_mcp_bridge_gets_the_session_id_it_was_spawned_with() {
+        let _env = CLAUDE_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("env.out");
+        env_probe_claude(dir.path(), &out);
+        let mut mgr = SessionManager::with_store_path(dir.path().join("daemon-sessions.json"));
+        mgr.configure_mcp_bridge(
+            Arc::new(Mutex::new(PaneRegistry::with_store_path(
+                dir.path().join("panes.json"),
+            ))),
+            dir.path().join("mcp.sock"),
+            dir.path().join("mcp.json"),
+        );
+        let sid = mgr
+            .spawn_session(
+                "cody-env".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                Some("sid-for-the-env-test".into()),
+                false,
+            )
+            .unwrap()
+            .expect("the session id it spawned with");
+        assert_eq!(sid, "sid-for-the-env-test");
+
+        let seen = probe_output(&out);
+        std::env::remove_var(CLAUDE_BIN_ENV);
+        assert_eq!(seen, "cody-env|sid-for-the-env-test|cody-env");
+    }
+
+    #[tokio::test]
+    async fn a_session_without_the_mcp_bridge_gets_no_origin_session() {
+        let _env = CLAUDE_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("env.out");
+        env_probe_claude(dir.path(), &out);
+        let mut mgr = SessionManager::with_store_path(dir.path().join("daemon-sessions.json"));
+        mgr.spawn_session(
+            "cody-nobridge".into(),
+            "cody".into(),
+            "Cody".into(),
+            None,
+            Some("sid-nobridge".into()),
+            false,
+        )
+        .unwrap();
+
+        let seen = probe_output(&out);
+        std::env::remove_var(CLAUDE_BIN_ENV);
+        assert_eq!(
+            seen, "||",
+            "identity variables are set only with the bridge"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_spawned_session_id_is_kept_in_the_tags_history_beside_the_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = CLAUDE_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(CLAUDE_BIN_ENV, "/bin/sh");
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager::with_store_path(dir.path().join("daemon-sessions.json"));
+        let first = mgr
+            .spawn_session(
+                "cody-h".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                None,
+                false,
+            )
+            .unwrap()
+            .expect("a fresh session id");
+        mgr.stop("cody-h");
+        let second = mgr
+            .spawn_session(
+                "cody-h".into(),
+                "cody".into(),
+                "Cody".into(),
+                None,
+                Some("an-explicit-second-session".into()),
+                false,
+            )
+            .unwrap()
+            .expect("the explicit session id");
+        std::env::remove_var(CLAUDE_BIN_ENV);
+
+        let history = mgr.session_history();
+        assert!(history.contains("cody-h", &first) && history.contains("cody-h", &second));
+        assert!(
+            !history.contains("another-focus", &first),
+            "a session belongs to its own tag"
+        );
+        let file = dir.path().join("focus-session-history.json");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let reopened = SessionHistory::open(file);
+        assert!(reopened.contains("cody-h", &first) && reopened.contains("cody-h", &second));
+    }
+
+    #[test]
+    fn origin_caller_knows_only_a_registered_or_running_focus() {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        assert_eq!(mgr.origin_caller("claudia-1"), None);
+        assert_eq!(mgr.origin_caller(""), None);
+        let mut meta = focus("claudia-1");
+        meta.display_name = "Claudia: Mother v2".into();
+        mgr.add_or_update_focus(meta);
+        save_id(&mgr.store_path.clone(), "claudia-1", Some("sid-claudia"));
+        let caller = mgr.origin_caller("claudia-1").expect("a registered focus");
+        assert_eq!(caller.name.as_deref(), Some("Claudia: Mother v2"));
+        assert_eq!(caller.session.as_deref(), Some("sid-claudia"));
+        assert_eq!(mgr.origin_caller("claudia-2"), None);
     }
 
     #[test]

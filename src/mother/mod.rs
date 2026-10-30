@@ -8,13 +8,16 @@
 //! - `MOTHER_STATUSLINE_CACHE`— statusline cache file (default: `/tmp/.mother-statusline`)
 //! - `NOSTROMO_MOTHER_CLI_TIMEOUT_MS` — bound on every `mother` CLI call (default: 30000)
 
+pub mod audit;
 pub mod broker_client;
 pub mod crew;
 pub mod decode;
 pub mod feed;
+pub mod origin;
 pub mod protocol;
 
 pub use feed::{JobsFeed, MotherSourceState};
+pub use origin::{JobAnnotation, OriginBook, SessionHistory};
 
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -208,9 +211,15 @@ pub struct MotherJob {
     /// `#[serde(default)]`.
     #[serde(default)]
     pub cycles: Vec<CycleInfo>,
-    /// Where the job came from (`mother add --label`). Only the label is read.
+    /// Where the job came from (`mother add --label`, `--origin-focus`,
+    /// `--origin-session`): a claim, not a fact. See [`MotherJobOrigin`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<MotherJobOrigin>,
+    /// What the daemon knows that Mother does not: who queued the job, as the
+    /// daemon vouches for it ([`origin`]). Set by [`origin::OriginBook::annotate`]
+    /// on every publish of the job feed; never read from Mother.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nostromo: Option<JobAnnotation>,
 
     // ── headless-crew keys ────────────────────────────────────────────────
     //
@@ -298,10 +307,34 @@ pub struct MotherJob {
 }
 
 /// The `origin` object of a Mother job record.
+///
+/// `label` is read as the record has it. `focus`, `focus_name` and `session`
+/// are what the job *claims* about the Nostromo focus that queued it (Mother's
+/// `--origin-focus`, `--origin-focus-name`, `--origin-session`); each is read
+/// leniently (a malformed one is `None`, never a lost job). They are never
+/// serialised: the claim and the session id stay in the daemon, and the
+/// annotation ([`MotherJob::nostromo`]) is the public face.
 #[derive(Debug, Clone, Default, serde::Serialize, Deserialize, PartialEq)]
 pub struct MotherJobOrigin {
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default, deserialize_with = "lenient_text", skip_serializing)]
+    pub focus: Option<String>,
+    #[serde(default, deserialize_with = "lenient_text", skip_serializing)]
+    pub focus_name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_text", skip_serializing)]
+    pub session: Option<String>,
+}
+
+fn lenient_text<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Mother records an absent claim as `""` (`origin.session` always): that is
+    // no claim, and reads as none.
+    let text: Option<String> =
+        crew::lenient::decode_key(d, "origin", crew::lenient::Shape::Scalar)?;
+    Ok(text.filter(|t| !t.trim().is_empty()))
 }
 
 /// The `--label` of every Mother job queued from a work item (Send to agent).
@@ -450,7 +483,7 @@ pub async fn resume(id: &str, answer: &str) -> Result<()> {
 /// Mother job ids are UUID-like hex strings (e.g. `ab12cd34`).  Accepting
 /// arbitrary strings here would let a malicious client smuggle flags like
 /// `--debug` or `-x` into the `mother` argv.
-fn validate_job_id(id: &str) -> Result<()> {
+pub(crate) fn validate_job_id(id: &str) -> Result<()> {
     if id.is_empty()
         || id.starts_with('-')
         || !id
@@ -612,6 +645,14 @@ pub struct AddJobRequest {
     pub max_cost: Option<f64>,
     pub label: Option<String>,
     pub depends_on: Vec<String>,
+    /// The Claude session that queued the job (`--origin-session`; the flag
+    /// exists in every `mother`).
+    pub origin_session: Option<String>,
+    /// The Nostromo focus tag that queued it (`--origin-focus`). Only passed
+    /// when `mother add` takes the flag (see [`origin::supports_origin_focus`]).
+    pub origin_focus: Option<String>,
+    /// That focus's name now (`--origin-focus-name`), a snapshot.
+    pub origin_focus_name: Option<String>,
 }
 
 impl AddJobRequest {
@@ -633,6 +674,9 @@ impl AddJobRequest {
             ("repo_path", self.repo_path.as_deref()),
             ("base", self.base.as_deref()),
             ("label", self.label.as_deref()),
+            ("origin_session", self.origin_session.as_deref()),
+            ("origin_focus", self.origin_focus.as_deref()),
+            ("origin_focus_name", self.origin_focus_name.as_deref()),
         ];
         for (name, value) in singles {
             if value.is_some_and(|v| v.starts_with('-')) {
@@ -648,6 +692,10 @@ impl AddJobRequest {
 
 /// Enqueue a plan via `mother add --plan-file .. --repo .. --branch .. --format text`
 /// and return the printed job id.
+///
+/// The origin fields are passed as given; a caller sets `origin_focus` and
+/// `origin_focus_name` only when `mother` takes them (an older one exits
+/// non-zero on an unknown flag).
 ///
 /// An invalid request, a non-zero exit or empty stdout is an `Err`; a CLI
 /// failure carries the CLI's stderr.
@@ -674,12 +722,22 @@ pub async fn add_job(req: AddJobRequest) -> Result<String> {
     if !req.depends_on.is_empty() {
         cmd.args(["--depends-on", &req.depends_on.join(",")]);
     }
+    if let Some(v) = &req.origin_session {
+        cmd.args(["--origin-session", v]);
+    }
+    if let Some(v) = &req.origin_focus {
+        cmd.args(["--origin-focus", v]);
+    }
+    if let Some(v) = &req.origin_focus_name {
+        cmd.args(["--origin-focus-name", v]);
+    }
     cmd.args(["--format", "text"]);
     let out = output_bounded(cmd, "add").await?;
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || id.is_empty() {
         let detail = trimmed_stderr(&out.stderr);
-        warn!("mother add {} failed: {detail}", req.plan_file.display());
+        // No plan path in the log: a plan is the user's text.
+        warn!("mother add failed: {detail}");
         return Err(cli_failure("add", detail).into());
     }
     Ok(id)
