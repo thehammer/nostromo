@@ -594,19 +594,73 @@ final class PlanMarkdownTests: XCTestCase {
 
     // MARK: Hostile content
 
-    /// Scalars that must not survive anywhere in the model. `\n` and `\t` are allowed in code only.
+    /// Scalars that must not survive anywhere in the model, whatever is next to them. `\n` and `\t` are
+    /// allowed in code only.
+    ///
+    /// Not in this set, because they are allowed in a context (see `contextViolations(in:)`): U+200C and
+    /// U+200D (only between two non-ASCII scalars that are not joiners) and U+FE0E / U+FE0F (only straight
+    /// after an emoji, or a keycap base before U+20E3). Document text drops the rest of the invisibles
+    /// outright: U+00AD, U+180E, U+FE00...FE0D, U+E0100...E01EF.
     private func isForbidden(_ scalar: Unicode.Scalar, inCode: Bool) -> Bool {
         switch scalar.value {
         case 0x09, 0x0A:
             return !inCode
         case 0x00 ... 0x1F, 0x7F, 0x80 ... 0x9F,
-             0x061C, 0x200B ... 0x200F, 0x2028 ... 0x202E, 0x2060 ... 0x2064, 0x2066 ... 0x2069,
+             0x061C, 0x200B, 0x200E, 0x200F, 0x2028 ... 0x202E, 0x2060 ... 0x2064, 0x2066 ... 0x2069,
              0xFEFF, 0xFFF9 ... 0xFFFB, 0xE0000 ... 0xE007F,
+             0x00AD, 0x180E, 0xFE00 ... 0xFE0D, 0xE0100 ... 0xE01EF,
              0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0:
             return true
         default:
             return false
         }
+    }
+
+    /// Every piece of text the model holds, with where it is: (text, in code, place).
+    private func shownStrings(in doc: PlanDocument) -> [(text: String, inCode: Bool, place: String)] {
+        var out: [(text: String, inCode: Bool, place: String)] = []
+        for block in allBlocks(doc) {
+            for spans in spanLists(block) {
+                for span in descend(spans) {
+                    switch span {
+                    case .text(let s): out.append((s, false, "text span"))
+                    case .code(let s): out.append((s, false, "code span"))
+                    case .image(let alt): out.append((alt, false, "image alt"))
+                    default: break
+                    }
+                }
+            }
+            if case .codeBlock(_, let text) = block.kind { out.append((text, true, "code block")) }
+        }
+        for entry in doc.outline { out.append((entry.title, false, "outline title")) }
+        return out
+    }
+
+    /// The context rules for the scalars `isForbidden` lets through: a joiner (U+200C, U+200D) needs a
+    /// non-ASCII, non-joiner scalar on both sides; a selector (U+FE0E, U+FE0F) needs an emoji before it.
+    /// Nothing next to an ASCII scalar, anywhere in shown text.
+    private func contextViolations(in doc: PlanDocument) -> [String] {
+        var found: [String] = []
+        for (text, _, place) in shownStrings(in: doc) {
+            let scalars = Array(text.unicodeScalars)
+            for (i, s) in scalars.enumerated() {
+                let before = i > 0 ? scalars[i - 1] : nil
+                let after = i + 1 < scalars.count ? scalars[i + 1] : nil
+                let name = "U+\(String(s.value, radix: 16, uppercase: true)) in \(place): \(text.prefix(40).debugDescription)"
+                switch s.value {
+                case 0x200C, 0x200D:
+                    let ok = [before, after].allSatisfy { $0.map { $0.value > 0x7F && $0.value != 0x200C && $0.value != 0x200D } == true }
+                    if !ok { found.append(name) }
+                case 0xFE0E, 0xFE0F:
+                    let afterEmoji = before.map { $0.value > 0x7F && $0.properties.isEmoji } == true
+                    let keycap = s.value == 0xFE0F && before.map { $0.value < 0x80 && $0.properties.isEmoji } == true && after?.value == 0x20E3
+                    if !(afterEmoji || keycap) { found.append(name) }
+                default:
+                    break
+                }
+            }
+        }
+        return found
     }
 
     private func forbiddenScalars(in doc: PlanDocument) -> [String] {
@@ -631,6 +685,79 @@ final class PlanMarkdownTests: XCTestCase {
         }
         for entry in doc.outline { check(entry.title, inCode: false, where: "outline title") }
         return found
+    }
+
+    // MARK: Invisible scalars around ASCII, in every kind of block (the fixture is binary: the text is inline)
+
+    /// Every scalar document text refuses to keep next to ASCII: the joiners, both selectors, the soft
+    /// hyphen, the Mongolian vowel separator and the variation selectors.
+    private static let invisibles = "\u{200D}\u{200C}\u{FE0F}\u{FE0E}\u{00AD}\u{180E}\u{FE00}\u{FE0D}\u{E0100}\u{E01EF}"
+
+    private func hostilePlan() -> String {
+        let v = Self.invisibles
+        return """
+        # head\(v)ing
+
+        para\(v)graph and a\u{200D}b and c\u{FE0F}d
+
+        - [ ] task\(v)item
+        - plain\u{200C}item\u{FE0F}
+
+        | h\(v)1 | h2 |
+        |---|---|
+        | ce\(v)ll | c2 |
+
+        ```swift
+        co\(v)de a\u{200D}b
+        ```
+
+        [li\(v)nk](https://example.invalid/x) end `in\(v)line`
+        """
+    }
+
+    func testInvisibleScalarsAroundASCIIAreGoneFromEveryKindOfBlock() {
+        let doc = PlanMarkdown.parse(hostilePlan())
+
+        XCTAssertEqual(forbiddenScalars(in: doc), [])
+        XCTAssertEqual(contextViolations(in: doc), [])
+
+        // and the words around them are all still there
+        XCTAssertEqual(doc.outline.map { $0.title }, ["heading"])
+        XCTAssertTrue(paragraphTexts(doc).contains { $0.hasPrefix("paragraph and ab and cd") }, "\(paragraphTexts(doc))")
+        let items = listItems(doc).compactMap(itemText)
+        XCTAssertEqual(items, ["taskitem", "plainitem"])
+        let cells = allBlocks(doc).compactMap { block -> [String]? in
+            if case .table(let header, let rows) = block.kind { return (header + rows.flatMap { $0 }).map { $0.plainText } }
+            return nil
+        }.first ?? []
+        XCTAssertEqual(cells, ["h1", "h2", "cell", "c2"])
+        XCTAssertEqual(codeBlocks(doc).first?.text, "code ab")
+        XCTAssertTrue(paragraphTexts(doc).contains { $0.contains("link end") && $0.contains("inline") }, "\(paragraphTexts(doc))")
+        XCTAssertTrue(allSpans(doc).contains { if case .link(_, let url) = $0 { return url == "https://example.invalid/x" } else { return false } },
+                      "the link still points where it did")
+    }
+
+    func testInvisibleScalarsWrittenAsEntitiesDoNotSurviveEither() {
+        // The parser turns an entity into the scalar after the whole text was sanitised: the model alone must be safe.
+        let doc = PlanMarkdown.parse("a&#8205;b c&#xAD;d e&#x200B;f g&#xFE0F;h i&#x180E;j k&#x200C;l\n\n    m&#8205;n\n")
+
+        XCTAssertEqual(forbiddenScalars(in: doc), [])
+        XCTAssertEqual(contextViolations(in: doc), [])
+    }
+
+    func testJoinersAndSelectorsInTheirPlaceSurviveParsing() {
+        let family = "👩\u{200D}👩\u{200D}👧"
+        let heart = "\u{2764}\u{FE0F}"
+        let persian = "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}"
+        let doc = PlanMarkdown.parse("family \(family) heart \(heart) persian \(persian)\n\n```\n\(family) \(heart)\n```\n")
+
+        let paragraph = paragraphTexts(doc).first ?? ""
+        for part in [family, heart, persian] {
+            XCTAssertTrue((paragraph as NSString).range(of: part, options: .literal).location != NSNotFound, "\(part.debugDescription) missing from \(paragraph.debugDescription)")
+        }
+        let code = codeBlocks(doc).first?.text ?? ""
+        XCTAssertEqual(code, "\(family) \(heart)")
+        XCTAssertEqual(contextViolations(in: doc), [])
     }
 
     func testTheHostileFixtureReallyContainsEveryKindOfHostileScalar() throws {

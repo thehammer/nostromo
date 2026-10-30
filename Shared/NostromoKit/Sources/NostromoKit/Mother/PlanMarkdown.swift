@@ -100,6 +100,17 @@ public enum PlanMarkdown {
     /// bounded amount of stack in the parser and in the view that draws it.
     static let maxDepth = 32
 
+    /// A run's block path (outermost first) is cut to this many components before a tree is built from
+    /// it: the first `maxPathComponents - tailComponents` and the last `tailComponents` (the leaf block
+    /// and the list item or table row around it). Foundation reports a million-deep path for a million
+    /// `>`, and a chain of that many nodes cannot be walked, freed or drawn on a small stack. What is
+    /// dropped is nesting, never text: the leaf keeps its content and lands in the nearest kept parent.
+    /// That keeps `maxDepth` levels of quote (1 component each) or of list (2 each) intact, so a
+    /// plan nested as deep as it can be drawn is untouched. The converter also flattens past
+    /// `maxDepth`, so its recursion is bounded by this path length, not by the file.
+    static let maxPathComponents = 2 * maxDepth + 2 * tailComponents
+    static let tailComponents = 3
+
     /// Never crashes and never throws: text Foundation cannot read at all is an empty document.
     public static func parse(_ text: String) -> PlanDocument {
         // Sanitise first so an escape sequence cannot be split by the markdown syntax around it,
@@ -115,7 +126,7 @@ public enum PlanMarkdown {
         var tree = Tree()
         for run in attributed.runs {
             tree.add(text: String(attributed[run.range].characters),
-                     path: run.presentationIntent?.components.reversed() ?? [],
+                     path: boundedPath(run.presentationIntent),
                      inline: run.inlinePresentationIntent ?? [],
                      link: run.link?.absoluteString,
                      image: run.imageURL?.absoluteString)
@@ -123,6 +134,16 @@ public enum PlanMarkdown {
         var converter = Converter()
         let blocks = converter.blocks(tree.roots, depth: 0)
         return PlanDocument(blocks: blocks, outline: converter.outline)
+    }
+
+    /// The run's block path, outermost first, cut to `maxPathComponents`. Touches only the components it
+    /// keeps, so a million-deep path costs a million steps to count and a few dozen to copy.
+    private static func boundedPath(_ intent: PresentationIntent?) -> [PresentationIntent.IntentType] {
+        guard let components = intent?.components else { return [] }   // innermost first
+        guard components.count > maxPathComponents else { return components.reversed() }
+        let outer = components.suffix(maxPathComponents - tailComponents).reversed()
+        let inner = components.prefix(tailComponents).reversed()
+        return Array(outer) + Array(inner)
     }
 
     // MARK: Tree of presentation intents

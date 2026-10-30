@@ -8,7 +8,7 @@ import Foundation
 /// - Drops C0 and C1 controls and DEL; newlines, carriage returns, tabs, NEL and the
 ///   Unicode line/paragraph separators become spaces.
 /// - Drops invisible format characters (zero-width space, word joiner and invisible
-///   operators, BOM, interlinear annotation). ZWJ/ZWNJ stay: emoji and scripts need them.
+///   operators, BOM, interlinear annotation). ZWJ/ZWNJ stay in rows: emoji and scripts need them.
 /// - Drops bidi embeddings/overrides/isolates and marks (U+202A–202E, U+2066–2069,
 ///   U+200E/F, U+061C) and tag characters (U+E0000–E007F), which can make a row read differently
 ///   from what it holds.
@@ -17,6 +17,17 @@ import Foundation
 ///   in a name or a command.
 /// - Stops at `maxUTF16` units, on a character boundary, so a megabyte of input costs no more
 ///   to lay out than a line.
+///
+/// Document text (`sanitizeInline`, `sanitizeMultiline`: a plan's paragraphs, code and checklist) is
+/// stricter, because there a name or a command can be read as a whole and has no row to stop it:
+/// - also drops the soft hyphen (U+00AD), the Mongolian vowel separator (U+180E), variation selectors
+///   U+FE00–FE0D and U+E0100–E01EF, which draw nothing;
+/// - keeps U+FE0E/FE0F only straight after an emoji (or a keycap base before U+20E3), where they choose
+///   how it is drawn;
+/// - keeps ZWJ/ZWNJ (U+200D, U+200C) only between two characters that are both outside ASCII and are
+///   not joiners themselves: emoji sequences, and the scripts that need them (Persian, Indic). A joiner
+///   next to ASCII, at either end of the text, or beside another joiner is dropped, so it cannot hide
+///   inside a word, a path or a command.
 ///
 /// For drawing only. Copy Commands copies the input verbatim.
 public enum FoldTextSanitizer {
@@ -35,14 +46,14 @@ public enum FoldTextSanitizer {
     /// Document text (a paragraph, a heading, a table cell): the same drops as `sanitize`, line breaks
     /// and tabs become one space, and there is no length cap: a plan is as long as it is.
     public static func sanitizeInline(_ text: String) -> String {
-        clean(text, mode: .row, cap: nil)
+        strict(clean(text, mode: .row, cap: nil))
     }
 
     /// Preformatted text (a code block, a whole plan file): no length cap, and `\n` and `\t` stay.
     /// `\r\n` becomes `\n`; a lone `\r`, NEL and the Unicode line/paragraph separators become a space.
     /// Everything else `sanitize` drops is dropped here too.
     public static func sanitizeMultiline(_ text: String) -> String {
-        clean(text, mode: .multiline, cap: nil)
+        strict(clean(text, mode: .multiline, cap: nil))
     }
 
     private enum Mode { case row, multiline }
@@ -107,6 +118,56 @@ public enum FoldTextSanitizer {
                 units += width
             }
             i = after
+        }
+        return String(out)
+    }
+
+    // MARK: Document text
+
+    private static func isStrictInteresting(_ v: UInt32) -> Bool {
+        switch v {
+        case 0x00AD, 0x180E, 0xFE00...0xFE0F, 0xE0100...0xE01EF, 0x200C, 0x200D: return true
+        default: return false
+        }
+    }
+
+    /// The extra rules of document text (see the type's comment), over text `clean` has already cleaned.
+    private static func strict(_ text: String) -> String {
+        guard text.unicodeScalars.contains(where: { isStrictInteresting($0.value) }) else { return text }
+        let scalars = Array(text.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        var last: Unicode.Scalar?
+        /// A joiner waiting to see what follows it.
+        var pending: Unicode.Scalar?
+        /// Joiners in a row (dropped text between them does not break the row): more than one and none survives.
+        var joinersInARow = 0
+
+        for (i, s) in scalars.enumerated() {
+            switch s.value {
+            case 0x00AD, 0x180E, 0xFE00...0xFE0D, 0xE0100...0xE01EF:
+                continue
+            case 0xFE0E, 0xFE0F:
+                guard pending == nil, let base = last else { continue }
+                let next = i + 1 < scalars.count ? scalars[i + 1] : nil
+                let keycap = base.value < 0x80 && base.properties.isEmoji && next?.value == 0x20E3 && s.value == 0xFE0F
+                guard keycap || (base.value > 0x7F && base.properties.isEmoji) else { continue }
+                out.append(s)
+                last = s
+                joinersInARow = 0
+            case 0x200C, 0x200D:
+                joinersInARow += 1
+                if joinersInARow == 1, let before = last, before.value > 0x7F {
+                    pending = s
+                } else {
+                    pending = nil   // next to ASCII, at the start, or beside another joiner: dropped
+                }
+            default:
+                if let joiner = pending, joinersInARow == 1, s.value > 0x7F { out.append(joiner) }
+                pending = nil
+                joinersInARow = 0
+                out.append(s)
+                last = s
+            }
         }
         return String(out)
     }
