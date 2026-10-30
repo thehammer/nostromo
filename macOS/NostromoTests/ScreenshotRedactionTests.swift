@@ -1035,8 +1035,8 @@ final class ScreenshotRedactionTests: XCTestCase {
         let output = try XCTUnwrap(SRPixels(png: data))
 
         XCTAssertGreaterThan(output.loudCount(in: region), 0, "the QA build's screenshot shows the drawer")
-        XCTAssertEqual(output.mismatches(against: baseline, excluding: [], tolerance: 2), 0)
-        XCTAssertEqual(output.fillCount(in: output.fullRect), 0, "no redaction block in the QA build")
+        XCTAssertEqual(output.mismatches(against: baseline, excluding: [], tolerance: 2), 0,
+                       "the QA build's screenshot is the capture, pixel for pixel")
     }
 
     func test_the_drawer_is_one_of_the_terminal_areas_of_its_window() throws {

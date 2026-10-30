@@ -143,11 +143,16 @@ final class AgentDisplayTextTests: XCTestCase {
         let all = try hostileTexts()
         XCTAssertGreaterThan(all.count, 50, "hostile.json should be found")
         var checked = 0
-        for entry in all where entry.code == "invalid_text" && !entry.name.hasPrefix("nostromo_markup") && !isWhitespaceRule(entry.name) {
+        // `bom` is checked below from escapes: Foundation's JSON reader drops a literal U+FEFF at the very start
+        // of a string, so the fixture's text arrives here without it.
+        for entry in all where entry.code == "invalid_text" && !entry.name.hasPrefix("nostromo_markup")
+            && !isWhitespaceRule(entry.name) && entry.name != "bom" {
             checked += 1
             XCTAssertFalse(AgentDisplayText.isInsertable(entry.text), "\(entry.name): \(entry.text.debugDescription) must not be placed at a prompt")
         }
         XCTAssertGreaterThan(checked, 25)
+        XCTAssertFalse(AgentDisplayText.isInsertable("\u{FEFF}ls"), "bom: a leading byte order mark")
+        XCTAssertFalse(AgentDisplayText.isInsertable("l\u{FEFF}s"), "bom: a byte order mark inside")
     }
 
     func testNoWhitespaceThatCouldHideTextIsInsertable() throws {
