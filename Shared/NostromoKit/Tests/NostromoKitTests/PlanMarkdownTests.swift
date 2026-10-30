@@ -111,16 +111,16 @@ final class PlanMarkdownTests: XCTestCase {
                 }
             }
         }
-        func blocks(_ blocks: [PlanBlock]) -> [PlanListItem] {
+        func walkBlocks(_ blocks: [PlanBlock]) -> [PlanListItem] {
             blocks.flatMap { block -> [PlanListItem] in
                 switch block.kind {
                 case .list(_, _, let items): return walk(items)
-                case .quote(let inner): return blocks(inner)
+                case .quote(let inner): return walkBlocks(inner)
                 default: return []
                 }
             }
         }
-        return blocks(doc.blocks)
+        return walkBlocks(doc.blocks)
     }
 
     /// The first paragraph of a list item: its own text, not its nested content.
