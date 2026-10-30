@@ -250,6 +250,9 @@ final class MotherJobDetail: NSView {
     private(set) var planView: PlanDocumentView?
     /// Makes the plan view's file loader (tests replace it to drive the watcher by hand).
     var makePlanFileLoader: () -> PlanFileLoader = { PlanFileLoader() }
+    /// Makes the Overview checklist's file loader (tests replace it). It watches the plan file while the
+    /// Overview is on show, as the plan view's does while the Plan is.
+    var makeChecklistFileLoader: () -> PlanFileLoader = { PlanFileLoader() }
 
     /// Top-down, like the scroll document inside it (an existing test reads `isFlipped` to find a top edge).
     override var isFlipped: Bool { true }
@@ -483,6 +486,7 @@ final class MotherJobDetail: NSView {
         }
         // The plan loads off the main thread: what it changes above the log lands later than `update`.
         planChecklistView.onWillChange = { [weak self] in self?.holdReaderPlace() }
+        planChecklistView.makeLoader = { [weak self] in self?.makeChecklistFileLoader() ?? PlanFileLoader() }
 
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 20),
@@ -696,6 +700,7 @@ final class MotherJobDetail: NSView {
          planSectionLabel, planChecklistView].forEach { $0.isHidden = false }
         emptyLabel.isHidden = true
         planView?.show(planPath: job.planPath)
+        planChecklistView.show(planPath: job.planPath)
         rebuildSegmentControl()
         showSelectedSegment()
 
@@ -709,7 +714,6 @@ final class MotherJobDetail: NSView {
         shownMeta = metaPairs(for: job)
         rebuildMeta(shownMeta)
         rebuildActions(job)
-        planChecklistView.load(planPath: job.planPath)
         loadLog(job)
         syncLogTimer(for: job)
     }
@@ -754,7 +758,7 @@ final class MotherJobDetail: NSView {
         if makeActionIdentity(for: job) != actionIdentity { rebuildActions(job) }
 
         if job.planPath != previous.planPath {
-            planChecklistView.load(planPath: job.planPath)
+            planChecklistView.show(planPath: job.planPath)
             planView?.show(planPath: job.planPath)
             // The Plan segment goes with the path.
             if (job.planPath ?? "").isEmpty, selectedSegment == .plan { selectedSegment = .overview }
@@ -810,6 +814,21 @@ final class MotherJobDetail: NSView {
             segmentControl.setToolTip(dotted ? "New log lines" : nil, forSegment: i)
         }
         segmentControl.selectedSegment = segments.firstIndex(of: selectedSegment) ?? 0
+        applySegmentAccessibility(segments)
+    }
+
+    /// What a screen reader says for `segment`: "Log, new lines", not "Log bullet".
+    func segmentAccessibilityLabel(_ segment: Segment) -> String? {
+        guard visibleSegments.contains(segment) else { return nil }
+        return segment == .log && logHasUnseenLines ? "Log, new lines" : segment.title
+    }
+
+    private func applySegmentAccessibility(_ segments: [Segment]) {
+        let children = segmentControl.accessibilityChildren() ?? []
+        for (child, segment) in zip(children, segments) {
+            guard let label = segmentAccessibilityLabel(segment) else { continue }
+            (child as? NSAccessibilityElement)?.setAccessibilityLabel(label)
+        }
     }
 
     /// Only the selected segment is on show; the others are hidden. The plan view reads and watches
@@ -820,6 +839,7 @@ final class MotherJobDetail: NSView {
         logScrollView.isHidden = selectedSegment != .log
         if selectedSegment == .plan { ensurePlanView().isHidden = false } else { planView?.isHidden = true }
         planView?.setActive(selectedSegment == .plan)
+        planChecklistView.setActive(selectedSegment == .overview)
     }
 
     private func ensurePlanView() -> PlanDocumentView {
@@ -961,7 +981,7 @@ final class MotherJobDetail: NSView {
         planView?.clear()
         planView?.isHidden = true
         emptyLabel.isHidden = false
-        planChecklistView.load(planPath: nil)
+        planChecklistView.show(planPath: nil)
         crewSection.update(model: MotherCrewPanelModel(), detailsAvailable: false)
         crewTopGap.constant = 0
         shownMeta = []
@@ -1751,19 +1771,39 @@ final class MotherJobDetail: NSView {
 /// Read-only checklist parsed from a plan markdown file.
 ///
 /// Scans the file for `- [ ]` / `- [x]` items (Kit's `PlanChecklist`, the same parser the Plan view's
-/// `n/m criteria` count uses) and renders them as icon+text rows. The file is read under the plan
-/// loader's rules (a regular markdown file of at most 1 MiB) and a read that a newer one has overtaken
-/// is dropped. Collapses to zero height (via `heightConstraint`) when there are no items.
+/// `n/m criteria` count uses) and renders them as icon+text rows. It reads and watches the file the way
+/// the Plan view does (`PlanFileLoader`: a regular markdown file of at most 1 MiB, a result that a newer
+/// read has overtaken is dropped, an edit on disk reloads it, a file that is not there yet is looked
+/// for again), and only while the Overview is the segment on show, so the two views of one file never
+/// disagree for longer than a debounce. Collapses to zero height (via `heightConstraint`) when there are
+/// no items.
 private class PlanChecklistView: NSView {
 
     /// Called on the main queue when items load or clear.  Parameter is `true` if items are present.
     var onItemsChanged: ((Bool) -> Void)?
     /// Called on the main queue right before the rows are replaced or cleared.
     var onWillChange: (() -> Void)?
+    /// Makes the file loader, the first time one is needed.
+    var makeLoader: () -> PlanFileLoader = { PlanFileLoader() }
 
     private let stack = NSStackView()
     private var heightConstraint: NSLayoutConstraint!
-    /// Every load takes the next number; a result applies only if it still holds the latest.
+    private var madeLoader: PlanFileLoader?
+    /// Made the first time it is needed, so a test can replace `makeLoader` first.
+    private var loader: PlanFileLoader {
+        if let madeLoader { return madeLoader }
+        let loader = makeLoader()
+        loader.onResult = { [weak self] result in self?.loaderDidDeliver(result) }
+        madeLoader = loader
+        return loader
+    }
+    private var planPath: String?
+    /// The Overview is the segment on show: only then does the view read and watch the file.
+    private var isActive = false
+    private var needsLoadOnActivate = false
+    /// What the rows show now; nil until the plan at `planPath` has answered once.
+    private var shownItems: [PlanChecklistItem]?
+    /// Every answer and every path change takes the next number; a parse applies only if it still holds the latest.
     private var generation = 0
 
     override init(frame: NSRect) {
@@ -1788,24 +1828,74 @@ private class PlanChecklistView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func load(planPath: String?) {
+    /// Show the plan at `path` (nil or empty: none). Reads it now if the Overview is on show, else when it is.
+    func show(planPath path: String?) {
+        let newPath = (path?.isEmpty ?? true) ? nil : path
+        guard newPath != planPath else {
+            onItemsChanged?(!stack.arrangedSubviews.isEmpty)
+            return
+        }
+        planPath = newPath
         generation += 1
-        let mine = generation
-        guard let path = planPath, !path.isEmpty else {
+        shownItems = nil
+        guard newPath != nil else {
+            needsLoadOnActivate = false
+            madeLoader?.load(path: nil)
             collapse()
             return
         }
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            var items: [PlanChecklistItem] = []
-            if case .loaded(let text, _, _) = PlanFileRules.read(path: path) { items = PlanChecklist.parse(text) }
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.generation == mine else { return }
-                self.apply(items)
+        if isActive { loader.load(path: newPath) } else { needsLoadOnActivate = true }
+    }
+
+    /// The Overview is on show (true) or another segment is (false). Hidden, the view holds no watcher.
+    func setActive(_ active: Bool) {
+        guard active != isActive else { return }
+        isActive = active
+        if active {
+            guard planPath != nil else { return }
+            if needsLoadOnActivate {
+                needsLoadOnActivate = false
+                loader.load(path: planPath)
+            } else {
+                loader.reload()
             }
+        } else {
+            generation += 1
+            madeLoader?.stop()
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            // Off screen for good, or until the detail is shown again.
+            generation += 1
+            madeLoader?.stop()
+            if planPath != nil, isActive { needsLoadOnActivate = true }
+        } else if isActive, needsLoadOnActivate {
+            needsLoadOnActivate = false
+            loader.load(path: planPath)
         }
     }
 
     // MARK: Private
+
+    private func loaderDidDeliver(_ result: PlanFileResult) {
+        generation += 1
+        let mine = generation
+        let loaderGeneration = loader.generation
+        guard case .loaded(let text, _, _) = result else {
+            apply([])   // no file, or one that cannot be shown: no items
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let items = PlanChecklist.parse(text)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.generation == mine, self.loader.generation == loaderGeneration else { return }
+                self.apply(items)
+            }
+        }
+    }
 
     private func collapse() {
         let mine = generation
@@ -1814,11 +1904,15 @@ private class PlanChecklistView: NSView {
             self.onWillChange?()
             self.stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
             self.heightConstraint.isActive = true
+            self.shownItems = []
             self.onItemsChanged?(false)
         }
     }
 
     private func apply(_ items: [PlanChecklistItem]) {
+        // The same items again (a save that changed nothing here, a reload on coming back): keep the rows.
+        guard items != shownItems else { return }
+        shownItems = items
         onWillChange?()
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard !items.isEmpty else {
@@ -1841,7 +1935,8 @@ private class PlanChecklistView: NSView {
         icon.textColor = item.done ? Theme.sage : Theme.fgMuted
         icon.setContentHuggingPriority(.required, for: .horizontal)
 
-        let lbl = NSTextField.boundedLabel(item.text)
+        // A plan's text is untrusted: no bidi override, zero-width or filler character, no escape sequence.
+        let lbl = NSTextField.boundedLabel(FoldTextSanitizer.sanitizeInline(item.text))
         lbl.font                 = .systemFont(ofSize: 11)
         lbl.lineBreakMode        = .byWordWrapping
         lbl.maximumNumberOfLines = 3

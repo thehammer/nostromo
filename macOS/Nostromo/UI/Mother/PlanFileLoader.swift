@@ -119,7 +119,10 @@ final class MainQueuePlanReloadScheduler: PlanReloadScheduler {
 ///
 /// Every load (a new path, or a reload after the file changed) takes a new generation number.
 /// A result is delivered, on the main thread, only if its generation is still the current one, so a
-/// slow read of an old path can never overwrite a newer one. Not thread-safe: use it from the main thread.
+/// slow read of an old path can never overwrite a newer one. While the file is not there (`.notFound`:
+/// it does not exist yet, or was deleted and has not come back) there is nothing to watch, so the
+/// loader asks again on the scheduler, after 0.5 s, then 1 s, 2 s, ... never more than 30 s apart,
+/// until the file shows up or the loader is stopped. Not thread-safe: use it from the main thread.
 final class PlanFileLoader {
 
     typealias Reader = (String) -> PlanFileResult
@@ -134,6 +137,17 @@ final class PlanFileLoader {
     var isWatching: Bool { source != nil }
     /// A change was seen and its reload has not run yet.
     var hasPendingReload: Bool { pending != nil }
+    /// The file was not found and another look is scheduled.
+    var hasPendingRetry: Bool { retry != nil }
+    /// How many looks in a row found no file (0 once one did).
+    private(set) var retryAttempt = 0
+
+    /// The wait before look number `attempt` (0-based) after a `.notFound`: doubles from 0.5 s, 30 s at most.
+    static func retryDelay(afterAttempts attempt: Int) -> TimeInterval {
+        min(maxRetryDelay, baseRetryDelay * pow(2, Double(min(attempt, 16))))
+    }
+    static let baseRetryDelay: TimeInterval = 0.5
+    static let maxRetryDelay: TimeInterval = 30
 
     private let reader: Reader
     private let scheduler: PlanReloadScheduler
@@ -143,6 +157,7 @@ final class PlanFileLoader {
     let debounce: TimeInterval
     private var source: DispatchSourceFileSystemObject?
     private var pending: PlanReloadToken?
+    private var retry: PlanReloadToken?
 
     init(reader: @escaping Reader = PlanFileRules.read(path:),
          scheduler: PlanReloadScheduler = MainQueuePlanReloadScheduler(),
@@ -159,6 +174,7 @@ final class PlanFileLoader {
     /// Start reading `path` and watching it. A nil or empty path stops everything: nothing is read.
     func load(path newPath: String?) {
         disarm()
+        retryAttempt = 0
         path = (newPath?.isEmpty ?? true) ? nil : newPath
         generation += 1
         guard let path else { return }
@@ -176,6 +192,7 @@ final class PlanFileLoader {
     /// Stop watching and drop anything still in flight. The path is kept: `reload()` starts again.
     func stop() {
         disarm()
+        retryAttempt = 0
         generation += 1
     }
 
@@ -187,6 +204,7 @@ final class PlanFileLoader {
             let result = reader(path)
             DispatchQueue.main.async {
                 guard let self, self.generation == generation else { return }
+                self.noteResult(result)
                 self.onResult?(result)
             }
         }
@@ -209,6 +227,22 @@ final class PlanFileLoader {
         watcher.resume()
     }
 
+    /// No file: look again later. A file (or any other answer): the watcher is the way to hear about it.
+    private func noteResult(_ result: PlanFileResult) {
+        guard result == .notFound else {
+            retryAttempt = 0
+            return
+        }
+        retry?.cancel()
+        let delay = Self.retryDelay(afterAttempts: retryAttempt)
+        retryAttempt += 1
+        retry = scheduler.schedule(after: delay) { [weak self] in
+            guard let self else { return }
+            self.retry = nil
+            self.reload()
+        }
+    }
+
     private func fileChanged() {
         guard source != nil else { return }   // stopped since the event fired
         pending?.cancel()
@@ -222,6 +256,8 @@ final class PlanFileLoader {
     private func disarm() {
         pending?.cancel()
         pending = nil
+        retry?.cancel()
+        retry = nil
         source?.cancel()
         source = nil
     }

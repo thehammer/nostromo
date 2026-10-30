@@ -19,8 +19,14 @@ final class MotherFocusFitnessTests: XCTestCase {
         "UI/Mother/PlanFileLoader.swift",
     ]
 
+    /// The job detail the plan views live in. It has its own `Logger` and its own host calls, so the scans
+    /// that make sense for a plan's text (nothing fetched, nothing run, nothing logged about a plan,
+    /// no way to open a file) apply to it, and the logging scan is the narrower one in
+    /// `testTheJobDetailLogsNothingAboutAPlan`.
+    private static let jobDetailSources = ["UI/Views/MotherJobDetail.swift"]
+
     /// Files that must never declare an `NSView.tag` of their own (#356).
-    private static let tagSensitiveSources = planViewerSources + ["UI/Views/MotherJobDetail.swift"]
+    private static let tagSensitiveSources = planViewerSources + jobDetailSources
 
     private static func source(_ relativePath: String, file: StaticString = #filePath, line: UInt = #line) throws -> String {
         var root = URL(fileURLWithPath: "\(file)")
@@ -31,10 +37,65 @@ final class MotherFocusFitnessTests: XCTestCase {
         return stripComments(text)
     }
 
-    /// Block comments, then `//` comments (not the `//` of a URL's `://`).
-    private static func stripComments(_ text: String) -> String {
-        text.replacingOccurrences(of: "/\\*[\\s\\S]*?\\*/", with: "", options: .regularExpression)
-            .replacingOccurrences(of: "(?<!:)//[^\\n]*", with: "", options: .regularExpression)
+    /// `text` without its comments: block comments (nested, as Swift has them) and `//` comments, but a
+    /// `//` inside a string literal (a URL, a path, a pattern) is text, not a comment. Line breaks stay,
+    /// so line numbers and "first line that contains" scans still mean something.
+    static func stripComments(_ text: String) -> String {
+        let chars = Array(text.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        var i = 0
+        var blockDepth = 0
+        var inString = false
+        var inMultilineString = false
+
+        func at(_ k: Int) -> Unicode.Scalar? { k < chars.count ? chars[k] : nil }
+
+        while i < chars.count {
+            let c = chars[i]
+            let next = at(i + 1)
+            if blockDepth > 0 {
+                if c == "/", next == "*" { blockDepth += 1; i += 2 }
+                else if c == "*", next == "/" { blockDepth -= 1; i += 2 }
+                else { if c == "\n" { out.append(c) }; i += 1 }
+                continue
+            }
+            if inMultilineString {
+                if c == "\\", let next { out.append(c); out.append(next); i += 2; continue }
+                if c == "\"", next == "\"", at(i + 2) == "\"" {
+                    out.append(contentsOf: [c, c, c])
+                    inMultilineString = false
+                    i += 3
+                    continue
+                }
+                out.append(c)
+                i += 1
+                continue
+            }
+            if inString {
+                if c == "\\", let next { out.append(c); out.append(next); i += 2; continue }
+                if c == "\"" || c == "\n" { inString = false }   // a line break ends a string that was never closed
+                out.append(c)
+                i += 1
+                continue
+            }
+            if c == "/", next == "/" {
+                while i < chars.count, chars[i] != "\n" { i += 1 }
+                continue
+            }
+            if c == "/", next == "*" { blockDepth = 1; i += 2; continue }
+            if c == "\"" {
+                if next == "\"", at(i + 2) == "\"" {
+                    out.append(contentsOf: [c, c, c])
+                    inMultilineString = true
+                    i += 3
+                    continue
+                }
+                inString = true
+            }
+            out.append(c)
+            i += 1
+        }
+        return String(out)
     }
 
     private func matches(_ pattern: String, in text: String) -> Bool {
@@ -57,6 +118,73 @@ final class MotherFocusFitnessTests: XCTestCase {
         }
     }
 
+    func testTheJobDetailLogsNothingAboutAPlanAndOpensNothing() throws {
+        for path in Self.jobDetailSources {
+            let text = try Self.source(path)
+            for pattern in ["\\bprint\\(", "\\bNSLog\\(", "\\bos_log\\("] {
+                XCTAssertFalse(matches(pattern, in: text), "\(path) logs (\(pattern))")
+            }
+            // Each `log.<level>(...)` statement as a whole (it may span lines), one level of parentheses inside.
+            let statement = try NSRegularExpression(pattern: "\\blog\\.(debug|info|notice|error|warning|fault|log)\\((?:[^()]|\\([^()]*\\))*\\)")
+            for match in statement.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length)) {
+                let call = (text as NSString).substring(with: match.range)
+                XCTAssertFalse(call.lowercased().contains("plan") || call.contains("checklist"),
+                               "\(path) logs something about a plan: \(call)")
+            }
+            XCTAssertEqual(occurrences(of: "NSWorkspace.shared.open(", in: text), 0, "\(path) opens nothing itself: the host does")
+        }
+    }
+
+    func testTheCommentStripperKeepsAStringThatLooksLikeAComment() {
+        let code = "let url = \"https://example.com/a//b\" // trailing\nlet s = \"// not a comment\" /* gone */ let t = 1\n"
+            + "/* outer /* nested */ still a comment */ let u = \"x\"\n"
+        let stripped = Self.stripComments(code)
+        XCTAssertTrue(stripped.contains("\"https://example.com/a//b\""), "a URL in a string stays")
+        XCTAssertTrue(stripped.contains("\"// not a comment\""), "a `//` in a string stays")
+        XCTAssertFalse(stripped.contains("trailing"))
+        XCTAssertFalse(stripped.contains("gone"))
+        XCTAssertFalse(stripped.contains("nested"))
+        XCTAssertFalse(stripped.contains("still a comment"))
+        XCTAssertTrue(stripped.contains("let t = 1") && stripped.contains("let u = \"x\""), "the code around comments stays")
+    }
+
+    func testTheJobDetailIsAmongTheScannedSourcesAndTheStripperKeepsItsUrlLiterals() throws {
+        XCTAssertTrue(Self.jobDetailSources.contains("UI/Views/MotherJobDetail.swift"))
+        for path in Self.jobDetailSources {
+            XCTAssertTrue(Self.tagSensitiveSources.contains(path), "\(path) is scanned for view tags")
+        }
+        XCTAssertFalse(Self.planViewerSources.isEmpty)
+
+        // Every string literal in the real sources that holds "://" and is not inside a comment must come out
+        // of the stripper whole. (If a source has none, this checks only that the sources are read.)
+        for path in Self.planViewerSources + Self.jobDetailSources {
+            var root = URL(fileURLWithPath: "\(#filePath)")
+            for _ in 0..<3 { root.deleteLastPathComponent() }
+            let raw = try String(contentsOf: root.appendingPathComponent("macOS/Nostromo").appendingPathComponent(path), encoding: .utf8)
+            let stripped = try Self.source(path)
+            XCTAssertLessThan(stripped.utf8.count, raw.utf8.count, "\(path) has comments, and they are gone")
+            for line in raw.components(separatedBy: "\n") where !line.trimmingCharacters(in: .whitespaces).hasPrefix("//") {
+                guard let literal = line.range(of: "\"[^\"\\n]*://[^\"\\n]*\"", options: .regularExpression) else { continue }
+                if let comment = line.range(of: "(?<!:)//", options: .regularExpression), comment.lowerBound < literal.lowerBound { continue }
+                XCTAssertTrue(stripped.contains(String(line[literal])), "\(path): the literal \(line[literal]) did not survive stripping")
+            }
+        }
+    }
+
+    func testTheCommentStripperHandlesEscapesAndMultilineStrings() {
+        let code = "let a = \"x \\\" // still in the string\" // gone\n"
+            + "let b = \"\"\"\n// inside a multiline string\n\"\"\" // gone too\n"
+            + "let c = \"://\" // gone as well\n"
+        let stripped = Self.stripComments(code)
+        XCTAssertTrue(stripped.contains("// still in the string"), "an escaped quote does not end the string")
+        XCTAssertTrue(stripped.contains("// inside a multiline string"), "a multiline string keeps its lines")
+        XCTAssertTrue(stripped.contains("\"://\""), "a bare ://  literal stays")
+        for gone in ["gone\n", "gone too", "gone as well"] {
+            XCTAssertFalse(stripped.contains(gone), "'\(gone)' was a comment")
+        }
+        XCTAssertEqual(stripped.components(separatedBy: "\n").count, code.components(separatedBy: "\n").count, "line numbers are kept")
+    }
+
     func testNothingDeclaresAViewTag() throws {
         for path in Self.tagSensitiveSources {
             let text = try Self.source(path)
@@ -68,7 +196,7 @@ final class MotherFocusFitnessTests: XCTestCase {
         let literal = ["NSImage(contentsOf:", "URLSession", "WKWebView", "Data(contentsOf: URL(string:",
                        "NSAppleScript", "posix_spawn"]
         let patterns = ["\\bProcess\\(", "\\bsystem\\("]
-        for path in Self.planViewerSources {
+        for path in Self.planViewerSources + Self.jobDetailSources {
             let text = try Self.source(path)
             for needle in literal {
                 XCTAssertFalse(text.contains(needle), "\(path) uses \(needle)")

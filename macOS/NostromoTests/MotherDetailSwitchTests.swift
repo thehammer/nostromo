@@ -321,6 +321,46 @@ final class MotherDetailSwitchTests: XCTestCase {
         XCTAssertEqual(detail.segmentLabel(.log), "Log")
     }
 
+    // MARK: - What a screen reader says for each segment
+
+    func testTheLogSegmentIsReadOutAsNewLinesWhileItHasADotAndAsLogOtherwise() throws {
+        let (detail, _) = try makeDetail()
+        detail.select(job(state: "done", plan: nil))
+        waitForLog(detail)
+        XCTAssertFalse(detail.logHasUnseenLines)
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.log), "Log")
+
+        detail.setLogAttributed(MDFixtures.logText(lines: 4, long: false))
+        XCTAssertTrue(detail.logHasUnseenLines)
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.log), "Log, new lines", "the dot is not read out as a bullet")
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.overview), "Overview", "the other segments are unaffected")
+
+        detail.selectSegment(.log)
+        XCTAssertFalse(detail.logHasUnseenLines)
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.log), "Log", "showing the Log clears it")
+
+        detail.selectSegment(.overview)
+        detail.setLogAttributed(MDFixtures.logText(lines: 9, long: false))
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.log), "Log, new lines", "and it comes back after leaving")
+        detail.select(job("j2", state: "done", plan: nil))
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.log), "Log", "another job starts clean")
+    }
+
+    func testThePlanSegmentHasNoLabelWithoutAPlanAndIsNamedPlanWithOne() throws {
+        let (detail, dir) = try makeDetail()
+        detail.select(job(plan: nil))
+        XCTAssertNil(detail.segmentAccessibilityLabel(.plan), "there is no Plan segment to name")
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.overview), "Overview")
+
+        detail.select(job(plan: try planCopy(dir: dir)))
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.plan), "Plan")
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.overview), "Overview")
+        XCTAssertEqual(detail.segmentAccessibilityLabel(.log), "Log")
+
+        detail.select(job(plan: ""))
+        XCTAssertNil(detail.segmentAccessibilityLabel(.plan), "an empty plan path is no plan")
+    }
+
     // MARK: - Nothing is left behind (MF4-12)
 
     func testOpeningAndClosingManyDetailsLeavesNoDetailPlanViewOrWatcherBehind() throws {

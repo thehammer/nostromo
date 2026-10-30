@@ -40,8 +40,9 @@ enum PlanLinkAction: Equatable {
 
 enum PlanLinkPolicy {
 
-    /// `http` and `https` open in the browser; `file:` URLs and relative or absolute paths are revealed
-    /// in Finder (never opened); every other scheme, and in-page `#` anchors, are inert.
+    /// `http` and `https` open in the browser; `file:` URLs for this machine (no host, or `localhost`) and
+    /// relative or absolute paths are revealed in Finder (never opened); every other scheme, a `file:` URL
+    /// for another host, and in-page `#` anchors, are inert.
     static func action(for target: String, planDirectory: URL?) -> PlanLinkAction {
         let target = target.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !target.isEmpty, !target.hasPrefix("#") else { return .none }
@@ -52,7 +53,7 @@ enum PlanLinkPolicy {
                 guard let url = URL(string: target), url.host?.isEmpty == false else { return .none }
                 return .open(url)
             case "file":
-                guard let url = URL(string: target), url.isFileURL else { return .none }
+                guard let url = URL(string: target), url.isFileURL, isThisMachine(url.host) else { return .none }
                 return .reveal(url.standardizedFileURL)
             default:
                 return .none
@@ -69,10 +70,34 @@ enum PlanLinkPolicy {
         return .reveal(URL(fileURLWithPath: path, relativeTo: planDirectory).standardizedFileURL)
     }
 
+    /// A `file://host/path` link names a file on `host`; only this machine's own names are ours to reveal.
+    private static func isThisMachine(_ host: String?) -> Bool {
+        guard let host, !host.isEmpty else { return true }
+        return host.lowercased() == "localhost"
+    }
+
     private static func isScheme(_ text: Substring) -> Bool {
         guard let first = text.first, first.isASCII, first.isLetter else { return false }
         return text.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "+-.".contains($0)) }
     }
+}
+
+// MARK: - Display limits
+
+/// What one plan may cost the main thread. Row heights are worked out for every row at every width and
+/// the rows are scanned on every scroll tick, so a 1 MiB file of one-line paragraphs (hundreds of
+/// thousands of rows) or of one code block (a million characters in one text layout) would stall the
+/// app. Past a limit the plan stops and a "plan truncated for display" row says so; the whole file is
+/// still one click away (Open, Finder, Copy path), and the Overview checklist is not affected.
+enum PlanDisplayLimits {
+    /// Rows of the document, a list item, a heading, a paragraph, a code block, a table or a rule each being one.
+    static let maxRows = 2_500
+    /// Characters of text over all rows.
+    static let maxCharacters = 400_000
+    /// Characters in one row.
+    static let maxCharactersPerRow = 60_000
+    /// Lines of one code block, or rows of one table.
+    static let maxLinesPerScrollRow = 1_500
 }
 
 // MARK: - Styles
@@ -345,7 +370,11 @@ private final class PlanScrollRow: PlanRowView {
         scrollView.documentView = textView
         if let languageLabel { addSubview(languageLabel) }
         addSubview(scrollView)
-        setAccessibilityLabel(kind == .code ? "Code block" : "Table")
+        // The row itself is the element (a group a screen reader can name); its text view stays inside it.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        let name = kind == .code ? "Code block" : "Table"
+        setAccessibilityLabel(language.map { $0.isEmpty ? name : "\(name), \($0)" } ?? name)
     }
     required init?(coder: NSCoder) { fatalError("PlanScrollRow is built in code") }
 
@@ -369,6 +398,52 @@ private final class PlanRuleRow: PlanRowView {
     }
 }
 
+/// The last row of a plan that was cut short for display: what happened, and a way to the whole file.
+private final class PlanNoticeRow: PlanRowView {
+    static let text = "Plan truncated for display. It is too large to show in full here; "
+        + "open it in your editor for the rest."
+    static let buttonHeight: CGFloat = 24
+    static let padding: CGFloat = 8
+
+    let label = NSTextField(wrappingLabelWithString: PlanNoticeRow.text)
+    let copyButton = NSButton(title: "Copy path", target: nil, action: nil)
+    private let copyPath: () -> Void
+
+    static func height(wrappingAt width: CGFloat) -> CGFloat {
+        let text = NSAttributedString(string: Self.text, attributes: [.font: NSFont.systemFont(ofSize: 12)])
+        return PlanTextMetrics.height(of: text, wrappingAt: width) + buttonHeight + 3 * padding
+    }
+
+    init(copyPath: @escaping () -> Void) {
+        self.copyPath = copyPath
+        super.init(frame: .zero)
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = Theme.fgMuted
+        label.maximumNumberOfLines = 0
+        label.isSelectable = true
+        copyButton.bezelStyle = .rounded
+        copyButton.controlSize = .small
+        copyButton.font = .systemFont(ofSize: 11)
+        copyButton.target = self
+        copyButton.action = #selector(copyTapped)
+        copyButton.setAccessibilityLabel("Copy plan path")
+        addSubview(label)
+        addSubview(copyButton)
+        setAccessibilityElement(false)
+    }
+    required init?(coder: NSCoder) { fatalError("PlanNoticeRow is built in code") }
+
+    override func layout() {
+        super.layout()
+        let textHeight = PlanTextMetrics.height(of: NSAttributedString(string: Self.text, attributes: [.font: NSFont.systemFont(ofSize: 12)]),
+                                                wrappingAt: bounds.width)
+        label.frame = NSRect(x: 0, y: Self.padding, width: bounds.width, height: textHeight)
+        copyButton.frame = NSRect(x: 0, y: label.frame.maxY + Self.padding, width: 80, height: Self.buttonHeight)
+    }
+
+    @objc private func copyTapped() { copyPath() }
+}
+
 // MARK: - Specs and the flow
 
 /// A row of the document that may or may not have a view right now. Its height is known (worked out
@@ -380,6 +455,8 @@ private final class PlanRowSpec {
         case code
         case table
         case rule
+        /// "Plan truncated for display" (always the last row).
+        case notice
     }
 
     let kind: Kind
@@ -422,9 +499,12 @@ private final class PlanFlowView: NSView {
     /// A row got its view.
     var onRowBuilt: ((PlanRowView) -> Void)?
 
+    private var headingCount = 0
+
     func setSpecs(_ newSpecs: [PlanRowSpec]) {
         specs.forEach { $0.view?.removeFromSuperview(); $0.view = nil }
         specs = newSpecs
+        headingCount = newSpecs.reduce(0) { $0 + ($1.headingTitle == nil ? 0 : 1) }
         laidOutWidth = -1
     }
 
@@ -451,7 +531,7 @@ private final class PlanFlowView: NSView {
         let margin = max(1_500, visible.height * 2)
         let near = visible.insetBy(dx: -10_000, dy: -margin)
         let far = near.insetBy(dx: 0, dy: -margin)
-        let headingsAlwaysBuilt = specs.lazy.filter { $0.headingTitle != nil }.count <= Self.alwaysBuiltHeadingLimit
+        let headingsAlwaysBuilt = headingCount <= Self.alwaysBuiltHeadingLimit
         for spec in specs {
             let isHeading = spec.headingTitle != nil
             if spec.view == nil {
@@ -519,7 +599,9 @@ private final class PlanHeaderView: NSView {
         copyButton.toolTip = "Copy the plan's path"
         copyButton.setAccessibilityLabel("Copy path")
         openButton.toolTip = "Open the plan in its default app"
+        openButton.setAccessibilityLabel("Open plan in its default app")
         finderButton.toolTip = "Show the plan in Finder"
+        finderButton.setAccessibilityLabel("Show plan in Finder")
         outlineButton.setAccessibilityLabel("Outline")
         [nameLabel, criteriaLabel, outlineButton, openButton, finderButton, copyButton].forEach(addSubview)
     }
@@ -597,6 +679,8 @@ final class PlanDocumentView: NSView {
         /// Reading or parsing.
         case loading
         case document
+        /// The file was read and has nothing to show (no bytes, only white space, or no blocks at all).
+        case emptyPlan
         /// The file could not be shown: `.notFound`, `.notReadable`, `.notMarkdown`, `.tooLarge` or `.notUTF8`.
         case unreadable(PlanFileResult)
     }
@@ -616,12 +700,17 @@ final class PlanDocumentView: NSView {
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     private let messageCopyButton = NSButton(title: "Copy path", target: nil, action: nil)
     private let messageOpenButton = NSButton(title: "Open ↗", target: nil, action: nil)
+    private let messageRevealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
 
     /// The text the shown document was built from: a reload that reads the same text changes nothing.
     private var shownText: String?
     private var document = PlanDocument()
     private var planDirectory: URL?
     private var checklistCounts = (done: 0, total: 0)
+    /// The plan was longer than `PlanDisplayLimits` allow and ends in a "truncated for display" row.
+    private(set) var isTruncatedForDisplay = false
+    /// Characters of text over all rows of the document (at most `PlanDisplayLimits.maxCharacters`).
+    private(set) var displayedCharacterCount = 0
     private var needsLoadOnActivate = false
     private var findCursor: (index: Int, end: Int)?
     private(set) var findVisible = false
@@ -724,6 +813,9 @@ final class PlanDocumentView: NSView {
     /// `✓ n/m criteria`, or nil when the plan has no task items (the label is hidden then).
     var criteriaText: String? { header.criteriaLabel.isHidden ? nil : header.criteriaLabel.stringValue }
     var fileNameText: String { header.nameLabel.stringValue }
+    /// The words of whatever message the pane shows instead of a document (nil while it shows one).
+    var shownMessage: String? { state.showsMessage && !messageLabel.isHidden ? messageLabel.stringValue : nil }
+    var messageRevealButtonView: NSButton { messageRevealButton }
     var outlineButton: NSPopUpButton { header.outlineButton }
     var openButton: NSButton { header.openButton }
     var finderButton: NSButton { header.finderButton }
@@ -913,12 +1005,12 @@ final class PlanDocumentView: NSView {
             y += 28
         }
         let rest = NSRect(x: 0, y: y, width: width, height: max(0, bounds.height - y))
-        if state.isUnreadable || state == .loading {
+        if state.showsMessage {
             let textWidth = max(40, width)
             let textHeight = ceil(messageLabel.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: textWidth, height: 10_000)).height ?? 20)
             messageLabel.frame = NSRect(x: 0, y: rest.minY + 8, width: textWidth, height: textHeight)
             var buttonX: CGFloat = 0
-            for button in [messageCopyButton, messageOpenButton] where !button.isHidden {
+            for button in [messageCopyButton, messageRevealButton, messageOpenButton] where !button.isHidden {
                 let w = min(max(ceil(button.fittingSize.width), 60), max(60, width - buttonX))
                 button.frame = NSRect(x: buttonX, y: messageLabel.frame.maxY + 8, width: w, height: 24)
                 buttonX += w + 8
@@ -973,7 +1065,7 @@ final class PlanDocumentView: NSView {
         messageLabel.lineBreakMode = .byWordWrapping
         messageLabel.isHidden = true
         addSubview(messageLabel)
-        for button in [messageCopyButton, messageOpenButton] {
+        for button in [messageCopyButton, messageRevealButton, messageOpenButton] {
             button.bezelStyle = .rounded
             button.controlSize = .small
             button.font = .systemFont(ofSize: 11)
@@ -984,13 +1076,19 @@ final class PlanDocumentView: NSView {
         messageCopyButton.action = #selector(copyThePath)
         messageOpenButton.target = self
         messageOpenButton.action = #selector(openExternally)
+        messageRevealButton.target = self
+        messageRevealButton.action = #selector(revealInFinder)
+        messageCopyButton.setAccessibilityLabel("Copy plan path")
+        messageOpenButton.setAccessibilityLabel("Open plan in its default app")
+        messageRevealButton.setAccessibilityLabel("Show plan in Finder")
     }
 
     /// Show what `state` says: the header and document, or one calm message with its buttons.
     private func render() {
         let showsDocument = state == .document
         header.isHidden = state == .empty
-        header.nameLabel.stringValue = planPath.map { ($0 as NSString).lastPathComponent } ?? ""
+        // A file name is as untrusted as the file: no bidi override or zero-width character in it.
+        header.nameLabel.stringValue = planPath.map { FoldTextSanitizer.sanitize(($0 as NSString).lastPathComponent) } ?? ""
         header.criteriaLabel.isHidden = !showsDocument || checklistCounts.total == 0
         if !header.criteriaLabel.isHidden {
             header.criteriaLabel.stringValue = "✓ \(checklistCounts.done)/\(checklistCounts.total) criteria"
@@ -1007,19 +1105,30 @@ final class PlanDocumentView: NSView {
         case .empty, .document:
             messageLabel.isHidden = true
             messageCopyButton.isHidden = true
+            messageRevealButton.isHidden = true
             messageOpenButton.isHidden = true
         case .loading:
             messageLabel.stringValue = "Loading the plan…"
             messageLabel.textColor = Theme.fgMuted
             messageLabel.isHidden = false
             messageCopyButton.isHidden = true
+            messageRevealButton.isHidden = true
+            messageOpenButton.isHidden = true
+        case .emptyPlan:
+            messageLabel.stringValue = "Empty plan. The file has nothing in it to show."
+            messageLabel.textColor = Theme.fgMuted
+            messageLabel.isHidden = false
+            messageCopyButton.isHidden = false
+            messageRevealButton.isHidden = true
             messageOpenButton.isHidden = true
         case .unreadable(let result):
             messageLabel.stringValue = Self.message(for: result)
             messageLabel.textColor = Theme.fg
             messageLabel.isHidden = false
             messageCopyButton.isHidden = false
-            messageOpenButton.isHidden = !(result == .notMarkdown || result == .tooLarge)
+            // A file that is not markdown is never handed to the system to open: show it in Finder instead.
+            messageRevealButton.isHidden = result != .notMarkdown
+            messageOpenButton.isHidden = result != .tooLarge
         }
         rebuildOutlineMenu()
         needsLayout = true
@@ -1032,7 +1141,10 @@ final class PlanDocumentView: NSView {
                 + "The job keeps running from its own copy if it is still running."
         case .notReadable:
             return "Can't read this file (permissions)."
-        case .notMarkdown, .tooLarge:
+        case .notMarkdown:
+            return "This plan isn't a markdown file, so it isn't shown or opened from here. "
+                + "Show it in Finder or copy its path."
+        case .tooLarge:
             return "This plan can't be shown here. Open it in your editor."
         case .notUTF8:
             return "This plan isn't UTF-8 text."
@@ -1044,7 +1156,9 @@ final class PlanDocumentView: NSView {
     private func rebuildOutlineMenu() {
         let menu = NSMenu()
         menu.addItem(withTitle: "Outline", action: nil, keyEquivalent: "")   // a pull-down's own title
-        for entry in document.outline {
+        // Only headings that have a row: a plan cut short for display lists what it shows.
+        let shown = Set(flow.specs.lazy.filter { $0.headingTitle != nil }.map(\.blockIndex))
+        for entry in document.outline where shown.contains(entry.blockIndex) {
             let indent = String(repeating: "  ", count: max(0, entry.level - 1))
             let title = indent + (entry.title.count > 60 ? String(entry.title.prefix(59)) + "…" : entry.title)
             let item = NSMenuItem(title: title, action: #selector(outlineChosen(_:)), keyEquivalent: "")
@@ -1060,7 +1174,7 @@ final class PlanDocumentView: NSView {
     private func loaderDidDeliver(_ result: PlanFileResult) {
         switch result {
         case .loaded(let text, _, _):
-            guard text != shownText || state != .document else {
+            guard text != shownText || !state.showsFile else {
                 return   // the same text again (a touch, a save with no change): nothing to rebuild
             }
             parseGeneration += 1
@@ -1075,6 +1189,8 @@ final class PlanDocumentView: NSView {
                 }
             }
         default:
+            // The same answer again (the loader keeps asking for a file that is not there): nothing changes.
+            guard state != .unreadable(result) else { return }
             parseGeneration += 1
             resetDocument()
             state = .unreadable(result)
@@ -1091,18 +1207,23 @@ final class PlanDocumentView: NSView {
         findCursor = nil
         var builder = PlanSpecBuilder(renderer: PlanSpanRenderer(planDirectory: planDirectory))
         builder.add(newDocument.blocks, leading: 0, quoteDepth: 0)
+        builder.finish(copyPath: { [weak self] in self?.copyThePath() })
         flow.setSpecs(builder.specs)
-        state = .document
+        isTruncatedForDisplay = builder.isTruncated
+        displayedCharacterCount = builder.characters
+        state = builder.specs.isEmpty ? .emptyPlan : .document
         render()
         layoutSubtreeIfNeeded()
         relayoutFlow(width: scrollView.contentSize.width)
-        if hadDocument { restore(anchor) } else { scroll(toY: 0) }
+        if hadDocument, state == .document { restore(anchor) } else { scroll(toY: 0) }
     }
 
     private func resetDocument() {
         shownText = nil
         document = PlanDocument()
         checklistCounts = (0, 0)
+        isTruncatedForDisplay = false
+        displayedCharacterCount = 0
         findCursor = nil
         flow.setSpecs([])
         flow.setFrameSize(NSSize(width: flow.frame.width, height: 0))
@@ -1210,26 +1331,90 @@ private extension PlanDocumentView.State {
         if case .unreadable = self { return true }
         return false
     }
+    /// The pane shows one calm message instead of a document.
+    var showsMessage: Bool {
+        switch self {
+        case .loading, .emptyPlan, .unreadable: return true
+        case .empty, .document: return false
+        }
+    }
+    /// A file was read and is what the pane is about (a document, or the fact that it is empty).
+    var showsFile: Bool { self == .document || self == .emptyPlan }
 }
 
 // MARK: - Building rows from blocks
 
 /// The document's blocks as row specs: what each row says and how tall it is, with its view made later.
+///
+/// It stops at `PlanDisplayLimits`: past the row or character budget nothing more is added, and
+/// `finish` puts a "plan truncated for display" row at the end. The work is bounded by the limits, not
+/// by the file.
 private struct PlanSpecBuilder {
     let renderer: PlanSpanRenderer
     private(set) var specs: [PlanRowSpec] = []
+    /// Something was left out.
+    private(set) var isTruncated = false
+    /// Characters of text over the rows so far.
+    private(set) var characters = 0
 
     init(renderer: PlanSpanRenderer) {
         self.renderer = renderer
     }
 
+    private var isFull: Bool {
+        specs.count >= PlanDisplayLimits.maxRows || characters >= PlanDisplayLimits.maxCharacters
+    }
+
     mutating func add(_ blocks: [PlanBlock], leading: CGFloat, quoteDepth: Int) {
-        for block in blocks { add(block, leading: leading, quoteDepth: quoteDepth) }
+        for block in blocks {
+            if isFull { isTruncated = true; return }
+            add(block, leading: leading, quoteDepth: quoteDepth)
+        }
+    }
+
+    /// The last row, when something was left out.
+    mutating func finish(copyPath: @escaping () -> Void) {
+        guard isTruncated else { return }
+        specs.append(PlanRowSpec(kind: .notice, blockIndex: -1, spaceBefore: 16, searchText: "",
+                                 height: { PlanNoticeRow.height(wrappingAt: $0) },
+                                 make: { PlanNoticeRow(copyPath: copyPath) }))
     }
 
     private mutating func append(_ spec: PlanRowSpec) {
         if specs.isEmpty { spec.spaceBefore = 0 }
+        characters += spec.searchText.utf16.count
         specs.append(spec)
+    }
+
+    /// `text`, cut (with an ellipsis) to what one row and the rest of the budget allow.
+    private mutating func fit(_ text: NSAttributedString) -> NSAttributedString {
+        let room = max(0, PlanDisplayLimits.maxCharacters - characters)
+        let limit = min(PlanDisplayLimits.maxCharactersPerRow, room)
+        guard text.length > limit else { return text }
+        isTruncated = true
+        // The ellipsis counts: the row is `limit` characters, not one more.
+        let kept = max(0, limit - 1)
+        let cut = NSMutableAttributedString(attributedString: text.attributedSubstring(from: NSRange(location: 0, length: kept)))
+        cut.append(NSAttributedString(string: "…"))
+        return cut
+    }
+
+    /// The first `maxLinesPerScrollRow` lines of `text`.
+    private mutating func firstLines(of text: String) -> String {
+        var lines = 0
+        let utf8 = text.utf8
+        var i = utf8.startIndex
+        while i < utf8.endIndex {
+            if utf8[i] == UInt8(ascii: "\n") {
+                lines += 1
+                if lines == PlanDisplayLimits.maxLinesPerScrollRow {
+                    isTruncated = true
+                    return String(text[..<i])
+                }
+            }
+            i = utf8.index(after: i)
+        }
+        return text
     }
 
     private let quoteStep: CGFloat = 14
@@ -1241,33 +1426,37 @@ private struct PlanSpecBuilder {
             var r = renderer
             r.baseSize = PlanStyle.headingSize(level)
             r.bold = true
-            let text = r.render(spans)
-            let title = spans.plainText
+            let rendered = r.render(spans)
+            let text = fit(rendered)
+            let title = text.length == rendered.length ? spans.plainText : text.string
             append(PlanRowSpec(kind: .heading(level: level, title: title), blockIndex: block.index,
                                spaceBefore: level == 1 ? 22 : 16, searchText: text.string,
                                height: { PlanTextMetrics.height(of: text, wrappingAt: $0) },
                                make: { PlanHeadingRow(level: level, title: title, attributed: text) }))
 
         case .paragraph(let spans):
-            let text = renderer.render(spans)
+            let text = NSMutableAttributedString(attributedString: fit(renderer.render(spans)))
             applyParagraphStyle(to: text)
             append(textSpec(text, block: block, marker: nil, leading: indent, quoteDepth: quoteDepth, spaceBefore: 8))
 
         case .list(ordered: let ordered, start: let start, items: let items):
             for (i, item) in items.enumerated() {
+                if isFull { isTruncated = true; return }
                 addListItem(item, number: ordered ? start + i : nil, parent: block, leading: indent, quoteDepth: quoteDepth)
             }
 
         case .codeBlock(lang: let lang, text: let code):
             let style = NSMutableParagraphStyle()
             style.lineBreakMode = .byClipping
-            let attributed = NSAttributedString(string: code, attributes: [
+            let attributed = fit(NSAttributedString(string: firstLines(of: code), attributes: [
                 .font: Theme.firaCode(size: PlanStyle.codeSize), .foregroundColor: Theme.fg, .paragraphStyle: style,
-            ])
+            ]))
             append(scrollSpec(.code, attributed, language: lang, block: block, leading: indent))
 
         case .table(header: let header, rows: let tableRows):
-            append(scrollSpec(.table, tableText(header: header, rows: tableRows), language: nil, block: block, leading: indent))
+            // Rows are cut first (so a million cells are never measured), then the whole table to a row's size
+            // (a header cell can be as long as the file).
+            append(scrollSpec(.table, fit(tableText(header: header, rows: limited(tableRows))), language: nil, block: block, leading: indent))
 
         case .quote(let inner):
             add(inner, leading: leading, quoteDepth: quoteDepth + 1)
@@ -1276,6 +1465,22 @@ private struct PlanSpecBuilder {
             append(PlanRowSpec(kind: .rule, blockIndex: block.index, spaceBefore: 14, searchText: "",
                                height: { _ in 1 }, make: { PlanRuleRow() }))
         }
+    }
+
+    /// The rows of a table that fit one row's limits (lines and characters).
+    private mutating func limited(_ rows: [[[PlanSpan]]]) -> [[[PlanSpan]]] {
+        var kept: [[[PlanSpan]]] = []
+        var characters = 0
+        for row in rows {
+            let size = row.reduce(0) { $0 + $1.plainText.utf16.count }
+            if kept.count >= PlanDisplayLimits.maxLinesPerScrollRow || characters + size > PlanDisplayLimits.maxCharactersPerRow {
+                isTruncated = true
+                break
+            }
+            characters += size
+            kept.append(row)
+        }
+        return kept
     }
 
     private func textSpec(_ text: NSAttributedString, block: PlanBlock, marker: (() -> NSView)?, leading: CGFloat,
@@ -1305,9 +1510,9 @@ private struct PlanSpecBuilder {
             anchorBlock = first
             content.removeFirst()
         }
-        let text = renderer.render(spans)
+        let text = NSMutableAttributedString(attributedString: fit(renderer.render(spans)))
         applyParagraphStyle(to: text)
-        let label = spans.plainText
+        let label = String(spans.plainText.prefix(500))   // what a screen reader says: a name, not the item's whole text
         let task = item.task
         let makeMarker: () -> NSView = {
             if let done = task {

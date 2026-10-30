@@ -420,7 +420,7 @@ final class PlanDocumentViewTests: XCTestCase {
     // MARK: - Unreadable files (SR7)
 
     private func assertUnreadable(_ path: String, shows result: PlanFileResult, message: String, opensInEditor: Bool,
-                                  secret: String? = nil, file: StaticString = #filePath, line: UInt = #line) {
+                                  revealsInFinder: Bool = false, secret: String? = nil, file: StaticString = #filePath, line: UInt = #line) {
         let recorder = Recorder()
         let rig = makeRig(path: path, actions: recorder.actions)
         rig.view.show(planPath: path)
@@ -432,6 +432,8 @@ final class PlanDocumentViewTests: XCTestCase {
         XCTAssertFalse(view.messageCopyPathButton.isHiddenOrHasHiddenAncestor, "Copy path is offered", file: file, line: line)
         XCTAssertEqual(view.messageOpenPlanButton.isHiddenOrHasHiddenAncestor, !opensInEditor,
                        "Open ↗ is offered only when the plan can be opened in an editor instead", file: file, line: line)
+        XCTAssertEqual(view.messageRevealButtonView.isHiddenOrHasHiddenAncestor, !revealsInFinder,
+                       "Show in Finder is offered instead of Open ↗ for a file that is not markdown", file: file, line: line)
         XCTAssertNil(rig.window.attachedSheet, "no sheet", file: file, line: line)
         XCTAssertTrue(view.documentScrollView.isHidden, "no document is shown", file: file, line: line)
 
@@ -442,6 +444,12 @@ final class PlanDocumentViewTests: XCTestCase {
             let open = view.messageOpenPlanButton
             _ = open.sendAction(open.action, to: open.target)
             XCTAssertEqual(recorder.openedPlans, [path], file: file, line: line)
+        }
+        if revealsInFinder {
+            let reveal = view.messageRevealButtonView
+            _ = reveal.sendAction(reveal.action, to: reveal.target)
+            XCTAssertEqual(recorder.revealed, [URL(fileURLWithPath: path)], file: file, line: line)
+            XCTAssertTrue(recorder.openedPlans.isEmpty, "a file that is not markdown is never handed to be opened", file: file, line: line)
         }
 
         if let secret {
@@ -480,8 +488,8 @@ final class PlanDocumentViewTests: XCTestCase {
         let secret = "SECRET-\(UUID().uuidString)"
         let url = dir.appendingPathComponent("notes.txt")
         try PlanTestSupport.writeInPlace(secret, to: url)
-        assertUnreadable(url.path, shows: .notMarkdown, message: "This plan can't be shown here. Open it in your editor.",
-                         opensInEditor: true, secret: "SECRET-")
+        assertUnreadable(url.path, shows: .notMarkdown, message: "This plan isn't a markdown file, so it isn't shown or opened from here. Show it in Finder or copy its path.",
+                         opensInEditor: false, revealsInFinder: true, secret: "SECRET-")
     }
 
     func testAMarkdownNamedLinkToANonMarkdownFileIsNotShownEither() throws {
@@ -491,8 +499,8 @@ final class PlanDocumentViewTests: XCTestCase {
         try PlanTestSupport.writeInPlace(secret, to: target)
         let link = dir.appendingPathComponent("plan.md")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
-        assertUnreadable(link.path, shows: .notMarkdown, message: "This plan can't be shown here. Open it in your editor.",
-                         opensInEditor: true, secret: "SECRET-")
+        assertUnreadable(link.path, shows: .notMarkdown, message: "This plan isn't a markdown file, so it isn't shown or opened from here. Show it in Finder or copy its path.",
+                         opensInEditor: false, revealsInFinder: true, secret: "SECRET-")
     }
 
     func testAPlanOverOneMebibyteIsNotShown() throws {
@@ -512,13 +520,19 @@ final class PlanDocumentViewTests: XCTestCase {
 
     // MARK: - Hostile text (SR2)
 
+    /// What is never on screen, whatever is next to it. NOT in this set, because each is allowed in a context
+    /// (see PlanViewFixupTests.testNoJoinerOrSelectorSitsNextToAnASCIIScalarAnywhereOnScreen): U+200C and
+    /// U+200D (between two non-ASCII scalars that are not joiners), U+FE0E and U+FE0F (after an emoji).
     private static let forbiddenScalars: Set<UInt32> = {
         var s = Set<UInt32>()
         s.formUnion(0x202A...0x202E)                       // bidi embeddings and overrides
         s.formUnion(0x2066...0x2069)                       // bidi isolates
         s.formUnion([0x061C])                              // Arabic letter mark
-        s.formUnion(0x200B...0x200F)                       // zero-width space ... directional marks
+        s.formUnion([0x200B, 0x200E, 0x200F])              // zero-width space, left-to-right and right-to-left marks
         s.formUnion(0x2060...0x2064)                       // word joiner, invisible operators
+        s.formUnion([0x00AD, 0x180E])                      // soft hyphen, Mongolian vowel separator
+        s.formUnion(0xFE00...0xFE0D)                       // variation selectors (FE0E, FE0F are in context only)
+        s.formUnion(0xE0100...0xE01EF)                     // variation selectors supplement
         s.insert(0xFEFF)                                   // BOM / zero-width no-break space
         s.formUnion([0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0])   // blank-looking fillers
         s.formUnion([0x2028, 0x2029])                      // line and paragraph separators

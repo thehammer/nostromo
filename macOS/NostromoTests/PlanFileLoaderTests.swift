@@ -84,11 +84,14 @@ final class ManualPlanReloadScheduler: PlanReloadScheduler {
     private var tokens: [Token] = []
     /// Every `schedule` call, cancelled or not.
     private(set) var scheduledCount = 0
+    /// The `delay` of every `schedule` call, in order, cancelled or not.
+    private(set) var delays: [TimeInterval] = []
     /// Work that was scheduled and neither cancelled nor run.
     var livePendingCount: Int { tokens.filter { $0.work != nil }.count }
 
     func schedule(after delay: TimeInterval, _ work: @escaping () -> Void) -> PlanReloadToken {
         scheduledCount += 1
+        delays.append(delay)
         let token = Token()
         token.work = work
         tokens.append(token)
@@ -481,5 +484,306 @@ final class PlanFileLoaderTests: XCTestCase {
         drainMain()
         XCTAssertEqual(scheduler.scheduledCount, 0, "a write after deallocation schedules nothing")
         XCTAssertEqual(delivered, deliveredBefore)
+    }
+}
+
+// MARK: - Looking again for a file that is not there
+
+/// A file that is not there yet (or was deleted and has not come back) cannot be watched, so the loader asks
+/// again on its scheduler: after 0.5 s, then 1, 2, 4, 8, 16, and 30 s from then on, until it finds the file or
+/// is stopped. Every wait here is a `ManualPlanReloadScheduler` fired by hand; the run loop is pumped on
+/// conditions, never for a duration.
+final class PlanFileLoaderRetryTests: XCTestCase {
+
+    /// A reader that counts its calls (and the paths it was asked for) from whatever queue it runs on.
+    private final class Reads {
+        private let lock = NSLock()
+        private var paths: [String] = []
+        private var script: [PlanFileResult]
+        private let fallback: PlanFileResult
+        init(script: [PlanFileResult] = [], then fallback: PlanFileResult = .notFound) {
+            self.script = script
+            self.fallback = fallback
+        }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return paths.count }
+        var asked: [String] { lock.lock(); defer { lock.unlock() }; return paths }
+        func read(_ path: String) -> PlanFileResult {
+            lock.lock(); defer { lock.unlock() }
+            paths.append(path)
+            return script.isEmpty ? fallback : script.removeFirst()
+        }
+    }
+
+    private final class Probe {
+        let scheduler = ManualPlanReloadScheduler()
+        let reads: Reads
+        let loader: PlanFileLoader
+        private(set) var results: [PlanFileResult] = []
+
+        init(_ reads: Reads) {
+            self.reads = reads
+            loader = PlanFileLoader(reader: { reads.read($0) }, scheduler: scheduler)
+            loader.onResult = { [weak self] in self?.results.append($0) }
+        }
+    }
+
+    private static let missing = "/redd-no-such-directory/plan.md"
+
+    private func waitFor(_ what: String, file: StaticString = #filePath, line: UInt = #line, _ condition: () -> Bool) {
+        XCTAssertTrue(PlanTestSupport.pumpUntil(condition), "timed out waiting for \(what)", file: file, line: line)
+    }
+
+    /// Everything queued on the main queue so far has run.
+    private func drainMain() {
+        var done = false
+        DispatchQueue.main.async { done = true }
+        XCTAssertTrue(PlanTestSupport.pumpUntil { done })
+    }
+
+    /// Fire the scheduler once and wait for the answer that brings.
+    private func fireAndWaitForAnotherResult(_ probe: Probe, file: StaticString = #filePath, line: UInt = #line) {
+        let before = probe.results.count
+        probe.scheduler.fire()
+        waitFor("the next look at the file", file: file, line: line) { probe.results.count > before }
+    }
+
+    // MARK: The schedule
+
+    func testTheWaitBetweenLooksDoublesFromHalfASecondAndStopsAtThirty() {
+        let expected: [TimeInterval] = [0.5, 1, 2, 4, 8, 16, 30, 30, 30]
+        XCTAssertEqual((0 ..< expected.count).map { PlanFileLoader.retryDelay(afterAttempts: $0) }, expected)
+        for attempt in [20, 100, 10_000, Int.max] {
+            XCTAssertEqual(PlanFileLoader.retryDelay(afterAttempts: attempt), 30, "attempt \(attempt)")
+        }
+    }
+
+    func testAMissingFileIsLookedForAgainWithGrowingWaits() {
+        let probe = Probe(Reads())
+        probe.loader.load(path: Self.missing)
+        waitFor("the first answer") { probe.results.count == 1 }
+        XCTAssertEqual(probe.results, [.notFound])
+        XCTAssertTrue(probe.loader.hasPendingRetry, "a file that is not there is looked for again")
+        XCTAssertEqual(probe.loader.retryAttempt, 1)
+        XCTAssertFalse(probe.loader.isWatching, "there is nothing to watch yet")
+        XCTAssertFalse(probe.loader.hasPendingReload)
+        XCTAssertEqual(probe.scheduler.delays, [0.5])
+        XCTAssertEqual(probe.scheduler.livePendingCount, 1)
+
+        for _ in 1 ... 8 { fireAndWaitForAnotherResult(probe) }
+
+        XCTAssertEqual(probe.results.count, 9)
+        XCTAssertTrue(probe.results.allSatisfy { $0 == .notFound })
+        XCTAssertEqual(probe.scheduler.delays, [0.5, 1, 2, 4, 8, 16, 30, 30, 30], "the waits follow retryDelay(afterAttempts:)")
+        XCTAssertEqual(probe.loader.retryAttempt, 9)
+        XCTAssertTrue(probe.loader.hasPendingRetry)
+        XCTAssertEqual(probe.scheduler.livePendingCount, 1, "one look is scheduled at a time")
+        XCTAssertEqual(probe.reads.count, 9, "a look is one read")
+        XCTAssertEqual(Set(probe.reads.asked), [Self.missing])
+    }
+
+    func testNothingIsReadAgainUntilTheSchedulerRuns() {
+        let probe = Probe(Reads())
+        probe.loader.load(path: Self.missing)
+        waitFor("the first answer") { probe.results.count == 1 }
+        drainMain()
+        drainMain()
+        XCTAssertEqual(probe.reads.count, 1, "the loader waits for its scheduler: it does not poll")
+    }
+
+    // MARK: A file that shows up
+
+    func testAFileThatAnswersEndsTheLookingAndStartsTheCountOver() {
+        let url = URL(fileURLWithPath: "/redd-found/plan.md")
+        let reads = Reads(script: [.notFound, .notFound, .loaded(text: "# Here\n", url: url, modified: nil), .notFound])
+        let probe = Probe(reads)
+        probe.loader.load(path: Self.missing)
+        waitFor("the first answer") { probe.results.count == 1 }
+        fireAndWaitForAnotherResult(probe)
+        XCTAssertEqual(probe.loader.retryAttempt, 2)
+        XCTAssertEqual(probe.scheduler.delays, [0.5, 1])
+
+        fireAndWaitForAnotherResult(probe)
+        XCTAssertEqual(probe.results.last, .loaded(text: "# Here\n", url: url, modified: nil))
+        XCTAssertEqual(probe.loader.retryAttempt, 0, "a file ends the count")
+        XCTAssertFalse(probe.loader.hasPendingRetry, "and the looking")
+        XCTAssertEqual(probe.scheduler.livePendingCount, 0)
+        XCTAssertEqual(probe.scheduler.delays, [0.5, 1], "a loaded answer schedules nothing")
+
+        // The file goes away again: the waits start from the beginning, not from where they were.
+        probe.loader.reload()
+        waitFor("the answer after it went") { probe.results.count == 4 }
+        XCTAssertEqual(probe.results.last, .notFound)
+        XCTAssertEqual(probe.scheduler.delays, [0.5, 1, 0.5])
+        XCTAssertEqual(probe.loader.retryAttempt, 1)
+    }
+
+    func testAnAnswerThatIsNotNotFoundIsNeverLookedForAgain() {
+        for answer: PlanFileResult in [.notReadable, .notMarkdown, .tooLarge, .notUTF8] {
+            let probe = Probe(Reads(script: [], then: answer))
+            probe.loader.load(path: Self.missing)
+            waitFor("the answer \(answer)") { probe.results.count == 1 }
+            drainMain()
+            XCTAssertFalse(probe.loader.hasPendingRetry, "\(answer)")
+            XCTAssertEqual(probe.loader.retryAttempt, 0, "\(answer)")
+            XCTAssertEqual(probe.scheduler.scheduledCount, 0, "\(answer): nothing is scheduled")
+        }
+    }
+
+    // MARK: Stopping
+
+    func testStopCancelsTheLookingAndNothingIsReadAfterIt() {
+        let probe = Probe(Reads())
+        probe.loader.load(path: Self.missing)
+        waitFor("the first answer") { probe.results.count == 1 }
+        XCTAssertTrue(probe.loader.hasPendingRetry)
+
+        probe.loader.stop()
+
+        XCTAssertFalse(probe.loader.hasPendingRetry)
+        XCTAssertEqual(probe.loader.retryAttempt, 0)
+        XCTAssertEqual(probe.scheduler.livePendingCount, 0)
+        probe.scheduler.fire()
+        drainMain()
+        drainMain()
+        XCTAssertEqual(probe.reads.count, 1, "firing the scheduler reads nothing more")
+        XCTAssertEqual(probe.results.count, 1)
+    }
+
+    func testLoadingNoPathCancelsTheLookingToo() {
+        for none in [nil, ""] as [String?] {
+            let probe = Probe(Reads())
+            probe.loader.load(path: Self.missing)
+            waitFor("the first answer") { probe.results.count == 1 }
+            XCTAssertTrue(probe.loader.hasPendingRetry)
+
+            probe.loader.load(path: none)
+
+            XCTAssertFalse(probe.loader.hasPendingRetry, "path \(String(describing: none))")
+            XCTAssertEqual(probe.loader.retryAttempt, 0)
+            probe.scheduler.fire()
+            drainMain()
+            drainMain()
+            XCTAssertEqual(probe.reads.count, 1, "nothing is read for no path")
+            XCTAssertEqual(probe.results.count, 1)
+        }
+    }
+
+    func testALookStillInFlightWhenTheLoaderIsStoppedLeavesNoLookingBehind() {
+        let gate = DispatchSemaphore(value: 0)
+        let queue = DispatchQueue(label: "plan.loader.retry.test.read", attributes: .concurrent)
+        let scheduler = ManualPlanReloadScheduler()
+        let loader = PlanFileLoader(reader: { _ in gate.wait(); return .notFound }, scheduler: scheduler, readQueue: queue)
+        var results = 0
+        loader.onResult = { _ in results += 1 }
+
+        loader.load(path: Self.missing)
+        loader.stop()                   // the read has not answered yet
+        gate.signal()
+        queue.sync(flags: .barrier) {}
+        drainMain()
+
+        XCTAssertEqual(results, 0, "an answer that came after stop() is not delivered")
+        XCTAssertFalse(loader.hasPendingRetry, "and it does not start a look of its own")
+        XCTAssertEqual(scheduler.scheduledCount, 0)
+    }
+
+    // MARK: A new path
+
+    func testALookForAnOlderPathNeverReadsTheNewOne() {
+        let url = URL(fileURLWithPath: "/redd-new/plan.md")
+        let reads = Reads(script: [.notFound, .loaded(text: "new\n", url: url, modified: nil)])
+        let probe = Probe(reads)
+        probe.loader.load(path: "/redd-old/plan.md")
+        waitFor("the old path's answer") { probe.results.count == 1 }
+        XCTAssertTrue(probe.loader.hasPendingRetry)
+
+        probe.loader.load(path: "/redd-new/plan.md")
+        waitFor("the new path's answer") { probe.results.count == 2 }
+        XCTAssertEqual(probe.reads.asked, ["/redd-old/plan.md", "/redd-new/plan.md"])
+        XCTAssertFalse(probe.loader.hasPendingRetry, "the old path's look was called off")
+        XCTAssertEqual(probe.scheduler.livePendingCount, 0)
+
+        probe.scheduler.fire()          // whatever the old path left behind runs now
+        drainMain()
+        drainMain()
+        XCTAssertEqual(probe.reads.asked, ["/redd-old/plan.md", "/redd-new/plan.md"], "nothing was read again")
+        XCTAssertEqual(probe.results.count, 2)
+    }
+
+    func testANewPathStartsItsOwnWaitsFromTheBeginning() {
+        let probe = Probe(Reads())
+        probe.loader.load(path: "/redd-old/plan.md")
+        waitFor("the first answer") { probe.results.count == 1 }
+        for _ in 1 ... 3 { fireAndWaitForAnotherResult(probe) }
+        XCTAssertEqual(probe.scheduler.delays, [0.5, 1, 2, 4])
+
+        probe.loader.load(path: "/redd-new/plan.md")
+        waitFor("the new path's answer") { probe.results.count == 5 }
+
+        XCTAssertEqual(probe.scheduler.delays, [0.5, 1, 2, 4, 0.5], "the new path is looked for after 0.5 s again")
+        XCTAssertEqual(probe.loader.retryAttempt, 1)
+        XCTAssertEqual(probe.scheduler.livePendingCount, 1, "only the new path's look is scheduled")
+    }
+
+    func testReloadingWhileALookIsScheduledLeavesExactlyOneLook() {
+        let probe = Probe(Reads())
+        probe.loader.load(path: Self.missing)
+        waitFor("the first answer") { probe.results.count == 1 }
+
+        probe.loader.reload()
+        waitFor("the reload's answer") { probe.results.count == 2 }
+
+        XCTAssertEqual(probe.scheduler.livePendingCount, 1, "the look that was scheduled was replaced, not added to")
+        XCTAssertTrue(probe.loader.hasPendingRetry)
+    }
+
+    // MARK: Teardown
+
+    func testALookScheduledWhenTheLoaderIsFreedReadsNothing() {
+        let reads = Reads()
+        let scheduler = ManualPlanReloadScheduler()
+        weak var weakLoader: PlanFileLoader?
+        var answered = 0
+        var loader: PlanFileLoader? = PlanFileLoader(reader: { reads.read($0) }, scheduler: scheduler)
+        weakLoader = loader
+        loader?.onResult = { _ in answered += 1 }
+        loader?.load(path: Self.missing)
+        waitFor("the first answer") { answered == 1 }
+        XCTAssertEqual(scheduler.livePendingCount, 1)
+
+        loader = nil
+
+        XCTAssertTrue(PlanTestSupport.pumpUntil { weakLoader == nil }, "the loader is freed once nothing holds it")
+        XCTAssertEqual(scheduler.livePendingCount, 0, "its look went with it")
+        scheduler.fire()
+        drainMain()
+        drainMain()
+        XCTAssertEqual(reads.count, 1, "firing what is left reads nothing")
+        XCTAssertEqual(answered, 1)
+    }
+
+    // MARK: End to end, with a real file
+
+    func testAFileCreatedAfterTheFirstLookIsLoadedByTheNextOneAndThenWatched() throws {
+        let dir = try PlanTestSupport.tempDirectory(self)
+        let url = dir.appendingPathComponent("later.md")
+        let scheduler = ManualPlanReloadScheduler()
+        let loader = PlanFileLoader(scheduler: scheduler)
+        var results: [PlanFileResult] = []
+        loader.onResult = { results.append($0) }
+
+        loader.load(path: url.path)
+        waitFor("the missing file to be reported") { results == [.notFound] }
+        XCTAssertTrue(loader.hasPendingRetry)
+
+        try PlanTestSupport.writeInPlace("# Later\n", to: url)
+        scheduler.fire()
+        waitFor("the file to be loaded") {
+            if case .loaded(let text, _, _)? = results.last { return text == "# Later\n" }
+            return false
+        }
+        XCTAssertFalse(loader.hasPendingRetry)
+        XCTAssertEqual(loader.retryAttempt, 0)
+        XCTAssertTrue(loader.isWatching, "once it is there the watcher takes over")
     }
 }
