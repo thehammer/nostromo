@@ -157,6 +157,12 @@ final class FoldTextSanitizerEdgeTests: XCTestCase {
         XCTAssertEqual(FoldTextSanitizer.sanitize("a\u{85}b"), "a b")
     }
 
+    func testUnassignedInvisibleCodePointsAreDroppedLikeTheDaemonsSet() {
+        XCTAssertEqual(
+            FoldTextSanitizer.sanitize("a\u{2065}b\u{FFF0}c\u{FFF8}d\u{E01F0}e\u{E0FFF}f"), "abcdef")
+        XCTAssertEqual(FoldTextSanitizer.sanitize("a\u{FFFC}b"), "a\u{FFFC}b")
+    }
+
     func testInvisibleFormatCharactersAreDroppedButJoinersStay() {
         XCTAssertEqual(FoldTextSanitizer.sanitize("a\u{200B}b\u{2060}c\u{FEFF}d\u{FFF9}e"), "abcde")
         let family = "👩\u{200D}👩\u{200D}👧"
