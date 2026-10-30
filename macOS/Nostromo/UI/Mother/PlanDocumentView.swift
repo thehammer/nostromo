@@ -93,7 +93,7 @@ enum PlanDisplayLimits {
     /// Rows of the document, a list item, a heading, a paragraph, a code block, a table or a rule each being one.
     static let maxRows = 2_500
     /// Characters of text over all rows.
-    static let maxCharacters = 400_000
+    static let maxCharacters = 200_000
     /// Characters in one row.
     static let maxCharactersPerRow = 60_000
     /// Lines of one code block, or rows of one table.
@@ -103,13 +103,17 @@ enum PlanDisplayLimits {
     /// this, not by the 1 MiB file cap; the rest of the file is the "truncated for display" row's.
     static let maxParsedBytes = 262_144
 
-    /// `text` cut to `maxParsedBytes` at a line break (so no character is split), and whether it was cut.
+    /// `text` cut to `maxParsedBytes` at a line break (so no character is split) when that keeps at least half
+    /// of it (a file of one enormous line is cut mid-line instead), and whether it was cut.
     static func parsedPrefix(of text: String) -> (text: String, wasCut: Bool) {
         let utf8 = text.utf8
         guard utf8.count > maxParsedBytes else { return (text, false) }
         let end = utf8.index(utf8.startIndex, offsetBy: maxParsedBytes)
         var prefix = text[..<end]
-        if let lineBreak = prefix.unicodeScalars.lastIndex(of: "\n") { prefix = prefix[..<lineBreak] }
+        if let lineBreak = prefix.unicodeScalars.lastIndex(of: "\n"),
+           utf8.distance(from: utf8.startIndex, to: lineBreak) >= maxParsedBytes / 2 {
+            prefix = prefix[..<lineBreak]
+        }
         return (String(prefix), true)
     }
 }
@@ -250,17 +254,51 @@ private final class PlanTextView: NSTextView {
 
 /// How tall text is, without a text view: what a row's height is worked out from for every row of a
 /// document, while views exist only for the rows near the viewport.
+///
+/// Short text is measured with `boundingRect`. A long text (a code block or a table of hundreds of lines)
+/// is measured by a layout manager instead: `boundingRect` grows faster than its input there (a
+/// 1,500-line table took 2 s on a CI runner with plain cells and 16 s with real ones, on the main
+/// thread, twice), while the layout manager the row's own text view uses lays the same text out in
+/// hundredths of a second. Main thread only (it keeps one text system and reuses it).
 private enum PlanTextMetrics {
+    /// Characters from which a text goes to the layout manager.
+    static let layoutManagerThreshold = 4_000
+
     static func height(of text: NSAttributedString, wrappingAt width: CGFloat) -> CGFloat {
         guard text.length > 0 else { return 0 }
-        let rect = text.boundingRect(with: NSSize(width: max(1, width), height: 1_000_000),
-                                     options: [.usesLineFragmentOrigin, .usesFontLeading])
-        return ceil(rect.height) + 1
+        let size = NSSize(width: max(1, width), height: 1_000_000)
+        let height = text.length > layoutManagerThreshold
+            ? usedRect(of: text, in: size).height
+            : text.boundingRect(with: size, options: [.usesLineFragmentOrigin, .usesFontLeading]).height
+        return ceil(height) + 1
     }
 
     static func width(of text: NSAttributedString) -> CGFloat {
-        ceil(text.boundingRect(with: NSSize(width: 1_000_000, height: 1_000_000),
-                               options: [.usesLineFragmentOrigin, .usesFontLeading]).width) + 1
+        let size = NSSize(width: 1_000_000, height: 1_000_000)
+        let width = text.length > layoutManagerThreshold
+            ? usedRect(of: text, in: size).width
+            : text.boundingRect(with: size, options: [.usesLineFragmentOrigin, .usesFontLeading]).width
+        return ceil(width) + 1
+    }
+
+    private static let storage = NSTextStorage()
+    private static let container: NSTextContainer = {
+        let container = NSTextContainer(size: NSSize(width: 1, height: 1_000_000))
+        container.lineFragmentPadding = 0   // as the plan's text views have it
+        let manager = NSLayoutManager()
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        return container
+    }()
+
+    private static func usedRect(of text: NSAttributedString, in size: NSSize) -> NSRect {
+        storage.setAttributedString(text)
+        container.size = size
+        guard let manager = container.layoutManager else { return .zero }
+        manager.ensureLayout(for: container)
+        let rect = manager.usedRect(for: container)
+        storage.setAttributedString(NSAttributedString())   // do not hold a megabyte between calls
+        return rect
     }
 }
 

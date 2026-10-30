@@ -319,7 +319,7 @@ final class PlanDisplayLimitsTests: XCTestCase {
     }
 
     func testAnyKindOfRowIsCutToTheRowLimit() throws {
-        let long = String(repeating: "x", count: 200_000)
+        let long = String(repeating: "x", count: 62_000)   // each over a row's limit, all four inside the parser's
         let opened = try open("# \(long)\n\n- list \(long)\n\n- [ ] task \(long)\n\n> quote \(long)\n")
         let view = opened.rig.view
         assertBounded(opened)
@@ -337,7 +337,7 @@ final class PlanDisplayLimitsTests: XCTestCase {
     // SUSPECTED GAP in the first cut (PlanSpecBuilder.limited only bounds the BODY rows of a table; the
     // header's cells go through `tableText` as they are): one giant header cell is one giant row.
     func testAGiantTableHeaderCellIsCutToTheRowLimitToo() throws {
-        let opened = try open("| " + String(repeating: "x", count: 300_000) + " | b |\n|---|---|\n| 1 | 2 |\n")
+        let opened = try open("| " + String(repeating: "x", count: 200_000) + " | b |\n|---|---|\n| 1 | 2 |\n")
         let view = opened.rig.view
         view.buildAllRows()
         let table = try tableText(view)
@@ -359,7 +359,7 @@ final class PlanDisplayLimitsTests: XCTestCase {
         view.buildAllRows()
         let shown = view.textViews.reduce(0) { $0 + $1.string.utf16.count }
         XCTAssertLessThanOrEqual(shown, Limits.maxCharacters, "and what the text views hold agrees")
-        XCTAssertGreaterThan(shown, 300_000, "most of the allowance is used before it stops")
+        XCTAssertGreaterThan(shown, 150_000, "most of the allowance is used before it stops")
         assertTheNotice(opened)
     }
 
@@ -414,6 +414,12 @@ final class PlanDisplayLimitsTests: XCTestCase {
         XCTAssertTrue(cut.text.hasPrefix(line) && big.hasPrefix(cut.text), "a prefix of the file")
         XCTAssertFalse(cut.text.hasSuffix("\n"), "cut before the last line break")
         XCTAssertFalse(cut.text.contains("\u{FFFD}"), "no character was split")
+
+        // The only line break is near the start: cutting there would keep almost nothing, so it is cut mid-line.
+        let longFirstLine = "```\n" + String(repeating: "x", count: 400_000)
+        let mid = Limits.parsedPrefix(of: longFirstLine)
+        XCTAssertTrue(mid.wasCut)
+        XCTAssertGreaterThan(mid.text.utf8.count, Limits.maxParsedBytes - 10, "the long line is kept up to the limit")
 
         // No line break at all: still cut, still valid text.
         let noBreaks = String(repeating: "日", count: 200_000)
