@@ -101,7 +101,27 @@ final class PlanMarkdownTests: XCTestCase {
         }
     }
 
-    private func listItems(_ doc: PlanDocument) -> [PlanListItem] { lists(doc).flatMap { $0.items } }
+    /// Every list item in document order: an item, then the items nested inside it, then its next sibling.
+    private func listItems(_ doc: PlanDocument) -> [PlanListItem] {
+        func walk(_ items: [PlanListItem]) -> [PlanListItem] {
+            items.flatMap { item in
+                [item] + item.blocks.flatMap { block -> [PlanListItem] in
+                    if case .list(_, _, let inner) = block.kind { return walk(inner) }
+                    return []
+                }
+            }
+        }
+        func blocks(_ blocks: [PlanBlock]) -> [PlanListItem] {
+            blocks.flatMap { block -> [PlanListItem] in
+                switch block.kind {
+                case .list(_, _, let items): return walk(items)
+                case .quote(let inner): return blocks(inner)
+                default: return []
+                }
+            }
+        }
+        return blocks(doc.blocks)
+    }
 
     /// The first paragraph of a list item: its own text, not its nested content.
     private func itemText(_ item: PlanListItem) -> String? {
@@ -404,8 +424,9 @@ final class PlanMarkdownTests: XCTestCase {
     func testAnImageInsideALinkKeepsTheLinkAndDropsTheImageURL() {
         let doc = PlanMarkdown.parse("[![badge](https://img.invalid/b.svg)](https://target.invalid/x)\n")
 
+        // Foundation hands an image inside a link over as the link's text: the label survives, the image URL does not.
         XCTAssertEqual(links(doc).map { $0.url }, ["https://target.invalid/x"])
-        XCTAssertTrue(allSpans(doc).contains { if case .image(let alt) = $0 { return alt == "badge" } else { return false } })
+        XCTAssertEqual(links(doc).map { $0.text }, ["badge"])
         XCTAssertFalse(dumped(doc).contains("img.invalid"))
     }
 

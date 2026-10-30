@@ -63,3 +63,29 @@ lenses: {add: [tests], remove: [ops-infra]}
 ## Vendored contract fixtures
 
 The contract recordings in `tests/fixtures/mother-contract/` are pinned to Mother `6712f38ecb28` (see `MANIFEST.json`; refresh with `scripts/mother-contract.py vendor`). Mother #98 added `base_sha` (string or null) to the job record. It is an additive key: clients must ignore it if unknown, and Nostromo's Rust, Kit and Mac decoders do.
+
+## Job detail: Overview · Plan · Log
+
+The job detail in the Mother focus has a three-way switch under the title and state line.
+
+- **Overview** is everything that used to sit above the log: the phase ribbon, crew panel, actions (with the reply box), todos, meta and the plan checklist. It scrolls on its own.
+- **Plan** renders the job's plan in place. It is read-only and never widens the pane: prose wraps, and a wide table or code block scrolls sideways inside its own block.
+- **Log** is the log tail, filling the area under the switch. A dot appears on its segment when new lines arrive while another segment is showing.
+
+Which segment is showing is per detail, so per open job tab. A new job (and a job that needs you) opens on Overview; job updates never change it. The Plan segment exists only while the job has a plan path; if the path goes away while Plan is showing, the detail goes back to Overview.
+
+### What the Plan view reads
+
+The plan path is Mother's own copy of the plan. The loader follows links, then shows the file only if the resolved path is a regular file ending in `.md`, `.markdown` or `.mdown`, is at most 1 MiB (checked with `stat` before any byte is read) and is valid UTF-8. Anything else is one calm message in place of the body (not found, can't read, can't be shown here, not UTF-8) with a **Copy path** button, and never an alert. A link named `.md` that points at some other kind of file is "can't be shown here", and its bytes are never read.
+
+The view watches the file while it is showing and reloads when it changes (events coalesced over 300 ms, so an editor's save-by-rename is one reload). The reader's place holds across a reload: the topmost visible heading stays where it was, or the nearest heading before it if that one is gone. Watchers and timers stop when the view leaves its window, is hidden behind another segment, or the job changes.
+
+### Safety
+
+A plan's text is untrusted. Every span goes through `FoldTextSanitizer` (escape sequences, controls, bidi, zero-width and invisible filler characters; code blocks keep `\n` and `\t`). Images render as `[image: alt]`: the image URL is not kept anywhere in the model and nothing is fetched. Links open only on click: `http` and `https` in the browser, `file:` links and relative paths are revealed in Finder (never opened), every other scheme is plain text. Nothing here logs plan text, a heading or a path. `MotherFocusFitnessTests` scans the plan files for logging calls, `tag` properties and network or process APIs.
+
+The header's **Open ↗**, **Finder** and **⧉** (copy the path) are view actions, like the old "View Plan" button. The text of the plan is on screen and in the accessibility tree: it is also on disk, readable by the same user.
+
+### Find
+
+⌘F with the keyboard in the plan opens a find field in its header; Return or ⌘G finds the next match (case-insensitive) across the whole document and brings it into view; Escape closes the field. The Edit menu items are the same ones the terminal pane uses: the app delegate forwards them to whichever of the two holds the keyboard. No key equivalent was added.

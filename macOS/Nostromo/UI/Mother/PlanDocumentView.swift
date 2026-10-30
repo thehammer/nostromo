@@ -753,6 +753,8 @@ final class PlanDocumentView: NSView {
     var tableScrollViews: [NSScrollView] { scrollRows(.table).map(\.scrollView) }
     /// The text views of the rows that have views, in reading order.
     var textViews: [NSTextView] { flow.builtRows.flatMap(\.textViews) }
+    /// A file watcher is armed (the view is active and has a plan).
+    var isWatchingFile: Bool { loader.isWatching }
     /// How many rows the document has, built or not.
     var rowCount: Int { flow.specs.count }
 

@@ -248,6 +248,8 @@ final class MotherJobDetail: NSView {
     private(set) var logHasUnseenLines = false
     /// The plan, rendered in place. Built the first time the Plan segment is chosen.
     private(set) var planView: PlanDocumentView?
+    /// Makes the plan view's file loader (tests replace it to drive the watcher by hand).
+    var makePlanFileLoader: () -> PlanFileLoader = { PlanFileLoader() }
 
     /// Top-down, like the scroll document inside it (an existing test reads `isFlipped` to find a top edge).
     override var isFlipped: Bool { true }
@@ -822,7 +824,8 @@ final class MotherJobDetail: NSView {
 
     private func ensurePlanView() -> PlanDocumentView {
         if let planView { return planView }
-        let view = PlanDocumentView(actions: PlanViewActions(openPlan: { [weak host] in host?.openPlan(path: $0) }))
+        let view = PlanDocumentView(loader: makePlanFileLoader(),
+                                     actions: PlanViewActions(openPlan: { [weak host] in host?.openPlan(path: $0) }))
         view.translatesAutoresizingMaskIntoConstraints = false
         view.isHidden = true
         addSubview(view)
