@@ -208,6 +208,15 @@ final class MarkdownCodeBlockTests: XCTestCase {
         XCTAssertFalse(s.string.contains("**"))
     }
 
+    func testBoldAroundInlineCodeKeepsTheCodeAndDropsTheMarkers() throws {
+        let s = render("Run **`make mac-install`** for the padding, and _`x`_ too.")
+        XCTAssertFalse(s.string.contains("*"), "literal asterisks left: \(s.string)")
+        XCTAssertFalse(s.string.contains("`"), "literal backticks left: \(s.string)")
+        let code = range(of: "make mac-install", in: s)
+        assertMonospacedUpright(s, code, "bold-wrapped inline code")
+        XCTAssertEqual(s.string, "Run make mac-install for the padding, and x too.")
+    }
+
     func testNothingInTheReportedMessageIsItalicOrHeadingSized() {
         // The message has no italic text and no headings: underscores in `job_class`, `outcome_quality`,
         // `error_message` and the `#` in `#5274` must not be read as markup.

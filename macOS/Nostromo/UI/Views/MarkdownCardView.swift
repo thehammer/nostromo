@@ -250,7 +250,21 @@ enum MarkdownRenderer {
     private static let boldRegex       = try? NSRegularExpression(pattern: #"\*\*(.+?)\*\*"#)
     private static let italicRegex     = try? NSRegularExpression(pattern: #"(?<![*])\*([^*]+?)\*(?![*])|_(.+?)_"#)
 
+    /// Bold or italic markers wrapped directly around one code span (`**`make x`**`). The span pass
+    /// skips a bold match that overlaps a code span, so the markers would print literally; code is
+    /// already monospace, so drop the markers and keep the code.
+    private static let emphasizedCodeRegex = try? NSRegularExpression(
+        pattern: #"(\*\*|\*|__|_)(`[^`\n]+`)\1"#
+    )
+
     private static func applyInlineSpans(to str: NSMutableAttributedString, baseFont: NSFont) {
+        if let rx = emphasizedCodeRegex {
+            let matches = rx.matches(in: str.string, range: NSRange(location: 0, length: str.length))
+            for m in matches.reversed() {
+                let code = (str.string as NSString).substring(with: m.range(at: 2))
+                str.replaceCharacters(in: m.range, with: code)
+            }
+        }
         let full = NSRange(location: 0, length: str.length)
         let text = str.string
 

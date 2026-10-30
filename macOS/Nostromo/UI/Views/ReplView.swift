@@ -45,6 +45,39 @@ class ReplView: NSView {
     private let inputBar   = ReplInputBar()
 
     private var inputBarHeightConstraint: NSLayoutConstraint!
+
+    /// Whether a click that ended on `hit` should hand the keyboard to the composer. Not when the
+    /// click landed on a control or link, or left a selection (or another editor) holding the
+    /// keyboard: only a plain click on empty pane or plain text takes it.
+    static func shouldFocusComposer(hit: NSView?, firstResponder: NSResponder?, composer: NSTextView) -> Bool {
+        var view = hit
+        while let v = view {
+            if v is NSControl { return false }
+            view = v.superview
+        }
+        if firstResponder === composer { return false }
+        if let text = firstResponder as? NSTextView {
+            if text.isEditable { return false }
+            if text.selectedRange().length > 0 { return false }
+        } else if firstResponder is NSText {
+            return false
+        }
+        return true
+    }
+
+    @objc private func paneClicked(_ g: NSClickGestureRecognizer) {
+        guard g.state == .ended else { return }
+        let point = g.location(in: self)
+        let hit = superview.flatMap { hitTest(convert(point, to: $0)) }
+        // Let the click's own handling (selection, links) finish first.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            guard Self.shouldFocusComposer(
+                hit: hit, firstResponder: window.firstResponder, composer: self.inputBar.textView
+            ) else { return }
+            window.makeFirstResponder(self.inputBar.textView)
+        }
+    }
     private let quickActions: [QuickAction]
     private var quickActionStrip: QuickActionStripView?
     private let contextMeter = ContextMeterView()
@@ -310,6 +343,12 @@ class ReplView: NSView {
         }
         // The whole pane (transcript included) accepts image drops.
         registerForDraggedTypes(ImagePasteboard.draggedTypes)
+
+        // A click anywhere in the pane that did not select text or hit a control puts the keyboard
+        // back in the composer. Mouse events still reach the views below (no delay).
+        let click = NSClickGestureRecognizer(target: self, action: #selector(paneClicked(_:)))
+        click.delaysPrimaryMouseButtonEvents = false
+        addGestureRecognizer(click)
 
         inputBarHeightConstraint = inputBar.heightAnchor.constraint(equalToConstant: ReplInputBar.minHeight)
 
