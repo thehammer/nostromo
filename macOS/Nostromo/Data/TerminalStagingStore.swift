@@ -7,8 +7,9 @@ import Foundation
 ///   (the daemon's revision counts up across every list).
 /// - `state: none` removes the list; `terminal_closed` and a lost daemon connection remove it too (the
 ///   daemon forgets its lists when it restarts, so a drawer must not outlive it).
-/// - For every entry, the local monotonic time its current `(command, note)` was first received
-///   (`shownSince`): the drawer will not insert an entry a person has had under 1.5 s to read.
+/// - For every entry, the local monotonic time its current `(command, note)` was first received, or
+///   the time the list's rows last changed (`shownSince`): the drawer will not insert an entry a person
+///   has had under 1.5 s to read, and none whose row may just have moved under the pointer.
 /// - Observers are tokens: dropping one (or its `deinit`) removes the observation. A frame that changes
 ///   nothing (same revision) notifies nobody.
 ///
@@ -94,7 +95,11 @@ final class TerminalStagingStore {
             return
         }
         let at = clock()
-        let previous = shownSince[id] ?? [:]
+        // An entry added, removed or moved shifts the rows (and a growing drawer moves them all on screen):
+        // nothing is under the pointer where the person last saw it, so every entry counts as just
+        // changed. A frame that only edits an entry's text restarts that entry alone.
+        let sameRows = lists[id]?.entries.map(\.id) == frame.entries.map(\.id)
+        let previous = sameRows ? (shownSince[id] ?? [:]) : [:]
         var next: [String: (fingerprint: Fingerprint, at: TimeInterval)] = [:]
         for entry in frame.entries {
             let fp = Fingerprint(command: entry.command, note: entry.note)
