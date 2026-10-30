@@ -1518,7 +1518,7 @@ Errors are `{ error, detail?, retry_after? }`, checked in this order; a refused 
 | `no_operator` | The Nostromo app is not open, or cannot show the staging drawer. Ask the user to open or update it; tell them the command in your reply instead. |
 | `staging_disabled` | Staging into remote shells is not available yet. Suggest the command in your reply. |
 | `rate_limited` | More than 30 changes in a minute or 300 in an hour. Wait `retry_after` seconds. |
-| `invalid_text` | A command is one non-empty line of printable text: no line break, tab, control or invisible character. Stage one command per entry. |
+| `invalid_text` | A command is one non-empty line of printable text: no line break, tab, control or invisible character, no leading or trailing space, no space but U+0020, no more than 4 spaces in a row. Stage one command per entry. |
 | `entry_too_long` / `note_too_long` | At most 1,000 / 120 characters. Shorten it. |
 | `looks_like_secret` | The command (or the note: detail `note`) contains something that looks like a secret or personal data. Never stage it; use a placeholder or an environment variable the user already has. |
 | `remote_shell_command` | It starts a remote shell (an ECS exec session, an SSM session, the session-manager plugin). Ask with `nostromo.request_remote_shell` instead. |

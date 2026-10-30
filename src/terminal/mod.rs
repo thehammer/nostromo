@@ -1443,7 +1443,7 @@ impl TerminalManager {
                     bytes,
                     confirmed,
                 } => AuditEvent::StagingInserted {
-                    terminal_id,
+                    terminal_id: Some(terminal_id).filter(|id| is_id_shaped(id)),
                     entry_number,
                     bytes,
                     confirmed,

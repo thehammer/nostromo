@@ -306,7 +306,7 @@ pub enum AuditEvent {
     /// The app reported inserting a staged entry at the prompt. `entry_number`
     /// is null when the entry was already gone.
     StagingInserted {
-        terminal_id: String,
+        terminal_id: Option<String>,
         entry_number: Option<u8>,
         bytes: usize,
         confirmed: bool,

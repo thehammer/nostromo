@@ -2106,6 +2106,19 @@ pub struct TerminalInfo {
     pub idle_warn_after_secs: Option<u64>,
 }
 
+/// The state of a staging list in `ServerMsg::TerminalStagingList`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalStagingState {
+    /// Its follower can still stage, edit and clear.
+    Active,
+    /// The follow ended: kept for the user, no agent can change it.
+    Frozen,
+    /// No list: no drawer.
+    #[serde(rename = "none")]
+    NoList,
+}
+
 /// One staged command in `ServerMsg::TerminalStagingList`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagedEntryWire {
@@ -2724,7 +2737,7 @@ pub enum ServerMsg {
     TerminalStagingList {
         terminal_id: String,
         pane_id: String,
-        state: String,
+        state: TerminalStagingState,
         owner_tag: String,
         agent_name: String,
         revision: u64,

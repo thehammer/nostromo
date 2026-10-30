@@ -9,10 +9,15 @@ use crate::terminal::redact::Redactor;
 
 use super::{MAX_AGENT_NAME_CHARS, MAX_COMMAND_CHARS, MAX_NOTE_CHARS};
 
+/// The longest run of consecutive spaces a command may hold. More would let a
+/// command push its real tail out of the drawer's visible lines.
+const MAX_SPACE_RUN: usize = 4;
+
 /// Why a command or a note was refused. Nothing was stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StagingTextCode {
-    /// Empty, more than one line, or a control or invisible character.
+    /// Empty, more than one line, a control or invisible character, or
+    /// whitespace that hides text (see [`hides_behind_whitespace`]).
     InvalidText,
     EntryTooLong,
     NoteTooLong,
@@ -38,7 +43,7 @@ impl StagingTextCode {
     pub fn detail(self) -> &'static str {
         match self {
             Self::InvalidText => {
-                "a command is one non-empty line of printable text: no line break, tab, control or invisible character"
+                "a command is one non-empty line of printable text: no line break, tab, control or invisible character, no leading or trailing space, no space but U+0020, and no more than 4 spaces in a row"
             }
             Self::EntryTooLong => "a command is at most 1000 characters",
             Self::NoteTooLong => "a note is at most 120 characters",
@@ -63,6 +68,9 @@ pub fn validate_command(text: &str) -> Result<(), StagingTextCode> {
     }
     if text.chars().count() > MAX_COMMAND_CHARS {
         return Err(Code::EntryTooLong);
+    }
+    if hides_behind_whitespace(text) {
+        return Err(Code::InvalidText);
     }
     if looks_like_secret(text) {
         return Err(Code::LooksLikeSecret);
@@ -102,6 +110,31 @@ pub fn clean_note(text: &str) -> Result<Option<String>, StagingTextCode> {
         return Err(StagingTextCode::LooksLikeSecret);
     }
     Ok(Some(cleaned))
+}
+
+/// Can whitespace in `text` hide part of it? Leading or trailing whitespace
+/// (a leading space also keeps a command out of shell history), any space
+/// separator but U+0020 (U+00A0, U+2003, U+3000, …: all of them, Unicode
+/// category Zs, are White_Space), or a run of more than [`MAX_SPACE_RUN`]
+/// spaces, which pushes what follows out of the drawer's visible lines.
+fn hides_behind_whitespace(text: &str) -> bool {
+    if text.trim() != text {
+        return true;
+    }
+    let mut run = 0;
+    for c in text.chars() {
+        if c == ' ' {
+            run += 1;
+            if run > MAX_SPACE_RUN {
+                return true;
+            }
+        } else if c.is_whitespace() {
+            return true;
+        } else {
+            run = 0;
+        }
+    }
+    false
 }
 
 /// Does `text` open or close one of Nostromo's own elements

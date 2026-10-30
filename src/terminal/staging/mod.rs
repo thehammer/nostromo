@@ -44,7 +44,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, SubsecRound, Utc};
 
-use crate::ipc::protocol::{ServerMsg, StagedEntryWire};
+use crate::ipc::protocol::{ServerMsg, StagedEntryWire, TerminalStagingState};
 use limits::StagingLimits;
 pub use text::StagingTextCode;
 
@@ -67,10 +67,10 @@ pub enum ListState {
 }
 
 impl ListState {
-    fn wire(self) -> &'static str {
+    fn wire(self) -> TerminalStagingState {
         match self {
-            Self::Active => "active",
-            Self::Frozen => "frozen",
+            Self::Active => TerminalStagingState::Active,
+            Self::Frozen => TerminalStagingState::Frozen,
         }
     }
 }
@@ -540,6 +540,7 @@ impl StagingStore {
         }
         list.state = ListState::Frozen;
         state.emit(terminal_id);
+        state.audit_changed(terminal_id, "freeze", "follow_ended");
     }
 
     /// The terminal is gone (closed, restarted, its focus removed).
@@ -610,7 +611,7 @@ pub(crate) fn frame_of(list: &StagingList) -> ServerMsg {
     ServerMsg::TerminalStagingList {
         terminal_id: list.terminal_id.clone(),
         pane_id: list.pane_id.clone(),
-        state: list.state.wire().to_string(),
+        state: list.state.wire(),
         owner_tag: list.owner_tag.clone(),
         agent_name: list.agent_name.clone(),
         revision: list.revision,
@@ -623,7 +624,7 @@ pub(crate) fn none_frame(terminal_id: &str, pane_id: &str, revision: u64) -> Ser
     ServerMsg::TerminalStagingList {
         terminal_id: terminal_id.to_string(),
         pane_id: pane_id.to_string(),
-        state: "none".to_string(),
+        state: TerminalStagingState::NoList,
         owner_tag: String::new(),
         agent_name: String::new(),
         revision,

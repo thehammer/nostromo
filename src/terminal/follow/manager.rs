@@ -668,14 +668,17 @@ impl FollowManager {
                     self.audit_delivery(terminal_id, &follow, DeliveryKind::Screen, &delivery);
                 }
             }
-            // A new follower starts with an empty staging list (the store's lock
-            // is a leaf: held only inside this call).
-            self.staging.follow_started(
-                terminal_id,
-                &info.pane_id,
-                follower_tag,
-                &sanitize_agent_name(None, follower_tag),
-            );
+            // A new local follower starts with an empty staging list (the
+            // store's lock is a leaf: held only inside this call). A remote
+            // terminal gets none: staging into one is opened deliberately later.
+            if info.kind == TerminalKind::Local {
+                self.staging.follow_started(
+                    terminal_id,
+                    &info.pane_id,
+                    follower_tag,
+                    &sanitize_agent_name(None, follower_tag),
+                );
+            }
             state.follows.insert(terminal_id.to_string(), follow);
             self.spawn_pump(terminal_id, id, receiver);
         }
@@ -1108,14 +1111,17 @@ impl FollowManager {
         let delivery = follow.take_delivery(kind);
         if let Some(element) = self.delivery_element(terminal_id, follow, kind, &delivery) {
             // Entries the user placed at the prompt are told first, in the
-            // same message (so the same coalesce key as the delivery).
+            // same message (so the same coalesce key as the delivery). They are
+            // forgotten only once the session has taken the message: one it
+            // could not take leaves them for the next delivery.
             let mut message = String::new();
-            for number in std::mem::take(&mut follow.pending_staged) {
-                message.push_str(&staged_inserted_notice(terminal_id, &follow.pane, number));
+            for number in &follow.pending_staged {
+                message.push_str(&staged_inserted_notice(terminal_id, &follow.pane, *number));
                 message.push_str("\n\n");
             }
             message.push_str(&element);
             if self.inject(follow, &message, terminal_id, true) {
+                follow.pending_staged.clear();
                 self.audit_delivery(terminal_id, follow, kind, &delivery);
             }
         }

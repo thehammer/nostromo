@@ -2574,6 +2574,48 @@ async fn a_staged_insert_is_not_told_to_a_follower_that_is_not_the_owner_or_that
         .all(|t| !t.contains("staged_inserted")));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_placed_notice_whose_delivery_the_session_could_not_take_is_told_with_the_next_one() {
+    let mut w = World::new();
+    let t = w.local("focus-1", "");
+    w.invite(&t, A, false);
+    let pane = format!("local shell in {}", w.cwd.display());
+    let store = w.terminals.lock().unwrap().staging();
+    let (id, ..) = store.stage(A, &t.id, "Cody", "ls -la", None, None).unwrap();
+    w.terminals
+        .lock()
+        .unwrap()
+        .staging_inserted(&cap(), &t.id, &id, 6, false)
+        .unwrap();
+    let mark = w.rec.mark();
+
+    // The delivery that would have carried the notice cannot be injected.
+    w.rec.fail_injects(true);
+    w.run_and_settle(&t, "printf 'LOST\\n'").await;
+    assert_eq!(w.rec.texts_for(A, mark), Vec::<String>::new());
+
+    // The session is back: the notice was not lost with the failed delivery.
+    w.rec.fail_injects(false);
+    w.run_and_settle(&t, "printf 'NEXT\\n'").await;
+    let texts = w.rec.texts_for(A, mark);
+    assert_eq!(texts.len(), 1, "one message: {texts:?}");
+    assert!(
+        texts[0].starts_with(&format!(
+            "{}\n\n<nostromo-terminal-output ",
+            staged_notice(&t, &pane, 1)
+        )),
+        "{}",
+        texts[0]
+    );
+    assert_eq!(texts[0].matches("staged_inserted").count(), 1);
+
+    // And still only once.
+    w.run_and_settle(&t, "printf 'AFTER\\n'").await;
+    let later = w.rec.deliveries_for(A, mark);
+    assert_eq!(later.len(), 2);
+    assert!(!later[1].contains("staged_inserted"), "{}", later[1]);
+}
+
 #[test]
 fn no_staging_notice_says_a_command_ran() {
     for n in 1..=12u8 {

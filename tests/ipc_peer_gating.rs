@@ -11000,7 +11000,7 @@ fn staging_list_frame(state: &str, command: &str) -> ServerMsg {
     ServerMsg::TerminalStagingList {
         terminal_id: "t-staging".into(),
         pane_id: "terminal-00000001".into(),
-        state: state.into(),
+        state: serde_json::from_value(serde_json::json!(state)).unwrap(),
         owner_tag: "cody-staging".into(),
         agent_name: "Cody".into(),
         revision: 3,
