@@ -27,7 +27,9 @@ let package = Package(
         .testTarget(
             name: "NostromoKitTests",
             dependencies: ["NostromoKit"],
-            path: "Tests/NostromoKitTests"
+            path: "Tests/NostromoKitTests",
+            // Plan files the tests read by path (`PlanFixtures`), not SwiftPM resources.
+            exclude: ["Fixtures"]
         ),
     ]
 )

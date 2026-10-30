@@ -12,6 +12,9 @@ import Foundation
 /// - Drops bidi embeddings/overrides/isolates and marks (U+202A–202E, U+2066–2069,
 ///   U+200E/F, U+061C) and tag characters (U+E0000–E007F), which can make a row read differently
 ///   from what it holds.
+/// - Drops the invisible filler characters that render as blank (Hangul fillers, Braille blank,
+///   combining grapheme joiner, Khmer inherent vowels, halfwidth Hangul filler), which can hide
+///   in a name or a command.
 /// - Stops at `maxUTF16` units, on a character boundary, so a megabyte of input costs no more
 ///   to lay out than a line.
 ///
@@ -26,6 +29,25 @@ public enum FoldTextSanitizer {
     public static let maxSequenceLength = 2_048
 
     public static func sanitize(_ text: String) -> String {
+        clean(text, mode: .row, cap: maxUTF16)
+    }
+
+    /// Document text (a paragraph, a heading, a table cell): the same drops as `sanitize`, line breaks
+    /// and tabs become one space, and there is no length cap: a plan is as long as it is.
+    public static func sanitizeInline(_ text: String) -> String {
+        clean(text, mode: .row, cap: nil)
+    }
+
+    /// Preformatted text (a code block, a whole plan file): no length cap, and `\n` and `\t` stay.
+    /// `\r\n` becomes `\n`; a lone `\r`, NEL and the Unicode line/paragraph separators become a space.
+    /// Everything else `sanitize` drops is dropped here too.
+    public static func sanitizeMultiline(_ text: String) -> String {
+        clean(text, mode: .multiline, cap: nil)
+    }
+
+    private enum Mode { case row, multiline }
+
+    private static func clean(_ text: String, mode: Mode, cap: Int?) -> String {
         let scalars = text.unicodeScalars
         var out = String.UnicodeScalarView()
         var units = 0
@@ -57,18 +79,30 @@ public enum FoldTextSanitizer {
             case 0x9D, 0x90, 0x98, 0x9E, 0x9F:
                 i = stringEnd(scalars, from: after) ?? after
                 continue
+            case 0x0A where mode == .multiline, 0x09 where mode == .multiline:
+                out.append(s)
+                units += 1
+            case 0x0D where mode == .multiline:
+                // CRLF is one line break; a lone CR is not one.
+                if after < scalars.endIndex, scalars[after] == "\n" {
+                    i = after
+                    continue
+                }
+                out.append(" ")
+                units += 1
             case 0x09, 0x0A, 0x0D, 0x85, 0x2028, 0x2029:
-                guard units + 1 <= maxUTF16 else { return String(out) }
+                if let cap, units + 1 > cap { return String(out) }
                 out.append(" ")
                 units += 1
             case 0x00...0x1F, 0x7F...0x9F,
                  0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069,
                  0x200B, 0x2060...0x2064, 0xFEFF, 0xFFF9...0xFFFB,
-                 0xE0000...0xE007F:
+                 0xE0000...0xE007F,
+                 0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0:
                 break
             default:
                 let width = s.utf16.count
-                guard units + width <= maxUTF16 else { return cappedCleanly(out, next: s) }
+                if let cap, units + width > cap { return cappedCleanly(out, next: s) }
                 out.append(s)
                 units += width
             }
