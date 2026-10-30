@@ -642,4 +642,37 @@ final class ChatTurnViewLayoutTests: XCTestCase {
         let narrowText = ChatTurnView.bubbleWidth(paneWidth: 200, imageOnly: false)
         XCTAssertEqual(ChatTurnView.bubbleWidth(paneWidth: 200, imageOnly: true), narrowText, accuracy: 0.001)
     }
+
+    // MARK: - Click in the pane focuses the composer
+
+    func testAPlainClickInThePaneFocusesTheComposerButNotOverAControlOrASelection() {
+        let composer = NSTextView()
+        let plain = NSView()
+        XCTAssertTrue(ReplView.shouldFocusComposer(hit: plain, firstResponder: nil, composer: composer))
+
+        let button = NSButton()
+        let inner = NSView()
+        button.addSubview(inner)
+        XCTAssertFalse(ReplView.shouldFocusComposer(hit: inner, firstResponder: nil, composer: composer),
+                       "a click on or inside a control belongs to the control")
+
+        XCTAssertFalse(ReplView.shouldFocusComposer(hit: plain, firstResponder: composer, composer: composer),
+                       "already focused")
+
+        let transcript = NSTextView()
+        transcript.isEditable = false
+        transcript.string = "select me"
+        transcript.setSelectedRange(NSRange(location: 0, length: 6))
+        XCTAssertFalse(ReplView.shouldFocusComposer(hit: plain, firstResponder: transcript, composer: composer),
+                       "a selection keeps the keyboard so it can be copied")
+
+        transcript.setSelectedRange(NSRange(location: 0, length: 0))
+        XCTAssertTrue(ReplView.shouldFocusComposer(hit: plain, firstResponder: transcript, composer: composer),
+                      "a caret in read-only text does not hold the keyboard")
+
+        let editor = NSTextView()
+        editor.isEditable = true
+        XCTAssertFalse(ReplView.shouldFocusComposer(hit: plain, firstResponder: editor, composer: composer),
+                       "another editor keeps focus")
+    }
 }
