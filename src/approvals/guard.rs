@@ -809,82 +809,147 @@ pub fn evaluate(payload: &HookPayload, probe: &dyn PaneProbe) -> Result<GuardVer
     Ok(GuardVerdict::Allow)
 }
 
+/// What the rules before tmux's make of one command string: the text in each
+/// form the rules read it in.
+struct Analysis {
+    parsed: shell::ShellParse,
+    normalized: String,
+    decoded: Vec<String>,
+    texts: Vec<String>,
+}
+
+/// What [`Analysis::marker`] found.
+enum Marker {
+    /// The command only mentions a marker, as data.
+    Inert,
+    /// The command is, or may be, a production shell; why.
+    Blocked(String),
+    Clear,
+}
+
+/// The detail given when a brace expansion went past its cap.
+const TOO_LARGE_DETAIL: &str = "brace expansion too large to scan";
+
+impl Analysis {
+    /// `Err` when a brace expansion is too large to scan.
+    fn of(raw: &str) -> Result<Self, TooLarge> {
+        // The shell deletes a backslash-newline before it reads anything (in double
+        // quotes, here-docs and unquoted text), so `$\<newline>(cmd)` is `$(cmd)`:
+        // every scan reads the text with them gone.
+        let joined = join_continuations(raw);
+        let parsed = parse_both(raw, &joined);
+        let normalized = unquote(&joined);
+        // Each command's words after quote removal (resolves `$'\x65…'`).
+        let words = parsed
+            .commands
+            .iter()
+            .map(|c| c.texts().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The same text decoded without any tokenizer (`$'\x65cs_connect'`, `aws ecs
+        // $'execute\x2dcommand'`): a `$` before a quote dropped, `\xHH`, `\NNN`, `\uXXXX`
+        // and `\UXXXXXXXX` written out, quotes and backslashes deleted. It does not depend
+        // on where the tokenizer is in the text, so a parse that lost its place (a `#`
+        // comment, a here-doc, a `case` arm, `${…}`) hides nothing from it.
+        let decoded: Vec<String> = if joined == raw {
+            vec![decode_text(&joined)]
+        } else {
+            vec![decode_text(&joined), decode_text(raw)]
+        };
+        let mut bases: Vec<&str> = vec![&normalized, &words];
+        bases.extend(decoded.iter().map(String::as_str));
+        let texts = scan_texts(&bases)?;
+        Ok(Self {
+            parsed,
+            normalized,
+            decoded,
+            texts,
+        })
+    }
+
+    /// Rule 2 (and the rule 3 words that need no tmux): is `raw` a production
+    /// shell, whatever tmux does with it?
+    fn marker(&self, raw: &str) -> Marker {
+        let (parsed, normalized, decoded, texts) =
+            (&self.parsed, &self.normalized, &self.decoded, &self.texts);
+        // A command that only mentions a marker, as data, is not a remote shell.
+        if inert::is_inert_mention(raw, parsed) {
+            return Marker::Inert;
+        }
+        if let Some(m) = texts.iter().find_map(|t| marker_find(t)) {
+            return Marker::Blocked(format!("command matches `{m}`"));
+        }
+        if let Some(op) = parsed
+            .commands
+            .iter()
+            .find_map(|c| aws_remote_shell(&c.words))
+        {
+            return Marker::Blocked(format!("command runs `{op}`"));
+        }
+        if let Some(w) = parsed
+            .commands
+            .iter()
+            .flat_map(|c| &c.words)
+            .find(|w| expand::could_spell(&w.pattern, word_markers()))
+        {
+            return Marker::Blocked(format!(
+                "word `{}` could expand to a production-shell command",
+                snippet(&w.text)
+            ));
+        }
+        let words = parsed
+            .commands
+            .iter()
+            .map(|c| c.texts().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lower = format!("{normalized}\n{words}\n{}", decoded.join("\n")).to_lowercase();
+        if runs_built_command(&lower)
+            || texts[2..]
+                .iter()
+                .any(|t| runs_built_command(&t.to_lowercase()))
+        {
+            return Marker::Blocked("command runs the output of `ecs_build_command`".to_owned());
+        }
+        Marker::Clear
+    }
+}
+
+/// Does `text` start an ECS exec session, an SSM session or the session-manager
+/// plugin, spell `ecs_connect` and its kin, or run the output of
+/// `ecs_build_command`? Why, if so. The pure part of [`evaluate`]'s rules
+/// (no tmux, no I/O), for callers that must not let a command text become a
+/// production shell.
+pub(crate) fn remote_shell_marker(text: &str) -> Option<String> {
+    match Analysis::of(text) {
+        Err(TooLarge) => Some(TOO_LARGE_DETAIL.to_owned()),
+        Ok(analysis) => match analysis.marker(text) {
+            Marker::Blocked(detail) => Some(detail),
+            Marker::Inert | Marker::Clear => None,
+        },
+    }
+}
+
 /// Rules 2 to 4 for one command string.
 fn evaluate_command(
     raw: &str,
     cwd: &Path,
     probe: &dyn PaneProbe,
 ) -> Result<Option<GuardVerdict>, GuardError> {
-    // The shell deletes a backslash-newline before it reads anything (in double
-    // quotes, here-docs and unquoted text), so `$\<newline>(cmd)` is `$(cmd)`:
-    // every scan reads the text with them gone.
-    let joined = join_continuations(raw);
-    let parsed = parse_both(raw, &joined);
-    let normalized = unquote(&joined);
-    // Each command's words after quote removal (resolves `$'\x65…'`).
-    let words = parsed
-        .commands
-        .iter()
-        .map(|c| c.texts().join(" "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    // The same text decoded without any tokenizer (`$'\x65cs_connect'`, `aws ecs
-    // $'execute\x2dcommand'`): a `$` before a quote dropped, `\xHH`, `\NNN`, `\uXXXX`
-    // and `\UXXXXXXXX` written out, quotes and backslashes deleted. It does not depend
-    // on where the tokenizer is in the text, so a parse that lost its place (a `#`
-    // comment, a here-doc, a `case` arm, `${…}`) hides nothing from it.
-    let decoded: Vec<String> = if joined == raw {
-        vec![decode_text(&joined)]
-    } else {
-        vec![decode_text(&joined), decode_text(raw)]
+    let Ok(analysis) = Analysis::of(raw) else {
+        return Ok(Some(block(RULE_COMMAND, TOO_LARGE_DETAIL.to_owned())));
     };
-    let mut bases: Vec<&str> = vec![&normalized, &words];
-    bases.extend(decoded.iter().map(String::as_str));
-    let Ok(texts) = scan_texts(&bases) else {
-        return Ok(Some(block(
-            RULE_COMMAND,
-            "brace expansion too large to scan".to_owned(),
-        )));
-    };
-    // A command that only mentions a marker, as data, is not a remote shell.
-    if inert::is_inert_mention(raw, &parsed) {
-        return Ok(None);
+    match analysis.marker(raw) {
+        Marker::Inert => return Ok(None),
+        Marker::Blocked(detail) => return Ok(Some(block(RULE_COMMAND, detail))),
+        Marker::Clear => {}
     }
-    if let Some(m) = texts.iter().find_map(|t| marker_find(t)) {
-        return Ok(Some(block(RULE_COMMAND, format!("command matches `{m}`"))));
-    }
-    if let Some(op) = parsed
-        .commands
-        .iter()
-        .find_map(|c| aws_remote_shell(&c.words))
-    {
-        return Ok(Some(block(RULE_COMMAND, format!("command runs `{op}`"))));
-    }
-    if let Some(w) = parsed
-        .commands
-        .iter()
-        .flat_map(|c| &c.words)
-        .find(|w| expand::could_spell(&w.pattern, word_markers()))
-    {
-        return Ok(Some(block(
-            RULE_COMMAND,
-            format!(
-                "word `{}` could expand to a production-shell command",
-                snippet(&w.text)
-            ),
-        )));
-    }
-    let lower = format!("{normalized}\n{words}\n{}", decoded.join("\n")).to_lowercase();
-    if runs_built_command(&lower)
-        || texts[2..]
-            .iter()
-            .any(|t| runs_built_command(&t.to_lowercase()))
-    {
-        return Ok(Some(block(
-            RULE_COMMAND,
-            "command runs the output of `ecs_build_command`".to_owned(),
-        )));
-    }
+    let Analysis {
+        parsed,
+        normalized,
+        texts,
+        ..
+    } = analysis;
 
     let env_moved = texts.iter().any(|t| tmux_env_moved_re().is_match(t));
     let mut cwd = cwd.to_path_buf();

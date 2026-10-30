@@ -1169,11 +1169,21 @@ async fn no_terminal_or_shell_tool_takes_a_command_script_input_keys_or_data_arg
             .cloned()
             .unwrap_or_default();
         for key in props.keys() {
+            // The one documented exception: staging's display text (see
+            // `tests/no_shell_surface.rs` for the reason).
+            if (name, key.as_str()) == ("nostromo.terminal_staging", "command") {
+                continue;
+            }
             assert!(
                 !FORBIDDEN.contains(&key.as_str()),
                 "{name} takes a `{key}` argument"
             );
         }
+        assert_eq!(
+            props.contains_key("command"),
+            name == "nostromo.terminal_staging",
+            "{name}: `command` is allowed on the staging tool and nowhere else"
+        );
     }
     assert!(
         checked >= 1,

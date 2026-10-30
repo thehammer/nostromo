@@ -37,9 +37,22 @@ pub fn summarize(tool_name: &str, tool_input: &serde_json::Value) -> String {
         }
         "Task" => task_summary(tool_input),
         "WebFetch" => web_fetch_host(tool_input),
+        // A staged command, its note and the terminal id never reach the feed:
+        // only which op ran.
+        other if other.ends_with("terminal_staging") => staging_summary(other, tool_input),
         other => fallback_summary(other, tool_input),
     };
     clip(&raw, MAX_SUMMARY_LEN)
+}
+
+/// `<tool>: <op>` for a command-staging call, from the `op` field alone and
+/// only when it is one of the five op names; otherwise the tool name.
+fn staging_summary(tool_name: &str, tool_input: &serde_json::Value) -> String {
+    const OPS: [&str; 5] = ["list", "stage", "replace", "remove", "clear"];
+    match str_field(tool_input, "op") {
+        Some(op) if OPS.contains(&op.as_str()) => format!("{tool_name}: {op}"),
+        _ => tool_name.to_string(),
+    }
 }
 
 /// `file_path`, falling back to `path`.
@@ -253,6 +266,34 @@ mod tests {
                 !out.contains("nested"),
                 "tool `{tool}` summary must never leak a raw tool_input field it doesn't understand: {out}"
             );
+        }
+    }
+
+    #[test]
+    fn a_staging_call_shows_its_op_and_never_the_command_note_or_terminal() {
+        const CANARY: &str = "zq7canary-ZQ7";
+        for tool in [
+            "nostromo.terminal_staging",
+            "mcp__nostromo__nostromo_terminal_staging",
+            "mcp__nostromo__nostromo.terminal_staging",
+        ] {
+            for op in ["list", "stage", "replace", "remove", "clear"] {
+                let input = json!({
+                    "op": op,
+                    "terminal_id": CANARY,
+                    "command": format!("echo {CANARY}"),
+                    "note": CANARY,
+                    "entry_id": CANARY,
+                });
+                let out = summarize(tool, &input);
+                assert_eq!(out, format!("{tool}: {op}"));
+                assert!(!out.contains(CANARY));
+            }
+            // An op that is not one of the five is not repeated.
+            let out = summarize(tool, &json!({"op": CANARY, "command": CANARY}));
+            assert_eq!(out, tool);
+            let out = summarize(tool, &json!({"command": CANARY, "terminal_id": CANARY}));
+            assert_eq!(out, tool);
         }
     }
 }

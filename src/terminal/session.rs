@@ -20,7 +20,7 @@
 use std::io::{Read, Write};
 use std::os::fd::RawFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -183,6 +183,11 @@ pub struct TerminalSession {
     stop_reader: AtomicBool,
     /// Input bytes queued and not yet written.
     queued_bytes: Arc<AtomicUsize>,
+    /// Bytes ever accepted for the child's input by [`Self::write`] (the daemon's
+    /// own accounting of input; the zero-bytes proof of command staging reads it).
+    input_bytes_accepted: AtomicU64,
+    /// Bytes ever written to the PTY master, counted by the one writer thread.
+    input_bytes_written: Arc<AtomicU64>,
     exit: Mutex<ExitState>,
     exit_cv: Condvar,
     reader_done: Mutex<bool>,
@@ -297,6 +302,7 @@ impl TerminalSession {
         let master_fd = pair.master.as_raw_fd();
         let (input, queued) = sync_channel(INPUT_QUEUE);
         let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let input_bytes_written = Arc::new(AtomicU64::new(0));
 
         let session = Arc::new(Self {
             screen: Mutex::new(Screen {
@@ -316,6 +322,8 @@ impl TerminalSession {
             sweep_group_on_exit: options.sweep_group_on_exit,
             stop_reader: AtomicBool::new(false),
             queued_bytes: Arc::clone(&queued_bytes),
+            input_bytes_accepted: AtomicU64::new(0),
+            input_bytes_written: Arc::clone(&input_bytes_written),
             exit: Mutex::new(ExitState::default()),
             exit_cv: Condvar::new(),
             reader_done: Mutex::new(false),
@@ -330,7 +338,7 @@ impl TerminalSession {
 
         std::thread::Builder::new()
             .name("terminal-writer".into())
-            .spawn(move || write_loop(writer, queued, queued_bytes))
+            .spawn(move || write_loop(writer, queued, queued_bytes, input_bytes_written))
             .context("writer thread")?;
 
         let for_waiter = Arc::clone(&session);
@@ -449,7 +457,11 @@ impl TerminalSession {
             return Err(InputError::Busy);
         }
         match self.input.try_send(bytes.to_vec()) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.input_bytes_accepted
+                    .fetch_add(bytes.len() as u64, Ordering::SeqCst);
+                Ok(())
+            }
             Err(e) => {
                 self.queued_bytes.fetch_sub(bytes.len(), Ordering::SeqCst);
                 Err(match e {
@@ -458,6 +470,19 @@ impl TerminalSession {
                 })
             }
         }
+    }
+
+    /// Bytes ever accepted for the child's input.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn input_bytes_accepted(&self) -> u64 {
+        self.input_bytes_accepted.load(Ordering::SeqCst)
+    }
+
+    /// Bytes ever written to the PTY master: every write goes through the one
+    /// writer thread, which counts them. Zero for a terminal nobody typed into.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn input_bytes_written(&self) -> u64 {
+        self.input_bytes_written.load(Ordering::SeqCst)
     }
 
     /// Resize the PTY and the screen model.
@@ -661,9 +686,13 @@ fn write_loop(
     mut writer: Box<dyn Write + Send>,
     queued: Receiver<Vec<u8>>,
     queued_bytes: Arc<AtomicUsize>,
+    input_bytes_written: Arc<AtomicU64>,
 ) {
     for bytes in queued {
         let result = writer.write_all(&bytes).and_then(|()| writer.flush());
+        if result.is_ok() {
+            input_bytes_written.fetch_add(bytes.len() as u64, Ordering::SeqCst);
+        }
         queued_bytes.fetch_sub(bytes.len(), Ordering::SeqCst);
         if let Err(e) = result {
             debug!("terminal writer ended: {e}");

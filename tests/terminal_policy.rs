@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 /// Words no file under `src/mcp/` may contain (`TerminalAgentApi` is the one
 /// terminal name that is allowed there).
-const FORBIDDEN: [&str; 22] = [
+const FORBIDDEN: [&str; 23] = [
     "OperatorCap",
     "TerminalManager",
     "terminal_input",
@@ -58,6 +58,9 @@ const FORBIDDEN: [&str; 22] = [
     // `TerminalAgentApi::request_follow`, and read through `read_screen_if_following`.
     "FollowManager",
     "FollowGrant",
+    // The staging lists: an agent edits one only through
+    // `TerminalAgentApi::staging`, which checks who follows the terminal.
+    "StagingStore",
 ];
 
 /// One forbidden token found in one file.

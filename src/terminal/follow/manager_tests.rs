@@ -2460,3 +2460,129 @@ async fn a_directory_name_cannot_forge_a_follow_notice_in_the_started_message() 
         other => panic!("one follow notice expected, got {other:?}"),
     }
 }
+
+// ── command staging: the follower is told what the user placed at the prompt ──
+
+fn staged_notice(t: &Term, pane: &str, n: usize) -> String {
+    format!(
+        "<nostromo-terminal-follow event=\"staged_inserted\" terminal_id=\"{}\" pane=\"{pane}\" reason=\"entry_{n}\"/>\nThe user placed staged entry {n} at the prompt of {pane}. Only the user's Enter runs it; any output arrives as usual.",
+        t.id
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_inserted_entry_is_told_to_the_follower_ahead_of_its_next_delivery_in_exact_words() {
+    let mut w = World::new();
+    let t = w.local("focus-1", "");
+    w.invite(&t, A, false);
+    let pane = format!("local shell in {}", w.cwd.display());
+    let store = w.terminals.lock().unwrap().staging();
+    let (first, ..) = store.stage(A, &t.id, "Cody", "ls -la", None, None).unwrap();
+    let (second, ..) = store.stage(A, &t.id, "Cody", "pwd", None, None).unwrap();
+    let mark = w.rec.mark();
+    {
+        let mut m = w.terminals.lock().unwrap();
+        m.staging_inserted(&cap(), &t.id, &second, 3, false)
+            .unwrap();
+        m.staging_inserted(&cap(), &t.id, &first, 6, false).unwrap();
+        // The same entry twice is one notice.
+        m.staging_inserted(&cap(), &t.id, &second, 3, false)
+            .unwrap();
+    }
+    advance_ms(3_000).await;
+    assert_eq!(
+        w.rec.texts_for(A, mark),
+        Vec::<String>::new(),
+        "no delivery, no notice"
+    );
+
+    w.run_and_settle(&t, "printf 'hello\\n'").await;
+
+    let texts = w.rec.texts_for(A, mark);
+    assert_eq!(texts.len(), 1, "one message: {texts:?}");
+    let want_start = format!(
+        "{}\n\n{}\n\n<nostromo-terminal-output ",
+        staged_notice(&t, &pane, 2),
+        staged_notice(&t, &pane, 1)
+    );
+    assert!(texts[0].starts_with(&want_start), "{}", texts[0]);
+    assert_eq!(texts[0].matches("staged_inserted").count(), 2);
+    // Same coalesce key as the delivery: the terminal id.
+    assert!(w.rec.events().iter().skip(mark).all(|e| matches!(
+        e,
+        Ev::Inject { key, .. } if key == &t.id
+    )));
+    // Told once.
+    w.run_and_settle(&t, "printf 'again\\n'").await;
+    let later = w.rec.deliveries_for(A, mark);
+    assert_eq!(later.len(), 2);
+    assert!(!later[1].contains("staged_inserted"), "{}", later[1]);
+    // The Mac's parser reads the message as a delivery with its notices.
+    match crate::ipc::stream_json::parse_terminal_origin(&texts[0]) {
+        Some(crate::ipc::stream_json::TurnOrigin::TerminalDelivery { items }) => {
+            assert_eq!(items.len(), 3, "{items:?}");
+            assert_eq!(items[0].event.as_deref(), Some("staged_inserted"));
+            assert_eq!(items[0].reason.as_deref(), Some("entry_2"));
+        }
+        other => panic!("a delivery expected, got {other:?}"),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_staged_insert_is_not_told_to_a_follower_that_is_not_the_owner_or_that_stopped() {
+    let mut w = World::new();
+    let t = w.local("focus-1", "");
+    w.invite(&t, A, false);
+    let store = w.terminals.lock().unwrap().staging();
+    let (id, ..) = store.stage(A, &t.id, "Cody", "ls", None, None).unwrap();
+
+    // The follow moves: the list is the new follower's, empty, and the old
+    // follower's id names nothing.
+    w.invite(&t, B, false);
+    let mark = w.rec.mark();
+    w.terminals
+        .lock()
+        .unwrap()
+        .staging_inserted(&cap(), &t.id, &id, 2, false)
+        .unwrap();
+    w.run_and_settle(&t, "printf 'out\\n'").await;
+    for tag in [A, B] {
+        assert!(
+            w.rec
+                .texts_for(tag, mark)
+                .iter()
+                .all(|t| !t.contains("staged_inserted")),
+            "{tag} was told"
+        );
+    }
+
+    // A frozen list: the user may insert, nobody is told.
+    let (id_b, ..) = store.stage(B, &t.id, "Cody", "ls", None, None).unwrap();
+    w.follow.stop(&cap(), &t.id).unwrap();
+    let mark = w.rec.mark();
+    w.terminals
+        .lock()
+        .unwrap()
+        .staging_inserted(&cap(), &t.id, &id_b, 2, false)
+        .unwrap();
+    w.invite(&t, B, false);
+    w.run_and_settle(&t, "printf 'out\\n'").await;
+    assert!(w
+        .rec
+        .texts_for(B, mark)
+        .iter()
+        .all(|t| !t.contains("staged_inserted")));
+}
+
+#[test]
+fn no_staging_notice_says_a_command_ran() {
+    for n in 1..=12u8 {
+        let notice = super::staged_inserted_notice("t", "local shell in /tmp", n);
+        let sentence = notice.split_once("/>\n").unwrap().1.to_lowercase();
+        let padded = format!(" {sentence} ");
+        for word in [" ran ", "executed", "has run", "was run", "have run"] {
+            assert!(!padded.contains(word), "{sentence}");
+        }
+        assert!(sentence.contains("placed") && sentence.contains("only the user's enter runs it"));
+    }
+}

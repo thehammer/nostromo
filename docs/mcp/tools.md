@@ -1499,6 +1499,35 @@ The limits are per follower (focus), and only a read of a terminal the caller fo
 
 Source: `src/mcp/tools/terminal_follow.rs`; the methods on `TerminalAgentApi` in `src/terminal/agent_api.rs`. The classifier that refuses read-shaped terminal tool names (`-32002`) exempts exactly `nostromo.read_terminal_screen`; every other read-shaped name, including `nostromo_read_terminal_screen` and `nostromo.read_terminal_output`, is still refused. None of the three names matches the production-shell guard's tool-name rule and none has a `command`, `cmd` or `script` field (`tests/remote_shell_guard_consistency.rs`).
 
+### `nostromo.terminal_staging`
+
+For a terminal **the caller follows**, keep a short list of single-line commands the user can click to place at its prompt. **Edits a display list only. Nothing here types, pastes or runs; the user clicks an entry to place it at the prompt and presses Enter themselves.** The daemon never writes a staged command to a terminal. Local terminals only for now; nothing is written to disk. Behaviour, limits and lifecycle: [`terminal.md`](../terminal.md#command-staging-s1).
+
+**Input** (`additionalProperties: false`): `op` and `terminal_id` (both required), then by op: `list` and `clear` take nothing more; `stage` takes `command` (required, one line, at most 1,000 characters), `note?` (at most 120), `position?` (1 to the entry count plus one: insert before that entry; default the end); `replace` takes `entry_id` (required) and at least one of `command`, `note` (`""` clears the note); `remove` takes `entry_id`. A key not allowed for the op is `unknown_argument` (detail: the key); a missing required key or a wrong type is `invalid_args` (detail names it). There is no command-number shortcut: entries are named by `entry_id`.
+
+**Output**: `list` gives `{ ok, terminal_id, staging: "on", frozen: false, entries: [{ id, number, command, note?, staged_at, inserted_count, last_inserted_at? }], limits: { max_entries: 12, max_command_chars: 1000, max_note_chars: 120 } }`; `stage` gives `{ ok, entry: { id, number }, entries }`; `replace` gives `{ ok, entry: { id, number } }` (a changed command resets `inserted_count`); `remove` gives `{ ok, entries }`; `clear` gives `{ ok, entries: 0 }`. A notice in the conversation (`<nostromo-terminal-follow event="staged_inserted" …/>`) says when the user placed an entry at the prompt, never that it ran.
+
+Errors are `{ error, detail?, retry_after? }`, checked in this order; a refused call changes nothing.
+
+| `error` | Meaning and what to do |
+|---|---|
+| `invalid_args` / `unknown_argument` | Fix the call; nothing was changed. |
+| `unknown_view` | The caller is not a focus the daemon knows. |
+| `not_following` | You do not follow that terminal, or the follow ended (the user stopped it, or it moved to another focus: the list is the user's now). The same answer for another focus's terminal and for one that does not exist. Ask with `nostromo.request_follow` and start a fresh list. |
+| `terminal_not_running` | The terminal's shell has ended. |
+| `no_operator` | The Nostromo app is not open, or cannot show the staging drawer. Ask the user to open or update it; tell them the command in your reply instead. |
+| `staging_disabled` | Staging into remote shells is not available yet. Suggest the command in your reply. |
+| `rate_limited` | More than 30 changes in a minute or 300 in an hour. Wait `retry_after` seconds. |
+| `invalid_text` | A command is one non-empty line of printable text: no line break, tab, control or invisible character. Stage one command per entry. |
+| `entry_too_long` / `note_too_long` | At most 1,000 / 120 characters. Shorten it. |
+| `looks_like_secret` | The command (or the note: detail `note`) contains something that looks like a secret or personal data. Never stage it; use a placeholder or an environment variable the user already has. |
+| `remote_shell_command` | It starts a remote shell (an ECS exec session, an SSM session, the session-manager plugin). Ask with `nostromo.request_remote_shell` instead. |
+| `invalid_position` | `position` is outside 1 to the entry count plus one. |
+| `unknown_entry` | No entry has that `entry_id`; call `list`. |
+| `list_full` | 12 entries; remove one first. |
+
+Refusals are audited as `staging_refused {terminal_id?, tag, op, code}`: the code only, never the text. The tool is withheld from a network-driven session like the other terminal tools, and is listed in `tests/no_shell_surface.rs` as unable to write to a shell. Source: `src/mcp/tools/terminal_staging.rs`; `TerminalAgentApi::staging` in `src/terminal/agent_api.rs`.
+
 ## Huey
 
 Huey is a built-in agent that writes one short morning report. Its tools exist only while `[agents.huey] enabled` is not `false`: a disabled Huey has no `huey.*` tools, and calling one answers like any unknown tool. A network peer (iOS, LAN) never sees them in v1: they are withheld exactly like `fred.`, `teri.` and `mother.`, and the `huey` view and the `huey` and `huey-run` tags are sensitive.

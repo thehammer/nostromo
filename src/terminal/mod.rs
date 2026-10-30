@@ -25,6 +25,7 @@ pub mod redact;
 pub mod remote_request;
 pub mod restart_guard;
 pub mod session;
+pub mod staging;
 pub mod store;
 #[cfg(test)]
 mod tests;
@@ -49,6 +50,7 @@ use idle::{IdleAction, IdlePolicy};
 use launcher::{ConnectFailure, Placement, RemoteLauncher, UnavailableLauncher};
 use remote_request::{Decision, RemoteRequests};
 use session::{InputError, SignalOps, TerminalSession};
+use staging::{StagingAudit, StagingStore};
 use store::{TerminalRecord, TerminalStore};
 
 use crate::ipc::pane_registry::{PaneError, PaneRegistry, SplitPosition};
@@ -120,6 +122,11 @@ pub const REMOTE_SHELL_CONFIRM: &str = "remote_shell_confirm";
 /// follows a terminal and stop it: only such a connection may invite.
 pub const TERMINAL_FOLLOW_UI: &str = "terminal_follow_ui";
 
+/// The capability an operator connection declares when it can show a terminal's
+/// staging drawer: the only connections `terminal_staging_list` frames go to,
+/// and one must be connected before an agent may stage.
+pub const TERMINAL_STAGING_UI: &str = "terminal_staging_ui";
+
 /// Why a terminal request failed. Nothing changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalError {
@@ -129,6 +136,8 @@ pub enum TerminalError {
     /// `terminal_restart` on a remote shell: the connection is the pane, and
     /// a new one needs a new request and a new confirm.
     RemoteNotRestartable,
+    /// A staging report or removal naming an entry (or a list) that is gone.
+    UnknownEntry,
     /// Input to a terminal whose process has ended.
     NotRunning,
     /// The process is not reading its input and its queue is full.
@@ -162,6 +171,7 @@ impl TerminalError {
             TerminalError::NotEnded => "terminal_not_ended",
             TerminalError::RemoteNotRestartable => "terminal_control_forbidden",
             TerminalError::NotRunning => "terminal_not_running",
+            TerminalError::UnknownEntry => "unknown_entry",
             TerminalError::InputBusy => "terminal_input_busy",
             TerminalError::InputTooLarge => "terminal_input_too_large",
             TerminalError::TooManyTerminals => "terminal_limit_reached",
@@ -292,6 +302,8 @@ pub struct TerminalManager {
     follow: Option<Arc<follow::FollowManager>>,
     /// When an idle remote shell is warned and closed.
     idle_policy: IdlePolicy,
+    /// Each terminal's staging list (memory only; see [`staging`]).
+    staging: Arc<StagingStore>,
 }
 
 impl Terminal {
@@ -321,7 +333,16 @@ impl Terminal {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum RefusalKey {
     Channel(RefusalChannel),
-    Read { focus: Option<String>, code: String },
+    Read {
+        focus: Option<String>,
+        code: String,
+    },
+    /// A staging refusal of one code from one focus (its own budget, so a
+    /// looping agent cannot hide a different refusal).
+    Staging {
+        focus: Option<String>,
+        code: String,
+    },
 }
 
 impl RefusalKey {
@@ -348,8 +369,13 @@ impl RefusalKey {
     fn channel(&self) -> RefusalChannel {
         match self {
             Self::Channel(channel) => *channel,
-            Self::Read { .. } => RefusalChannel::Mcp,
+            Self::Read { .. } | Self::Staging { .. } => RefusalChannel::Mcp,
         }
+    }
+
+    /// Is this a (focus, code) budget, which ends with its window?
+    fn is_per_focus(&self) -> bool {
+        matches!(self, Self::Read { .. } | Self::Staging { .. })
     }
 }
 
@@ -382,6 +408,7 @@ impl TerminalManager {
                 ecs_paths: EcsPaths::from_config(&crate::config::TerminalConfig::default()),
                 follow: None,
                 idle_policy: IdlePolicy::default(),
+                staging: StagingStore::new(),
             })
         })
     }
@@ -544,6 +571,7 @@ impl TerminalManager {
 
     pub fn register_conn(&mut self, _cap: &OperatorCap, conn_key: &str, conn: OperatorConn) {
         self.operator_conns.insert(conn_key.to_string(), conn);
+        self.replay_staging_to(conn_key);
     }
 
     pub fn set_capabilities(&mut self, _cap: &OperatorCap, conn_key: &str, caps: Vec<String>) {
@@ -551,6 +579,7 @@ impl TerminalManager {
             conn.capabilities = caps;
         }
         self.end_remote_request_if_unanswerable();
+        self.replay_staging_to(conn_key);
     }
 
     /// Did the operator connection `conn_key` declare `capability`?
@@ -1231,6 +1260,9 @@ impl TerminalManager {
         if let Some(follow) = &self.follow {
             follow.terminal_closed(terminal_id, true);
         }
+        // The new shell has a new id: nothing staged for the old one carries over.
+        self.staging.terminal_gone(terminal_id);
+        self.flush_staging();
         if let Some(old_session) = &old.session {
             // Already exited: this signals nothing, it ends the old reader.
             old_session.kill();
@@ -1343,6 +1375,166 @@ impl TerminalManager {
             .collect()
     }
 
+    // ── command staging ──────────────────────────────────────────────────────
+
+    /// The staging lists (shared with the follow manager and the agent API).
+    pub fn staging(&self) -> Arc<StagingStore> {
+        Arc::clone(&self.staging)
+    }
+
+    /// Is a verified operator app that declared [`TERMINAL_STAGING_UI`] still
+    /// connected? Nothing may be staged without one: no one would see it.
+    pub(crate) fn staging_ui_connected(&self) -> bool {
+        !self.staging_conns().is_empty()
+    }
+
+    /// The targeted channels of the operator connections that declared
+    /// [`TERMINAL_STAGING_UI`]: the only ones a staging frame goes to.
+    fn staging_conns(&self) -> Vec<mpsc::UnboundedSender<ServerMsg>> {
+        self.operator_conns
+            .values()
+            .filter(|c| {
+                !c.targeted.is_closed()
+                    && c.capabilities.iter().any(|cap| cap == TERMINAL_STAGING_UI)
+            })
+            .map(|c| c.targeted.clone())
+            .collect()
+    }
+
+    /// Every staging list, to `conn_key` alone, if it declared the capability
+    /// (it just connected or just subscribed).
+    fn replay_staging_to(&self, conn_key: &str) {
+        let Some(conn) = self.operator_conns.get(conn_key).filter(|c| {
+            !c.targeted.is_closed() && c.capabilities.iter().any(|cap| cap == TERMINAL_STAGING_UI)
+        }) else {
+            return;
+        };
+        for frame in self.staging.frames_of_all() {
+            let _ = conn.targeted.send(frame);
+        }
+    }
+
+    /// Send and audit what the staging changes so far left in the store's
+    /// outbox. Called by whoever made a change, holding this manager's lock:
+    /// that keeps frames in revision order, and the store's own (leaf) lock is
+    /// only held to take the outbox, never while sending or auditing.
+    pub(crate) fn flush_staging(&self) {
+        let outbox = self.staging.drain();
+        for audit in outbox.audits {
+            self.record(match audit {
+                StagingAudit::Changed {
+                    terminal_id,
+                    owner_tag,
+                    op,
+                    by,
+                    entries,
+                    bytes,
+                } => AuditEvent::StagingChanged {
+                    terminal_id,
+                    tag: self.audit_tag(&owner_tag),
+                    op: op.to_string(),
+                    by: by.to_string(),
+                    entries,
+                    bytes,
+                },
+                StagingAudit::Inserted {
+                    terminal_id,
+                    entry_number,
+                    bytes,
+                    confirmed,
+                } => AuditEvent::StagingInserted {
+                    terminal_id,
+                    entry_number,
+                    bytes,
+                    confirmed,
+                },
+            });
+        }
+        if outbox.frames.is_empty() {
+            return;
+        }
+        let conns = self.staging_conns();
+        for frame in outbox.frames {
+            for conn in &conns {
+                let _ = conn.send(frame.clone());
+            }
+        }
+    }
+
+    /// The app inserted a staged entry at the prompt (through `terminal_input`)
+    /// and says so. The report carries no text and writes nothing to the
+    /// terminal: the entry is counted, the follower is told on its next
+    /// delivery, and the audit trail gets the sizes.
+    pub fn staging_inserted(
+        &mut self,
+        _cap: &OperatorCap,
+        terminal_id: &str,
+        entry_id: &str,
+        bytes: u32,
+        confirmed: bool,
+    ) -> Result<(), TerminalError> {
+        let report = self
+            .staging
+            .inserted(terminal_id, entry_id, bytes, confirmed);
+        if let (Some(number), Some(owner), Some(follow)) =
+            (report.entry_number, report.notify_owner, &self.follow)
+        {
+            follow.note_staged_insert(terminal_id, &owner, number);
+        }
+        self.flush_staging();
+        Ok(())
+    }
+
+    /// The user removed one staged entry.
+    pub fn staging_remove(
+        &mut self,
+        _cap: &OperatorCap,
+        terminal_id: &str,
+        entry_id: &str,
+    ) -> Result<(), TerminalError> {
+        let found = self.staging.user_remove(terminal_id, entry_id);
+        self.flush_staging();
+        found.then_some(()).ok_or(TerminalError::UnknownEntry)
+    }
+
+    /// The user cleared the staging list.
+    pub fn staging_clear(
+        &mut self,
+        _cap: &OperatorCap,
+        terminal_id: &str,
+    ) -> Result<(), TerminalError> {
+        let found = self.staging.user_clear(terminal_id);
+        self.flush_staging();
+        found.then_some(()).ok_or(TerminalError::UnknownEntry)
+    }
+
+    /// Record that an agent's staging call from `tag` was refused (`code` only:
+    /// never what it tried to stage), within the refusal budget of its
+    /// (focus, code).
+    pub(crate) fn audit_staging_refused(
+        &self,
+        terminal_id: Option<&str>,
+        tag: &str,
+        op: &str,
+        code: &str,
+    ) {
+        let key = RefusalKey::Staging {
+            focus: Some(tag.to_string()),
+            code: code.to_string(),
+        };
+        if !self.take_refusal_budget(key) {
+            return;
+        }
+        self.record(AuditEvent::StagingRefused {
+            terminal_id: terminal_id
+                .filter(|id| is_id_shaped(id))
+                .map(str::to_string),
+            tag: self.audit_tag(tag),
+            op: op.to_string(),
+            code: code.to_string(),
+        });
+    }
+
     // ── audit ────────────────────────────────────────────────────────────────
 
     /// Record a refused terminal request (no cap: refusals come from anyone).
@@ -1440,12 +1632,9 @@ impl TerminalManager {
             .refusal_budgets
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if matches!(key, RefusalKey::Read { .. }) && !budgets.contains_key(&key) {
+        if key.is_per_focus() && !budgets.contains_key(&key) {
             self.forget_ended_read_budgets(&mut budgets);
-            let live = budgets
-                .keys()
-                .filter(|k| matches!(k, RefusalKey::Read { .. }))
-                .count();
+            let live = budgets.keys().filter(|k| k.is_per_focus()).count();
             if live >= MAX_READ_REFUSAL_KEYS {
                 key = RefusalKey::Channel(key.channel());
             }
@@ -1489,8 +1678,7 @@ impl TerminalManager {
     /// suppressed), so they do not pile up.
     fn forget_ended_read_budgets(&self, budgets: &mut HashMap<RefusalKey, RefusalBudget>) {
         budgets.retain(|key, budget| {
-            let ended = matches!(key, RefusalKey::Read { .. })
-                && budget.started.elapsed() >= REFUSAL_WINDOW;
+            let ended = key.is_per_focus() && budget.started.elapsed() >= REFUSAL_WINDOW;
             if ended && budget.suppressed > 0 {
                 self.record(self.suppressed_event(key, budget.suppressed));
             }
@@ -1513,7 +1701,7 @@ impl TerminalManager {
     fn refusal_key_fields(&self, key: &RefusalKey) -> (Option<String>, Option<String>) {
         match key {
             RefusalKey::Channel(_) => (None, None),
-            RefusalKey::Read { focus, code } => (
+            RefusalKey::Read { focus, code } | RefusalKey::Staging { focus, code } => (
                 Some(code.clone()),
                 focus.as_deref().map(|f| self.audit_tag(f)),
             ),
@@ -1648,6 +1836,8 @@ impl TerminalManager {
         if let Some(follow) = &self.follow {
             follow.terminal_closed(&info.terminal_id, false);
         }
+        self.staging.terminal_gone(&info.terminal_id);
+        self.flush_staging();
         let tree = self.remove_leaf(&info.tag, &info.pane_id);
         self.persist();
         self.record(AuditEvent::Closed {
@@ -1765,6 +1955,9 @@ pub fn op_of(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::TerminalFollowStop { .. } => "follow_stop",
         ClientMsg::TerminalFollowResume { .. } => "follow_resume",
         ClientMsg::TerminalSendSelection { .. } => "send_selection",
+        ClientMsg::TerminalStagingInserted { .. } => "staging_inserted",
+        ClientMsg::TerminalStagingRemove { .. } => "staging_remove",
+        ClientMsg::TerminalStagingClear { .. } => "staging_clear",
         // The remote-shell verbs are all "control" to the audit trail.
         ClientMsg::RemoteShellTargetsRequest
         | ClientMsg::RemoteShellOpen { .. }
@@ -1786,7 +1979,10 @@ pub fn terminal_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::TerminalFollowInvite { terminal_id, .. }
         | ClientMsg::TerminalFollowStop { terminal_id }
         | ClientMsg::TerminalFollowResume { terminal_id }
-        | ClientMsg::TerminalSendSelection { terminal_id, .. } => Some(terminal_id),
+        | ClientMsg::TerminalSendSelection { terminal_id, .. }
+        | ClientMsg::TerminalStagingInserted { terminal_id, .. }
+        | ClientMsg::TerminalStagingRemove { terminal_id, .. }
+        | ClientMsg::TerminalStagingClear { terminal_id } => Some(terminal_id),
         ClientMsg::TerminalRefusalReport { terminal_id, .. } => terminal_id.as_deref(),
         _ => None,
     }

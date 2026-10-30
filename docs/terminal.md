@@ -34,6 +34,9 @@ Additive; `PROTOCOL_VERSION` is unchanged. Byte fields are base64. `*` means ope
 | `terminal_keep_alive`* | `terminal_id` (a remote shell: restart its idle timer, see Idle timeout) |
 | `terminal_remote_summary_request` | none; any local peer (metadata only, changes nothing) |
 | `terminal_refusal_report`* | `terminal_id?, op, channel` (audited; ignored from anyone else) |
+| `terminal_staging_inserted`* | `terminal_id, entry_id, bytes, confirmed?` (the app placed a staged entry at the prompt; carries no text, writes nothing, see Command staging) |
+| `terminal_staging_remove`* | `terminal_id, entry_id` (the user's Remove) |
+| `terminal_staging_clear`* | `terminal_id` (the user's Clear) |
 
 `Subscribe` also takes `capabilities: [String]` (default empty, recorded only for the operator app) and `operator_nonce?` (the `Welcome`'s; required before any `*` verb is honoured).
 
@@ -48,6 +51,7 @@ Other `terminal_refused` codes: `unknown_terminal`, `terminal_not_ended`, `termi
 | `terminal_output` | attached connections | `terminal_id, bytes` |
 | `terminal_refused` | targeted | `op, terminal_id?, code` |
 | `terminal_remote_summary` | targeted, answers `terminal_remote_summary_request` | `shells: [{label, target, opened_at}]` (open `ecs` terminals; no output) |
+| `terminal_staging_list` | targeted, only to operator connections that declared `terminal_staging_ui`; never broadcast | `terminal_id, pane_id, state` (`active`, `frozen`, `none`), `owner_tag, agent_name, revision, entries: [{id, number, command, note?, staged_at, changed_at, inserted_count, last_inserted_at?}]` |
 
 A terminal leaf's pane id is `terminal-<8 hex>`. The daemon also sends `pane_content` with `kind: "terminal"` (`terminal_id, label`, `environment` only for a remote shell) so a client that cannot attach can show a placeholder.
 
@@ -122,6 +126,7 @@ What an agent session needs to know (the same text, shortened, is the Nostromo M
 - `nostromo.list_terminals`: your own focus's terminals plus ones you follow; metadata only.
 - `nostromo.request_follow`: asks the **user** to let you follow one of your own focus's terminals; blocks until they decide. The reason is at most 200 characters and the user sees it, so say what and why plainly. Errors: `denied`, `dismissed`, `timeout`, `no_operator`, `request_cooldown`, `request_limit`, `request_pending`, `terminal_not_running`. Do not repeat a refused request inside the cooldown.
 - `nostromo.read_terminal_screen`: only while following; redacted; at most one read per 2 s and 240 per hour.
+- `nostromo.terminal_staging`: for a terminal you follow, stage up to 12 single-line commands the user can click to place at its prompt. Only the user presses Enter. One command per entry, plainly; no secrets; never disguise what a command does. A notice says when an entry was inserted, not that it ran.
 - `nostromo.open_terminal`: a local shell, within the user's session limits.
 - `nostromo.list_remote_shell_targets` / `nostromo.request_remote_shell`: ask the user for a remote shell; blocks until they decide. The user sees the resolved command, profile and cluster. Never retry after a denial inside the cooldown.
 
@@ -194,6 +199,47 @@ A daemon restart ends every shell. The *controlled* restart paths therefore refu
 
 A crash or a raw SIGTERM cannot be guarded: those still end the shells, and the app shows it (`terminal_closed`, `daemon_stopped` on the next start).
 
+## Command staging (S1)
+
+An agent that follows a **local** terminal keeps a short list of single-line commands for the user. The Mac app shows them in a drawer in the terminal pane (slice S1b); **a human click places the text at the prompt, with no line break, and only the user's Enter runs it.** Nothing in the daemon writes a staged command to a terminal. Until the app ships (S1b), no connection declares `terminal_staging_ui`, so every call returns `no_operator`. Remote (`ecs`) terminals are refused `staging_disabled` until slice S2.
+
+**The tool.** `nostromo.terminal_staging` (reference: [`mcp/tools.md`](mcp/tools.md#nostromoterminal_staging)). `op` is `list`, `stage {command, note?, position?}`, `replace {entry_id, command?, note?}` (`note: ""` clears it), `remove {entry_id}` or `clear`, with `terminal_id`. Its only path to the store is `TerminalAgentApi::staging` (`src/terminal/agent_api.rs`); no code under `src/mcp/` can name the store (`tests/terminal_policy.rs`).
+
+**Who.** Only the focus that follows the terminal (active or paused), and only on the list it owns: the owner is the follower at the moment the list was created. Anyone else, and a former follower of a frozen list, gets `not_following` (also for a terminal that does not exist: another focus's terminals are never revealed).
+
+**Lifecycle.** A new follow (invite, request, sheet, or a move to another focus) starts an **empty** list owned by the new follower, replacing any other. The user stopping the follow, or the follower's session ending, **freezes** the list: it stays in the drawer and the user can still insert, remove and clear, but no agent can change it. Closing the pane, restarting the terminal (a new id), removing the focus, or the last operator app disconnecting removes it (`terminal_staging_list` with `state: "none"`). A frozen list the user empties is removed. Lists are memory only: a daemon restart forgets them, and `daemon-terminals.json` has no staging field.
+
+**Errors**, in the order they are checked; a refused call changes nothing (no list change, no frame, no revision bump): `invalid_args` / `unknown_argument` (a key not allowed for the op), `unknown_view`, `not_following`, `terminal_not_running`, `no_operator` (no verified app that declared `terminal_staging_ui`), `staging_disabled` (any kind but local), `rate_limited` (`retry_after` seconds, at least 1), then the content: `invalid_text`, `entry_too_long`, `note_too_long`, `looks_like_secret`, `remote_shell_command`, `invalid_position`, `unknown_entry`, `list_full`.
+
+**Limits.**
+
+| Limit | Value | Refusal |
+|---|---|---|
+| Entries per list | 12 | `list_full` |
+| Command length | 1,000 Unicode scalars | `entry_too_long` |
+| Note length | 120 Unicode scalars | `note_too_long` |
+| Agent name in the drawer | 40 scalars (sanitised) | |
+| Changes (stage, replace, remove, clear) per follower | 30 per rolling minute, 300 per rolling hour | `rate_limited` |
+
+A call that passes the follower check counts towards the rate limit whether it was accepted or refused for its content, so a hostile caller is bounded; `list` does not count.
+
+**Text rules** (`src/terminal/staging/text.rs`), first failure wins: empty or whitespace-only; the tracker's `validate_command_text`; any control character (tab, LF, CR, VT, FF, ESC, DEL, C1 included), any invisible or bidi character (`is_invisible`), or text that opens or closes a `<nostromo-` element (`invalid_text`); more than 1,000 scalars (`entry_too_long`); anything the terminal redactor would redact, which includes SSN- and date-of-birth-shaped values (`looks_like_secret`); and anything that starts a production shell (`remote_shell_command`: an ECS exec session, an SSM session, the session-manager plugin, or running `ecs_build_command`'s output, decided by the production-shell guard's own matcher). Staging is a strict superset of the tracker's rule (`tests/terminal_staging_*`). A note is cut to one line (control and invisible characters removed, runs of spaces collapsed) and is held to the secret rule too.
+
+**Insert report.** The app places the text itself through its own `terminal_input`, then sends `terminal_staging_inserted`. The daemon counts it (`inserted_count`, `last_inserted_at`), pushes the list, audits it, and tells the follower at its next delivery, ahead of the output:
+
+```
+<nostromo-terminal-follow event="staged_inserted" terminal_id="…" pane="…" reason="entry_2"/>
+The user placed staged entry 2 at the prompt of <pane>. Only the user's Enter runs it; any output arrives as usual.
+```
+
+No notice says a command ran. A changed command resets its counts.
+
+**Audit** (counts only, never text): `staging_changed {terminal_id, tag, op, by, entries, bytes}` (`by`: `agent`, `user`, `follow_started`, `follow_moved`, `terminal_closed`, `app_closed`), `staging_inserted {terminal_id, entry_number|null, bytes, confirmed}`, `staging_refused {terminal_id?, tag, op, code}` (within the per-(focus, code) refusal budget). **Nothing staged is written to disk**: not the audit trail, not the activity feed (`nostromo.terminal_staging` appears there as `<tool>: <op>`), not a log line, not the terminal store.
+
+**Frames.** `terminal_staging_list` is `LocalOnly` and targeted to connections that declared `terminal_staging_ui` (sent on every change, and for every list right after such a connection subscribes). The three client frames are operator-only and refused over TCP. Golden files: `tests/fixtures/terminal_staging/`. Timestamps are RFC 3339 UTC with milliseconds.
+
+**Proofs that no byte reaches a shell** (`tests/no_shell_surface.rs`, `src/terminal/staging/tests.rs`): every tool is classified as unable to write to a shell and a suspect property (`command`, `terminal_id`, …) needs a documented exception; and a child that logs what it reads saw nothing (and `TerminalSession::input_bytes_written` stayed zero) through every op, every hostile string and concurrent insert and follow changes.
+
 ## Network peers (FND-1)
 
 Every `terminal_*` client frame is `NetworkPolicy::Refused` (`src/ipc/peer.rs`): over TCP it is answered with `requires_secure_connection` before dispatch and audited with `channel: "tcp"`. Every terminal server frame is `ServerClass::LocalOnly`: a TCP peer receives none of them, not even metadata.
@@ -231,7 +277,7 @@ Output is coalesced. A chunk goes out at once if nothing was sent in the last 8 
 
 ## Audit
 
-`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, the remote-shell and follow events above, `idle_warning`, `idle_kept_open`, `idle_closed`, plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
+`~/.nostromo/audit/terminal.jsonl` (directory `0700`, file `0600`), appended only by the daemon. It rotates at 10 MiB to `terminal-<UTC yyyymmddThhmmss>.jsonl` and keeps 12 rotated files. Events: `opened`, `closed`, `ended`, `daemon_stopped`, `restarted`, `refused`, the remote-shell and follow events above, `idle_warning`, `idle_kept_open`, `idle_closed`, the command-staging events (`staging_changed`, `staging_inserted`, `staging_refused`: counts only, see Command staging), plus `refusal_limit_reached` and `refusals_suppressed`. The next daemon's start writes the stop's ending: `daemon_stopped` for each local terminal that was left `ended`, and `closed` (reason `daemon_stopped`, or `pane_missing`) for each terminal whose pane is gone. A sensitive focus appears by its opaque tag, never by name. `AuditEvent` is a closed enum with no field that can hold keystrokes or output.
 
 Refused lines are capped at 120 a minute per channel (one budget for the whole MCP channel, not one per focus), so a flood over TCP neither fills the log quickly nor silences local refusals. The exception is a follower's screen-read refusals on MCP: each (focus, code) has its own 120-a-minute budget (at most 64 at once, then they use the channel's), so the first refusal of every pair in a window is always written and a looping read cannot hide a different refusal. A capped read budget's `refusal_limit_reached` and `refusals_suppressed` lines name its `code` and `focus`. A peer-supplied `terminal_id` is recorded only if it is shaped like an id.
 

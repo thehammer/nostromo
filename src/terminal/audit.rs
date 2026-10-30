@@ -288,6 +288,36 @@ pub enum AuditEvent {
         lines: usize,
         bytes: usize,
     },
+    /// A staging list changed. Counts only: never a command or a note.
+    StagingChanged {
+        terminal_id: String,
+        /// The list's owner (the focus that followed the terminal).
+        tag: String,
+        /// `stage`, `replace`, `remove` or `clear`.
+        op: String,
+        /// `agent`, `user`, `follow_moved`, `follow_started`,
+        /// `terminal_closed` or `app_closed`.
+        by: String,
+        /// Entries in the list after the change.
+        entries: usize,
+        /// Total command bytes in the list after the change.
+        bytes: usize,
+    },
+    /// The app reported inserting a staged entry at the prompt. `entry_number`
+    /// is null when the entry was already gone.
+    StagingInserted {
+        terminal_id: String,
+        entry_number: Option<u8>,
+        bytes: usize,
+        confirmed: bool,
+    },
+    /// A staging call was refused.
+    StagingRefused {
+        terminal_id: Option<String>,
+        tag: String,
+        op: String,
+        code: String,
+    },
 }
 
 /// The digests a remote shell's request was pinned to (lowercase hex SHA-256):
