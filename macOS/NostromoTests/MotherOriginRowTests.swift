@@ -103,6 +103,48 @@ final class MotherOriginRowTests: XCTestCase {
         XCTAssertEqual(vm.rowModel(for: job("j1")).accessibilitySummary, "title-j1. From You.")
     }
 
+    // MARK: Real accessibility output (MF3-7)
+
+    private func accessibilityLabels(of model: MotherJobRowModel, onOriginTap: (() -> Void)? = nil) -> (labels: [String], actions: [String]) {
+        let host = NSHostingView(rootView: NostromoKit.MotherJobRow(model: model, onOriginTap: onOriginTap))
+        host.frame = NSRect(x: 0, y: 0, width: 280, height: 80)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: true)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        var labels: [String] = []
+        var actions: [String] = []
+        func walk(_ element: Any?, depth: Int) {
+            guard depth < 12, let e = element as? NSAccessibilityElementProtocol else { return }
+            if let l = (e as AnyObject).accessibilityLabel?(), !l.isEmpty { labels.append(l) }
+            if let acts = (e as AnyObject).accessibilityCustomActions?() { actions += acts.map(\.name) }
+            for c in (e as AnyObject).accessibilityChildren?() ?? [] { walk(c, depth: depth + 1) }
+        }
+        walk(host, depth: 0)
+        return (labels, actions)
+    }
+
+    func testARowWithAnOriginReadsItsTitleThenWhereItCameFrom() {
+        let origin = MotherOriginDisplay.make(annotation: note(.you), currentName: { _ in nil })
+        let model = MotherJobRowModel(id: "j1", state: "queued", title: "Ship it", origin: origin)
+        XCTAssertTrue(accessibilityLabels(of: model).labels.contains("Ship it. From You."))
+    }
+
+    func testARowWithoutAnOriginKeepsItsOwnAccessibility() {
+        let model = MotherJobRowModel(id: "j1", state: "queued", title: "Ship it")
+        let labels = accessibilityLabels(of: model).labels
+        XCTAssertFalse(labels.contains { $0.contains("From ") })
+        XCTAssertFalse(labels.contains("Ship it"), "no origin: the row is not collapsed into one element")
+    }
+
+    func testAClickableOriginStaysReachableAsAnAction() {
+        let origin = MotherOriginDisplay.make(
+            annotation: note(.focus, tag: "claudia-ABCDEF12", snapshot: "Fix login"), currentName: { _ in "Fix login" })
+        XCTAssertTrue(origin.isClickable)
+        let model = MotherJobRowModel(id: "j1", state: "queued", title: "Ship it", origin: origin)
+        let result = accessibilityLabels(of: model, onOriginTap: {})
+        XCTAssertTrue(result.actions.contains("Show Fix login"), "actions: \(result.actions)")
+    }
+
     func testAnArrivingAnnotationChangesTheRowAndAnnouncesIt() throws {
         let vm = makeVM(try makeStore(), jobs: [job("j1")])
         var announced = 0

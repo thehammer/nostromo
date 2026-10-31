@@ -37,6 +37,7 @@ public struct MotherJobRow: View {
 
     public var body: some View {
         rowContent
+            .modifier(OriginAccessibility(model: model, onOriginTap: onOriginTap))
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 if model.isDone {
                     Button(role: .destructive, action: onArchive) {
@@ -226,6 +227,33 @@ public struct MotherJobRow: View {
         case (let r?, nil):    return r
         case (nil, let b?):    return b
         case (nil, nil):       return nil
+        }
+    }
+}
+
+
+/// When the row shows an origin, the row reads as one element: `<title>. From <origin>.`
+/// A clickable origin stays reachable as a named action. Without an origin (iOS) the row's
+/// accessibility is untouched.
+struct OriginAccessibility: ViewModifier {
+    let model: MotherJobRowModel
+    let onOriginTap: (() -> Void)?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let origin = model.origin {
+            if origin.isClickable, let onOriginTap {
+                content
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(model.accessibilitySummary)
+                    .accessibilityAction(named: "Show \(origin.text)", onOriginTap)
+            } else {
+                content
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(model.accessibilitySummary)
+            }
+        } else {
+            content
         }
     }
 }
