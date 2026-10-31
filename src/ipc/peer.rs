@@ -1248,6 +1248,9 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
                 if let Some(annotation) = &mut job.nostromo {
                     annotation.redact_for_network(|tag| tags.tag_is_sensitive(tag));
                 }
+                // Mother's free-form failure reason is for the local app (and a
+                // notice names only its class): never a network peer's.
+                job.failure_reason = None;
             }
             ServerMsg::MotherJobs { jobs }
         }
@@ -3776,6 +3779,26 @@ mod tests {
         let tags = SensitiveTags::persisted(path);
 
         assert!(outbound(PeerTrust::Tcp, approval_pending("cody-anything"), &tags).is_none());
+    }
+
+    #[test]
+    fn a_network_peer_never_gets_a_jobs_free_form_failure_reason_but_keeps_its_cost() {
+        let tags = SensitiveTags::in_memory();
+        let job: crate::mother::MotherJob = serde_json::from_value(serde_json::json!({
+            "id": "j1",
+            "state": "failed",
+            "failure_reason": "SECRET-REASON gate output",
+            "actual_cost_usd": 2.5,
+        }))
+        .unwrap();
+        assert!(job.failure_reason.is_some(), "the fixture carries a reason");
+
+        let redacted = redact_for_network(ServerMsg::MotherJobs { jobs: vec![job] }, &tags);
+
+        let wire = serde_json::to_string(&redacted).unwrap();
+        assert!(!wire.contains("SECRET-REASON"), "{wire}");
+        assert!(!wire.contains("failure_reason"), "{wire}");
+        assert!(wire.contains("\"actual_cost_usd\":2.5"), "{wire}");
     }
 
     #[test]
