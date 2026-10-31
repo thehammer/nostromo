@@ -222,11 +222,37 @@ final class MotherJobDetail: NSView {
     // Stored once, toggled via isHidden
     private let emptyLabel = NSTextField(labelWithString: "Select a job")
 
-    /// Scrolls everything the detail shows. Its document is `content`, pinned to the clip's width.
+    /// Scrolls the Overview: everything but the title, the switch and the log. Its document is `content`,
+    /// pinned to the clip's width.
     let contentScrollView = NSScrollView()
     private let content = DetailDocumentView()
-    /// The log never gets shorter than this, however much content is above it.
-    private static let minLogHeight: CGFloat = 160
+
+    /// The three views of a job, chosen with the switch under the title.
+    enum Segment: Int, CaseIterable {
+        case overview, plan, log
+
+        var title: String {
+            switch self {
+            case .overview: return "Overview"
+            case .plan:     return "Plan"
+            case .log:      return "Log"
+            }
+        }
+    }
+
+    /// Overview · Plan · Log. The Plan segment exists only while the job has a plan path.
+    let segmentControl = NSSegmentedControl()
+    /// The segment on show. Per detail (so per job tab): `select` starts at Overview, `update` never changes it.
+    private(set) var selectedSegment: Segment = .overview
+    /// New log lines arrived while another segment was showing; cleared by showing the Log.
+    private(set) var logHasUnseenLines = false
+    /// The plan, rendered in place. Built the first time the Plan segment is chosen.
+    private(set) var planView: PlanDocumentView?
+    /// Makes the plan view's file loader (tests replace it to drive the watcher by hand).
+    var makePlanFileLoader: () -> PlanFileLoader = { PlanFileLoader() }
+    /// Makes the Overview checklist's file loader (tests replace it). It watches the plan file while the
+    /// Overview is on show, as the plan view's does while the Plan is.
+    var makeChecklistFileLoader: () -> PlanFileLoader = { PlanFileLoader() }
 
     /// Top-down, like the scroll document inside it (an existing test reads `isFlipped` to find a top edge).
     override var isFlipped: Bool { true }
@@ -263,7 +289,6 @@ final class MotherJobDetail: NSView {
     /// The stack currently inside `actionsContainer`; a stable object while the identity holds.
     private(set) var actionStack: NSStackView?
     private var actionIdentity: ActionIdentity?
-    private let logSectionLabel = NSTextField(labelWithString: "LOG TAIL")
     let logScrollView   = NSScrollView()
     let logTextView     = NSTextView()
 
@@ -277,7 +302,6 @@ final class MotherJobDetail: NSView {
     private let forceStartButton = NSButton(title: "Force-start", target: nil, action: nil)
     private let archiveButton    = NSButton(title: "Archive",     target: nil, action: nil)
     private let escalateButton   = NSButton(title: "Escalate",    target: nil, action: nil)
-    private let viewPlanButton   = NSButton(title: "View Plan",   target: nil, action: nil)
     private let actionErrorLabel = NSTextField.boundedLabel("", maxLines: 4)
     /// Shown under the guidance box when it is too long to send.
     private let guidanceHintLabel = NSTextField(labelWithString: "Guidance is longer than 4,000 characters.")
@@ -305,7 +329,6 @@ final class MotherJobDetail: NSView {
         var brokerConnected: Bool
         var decisionId: String?
         var holdKind: String?
-        var hasPlan: Bool
         /// Mother's options are buttons (the broker answers by option id).
         var optionMode: Bool
         /// The open decision's send state: a send, a confirm or a failure changes the buttons.
@@ -318,7 +341,6 @@ final class MotherJobDetail: NSView {
             self.brokerConnected = brokerConnected
             decisionId = job.crew.decision.flatMap { $0.isOpen ? $0.id : nil }
             holdKind = job.holdSummary?.kind
-            hasPlan = !(job.planPath ?? "").isEmpty
         }
     }
 
@@ -360,9 +382,6 @@ final class MotherJobDetail: NSView {
         // Actions container (variable height, rebuilt per job state)
         actionsContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        logSectionLabel.font      = .systemFont(ofSize: 9, weight: .semibold)
-        logSectionLabel.textColor = Theme.fgMuted
-
         logTextView.isEditable         = false
         logTextView.isSelectable       = true
         logTextView.drawsBackground    = false
@@ -381,6 +400,19 @@ final class MotherJobDetail: NSView {
         logScrollView.layer?.backgroundColor = NSColor(white: 0.09, alpha: 1).cgColor
         logScrollView.layer?.cornerRadius    = 4
         logScrollView.documentView = logTextView
+        logScrollView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(logScrollView)
+
+        segmentControl.segmentStyle = .rounded
+        segmentControl.trackingMode = .selectOne
+        segmentControl.controlSize = .small
+        segmentControl.target = self
+        segmentControl.action = #selector(segmentChanged(_:))
+        segmentControl.setAccessibilityLabel("Job view")
+        segmentControl.translatesAutoresizingMaskIntoConstraints = false
+        segmentControl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addSubview(segmentControl)
+        rebuildSegmentControl()
 
         todoStack.orientation = .vertical
         todoStack.spacing     = 4
@@ -411,22 +443,24 @@ final class MotherJobDetail: NSView {
             .sink { [weak self] _ in self?.placeHeld = false }
             .store(in: &cancellables)
         NSLayoutConstraint.activate([
-            contentScrollView.topAnchor.constraint(equalTo: topAnchor),
+            contentScrollView.topAnchor.constraint(equalTo: segmentControl.bottomAnchor, constant: 10),
             contentScrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             contentScrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             contentScrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            // The document is as wide as the clip (never scrolls sideways), as tall as its content
-            // and at least as tall as the clip, so short content still fills the pane (the log
-            // takes the slack, as it always did).
+            // The document is as wide as the clip (it never scrolls sideways) and as tall as its content.
             content.topAnchor.constraint(equalTo: clip.topAnchor),
             content.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
             content.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
-            content.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor),
         ])
 
-        for v in [titleLabel, stateLabel, phaseRibbonView, crewSection, actionsContainer, todoStack, metaStack,
-                  planSectionLabel, planChecklistView, logSectionLabel, logScrollView] as [NSView] {
+        // The title, the state and the switch stay put above whichever segment is showing.
+        for v in [titleLabel, stateLabel] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        for v in [phaseRibbonView, crewSection, actionsContainer, todoStack, metaStack,
+                  planSectionLabel, planChecklistView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
         }
@@ -452,21 +486,33 @@ final class MotherJobDetail: NSView {
         }
         // The plan loads off the main thread: what it changes above the log lands later than `update`.
         planChecklistView.onWillChange = { [weak self] in self?.holdReaderPlace() }
+        planChecklistView.makeLoader = { [weak self] in self?.makeChecklistFileLoader() ?? PlanFileLoader() }
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-            titleLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            titleLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 20),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
 
             // A fitting-size pass would otherwise take the label's full text width for the pane's.
-            titleLabel.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -32),
-            stateLabel.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, constant: -32),
+            titleLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
+            stateLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
 
             stateLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
-            stateLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
-            // Phase ribbon — sits between state label and actions; height is 0 when hidden
-            phaseRibbonView.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 8),
+            // The switch: right under the state line, never wider than the pane.
+            segmentControl.topAnchor.constraint(equalTo: stateLabel.bottomAnchor, constant: 8),
+            segmentControl.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            segmentControl.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+
+            // The log fills the area under the switch while it is the segment on show.
+            logScrollView.topAnchor.constraint(equalTo: segmentControl.bottomAnchor, constant: 10),
+            logScrollView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            logScrollView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            logScrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+
+            // Phase ribbon — the top of the Overview; height is 0 when hidden
+            phaseRibbonView.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
             phaseRibbonView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             phaseRibbonView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
@@ -489,7 +535,7 @@ final class MotherJobDetail: NSView {
             metaStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             metaStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
-            // Plan checklist section — between meta and log
+            // Plan checklist section — the end of the Overview
             planSectionLabel.topAnchor.constraint(equalTo: metaStack.bottomAnchor, constant: 12),
             planSectionLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
 
@@ -497,14 +543,7 @@ final class MotherJobDetail: NSView {
             planChecklistView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             planChecklistView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
-            logSectionLabel.topAnchor.constraint(equalTo: planChecklistView.bottomAnchor, constant: 12),
-            logSectionLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-
-            logScrollView.topAnchor.constraint(equalTo: logSectionLabel.bottomAnchor, constant: 6),
-            logScrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            logScrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            logScrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
-            logScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minLogHeight),
+            planChecklistView.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
         ])
 
         // Configure action widgets
@@ -591,7 +630,7 @@ final class MotherJobDetail: NSView {
 
         // Buttons
         for btn in [answerButton, cancelButton, retryButton,
-                    forceStartButton, archiveButton, viewPlanButton] {
+                    forceStartButton, archiveButton] {
             btn.bezelStyle  = .rounded
             btn.isBordered  = true
             btn.font        = .systemFont(ofSize: 11)
@@ -609,15 +648,12 @@ final class MotherJobDetail: NSView {
         escalateButton.target   = self
         escalateButton.action   = #selector(didEscalate)
         escalateButton.toolTip  = "Re-run this failed job on the next model tier (costs more)"
-        viewPlanButton.target   = self
-        viewPlanButton.action   = #selector(didViewPlan)
 
         // Semantic color coding via contentTintColor
         cancelButton.contentTintColor     = Theme.redSweater
         retryButton.contentTintColor      = Theme.sage
         forceStartButton.contentTintColor = Theme.amber
         archiveButton.contentTintColor    = Theme.fgMuted
-        viewPlanButton.contentTintColor   = Theme.fgMuted
         answerButton.contentTintColor     = Theme.sage
 
         guidanceHintLabel.font      = .systemFont(ofSize: 10)
@@ -648,6 +684,9 @@ final class MotherJobDetail: NSView {
         scrollContentToTop()
         replyTextView.string = ""
         lastLogText = nil
+        logHasUnseenLines = false
+        // A new job starts on the Overview, a job that needs you included.
+        selectedSegment = .overview
         crewSection.collapseBreakdown()
 
         guard let job else {
@@ -657,9 +696,13 @@ final class MotherJobDetail: NSView {
             return
         }
 
-        [titleLabel, stateLabel, todoStack, metaStack, actionsContainer,
-         planSectionLabel, planChecklistView, logSectionLabel, logScrollView].forEach { $0.isHidden = false }
+        [titleLabel, stateLabel, segmentControl, todoStack, metaStack, actionsContainer,
+         planSectionLabel, planChecklistView].forEach { $0.isHidden = false }
         emptyLabel.isHidden = true
+        planView?.show(planPath: job.planPath)
+        planChecklistView.show(planPath: job.planPath)
+        rebuildSegmentControl()
+        showSelectedSegment()
 
         titleLabel.stringValue = job.title.isEmpty ? job.id : job.title
         stateLabel.stringValue = job.state.uppercased()
@@ -671,7 +714,6 @@ final class MotherJobDetail: NSView {
         shownMeta = metaPairs(for: job)
         rebuildMeta(shownMeta)
         rebuildActions(job)
-        planChecklistView.load(planPath: job.planPath)
         loadLog(job)
         syncLogTimer(for: job)
     }
@@ -715,7 +757,14 @@ final class MotherJobDetail: NSView {
 
         if makeActionIdentity(for: job) != actionIdentity { rebuildActions(job) }
 
-        if job.planPath != previous.planPath { planChecklistView.load(planPath: job.planPath) }
+        if job.planPath != previous.planPath {
+            planChecklistView.show(planPath: job.planPath)
+            planView?.show(planPath: job.planPath)
+            // The Plan segment goes with the path.
+            if (job.planPath ?? "").isEmpty, selectedSegment == .plan { selectedSegment = .overview }
+            rebuildSegmentControl()
+            showSelectedSegment()
+        }
 
         if job.state != previous.state {
             syncLogTimer(for: job)
@@ -723,7 +772,93 @@ final class MotherJobDetail: NSView {
         }
     }
 
+    /// Show `segment`, if the job has it (Plan needs a plan path). A person's choice or the keyboard's:
+    /// the switch itself calls this.
+    func selectSegment(_ segment: Segment) {
+        guard currentJob != nil, visibleSegments.contains(segment) else { return }
+        selectedSegment = segment
+        if segment == .log { logHasUnseenLines = false }
+        rebuildSegmentControl()
+        showSelectedSegment()
+    }
+
+    /// The segments the job has, in order.
+    var visibleSegments: [Segment] {
+        hasPlan ? [.overview, .plan, .log] : [.overview, .log]
+    }
+
+    /// The text of a segment's label on the switch (the Log carries a dot while it has unseen lines).
+    func segmentLabel(_ segment: Segment) -> String? {
+        guard let index = visibleSegments.firstIndex(of: segment) else { return nil }
+        return segmentControl.label(forSegment: index)
+    }
+
     // MARK: Private
+
+    private var hasPlan: Bool { !(currentJob?.planPath ?? "").isEmpty }
+
+    @objc private func segmentChanged(_ sender: NSSegmentedControl) {
+        let segments = visibleSegments
+        guard sender.selectedSegment >= 0, sender.selectedSegment < segments.count else { return }
+        selectSegment(segments[sender.selectedSegment])
+    }
+
+    /// Labels and selection of the switch from `visibleSegments`, `selectedSegment` and the log dot.
+    private func rebuildSegmentControl() {
+        let segments = visibleSegments
+        if segmentControl.segmentCount != segments.count { segmentControl.segmentCount = segments.count }
+        for (i, segment) in segments.enumerated() {
+            let dotted = segment == .log && logHasUnseenLines
+            segmentControl.setLabel(dotted ? "Log \u{2022}" : segment.title, forSegment: i)
+            segmentControl.setWidth(0, forSegment: i)
+            segmentControl.setToolTip(dotted ? "New log lines" : nil, forSegment: i)
+        }
+        segmentControl.selectedSegment = segments.firstIndex(of: selectedSegment) ?? 0
+        applySegmentAccessibility(segments)
+    }
+
+    /// What a screen reader says for `segment`: "Log, new lines", not "Log bullet".
+    func segmentAccessibilityLabel(_ segment: Segment) -> String? {
+        guard visibleSegments.contains(segment) else { return nil }
+        return segment == .log && logHasUnseenLines ? "Log, new lines" : segment.title
+    }
+
+    private func applySegmentAccessibility(_ segments: [Segment]) {
+        let children = segmentControl.accessibilityChildren() ?? []
+        for (child, segment) in zip(children, segments) {
+            guard let label = segmentAccessibilityLabel(segment) else { continue }
+            (child as? NSAccessibilityElement)?.setAccessibilityLabel(label)
+        }
+    }
+
+    /// Only the selected segment is on show; the others are hidden. The plan view reads and watches
+    /// its file only while it is the one on show.
+    private func showSelectedSegment() {
+        guard currentJob != nil else { return }
+        contentScrollView.isHidden = selectedSegment != .overview
+        logScrollView.isHidden = selectedSegment != .log
+        if selectedSegment == .plan { ensurePlanView().isHidden = false } else { planView?.isHidden = true }
+        planView?.setActive(selectedSegment == .plan)
+        planChecklistView.setActive(selectedSegment == .overview)
+    }
+
+    private func ensurePlanView() -> PlanDocumentView {
+        if let planView { return planView }
+        let view = PlanDocumentView(loader: makePlanFileLoader(),
+                                     actions: PlanViewActions(openPlan: { [weak host] in host?.openPlan(path: $0) }))
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.isHidden = true
+        addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: segmentControl.bottomAnchor, constant: 10),
+            view.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            view.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            view.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
+        ])
+        view.show(planPath: currentJob?.planPath)
+        planView = view
+        return view
+    }
 
     /// A new subject starts at the top. Updates to the same job never call this: they keep what the
     /// reader is looking at where it is (`holdReaderPlace`).
@@ -841,10 +976,12 @@ final class MotherJobDetail: NSView {
     }
 
     private func showEmpty() {
-        [titleLabel, stateLabel, phaseRibbonView, crewSection, todoStack, metaStack, actionsContainer,
-         planSectionLabel, planChecklistView, logSectionLabel, logScrollView].forEach { $0.isHidden = true }
+        [titleLabel, stateLabel, segmentControl, phaseRibbonView, crewSection, todoStack, metaStack, actionsContainer,
+         planSectionLabel, planChecklistView, contentScrollView, logScrollView].forEach { $0.isHidden = true }
+        planView?.clear()
+        planView?.isHidden = true
         emptyLabel.isHidden = false
-        planChecklistView.load(planPath: nil)
+        planChecklistView.show(planPath: nil)
         crewSection.update(model: MotherCrewPanelModel(), detailsAvailable: false)
         crewTopGap.constant = 0
         shownMeta = []
@@ -1053,22 +1190,16 @@ final class MotherJobDetail: NSView {
             break
         }
 
-        // View Plan — show whenever planPath is set
-        if let planPath = job.planPath, !planPath.isEmpty {
-            widgets.append(viewPlanButton)
-        }
-
         widgets.append(actionErrorLabel)
 
         // Disable action buttons when broker is offline
         for btn in [answerButton, cancelButton, retryButton,
-                    forceStartButton, archiveButton, viewPlanButton, escalateButton] {
+                    forceStartButton, archiveButton, escalateButton] {
             btn.isEnabled = connected
         }
         escalateButton.isEnabled = true   // goes through the CLI, not the broker
-        // Archive and View Plan don't require broker — always enabled
+        // Archive doesn't require the broker — always enabled
         archiveButton.isEnabled  = true
-        viewPlanButton.isEnabled = true
 
         guard !widgets.filter({ $0 !== actionErrorLabel || !$0.isHidden }).isEmpty else { return }
 
@@ -1277,9 +1408,8 @@ final class MotherJobDetail: NSView {
             btn.isEnabled = connected
         }
         updateOptionButtonStates()
-        // Archive and View Plan don't use the broker — always enabled
+        // Archive doesn't use the broker — always enabled
         archiveButton.isEnabled  = true
-        viewPlanButton.isEnabled = true
     }
 
     private func showActionError(_ message: String) {
@@ -1419,11 +1549,6 @@ final class MotherJobDetail: NSView {
         host.archiveJob(job.id)
     }
 
-    @objc private func didViewPlan() {
-        guard let path = currentJob?.planPath, !path.isEmpty else { return }
-        host.openPlan(path: path)
-    }
-
     private struct MetaPair: Equatable { let key: String; let value: String }
 
     private func metaPairs(for job: MotherJob) -> [MetaPair] {
@@ -1496,7 +1621,13 @@ final class MotherJobDetail: NSView {
     /// following new lines; one scrolled up stays exactly where it was.
     func setLogAttributed(_ text: String) {
         guard text != lastLogText else { return }   // nothing new: leave the view alone
+        let hadLog = lastLogText != nil
         lastLogText = text
+        // Lines that come in while the Log is not on show are marked on its segment.
+        if hadLog, selectedSegment != .log, !text.isEmpty, !logHasUnseenLines {
+            logHasUnseenLines = true
+            rebuildSegmentControl()
+        }
         let result = NSMutableAttributedString()
         for line in text.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -1639,22 +1770,41 @@ final class MotherJobDetail: NSView {
 
 /// Read-only checklist parsed from a plan markdown file.
 ///
-/// Scans the file for `- [ ]` / `- [x]` items and renders them as icon+text rows.
-/// Collapses to zero height (via `heightConstraint`) when there are no items.
+/// Scans the file for `- [ ]` / `- [x]` items (Kit's `PlanChecklist`, the same parser the Plan view's
+/// `n/m criteria` count uses) and renders them as icon+text rows. It reads and watches the file the way
+/// the Plan view does (`PlanFileLoader`: a regular markdown file of at most 1 MiB, a result that a newer
+/// read has overtaken is dropped, an edit on disk reloads it, a file that is not there yet is looked
+/// for again), and only while the Overview is the segment on show, so the two views of one file never
+/// disagree for longer than a debounce. Collapses to zero height (via `heightConstraint`) when there are
+/// no items.
 private class PlanChecklistView: NSView {
 
     /// Called on the main queue when items load or clear.  Parameter is `true` if items are present.
     var onItemsChanged: ((Bool) -> Void)?
     /// Called on the main queue right before the rows are replaced or cleared.
     var onWillChange: (() -> Void)?
+    /// Makes the file loader, the first time one is needed.
+    var makeLoader: () -> PlanFileLoader = { PlanFileLoader() }
 
     private let stack = NSStackView()
     private var heightConstraint: NSLayoutConstraint!
-
-    private static let itemRegex: NSRegularExpression = {
-        // Matches: optional leading spaces, "- [", space or x/X, "]", space, item text
-        try! NSRegularExpression(pattern: #"^\s*- \[([ xX])\]\s+(.+)$"#)
-    }()
+    private var madeLoader: PlanFileLoader?
+    /// Made the first time it is needed, so a test can replace `makeLoader` first.
+    private var loader: PlanFileLoader {
+        if let madeLoader { return madeLoader }
+        let loader = makeLoader()
+        loader.onResult = { [weak self] result in self?.loaderDidDeliver(result) }
+        madeLoader = loader
+        return loader
+    }
+    private var planPath: String?
+    /// The Overview is the segment on show: only then does the view read and watch the file.
+    private var isActive = false
+    private var needsLoadOnActivate = false
+    /// What the rows show now; nil until the plan at `planPath` has answered once.
+    private var shownItems: [PlanChecklistItem]?
+    /// Every answer and every path change takes the next number; a parse applies only if it still holds the latest.
+    private var generation = 0
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -1678,32 +1828,91 @@ private class PlanChecklistView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func load(planPath: String?) {
-        guard let path = planPath, !path.isEmpty else {
+    /// Show the plan at `path` (nil or empty: none). Reads it now if the Overview is on show, else when it is.
+    func show(planPath path: String?) {
+        let newPath = (path?.isEmpty ?? true) ? nil : path
+        guard newPath != planPath else {
+            onItemsChanged?(!stack.arrangedSubviews.isEmpty)
+            return
+        }
+        planPath = newPath
+        generation += 1
+        shownItems = nil
+        guard newPath != nil else {
+            needsLoadOnActivate = false
+            madeLoader?.load(path: nil)
             collapse()
             return
         }
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let content = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-            let items   = Self.parse(content)
-            DispatchQueue.main.async { [weak self] in
-                self?.apply(items)
+        if isActive { loader.load(path: newPath) } else { needsLoadOnActivate = true }
+    }
+
+    /// The Overview is on show (true) or another segment is (false). Hidden, the view holds no watcher.
+    func setActive(_ active: Bool) {
+        guard active != isActive else { return }
+        isActive = active
+        if active {
+            guard planPath != nil else { return }
+            if needsLoadOnActivate {
+                needsLoadOnActivate = false
+                loader.load(path: planPath)
+            } else {
+                loader.reload()
             }
+        } else {
+            generation += 1
+            madeLoader?.stop()
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil {
+            // Off screen for good, or until the detail is shown again.
+            generation += 1
+            madeLoader?.stop()
+            if planPath != nil, isActive { needsLoadOnActivate = true }
+        } else if isActive, needsLoadOnActivate {
+            needsLoadOnActivate = false
+            loader.load(path: planPath)
         }
     }
 
     // MARK: Private
 
-    private func collapse() {
-        DispatchQueue.main.async { [weak self] in
-            self?.onWillChange?()
-            self?.stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            self?.heightConstraint.isActive = true
-            self?.onItemsChanged?(false)
+    private func loaderDidDeliver(_ result: PlanFileResult) {
+        generation += 1
+        let mine = generation
+        let loaderGeneration = loader.generation
+        guard case .loaded(let text, _, _) = result else {
+            apply([])   // no file, or one that cannot be shown: no items
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let items = PlanChecklist.parse(text)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.generation == mine, self.loader.generation == loaderGeneration else { return }
+                self.apply(items)
+            }
         }
     }
 
-    private func apply(_ items: [(done: Bool, text: String)]) {
+    private func collapse() {
+        let mine = generation
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.generation == mine else { return }
+            self.onWillChange?()
+            self.stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            self.heightConstraint.isActive = true
+            self.shownItems = []
+            self.onItemsChanged?(false)
+        }
+    }
+
+    private func apply(_ items: [PlanChecklistItem]) {
+        // The same items again (a save that changed nothing here, a reload on coming back): keep the rows.
+        guard items != shownItems else { return }
+        shownItems = items
         onWillChange?()
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard !items.isEmpty else {
@@ -1720,13 +1929,14 @@ private class PlanChecklistView: NSView {
         onItemsChanged?(true)
     }
 
-    private func checklistRow(_ item: (done: Bool, text: String)) -> NSView {
+    private func checklistRow(_ item: PlanChecklistItem) -> NSView {
         let icon = NSTextField(labelWithString: item.done ? "✓" : "○")
         icon.font      = .systemFont(ofSize: 11)
         icon.textColor = item.done ? Theme.sage : Theme.fgMuted
         icon.setContentHuggingPriority(.required, for: .horizontal)
 
-        let lbl = NSTextField.boundedLabel(item.text)
+        // A plan's text is untrusted: no bidi override, zero-width or filler character, no escape sequence.
+        let lbl = NSTextField.boundedLabel(FoldTextSanitizer.sanitizeInline(item.text))
         lbl.font                 = .systemFont(ofSize: 11)
         lbl.lineBreakMode        = .byWordWrapping
         lbl.maximumNumberOfLines = 3
@@ -1737,22 +1947,6 @@ private class PlanChecklistView: NSView {
         row.spacing     = 5
         row.alignment   = .firstBaseline
         return row
-    }
-
-    private static func parse(_ content: String) -> [(done: Bool, text: String)] {
-        var result: [(done: Bool, text: String)] = []
-        let lines = content.components(separatedBy: "\n")
-        for line in lines {
-            let nsLine = line as NSString
-            let range  = NSRange(location: 0, length: nsLine.length)
-            guard let match = itemRegex.firstMatch(in: line, range: range),
-                  match.numberOfRanges == 3 else { continue }
-            let marker = nsLine.substring(with: match.range(at: 1))
-            let text   = nsLine.substring(with: match.range(at: 2))
-            let done   = marker == "x" || marker == "X"
-            result.append((done: done, text: text))
-        }
-        return result
     }
 }
 

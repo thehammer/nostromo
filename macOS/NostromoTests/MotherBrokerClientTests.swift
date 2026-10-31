@@ -1875,8 +1875,8 @@ final class MC2JobDetailNoChurnTests: XCTestCase {
         XCTAssertTrue(mc2WaitUntil { self.checklistRows()?.count == 2 }, "the plan's two items never appeared")
         let rows = try XCTUnwrap(checklistRows())
 
-        // The file changes on disk, but the plan path does not: no reason to read it again.
-        try "- [ ] first\n- [x] second\n- [ ] third\n".write(to: planA, atomically: true, encoding: .utf8)
+        // The checklist follows its file on disk by itself (a watcher: see PlanFixupTests), so an
+        // update tick is no reason to read it again. The file is left alone here: ticks only.
         for i in 2...12 { detail.update(job(plan: planA.path, pct: i)) }
         mc2Spin(0.4)
         assertSameViews(try XCTUnwrap(checklistRows()), rows, "the checklist rows are the same views")
