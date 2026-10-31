@@ -206,6 +206,22 @@ impl Rig {
         self.dir.path().join("audit").join("mother.jsonl")
     }
 
+    /// The store file of a rig built with [`Rig::with_store`].
+    fn store_file(&self) -> &PathBuf {
+        self.store_path.as_ref().expect("a rig with a store file")
+    }
+
+    /// Rewrite the store file on disk through `edit` (the engine keeps running;
+    /// the change is seen by the next [`Rig::restart`]).
+    fn edit_store_file(&self, edit: impl FnOnce(&mut Value)) {
+        let path = self.store_file();
+        let mut json: Value =
+            serde_json::from_slice(&std::fs::read(path).expect("the store file exists"))
+                .expect("the store file is JSON");
+        edit(&mut json);
+        std::fs::write(path, serde_json::to_vec_pretty(&json).unwrap()).expect("write the store");
+    }
+
     // ── inputs ──
 
     fn jobs(&self, jobs: &[MotherJob]) {
@@ -399,9 +415,16 @@ trait JobExt: Sized {
     fn asking(self, question: &str) -> Self;
     fn failing_with(self, reason: &str) -> Self;
     fn notify(self, level: NotifyLevel) -> Self;
+    /// Mother stamped the job as created at `ms` (epoch milliseconds, the
+    /// engine clock's scale).
+    fn created(self, ms: i64) -> Self;
 }
 
 impl JobExt for MotherJob {
+    fn created(mut self, ms: i64) -> Self {
+        self.created_at = chrono::DateTime::from_timestamp_millis(ms);
+        self
+    }
     fn titled(mut self, title: &str) -> Self {
         self.title = title.to_owned();
         self

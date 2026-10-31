@@ -717,7 +717,8 @@ async fn a_user_message_that_starts_with_the_notice_element_is_still_the_users_t
         unreachable!()
     };
     assert!(!author.is_notice());
-    // Pinned as harmless: the transcript still draws it as a notice.
+    // The text reads like a notice, but the daemon did not write it: the
+    // transcript keeps it a plain turn (and it can be the session's title).
     let origin = eventually("the pasted turn in the transcript", || {
         let turns = mgr.sessions["u"]
             .shared
@@ -731,6 +732,43 @@ async fn a_user_message_that_starts_with_the_notice_element_is_still_the_users_t
             .map(|t| t.origin.clone())
     })
     .await;
+    assert_eq!(origin, None, "a pasted notice is not a notice turn");
+    assert!(mgr.sessions["u"]
+        .shared
+        .transcript
+        .lock()
+        .unwrap()
+        .first_user_input()
+        .is_some_and(|t| t.contains("<<PASTED>>")));
+    mgr.stop("u");
+}
+
+#[tokio::test]
+async fn a_notice_the_daemon_wrote_is_a_notice_turn_in_the_transcript() {
+    let mut mgr = SessionManager::with_store_path(tmp_store());
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("stdin.log");
+    spawn_stub(&mut mgr, "n", &echo_stub(&log, None));
+    let heard = record_turns(&mut mgr);
+    let text = notice_msg("j-1", "<<REAL>>");
+
+    mgr.inject_notice("n", &notice_key("n", 1), &text, &text)
+        .unwrap();
+    wait_for_events(&heard, "n", 2).await;
+
+    let origin = eventually("the notice turn in the transcript", || {
+        let turns = mgr.sessions["n"]
+            .shared
+            .transcript
+            .lock()
+            .unwrap()
+            .snapshot();
+        turns
+            .iter()
+            .find(|t| t.user_input.contains("<<REAL>>"))
+            .map(|t| t.origin.clone())
+    })
+    .await;
     assert!(
         matches!(
             origin,
@@ -738,7 +776,7 @@ async fn a_user_message_that_starts_with_the_notice_element_is_still_the_users_t
         ),
         "{origin:?}"
     );
-    mgr.stop("u");
+    mgr.stop("n");
 }
 
 #[tokio::test]

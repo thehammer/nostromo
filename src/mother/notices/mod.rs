@@ -30,7 +30,11 @@
 //! ([`NoticeEngine::on_registry`] does), and the origin book may too (the
 //! notice-born hook), but the engine never calls them back from under its
 //! lock. The port lock (`RwLock<Option<port>>`) is also a leaf: the port is
-//! cloned out of it before use.
+//! cloned out of it before use. So is the file lock (`written`): the store is
+//! snapshotted under the engine lock, and written to disk only after it is
+//! released, so a slow disk never holds up `on_registry` (which the session
+//! manager calls under its own lock). Snapshots carry a sequence number, so a
+//! write that lost the race to a newer one is skipped.
 //!
 //! Turn events reach the engine from the session readers through a channel to
 //! one worker thread ([`attach`]), never on the reader itself, because a
@@ -280,8 +284,14 @@ pub struct NoticeEngine {
     clock: Arc<dyn Clock>,
     audit: MotherAudit,
     store_path: Option<PathBuf>,
+    /// The sequence number of the newest snapshot written to `store_path`;
+    /// held while writing. Taken only with the engine lock released.
+    written: Mutex<u64>,
     port: RwLock<Option<Arc<dyn SessionPort>>>,
     changes: watch::Sender<u64>,
+    /// Runs just before the store is written (tests hold the write here).
+    #[cfg(test)]
+    before_write: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl NoticeEngine {
@@ -297,8 +307,11 @@ impl NoticeEngine {
             clock: config.clock,
             audit: config.audit,
             store_path: config.store_path,
+            written: Mutex::new(0),
             port: RwLock::new(None),
             changes: watch::channel(0).0,
+            #[cfg(test)]
+            before_write: Mutex::new(None),
         })
     }
 
@@ -369,7 +382,7 @@ impl NoticeEngine {
     /// `job_id` was just stamped (or first evaluated) as queued by `tag`. When
     /// `tag` is in a notice turn, the job is notice-born (loop guard).
     pub fn note_job_origin(&self, _job_id: &str, tag: &str) {
-        self.lock().note_job_origin(tag);
+        self.lock().note_job_origin(tag, None);
     }
 
     /// Look at the timers: windows that closed, cap holds whose hour rolled,
@@ -447,17 +460,36 @@ impl NoticeEngine {
 
     // ── effects ─────────────────────────────────────────────────────────────
 
-    /// Write the store if needed, release the lock, then audit, publish and
-    /// run `effects` (each delivery's outcome is applied under the lock again).
-    fn finish(&self, mut st: MutexGuard<'_, State>, effects: Vec<Effect>) {
-        if st.take_dirty() {
-            if let Some(path) = &self.store_path {
-                store::save(path, &st.store);
-            }
+    #[cfg(test)]
+    fn run_before_write_hook(&self) {
+        let hook = self.before_write.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
         }
+    }
+
+    #[cfg(not(test))]
+    fn run_before_write_hook(&self) {}
+
+    /// Snapshot the store if it needs writing, release the lock, then write
+    /// it, audit, publish and run `effects` (each delivery's outcome is
+    /// applied under the lock again).
+    fn finish(&self, mut st: MutexGuard<'_, State>, effects: Vec<Effect>) {
+        let snapshot = (st.take_dirty() && self.store_path.is_some()).then(|| {
+            st.saves += 1;
+            (st.saves, st.store.clone())
+        });
         let audits = st.take_audits();
         let changed = st.take_changed();
         drop(st);
+        if let (Some((seq, store)), Some(path)) = (snapshot, &self.store_path) {
+            self.run_before_write_hook();
+            let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
+            if seq > *written {
+                store::save(path, &store);
+                *written = seq;
+            }
+        }
         for event in &audits {
             self.audit.record(event);
         }

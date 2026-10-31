@@ -247,3 +247,88 @@ fn concurrent_feed_turns_settings_registry_timers_and_reads_never_deadlock() {
         "a new change is still delivered"
     );
 }
+
+// ── the store is written outside the engine's lock ───────────────────────────
+
+/// An engine with a store file whose first write is held at the gate until the
+/// returned sender is used. Receiving on the returned receiver says the write
+/// is held.
+fn engine_with_first_write_held() -> (
+    tempfile::TempDir,
+    Arc<NoticeEngine>,
+    mpsc::Sender<()>,
+    mpsc::Receiver<()>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = NoticeEngine::new(NoticeConfig {
+        store_path: Some(dir.path().join("mother-notices.json")),
+        audit: MotherAudit::open(&dir.path().join("audit").join("mother.jsonl")).unwrap(),
+        clock: Arc::new(ManualClock::new(T0)),
+    });
+    let (held_tx, held_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    let first = std::sync::atomic::AtomicBool::new(true);
+    *engine.before_write.lock().unwrap() = Some(Arc::new(move || {
+        if first.swap(false, Ordering::SeqCst) {
+            let _ = held_tx.send(());
+            let _ = release_rx.lock().unwrap().recv_timeout(DEADLINE);
+        }
+    }));
+    (dir, engine, release_tx, held_rx)
+}
+
+#[test]
+fn a_slow_store_write_never_holds_up_the_registry_push_or_readers() {
+    let (_dir, engine, release, held) = engine_with_first_write_held();
+    let writer = {
+        let engine = Arc::clone(&engine);
+        thread::spawn(move || engine.on_jobs(&[]))
+    };
+    held.recv_timeout(Duration::from_secs(10))
+        .expect("the first look at the feed writes the store");
+
+    // The manager's lock is held by the registry push (as `set_focus_registry`
+    // does) while the write is still going on.
+    let (done_tx, done_rx) = mpsc::channel();
+    let other = {
+        let engine = Arc::clone(&engine);
+        thread::spawn(move || {
+            engine.on_registry(&[F.to_owned()], &[]);
+            let _ = engine.notice_of("none");
+            let _ = engine.state_msg();
+            let _ = done_tx.send(());
+        })
+    };
+    let ran = done_rx.recv_timeout(Duration::from_secs(10));
+    release.send(()).unwrap();
+    writer.join().unwrap();
+    other.join().unwrap();
+    assert!(
+        ran.is_ok(),
+        "the registry push and readers wait for a store write: it is under the engine lock"
+    );
+}
+
+#[test]
+fn a_store_write_that_lost_the_race_to_a_newer_one_does_not_overwrite_it() {
+    let (dir, engine, release, held) = engine_with_first_write_held();
+    let writer = {
+        let engine = Arc::clone(&engine);
+        thread::spawn(move || engine.on_jobs(&[]))
+    };
+    held.recv_timeout(Duration::from_secs(10)).unwrap();
+    // A newer state is written while the first (older) snapshot is held.
+    engine
+        .apply_settings(NoticeScope::Global, None, None, Some(false))
+        .unwrap();
+    release.send(()).unwrap();
+    writer.join().unwrap();
+
+    let file = std::fs::read_to_string(dir.path().join("mother-notices.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&file).unwrap();
+    assert_eq!(
+        json["enabled"], false,
+        "the older snapshot overwrote the newer one"
+    );
+}

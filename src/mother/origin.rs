@@ -831,9 +831,17 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// warning carries the path and the byte count, never a byte of the content
 /// (it holds session ids and focus names).
 pub(crate) fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    load_json_checked(path).0
+}
+
+/// [`load_json`], also saying whether the file was read and parsed (`false`:
+/// it is missing, or unreadable or unparseable and so started empty).
+pub(crate) fn load_json_checked<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+) -> (T, bool) {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (T::default(), false),
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
@@ -841,11 +849,11 @@ pub(crate) fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -
                 "a Mother origin file could not be read; starting empty"
             );
             keep_backup(path);
-            return T::default();
+            return (T::default(), false);
         }
     };
     match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
+        Ok(value) => (value, true),
         Err(_) => {
             let backup = keep_backup(path);
             tracing::warn!(
@@ -854,7 +862,7 @@ pub(crate) fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -
                 backed_up = backup.is_some(),
                 "a Mother origin file could not be parsed; starting empty (the file is kept as a backup)"
             );
-            T::default()
+            (T::default(), false)
         }
     }
 }

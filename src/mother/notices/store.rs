@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::batch::Bucket;
 use super::limits::Limits;
 use super::NoticeView;
-use crate::mother::origin::{load_json, write_private, NotifyLevel};
+use crate::mother::origin::{load_json_checked, write_private, NotifyLevel};
 
 /// The file's name beside the session store.
 pub const STORE_FILE: &str = "mother-notices.json";
@@ -94,9 +94,16 @@ pub struct JobRecord {
     pub has_pr: bool,
     #[serde(default)]
     pub last_seen_ms: i64,
-    /// The newest state accounted for: told, dropped, not sent, or recorded
-    /// silently (bootstrap, a job nobody is told about).
+    /// Mother's state of the job when it was last accounted for: told,
+    /// dropped, not sent, or recorded silently (bootstrap, a job nobody is
+    /// told about). Kept apart from the notice's event token, which names PR
+    /// and retry events that are no Mother state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounted_state: Option<String>,
+    /// Read from a store written before `accounted_state` existed: it held the
+    /// last event token, so it says nothing about Mother's state. Never
+    /// written; the engine turns it into `accounted_state` on load.
+    #[serde(default, skip_serializing)]
     pub last_notified: Option<String>,
     /// The verified focus that queued it, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,11 +119,11 @@ pub struct JobRecord {
     pub notice: NoticeView,
 }
 
-/// The store at `path` and whether the file existed (a missing file means the
-/// engine has never run: its first look at the feed is silent).
+/// The store at `path` and whether it was loaded. A file that is missing, or
+/// present but unreadable or unparseable (kept as a `.bak`), loads nothing: the
+/// engine's first look at the feed is then silent, as on a first run.
 pub fn load(path: &Path) -> (Store, bool) {
-    let existed = path.exists();
-    (load_json(path), existed)
+    load_json_checked(path)
 }
 
 /// Write `store` to `path`. A failure is logged without content.

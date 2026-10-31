@@ -2808,11 +2808,18 @@ fn run_reader(
         }
 
         let deltas = lock_recover(&shared.transcript).ingest_parsed(parsed);
-        for delta in deltas {
-            match &delta {
-                TurnDelta::TurnStarted { .. } => {
+        for mut delta in deltas {
+            match &mut delta {
+                TurnDelta::TurnStarted { turn } => {
                     auth.begin_turn();
                     let author = login::on_turn_started(&shared);
+                    // The transcript read a notice origin from the prompt's
+                    // text; only a turn the daemon wrote as a notice keeps it.
+                    if !author.is_notice()
+                        && lock_recover(&shared.transcript).disown_notice_origin(&turn.id)
+                    {
+                        turn.origin = None;
+                    }
                     shared.set_state(SessionState::MidTurn);
                     shared.turn_event(&tag, TurnEvent::Started { author });
                 }

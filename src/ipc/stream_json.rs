@@ -193,7 +193,9 @@ pub struct Turn {
     pub is_complete: bool,
     /// What opened the turn when it was not something the user typed: output
     /// from a terminal the focus follows, or a follow notice. Derived from the
-    /// prompt's text, so a reloaded transcript gets it too.
+    /// prompt's text, so a reloaded transcript gets it too; on a live session
+    /// the daemon takes back a Mother job notice origin from a turn it did
+    /// not write as a notice ([`SessionTranscript::disown_notice_origin`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<TurnOrigin>,
 }
@@ -1659,6 +1661,25 @@ impl SessionTranscript {
             message: "Not a message: a system entry the CLI replayed.".to_owned(),
             discarded: true,
         })
+    }
+
+    /// Turn `turn_id` was not written by the daemon's notice engine, whatever
+    /// its text says: take back a Mother job notice origin read from that text
+    /// (a user pasted it, or the CLI began the turn itself), and let the turn
+    /// be the session's title if it is the first real prompt. Returns whether
+    /// anything changed.
+    pub fn disown_notice_origin(&mut self, turn_id: &str) -> bool {
+        let Some(turn) = self.turns.iter_mut().find(|t| t.id == turn_id) else {
+            return false;
+        };
+        if !matches!(turn.origin, Some(TurnOrigin::MotherJobNotice { .. })) {
+            return false;
+        }
+        turn.origin = None;
+        if self.first_user_input.is_none() {
+            self.first_user_input = Some(turn.user_input.clone());
+        }
+        true
     }
 
     /// Mark the in-flight turn as errored (used on unexpected child exit).

@@ -1004,6 +1004,347 @@ fn a_change_dropped_by_a_switch_is_not_announced_after_a_restart_or_when_the_swi
     assert!(r.deliveries().is_empty());
 }
 
+// ── announced once across a restart, whatever the last notice said ───────────
+
+const PR: &str = "https://github.com/acme/repo/pull/7";
+
+/// The daemon has restarted and the feed shows `feed` again. Nothing is said
+/// about those jobs however long the windows and whoever speaks, and a job
+/// that turns up afterwards is announced alone (the silence is not a switch
+/// left off).
+fn assert_nothing_is_re_announced(r: &Rig, feed: &[MotherJob]) {
+    r.jobs(feed);
+    r.after(2 * MIN);
+    r.after(HOUR);
+    r.user_turn_starts(F);
+    r.turn_ends(F);
+    assert!(
+        r.deliveries().is_empty(),
+        "a restart re-announced a job that was already told: {:#?}",
+        r.deliveries()
+    );
+
+    let mut later = feed.to_vec();
+    later.push(job(F, "late", "succeeded"));
+    r.jobs(&later);
+    r.after(30 * SEC);
+    let ds = r.deliveries();
+    assert_eq!(ds.len(), 1, "exactly the new job is announced: {ds:#?}");
+    assert_eq!(ids(&ds[0].fresh), sorted(&["late"]), "{}", ds[0].fresh);
+    assert_eq!(ids(&ds[0].merged), sorted(&["late"]), "{}", ds[0].merged);
+}
+
+#[test]
+fn a_job_told_its_pr_was_merged_is_not_announced_again_after_a_restart() {
+    let a = || job(F, "a", "succeeded").with_pr(PR);
+    let r = Rig::with_store();
+    r.jobs(&[]);
+    r.jobs(&[a()]);
+    r.after(30 * SEC);
+    r.engine.pr_event("a", true);
+    r.after(30 * SEC);
+    let ds = r.deliveries();
+    assert_eq!(ds.len(), 2, "succeeded, then the merge: {ds:#?}");
+    assert_eq!(
+        attr(element_for(&ds[1].fresh, "a"), "state").as_deref(),
+        Some("pr_merged")
+    );
+
+    let r = r.restart();
+    assert_nothing_is_re_announced(&r, &[a()]);
+}
+
+#[test]
+fn a_job_told_its_pr_opened_after_it_succeeded_is_not_announced_again_after_a_restart() {
+    let r = Rig::with_store();
+    r.jobs(&[]);
+    r.jobs(&[job(F, "a", "succeeded")]);
+    r.after(30 * SEC);
+    r.jobs(&[job(F, "a", "succeeded").with_pr(PR)]);
+    r.after(30 * SEC);
+    let ds = r.deliveries();
+    assert_eq!(ds.len(), 2, "succeeded, then the PR: {ds:#?}");
+    assert_eq!(
+        attr(element_for(&ds[1].fresh, "a"), "state").as_deref(),
+        Some("pr_opened")
+    );
+
+    let r = r.restart();
+    assert_nothing_is_re_announced(&r, &[job(F, "a", "succeeded").with_pr(PR)]);
+}
+
+#[test]
+fn a_job_told_it_was_retried_is_not_announced_as_running_after_a_restart() {
+    let r = Rig::with_store();
+    r.jobs(&[]);
+    r.jobs(&[job(F, "a", "failed")]);
+    r.after(30 * SEC);
+    // The retry is quiet; it rides along in the next delivery.
+    r.jobs(&[job(F, "a", "running")]);
+    r.jobs(&[job(F, "a", "running"), job(F, "z", "succeeded")]);
+    r.after(30 * SEC);
+    let ds = r.deliveries();
+    assert_eq!(ds.len(), 2, "{ds:#?}");
+    assert_eq!(ids(&ds[1].fresh), sorted(&["a", "z"]), "{}", ds[1].fresh);
+    assert_eq!(
+        attr(element_for(&ds[1].fresh, "a"), "state").as_deref(),
+        Some("retry_started")
+    );
+
+    let r = r.restart();
+    assert_nothing_is_re_announced(&r, &[job(F, "a", "running")]);
+}
+
+#[test]
+fn a_job_told_its_pr_was_closed_is_not_announced_again_after_a_restart() {
+    let a = || job(F, "a", "succeeded").with_pr(PR);
+    let r = Rig::with_store();
+    r.jobs(&[]);
+    r.jobs(&[a()]);
+    r.after(30 * SEC);
+    // The close is quiet; it rides along in the next delivery.
+    r.engine.pr_event("a", false);
+    r.jobs(&[a(), job(F, "z", "succeeded")]);
+    r.after(30 * SEC);
+    let ds = r.deliveries();
+    assert_eq!(ds.len(), 2, "{ds:#?}");
+    assert_eq!(ids(&ds[1].fresh), sorted(&["a", "z"]), "{}", ds[1].fresh);
+    assert_eq!(
+        attr(element_for(&ds[1].fresh, "a"), "state").as_deref(),
+        Some("pr_closed")
+    );
+
+    let r = r.restart();
+    assert_nothing_is_re_announced(&r, &[a()]);
+}
+
+/// The fields a job record had before the engine kept its Mother state apart
+/// from the last notice.
+const OLD_JOB_RECORD_FIELDS: [&str; 9] = [
+    "state",
+    "has_pr",
+    "last_seen_ms",
+    "last_notified",
+    "focus",
+    "notify",
+    "snapshot",
+    "pr_final",
+    "notice",
+];
+
+#[test]
+fn a_store_written_by_the_previous_version_is_trusted_not_re_announced_from() {
+    // The old file recorded the last notice's token (`pr_merged`, ...) where a
+    // Mother state belongs; whatever it says, a job it knows is not news.
+    let cases = [
+        ("pr_merged", "succeeded"),
+        ("pr_closed", "succeeded"),
+        ("pr_opened", "succeeded"),
+        ("retry_started", "running"),
+    ];
+    for (token, state) in cases {
+        // `z` succeeding wakes the focus, so `a`'s change is told with it (a
+        // quiet `running` alone would only wait in the bucket, untold).
+        let feed = || [job(F, "a", state), job(F, "z", "succeeded")];
+        let r = Rig::with_store();
+        r.jobs(&[]);
+        r.jobs(&feed());
+        r.after(30 * SEC);
+        r.after(HOUR);
+        r.edit_store_file(|json| {
+            let record = json["jobs"]["a"]
+                .as_object_mut()
+                .expect("the store knows job a");
+            record.retain(|key, _| OLD_JOB_RECORD_FIELDS.contains(&key.as_str()));
+            record.insert("last_notified".to_owned(), serde_json::json!(token));
+        });
+
+        let r = r.restart();
+        assert_nothing_is_re_announced(&r, &feed());
+    }
+}
+
+// ── a store that cannot be read ──────────────────────────────────────────────
+
+#[test]
+fn a_store_that_cannot_be_read_is_kept_as_a_backup_and_the_first_look_is_silent() {
+    let garbage: [&[u8]; 2] = [b"{ \"enabled\": tr", b""];
+    for bytes in garbage {
+        let r = Rig::with_store();
+        r.jobs(&[]);
+        r.jobs(&[job(F, "old", "succeeded")]);
+        r.after(30 * SEC);
+        assert!(r.store_file().exists(), "the engine wrote its store");
+        std::fs::write(r.store_file(), bytes).expect("corrupt the store");
+
+        let r = r.restart();
+        let finished = [
+            job(F, "a", "succeeded"),
+            job(F, "b", "failed"),
+            job(F, "c", "awaiting").asking("Which one?"),
+            job(G, "d", "succeeded"),
+        ];
+        r.jobs(&finished);
+        r.after(30 * SEC);
+        r.jobs(&finished);
+        r.after(HOUR);
+        r.user_turn_starts(F);
+        r.user_turn_starts(G);
+        assert!(
+            r.deliveries().is_empty(),
+            "old finished jobs were announced after the store was lost ({} bytes): {:#?}",
+            bytes.len(),
+            r.deliveries()
+        );
+        if !bytes.is_empty() {
+            let backup = r.store_file().with_file_name("mother-notices.json.bak");
+            assert_eq!(
+                std::fs::read(&backup).expect("the bad file is kept beside the store"),
+                bytes
+            );
+        }
+
+        r.jobs(&[finished.to_vec(), vec![job(F, "fresh", "succeeded")]].concat());
+        r.after(30 * SEC);
+        let ds = r.deliveries();
+        assert_eq!(ds.len(), 1, "the silence was one look long: {ds:#?}");
+        assert_eq!(ids(&ds[0].fresh), sorted(&["fresh"]));
+    }
+}
+
+// ── a notice turn that exited, a delivered notice that ages, the wake race ───
+
+#[test]
+fn a_hold_behind_a_notice_turn_whose_session_exited_goes_with_any_turn_not_only_the_users() {
+    let r = Rig::new();
+    r.jobs(&[job(F, "a", "succeeded")]);
+    r.after(30 * SEC);
+    r.notice_turn_starts(F);
+    r.jobs(&[job(F, "b", "succeeded")]);
+    r.after(30 * SEC);
+    assert_eq!(
+        r.status("b"),
+        (NoticeStatus::Held, Some(NoticeReason::Busy))
+    );
+
+    r.turn(F, TurnEvent::Exited);
+    assert_eq!(
+        r.deliveries().len(),
+        1,
+        "an exited session is not written to"
+    );
+    assert_eq!(
+        r.status("b"),
+        (NoticeStatus::Held, Some(NoticeReason::SessionNotRunning))
+    );
+    let held = r.focus(F).and_then(|f| f.held).expect("F shows a hold");
+    assert_eq!(held.reason, NoticeReason::SessionNotRunning);
+
+    r.reply(F, Reply::Queued);
+    r.cli_turn_starts(F);
+    let ds = r.deliveries();
+    assert_eq!(ds.len(), 2, "any turn start releases it");
+    assert_eq!(ids(&ds[1].fresh), sorted(&["b"]));
+}
+
+#[test]
+fn a_notice_already_handed_to_the_session_is_not_expired_and_is_told_when_its_turn_starts() {
+    let r = Rig::new();
+    r.reply(F, Reply::Queued);
+    r.jobs(&[job(F, "a", "succeeded")]);
+    r.after(30 * SEC);
+    assert_eq!(r.deliveries().len(), 1, "handed to the session's queue");
+    assert_eq!(
+        r.status("a"),
+        (NoticeStatus::Held, Some(NoticeReason::Busy))
+    );
+
+    r.after(25 * HOUR);
+    assert_ne!(
+        r.status("a").0,
+        NoticeStatus::Dropped,
+        "the queued message can still run: it is not expired"
+    );
+    let expired: Vec<Value> = r
+        .audit_events("job_notice_dropped")
+        .into_iter()
+        .filter(|d| d["reason"] == "expired")
+        .collect();
+    assert!(expired.is_empty(), "no expiry is audited: {expired:?}");
+
+    r.notice_turn_starts(F);
+    assert_eq!(r.status("a").0, NoticeStatus::Told);
+}
+
+/// A session port whose `deliver` lets the notice turn's `Started` reach the
+/// engine before it returns `Woke`: in the daemon the session reader's worker
+/// thread handles the turn event before the deliverer re-takes the lock.
+struct RacyPort {
+    inner: FakePort,
+    engine: Mutex<Option<std::sync::Weak<NoticeEngine>>>,
+}
+
+impl SessionPort for RacyPort {
+    fn deliver(
+        &self,
+        tag: &str,
+        key: &str,
+        merged: &str,
+        fresh: &str,
+    ) -> anyhow::Result<NoticeDelivery> {
+        let outcome = self.inner.deliver(tag, key, merged, fresh)?;
+        let engine = self
+            .engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .expect("the engine is alive");
+        engine.on_turn(
+            tag,
+            &TurnEvent::Started {
+                author: notice_author(key),
+            },
+        );
+        Ok(outcome)
+    }
+
+    fn withdraw(&self, tag: &str) {
+        self.inner.withdraw(tag);
+    }
+}
+
+#[test]
+fn a_wake_whose_turn_started_before_the_delivery_returned_is_still_recorded_as_a_wake() {
+    let r = Rig::new();
+    let port = Arc::new(RacyPort {
+        inner: FakePort::default(),
+        engine: Mutex::new(None),
+    });
+    *port.engine.lock().unwrap() = Some(Arc::downgrade(&r.engine));
+    r.engine.set_port(port.clone());
+
+    r.jobs(&[job(F, "a", "succeeded")]);
+    r.after(30 * SEC);
+    assert_eq!(port.inner.deliveries.lock().unwrap().len(), 1);
+    assert_eq!(r.status("a"), (NoticeStatus::Told, None));
+
+    let told: Vec<_> = r
+        .notice("a")
+        .history
+        .into_iter()
+        .filter(|h| h.status == NoticeStatus::Told)
+        .collect();
+    assert_eq!(told.len(), 1, "told once: {told:?}");
+    assert!(told[0].wake, "the notice woke an idle session: {told:?}");
+
+    let delivered = r.audit_events("job_notice_delivered");
+    assert_eq!(delivered.len(), 1, "audited once: {delivered:?}");
+    assert_eq!(delivered[0]["job_ids"], serde_json::json!(["a"]));
+    assert_eq!(delivered[0]["wake"], true, "{delivered:?}");
+    assert_eq!(r.wakes(F), 1, "one notice turn");
+}
+
 // ── the notice record (§W) ───────────────────────────────────────────────────
 
 #[test]

@@ -290,6 +290,100 @@ fn a_job_queued_by_another_focus_does_not_grow_the_chain() {
     assert!(!r.focus(F).expect("F").chain_held);
 }
 
+/// `job`, finished (same job, same creation time).
+fn finished(job: &MotherJob) -> MotherJob {
+    MotherJob {
+        state: "succeeded".to_owned(),
+        ..job.clone()
+    }
+}
+
+/// Three notice turns in a row. After each turn's `Completed` the feed shows,
+/// for the first time, a new job of F whose `created_at` is
+/// `created_at(turn_started_ms, turn_ended_ms)`; that job then finishes so the
+/// next notice is due. Returns the last such job.
+fn three_notice_turns_with_jobs_seen_after_the_turn(
+    r: &Rig,
+    created_at: impl Fn(i64, i64) -> i64,
+) -> MotherJob {
+    r.jobs(&[job(F, "seed", "succeeded")]);
+    r.after(30 * SEC);
+    let mut previous: Option<MotherJob> = None;
+    for k in 1..=3 {
+        if let Some(p) = &previous {
+            r.advance(MIN);
+            r.jobs(&[finished(p)]);
+            r.after(30 * SEC);
+            assert_eq!(r.deliveries().len(), k, "notice {k} is delivered");
+        }
+        r.notice_turn_starts(F);
+        let started = r.now();
+        r.advance(15 * SEC);
+        let ended = r.now();
+        r.turn_ends(F);
+        // The feed catches up later.
+        r.advance(5 * SEC);
+        let born = job(F, &format!("born{k}"), "queued").created(created_at(started, ended));
+        r.jobs(std::slice::from_ref(&born));
+        previous = Some(born);
+    }
+    previous.unwrap()
+}
+
+#[test]
+fn a_job_created_during_a_notice_turn_counts_for_the_loop_guard_even_if_the_feed_shows_it_after_the_turn(
+) {
+    let r = Rig::new();
+    let last = three_notice_turns_with_jobs_seen_after_the_turn(&r, |started, _| started + 5 * SEC);
+    assert_eq!(r.deliveries().len(), 3);
+    assert!(
+        r.focus(F).expect("F has a chain").chain_held,
+        "three notice turns in a row each queued a job (seen late)"
+    );
+
+    r.advance(MIN);
+    r.jobs(&[finished(&last)]);
+    r.after(30 * SEC);
+    r.after(2 * HOUR);
+    assert_eq!(r.deliveries().len(), 3, "the fourth waits for the user");
+    assert_eq!(
+        r.status("born3"),
+        (NoticeStatus::Held, Some(NoticeReason::LoopGuard))
+    );
+    r.cli_turn_starts(F);
+    r.turn_ends(F);
+    assert_eq!(r.deliveries().len(), 3, "only the user releases the guard");
+
+    r.reply(F, Reply::Queued);
+    r.user_turn_starts(F);
+    let ds = r.deliveries();
+    assert_eq!(ds.len(), 4, "the user's turn releases it");
+    assert_eq!(ids(&ds[3].fresh), sorted(&["born3"]));
+    assert!(!r.focus(F).expect("F").chain_held);
+}
+
+#[test]
+fn a_job_created_outside_the_notice_turn_never_counts_for_the_loop_guard_however_late_it_is_seen() {
+    // Created long before the turn, or after it had ended: not the turn's job.
+    type CreatedAt = fn(i64, i64) -> i64;
+    let cases: [(&str, CreatedAt); 2] = [
+        ("long before the turn", |_, _| T0 - HOUR),
+        ("after the turn ended", |_, ended| ended + 3 * SEC),
+    ];
+    for (name, created_at) in cases {
+        let r = Rig::new();
+        let last = three_notice_turns_with_jobs_seen_after_the_turn(&r, created_at);
+        assert!(
+            !r.focus(F).expect("F").chain_held,
+            "{name}: the chain grew without a notice-born job"
+        );
+        r.advance(MIN);
+        r.jobs(&[finished(&last)]);
+        r.after(30 * SEC);
+        assert_eq!(r.deliveries().len(), 4, "{name}: the fourth is delivered");
+    }
+}
+
 // ── wakes per local day ──────────────────────────────────────────────────────
 
 fn local_noon(y: i32, m: u32, d: u32) -> i64 {

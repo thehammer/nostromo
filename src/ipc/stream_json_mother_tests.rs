@@ -791,3 +791,24 @@ fn the_golden_is_a_notice_turn_with_both_jobs_and_no_title_role() {
     let back: Turn = serde_json::from_value(wire).unwrap();
     assert_eq!(back, turn);
 }
+
+#[test]
+fn a_turn_the_daemon_did_not_write_as_a_notice_gives_the_origin_back_and_can_be_the_title() {
+    let mut t = SessionTranscript::new();
+    let text = notice(&[element("id=\"j-1\" state=\"succeeded\" title=\"pasted\"")]);
+    let deltas = t.ingest_line(&live_prompt(&text));
+    let Some(TurnDelta::TurnStarted { turn }) = deltas.first() else {
+        panic!("{deltas:?}")
+    };
+    assert!(turn.origin.is_some(), "the text alone reads as a notice");
+    assert_eq!(t.first_user_input(), None);
+
+    assert!(t.disown_notice_origin(&turn.id));
+
+    let kept = t.snapshot().pop().unwrap();
+    assert_eq!(kept.origin, None);
+    assert_eq!(t.first_user_input(), Some(text.as_str()));
+    // Nothing left to take back; an unknown turn is a no-op.
+    assert!(!t.disown_notice_origin(&turn.id));
+    assert!(!t.disown_notice_origin("no-such-turn"));
+}

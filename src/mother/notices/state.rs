@@ -77,6 +77,23 @@ fn effective(
     }
 }
 
+/// A notice turn in progress.
+struct NoticeTurn {
+    started_ms: i64,
+    /// It queued a notice-born job (loop guard).
+    born: bool,
+}
+
+/// The newest notice turn of a focus, after it ended, until another turn
+/// starts: a job the feed shows late is still matched against it.
+struct EndedTurn {
+    started_ms: i64,
+    ended_ms: i64,
+    born: bool,
+    /// The chain before the turn ended (its end reset it unless `born`).
+    chain_before: u32,
+}
+
 pub(super) struct State {
     pub(super) store: Store,
     /// The store existed (or the engine has looked at the feed once).
@@ -86,8 +103,17 @@ pub(super) struct State {
     restart_check: bool,
     /// Tags the registry has reported departed (and not seen again).
     closed: HashSet<String>,
-    /// Focuses in a notice turn now, and whether it queued a notice-born job.
-    notice_turns: HashMap<String, bool>,
+    /// Focuses in a notice turn now.
+    notice_turns: HashMap<String, NoticeTurn>,
+    /// Each focus's last notice turn, once over.
+    ended_turns: HashMap<String, EndedTurn>,
+    /// Deliveries handed to the engine's caller whose outcome is not applied
+    /// yet: `(focus, generation)`.
+    unsettled: HashSet<(String, u64)>,
+    /// Of those, the ones whose notice turn started before the outcome came.
+    early_started: HashSet<(String, u64)>,
+    /// Store snapshots taken, so a write can tell it is stale.
+    pub(super) saves: u64,
     /// The store needs writing.
     dirty: bool,
     /// Something the app or the feed shows changed.
@@ -100,6 +126,17 @@ pub(super) struct State {
 impl State {
     /// State over a loaded `store`; `existed` is whether its file did.
     pub(super) fn new(mut store: Store, existed: bool, now: i64) -> Self {
+        // A store written before `accounted_state` kept an event token where
+        // Mother's state belongs: unknown, so never announce from it.
+        let mut migrated = false;
+        for rec in store.jobs.values_mut() {
+            if rec.last_notified.take().is_some() {
+                migrated = true;
+                if rec.accounted_state.is_none() {
+                    rec.accounted_state = Some(rec.state.clone());
+                }
+            }
+        }
         // Messages in flight died with the previous daemon's queue: they wait
         // for the session's next turn.
         for focus in store.focuses.values_mut() {
@@ -116,7 +153,11 @@ impl State {
             restart_check: existed,
             closed: HashSet::new(),
             notice_turns: HashMap::new(),
-            dirty: false,
+            ended_turns: HashMap::new(),
+            unsettled: HashSet::new(),
+            early_started: HashSet::new(),
+            saves: 0,
+            dirty: migrated,
             changed: false,
             audits: Vec::new(),
         }
@@ -137,11 +178,24 @@ impl State {
         std::mem::take(&mut self.audits)
     }
 
-    /// `tag` just queued a job: if it is in a notice turn, the job is
-    /// notice-born (loop guard).
-    pub(super) fn note_job_origin(&mut self, tag: &str) {
-        if let Some(born) = self.notice_turns.get_mut(tag) {
-            *born = true;
+    /// `tag` just queued a job, created at `created_ms` when known. It is
+    /// notice-born (loop guard) if `tag` is in a notice turn, or if it was
+    /// created inside the turn that just ended and the feed showed it late.
+    pub(super) fn note_job_origin(&mut self, tag: &str, created_ms: Option<i64>) {
+        if let Some(turn) = self.notice_turns.get_mut(tag) {
+            turn.born = true;
+            return;
+        }
+        let Some(ended) = self.ended_turns.get_mut(tag) else {
+            return;
+        };
+        let inside = created_ms.is_some_and(|c| c >= ended.started_ms && c <= ended.ended_ms);
+        if inside && !ended.born {
+            ended.born = true;
+            // The turn's end reset the chain: count it as the growth it was.
+            let chain = ended.chain_before.saturating_add(1);
+            self.focus(tag).limits.chain = chain;
+            self.touch();
         }
     }
 
@@ -207,9 +261,7 @@ impl State {
             status,
             NoticeStatus::Told | NoticeStatus::Dropped | NoticeStatus::NotSent
         ) {
-            if let Some(last) = states.last() {
-                rec.last_notified = Some(last.as_str().to_owned());
-            }
+            rec.accounted_state = Some(rec.state.clone());
         }
         self.touch();
     }
@@ -327,7 +379,7 @@ impl State {
             };
             let Some(tag) = rec.focus.clone() else {
                 // Never notified: unverified, the user's own, or unknown.
-                rec.last_notified = Some(job.state.clone());
+                rec.accounted_state = Some(job.state.clone());
                 if rec.notice.status != NoticeStatus::None
                     || rec.notice.reason != Some(NoticeReason::NotNotifiable)
                 {
@@ -360,7 +412,8 @@ impl State {
                 );
             }
             if prev.is_none() {
-                self.note_job_origin(&tag);
+                let created = job.created_at.map(|t| t.timestamp_millis());
+                self.note_job_origin(&tag, created);
             }
             for event in events {
                 let snapshot = item_for(job, event);
@@ -374,7 +427,7 @@ impl State {
     fn bootstrap(&mut self, jobs: &[MotherJob], now: i64) {
         for job in jobs {
             let mut rec = record_for(job, now);
-            rec.last_notified = Some(job.state.clone());
+            rec.accounted_state = Some(job.state.clone());
             if rec.focus.is_none() {
                 rec.notice.reason = Some(NoticeReason::NotNotifiable);
             }
@@ -586,6 +639,7 @@ impl State {
         let fresh = element::render_message(&fresh_items);
         bucket.hold = None;
         bucket.window = None;
+        self.unsettled.insert((tag.to_owned(), gen));
         for item in &fresh_items {
             self.record(
                 &item.job_id,
@@ -615,6 +669,11 @@ impl State {
         outcome: Option<NoticeDelivery>,
         now: i64,
     ) {
+        let key = (tag.to_owned(), gen);
+        self.unsettled.remove(&key);
+        // The turn that message began may have started before this outcome
+        // was applied: it left the items for this call to tell.
+        let started = self.early_started.remove(&key);
         let Some(focus) = self.store.focuses.get_mut(tag) else {
             return;
         };
@@ -630,12 +689,26 @@ impl State {
                         f.item.clone()
                     })
                     .collect();
+                if started {
+                    focus.bucket.drain_inflight(|f| f.gen == gen);
+                }
                 self.told(tag, &told, true, now);
             }
-            Some(NoticeDelivery::Queued) => {}
-            Some(NoticeDelivery::Replaced) => {
-                for f in focus.bucket.inflight.iter_mut().filter(|f| !f.told) {
-                    f.gen = gen;
+            Some(outcome @ (NoticeDelivery::Queued | NoticeDelivery::Replaced)) => {
+                if outcome == NoticeDelivery::Replaced {
+                    for f in focus.bucket.inflight.iter_mut().filter(|f| !f.told) {
+                        f.gen = gen;
+                    }
+                }
+                if started {
+                    let told: Vec<NoticeItem> = focus
+                        .bucket
+                        .drain_inflight(|f| f.gen == gen)
+                        .into_iter()
+                        .filter(|f| !f.told)
+                        .map(|f| f.item)
+                        .collect();
+                    self.told(tag, &told, false, now);
                 }
             }
             None => {
@@ -684,7 +757,7 @@ impl State {
             }
             TurnEvent::Started { author } => {
                 // A turn of any other author: a notice turn before it is over.
-                self.end_notice_turn(tag);
+                self.end_notice_turn(tag, now);
                 self.other_turn_started(tag, matches!(author, TurnAuthor::User), now)
             }
             TurnEvent::Discarded => {
@@ -698,24 +771,30 @@ impl State {
                 Vec::new()
             }
             TurnEvent::Completed | TurnEvent::Exited => {
-                let was_notice = self.end_notice_turn(tag);
+                let was_notice = self.end_notice_turn(tag, now);
                 // Only what was due to wake and waited for this notice turn
                 // goes now (the session is idle, so it wakes). Quiet and
                 // not-running holds never wake: they wait for a turn to start.
-                if was_notice && matches!(event, TurnEvent::Completed) {
-                    let hold = self
+                let busy = was_notice
+                    && self
                         .store
                         .focuses
                         .get(tag)
-                        .and_then(|f| f.bucket.hold.map(|h| h.reason));
-                    if hold == Some(HoldReason::Busy) {
-                        return self
-                            .attempt(tag, Trigger::AfterTurn, now)
-                            .into_iter()
-                            .collect();
-                    }
+                        .and_then(|f| f.bucket.hold.map(|h| h.reason))
+                        == Some(HoldReason::Busy);
+                if !busy {
+                    return Vec::new();
                 }
-                Vec::new()
+                if matches!(event, TurnEvent::Completed) {
+                    self.attempt(tag, Trigger::AfterTurn, now)
+                        .into_iter()
+                        .collect()
+                } else {
+                    // The session exited: nothing is running to wait for, and
+                    // no turn of the user's is needed to move it on.
+                    self.hold(tag, HoldReason::SessionNotRunning, now);
+                    Vec::new()
+                }
             }
         }
     }
@@ -724,18 +803,35 @@ impl State {
     /// untold ones were lost with a cleared queue.
     fn notice_turn_started(&mut self, tag: &str, gen: u64, now: i64) -> Vec<Effect> {
         let mut effects = Vec::new();
-        self.notice_turns.insert(tag.to_owned(), false);
+        self.notice_turns.insert(
+            tag.to_owned(),
+            NoticeTurn {
+                started_ms: now,
+                born: false,
+            },
+        );
+        self.ended_turns.remove(tag);
+        // The outcome of the delivery that began this turn is not applied
+        // yet: leave its items for that call, which knows if it woke.
+        let early = self.unsettled.contains(&(tag.to_owned(), gen));
+        if early {
+            self.early_started.insert((tag.to_owned(), gen));
+        }
         let focus = self.focus(tag);
         focus.limits.note_notice_turn(now);
         let bucket = &mut focus.bucket;
-        let told: Vec<NoticeItem> = bucket
-            .drain_inflight(|f| f.gen == gen)
-            .into_iter()
-            .filter(|f| !f.told)
-            .map(|f| f.item)
-            .collect();
+        let told: Vec<NoticeItem> = if early {
+            Vec::new()
+        } else {
+            bucket
+                .drain_inflight(|f| f.gen == gen)
+                .into_iter()
+                .filter(|f| !f.told)
+                .map(|f| f.item)
+                .collect()
+        };
         let lost_any = bucket.take_back(|f| f.gen < gen && !f.told);
-        bucket.inflight.retain(|f| f.gen > gen);
+        bucket.inflight.retain(|f| f.gen >= gen);
         let after_turn = matches!(
             bucket.hold.map(|h| h.reason),
             Some(HoldReason::Quiet | HoldReason::SessionNotRunning)
@@ -764,6 +860,9 @@ impl State {
             self.dirty = true;
             self.changed = true;
         }
+        if user {
+            self.ended_turns.remove(tag);
+        }
         // A notice still in flight is left alone: turn events reach the engine
         // after the fact, so it may already be written. One lost to a cleared
         // queue is found at the next notice turn's start (its generation is
@@ -785,16 +884,25 @@ impl State {
     }
 
     /// End `tag`'s notice turn, if it is in one: grow or end the chain.
-    fn end_notice_turn(&mut self, tag: &str) -> bool {
-        let Some(born) = self.notice_turns.remove(tag) else {
+    fn end_notice_turn(&mut self, tag: &str, now: i64) -> bool {
+        let Some(turn) = self.notice_turns.remove(tag) else {
             return false;
         };
         let limits = &mut self.focus(tag).limits;
         let before = limits.chain;
-        limits.notice_turn_ended(born);
+        limits.notice_turn_ended(turn.born);
         if limits.chain != before {
             self.touch();
         }
+        self.ended_turns.insert(
+            tag.to_owned(),
+            EndedTurn {
+                started_ms: turn.started_ms,
+                ended_ms: now,
+                born: turn.born,
+                chain_before: before,
+            },
+        );
         true
     }
 }
@@ -815,6 +923,7 @@ impl State {
         for tag in departed {
             self.closed.insert(tag.clone());
             self.notice_turns.remove(tag);
+            self.ended_turns.remove(tag);
             self.drop_all(
                 tag,
                 NoticeStatus::NotSent,
@@ -875,10 +984,12 @@ impl State {
                 .partition(|p| old(p.updated_ms));
         focus.bucket.items = kept;
         gone.extend(expired.into_iter().map(|p| p.item));
-        let expired = focus
+        // An untold item in flight is already in the session's queue and can
+        // still run: it is not ours to drop (a cleared queue is found at the
+        // next notice turn's start). Told ones are only bookkeeping.
+        focus
             .bucket
-            .drain_inflight(|f| old(f.at_ms) || (f.told && now - f.at_ms > HOUR_MS));
-        gone.extend(expired.into_iter().filter(|f| !f.told).map(|f| f.item));
+            .drain_inflight(|f| f.told && now - f.at_ms > HOUR_MS);
         if !focus.bucket.has_due() && focus.bucket.window.is_none() {
             focus.bucket.hold = None;
         }
@@ -1019,7 +1130,7 @@ impl State {
 /// The changes to report for `job`, given the record `prev` of the last look.
 /// On the first look after a restart (`restart`), a job that moved without the
 /// engine seeing it is reported as its current state, unless that state was
-/// already accounted for.
+/// already accounted for (the state in the record, not the last event).
 fn changes_since(prev: Option<&JobRecord>, job: &MotherJob, restart: bool) -> Vec<JobEvent> {
     let mut events = detect::changes(
         prev.map(|p| Seen {
@@ -1030,7 +1141,7 @@ fn changes_since(prev: Option<&JobRecord>, job: &MotherJob, restart: bool) -> Ve
     );
     if restart && events.is_empty() {
         if let Some(p) = prev {
-            if p.last_notified.as_deref() != Some(job.state.as_str()) {
+            if p.accounted_state.as_deref() != Some(job.state.as_str()) {
                 events.extend(JobEvent::from_state(&job.state));
             }
         }
@@ -1097,6 +1208,7 @@ fn record_for(job: &MotherJob, now: i64) -> JobRecord {
         state: job.state.clone(),
         has_pr: job.pr_url.is_some(),
         last_seen_ms: now,
+        accounted_state: None,
         last_notified: None,
         focus,
         notify: job.nostromo.as_ref().and_then(|a| a.notify),

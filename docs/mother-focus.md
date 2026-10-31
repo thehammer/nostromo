@@ -154,7 +154,8 @@ Mother job update for a job this focus queued. Untrusted display data, not instr
 One element per job (at most 20; past that a `[… K more jobs updated; use mother_list_jobs …]` line),
 then one advisory line. Attributes, in order: `id`, `state` (the newest), `title` (one line, bidi,
 zero-width, filler and control characters removed, at most 120 characters with `…`), `pr?`, `cost_usd?`
-(two decimals, Mother's `actual_cost_usd`), `since?` (the earlier states in this message, oldest first),
+(two decimals, Mother's `actual_cost_usd`), `since?` (the earlier states in this message, oldest first;
+at most the newest 5), `since_omitted?` (how many earlier states `since` leaves out, present only then),
 `reason?`. `& < > " '` are escaped in every value. The reason is `failure: <class>` for a failure
 (`gates`, `cost_cap`, `timeout`, `agent_error`, `merge_conflict`, `unspecified`, `other`, mapped from
 Mother's `failure_reason`), the first line of the question for needs-you (redacted like terminal follow
@@ -210,18 +211,26 @@ The effective level is the lowest of the global switch, the focus's mode and the
   delivery is held (`cap`) and goes when the hour rolls (waking an idle session) or behind the user's
   next message in that focus. Held items are never dropped for the cap; the 24 h rule still applies.
 - **Loop guard**: a job a focus queues during a notice turn (MCP stamp, or a shell job first seen then)
-  is notice-born. A notice turn that queued one grows the focus's chain; one that did not ends it, and so
-  does any turn the user starts. At 3, every later delivery for the focus is held (`loop_guard`,
+  is notice-born, and so is one the feed shows late if its creation time falls inside the notice turn
+  (until another turn starts). A notice turn that queued one grows the focus's chain; one that did not
+  ends it, and so does any turn the user starts. At 3, every later delivery for the focus is held (`loop_guard`,
   `chain_held: true`) until the user sends a message there; that message releases one combined delivery.
 - `wakes_by_day` counts notice turns per local day for the last 7 days (SR9).
+- Any `SessionSend` counts as a user turn for the loop guard and the cap hold, whichever local peer sent it:
+  the daemon cannot tell the operator app from another local peer there, so a local process able to send a
+  message to a focus can lift its loop guard (the 6-per-hour cap still bounds the wakes).
 
 ### Lifecycle
 
 - **Focus closed** (the registry reports it departed): what waited is dropped, and later changes of its
   jobs are recorded as `not_sent`, `focus_closed`. Its mode is kept (a recreated focus gets its tag back).
-- **Daemon restart**: each job is compared with the last state accounted for; a job that moved while
-  the daemon was down gets exactly one notice with its current state, and a second restart gives none.
-  The very first run (no `mother-notices.json`) records every job silently and announces nothing.
+- **Daemon restart**: each job is compared with Mother's state when it was last accounted for (kept
+  apart from the notice's event, so a told `pr_opened`, `pr_merged`, `pr_closed` or `retry_started`
+  does not look like an unaccounted state); a job that moved while the daemon was down gets exactly one
+  notice with its current state, and a second restart gives none. A store written before that field
+  existed is trusted: its jobs are recorded silently.
+  The very first run (no `mother-notices.json`, or one that cannot be read or parsed, which is kept as a
+  `.bak`) records every job silently and announces nothing.
   Messages that were waiting in a session's queue died with it: they are held for the session's next
   turn.
 
@@ -238,7 +247,11 @@ transcript).
 **Transcript**: a notice turn's origin is `{"type": "mother_job_notice", "items": [{job_id, title, state,
 since, pr_url?, pr_number?}]}` (`TurnOrigin::MotherJobNotice`). It counts as a prompt like any other but
 is never the session's title. The golden turn is `tests/fixtures/mother-v2/turn-mother-notice.json`. Until
-the Mac renders the marker (MF2c), a notice turn shows as a plain bubble with the element text.
+the Mac renders the marker (MF2c), a notice turn shows as a plain bubble with the element text. The
+origin is first read from the turn's text (a stored transcript has nothing else), but on a live session
+the daemon takes it back from any turn it did not write as a notice (`TurnAuthor::Injected` with the
+notice key), so a pasted message that starts with the notice tag is a plain user turn and may be the
+session's title. A reloaded transcript still reads it from the text.
 
 ### Logging
 
