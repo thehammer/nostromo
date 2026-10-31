@@ -82,6 +82,8 @@ mod inject;
 mod inject_tests;
 mod login;
 mod model_switch;
+#[cfg(test)]
+mod notice_inject_tests;
 mod task_runtime;
 use control::ControlReply;
 pub use control::CONTROL_TIMEOUT;
@@ -2819,7 +2821,13 @@ fn run_reader(
                 // the next queued message into it or start a switch mid-turn.
                 TurnDelta::TurnErrored {
                     discarded: true, ..
-                } => {}
+                } => {
+                    // The phantom took the written message when it "started":
+                    // give it back to the real prompt arriving now, and tell
+                    // the hook the phantom was never a turn.
+                    login::on_turn_discarded(&shared);
+                    shared.turn_event(&tag, TurnEvent::Discarded);
+                }
                 TurnDelta::TurnCompleted { .. } | TurnDelta::TurnErrored { .. } => {
                     shared.broadcast(SessionEvent::Delta(delta.clone()));
                     // A turn that failed to authenticate makes a hold, and `step`

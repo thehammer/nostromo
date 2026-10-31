@@ -71,7 +71,11 @@ impl Limits {
 
     /// A notice turn ended; `born` says whether it queued a notice-born job.
     pub fn notice_turn_ended(&mut self, born: bool) {
-        self.chain = if born { self.chain.saturating_add(1) } else { 0 };
+        self.chain = if born {
+            self.chain.saturating_add(1)
+        } else {
+            0
+        };
     }
 
     /// The user started a turn: the chain is over.

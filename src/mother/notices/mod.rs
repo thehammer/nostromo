@@ -409,7 +409,9 @@ impl NoticeEngine {
                 .collect();
             if !lost.is_empty() {
                 focus.bucket.restore(lost);
-                focus.bucket.hold_at_least(HoldReason::SessionNotRunning, now);
+                focus
+                    .bucket
+                    .hold_at_least(HoldReason::SessionNotRunning, now);
             }
         }
         Arc::new(Self {
@@ -702,7 +704,15 @@ impl State {
                 r.notice.status != NoticeStatus::Held || r.notice.reason != Some(reason)
             });
             if changed {
-                self.record(&id, NoticeStatus::Held, Some(reason), &states, false, true, now);
+                self.record(
+                    &id,
+                    NoticeStatus::Held,
+                    Some(reason),
+                    &states,
+                    false,
+                    true,
+                    now,
+                );
             }
         }
     }
@@ -740,7 +750,15 @@ impl State {
             return false;
         }
         for item in &gone {
-            self.record(&item.job_id, status, Some(reason), &item.states, false, true, now);
+            self.record(
+                &item.job_id,
+                status,
+                Some(reason),
+                &item.states,
+                false,
+                true,
+                now,
+            );
         }
         if let Some(word) = audit {
             self.audits.push(MotherAuditEvent::JobNoticeDropped {
@@ -833,6 +851,22 @@ impl State {
                 self.changed = true;
             }
             let notify = rec.notify;
+            // The origin book says the focus is closed (it saw a registry push
+            // without it): after a daemon restart no departure is reported for
+            // a focus closed meanwhile, so this is how the engine learns it.
+            let closed = job
+                .nostromo
+                .as_ref()
+                .is_some_and(|a| a.origin.closed == Some(true));
+            if closed && self.closed.insert(tag.clone()) {
+                self.drop_all(
+                    &tag,
+                    NoticeStatus::NotSent,
+                    NoticeReason::FocusClosed,
+                    Some("focus_closed"),
+                    now,
+                );
+            }
             if prev.is_none() {
                 if let Some(born) = self.notice_turns.get_mut(&tag) {
                     *born = true;
@@ -911,7 +945,15 @@ impl State {
         let level = match effective(global, mode, notify) {
             Ok(level) => level,
             Err(reason) => {
-                self.record(job_id, NoticeStatus::Dropped, Some(reason), &[event], false, true, now);
+                self.record(
+                    job_id,
+                    NoticeStatus::Dropped,
+                    Some(reason),
+                    &[event],
+                    false,
+                    true,
+                    now,
+                );
                 if event.is_waking() {
                     self.audits.push(MotherAuditEvent::JobNoticeDropped {
                         focus: tag.to_owned(),
@@ -961,7 +1003,15 @@ impl State {
         self.dirty = true;
         self.changed = true;
         if let Some((reason, history)) = held {
-            self.record(job_id, NoticeStatus::Held, Some(reason), &states, false, history, now);
+            self.record(
+                job_id,
+                NoticeStatus::Held,
+                Some(reason),
+                &states,
+                false,
+                history,
+                now,
+            );
         }
     }
 
@@ -979,7 +1029,13 @@ impl State {
             return None;
         }
         if self.closed.contains(tag) {
-            self.drop_all(tag, NoticeStatus::NotSent, NoticeReason::FocusClosed, None, now);
+            self.drop_all(
+                tag,
+                NoticeStatus::NotSent,
+                NoticeReason::FocusClosed,
+                None,
+                now,
+            );
             return None;
         }
         if trigger != Trigger::UserTurn {
@@ -1002,8 +1058,10 @@ impl State {
         let items = bucket.take_items();
         let carried: Vec<NoticeItem> = bucket.untold_inflight().map(|f| f.item.clone()).collect();
         let fresh_items: Vec<NoticeItem> = items.iter().map(|p| p.item.clone()).collect();
-        let merged_items: Vec<NoticeItem> =
-            carried.into_iter().chain(fresh_items.iter().cloned()).collect();
+        let merged_items: Vec<NoticeItem> = carried
+            .into_iter()
+            .chain(fresh_items.iter().cloned())
+            .collect();
         let merged = element::render_message(&merged_items);
         let fresh = element::render_message(&fresh_items);
         bucket.inflight.extend(items.into_iter().map(|p| InFlight {
@@ -1090,7 +1148,15 @@ impl State {
             return;
         }
         for item in items {
-            self.record(&item.job_id, NoticeStatus::Told, None, &item.states, wake, true, now);
+            self.record(
+                &item.job_id,
+                NoticeStatus::Told,
+                None,
+                &item.states,
+                wake,
+                true,
+                now,
+            );
         }
         self.audits.push(MotherAuditEvent::JobNoticeDelivered {
             job_ids: items.iter().map(|i| i.job_id.clone()).collect(),
@@ -1154,12 +1220,24 @@ impl State {
                     self.dirty = true;
                     self.changed = true;
                 }
+                // A notice handed to the session and not yet started is either
+                // still queued behind this turn or was lost (the queue was
+                // cleared): messages are written in order, so one queued
+                // before this turn's would have started already. Take it back
+                // and hand it again, so it is neither lost nor told twice.
+                let requeued = take_back_inflight(&mut focus.bucket);
+                if requeued {
+                    effects.push(Effect::Withdraw {
+                        tag: tag.to_owned(),
+                    });
+                }
                 let hold = focus.bucket.hold.map(|h| h.reason);
-                let release = match hold {
-                    None => false,
-                    Some(_) if user => true,
-                    Some(r) => matches!(r, HoldReason::Quiet | HoldReason::SessionNotRunning),
-                };
+                let release = requeued
+                    || match hold {
+                        None => false,
+                        Some(_) if user => true,
+                        Some(r) => matches!(r, HoldReason::Quiet | HoldReason::SessionNotRunning),
+                    };
                 if release {
                     let trigger = if user {
                         Trigger::UserTurn
@@ -1167,6 +1245,16 @@ impl State {
                         Trigger::AfterTurn
                     };
                     effects.extend(self.attempt(tag, trigger, now));
+                }
+            }
+            TurnEvent::Discarded => {
+                // The notice turn that "started" was a phantom: the real turn's
+                // Started follows. Undo its count; its items stay told.
+                if self.notice_turns.remove(tag).is_some() {
+                    let limits = &mut self.focus(tag).limits;
+                    limits.wakes.pop();
+                    self.dirty = true;
+                    self.changed = true;
                 }
             }
             TurnEvent::Completed | TurnEvent::Exited => {
@@ -1228,9 +1316,9 @@ impl State {
         // Modes of focuses unseen for 90 days go; departed ones keep theirs
         // until then (a recreated focus gets its tag back).
         let before = self.store.focuses.len();
-        self.store.focuses.retain(|_, f| {
-            !(now - f.last_seen_ms > FOCUS_UNSEEN_MAX_MS && f.bucket.is_empty())
-        });
+        self.store
+            .focuses
+            .retain(|_, f| !(now - f.last_seen_ms > FOCUS_UNSEEN_MAX_MS && f.bucket.is_empty()));
         if self.store.focuses.len() != before {
             self.dirty = true;
             self.changed = true;
@@ -1245,11 +1333,7 @@ impl State {
             let Some(focus) = self.store.focuses.get_mut(&tag) else {
                 continue;
             };
-            if focus
-                .bucket
-                .window
-                .is_some_and(|w| now >= w.closes_at())
-            {
+            if focus.bucket.window.is_some_and(|w| now >= w.closes_at()) {
                 focus.bucket.window = None;
                 effects.extend(self.attempt(&tag, Trigger::Window, now));
                 continue;
@@ -1282,10 +1366,9 @@ impl State {
         };
         let old = |t: i64| now - t > batch::HOLD_MAX_MS;
         let mut gone: Vec<NoticeItem> = Vec::new();
-        let (expired, kept): (Vec<Pending>, Vec<Pending>) =
-            std::mem::take(&mut focus.bucket.items)
-                .into_iter()
-                .partition(|p| old(p.updated_ms));
+        let (expired, kept): (Vec<Pending>, Vec<Pending>) = std::mem::take(&mut focus.bucket.items)
+            .into_iter()
+            .partition(|p| old(p.updated_ms));
         focus.bucket.items = kept;
         gone.extend(expired.into_iter().map(|p| p.item));
         let (expired, kept): (Vec<InFlight>, Vec<InFlight>) =
@@ -1301,7 +1384,15 @@ impl State {
             return;
         }
         for item in &gone {
-            self.record(&item.job_id, NoticeStatus::Dropped, None, &item.states, false, true, now);
+            self.record(
+                &item.job_id,
+                NoticeStatus::Dropped,
+                None,
+                &item.states,
+                false,
+                true,
+                now,
+            );
         }
         self.audits.push(MotherAuditEvent::JobNoticeDropped {
             focus: tag.to_owned(),
@@ -1399,7 +1490,8 @@ impl State {
             .filter(|(_, f)| !f.is_trivial())
             .map(|(tag, f)| {
                 let b = &f.bucket;
-                let waiting = b.items.iter().filter(|p| p.due).count() + b.untold_inflight().count();
+                let waiting =
+                    b.items.iter().filter(|p| p.due).count() + b.untold_inflight().count();
                 let reason = match (b.hold, b.window, b.untold_inflight().next()) {
                     (Some(Hold { reason, .. }), _, _) => Some(reason.into()),
                     (None, Some(_), _) => Some(NoticeReason::Batching),
@@ -1409,18 +1501,39 @@ impl State {
                 FocusNoticeState {
                     tag: tag.clone(),
                     mode: f.mode.unwrap_or(NotifyLevel::Wake),
-                    held: reason
-                        .filter(|_| waiting > 0)
-                        .map(|reason| HeldSummary {
-                            count: waiting,
-                            reason,
-                        }),
+                    held: reason.filter(|_| waiting > 0).map(|reason| HeldSummary {
+                        count: waiting,
+                        reason,
+                    }),
                     chain_held: f.limits.chain_held(),
                     wakes_by_day: f.limits.wakes_by_day(now),
                 }
             })
             .collect()
     }
+}
+
+/// Move every untold item in flight back to the waiting items. Returns
+/// whether there was any.
+fn take_back_inflight(bucket: &mut batch::Bucket) -> bool {
+    let (untold, told): (Vec<InFlight>, Vec<InFlight>) = std::mem::take(&mut bucket.inflight)
+        .into_iter()
+        .partition(|f| !f.told);
+    bucket.inflight = told;
+    if untold.is_empty() {
+        return false;
+    }
+    bucket.restore(
+        untold
+            .into_iter()
+            .map(|f| Pending {
+                item: f.item,
+                due: f.due,
+                updated_ms: f.at_ms,
+            })
+            .collect(),
+    );
+    true
 }
 
 /// A job's record as the feed shows it now (accounting fields empty).

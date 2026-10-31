@@ -244,12 +244,7 @@ impl Bucket {
     /// Forget everything waiting and in flight; returns what was dropped.
     pub fn clear(&mut self) -> Vec<NoticeItem> {
         let mut gone: Vec<NoticeItem> = self.items.drain(..).map(|p| p.item).collect();
-        gone.extend(
-            self.inflight
-                .drain(..)
-                .filter(|f| !f.told)
-                .map(|f| f.item),
-        );
+        gone.extend(self.inflight.drain(..).filter(|f| !f.told).map(|f| f.item));
         self.window = None;
         self.hold = None;
         gone

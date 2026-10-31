@@ -297,6 +297,15 @@ pub(super) fn on_turn_started(shared: &Shared) -> TurnAuthor {
     TurnAuthor::of(cell.bound.as_ref())
 }
 
+/// The turn that last started was a phantom (a replayed system entry), dropped
+/// as the real prompt arrives: the message it took belongs to that prompt.
+pub(super) fn on_turn_discarded(shared: &Shared) {
+    let mut cell = lock_recover(&shared.login.cell);
+    if cell.written.is_none() {
+        cell.written = cell.bound.take();
+    }
+}
+
 /// A turn ended. `outcome` is `Some` when it was an auth failure. The caller
 /// advances the session afterwards; while a hold exists `step` does not drain
 /// the queue.

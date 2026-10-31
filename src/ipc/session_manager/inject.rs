@@ -57,6 +57,10 @@ pub enum TurnEvent {
     Completed,
     /// The session's process went away (no more events for this session).
     Exited,
+    /// The turn that last started was not a real turn (a system entry the CLI
+    /// replayed, dropped as the real prompt arrives). No `Completed` follows
+    /// it; the real prompt's `Started` comes next, with the author.
+    Discarded,
 }
 
 /// Who wrote the message a turn answers: taken from the message the session
