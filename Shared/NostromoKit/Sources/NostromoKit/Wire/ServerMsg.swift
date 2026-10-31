@@ -341,17 +341,20 @@ extension DaemonTurn {
 }
 
 /// Mirrors `stream_json::TurnOrigin` — tagged by `type` (`terminal_delivery`,
-/// `terminal_follow_notice`).
+/// `terminal_follow_notice`, `mother_job_notice`).
 ///
-/// Both kinds carry the same item shape here: a follow notice's items decode with `kind`
-/// `"notice"`, as the daemon's own delivery items do for a notice sent with output. Decoding an
-/// unknown `type` throws; `DaemonTurn` turns that into a nil origin.
-public enum TurnOriginWire: Decodable, Equatable {
+/// The two terminal kinds carry the same item shape here: a follow notice's items decode with
+/// `kind` `"notice"`, as the daemon's own delivery items do for a notice sent with output. A Mother
+/// job notice carries `MotherNoticeItemWire`s. Decoding an unknown `type` throws; `DaemonTurn`
+/// turns that into a nil origin.
+public enum TurnOriginWire: Codable, Equatable {
     /// Output from followed terminals, plus any notices sent with it, in the order the message
     /// has them.
     case terminalDelivery(items: [TerminalOriginItem])
     /// Follow notices only (following started, stopped, paused, resumed).
     case terminalFollowNotice(items: [TerminalOriginItem])
+    /// Mother jobs the focus queued that moved, as the daemon told the agent.
+    case motherJobNotice(items: [MotherNoticeItemWire])
 
     private enum K: String, CodingKey { case type, items }
 
@@ -363,16 +366,53 @@ public enum TurnOriginWire: Decodable, Equatable {
         case "terminal_follow_notice":
             let items = try c.decode([TerminalOriginItem].self, forKey: .items)
             self = .terminalFollowNotice(items: items.map { $0.asNotice })
+        case "mother_job_notice":
+            // A malformed item is skipped; with none left there is nothing to draw, so the
+            // origin is not one (the turn then shows as the plain bubble it is).
+            let items = try c.decode([LossyItem].self, forKey: .items).compactMap(\.value)
+            guard !items.isEmpty else {
+                throw DecodingError.dataCorruptedError(forKey: .items, in: c,
+                    debugDescription: "mother_job_notice without a readable item")
+            }
+            self = .motherJobNotice(items: items)
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c,
                 debugDescription: "unknown TurnOrigin type: \(other)")
         }
     }
 
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: K.self)
+        switch self {
+        case .terminalDelivery(let items):
+            try c.encode("terminal_delivery", forKey: .type)
+            try c.encode(items, forKey: .items)
+        case .terminalFollowNotice(let items):
+            try c.encode("terminal_follow_notice", forKey: .type)
+            try c.encode(items, forKey: .items)
+        case .motherJobNotice(let items):
+            try c.encode("mother_job_notice", forKey: .type)
+            try c.encode(items, forKey: .items)
+        }
+    }
+
+    /// The terminal items of a terminal origin; empty for a Mother job notice.
     public var items: [TerminalOriginItem] {
         switch self {
         case .terminalDelivery(let items), .terminalFollowNotice(let items): return items
+        case .motherJobNotice: return []
         }
+    }
+
+    /// The jobs of a Mother job notice; empty for a terminal origin.
+    public var motherNoticeItems: [MotherNoticeItemWire] {
+        if case .motherJobNotice(let items) = self { return items }
+        return []
+    }
+
+    private struct LossyItem: Decodable {
+        let value: MotherNoticeItemWire?
+        init(from decoder: Decoder) throws { value = try? MotherNoticeItemWire(from: decoder) }
     }
 }
 
@@ -380,7 +420,7 @@ public enum TurnOriginWire: Decodable, Equatable {
 /// `screen` or `selection`) or a `<nostromo-terminal-follow/>` notice (kind `notice`, with
 /// `event` and maybe `reason`). Mirrors `DeliveryItem` / `NoticeItem` in Rust; a count the wire
 /// omits is 0.
-public struct TerminalOriginItem: Decodable, Equatable {
+public struct TerminalOriginItem: Codable, Equatable {
     public let terminalId:  String
     public let pane:        String
     public let kind:        String

@@ -433,3 +433,177 @@ final class TerminalDeliveryScrollSafetyTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Mother notice: scroll safety
+
+/// MF2c: a Mother job notice arriving, or its marker being clicked, must never move the transcript
+/// (the gate is `SafetyRig` in ScrollSafetyGate.swift).
+///
+/// The marker's own click goes to `MotherJobRouting.open(jobId:)` (it sets a static request, posts a
+/// notification and sends a focus request); `tearDown` clears the static so nothing leaks.
+final class MotherNoticeScrollSafetyTests: XCTestCase {
+
+    override func tearDown() {
+        MotherView.requestedJobId = nil
+        super.tearDown()
+    }
+
+    private func notice(seq: Int) -> ChatTurn {
+        let origin = TurnOriginWire.motherJobNotice(items: MotherNoticeFixtures.items(3))
+        return MotherNoticeFixtures.turn(userInput: MotherNoticeFixtures.rawText + "\n\(seq)", origin: origin,
+                                         blocks: [.text("Noted.")], seq: seq)
+    }
+
+    func testANoticeArrivingWhileScrolledUpDoesNotMoveWhatIsOnScreen() {
+        let rig = SafetyRig.scrolledUp(self)
+
+        rig.assertNoMove("notice arrives", following: false) {
+            rig.appendTurn(notice(seq: 30))
+        }
+    }
+
+    func testANoticeArrivingWhileFollowingTheTailKeepsFollowing() {
+        let rig = SafetyRig.followingTail(self)
+        XCTAssertTrue(rig.followTail.isPinned)
+
+        rig.appendTurn(notice(seq: 31))
+        rig.settle()
+
+        XCTAssertTrue(rig.followTail.isPinned, "still following the tail")
+        XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1, "the notice is at the bottom of the view")
+        XCTAssertEqual(rig.snapshot().bottomOffsetPt, 0, accuracy: 1)
+    }
+
+    func testClickingAMarkerDoesNotMoveTheTranscript() {
+        var turns = SafetyFixtures.transcript()
+        let turn = notice(seq: 32)
+        turns.insert(turn, at: 3)
+        let rig = SafetyRig(self, turns: turns)
+        rig.start()
+        rig.focusComposer()
+        rig.userScroll(to: rig.virtualizer.offset(of: 3))
+        rig.followTail.setPinned(false, cause: .harness)
+        rig.settle()
+        // Back up a little so the end of the previous turn shows above the marker.
+        rig.userScroll(to: max(rig.clip.bounds.minY - 60, 0))
+        rig.settle()
+
+        guard let marker = rig.materialized[turn.id]?.wakeMarkerView else {
+            return XCTFail("the notice turn's marker is not on screen")
+        }
+        rig.assertNoMove("marker clicked", following: false) {
+            marker.activate()
+            rig.runPass()
+        }
+        XCTAssertEqual(MotherView.requestedJobId, "j-0", "the click did open the job")
+    }
+}
+
+// MARK: - Mother notice: reattach
+
+/// MF2c: a notice turn is matched across a reattach by the same identity as any turn (its record
+/// timestamp and the start of `userInput`): the raw element stays in `userInput` and the marker is only
+/// how it is drawn.
+final class MotherNoticeReattachTests: XCTestCase {
+
+    private static let base = Date(timeIntervalSince1970: 1_770_000_000)
+
+    private static func raw(_ seq: Int) -> String {
+        MotherNoticeFixtures.rawText.replacingOccurrences(of: "j-1", with: "j-\(seq)") + "\nseq \(seq)"
+    }
+
+    /// Record entry `seq`: a notice turn when `seq` is in `notices`, else an ordinary one.
+    private func entry(_ seq: Int, notices: Set<Int>, epoch: Int = 0, daemonIdPrefix: String = "r") -> ChatTurn {
+        let isNotice = notices.contains(seq)
+        return ChatTurn(userInput: isNotice ? Self.raw(seq) : "message \(seq)",
+                        timestamp: Self.base.addingTimeInterval(Double(seq)),
+                        timestampRaw: String(format: "2026-10-30T12:00:00.%04dZ", seq),
+                        blocks: [], isComplete: true,
+                        daemonId: "\(daemonIdPrefix)\(seq)", epoch: epoch,
+                        origin: isNotice ? MotherNoticeFixtures.singleOrigin : nil)
+    }
+
+    private func gapMarkers(_ turns: [ChatTurn]) -> Int { turns.filter { $0.isGapMarker }.count }
+
+    // MARK: Keys
+
+    func testANoticeTurnsKeysAreThoseOfAnOrdinaryTurnWithTheSameText() {
+        let text = Self.raw(1)
+        let notice = ChatTurn(userInput: text, timestamp: Self.base, timestampRaw: "2026-10-30T12:00:00.0001Z",
+                              blocks: [.text("Noted.")], isComplete: true, origin: MotherNoticeFixtures.singleOrigin)
+        let ordinary = ChatTurn(userInput: text, timestamp: Self.base, timestampRaw: "2026-10-30T12:00:00.0001Z",
+                                blocks: [.text("Noted.")], isComplete: true)
+
+        XCTAssertEqual(notice.identityKey, ordinary.identityKey)
+        XCTAssertEqual(notice.contentKey, ordinary.contentKey)
+        XCTAssertTrue(notice.identityKey.contains(String(text.prefix(40))), "the key still hashes the raw text, not the marker line")
+        XCTAssertFalse(notice.identityKey.contains("⟲"))
+    }
+
+    func testTwoNoticesAtTheSameTimeWithDifferentTextHaveDifferentIdentities() {
+        let a = ChatTurn(userInput: Self.raw(1), timestamp: Self.base, timestampRaw: "same", isComplete: true, origin: MotherNoticeFixtures.singleOrigin)
+        let b = ChatTurn(userInput: Self.raw(2), timestamp: Self.base, timestampRaw: "same", isComplete: true, origin: MotherNoticeFixtures.singleOrigin)
+
+        XCTAssertNotEqual(a.identityKey, b.identityKey)
+    }
+
+    // MARK: Reconcile
+
+    func testReattachingWithTheSameHistoryAddsNoGapMarkerAndNoDuplicate() {
+        let notices: Set<Int> = [3, 7, 12]
+        let retained = (0 ..< 20).map { entry($0, notices: notices) }
+        let snapshot = (0 ..< 20).map { entry($0, notices: notices, epoch: 1, daemonIdPrefix: "t") }
+
+        let outcome = TurnReconciler.reconcile(retained: retained, snapshot: snapshot, sessionIdChanged: false)
+
+        XCTAssertEqual(outcome.turns.count, 20, "no turn added, none dropped")
+        XCTAssertEqual(gapMarkers(outcome.turns), 0)
+        XCTAssertFalse(outcome.insertedGapMarker)
+        XCTAssertFalse(outcome.didReplaceAll)
+        XCTAssertEqual(outcome.turns.map(\.identityKey), retained.map(\.identityKey))
+        XCTAssertEqual(outcome.turns.map(\.id), retained.map(\.id), "every view keeps its identity")
+        XCTAssertEqual(Set(outcome.turns.map(\.identityKey)).count, 20, "no record entry twice")
+        XCTAssertEqual(outcome.turns.filter(\.hasMotherNoticeOrigin).count, 3, "the notices are still notices")
+    }
+
+    func testReattachingWithNewerHistoryAppendsOnlyTheNewTurnsAroundNotices() {
+        let notices: Set<Int> = [4, 7, 12]
+        let retained = (0 ..< 10).map { entry($0, notices: notices) }
+        let snapshot = (4 ..< 14).map { entry($0, notices: notices, epoch: 1, daemonIdPrefix: "t") }
+
+        let outcome = TurnReconciler.reconcile(retained: retained, snapshot: snapshot, sessionIdChanged: false)
+
+        XCTAssertEqual(outcome.turns.count, 14)
+        XCTAssertEqual(gapMarkers(outcome.turns), 0)
+        XCTAssertEqual(Set(outcome.turns.map(\.identityKey)).count, 14, "no record entry twice")
+        XCTAssertEqual(outcome.turns[4].id, retained[4].id, "an overlapping notice keeps its view identity")
+        XCTAssertEqual(outcome.turns[7].id, retained[7].id)
+        XCTAssertTrue(outcome.turns[12].hasMotherNoticeOrigin, "a notice that arrived while detached comes in as a notice")
+    }
+
+    func testASessionThatReattachesWithANoticeInItsHistoryKeepsOneTurnPerEntry() {
+        let client = NostromodClient(socketPath: "/dev/null")
+        let session = ChatSession(tag: "test", agentName: "cody", displayName: "Cody",
+                                  workingDirectory: nil, client: client)
+        func daemonTurn(_ n: Int, notice: Bool) -> DaemonTurn {
+            DaemonTurn(id: "d\(n)", userInput: notice ? Self.raw(n) : "message \(n)",
+                       timestamp: "2026-10-30T12:00:0\(n).000Z", blocks: [], isComplete: true,
+                       origin: notice ? MotherNoticeFixtures.singleOrigin : nil)
+        }
+
+        client.messages.send(.sessionTurns(tag: "test", turns: [daemonTurn(0, notice: false), daemonTurn(1, notice: true)]))
+        _ = modelWaitUntil { session.turns.count == 2 }
+        modelFlushMain()
+        let firstIds = session.turns.map(\.id)
+
+        client.messages.send(.sessionTurns(tag: "test", turns: [daemonTurn(0, notice: false), daemonTurn(1, notice: true), daemonTurn(2, notice: false)]))
+        _ = modelWaitUntil { session.turns.count == 3 }
+        modelFlushMain()
+
+        XCTAssertEqual(session.turns.count, 3)
+        XCTAssertEqual(gapMarkers(session.turns), 0, "nothing is missing, so no gap marker")
+        XCTAssertEqual(Array(session.turns.map(\.id).prefix(2)), firstIds, "the earlier turns keep their views")
+        XCTAssertTrue(session.turns[1].hasMotherNoticeOrigin)
+        XCTAssertEqual(session.turns[1].userInput, Self.raw(1), "the raw text is kept for Copy Notice Text")
+    }
+}
