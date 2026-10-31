@@ -368,9 +368,28 @@ final class PlanMarkdownDepthTests: XCTestCase {
             ("a fence after an HTML tag", "<div>\n```\n</div>\n"),
             ("a fence after an HTML tag indented three spaces", "   <div>\n```\n</div>\n"),
             ("a fence that opens after an HTML line and a blank one", "<b>hi</b>\n\n```\n"),
+            // The parser has a top-level fence open after the indented opener and the fence line at the
+            // start of the next line CLOSES it; a tracker that took that line for an opener would copy
+            // everything after it as code while the parser reads it as markdown.
+            ("an indented fence closed by a fence line at the start of a line", " ```\n```\n"),
+            ("the same with tildes and two spaces", "  ~~~\n~~~\n"),
+            ("an indented fence, its closer and another opener", "   ```\n```\n```\n"),
+            ("an indented fence and a fence line of the other character", " ```\n~~~\n"),
         ]
         for (name, prefix) in cases {
             assertSameText(PlanMarkdown.boundingNesting("\(prefix)\(manyQuotes)\n"), "\(prefix)\(boundedQuotes)\n", name)
+        }
+    }
+
+    /// A fence at the start of a line is honoured until something makes the bound and the parser possibly
+    /// disagree about fences; from there on every line is bounded, whatever follows.
+    func testFenceRecognitionStopsForGoodAtTheFirstLineThatCouldMakeTheParserDisagree() {
+        let fenced = "```\n\(wideLine)\n```\n"
+        for (name, doubt) in [("an indented fence", " ```\n"), ("an HTML line", "<b>hi</b>\n")] {
+            let text = "\(fenced)\(doubt)```\n\(wideLine)\n\(manyQuotes)\n~~~\n\(wideLine)\n"
+            let expected = "\(fenced)\(doubt)```\n\(boundedWideLine)\n\(boundedQuotes)\n~~~\n\(boundedWideLine)\n"
+            assertSameText(PlanMarkdown.boundingNesting(text), expected,
+                           "the fence before \(name) is kept whole, everything after it is bounded")
         }
     }
 

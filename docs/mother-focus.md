@@ -127,9 +127,12 @@ peers after the hold lapses. That covers both ways a job gets its origin: an MCP
 the caller's sensitivity, and a job the poll decides (the child's own shell `mother add`, whether it
 claims the focus or only its session id) records whether the focus tag is sensitive, registered or
 held, **at the poll that first sees the job**; an unverified claim that names a sensitive tag is
-recorded the same way. What is not covered: a job whose focus's hold lapsed before the poll first saw
-the job, because nothing else says the focus was sensitive when it queued it (the poll runs every two
-seconds, so a hold has to lapse inside that gap). A job already in the book is never
+recorded the same way. What is not covered: a job whose focus's hold lapsed before the daemon first saw
+the job, because nothing else says the focus was sensitive when it queued it. The poll runs every two
+seconds, but holds live in memory only, so a daemon restart between the queue and the first sight, or
+a `mother list` that is slow or failing, widens that gap. While the sensitive-tag registry cannot be
+read every tag counts as sensitive: a job decided then is flagged for good, even after the registry is
+repaired. A job already in the book is never
 re-evaluated, and the flag is only ever set, never cleared. A sensitive focus's tag and display name are also not written into
 Mother's record or argv (`--origin-focus` and `--origin-focus-name` are omitted); the daemon's own
 book keeps the snapshot, which only the local Mac sees. Work-send jobs and sensitive jobs are

@@ -169,18 +169,21 @@ public enum PlanMarkdown {
     ///
     /// Code is left alone: the lines of a fenced code block that opens at the very start of a line (three
     /// or more backticks or tildes, as the parser reads a fence) are copied as they are, up to the line
-    /// that closes it, because their white space is the code's own. Only a fence the parser cannot read
-    /// differently is recognised, so a line the parser would nest is never skipped: not one inside a quote
-    /// or list item (its container can end while the fence is still open here), not one indented (the
-    /// list item it may belong to can end), and none after a line that starts with `<` (an HTML block can
-    /// swallow a fence line). Those are bounded like any other line.
+    /// that closes it, because their white space is the code's own. A line is only skipped when the
+    /// parser is certain to be inside that same code block, so nothing it would nest escapes the cap.
+    /// That holds only while this tracker and the parser agree on which lines open and close a fence, so
+    /// recognition is switched off, for the rest of the text, by anything that could make them differ: a
+    /// line that starts with `<` (an HTML block can swallow a fence line) and a fence-shaped line
+    /// indented 1 to 3 columns (the parser may have a fence open there that a fence line at the start of
+    /// a line closes, or none, if a list item ended). A fence inside a quote or list item is never
+    /// recognised. All the other lines are bounded like any other.
     static func boundingNesting(_ text: String) -> String {
         let space = UInt8(ascii: " "), tab = UInt8(ascii: "\t"), quote = UInt8(ascii: ">"), newline = UInt8(ascii: "\n")
         let bytes = Array(text.utf8)
         var out: [UInt8] = []
         out.reserveCapacity(bytes.count)
         var fence: Fence?
-        var htmlMayHideFences = false
+        var trustsFences = true
         var i = 0
         while i < bytes.count {
             if let current = fence {   // inside a fenced code block: the line is code
@@ -218,11 +221,12 @@ public enum PlanMarkdown {
                     i += length
                 }
             }
-            if i < bytes.count, markers == 0, columns <= 3 {
+            if trustsFences, i < bytes.count, markers == 0, columns <= 3 {
                 if bytes[i] == UInt8(ascii: "<") {
-                    htmlMayHideFences = true
-                } else if columns == 0, !htmlMayHideFences, bytes[i] == UInt8(ascii: "`") || bytes[i] == UInt8(ascii: "~") {
-                    fence = Fence(opening: bytes, at: i, lineEnd: lineEnd(in: bytes, from: i))
+                    trustsFences = false
+                } else if bytes[i] == UInt8(ascii: "`") || bytes[i] == UInt8(ascii: "~"),
+                          let opened = Fence(opening: bytes, at: i, lineEnd: lineEnd(in: bytes, from: i)) {
+                    if columns == 0 { fence = opened } else { trustsFences = false }
                 }
             }
             while i < bytes.count {   // the rest of the line is the text
