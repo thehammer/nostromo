@@ -162,7 +162,6 @@ name, a session id, a plan path, a reason or a URL.
 Nothing in this path logs a job title, a focus name, a session id or a plan path either; a test drives it
 at TRACE level with canary values to prove it.
 
-<<<<<<< HEAD
 ## How the Mac shows it
 
 The Mac reads jobs from Mother's broker, not the daemon. From the daemon's `mother_jobs` frame it reads only
@@ -189,7 +188,7 @@ opens the Mother focus in that window with the filter set to that focus. These a
 gesture-gated.
 
 Code: Kit `Mother/MotherOriginDisplay.swift`, Mac `UI/Mother/MotherJobFilter.swift`, `UI/Views/MotherView.swift`.
-=======
+
 ## Job notices
 
 When a job queued by a verified focus moves, the daemon tells that focus's session with one structured
@@ -310,7 +309,6 @@ session's title. A reloaded transcript still reads it from the text.
 Nothing in the notice path logs or audits a title, a reason, a question, a PR URL, a focus name or a
 session id; a test drives a job with canary values through wake, hold and drop at TRACE level and scans
 the log and the audit file.
->>>>>>> origin/main
 
 ## Where the code is
 
