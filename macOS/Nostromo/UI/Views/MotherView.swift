@@ -643,7 +643,7 @@ struct MotherFromHeader: View {
     let result: MotherJobFilterResult
 
     /// The picker's label truncates past this so `× · N of M` always fits a 280 pt list.
-    static let pickerMaxWidth: CGFloat = 170
+    static let pickerMaxWidth: CGFloat = 130
 
     var body: some View {
         HStack(spacing: 6) {
@@ -659,7 +659,7 @@ struct MotherFromHeader: View {
             .pickerStyle(.menu)
             .labelsHidden()
             .controlSize(.small)
-            .frame(maxWidth: Self.pickerMaxWidth, alignment: .leading)
+            .frame(minWidth: 0, idealWidth: Self.pickerMaxWidth, maxWidth: Self.pickerMaxWidth, alignment: .leading)
             .layoutPriority(-1)
             .accessibilityLabel("From")
             if vm.filter != .all {
