@@ -135,12 +135,17 @@ public struct MotherRowLineTwo: Equatable, Sendable {
 
     /// `<state>. <title>. From <origin>. <state fact>.` then the open attention badges.
     public static func accessibilityLabel(model: MotherJobRowModel) -> String {
-        let state = model.state.prefix(1).uppercased() + model.state.dropFirst()
+        let cleanState = MotherOriginDisplay.clean(model.state, cap: 20)
+        let rawState = cleanState.isEmpty ? "unknown" : cleanState
+        let state = rawState.prefix(1).uppercased() + rawState.dropFirst()
         let title = FoldTextSanitizer.sanitizeInline(model.title.isEmpty ? model.id : model.title)
         var parts = ["\(state).", "\(title)."]
         if let origin = model.origin { parts.append("\(origin.accessibilityText).") }
         parts.append("\(stateFact(for: model)).")
-        for badge in model.attentionBadges { parts.append("\(badge).") }
+        for badge in model.attentionBadges {
+            let clean = MotherOriginDisplay.clean(badge, cap: 30)
+            if !clean.isEmpty { parts.append("\(clean).") }
+        }
         return parts.joined(separator: " ")
     }
 }
