@@ -13,7 +13,25 @@ final class WakeMarkerAppearanceTests: XCTestCase {
     /// A 400-character title, wide letters, and a hostile variant carrying every control and
     /// direction scalar the sanitizer exists for.
     private static let wideTitle = String(repeating: "W", count: 400)
-    private static let hostileTitle = String((HostileContent.kitchenSink + String(repeating: "W", count: 400)).prefix(2_000))
+    /// Copied from NostromoKit's `HostileContent`, which the Mac target cannot see: ANSI, OSC 8, bidi,
+    /// tag characters, NUL, line breaks and the invisible fillers, then the wide letters.
+    private static let hostileTitle = "\u{1B}[31mred\u{1B}[0m \u{1B}]8;;https://x\u{1B}\\label\u{1B}]8;;\u{1B}\\"
+        + "safe\u{202E}evil\u{2066}iso\u{2069}\u{200E}\u{200F}tail tag\u{E0041}\u{E007F}ged before\u{0}after "
+        + "one\ntwo\r\nthree\tfour\u{7F}five \u{2028}\u{2029} a\u{034F}b\u{115F}c\u{1160}d\u{17B4}e\u{17B5}f\u{2800}g\u{3164}h\u{FFA0}i "
+        + String(repeating: "W", count: 400)
+
+    /// Scalars that must never survive onto a drawn row (as `HostileContent.isForbiddenOnARow`).
+    private static func isForbiddenOnARow(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x0000 ... 0x001F, 0x007F, 0x0080 ... 0x009F,
+             0x200E, 0x200F, 0x202A ... 0x202E, 0x2066 ... 0x2069,
+             0xE0000 ... 0xE007F,
+             0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0:
+            return true
+        default:
+            return false
+        }
+    }
     private static let shortTitle = "short"
 
     private func content(_ title: String) -> WakeMarkerContent {
@@ -97,7 +115,7 @@ final class WakeMarkerAppearanceTests: XCTestCase {
 
         for text in [view.shownText, view.toolTip ?? ""] {
             for scalar in text.unicodeScalars where scalar != "\n" || text == view.shownText {
-                XCTAssertFalse(HostileContent.isForbiddenOnARow(scalar), "U+\(String(scalar.value, radix: 16, uppercase: true))")
+                XCTAssertFalse(Self.isForbiddenOnARow(scalar), "U+\(String(scalar.value, radix: 16, uppercase: true))")
             }
         }
         XCTAssertFalse(view.shownText.contains("\n"))
