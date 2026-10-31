@@ -435,8 +435,10 @@ final class MotherNoticeTurnViewTests: XCTestCase {
 
     func testTerminalTurnsHaveATerminalOriginAndNoMotherNoticeOrigin() {
         let delivery = OriginFixtures.turn()
-        let follow = OriginFixtures.turn(userInput: OriginFixtures.notice("stopped"),
-                                         origin: .terminalFollowNotice(items: [OriginFixtures.noticeItem("stopped")]))
+        // "started": the event whose explanatory sentence `OriginFixtures` writes after the element, so
+        // the turn holds no text the notice does not show (which would add a bubble).
+        let follow = OriginFixtures.turn(userInput: OriginFixtures.notice("started"),
+                                         origin: .terminalFollowNotice(items: [OriginFixtures.noticeItem("started")]))
 
         for turn in [delivery, follow] {
             XCTAssertTrue(turn.hasTerminalOrigin)
@@ -539,8 +541,10 @@ final class MotherNoticeHeightTests: XCTestCase {
     func testTerminalOriginEstimatesAreUnchanged() {
         let delivery = OriginFixtures.turn(userInput: OriginFixtures.output(body: "x"),
                                            origin: .terminalDelivery(items: [OriginFixtures.outputItem()]))
-        let follow = OriginFixtures.turn(userInput: OriginFixtures.notice("stopped"),
-                                         origin: .terminalFollowNotice(items: [OriginFixtures.noticeItem("stopped")]))
+        // "started": the event whose explanatory sentence `OriginFixtures` writes after the element, so
+        // the turn holds no text the notice does not show (which would add a bubble).
+        let follow = OriginFixtures.turn(userInput: OriginFixtures.notice("started"),
+                                         origin: .terminalFollowNotice(items: [OriginFixtures.noticeItem("started")]))
 
         XCTAssertEqual(TurnHeightEstimator.estimate(delivery, width: 900),
                        TurnHeightEstimator.turnChrome + TurnHeightEstimator.deliveryCollapsed)

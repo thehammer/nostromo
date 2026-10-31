@@ -94,8 +94,10 @@ final class WakeMarkerAppearanceTests: XCTestCase {
 
                 XCTAssertLessThanOrEqual(view.fittingSize.width, width + 0.5, "width \(width)")
                 for label in labels(in: view) {
-                    XCTAssertLessThanOrEqual(label.frame.maxX, width + 0.5, "width \(width): the label stays inside the view")
-                    XCTAssertGreaterThanOrEqual(label.frame.minX, -0.5)
+                    // The alignment rect: a text field's frame is 2 pt wider each side (the cell's own padding).
+                    let rect = label.alignmentRect(forFrame: label.frame)
+                    XCTAssertLessThanOrEqual(rect.maxX, width + 0.5, "width \(width): the label stays inside the view")
+                    XCTAssertGreaterThanOrEqual(rect.minX, -0.5)
                 }
             }
         }
