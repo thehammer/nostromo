@@ -117,7 +117,7 @@ final class MotherOriginRowTests: XCTestCase {
         func walk(_ node: Any, depth: Int) {
             guard depth < 16, let ax = node as? NSAccessibilityProtocol else { return }
             if let l = ax.accessibilityLabel(), !l.isEmpty { labels.append(l) }
-            if let acts = ax.accessibilityCustomActions { actions += acts.map(\.name) }
+            if let acts = ax.accessibilityCustomActions() { actions += acts.map(\.name) }
             let children = ax.accessibilityChildren() ?? []
             for c in children { walk(c, depth: depth + 1) }
             if children.isEmpty, let v = node as? NSView {
