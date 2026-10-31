@@ -221,14 +221,20 @@ pub struct MotherJob {
     /// on every publish of the job feed; never read from Mother.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nostromo: Option<JobAnnotation>,
-    /// Mother's free-form `.failure_reason` of the latest `failed` transition.
-    /// Read only to classify a failure notice (`notices::element`); never
-    /// serialised.
-    #[serde(default, deserialize_with = "lenient_reason", skip_serializing)]
+    /// Mother's free-form `.failure_reason` of the latest `failed` transition
+    /// (a notice names only its class, `notices::element::failure_class`).
+    #[serde(
+        default,
+        deserialize_with = "lenient_reason",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub failure_reason: Option<String>,
-    /// Mother's `.actual_cost_usd` (cumulative spend). Read only for a notice's
-    /// `cost_usd`; never serialised.
-    #[serde(default, deserialize_with = "lenient_cost", skip_serializing)]
+    /// Mother's `.actual_cost_usd` (cumulative spend; a notice's `cost_usd`).
+    #[serde(
+        default,
+        deserialize_with = "lenient_cost",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub actual_cost_usd: Option<f64>,
 
     // ── headless-crew keys ────────────────────────────────────────────────
