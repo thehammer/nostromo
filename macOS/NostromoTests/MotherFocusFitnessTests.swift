@@ -381,3 +381,45 @@ extension MotherFocusFitnessTests {
         }
     }
 }
+
+// MARK: - MF5: the condensed row and the resizable list column
+//
+// Line two carries an origin, a repo, a failure reason and a question: all agent- or shell-controlled
+// text. The new files hold no logging at all (they are presentation), and none declares a `tag` that
+// would collide with NSView.tag (#356).
+
+extension MotherFocusFitnessTests {
+
+    private static let rowAndDividerSources = [
+        "macOS/Nostromo/UI/Mother/MotherListDivider.swift",
+        "Shared/NostromoKit/Sources/NostromoKit/Mother/MotherRowLineTwo.swift",
+        "Shared/NostromoKit/Sources/NostromoKit/UI/CondensedMotherJobRowContent.swift",
+    ]
+
+    func testTheCondensedRowAndTheDividerLogNothingAtAll() throws {
+        for path in Self.rowAndDividerSources {
+            let text = try Self.repoSource(path)
+            for pattern in ["\\blog\\.", "\\blayoutLog\\.", "\\bLogger\\b", "\\bprint\\(", "\\bNSLog\\(", "\\bos_log\\(", "\\bdebugPrint\\("] {
+                XCTAssertFalse(matches(pattern, in: text), "\(path) logs (\(pattern)): a row's text is not for logs")
+            }
+        }
+    }
+
+    func testTheCondensedRowAndTheDividerDeclareNoViewTag() throws {
+        for path in Self.rowAndDividerSources {
+            let text = try Self.repoSource(path)
+            XCTAssertFalse(matches("\\b(var|let)\\s+tag\\b", in: text),
+                           "\(path) declares a `tag`, which collides with NSView.tag (#356)")
+        }
+    }
+
+    func testTheCondensedRowAndTheDividerFetchNothingAndRunNothing() throws {
+        for path in Self.rowAndDividerSources {
+            let text = try Self.repoSource(path)
+            for needle in ["URLSession", "NSWorkspace.shared.open(", "NSAppleScript", "posix_spawn"] {
+                XCTAssertFalse(text.contains(needle), "\(path) uses \(needle)")
+            }
+            XCTAssertFalse(matches("\\bProcess\\(", in: text), "\(path) runs a program")
+        }
+    }
+}

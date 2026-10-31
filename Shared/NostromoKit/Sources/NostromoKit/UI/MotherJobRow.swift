@@ -7,6 +7,44 @@
 // Terminal-state rows show "Archive"; active rows show "Cancel".
 
 import SwiftUI
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
+
+/// How a row is laid out. `.regular` is the original layout (iOS); `.condensed` is the Mac list's
+/// fixed-height, two-line row.
+public enum MotherJobRowStyle: Equatable, Sendable {
+    case regular
+    case condensed
+}
+
+/// Sizes of the condensed row, from the current system fonts, so its height scales with text size
+/// and never depends on what the row says.
+public enum MotherRowMetrics {
+    public static let verticalPadding: CGFloat = 3
+    public static let horizontalPadding: CGFloat = 4
+    public static let lineSpacing: CGFloat = 1
+
+    public static var titleLineHeight: CGFloat { lineHeight(.body) }
+    public static var detailLineHeight: CGFloat { lineHeight(.caption1) }
+    /// Top padding + one body line + one caption line + bottom padding.
+    public static var rowHeight: CGFloat {
+        verticalPadding * 2 + titleLineHeight + lineSpacing + detailLineHeight
+    }
+
+    #if os(macOS)
+    private static func lineHeight(_ style: NSFont.TextStyle) -> CGFloat {
+        let f = NSFont.preferredFont(forTextStyle: style)
+        return ceil(f.ascender - f.descender + f.leading)
+    }
+    #else
+    private static func lineHeight(_ style: UIFont.TextStyle) -> CGFloat {
+        ceil(UIFont.preferredFont(forTextStyle: style).lineHeight)
+    }
+    #endif
+}
 
 /// A single Mother job row with built-in swipe-to-archive / swipe-to-cancel
 /// and a state-aware right-click / long-press context menu.
@@ -18,6 +56,7 @@ public struct MotherJobRow: View {
     public let onForceStart: () -> Void
     /// Set by the Mac when the origin is a clickable focus. Nil leaves the origin plain text.
     public let onOriginTap: (() -> Void)?
+    public let style: MotherJobRowStyle
 
     public init(
         model: MotherJobRowModel,
@@ -25,7 +64,8 @@ public struct MotherJobRow: View {
         onCancel:     @escaping () -> Void = {},
         onRetry:      @escaping () -> Void = {},
         onForceStart: @escaping () -> Void = {},
-        onOriginTap:  (() -> Void)? = nil
+        onOriginTap:  (() -> Void)? = nil,
+        style: MotherJobRowStyle = .regular
     ) {
         self.model        = model
         self.onArchive    = onArchive
@@ -33,11 +73,11 @@ public struct MotherJobRow: View {
         self.onRetry      = onRetry
         self.onForceStart = onForceStart
         self.onOriginTap  = onOriginTap
+        self.style        = style
     }
 
     public var body: some View {
-        rowContent
-            .modifier(OriginAccessibility(model: model, onOriginTap: onOriginTap))
+        styledContent
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 if model.isDone {
                     Button(role: .destructive, action: onArchive) {
@@ -50,6 +90,17 @@ public struct MotherJobRow: View {
                 }
             }
             .contextMenu { contextMenuItems }
+    }
+
+    @ViewBuilder
+    private var styledContent: some View {
+        switch style {
+        case .regular:
+            rowContent
+                .modifier(OriginAccessibility(model: model, onOriginTap: onOriginTap))
+        case .condensed:
+            CondensedMotherJobRowContent(model: model, onOriginTap: onOriginTap)
+        }
     }
 
     // MARK: - Context menu
@@ -209,8 +260,10 @@ public struct MotherJobRow: View {
             .padding(.top, 2)
     }
 
-    private var stateColor: Color {
-        switch model.state {
+    private var stateColor: Color { Self.stateColor(for: model.state) }
+
+    static func stateColor(for state: String) -> Color {
+        switch state {
         case "running":          return .blue
         case "awaiting":         return .orange
         case "queued", "ready":  return .gray

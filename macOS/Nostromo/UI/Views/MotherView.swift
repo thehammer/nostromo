@@ -140,7 +140,12 @@ class MotherView: NSView {
             }
         }
 
-        for v in [countsStrip, notifyNote, jobList, divider, tabRegion] as [NSView] {
+        let handle = listDivider
+        handle.currentWidth = { [weak self] in self?.listWidth ?? MotherListWidth.defaultWidth }
+        handle.onResize = { [weak self] in self?.setListWidth($0) }
+        handle.onCommit = { [weak self] in self?.rememberListWidth() }
+
+        for v in [countsStrip, notifyNote, jobList, divider, tabRegion, handle] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -157,11 +162,17 @@ class MotherView: NSView {
             notifyNote.leadingAnchor.constraint(equalTo: leadingAnchor),
             notifyNote.trailingAnchor.constraint(equalTo: trailingAnchor),
 
-            // Job list — fixed width left pane
+            // Job list — left pane; its width is `listWidth`, changed only through `listWidthConstraint`
             jobList.topAnchor.constraint(equalTo: notifyNote.bottomAnchor),
             jobList.leadingAnchor.constraint(equalTo: leadingAnchor),
-            jobList.widthAnchor.constraint(equalToConstant: 280),
+            listWidthConstraint,
             jobList.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            // Drag handle — a 6 pt grab area centred on the divider
+            handle.topAnchor.constraint(equalTo: divider.topAnchor),
+            handle.bottomAnchor.constraint(equalTo: divider.bottomAnchor),
+            handle.centerXAnchor.constraint(equalTo: divider.centerXAnchor),
+            handle.widthAnchor.constraint(equalToConstant: MotherListDivider.hitWidth),
 
             // Divider — 1px, full height of content area
             divider.topAnchor.constraint(equalTo: notifyNote.bottomAnchor),
@@ -211,6 +222,56 @@ class MotherView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         applyRequestedFilter()
+        restoreListWidth()
+    }
+
+    override func layout() {
+        // The detail never gets narrower than its minimum when the window shrinks.
+        applyListWidth()
+        super.layout()
+    }
+
+    // MARK: - Resizable list column
+
+    /// Where the per-window list width is remembered. Tests swap in a throwaway suite.
+    static var widthDefaults: UserDefaults = .standard
+
+    /// The width the reader asked for (default 280 pt). The constraint holds it clamped to the current bounds.
+    private(set) var listWidth: CGFloat = MotherListWidth.defaultWidth
+    let listDivider = MotherListDivider()
+    private lazy var listWidthConstraint = jobList.widthAnchor.constraint(equalToConstant: MotherListWidth.defaultWidth)
+
+    /// The width the list column has right now.
+    var listColumnWidth: CGFloat { listWidthConstraint.constant }
+
+    /// Live dragging calls this: it only changes the width constraint.
+    func setListWidth(_ width: CGFloat) {
+        listWidth = MotherListWidth.clamp(width, viewWidth: bounds.width > 0 ? bounds.width : .greatestFiniteMagnitude)
+        applyListWidth()
+    }
+
+    private func applyListWidth() {
+        let shown = bounds.width > 0 ? MotherListWidth.clamp(listWidth, viewWidth: bounds.width) : listWidth
+        if listWidthConstraint.constant != shown { listWidthConstraint.constant = shown }
+    }
+
+    /// `window.frameAutosaveName`, else its identifier; nil for a window with neither (the width is then not remembered).
+    private var listWidthWindowKey: String? {
+        if let name = window?.frameAutosaveName, !name.isEmpty { return name }
+        if let id = window?.identifier?.rawValue, !id.isEmpty { return id }
+        return nil
+    }
+
+    func rememberListWidth() {
+        guard let key = listWidthWindowKey else { return }
+        MotherListWidth.store(listWidth, in: Self.widthDefaults, windowKey: key)
+    }
+
+    private func restoreListWidth() {
+        guard let key = listWidthWindowKey,
+              let stored = MotherListWidth.stored(in: Self.widthDefaults, windowKey: key) else { return }
+        listWidth = stored
+        applyListWidth()
     }
 
     private func applyRequestedFilter() {
@@ -515,7 +576,7 @@ final class MotherJobListViewModel: ObservableObject {
                               currentName: { [self] in currentName(forTag: $0) })
     }
 
-    func rowModel(for job: MotherJob) -> MotherJobRowModel {
+    func rowModel(for job: MotherJob, now: Date = Date()) -> MotherJobRowModel {
         let progress = job.state == "running" || job.state == "awaiting"
             ? MotherProgressLine.make(progress: job.crew.progress, gates: job.crew.gates) : nil
         return MotherJobRowModel(
@@ -525,29 +586,41 @@ final class MotherJobListViewModel: ObservableObject {
             repo: job.repo.isEmpty ? nil : job.repo,
             branch: nil,                     // macOS MotherJob has no branch field
             question: job.question,
-            relativeTimestamp: formattedTimestamp(for: job),
+            relativeTimestamp: Self.formattedTimestamp(for: job, now: now),
             progressLine: progress?.text,
             attentionBadges: MotherAttentionBadges.make(job.crew.attention).filter { !$0.acked }.map(\.label),
             progressAccessibility: progress?.accessibility,
             showsProgressLine: true,
-            origin: originDisplay(forJobId: job.id)
+            origin: originDisplay(forJobId: job.id),
+            prNumber: Self.prNumber(fromURL: job.crew.prUrl),
+            failureReason: job.failureReason,
+            cost: job.costUsd.map { String(format: "$%.2f", $0) }
         )
     }
 
-    private func formattedTimestamp(for job: MotherJob) -> String? {
-        // Running jobs: show elapsed time since start.
+    /// `https://github.com/org/repo/pull/907` → 907.
+    static func prNumber(fromURL url: String?) -> Int? {
+        guard let url, let range = url.range(of: "/pull/", options: .backwards) else { return nil }
+        let digits = url[range.upperBound...].prefix { $0.isNumber }
+        return Int(digits)
+    }
+
+    /// The row's age: a running job's elapsed time (`12m`, `3d`), otherwise how long ago it last moved
+    /// (`4m ago`, `2h ago`). `now` is injected so it never depends on the clock.
+    static func formattedTimestamp(for job: MotherJob, now: Date) -> String? {
         if job.state == "running", let started = job.startedAt {
-            let secs = Int(Date().timeIntervalSince(started))
-            if secs < 60   { return "\(secs)s" }
-            if secs < 3600 { return "\(secs / 60)m" }
-            return "\(secs / 3600)h\((secs % 3600) / 60)m"
+            let secs = max(0, Int(now.timeIntervalSince(started)))
+            if secs < 60    { return "\(secs)s" }
+            if secs < 3600  { return "\(secs / 60)m" }
+            if secs < 86400 { return "\(secs / 3600)h\((secs % 3600) / 60)m" }
+            return "\(secs / 86400)d"
         }
-        // Others: relative time from most-recent timestamp.
         if let date = job.finishedAt ?? job.startedAt ?? job.createdAt {
-            let secs = Int(Date().timeIntervalSince(date))
-            if secs < 60   { return "\(secs)s ago" }
-            if secs < 3600 { return "\(secs / 60)m ago" }
-            return "\(secs / 3600)h ago"
+            let secs = max(0, Int(now.timeIntervalSince(date)))
+            if secs < 60    { return "\(secs)s ago" }
+            if secs < 3600  { return "\(secs / 60)m ago" }
+            if secs < 86400 { return "\(secs / 3600)h ago" }
+            return "\(secs / 86400)d"
         }
         return nil
     }
@@ -555,7 +628,7 @@ final class MotherJobListViewModel: ObservableObject {
 
 // MARK: - MotherJobListSwiftUI
 
-private struct MotherJobListSwiftUI: View {
+struct MotherJobListSwiftUI: View {
     @ObservedObject var vm: MotherJobListViewModel
     @State private var selectedId: String?
 
@@ -570,7 +643,7 @@ private struct MotherJobListSwiftUI: View {
     private func list(_ result: MotherJobFilterResult) -> some View {
         List(selection: $selectedId) {
             ForEach(result.groups) { group in
-                Section(group.state.uppercased()) {
+                Section {
                     ForEach(group.jobs, id: \.id) { job in
                         NostromoKit.MotherJobRow(
                             model: vm.rowModel(for: job),
@@ -578,8 +651,10 @@ private struct MotherJobListSwiftUI: View {
                             onCancel:     { AppStore.shared.cancelJob(job.id) },
                             onRetry:      { AppStore.shared.retryJob(job.id) },
                             onForceStart: { AppStore.shared.forceStartJob(job.id) },
-                            onOriginTap: originTapAction(for: job)
+                            onOriginTap: originTapAction(for: job),
+                            style: .condensed
                         )
+                        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
                         .tag(job.id)
                         .contextMenu {
                             let m = vm.rowModel(for: job)
@@ -594,6 +669,12 @@ private struct MotherJobListSwiftUI: View {
                             }
                         }
                     }
+                } header: {
+                    // `RUNNING 3`: one compact line.
+                    Text("\(group.state.uppercased()) \(group.jobs.count)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 1)
                 }
             }
         }

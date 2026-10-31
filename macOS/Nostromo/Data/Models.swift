@@ -373,6 +373,9 @@ struct MotherJob: Identifiable, Equatable {
     var crew:   MotherCrewState = MotherCrewState()
     /// The job's `origin.label` (`mother add --label`), when it has one; only the label is read.
     var originLabel: String? = nil
+    /// Mother's `failure_reason` and `actual_cost_usd`, when the list read carries them (row line two).
+    var failureReason: String? = nil
+    var costUsd: Double? = nil
 
     /// Apply a `progress_updated` overlay. A strictly older `updated_at` is ignored (events can
     /// arrive out of order, or after a `query.get` that already has a later one); a tie goes to
@@ -487,6 +490,8 @@ struct MotherJobSlim: Decodable {
     let crew:            MotherCrewState
     /// `origin.label`; the rest of `origin` is not read.
     let originLabel:     String?
+    let failureReason:   String?
+    let costUsd:         Double?
 
     private struct Origin: Decodable { let label: String? }
 
@@ -499,6 +504,8 @@ struct MotherJobSlim: Decodable {
         case pausedReason    = "paused_reason"
         case adherenceStatus = "adherence_status"
         case currentTier     = "current_tier"
+        case failureReason   = "failure_reason"
+        case costUsd         = "actual_cost_usd"
     }
 
     /// Every pre-crew field decodes exactly as the synthesized `Decodable` did (a required
@@ -524,6 +531,9 @@ struct MotherJobSlim: Decodable {
         cycles          = try c.decodeIfPresent([JobCycle].self, forKey: .cycles)
         crew            = (try? MotherCrewState(jobDecoder: decoder)) ?? MotherCrewState()
         originLabel     = (try? c.decodeIfPresent(Origin.self, forKey: .origin))?.label
+        // Display-only extras: a wrong type never costs the job.
+        failureReason   = (try? c.decodeIfPresent(String.self, forKey: .failureReason)) ?? nil
+        costUsd         = (try? c.decodeIfPresent(Double.self, forKey: .costUsd)) ?? nil
     }
 
     private static let fmtFrac: ISO8601DateFormatter = {
@@ -556,7 +566,9 @@ struct MotherJobSlim: Decodable {
                   phases:          phases ?? [],
                   cycles:          cycles ?? [],
                   crew:            crew,
-                  originLabel:     originLabel)
+                  originLabel:     originLabel,
+                  failureReason:   failureReason,
+                  costUsd:         costUsd)
     }
 }
 
