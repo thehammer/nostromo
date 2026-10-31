@@ -25,8 +25,12 @@ final class MotherFocusFitnessTests: XCTestCase {
     /// `testTheJobDetailLogsNothingAboutAPlan`.
     private static let jobDetailSources = ["UI/Views/MotherJobDetail.swift"]
 
+    /// The muted marker a Mother job notice shows in the transcript (MF2c). It draws a job's title, which is
+    /// untrusted text from a plan, so it logs nothing and opens nothing of its own.
+    private static let wakeMarkerSources = ["UI/Background/WakeMarkerView.swift"]
+
     /// Files that must never declare an `NSView.tag` of their own (#356).
-    private static let tagSensitiveSources = planViewerSources + jobDetailSources
+    private static let tagSensitiveSources = planViewerSources + jobDetailSources + wakeMarkerSources
 
     private static func source(_ relativePath: String, file: StaticString = #filePath, line: UInt = #line) throws -> String {
         var root = URL(fileURLWithPath: "\(file)")
@@ -226,5 +230,44 @@ final class MotherFocusFitnessTests: XCTestCase {
             XCTAssertEqual(occurrences(of: "\"\(ext)\"", in: loader), 1, "the extension \"\(ext)\" is listed once")
         }
         XCTAssertEqual(occurrences(of: "1_048_576", in: loader), 1, "the 1 MiB cap is one constant")
+    }
+
+    // MARK: - MF2c: the wake marker
+
+    func testTheWakeMarkerSourcesLogNothing() throws {
+        let forbidden = ["\\bprint\\(", "\\bNSLog\\(", "\\bos_log\\(", "\\bLogger\\(",
+                         "\\blog\\.(debug|info|notice|error|warning|fault|log)\\("]
+        for path in Self.wakeMarkerSources {
+            let text = try Self.source(path)
+            for pattern in forbidden {
+                XCTAssertFalse(matches(pattern, in: text), "\(path) logs (\(pattern)): a job's title is not for logs")
+            }
+        }
+    }
+
+    func testTheWakeMarkerIsScannedForViewTags() {
+        XCTAssertTrue(Self.wakeMarkerSources.contains("UI/Background/WakeMarkerView.swift"))
+        for path in Self.wakeMarkerSources {
+            XCTAssertTrue(Self.tagSensitiveSources.contains(path), "\(path) is scanned for view tags")
+        }
+    }
+
+    func testTheWakeMarkerOpensNothingAndFetchesNothing() throws {
+        for path in Self.wakeMarkerSources {
+            let text = try Self.source(path)
+            for needle in ["NSWorkspace", "URLSession", "WKWebView", "NSAppleScript", "posix_spawn"] {
+                XCTAssertFalse(text.contains(needle), "\(path) uses \(needle): a click only opens a job in the Mother focus")
+            }
+            XCTAssertFalse(matches("\\bProcess\\(", in: text), "\(path) runs a program")
+        }
+    }
+
+    func testOnlyTerminalOriginsCountAsTerminalOrigin() throws {
+        let text = try Self.source("Data/TurnOrigin.swift")
+
+        XCTAssertTrue(matches("var\\s+hasTerminalOrigin\\s*:\\s*Bool", in: text), "hasTerminalOrigin is still defined")
+        XCTAssertFalse(matches("hasTerminalOrigin\\s*:\\s*Bool\\s*\\{\\s*origin\\s*!=\\s*nil\\s*\\}", in: text),
+                       "hasTerminalOrigin must not be `origin != nil`: a Mother job notice has an origin and is not a terminal one")
+        XCTAssertTrue(matches("var\\s+hasMotherNoticeOrigin\\s*:\\s*Bool", in: text))
     }
 }

@@ -82,6 +82,11 @@ enum TurnHeightEstimator {
     static let minimumTurnHeight: CGFloat   = 24
     /// Height of a `.gap` / `.historyUnavailable` marker row.
     static let markerHeight: CGFloat        = 44
+    /// `WakeMarkerView`: one muted line in the user slot, a fixed height whatever it says (a Mother
+    /// job notice turn). Not `markerHeight`, which is the history-gap row.
+    static let wakeMarkerHeight: CGFloat    = 22
+    /// The gap between the user slot and the blocks under it (`ChatTurnView.bubbleGap`).
+    static let userSlotGap: CGFloat         = 8
 
     // MARK: - Estimation
 
@@ -99,7 +104,12 @@ enum TurnHeightEstimator {
         let blockWidth = paneWidth * blocksWidthFraction - 14
         var columns = 0
         let bubbleWidth = paneWidth * bubbleWidthFraction - 24
-        if turn.hasTerminalOrigin {
+        if turn.hasMotherNoticeOrigin {
+            // A Mother job notice is one fixed-height marker in the user slot: the element's length
+            // is never measured, because the marker never shows it.
+            height += wakeMarkerHeight + userSlotGap
+            columns += 1
+        } else if turn.hasTerminalOrigin {
             // A terminal delivery is blocks, not a bubble: its text length (up to tens of KB) is
             // collapsed away, so only the number of blocks counts. A bubble appears only for
             // attachments or text the blocks do not show.

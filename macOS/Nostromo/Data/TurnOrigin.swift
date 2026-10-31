@@ -15,7 +15,26 @@ extension ChatTurn {
     var terminalOriginItems: [TerminalOriginItem] { origin?.items ?? [] }
 
     /// Whether this turn is a terminal delivery or follow notice (shown as blocks, not a bubble).
-    var hasTerminalOrigin: Bool { origin != nil }
+    /// Any other origin (a Mother job notice) is not: it has no terminal items to draw.
+    var hasTerminalOrigin: Bool {
+        switch origin {
+        case .terminalDelivery?, .terminalFollowNotice?: return true
+        case .motherJobNotice?, nil: return false
+        }
+    }
+
+    /// Whether this turn is a Mother job notice (shown as one muted marker, not a bubble).
+    var hasMotherNoticeOrigin: Bool {
+        if case .motherJobNotice? = origin { return true }
+        return false
+    }
+
+    /// The marker a Mother job notice turn shows in the user slot; nil for any other turn. The raw
+    /// element stays in `userInput`, which the marker's Copy Notice Text menu puts on the pasteboard.
+    var motherNoticeMarker: WakeMarkerContent? {
+        guard case .motherJobNotice(let items)? = origin else { return nil }
+        return WakeMarkerText.motherNotice(items)
+    }
 
     /// The exact text of each item's element in `userInput` (nil for a notice, and for an element
     /// the text no longer holds), parallel to `terminalOriginItems`.
