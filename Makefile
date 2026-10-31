@@ -1,4 +1,4 @@
-.PHONY: build release install daemon-restart-guard test fmt-check python-test qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
+.PHONY: doctor build release install daemon-restart-guard test fmt-check python-test qa-selftest ci-remote clean daemon install-daemon uninstall-daemon
 
 build:
 	cargo build
@@ -31,6 +31,7 @@ fmt-check:
 python-test:
 	python3 -m unittest discover -s tests/transcript_load -v
 	python3 -m unittest discover -s tests/doctor -v
+	python3 -m unittest discover -s tests/doctor_preflight -v
 	python3 -m unittest discover -s tests/ios_policy -v
 	python3 -m unittest discover -s tests/fake_mother -v
 	python3 -m unittest discover -s tests/fake_claude_perm -v
@@ -233,7 +234,12 @@ mac-icon:
 ## The previous product is removed first and the build's own status decides
 ## (`pipefail`), so a failed build can never be signed, pinned and installed
 ## from a STALE product left by an earlier run.
-mac-release:
+## Xcode/build-environment preflight (read-only; prints fixes, never runs them).
+## `SKIP_DOCTOR=1 make mac-install` bypasses it.
+doctor:
+	@scripts/doctor-preflight.sh
+
+mac-release: $(if $(SKIP_DOCTOR),,doctor)
 	@rm -rf "$(APP_RELEASE)"
 	set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme Nostromo \
 	  -configuration Release -derivedDataPath build \
@@ -310,7 +316,7 @@ ios-install-all: ios-build
 ## Deploy app and daemon together: `make mac-install`, `make install-daemon`,
 ## then relaunch the app.
 OPERATOR_PIN = $(HOME)/.nostromo/operator-app.pin
-mac-install: mac-release
+mac-install: $(if $(SKIP_DOCTOR),,doctor) mac-release
 	scripts/sign-operator-app.sh "$(APP_RELEASE)"
 	scripts/install-operator-app.sh "$(APP_RELEASE)" "$(INSTALLED)"
 	scripts/write-operator-pin.sh "$(INSTALLED)" "$(OPERATOR_PIN)"
