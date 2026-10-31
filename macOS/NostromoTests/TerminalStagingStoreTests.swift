@@ -7,6 +7,8 @@ import Foundation
 //     notifies nobody.
 //   * `state: none` removes the list; `terminal_closed` and a lost daemon connection remove it too
 //     (a lost connection also forgets every revision, because a restarted daemon counts from the start).
+//   * A frame the app cannot read (`listUnreadable`) drops that terminal's list like `none` does, but KEEPS
+//     its revision: a replayed frame must not bring the dropped list back (a closed terminal forgets it).
 //   * `shownSince`: when an entry's current (command, note) was first received, on the store's injected
 //     clock. Kept for every entry while no entry's text changed; restarted for EVERY entry when any entry's
 //     command or note changes, or when the sequence of entry ids changes (a row appeared, went away or
@@ -176,6 +178,79 @@ final class TerminalStagingStoreTests: XCTestCase {
         store.ingest(frame([entry("a", "pwd")], revision: 1))
 
         XCTAssertEqual(store.list(for: id)?.entries.first?.command, "pwd")
+    }
+
+    // MARK: A frame the app cannot read
+
+    func testAnUnreadableListIsDroppedForThatTerminalOnlyAndItsObserverIsToldOnce() {
+        clock = 700
+        store.ingest(frame([entry("a", "ls")], terminal: "t-1", revision: 5))
+        store.ingest(frame([entry("a", "pwd")], terminal: "t-2", revision: 5))
+        var gone = 0, other = 0
+        let first = store.observe(terminalId: "t-1") { gone += 1 }
+        let second = store.observe(terminalId: "t-2") { other += 1 }
+
+        store.listUnreadable("t-1")
+
+        XCTAssertNil(store.list(for: "t-1"))
+        XCTAssertNil(shown("a", terminal: "t-1"), "no entry of it is being read any more")
+        XCTAssertEqual(store.list(for: "t-2")?.entries.first?.command, "pwd", "another terminal's list is untouched")
+        XCTAssertEqual(shown("a", terminal: "t-2"), 700)
+        XCTAssertEqual(gone, 1, "its drawer is told once")
+        XCTAssertEqual(other, 0)
+        withExtendedLifetime([first, second]) {}
+    }
+
+    func testAnUnreadableListForATerminalWithNoListNotifiesNobody() {
+        var calls = 0
+        let token = store.observe(terminalId: id) { calls += 1 }
+        let before = store.notificationCount
+
+        store.listUnreadable(id)
+        store.listUnreadable("nobody")
+
+        XCTAssertNil(store.list(for: id))
+        XCTAssertEqual(store.notificationCount, before)
+        XCTAssertEqual(calls, 0)
+        withExtendedLifetime(token) {}
+    }
+
+    func testAnUnreadableListKeepsTheRevisionSoAReplayedFrameCannotBringTheListBack() {
+        store.ingest(frame([entry("a", "ls")], revision: 5))
+        var calls = 0
+        let token = store.observe(terminalId: id) { calls += 1 }
+
+        store.listUnreadable(id)
+        XCTAssertNil(store.list(for: id), "harness: the list is gone")
+        XCTAssertEqual(calls, 1, "harness: and the observer was told")
+        let before = store.notificationCount
+
+        store.ingest(frame([entry("a", "replayed")], revision: 4))
+        store.ingest(frame([entry("a", "replayed too")], revision: 5))
+
+        XCTAssertNil(store.list(for: id), "revisions 4 and 5 were seen already: neither brings the list back")
+        XCTAssertNil(shown("a"))
+        XCTAssertEqual(store.notificationCount, before, "and nobody is told about them")
+        XCTAssertEqual(calls, 1)
+
+        store.ingest(frame([entry("a", "ls -la")], revision: 6))
+
+        XCTAssertEqual(store.list(for: id)?.entries.first?.command, "ls -la", "a newer revision is accepted")
+        XCTAssertEqual(calls, 2)
+        withExtendedLifetime(token) {}
+    }
+
+    func testAnUnreadableListIsNotTheSameAsAClosedTerminalWhichForgetsItsRevision() {
+        store.ingest(frame([entry("a", "ls")], terminal: "t-1", revision: 50))
+        store.ingest(frame([entry("a", "ls")], terminal: "t-2", revision: 50))
+
+        store.listUnreadable("t-1")
+        store.terminalClosed("t-2")
+        store.ingest(frame([entry("a", "again")], terminal: "t-1", revision: 1))
+        store.ingest(frame([entry("a", "again")], terminal: "t-2", revision: 1))
+
+        XCTAssertNil(store.list(for: "t-1"), "an unreadable list still remembers revision 50")
+        XCTAssertEqual(store.list(for: "t-2")?.entries.first?.command, "again", "a closed terminal's next list may start from 1")
     }
 
     func testLosingTheConnectionClearsEveryListAndNotifiesEachObserver() {

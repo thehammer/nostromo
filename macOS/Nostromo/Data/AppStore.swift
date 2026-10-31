@@ -1724,7 +1724,7 @@ class AppStore: ObservableObject {
         case .terminalStagingList(let list):
             TerminalStagingStore.shared.ingest(list)
         case .terminalStagingUnreadable(let terminalId):
-            TerminalStagingStore.shared.terminalClosed(terminalId)
+            TerminalStagingStore.shared.listUnreadable(terminalId)
 
         // Remote shells (2c): the store keeps the vocabulary; `RemoteShellPresenter` shows the sheets.
         case .remoteShellTargets(let targets):

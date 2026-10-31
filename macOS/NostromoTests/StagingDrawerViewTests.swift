@@ -13,8 +13,9 @@ import AppKit
 //          never scrolls anything.
 //   SB-7   every window shows the same rows from one store update; only the driver's rows insert; a mirror's
 //          rows say why and a click sends nothing; the moment a mirror becomes the driver its rows are live.
-//   SB-8   the list goes with the daemon connection, the terminal or a `none` frame; a frozen list says so,
-//          stays insertable, and still accepts Remove and Clear all.
+//   SB-8   the list goes with the daemon connection, the terminal, a `none` frame or a frame the app cannot
+//          read (which keeps the revision, so a replay does not bring it back); a drawer that held the
+//          keyboard gives it back. A frozen list says so, stays insertable, and still accepts Remove and Clear all.
 //   SB-9   keyboard: Up/Down/Tab/Shift-Tab select, Space inserts (a person's key event only), Return and
 //          Enter do nothing and go nowhere, Escape gives the keyboard back, and nothing has a key equivalent.
 //   SB-10  VoiceOver: a row is a button with a spoken label; a disabled one says why.
@@ -22,6 +23,10 @@ import AppKit
 //   SB-14  layout at 200/280/400/700 pt with 12 entries, a 1,000-character command, a long note and a long
 //          agent name: nothing overlaps or overflows; Show all reveals everything.
 //   SB-15  no leaks, a timer only while visible with entries, an unchanged frame redraws nothing.
+//   SB-16  rows hold still: none moves (nor does the drawer) when the 1.5 s reading delay ends after an edit,
+//          an added or a removed entry, nor when a refusal notice or the shared reason appears or clears,
+//          at 200 and 400 pt. The reason and the note are labels whose OWN cell wraps (two lines, the last
+//          one cut), and each draws the two lines it has room for.
 
 // MARK: - Fixtures
 
@@ -1608,6 +1613,231 @@ final class StagingDrawerViewTests: XCTestCase {
         XCTAssertNil(host.drawer.notice)
     }
 
+    // MARK: - Rows hold still: nothing moves under the pointer when a row becomes clickable
+
+    /// Where a person can aim, as the host has laid it out: each row in the drawer's document and in the
+    /// window, and the drawer itself.
+    private struct DrawerGeometry {
+        let rowIds: [String]
+        let documentFrames: [NSRect]
+        let windowFrames: [NSRect]
+        let drawerFrame: NSRect
+        let preferredHeight: CGFloat
+    }
+
+    private func geometry(of host: StagingDrawerHost) -> DrawerGeometry {
+        DrawerGeometry(rowIds: host.rows.map { $0.model.entryId },
+                       documentFrames: host.rows.map { $0.frame },
+                       windowFrames: host.rows.map { $0.convert($0.bounds, to: nil) },
+                       drawerFrame: host.drawer.frame,
+                       preferredHeight: host.drawer.preferredHeight(forBodyHeight: host.bodyHeight, width: host.width))
+    }
+
+    private func assertSameRect(_ a: NSRect, _ b: NSRect, _ message: String, file: StaticString = #filePath, line: UInt = #line) {
+        let moved = max(abs(a.minX - b.minX), abs(a.minY - b.minY), abs(a.width - b.width), abs(a.height - b.height))
+        XCTAssertLessThanOrEqual(moved, 0.01, "\(message): \(a) became \(b)", file: file, line: line)
+    }
+
+    /// Every row is in the same place in the window (a row a person is about to click has not moved).
+    private func assertRowsStill(_ a: DrawerGeometry, _ b: DrawerGeometry, _ tag: String,
+                                 file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(a.rowIds, b.rowIds, "\(tag): the same rows", file: file, line: line)
+        guard a.rowIds == b.rowIds else { return }
+        for (index, id) in a.rowIds.enumerated() {
+            assertSameRect(a.windowFrames[index], b.windowFrames[index], "\(tag): row \(id) moved in the window", file: file, line: line)
+        }
+    }
+
+    /// Nothing moved or resized: each row in the window and in the drawer's document, the drawer's frame and
+    /// the height it asks the host for.
+    private func assertSameGeometry(_ a: DrawerGeometry, _ b: DrawerGeometry, _ tag: String,
+                                    file: StaticString = #filePath, line: UInt = #line) {
+        assertRowsStill(a, b, tag, file: file, line: line)
+        guard a.rowIds == b.rowIds else { return }
+        for (index, id) in a.rowIds.enumerated() {
+            assertSameRect(a.documentFrames[index], b.documentFrames[index], "\(tag): row \(id) moved in the drawer", file: file, line: line)
+        }
+        assertSameRect(a.drawerFrame, b.drawerFrame, "\(tag): the drawer's frame", file: file, line: line)
+        XCTAssertEqual(a.preferredHeight, b.preferredHeight, accuracy: 0.01, "\(tag): the height the drawer asks for", file: file, line: line)
+    }
+
+    private var wrappedBoundaryCommand: String {
+        "docker run --rm -it -v $(pwd):/work -w /work -e FOO=bar ghcr.io/example/builder:latest make test-all"
+    }
+
+    /// A list that looks like a real one: a plain command, a command that wraps (and needs Show all at 200 pt),
+    /// a `<name>` placeholder (the app's own label), one with a note, one that was inserted before (a line
+    /// `inserted 2s ago` once it is readable) and one the app will not insert (a tab).
+    private func readingBoundaryEntries() -> [StagingEntry] {
+        [StagingFixtures.entry("s-1", 1, "ls -la"),
+         StagingFixtures.entry("s-2", 2, wrappedBoundaryCommand),
+         StagingFixtures.entry("s-3", 3, "scp <file> host:/tmp"),
+         StagingFixtures.entry("s-4", 4, "git status --short", note: "Run this first to see what changed, then decide what to commit"),
+         StagingFixtures.entry("s-5", 5, "make build", insertedCount: 1, lastInsertedAt: StagingFixtures.baseDate.addingTimeInterval(8)),
+         StagingFixtures.entry("s-6", 6, "ls\u{09}-la")]
+    }
+
+    /// Stages the list and lets it be read, changes it with `change`, looks at the drawer 1.49 s later (every
+    /// row still "Just changed") and 1.51 s later (the rows are clickable) and says where everything was each time.
+    private func drawerAroundTheEndOfTheReadingDelay(width: CGFloat, tag: String, change: ([StagingEntry]) -> [StagingEntry])
+        -> (before: DrawerGeometry, after: DrawerGeometry) {
+        let rig = makeRig(gate: StagingGates.real())
+        let host = makeHost(rig, width: width, bodyHeight: 2_000)
+        let initial = readingBoundaryEntries()
+        rig.ingest(initial)
+        rig.settle()
+        host.drawer.refresh()
+        host.relayout()
+
+        rig.ingest(change(initial))
+        rig.box.storeClock += StagingDrawerModel.readingDelay - 0.01
+        host.drawer.refresh()
+        host.relayout()
+        XCTAssertGreaterThanOrEqual(host.rows.count, 5, "\(tag): harness: the rows are there")
+        XCTAssertTrue(host.rows.allSatisfy { $0.model.state == .disabled(.justChanged) },
+                      "\(tag): harness: at 1.49 s every row still says it just changed: \(host.rows.map { $0.model.state })")
+        let before = geometry(of: host)
+
+        rig.box.storeClock += 0.02
+        host.drawer.refresh()
+        host.relayout()
+        for row in host.rows {
+            let expected: StagingRowModel.State
+            switch row.model.entryId {
+            case "s-5": expected = .inserted(ago: "inserted 2s ago")
+            case "s-6": expected = .disabled(.notInsertable)
+            default:    expected = .ready
+            }
+            XCTAssertEqual(row.model.state, expected, "\(tag): harness: \(row.model.entryId) at 1.51 s")
+        }
+        return (before, geometry(of: host))
+    }
+
+    func testNoRowMovesWhenTheReadingDelayEndsAfterAnEdit() {
+        for width in [200.0, 400.0] {
+            let tag = "edit, width \(Int(width))"
+            let result = drawerAroundTheEndOfTheReadingDelay(width: CGFloat(width), tag: tag) { entries in
+                var edited = entries
+                edited[0] = StagingFixtures.entry("s-1", 1, "ls -la --color=always")
+                return edited
+            }
+            assertSameGeometry(result.before, result.after, "\(tag): between 1.49 s and 1.51 s")
+        }
+    }
+
+    func testNoRowMovesWhenTheReadingDelayEndsAfterAnEntryIsAdded() {
+        for width in [200.0, 400.0] {
+            let tag = "add, width \(Int(width))"
+            let result = drawerAroundTheEndOfTheReadingDelay(width: CGFloat(width), tag: tag) { entries in
+                var added = entries
+                added.insert(StagingFixtures.entry("s-7", 7, "git log --oneline -5", note: "the last five commits"), at: 2)
+                return added
+            }
+            assertSameGeometry(result.before, result.after, "\(tag): between 1.49 s and 1.51 s")
+        }
+    }
+
+    func testNoRowMovesWhenTheReadingDelayEndsAfterAnEntryIsRemoved() {
+        for width in [200.0, 400.0] {
+            let tag = "remove, width \(Int(width))"
+            let result = drawerAroundTheEndOfTheReadingDelay(width: CGFloat(width), tag: tag) { entries in
+                entries.filter { $0.id != "s-2" }
+            }
+            assertSameGeometry(result.before, result.after, "\(tag): between 1.49 s and 1.51 s")
+        }
+    }
+
+    // MARK: Notices and reasons come and go without moving a row
+
+    func testAJustChangedRefusalNoticeAppearingAndClearingNeverMovesARowOrChangesTheDrawersHeight() throws {
+        for width in [200.0, 400.0] {
+            let tag = "width \(Int(width))"
+            let rig = makeRig(gate: StagingGates.real())
+            let host = makeHost(rig, width: CGFloat(width), bodyHeight: 2_000)
+            rig.ingest(readingBoundaryEntries())    // just changed: a click is refused
+            host.drawer.refresh()
+            host.relayout()
+            let before = geometry(of: host)
+
+            rig.click(try XCTUnwrap(host.rows.first, tag), in: host.window)
+            host.relayout()
+            XCTAssertEqual(host.drawer.notice, StagingDisabledReason.justChanged.text, "\(tag): harness: the refusal is showing")
+            XCTAssertTrue(host.visibleTexts.contains(StagingDisabledReason.justChanged.text), "\(tag): harness: \(host.visibleTexts)")
+            let during = geometry(of: host)
+
+            rig.settle()     // the reading delay is over: the row is ready and the notice goes
+            host.drawer.refresh()
+            host.relayout()
+            XCTAssertNil(host.drawer.notice, "\(tag): harness: the notice is gone")
+            let after = geometry(of: host)
+
+            assertSameGeometry(before, during, "\(tag): the notice appearing")
+            assertSameGeometry(during, after, "\(tag): the notice clearing at the ready transition")
+        }
+    }
+
+    func testTheNotSentNoticeAppearingAndClearingNeverMovesARowOrChangesTheDrawersHeight() throws {
+        for width in [200.0, 400.0] {
+            let tag = "width \(Int(width))"
+            let rig = makeRig(gate: StagingGates.real())
+            let host = makeHost(rig, width: CGFloat(width), bodyHeight: 2_000)
+            let entries = readingBoundaryEntries()
+            rig.ingest(entries)
+            rig.settle()
+            host.drawer.refresh()
+            host.relayout()
+            let before = geometry(of: host)
+
+            rig.target.sendResult = false
+            rig.click(try XCTUnwrap(host.rows.first, tag), in: host.window)
+            host.relayout()
+            XCTAssertEqual(host.drawer.notice, StagingDisabledReason.notSent.text, "\(tag): harness: the notice is showing")
+            XCTAssertTrue(host.visibleTexts.contains(StagingDisabledReason.notSent.text), "\(tag): harness: \(host.visibleTexts)")
+            let during = geometry(of: host)
+
+            // The same rows again in a newer frame: what the notice was about is no longer there, the rows are the same.
+            rig.ingest(entries)
+            host.relayout()
+            XCTAssertNil(host.drawer.notice, "\(tag): harness: the notice is gone")
+            let after = geometry(of: host)
+
+            assertSameGeometry(before, during, "\(tag): the notice appearing")
+            assertSameGeometry(during, after, "\(tag): the notice clearing")
+        }
+    }
+
+    func testAMirrorWindowBecomingTheDriverAndMirrorAgainNeverMovesARow() {
+        for width in [200.0, 400.0] {
+            let tag = "width \(Int(width))"
+            let rig = makeRig(gate: StagingGates.real())
+            let side = rig.makeSide(isMirror: true, gate: StagingGates.real())
+            let host = makeHost(rig, side: side, width: CGFloat(width), bodyHeight: 2_000)
+            // Rows with no line of their own once readable: it is the shared reason that comes and goes.
+            rig.ingest(Array(readingBoundaryEntries().prefix(4)))
+            rig.settle()
+            host.drawer.refresh()
+            host.relayout()
+            XCTAssertTrue(host.visibleTexts.contains(StagingDisabledReason.mirror.text), "\(tag): harness: the shared reason is showing")
+            let asMirror = geometry(of: host)
+
+            side.context?.isMirror = false      // a click in the terminal: this window drives now
+            host.drawer.refresh()
+            host.relayout()
+            XCTAssertFalse(host.visibleTexts.contains(StagingDisabledReason.mirror.text), "\(tag): harness: the shared reason is gone")
+            XCTAssertEqual(host.rows.first?.model.state, .ready, "\(tag): harness: the rows are live")
+            let asDriver = geometry(of: host)
+
+            side.context?.isMirror = true       // another window took the terminal back
+            host.drawer.refresh()
+            host.relayout()
+            XCTAssertTrue(host.visibleTexts.contains(StagingDisabledReason.mirror.text), "\(tag): harness: the shared reason is back")
+            let mirrorAgain = geometry(of: host)
+
+            assertRowsStill(asMirror, asDriver, "\(tag): the shared reason clearing")
+            assertRowsStill(asDriver, mirrorAgain, "\(tag): the shared reason appearing")
+        }
+    }
+
     // MARK: - The drawer gives the keyboard back when it goes away
 
     func testADrawerThatHoldsTheKeyboardGivesItBackExactlyOnceWhenItsListGoesAway() {
@@ -1655,6 +1885,40 @@ final class StagingDrawerViewTests: XCTestCase {
 
         XCTAssertEqual(returned, 0, "something else held the keyboard")
         XCTAssertTrue(host.window.firstResponder === probe)
+        XCTAssertFalse(host.drawer.hasList)
+    }
+
+    func testADrawerThatHoldsTheKeyboardGivesItBackExactlyOnceWhenItsListBecomesUnreadableAndAReplayedFrameDoesNotBringItBack() {
+        let (rig, host) = readyHost()
+        var returned = 0
+        host.drawer.onReturnToTerminal = { returned += 1 }
+        XCTAssertTrue(host.drawer.focusRows())
+        XCTAssertTrue(host.window.firstResponder === host.drawer, "harness")
+
+        rig.staging.listUnreadable(StagingFixtures.terminalId)
+
+        XCTAssertEqual(returned, 1)
+        XCTAssertFalse(host.drawer.hasList)
+        XCTAssertTrue(host.drawer.isHidden)
+        XCTAssertEqual(host.height, 0)
+        host.drawer.refresh()
+        XCTAssertEqual(returned, 1, "not again on the next refresh")
+
+        // The daemon's revision 1 was seen already: a replay of it shows nothing. A newer frame does.
+        rig.staging.ingest(StagingFixtures.list(revision: 1, entries: StagingFixtures.entries(["ls -la"])))
+        XCTAssertFalse(host.drawer.hasList, "a replayed frame does not bring the drawer back")
+        rig.ingest(StagingFixtures.entries(["ls -la"]))
+        XCTAssertTrue(host.drawer.hasList, "a newer frame does")
+    }
+
+    func testADrawerThatNeverHeldTheKeyboardDoesNotAskForItToBeGivenBackWhenItsListBecomesUnreadable() {
+        let (rig, host) = readyHost()
+        var returned = 0
+        host.drawer.onReturnToTerminal = { returned += 1 }
+
+        rig.staging.listUnreadable(StagingFixtures.terminalId)
+
+        XCTAssertEqual(returned, 0, "the keyboard was never the drawer's")
         XCTAssertFalse(host.drawer.hasList)
     }
 
@@ -1772,6 +2036,97 @@ final class StagingDrawerViewTests: XCTestCase {
                              wide.host.drawer.preferredHeight(forBodyHeight: 1_000, width: 600))
     }
 
+    // MARK: - The reason label itself wraps and draws its lines (not a separate cell measured for it)
+
+    /// The pixel rows of what `view` draws by itself (nothing behind it) that hold ink, as bands: a run of
+    /// rows with ink ended by a row with none. One band is one line of text, two bands are two lines.
+    private func inkBands(of view: NSView) throws -> (bands: [Range<Int>], pointsPerPixelRow: CGFloat) {
+        let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds), "harness: a bitmap to draw the label into")
+        view.cacheDisplay(in: view.bounds, to: rep)
+        var bands: [Range<Int>] = []
+        var start: Int?
+        for y in 0..<rep.pixelsHigh {
+            var hasInk = false
+            for x in 0..<rep.pixelsWide {
+                if (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.2 {
+                    hasInk = true
+                    break
+                }
+            }
+            if hasInk {
+                if start == nil { start = y }
+            } else if let began = start {
+                bands.append(began..<y)
+                start = nil
+            }
+        }
+        if let began = start { bands.append(began..<rep.pixelsHigh) }
+        return (bands, view.bounds.height / CGFloat(max(1, rep.pixelsHigh)))
+    }
+
+    /// The height `label`'s own cell needs for the label's own text at the label's own width, no line limit.
+    private func ownCellNeed(of label: NSTextField) -> CGFloat {
+        let saved = label.maximumNumberOfLines
+        label.maximumNumberOfLines = 0
+        defer { label.maximumNumberOfLines = saved }
+        return ceil(label.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: label.frame.width, height: 10_000)).height)
+    }
+
+    /// A label that shows at most two wrapped lines: its cell wraps at words and cuts the last visible line.
+    /// (A label whose cell does not wrap draws one truncated line however tall its frame is.)
+    private func assertWrapsInTwoLinesAndCutsTheLast(_ label: NSTextField, _ tag: String,
+                                                     file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(label.cell?.wraps, true, "\(tag): the label's own cell wraps", file: file, line: line)
+        XCTAssertEqual(label.lineBreakMode, .byWordWrapping, "\(tag): it breaks lines at words", file: file, line: line)
+        XCTAssertEqual(label.maximumNumberOfLines, 2, "\(tag): at most two lines", file: file, line: line)
+        XCTAssertEqual(label.cell?.truncatesLastVisibleLine, true, "\(tag): what does not fit is cut at the end of the last line", file: file, line: line)
+    }
+
+    func testTheReasonLabelItselfIsSetToWrapAtWordsInTwoLinesAndCutTheLast() throws {
+        let text = StagingDisabledReason.mirror.text
+        for width in [200.0, 600.0] {
+            let (_, host) = mirrorHost(width: CGFloat(width))
+            let label = try XCTUnwrap(reasonLabel(in: host, text: text), "width \(Int(width))")
+
+            assertWrapsInTwoLinesAndCutsTheLast(label, "width \(Int(width))")
+            XCTAssertEqual(StagingDrawerView.reasonLines, 2, "harness")
+        }
+    }
+
+    func testTheReasonLabelsOwnCellNeedsTwoLinesAtTwoHundredPointsAndTheLabelHasRoomForThemAndOneLineWhenThereIsRoom() throws {
+        let text = StagingDisabledReason.mirror.text
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: Theme.statusFont)
+        let narrow = mirrorHost(width: 200)
+        let wide = mirrorHost(width: 600)
+        let narrowLabel = try XCTUnwrap(reasonLabel(in: narrow.host, text: text))
+        let wideLabel = try XCTUnwrap(reasonLabel(in: wide.host, text: text))
+
+        // Measured by the label's OWN cell, which is what draws it.
+        let narrowNeed = ownCellNeed(of: narrowLabel)
+        let wideNeed = ownCellNeed(of: wideLabel)
+        XCTAssertGreaterThanOrEqual(narrowNeed, 2 * lineHeight - 0.5, "the label's own cell needs two lines at 200 pt, not one: \(narrowNeed) pt")
+        XCTAssertLessThan(narrowNeed, 3 * lineHeight - 0.5, "and not three")
+        XCTAssertLessThan(wideNeed, 2 * lineHeight - 0.5, "one line is enough at 600 pt: \(wideNeed) pt")
+        XCTAssertGreaterThanOrEqual(narrowLabel.frame.height, narrowNeed - 0.5, "the label is as tall as its own cell needs")
+        XCTAssertGreaterThanOrEqual(wideLabel.frame.height, wideNeed - 0.5)
+    }
+
+    func testTheReasonLabelDrawsBothWrappedLinesInsideItsOwnFrameAtTwoHundredPointsAndOneLineWhenThereIsRoom() throws {
+        let text = StagingDisabledReason.mirror.text
+        let narrow = mirrorHost(width: 200)
+        let wide = mirrorHost(width: 600)
+        let narrowLabel = try XCTUnwrap(reasonLabel(in: narrow.host, text: text))
+        let wideLabel = try XCTUnwrap(reasonLabel(in: wide.host, text: text))
+
+        // Rendered by the label itself into a bitmap: lines of ink, counted. (No descender in this text,
+        // so two lines are two clearly separate bands.)
+        let narrowInk = try inkBands(of: narrowLabel)
+        let wideInk = try inkBands(of: wideLabel)
+
+        XCTAssertEqual(narrowInk.bands.count, 2, "the reason's label draws two lines of text at 200 pt: \(narrowInk.bands) in \(narrowLabel.frame)")
+        XCTAssertEqual(wideInk.bands.count, 1, "and one line at 600 pt: \(wideInk.bands) in \(wideLabel.frame)")
+    }
+
     // MARK: - Stacked combining marks cannot cover the lines below the command
 
     func testTheLinesBelowACommandOfStackedCombiningMarksSitBelowItsClippedLabel() throws {
@@ -1836,6 +2191,75 @@ final class StagingDrawerViewTests: XCTestCase {
                 XCTAssertGreaterThanOrEqual(warning.frame.minY, command.frame.maxY - 0.5, tag)
             }
         }
+    }
+
+    // MARK: - The note under a command wraps in its own label, two lines at most
+
+    private var veryLongNote: String {
+        "Run the whole migration suite before you push this branch, because the last two reviews both found a missing index and a rename that broke the staging seed script, and nobody wants a third round of that"
+    }
+
+    /// A drawer with one plain row carrying `note`, laid out at `width`, and the label that draws the note.
+    private func noteRow(width: CGFloat, note: String) throws -> (host: StagingDrawerHost, row: StagingRowView, label: NSTextField) {
+        let rig = makeRig()
+        let host = makeHost(rig, width: width, bodyHeight: 1_000)
+        rig.ingest([StagingFixtures.entry("s-1", 1, "echo hello", note: note)])
+        rig.settle()
+        host.drawer.refresh()
+        host.relayout()
+        let row = try XCTUnwrap(host.rows.first)
+        row.needsLayout = true
+        row.layoutSubtreeIfNeeded()
+        let fields = row.subviews.compactMap { $0 as? NSTextField }
+        let label = try XCTUnwrap(fields.first { $0.stringValue.contains("(unverified)") }, "the note is in the row at width \(Int(width))")
+        return (host, row, label)
+    }
+
+    func testTheNotesOwnLabelWrapsAtWordsAndCutsOnlyItsLastOfTwoLinesAndStillSaysUnverifiedAtTheStart() throws {
+        for width in [200.0, 400.0] {
+            let tag = "width \(Int(width))"
+            let (_, row, label) = try noteRow(width: CGFloat(width), note: veryLongNote)
+
+            assertWrapsInTwoLinesAndCutsTheLast(label, tag)
+            XCTAssertTrue(label.stringValue.hasPrefix("Claudia's note (unverified): "), "\(tag): \(label.stringValue)")
+            XCTAssertTrue(label.stringValue.contains("Run the whole migration suite"), tag)
+            XCTAssertFalse(label.isHiddenOrHasHiddenAncestor, tag)
+            XCTAssertTrue(row.bounds.insetBy(dx: -0.5, dy: -0.5).contains(label.frame), "\(tag): \(label.frame) in \(row.bounds)")
+        }
+    }
+
+    func testALongNoteDrawsTwoLinesInItsOwnFrameAtTwoHundredPointsAndIsCutThereNotAtThree() throws {
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: Theme.statusFont)
+        let (_, row, label) = try noteRow(width: 200, note: veryLongNote)
+
+        // What the label's own cell draws: two lines of ink ("Claudia's note", then "(unverified): ..." cut off).
+        let ink = try inkBands(of: label)
+        XCTAssertEqual(ink.bands.count, 2, "the note's label draws two lines at 200 pt: \(ink.bands)")
+
+        // The label has room for exactly those two lines, and the row for the label.
+        XCTAssertGreaterThanOrEqual(label.frame.height, 2 * lineHeight - 0.5, "room for two lines: \(label.frame)")
+        XCTAssertLessThan(label.frame.height, 3 * lineHeight - 0.5, "never room for a third: \(label.frame)")
+        XCTAssertTrue(row.bounds.insetBy(dx: -0.5, dy: -0.5).contains(label.frame), "\(label.frame) in \(row.bounds)")
+        // Its own cell needs more than that for the whole note: it is cut, not squeezed.
+        XCTAssertGreaterThan(ownCellNeed(of: label), 3 * lineHeight, "the label's own cell wraps the whole note onto more than three lines at 200 pt")
+    }
+
+    func testALongNoteAtFourHundredPointsAlsoDrawsTwoLinesAndAShortNoteDrawsOne() throws {
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: Theme.statusFont)
+
+        let long = try noteRow(width: 400, note: veryLongNote).label
+        let longInk = try inkBands(of: long)
+        let first = try XCTUnwrap(longInk.bands.first, "the long note draws something")
+        let last = try XCTUnwrap(longInk.bands.last)
+        let extent = CGFloat(last.upperBound - first.lowerBound) * longInk.pointsPerPixelRow
+        XCTAssertGreaterThan(extent, lineHeight * 1.4, "the ink of a long note spans two lines, not one: \(extent) pt, bands \(longInk.bands)")
+        XCTAssertLessThanOrEqual(longInk.bands.count, 2, "never a third line: \(longInk.bands)")
+        XCTAssertLessThan(long.frame.height, 3 * lineHeight - 0.5)
+
+        let short = try noteRow(width: 400, note: "check the path first").label
+        let shortInk = try inkBands(of: short)
+        XCTAssertEqual(shortInk.bands.count, 1, "a note that fits is one line: \(shortInk.bands)")
+        XCTAssertLessThan(short.frame.height, 2 * lineHeight - 0.5, "and takes no room for a second")
     }
 
     // MARK: - "Show all" and the command's drawn lines

@@ -5,8 +5,9 @@ import Foundation
 ///
 /// - One list per terminal id. A frame whose revision is not newer than the last one seen is ignored
 ///   (the daemon's revision counts up across every list).
-/// - `state: none` removes the list; `terminal_closed` and a lost daemon connection remove it too (the
-///   daemon forgets its lists when it restarts, so a drawer must not outlive it).
+/// - `state: none` removes the list; `terminal_closed`, a frame the app cannot read (the revision floor is
+///   kept) and a lost daemon connection remove it too (the daemon forgets its lists when it restarts, so a
+///   drawer must not outlive it).
 /// - For every entry, the local monotonic time its current `(command, note)` was first received, or
 ///   the time the list's rows last changed (`shownSince`): the drawer will not insert an entry a person
 ///   has had under 1.5 s to read, and none whose row may just have moved under the pointer. Any change to
@@ -115,6 +116,15 @@ final class TerminalStagingStore {
     /// A closed terminal has no staged list.
     func terminalClosed(_ terminalId: String) {
         lastRevision.removeValue(forKey: terminalId)
+        guard lists.removeValue(forKey: terminalId) != nil else { return }
+        shownSince.removeValue(forKey: terminalId)
+        notify(terminalId)
+    }
+
+    /// A frame for `terminalId` could not be read: the list is dropped (the drawer must not show what the
+    /// daemon no longer vouches for) but the revision floor stays, so an older replayed frame cannot bring
+    /// it back. A closed terminal, by contrast, forgets its revision.
+    func listUnreadable(_ terminalId: String) {
         guard lists.removeValue(forKey: terminalId) != nil else { return }
         shownSince.removeValue(forKey: terminalId)
         notify(terminalId)
