@@ -382,9 +382,9 @@ final class MotherOriginRowTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
 
         func find(_ el: Any, label: String, depth: Int = 0) -> NSRect? {
-            guard depth < 12, let obj = el as? NSObject else { return nil }
-            if obj.accessibilityLabel() == label { return obj.accessibilityFrame() }
-            for k in obj.accessibilityChildren() ?? [] { if let r = find(k, label: label, depth: depth + 1) { return r } }
+            guard depth < 12, let ax = el as? NSAccessibilityProtocol else { return nil }
+            if ax.accessibilityLabel?() == label { return ax.accessibilityFrame?() }
+            for k in ax.accessibilityChildren?() ?? [] { if let r = find(k, label: label, depth: depth + 1) { return r } }
             return nil
         }
         let button = try XCTUnwrap(find(host, label: "Show all jobs"), "the clear button is not in the header")
