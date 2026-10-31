@@ -2100,6 +2100,36 @@ async fn the_history_vouches_for_a_session_before_its_child_runs_and_a_failed_sp
 }
 
 #[tokio::test]
+async fn a_poll_that_decided_the_job_first_still_gets_the_sensitive_flag_from_the_stamp() {
+    // A poll between `mother add` and the stamp can read the record's session alone and decide
+    // `focus` (not sensitive: it cannot know). The stamp that follows must still say so.
+    let rig = Rig::new(Mother::New).await;
+    add_a_sensitive_and_a_plain_focus(&rig, Sensitivity::Marked);
+    rig.history.record(PLAIN_FOCUS, PLAIN_SID);
+    rig.feed
+        .publish_jobs(vec![job("job1", Some(json!({ "session": PLAIN_SID })))]);
+    let decided = rig.book.entry("job1").expect("decided by the poll");
+    assert_eq!(decided.kind, OriginKind::Focus);
+    assert!(!decided.sensitive);
+
+    let caller = nostromo::mother::origin::OriginCaller {
+        tag: PLAIN_FOCUS.into(),
+        name: Some(PLAIN_NAME.into()),
+        session: Some(PLAIN_SID.into()),
+        sensitive: true,
+    };
+    rig.book.stamp("job1", caller.stamp(Via::Mcp, None));
+    assert!(rig.book.entry("job1").expect("still there").sensitive);
+
+    // Another focus's stamp, or an ordinary one, never sets or clears it.
+    rig.book.stamp(
+        "job1",
+        Stamp::focus(PLAIN_FOCUS, None, None, Via::Mcp, None),
+    );
+    assert!(rig.book.entry("job1").expect("still there").sensitive);
+}
+
+#[tokio::test]
 async fn a_name_recorded_during_a_hold_stays_withheld_from_a_network_peer_after_the_hold_ends() {
     let rig = Rig::new(Mother::New).await;
     add_a_sensitive_and_a_plain_focus(&rig, Sensitivity::Marked);

@@ -572,7 +572,8 @@ impl OriginBook {
     ///
     /// Upgrades only: it replaces nothing but an `unknown` or `unverified`
     /// entry. A `focus` or `you` entry is never overwritten (an enqueue that
-    /// lost a race with the poller's evaluation can still add its `notify`).
+    /// lost a race with the poller's evaluation can still add its `notify` and
+    /// its `sensitive` flag).
     pub fn stamp(&self, job_id: &str, stamp: Stamp) -> bool {
         if validate_job_id(job_id).is_err() {
             return false;
@@ -582,15 +583,24 @@ impl OriginBook {
             let mut state = lock(&self.state);
             let notify_only = match state.entries.get_mut(job_id) {
                 Some(existing) if matches!(existing.kind, OriginKind::Focus | OriginKind::You) => {
-                    if existing.notify.is_none()
-                        && stamp.notify.is_some()
-                        && existing.focus_tag == stamp.focus_tag
-                    {
+                    // A poll that lost the race with this stamp decided the origin already (from
+                    // the record's session alone). What only the enqueue knows is added to it:
+                    // its notify level, and that the focus was sensitive when it queued the job
+                    // (a flag is only ever set, never cleared, so the race fails closed).
+                    let same_focus = existing.focus_tag == stamp.focus_tag;
+                    let mut changed = false;
+                    if same_focus && existing.notify.is_none() && stamp.notify.is_some() {
                         existing.notify = stamp.notify;
-                        true
-                    } else {
+                        changed = true;
+                    }
+                    if same_focus && stamp.sensitive && !existing.sensitive {
+                        existing.sensitive = true;
+                        changed = true;
+                    }
+                    if !changed {
                         return false;
                     }
+                    true
                 }
                 _ => false,
             };

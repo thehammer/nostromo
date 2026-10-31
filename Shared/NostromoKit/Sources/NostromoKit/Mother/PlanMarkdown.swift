@@ -111,12 +111,12 @@ public enum PlanMarkdown {
     static let maxPathComponents = 2 * maxDepth + 2 * tailComponents
     static let tailComponents = 3
 
-    /// A line's leading `>` markers beyond this many are dropped before parsing (their text stays).
-    /// Foundation's parser is not cancellable and its cost grows with nesting depth times the number of
-    /// inline runs: 256 KiB of `>` followed by short emphasis spans took 7 s at 2,500 levels and 23 s at
-    /// 10,000, again at every file-watch reload. Past `maxDepth` the converter flattens anyway, so the
-    /// extra markers draw nothing.
-    static let maxQuoteMarkersPerLine = maxDepth
+    /// A line's leading container markers (`>`, a bullet or an ordered-list marker) beyond this many are
+    /// dropped before parsing (their text stays). Foundation's parser is not cancellable and its cost grows
+    /// with nesting depth times the number of inline runs: 256 KiB of `>` followed by short emphasis spans
+    /// took 7 s at 2,500 levels and 23 s at 10,000, again at every file-watch reload. Past `maxDepth` the
+    /// converter flattens anyway, so the extra markers draw nothing.
+    static let maxMarkersPerLine = maxDepth
 
     /// A line's leading white space beyond this many columns (a tab counts 4) is dropped before parsing,
     /// for the same reason: indentation is how lists nest, and every 2 to 4 columns is a level. It keeps
@@ -160,45 +160,73 @@ public enum PlanMarkdown {
         return (PlanDocument(blocks: blocks, outline: converter.outline), work)
     }
 
-    /// The text with each line's container prefix bounded: at most `maxQuoteMarkersPerLine` leading `>`
-    /// markers (the rest, and the white space after each dropped one, are removed) and at most
+    /// The text with each line's container prefix bounded: at most `maxMarkersPerLine` leading container
+    /// markers (`>`, `-`, `*` or `+` followed by white space, 1 to 9 digits and `.` or `)` followed by
+    /// white space; the rest, and the white space after each dropped one, are removed) and at most
     /// `maxIndentColumns` of white space in each stretch of it. Only that prefix is touched, and only
-    /// text is flattened, never lost: whatever followed the markers is still there. One pass.
+    /// nesting is flattened, never text: whatever followed the markers is still there. One pass.
     /// Expects `\n` line breaks (`sanitizeMultiline` leaves no other).
     static func boundingNesting(_ text: String) -> String {
         let space = UInt8(ascii: " "), tab = UInt8(ascii: "\t"), quote = UInt8(ascii: ">"), newline = UInt8(ascii: "\n")
+        let bytes = Array(text.utf8)
         var out: [UInt8] = []
-        out.reserveCapacity(text.utf8.count)
-        var inPrefix = true
-        var quotes = 0
-        var columns = 0
-        var droppingAfterMarker = false
-        for byte in text.utf8 {
-            if byte == newline {
-                out.append(byte)
-                inPrefix = true
-                quotes = 0
-                columns = 0
-                droppingAfterMarker = false
-                continue
+        out.reserveCapacity(bytes.count)
+        var i = 0
+        while i < bytes.count {
+            var markers = 0
+            var columns = 0
+            var dropping = false
+            prefix: while i < bytes.count {
+                let byte = bytes[i]
+                switch byte {
+                case space, tab:
+                    if !dropping {
+                        columns += byte == tab ? 4 : 1
+                        if columns <= maxIndentColumns { out.append(byte) }
+                    }
+                    i += 1
+                case quote:
+                    markers += 1
+                    columns = 0
+                    dropping = markers > maxMarkersPerLine
+                    if !dropping { out.append(byte) }
+                    i += 1
+                default:
+                    let length = listMarkerLength(in: bytes, at: i)
+                    guard length > 0 else { break prefix }
+                    markers += 1
+                    columns = 0
+                    dropping = markers > maxMarkersPerLine
+                    if !dropping { out.append(contentsOf: bytes[i ..< i + length]) }
+                    i += length
+                }
             }
-            guard inPrefix else { out.append(byte); continue }
-            switch byte {
-            case quote:
-                quotes += 1
-                columns = 0
-                droppingAfterMarker = quotes > maxQuoteMarkersPerLine
-                if !droppingAfterMarker { out.append(byte) }
-            case space, tab:
-                if droppingAfterMarker { continue }
-                columns += byte == tab ? 4 : 1
-                if columns <= maxIndentColumns { out.append(byte) }
-            default:
-                inPrefix = false
+            while i < bytes.count {   // the rest of the line is the text
+                let byte = bytes[i]
                 out.append(byte)
+                i += 1
+                if byte == newline { break }
             }
         }
         return String(decoding: out, as: UTF8.self)
+    }
+
+    /// The length of a list marker (without the white space after it) that starts at `i`, or 0:
+    /// `-`, `*` or `+`, or 1 to 9 digits and `.` or `)`; either one followed by a space or a tab.
+    private static func listMarkerLength(in bytes: [UInt8], at i: Int) -> Int {
+        let bullets = [UInt8(ascii: "-"), UInt8(ascii: "*"), UInt8(ascii: "+")]
+        var end = i
+        if bullets.contains(bytes[i]) {
+            end = i + 1
+        } else {
+            while end < bytes.count, bytes[end] >= UInt8(ascii: "0"), bytes[end] <= UInt8(ascii: "9") { end += 1 }
+            guard (1 ... 9).contains(end - i), end < bytes.count,
+                  bytes[end] == UInt8(ascii: ".") || bytes[end] == UInt8(ascii: ")")
+            else { return 0 }
+            end += 1
+        }
+        guard end < bytes.count, bytes[end] == UInt8(ascii: " ") || bytes[end] == UInt8(ascii: "\t") else { return 0 }
+        return end - i
     }
 
     /// The run's block path, outermost first, cut to `maxPathComponents`. Touches only the components it

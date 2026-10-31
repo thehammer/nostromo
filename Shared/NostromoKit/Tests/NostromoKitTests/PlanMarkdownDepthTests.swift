@@ -206,7 +206,11 @@ final class PlanMarkdownDepthTests: XCTestCase {
         let budget = 20_000_000
         let indented = (0 ..< 3_000).map { String(repeating: " ", count: 2 * $0) + "- item" }.joined(separator: "\n")
             + "\n" + String(repeating: " ", count: 6_000) + String(repeating: "*a* ", count: 40_000)
-        for (name, text) in [("2,500 quotes", quotesThenSpans(levels: 2_500)),
+        let bullets = String(repeating: "- ", count: 5_000) + String(repeating: "*a* ", count: 60_000)
+        let numbered = String(repeating: "1. ", count: 5_000) + String(repeating: "*a* ", count: 60_000)
+        let mixed = String(repeating: "> - ", count: 2_500) + String(repeating: "*a* ", count: 60_000)
+        for (name, text) in [("5,000 bullets", bullets), ("5,000 numbered items", numbered), ("2,500 quote-bullet pairs", mixed),
+                             ("2,500 quotes", quotesThenSpans(levels: 2_500)),
                              ("10,000 quotes", quotesThenSpans(levels: 10_000)),
                              ("3,000 nested list levels", indented)] {
             let run = try XCTUnwrap(onSmallStack({ PlanMarkdown.parseCounting(text) }))
@@ -218,13 +222,21 @@ final class PlanMarkdownDepthTests: XCTestCase {
 
     func testTheSourceIsBoundedBeforeItIsParsedAndOnlyItsLinePrefixChanges() {
         let bound = PlanMarkdown.boundingNesting
-        let maxQuotes = PlanMarkdown.maxQuoteMarkersPerLine
+        let maxQuotes = PlanMarkdown.maxMarkersPerLine
 
         let manyQuotes = bound(String(repeating: ">", count: 5_000) + " hello\n> next")
         XCTAssertEqual(manyQuotes, String(repeating: ">", count: maxQuotes) + "hello\n> next",
                        "markers past the cap are dropped with their white space, the text and the next line stay")
         let spaced = bound(String(repeating: "> ", count: 5_000) + "hello")
         XCTAssertEqual(spaced, String(repeating: "> ", count: maxQuotes) + "hello")
+
+        let bullets = bound(String(repeating: "- ", count: 5_000) + "item\n- next")
+        XCTAssertEqual(bullets, String(repeating: "- ", count: maxQuotes) + "item\n- next", "bullets count toward the same cap")
+        let numbered = bound(String(repeating: "12. ", count: 5_000) + "item")
+        XCTAssertEqual(numbered, String(repeating: "12. ", count: maxQuotes) + "item")
+        let mixed = bound(String(repeating: "> 1) * ", count: 5_000) + "item")
+        XCTAssertEqual(mixed, String(repeating: "> 1) * ", count: 10) + "> 1) " + "item",
+                       "quotes, ordered and bullet markers share one cap of \(maxQuotes): ten groups of three and two more")
 
         let indent = bound(String(repeating: " ", count: 5_000) + "- deep")
         XCTAssertEqual(indent, String(repeating: " ", count: PlanMarkdown.maxIndentColumns) + "- deep")
