@@ -464,20 +464,25 @@ final class FoldTextSanitizerDocumentTextTests: XCTestCase {
     }
 
     func testScalarsJustOutsideTheRemovedRangesAreLeftAlone() {
-        for value: UInt32 in [0x00AC, 0x00AE, 0xFE10, 0xE01F0] {
+        for value: UInt32 in [0x00AC, 0x00AE, 0xFE10] {
             let s = "a" + String(Unicode.Scalar(value)!) + "b"
             assertBoth(s, s, "U+\(String(value, radix: 16, uppercase: true)) is not one of them")
         }
     }
 
     func testARowKeepsEverythingDocumentTextDrops() {
-        // Row mode did not change: these are what it has always kept.
-        let kept = ["a\u{00AD}b", "a\u{180E}b", "a\u{FE00}b", "a\u{E0100}b", "\u{2764}\u{FE0F}", "a\(vs16)", "a\(vs15)b",
+        // Rows keep what emoji and scripts need next to ordinary text: ZWJ/ZWNJ and U+FE00-FE0F. Rows now match
+        // the daemon's `is_invisible` for the rest (U+00AD, U+180B-180F, U+E0100-E0FFF): a hidden payload can ride
+        // in the variation selectors supplement after a visible base character, so a row must not carry it.
+        let kept = ["a\u{FE00}b", "\u{2764}\u{FE0F}", "a\(vs16)", "a\(vs15)b",
                     "a\(zwj)b", "a\(zwnj)b", "\(zwj)\(eAcute)", "\(eAcute)\(zwj)", "\(eAcute)\(zwj)\(zwj)\(eAcute)"]
         for text in kept {
             XCTAssertEqual(row(text), text, "a row keeps \(hex(text))")
         }
         XCTAssertEqual(row("👩\(zwj)👩\(zwj)👧"), "👩\(zwj)👩\(zwj)👧")
+        for dropped in ["a\u{00AD}b", "a\u{180E}b", "a\u{E0100}b", "a\u{E01F0}b"] {
+            XCTAssertEqual(row(dropped), "ab", "a row drops \(hex(dropped))")
+        }
     }
 
     // MARK: U+FE0F and U+FE0E (text and emoji presentation)
