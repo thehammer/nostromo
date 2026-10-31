@@ -35,7 +35,6 @@ final class JobViewSwitch: NSSegmentedControl {
     }
 
     override func accessibilityChildren() -> [Any]? {
-        guard !readingAppKitChildren else { return nil }
         while elements.count < segmentCount {
             let element = SegmentElement()
             element.setAccessibilityRole(.radioButton)
@@ -53,42 +52,11 @@ final class JobViewSwitch: NSSegmentedControl {
         return elements
     }
 
-    /// Where each segment is, in the control's own coordinates. AppKit lays the segments out and builds its
-    /// own accessibility proxy for each, whose frame is the segment's real rectangle whatever the
-    /// control's `segmentDistribution`, widths or style (Voice Control and the VoiceOver cursor draw
-    /// from these frames). Only when AppKit gives none that fit (the control is not in a window yet, or
-    /// it names another number of children) are they worked out from the distribution.
+    /// Where each segment is, in the control's own coordinates: the control's width shared out by its
+    /// `segmentDistribution`, equally for `.fillEqually`, otherwise by the width of each label with the same
+    /// padding each (the segments size themselves to their labels). An estimate; it is not read back from
+    /// AppKit's own segment geometry.
     private func segmentFrames() -> [NSRect] {
-        appKitSegmentFrames() ?? estimatedSegmentFrames()
-    }
-
-    /// Set while AppKit's own children are being read, so a query that comes back to this control from
-    /// inside that read is answered with nothing instead of recursing.
-    private var readingAppKitChildren = false
-
-    /// The rectangles of AppKit's own segment proxies, converted from screen coordinates, or nil when
-    /// they are missing or do not lie on the control.
-    private func appKitSegmentFrames() -> [NSRect]? {
-        guard let window, segmentCount > 0, bounds.width > 0, bounds.height > 0 else { return nil }
-        readingAppKitChildren = true
-        defer { readingAppKitChildren = false }
-        guard let proxies = super.accessibilityChildren(), proxies.count == segmentCount else { return nil }
-        let frameKey = "accessibilityFrame"
-        let slack = bounds.insetBy(dx: -4, dy: -4)
-        var frames: [NSRect] = []
-        for proxy in proxies {
-            guard let object = proxy as? NSObject, object.responds(to: NSSelectorFromString(frameKey)),
-                  let value = object.value(forKey: frameKey) as? NSValue else { return nil }
-            let frame = convert(window.convertFromScreen(value.rectValue), from: nil)
-            guard frame.width > 0, frame.height > 0, slack.contains(frame) else { return nil }
-            frames.append(frame)
-        }
-        return frames
-    }
-
-    /// The control's width shared out by its distribution: equally for `.fillEqually`, otherwise by the
-    /// width of each label with the same padding each (the segments size themselves to their labels).
-    private func estimatedSegmentFrames() -> [NSRect] {
         let count = segmentCount
         guard count > 0, bounds.width > 0 else { return Array(repeating: bounds, count: count) }
         let shares: [CGFloat]
