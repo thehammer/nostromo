@@ -337,6 +337,25 @@ final class PlanFileLoaderTests: XCTestCase {
         XCTAssertTrue(probe.results.isEmpty, "a read that finished after stop() is not delivered")
     }
 
+    func testAFileThatAppearsAfterTheWatchWasArmedIsWatchedOnceItLoads() throws {
+        let dir = try PlanTestSupport.tempDirectory(self)
+        let url = dir.appendingPathComponent("appears.md")
+        // The read is held back until `load` has returned, so the watcher's look (no file yet) comes first.
+        let queue = DispatchQueue(label: "plan.loader.test.late-read", attributes: .initiallyInactive)
+        let probe = Probe(reader: { path in
+            try? PlanTestSupport.writeInPlace("# Appears\n", to: url)
+            return PlanFileRules.read(path: path)
+        }, readQueue: queue)
+
+        probe.loader.load(path: url.path)
+        XCTAssertFalse(probe.loader.isWatching, "nothing was there to watch when the watcher looked")
+        queue.activate()
+        waitFor("the file to load") { !probe.results.isEmpty }
+
+        XCTAssertEqual(probe.texts, ["# Appears\n"])
+        XCTAssertTrue(probe.loader.isWatching, "a loaded plan is always watched")
+    }
+
     func testEachLoadAndStopTakesANewGeneration() {
         let probe = Probe(reader: { _ in .notFound })
         let g0 = probe.loader.generation

@@ -228,9 +228,14 @@ final class PlanFileLoader {
     }
 
     /// No file: look again later. A file (or any other answer): the watcher is the way to hear about it.
+    ///
+    /// `start` arms its watcher right after it queues the read, so a file that appears between the
+    /// watcher's `realpath` and the reader's loads with nothing watching it. A loaded file with no
+    /// watcher on it arms one here.
     private func noteResult(_ result: PlanFileResult) {
         guard result == .notFound else {
             retryAttempt = 0
+            if case .loaded = result, source == nil, let path { arm(path: path) }
             return
         }
         retry?.cancel()

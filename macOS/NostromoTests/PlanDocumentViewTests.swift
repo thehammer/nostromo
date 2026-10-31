@@ -433,7 +433,7 @@ final class PlanDocumentViewTests: XCTestCase {
         XCTAssertEqual(view.messageOpenPlanButton.isHiddenOrHasHiddenAncestor, !opensInEditor,
                        "Open ↗ is offered only when the plan can be opened in an editor instead", file: file, line: line)
         XCTAssertEqual(view.messageRevealButtonView.isHiddenOrHasHiddenAncestor, !revealsInFinder,
-                       "Show in Finder is offered instead of Open ↗ for a file that is not markdown", file: file, line: line)
+                       "Show in Finder is offered for a file that is not markdown, cannot be read or is not UTF-8", file: file, line: line)
         XCTAssertNil(rig.window.attachedSheet, "no sheet", file: file, line: line)
         XCTAssertTrue(view.documentScrollView.isHidden, "no document is shown", file: file, line: line)
 
@@ -480,7 +480,8 @@ final class PlanDocumentViewTests: XCTestCase {
         let url = dir.appendingPathComponent("plan.md")
         try PlanTestSupport.writeInPlace("# Hidden\n", to: url)
         XCTAssertEqual(chmod(url.path, 0o000), 0)
-        assertUnreadable(url.path, shows: .notReadable, message: "Can't read this file (permissions).", opensInEditor: false)
+        assertUnreadable(url.path, shows: .notReadable, message: "Can't read this file (permissions).",
+                         opensInEditor: false, revealsInFinder: true)
     }
 
     func testAFileThatIsNotMarkdownIsNotShownAndItsTextIsNowhereOnScreen() throws {
@@ -515,7 +516,8 @@ final class PlanDocumentViewTests: XCTestCase {
         let dir = try PlanTestSupport.tempDirectory(self)
         let url = dir.appendingPathComponent("plan.md")
         try Data([0xFF, 0xFE, 0x41, 0x80]).write(to: url)
-        assertUnreadable(url.path, shows: .notUTF8, message: "This plan isn't UTF-8 text.", opensInEditor: false)
+        assertUnreadable(url.path, shows: .notUTF8, message: "This plan isn't UTF-8 text.",
+                         opensInEditor: false, revealsInFinder: true)
     }
 
     // MARK: - Hostile text (SR2)
