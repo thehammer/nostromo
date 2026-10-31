@@ -94,6 +94,9 @@ pub struct JobRecord {
     pub has_pr: bool,
     #[serde(default)]
     pub last_seen_ms: i64,
+    /// When Mother says the job finished (epoch ms); `None` while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<i64>,
     /// Mother's state of the job when it was last accounted for: told,
     /// dropped, not sent, or recorded silently (bootstrap, a job nobody is
     /// told about). Kept apart from the notice's event token, which names PR
@@ -112,7 +115,9 @@ pub struct JobRecord {
     pub notify: Option<NotifyLevel>,
     #[serde(default)]
     pub snapshot: Snapshot,
-    /// The PR's end, once announced (`true` merged, `false` closed).
+    /// The PR's end, once announced (`true` merged, `false` closed). This is
+    /// MF2b's `pr_merged_notified` / `pr_closed_seen`: set when `pr_event` is
+    /// accepted, so a relay event, a poll and a restart announce a PR once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_final: Option<bool>,
     #[serde(default)]

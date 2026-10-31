@@ -1501,3 +1501,178 @@ fn the_state_frame_lists_each_focus_with_its_mode_and_hold() {
         other => panic!("not a notice state frame: {other:?}"),
     }
 }
+
+// ── MF2b leftovers from MF2a: a queued notice whose session exits, and the
+// ── wake race for a replaced notice ─────────────────────────────────────────
+
+#[test]
+fn a_notice_queued_behind_a_user_turn_is_held_not_lost_when_the_session_exits() {
+    let r = Rig::new();
+    r.reply(F, Reply::Queued);
+    r.jobs(&[job(F, "a", "succeeded")]);
+    r.after(30 * SEC);
+    assert_eq!(
+        r.deliveries().len(),
+        1,
+        "handed to the busy session's queue"
+    );
+    assert_eq!(
+        r.status("a"),
+        (NoticeStatus::Held, Some(NoticeReason::Busy))
+    );
+
+    // The user's turn runs, then the session exits before the queued notice
+    // was ever written: the notice died with the session.
+    r.user_turn_starts(F);
+    r.turn(F, TurnEvent::Exited);
+    assert_eq!(
+        r.status("a"),
+        (NoticeStatus::Held, Some(NoticeReason::SessionNotRunning)),
+        "an untold notice is taken back, not left in flight forever"
+    );
+    let held = r.focus(F).and_then(|f| f.held).expect("F shows a hold");
+    assert_eq!(held.reason, NoticeReason::SessionNotRunning);
+    assert_eq!(
+        r.deliveries().len(),
+        1,
+        "an exited session is not written to"
+    );
+
+    // It is not silently kept forever: it is still a hold (not told, not gone)
+    // however long it waits.
+    r.after(2 * HOUR);
+    assert_eq!(
+        r.status("a"),
+        (NoticeStatus::Held, Some(NoticeReason::SessionNotRunning))
+    );
+    assert_eq!(r.deliveries().len(), 1);
+
+    // A later turn of any author re-delivers it, once.
+    r.reply(F, Reply::Queued);
+    r.cli_turn_starts(F);
+    let ds = r.deliveries();
+    assert_eq!(ds.len(), 2, "the next turn releases it: {ds:#?}");
+    assert_eq!(ids(&ds[1].fresh), sorted(&["a"]));
+    r.notice_turn_starts(F);
+    assert_eq!(r.status("a").0, NoticeStatus::Told);
+    r.turn_ends(F);
+    r.after(HOUR);
+    assert_eq!(r.deliveries().len(), 2, "told once, never again");
+    let told = r
+        .notice("a")
+        .history
+        .into_iter()
+        .filter(|h| h.status == NoticeStatus::Told)
+        .count();
+    assert_eq!(told, 1);
+}
+
+/// A port that hands out whatever `inner` replies and, once `race` is set,
+/// lets the notice turn's `Started` reach the engine before `deliver` returns
+/// (the session reader's worker beating the deliverer to the lock).
+struct ReplaceRacePort {
+    inner: FakePort,
+    engine: Mutex<Option<std::sync::Weak<NoticeEngine>>>,
+    race: std::sync::atomic::AtomicBool,
+}
+
+impl SessionPort for ReplaceRacePort {
+    fn deliver(
+        &self,
+        tag: &str,
+        key: &str,
+        merged: &str,
+        fresh: &str,
+    ) -> anyhow::Result<NoticeDelivery> {
+        let outcome = self.inner.deliver(tag, key, merged, fresh)?;
+        if self.race.load(std::sync::atomic::Ordering::SeqCst) {
+            let engine = self
+                .engine
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .expect("the engine is alive");
+            engine.on_turn(
+                tag,
+                &TurnEvent::Started {
+                    author: notice_author(key),
+                },
+            );
+        }
+        Ok(outcome)
+    }
+
+    fn withdraw(&self, tag: &str) {
+        self.inner.withdraw(tag);
+    }
+}
+
+#[test]
+fn a_replaced_notice_whose_turn_started_before_the_delivery_returned_loses_no_older_job() {
+    let r = Rig::new();
+    let port = Arc::new(ReplaceRacePort {
+        inner: FakePort::default(),
+        engine: Mutex::new(None),
+        race: std::sync::atomic::AtomicBool::new(false),
+    });
+    *port.engine.lock().unwrap() = Some(Arc::downgrade(&r.engine));
+    r.engine.set_port(port.clone());
+    let delivered = || port.inner.deliveries.lock().unwrap().clone();
+
+    // gen 1: handed to a busy session, still waiting in its queue.
+    port.inner
+        .replies
+        .lock()
+        .unwrap()
+        .insert(F.to_owned(), Reply::Queued);
+    r.jobs(&[job(F, "a", "succeeded")]);
+    r.after(30 * SEC);
+    assert_eq!(delivered().len(), 1);
+    assert_eq!(
+        r.status("a"),
+        (NoticeStatus::Held, Some(NoticeReason::Busy))
+    );
+
+    // gen 2 replaces it in the session's queue, and its turn starts before
+    // the engine hears "replaced".
+    port.inner
+        .replies
+        .lock()
+        .unwrap()
+        .insert(F.to_owned(), Reply::Replaced);
+    port.race.store(true, std::sync::atomic::Ordering::SeqCst);
+    r.jobs(&[job(F, "a", "succeeded"), job(F, "b", "succeeded")]);
+    r.after(30 * SEC);
+    let ds = delivered();
+    assert_eq!(ds.len(), 2, "{ds:#?}");
+    assert_eq!(ids(&ds[1].fresh), sorted(&["b"]));
+    assert_eq!(
+        ids(&ds[1].merged),
+        sorted(&["a", "b"]),
+        "the replacement carries the older job too"
+    );
+
+    // The replacement's turn told both; the older job was not taken back.
+    assert_eq!(r.status("a"), (NoticeStatus::Told, None));
+    assert_eq!(r.status("b"), (NoticeStatus::Told, None));
+
+    r.turn_ends(F);
+    r.after(HOUR);
+    r.after(HOUR);
+    assert_eq!(
+        delivered().len(),
+        2,
+        "nothing is sent twice after the turn ends: {:#?}",
+        delivered()
+    );
+    for id in ["a", "b"] {
+        let told = r
+            .notice(id)
+            .history
+            .into_iter()
+            .filter(|h| h.status == NoticeStatus::Told)
+            .count();
+        assert_eq!(told, 1, "{id} is told exactly once");
+    }
+}

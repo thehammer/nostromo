@@ -14,6 +14,9 @@
 //! Only jobs whose origin the daemon verified (`OriginKind::Focus`) are ever
 //! notified, and only their own focus.
 //!
+//! `pr_state` supplies the "PR merged" signal: relay events and a low-rate
+//! `gh` poll, both ending in [`NoticeEngine::pr_event`].
+//!
 //! This file holds the wire types, the clock and session ports, and the
 //! [`NoticeEngine`] API: it takes the lock, calls into the private state
 //! machine (`state`) and runs the effects it returns. `wiring` connects the
@@ -32,9 +35,12 @@
 //! lock. The port lock (`RwLock<Option<port>>`) is also a leaf: the port is
 //! cloned out of it before use. So is the file lock (`written`): the store is
 //! snapshotted under the engine lock, and written to disk only after it is
-//! released, so a slow disk never holds up `on_registry` (which the session
-//! manager calls under its own lock). Snapshots carry a sequence number, so a
-//! write that lost the race to a newer one is skipped.
+//! released. A call that changes the store writes it on its caller's thread, so
+//! a slow disk delays that caller, and any other call that wants to write; but
+//! `on_registry` (which the session manager calls under its own lock) never
+//! writes: it marks the store dirty and the next call that finishes (the tick)
+//! writes it. Snapshots carry a sequence number, so a write that lost the race
+//! to a newer one is skipped.
 //!
 //! Turn events reach the engine from the session readers through a channel to
 //! one worker thread ([`attach`]), never on the reader itself, because a
@@ -47,6 +53,7 @@ pub mod batch;
 pub mod detect;
 pub mod element;
 pub mod limits;
+pub mod pr_state;
 mod state;
 pub mod store;
 mod wiring;
@@ -354,6 +361,15 @@ impl NoticeEngine {
         let mut st = self.lock();
         st.pr_event(job_id, merged, now);
         self.finish(st, Vec::new());
+    }
+
+    /// The jobs whose PRs are worth asking about: a verified origin, an open
+    /// focus, a level that is not Off, no PR outcome announced yet, still in
+    /// the feed, and running or finished less than 14 days ago. `None` until
+    /// the engine has seen the feed once; empty while the global switch is off.
+    pub fn pr_candidates(&self) -> Option<Vec<pr_state::PrCandidate>> {
+        let now = self.now();
+        self.lock().pr_candidates(now)
     }
 
     /// A turn event from `tag`'s session.

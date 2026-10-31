@@ -14,6 +14,8 @@
 //!   (MF2a-7, MF2a-12).
 //! - `audit_tests.rs`: the audit vocabulary and the TRACE canary (MF2a-12, SR8).
 //! - `concurrency_tests.rs`: the lock-order test (MF2a-13).
+//! - `pr_state_tests.rs`: learning that a job's PR merged: relay events, the
+//!   `gh` poll, `GhProbe` and the log canary (MF2b).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,6 +42,8 @@ mod element_tests;
 mod engine_tests;
 #[path = "limits_tests.rs"]
 mod limits_tests;
+#[path = "pr_state_tests.rs"]
+mod pr_state_tests;
 
 // ── constants ────────────────────────────────────────────────────────────────
 

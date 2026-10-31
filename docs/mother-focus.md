@@ -194,7 +194,40 @@ review findings. Code: `src/mother/notices/element.rs`.
 | `pr_opened` | waking for the batch window: with a final state in the same window it is one wake |
 | `queued`, `ready`, `running`, `retry_started` (`failed` back to `queued`/`ready`/`running`), `pr_closed` | quiet: never starts a turn; rides along in the next delivery's `since` |
 
-`pr_merged` and `pr_closed` come from `NoticeEngine::pr_event`, fed by slice MF2b; this slice wires the API only.
+`pr_merged` and `pr_closed` come from `NoticeEngine::pr_event`, fed by the tracker described under [PR merged](#pr-merged).
+
+### PR merged
+
+Mother records a job's `pr_url` and never a merge, so the daemon learns it from outside
+(`src/mother/notices/pr_state.rs`). Each PR outcome is announced once per job: the store keeps it
+(`pr_final`), so a relay event, a poll and a daemon restart cannot announce it twice, and a merge
+already announced silences a later close.
+
+- **Which jobs.** Only jobs the engine would notify: a verified origin, an open focus, an effective
+  level that is not Off, no outcome announced yet, still in the job feed, and running or finished less
+  than 14 days ago. With the global switch off nothing is tracked and nothing is probed.
+- **The relay.** nostromd's github-relay subscription (webhook to WebSocket, about 3 s) fans every
+  event out to Perri's queue (unchanged) and to the tracker. `pr.merged`, or `pr.closed` with
+  `merged: true`, for a tracked `owner/name#number` is a merge (waking); `pr.closed` with
+  `merged: false` is a close (quiet). Owner and repo compare without regard to case. A job's PR is read
+  from its `pr_url` (`https://github.com/<owner>/<name>/pull/<n>`, a trailing `/files`, query or
+  fragment tolerated); anything else is not tracked.
+- **Coverage.** The relay covers the organisation its ack names (`Carefeed` by default): everything else,
+  such as `thehammer/nostromo` and `thehammer/mother`, is polled about every 5 minutes. A covered job is
+  polled too while the relay is disconnected (or disabled after a 401 or close code 4001), and once
+  after every relay (re)connect, because relay delivery is at-most-once.
+- **The poll.** `gh pr view <url> --json state,mergedAt` (no shell, 20 s timeout, stderr discarded),
+  `MERGED`, `CLOSED` or `OPEN`. Rate limits: a job is probed at most once every 5 minutes; a cycle
+  (every 60 s) starts at most 20 probes, the oldest-checked first; after a failed probe the job backs
+  off 5, 10, 20, 40 and at most 60 minutes. Tracking ends on a merge, a close, 14 days after the job
+  finished, or when the job leaves the feed.
+- **Running.** The subscriber starts when `relay_url` and `relay_token` are set and Perri is enabled or
+  Mother notices are on at daemon start; the poll runs either way. Switching notices on later does not
+  start a subscriber that was not running: the poll covers the gap until the daemon restarts.
+- **Delivery.** `pr_event` goes through the normal path: the 30 s window, caps, loop guard and switches.
+  A job that already succeeded can still wake its focus on its merge.
+- **Logging.** Job ids, counts and error classes only; no PR URL, repo, token or `gh` output. A canary
+  test scans the log and the audit file.
 
 ### Batching and delivery
 
@@ -236,7 +269,7 @@ The effective level is the lowest of the global switch, the focus's mode and the
   next message in that focus. Held items are never dropped for the cap; the 24 h rule still applies.
 - **Loop guard**: a job a focus queues during a notice turn (MCP stamp, or a shell job first seen then)
   is notice-born, and so is one the feed shows late if its creation time falls inside the notice turn
-  (until another turn starts). A notice turn that queued one grows the focus's chain; one that did not
+  (until the user starts a turn or the next notice turn starts). A notice turn that queued one grows the focus's chain; one that did not
   ends it, and so does any turn the user starts. At 3, every later delivery for the focus is held (`loop_guard`,
   `chain_held: true`) until the user sends a message there; that message releases one combined delivery.
 - `wakes_by_day` counts notice turns per local day for the last 7 days (SR9).
@@ -287,6 +320,6 @@ the log and the audit file.
 
 `src/mother/origin.rs` (session history, origin book, annotation, the `--origin-focus` probe),
 `src/mother/audit.rs`, `src/mother/feed.rs` (annotates on every publish), `src/mother/notices/` (the
-notice engine: `detect`, `batch`, `element`, `limits`, `store`), `src/mcp/tools/mother_mutators.rs`
+notice engine: `detect`, `batch`, `element`, `limits`, `store`, `pr_state`), `src/data/relay_client.rs` (the relay hub and status), `src/mcp/tools/mother_mutators.rs`
 and `create_focus.rs` (stamping), `src/ipc/session_manager/mod.rs` (the session id in the environment, the
 history), `src/ipc/peer.rs` (network redaction), Kit `Wire/MotherJobAnnotation.swift`.

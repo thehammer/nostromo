@@ -699,12 +699,36 @@ async fn main() -> Result<()> {
         }
     });
 
-    // ── github-relay subscriber ───────────────────────────────────────────────
-    // Connects to the relay WebSocket and triggers an immediate queue refresh
-    // on every relevant GitHub event, reducing PR-queue lag from the poll
-    // interval (~60s) to ~3s. No-ops if relay_url/relay_token are not set.
-    if let Some(relay_tx) = perri_queue_relay_tx {
-        nostromo::data::relay_client::spawn(config.clone(), relay_tx);
+    // ── github-relay subscriber and Mother's PR tracker ───────────────────────
+    // The relay WebSocket triggers an immediate Perri queue refresh on every
+    // relevant GitHub event (PR-queue lag from the poll interval, ~60s, to
+    // ~3s), and tells Mother when a job's PR merged or closed. The subscriber
+    // runs when Perri is enabled or Mother notices are on (it no-ops without
+    // relay_url/relay_token). The tracker polls `gh` for the PRs the relay
+    // cannot tell us about (other owners, or the relay is down), so it runs
+    // either way; it probes nothing while nothing is trackable.
+    {
+        use nostromo::data::relay_client::{relay_wanted, RelayHub};
+        use nostromo::mother::notices::pr_state::{GhProbe, PrTracker, TokioRunner};
+        let mut hub = RelayHub::new();
+        let perri_wants_relay = perri_queue_relay_tx.is_some();
+        if let Some(relay_tx) = perri_queue_relay_tx {
+            hub.subscribe(relay_tx);
+        }
+        let signals = hub.channel();
+        let tracker = PrTracker::new(
+            Arc::clone(&notice_engine),
+            Arc::new(GhProbe::new(
+                Arc::new(TokioRunner),
+                nostromo::perri_cli::gh_bin(),
+            )),
+            hub.status(),
+            Arc::new(nostromo::mother::notices::SystemClock),
+        );
+        tracker.spawn(signals);
+        if relay_wanted(perri_wants_relay, notice_engine.enabled()) {
+            nostromo::data::relay_client::spawn(config.clone(), hub);
+        }
     }
 
     // ── Mother pollers ────────────────────────────────────────────────────────
