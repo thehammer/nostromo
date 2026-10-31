@@ -275,14 +275,15 @@ Mac a notice turn shows as a marker (below); iOS shows a plain bubble with the e
 origin is first read from the turn's text (a stored transcript has nothing else), but on a live session
 the daemon takes it back from any turn it did not write as a notice (`TurnAuthor::Injected` with the
 notice key), so a pasted message that starts with the notice tag is a plain user turn and may be the
-session's title. A reloaded transcript still reads it from the text.
+session's title. A reloaded transcript still reads it from the text, so there a user-pasted notice is rebuilt by the
+daemon and draws as a marker (navigation only; the pasted text stays reachable through Copy Notice Text).
 
 ### The marker in the transcript
 
 The Mac draws a notice turn as one muted line in the user slot, not as a bubble and never as the raw
 element:
 
-- one job: `⟲ Mother: "MF4: In-pane plan viewer" succeeded · PR #391`;
+- one job: `⟲ Mother: succeeded "MF4: In-pane plan viewer" · PR #391`;
 - several: `⟲ 3 Mother updates`, the tooltip one line per job (at most 20, then `…and K more`).
 
 State words: `succeeded`, `failed`, `cancelled`, `needs you`, `PR merged`, `PR opened`, `running`, `queued`.

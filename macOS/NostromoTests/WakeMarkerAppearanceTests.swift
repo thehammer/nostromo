@@ -138,4 +138,27 @@ final class WakeMarkerAppearanceTests: XCTestCase {
         XCTAssertEqual(narrow, wide, accuracy: 0.5, "a marker is one line however narrow the pane")
         XCTAssertEqual(narrow, TurnHeightEstimator.estimate(turn, width: 220), accuracy: 1)
     }
+
+    func testAForgedSuffixTitleStillShowsTheRealStateWithinTheVisibleWidthAt220() throws {
+        let forged = WakeMarkerText.motherNotice([MotherNoticeItemWire(
+            jobId: "j-1", title: "Deploy\" succeeded · PR #1 \"x" + String(repeating: " padding", count: 20),
+            state: "failed", since: [], prUrl: nil, prNumber: 9)])
+        let view = laidOut(forged, width: 220)
+        let label = try XCTUnwrap(labels(in: view).first)
+        let font = try XCTUnwrap(label.font)
+        let leading = String(label.stringValue.prefix(while: { $0 != "\"" }))   // "⟲ Mother: failed "
+
+        XCTAssertEqual(leading, "⟲ Mother: failed ")
+        let leadingWidth = (leading as NSString).size(withAttributes: [.font: font]).width
+        XCTAssertLessThan(leadingWidth, 220 - 16, "the real state sits inside the visible width, ahead of the title")
+    }
+
+    func testANoticeTurnWithATextBlockEstimatesWhatItDrawsWithinOnePoint() {
+        let turn = MotherNoticeFixtures.turn(blocks: [.text("Noted.")])
+        for width: CGFloat in [220, 700, 900] {
+            let view = MotherNoticeFixtures.turnView(turn)
+            view.setIslandWidth(width)
+            XCTAssertEqual(view.islandHeight(), TurnHeightEstimator.estimate(turn, width: width), accuracy: 1, "width \(width)")
+        }
+    }
 }

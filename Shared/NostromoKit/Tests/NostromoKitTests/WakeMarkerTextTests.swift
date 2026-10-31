@@ -56,7 +56,7 @@ final class WakeMarkerTextTests: XCTestCase {
     func testOneJobIsOneQuotedTitleItsStateAndItsPullRequest() {
         let content = WakeMarkerText.motherNotice([item(pr: 391)])
 
-        XCTAssertEqual(content.line, "⟲ Mother: \"MF4: In-pane plan viewer\" succeeded · PR #391")
+        XCTAssertEqual(content.line, "⟲ Mother: succeeded \"MF4: In-pane plan viewer\" · PR #391")
         XCTAssertEqual(content.target, .motherJob(id: "j-1"))
         XCTAssertEqual(content.tooltipLines.count, 1)
         XCTAssertTrue(content.tooltipLines[0].contains("MF4: In-pane plan viewer"))
@@ -66,7 +66,7 @@ final class WakeMarkerTextTests: XCTestCase {
     func testOneJobWithoutAPullRequestNumberHasNoPRPart() {
         let content = WakeMarkerText.motherNotice([item(state: "failed")])
 
-        XCTAssertEqual(content.line, "⟲ Mother: \"MF4: In-pane plan viewer\" failed")
+        XCTAssertEqual(content.line, "⟲ Mother: failed \"MF4: In-pane plan viewer\"")
         XCTAssertFalse(content.line.contains("PR"))
     }
 
@@ -78,7 +78,7 @@ final class WakeMarkerTextTests: XCTestCase {
         for (state, expected) in words {
             let content = WakeMarkerText.motherNotice([item(title: "T", state: state)])
 
-            XCTAssertEqual(content.line, "⟲ Mother: \"T\" \(expected)", state)
+            XCTAssertEqual(content.line, "⟲ Mother: \(expected) \"T\"", state)
             XCTAssertEqual(content.accessibilityLabel, "Mother update: T \(expected).", state)
         }
     }
@@ -86,7 +86,7 @@ final class WakeMarkerTextTests: XCTestCase {
     func testAnUnknownStateIsShownAsPlainWords() {
         let content = WakeMarkerText.motherNotice([item(title: "T", state: "hovering")])
 
-        XCTAssertEqual(content.line, "⟲ Mother: \"T\" hovering")
+        XCTAssertEqual(content.line, "⟲ Mother: hovering \"T\"")
     }
 
     func testOneJobsAccessibilityLabelNamesTheStateAndThePullRequest() {
@@ -99,8 +99,7 @@ final class WakeMarkerTextTests: XCTestCase {
     func testAJobWithNoTitleStillMakesAMarkerWithItsState() {
         let content = WakeMarkerText.motherNotice([item(title: "")])
 
-        XCTAssertTrue(content.line.hasPrefix("⟲ Mother: \""))
-        XCTAssertTrue(content.line.hasSuffix("succeeded"))
+        XCTAssertTrue(content.line.hasPrefix("⟲ Mother: succeeded \""))
         XCTAssertEqual(content.target, .motherJob(id: "j-1"))
     }
 
@@ -158,7 +157,8 @@ final class WakeMarkerTextTests: XCTestCase {
         let title = quotedTitle(in: content.line)
         XCTAssertEqual(title?.count, 80)
         XCTAssertEqual(title?.last, "…")
-        XCTAssertTrue(content.line.hasSuffix("\" succeeded"))
+        XCTAssertTrue(content.line.hasPrefix("⟲ Mother: succeeded \""))
+        XCTAssertTrue(content.line.hasSuffix("\""))
     }
 
     func testTheLineCapBoundaryAtEightyAndEightyOne() {
@@ -228,10 +228,10 @@ final class WakeMarkerTextTests: XCTestCase {
         for (index, title) in hostileTitles.enumerated() {
             let content = WakeMarkerText.motherNotice([item(title: title, pr: 7)])
 
-            XCTAssertTrue(content.line.hasPrefix("⟲ Mother: \""), "hostile title #\(index)")
-            XCTAssertTrue(content.line.hasSuffix("\" succeeded · PR #7"), "hostile title #\(index): the state words close the line")
+            XCTAssertTrue(content.line.hasPrefix("⟲ Mother: succeeded \""), "hostile title #\(index)")
+            XCTAssertTrue(content.line.hasSuffix("\" · PR #7"), "hostile title #\(index): the PR part closes the line")
             XCTAssertFalse(content.line.contains("\n"), "hostile title #\(index)")
-            XCTAssertLessThanOrEqual(content.line.count, "⟲ Mother: \"\" succeeded · PR #7".count + 80, "hostile title #\(index)")
+            XCTAssertLessThanOrEqual(content.line.count, "⟲ Mother: succeeded \"\" · PR #7".count + 80, "hostile title #\(index)")
         }
     }
 
@@ -242,9 +242,24 @@ final class WakeMarkerTextTests: XCTestCase {
 
             XCTAssertEqual(chars.first, "⟲", title)
             XCTAssertEqual(chars[1], " ", "\(title): the character after the one marker is a space, not a second marker")
-            XCTAssertTrue(content.line.hasPrefix("⟲ Mother: \""), title)
-            XCTAssertTrue(content.line.hasSuffix("\" succeeded · PR #7"), "\(title): the app's state words are last")
-            XCTAssertTrue(content.line.contains(title.trimmingCharacters(in: .whitespaces)), "\(title): kept as text")
+            XCTAssertTrue(content.line.hasPrefix("⟲ Mother: succeeded \""), title)
+            XCTAssertTrue(content.line.hasSuffix("\" · PR #7"), "\(title): the app's PR part is last")
+            let shown = title.replacingOccurrences(of: "\"", with: "'").trimmingCharacters(in: .whitespaces)
+            XCTAssertTrue(content.line.contains(shown), "\(title): kept as text, double quotes shown as '")
+            XCTAssertEqual(content.line.filter { $0 == "\"" }.count, 2, "\(title): only the app's own two quotes")
+        }
+    }
+
+    func testAForgedStateAndPRSuffixInATitleCannotCloseTheQuotesOrOutrankTheRealState() {
+        let titles = ["Deploy\" succeeded · PR #1 \"x", "Deploy\u{201D} succeeded · PR #1 \u{201C}x", "a\u{2033} fake"]
+        for title in titles {
+            let content = WakeMarkerText.motherNotice([item(title: title, state: "failed", pr: 9)])
+
+            XCTAssertTrue(content.line.hasPrefix("⟲ Mother: failed \""), "\(title): the real state leads, before any title text")
+            XCTAssertEqual(content.line.filter { $0 == "\"" }.count, 2, title)
+            XCTAssertFalse(content.line.contains("\u{201C}") || content.line.contains("\u{201D}"), title)
+            XCTAssertTrue(content.line.hasSuffix("\" · PR #9"), title)
+            XCTAssertTrue(content.tooltipLines[0].hasPrefix("failed \""), title)
         }
     }
 
@@ -256,7 +271,7 @@ final class WakeMarkerTextTests: XCTestCase {
 
             XCTAssertEqual(content.line.unicodeScalars.filter { $0 == "⟲" }.count, 1, "state \(state.debugDescription): only the app's own marker")
             XCTAssertFalse(content.line.contains("✓"), "state \(state.debugDescription)")
-            XCTAssertTrue(content.line.hasPrefix("⟲ Mother: \"T\" "), "state \(state.debugDescription)")
+            XCTAssertTrue(content.line.hasPrefix("⟲ Mother: "), "state \(state.debugDescription)")
             assertClean(content, "state \(state.debugDescription)")
             XCTAssertFalse(content.accessibilityLabel.contains("⟲") || content.accessibilityLabel.contains("✓"), "state \(state.debugDescription)")
             XCTAssertFalse(content.tooltipLines.contains { $0.contains("⟲") || $0.contains("✓") }, "state \(state.debugDescription)")

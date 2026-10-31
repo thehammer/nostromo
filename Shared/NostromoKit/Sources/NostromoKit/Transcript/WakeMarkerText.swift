@@ -5,7 +5,7 @@ import Foundation
 /// A marker stands in for a turn the user did not type but the agent received (a Mother job notice
 /// today; a background-task wake later). The text is built here, once, and drawn as plain text:
 /// every mark (`⟲`, the quotes, the state words, `PR #n`) is computed by the app, and the only
-/// untrusted text, a job's title, sits inside the quotes after `FoldTextSanitizer` and a cap. So a
+/// untrusted text, a job's title, sits inside the quotes after `FoldTextSanitizer`, a cap and quote replacement. So a
 /// title cannot draw a second marker, a badge or a tick of its own.
 public struct WakeMarkerContent: Equatable {
     /// The one line drawn in the transcript.
@@ -56,7 +56,7 @@ public enum WakeMarkerText {
             let tooltip = detail(first, titleLimit: tooltipTitleLimit)
             let pull = first.prNumber.map { ", pull request \($0)" } ?? ""
             return WakeMarkerContent(
-                line: "\(mark) Mother: \"\(title(first, limit: lineTitleLimit))\" \(stateWords(first.state))\(prSuffix(first))",
+                line: "\(mark) Mother: \(stateWords(first.state)) \"\(title(first, limit: lineTitleLimit))\"\(prSuffix(first))",
                 tooltipLines: [tooltip],
                 accessibilityLabel: "Mother update: \(title(first, limit: tooltipTitleLimit)) \(stateWords(first.state))\(pull).",
                 target: .motherJob(id: first.jobId))
@@ -72,9 +72,9 @@ public enum WakeMarkerText {
 
     // MARK: Pieces
 
-    /// `"<title>" <state words>` (· PR #n).
+    /// `<state words> "<title>"` (· PR #n). The state comes first so tail truncation never hides it.
     private static func detail(_ item: MotherNoticeItemWire, titleLimit: Int) -> String {
-        "\"\(title(item, limit: titleLimit))\" \(stateWords(item.state))\(prSuffix(item))"
+        "\(stateWords(item.state)) \"\(title(item, limit: titleLimit))\"\(prSuffix(item))"
     }
 
     private static func prSuffix(_ item: MotherNoticeItemWire) -> String {
@@ -82,7 +82,10 @@ public enum WakeMarkerText {
     }
 
     private static func title(_ item: MotherNoticeItemWire, limit: Int) -> String {
-        let clean = FoldTextSanitizer.sanitize(item.title).trimmingCharacters(in: .whitespaces)
+        // Double quotes become `'` so the title cannot close the quoted region and forge what follows.
+        let quotes: Set<Character> = ["\"", "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{2033}", "\u{FF02}"]
+        let clean = String(FoldTextSanitizer.sanitize(item.title).map { quotes.contains($0) ? "'" : $0 })
+            .trimmingCharacters(in: .whitespaces)
         return capped(clean.isEmpty ? "Untitled job" : clean, to: limit)
     }
 

@@ -160,6 +160,7 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { hasTarget ? .button : .staticText }
     override func accessibilityLabel() -> String? { content.accessibilityLabel }
+    override func accessibilityHelp() -> String? { hasTarget ? "Opens the job in Mother" : nil }
     override func accessibilityChildren() -> [Any]? { [] }
     override func accessibilityPerformPress() -> Bool {
         guard hasTarget else { return false }

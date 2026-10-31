@@ -108,7 +108,6 @@ enum TurnHeightEstimator {
             // A Mother job notice is one fixed-height marker in the user slot: the element's length
             // is never measured, because the marker never shows it.
             height += wakeMarkerHeight + userSlotGap
-            columns += 1
         } else if turn.hasTerminalOrigin {
             // A terminal delivery is blocks, not a bubble: its text length (up to tens of KB) is
             // collapsed away, so only the number of blocks counts. A bubble appears only for
