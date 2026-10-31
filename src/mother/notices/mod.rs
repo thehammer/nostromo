@@ -317,6 +317,10 @@ enum Trigger {
     CapRolled,
     /// The user started a turn: releases every hold, cap and loop guard too.
     UserTurn,
+    /// A notice turn started: Quiet / session-not-running items queue behind
+    /// it, but only when the delivery cannot become a turn past the cap or the
+    /// loop guard whatever this turn does.
+    DuringNoticeTurn,
 }
 
 /// Something to do once the engine's lock is released.
@@ -969,7 +973,11 @@ impl State {
         };
         let due = event.is_waking();
         let bucket = &mut self.focus(tag).bucket;
-        bucket.add(snapshot, event, due, now);
+        if !bucket.add(snapshot, event, due, now) {
+            // Already waiting with this state (a restart's re-check): it keeps
+            // its window or hold, and no window opens for it again.
+            return;
+        }
         let states = bucket
             .items
             .iter()
@@ -990,14 +998,20 @@ impl State {
                     (reason, false)
                 })
             }
-            NotifyLevel::Quiet => due.then(|| {
-                bucket.hold_at_least(HoldReason::Quiet, now);
-                let reason = bucket
-                    .hold
-                    .map(|h| h.reason.into())
-                    .unwrap_or(NoticeReason::Quiet);
-                (reason, true)
-            }),
+            NotifyLevel::Quiet => {
+                // It joins an open window (moving its end) but never opens one.
+                if bucket.window.is_some() {
+                    bucket.touch_window(now);
+                }
+                due.then(|| {
+                    bucket.hold_at_least(HoldReason::Quiet, now);
+                    let reason = bucket
+                        .hold
+                        .map(|h| h.reason.into())
+                        .unwrap_or(NoticeReason::Quiet);
+                    (reason, true)
+                })
+            }
             NotifyLevel::Off => None,
         };
         self.dirty = true;
@@ -1038,39 +1052,71 @@ impl State {
             );
             return None;
         }
-        if trigger != Trigger::UserTurn {
-            if chain_held {
-                self.hold(tag, HoldReason::LoopGuard, now);
+        if trigger == Trigger::DuringNoticeTurn {
+            // Queued behind the notice turn now running, this delivery is the
+            // next notice turn: send it only if that one stays within the cap
+            // (this turn already counted) and the loop guard even if this turn
+            // queues a job. Otherwise it waits for a later turn's start.
+            let chain = self.store.focuses.get(tag).map_or(0, |f| f.limits.chain);
+            if chain + 1 >= limits::CHAIN_LIMIT || capped {
                 return None;
             }
-            if capped {
-                self.hold(tag, HoldReason::Cap, now);
+        } else {
+            if trigger != Trigger::UserTurn {
+                if chain_held {
+                    self.hold(tag, HoldReason::LoopGuard, now);
+                    return None;
+                }
+                if capped {
+                    self.hold(tag, HoldReason::Cap, now);
+                    return None;
+                }
+            }
+            if self.notice_turns.contains_key(tag) {
+                self.hold(tag, HoldReason::Busy, now);
                 return None;
             }
-        }
-        if self.notice_turns.contains_key(tag) {
-            self.hold(tag, HoldReason::Busy, now);
-            return None;
         }
         let bucket = &mut self.focus(tag).bucket;
         bucket.gen += 1;
         let gen = bucket.gen;
         let items = bucket.take_items();
-        let carried: Vec<NoticeItem> = bucket.untold_inflight().map(|f| f.item.clone()).collect();
         let fresh_items: Vec<NoticeItem> = items.iter().map(|p| p.item.clone()).collect();
-        let merged_items: Vec<NoticeItem> = carried
-            .into_iter()
-            .chain(fresh_items.iter().cloned())
-            .collect();
+        // One element per job: a job whose notice still waits in the session's
+        // queue gains the new states in place of a second element.
+        for p in items {
+            match bucket
+                .inflight
+                .iter_mut()
+                .find(|f| !f.told && f.item.job_id == p.item.job_id)
+            {
+                Some(f) => {
+                    for s in &p.item.states {
+                        if f.item.states.last() != Some(s) {
+                            f.item.states.push(*s);
+                        }
+                    }
+                    f.item.title = p.item.title;
+                    f.item.pr_url = p.item.pr_url;
+                    f.item.cost_usd = p.item.cost_usd;
+                    f.item.reason = p.item.reason;
+                    f.due |= p.due;
+                    f.gen = gen;
+                    f.at_ms = now;
+                }
+                None => bucket.inflight.push(InFlight {
+                    gen,
+                    item: p.item,
+                    due: p.due,
+                    at_ms: now,
+                    told: false,
+                }),
+            }
+        }
+        let merged_items: Vec<NoticeItem> =
+            bucket.untold_inflight().map(|f| f.item.clone()).collect();
         let merged = element::render_message(&merged_items);
         let fresh = element::render_message(&fresh_items);
-        bucket.inflight.extend(items.into_iter().map(|p| InFlight {
-            gen,
-            item: p.item,
-            due: p.due,
-            at_ms: now,
-            told: false,
-        }));
         bucket.hold = None;
         bucket.window = None;
         for item in &fresh_items {
@@ -1201,9 +1247,18 @@ impl State {
                 focus.bucket.inflight = keep;
                 let lost_any = !lost.is_empty();
                 focus.bucket.restore(lost);
+                let after_turn = matches!(
+                    focus.bucket.hold.map(|h| h.reason),
+                    Some(HoldReason::Quiet | HoldReason::SessionNotRunning)
+                );
                 self.told(tag, &told, false, now);
                 if lost_any {
+                    // Lost from a cleared queue: they go when this turn ends.
                     self.hold(tag, HoldReason::Busy, now);
+                } else if after_turn {
+                    // Quiet and not-running holds go behind any turn that
+                    // starts, this one included, when that is safe.
+                    effects.extend(self.attempt(tag, Trigger::DuringNoticeTurn, now));
                 }
                 self.dirty = true;
                 self.changed = true;
@@ -1259,16 +1314,16 @@ impl State {
             }
             TurnEvent::Completed | TurnEvent::Exited => {
                 let was_notice = self.end_notice_turn(tag);
+                // Only what was due to wake and waited for this notice turn
+                // goes now (the session is idle, so it wakes). Quiet and
+                // not-running holds never wake: they wait for a turn to start.
                 if was_notice && matches!(event, TurnEvent::Completed) {
                     let hold = self
                         .store
                         .focuses
                         .get(tag)
                         .and_then(|f| f.bucket.hold.map(|h| h.reason));
-                    if matches!(
-                        hold,
-                        Some(HoldReason::Busy | HoldReason::Quiet | HoldReason::SessionNotRunning)
-                    ) {
+                    if hold == Some(HoldReason::Busy) {
                         effects.extend(self.attempt(tag, Trigger::AfterTurn, now));
                     }
                 }
