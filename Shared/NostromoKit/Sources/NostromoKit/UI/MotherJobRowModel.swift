@@ -61,11 +61,26 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         self.origin = origin
     }
 
-    /// The row's spoken form: the title, then `From <origin>.` when the surface shows one.
+    /// The row's spoken form. Without an origin (iOS) just the title. With one: the title, `From <origin>.`,
+    /// the repo and branch, then what the row's progress line shows (its spoken progress and attention
+    /// badges), so a single combined element loses nothing the row displays.
     public var accessibilitySummary: String {
         let name = title.isEmpty ? id : title
         guard let origin else { return name }
-        return "\(name). \(origin.accessibilityText)."
+        var parts = ["\(name). \(origin.accessibilityText)."]
+        switch (repo, branch) {
+        case (let r?, let b?): parts.append("\(r), branch \(b).")
+        case (let r?, nil):    parts.append("\(r).")
+        case (nil, let b?):    parts.append("Branch \(b).")
+        case (nil, nil):       break
+        }
+        if reservesProgressLine {
+            if let progress = progressAccessibility ?? progressLine, !progress.isEmpty {
+                parts.append("\(progress).")
+            }
+            for badge in attentionBadges { parts.append("\(badge).") }
+        }
+        return parts.joined(separator: " ")
     }
 
     /// Running and awaiting rows reserve a second line for progress and attention, so a

@@ -101,7 +101,7 @@ final class MotherOriginRowTests: XCTestCase {
 
     func testARowsSpokenSummaryNamesTheJobThenItsOrigin() throws {
         let vm = makeVM(try makeStore(), jobs: [job("j1")], annotations: ["j1": note(.you)])
-        XCTAssertEqual(vm.rowModel(for: job("j1")).accessibilitySummary, "title-j1. From You.")
+        XCTAssertEqual(vm.rowModel(for: job("j1")).accessibilitySummary, "title-j1. From You. nostromo.")
     }
 
     func testAnArrivingAnnotationChangesTheRowAndAnnouncesIt() throws {
@@ -348,6 +348,52 @@ final class MotherOriginRowTests: XCTestCase {
         defer { NotificationCenter.default.removeObserver(observer) }
         MotherView.requestShowJobs(tag: "claudia-ABCDEF12") { order.append("switched(tag=\(MotherView.requestedFilterTag ?? "nil"))") }
         XCTAssertEqual(order, ["switched(tag=claudia-ABCDEF12)", "posted(tag=claudia-ABCDEF12)"])
+    }
+
+    func testAnUnconsumedRequestExpiresSoALaterViewDoesNotApplyIt() throws {
+        let saved = MotherView.requestLifetime
+        MotherView.requestLifetime = 0.05
+        defer { MotherView.requestLifetime = saved }
+        MotherView.requestShowJobs(tag: "claudia-ABCDEF12") {}
+        XCTAssertEqual(MotherView.requestedFilterTag, "claudia-ABCDEF12", "still pending for a view about to apply it")
+        let expired = expectation(description: "request expired")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { expired.fulfill() }
+        wait(for: [expired], timeout: 2)
+        XCTAssertNil(MotherView.requestedFilterTag)
+        let later = makeVM(try makeStore())
+        later.applyShowJobsRequest(isKeyWindow: true)
+        XCTAssertEqual(later.filter, .all)
+    }
+
+    func testTheFromHeaderKeepsItsClearButtonInsideAt280Points() throws {
+        let vm = makeVM(try makeStore())
+        let tag = "claudia-ABCDEF12"
+        vm.filter = .focus(tag: tag)
+        let result = MotherJobFilterResult(
+            groups: [], matched: 12, total: 34,
+            entries: [MotherOriginFilterEntry(selection: .all, title: "All", count: 34),
+                      MotherOriginFilterEntry(selection: .focus(tag: tag), title: String(repeating: "W", count: 40), count: 12)],
+            selectionTitle: String(repeating: "W", count: 40))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280, height: 24), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        let host = NSHostingView(rootView: MotherFromHeader(vm: vm, result: result))
+        window.contentView = host
+        host.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        host.layoutSubtreeIfNeeded()
+
+        func find(_ el: Any, label: String, depth: Int = 0) -> NSRect? {
+            guard depth < 12 else { return nil }
+            if let a = el as? NSAccessibilityElementProtocol, (el as AnyObject).accessibilityLabel?() == label {
+                return a.accessibilityFrame?()
+            }
+            let kids = (el as AnyObject).accessibilityChildren?() ?? []
+            for k in kids { if let r = find(k, label: label, depth: depth + 1) { return r } }
+            return nil
+        }
+        let button = try XCTUnwrap(find(host, label: "Show all jobs"), "the clear button is not in the header")
+        let hostFrame = window.convertToScreen(host.convert(host.bounds, to: nil))
+        XCTAssertLessThanOrEqual(button.maxX, hostFrame.maxX + 0.5, "the clear button stays inside a 280 pt header")
+        XCTAssertGreaterThanOrEqual(button.minX, hostFrame.minX)
     }
 
     func testOnlyTheKeyWindowsListAppliesTheFilterAndEachWindowKeepsItsOwn() throws {

@@ -479,3 +479,30 @@ final class MotherOriginDisplayTests: XCTestCase {
         XCTAssertNil(OriginAccessibilityDecision.make(model: row, hasOriginTap: true)?.actionName)
     }
 }
+
+// MARK: - Spoken summary keeps the row's content
+
+final class MotherRowSpokenSummaryTests: XCTestCase {
+    private let you = MotherOriginDisplay.make(
+        annotation: MotherJobAnnotation(origin: MotherOriginView(kind: .you, focusTag: nil, nameSnapshot: nil, focusName: nil)),
+        currentName: { _ in nil })
+
+    func testANeedsDecisionRowStillSaysSo() {
+        let row = MotherJobRowModel(id: "j", state: "awaiting", title: "Ship it", attentionBadges: ["Needs decision"],
+                                    showsProgressLine: true, origin: you)
+        XCTAssertTrue(row.accessibilitySummary.contains("Needs decision"), row.accessibilitySummary)
+        XCTAssertTrue(row.accessibilitySummary.hasPrefix("Ship it. From You."))
+    }
+
+    func testAProgressRowKeepsItsSpokenProgress() {
+        let row = MotherJobRowModel(id: "j", state: "running", title: "Ship it", progressLine: "≈60% · gates 2/3",
+                                    progressAccessibility: "about 60 percent, gates 2 of 3", showsProgressLine: true, origin: you)
+        XCTAssertTrue(row.accessibilitySummary.contains("about 60 percent, gates 2 of 3"), row.accessibilitySummary)
+    }
+
+    func testRepoAndBranchAreSpoken() {
+        let row = MotherJobRowModel(id: "j", state: "queued", title: "Ship it", repo: "nostromo", branch: "main", origin: you)
+        XCTAssertTrue(row.accessibilitySummary.contains("nostromo"))
+        XCTAssertTrue(row.accessibilitySummary.contains("main"))
+    }
+}

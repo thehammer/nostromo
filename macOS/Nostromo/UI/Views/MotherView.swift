@@ -91,6 +91,9 @@ class MotherView: NSView {
     static let showJobsNotification = Notification.Name("nostromo.mother.showJobs")
     /// The focus tag whose jobs a Mother view should filter to. Cleared once applied.
     static var requestedFilterTag: String?
+    private static var requestGeneration = 0
+    /// How long an unconsumed "Show My Jobs" request stays pending.
+    static var requestLifetime: TimeInterval = 1.0
 
     /// "Show My Jobs": record the tag, let the caller switch the window to the Mother focus (so a Mother
     /// view created by the switch finds the tag), then tell the Mother views to look.
@@ -98,6 +101,13 @@ class MotherView: NSView {
         requestedFilterTag = tag
         switchToMother()
         NotificationCenter.default.post(name: showJobsNotification, object: nil)
+        // Views apply on the main queue (the sinks hop there; a new view applies when it joins a window), so
+        // give them a moment, then drop a request nobody consumed: a later view must not apply a filter nobody asked for.
+        requestGeneration += 1
+        let generation = requestGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestLifetime) {
+            if generation == requestGeneration { requestedFilterTag = nil }
+        }
     }
 
     private var cancellables = Set<AnyCancellable>()
@@ -628,9 +638,12 @@ private struct MotherJobListSwiftUI: View {
 }
 
 /// `From: All ▾`, and once something is picked `· N of M` and a clear button. 24 pt, left-aligned.
-private struct MotherFromHeader: View {
+struct MotherFromHeader: View {
     @ObservedObject var vm: MotherJobListViewModel
     let result: MotherJobFilterResult
+
+    /// The picker's label truncates past this so `× · N of M` always fits a 280 pt list.
+    static let pickerMaxWidth: CGFloat = 170
 
     var body: some View {
         HStack(spacing: 6) {
@@ -646,7 +659,8 @@ private struct MotherFromHeader: View {
             .pickerStyle(.menu)
             .labelsHidden()
             .controlSize(.small)
-            .fixedSize()
+            .frame(maxWidth: Self.pickerMaxWidth, alignment: .leading)
+            .layoutPriority(-1)
             .accessibilityLabel("From")
             if vm.filter != .all {
                 Text("· \(result.matched) of \(result.total)")
@@ -654,9 +668,12 @@ private struct MotherFromHeader: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .fixedSize()
+                    .layoutPriority(1)
                 Button { vm.filter = .all } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .layoutPriority(1)
                     .accessibilityLabel("Show all jobs")
                     .help("Show all jobs")
             }
