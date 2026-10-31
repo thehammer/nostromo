@@ -99,17 +99,23 @@ public enum WakeMarkerText {
         case "running": return "running"
         case "queued": return "queued"
         default:
-            let words = String(String.UnicodeScalarView(
-                FoldTextSanitizer.sanitize(state).unicodeScalars.prefix(256).map { scalar in
-                    scalar == "_" ? " " : scalar
-                }.filter { scalar in
-                    scalar == " " || scalar == "-"
-                        || (scalar.properties.isAlphabetic && scalar.isASCII)
-                        || ("0"..."9").contains(scalar)
-                }))
-            let trimmed = capped(words.trimmingCharacters(in: .whitespaces), to: stateLimit)
-            return trimmed.isEmpty ? "updated" : trimmed
+            return plainWords(state)
         }
+    }
+
+    /// An unknown state as plain words: ASCII letters, digits, spaces and `-` only (`_` is a space),
+    /// at most `stateLimit` characters; `updated` when nothing is left.
+    private static func plainWords(_ state: String) -> String {
+        var words = ""
+        for scalar in FoldTextSanitizer.sanitize(state).unicodeScalars.prefix(256) {
+            if scalar == "_" || scalar == " " {
+                words.append(" ")
+            } else if scalar == "-" || (scalar.isASCII && (scalar.properties.isAlphabetic || ("0"..."9").contains(scalar))) {
+                words.unicodeScalars.append(scalar)
+            }
+        }
+        let trimmed: String = capped(words.trimmingCharacters(in: CharacterSet.whitespaces), to: stateLimit)
+        return trimmed.isEmpty ? "updated" : trimmed
     }
 
     /// `text` cut to at most `limit` characters, ending in `…` when it was cut.
