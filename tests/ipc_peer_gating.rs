@@ -3063,7 +3063,10 @@ fn redacting_for_the_network_removes_the_notice_of_a_sensitive_origin_and_keeps_
                 session_prefix: Some("abcd1234".into()),
             },
             notify: Some(NotifyLevel::Wake),
-            notice: Some(json!({"status": "told"})),
+            notice: Some(nostromo::mother::notices::NoticeView {
+                status: nostromo::mother::notices::NoticeStatus::Told,
+                ..Default::default()
+            }),
         });
         j
     };
@@ -3113,7 +3116,11 @@ fn redacting_for_the_network_removes_the_notice_of_a_sensitive_origin_and_keeps_
     }
     for id in ["plain", "you"] {
         let a = by_id(id);
-        assert_eq!(a.notice, Some(json!({"status": "told"})), "{id}");
+        assert_eq!(
+            a.notice.map(|n| serde_json::to_value(n).expect("notice")),
+            Some(json!({"status": "told"})),
+            "{id}"
+        );
         assert_eq!(
             a.origin.name_snapshot.as_deref(),
             Some("A snapshot"),

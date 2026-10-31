@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::{
     advance, lock_recover, resolve_claude, write_user_frame, PendingMessage, SessionEvent,
-    SessionManager, Shared,
+    SessionManager, Shared, TurnAuthor,
 };
 use crate::ipc::auth_failure::TurnAuthOutcome;
 use crate::ipc::claude_login::{
@@ -289,9 +289,12 @@ pub(super) fn write_recorded(shared: &Shared, msg: &PendingMessage) -> Result<()
 // ── the reader's side ──────────────────────────────────────────────────────────
 
 /// A turn started: it belongs to the message the daemon last wrote, if any.
-pub(super) fn on_turn_started(shared: &Shared) {
+/// Returns who wrote that message (the turn's author; never read from the
+/// prompt text).
+pub(super) fn on_turn_started(shared: &Shared) -> TurnAuthor {
     let mut cell = lock_recover(&shared.login.cell);
     cell.bound = cell.written.take();
+    TurnAuthor::of(cell.bound.as_ref())
 }
 
 /// A turn ended. `outcome` is `Some` when it was an auth failure. The caller

@@ -208,6 +208,29 @@ pub enum TurnOrigin {
     TerminalDelivery { items: Vec<DeliveryItem> },
     /// Follow notices only (following started, stopped, paused, resumed).
     TerminalFollowNotice { items: Vec<NoticeItem> },
+    /// A Mother job notice: one item per `<nostromo-mother-job …/>` element
+    /// (see [`parse_mother_origin`]). Never the session's title.
+    MotherJobNotice { items: Vec<MotherNoticeItem> },
+    /// An origin this build does not know (a newer daemon wrote it): read as
+    /// such rather than failing the whole turn.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One `<nostromo-mother-job …/>` element of a [`TurnOrigin::MotherJobNotice`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MotherNoticeItem {
+    pub job_id: String,
+    pub title: String,
+    pub state: String,
+    /// The earlier states the notice reports, oldest first.
+    #[serde(default)]
+    pub since: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    /// The number at the end of a `…/pull/<n>` PR URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u32>,
 }
 
 /// One `<nostromo-terminal-output>` element (or, with kind `notice`, one
@@ -767,6 +790,89 @@ pub const TERMINAL_ELEMENT_PREFIX: &str = "<nostromo-terminal-";
 pub const TERMINAL_OUTPUT_TAG: &str = "nostromo-terminal-output";
 /// The (empty) element of a follow notice.
 pub const TERMINAL_FOLLOW_TAG: &str = "nostromo-terminal-follow";
+/// A Mother job notice starts with this (`mother::notices::element`).
+pub const MOTHER_ELEMENT_PREFIX: &str = "<nostromo-mother-job ";
+
+/// What a Mother job notice carries: one item per leading
+/// `<nostromo-mother-job …/>` line, read from its `id`, `state`, `title`,
+/// `pr` and `since` attributes. `None` unless `text` starts with
+/// [`MOTHER_ELEMENT_PREFIX`], or when an element cannot be read (no closing
+/// `/>`, an attribute that is not `name="value"`, no `id`, `state` or
+/// `title`): such a message shows as a plain turn.
+///
+/// Reading stops at the first line that is not an element (the `K more` line
+/// and the advisory line, and anything after them, are ignored). Values are
+/// unescaped (`&amp; &lt; &gt; &quot; &#39;`); other attributes are ignored.
+pub fn parse_mother_origin(text: &str) -> Option<TurnOrigin> {
+    if !text.starts_with(MOTHER_ELEMENT_PREFIX) {
+        return None;
+    }
+    let mut items = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        let Some(rest) = line.strip_prefix(MOTHER_ELEMENT_PREFIX) else {
+            break;
+        };
+        let head = rest.trim_end().strip_suffix("/>")?;
+        let attrs = parse_mother_attributes(head)?;
+        let attr = |key: &str| attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        let pr_url = attr("pr").filter(|p| !p.is_empty());
+        items.push(MotherNoticeItem {
+            job_id: attr("id")?,
+            title: attr("title")?,
+            state: attr("state")?,
+            since: attr("since")
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            pr_number: pr_url.as_deref().and_then(pr_number_of),
+            pr_url,
+        });
+    }
+    (!items.is_empty()).then_some(TurnOrigin::MotherJobNotice { items })
+}
+
+/// `name="value"` pairs of a Mother element's head; `None` when anything in
+/// it is not one.
+fn parse_mother_attributes(mut s: &str) -> Option<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    loop {
+        s = s.trim_start();
+        if s.is_empty() {
+            return Some(out);
+        }
+        let eq = s.find('=')?;
+        let name = &s[..eq];
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return None;
+        }
+        let value = s[eq + 1..].strip_prefix('"')?;
+        let end = value.find('"')?;
+        out.push((name.to_owned(), unescape_mother_attribute(&value[..end])));
+        s = &value[end + 1..];
+    }
+}
+
+/// Undo the five escapes a Mother element's values carry.
+fn unescape_mother_attribute(v: &str) -> String {
+    v.replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// The PR number of a `…/pull/<n>` URL.
+fn pr_number_of(url: &str) -> Option<u32> {
+    let (_, tail) = url.rsplit_once("/pull/")?;
+    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
 
 /// What a prompt the daemon wrote for a followed terminal carries: one item
 /// per `<nostromo-terminal-output …>` element or `<nostromo-terminal-follow
@@ -1431,12 +1537,14 @@ impl SessionTranscript {
                 if let Some(last) = self.turns.last_mut() {
                     last.is_complete = true;
                 }
-                if self.first_user_input.is_none() {
+                let origin = parse_terminal_origin(&text).or_else(|| parse_mother_origin(&text));
+                // A Mother job notice is never the session's title.
+                let notice = matches!(origin, Some(TurnOrigin::MotherJobNotice { .. }));
+                if self.first_user_input.is_none() && !notice {
                     self.first_user_input = Some(text.clone());
                 }
                 self.prompt_count += 1;
                 let id = self.alloc_id();
-                let origin = parse_terminal_origin(&text);
                 let turn = Turn {
                     id,
                     user_input: text,
@@ -1843,7 +1951,12 @@ pub fn transcript_from_jsonl(content: &str, max_turns: usize) -> SessionTranscri
     // reads via `turns.first()` today — preserves today's resume-summary
     // behavior exactly, even though the true first prompt of the whole
     // session may have been trimmed away by `truncate_to_last` above.
-    t.first_user_input = t.turns.first().map(|turn| turn.user_input.clone());
+    // A Mother job notice is never the title: the oldest other turn is.
+    t.first_user_input = t
+        .turns
+        .iter()
+        .find(|turn| !matches!(turn.origin, Some(TurnOrigin::MotherJobNotice { .. })))
+        .map(|turn| turn.user_input.clone());
     t
 }
 
@@ -1878,6 +1991,10 @@ pub fn load_scrollback(session_id: &str, max_turns: usize) -> SessionTranscript 
 #[cfg(test)]
 #[path = "stream_json_origin_tests.rs"]
 mod origin_tests;
+
+#[cfg(test)]
+#[path = "stream_json_mother_tests.rs"]
+mod mother_tests;
 
 #[cfg(test)]
 mod tests {

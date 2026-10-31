@@ -13,6 +13,7 @@ pub mod broker_client;
 pub mod crew;
 pub mod decode;
 pub mod feed;
+pub mod notices;
 pub mod origin;
 pub mod protocol;
 
@@ -220,6 +221,15 @@ pub struct MotherJob {
     /// on every publish of the job feed; never read from Mother.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nostromo: Option<JobAnnotation>,
+    /// Mother's free-form `.failure_reason` of the latest `failed` transition.
+    /// Read only to classify a failure notice (`notices::element`); never
+    /// serialised.
+    #[serde(default, deserialize_with = "lenient_reason", skip_serializing)]
+    pub failure_reason: Option<String>,
+    /// Mother's `.actual_cost_usd` (cumulative spend). Read only for a notice's
+    /// `cost_usd`; never serialised.
+    #[serde(default, deserialize_with = "lenient_cost", skip_serializing)]
+    pub actual_cost_usd: Option<f64>,
 
     // ── headless-crew keys ────────────────────────────────────────────────
     //
@@ -335,6 +345,23 @@ where
     let text: Option<String> =
         crew::lenient::decode_key(d, "origin", crew::lenient::Shape::Scalar)?;
     Ok(text.filter(|t| !t.trim().is_empty()))
+}
+
+fn lenient_reason<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text: Option<String> =
+        crew::lenient::decode_key(d, "failure_reason", crew::lenient::Shape::Scalar)?;
+    Ok(text.filter(|t| !t.trim().is_empty()))
+}
+
+fn lenient_cost<'de, D>(d: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_f64().filter(|c| c.is_finite() && *c >= 0.0))
 }
 
 /// The `--label` of every Mother job queued from a work item (Send to agent).

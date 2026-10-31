@@ -423,28 +423,58 @@ async fn main() -> Result<()> {
     // Who queued each job: the daemon's own record (`~/.nostromo/mother-origins.json`),
     // checked against the per-focus session history the session manager keeps. The
     // feed annotates every job with it; the session manager feeds it the focus registry.
+    let mother_audit = match nostromo::mother::audit::MotherAudit::open(
+        &nostromo::mother::audit::default_path(),
+    ) {
+        Ok(audit) => audit,
+        Err(e) => {
+            warn!("mother audit unavailable: {e}");
+            nostromo::mother::audit::MotherAudit::disabled()
+        }
+    };
     let origin_book = {
-        let audit = match nostromo::mother::audit::MotherAudit::open(
-            &nostromo::mother::audit::default_path(),
-        ) {
-            Ok(audit) => audit,
-            Err(e) => {
-                warn!("mother audit unavailable: {e}");
-                nostromo::mother::audit::MotherAudit::disabled()
-            }
-        };
         let mut mgr = session_mgr.lock().unwrap();
         let book = nostromo::mother::OriginBook::open(
             nostromo::mother::OriginBook::path_beside(
                 &nostromo::ipc::session_manager::default_store_path(),
             ),
             mgr.session_history(),
-            audit,
+            mother_audit.clone(),
         );
         mgr.configure_origin_book(book.clone());
         book
     };
-    let jobs_feed = nostromo::mother::JobsFeed::new().with_origins(origin_book);
+    // Mother job notices: the focus that queued a job hears when it moves
+    // (`~/.nostromo/mother-notices.json`). Deliveries go through the session
+    // manager; turn events reach the engine's worker thread; a job stamped
+    // during a notice turn is notice-born (the loop guard).
+    let notice_engine =
+        nostromo::mother::notices::NoticeEngine::new(nostromo::mother::notices::NoticeConfig {
+            store_path: Some(nostromo::mother::notices::store::path_beside(
+                &nostromo::ipc::session_manager::default_store_path(),
+            )),
+            audit: mother_audit,
+            clock: Arc::new(nostromo::mother::notices::SystemClock),
+        });
+    nostromo::mother::notices::attach(&notice_engine, &session_mgr);
+    {
+        let engine = Arc::downgrade(&notice_engine);
+        origin_book.set_focus_job_hook(Arc::new(move |job: &str, tag: &str| {
+            if let Some(engine) = engine.upgrade() {
+                engine.note_job_origin(job, tag);
+            }
+        }));
+    }
+    let jobs_feed = nostromo::mother::JobsFeed::new()
+        .with_origins(origin_book)
+        .with_notices(Arc::clone(&notice_engine));
+    nostromo::mother::notices::spawn_feed_watcher(Arc::clone(&notice_engine), &jobs_feed);
+    nostromo::mother::notices::spawn_publisher(
+        Arc::clone(&notice_engine),
+        jobs_feed.clone(),
+        broadcast_tx.clone(),
+        Some(server.subscribe_republish()),
+    );
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // A disabled agent still hands its consumers a live `watch::Receiver`:
