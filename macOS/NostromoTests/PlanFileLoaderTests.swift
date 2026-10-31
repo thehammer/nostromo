@@ -268,6 +268,15 @@ final class PlanFileLoaderTests: XCTestCase {
         }
     }
 
+    /// Counts reader calls, from whatever queue they run on.
+    private final class Calls {
+        private let lock = NSLock()
+        private var made = 0
+        /// This call's number: the first is 1.
+        func next() -> Int { lock.lock(); defer { lock.unlock() }; made += 1; return made }
+        var total: Int { lock.lock(); defer { lock.unlock() }; return made }
+    }
+
     private func waitFor(_ what: String, file: StaticString = #filePath, line: UInt = #line,
                          _ condition: () -> Bool) {
         XCTAssertTrue(PlanTestSupport.pumpUntil(condition), "timed out waiting for \(what)", file: file, line: line)
@@ -354,6 +363,87 @@ final class PlanFileLoaderTests: XCTestCase {
 
         XCTAssertEqual(probe.texts, ["# Appears\n"])
         XCTAssertTrue(probe.loader.isWatching, "a loaded plan is always watched")
+    }
+
+    /// The window the late arm closes: a read finds the file, nothing is watching it yet (it was not there when
+    /// `load` armed the watcher), and the file is written again before the watcher is armed on it. That write
+    /// raises no event, so only a second read can correct the text the first one found.
+    func testAWriteBetweenTheReadAndTheLateArmIsPickedUpByOneMoreReadAndOnlyTheNewerTextIsDelivered() throws {
+        let dir = try PlanTestSupport.tempDirectory(self)
+        let url = dir.appendingPathComponent("late.md")
+        let gate = DispatchSemaphore(value: 0)       // holds the first read back until the file exists
+        let readDone = DispatchSemaphore(value: 0)   // the first read has its result
+        let calls = Calls()
+        let queue = DispatchQueue(label: "plan.loader.test.late-arm-read")
+        let probe = Probe(reader: { path in
+            let call = calls.next()
+            if call == 1 { gate.wait() }
+            let result = PlanFileRules.read(path: path)
+            if call == 1 { readDone.signal() }
+            return result
+        }, readQueue: queue)
+
+        probe.loader.load(path: url.path)
+        XCTAssertFalse(probe.loader.isWatching, "nothing was there to watch when the watcher looked")
+        try PlanTestSupport.writeInPlace("v1", to: url)
+        gate.signal()
+        // The first read now has "v1". Blocking the main thread here keeps the loader from hearing about it,
+        // so the write below lands after the read and before anything watches the file.
+        guard readDone.wait(timeout: .now() + 20) == .success else { return XCTFail("the first read never finished") }
+        try PlanTestSupport.writeInPlace("v2", to: url)
+
+        waitFor("a result") { !probe.results.isEmpty }
+        XCTAssertEqual(probe.texts, ["v2"], "the older read's text is never delivered, the newer one is")
+        XCTAssertEqual(calls.total, 2, "arming the watcher late is followed by one more read")
+        XCTAssertTrue(probe.loader.isWatching, "a loaded plan is watched")
+
+        queue.sync {}      // a third read, if one was started, has run
+        drainMain()        // ...and so has its hop to the main queue
+        XCTAssertEqual(calls.total, 2, "the newer read found a watcher on the file: it asks for nothing more")
+        XCTAssertEqual(probe.texts, ["v2"])
+    }
+
+    /// [guard] The extra read belongs to the late arm only.
+    func testAFileThatIsAlreadyWatchedWhenItsReadReturnsIsReadOnce() throws {
+        let dir = try PlanTestSupport.tempDirectory(self)
+        let url = dir.appendingPathComponent("watched.md")
+        try PlanTestSupport.writeInPlace("# Here\n", to: url)
+        let calls = Calls()
+        let queue = DispatchQueue(label: "plan.loader.test.watched-read")
+        let probe = Probe(reader: { path in
+            _ = calls.next()
+            return PlanFileRules.read(path: path)
+        }, readQueue: queue)
+
+        probe.loader.load(path: url.path)
+        XCTAssertTrue(probe.loader.isWatching, "the file was there to watch when load looked")
+        waitFor("the result") { !probe.results.isEmpty }
+        queue.sync {}
+        drainMain()
+
+        XCTAssertEqual(probe.texts, ["# Here\n"])
+        XCTAssertEqual(calls.total, 1, "a loaded result that finds a watcher on the file never asks for another read")
+    }
+
+    /// [guard] When the late arm cannot put a watcher on the file there is nothing to wait for: the answer is
+    /// delivered as it is, and the loader does not read again in the hope of arming (that would never end).
+    func testALoadedAnswerForAPathThatCannotBeWatchedIsDeliveredOnceAndNeverReadAgain() {
+        let loaded = PlanFileResult.loaded(text: "# Here\n", url: URL(fileURLWithPath: "/redd-found/plan.md"), modified: nil)
+        let calls = Calls()
+        let queue = DispatchQueue(label: "plan.loader.test.unwatchable-read")
+        let probe = Probe(reader: { _ in
+            _ = calls.next()
+            return loaded
+        }, readQueue: queue)
+
+        probe.loader.load(path: "/redd-no-such-directory/plan.md")
+        waitFor("the answer") { !probe.results.isEmpty }
+        queue.sync {}
+        drainMain()
+
+        XCTAssertEqual(probe.results, [loaded])
+        XCTAssertFalse(probe.loader.isWatching, "the path does not resolve, so there is nothing to watch")
+        XCTAssertEqual(calls.total, 1, "one read: an arm that cannot succeed is not retried by reading again")
     }
 
     func testEachLoadAndStopTakesANewGeneration() {

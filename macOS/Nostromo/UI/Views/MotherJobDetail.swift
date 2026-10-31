@@ -52,18 +52,26 @@ final class JobViewSwitch: NSSegmentedControl {
         return elements
     }
 
-    /// Where each segment is, in the control's own coordinates: the control's width shared out by the width
-    /// of each label (the segments size themselves to their labels, with the same padding each).
+    /// Where each segment is, in the control's own coordinates: the control's width shared out by its
+    /// `segmentDistribution`, equally for `.fillEqually`, otherwise by the width of each label with the same
+    /// padding each (the segments size themselves to their labels). An estimate; it is not read back from
+    /// AppKit's own segment geometry.
     private func segmentFrames() -> [NSRect] {
         let count = segmentCount
         guard count > 0, bounds.width > 0 else { return Array(repeating: bounds, count: count) }
-        let attributes: [NSAttributedString.Key: Any] = [.font: font ?? NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
-        let widths = (0 ..< count).map { NSAttributedString(string: label(forSegment: $0) ?? "", attributes: attributes).size().width }
-        let padding = max(0, (bounds.width - widths.reduce(0, +)) / CGFloat(count))
+        let shares: [CGFloat]
+        if segmentDistribution == .fillEqually {
+            shares = Array(repeating: bounds.width / CGFloat(count), count: count)
+        } else {
+            let attributes: [NSAttributedString.Key: Any] = [.font: font ?? NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
+            let widths = (0 ..< count).map { NSAttributedString(string: label(forSegment: $0) ?? "", attributes: attributes).size().width }
+            let padding = max(0, (bounds.width - widths.reduce(0, +)) / CGFloat(count))
+            shares = widths.map { $0 + padding }
+        }
         var x = bounds.minX
-        return widths.map { width in
-            defer { x += width + padding }
-            return NSRect(x: x, y: bounds.minY, width: width + padding, height: bounds.height)
+        return shares.map { width in
+            defer { x += width }
+            return NSRect(x: x, y: bounds.minY, width: width, height: bounds.height)
         }
     }
 

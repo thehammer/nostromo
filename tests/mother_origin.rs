@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use nostromo::data::work::sent::{install_ledger, SentLedger};
 use nostromo::ipc::pane_registry::PaneRegistry;
+use nostromo::ipc::peer::SensitiveTags;
 use nostromo::ipc::protocol::{FocusMeta, ServerMsg};
 use nostromo::ipc::session_manager::CLAUDE_BIN_ENV;
 use nostromo::ipc::SessionManager;
@@ -34,7 +35,9 @@ use nostromo::mcp::tools::create_focus::{
 };
 use nostromo::mcp::{DaemonMcpBackend, DaemonSources, McpServer, McpSharedState, PerriDaemonState};
 use nostromo::mother::audit::MotherAudit;
-use nostromo::mother::origin::{JobAnnotation, NotifyLevel, OriginKind, OriginView, Stamp, Via};
+use nostromo::mother::origin::{
+    JobAnnotation, NotifyLevel, OriginKind, OriginView, Stamp, Via, SENSITIVE_NAME,
+};
 use nostromo::mother::{JobsFeed, MotherJob, OriginBook, SessionHistory};
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -2037,18 +2040,26 @@ async fn a_failed_mother_add_logs_and_returns_no_session_id() {
 
 #[tokio::test]
 async fn the_history_vouches_for_a_session_before_its_child_runs_and_a_failed_spawn_leaves_it() {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     const FAILING: &str = "FAILSPWN-1111-2222-3333";
+    const SPAWNED: &str = "5eed0001-aaaa-4bbb-8ccc-1234567890ab";
     let mut rig = Rig::new(Mother::New).await;
-    // A claude that copies the history file as it finds it at start.
+    // A claude that copies the history file as it finds it at start. The copy
+    // appears under its final name only once it is whole (and is empty when
+    // there is no history file to copy), so a reader never sees half of it.
     let seen = rig.dir.path().join("history-at-start");
+    let seen_part = rig.dir.path().join("history-at-start.part");
     let history_file = SessionHistory::path_beside(&rig.store_path);
     let stub = rig.dir.path().join("claude-stub");
     std::fs::write(
         &stub,
         format!(
-            "#!/bin/sh\ncp '{}' '{}'\n",
-            history_file.display(),
-            seen.display()
+            "#!/bin/sh\ncp '{history}' '{part}' 2>/dev/null || : > '{part}'\nmv '{part}' '{seen}'\n",
+            history = history_file.display(),
+            part = seen_part.display(),
+            seen = seen.display()
         ),
     )
     .unwrap();
@@ -2057,24 +2068,60 @@ async fn the_history_vouches_for_a_session_before_its_child_runs_and_a_failed_sp
         .push((CLAUDE_BIN_ENV, std::env::var_os(CLAUDE_BIN_ENV)));
     std::env::set_var(CLAUDE_BIN_ENV, &stub);
 
-    let sid = rig
-        .mgr
-        .lock()
-        .unwrap()
-        .spawn_session(
+    // Hold the child ledger's lock. Straight after `cmd.spawn()` the session
+    // manager records the child in that ledger, which takes this lock and
+    // waits for it (at most `LEDGER_LOCK_WAIT`, then carries on without it).
+    // So the parent is stalled right after the child exists, and the child's
+    // first instruction, the copy above, runs while it is. If the history were
+    // only noted after the spawn, that copy would find no id in it. (Only a
+    // child that is slower than the whole wait can make this pass when it
+    // should not; it can never make it fail.)
+    let ledger_lock = nostromo::ipc::orphans::lock_path_for(
+        &nostromo::ipc::orphans::ledger_path_beside(&rig.store_path),
+    );
+    std::fs::create_dir_all(ledger_lock.parent().unwrap()).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&ledger_lock)
+        .expect("open the ledger lock file");
+    // SAFETY: plain syscall on a descriptor `lock` owns.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) },
+        0,
+        "the test takes the ledger lock"
+    );
+
+    let mgr = Arc::clone(&rig.mgr);
+    let spawning = tokio::task::spawn_blocking(move || {
+        mgr.lock().unwrap().spawn_session(
             "spawn-first".into(),
             "cody".into(),
             "Cody".into(),
             None,
-            None,
+            Some(SPAWNED.into()),
             false,
         )
-        .expect("spawns")
-        .expect("an id");
+    });
     wait_until("the child to start", || seen.exists()).await;
     assert!(
-        std::fs::read_to_string(&seen).unwrap().contains(&sid),
+        std::fs::read_to_string(&seen).unwrap().contains(SPAWNED),
         "a `mother add` the child runs at once must already find its session in the history"
+    );
+
+    // Let the parent go on; it has not been waiting on anything else.
+    drop(lock);
+    let sid = spawning
+        .await
+        .expect("the spawn thread ran")
+        .expect("spawns")
+        .expect("an id");
+    assert_eq!(
+        sid, SPAWNED,
+        "the session id it was given is the one it runs"
     );
 
     // A spawn that fails afterwards leaves its id there: nothing ever ran
@@ -3058,6 +3105,284 @@ async fn a_create_focus_job_from_a_sensitive_focus_carries_no_name_either() {
     );
 }
 
+// ── a job the poll decides: whether its focus was sensitive is taken at that poll ─
+
+/// How the record of a job its focus's own shell queued (a `mother add` that
+/// reads `MOTHER_ORIGIN_SESSION`) names that focus. No stamp exists for such a
+/// job: only the poll decides its origin.
+#[derive(Clone, Copy, Debug)]
+enum ShellRecord {
+    /// A current `mother`: `--origin-focus` and `--origin-session`.
+    FocusAndSession,
+    /// An older `mother`: `--origin-session` alone.
+    SessionOnly,
+}
+
+const EVERY_SHELL_RECORD: [ShellRecord; 2] =
+    [ShellRecord::FocusAndSession, ShellRecord::SessionOnly];
+
+impl ShellRecord {
+    fn naming(self, tag: &str, sid: &str) -> Value {
+        match self {
+            ShellRecord::FocusAndSession => claim(tag, sid),
+            ShellRecord::SessionOnly => json!({ "session": sid }),
+        }
+    }
+}
+
+/// The origin of `published` as a network peer is shown it: the job's
+/// annotation through the redaction the daemon applies, asking `tags` about the
+/// focus tag at this moment.
+fn origin_a_network_peer_sees(published: &MotherJob, tags: &SensitiveTags) -> OriginView {
+    let mut annotation = published
+        .nostromo
+        .clone()
+        .unwrap_or_else(|| panic!("job {} carries no annotation", published.id));
+    annotation.redact_for_network(|tag| tags.tag_is_sensitive(tag));
+    annotation.origin
+}
+
+fn assert_no_names_reach_a_network_peer(view: &OriginView, what: &str) {
+    assert_eq!(
+        view.name_snapshot.as_deref(),
+        Some(SENSITIVE_NAME),
+        "{what}: {view:?}"
+    );
+    assert_eq!(
+        view.focus_name.as_deref(),
+        Some(SENSITIVE_NAME),
+        "{what}: {view:?}"
+    );
+    assert_eq!(view.focus_tag, None, "{what}: {view:?}");
+    assert_eq!(view.session_prefix, None, "{what}: {view:?}");
+}
+
+fn assert_the_name_reaches_a_network_peer(view: &OriginView, name: &str, what: &str) {
+    assert_eq!(
+        view.name_snapshot.as_deref(),
+        Some(name),
+        "{what}: {view:?}"
+    );
+    assert_eq!(view.focus_name.as_deref(), Some(name), "{what}: {view:?}");
+    assert_eq!(view.focus_tag, None, "{what}: the tag never goes: {view:?}");
+    assert_eq!(view.session_prefix, None, "{what}: {view:?}");
+}
+
+#[tokio::test]
+async fn a_name_the_poll_recorded_while_its_focus_was_held_sensitive_stays_withheld_from_a_network_peer_after_the_hold_lapses(
+) {
+    for record in EVERY_SHELL_RECORD {
+        let rig = Rig::new(Mother::New).await;
+        add_a_sensitive_and_a_plain_focus(&rig, Sensitivity::Marked);
+        rig.history.record(PLAIN_FOCUS, PLAIN_SID);
+        let tags = rig.sensitive_tags();
+        assert!(!tags.tag_is_sensitive(PLAIN_FOCUS), "an ordinary focus");
+        let queued = || job("job1", Some(record.naming(PLAIN_FOCUS, PLAIN_SID)));
+
+        // PLAIN_FOCUS follows a remote shell, which holds it sensitive, and its
+        // own shell queues a job meanwhile. The first poll to see the job is
+        // the one that decides its origin.
+        let hold = tags.hold_sensitive(PLAIN_FOCUS);
+        let first = rig.feed.publish_jobs(vec![queued()]);
+        assert_eq!(kind_of(&first[0]), OriginKind::Focus, "{record:?}");
+        assert_no_names_reach_a_network_peer(
+            &origin_a_network_peer_sees(&first[0], &tags),
+            &format!("{record:?}: while the hold lasts"),
+        );
+
+        drop(hold);
+        assert!(!tags.tag_is_sensitive(PLAIN_FOCUS), "the hold lapsed");
+        let later = rig.feed.publish_jobs(vec![queued()]);
+
+        assert!(
+            rig.book.entry("job1").expect("in the book").sensitive,
+            "{record:?}: the book records that the focus was sensitive when the poll saw the job"
+        );
+        assert_no_names_reach_a_network_peer(
+            &origin_a_network_peer_sees(&later[0], &tags),
+            &format!("{record:?}: after the hold lapsed"),
+        );
+        // The Mac, which sees the daemon's own copy, still has the name.
+        let local = &later[0].nostromo.as_ref().unwrap().origin;
+        assert_eq!(local.name_snapshot.as_deref(), Some(PLAIN_NAME));
+        assert_eq!(local.focus_name.as_deref(), Some(PLAIN_NAME));
+        // The flag survives a restart of the daemon.
+        let reopened = OriginBook::open(
+            OriginBook::path_beside(&rig.store_path),
+            SessionHistory::in_memory(),
+            MotherAudit::disabled(),
+        );
+        assert!(
+            reopened.entry("job1").expect("persisted").sensitive,
+            "{record:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_job_the_poll_decides_for_a_registered_sensitive_focus_is_recorded_as_sensitive() {
+    for how in EVERY_SENSITIVITY {
+        for record in EVERY_SHELL_RECORD {
+            let rig = Rig::new(Mother::New).await;
+            add_a_sensitive_and_a_plain_focus(&rig, how);
+            rig.history.record(SECRET_FOCUS, SECRET_SID);
+            let tags = rig.sensitive_tags();
+            assert!(tags.tag_is_sensitive(SECRET_FOCUS), "{how:?}");
+
+            let published = rig.feed.publish_jobs(vec![job(
+                "job1",
+                Some(record.naming(SECRET_FOCUS, SECRET_SID)),
+            )]);
+
+            assert_eq!(kind_of(&published[0]), OriginKind::Focus);
+            assert!(
+                rig.book.entry("job1").expect("in the book").sensitive,
+                "{how:?} {record:?}"
+            );
+            assert_no_names_reach_a_network_peer(
+                &origin_a_network_peer_sees(&published[0], &tags),
+                &format!("{how:?} {record:?}"),
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_job_the_poll_decides_for_an_ordinary_focus_is_not_recorded_as_sensitive_and_keeps_its_names_for_a_network_peer(
+) {
+    for record in EVERY_SHELL_RECORD {
+        let rig = Rig::new(Mother::New).await;
+        // A sensitive focus beside it, so "nothing is withheld" cannot be an accident.
+        add_a_sensitive_and_a_plain_focus(&rig, Sensitivity::Marked);
+        rig.history.record(PLAIN_FOCUS, PLAIN_SID);
+        let tags = rig.sensitive_tags();
+        assert!(tags.tag_is_sensitive(SECRET_FOCUS));
+        assert!(!tags.tag_is_sensitive(PLAIN_FOCUS));
+
+        for _poll in 0..2 {
+            let published = rig.feed.publish_jobs(vec![job(
+                "job1",
+                Some(record.naming(PLAIN_FOCUS, PLAIN_SID)),
+            )]);
+            assert_eq!(kind_of(&published[0]), OriginKind::Focus, "{record:?}");
+            assert!(
+                !rig.book.entry("job1").expect("in the book").sensitive,
+                "{record:?}"
+            );
+            assert_the_name_reaches_a_network_peer(
+                &origin_a_network_peer_sees(&published[0], &tags),
+                PLAIN_NAME,
+                &format!("{record:?}"),
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_job_the_poll_first_sees_after_the_hold_lapsed_is_not_recorded_as_sensitive() {
+    // The limit docs/mother-focus.md states: nothing says the focus was
+    // sensitive when it queued a job the poll only sees once the hold is over.
+    for record in EVERY_SHELL_RECORD {
+        let rig = Rig::new(Mother::New).await;
+        add_a_sensitive_and_a_plain_focus(&rig, Sensitivity::Marked);
+        rig.history.record(PLAIN_FOCUS, PLAIN_SID);
+        let tags = rig.sensitive_tags();
+        let queued = |id: &str| job(id, Some(record.naming(PLAIN_FOCUS, PLAIN_SID)));
+
+        let hold = tags.hold_sensitive(PLAIN_FOCUS);
+        rig.feed.publish_jobs(vec![queued("during")]);
+        drop(hold);
+        let published = rig
+            .feed
+            .publish_jobs(vec![queued("during"), queued("after")]);
+
+        assert!(rig.book.entry("during").expect("in the book").sensitive);
+        let after = rig.book.entry("after").expect("in the book");
+        assert!(
+            !after.sensitive,
+            "{record:?}: the poll saw it with no hold on the focus"
+        );
+        assert_the_name_reaches_a_network_peer(
+            &origin_a_network_peer_sees(&published[1], &tags),
+            PLAIN_NAME,
+            &format!("{record:?}"),
+        );
+        assert_no_names_reach_a_network_peer(
+            &origin_a_network_peer_sees(&published[0], &tags),
+            &format!("{record:?}: the one the poll saw during the hold"),
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unverified_claim_that_names_a_sensitive_tag_is_recorded_as_sensitive_and_its_claimed_name_stays_withheld(
+) {
+    let rig = Rig::new(Mother::New).await;
+    add_a_sensitive_and_a_plain_focus(&rig, Sensitivity::Marked);
+    let tags = rig.sensitive_tags();
+    let named = |tag: &str, name: &str, session: Option<&str>| {
+        let mut o = json!({ "focus": tag, "focus_name": name });
+        if let Some(sid) = session {
+            o["session"] = json!(sid);
+        }
+        o
+    };
+
+    // A registered sensitive tag, claimed with no session and with a forged one.
+    rig.feed.publish_jobs(vec![
+        job("bare", Some(named(SECRET_FOCUS, SECRET_NAME, None))),
+        job(
+            "forged",
+            Some(named(SECRET_FOCUS, SECRET_NAME, Some("a-forged-session"))),
+        ),
+    ]);
+    // A tag that is held sensitive when the poll sees the claim, then released.
+    let hold = tags.hold_sensitive(PLAIN_FOCUS);
+    rig.feed.publish_jobs(vec![job(
+        "held",
+        Some(named(PLAIN_FOCUS, PLAIN_NAME, Some("a-forged-session"))),
+    )]);
+    drop(hold);
+    assert!(!tags.tag_is_sensitive(PLAIN_FOCUS), "the hold lapsed");
+    let published = rig.feed.publish_jobs(vec![
+        job("bare", Some(named(SECRET_FOCUS, SECRET_NAME, None))),
+        job(
+            "forged",
+            Some(named(SECRET_FOCUS, SECRET_NAME, Some("a-forged-session"))),
+        ),
+        job(
+            "held",
+            Some(named(PLAIN_FOCUS, PLAIN_NAME, Some("a-forged-session"))),
+        ),
+    ]);
+
+    for (i, id) in ["bare", "forged", "held"].into_iter().enumerate() {
+        assert_eq!(kind_of(&published[i]), OriginKind::Unverified, "{id}");
+        assert!(
+            rig.book.entry(id).expect("in the book").sensitive,
+            "{id}: the claim names a tag that was sensitive at the poll"
+        );
+        assert_no_names_reach_a_network_peer(&origin_a_network_peer_sees(&published[i], &tags), id);
+    }
+}
+
+#[tokio::test]
+async fn an_unverified_claim_that_names_an_ordinary_tag_is_not_recorded_as_sensitive_and_keeps_its_claimed_name(
+) {
+    let rig = Rig::new(Mother::New).await;
+    add_a_sensitive_and_a_plain_focus(&rig, Sensitivity::Marked);
+    let tags = rig.sensitive_tags();
+    let record = json!({ "focus": PLAIN_FOCUS, "focus_name": PLAIN_NAME });
+
+    let published = rig.feed.publish_jobs(vec![job("bare", Some(record))]);
+
+    assert_eq!(kind_of(&published[0]), OriginKind::Unverified);
+    assert!(!rig.book.entry("bare").expect("in the book").sensitive);
+    let seen = origin_a_network_peer_sees(&published[0], &tags);
+    assert_eq!(seen.name_snapshot.as_deref(), Some(PLAIN_NAME), "{seen:?}");
+    assert_eq!(seen.focus_tag, None, "{seen:?}");
+}
+
 // ── an unverified claim never borrows the registry's name ────────────────────
 
 #[test]
@@ -3513,6 +3838,133 @@ fn only_the_newest_three_numbered_backups_are_kept_and_the_first_bak_stays() {
         contents[4..].to_vec(),
         "the newest three, oldest first"
     );
+}
+
+/// The numbered backups the daemon itself writes beside `path`:
+/// `<file>.bak.<13 digits>` (the millisecond clock), nothing else.
+fn stamped_backups(path: &Path) -> Vec<PathBuf> {
+    let prefix = format!("{}.bak.", path.file_name().unwrap().to_string_lossy());
+    let mut found: Vec<PathBuf> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            name.strip_prefix(&prefix)
+                .is_some_and(|ms| ms.len() == 13 && ms.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Open the history at `path` (what a daemon start does).
+fn open_history_at(path: &Path) {
+    SessionHistory::open(path.to_path_buf());
+}
+
+/// How a daemon start opens one of its files.
+type OpenFile = fn(&Path);
+
+/// Each file the daemon keeps a backup of, and how a start opens it.
+const BACKED_UP_FILES: [(&str, OpenFile); 2] = [
+    ("focus-session-history.json", open_history_at),
+    ("mother-origins.json", open_book_at),
+];
+
+#[test]
+fn a_hand_made_numbered_copy_is_neither_pruned_nor_counted_among_the_newest_three() {
+    const SENTINEL: &[u8] = b"kept by hand, not by the daemon";
+    for (file, open) in BACKED_UP_FILES {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(file);
+        let hand_made = path.with_file_name(format!("{file}.bak.1"));
+        std::fs::write(&hand_made, SENTINEL).unwrap();
+        // The first corruption becomes the plain `.bak`, each of the five
+        // after it a numbered copy.
+        let contents: Vec<Vec<u8>> = (0..6)
+            .map(|i| corrupt_bytes(&format!("HAND-MADE-{i}"), 500 + i))
+            .collect();
+        for bytes in &contents {
+            std::fs::write(&path, bytes).unwrap();
+            open(&path);
+            std::thread::sleep(Duration::from_millis(3));
+        }
+
+        assert_eq!(
+            std::fs::read(backup_of(&path)).unwrap(),
+            contents[0],
+            "{file}: the first backup is the first corrupt file"
+        );
+        let kept = stamped_backups(&path);
+        let kept_bytes: Vec<Vec<u8>> = kept.iter().map(|p| std::fs::read(p).unwrap()).collect();
+        assert_eq!(
+            kept_bytes,
+            contents[3..].to_vec(),
+            "{file}: the newest three of the daemon's own copies, oldest first: {kept:?}"
+        );
+        assert_eq!(
+            std::fs::read(&hand_made).ok().as_deref(),
+            Some(SENTINEL),
+            "{file}: a file the daemon did not write is not its to delete"
+        );
+    }
+}
+
+#[test]
+fn a_hand_made_numbered_copy_is_never_taken_for_a_copy_that_already_holds_the_corrupt_bytes() {
+    // Names that merely look like a numbered backup: too few digits, too many,
+    // or a sign. None is `<13 digits>`, so none is one the daemon wrote.
+    const NOT_OURS: [&str; 5] = [
+        "1",
+        "12345",
+        "12345678901234",
+        "-123456789012",
+        "+123456789012",
+    ];
+    for (file, open) in BACKED_UP_FILES {
+        for suffix in NOT_OURS {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join(file);
+            let corrupt = corrupt_bytes("HAND-MADE-SAME", 800);
+            let hand_made = path.with_file_name(format!("{file}.bak.{suffix}"));
+            std::fs::write(&hand_made, &corrupt).unwrap();
+            std::fs::write(&path, &corrupt).unwrap();
+
+            open(&path);
+
+            assert!(
+                backup_of(&path).exists(),
+                "{file}: `.bak.{suffix}` is no backup of the daemon's, so the bytes are still unkept"
+            );
+            assert_eq!(std::fs::read(backup_of(&path)).unwrap(), corrupt, "{file}");
+            assert!(stamped_backups(&path).is_empty(), "{file}: {suffix}");
+            assert_eq!(
+                std::fs::read(&hand_made).unwrap(),
+                corrupt,
+                "{file}: the hand-made file is left alone"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_numbered_copy_the_daemon_wrote_that_holds_the_corrupt_bytes_is_still_the_backup() {
+    // The control for the two above: a name of exactly the shape the daemon
+    // writes is a copy, and bytes some copy holds are not copied again.
+    for (file, open) in BACKED_UP_FILES {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(file);
+        let corrupt = corrupt_bytes("OUR-OWN-COPY", 800);
+        let ours = path.with_file_name(format!("{file}.bak.1800000000000"));
+        std::fs::write(&ours, &corrupt).unwrap();
+        std::fs::write(&path, &corrupt).unwrap();
+
+        open(&path);
+
+        assert!(!backup_of(&path).exists(), "{file}: nothing new is kept");
+        assert_eq!(stamped_backups(&path), vec![ours.clone()], "{file}");
+        assert_eq!(std::fs::read(&ours).unwrap(), corrupt, "{file}");
+    }
 }
 
 // ── the history ages a session by when it was last spawned ───────────────────

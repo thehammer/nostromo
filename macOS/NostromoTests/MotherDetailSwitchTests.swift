@@ -406,6 +406,120 @@ final class MotherDetailSwitchTests: XCTestCase {
         XCTAssertNil(detail.segmentAccessibilityLabel(.plan), "an empty plan path is no plan")
     }
 
+    // MARK: - Where each segment is (the frames VoiceOver outlines and a click-by-position tool aims at)
+
+    /// A `JobViewSwitch` of its own, set up the way the detail sets it up (Overview, Plan, Log; automatic widths;
+    /// small and rounded), 300 pt wide, in a window that is never shown. The window lives until the test ends.
+    private func makeSwitch(_ distribution: NSSegmentedControl.Distribution) -> JobViewSwitch {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 80),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        addTeardownBlock { window.close() }
+
+        let control = JobViewSwitch(frame: NSRect(x: 20, y: 28, width: 300, height: 24))
+        control.segmentStyle = .rounded
+        control.controlSize = .small
+        control.segmentCount = 3
+        for (index, label) in ["Overview", "Plan", "Log"].enumerated() {
+            control.setLabel(label, forSegment: index)
+            control.setWidth(0, forSegment: index)
+        }
+        control.segmentDistribution = distribution
+        window.contentView?.addSubview(control)
+        window.contentView?.layoutSubtreeIfNeeded()
+        return control
+    }
+
+    private func relayout(_ control: JobViewSwitch) {
+        control.window?.contentView?.layoutSubtreeIfNeeded()
+    }
+
+    /// What a screen reader gets for the segments: the control's own accessibility children.
+    private func spokenElements(_ control: JobViewSwitch,
+                                file: StaticString = #filePath, line: UInt = #line) -> [NSAccessibilityElement] {
+        let elements = (control.accessibilityChildren() ?? []).compactMap { $0 as? NSAccessibilityElement }
+        XCTAssertEqual(elements.count, 3, "one accessibility element per segment", file: file, line: line)
+        return elements
+    }
+
+    /// Where each of those says its segment is, in the control's own coordinates.
+    private func spokenFrames(_ control: JobViewSwitch,
+                              file: StaticString = #filePath, line: UInt = #line) -> [NSRect] {
+        spokenElements(control, file: file, line: line).map { $0.accessibilityFrameInParentSpace() }
+    }
+
+    /// Three frames, left to right with no gap or overlap (3 pt of slack for the segments' edges), each with
+    /// a width of its own and inside the control (2 pt of slack).
+    private func assertLaidOutLeftToRight(_ frames: [NSRect], in control: NSView, _ what: String,
+                                          file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(frames.count, 3, "\(what): a frame for each segment", file: file, line: line)
+        guard frames.count == 3 else { return }
+        let inside = control.bounds.insetBy(dx: -2, dy: -2)
+        for (index, frame) in frames.enumerated() {
+            XCTAssertGreaterThan(frame.width, 10, "\(what): segment \(index) has a width: \(frame)", file: file, line: line)
+            XCTAssertTrue(inside.contains(frame), "\(what): segment \(index) at \(frame) is outside the control \(control.bounds)",
+                          file: file, line: line)
+        }
+        for index in 1 ..< frames.count {
+            XCTAssertGreaterThan(frames[index].minX, frames[index - 1].minX, "\(what): segment \(index) is right of segment \(index - 1)",
+                                 file: file, line: line)
+            XCTAssertEqual(frames[index].minX, frames[index - 1].maxX, accuracy: 3,
+                           "\(what): segment \(index) starts where segment \(index - 1) ends: \(frames)", file: file, line: line)
+        }
+    }
+
+    func testSegmentsOfEqualWidthAreGivenEqualFramesThatSpanTheControl() {
+        let control = makeSwitch(.fillEqually)
+        let frames = spokenFrames(control)
+        assertLaidOutLeftToRight(frames, in: control, "fillEqually")
+        guard frames.count == 3 else { return }
+
+        let widths = frames.map { $0.width }
+        XCTAssertLessThanOrEqual((widths.max() ?? 0) - (widths.min() ?? 0), 1.5,
+                                 "the segments are one width, so their frames are: \(widths)")
+        XCTAssertEqual(frames[0].minX, control.bounds.minX, accuracy: 4, "the first segment starts at the control's left edge")
+        XCTAssertEqual(frames[2].maxX, control.bounds.maxX, accuracy: 4, "the last segment ends at the control's right edge")
+    }
+
+    func testSegmentsSizedToTheirLabelsAreGivenFramesInOrderWithOverviewWiderThanLog() {
+        let control = makeSwitch(.fill)
+        let frames = spokenFrames(control)
+        assertLaidOutLeftToRight(frames, in: control, "fill")
+        guard frames.count == 3 else { return }
+
+        XCTAssertGreaterThan(frames[0].width, frames[2].width, "Overview is the longer label, so it has the wider segment: \(frames)")
+    }
+
+    func testTheFramesFollowTheDistributionAsItChangesBackAndForth() {
+        let control = makeSwitch(.fill)
+        let elements = spokenElements(control)
+        guard elements.count == 3 else { return }
+
+        for round in 1 ... 2 {
+            control.segmentDistribution = .fillEqually
+            relayout(control)
+            let equal = spokenFrames(control)
+            assertLaidOutLeftToRight(equal, in: control, "round \(round), fillEqually")
+            let equalWidths = equal.map { $0.width }
+            XCTAssertLessThanOrEqual((equalWidths.max() ?? 0) - (equalWidths.min() ?? 0), 1.5,
+                                     "round \(round): equal segments have equal frames again: \(equalWidths)")
+
+            control.segmentDistribution = .fill
+            relayout(control)
+            let filled = spokenFrames(control)
+            assertLaidOutLeftToRight(filled, in: control, "round \(round), fill")
+            if filled.count == 3 {
+                XCTAssertGreaterThan(filled[0].width, filled[2].width,
+                                     "round \(round): Overview is wider than Log again: \(filled)")
+            }
+
+            for (kept, now) in zip(elements, spokenElements(control)) {
+                XCTAssertTrue(kept === now, "round \(round): the elements are kept and their frames set again, not rebuilt")
+            }
+        }
+    }
+
     // MARK: - Nothing is left behind (MF4-12)
 
     func testOpeningAndClosingManyDetailsLeavesNoDetailPlanViewOrWatcherBehind() throws {

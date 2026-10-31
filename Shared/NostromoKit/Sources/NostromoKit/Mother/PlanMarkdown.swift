@@ -162,17 +162,37 @@ public enum PlanMarkdown {
 
     /// The text with each line's container prefix bounded: at most `maxMarkersPerLine` leading container
     /// markers (`>`, `-`, `*` or `+` followed by white space, 1 to 9 digits and `.` or `)` followed by
-    /// white space; the rest, and the white space after each dropped one, are removed) and at most
-    /// `maxIndentColumns` of white space in each stretch of it. Only that prefix is touched, and only
-    /// nesting is flattened, never text: whatever followed the markers is still there. One pass.
-    /// Expects `\n` line breaks (`sanitizeMultiline` leaves no other).
+    /// white space; the rest, and the white space after each dropped one, are removed; the three kinds
+    /// share the one cap) and at most `maxIndentColumns` of white space in each stretch of it. Only that
+    /// prefix is touched, and only nesting is flattened, never text: whatever followed the markers is
+    /// still there. One pass. Expects `\n` line breaks (`sanitizeMultiline` leaves no other).
+    ///
+    /// Code is left alone: the lines of a fenced code block that opens at the very start of a line (three
+    /// or more backticks or tildes, as the parser reads a fence) are copied as they are, up to the line
+    /// that closes it, because their white space is the code's own. A line is only skipped when the
+    /// parser is certain to be inside that same code block, so nothing it would nest escapes the cap.
+    /// That holds only while this tracker and the parser agree on which lines open and close a fence, so
+    /// recognition is switched off, for the rest of the text, by anything that could make them differ: a
+    /// line that starts with `<` (an HTML block can swallow a fence line) and a fence-shaped line
+    /// indented 1 to 3 columns (the parser may have a fence open there that a fence line at the start of
+    /// a line closes, or none, if a list item ended). A fence inside a quote or list item is never
+    /// recognised. All the other lines are bounded like any other.
     static func boundingNesting(_ text: String) -> String {
         let space = UInt8(ascii: " "), tab = UInt8(ascii: "\t"), quote = UInt8(ascii: ">"), newline = UInt8(ascii: "\n")
         let bytes = Array(text.utf8)
         var out: [UInt8] = []
         out.reserveCapacity(bytes.count)
+        var fence: Fence?
+        var trustsFences = true
         var i = 0
         while i < bytes.count {
+            if let current = fence {   // inside a fenced code block: the line is code
+                let end = lineEnd(in: bytes, from: i)
+                if current.isClosed(by: bytes, lineStart: i, lineEnd: end) { fence = nil }
+                out.append(contentsOf: bytes[i ..< end])
+                i = end
+                continue
+            }
             var markers = 0
             var columns = 0
             var dropping = false
@@ -201,6 +221,14 @@ public enum PlanMarkdown {
                     i += length
                 }
             }
+            if trustsFences, i < bytes.count, markers == 0, columns <= 3 {
+                if bytes[i] == UInt8(ascii: "<") {
+                    trustsFences = false
+                } else if bytes[i] == UInt8(ascii: "`") || bytes[i] == UInt8(ascii: "~"),
+                          let opened = Fence(opening: bytes, at: i, lineEnd: lineEnd(in: bytes, from: i)) {
+                    if columns == 0 { fence = opened } else { trustsFences = false }
+                }
+            }
             while i < bytes.count {   // the rest of the line is the text
                 let byte = bytes[i]
                 out.append(byte)
@@ -209,6 +237,47 @@ public enum PlanMarkdown {
             }
         }
         return String(decoding: out, as: UTF8.self)
+    }
+
+    /// The index just past the line that starts at `start` (past its line break, or the end of the text).
+    private static func lineEnd(in bytes: [UInt8], from start: Int) -> Int {
+        var end = start
+        while end < bytes.count {
+            end += 1
+            if bytes[end - 1] == UInt8(ascii: "\n") { break }
+        }
+        return end
+    }
+
+    /// An open fenced code block, as `cmark` reads one: a line of three or more backticks (none in the rest
+    /// of the line) or tildes opens it; a line of at least as many of the same character, indented 3 columns
+    /// at most and followed by nothing but spaces and tabs, closes it. It runs to the end of the text if no
+    /// line does.
+    private struct Fence {
+        let character: UInt8
+        let length: Int
+
+        /// The fence that the line `[at, lineEnd)` opens, if it does (`at` is the start of the line).
+        init?(opening bytes: [UInt8], at start: Int, lineEnd: Int) {
+            let character = bytes[start]
+            guard character == UInt8(ascii: "`") || character == UInt8(ascii: "~") else { return nil }
+            var end = start
+            while end < lineEnd, bytes[end] == character { end += 1 }
+            guard end - start >= 3 else { return nil }
+            if character == UInt8(ascii: "`"), bytes[end ..< lineEnd].contains(UInt8(ascii: "`")) { return nil }
+            self.character = character
+            self.length = end - start
+        }
+
+        func isClosed(by bytes: [UInt8], lineStart: Int, lineEnd: Int) -> Bool {
+            var i = lineStart
+            while i < lineEnd, i - lineStart < 4, bytes[i] == UInt8(ascii: " ") { i += 1 }
+            guard i - lineStart <= 3 else { return false }
+            let run = i
+            while i < lineEnd, bytes[i] == character { i += 1 }
+            guard i - run >= length else { return false }
+            return bytes[i ..< lineEnd].allSatisfy { $0 == UInt8(ascii: " ") || $0 == UInt8(ascii: "\t") || $0 == UInt8(ascii: "\n") }
+        }
     }
 
     /// The length of a list marker (without the white space after it) that starts at `i`, or 0:

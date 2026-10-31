@@ -2361,9 +2361,13 @@ impl SessionManager {
         self.session_history = history;
     }
 
-    /// Hand the daemon's origin book the focus registry from now on (and now).
+    /// Hand the daemon's origin book the focus registry from now on (and now),
+    /// and the registry of sensitive tags, which it asks when the poll decides
+    /// a job's origin.
     pub fn configure_origin_book(&mut self, book: OriginBook) {
         book.note_registry_update(&self.focus_registry);
+        let tags = self.sensitive.clone();
+        book.set_sensitivity(move |tag| tags.tag_is_sensitive(tag));
         self.origin_book = Some(book);
     }
 
