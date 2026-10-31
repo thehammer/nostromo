@@ -1,9 +1,11 @@
 //! github-relay WebSocket subscriber.
 //!
 //! Connects to the github-relay service and forwards every GitHub event it
-//! receives to the Perri queue. The relay delivers events within ~3 seconds of
-//! the GitHub webhook firing, replacing the queue's poll-cycle lag with
-//! near-real-time updates.
+//! receives to each subscriber of a [`RelayHub`]: the Perri queue, and Mother's
+//! PR tracker (`mother::notices::pr_state`). The relay delivers events within
+//! ~3 seconds of the GitHub webhook firing, replacing the queue's poll-cycle
+//! lag with near-real-time updates. The hub also carries a [`RelayStatus`]
+//! (connected or not, and the organisation the relay covers).
 //!
 //! # The queue signal
 //!
@@ -138,6 +140,9 @@ enum RelayMsg {
     Ack {
         #[serde(default)]
         events: Vec<String>,
+        /// The organisation the relay will send events for, if it says.
+        #[serde(default)]
+        org: Option<String>,
     },
     Event {
         event_type: String,
@@ -193,14 +198,113 @@ fn parse_delivered_at(raw: Option<&str>) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
+// ── fan-out and status ────────────────────────────────────────────────────────
+
+/// The organisation the subscribe frame asks for, until an ack says otherwise.
+pub const DEFAULT_ORG: &str = "Carefeed";
+
+/// What the subscriber knows about its own connection, shared with consumers
+/// that need to know whether the relay is covering them right now.
+#[derive(Debug, Default)]
+pub struct RelayStatus {
+    connected: std::sync::atomic::AtomicBool,
+    org: std::sync::Mutex<Option<String>>,
+}
+
+impl RelayStatus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True after the subscribe ack, false on close or error, and false for
+    /// good once the subscriber is disabled (401 or close code 4001).
+    pub fn connected(&self) -> bool {
+        self.connected.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_connected(&self, connected: bool) {
+        self.connected
+            .store(connected, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The organisation whose events the relay sends: the ack's effective
+    /// selection if it named one, else [`DEFAULT_ORG`].
+    pub fn org(&self) -> String {
+        self.org
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ORG.to_owned())
+    }
+
+    pub fn set_org(&self, org: Option<String>) {
+        *self.org.lock().unwrap_or_else(|e| e.into_inner()) = org;
+    }
+}
+
+/// Where the subscriber publishes: every registered consumer gets every
+/// signal, in order. Consumers register before [`spawn_with`].
+#[derive(Clone, Default)]
+pub struct RelayHub {
+    subscribers: Vec<mpsc::UnboundedSender<QueueSignal>>,
+    status: std::sync::Arc<RelayStatus>,
+}
+
+impl RelayHub {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register an existing channel's sender.
+    pub fn subscribe(&mut self, tx: mpsc::UnboundedSender<QueueSignal>) {
+        self.subscribers.push(tx);
+    }
+
+    /// Register a new consumer and return its receiver.
+    pub fn channel(&mut self) -> mpsc::UnboundedReceiver<QueueSignal> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.subscribers.push(tx);
+        rx
+    }
+
+    /// Send `signal` to every subscriber; one whose receiver is gone is skipped.
+    fn publish(&self, signal: QueueSignal) {
+        for tx in &self.subscribers {
+            let _ = tx.send(signal.clone());
+        }
+    }
+
+    /// The connection status the subscriber keeps current.
+    pub fn status(&self) -> std::sync::Arc<RelayStatus> {
+        std::sync::Arc::clone(&self.status)
+    }
+}
+
+/// Is the subscriber wanted at all? Perri's queue and Mother's notices are
+/// its only consumers: with both off nothing is spawned.
+pub fn relay_wanted(perri_enabled: bool, notices_enabled: bool) -> bool {
+    perri_enabled || notices_enabled
+}
+
+/// Like [`spawn`], publishing to every subscriber of `hub` and keeping its
+/// status current, for an explicit `url` and `token`.
+pub fn spawn_with(url: String, token: String, hub: RelayHub) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        run_loop(&url, &token, &hub).await;
+        // A subscriber that ended (401, 4001) never reconnects.
+        hub.status.set_connected(false);
+    })
+}
+
 // ── public entry point ────────────────────────────────────────────────────────
 
 /// Spawn a long-running task that maintains a WebSocket connection to the
-/// github-relay and sends a [`QueueSignal`] on `signal_tx` for every event it
-/// parses.  Returns immediately; the task runs for the lifetime of the daemon.
+/// github-relay and publishes a [`QueueSignal`] to every subscriber of `hub`
+/// for each event it parses.  Returns immediately; the task runs for the
+/// lifetime of the daemon.
 ///
 /// Does nothing if `relay_url` or `relay_token` is absent from the config.
-pub fn spawn(config: Config, signal_tx: mpsc::UnboundedSender<QueueSignal>) {
+pub fn spawn(config: Config, hub: RelayHub) {
     let (url, token) = match (&config.relay_url, &config.relay_token) {
         (Some(u), Some(t)) => (u.clone(), t.clone()),
         _ => {
@@ -208,19 +312,18 @@ pub fn spawn(config: Config, signal_tx: mpsc::UnboundedSender<QueueSignal>) {
             return;
         }
     };
-
-    tokio::spawn(async move {
-        run_loop(&url, &token, signal_tx).await;
-    });
+    spawn_with(url, token, hub);
 }
 
 // ── connection loop ───────────────────────────────────────────────────────────
 
-async fn run_loop(url: &str, token: &str, signal_tx: mpsc::UnboundedSender<QueueSignal>) {
+async fn run_loop(url: &str, token: &str, hub: &RelayHub) {
     let mut backoff_secs: u64 = 1;
 
     loop {
-        match connect_and_subscribe(url, token, &signal_tx).await {
+        let outcome = connect_and_subscribe(url, token, hub).await;
+        hub.status.set_connected(false);
+        match outcome {
             Ok(()) => {
                 // Normal close (server shutdown etc.) — reconnect.
                 info!("github-relay: connection closed, reconnecting in {backoff_secs}s");
@@ -247,11 +350,7 @@ enum RelayError {
     Other(anyhow::Error),
 }
 
-async fn connect_and_subscribe(
-    url: &str,
-    token: &str,
-    signal_tx: &mpsc::UnboundedSender<QueueSignal>,
-) -> Result<(), RelayError> {
+async fn connect_and_subscribe(url: &str, token: &str, hub: &RelayHub) -> Result<(), RelayError> {
     // Build the WebSocket request with the Authorization header.
     let mut request = url
         .into_client_request()
@@ -296,10 +395,12 @@ async fn connect_and_subscribe(
         match msg {
             Ok(Message::Text(text)) => {
                 match serde_json::from_str::<RelayMsg>(&text) {
-                    Ok(RelayMsg::Ack { events }) => {
+                    Ok(RelayMsg::Ack { events, org }) => {
                         info!("github-relay: subscribed, effective events={events:?}");
+                        hub.status.set_org(org.filter(|o| !o.trim().is_empty()));
+                        hub.status.set_connected(true);
                         // Re-fetch on (re)connect to fill any gap during the outage.
-                        let _ = signal_tx.send(QueueSignal::Reconnected);
+                        hub.publish(QueueSignal::Reconnected);
                     }
                     Ok(RelayMsg::Event {
                         event_type,
@@ -335,7 +436,7 @@ async fn connect_and_subscribe(
                         // (`perri_queue_targeted::classify_event`) so it lives
                         // in one place instead of two that can drift.  The cost
                         // of forwarding is an in-process channel send.
-                        let _ = signal_tx.send(QueueSignal::Event(RelayEvent {
+                        hub.publish(QueueSignal::Event(RelayEvent {
                             event_type,
                             event_id,
                             delivered_at: Some(parse_delivered_at(delivered_at.as_deref())),
@@ -380,4 +481,361 @@ async fn connect_and_subscribe(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! The hub and the status, against a fake relay on 127.0.0.1. Nothing
+    //! here sleeps or has a time limit: a test waits for a signal or a
+    //! condition. The reconnect test runs on paused time so the client's
+    //! one-second back-off passes at once.
+
+    use super::*;
+
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::handshake::server::{
+        ErrorResponse, Request, Response as HandshakeResponse,
+    };
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::{accept_async, accept_hdr_async};
+
+    // ── the fake relay ──
+
+    enum Cmd {
+        Send(String),
+        Close,
+        CloseWith(u16),
+    }
+
+    struct FakeRelay {
+        url: String,
+        /// The first frame of each connection (the client's `subscribe`).
+        subscribes: mpsc::UnboundedReceiver<String>,
+        cmds: mpsc::UnboundedSender<Cmd>,
+    }
+
+    impl FakeRelay {
+        fn send(&self, frame: &str) {
+            let _ = self.cmds.send(Cmd::Send(frame.to_owned()));
+        }
+        fn close(&self) {
+            let _ = self.cmds.send(Cmd::Close);
+        }
+        fn close_with(&self, code: u16) {
+            let _ = self.cmds.send(Cmd::CloseWith(code));
+        }
+    }
+
+    /// Accepts connections one after another; for each, reports the client's
+    /// first frame, then does what it is told until told to close.
+    async fn fake_relay() -> FakeRelay {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (sub_tx, subscribes) = mpsc::unbounded_channel();
+        let (cmds, mut cmd_rx) = mpsc::unbounded_channel::<Cmd>();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut ws) = accept_async(stream).await else {
+                    continue;
+                };
+                if let Some(Ok(Message::Text(frame))) = ws.next().await {
+                    let _ = sub_tx.send(frame);
+                }
+                loop {
+                    match cmd_rx.recv().await {
+                        Some(Cmd::Send(text)) => {
+                            let _ = ws.send(Message::Text(text)).await;
+                        }
+                        Some(Cmd::Close) => {
+                            let _ = ws.close(None).await;
+                            break;
+                        }
+                        Some(Cmd::CloseWith(code)) => {
+                            let _ = ws
+                                .send(Message::Close(Some(CloseFrame {
+                                    code: CloseCode::from(code),
+                                    reason: "".into(),
+                                })))
+                                .await;
+                            let _ = ws.flush().await;
+                            break;
+                        }
+                        None => return,
+                    }
+                }
+            }
+        });
+        FakeRelay {
+            url: format!("ws://{addr}/subscribe"),
+            subscribes,
+            cmds,
+        }
+    }
+
+    /// A relay that answers every handshake with HTTP 401.
+    #[allow(clippy::result_large_err)] // the handshake callback's `ErrorResponse` is fixed by tungstenite
+    async fn rejecting_relay() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let _ = accept_hdr_async(
+                    stream,
+                    |_: &Request,
+                     _: HandshakeResponse|
+                     -> Result<HandshakeResponse, ErrorResponse> {
+                        Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                            .status(401)
+                            .body(None)
+                            .unwrap())
+                    },
+                )
+                .await;
+            }
+        });
+        format!("ws://{addr}/subscribe")
+    }
+
+    const ACK: &str = r#"{"type":"ack","events":["pr.merged","pr.closed"]}"#;
+    const ACK_ACME: &str = r#"{"type":"ack","events":["pr.merged"],"org":"Acme"}"#;
+    const MERGED: &str = r#"{"type":"event","event_type":"pr.merged","repo":"Carefeed/app","number":7,"merged":true}"#;
+    const CI: &str =
+        r#"{"type":"event","event_type":"ci.completed","repo":"Carefeed/app","name":"build"}"#;
+
+    /// Wait until `cond` holds (a condition, not a time).
+    async fn until(mut cond: impl FnMut() -> bool) {
+        while !cond() {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn expect_reconnected(rx: &mut mpsc::UnboundedReceiver<QueueSignal>) {
+        match rx.recv().await {
+            Some(QueueSignal::Reconnected) => {}
+            other => panic!("expected Reconnected, got {other:?}"),
+        }
+    }
+
+    async fn expect_event(
+        rx: &mut mpsc::UnboundedReceiver<QueueSignal>,
+        event_type: &str,
+        repo: &str,
+        number: Option<u64>,
+    ) {
+        match rx.recv().await {
+            Some(QueueSignal::Event(e)) => {
+                assert_eq!(e.event_type, event_type);
+                assert_eq!(e.repo.as_deref(), Some(repo));
+                assert_eq!(e.number, number);
+            }
+            other => panic!("expected the {event_type} event, got {other:?}"),
+        }
+    }
+
+    // ── fan-out ──
+
+    #[tokio::test]
+    async fn every_subscriber_gets_the_reconnect_and_every_event_in_order() {
+        let mut relay = fake_relay().await;
+        let mut hub = RelayHub::new();
+        let mut a = hub.channel();
+        let mut b = hub.channel();
+        let (tx, mut c) = mpsc::unbounded_channel();
+        hub.subscribe(tx);
+        let _task = spawn_with(relay.url.clone(), "tok".into(), hub);
+
+        let subscribe: serde_json::Value =
+            serde_json::from_str(&relay.subscribes.recv().await.expect("a subscribe frame"))
+                .expect("JSON");
+        assert_eq!(subscribe["type"], "subscribe");
+        assert_eq!(subscribe["org"], "Carefeed");
+
+        relay.send(ACK);
+        relay.send(MERGED);
+        relay.send(CI);
+        for rx in [&mut a, &mut b, &mut c] {
+            expect_reconnected(rx).await;
+            expect_event(rx, "pr.merged", "Carefeed/app", Some(7)).await;
+            expect_event(rx, "ci.completed", "Carefeed/app", None).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_that_went_away_does_not_starve_the_others() {
+        let mut relay = fake_relay().await;
+        let mut hub = RelayHub::new();
+        let gone = hub.channel();
+        let mut kept = hub.channel();
+        drop(gone);
+        let _task = spawn_with(relay.url.clone(), "tok".into(), hub);
+        relay.subscribes.recv().await.expect("a subscribe frame");
+        relay.send(ACK);
+        relay.send(MERGED);
+        expect_reconnected(&mut kept).await;
+        expect_event(&mut kept, "pr.merged", "Carefeed/app", Some(7)).await;
+    }
+
+    // ── status ──
+
+    #[tokio::test]
+    async fn the_status_is_down_before_the_ack_up_after_it_and_down_when_the_server_closes() {
+        let mut relay = fake_relay().await;
+        let mut hub = RelayHub::new();
+        let mut rx = hub.channel();
+        let status = hub.status();
+        assert!(!status.connected(), "not connected before anything");
+        let _task = spawn_with(relay.url.clone(), "tok".into(), hub);
+
+        relay.subscribes.recv().await.expect("a subscribe frame");
+        assert!(!status.connected(), "subscribed but not acked");
+
+        relay.send(ACK);
+        expect_reconnected(&mut rx).await;
+        assert!(
+            status.connected(),
+            "acked: up by the time Reconnected is seen"
+        );
+
+        relay.close();
+        until(|| !status.connected()).await;
+        assert!(!status.connected());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn after_a_close_the_client_reconnects_and_signals_again() {
+        let mut relay = fake_relay().await;
+        let mut hub = RelayHub::new();
+        let mut rx = hub.channel();
+        let status = hub.status();
+        let _task = spawn_with(relay.url.clone(), "tok".into(), hub);
+
+        relay.subscribes.recv().await.expect("the first subscribe");
+        relay.send(ACK);
+        expect_reconnected(&mut rx).await;
+        relay.close();
+
+        // The back-off runs on paused time; the client comes back.
+        relay.subscribes.recv().await.expect("a second subscribe");
+        relay.send(ACK);
+        relay.send(MERGED);
+        expect_reconnected(&mut rx).await;
+        assert!(status.connected(), "up again");
+        expect_event(&mut rx, "pr.merged", "Carefeed/app", Some(7)).await;
+    }
+
+    #[tokio::test]
+    async fn the_org_is_carefeed_unless_the_ack_names_another() {
+        let mut relay = fake_relay().await;
+        let mut hub = RelayHub::new();
+        let mut rx = hub.channel();
+        let status = hub.status();
+        assert_eq!(status.org(), "Carefeed");
+        let _task = spawn_with(relay.url.clone(), "tok".into(), hub);
+        relay.subscribes.recv().await.expect("a subscribe frame");
+        relay.send(ACK);
+        expect_reconnected(&mut rx).await;
+        assert_eq!(status.org(), "Carefeed", "an ack without an org");
+
+        let mut relay = fake_relay().await;
+        let mut hub = RelayHub::new();
+        let mut rx = hub.channel();
+        let status = hub.status();
+        let _task = spawn_with(relay.url.clone(), "tok".into(), hub);
+        relay.subscribes.recv().await.expect("a subscribe frame");
+        relay.send(ACK_ACME);
+        expect_reconnected(&mut rx).await;
+        assert_eq!(status.org(), "Acme", "the ack's effective org");
+    }
+
+    // ── a refused token ends it ──
+
+    #[tokio::test]
+    async fn an_http_401_ends_the_subscriber_with_the_relay_never_connected() {
+        let url = rejecting_relay().await;
+        let mut hub = RelayHub::new();
+        let mut rx = hub.channel();
+        let status = hub.status();
+        let task = spawn_with(url, "bad".into(), hub);
+        task.await.expect("the task ends cleanly");
+        assert!(!status.connected());
+        assert!(rx.recv().await.is_none(), "nothing was published");
+    }
+
+    #[tokio::test]
+    async fn a_close_with_code_4001_ends_the_subscriber() {
+        let mut relay = fake_relay().await;
+        let mut hub = RelayHub::new();
+        let mut rx = hub.channel();
+        let status = hub.status();
+        let task = spawn_with(relay.url.clone(), "revoked".into(), hub);
+        relay.subscribes.recv().await.expect("a subscribe frame");
+        relay.close_with(4001);
+        task.await.expect("the task ends cleanly");
+        assert!(!status.connected());
+        assert!(rx.recv().await.is_none(), "nothing was published");
+    }
+
+    // ── what is wanted ──
+
+    #[test]
+    fn the_subscriber_is_wanted_when_perri_or_notices_use_it() {
+        assert!(relay_wanted(true, true));
+        assert!(relay_wanted(true, false));
+        assert!(relay_wanted(false, true));
+        assert!(!relay_wanted(false, false));
+    }
+
+    // ── the token never reaches the log ──
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_token_is_never_logged() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::trace!("relay-canary-capture-check");
+
+        let mut relay = fake_relay().await;
+        let mut hub = RelayHub::new();
+        let mut rx = hub.channel();
+        let _task = spawn_with(relay.url.clone(), "SECRET-TOKEN-123".into(), hub);
+        relay.subscribes.recv().await.expect("a subscribe frame");
+        relay.send(ACK);
+        relay.send(MERGED);
+        expect_reconnected(&mut rx).await;
+        expect_event(&mut rx, "pr.merged", "Carefeed/app", Some(7)).await;
+        relay.close_with(4001);
+        _task.await.expect("ends");
+
+        let logged = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+        assert!(logged.contains("relay-canary-capture-check"), "{logged}");
+        assert!(!logged.contains("SECRET-TOKEN"), "{logged}");
+    }
 }

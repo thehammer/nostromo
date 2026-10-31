@@ -11,6 +11,7 @@ use super::batch::{self, Bucket, Hold, HoldReason};
 use super::detect::{self, JobEvent, Seen};
 use super::element::{self, NoticeItem};
 use super::limits::{self, HOUR_MS};
+use super::pr_state::{self, PrCandidate};
 use super::store::{FocusRecord, JobRecord, Snapshot, Store};
 use super::{
     gen_of, FocusNoticeState, HeldSummary, NoticeHistoryEntry, NoticeReason, NoticeScope,
@@ -101,6 +102,10 @@ pub(super) struct State {
     /// The first look after loading compares each job with what was last
     /// accounted for (R9).
     restart_check: bool,
+    /// The feed was seen at least once since this engine started.
+    fed: bool,
+    /// The jobs in the newest feed (a job not in it has left the feed).
+    in_feed: HashSet<String>,
     /// Tags the registry has reported departed (and not seen again).
     closed: HashSet<String>,
     /// Focuses in a notice turn now.
@@ -151,6 +156,8 @@ impl State {
             store,
             bootstrapped: existed,
             restart_check: existed,
+            fed: false,
+            in_feed: HashSet::new(),
             closed: HashSet::new(),
             notice_turns: HashMap::new(),
             ended_turns: HashMap::new(),
@@ -365,6 +372,8 @@ impl State {
 
 impl State {
     pub(super) fn on_jobs(&mut self, jobs: &[MotherJob], now: i64) {
+        self.fed = true;
+        self.in_feed = jobs.iter().map(|j| j.id.clone()).collect();
         if !self.bootstrapped {
             self.bootstrap(jobs, now);
             return;
@@ -447,11 +456,13 @@ impl State {
                 let moved = rec.state != fresh.state
                     || rec.has_pr != fresh.has_pr
                     || rec.focus != fresh.focus
+                    || rec.finished_ms != fresh.finished_ms
                     || rec.notify != fresh.notify
                     || rec.snapshot != fresh.snapshot
                     || now - rec.last_seen_ms > HOUR_MS;
                 rec.state = fresh.state;
                 rec.has_pr = fresh.has_pr;
+                rec.finished_ms = fresh.finished_ms;
                 rec.focus = fresh.focus;
                 rec.notify = fresh.notify;
                 rec.snapshot = fresh.snapshot;
@@ -465,11 +476,44 @@ impl State {
         }
     }
 
+    /// See `NoticeEngine::pr_candidates`.
+    pub(super) fn pr_candidates(&self, now: i64) -> Option<Vec<PrCandidate>> {
+        if !self.fed {
+            return None;
+        }
+        if !self.store.enabled {
+            return Some(Vec::new());
+        }
+        let candidates = self
+            .store
+            .jobs
+            .iter()
+            .filter(|(id, rec)| {
+                rec.pr_final.is_none()
+                    && self.in_feed.contains(*id)
+                    && rec
+                        .finished_ms
+                        .is_none_or(|f| now - f < pr_state::TRACK_MAX_MS)
+            })
+            .filter_map(|(id, rec)| {
+                let tag = rec.focus.as_ref().filter(|t| !self.closed.contains(*t))?;
+                let mode = self.store.focuses.get(tag).and_then(|f| f.mode);
+                effective(true, mode, rec.notify).ok()?;
+                Some(PrCandidate {
+                    job_id: id.clone(),
+                    pr_url: rec.snapshot.pr_url.clone()?,
+                })
+            })
+            .collect();
+        Some(candidates)
+    }
+
     pub(super) fn pr_event(&mut self, job_id: &str, merged: bool, now: i64) {
         let Some(rec) = self.store.jobs.get_mut(job_id) else {
             return;
         };
-        if rec.pr_final == Some(merged) {
+        // Once merged, nothing more is said; once closed, only a merge is news.
+        if rec.pr_final == Some(true) || rec.pr_final == Some(merged) {
             return;
         }
         rec.pr_final = Some(merged);
@@ -674,6 +718,11 @@ impl State {
         // The turn that message began may have started before this outcome
         // was applied: it left the items for this call to tell.
         let started = self.early_started.remove(&key);
+        // A new message that began a turn on its own (it did not replace an
+        // older one) found older untold items lost with a cleared queue; the
+        // start left them for this call (`notice_turn_started`).
+        let sweep_older =
+            started && matches!(outcome, Some(NoticeDelivery::Woke | NoticeDelivery::Queued));
         let Some(focus) = self.store.focuses.get_mut(tag) else {
             return;
         };
@@ -716,7 +765,30 @@ impl State {
                 self.hold(tag, HoldReason::SessionNotRunning, now);
             }
         }
+        if sweep_older {
+            self.take_back_lost_older(tag, gen, now);
+        }
         self.touch();
+    }
+
+    /// Items of generations older than `gen` that are still untold when
+    /// `gen`'s notice turn has started were lost with a cleared queue: they
+    /// wait again, and go when that turn ends. Returns whether any did.
+    fn take_back_lost_older(&mut self, tag: &str, gen: u64, now: i64) -> bool {
+        let bucket = &mut self.focus(tag).bucket;
+        let lost = bucket.take_back(|f| f.gen < gen && !f.told);
+        bucket.inflight.retain(|f| f.gen >= gen);
+        if lost {
+            // The turn may be over by the time a late outcome is applied: its
+            // end found nothing to wait for, so the next turn start releases.
+            let reason = if self.notice_turns.contains_key(tag) {
+                HoldReason::Busy
+            } else {
+                HoldReason::SessionNotRunning
+            };
+            self.hold(tag, reason, now);
+        }
+        lost
     }
 
     /// `items` reached `tag`'s agent.
@@ -782,20 +854,42 @@ impl State {
                         .get(tag)
                         .and_then(|f| f.bucket.hold.map(|h| h.reason))
                         == Some(HoldReason::Busy);
+                if matches!(event, TurnEvent::Exited) {
+                    self.session_exited(tag, busy, now);
+                    return Vec::new();
+                }
                 if !busy {
                     return Vec::new();
                 }
-                if matches!(event, TurnEvent::Completed) {
-                    self.attempt(tag, Trigger::AfterTurn, now)
-                        .into_iter()
-                        .collect()
-                } else {
-                    // The session exited: nothing is running to wait for, and
-                    // no turn of the user's is needed to move it on.
-                    self.hold(tag, HoldReason::SessionNotRunning, now);
-                    Vec::new()
-                }
+                self.attempt(tag, Trigger::AfterTurn, now)
+                    .into_iter()
+                    .collect()
             }
+        }
+    }
+
+    /// The session exited: nothing is running to wait for, and no turn of the
+    /// user's is needed to move it on. What was handed to its queue and not
+    /// written died with it, whichever turn was running. `busy`: the notice
+    /// turn that just ended had due items waiting behind it.
+    fn session_exited(&mut self, tag: &str, busy: bool, now: i64) {
+        let bucket = &mut self.focus(tag).bucket;
+        let lost = bucket.take_back(|f| !f.told);
+        let stronger = matches!(
+            bucket.hold.map(|h| h.reason),
+            Some(HoldReason::Cap | HoldReason::LoopGuard)
+        );
+        if (lost || busy) && !stronger {
+            self.hold(tag, HoldReason::SessionNotRunning, now);
+        } else if lost {
+            // A cap or loop-guard hold stays; the lost items are recorded under it.
+            let reason = bucket.hold.map(|h| h.reason.into());
+            if let Some(reason) = reason {
+                self.record_held(tag, reason, now);
+            }
+        }
+        if lost {
+            self.touch();
         }
     }
 
@@ -830,17 +924,16 @@ impl State {
                 .map(|f| f.item)
                 .collect()
         };
-        let lost_any = bucket.take_back(|f| f.gen < gen && !f.told);
-        bucket.inflight.retain(|f| f.gen >= gen);
+        // While the outcome is pending, older untold items may belong to the
+        // message that replaced them: `delivered` settles them.
         let after_turn = matches!(
             bucket.hold.map(|h| h.reason),
             Some(HoldReason::Quiet | HoldReason::SessionNotRunning)
         );
         self.told(tag, &told, false, now);
-        if lost_any {
-            // Lost from a cleared queue: they go when this turn ends.
-            self.hold(tag, HoldReason::Busy, now);
-        } else if after_turn {
+        // Lost from a cleared queue: they go when this turn ends.
+        let lost_any = !early && self.take_back_lost_older(tag, gen, now);
+        if !lost_any && after_turn {
             // Quiet and not-running holds go behind any turn that starts, this
             // one included, when that is safe.
             effects.extend(self.attempt(tag, Trigger::DuringNoticeTurn, now));
@@ -1208,6 +1301,7 @@ fn record_for(job: &MotherJob, now: i64) -> JobRecord {
         state: job.state.clone(),
         has_pr: job.pr_url.is_some(),
         last_seen_ms: now,
+        finished_ms: job.finished_at.map(|t| t.timestamp_millis()),
         accounted_state: None,
         last_notified: None,
         focus,

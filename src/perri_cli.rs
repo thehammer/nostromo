@@ -18,7 +18,7 @@ use crate::data::perri_current_pr;
 /// `GH_BIN` env var overrides the default `gh` binary name (used for approve).
 const GH_BIN_ENV: &str = "GH_BIN";
 
-fn gh_bin() -> String {
+pub fn gh_bin() -> String {
     std::env::var(GH_BIN_ENV).unwrap_or_else(|_| "gh".to_owned())
 }
 
