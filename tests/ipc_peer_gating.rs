@@ -3064,6 +3064,7 @@ fn redacting_for_the_network_removes_the_notice_of_a_sensitive_origin_and_keeps_
             },
             notify: Some(NotifyLevel::Wake),
             notice: Some(json!({"status": "told"})),
+            ..Default::default()
         });
         j
     };

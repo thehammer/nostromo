@@ -346,6 +346,51 @@ final class MotherDetailSwitchTests: XCTestCase {
         XCTAssertEqual(detail.segmentAccessibilityLabel(.log), "Log", "another job starts clean")
     }
 
+    /// What a screen reader gets: the control's own accessibility children, not the helper behind them.
+    private func spokenSegments(_ detail: MotherJobDetail) -> [(label: String?, role: NSAccessibility.Role?, value: Any?)] {
+        (detail.segmentControl.accessibilityChildren() ?? []).map { child in
+            let element = child as? NSAccessibilityElement
+            return (element?.accessibilityLabel(), element?.accessibilityRole(), element?.accessibilityValue())
+        }
+    }
+
+    func testAScreenReaderGetsLogNewLinesFromTheSwitchItselfNotLogBullet() throws {
+        let (detail, dir) = try makeDetail()
+        detail.select(job(state: "done", plan: try planCopy(dir: dir)))
+        waitForLog(detail)
+
+        XCTAssertEqual(spokenSegments(detail).map(\.label), ["Overview", "Plan", "Log"])
+        XCTAssertEqual(spokenSegments(detail).map(\.role), [.radioButton, .radioButton, .radioButton])
+
+        detail.setLogAttributed(MDFixtures.logText(lines: 4, long: false))
+        XCTAssertEqual(detail.segmentLabel(.log), "Log \u{2022}", "the switch itself still shows the dot")
+        XCTAssertEqual(spokenSegments(detail).map(\.label), ["Overview", "Plan", "Log, new lines"],
+                       "the accessibility children say it in words, however often they are asked for")
+        XCTAssertEqual(spokenSegments(detail).map(\.label), ["Overview", "Plan", "Log, new lines"])
+        for child in detail.segmentControl.accessibilityChildren() ?? [] {
+            XCTAssertTrue((child as? NSAccessibilityElement)?.accessibilityParent() as AnyObject? === detail.segmentControl)
+        }
+
+        detail.selectSegment(.log)
+        XCTAssertEqual(spokenSegments(detail).map(\.label), ["Overview", "Plan", "Log"], "showing the Log clears it")
+        XCTAssertEqual(spokenSegments(detail).compactMap { $0.value as? Int }, [0, 0, 1], "and the Log is the selected one")
+    }
+
+    func testPressingASegmentThroughAccessibilityShowsIt() throws {
+        let (detail, dir) = try makeDetail()
+        detail.select(job(state: "done", plan: try planCopy(dir: dir)))
+        waitForLog(detail)
+
+        let children = try XCTUnwrap(detail.segmentControl.accessibilityChildren())
+        XCTAssertEqual(children.count, 3)
+        let plan = try XCTUnwrap(children[1] as? NSAccessibilityElement)
+        XCTAssertTrue(plan.accessibilityPerformPress())
+        XCTAssertEqual(detail.selectedSegment, .plan)
+        let log = try XCTUnwrap(detail.segmentControl.accessibilityChildren()?[2] as? NSAccessibilityElement)
+        XCTAssertTrue(log.accessibilityPerformPress())
+        XCTAssertEqual(detail.selectedSegment, .log)
+    }
+
     func testThePlanSegmentHasNoLabelWithoutAPlanAndIsNamedPlanWithOne() throws {
         let (detail, dir) = try makeDetail()
         detail.select(job(plan: nil))
