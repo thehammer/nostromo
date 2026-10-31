@@ -1091,7 +1091,10 @@ final class StagingDrawerViewTests: XCTestCase {
 
         XCTAssertTrue(note.stringValue.hasPrefix("Claudia's note (unverified): "))
         XCTAssertEqual(note.maximumNumberOfLines, 2)
-        XCTAssertEqual(note.lineBreakMode, .byTruncatingTail)
+        // Word wrapping with the last visible line cut: `.byTruncatingTail` would draw one line.
+        XCTAssertEqual(note.lineBreakMode, .byWordWrapping)
+        XCTAssertEqual(note.cell?.wraps, true)
+        XCTAssertEqual(note.cell?.truncatesLastVisibleLine, true)
     }
 
     func testThePlaceholderWarningIsTheAppsOwnTextAndOnlyForACommandWithAPlaceholder() throws {
