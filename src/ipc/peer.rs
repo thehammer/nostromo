@@ -1241,21 +1241,29 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
             // has registered the new job's id, and the job feed must not
             // include it in that gap.
             jobs.retain(|j| !j.is_work_send() && !tags.job_is_sensitive(&j.id));
-            // Who queued a job is the daemon's own knowledge: a peer gets the
-            // kind and the names, never the focus tag or the session prefix,
-            // and a sensitive focus's name and notice are replaced (SR6).
             for job in &mut jobs {
-                if let Some(annotation) = &mut job.nostromo {
-                    annotation.redact_for_network(|tag| tags.tag_is_sensitive(tag));
-                }
-                // Mother's free-form failure reason is for the local app (and a
-                // notice names only its class): never a network peer's.
-                job.failure_reason = None;
+                redact_job(job, tags);
             }
             ServerMsg::MotherJobs { jobs }
         }
+        ServerMsg::MotherAwaitDetected(mut job) => {
+            redact_job(&mut job, tags);
+            ServerMsg::MotherAwaitDetected(job)
+        }
         other => other,
     }
+}
+
+/// What a network peer may see of one Mother job. Who queued it is the
+/// daemon's own knowledge: the kind and the names, never the focus tag or the
+/// session prefix, and a sensitive focus's name and notice are replaced (SR6).
+/// Mother's free-form failure reason is for the local app (a notice names only
+/// its class).
+fn redact_job(job: &mut crate::mother::MotherJob, tags: &SensitiveTags) {
+    if let Some(annotation) = &mut job.nostromo {
+        annotation.redact_for_network(|tag| tags.tag_is_sensitive(tag));
+    }
+    job.failure_reason = None;
 }
 
 /// The topics withheld from network peers, as announced in `Withheld`.
@@ -3799,6 +3807,23 @@ mod tests {
         assert!(!wire.contains("SECRET-REASON"), "{wire}");
         assert!(!wire.contains("failure_reason"), "{wire}");
         assert!(wire.contains("\"actual_cost_usd\":2.5"), "{wire}");
+    }
+
+    #[test]
+    fn a_network_peer_never_gets_a_failure_reason_in_an_await_notice_either() {
+        let tags = SensitiveTags::in_memory();
+        let job: crate::mother::MotherJob = serde_json::from_value(serde_json::json!({
+            "id": "j2",
+            "state": "awaiting",
+            "failure_reason": "SECRET-REASON from an earlier failure",
+        }))
+        .unwrap();
+
+        let redacted = redact_for_network(ServerMsg::MotherAwaitDetected(Box::new(job)), &tags);
+
+        let wire = serde_json::to_string(&redacted).unwrap();
+        assert!(!wire.contains("SECRET-REASON"), "{wire}");
+        assert!(wire.contains("\"j2\""), "still the same job: {wire}");
     }
 
     #[test]
