@@ -592,6 +592,7 @@ class AppStore: ObservableObject {
 
         // Terminal frames go out through this app's one daemon connection.
         TerminalSessionStore.shared.transport = { [client] in client.sendTerminal($0) }
+        TerminalStagingStore.shared.transport = { [client] in client.sendTerminal($0) }
         RemoteShellStore.shared.transport = { [client] in client.sendRemoteShell($0) }
 
         // The work store holds what one connection pushed. When it drops, requests
@@ -610,6 +611,8 @@ class AppStore: ObservableObject {
                 BackgroundTaskStore.shared.tasksSupported = connected && self?.client.daemonAdvertisesTasks == true
                 // Terminal views attach again after a reconnect, and are told when the daemon is gone.
                 TerminalSessionStore.shared.connectionChanged(connected)
+                // A daemon restart forgets every staged list: so does the drawer.
+                TerminalStagingStore.shared.connectionChanged(connected)
                 if connected {
                     // What the New Remote Shell picker offers (read from the user's ECS data per request).
                     RemoteShellStore.shared.requestTargets()
@@ -1714,6 +1717,14 @@ class AppStore: ObservableObject {
         // Terminal panes (1d): `TerminalSessionStore` keeps them, every window's pane view shows them.
         case .terminalList, .terminalState, .terminalClosed, .terminalReplay, .terminalOutput, .terminalRefused:
             TerminalSessionStore.shared.ingest(msg)
+            // A closed terminal takes its staged list with it.
+            if case .terminalClosed(let closed) = msg { TerminalStagingStore.shared.terminalClosed(closed.terminalId) }
+
+        // Staged commands (S1): `TerminalStagingStore` keeps them, every window's drawer shows them.
+        case .terminalStagingList(let list):
+            TerminalStagingStore.shared.ingest(list)
+        case .terminalStagingUnreadable(let terminalId):
+            TerminalStagingStore.shared.listUnreadable(terminalId)
 
         // Remote shells (2c): the store keeps the vocabulary; `RemoteShellPresenter` shows the sheets.
         case .remoteShellTargets(let targets):

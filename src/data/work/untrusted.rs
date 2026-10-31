@@ -55,10 +55,10 @@ pub fn is_invisible(c: char) -> bool {
             '\u{00AD}' | '\u{034F}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}'
             | '\u{0890}'..='\u{0891}' | '\u{08E2}' | '\u{115F}' | '\u{1160}' | '\u{17B4}'..='\u{17B5}' | '\u{180B}'..='\u{180F}'
             | '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{2800}' | '\u{3164}'
-            | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{2060}'..='\u{206F}' | '\u{2800}' | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFFB}'
             | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}'
-            | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E00FF}' | '\u{E0100}'..='\u{E01EF}')
+            | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E0FFF}')
 }
 
 /// `text` as one trimmed line of at most `max_chars` characters: invisible
@@ -696,6 +696,21 @@ mod tests {
         for _ in 0..50 {
             let fence = NonceFence::avoiding(&[text]);
             assert!(!text.contains(&fence.nonce));
+        }
+    }
+
+    #[test]
+    fn is_invisible_covers_the_unassigned_format_ranges() {
+        // U+2065 (unassigned, between the invisible operators and the bidi isolates), the
+        // specials block's unassigned U+FFF0..U+FFF8, and the whole tag/variation-selector plane
+        // tail up to U+E0FFF: all render as nothing and some can carry bytes.
+        for cp in [0x2065, 0xFFF0, 0xFFF4, 0xFFF8, 0xE01F0, 0xE0500, 0xE0FFF] {
+            assert!(is_invisible(char::from_u32(cp).unwrap()), "U+{cp:04X}");
+        }
+        // Visible neighbours stay ordinary text: the object replacement character, the
+        // replacement character, and the first code point after the range.
+        for plain in ['\u{FFFC}', '\u{FFFD}', '\u{E1000}', '\u{2070}'] {
+            assert!(!is_invisible(plain), "U+{:04X}", plain as u32);
         }
     }
 

@@ -238,18 +238,17 @@ final class AppControlServer {
     // MARK: - Tree / find
 
     private func text(of v: NSView) -> String? {
-        var s: String?
-        if let f = v as? NSTextField { s = f.stringValue }
-        else if let b = v as? NSButton { s = b.title }
-        else if let t = v as? NSTextView { s = t.string }
-        guard var out = s, !out.isEmpty else { return nil }
-        if out.count > 160 { out = String(out.prefix(160)) + "…" }
-        return out
+        AppControlAX.text(of: v)
     }
 
     private func node(_ v: NSView, in w: NSWindow, depth: Int, maxDepth: Int, visibleOnly: Bool) -> [String: Any]? {
         if visibleOnly && v.isHidden { return nil }
         let frameInWindow = v.convert(v.bounds, to: nil)
+        if v is StagingDrawerView, AppControlAX.isWithheld(v) {
+            // Staged commands are the user's to read on screen, not app-control's: one fixed entry, no children.
+            return ["class": "StagingDrawerView", "text": AppControlAX.stagedHiddenText,
+                    "frame": AppControlGeometry.topLeftRect(viewFrameInWindow: frameInWindow, contentHeight: contentHeight(w))]
+        }
         var n: [String: Any] = [
             "class": String(describing: type(of: v)),
             "frame": AppControlGeometry.topLeftRect(viewFrameInWindow: frameInWindow, contentHeight: contentHeight(w)),
@@ -297,6 +296,10 @@ final class AppControlServer {
         var out: [Hit] = []
         func walk(_ v: NSView) {
             if v.isHidden { return }
+            if v is StagingDrawerView, AppControlAX.isWithheld(v) {
+                if v.window != nil, AppControlAX.stagedHiddenText.contains(needle) { out.append(Hit(cls: "StagingDrawerView", text: AppControlAX.stagedHiddenText, rectInWindow: v.convert(v.bounds, to: nil))) }
+                return
+            }
             let hay = [text(of: v), v.toolTip, v.accessibilityLabel(), String(describing: type(of: v))]
                 .compactMap { $0?.lowercased() }
             if v.window != nil, hay.contains(where: { $0.contains(needle) }) { out.append(hit(for: v)) }
@@ -361,6 +364,7 @@ final class AppControlServer {
         if let cv = w.contentView { walk(cv) }
         guard let t = target else { throw AppControlError.notFound("no view with class containing \(needle)") }
         var o = AppControlAX.dump(t, 0)
+        if AppControlAX.isWithheld(t) { return o }
         o["isAccessibilityElement"] = t.isAccessibilityElement()
         o["enhancedUI"] = NSApp.accessibilityAttributeValue(NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")) as Any
         o["cellRows"] = (t.accessibilityRows() ?? []).count
