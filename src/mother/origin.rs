@@ -809,7 +809,7 @@ pub fn session_prefix(sid: &str) -> Option<String> {
 
 /// Does `s` look like a focus tag (`claudia-C9D6B773`, `teri:fred`)? A claim
 /// that does not never reaches the audit file or the wire.
-fn is_tag_like(s: &str) -> bool {
+pub(crate) fn is_tag_like(s: &str) -> bool {
     !s.is_empty()
         && s.chars().count() <= MAX_TAG_CHARS
         && s.chars()

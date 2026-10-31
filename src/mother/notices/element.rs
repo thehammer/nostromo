@@ -97,7 +97,7 @@ pub fn failure_class(raw: Option<&str>) -> &'static str {
     let r = raw.to_ascii_lowercase();
     if r == "unspecified" {
         "unspecified"
-    } else if r.contains("merge_conflict") || r.contains("conflict") {
+    } else if r.contains("conflict") {
         "merge_conflict"
     } else if r.contains("gate") {
         "gates"

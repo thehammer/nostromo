@@ -80,6 +80,17 @@ pub struct InFlight {
     pub told: bool,
 }
 
+impl From<InFlight> for Pending {
+    /// An item taken back from the session's queue waits again, as it did.
+    fn from(f: InFlight) -> Self {
+        Self {
+            item: f.item,
+            due: f.due,
+            updated_ms: f.at_ms,
+        }
+    }
+}
+
 /// A due delivery's hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hold {
@@ -210,6 +221,61 @@ impl Bucket {
         let mut items = std::mem::take(&mut self.items);
         items.sort_by_key(|p| !p.due);
         items
+    }
+
+    /// Hand `items` to the session as generation `gen`. One element per job: a
+    /// job whose notice still waits in the session's queue gains the new
+    /// states in place of a second element.
+    pub fn put_in_flight(&mut self, items: Vec<Pending>, gen: u64, now: i64) {
+        for p in items {
+            match self
+                .inflight
+                .iter_mut()
+                .find(|f| !f.told && f.item.job_id == p.item.job_id)
+            {
+                Some(f) => {
+                    for s in &p.item.states {
+                        if f.item.states.last() != Some(s) {
+                            f.item.states.push(*s);
+                        }
+                    }
+                    f.item.title = p.item.title;
+                    f.item.pr_url = p.item.pr_url;
+                    f.item.cost_usd = p.item.cost_usd;
+                    f.item.reason = p.item.reason;
+                    f.due |= p.due;
+                    f.gen = gen;
+                    f.at_ms = now;
+                }
+                None => self.inflight.push(InFlight {
+                    gen,
+                    item: p.item,
+                    due: p.due,
+                    at_ms: now,
+                    told: false,
+                }),
+            }
+        }
+    }
+
+    /// Remove and return the in-flight entries `pick` selects.
+    pub fn drain_inflight(&mut self, pick: impl Fn(&InFlight) -> bool) -> Vec<InFlight> {
+        let (taken, kept): (Vec<InFlight>, Vec<InFlight>) = std::mem::take(&mut self.inflight)
+            .into_iter()
+            .partition(|f| pick(f));
+        self.inflight = kept;
+        taken
+    }
+
+    /// Move the in-flight entries `pick` selects back to the waiting items.
+    /// Returns whether any moved.
+    pub fn take_back(&mut self, pick: impl Fn(&InFlight) -> bool) -> bool {
+        let back = self.drain_inflight(pick);
+        if back.is_empty() {
+            return false;
+        }
+        self.restore(back.into_iter().map(Pending::from).collect());
+        true
     }
 
     /// Put items back (a delivery that could not be made), merging with
