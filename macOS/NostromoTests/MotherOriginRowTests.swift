@@ -111,7 +111,11 @@ final class MotherOriginRowTests: XCTestCase {
         host.frame = NSRect(x: 0, y: 0, width: 280, height: 80)
         let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: true)
         window.contentView = host
+        window.orderBack(nil)
         host.layoutSubtreeIfNeeded()
+        // Let SwiftUI publish its accessibility tree (a few run-loop turns, not a wall-clock bound).
+        for _ in 0..<5 { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        defer { window.orderOut(nil) }
         var labels: [String] = []
         var actions: [String] = []
         func walk(_ node: Any, depth: Int) {
@@ -138,6 +142,7 @@ final class MotherOriginRowTests: XCTestCase {
     func testARowWithoutAnOriginKeepsItsOwnAccessibility() {
         let model = MotherJobRowModel(id: "j1", state: "queued", title: "Ship it")
         let labels = accessibilityLabels(of: model).labels
+        XCTAssertFalse(labels.isEmpty, "the harness must see the row's accessibility tree")
         XCTAssertFalse(labels.contains { $0.contains("From ") })
         XCTAssertFalse(labels.contains("Ship it"), "no origin: the row is not collapsed into one element")
     }
