@@ -200,14 +200,16 @@ final class StagingRowView: NSView {
     }
 
     /// The line under the command: `inserted 2m ago`, or this row's own reason. A row that is only waiting
-    /// out the reading delay shows what it will show afterwards (nothing, for a ready row; the dimming
-    /// and the spoken label say it is unavailable), so its height is the same on both sides of the delay.
+    /// out the reading delay, or blocked by a shared reason, shows what it will show afterwards (nothing,
+    /// for a ready row; the dimming and the spoken label say it is unavailable), so its height is the
+    /// same on both sides of the transition.
     private var stateLine: String? {
         switch model.state {
         case .ready: return nil
         case .inserted(let ago): return ago
         case .disabled(.justChanged): return model.lineAfterDelay
-        case .disabled(let reason): return showsReason || !reason.appliesToEveryRow ? reason.text : nil
+        case .disabled(let reason):
+            return showsReason || !reason.appliesToEveryRow ? reason.text : model.lineAfterDelay
         }
     }
 

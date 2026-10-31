@@ -69,9 +69,10 @@ struct StagingRowModel: Equatable {
     let noteText: String?
     /// The app's own labels (never the agent's). In S1: the placeholder warning.
     let labels: [String]
-    /// For a row that is only waiting out the reading delay: the line it will show once it can be read
-    /// (`inserted 2m ago`, or why its text is not insertable), shown now so the row's height does not
-    /// change at the moment it becomes clickable. nil for every other row.
+    /// For a row blocked by the reading delay or by a reason shared by every row (which the drawer shows
+    /// once, not per row): the line it will show once it can be clicked (`inserted 2m ago`, or why its
+    /// text is not insertable), shown now so the row's height does not change at the moment it becomes
+    /// clickable. nil for every other row.
     let lineAfterDelay: String?
     let accessibilityLabel: String
 
@@ -221,7 +222,7 @@ enum StagingDrawerModel {
             state = .ready
         }
         var lineAfterDelay: String?
-        if state == .disabled(.justChanged) {
+        if case .disabled(let reason) = state, reason == .justChanged || reason.appliesToEveryRow {
             if !AgentDisplayText.isInsertable(entry.command) {
                 lineAfterDelay = StagingDisabledReason.notInsertable.text
             } else if entry.insertedCount > 0, let last = entry.lastInsertedAt {

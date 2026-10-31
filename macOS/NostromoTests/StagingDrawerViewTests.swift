@@ -1814,36 +1814,87 @@ final class StagingDrawerViewTests: XCTestCase {
         }
     }
 
-    func testAMirrorWindowBecomingTheDriverAndMirrorAgainNeverMovesARow() {
+    /// The full list (an inserted row and a row the app will not insert, which each gain a line once a shared
+    /// reason clears) with a reason that every row shares coming and going: `engage` puts the reason in place,
+    /// `release` takes it away. Says where everything was with the reason, without it, and with it again.
+    private func assertASharedReasonComingAndGoingNeverMovesAnything(
+        _ reason: StagingDisabledReason,
+        prepare: (StagingRig) -> StagingSide = { $0.primary },
+        engage: (StagingRig, StagingSide) -> Void,
+        release: (StagingRig, StagingSide) -> Void,
+        file: StaticString = #filePath, line: UInt = #line) {
         for width in [200.0, 400.0] {
-            let tag = "width \(Int(width))"
+            let tag = "\(reason), width \(Int(width))"
             let rig = makeRig(gate: StagingGates.real())
-            let side = rig.makeSide(isMirror: true, gate: StagingGates.real())
+            let side = prepare(rig)
+            engage(rig, side)
             let host = makeHost(rig, side: side, width: CGFloat(width), bodyHeight: 2_000)
-            // Rows with no line of their own once readable: it is the shared reason that comes and goes.
-            rig.ingest(Array(readingBoundaryEntries().prefix(4)))
+            rig.ingest(readingBoundaryEntries())
             rig.settle()
             host.drawer.refresh()
             host.relayout()
-            XCTAssertTrue(host.visibleTexts.contains(StagingDisabledReason.mirror.text), "\(tag): harness: the shared reason is showing")
-            let asMirror = geometry(of: host)
+            XCTAssertEqual(host.rows.count, 6, "\(tag): harness: every row is there", file: file, line: line)
+            XCTAssertTrue(host.rows.allSatisfy { $0.model.state == .disabled(reason) },
+                          "\(tag): harness: every row is blocked by the shared reason: \(host.rows.map { $0.model.state })",
+                          file: file, line: line)
+            XCTAssertTrue(host.visibleTexts.contains(reason.text), "\(tag): harness: the shared reason is showing: \(host.visibleTexts)",
+                          file: file, line: line)
+            let withReason = geometry(of: host)
 
-            side.context?.isMirror = false      // a click in the terminal: this window drives now
+            release(rig, side)
             host.drawer.refresh()
             host.relayout()
-            XCTAssertFalse(host.visibleTexts.contains(StagingDisabledReason.mirror.text), "\(tag): harness: the shared reason is gone")
-            XCTAssertEqual(host.rows.first?.model.state, .ready, "\(tag): harness: the rows are live")
-            let asDriver = geometry(of: host)
+            XCTAssertFalse(host.visibleTexts.contains(reason.text), "\(tag): harness: the shared reason is gone", file: file, line: line)
+            for row in host.rows {
+                let expected: StagingRowModel.State
+                switch row.model.entryId {
+                case "s-5": expected = .inserted(ago: "inserted 2s ago")      // gains its line now
+                case "s-6": expected = .disabled(.notInsertable)              // gains its reason now
+                default:    expected = .ready
+                }
+                XCTAssertEqual(row.model.state, expected, "\(tag): harness: \(row.model.entryId) once the reason is gone",
+                               file: file, line: line)
+            }
+            let without = geometry(of: host)
 
-            side.context?.isMirror = true       // another window took the terminal back
+            engage(rig, side)
             host.drawer.refresh()
             host.relayout()
-            XCTAssertTrue(host.visibleTexts.contains(StagingDisabledReason.mirror.text), "\(tag): harness: the shared reason is back")
-            let mirrorAgain = geometry(of: host)
+            XCTAssertTrue(host.visibleTexts.contains(reason.text), "\(tag): harness: the shared reason is back", file: file, line: line)
+            let again = geometry(of: host)
 
-            assertRowsStill(asMirror, asDriver, "\(tag): the shared reason clearing")
-            assertRowsStill(asDriver, mirrorAgain, "\(tag): the shared reason appearing")
+            assertSameGeometry(withReason, without, "\(tag): the shared reason clearing", file: file, line: line)
+            assertSameGeometry(without, again, "\(tag): the shared reason appearing", file: file, line: line)
         }
+    }
+
+    func testAMirrorWindowBecomingTheDriverAndMirrorAgainNeverMovesARow() {
+        assertASharedReasonComingAndGoingNeverMovesAnything(
+            .mirror,
+            prepare: { $0.makeSide(isMirror: true, gate: StagingGates.real()) },
+            engage: { _, side in side.context?.isMirror = true },      // another window took the terminal back
+            release: { _, side in side.context?.isMirror = false })    // a click in the terminal: this window drives now
+    }
+
+    func testAFullScreenProgramStartingAndEndingNeverMovesARow() {
+        assertASharedReasonComingAndGoingNeverMovesAnything(
+            .alternateScreen,
+            engage: { _, side in side.target.isAlternateScreen = true },
+            release: { _, side in side.target.isAlternateScreen = false })
+    }
+
+    func testAPasteInProgressStartingAndFinishingNeverMovesARow() {
+        assertASharedReasonComingAndGoingNeverMovesAnything(
+            .sendingPaste,
+            engage: { rig, _ in if !rig.sessions.isSendingInput(terminalId: StagingFixtures.terminalId) { rig.sendBacklog() } },
+            release: { rig, _ in rig.drainBacklog() })
+    }
+
+    func testAShellThatIsStillConnectingBecomingReadyNeverMovesARow() {
+        assertASharedReasonComingAndGoingNeverMovesAnything(
+            .connecting,
+            engage: { _, side in side.context?.status = .connecting },
+            release: { _, side in side.context?.status = .running })
     }
 
     // MARK: - The drawer gives the keyboard back when it goes away

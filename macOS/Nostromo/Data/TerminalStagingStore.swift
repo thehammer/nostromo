@@ -100,6 +100,8 @@ final class TerminalStagingStore {
         // Any change to what the rows say (an entry added, removed, moved, or its command or note edited)
         // can change a row's height, shift every row below it and grow the drawer: nothing is under the
         // pointer where the person last saw it. So one change restarts the delay for EVERY entry.
+        // (Marking an entry inserted for the first time does not restart it: the row under the pointer is the
+        // one just clicked and it only grows downward, so nothing the pointer rests on moves.)
         let fingerprints = frame.entries.map { Fingerprint(command: $0.command, note: $0.note) }
         let previous = shownSince[id] ?? [:]
         let unchanged = lists[id]?.entries.map(\.id) == frame.entries.map(\.id)
