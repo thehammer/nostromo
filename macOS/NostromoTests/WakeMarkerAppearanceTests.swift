@@ -153,12 +153,16 @@ final class WakeMarkerAppearanceTests: XCTestCase {
         XCTAssertLessThan(leadingWidth, 220 - 16, "the real state sits inside the visible width, ahead of the title")
     }
 
-    func testANoticeTurnWithATextBlockEstimatesWhatItDrawsWithinOnePoint() {
-        let turn = MotherNoticeFixtures.turn(blocks: [.text("Noted.")])
+    /// The drawn layout puts only `bubbleGap` between the user slot and the first column and adds
+    /// `blockSpacing` only after column 0, so the first block adds exactly its own height.
+    func testTheFirstBlockOfANoticeTurnAddsExactlyItsOwnHeightWithNoBlockSpacing() {
+        let blockless = MotherNoticeFixtures.turn()
+        let withText = MotherNoticeFixtures.turn(blocks: [.text("Noted.")])
         for width: CGFloat in [220, 700, 900] {
-            let view = MotherNoticeFixtures.turnView(turn)
-            view.setIslandWidth(width)
-            XCTAssertEqual(view.islandHeight(), TurnHeightEstimator.estimate(turn, width: width), accuracy: 1, "width \(width)")
+            let own = TurnHeightEstimator.estimate(block: .text("Noted."), characters: 6,
+                                                   width: width * TurnHeightEstimator.blocksWidthFraction - 14)
+            XCTAssertEqual(TurnHeightEstimator.estimate(withText, width: width) - TurnHeightEstimator.estimate(blockless, width: width),
+                           own, accuracy: 0.001, "width \(width)")
         }
     }
 }
