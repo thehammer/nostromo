@@ -157,10 +157,11 @@ final class PlanDisplayLimitsTests: XCTestCase {
     }
 
     /// The longest stretch the main thread may be busy at a time. The measured worst case is 1.9 s (a
-    /// megabyte of short paragraphs, on a developer Mac); a plan whose rows are not bounded takes tens of
-    /// seconds, so this catches a real regression with room for a slow CI runner. The row and character
-    /// counts below are the primary guard: they do not depend on the machine.
-    private static let stallBound: TimeInterval = 6
+    /// megabyte of short paragraphs, on a developer Mac) and CI runs about 2.5 times slower than that, so
+    /// 15 s is more than three times what CI takes; a plan whose rows are not bounded takes tens of
+    /// seconds. The row and character counts below are the real guard: they do not depend on the machine,
+    /// and this only catches a stall that they cannot see.
+    private static let stallBound: TimeInterval = 15
 
     /// The counts every truncated plan keeps, whatever it was made of.
     private func assertBounded(_ opened: Opened, file: StaticString = #filePath, line: UInt = #line) {

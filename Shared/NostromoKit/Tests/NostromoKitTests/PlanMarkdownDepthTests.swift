@@ -203,17 +203,21 @@ final class PlanMarkdownDepthTests: XCTestCase {
 
     // [work-count] The same shapes, counted in operations so a slow machine cannot flake it.
     func testDeepQuotesAndIndentsFollowedByManySpansStayWithinAWorkBudget() throws {
-        // Each run's block path is walked: with the markers unbounded that is levels x runs (hundreds of
-        // millions); bounded it is the depth limit x runs, a few million.
-        let budget = 8_000_000
+        // Each run's block path is walked: with the markers unbounded that is levels x runs; bounded it is
+        // the depth limit x runs. Each `*a* ` is about two runs, so 3,000 spans are about 6,000 runs. Bounded,
+        // a path is at most ~70 components, so about 420,000 in all. Unbounded: 2,500 quotes = 15 million,
+        // 5,000 bullets (2 components each) = 60 million, 3,000 nested list levels about 36 million. So every
+        // case is at least 5x over the budget and the bounded figure at least 7x under it: the guard still
+        // trips on the old code, and the test costs a few seconds, not twelve.
+        let budget = 3_000_000
         let indented = (0 ..< 3_000).map { String(repeating: " ", count: 2 * $0) + "- item" }.joined(separator: "\n")
-            + "\n" + String(repeating: " ", count: 6_000) + String(repeating: "*a* ", count: 15_000)
-        let bullets = String(repeating: "- ", count: 5_000) + String(repeating: "*a* ", count: 15_000)
-        let numbered = String(repeating: "1. ", count: 5_000) + String(repeating: "*a* ", count: 15_000)
-        let mixed = String(repeating: "> - ", count: 2_500) + String(repeating: "*a* ", count: 15_000)
+            + "\n" + String(repeating: " ", count: 6_000) + String(repeating: "*a* ", count: 3_000)
+        let bullets = String(repeating: "- ", count: 5_000) + String(repeating: "*a* ", count: 3_000)
+        let numbered = String(repeating: "1. ", count: 5_000) + String(repeating: "*a* ", count: 3_000)
+        let mixed = String(repeating: "> - ", count: 2_500) + String(repeating: "*a* ", count: 3_000)
         for (name, text) in [("5,000 bullets", bullets), ("5,000 numbered items", numbered), ("2,500 quote-bullet pairs", mixed),
-                             ("2,500 quotes", quotesThenSpans(levels: 2_500, spans: 15_000)),
-                             ("10,000 quotes", quotesThenSpans(levels: 10_000, spans: 15_000)),
+                             ("2,500 quotes", quotesThenSpans(levels: 2_500, spans: 3_000)),
+                             ("10,000 quotes", quotesThenSpans(levels: 10_000, spans: 3_000)),
                              ("3,000 nested list levels", indented)] {
             let run = try XCTUnwrap(onSmallStack({ PlanMarkdown.parseCounting(text) }))
             XCTAssertLessThan(run.value.pathComponents, budget, "\(name): \(run.value.pathComponents) path components walked")
@@ -251,5 +255,135 @@ final class PlanMarkdownDepthTests: XCTestCase {
         }
         XCTAssertEqual(bound("x" + String(repeating: ">", count: 100)), "x" + String(repeating: ">", count: 100),
                        "only the line's own prefix counts: a > after text is text")
+    }
+
+    // MARK: Fenced code is left as written (the source bound only flattens what the parser would nest)
+
+    /// A line of 200 spaces and an x: past `maxIndentColumns`, so the bound cuts it anywhere it applies.
+    private var wideLine: String { String(repeating: " ", count: 200) + "x" }
+    /// `wideLine` as the bound leaves an ordinary line.
+    private var boundedWideLine: String { String(repeating: " ", count: PlanMarkdown.maxIndentColumns) + "x" }
+    /// 5,000 quote markers and a word: past `maxMarkersPerLine`.
+    private var manyQuotes: String { String(repeating: ">", count: 5_000) + " hello" }
+    /// `manyQuotes` as the bound leaves an ordinary line.
+    private var boundedQuotes: String { String(repeating: ">", count: PlanMarkdown.maxMarkersPerLine) + "hello" }
+
+    /// `XCTAssertEqual` for the long texts here: a failure names the first line that differs instead of
+    /// printing both texts in full.
+    private func assertSameText(_ actual: String, _ expected: String, _ what: String,
+                                file: StaticString = #filePath, line: UInt = #line) {
+        guard actual != expected else { return }
+        let got = actual.components(separatedBy: "\n")
+        let want = expected.components(separatedBy: "\n")
+        let shared = min(got.count, want.count)
+        let first = (0 ..< shared).first(where: { got[$0] != want[$0] }) ?? shared
+        func describe(_ lines: [String]) -> String {
+            first < lines.count ? "\(lines[first].utf8.count) bytes" : "no such line"
+        }
+        XCTFail("\(what): line \(first + 1) differs (\(describe(got)), where \(describe(want)) were expected)", file: file, line: line)
+    }
+
+    func testFencedCodeKeepsItsIndentationPastTheColumnCap() {
+        let wide = wideLine
+        let tabs = String(repeating: "\t", count: 40) + "x"
+        let fences: [(String, String)] = [
+            ("backticks", "```\n\(wide)\n```\n"),
+            ("tildes", "~~~\n\(wide)\n~~~\n"),
+            ("an info string", "```swift\n\(wide)\n```\n"),
+            ("a tilde fence whose info string has a backtick", "~~~ a`b\n\(wide)\n~~~\n"),
+            ("a four-backtick fence holding a three-backtick line", "````\n```\n\(wide)\n````\n"),
+            ("a tilde fence holding backticks", "~~~\n```\n\(wide)\n~~~\n"),
+            ("a backtick fence holding tildes", "```\n~~~\n\(wide)\n```\n"),
+            ("tabs that add up to more than the cap", "```\n\(tabs)\n```\n"),
+            ("text before it", "# Plan\n\nSome words.\n\n```\n\(wide)\n```\n"),
+        ]
+        for (name, text) in fences {
+            assertSameText(PlanMarkdown.boundingNesting(text), text, name)
+        }
+    }
+
+    func testQuoteAndBulletMarkersInsideAFenceAreLeftAloneAndTheSameLinesAfterItAreBounded() {
+        let quotes = manyQuotes
+        let bullets = String(repeating: "- ", count: 5_000) + "item"
+        let after = "\(quotes)\n\(bullets)\n"
+        let boundedAfter = "\(boundedQuotes)\n\(String(repeating: "- ", count: PlanMarkdown.maxMarkersPerLine))item\n"
+        for fence in ["```", "~~~"] {
+            let inside = "\(fence)\n\(quotes)\n\(bullets)\n\(fence)\n"
+            assertSameText(PlanMarkdown.boundingNesting(inside + after), inside + boundedAfter,
+                           "\(fence): the fenced lines stay whole, the same lines after it are bounded")
+        }
+    }
+
+    func testOnlyAProperClosingLineEndsAFence() {
+        let wide = wideLine
+        // Each of these closes the fence: the wide line after it is an ordinary line again.
+        for closer in ["```", "````", "```   ", "```\t", "   ```", " ```  "] {
+            let text = "```\n\(wide)\n\(closer)\n\(wide)\n"
+            let expected = "```\n\(wide)\n\(closer)\n\(boundedWideLine)\n"
+            assertSameText(PlanMarkdown.boundingNesting(text), expected, "closed by \(closer.debugDescription)")
+        }
+        // None of these does: they are lines of the code, and the fence is still open after them.
+        for notCloser in ["    ```", "``", "``` x", "~~~", "\t```"] {
+            let text = "```\n\(wide)\n\(notCloser)\n\(wide)\n"
+            assertSameText(PlanMarkdown.boundingNesting(text), text, "not closed by \(notCloser.debugDescription)")
+        }
+        // A longer fence is closed only by one at least as long, of the same character.
+        let longer = "~~~~\n~~~\n\(wide)\n~~~~~\n\(wide)\n"
+        assertSameText(PlanMarkdown.boundingNesting(longer), "~~~~\n~~~\n\(wide)\n~~~~~\n\(boundedWideLine)\n",
+                       "a four-tilde fence is closed by five")
+    }
+
+    func testTextBetweenTwoFencesIsBoundedAndBothFencesAreKept() {
+        let fence = "```\n\(wideLine)\n\(manyQuotes)\n```\n"
+        let text = "\(fence)\(wideLine)\n\(manyQuotes)\n\(fence)"
+        let expected = "\(fence)\(boundedWideLine)\n\(boundedQuotes)\n\(fence)"
+        assertSameText(PlanMarkdown.boundingNesting(text), expected, "each fence is its own; what lies between is bounded")
+    }
+
+    func testAnUnclosedFenceRunsToTheEndOfTheText() {
+        let tail = "\(wideLine)\n\(manyQuotes)\n\(String(repeating: "- ", count: 5_000))item"
+        for opener in ["```", "~~~", "````swift"] {
+            let text = "# Plan\n\n\(opener)\n\(tail)"
+            assertSameText(PlanMarkdown.boundingNesting(text), text, "everything after an unclosed \(opener) is left as written")
+        }
+    }
+
+    /// [guard] Each case is one where the parser's idea of the structure can differ from a fence tracker's,
+    /// so the line after it, 5,000 quote markers, must still be cut to `maxMarkersPerLine`. These are how
+    /// the old code behaved, too: they stay green, and fail if the tracker believes a fence the parser
+    /// would not see (the bound is the only thing between such a line and a cost the parser cannot cancel).
+    func testAFenceTheParserMightNotSeeIsNotTrustedAndTheLineAfterItStaysBounded() {
+        let cases: [(String, String)] = [
+            ("a fence inside a list item", "- x\n  ```\n"),
+            ("a fence on a bullet's own line", "- ```\n"),
+            ("a fence on an ordered item's own line", "1. ```\n"),
+            ("a fence inside a quote", "> ```\nfoo\n"),
+            ("a backtick fence with a backtick in its info string", "```a`b\n"),
+            ("a fence indented one space", " ```\n"),
+            ("a fence indented two spaces", "  ```\n"),
+            ("a fence indented three spaces", "   ```\n"),
+            ("a tilde fence indented", "  ~~~\n"),
+            ("two backticks", "``\n"),
+            ("a fence after an HTML comment opens", "<!--\n```\n-->\n"),
+            ("a fence after an HTML tag", "<div>\n```\n</div>\n"),
+            ("a fence after an HTML tag indented three spaces", "   <div>\n```\n</div>\n"),
+            ("a fence that opens after an HTML line and a blank one", "<b>hi</b>\n\n```\n"),
+        ]
+        for (name, prefix) in cases {
+            assertSameText(PlanMarkdown.boundingNesting("\(prefix)\(manyQuotes)\n"), "\(prefix)\(boundedQuotes)\n", name)
+        }
+    }
+
+    func testACodeBlockKeepsTheWhiteSpaceOfItsLinesInTheParsedModel() throws {
+        let indent = String(repeating: " ", count: 200)
+        let run = try XCTUnwrap(parseOnSmallStack("```\n\(indent)x\n```\n"))
+        assertBounded(run)
+        var code: [String] = []
+        for block in run.doc.blocks {
+            if case .codeBlock(_, let text) = block.kind { code.append(text) }
+        }
+        XCTAssertEqual(code.count, 1, "the fence is one code block")
+        XCTAssertTrue(code.first?.hasPrefix(indent + "x") == true,
+                      "the 200 spaces survive: \(code.first?.prefix(140).debugDescription ?? "no code block")")
     }
 }
