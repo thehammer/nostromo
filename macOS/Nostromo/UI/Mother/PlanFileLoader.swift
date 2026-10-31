@@ -199,16 +199,20 @@ final class PlanFileLoader {
     // MARK: Private
 
     private func start(path: String, generation: Int) {
+        // The watcher goes on the file before the read starts, so a write after the read began raises
+        // an event: no write can fall between the two.
+        arm(path: path)
         let reader = self.reader
         readQueue.async { [weak self] in
             let result = reader(path)
             DispatchQueue.main.async {
                 guard let self, self.generation == generation else { return }
                 self.noteResult(result)
+                // `noteResult` may have started a newer read; this result is then out of date.
+                guard self.generation == generation else { return }
                 self.onResult?(result)
             }
         }
-        arm(path: path)
     }
 
     /// Watch the file's current inode. An editor that replaces the file leaves this one behind
@@ -229,13 +233,19 @@ final class PlanFileLoader {
 
     /// No file: look again later. A file (or any other answer): the watcher is the way to hear about it.
     ///
-    /// `start` arms its watcher right after it queues the read, so a file that appears between the
+    /// `start` arms its watcher just before it queues the read, so a file that appears between the
     /// watcher's `realpath` and the reader's loads with nothing watching it. A loaded file with no
-    /// watcher on it arms one here.
+    /// watcher on it arms one here, and reads once more: a write between that read and this arm
+    /// raised no event, so the text just read may already be out of date. The second read starts
+    /// with the watcher already on the file (`start` arms first), so no write can slip past it, and
+    /// it does not come back here.
     private func noteResult(_ result: PlanFileResult) {
         guard result == .notFound else {
             retryAttempt = 0
-            if case .loaded = result, source == nil, let path { arm(path: path) }
+            if case .loaded = result, source == nil, let path {
+                arm(path: path)
+                if source != nil { reload() }
+            }
             return
         }
         retry?.cancel()

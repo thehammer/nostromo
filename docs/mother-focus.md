@@ -86,7 +86,8 @@ origin and shown as `nostromo.notify`; the notice slice acts on it.
 - `~/.nostromo/mother-origins.json`: the origin book, per job id,
   `{kind, focus_tag?, name_snapshot?, session_prefix?, via, notify?, sensitive?, evaluated_at_ms}`.
   `sensitive` is written (as `true`, otherwise absent) when the focus was sensitive when it queued the
-  job. Entries for jobs absent from the feed for more than 30 days are dropped.
+  job, or, for a job the poll decides, when the poll that first saw it found the focus tag sensitive or
+  held (see "On the wire"). Entries for jobs absent from the feed for more than 30 days are dropped.
 - `~/.nostromo/audit/mother.jsonl`: the content-free audit (below). Rotated at 10 MiB, twelve rotated
   files kept.
 
@@ -122,7 +123,14 @@ removed. Sensitivity is asked of the tag, and a tag registered as sensitive stay
 closed (registration is permanent), so a closed sensitive focus's name snapshot is still withheld. A
 focus can also be sensitive only for a while (it is held sensitive while it follows a remote shell):
 a job it queues then is recorded as such in the book (`sensitive`), and its names stay withheld from
-peers after the hold lapses. A sensitive focus's tag and display name are also not written into
+peers after the hold lapses. That covers both ways a job gets its origin: an MCP or app stamp records
+the caller's sensitivity, and a job the poll decides (the child's own shell `mother add`, whether it
+claims the focus or only its session id) records whether the focus tag is sensitive, registered or
+held, **at the poll that first sees the job**; an unverified claim that names a sensitive tag is
+recorded the same way. What is not covered: a job whose focus's hold lapsed before the poll first saw
+the job, because nothing else says the focus was sensitive when it queued it (the poll runs every two
+seconds, so a hold has to lapse inside that gap). A job already in the book is never
+re-evaluated, and the flag is only ever set, never cleared. A sensitive focus's tag and display name are also not written into
 Mother's record or argv (`--origin-focus` and `--origin-focus-name` are omitted); the daemon's own
 book keeps the snapshot, which only the local Mac sees. Work-send jobs and sensitive jobs are
 withheld from them entirely, as before.

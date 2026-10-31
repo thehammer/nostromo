@@ -453,12 +453,20 @@ impl FocusDirectory {
     }
 }
 
+/// Asks whether a focus tag is sensitive right now (registered, a Teri/Fred
+/// session, or held while it follows a remote shell).
+type SensitivityCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 struct BookState {
     path: Option<PathBuf>,
     entries: BTreeMap<String, OriginEntry>,
     focuses: FocusDirectory,
     /// Enqueues in flight (see [`OriginBook::begin_enqueue`]).
     enqueues_in_flight: usize,
+    /// Asked of the focus tag when the poll decides a job's origin, so the name
+    /// it records is flagged `sensitive` while the tag is. `None` (a book
+    /// nothing has wired up) flags nothing.
+    sensitivity: Option<SensitivityCheck>,
 }
 
 /// Held by an enqueue from `mother add` until its job is stamped: a job the
@@ -513,6 +521,7 @@ impl OriginBook {
                 entries,
                 focuses: FocusDirectory::default(),
                 enqueues_in_flight: 0,
+                sensitivity: None,
             })),
             history,
             audit,
@@ -527,6 +536,15 @@ impl OriginBook {
     /// The recorded origin of `job_id`, if one was decided.
     pub fn entry(&self, job_id: &str) -> Option<OriginEntry> {
         lock(&self.state).entries.get(job_id).cloned()
+    }
+
+    /// Ask `is_sensitive` about a focus tag whenever the poll decides a job's
+    /// origin (a job the book has not stamped): a name recorded while the tag
+    /// is sensitive or held is flagged for good, so it stays withheld from a
+    /// network peer after a hold lapses. Takes effect for every clone of the
+    /// book.
+    pub fn set_sensitivity(&self, is_sensitive: impl Fn(&str) -> bool + Send + Sync + 'static) {
+        lock(&self.state).sensitivity = Some(Arc::new(is_sensitive));
     }
 
     /// The registry the Mac pushed. Only a non-empty push is evidence that a
@@ -642,6 +660,8 @@ impl OriginBook {
         let mut unverified = Vec::new();
         {
             let mut state = lock(&self.state);
+            let sensitivity = state.sensitivity.clone();
+            let is_sensitive = |tag: &str| sensitivity.as_ref().is_some_and(|ask| ask(tag));
             let mut dirty = false;
             for job in jobs.iter_mut() {
                 let entry = match state.entries.get_mut(&job.id) {
@@ -650,7 +670,7 @@ impl OriginBook {
                         entry.clone()
                     }
                     None => {
-                        let entry = self.evaluate(job, &state.focuses, now);
+                        let entry = self.evaluate(job, &state.focuses, &is_sensitive, now);
                         if state.enqueues_in_flight > 0
                             && matches!(entry.kind, OriginKind::Unverified | OriginKind::Unknown)
                         {
@@ -696,21 +716,28 @@ impl OriginBook {
         }
     }
 
-    /// Decide the origin of a job the book has not seen, from its claim.
-    fn evaluate(&self, job: &MotherJob, focuses: &FocusDirectory, now: i64) -> OriginEntry {
+    /// Decide the origin of a job the book has not seen, from its claim. The
+    /// entry is `sensitive` when `is_sensitive` says its focus tag is now.
+    fn evaluate(
+        &self,
+        job: &MotherJob,
+        focuses: &FocusDirectory,
+        is_sensitive: &dyn Fn(&str) -> bool,
+        now: i64,
+    ) -> OriginEntry {
         let origin = job.origin.as_ref();
         let claim = origin
             .and_then(|o| o.focus.as_deref())
             .map(str::trim)
             .filter(|f| !f.is_empty());
-        let entry = |kind, focus_tag, name_snapshot, session_prefix| OriginEntry {
+        let entry = |kind, focus_tag: Option<String>, name_snapshot, session_prefix| OriginEntry {
             kind,
+            via: Via::Shell,
+            notify: None,
+            sensitive: focus_tag.as_deref().is_some_and(is_sensitive),
             focus_tag,
             name_snapshot,
             session_prefix,
-            via: Via::Shell,
-            notify: None,
-            sensitive: false,
             evaluated_at_ms: now,
             last_seen_ms: now,
         };
@@ -856,6 +883,8 @@ fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
 /// How many `<file>.bak.<ms>` copies stay beside a file (the plain `.bak`, the
 /// first one kept, is not counted and never goes).
 const NUMBERED_BACKUPS_KEPT: usize = 3;
+/// Digits in the millisecond timestamp of a numbered backup (`now_ms()`, until 2286).
+const BACKUP_MS_DIGITS: usize = 13;
 
 /// Copy `path` to a `.bak` beside it that nothing overwrites. `None` when the
 /// copy failed.
@@ -896,7 +925,9 @@ fn keep_backup(path: &Path) -> Option<PathBuf> {
     Some(backup)
 }
 
-/// The `<name>.bak.<ms>` files beside `path`, oldest first.
+/// The `<name>.bak.<ms>` files beside `path`, oldest first. Only the exact
+/// shape [`keep_backup`] writes counts (`ms` is 13 digits): a hand-made
+/// `<name>.bak.1` is neither compared with nor pruned.
 fn numbered_backups(path: &Path, name: &str) -> Vec<(i64, PathBuf)> {
     let prefix = format!("{name}.bak.");
     let Ok(dir) = std::fs::read_dir(path.parent().unwrap_or_else(|| Path::new("."))) else {
@@ -906,8 +937,11 @@ fn numbered_backups(path: &Path, name: &str) -> Vec<(i64, PathBuf)> {
         .filter_map(Result::ok)
         .filter_map(|e| {
             let file = e.file_name().to_string_lossy().into_owned();
-            let ms = file.strip_prefix(&prefix)?.parse::<i64>().ok()?;
-            Some((ms, e.path()))
+            let ms = file.strip_prefix(&prefix)?;
+            if ms.len() != BACKUP_MS_DIGITS || !ms.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            Some((ms.parse::<i64>().ok()?, e.path()))
         })
         .collect();
     found.sort();
@@ -1002,6 +1036,7 @@ async fn probe_help(mut cmd: tokio::process::Command, limit: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::peer::SensitiveTags;
     use crate::mother::MotherJobOrigin;
 
     fn job(id: &str, origin: Option<MotherJobOrigin>) -> MotherJob {
@@ -1266,6 +1301,132 @@ mod tests {
         assert_eq!(a.origin.name_snapshot.as_deref(), Some(SENSITIVE_NAME));
         assert!(a.notice.is_none());
         assert_eq!(a.notify, Some(NotifyLevel::Wake));
+    }
+
+    // ── a job the poll decides is flagged when its focus tag is sensitive then ─
+
+    /// A book that asks `tags` about a focus tag when the poll decides a job.
+    fn book_asking(tags: &SensitiveTags) -> OriginBook {
+        let b = book();
+        let tags = tags.clone();
+        b.set_sensitivity(move |tag| tags.tag_is_sensitive(tag));
+        b
+    }
+
+    fn session_only(sid: &str) -> MotherJobOrigin {
+        MotherJobOrigin {
+            session: Some(sid.into()),
+            ..Default::default()
+        }
+    }
+
+    fn focus_only(tag: &str) -> MotherJobOrigin {
+        MotherJobOrigin {
+            focus: Some(tag.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_job_the_poll_decides_records_whether_its_focus_tag_is_sensitive_at_that_poll() {
+        let tags = SensitiveTags::in_memory();
+        tags.mark_tag("claudia-SECRET");
+        let _hold = tags.hold_sensitive("claudia-HELD");
+        let b = book_asking(&tags);
+        for tag in ["claudia-SECRET", "claudia-HELD", "claudia-PLAIN"] {
+            b.history().record(tag, &format!("sid-{tag}"));
+        }
+        let sid = |tag: &str| format!("sid-{tag}");
+
+        // (job id, claim, whether the focus tag is sensitive at this poll)
+        let cases: Vec<(&str, MotherJobOrigin, bool)> = vec![
+            // The child's own shell: focus and session.
+            (
+                "claim-secret",
+                claim("claudia-SECRET", &sid("claudia-SECRET")),
+                true,
+            ),
+            (
+                "claim-held",
+                claim("claudia-HELD", &sid("claudia-HELD")),
+                true,
+            ),
+            (
+                "claim-plain",
+                claim("claudia-PLAIN", &sid("claudia-PLAIN")),
+                false,
+            ),
+            // An older `mother`: the session alone says which focus it is.
+            ("session-secret", session_only(&sid("claudia-SECRET")), true),
+            ("session-held", session_only(&sid("claudia-HELD")), true),
+            ("session-plain", session_only(&sid("claudia-PLAIN")), false),
+            // A claim nothing vouches for still names the tag it names.
+            ("forged-secret", claim("claudia-SECRET", "forged"), true),
+            ("forged-held", claim("claudia-HELD", "forged"), true),
+            ("forged-plain", claim("claudia-PLAIN", "forged"), false),
+            ("bare-secret", focus_only("claudia-SECRET"), true),
+            ("bare-held", focus_only("claudia-HELD"), true),
+            ("bare-plain", focus_only("claudia-PLAIN"), false),
+        ];
+        let mut jobs: Vec<MotherJob> = cases
+            .iter()
+            .map(|(id, origin, _)| job(id, Some(origin.clone())))
+            .collect();
+        // No claim at all names no tag to ask about.
+        jobs.push(job("no-claim", None));
+
+        b.annotate(&mut jobs);
+
+        for (id, _, sensitive) in &cases {
+            let entry = b.entry(id).expect("recorded");
+            assert_eq!(entry.sensitive, *sensitive, "{id}: {entry:?}");
+            let shown = jobs.iter().find(|j| j.id == *id).unwrap();
+            assert_eq!(
+                shown.nostromo.as_ref().unwrap().origin_was_sensitive,
+                *sensitive,
+                "{id}: the annotation carries the flag"
+            );
+        }
+        assert!(!b.entry("no-claim").expect("recorded").sensitive);
+    }
+
+    #[test]
+    fn the_flag_is_taken_at_the_poll_that_first_sees_a_job_and_never_changes_after() {
+        let tags = SensitiveTags::in_memory();
+        let b = book_asking(&tags);
+        b.history().record("claudia-A", "sid-a");
+        let queued = |id: &str| job(id, Some(claim("claudia-A", "sid-a")));
+
+        // `during` is first seen while the focus is held sensitive...
+        let hold = tags.hold_sensitive("claudia-A");
+        b.annotate(&mut [queued("during")]);
+        drop(hold);
+        // ...and `after` only once the hold has lapsed.
+        let mut jobs = vec![queued("during"), queued("after")];
+        b.annotate(&mut jobs);
+        assert!(b.entry("during").unwrap().sensitive, "kept after the lapse");
+        assert!(
+            !b.entry("after").unwrap().sensitive,
+            "nothing says the focus was sensitive when it queued this one"
+        );
+
+        // The tag turns sensitive for good: neither entry is evaluated again.
+        tags.mark_tag("claudia-A");
+        let mut jobs = vec![queued("during"), queued("after")];
+        b.annotate(&mut jobs);
+        assert!(b.entry("during").unwrap().sensitive);
+        assert!(!b.entry("after").unwrap().sensitive, "never set later");
+        // A network peer still gets no names for either: the tag is sensitive now.
+        for j in &jobs {
+            let mut annotation = j.nostromo.clone().expect("annotated");
+            annotation.redact_for_network(|t| tags.tag_is_sensitive(t));
+            assert_eq!(
+                annotation.origin.name_snapshot.as_deref(),
+                Some(SENSITIVE_NAME),
+                "{}",
+                j.id
+            );
+        }
     }
 
     // ── EnqueueGuard: a job whose enqueue has not answered is undecided ──────
