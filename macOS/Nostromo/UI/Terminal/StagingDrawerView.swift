@@ -352,16 +352,17 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         return max(Self.stripHeight, h + 8)
     }
 
-    /// The reason's label height at `width` (one or two lines; wrapping is by word, inside the cell's padding).
+    /// The reason's label height at `width`: one or two lines, as the label's own cell draws them (its
+    /// internal padding included).
     private func reasonLabelHeight(width: CGFloat) -> CGFloat {
         let text = reasonLabel.stringValue
         guard !text.isEmpty else { return 0 }
-        let one = ceil(NSLayoutManager().defaultLineHeight(for: Theme.statusFont))
-        let available = max(20, width - 16 - 4)
-        let full = ceil(NSAttributedString(string: text, attributes: [.font: Theme.statusFont])
-            .boundingRect(with: NSSize(width: available, height: .greatestFiniteMagnitude),
-                          options: [.usesLineFragmentOrigin]).height)
-        return min(max(full, one), one * CGFloat(Self.reasonLines))
+        let available = max(20, width - 16)
+        let attributed = NSAttributedString(string: text, attributes: [.font: Theme.statusFont])
+        let full = StagingRowView.cellHeight(of: attributed, width: available)
+        let one = StagingRowView.cellHeight(of: NSAttributedString(string: "X", attributes: [.font: Theme.statusFont]), width: available)
+        let chrome = max(0, one - ceil(NSLayoutManager().defaultLineHeight(for: Theme.statusFont)))
+        return min(max(full, one), (one - chrome) * CGFloat(Self.reasonLines) + chrome)
     }
 
     private func reasonHeight(width: CGFloat) -> CGFloat {

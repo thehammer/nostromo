@@ -254,8 +254,8 @@ final class StagingRowView: NSView {
         // The command is measured by the cell it is drawn in, so its internal padding (which narrows the
         // wrap width and adds to the height) is counted: a command that draws as 4 lines is never taken
         // for 3, which would cut the last line with no Show all.
-        let chrome = max(0, Self.cellHeight(of: Self.commandText("X", dimmed: false), width: textWidth) - lineHeight)
-        let fullHeight = Self.cellHeight(of: commandLabel.attributedStringValue, width: textWidth)
+        let chrome = max(0, Self.cellHeight(of: Self.commandText("X", dimmed: false), width: textWidth, wrapping: .byCharWrapping) - lineHeight)
+        let fullHeight = Self.cellHeight(of: commandLabel.attributedStringValue, width: textWidth, wrapping: .byCharWrapping)
         let fullLines = max(1, Int(((fullHeight - chrome) / lineHeight).rounded()))
         let truncated = !isExpanded && fullLines > Self.collapsedLines
         let shownLines = isExpanded ? fullLines : min(fullLines, Self.collapsedLines)
@@ -294,12 +294,14 @@ final class StagingRowView: NSView {
         return info
     }
 
-    /// The height a text field's own cell needs for `text` at `width` (no line limit): what it draws.
-    private static func cellHeight(of text: NSAttributedString, width: CGFloat) -> CGFloat {
+    /// The height a text field's own cell needs for `text` at `width` when it wraps by `wrapping` and has
+    /// no line limit: what it draws, internal padding included.
+    static func cellHeight(of text: NSAttributedString, width: CGFloat, wrapping: NSLineBreakMode = .byWordWrapping) -> CGFloat {
         guard text.length > 0 else { return 0 }
         let field = NSTextField(labelWithString: "")
-        field.attributedStringValue = text
+        field.lineBreakMode = wrapping       // a label clips by default, which would measure one line
         field.maximumNumberOfLines = 0
+        field.attributedStringValue = text
         guard let cell = field.cell else { return 0 }
         return ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)).height)
     }
