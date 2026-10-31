@@ -228,3 +228,156 @@ final class MotherFocusFitnessTests: XCTestCase {
         XCTAssertEqual(occurrences(of: "1_048_576", in: loader), 1, "the 1 MiB cap is one constant")
     }
 }
+
+// MARK: - MF3: the origin line, the From: filter and Show My Jobs
+//
+// A focus name, a job title, a name snapshot and a tag are agent- and shell-controlled text (and a focus
+// name is something the user typed). The origin display and the filter must log nothing about them, hold
+// no `tag` property that would collide with `NSView.tag` (#356), and "Show My Jobs" is a view action: it
+// must not ask whether the click was a human gesture (that gate is for controls that answer an agent).
+
+extension MotherFocusFitnessTests {
+
+    /// Files that must hold no logging at all: pure presentation, nothing to say.
+    private static let originPureSources = [
+        "macOS/Nostromo/UI/Mother/MotherJobFilter.swift",
+        "Shared/NostromoKit/Sources/NostromoKit/Mother/MotherOriginDisplay.swift",
+    ]
+
+    /// Files this slice changed that do log: no log line may interpolate a name, title, snapshot or tag.
+    private static let originChangedSources = [
+        "macOS/Nostromo/UI/Views/MotherView.swift",
+        "macOS/Nostromo/UI/Views/MotherJobDetail.swift",
+        "Shared/NostromoKit/Sources/NostromoKit/UI/MotherJobRow.swift",
+    ]
+
+    /// A path from the repository root (the Kit lives outside `macOS/Nostromo`).
+    private static func repoSource(_ relativePath: String, file: StaticString = #filePath, line: UInt = #line) throws -> String {
+        var root = URL(fileURLWithPath: "\(file)")
+        for _ in 0..<3 { root.deleteLastPathComponent() }   // NostromoTests, macOS, repo root
+        let text = try String(contentsOf: root.appendingPathComponent(relativePath), encoding: .utf8)
+        XCTAssertFalse(text.isEmpty, "\(relativePath) is empty", file: file, line: line)
+        return stripComments(text)
+    }
+
+    /// The text from the first `start` to the first `end` after it (inclusive), or fails the test.
+    private func block(from start: String, to end: String, in text: String, _ what: String,
+                       file: StaticString = #filePath, line: UInt = #line) -> String {
+        guard let s = text.range(of: start), let e = text.range(of: end, range: s.upperBound ..< text.endIndex) else {
+            XCTFail("could not find \(what) in the source (looked for \(start))", file: file, line: line)
+            return ""
+        }
+        return String(text[s.lowerBound ..< e.upperBound])
+    }
+
+    /// Each `log.<level>(...)` / `Logger` call as a whole statement.
+    private func logStatements(in text: String) throws -> [String] {
+        let statement = try NSRegularExpression(
+            pattern: "\\b(?:log|layoutLog)\\.(debug|info|notice|error|warning|fault|log|trace)\\((?:[^()]|\\((?:[^()]|\\([^()]*\\))*\\))*\\)")
+        let ns = text as NSString
+        return statement.matches(in: text, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range) }
+    }
+
+    func testTheOriginDisplayAndTheFilterLogNothingAtAll() throws {
+        for path in Self.originPureSources {
+            let text = try Self.repoSource(path)
+            for pattern in ["\\blog\\.", "\\blayoutLog\\.", "\\bLogger\\b", "\\bprint\\(", "\\bNSLog\\(", "\\bos_log\\(", "\\bdebugPrint\\("] {
+                XCTAssertFalse(matches(pattern, in: text), "\(path) logs (\(pattern)): a focus name is not for logs")
+            }
+        }
+    }
+
+    func testNoLogLineInTheChangedFilesInterpolatesAFocusNameATitleASnapshotOrATag() throws {
+        let namey = "(?i)\\\\\\([^)]*(name|title|snapshot|tag|label|origin|annotation|summary)"
+        for path in Self.originChangedSources {
+            let text = try Self.repoSource(path)
+            for pattern in ["\\bprint\\(", "\\bNSLog\\(", "\\bos_log\\("] {
+                XCTAssertFalse(matches(pattern, in: text), "\(path) logs (\(pattern))")
+            }
+            for call in try logStatements(in: text) {
+                XCTAssertFalse(matches(namey, in: call), "\(path) logs a name, title, snapshot or tag: \(call)")
+            }
+        }
+    }
+
+    func testTheLogStatementScanActuallySeesInterpolatedNames() throws {
+        // Guard the scan itself: it must flag the shapes it exists to forbid.
+        let bad = [
+            "log.debug(\"queued by \\(focus.displayName)\")",
+            "log.info(\"origin \\(origin.text, privacy: .public)\")",
+            "log.error(\"tag \\(tag)\")",
+            "log.debug(\"job \\(job.title)\")",
+        ]
+        let namey = "(?i)\\\\\\([^)]*(name|title|snapshot|tag|label|origin|annotation|summary)"
+        for source in bad {
+            let calls = try logStatements(in: source)
+            XCTAssertEqual(calls.count, 1, "the scan did not find the call in: \(source)")
+            XCTAssertTrue(calls.allSatisfy { matches(namey, in: $0) }, "the scan did not flag: \(source)")
+        }
+        let fine = try logStatements(in: "log.debug(\"live jobs: \\(jobs.count, privacy: .public)\")")
+        XCTAssertEqual(fine.count, 1)
+        XCTAssertFalse(matches(namey, in: fine[0]), "a count is fine to log")
+    }
+
+    func testTheOriginDisplayHoldsAFocusTagAndNoPropertyNamedTag() throws {
+        let display = try Self.repoSource("Shared/NostromoKit/Sources/NostromoKit/Mother/MotherOriginDisplay.swift")
+        XCTAssertFalse(matches("\\b(var|let)\\s+tag\\s*:", in: display),
+                       "MotherOriginDisplay declares a `tag`, which collides with NSView.tag (#356): it holds `focusTag`")
+        XCTAssertTrue(matches("\\b(var|let)\\s+focusTag\\s*:", in: display), "MotherOriginDisplay holds `focusTag`")
+
+        for path in ["UI/Mother/MotherJobFilter.swift", "UI/Views/MotherJobDetail.swift"] {
+            let text = try Self.source(path)
+            XCTAssertFalse(matches("\\b(var|let)\\s+tag\\s*:", in: text), "\(path) declares a `tag` (#356)")
+        }
+        let originLine = block(from: "final class MotherOriginLine", to: "\n}\n",
+                               in: try Self.source("UI/Views/MotherJobDetail.swift"), "MotherOriginLine")
+        XCTAssertFalse(originLine.isEmpty)
+        XCTAssertFalse(matches("\\b(var|let)\\s+tag\\b", in: originLine), "MotherOriginLine declares a `tag`")
+    }
+
+    func testTheOriginLineLogsNothingAndOpensNothingItself() throws {
+        let originLine = block(from: "final class MotherOriginLine", to: "\n}\n",
+                               in: try Self.source("UI/Views/MotherJobDetail.swift"), "MotherOriginLine")
+        XCTAssertFalse(originLine.isEmpty)
+        for pattern in ["\\blog\\.", "\\bprint\\(", "\\bNSLog\\(", "\\bos_log\\(", "\\bLogger\\b"] {
+            XCTAssertFalse(matches(pattern, in: originLine), "MotherOriginLine logs (\(pattern))")
+        }
+        XCTAssertEqual(occurrences(of: "NSWorkspace.shared.open(", in: originLine), 0, "the line reports a tap; the host acts on it")
+    }
+
+    func testShowMyJobsIsAViewActionAndAsksNothingOfTheGestureGate() throws {
+        let gate = ["SyntheticInputGate", "isSynthetic", "allowsSynthetic", "TerminalInputGuard"]
+
+        let tabBar = try Self.source("UI/TabBarView.swift")
+        let layout = try Self.source("UI/MainLayout.swift")
+        let handler = block(from: "@objc private func showJobsTapped", to: "\n    }\n", in: tabBar, "showJobsTapped")
+        let action = block(from: "private func showJobs(of focus: Focus)", to: "\n    }\n", in: layout, "MainLayout.showJobs")
+        XCTAssertTrue(handler.contains("onShowJobs"), "the menu item reports through onShowJobs")
+        XCTAssertTrue(action.contains("requestedFilterTag"), "showJobs sets the filter request")
+
+        for (what, text) in [("TabBarView", tabBar), ("MainLayout", layout), ("showJobsTapped", handler), ("showJobs", action)] {
+            for needle in gate {
+                XCTAssertFalse(text.contains(needle), "\(what) references \(needle): Show My Jobs is a view action, not gesture-gated")
+            }
+        }
+        for text in [handler, action] {
+            for pattern in ["\\blog\\.", "\\blayoutLog\\.", "\\bprint\\(", "\\bNSLog\\("] {
+                XCTAssertFalse(matches(pattern, in: text), "Show My Jobs logs (\(pattern)): it handles a focus tag")
+            }
+        }
+    }
+
+    func testTheMotherViewsOriginPartsAskNothingOfTheGestureGateEither() throws {
+        let view = try Self.source("UI/Views/MotherView.swift")
+        let filter = try Self.source("UI/Mother/MotherJobFilter.swift")
+        for needle in ["SyntheticInputGate", "isSynthetic", "allowsSynthetic"] {
+            XCTAssertFalse(view.contains(needle), "MotherView references \(needle): jumping to a focus is a view action")
+            XCTAssertFalse(filter.contains(needle), "MotherJobFilter references \(needle)")
+        }
+        let originLine = block(from: "final class MotherOriginLine", to: "\n}\n",
+                               in: try Self.source("UI/Views/MotherJobDetail.swift"), "MotherOriginLine")
+        for needle in ["SyntheticInputGate", "isSynthetic", "allowsSynthetic"] {
+            XCTAssertFalse(originLine.contains(needle), "MotherOriginLine references \(needle)")
+        }
+    }
+}

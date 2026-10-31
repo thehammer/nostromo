@@ -30,6 +30,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
     public let showsProgressLine: Bool
     /// Short attention labels, e.g. "Needs decision" (see `MotherAttentionBadges`).
     public let attentionBadges: [String]
+    /// Who queued the job (Mother focus v2). Nil on iOS and wherever the surface does not show it.
+    public let origin: MotherOriginDisplay?
 
     public init(
         id: String,
@@ -42,7 +44,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         progressLine: String? = nil,
         attentionBadges: [String] = [],
         progressAccessibility: String? = nil,
-        showsProgressLine: Bool = false
+        showsProgressLine: Bool = false,
+        origin: MotherOriginDisplay? = nil
     ) {
         self.id               = id
         self.state            = state
@@ -55,6 +58,14 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         self.attentionBadges  = attentionBadges
         self.progressAccessibility = progressAccessibility
         self.showsProgressLine = showsProgressLine
+        self.origin = origin
+    }
+
+    /// The row's spoken form: the title, then `From <origin>.` when the surface shows one.
+    public var accessibilitySummary: String {
+        let name = title.isEmpty ? id : title
+        guard let origin else { return name }
+        return "\(name). \(origin.accessibilityText)."
     }
 
     /// Running and awaiting rows reserve a second line for progress and attention, so a

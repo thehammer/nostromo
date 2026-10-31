@@ -87,6 +87,11 @@ class MotherView: NSView {
     /// marker was clicked). Cleared once opened.
     static var requestedJobId: String?
 
+    /// Posted after `requestedFilterTag` is set ("Show My Jobs"), for the Mother view in the key window.
+    static let showJobsNotification = Notification.Name("nostromo.mother.showJobs")
+    /// The focus tag whose jobs a Mother view should filter to. Cleared once applied.
+    static var requestedFilterTag: String?
+
     private var cancellables = Set<AnyCancellable>()
 
     override init(frame: NSRect) { super.init(frame: frame); setup() }
@@ -164,11 +169,46 @@ class MotherView: NSView {
             .sink { [weak self] _ in self?.openRequestedJob(in: AppStore.shared.motherJobs) }
             .store(in: &cancellables)
 
-        // Live data — empty state ("No jobs") shows until first jobs arrive
+        // "Show My Jobs": applied by the Mother view in the key window only, so each window keeps its own filter.
+        NotificationCenter.default.publisher(for: Self.showJobsNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.applyRequestedFilter() }
+            .store(in: &cancellables)
+
+        AppStore.shared.$motherAnnotations
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] annotations in self?.jobList.update(annotations: annotations) }
+            .store(in: &cancellables)
+
+        // A rename or removal reaches rows and detail lines in the same run-loop turn as the publish.
+        jobList.onOriginsChanged = { [weak self] in self?.refreshDetailOrigins() }
+
+        // Live data — empty state shows until first jobs arrive
         AppStore.shared.$motherJobs
             .receive(on: DispatchQueue.main)
             .sink { [weak self] jobs in self?.jobsDidChange(jobs) }
             .store(in: &cancellables)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyRequestedFilter()
+    }
+
+    private func applyRequestedFilter() {
+        guard let tag = Self.requestedFilterTag, let window, window.isKeyWindow else { return }
+        Self.requestedFilterTag = nil
+        jobList.setFilter(.focus(tag: tag))
+    }
+
+    private func refreshDetailOrigins() {
+        for (id, detail) in jobDetails { applyOrigin(to: detail, jobId: id) }
+    }
+
+    private func applyOrigin(to detail: MotherJobDetail, jobId: String) {
+        let origin = jobList.originDisplay(forJobId: jobId)
+        let tag = origin.isClickable ? origin.focusTag : nil
+        detail.setOrigin(origin, onTap: tag.map { tag in { [weak jobList] in jobList?.openFocus(tag: tag) } })
     }
 
     private func jobsDidChange(_ jobs: [MotherJob]) {
@@ -199,6 +239,7 @@ class MotherView: NSView {
         }
         let detail = MotherJobDetail(host: AppStore.shared)
         detail.select(job)
+        applyOrigin(to: detail, jobId: job.id)
         jobDetails[job.id] = detail
         let label = job.title.isEmpty ? job.id : job.title
         tabRegion.addTab(TabRegionView.Tab(paneId: paneId, label: label, view: detail))
@@ -394,12 +435,61 @@ private final class MotherNotifyNoteRow: NSView {
 
 // MARK: - MotherJobListViewModel
 
-private class MotherJobListViewModel: ObservableObject {
+final class MotherJobListViewModel: ObservableObject {
     /// Written by the owner to move the list's highlight (nil clears it, so a
     /// row whose tab was closed can be clicked — and so reopened — again).
     @Published var requestedSelection: String?
     @Published var jobs: [MotherJob] = []
+    /// Who queued each job (the daemon's note), by job id.
+    @Published var annotations: [String: MotherJobAnnotation] = [:]
+    /// The open focuses, as of the last `FocusStore` publish.
+    @Published private(set) var focuses: [Focus]
+    /// The `From:` selection. Belongs to this list (one per window); never persisted.
+    @Published var filter: MotherOriginSelection = .all
     var onSelect: ((MotherJob?) -> Void)?
+    /// Called after a change that can alter an origin line (annotations, a rename, a removal).
+    var onOriginsChanged: (() -> Void)?
+    /// Jump to the focus with this tag. Default: select it in the key window.
+    var openFocus: (String) -> Void = { tag in
+        guard let focus = FocusStore.shared.focuses.first(where: { $0.sessionTag == tag }) else { return }
+        AppStore.shared.focusSelectionRequests.send(focus)
+    }
+
+    private var cancellables = Set<AnyCancellable>()
+
+    init(focusStore: FocusStore = .shared) {
+        focuses = focusStore.focuses
+        // No `receive(on:)`: the new names land in the same run-loop turn as the publish. The sink
+        // runs before the store property holds the value, so it uses the value it is handed.
+        focusStore.$focuses
+            .dropFirst()
+            .sink { [weak self] focuses in
+                self?.focuses = focuses
+                self?.onOriginsChanged?()
+            }
+            .store(in: &cancellables)
+    }
+
+    func setAnnotations(_ new: [String: MotherJobAnnotation]) {
+        guard new != annotations else { return }
+        annotations = new
+        onOriginsChanged?()
+    }
+
+    /// The app's current name for a focus tag; nil when it is not an open focus.
+    func currentName(forTag tag: String) -> String? {
+        focuses.first { $0.sessionTag == tag }?.displayName
+    }
+
+    func originDisplay(forJobId id: String) -> MotherOriginDisplay {
+        MotherOriginDisplay.make(annotation: annotations[id], currentName: { [self] in currentName(forTag: $0) })
+    }
+
+    /// The jobs the list shows, grouped, with the pop-up entries and counts.
+    var filtered: MotherJobFilterResult {
+        MotherJobFilter.apply(jobs: jobs, annotations: annotations, selection: filter,
+                              currentName: { [self] in currentName(forTag: $0) })
+    }
 
     func rowModel(for job: MotherJob) -> MotherJobRowModel {
         let progress = job.state == "running" || job.state == "awaiting"
@@ -415,7 +505,8 @@ private class MotherJobListViewModel: ObservableObject {
             progressLine: progress?.text,
             attentionBadges: MotherAttentionBadges.make(job.crew.attention).filter { !$0.acked }.map(\.label),
             progressAccessibility: progress?.accessibility,
-            showsProgressLine: true
+            showsProgressLine: true,
+            origin: originDisplay(forJobId: job.id)
         )
     }
 
@@ -445,8 +536,16 @@ private struct MotherJobListSwiftUI: View {
     @State private var selectedId: String?
 
     var body: some View {
+        let result = vm.filtered
+        VStack(spacing: 0) {
+            MotherFromHeader(vm: vm, result: result)
+            list(result)
+        }
+    }
+
+    private func list(_ result: MotherJobFilterResult) -> some View {
         List(selection: $selectedId) {
-            ForEach(groupedJobs) { group in
+            ForEach(result.groups) { group in
                 Section(group.state.uppercased()) {
                     ForEach(group.jobs, id: \.id) { job in
                         NostromoKit.MotherJobRow(
@@ -454,7 +553,8 @@ private struct MotherJobListSwiftUI: View {
                             onArchive:    { AppStore.shared.archiveJob(job.id) },
                             onCancel:     { AppStore.shared.cancelJob(job.id) },
                             onRetry:      { AppStore.shared.retryJob(job.id) },
-                            onForceStart: { AppStore.shared.forceStartJob(job.id) }
+                            onForceStart: { AppStore.shared.forceStartJob(job.id) },
+                            onOriginTap: originTapAction(for: job)
                         )
                         .tag(job.id)
                         .contextMenu {
@@ -478,9 +578,20 @@ private struct MotherJobListSwiftUI: View {
         .background(Color(nsColor: Theme.bg))
         .overlay {
             if vm.jobs.isEmpty {
-                Text("No jobs")
+                Text("No Mother jobs. Agents queue them with mother_enqueue_job; jobs show who queued them here.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+            } else if result.matched == 0 {
+                VStack(spacing: 8) {
+                    Text("No jobs from \(result.selectionTitle).")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("Show all") { vm.filter = .all }
+                }
+                .padding(.horizontal, 16)
             }
         }
         .onChange(of: selectedId) { _, newId in
@@ -491,13 +602,57 @@ private struct MotherJobListSwiftUI: View {
         }
     }
 
-    /// Jobs grouped by state, sorted: awaiting → running → queued/ready → failed → succeeded/cancelled.
-    private var groupedJobs: [MotherJobGroup] { MotherJobGrouping.groups(from: vm.jobs) }
+    /// A clickable origin (an open focus) jumps to that focus; anything else is plain text.
+    private func originTapAction(for job: MotherJob) -> (() -> Void)? {
+        let origin = vm.originDisplay(forJobId: job.id)
+        guard origin.isClickable, let tag = origin.focusTag else { return nil }
+        return { vm.openFocus(tag) }
+    }
+}
+
+/// `From: All ▾`, and once something is picked `· N of M` and a clear button. 24 pt, left-aligned.
+private struct MotherFromHeader: View {
+    @ObservedObject var vm: MotherJobListViewModel
+    let result: MotherJobFilterResult
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text("From:")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Picker("From", selection: $vm.filter) {
+                ForEach(result.entries, id: \.selection) { entry in
+                    Text(entry.title).tag(entry.selection)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .controlSize(.small)
+            .fixedSize()
+            .accessibilityLabel("From")
+            if vm.filter != .all {
+                Text("· \(result.matched) of \(result.total)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                Button { vm.filter = .all } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Show all jobs")
+                    .help("Show all jobs")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 24)
+    }
 }
 
 // MARK: - MotherJobList
 
-private class MotherJobList: NSView {
+private final class MotherJobList: NSView {
 
     func select(jobId: String) { viewModel.requestedSelection = jobId }
 
@@ -513,6 +668,13 @@ private class MotherJobList: NSView {
     }
 
     private let viewModel = MotherJobListViewModel()
+    var onOriginsChanged: (() -> Void)? {
+        didSet { viewModel.onOriginsChanged = onOriginsChanged }
+    }
+    func setFilter(_ selection: MotherOriginSelection) { viewModel.filter = selection }
+    func originDisplay(forJobId id: String) -> MotherOriginDisplay { viewModel.originDisplay(forJobId: id) }
+    func openFocus(tag: String) { viewModel.openFocus(tag) }
+    func update(annotations: [String: MotherJobAnnotation]) { viewModel.setAnnotations(annotations) }
     private var hostingView: NSHostingView<MotherJobListSwiftUI>!
 
     override init(frame: NSRect) {

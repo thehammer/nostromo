@@ -16,19 +16,23 @@ public struct MotherJobRow: View {
     public let onCancel: () -> Void
     public let onRetry: () -> Void
     public let onForceStart: () -> Void
+    /// Set by the Mac when the origin is a clickable focus. Nil leaves the origin plain text.
+    public let onOriginTap: (() -> Void)?
 
     public init(
         model: MotherJobRowModel,
         onArchive:    @escaping () -> Void = {},
         onCancel:     @escaping () -> Void = {},
         onRetry:      @escaping () -> Void = {},
-        onForceStart: @escaping () -> Void = {}
+        onForceStart: @escaping () -> Void = {},
+        onOriginTap:  (() -> Void)? = nil
     ) {
         self.model        = model
         self.onArchive    = onArchive
         self.onCancel     = onCancel
         self.onRetry      = onRetry
         self.onForceStart = onForceStart
+        self.onOriginTap  = onOriginTap
     }
 
     public var body: some View {
@@ -106,11 +110,8 @@ public struct MotherJobRow: View {
                     .font(.headline)
                     .lineLimit(2)
 
-                if let repoBranch = repoBranchLabel {
-                    Text(repoBranch)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                if model.origin != nil || repoBranchLabel != nil {
+                    detailLine
                 }
 
                 if model.reservesProgressLine {
@@ -128,6 +129,53 @@ public struct MotherJobRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    /// `origin · repo • branch`. The origin truncates first: the repo keeps its width.
+    private var detailLine: some View {
+        HStack(spacing: 4) {
+            if let origin = model.origin {
+                originView(origin)
+                if origin.badge != nil, let badge = origin.badge {
+                    Text(badge)
+                        .font(.caption2)
+                        .padding(.horizontal, 4)
+                        .background(Capsule().fill(.quaternary))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .accessibilityHidden(true)
+                }
+                if repoBranchLabel != nil { Text("·").layoutPriority(1) }
+            }
+            if let repoBranch = repoBranchLabel {
+                Text(repoBranch)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private func originView(_ origin: MotherOriginDisplay) -> some View {
+        let base = Text(origin.text).italic(origin.isItalic)
+        if origin.isClickable, let onOriginTap {
+            Button(action: onOriginTap) { originText(base.underline(), origin) }
+                .buttonStyle(.plain)
+                .help(origin.tooltip)
+                .accessibilityLabel(origin.accessibilityText)
+        } else {
+            originText(base, origin)
+                .help(origin.tooltip)
+                .accessibilityLabel(origin.accessibilityText)
+        }
+    }
+
+    private func originText(_ text: Text, _ origin: MotherOriginDisplay) -> some View {
+        text.lineLimit(1)
+            .truncationMode(.tail)
+            .opacity(origin.isMuted ? 0.7 : 1)
     }
 
     /// `≈60% · gates 2/3 · ETA ~25m` and attention badges. The line is always there for

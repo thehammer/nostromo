@@ -56,6 +56,10 @@ class TabBarView: NSView {
     /// Called when the user selects "Rename…" from a dynamic item's context menu.
     var onRename: ((Focus) -> Void)?
 
+    /// Called when the user selects "Show My Jobs" from a dynamic item's context menu: open the
+    /// Mother focus filtered to this focus's jobs. A view action, not gesture-gated.
+    var onShowJobs: ((Focus) -> Void)?
+
     /// Called when the user selects "Force Start" from a dynamic item's context menu.
     var onForceStart: ((Focus) -> Void)?
 
@@ -284,6 +288,15 @@ class TabBarView: NSView {
                     renameItem.representedObject = focus
                     menu.addItem(renameItem)
 
+                    let showJobsItem = NSMenuItem(
+                        title: "Show My Jobs",
+                        action: #selector(showJobsTapped(_:)),
+                        keyEquivalent: ""
+                    )
+                    showJobsItem.target = self
+                    showJobsItem.representedObject = focus
+                    menu.addItem(showJobsItem)
+
                     let forceStartItem = NSMenuItem(
                         title: "Force Start",
                         action: #selector(forceStartTapped(_:)),
@@ -349,6 +362,11 @@ class TabBarView: NSView {
     @objc private func renameTapped(_ sender: NSMenuItem) {
         guard let focus = sender.representedObject as? Focus else { return }
         onRename?(focus)
+    }
+
+    @objc private func showJobsTapped(_ sender: NSMenuItem) {
+        guard let focus = sender.representedObject as? Focus else { return }
+        onShowJobs?(focus)
     }
 
     @objc private func forceStartTapped(_ sender: NSMenuItem) {

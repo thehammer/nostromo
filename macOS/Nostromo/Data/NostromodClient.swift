@@ -163,6 +163,9 @@ enum ServerMsg {
     case welcome(protocolVersion: Int, daemonPid: Int, enabledAgents: EnabledAgents = .all)
     case activity(ActivityEvent)
     case motherJobs([MotherJob])
+    /// The daemon's per-job notes (who queued each job), keyed by job id. The jobs themselves come
+    /// from the broker; only `id` and `nostromo` are read here, never a date.
+    case motherAnnotations([String: MotherJobAnnotation])
     case motherStatusline(MotherStatus)
     case motherPeek(MotherPeekPayload)
     case pong
@@ -1455,6 +1458,21 @@ class NostromodClient {
         }
     }
 
+    /// `jobs[].nostromo` by `jobs[].id`. An entry that is missing, malformed or the wrong type is
+    /// skipped; it never costs the others.
+    static func motherAnnotations(from json: [String: Any]) -> [String: MotherJobAnnotation] {
+        var out: [String: MotherJobAnnotation] = [:]
+        for case let job as [String: Any] in json["jobs"] as? [Any] ?? [] {
+            guard let id = job["id"] as? String,
+                  let note = job["nostromo"] as? [String: Any],
+                  let data = try? JSONSerialization.data(withJSONObject: note),
+                  let annotation = try? JSONDecoder().decode(MotherJobAnnotation.self, from: data)
+            else { continue }
+            out[id] = annotation
+        }
+        return out
+    }
+
     func decode(type_: String, json: [String: Any], raw: Data) -> ServerMsg {
         switch type_ {
 
@@ -1472,9 +1490,9 @@ class NostromodClient {
             }
 
         case "mother_jobs":
-            // Jobs are now sourced via `mother list --format json` polling in AppStore.
-            // IPC mother_jobs is ignored to avoid the fractional-seconds date decode issue.
-            break
+            // Jobs are sourced from the broker. This frame is read lightly, for `jobs[].id` and
+            // `jobs[].nostromo` only: a full decode trips on the fractional-seconds dates.
+            return .motherAnnotations(Self.motherAnnotations(from: json))
 
         case "mother_statusline":
             return .motherStatusline(MotherStatus(

@@ -262,6 +262,7 @@ class MainLayout: NSView {
         tabBar.onAdd         = { [weak self] in self?.presentCreateFocusSheet() }
         tabBar.onRename      = { [weak self] focus in self?.presentRenameSheet(for: focus) }
         tabBar.onRemove      = { [weak self] focus in self?.removeFocus(focus) }
+        tabBar.onShowJobs    = { [weak self] focus in self?.showJobs(of: focus) }
         tabBar.onForceStart  = { [weak self] focus in self?.forceStart(focus) }
 
         // Subscribe to FocusStore so the tab bar rebuilds when focuses change.
@@ -354,6 +355,15 @@ class MainLayout: NSView {
     }
 
     // MARK: - Focus switching
+
+    /// "Show My Jobs": switch this window to the Mother focus, then ask its Mother view to filter
+    /// to `focus`. The tag is set first so a Mother view created by the switch picks it up.
+    private func showJobs(of focus: Focus) {
+        MotherView.requestedFilterTag = focus.sessionTag
+        let mother = FocusStore.shared.focuses.first { $0.id == Focus.mother.id } ?? Focus.mother
+        switchFocus(mother)
+        NotificationCenter.default.post(name: MotherView.showJobsNotification, object: nil)
+    }
 
     private func switchFocus(_ focus: Focus) {
         activeFocus          = focus
