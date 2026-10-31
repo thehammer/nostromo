@@ -83,8 +83,11 @@ public enum WakeMarkerText {
 
     private static func title(_ item: MotherNoticeItemWire, limit: Int) -> String {
         // Double quotes become `'` so the title cannot close the quoted region and forge what follows.
-        let quotes: Set<Character> = ["\"", "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{2033}", "\u{FF02}"]
-        let clean = String(FoldTextSanitizer.sanitize(item.title).map { quotes.contains($0) ? "'" : $0 })
+        let quotes: Set<Unicode.Scalar> = ["\"", "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{2033}", "\u{2036}",
+                                           "\u{FF02}", "\u{275D}", "\u{275E}", "\u{301D}", "\u{301E}", "\u{301F}", "\u{02BA}"]
+        // Scalar level: a quote with a combining mark after it is one Character, but still a quote.
+        let scalars = FoldTextSanitizer.sanitize(item.title).unicodeScalars.map { quotes.contains($0) ? "'" : $0 }
+        let clean = String(String.UnicodeScalarView(scalars))
             .trimmingCharacters(in: .whitespaces)
         return capped(clean.isEmpty ? "Untitled job" : clean, to: limit)
     }

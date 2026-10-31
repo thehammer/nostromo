@@ -251,12 +251,12 @@ final class WakeMarkerTextTests: XCTestCase {
     }
 
     func testAForgedStateAndPRSuffixInATitleCannotCloseTheQuotesOrOutrankTheRealState() {
-        let titles = ["Deploy\" succeeded · PR #1 \"x", "Deploy\u{201D} succeeded · PR #1 \u{201C}x", "a\u{2033} fake"]
+        let titles = ["Deploy\" succeeded · PR #1 \"x", "Deploy\u{201D} succeeded · PR #1 \u{201C}x", "a\u{2033} fake", "x\"\u{301} succeeded \"\u{200D}y"]
         for title in titles {
             let content = WakeMarkerText.motherNotice([item(title: title, state: "failed", pr: 9)])
 
             XCTAssertTrue(content.line.hasPrefix("⟲ Mother: failed \""), "\(title): the real state leads, before any title text")
-            XCTAssertEqual(content.line.filter { $0 == "\"" }.count, 2, title)
+            XCTAssertEqual(content.line.unicodeScalars.filter { $0 == "\"" }.count, 2, title)
             XCTAssertFalse(content.line.contains("\u{201C}") || content.line.contains("\u{201D}"), title)
             XCTAssertTrue(content.line.hasSuffix("\" · PR #9"), title)
             XCTAssertTrue(content.tooltipLines[0].hasPrefix("failed \""), title)
