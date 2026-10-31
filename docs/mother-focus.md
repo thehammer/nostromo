@@ -173,6 +173,33 @@ name, a session id, a plan path, a reason or a URL.
 Nothing in this path logs a job title, a focus name, a session id or a plan path either; a test drives it
 at TRACE level with canary values to prove it.
 
+## How the Mac shows it
+
+The Mac reads jobs from Mother's broker, not the daemon. From the daemon's `mother_jobs` frame it reads only
+`jobs[].id` and `jobs[].nostromo` (never a date, so the fractional-seconds trap cannot reach it) and joins them
+to the broker's jobs by id (`AppStore.motherAnnotations`, published only on change, kept through a disconnect).
+A job with no annotation reads `origin unknown`.
+
+| Kind | Row text | Notes |
+|---|---|---|
+| `focus`, open | current name | Clickable: switches the key window to that focus. A rename shows in every row in the same run-loop turn. |
+| `focus`, closed | `<name> (closed)` | Muted, plain text. |
+| `unverified` | `<claimed name>?` and an `unverified` badge | Muted, plain text. Never notified. |
+| `you` | `You` | Plain text. |
+| `unknown` or none | `origin unknown` | Muted, italic. |
+
+Tooltips carry the tag, `queued as <snapshot>` when the name changed, and the session prefix. Every name is
+sanitised (`FoldTextSanitizer`) and capped at 40 characters in a row, 120 in a tooltip. The detail has a
+`From <origin> ↗ · <repo>` line under the title.
+
+**`From:` filter.** A pop-up above the list: All, each focus with jobs (A-Z; closed ones last, with
+"(closed)"), unverified claims, You, Unknown origin. Picking one shows `· N of M` and a clear button. The
+filter belongs to the window's Mother view and is not persisted. **Show My Jobs** in a focus's context menu
+opens the Mother focus in that window with the filter set to that focus. These are view actions, so none is
+gesture-gated.
+
+Code: Kit `Mother/MotherOriginDisplay.swift`, Mac `UI/Mother/MotherJobFilter.swift`, `UI/Views/MotherView.swift`.
+
 ## Job notices
 
 When a job queued by a verified focus moves, the daemon tells that focus's session with one structured
