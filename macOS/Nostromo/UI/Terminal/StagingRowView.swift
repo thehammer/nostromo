@@ -270,9 +270,8 @@ final class StagingRowView: NSView {
         func secondary(_ label: NSTextField, lines: Int) -> NSRect {
             guard !label.isHidden else { return .zero }
             // The label's own cell measures it, so its internal padding is counted here too.
-            let attributed = NSAttributedString(string: label.stringValue, attributes: [.font: Theme.statusFont])
-            let full = Self.cellHeight(of: attributed, width: textWidth)
-            let one = Self.cellHeight(of: NSAttributedString(string: "X", attributes: [.font: Theme.statusFont]), width: textWidth)
+            let full = Self.cellHeight(of: label.stringValue, font: Theme.statusFont, width: textWidth)
+            let one = Self.cellHeight(of: "X", font: Theme.statusFont, width: textWidth)
             let chrome = max(0, one - ceil(NSLayoutManager().defaultLineHeight(for: Theme.statusFont)))
             let h = lines == 0 ? full : min(full, (one - chrome) * CGFloat(lines) + chrome)
             let rect = NSRect(x: textX, y: y + 1, width: textWidth, height: ceil(h))
@@ -299,9 +298,22 @@ final class StagingRowView: NSView {
     static func cellHeight(of text: NSAttributedString, width: CGFloat, wrapping: NSLineBreakMode = .byWordWrapping) -> CGFloat {
         guard text.length > 0 else { return 0 }
         let field = NSTextField(labelWithString: "")
-        field.lineBreakMode = wrapping       // a label clips by default, which would measure one line
-        field.maximumNumberOfLines = 0
         field.attributedStringValue = text
+        return cellHeight(of: field, width: width, wrapping: wrapping)
+    }
+
+    /// The same for a plain string in `font` (how the app's own labels are set).
+    static func cellHeight(of text: String, font: NSFont, width: CGFloat, wrapping: NSLineBreakMode = .byWordWrapping) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        let field = NSTextField(labelWithString: text)
+        field.font = font
+        return cellHeight(of: field, width: width, wrapping: wrapping)
+    }
+
+    private static func cellHeight(of field: NSTextField, width: CGFloat, wrapping: NSLineBreakMode) -> CGFloat {
+        field.lineBreakMode = wrapping       // a label clips by default, which would measure one line
+        field.cell?.wraps = true
+        field.maximumNumberOfLines = 0
         guard let cell = field.cell else { return 0 }
         return ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)).height)
     }

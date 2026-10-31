@@ -358,9 +358,8 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         let text = reasonLabel.stringValue
         guard !text.isEmpty else { return 0 }
         let available = max(20, width - 16)
-        let attributed = NSAttributedString(string: text, attributes: [.font: Theme.statusFont])
-        let full = StagingRowView.cellHeight(of: attributed, width: available)
-        let one = StagingRowView.cellHeight(of: NSAttributedString(string: "X", attributes: [.font: Theme.statusFont]), width: available)
+        let full = StagingRowView.cellHeight(of: text, font: Theme.statusFont, width: available)
+        let one = StagingRowView.cellHeight(of: "X", font: Theme.statusFont, width: available)
         let chrome = max(0, one - ceil(NSLayoutManager().defaultLineHeight(for: Theme.statusFont)))
         return min(max(full, one), (one - chrome) * CGFloat(Self.reasonLines) + chrome)
     }
