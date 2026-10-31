@@ -404,6 +404,7 @@ fn origin(kind: OriginKind, tag: Option<&str>) -> JobAnnotation {
         },
         notify: None,
         notice: None,
+        ..Default::default()
     }
 }
 

@@ -268,6 +268,7 @@ fn job(tag: &str, id: &str, state: &str) -> MotherJob {
             },
             notify: None,
             notice: None,
+            ..Default::default()
         }),
         ..Default::default()
     }

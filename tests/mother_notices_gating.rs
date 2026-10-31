@@ -701,6 +701,7 @@ fn job_from(id: &str, tag: &str) -> MotherJob {
         },
         notify: Some(NotifyLevel::Wake),
         notice: Some(rich_notice()),
+        ..Default::default()
     });
     job
 }
