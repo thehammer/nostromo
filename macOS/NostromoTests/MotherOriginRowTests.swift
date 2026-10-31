@@ -114,11 +114,16 @@ final class MotherOriginRowTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         var labels: [String] = []
         var actions: [String] = []
-        func walk(_ element: Any?, depth: Int) {
-            guard depth < 12, let e = element as? NSAccessibilityElementProtocol else { return }
-            if let l = (e as AnyObject).accessibilityLabel?(), !l.isEmpty { labels.append(l) }
-            if let acts = (e as AnyObject).accessibilityCustomActions?() { actions += acts.map(\.name) }
-            for c in (e as AnyObject).accessibilityChildren?() ?? [] { walk(c, depth: depth + 1) }
+        func walk(_ node: NSObject, depth: Int) {
+            guard depth < 16 else { return }
+            if let l = node.accessibilityLabel(), !l.isEmpty { labels.append(l) }
+            if let p = node as? NSAccessibilityProtocol, let acts = p.accessibilityCustomActions?() { actions += acts.map(\.name) }
+            // SwiftUI exposes its tree as accessibilityChildren on the hosting view and as
+            // accessibilitySubrole-bearing NSObjects; also follow plain subviews.
+            for c in (node.accessibilityChildren() as? [NSObject]) ?? [] { walk(c, depth: depth + 1) }
+            if let v = node as? NSView, (node.accessibilityChildren() ?? []).isEmpty {
+                for sub in v.subviews { walk(sub, depth: depth + 1) }
+            }
         }
         walk(host, depth: 0)
         return (labels, actions)
@@ -127,7 +132,8 @@ final class MotherOriginRowTests: XCTestCase {
     func testARowWithAnOriginReadsItsTitleThenWhereItCameFrom() {
         let origin = MotherOriginDisplay.make(annotation: note(.you), currentName: { _ in nil })
         let model = MotherJobRowModel(id: "j1", state: "queued", title: "Ship it", origin: origin)
-        XCTAssertTrue(accessibilityLabels(of: model).labels.contains("Ship it. From You."))
+        let labels = accessibilityLabels(of: model).labels
+        XCTAssertTrue(labels.contains("Ship it. From You."), "labels: \(labels)")
     }
 
     func testARowWithoutAnOriginKeepsItsOwnAccessibility() {
