@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import Combine
+import SwiftUI
 import NostromoKit
 
 // MotherJobListViewModel, MotherJobDetail, MotherOriginLine, FocusStore and Focus are compiled into this
