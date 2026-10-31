@@ -271,9 +271,9 @@ final class StagingRowView: NSView {
             guard !label.isHidden else { return .zero }
             // The label's own cell measures it, so its internal padding is counted here too.
             let full = Self.cellHeight(of: label.stringValue, font: Theme.statusFont, width: textWidth)
-            let one = Self.cellHeight(of: "X", font: Theme.statusFont, width: textWidth)
-            let chrome = max(0, one - ceil(NSLayoutManager().defaultLineHeight(for: Theme.statusFont)))
-            let h = lines == 0 ? full : min(full, (one - chrome) * CGFloat(lines) + chrome)
+            // The cap is what the cell itself needs for that many lines.
+            let capped = Self.cellHeight(of: Self.lines(lines), font: Theme.statusFont, width: textWidth)
+            let h = lines == 0 ? full : min(full, capped)
             let rect = NSRect(x: textX, y: y + 1, width: textWidth, height: ceil(h))
             y = rect.maxY
             return rect
@@ -300,6 +300,11 @@ final class StagingRowView: NSView {
         let field = NSTextField(labelWithString: "")
         field.attributedStringValue = text
         return cellHeight(of: field, width: width, wrapping: wrapping)
+    }
+
+    /// `count` short lines, for measuring what a cell needs for that many.
+    static func lines(_ count: Int) -> String {
+        Array(repeating: "X", count: max(1, count)).joined(separator: "\n")
     }
 
     /// The same for a plain string in `font` (how the app's own labels are set).
