@@ -313,6 +313,9 @@ enum ServerMsg {
     /// The commands an agent that follows a terminal has staged (S1). Local clients that declared
     /// `terminal_staging_ui` only.
     case terminalStagingList(TerminalStagingList)
+    /// A `terminal_staging_list` frame that did not decode but names its terminal: that terminal's list is
+    /// dropped, so the drawer cannot keep offering text the agent has since replaced.
+    case terminalStagingUnreadable(terminalId: String)
 
     // ── remote shells (2c) ────────────────────────────────────────────────────
     /// What the picker offers: projects, environments, services, shell types.

@@ -121,6 +121,74 @@ final class StagingDrawerHost {
     }
 }
 
+// MARK: - What an accessibility client is shown
+
+/// One element in the accessibility tree as a client (VoiceOver, app-control) would be shown it.
+fileprivate struct StagingAXNode {
+    let object: NSObject
+    let role: NSAccessibility.Role?
+    let label: String?
+    let value: String?
+    let identifier: String
+    let children: [StagingAXNode]
+
+    var descendants: [StagingAXNode] { children.flatMap { [$0] + $0.descendants } }
+}
+
+/// Walks the real accessibility children (never a view's own role): a view that is not an accessibility
+/// element is replaced by whatever it contains, exactly as `NSAccessibility.unignoredChildren` does, and
+/// an element contributes itself and what it says its children are.
+fileprivate enum StagingAX {
+    /// What a client sees beneath `root` (not `root` itself).
+    static func tree(under root: NSView) -> [StagingAXNode] {
+        dedupe(childObjects(of: root).flatMap { nodes(for: $0, depth: 1) })
+    }
+
+    private static func nodes(for object: NSObject, depth: Int) -> [StagingAXNode] {
+        guard depth < 40 else { return [] }
+        if let view = object as? NSView, !view.isAccessibilityElement() {
+            var inside = childObjects(of: view)
+            if inside.isEmpty { inside = view.subviews.filter { !$0.isHidden } }
+            return dedupe(inside.flatMap { nodes(for: $0, depth: depth + 1) })
+        }
+        let role = string(object, "accessibilityRole").map { NSAccessibility.Role(rawValue: $0) }
+        return [StagingAXNode(object: object, role: role, label: string(object, "accessibilityLabel"),
+                              value: text(object, "accessibilityValue"),
+                              identifier: string(object, "accessibilityIdentifier") ?? "",
+                              children: dedupe(childObjects(of: object).flatMap { nodes(for: $0, depth: depth + 1) }))]
+    }
+
+    private static func childObjects(of object: NSObject) -> [NSObject] {
+        var found: [NSObject] = []
+        for name in ["accessibilityChildren", "accessibilityContents"] {
+            let selector = NSSelectorFromString(name)
+            guard object.responds(to: selector),
+                  let array = object.perform(selector)?.takeUnretainedValue() as? [AnyObject] else { continue }
+            found += array.compactMap { $0 as? NSObject }
+        }
+        // A scroll area's own children are AppKit's business; be sure its content is looked at.
+        if let scroll = object as? NSScrollView, let document = scroll.documentView { found.append(document) }
+        return found
+    }
+
+    private static func string(_ object: NSObject, _ name: String) -> String? {
+        let selector = NSSelectorFromString(name)
+        guard object.responds(to: selector) else { return nil }
+        return object.perform(selector)?.takeUnretainedValue() as? String
+    }
+
+    private static func text(_ object: NSObject, _ name: String) -> String? {
+        let selector = NSSelectorFromString(name)
+        guard object.responds(to: selector), let value = object.perform(selector)?.takeUnretainedValue() else { return nil }
+        return (value as? String) ?? (value as? NSAttributedString)?.string
+    }
+
+    private static func dedupe(_ nodes: [StagingAXNode]) -> [StagingAXNode] {
+        var seen = Set<ObjectIdentifier>()
+        return nodes.filter { seen.insert(ObjectIdentifier($0.object)).inserted }
+    }
+}
+
 // MARK: - Tests
 
 final class StagingDrawerViewTests: XCTestCase {
@@ -682,6 +750,75 @@ final class StagingDrawerViewTests: XCTestCase {
         XCTAssertTrue(rig.insertedFrames.isEmpty)
     }
 
+    /// A Space key-down as the keyboard makes it: `repeating` is the auto-repeat of a held key.
+    private func spaceEvent(in window: NSWindow, repeating: Bool, modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                         timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                         context: nil, characters: " ", charactersIgnoringModifiers: " ",
+                         isARepeat: repeating, keyCode: 49)!
+    }
+
+    // The gate lets everything through here, so the only thing that can refuse these Spaces is the rule
+    // that a held key (auto-repeat) and a Space with a modifier are not a person pressing Space.
+
+    func testAnAutoRepeatedSpaceInsertsNothingSendsNothingAndChangesNothing() {
+        let (rig, host) = readyHost(gate: StagingGates.allowAll)
+        host.drawer.focusRows()
+        let modelsBefore = host.rows.map { $0.model }
+        let selectedBefore = host.drawer.selectedEntryId
+        let noticeBefore = host.drawer.notice
+        let sessionFramesBefore = rig.sessionFrames.count
+        let held = spaceEvent(in: host.window, repeating: true)
+        XCTAssertTrue(held.isARepeat, "the event under test is a repeat")
+
+        for _ in 0..<3 { host.drawer.keyDown(with: held) }
+
+        XCTAssertTrue(rig.target.sent.isEmpty, "no bytes reach the shell from a held Space")
+        XCTAssertEqual(rig.target.focusCount, 0)
+        XCTAssertTrue(rig.stagingFrames.isEmpty, "nothing is reported to the daemon")
+        XCTAssertEqual(rig.sessionFrames.count, sessionFramesBefore)
+        XCTAssertEqual(host.drawer.notice, noticeBefore)
+        XCTAssertEqual(host.drawer.selectedEntryId, selectedBefore)
+        XCTAssertEqual(host.rows.map { $0.model }, modelsBefore)
+
+        host.drawer.keyDown(with: spaceEvent(in: host.window, repeating: false))
+        XCTAssertEqual(rig.target.sent, [Array("ls -la".utf8)], "a plain Space that is not a repeat still inserts")
+    }
+
+    func testSpaceWithACommandControlOptionOrShiftModifierInsertsNothing() {
+        let (rig, host) = readyHost(gate: StagingGates.allowAll)
+        host.drawer.focusRows()
+
+        for (name, modifier) in [("command", NSEvent.ModifierFlags.command), ("control", .control),
+                                 ("option", .option), ("shift", .shift)] {
+            host.drawer.keyDown(with: spaceEvent(in: host.window, repeating: false, modifiers: [modifier]))
+            XCTAssertTrue(rig.target.sent.isEmpty, "\(name)-Space inserts nothing")
+            XCTAssertTrue(rig.stagingFrames.isEmpty, "\(name)-Space reports nothing")
+            XCTAssertEqual(rig.target.focusCount, 0, "\(name)-Space")
+        }
+
+        host.drawer.keyDown(with: spaceEvent(in: host.window, repeating: false))
+        XCTAssertEqual(rig.target.sent, [Array("ls -la".utf8)], "plain Space is the positive control")
+    }
+
+    func testHoldingSpaceOnARowThatJustChangedDoesNotInsertItWhenTheReadingDelayRunsOut() {
+        let (rig, host) = readyHost(gate: StagingGates.allowAll)
+        host.drawer.focusRows()
+        rig.ingest(StagingFixtures.entries(["ls -la --color", "pwd", "date"]))   // the selected row just changed
+        let w = host.window
+
+        host.drawer.keyDown(with: spaceEvent(in: w, repeating: false))
+        XCTAssertTrue(rig.target.sent.isEmpty, "the first press is inside the 1.5 s reading delay")
+
+        rig.settle()   // the key is still down: its auto-repeats arrive after the delay
+        for _ in 0..<3 { host.drawer.keyDown(with: spaceEvent(in: w, repeating: true)) }
+        XCTAssertTrue(rig.target.sent.isEmpty, "a held key never turns into an insert")
+        XCTAssertTrue(rig.insertedFrames.isEmpty)
+
+        host.drawer.keyDown(with: spaceEvent(in: w, repeating: false))
+        XCTAssertEqual(rig.target.sent, [Array("ls -la --color".utf8)], "a fresh press after the delay inserts")
+    }
+
     func testReturnAndKeypadEnterSendNothingAndAreNotForwarded() {
         let (rig, host) = readyHost()
         host.drawer.focusRows()
@@ -802,6 +939,106 @@ final class StagingDrawerViewTests: XCTestCase {
         XCTAssertEqual(chevron.accessibilityRole(), .button)
         XCTAssertTrue(chevron.accessibilityPerformPress())
         XCTAssertTrue(host.drawer.isCollapsed)
+    }
+
+    // MARK: - SB-10: VoiceOver sees one element per row (the real accessibility tree)
+
+    /// Four rows: one with a note, one inserted and a placeholder, one long (Show all), one plain.
+    private func voiceOverHost() -> (rig: StagingRig, host: StagingDrawerHost) {
+        let rig = makeRig()
+        let host = makeHost(rig, width: 400, bodyHeight: 1_000)
+        rig.ingest([
+            StagingFixtures.entry("s-1", 1, "git status --short", note: "see what changed"),
+            StagingFixtures.entry("s-2", 2, "echo <name>", insertedCount: 1,
+                                  lastInsertedAt: StagingFixtures.baseDate.addingTimeInterval(8)),
+            StagingFixtures.entry("s-3", 3, String(repeating: "word ", count: 190)),
+            StagingFixtures.entry("s-4", 4, "pwd"),
+        ])
+        rig.settle()
+        host.drawer.refresh()
+        host.relayout()
+        host.window.contentView?.layoutSubtreeIfNeeded()
+        return (rig, host)
+    }
+
+    /// The drawer's element in the tree a client sees, with everything inside it.
+    private func drawerNode(_ host: StagingDrawerHost, file: StaticString = #filePath, line: UInt = #line) throws -> StagingAXNode {
+        let everything = StagingAX.tree(under: host.container).flatMap { [$0] + $0.descendants }
+        let groups = everything.filter { $0.role == .group && $0.label == "Staged commands" }
+        XCTAssertEqual(groups.count, 1, "one group named Staged commands in the tree", file: file, line: line)
+        return try XCTUnwrap(groups.first, "no element is the drawer", file: file, line: line)
+    }
+
+    func testTheDrawerIsOneAccessibilityGroupNamedStagedCommandsThatContainsTheRows() throws {
+        let (_, host) = voiceOverHost()
+
+        let drawer = try drawerNode(host)
+
+        XCTAssertEqual(drawer.identifier, "staging-drawer")
+        let labels = drawer.descendants.compactMap { $0.label }
+        for row in host.rows {
+            XCTAssertTrue(labels.contains(row.model.accessibilityLabel), "\(row.model.accessibilityLabel) is inside the group")
+        }
+    }
+
+    func testEachStagedRowIsExactlyOneButtonWithItsSpokenLabelInTheAccessibilityTree() throws {
+        let (_, host) = voiceOverHost()
+        let drawer = try drawerNode(host)
+        XCTAssertEqual(host.rows.count, 4)
+
+        for row in host.rows {
+            let spoken = row.model.accessibilityLabel
+            let matches = drawer.descendants.filter { $0.label == spoken }
+            XCTAssertEqual(matches.count, 1, "\(spoken): one element, not one per piece of text")
+            XCTAssertEqual(matches.first?.role, .button, spoken)
+            XCTAssertEqual(matches.first?.identifier, "staging-row", spoken)
+        }
+        let rowElements = drawer.descendants.filter { $0.identifier == "staging-row" }
+        XCTAssertEqual(rowElements.count, 4, "exactly the four staged rows, nothing more")
+        XCTAssertTrue(rowElements.allSatisfy { $0.role == .button })
+    }
+
+    func testNoneOfARowsChildTextIsASeparateAccessibilityElement() throws {
+        let (_, host) = voiceOverHost()
+        let drawer = try drawerNode(host)
+        let rowElements = drawer.descendants.filter { $0.identifier == "staging-row" }
+        XCTAssertEqual(rowElements.count, 4, "the rows must be elements before their text can be hidden")
+        let seen = drawer.descendants.filter { $0.identifier != "staging-row" }
+
+        for row in host.rows {
+            let fields = row.subviews.compactMap { $0 as? NSTextField }
+            XCTAssertGreaterThanOrEqual(fields.count, 5, "the row has its number, glyph, command, age and more")
+            for field in fields {
+                let shown = field.attributedStringValue.string
+                XCTAssertFalse(seen.contains { $0.object === field },
+                               "row \(row.model.number): the text field \"\(shown)\" is an element of its own")
+                guard !shown.isEmpty else { continue }
+                XCTAssertFalse(seen.contains { $0.value == shown || $0.label == shown },
+                               "row \(row.model.number): \"\(shown)\" is read a second time, apart from the row's own label")
+            }
+        }
+    }
+
+    func testShowAllAndTheDrawersChevronAndMenuAreButtonsInTheAccessibilityTree() throws {
+        let (_, host) = voiceOverHost()
+        let drawer = try drawerNode(host)
+        let longRow = try XCTUnwrap(host.rows.first { $0.model.command.hasPrefix("word ") })
+        let showAll = try XCTUnwrap(host.showAll(of: longRow))
+        XCTAssertFalse(showAll.isHidden, "the long row offers Show all")
+        let inside = drawer.descendants
+
+        let showAllNode = try XCTUnwrap(inside.first { $0.object === showAll }, "the long row's Show all is in the tree")
+        XCTAssertEqual(showAllNode.role, .button)
+        XCTAssertEqual(showAllNode.label, "Show all")
+        for label in ["Collapse staged commands", "Staged commands menu"] {
+            let matches = inside.filter { $0.label == label }
+            XCTAssertEqual(matches.count, 1, "\(label): one element")
+            XCTAssertEqual(matches.first?.role, .button, label)
+        }
+        for buttonText in ["Show all", "\u{25BE}"] {
+            XCTAssertFalse(inside.contains { $0.role == .staticText && ($0.value == buttonText || $0.label == buttonText) },
+                           "a button's own text (\(buttonText)) is not a second element beside it")
+        }
     }
 
     // MARK: - SB-11: agent text only in its slots

@@ -8,8 +8,9 @@ import Foundation
 //   * `state: none` removes the list; `terminal_closed` and a lost daemon connection remove it too
 //     (a lost connection also forgets every revision, because a restarted daemon counts from the start).
 //   * `shownSince`: when an entry's current (command, note) was first received, on the store's injected
-//     clock. Kept while the text is unchanged; restarted for one entry whose command or note changed;
-//     restarted for EVERY entry when the sequence of entry ids changes (a row appeared, went away or moved).
+//     clock. Kept for every entry while no entry's text changed; restarted for EVERY entry when any entry's
+//     command or note changes, or when the sequence of entry ids changes (a row appeared, went away or
+//     moved): an edit that changes one row's height shifts every row below it.
 //   * Observers are tokens: releasing one stops its calls.
 //   * Remove, Clear and the insert report go out through the transport as the right frames.
 
@@ -237,7 +238,7 @@ final class TerminalStagingStoreTests: XCTestCase {
         XCTAssertEqual(shown("b"), 700)
     }
 
-    func testShownSinceRestartsForTheEntryWhoseCommandChangedOnly() {
+    func testShownSinceRestartsForEveryEntryWhenOneEntrysCommandChanges() {
         clock = 700
         store.ingest(frame([entry("a", "ls"), entry("b", "pwd")]))
 
@@ -245,21 +246,54 @@ final class TerminalStagingStoreTests: XCTestCase {
         store.ingest(frame([entry("a", "ls -la"), entry("b", "pwd")]))
 
         XCTAssertEqual(shown("a"), 760)
-        XCTAssertEqual(shown("b"), 700, "an edit of one entry restarts that entry alone")
+        XCTAssertEqual(shown("b"), 760, "an edit may change a row's height and move every row below it")
     }
 
-    func testShownSinceRestartsForTheEntryWhoseNoteChangedOnly() {
+    func testShownSinceRestartsForEveryEntryWhenOneEntrysNoteChanges() {
         clock = 700
         store.ingest(frame([entry("a", "ls", note: "old"), entry("b", "pwd")]))
 
         clock = 760
         store.ingest(frame([entry("a", "ls", note: "new"), entry("b", "pwd")]))
         XCTAssertEqual(shown("a"), 760)
-        XCTAssertEqual(shown("b"), 700)
+        XCTAssertEqual(shown("b"), 760, "a longer note makes the row taller and moves the rows below it")
 
         clock = 800
         store.ingest(frame([entry("a", "ls", note: nil), entry("b", "pwd")]))
         XCTAssertEqual(shown("a"), 800, "dropping the note is a change too")
+        XCTAssertEqual(shown("b"), 800)
+    }
+
+    func testAnEditToTheFirstRowRearmsTheReadingDelayOfTheRowBelowItWhoseTextDidNotChange() {
+        clock = 700
+        store.ingest(frame([entry("a", "ls"), entry("b", "pwd", note: "where am i")]))
+        clock = 740
+        XCTAssertEqual(shown("b"), 700)
+
+        clock = 760
+        store.ingest(frame([entry("a", "ls -la --color=always"), entry("b", "pwd", note: "where am i")]))
+
+        XCTAssertEqual(store.entry(terminalId: id, entryId: "b")?.command, "pwd", "row b's text is untouched")
+        XCTAssertEqual(store.entry(terminalId: id, entryId: "b")?.note, "where am i")
+        XCTAssertEqual(shown("b"), 760, "but row b moved, so it is read afresh from the moment of the edit")
+    }
+
+    func testAFrameThatChangesNoTextKeepsEveryShownSinceEvenWhenOtherFieldsChange() {
+        clock = 700
+        store.ingest(frame([entry("a", "ls", note: "n"), entry("b", "pwd")]))
+        clock = 710
+        store.ingest(frame([entry("a", "ls", note: "n"), entry("b", "pwd"), entry("c", "date")]))
+        XCTAssertEqual(shown("a"), 710)
+
+        clock = 900
+        let later = Date(timeIntervalSince1970: 1_800_000_000)
+        store.ingest(frame([StagingFixtures.entry("a", 1, "ls", note: "n", insertedCount: 3, lastInsertedAt: later),
+                            StagingFixtures.entry("b", 1, "pwd", insertedCount: 1, lastInsertedAt: later),
+                            entry("c", "date")]))
+
+        XCTAssertEqual(shown("a"), 710, "only insert counts changed")
+        XCTAssertEqual(shown("b"), 710)
+        XCTAssertEqual(shown("c"), 710)
     }
 
     func testShownSinceRestartsForEveryEntryWhenOneIsAppended() {

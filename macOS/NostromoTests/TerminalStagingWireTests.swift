@@ -215,6 +215,79 @@ final class TerminalStagingWireTests: XCTestCase {
         }
     }
 
+    // MARK: A frame that does not decode
+
+    private func decodedMessage(object: [String: Any]) throws -> ServerMsg {
+        let raw = try JSONSerialization.data(withJSONObject: object)
+        return NostromodClient(socketPath: "/dev/null").decode(type_: "terminal_staging_list", json: object, raw: raw)
+    }
+
+    private func activeFrameObject() throws -> [String: Any] {
+        try jsonObject(try StagingFixtures.fixtureData("frame-terminal-staging-list-active.json"))
+    }
+
+    func testAFrameThatDoesNotDecodeButNamesItsTerminalIsReportedUnreadableForThatTerminal() throws {
+        var frame = try activeFrameObject()
+        var entries = try XCTUnwrap(frame["entries"] as? [[String: Any]])
+        entries[0]["staged_at"] = "not a time"
+        frame["entries"] = entries
+
+        let message = try decodedMessage(object: frame)
+
+        guard case .terminalStagingUnreadable(let terminalId) = message else {
+            return XCTFail("an undecodable frame that names its terminal must say so (decoded as \(message))")
+        }
+        XCTAssertEqual(terminalId, id)
+    }
+
+    func testAFrameWithAnEntryMissingItsCommandIsReportedUnreadableToo() throws {
+        var frame = try activeFrameObject()
+        var entries = try XCTUnwrap(frame["entries"] as? [[String: Any]])
+        entries[1]["command"] = nil
+        frame["entries"] = entries
+
+        guard case .terminalStagingUnreadable(let terminalId) = try decodedMessage(object: frame) else {
+            return XCTFail("a frame that lost an entry's command must be reported unreadable")
+        }
+        XCTAssertEqual(terminalId, id)
+    }
+
+    func testAFrameWithNoReadableTerminalIdIsNotReportedUnreadableForAnyTerminal() throws {
+        for bad: Any? in [nil, 42, NSNull()] {
+            var frame = try activeFrameObject()
+            frame["terminal_id"] = bad
+            var entries = try XCTUnwrap(frame["entries"] as? [[String: Any]])
+            entries[0]["staged_at"] = "not a time"
+            frame["entries"] = entries
+
+            let message = try decodedMessage(object: frame)
+
+            if case .terminalStagingUnreadable = message {
+                XCTFail("terminal_id \(String(describing: bad)) names no terminal; the frame stays dropped")
+            }
+            if case .terminalStagingList = message { XCTFail("it does not decode as a list either") }
+        }
+    }
+
+    func testAnUndecodableFrameWithoutATerminalIdDecodesAsUnknown() throws {
+        var frame = try activeFrameObject()
+        frame["terminal_id"] = nil
+        var entries = try XCTUnwrap(frame["entries"] as? [[String: Any]])
+        entries[0]["staged_at"] = "not a time"
+        frame["entries"] = entries
+
+        guard case .unknown = try decodedMessage(object: frame) else {
+            return XCTFail("a frame that names no terminal is dropped as unknown")
+        }
+    }
+
+    func testAGoodFrameStillDecodesAsAListNotAsUnreadable() throws {
+        guard case .terminalStagingList(let list) = try decodedMessage(object: try activeFrameObject()) else {
+            return XCTFail("a good frame is a list")
+        }
+        XCTAssertEqual(list.terminalId, id)
+    }
+
     // MARK: The capability that makes the daemon send it
 
     func testTheOperatorAppDeclaresTheStagingUICapability() {

@@ -1723,6 +1723,8 @@ class AppStore: ObservableObject {
         // Staged commands (S1): `TerminalStagingStore` keeps them, every window's drawer shows them.
         case .terminalStagingList(let list):
             TerminalStagingStore.shared.ingest(list)
+        case .terminalStagingUnreadable(let terminalId):
+            TerminalStagingStore.shared.terminalClosed(terminalId)
 
         // Remote shells (2c): the store keeps the vocabulary; `RemoteShellPresenter` shows the sheets.
         case .remoteShellTargets(let targets):
