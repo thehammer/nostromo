@@ -2196,6 +2196,15 @@ fn golden_path() -> PathBuf {
         .join("tests/fixtures/mother-v2/mother-jobs-annotated.json")
 }
 
+/// A notice record that says the focus was told (serialises as
+/// `{"status":"told"}`).
+fn told_notice() -> nostromo::mother::notices::NoticeView {
+    nostromo::mother::notices::NoticeView {
+        status: nostromo::mother::notices::NoticeStatus::Told,
+        ..Default::default()
+    }
+}
+
 fn annotated(id: &str, title: &str, state: &str, annotation: Option<JobAnnotation>) -> MotherJob {
     let mut j: MotherJob = serde_json::from_value(json!({
         "id": id,
@@ -2230,7 +2239,7 @@ fn golden_frame() -> String {
                 session_prefix: Some("5f3c9a10".into()),
             },
             notify: Some(NotifyLevel::Quiet),
-            notice: Some(json!({ "status": "told" })),
+            notice: Some(told_notice()),
             ..Default::default()
         }),
     );
@@ -2802,7 +2811,7 @@ async fn a_closed_sensitive_focus_shows_a_network_peer_neither_its_name_nor_its_
             );
             // The notice is MF2's; it must not reach a network peer for a
             // sensitive focus whatever it holds.
-            annotation.notice = Some(json!({ "status": "told" }));
+            annotation.notice = Some(told_notice());
         }
         let tags = rig.sensitive_tags();
         assert!(tags.tag_is_sensitive(SECRET_FOCUS), "{how:?}");

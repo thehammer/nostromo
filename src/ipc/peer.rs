@@ -765,6 +765,10 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         // The answer to a document action: a reason in plain English and maybe a
         // file URL on this machine. A network peer can never send the action.
         ServerMsg::PaneActionResult { .. } => ServerClass::LocalOnly,
+        // The Mother notice switches and per-focus notice state: focus tags,
+        // held counts and wake counts. The operator's own; never a network
+        // peer's (SR6), which cannot change them either.
+        ServerMsg::MotherNoticeState { .. } => ServerClass::LocalOnly,
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
@@ -1058,7 +1062,10 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         // Command staging: the insert report and the user's removals.
         | ClientMsg::TerminalStagingInserted { .. }
         | ClientMsg::TerminalStagingRemove { .. }
-        | ClientMsg::TerminalStagingClear { .. } => NetworkPolicy::Refused,
+        | ClientMsg::TerminalStagingClear { .. }
+        // Mother notice switches decide what wakes the user's sessions: the
+        // operator app only.
+        | ClientMsg::MotherNoticeSettingsSet { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -1147,7 +1154,9 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::TerminalSendSelection { .. }
         | ClientMsg::TerminalStagingInserted { .. }
         | ClientMsg::TerminalStagingRemove { .. }
-        | ClientMsg::TerminalStagingClear { .. } => false,
+        | ClientMsg::TerminalStagingClear { .. }
+        // Names a focus tag, but is refused for a network peer whatever it names.
+        | ClientMsg::MotherNoticeSettingsSet { .. } => false,
     }
 }
 
@@ -1232,18 +1241,29 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
             // has registered the new job's id, and the job feed must not
             // include it in that gap.
             jobs.retain(|j| !j.is_work_send() && !tags.job_is_sensitive(&j.id));
-            // Who queued a job is the daemon's own knowledge: a peer gets the
-            // kind and the names, never the focus tag or the session prefix,
-            // and a sensitive focus's name and notice are replaced (SR6).
             for job in &mut jobs {
-                if let Some(annotation) = &mut job.nostromo {
-                    annotation.redact_for_network(|tag| tags.tag_is_sensitive(tag));
-                }
+                redact_job(job, tags);
             }
             ServerMsg::MotherJobs { jobs }
         }
+        ServerMsg::MotherAwaitDetected(mut job) => {
+            redact_job(&mut job, tags);
+            ServerMsg::MotherAwaitDetected(job)
+        }
         other => other,
     }
+}
+
+/// What a network peer may see of one Mother job. Who queued it is the
+/// daemon's own knowledge: the kind and the names, never the focus tag or the
+/// session prefix, and a sensitive focus's name and notice are replaced (SR6).
+/// Mother's free-form failure reason is for the local app (a notice names only
+/// its class).
+fn redact_job(job: &mut crate::mother::MotherJob, tags: &SensitiveTags) {
+    if let Some(annotation) = &mut job.nostromo {
+        annotation.redact_for_network(|tag| tags.tag_is_sensitive(tag));
+    }
+    job.failure_reason = None;
 }
 
 /// The topics withheld from network peers, as announced in `Withheld`.
@@ -2045,6 +2065,12 @@ mod tests {
             ClientMsg::TerminalStagingClear {
                 terminal_id: "t".into(),
             },
+            ClientMsg::MotherNoticeSettingsSet {
+                scope: crate::mother::notices::NoticeScope::Focus,
+                tag: Some("claudia-1".into()),
+                mode: Some(crate::mother::origin::NotifyLevel::Quiet),
+                enabled: None,
+            },
         ]
     }
 
@@ -2083,7 +2109,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 65;
+    const CLIENT_MSG_VARIANTS: usize = 66;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2153,6 +2179,7 @@ mod tests {
             ClientMsg::TerminalStagingInserted { .. } => 62,
             ClientMsg::TerminalStagingRemove { .. } => 63,
             ClientMsg::TerminalStagingClear { .. } => 64,
+            ClientMsg::MotherNoticeSettingsSet { .. } => 65,
         }
     }
 
@@ -2190,9 +2217,9 @@ mod tests {
         assert_eq!(by_name("PtyDetach"), 8);
         assert_eq!(by_name("PtyList"), 9);
         // 62 since `PaneAction` (H6) was added after the retired verbs, so no ordinal moved;
-        // 65 with the three command-staging verbs.
-        assert_eq!(CLIENT_MSG_VARIANTS, 65);
-        assert_eq!(every_client_msg().len(), 65);
+        // 65 with the three command-staging verbs; 66 with `MotherNoticeSettingsSet`.
+        assert_eq!(CLIENT_MSG_VARIANTS, 66);
+        assert_eq!(every_client_msg().len(), 66);
     }
 
     #[test]
@@ -3760,6 +3787,43 @@ mod tests {
         let tags = SensitiveTags::persisted(path);
 
         assert!(outbound(PeerTrust::Tcp, approval_pending("cody-anything"), &tags).is_none());
+    }
+
+    #[test]
+    fn a_network_peer_never_gets_a_jobs_free_form_failure_reason_but_keeps_its_cost() {
+        let tags = SensitiveTags::in_memory();
+        let job: crate::mother::MotherJob = serde_json::from_value(serde_json::json!({
+            "id": "j1",
+            "state": "failed",
+            "failure_reason": "SECRET-REASON gate output",
+            "actual_cost_usd": 2.5,
+        }))
+        .unwrap();
+        assert!(job.failure_reason.is_some(), "the fixture carries a reason");
+
+        let redacted = redact_for_network(ServerMsg::MotherJobs { jobs: vec![job] }, &tags);
+
+        let wire = serde_json::to_string(&redacted).unwrap();
+        assert!(!wire.contains("SECRET-REASON"), "{wire}");
+        assert!(!wire.contains("failure_reason"), "{wire}");
+        assert!(wire.contains("\"actual_cost_usd\":2.5"), "{wire}");
+    }
+
+    #[test]
+    fn a_network_peer_never_gets_a_failure_reason_in_an_await_notice_either() {
+        let tags = SensitiveTags::in_memory();
+        let job: crate::mother::MotherJob = serde_json::from_value(serde_json::json!({
+            "id": "j2",
+            "state": "awaiting",
+            "failure_reason": "SECRET-REASON from an earlier failure",
+        }))
+        .unwrap();
+
+        let redacted = redact_for_network(ServerMsg::MotherAwaitDetected(Box::new(job)), &tags);
+
+        let wire = serde_json::to_string(&redacted).unwrap();
+        assert!(!wire.contains("SECRET-REASON"), "{wire}");
+        assert!(wire.contains("\"j2\""), "still the same job: {wire}");
     }
 
     #[test]

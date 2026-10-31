@@ -12,6 +12,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::watch;
 
+use super::notices::NoticeEngine;
 use super::{MotherJob, OriginBook};
 
 /// Whether the job list can be trusted.
@@ -75,6 +76,9 @@ pub struct JobsFeed {
     /// annotated (`MotherJob.nostromo`) on every publish path, so every reader
     /// of the feed sees the same thing.
     origins: Option<OriginBook>,
+    /// The notice engine, which adds each job's notice record
+    /// (`MotherJob.nostromo.notice`) on every publish path.
+    notices: Option<Arc<NoticeEngine>>,
 }
 
 impl Default for JobsFeed {
@@ -92,7 +96,41 @@ impl JobsFeed {
             applied: Arc::new(AtomicU64::new(0)),
             skipped: Arc::new(AtomicUsize::new(0)),
             origins: None,
+            notices: None,
         }
+    }
+
+    /// A feed whose annotated jobs also carry their notice record.
+    pub fn with_notices(mut self, notices: Arc<NoticeEngine>) -> Self {
+        self.notices = Some(notices);
+        self
+    }
+
+    /// Annotate `jobs` as every publish does: origin, then notice record.
+    fn annotate(&self, jobs: &mut [MotherJob]) {
+        if let Some(origins) = &self.origins {
+            origins.annotate(jobs);
+        }
+        if let Some(notices) = &self.notices {
+            notices.annotate(jobs);
+        }
+    }
+
+    /// The notice records changed: publish the current list again with fresh
+    /// annotations (the source state is unchanged) and return it, so the
+    /// caller broadcasts what readers see. `None` before any list was
+    /// published or without a notice engine.
+    pub fn republish_annotations(&self) -> Option<Vec<MotherJob>> {
+        let notices = self.notices.as_ref()?;
+        // Nothing was ever published: there is no list to annotate.
+        self.source_tx.borrow().updated_at()?;
+        let mut published = None;
+        self.jobs_tx.send_if_modified(|jobs| {
+            notices.annotate(jobs);
+            published = Some(jobs.clone());
+            true
+        });
+        published
     }
 
     /// A feed whose jobs are annotated with their origin ([`OriginBook`]).
@@ -188,9 +226,7 @@ impl JobsFeed {
     /// Publish a successful `mother list`, annotated with each job's origin.
     /// Returns the jobs as published.
     pub fn publish_jobs(&self, mut jobs: Vec<MotherJob>) -> Vec<MotherJob> {
-        if let Some(origins) = &self.origins {
-            origins.annotate(&mut jobs);
-        }
+        self.annotate(&mut jobs);
         self.jobs_tx.send_replace(jobs.clone());
         self.source_tx.send_replace(MotherSourceState::Fresh {
             updated_at: Utc::now(),
@@ -218,11 +254,7 @@ impl JobsFeed {
             Ok((mut jobs, skipped)) => {
                 match self.publish_annotated_at(ticket, jobs.clone(), skipped) {
                     Some(published) => jobs = published,
-                    None => {
-                        if let Some(origins) = &self.origins {
-                            origins.annotate(&mut jobs);
-                        }
-                    }
+                    None => self.annotate(&mut jobs),
                 }
                 Ok(jobs)
             }
