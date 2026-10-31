@@ -332,4 +332,41 @@ final class MotherJobFilterTests: XCTestCase {
         XCTAssertLessThanOrEqual(r.selectionTitle.count, 40 + " (closed)".count)
         XCTAssertTrue(r.selectionTitle.hasSuffix("(closed)"))
     }
+
+    // MARK: - Empty states (MF3-4, MF3-6)
+
+    func testNoJobsAtAllShowsTheEmptyListText() {
+        XCTAssertEqual(apply([], [:]).emptyState,
+                       .noJobs(text: "No Mother jobs. Agents queue them with mother_enqueue_job; jobs show who queued them here."))
+    }
+
+    func testNoJobsAtAllWinsOverAFilterThatWasSet() {
+        XCTAssertEqual(apply([], [:], .you).emptyState, .noJobs(text: MotherJobListEmptyState.noJobsText))
+    }
+
+    func testAFilterWithNoMatchesNamesWhoseJobsThereAreNone() {
+        let r = apply([job("a")], ["a": note(.you)], .focus(tag: "t1"), open: ["t1": "Fix login"])
+        XCTAssertEqual(r.emptyState, .noMatch(text: "No jobs from Fix login."))
+        XCTAssertEqual(r.matched, 0)
+        XCTAssertEqual(r.total, 1)
+    }
+
+    func testAFilterOnAClosedFocusSaysSo() {
+        let r = apply([job("a")], ["a": note(.you)], .focus(tag: "gone"))
+        XCTAssertEqual(r.emptyState, .noMatch(text: "No jobs from gone (closed)."))
+    }
+
+    func testAListWithMatchesHasNoEmptyState() {
+        XCTAssertEqual(apply([job("a")], ["a": note(.you)], .you).emptyState, .none)
+        XCTAssertEqual(apply([job("a")], [:]).emptyState, .none)
+    }
+
+    func testClearingTheFilterAfterNoMatchRestoresEveryJob() {
+        let jobs = [job("a"), job("b")]
+        let annotations = ["a": note(.you), "b": note(.you)]
+        XCTAssertEqual(apply(jobs, annotations, .focus(tag: "t")).emptyState, .noMatch(text: "No jobs from t (closed)."))
+        let cleared = apply(jobs, annotations, .all)
+        XCTAssertEqual(cleared.emptyState, .none)
+        XCTAssertEqual(ids(cleared), ["a", "b"])
+    }
 }

@@ -445,4 +445,37 @@ final class MotherOriginDisplayTests: XCTestCase {
             assertClean(summary, "accessibilitySummary")
         }
     }
+
+    // MARK: - VoiceOver decision (MF3-7)
+
+    func testNoOriginMeansNoAccessibilityChange() {
+        let row = MotherJobRowModel(id: "j", state: "queued", title: "Ship it")
+        XCTAssertNil(OriginAccessibilityDecision.make(model: row, hasOriginTap: false))
+        XCTAssertNil(OriginAccessibilityDecision.make(model: row, hasOriginTap: true))
+    }
+
+    func testAnOriginRowReadsTitleThenFromOrigin() {
+        let origin = MotherOriginDisplay.make(annotation: annotation(.you), currentName: noFocusOpen)
+        let row = MotherJobRowModel(id: "j", state: "queued", title: "Ship it", origin: origin)
+        let d = OriginAccessibilityDecision.make(model: row, hasOriginTap: false)
+        XCTAssertEqual(d?.label, "Ship it. From You.")
+        XCTAssertNil(d?.actionName)
+    }
+
+    func testAClickableOriginIsANamedAction() {
+        let origin = MotherOriginDisplay.make(
+            annotation: annotation(.focus, tag: "t1", snapshot: "Fix login"), currentName: names(["t1": "Fix login"]))
+        XCTAssertTrue(origin.isClickable)
+        let row = MotherJobRowModel(id: "j", state: "queued", title: "Ship it", origin: origin)
+        XCTAssertEqual(OriginAccessibilityDecision.make(model: row, hasOriginTap: true)?.actionName, "Show Fix login")
+        XCTAssertNil(OriginAccessibilityDecision.make(model: row, hasOriginTap: false)?.actionName,
+                     "no tap handler, no action")
+    }
+
+    func testANonClickableOriginHasNoAction() {
+        let origin = MotherOriginDisplay.make(annotation: annotation(.focus, tag: "gone", snapshot: "Old"), currentName: noFocusOpen)
+        XCTAssertFalse(origin.isClickable)
+        let row = MotherJobRowModel(id: "j", state: "queued", title: "Ship it", origin: origin)
+        XCTAssertNil(OriginAccessibilityDecision.make(model: row, hasOriginTap: true)?.actionName)
+    }
 }

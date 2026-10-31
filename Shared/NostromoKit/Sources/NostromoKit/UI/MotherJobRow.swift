@@ -232,25 +232,39 @@ public struct MotherJobRow: View {
 }
 
 
-/// When the row shows an origin, the row reads as one element: `<title>. From <origin>.`
-/// A clickable origin stays reachable as a named action. Without an origin (iOS) the row's
-/// accessibility is untouched.
+/// What a row says to VoiceOver. Decided here, apart from SwiftUI, so it can be tested: nothing
+/// changes for a row without an origin (iOS); with one, the row reads as one element, `<title>.
+/// From <origin>.`, and a clickable origin stays reachable as a named action.
+public struct OriginAccessibilityDecision: Equatable, Sendable {
+    public let label: String
+    /// Set only for a clickable origin that has a tap handler.
+    public let actionName: String?
+
+    /// Nil when the row has no origin: its accessibility is left alone.
+    public static func make(model: MotherJobRowModel, hasOriginTap: Bool) -> OriginAccessibilityDecision? {
+        guard let origin = model.origin else { return nil }
+        return OriginAccessibilityDecision(
+            label: model.accessibilitySummary,
+            actionName: origin.isClickable && hasOriginTap ? "Show \(origin.text)" : nil)
+    }
+}
+
 struct OriginAccessibility: ViewModifier {
     let model: MotherJobRowModel
     let onOriginTap: (() -> Void)?
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if let origin = model.origin {
-            if origin.isClickable, let onOriginTap {
+        if let decision = OriginAccessibilityDecision.make(model: model, hasOriginTap: onOriginTap != nil) {
+            if let name = decision.actionName, let onOriginTap {
                 content
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(model.accessibilitySummary)
-                    .accessibilityAction(named: "Show \(origin.text)", onOriginTap)
+                    .accessibilityLabel(decision.label)
+                    .accessibilityAction(named: name, onOriginTap)
             } else {
                 content
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(model.accessibilitySummary)
+                    .accessibilityLabel(decision.label)
             }
         } else {
             content

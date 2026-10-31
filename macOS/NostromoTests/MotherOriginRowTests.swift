@@ -104,58 +104,6 @@ final class MotherOriginRowTests: XCTestCase {
         XCTAssertEqual(vm.rowModel(for: job("j1")).accessibilitySummary, "title-j1. From You.")
     }
 
-    // MARK: Real accessibility output (MF3-7)
-
-    private func accessibilityLabels(of model: MotherJobRowModel, onOriginTap: (() -> Void)? = nil) -> (labels: [String], actions: [String]) {
-        let host = NSHostingView(rootView: NostromoKit.MotherJobRow(model: model, onOriginTap: onOriginTap))
-        host.frame = NSRect(x: 0, y: 0, width: 280, height: 80)
-        let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: true)
-        window.contentView = host
-        window.orderBack(nil)
-        host.layoutSubtreeIfNeeded()
-        // Let SwiftUI publish its accessibility tree (a few run-loop turns, not a wall-clock bound).
-        for _ in 0..<5 { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.01)) }
-        defer { window.orderOut(nil) }
-        var labels: [String] = []
-        var actions: [String] = []
-        func walk(_ node: Any, depth: Int) {
-            guard depth < 16, let ax = node as? NSAccessibilityProtocol else { return }
-            if let l = ax.accessibilityLabel(), !l.isEmpty { labels.append(l) }
-            if let acts = ax.accessibilityCustomActions() { actions += acts.map(\.name) }
-            let children = ax.accessibilityChildren() ?? []
-            for c in children { walk(c, depth: depth + 1) }
-            if children.isEmpty, let v = node as? NSView {
-                for sub in v.subviews { walk(sub, depth: depth + 1) }
-            }
-        }
-        walk(host, depth: 0)
-        return (labels, actions)
-    }
-
-    func testARowWithAnOriginReadsItsTitleThenWhereItCameFrom() {
-        let origin = MotherOriginDisplay.make(annotation: note(.you), currentName: { _ in nil })
-        let model = MotherJobRowModel(id: "j1", state: "queued", title: "Ship it", origin: origin)
-        let labels = accessibilityLabels(of: model).labels
-        XCTAssertTrue(labels.contains("Ship it. From You."), "labels: \(labels)")
-    }
-
-    func testARowWithoutAnOriginKeepsItsOwnAccessibility() {
-        let model = MotherJobRowModel(id: "j1", state: "queued", title: "Ship it")
-        let labels = accessibilityLabels(of: model).labels
-        XCTAssertFalse(labels.isEmpty, "the harness must see the row's accessibility tree")
-        XCTAssertFalse(labels.contains { $0.contains("From ") })
-        XCTAssertFalse(labels.contains("Ship it"), "no origin: the row is not collapsed into one element")
-    }
-
-    func testAClickableOriginStaysReachableAsAnAction() {
-        let origin = MotherOriginDisplay.make(
-            annotation: note(.focus, tag: "claudia-ABCDEF12", snapshot: "Fix login"), currentName: { _ in "Fix login" })
-        XCTAssertTrue(origin.isClickable)
-        let model = MotherJobRowModel(id: "j1", state: "queued", title: "Ship it", origin: origin)
-        let result = accessibilityLabels(of: model, onOriginTap: {})
-        XCTAssertTrue(result.actions.contains("Show Fix login"), "actions: \(result.actions)")
-    }
-
     func testAnArrivingAnnotationChangesTheRowAndAnnouncesIt() throws {
         let vm = makeVM(try makeStore(), jobs: [job("j1")])
         var announced = 0
@@ -365,6 +313,61 @@ final class MotherOriginRowTests: XCTestCase {
                                "U+\(String(v, radix: 16)) survived in \(s)")
             }
         }
+    }
+
+    // MARK: Show My Jobs (MF3-5)
+
+    override func setUp() {
+        super.setUp()
+        MotherView.requestedFilterTag = nil
+    }
+
+    func testTheContextMenuItemReportsItsFocusThroughOnShowJobs() {
+        let focus = dynamicFocus(label: "Fix login")
+        let tabBar = TabBarView(frame: NSRect(x: 0, y: 0, width: 220, height: 400))
+        var reported: [Focus] = []
+        tabBar.onShowJobs = { reported.append($0) }
+        tabBar.setFocuses([focus])
+
+        func items(in v: NSView) -> [NavTabItem] {
+            v.subviews.flatMap { ($0 as? NavTabItem).map { [$0] } ?? [] } + v.subviews.flatMap(items(in:))
+        }
+        guard let menu = items(in: tabBar).first(where: { $0.menu != nil })?.menu,
+              let item = menu.items.first(where: { $0.title == "Show My Jobs" }), let action = item.action else {
+            return XCTFail("the dynamic focus's context menu has no Show My Jobs item")
+        }
+        XCTAssertTrue(NSApp.sendAction(action, to: item.target, from: item))
+        XCTAssertEqual(reported.map(\.id), [focus.id])
+    }
+
+    func testTheRequestRecordsTheTagBeforeSwitchingThenAnnouncesIt() {
+        var order: [String] = []
+        let observer = NotificationCenter.default.addObserver(forName: MotherView.showJobsNotification, object: nil, queue: nil) { _ in
+            order.append("posted(tag=\(MotherView.requestedFilterTag ?? "nil"))")
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        MotherView.requestShowJobs(tag: "claudia-ABCDEF12") { order.append("switched(tag=\(MotherView.requestedFilterTag ?? "nil"))") }
+        XCTAssertEqual(order, ["switched(tag=claudia-ABCDEF12)", "posted(tag=claudia-ABCDEF12)"])
+    }
+
+    func testOnlyTheKeyWindowsListAppliesTheFilterAndEachWindowKeepsItsOwn() throws {
+        let store = try makeStore()
+        let key = makeVM(store), other = makeVM(store)
+        other.filter = .you   // the other window's own filter
+
+        MotherView.requestShowJobs(tag: "claudia-ABCDEF12") {}
+        other.applyShowJobsRequest(isKeyWindow: false)
+        XCTAssertEqual(other.filter, .you, "a window that is not key leaves its filter alone")
+        XCTAssertEqual(key.filter, .all)
+        XCTAssertEqual(MotherView.requestedFilterTag, "claudia-ABCDEF12", "a non-key window leaves the request for the key one")
+
+        key.applyShowJobsRequest(isKeyWindow: true)
+        XCTAssertEqual(key.filter, .focus(tag: "claudia-ABCDEF12"))
+        XCTAssertNil(MotherView.requestedFilterTag, "the request is consumed once applied")
+        XCTAssertEqual(other.filter, .you)
+
+        other.applyShowJobsRequest(isKeyWindow: true)
+        XCTAssertEqual(other.filter, .you, "nothing pending, nothing changes")
     }
 }
 

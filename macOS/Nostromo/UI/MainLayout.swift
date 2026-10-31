@@ -359,10 +359,8 @@ class MainLayout: NSView {
     /// "Show My Jobs": switch this window to the Mother focus, then ask its Mother view to filter
     /// to `focus`. The tag is set first so a Mother view created by the switch picks it up.
     private func showJobs(of focus: Focus) {
-        MotherView.requestedFilterTag = focus.sessionTag
         let mother = FocusStore.shared.focuses.first { $0.id == Focus.mother.id } ?? Focus.mother
-        switchFocus(mother)
-        NotificationCenter.default.post(name: MotherView.showJobsNotification, object: nil)
+        MotherView.requestShowJobs(tag: focus.sessionTag) { switchFocus(mother) }
     }
 
     private func switchFocus(_ focus: Focus) {

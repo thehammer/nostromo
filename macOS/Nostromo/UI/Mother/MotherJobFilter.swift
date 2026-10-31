@@ -19,6 +19,17 @@ struct MotherOriginFilterEntry: Equatable {
     let count: Int
 }
 
+/// What the list shows in place of rows, if anything.
+enum MotherJobListEmptyState: Equatable {
+    case none
+    /// No jobs at all (R14).
+    case noJobs(text: String)
+    /// Jobs exist, but none match the `From:` selection; the view offers `Show all`.
+    case noMatch(text: String)
+
+    static let noJobsText = "No Mother jobs. Agents queue them with mother_enqueue_job; jobs show who queued them here."
+}
+
 struct MotherJobFilterResult: Equatable {
     /// Matching jobs, grouped by state.
     let groups: [MotherJobGroup]
@@ -29,6 +40,12 @@ struct MotherJobFilterResult: Equatable {
     let entries: [MotherOriginFilterEntry]
     /// The selected entry's name, for the header and the empty message.
     let selectionTitle: String
+
+    var emptyState: MotherJobListEmptyState {
+        if total == 0 { return .noJobs(text: MotherJobListEmptyState.noJobsText) }
+        if matched == 0 { return .noMatch(text: "No jobs from \(selectionTitle).") }
+        return .none
+    }
 }
 
 /// Pure: jobs, the daemon's annotations and a selection in; the grouped, filtered jobs and the

@@ -353,7 +353,7 @@ extension MotherFocusFitnessTests {
         let handler = block(from: "@objc private func showJobsTapped", to: "\n    }\n", in: tabBar, "showJobsTapped")
         let action = block(from: "private func showJobs(of focus: Focus)", to: "\n    }\n", in: layout, "MainLayout.showJobs")
         XCTAssertTrue(handler.contains("onShowJobs"), "the menu item reports through onShowJobs")
-        XCTAssertTrue(action.contains("requestedFilterTag"), "showJobs sets the filter request")
+        XCTAssertTrue(action.contains("requestShowJobs"), "showJobs sets the filter request")
 
         for (what, text) in [("TabBarView", tabBar), ("MainLayout", layout), ("showJobsTapped", handler), ("showJobs", action)] {
             for needle in gate {

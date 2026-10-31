@@ -92,6 +92,14 @@ class MotherView: NSView {
     /// The focus tag whose jobs a Mother view should filter to. Cleared once applied.
     static var requestedFilterTag: String?
 
+    /// "Show My Jobs": record the tag, let the caller switch the window to the Mother focus (so a Mother
+    /// view created by the switch finds the tag), then tell the Mother views to look.
+    static func requestShowJobs(tag: String, afterRequest switchToMother: () -> Void) {
+        requestedFilterTag = tag
+        switchToMother()
+        NotificationCenter.default.post(name: showJobsNotification, object: nil)
+    }
+
     private var cancellables = Set<AnyCancellable>()
 
     override init(frame: NSRect) { super.init(frame: frame); setup() }
@@ -196,9 +204,7 @@ class MotherView: NSView {
     }
 
     private func applyRequestedFilter() {
-        guard let tag = Self.requestedFilterTag, let window, window.isKeyWindow else { return }
-        Self.requestedFilterTag = nil
-        jobList.setFilter(.focus(tag: tag))
+        jobList.applyShowJobsRequest(isKeyWindow: window?.isKeyWindow == true)
     }
 
     private func refreshDetailOrigins() {
@@ -470,6 +476,14 @@ final class MotherJobListViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// Applies a pending "Show My Jobs" request, only if this list's window is the key window. Another
+    /// window's list leaves the request (and its own filter) alone.
+    func applyShowJobsRequest(isKeyWindow: Bool) {
+        guard isKeyWindow, let tag = MotherView.requestedFilterTag else { return }
+        MotherView.requestedFilterTag = nil
+        filter = .focus(tag: tag)
+    }
+
     func setAnnotations(_ new: [String: MotherJobAnnotation]) {
         guard new != annotations else { return }
         annotations = new
@@ -577,15 +591,18 @@ private struct MotherJobListSwiftUI: View {
         .scrollContentBackground(.hidden)
         .background(Color(nsColor: Theme.bg))
         .overlay {
-            if vm.jobs.isEmpty {
-                Text("No Mother jobs. Agents queue them with mother_enqueue_job; jobs show who queued them here.")
+            switch result.emptyState {
+            case .none:
+                EmptyView()
+            case .noJobs(let text):
+                Text(text)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 16)
-            } else if result.matched == 0 {
+            case .noMatch(let text):
                 VStack(spacing: 8) {
-                    Text("No jobs from \(result.selectionTitle).")
+                    Text(text)
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -671,7 +688,7 @@ private final class MotherJobList: NSView {
     var onOriginsChanged: (() -> Void)? {
         didSet { viewModel.onOriginsChanged = onOriginsChanged }
     }
-    func setFilter(_ selection: MotherOriginSelection) { viewModel.filter = selection }
+    func applyShowJobsRequest(isKeyWindow: Bool) { viewModel.applyShowJobsRequest(isKeyWindow: isKeyWindow) }
     func originDisplay(forJobId id: String) -> MotherOriginDisplay { viewModel.originDisplay(forJobId: id) }
     func openFocus(tag: String) { viewModel.openFocus(tag) }
     func update(annotations: [String: MotherJobAnnotation]) { viewModel.setAnnotations(annotations) }
