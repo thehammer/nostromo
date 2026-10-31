@@ -16,23 +16,28 @@ public struct MotherJobRow: View {
     public let onCancel: () -> Void
     public let onRetry: () -> Void
     public let onForceStart: () -> Void
+    /// Set by the Mac when the origin is a clickable focus. Nil leaves the origin plain text.
+    public let onOriginTap: (() -> Void)?
 
     public init(
         model: MotherJobRowModel,
         onArchive:    @escaping () -> Void = {},
         onCancel:     @escaping () -> Void = {},
         onRetry:      @escaping () -> Void = {},
-        onForceStart: @escaping () -> Void = {}
+        onForceStart: @escaping () -> Void = {},
+        onOriginTap:  (() -> Void)? = nil
     ) {
         self.model        = model
         self.onArchive    = onArchive
         self.onCancel     = onCancel
         self.onRetry      = onRetry
         self.onForceStart = onForceStart
+        self.onOriginTap  = onOriginTap
     }
 
     public var body: some View {
         rowContent
+            .modifier(OriginAccessibility(model: model, onOriginTap: onOriginTap))
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 if model.isDone {
                     Button(role: .destructive, action: onArchive) {
@@ -106,11 +111,8 @@ public struct MotherJobRow: View {
                     .font(.headline)
                     .lineLimit(2)
 
-                if let repoBranch = repoBranchLabel {
-                    Text(repoBranch)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                if model.origin != nil || repoBranchLabel != nil {
+                    detailLine
                 }
 
                 if model.reservesProgressLine {
@@ -128,6 +130,53 @@ public struct MotherJobRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    /// `origin · repo • branch`. The origin truncates first: the repo keeps its width.
+    private var detailLine: some View {
+        HStack(spacing: 4) {
+            if let origin = model.origin {
+                originView(origin)
+                if origin.badge != nil, let badge = origin.badge {
+                    Text(badge)
+                        .font(.caption2)
+                        .padding(.horizontal, 4)
+                        .background(Capsule().fill(.quaternary))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .accessibilityHidden(true)
+                }
+                if repoBranchLabel != nil { Text("·").layoutPriority(1) }
+            }
+            if let repoBranch = repoBranchLabel {
+                Text(repoBranch)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    @ViewBuilder
+    private func originView(_ origin: MotherOriginDisplay) -> some View {
+        let base = Text(origin.text).italic(origin.isItalic)
+        if origin.isClickable, let onOriginTap {
+            Button(action: onOriginTap) { originText(base.underline(), origin) }
+                .buttonStyle(.plain)
+                .help(origin.tooltip)
+                .accessibilityLabel(origin.accessibilityText)
+        } else {
+            originText(base, origin)
+                .help(origin.tooltip)
+                .accessibilityLabel(origin.accessibilityText)
+        }
+    }
+
+    private func originText(_ text: Text, _ origin: MotherOriginDisplay) -> some View {
+        text.lineLimit(1)
+            .truncationMode(.tail)
+            .opacity(origin.isMuted ? 0.7 : 1)
     }
 
     /// `≈60% · gates 2/3 · ETA ~25m` and attention badges. The line is always there for
@@ -178,6 +227,47 @@ public struct MotherJobRow: View {
         case (let r?, nil):    return r
         case (nil, let b?):    return b
         case (nil, nil):       return nil
+        }
+    }
+}
+
+
+/// What a row says to VoiceOver. Decided here, apart from SwiftUI, so it can be tested: nothing
+/// changes for a row without an origin (iOS); with one, the row reads as one element, `<title>.
+/// From <origin>.`, and a clickable origin stays reachable as a named action.
+public struct OriginAccessibilityDecision: Equatable, Sendable {
+    public let label: String
+    /// Set only for a clickable origin that has a tap handler.
+    public let actionName: String?
+
+    /// Nil when the row has no origin: its accessibility is left alone.
+    public static func make(model: MotherJobRowModel, hasOriginTap: Bool) -> OriginAccessibilityDecision? {
+        guard let origin = model.origin else { return nil }
+        return OriginAccessibilityDecision(
+            label: model.accessibilitySummary,
+            actionName: origin.isClickable && hasOriginTap ? "Show \(origin.text)" : nil)
+    }
+}
+
+struct OriginAccessibility: ViewModifier {
+    let model: MotherJobRowModel
+    let onOriginTap: (() -> Void)?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let decision = OriginAccessibilityDecision.make(model: model, hasOriginTap: onOriginTap != nil) {
+            if let name = decision.actionName, let onOriginTap {
+                content
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(decision.label)
+                    .accessibilityAction(named: name, onOriginTap)
+            } else {
+                content
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(decision.label)
+            }
+        } else {
+            content
         }
     }
 }

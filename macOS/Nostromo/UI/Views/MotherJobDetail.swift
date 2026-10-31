@@ -202,6 +202,95 @@ extension NSTextField {
     }
 }
 
+/// `From <origin> ↗ · <repo>`: one line under the job title. A link-styled button when the origin is
+/// an open focus, plain text otherwise. It reports no intrinsic width, so it truncates (tail) rather
+/// than setting the detail's width.
+final class MotherOriginLine: NSView {
+    private final class Label: NSTextField {
+        override var intrinsicContentSize: NSSize {
+            var size = super.intrinsicContentSize
+            size.width = NSView.noIntrinsicMetric
+            return size
+        }
+    }
+    private final class LinkButton: NSButton {
+        override var intrinsicContentSize: NSSize {
+            var size = super.intrinsicContentSize
+            size.width = NSView.noIntrinsicMetric
+            return size
+        }
+    }
+
+    let label: NSTextField = Label(labelWithString: "")
+    let button: NSButton = LinkButton(title: "", target: nil, action: nil)
+    /// Called when the clickable origin is pressed.
+    var onTap: (() -> Void)?
+    private(set) var shown: (MotherOriginDisplay, String)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = Theme.fgMuted
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.isSelectable = false
+        button.isBordered = false
+        button.alignment = .left
+        button.lineBreakMode = .byTruncatingTail
+        button.target = self
+        button.action = #selector(pressed)
+        button.setButtonType(.momentaryChange)
+        for v in [label, button] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            addSubview(v)
+            NSLayoutConstraint.activate([
+                v.topAnchor.constraint(equalTo: topAnchor),
+                v.bottomAnchor.constraint(equalTo: bottomAnchor),
+                v.leadingAnchor.constraint(equalTo: leadingAnchor),
+                v.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ])
+        }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// The text the line reads, without styling.
+    static func text(for origin: MotherOriginDisplay, repo: String) -> String {
+        var t = "From \(origin.text)"
+        if origin.isClickable { t += " ↗" }
+        if let badge = origin.badge { t += " (\(badge))" }
+        let r = MotherOriginDisplay.clean(repo, cap: MotherOriginDisplay.rowCap)
+        if !r.isEmpty { t += " · \(r)" }
+        return t
+    }
+
+    /// Applies only what changed: no layout churn on a progress tick.
+    func show(_ origin: MotherOriginDisplay, repo: String) {
+        if let shown, shown.0 == origin, shown.1 == repo { return }
+        shown = (origin, repo)
+        let text = Self.text(for: origin, repo: repo)
+        label.stringValue = text
+        label.alphaValue = origin.isMuted ? 0.75 : 1
+        label.font = origin.isItalic
+            ? NSFontManager.shared.convert(.systemFont(ofSize: 11), toHaveTrait: .italicFontMask)
+            : .systemFont(ofSize: 11)
+        button.attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: Theme.followBlue,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ])
+        label.isHidden = origin.isClickable
+        button.isHidden = !origin.isClickable
+        let tip = origin.tooltip
+        label.toolTip = tip
+        button.toolTip = tip
+        label.setAccessibilityLabel(origin.accessibilityText)
+        button.setAccessibilityLabel(origin.accessibilityText)
+    }
+
+    @objc private func pressed() { onTap?() }
+}
+
 /// A wrapping label that is pinned to both edges of its container: it reports no intrinsic
 /// width (so its text can never set the container's fitting width) and wraps at the width
 /// it is given.
@@ -361,6 +450,13 @@ final class MotherJobDetail: NSView {
     // Content fields
     private let titleLabel      = EdgePinnedLabel(wrappingLabelWithString: "")
     private let stateLabel      = NSTextField.boundedLabel("", maxLines: 1, truncating: true)
+    /// Who queued the job, under the title. Set by `setOrigin`.
+    let originLine = MotherOriginLine()
+    private lazy var originWidth: NSLayoutConstraint = {
+        let c = originLine.widthAnchor.constraint(equalTo: widthAnchor, constant: -32)
+        c.priority = .defaultHigh
+        return c
+    }()
     private let phaseRibbonView = PhaseRibbonView()
     private var ribbonHeight:   NSLayoutConstraint!
     /// Gates, lens rows, progress and the hold banner (hidden at zero height without crew data).
@@ -540,7 +636,7 @@ final class MotherJobDetail: NSView {
         ])
 
         // The title, the state and the switch stay put above whichever segment is showing.
-        for v in [titleLabel, stateLabel] as [NSView] {
+        for v in [titleLabel, originLine, stateLabel] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -582,7 +678,13 @@ final class MotherJobDetail: NSView {
             titleLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
             stateLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -32),
 
-            stateLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
+            originLine.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            originLine.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            originLine.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+            // No intrinsic width: it takes the pane's width (less the margins) and truncates inside it.
+            originWidth,
+
+            stateLabel.topAnchor.constraint(equalTo: originLine.bottomAnchor, constant: 4),
             stateLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
 
             // The switch: right under the state line, never wider than the pane.
@@ -755,6 +857,19 @@ final class MotherJobDetail: NSView {
 
     // MARK: Public
 
+    /// Who queued the shown job. Refreshes in place; `onTap` jumps to the origin's focus.
+    func setOrigin(_ origin: MotherOriginDisplay, onTap: (() -> Void)?) {
+        self.origin = origin
+        originLine.onTap = onTap
+        refreshOriginLine()
+    }
+
+    private var origin: MotherOriginDisplay = .unknown
+
+    private func refreshOriginLine() {
+        originLine.show(origin, repo: currentJob?.repo ?? "")
+    }
+
     /// Show `job` as the pane's subject: a different job than the one shown, or none (nil).
     /// Starts from a clean slate: the reply draft is cleared and everything is rebuilt.
     func select(_ job: MotherJob?) {
@@ -781,7 +896,7 @@ final class MotherJobDetail: NSView {
             return
         }
 
-        [titleLabel, stateLabel, segmentControl, todoStack, metaStack, actionsContainer,
+        [titleLabel, originLine, stateLabel, segmentControl, todoStack, metaStack, actionsContainer,
          planSectionLabel, planChecklistView].forEach { $0.isHidden = false }
         emptyLabel.isHidden = true
         planView?.show(planPath: job.planPath)
@@ -792,6 +907,7 @@ final class MotherJobDetail: NSView {
         titleLabel.stringValue = job.title.isEmpty ? job.id : job.title
         stateLabel.stringValue = job.state.uppercased()
         stateLabel.textColor   = stateColor(job.state)
+        refreshOriginLine()
 
         updateRibbon(job)
         updateCrewSection(job)
@@ -818,6 +934,7 @@ final class MotherJobDetail: NSView {
         if job.title != previous.title {
             titleLabel.stringValue = job.title.isEmpty ? job.id : job.title
         }
+        if job.repo != previous.repo { refreshOriginLine() }
         if job.state != previous.state {
             stateLabel.stringValue = job.state.uppercased()
             stateLabel.textColor   = stateColor(job.state)

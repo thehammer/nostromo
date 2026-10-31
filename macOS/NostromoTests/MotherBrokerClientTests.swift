@@ -3692,3 +3692,236 @@ final class MC4RelaunchBaselineTests: XCTestCase {
         XCTAssertEqual(center.removedDelivered, ["mother:j1:await"])
     }
 }
+
+// MARK: - MF3: who queued each job (the daemon's `mother_jobs` frame)
+
+/// The daemon's `mother_jobs` frame carries `jobs[].nostromo`, its note on who queued each job. The app
+/// reads that frame lightly: `jobs[].id` and `jobs[].nostromo`, nothing else, so a date it cannot parse
+/// (the fractional-seconds trouble that made the app stop decoding this frame) costs nothing.
+///
+/// `tests/fixtures/mother-v2/mother-jobs-annotated.json` is the daemon's own frame (the same golden the
+/// Kit's `MotherJobAnnotationTests` reads). Its jobs:
+///
+///   j-focus, j-unverified, j-you, j-unknown   one origin kind each
+///   j-robot                                   a kind this build has never heard of
+///   j-bad-string, j-bad-origin                a malformed annotation: skipped, nothing else lost
+final class MF3MotherAnnotationsTests: XCTestCase {
+
+    // MARK: Helpers
+
+    /// `<repo>/tests/fixtures/mother-v2/mother-jobs-annotated.json`, from this file's location
+    /// (`<repo>/macOS/NostromoTests/`).
+    private static let goldenURL: URL = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()   // NostromoTests
+        .deletingLastPathComponent()   // macOS
+        .deletingLastPathComponent()   // <repo>
+        .appendingPathComponent("tests/fixtures/mother-v2/mother-jobs-annotated.json")
+
+    private let client = NostromodClient(socketPath: "/dev/null")
+
+    private func object(_ data: Data) throws -> [String: Any] {
+        try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func golden() throws -> (json: [String: Any], raw: Data) {
+        let raw = try Data(contentsOf: Self.goldenURL)
+        return (try object(raw), raw)
+    }
+
+    /// A frame from raw job objects.
+    private func frame(_ jobs: [Any]) throws -> (json: [String: Any], raw: Data) {
+        let raw = try JSONSerialization.data(withJSONObject: ["type": "mother_jobs", "jobs": jobs] as [String: Any])
+        return (try object(raw), raw)
+    }
+
+    private func decodeAnnotations(_ f: (json: [String: Any], raw: Data)) throws -> [String: MotherJobAnnotation] {
+        guard case .motherAnnotations(let annotations) = client.decode(type_: "mother_jobs", json: f.json, raw: f.raw) else {
+            XCTFail("a mother_jobs frame must decode to .motherAnnotations")
+            return [:]
+        }
+        return annotations
+    }
+
+    // MARK: The golden frame
+
+    func testTheGoldenFrameDecodesToItsFiveGoodAnnotationsAndSkipsTheTwoBadOnes() throws {
+        let annotations = try decodeAnnotations(try golden())
+        XCTAssertEqual(Set(annotations.keys), ["j-focus", "j-unverified", "j-you", "j-unknown", "j-robot"])
+    }
+
+    func testTheGoldenAnnotationsCarryTheirOrigins() throws {
+        let annotations = try decodeAnnotations(try golden())
+        let focus = try XCTUnwrap(annotations["j-focus"]?.origin)
+        XCTAssertEqual(focus.kind, .focus)
+        XCTAssertEqual(focus.focusTag, "claudia-C9D6B773")
+        XCTAssertEqual(focus.nameSnapshot, "Fix login")
+        XCTAssertEqual(focus.focusName, "Fix the login flow")
+        XCTAssertEqual(focus.sessionPrefix, "5f3c9a10")
+        XCTAssertEqual(annotations["j-focus"]?.notify, "quiet")
+
+        let unverified = try XCTUnwrap(annotations["j-unverified"]?.origin)
+        XCTAssertEqual(unverified.kind, .unverified)
+        XCTAssertEqual(unverified.focusTag, "claudia-D00DFEED")
+        XCTAssertEqual(unverified.nameSnapshot, "Claimed name")
+
+        XCTAssertEqual(annotations["j-you"]?.origin?.kind, .you)
+        XCTAssertEqual(annotations["j-unknown"]?.origin?.kind, .unknown)
+        XCTAssertEqual(annotations["j-robot"]?.origin?.kind, .other("robot"))
+    }
+
+    func testTheStaticReaderAndTheClientAgree() throws {
+        let g = try golden()
+        XCTAssertEqual(NostromodClient.motherAnnotations(from: g.json), try decodeAnnotations(g))
+    }
+
+    func testTheGoldenFrameFeedsTheOriginDisplayItsDocumentedWayForEachKind() throws {
+        let annotations = try decodeAnnotations(try golden())
+        func text(_ id: String, open: [String: String] = [:]) -> String {
+            MotherOriginDisplay.make(annotation: annotations[id], currentName: { open[$0] }).text
+        }
+        XCTAssertEqual(text("j-focus", open: ["claudia-C9D6B773": "Fix the login flow"]), "Fix the login flow")
+        XCTAssertEqual(text("j-focus"), "Fix the login flow (closed)")
+        XCTAssertEqual(text("j-unverified"), "Claimed name?")
+        XCTAssertEqual(text("j-you"), "You")
+        XCTAssertEqual(text("j-unknown"), "origin unknown")
+        XCTAssertEqual(text("j-robot"), "origin unknown")
+        XCTAssertEqual(text("j-bad-string"), "origin unknown", "a skipped annotation reads as unknown")
+        XCTAssertEqual(text("j-bad-origin"), "origin unknown")
+    }
+
+    // MARK: A bad entry costs only itself
+
+    func testAMalformedAnnotationIsSkippedWithoutCostingTheOthers() throws {
+        let f = try frame([
+            ["id": "good-1", "nostromo": ["origin": ["kind": "you"]]],
+            ["id": "bad", "nostromo": ["origin": 7]],
+            ["id": "good-2", "nostromo": ["origin": ["kind": "unknown"]]],
+        ])
+        let annotations = try decodeAnnotations(f)
+        XCTAssertEqual(Set(annotations.keys), ["good-1", "good-2"])
+    }
+
+    func testEntriesThatAreTheWrongShapeAreSkipped() throws {
+        let f = try frame([
+            "not an object",
+            42,
+            ["nostromo": ["origin": ["kind": "you"]]],                            // no id
+            ["id": 7, "nostromo": ["origin": ["kind": "you"]]],                   // id not a string
+            ["id": "no-note"],                                                   // no nostromo
+            ["id": "string-note", "nostromo": "oops"],
+            ["id": "array-note", "nostromo": [1, 2]],
+            ["id": "null-note", "nostromo": NSNull()],
+            ["id": "survivor", "nostromo": ["origin": ["kind": "you"]]],
+        ])
+        XCTAssertEqual(Set(try decodeAnnotations(f).keys), ["survivor"])
+    }
+
+    func testAFrameWithNoJobsOrJobsOfTheWrongTypeYieldsNoAnnotations() throws {
+        for json in [["type": "mother_jobs"] as [String: Any],
+                     ["type": "mother_jobs", "jobs": "nope"],
+                     ["type": "mother_jobs", "jobs": NSNull()],
+                     ["type": "mother_jobs", "jobs": [Any]()]] {
+            let raw = try JSONSerialization.data(withJSONObject: json)
+            XCTAssertEqual(NostromodClient.motherAnnotations(from: json), [:])
+            guard case .motherAnnotations(let annotations) = client.decode(type_: "mother_jobs", json: try object(raw), raw: raw) else {
+                return XCTFail("a mother_jobs frame must decode to .motherAnnotations, even an empty one")
+            }
+            XCTAssertTrue(annotations.isEmpty)
+        }
+    }
+
+    func testAnAnnotationWithAWrongTypedNotifyKeepsItsOrigin() throws {
+        let f = try frame([["id": "j", "nostromo": ["notify": 3, "origin": ["kind": "you"]]]])
+        let annotation = try XCTUnwrap(try decodeAnnotations(f)["j"])
+        XCTAssertEqual(annotation.origin?.kind, .you)
+        XCTAssertNil(annotation.notify)
+    }
+
+    // MARK: Dates and other job fields never matter
+
+    func testFractionalSecondDatesDoNotCostTheAnnotations() throws {
+        let f = try frame([
+            ["id": "frac", "state": "running", "repo": "r", "isolation": "worktree", "title": "t",
+             "created_at": "2026-10-20T15:00:00.123456Z", "started_at": "2026-10-20T15:00:01.5Z",
+             "finished_at": "2026-10-20T15:00:02.999999999Z",
+             "nostromo": ["origin": ["kind": "you"]]],
+        ])
+        XCTAssertEqual(try decodeAnnotations(f)["frac"]?.origin?.kind, .you)
+    }
+
+    func testGarbageDatesAndMissingFieldsInTheJobDoNotCostTheAnnotations() throws {
+        let f = try frame([
+            ["id": "garbage", "state": "running", "created_at": "yesterday-ish", "started_at": 12345,
+             "finished_at": ["x": 1], "nostromo": ["origin": ["kind": "you"]]],
+            ["id": "bare", "nostromo": ["origin": ["kind": "unknown"]]],                       // only an id and a note
+            ["id": "wrong-types", "state": 7, "repo": NSNull(), "title": ["a"], "cycles": "no",
+             "phases": 9, "nostromo": ["origin": ["kind": "unverified", "focus_tag": "t", "name_snapshot": "N"]]],
+        ])
+        let annotations = try decodeAnnotations(f)
+        XCTAssertEqual(Set(annotations.keys), ["garbage", "bare", "wrong-types"])
+        XCTAssertEqual(annotations["wrong-types"]?.origin?.kind, .unverified)
+    }
+
+    func testTheOtherFramesTheClientReadsStillDecode() throws {
+        // The new arm must not change what a neighbouring frame type does.
+        let json: [String: Any] = ["type": "pong"]
+        let raw = try JSONSerialization.data(withJSONObject: json)
+        guard case .pong = client.decode(type_: "pong", json: json, raw: raw) else {
+            return XCTFail("pong must still decode to .pong")
+        }
+    }
+
+    // MARK: AppStore
+
+    /// `AppStore.shared` is the only store there is; leave it as found.
+    override func tearDown() {
+        AppStore.shared.applyForTesting(.motherAnnotations([:]))
+        super.tearDown()
+    }
+
+    private func note(_ kind: MotherOriginKind) -> MotherJobAnnotation {
+        MotherJobAnnotation(origin: MotherOriginView(kind: kind))
+    }
+
+    func testTheStorePublishesAnnotationsOnlyWhenTheyChange() {
+        let store = AppStore.shared
+        store.applyForTesting(.motherAnnotations([:]))
+        var emissions: [[String: MotherJobAnnotation]] = []
+        let sub = store.$motherAnnotations.dropFirst().sink { emissions.append($0) }
+        defer { sub.cancel() }
+
+        let first = ["j1": note(.you)]
+        store.applyForTesting(.motherAnnotations(first))
+        XCTAssertEqual(emissions.count, 1)
+
+        store.applyForTesting(.motherAnnotations(first))
+        store.applyForTesting(.motherAnnotations(["j1": note(.you)]))   // equal, built again
+        XCTAssertEqual(emissions.count, 1, "an equal frame (every poll sends one) must not republish")
+
+        store.applyForTesting(.motherAnnotations(["j1": note(.you), "j2": note(.unknown)]))
+        XCTAssertEqual(emissions.count, 2)
+        XCTAssertEqual(emissions.last?.keys.sorted(), ["j1", "j2"])
+
+        store.applyForTesting(.motherAnnotations(["j1": note(.unknown), "j2": note(.unknown)]))
+        XCTAssertEqual(emissions.count, 3, "a changed origin is a change")
+    }
+
+    func testTheStoreHoldsTheLastAnnotationsItWasGiven() {
+        let store = AppStore.shared
+        store.applyForTesting(.motherAnnotations(["j1": note(.you)]))
+        XCTAssertEqual(store.motherAnnotations, ["j1": note(.you)])
+        store.applyForTesting(.motherAnnotations(["j2": note(.unknown)]))
+        XCTAssertEqual(store.motherAnnotations, ["j2": note(.unknown)], "the newest frame replaces the old one")
+    }
+
+    func testTheStoreKeepsAnnotationsThroughAReconnectAndWhenAJobsFrameArrivesFromTheOldPath() {
+        let store = AppStore.shared
+        store.applyForTesting(.motherAnnotations(["j1": note(.you)]))
+
+        store.applyForTesting(.motherJobs([]))
+        XCTAssertEqual(store.motherAnnotations, ["j1": note(.you)], "the broker's jobs are not this frame's business")
+
+        store.applyBrokerEventForTesting(.reconnected)
+        XCTAssertEqual(store.motherAnnotations, ["j1": note(.you)], "a dropped broker link must not blank every row's origin")
+    }
+}

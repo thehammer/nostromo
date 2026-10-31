@@ -1,4 +1,5 @@
 import XCTest
+import NostromoKit
 
 // MotherJobGrouping / MotherJob are compiled into this target directly (logic test).
 
@@ -40,5 +41,31 @@ final class MotherJobGroupingTests: XCTestCase {
 
     func testEmptyInputGivesNoGroups() {
         XCTAssertTrue(MotherJobGrouping.groups(from: []).isEmpty)
+    }
+
+    // MARK: - With the From: filter (MF3)
+
+    private func note(_ kind: MotherOriginKind, tag: String? = nil) -> MotherJobAnnotation {
+        MotherJobAnnotation(origin: MotherOriginView(kind: kind, focusTag: tag, nameSnapshot: tag, focusName: nil))
+    }
+
+    func testAFilteredListKeepsStateOrderAndNewestFirstWithinEachState() {
+        let jobs = [job("a", "queued"), job("b", "running", started: 100), job("c", "running", started: 200),
+                    job("d", "running", started: 300), job("e", "failed")]
+        let annotations = ["a": note(.focus, tag: "t"), "b": note(.focus, tag: "t"), "c": note(.focus, tag: "t"),
+                           "d": note(.you), "e": note(.focus, tag: "t")]
+        let r = MotherJobFilter.apply(jobs: jobs, annotations: annotations, selection: .focus(tag: "t"), currentName: { _ in "T" })
+        XCTAssertEqual(r.groups.map(\.state), ["running", "queued", "failed"])
+        XCTAssertEqual(r.groups[0].jobs.map(\.id), ["c", "b"], "the other originator's newer job is filtered out")
+        XCTAssertEqual(r.matched, 4)
+        XCTAssertEqual(r.total, 5)
+    }
+
+    func testAFilterThatMatchesNothingLeavesNoGroups() {
+        let r = MotherJobFilter.apply(jobs: [job("a", "queued")], annotations: ["a": note(.you)],
+                                      selection: .focus(tag: "t"), currentName: { _ in nil })
+        XCTAssertTrue(r.groups.isEmpty)
+        XCTAssertEqual(r.matched, 0)
+        XCTAssertEqual(r.total, 1)
     }
 }

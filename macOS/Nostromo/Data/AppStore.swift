@@ -36,6 +36,9 @@ class AppStore: ObservableObject {
     @Published private(set) var motherNotifyNoteVisible = false
     @Published private(set) var motherStatus:       MotherStatus = MotherStatus()
     @Published private(set) var motherJobs:         [MotherJob]  = []
+    /// Who queued each Mother job, from the daemon's `mother_jobs` frame, keyed by job id. Kept
+    /// through a disconnect; published only when it changes.
+    @Published private(set) var motherAnnotations:  [String: MotherJobAnnotation] = [:]
     /// Live peek snapshots keyed by job id. Cleared on disconnect and on terminal transition.
     @Published private(set) var motherPeeks:        [String: MotherPeekPayload] = [:]
     /// True while the broker socket is connected (hello received + subscribe sent).
@@ -1402,6 +1405,9 @@ class AppStore: ObservableObject {
             // Ignored — jobs now come from the broker
             log.debug("mother_jobs IPC message ignored (broker is source of truth)")
             _ = jobs
+
+        case .motherAnnotations(let annotations):
+            if annotations != motherAnnotations { motherAnnotations = annotations }
 
         case .motherPeek(let payload):
             if payload.isEmpty {
