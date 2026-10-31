@@ -114,14 +114,13 @@ final class MotherOriginRowTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         var labels: [String] = []
         var actions: [String] = []
-        func walk(_ node: NSObject, depth: Int) {
-            guard depth < 16 else { return }
-            if let l = node.accessibilityLabel(), !l.isEmpty { labels.append(l) }
-            if let p = node as? NSAccessibilityProtocol, let acts = p.accessibilityCustomActions?() { actions += acts.map(\.name) }
-            // SwiftUI exposes its tree as accessibilityChildren on the hosting view and as
-            // accessibilitySubrole-bearing NSObjects; also follow plain subviews.
-            for c in (node.accessibilityChildren() as? [NSObject]) ?? [] { walk(c, depth: depth + 1) }
-            if let v = node as? NSView, (node.accessibilityChildren() ?? []).isEmpty {
+        func walk(_ node: Any, depth: Int) {
+            guard depth < 16, let ax = node as? NSAccessibilityProtocol else { return }
+            if let l = ax.accessibilityLabel(), !l.isEmpty { labels.append(l) }
+            if let acts = ax.accessibilityCustomActions { actions += acts.map(\.name) }
+            let children = ax.accessibilityChildren() ?? []
+            for c in children { walk(c, depth: depth + 1) }
+            if children.isEmpty, let v = node as? NSView {
                 for sub in v.subviews { walk(sub, depth: depth + 1) }
             }
         }
