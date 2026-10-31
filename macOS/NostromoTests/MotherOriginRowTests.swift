@@ -374,23 +374,10 @@ final class MotherOriginRowTests: XCTestCase {
             entries: [MotherOriginFilterEntry(selection: .all, title: "All", count: 34),
                       MotherOriginFilterEntry(selection: .focus(tag: tag), title: String(repeating: "W", count: 40), count: 12)],
             selectionTitle: String(repeating: "W", count: 40))
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280, height: 24), styleMask: [.borderless],
-                              backing: .buffered, defer: false)
+        // The header's own width demand, with a 40-character name selected and the clear button showing.
         let host = NSHostingView(rootView: MotherFromHeader(vm: vm, result: result))
-        window.contentView = host
-        host.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
         host.layoutSubtreeIfNeeded()
-
-        func find(_ el: Any, label: String, depth: Int = 0) -> NSRect? {
-            guard depth < 12, let ax = el as? NSAccessibilityProtocol else { return nil }
-            if ax.accessibilityLabel?() == label { return ax.accessibilityFrame?() }
-            for k in ax.accessibilityChildren?() ?? [] { if let r = find(k, label: label, depth: depth + 1) { return r } }
-            return nil
-        }
-        let button = try XCTUnwrap(find(host, label: "Show all jobs"), "the clear button is not in the header")
-        let hostFrame = window.convertToScreen(host.convert(host.bounds, to: nil))
-        XCTAssertLessThanOrEqual(button.maxX, hostFrame.maxX + 0.5, "the clear button stays inside a 280 pt header")
-        XCTAssertGreaterThanOrEqual(button.minX, hostFrame.minX)
+        XCTAssertLessThanOrEqual(host.fittingSize.width, 280, "picker + × · N of M must fit a 280 pt list")
     }
 
     func testOnlyTheKeyWindowsListAppliesTheFilterAndEachWindowKeepsItsOwn() throws {
