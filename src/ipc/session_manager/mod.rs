@@ -1053,7 +1053,15 @@ impl SessionManager {
 
         // Note the id in the history Mother jobs' claimed sessions are checked
         // against *before* the child exists: a `mother add` it runs at once
-        // must already find it.
+        // must already find it (the child is handed this id in its
+        // environment, so there is no later moment that is early enough).
+        //
+        // A spawn that then fails (no `claude` binary, `resolve_claude()?` or
+        // the spawn itself) leaves an id here that never ran. That is
+        // harmless: the history only vouches that a claim's session belongs to
+        // this tag. A minted id was never handed to anyone, so nothing can
+        // quote it; an explicit or stored id was already this focus's own, and
+        // a retry reuses it. Entries age out after 90 days.
         self.session_history.record(&tag, &effective_id);
 
         let program = resolve_claude()?;

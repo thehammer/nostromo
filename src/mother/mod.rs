@@ -661,6 +661,23 @@ fn trimmed_stderr(stderr: &[u8]) -> String {
         .collect()
 }
 
+/// [`trimmed_stderr`] with every Claude session id removed: `session` as given
+/// and anything shaped like one (a UUID). The scrub runs before the cap, so a
+/// cut cannot leave half an id behind.
+fn scrubbed_stderr(stderr: &[u8], session: Option<&str>) -> String {
+    static UUID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let uuid = UUID.get_or_init(|| {
+        regex::Regex::new("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+            .expect("a valid pattern")
+    });
+    let mut text = String::from_utf8_lossy(stderr).into_owned();
+    if let Some(session) = session.filter(|s| !s.is_empty()) {
+        text = text.replace(session, "<session>");
+    }
+    let text = uuid.replace_all(&text, "<session>");
+    trimmed_stderr(text.as_bytes())
+}
+
 /// Archive every terminal-state job, regardless of age
 /// (`mother archive --older-than 0`).
 pub async fn archive_all() -> Result<()> {
@@ -773,8 +790,9 @@ pub async fn add_job(req: AddJobRequest) -> Result<String> {
     let out = output_bounded(cmd, "add").await?;
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || id.is_empty() {
-        let detail = trimmed_stderr(&out.stderr);
-        // No plan path in the log: a plan is the user's text.
+        let detail = scrubbed_stderr(&out.stderr, req.origin_session.as_deref());
+        // No plan path in the log: a plan is the user's text. No session id
+        // either: argv carries `--origin-session <sid>` and Mother may echo it.
         warn!("mother add failed: {detail}");
         return Err(cli_failure("add", detail).into());
     }

@@ -3067,6 +3067,7 @@ fn redacting_for_the_network_removes_the_notice_of_a_sensitive_origin_and_keeps_
                 status: nostromo::mother::notices::NoticeStatus::Told,
                 ..Default::default()
             }),
+            ..Default::default()
         });
         j
     };

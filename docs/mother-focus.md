@@ -31,8 +31,11 @@ forged claim cannot borrow a real focus's face.
 
 1. **MCP.** `mother.enqueue_job` and `create_focus` (destination `mother_job`) are stamped from the
    MCP connection's own identity, never from arguments. The daemon passes `--origin-session <sid>` to
-   `mother add` (the focus's current Claude session id) and, when the installed `mother` supports it,
-   `--origin-focus <tag>` and `--origin-focus-name <name>`. Support is probed once by running
+   `mother add` (the focus's current Claude session id) and, when the installed `mother` supports it
+   and the focus is not sensitive, `--origin-focus <tag>` and `--origin-focus-name <name>`. A
+   sensitive focus hands over its session id only (its tag can be a slug of a work item's title); the
+   daemon still verifies the job, because that session id alone names the one focus whose history holds
+   it, and it stamps the tag and name into its own book. Support is probed once by running
    `mother add --help` and looking for the literal `--origin-focus`; a yes is kept for the life of the
    daemon and a no is asked again at most once an hour. An older `mother` never sees the new flags.
 2. **App.** The app's Send to agent records kind `you`. Its label stays `teri-send`, and those jobs
@@ -48,8 +51,9 @@ forged claim cannot borrow a real focus's face.
 4. A job the daemon has never seen is evaluated **once** when it first appears in the job feed, and the
    result is frozen. The exception is the daemon's own enqueue: Mother lists a new job before the daemon
    has stamped it, so while an enqueue is in flight a job not yet in the book is shown without an origin
-   and neither recorded nor audited; the next poll decides it (from the stamp). The only change allowed later is an **upgrade**: an MCP or app stamp for the same
-   job replaces `unknown` or `unverified`. A `focus` or `you` entry is never changed.
+   and neither recorded nor audited; the next poll decides it (from the stamp). The only change allowed
+   later is an **upgrade**: an MCP or app stamp for the same job replaces `unknown` or `unverified`. A
+   `focus` or `you` entry is never changed.
 
 Verification compares the claimed session id with the daemon's per-focus session history. It stops
 accidental and casual mis-claims, not a determined process of the same user. What can still be beaten
@@ -74,20 +78,33 @@ origin and shown as `nostromo.notify`; the notice slice acts on it.
 
 ## Where it lives
 
-| File | What |
-|---|---|
-| `~/.nostromo/focus-session-history.json` | Per focus tag, the Claude session ids the daemon spawned for it: `{sid, first_seen_ms, last_seen_ms}`, newest 64 per tag. `last_seen_ms` is refreshed each time the daemon spawns that session again (a resume), and entries are aged out by it: not seen for 90 days is dropped, so a long-lived focus's current session is never aged out by its first spawn. A file written before `last_seen_ms` existed ages by `first_seen_ms`. Departed tags are kept so old jobs can still be verified. Beside the session store (`daemon-sessions.json`). |
-| `~/.nostromo/mother-origins.json` | The origin book: per job id, `{kind, focus_tag?, name_snapshot?, session_prefix?, via, notify?, evaluated_at_ms}`. Entries for jobs absent from the feed for more than 30 days are dropped. |
-| `~/.nostromo/mother-notices.json` | The notice engine's state (see [Job notices](#job-notices)): the global switch, each focus's mode, what waits for each focus and why, its notice-turn times and loop-guard chain, and per job the last state seen, the last state accounted for and its notice record. Jobs absent from the feed for 7 days are dropped; a focus's mode goes when the focus has not been seen for 90 days. |
-| `~/.nostromo/audit/mother.jsonl` | The content-free audit (below). Rotated at 10 MiB, twelve rotated files kept. |
+- `~/.nostromo/focus-session-history.json` (beside the session store, `daemon-sessions.json`): per
+  focus tag, the Claude session ids the daemon spawned for it, `{sid, first_seen_ms, last_seen_ms}`,
+  newest 64 per tag. `last_seen_ms` is refreshed each time the daemon spawns that session again (a
+  resume), and entries age out by it: one not seen for 90 days is dropped, so a long-lived focus's
+  current session is never aged out by its first spawn. A file written before `last_seen_ms` existed
+  ages by `first_seen_ms`. Departed tags are kept so old jobs can still be verified.
+- `~/.nostromo/mother-origins.json`: the origin book, per job id,
+  `{kind, focus_tag?, name_snapshot?, session_prefix?, via, notify?, sensitive?, evaluated_at_ms}`.
+  `sensitive` is written (as `true`, otherwise absent) when the focus was sensitive when it queued the
+  job. Entries for jobs absent from the feed for more than 30 days are dropped.
+- `~/.nostromo/mother-notices.json`: the notice engine's state (see [Job notices](#job-notices)): the
+  global switch, each focus's mode, what waits for each focus and why, its notice-turn times and
+  loop-guard chain, and per job the last state seen, Mother's state when it was last accounted for and
+  its notice record. Jobs absent from the feed for 7 days are dropped; a focus's mode goes when the
+  focus has not been seen for 90 days.
+- `~/.nostromo/audit/mother.jsonl`: the content-free audit (below). Rotated at 10 MiB, twelve rotated
+  files kept.
 
 The JSON files are written atomically at mode `0600`; the audit directory is `0700` and its file `0600`.
 
-A history or book file that exists but cannot be read or parsed is never silently overwritten. The daemon
-starts with an empty one, copies the bad file to `<file>.bak` (`<file>.bak.<ms>` when a `.bak` is already
-there) before any write can replace it, and logs one warning with the path and the byte count only, never
-any of the content. Jobs whose sessions were in a lost history read as `unverified` or `unknown` until
-the file is restored from the `.bak`.
+A history or book file that exists but cannot be read or parsed is never silently overwritten. The
+daemon starts with an empty one, copies the bad file to `<file>.bak` (`<file>.bak.<ms>` when a `.bak`
+is already there) before any write can replace it, and logs one warning with the path and the byte
+count only, never any of the content. A file that stays corrupt across restarts is not copied again
+once a `.bak` or numbered copy holds the same bytes, and only the newest three numbered copies are
+kept (the first `.bak` stays), because each copy holds session ids. Jobs whose sessions were in a lost
+history read as `unverified` or `unknown` until the file is restored from the `.bak`.
 
 ## On the wire
 
@@ -109,12 +126,19 @@ id (`origin.session`) are read from Mother's record but never serialised.
 focus is sensitive, `focus_name` and `name_snapshot` become `a sensitive focus` and any `notice` is
 removed. Sensitivity is asked of the tag, and a tag registered as sensitive stays so after its focus is
 closed (registration is permanent), so a closed sensitive focus's name snapshot is still withheld. A
-sensitive focus's display name is also not written into Mother's record or argv
-(`--origin-focus-name` is omitted); the daemon's own book keeps the snapshot, which only the local
-Mac sees. Work-send jobs and sensitive jobs are withheld from them entirely, as before.
+focus can also be sensitive only for a while (it is held sensitive while it follows a remote shell):
+a job it queues then is recorded as such in the book (`sensitive`), and its names stay withheld from
+peers after the hold lapses. A sensitive focus's tag and display name are also not written into
+Mother's record or argv (`--origin-focus` and `--origin-focus-name` are omitted); the daemon's own
+book keeps the snapshot, which only the local Mac sees. Work-send jobs and sensitive jobs are
+withheld from them entirely, as before.
+
+When `mother add` fails, the daemon logs Mother's stderr with session ids removed (the one it was
+given and anything UUID-shaped), since the argv carries `--origin-session <sid>`.
 
 **iOS and the shared Kit** decode `nostromo` tolerantly: an origin kind they do not know becomes
-`.other`, a malformed `nostromo` object (including a malformed `origin`) reads as none, a wrong-typed `notify` costs only the notify and never a valid `origin`, so one bad annotation never costs a job
+`.other`, a malformed `nostromo` object (including a malformed `origin`) reads as none, a wrong-typed
+`notify` costs only the notify and never a valid `origin`, so one bad annotation never costs a job
 (iOS decodes a whole `mother_jobs` message all-or-nothing). The golden frame is
 `tests/fixtures/mother-v2/mother-jobs-annotated.json`, written by `tests/mother_origin.rs` with
 `UPDATE_GOLDEN=1` and read by the Kit tests.

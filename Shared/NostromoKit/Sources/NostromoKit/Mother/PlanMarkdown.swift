@@ -111,35 +111,131 @@ public enum PlanMarkdown {
     static let maxPathComponents = 2 * maxDepth + 2 * tailComponents
     static let tailComponents = 3
 
+    /// A line's leading container markers (`>`, a bullet or an ordered-list marker) beyond this many are
+    /// dropped before parsing (their text stays). Foundation's parser is not cancellable and its cost grows
+    /// with nesting depth times the number of inline runs: 256 KiB of `>` followed by short emphasis spans
+    /// took 7 s at 2,500 levels and 23 s at 10,000, again at every file-watch reload. Past `maxDepth` the
+    /// converter flattens anyway, so the extra markers draw nothing.
+    static let maxMarkersPerLine = maxDepth
+
+    /// A line's leading white space beyond this many columns (a tab counts 4) is dropped before parsing,
+    /// for the same reason: indentation is how lists nest, and every 2 to 4 columns is a level. It keeps
+    /// `maxDepth` levels of the widest lists (4 columns each); deeper lines land at the deepest kept level.
+    static let maxIndentColumns = 4 * maxDepth
+
+    /// The most block-path components (summed over all runs) that are looked at in full. The source
+    /// bounds above make the real figure a few million at most for 256 KiB; a run past this budget is
+    /// reduced to its leaf (its text is kept) so a shape the bounds missed still costs a bounded amount.
+    static let maxPathWork = 12_000_000
+
     /// Never crashes and never throws: text Foundation cannot read at all is an empty document.
     public static func parse(_ text: String) -> PlanDocument {
+        parseCounting(text).document
+    }
+
+    /// [`parse`], and how many block-path components the runs of the parsed text had to be walked
+    /// through: a measure of the work that does not depend on the machine (for tests).
+    static func parseCounting(_ text: String) -> (document: PlanDocument, pathComponents: Int) {
         // Sanitise first so an escape sequence cannot be split by the markdown syntax around it,
         // and again per span, so the model alone is safe whatever the parser did.
-        let clean = FoldTextSanitizer.sanitizeMultiline(text)
-        guard !clean.allSatisfy(\.isWhitespace) else { return PlanDocument() }
+        let clean = boundingNesting(FoldTextSanitizer.sanitizeMultiline(text))
+        guard !clean.allSatisfy(\.isWhitespace) else { return (PlanDocument(), 0) }
 
         var options = AttributedString.MarkdownParsingOptions()
         options.interpretedSyntax = .full
         options.failurePolicy = .returnPartiallyParsedIfPossible
-        guard let attributed = try? AttributedString(markdown: clean, options: options) else { return PlanDocument() }
+        guard let attributed = try? AttributedString(markdown: clean, options: options) else { return (PlanDocument(), 0) }
 
         var tree = Tree()
+        var work = 0
         for run in attributed.runs {
             tree.add(text: String(attributed[run.range].characters),
-                     path: boundedPath(run.presentationIntent),
+                     path: boundedPath(run.presentationIntent, work: &work),
                      inline: run.inlinePresentationIntent ?? [],
                      link: run.link?.absoluteString,
                      image: run.imageURL?.absoluteString)
         }
         var converter = Converter()
         let blocks = converter.blocks(tree.roots, depth: 0)
-        return PlanDocument(blocks: blocks, outline: converter.outline)
+        return (PlanDocument(blocks: blocks, outline: converter.outline), work)
+    }
+
+    /// The text with each line's container prefix bounded: at most `maxMarkersPerLine` leading container
+    /// markers (`>`, `-`, `*` or `+` followed by white space, 1 to 9 digits and `.` or `)` followed by
+    /// white space; the rest, and the white space after each dropped one, are removed) and at most
+    /// `maxIndentColumns` of white space in each stretch of it. Only that prefix is touched, and only
+    /// nesting is flattened, never text: whatever followed the markers is still there. One pass.
+    /// Expects `\n` line breaks (`sanitizeMultiline` leaves no other).
+    static func boundingNesting(_ text: String) -> String {
+        let space = UInt8(ascii: " "), tab = UInt8(ascii: "\t"), quote = UInt8(ascii: ">"), newline = UInt8(ascii: "\n")
+        let bytes = Array(text.utf8)
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count)
+        var i = 0
+        while i < bytes.count {
+            var markers = 0
+            var columns = 0
+            var dropping = false
+            prefix: while i < bytes.count {
+                let byte = bytes[i]
+                switch byte {
+                case space, tab:
+                    if !dropping {
+                        columns += byte == tab ? 4 : 1
+                        if columns <= maxIndentColumns { out.append(byte) }
+                    }
+                    i += 1
+                case quote:
+                    markers += 1
+                    columns = 0
+                    dropping = markers > maxMarkersPerLine
+                    if !dropping { out.append(byte) }
+                    i += 1
+                default:
+                    let length = listMarkerLength(in: bytes, at: i)
+                    guard length > 0 else { break prefix }
+                    markers += 1
+                    columns = 0
+                    dropping = markers > maxMarkersPerLine
+                    if !dropping { out.append(contentsOf: bytes[i ..< i + length]) }
+                    i += length
+                }
+            }
+            while i < bytes.count {   // the rest of the line is the text
+                let byte = bytes[i]
+                out.append(byte)
+                i += 1
+                if byte == newline { break }
+            }
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    /// The length of a list marker (without the white space after it) that starts at `i`, or 0:
+    /// `-`, `*` or `+`, or 1 to 9 digits and `.` or `)`; either one followed by a space or a tab.
+    private static func listMarkerLength(in bytes: [UInt8], at i: Int) -> Int {
+        let bullets = [UInt8(ascii: "-"), UInt8(ascii: "*"), UInt8(ascii: "+")]
+        var end = i
+        if bullets.contains(bytes[i]) {
+            end = i + 1
+        } else {
+            while end < bytes.count, bytes[end] >= UInt8(ascii: "0"), bytes[end] <= UInt8(ascii: "9") { end += 1 }
+            guard (1 ... 9).contains(end - i), end < bytes.count,
+                  bytes[end] == UInt8(ascii: ".") || bytes[end] == UInt8(ascii: ")")
+            else { return 0 }
+            end += 1
+        }
+        guard end < bytes.count, bytes[end] == UInt8(ascii: " ") || bytes[end] == UInt8(ascii: "\t") else { return 0 }
+        return end - i
     }
 
     /// The run's block path, outermost first, cut to `maxPathComponents`. Touches only the components it
-    /// keeps, so a million-deep path costs a million steps to count and a few dozen to copy.
-    private static func boundedPath(_ intent: PresentationIntent?) -> [PresentationIntent.IntentType] {
+    /// keeps, so a million-deep path costs a million steps to count and a few dozen to copy. `work` adds
+    /// up the components seen; once it passes `maxPathWork` a run keeps only its leaf `tailComponents`.
+    private static func boundedPath(_ intent: PresentationIntent?, work: inout Int) -> [PresentationIntent.IntentType] {
         guard let components = intent?.components else { return [] }   // innermost first
+        work += components.count
+        if work > maxPathWork { return Array(components.prefix(tailComponents).reversed()) }
         guard components.count > maxPathComponents else { return components.reversed() }
         let outer = components.suffix(maxPathComponents - tailComponents).reversed()
         let inner = components.prefix(tailComponents).reversed()

@@ -156,12 +156,18 @@ final class PlanDisplayLimitsTests: XCTestCase {
         XCTAssertTrue(opened.rig.recorder.openedPlans.isEmpty && opened.rig.recorder.revealed.isEmpty, file: file, line: line)
     }
 
+    /// The longest stretch the main thread may be busy at a time. The measured worst case is 1.9 s (a
+    /// megabyte of short paragraphs, on a developer Mac); a plan whose rows are not bounded takes tens of
+    /// seconds, so this catches a real regression with room for a slow CI runner. The row and character
+    /// counts below are the primary guard: they do not depend on the machine.
+    private static let stallBound: TimeInterval = 6
+
     /// The counts every truncated plan keeps, whatever it was made of.
     private func assertBounded(_ opened: Opened, file: StaticString = #filePath, line: UInt = #line) {
         let view = opened.rig.view
         XCTAssertLessThanOrEqual(view.rowCount, Limits.maxRows + 1, "rows: at most the limit and the notice", file: file, line: line)
         XCTAssertLessThanOrEqual(view.displayedCharacterCount, Limits.maxCharacters, "characters over all rows", file: file, line: line)
-        XCTAssertLessThan(opened.longestStall, 10, "the main thread was busy for \(opened.longestStall) s at a stretch", file: file, line: line)
+        XCTAssertLessThan(opened.longestStall, Self.stallBound, "the main thread was busy for \(opened.longestStall) s at a stretch", file: file, line: line)
     }
 
     /// A layout at another width completes and leaves the document as wide as the view.
@@ -567,14 +573,16 @@ final class PlanViewFixupTests: XCTestCase {
     // MARK: 2. The header's file name
 
     func testTheHeaderShowsAFileNameWithoutBidiZeroWidthOrFillerCharacters() throws {
-        let hostile = "a\u{202E}b\u{200B}c\u{3164}d\u{2066}e.md"
+        // The name is read as a whole, so it gets the document rules: a soft hyphen and a joiner between
+        // two ASCII letters go too (the row rules keep them).
+        let hostile = "a\u{202E}b\u{200B}c\u{3164}d\u{2066}e\u{00AD}f\u{200D}g.md"
         let url = try write("# Title\n", named: hostile)
         let rig = openRig(for: url)
         waitForState(rig, .document)
 
-        XCTAssertEqual(rig.view.fileNameText, "abcde.md")
+        XCTAssertEqual(rig.view.fileNameText, "abcdefg.md")
         for scalar in rig.view.fileNameText.unicodeScalars {
-            XCTAssertFalse([0x202E, 0x200B, 0x3164, 0x2066].contains(scalar.value), "U+\(String(scalar.value, radix: 16, uppercase: true)) is in the header")
+            XCTAssertFalse([0x202E, 0x200B, 0x3164, 0x2066, 0x00AD, 0x200D].contains(scalar.value), "U+\(String(scalar.value, radix: 16, uppercase: true)) is in the header")
         }
     }
 
