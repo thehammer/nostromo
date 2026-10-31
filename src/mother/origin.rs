@@ -108,10 +108,15 @@ pub struct JobAnnotation {
     /// The job's own notify level, if the enqueue gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<NotifyLevel>,
-    /// Placeholder: the notice state (MF2a gives it a type). Removed for a
-    /// network peer when the origin focus is sensitive.
+    /// The notice state (`notices::NoticeView`). Removed for a network peer
+    /// when the origin focus is sensitive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notice: Option<serde_json::Value>,
+    pub notice: Option<super::notices::NoticeView>,
+    /// The focus was sensitive when it queued the job (see
+    /// [`OriginEntry::sensitive`]). Never serialised: the daemon uses it to
+    /// withhold the names from a network peer after the cause has lapsed.
+    #[serde(skip)]
+    pub origin_was_sensitive: bool,
 }
 
 /// The origin of a job as shown (§W of the plan index).
@@ -152,14 +157,15 @@ impl Default for OriginView {
 impl JobAnnotation {
     /// Trim what a network peer may see: no focus tag, no session prefix, no
     /// notice. When the origin focus is sensitive (`tag_is_sensitive`, asked
-    /// about the tag before it is removed) both names become
-    /// [`SENSITIVE_NAME`].
+    /// about the tag before it is removed) or was when it queued the job, both
+    /// names become [`SENSITIVE_NAME`].
     pub fn redact_for_network(&mut self, tag_is_sensitive: impl Fn(&str) -> bool) {
-        let sensitive = self
-            .origin
-            .focus_tag
-            .as_deref()
-            .is_some_and(tag_is_sensitive);
+        let sensitive = self.origin_was_sensitive
+            || self
+                .origin
+                .focus_tag
+                .as_deref()
+                .is_some_and(tag_is_sensitive);
         self.origin.focus_tag = None;
         self.origin.session_prefix = None;
         if sensitive {
@@ -314,6 +320,12 @@ pub struct OriginEntry {
     pub via: Via,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<NotifyLevel>,
+    /// The focus was sensitive (registered, a Teri/Fred session, or held
+    /// sensitive while it followed a remote shell) when it queued the job. A
+    /// hold lapses, so the name recorded then must stay withheld from a
+    /// network peer after it does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
     pub evaluated_at_ms: i64,
     /// When the job was last in the feed; entries absent for 30 days go.
     #[serde(default)]
@@ -356,13 +368,16 @@ impl OriginCaller {
 
     /// The stamp this caller's enqueue records.
     pub fn stamp(&self, via: Via, notify: Option<NotifyLevel>) -> Stamp {
-        Stamp::focus(
-            &self.tag,
-            self.name.as_deref(),
-            self.session.as_deref(),
-            via,
-            notify,
-        )
+        Stamp {
+            sensitive: self.sensitive,
+            ..Stamp::focus(
+                &self.tag,
+                self.name.as_deref(),
+                self.session.as_deref(),
+                via,
+                notify,
+            )
+        }
     }
 }
 
@@ -375,6 +390,7 @@ pub struct Stamp {
     session_prefix: Option<String>,
     via: Via,
     notify: Option<NotifyLevel>,
+    sensitive: bool,
 }
 
 impl Stamp {
@@ -394,6 +410,7 @@ impl Stamp {
             session_prefix: session.and_then(session_prefix),
             via,
             notify,
+            sensitive: false,
         }
     }
 
@@ -406,6 +423,7 @@ impl Stamp {
             session_prefix: None,
             via: Via::App,
             notify,
+            sensitive: false,
         }
     }
 }
@@ -456,12 +474,18 @@ impl Drop for EnqueueGuard {
     }
 }
 
+/// Told `(job_id, focus_tag)` when a job is first recorded as queued by a
+/// verified focus (an MCP stamp or a shell claim evaluated). Called with the
+/// book's lock released. The notice engine uses it to spot notice-born jobs.
+pub type FocusJobHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// The daemon's record of every job's origin. Cheap to clone; clones share it.
 #[derive(Clone)]
 pub struct OriginBook {
     state: Arc<Mutex<BookState>>,
     history: SessionHistory,
     audit: MotherAudit,
+    focus_job_hook: Arc<Mutex<Option<FocusJobHook>>>,
 }
 
 impl OriginBook {
@@ -498,6 +522,25 @@ impl OriginBook {
             })),
             history,
             audit,
+            focus_job_hook: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Be told about every job newly recorded as a verified focus's (see
+    /// [`FocusJobHook`]).
+    pub fn set_focus_job_hook(&self, hook: FocusJobHook) {
+        *lock(&self.focus_job_hook) = Some(hook);
+    }
+
+    fn focus_job_recorded(&self, recorded: &[(String, String)]) {
+        if recorded.is_empty() {
+            return;
+        }
+        let hook = lock(&self.focus_job_hook).clone();
+        if let Some(hook) = hook {
+            for (job, tag) in recorded {
+                hook(job, tag);
+            }
         }
     }
 
@@ -554,7 +597,8 @@ impl OriginBook {
     ///
     /// Upgrades only: it replaces nothing but an `unknown` or `unverified`
     /// entry. A `focus` or `you` entry is never overwritten (an enqueue that
-    /// lost a race with the poller's evaluation can still add its `notify`).
+    /// lost a race with the poller's evaluation can still add its `notify` and
+    /// its `sensitive` flag).
     pub fn stamp(&self, job_id: &str, stamp: Stamp) -> bool {
         if validate_job_id(job_id).is_err() {
             return false;
@@ -564,15 +608,24 @@ impl OriginBook {
             let mut state = lock(&self.state);
             let notify_only = match state.entries.get_mut(job_id) {
                 Some(existing) if matches!(existing.kind, OriginKind::Focus | OriginKind::You) => {
-                    if existing.notify.is_none()
-                        && stamp.notify.is_some()
-                        && existing.focus_tag == stamp.focus_tag
-                    {
+                    // A poll that lost the race with this stamp decided the origin already (from
+                    // the record's session alone). What only the enqueue knows is added to it:
+                    // its notify level, and that the focus was sensitive when it queued the job
+                    // (a flag is only ever set, never cleared, so the race fails closed).
+                    let same_focus = existing.focus_tag == stamp.focus_tag;
+                    let mut changed = false;
+                    if same_focus && existing.notify.is_none() && stamp.notify.is_some() {
                         existing.notify = stamp.notify;
-                        true
-                    } else {
+                        changed = true;
+                    }
+                    if same_focus && stamp.sensitive && !existing.sensitive {
+                        existing.sensitive = true;
+                        changed = true;
+                    }
+                    if !changed {
                         return false;
                     }
+                    true
                 }
                 _ => false,
             };
@@ -585,6 +638,9 @@ impl OriginBook {
                 focus: stamp.focus_tag.clone(),
                 via: stamp.via,
             };
+            let recorded = (stamp.kind == OriginKind::Focus)
+                .then(|| stamp.focus_tag.clone().map(|t| (job_id.to_owned(), t)))
+                .flatten();
             state.entries.insert(
                 job_id.to_owned(),
                 OriginEntry {
@@ -594,14 +650,17 @@ impl OriginBook {
                     session_prefix: stamp.session_prefix,
                     via: stamp.via,
                     notify: stamp.notify,
+                    sensitive: stamp.sensitive,
                     evaluated_at_ms: now,
                     last_seen_ms: now,
                 },
             );
             state.persist();
-            event
+            (event, recorded)
         };
+        let (audit, recorded) = audit;
         self.audit.record(&audit);
+        self.focus_job_recorded(&recorded.into_iter().collect::<Vec<_>>());
         true
     }
 
@@ -611,6 +670,7 @@ impl OriginBook {
     pub fn annotate(&self, jobs: &mut [MotherJob]) {
         let now = now_ms();
         let mut unverified = Vec::new();
+        let mut recorded = Vec::new();
         {
             let mut state = lock(&self.state);
             let mut dirty = false;
@@ -640,6 +700,11 @@ impl OriginBook {
                                     .unwrap_or_else(|| "invalid".to_owned()),
                             });
                         }
+                        if entry.kind == OriginKind::Focus {
+                            if let Some(tag) = &entry.focus_tag {
+                                recorded.push((job.id.clone(), tag.clone()));
+                            }
+                        }
                         state.entries.insert(job.id.clone(), entry.clone());
                         dirty = true;
                         entry
@@ -649,6 +714,7 @@ impl OriginBook {
                     origin: view_of(&entry, &state.focuses),
                     notify: entry.notify,
                     notice: None,
+                    origin_was_sensitive: entry.sensitive,
                 });
             }
             let live: HashSet<&str> = jobs.iter().map(|j| j.id.as_str()).collect();
@@ -664,6 +730,7 @@ impl OriginBook {
         for event in &unverified {
             self.audit.record(event);
         }
+        self.focus_job_recorded(&recorded);
     }
 
     /// Decide the origin of a job the book has not seen, from its claim.
@@ -680,6 +747,7 @@ impl OriginBook {
             session_prefix,
             via: Via::Shell,
             notify: None,
+            sensitive: false,
             evaluated_at_ms: now,
             last_seen_ms: now,
         };
@@ -772,7 +840,7 @@ pub fn session_prefix(sid: &str) -> Option<String> {
 
 /// Does `s` look like a focus tag (`claudia-C9D6B773`, `teri:fred`)? A claim
 /// that does not never reaches the audit file or the wire.
-fn is_tag_like(s: &str) -> bool {
+pub(crate) fn is_tag_like(s: &str) -> bool {
     !s.is_empty()
         && s.chars().count() <= MAX_TAG_CHARS
         && s.chars()
@@ -793,10 +861,18 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `<file>.bak.<ms>` when a `.bak` already exists) and a warning says so. The
 /// warning carries the path and the byte count, never a byte of the content
 /// (it holds session ids and focus names).
-fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+pub(crate) fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    load_json_checked(path).0
+}
+
+/// [`load_json`], also saying whether the file was read and parsed (`false`:
+/// it is missing, or unreadable or unparseable and so started empty).
+pub(crate) fn load_json_checked<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+) -> (T, bool) {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (T::default(), false),
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
@@ -804,11 +880,11 @@ fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
                 "a Mother origin file could not be read; starting empty"
             );
             keep_backup(path);
-            return T::default();
+            return (T::default(), false);
         }
     };
     match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
+        Ok(value) => (value, true),
         Err(_) => {
             let backup = keep_backup(path);
             tracing::warn!(
@@ -817,25 +893,75 @@ fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
                 backed_up = backup.is_some(),
                 "a Mother origin file could not be parsed; starting empty (the file is kept as a backup)"
             );
-            T::default()
+            (T::default(), false)
         }
     }
 }
 
+/// How many `<file>.bak.<ms>` copies stay beside a file (the plain `.bak`, the
+/// first one kept, is not counted and never goes).
+const NUMBERED_BACKUPS_KEPT: usize = 3;
+
 /// Copy `path` to a `.bak` beside it that nothing overwrites. `None` when the
 /// copy failed.
+///
+/// A file that stays corrupt across restarts (nothing writes it in between)
+/// is the same bytes every time: when a `.bak` or a numbered copy already holds
+/// them, that copy is the answer and nothing new is written. Otherwise a
+/// numbered copy is added, and all but the newest
+/// [`NUMBERED_BACKUPS_KEPT`] numbered copies are removed (each holds session
+/// ids, so they must not pile up).
 fn keep_backup(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_string_lossy().into_owned();
-    let mut backup = path.with_file_name(format!("{name}.bak"));
-    if backup.exists() {
-        backup = path.with_file_name(format!("{name}.bak.{}", now_ms()));
+    let plain = path.with_file_name(format!("{name}.bak"));
+    let numbered = numbered_backups(path, &name);
+    if let Ok(bytes) = std::fs::read(path) {
+        let same = |p: &Path| std::fs::read(p).is_ok_and(|b| b == bytes);
+        if let Some(existing) = std::iter::once(&plain)
+            .chain(numbered.iter().map(|(_, p)| p))
+            .find(|p| p.exists() && same(p))
+        {
+            return Some(existing.clone());
+        }
     }
-    std::fs::copy(path, &backup).ok().map(|_| backup)
+    let backup = if plain.exists() {
+        path.with_file_name(format!("{name}.bak.{}", now_ms()))
+    } else {
+        plain
+    };
+    std::fs::copy(path, &backup).ok()?;
+    // Oldest first; the copy just made is the newest.
+    let mut all = numbered_backups(path, &name);
+    let excess = all.len().saturating_sub(NUMBERED_BACKUPS_KEPT);
+    for (_, old) in all.drain(..excess) {
+        if old != backup {
+            let _ = std::fs::remove_file(old);
+        }
+    }
+    Some(backup)
+}
+
+/// The `<name>.bak.<ms>` files beside `path`, oldest first.
+fn numbered_backups(path: &Path, name: &str) -> Vec<(i64, PathBuf)> {
+    let prefix = format!("{name}.bak.");
+    let Ok(dir) = std::fs::read_dir(path.parent().unwrap_or_else(|| Path::new("."))) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(i64, PathBuf)> = dir
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let file = e.file_name().to_string_lossy().into_owned();
+            let ms = file.strip_prefix(&prefix)?.parse::<i64>().ok()?;
+            Some((ms, e.path()))
+        })
+        .collect();
+    found.sort();
+    found
 }
 
 /// Write `value` as JSON to `path`, atomically (a temp file in the same
 /// directory, renamed over it), with the file mode `0600`.
-fn write_private<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+pub(crate) fn write_private<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1171,7 +1297,11 @@ mod tests {
                 session_prefix: Some("abcd1234".into()),
             },
             notify: Some(NotifyLevel::Wake),
-            notice: Some(serde_json::json!({"status": "told"})),
+            notice: Some(crate::mother::notices::NoticeView {
+                status: crate::mother::notices::NoticeStatus::Told,
+                ..Default::default()
+            }),
+            ..Default::default()
         };
         let mut plain = a.clone();
         plain.redact_for_network(|_| false);

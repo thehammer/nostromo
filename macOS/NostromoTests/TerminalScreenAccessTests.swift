@@ -193,4 +193,197 @@ final class TerminalScreenAccessTests: XCTestCase {
         XCTAssertNil(AppControlAX.value(f.terminal, "accessibilityValue"), "the gate answers nil")
         XCTAssertNil(AppControlAX.value(f.terminal, "noSuchAccessibilityProperty"))
     }
+    // MARK: - The staged-commands drawer (what an agent staged for a person is read on screen only)
+
+    // The drawer's rows speak their command and note to VoiceOver, so app-control's accessibility walk
+    // (`tree`, `find`, `ax`) would read them as well. In the real app (`allowsSynthetic` false) it reads one
+    // fixed entry for the whole drawer and nothing below it, whether it starts above the drawer or inside it.
+
+    private let stagedCanary = "CANARY-STAGED-5a8c13"
+
+    private struct StagedFixture {
+        let rig: StagingRig
+        let host: StagingDrawerHost
+        let container: ScreenAccessContainerView
+    }
+
+    private func stagedFixture(reportingRowsAsKids: Bool) -> StagedFixture {
+        let rig = StagingRig()
+        let host = StagingDrawerHost(rig: rig, width: 400, bodyHeight: 400)
+        addTeardownBlock {
+            host.tearDown()
+            rig.tearDown()
+        }
+        rig.ingest([StagingFixtures.entry("s-1", 1, "echo \(stagedCanary)", note: "note \(stagedCanary)"),
+                    StagingFixtures.entry("s-2", 2, "pwd")])
+        rig.settle()
+        host.drawer.refresh()
+        let container = ScreenAccessContainerView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        host.window.contentView!.addSubview(container)
+        if reportingRowsAsKids {
+            container.kids = host.rows
+        } else {
+            container.kids = [host.drawer]
+        }
+        return StagedFixture(rig: rig, host: host, container: container)
+    }
+
+    func testTheStagedDrawerIsOneFixedEntryInTheRealAppsAccessibilityHits() {
+        let f = stagedFixture(reportingRowsAsKids: false)
+
+        let hits = AppControlAX.hits(under: f.container, in: f.host.window, allowsSynthetic: false)
+
+        XCTAssertEqual(hits.count, 1, "\(hits)")
+        XCTAssertEqual(hits.first?.text, AppControlAX.stagedHiddenText)
+        XCTAssertEqual(hits.first?.cls, "ax:" + NSAccessibility.Role.group.rawValue)
+        XCTAssertGreaterThan(hits.first?.rectInWindow.width ?? 0, 0)
+        for hit in hits { XCTAssertFalse(hit.text?.contains(stagedCanary) ?? false, "\(hit)") }
+        XCTAssertEqual(AppControlAX.stagedHiddenText, "staged commands hidden from app-control")
+    }
+
+    func testTheStagedDrawerStaysOneFixedEntryWhenTheWalkStartsInsideIt() throws {
+        let f = stagedFixture(reportingRowsAsKids: false)
+        let row = try XCTUnwrap(f.host.rows.first)
+        let label = try XCTUnwrap(f.host.textFields.first { $0.stringValue.contains(stagedCanary) })
+
+        for start in [row, label, f.host.drawer] as [NSView] {
+            let hits = AppControlAX.hits(under: start, in: f.host.window, allowsSynthetic: false)
+            XCTAssertEqual(hits.map { $0.text }, [AppControlAX.stagedHiddenText], "from \(type(of: start))")
+        }
+    }
+
+    func testTheStagedRowsAreNotFoundByTheirTextInTheRealApp() {
+        let f = stagedFixture(reportingRowsAsKids: true)
+        let needle = stagedCanary.lowercased()
+
+        let hits = AppControlAX.hits(under: f.container, in: f.host.window, allowsSynthetic: false)
+
+        XCTAssertTrue(hits.filter { $0.text?.lowercased().contains(needle) == true }.isEmpty, "app-control `find` located staged text: \(hits)")
+        XCTAssertFalse(hits.contains { $0.text?.contains("Staged command") == true }, "\(hits)")
+    }
+
+    func testTheAxDumpOfTheStagedDrawerIsOneFixedNodeWithNoChildren() throws {
+        let f = stagedFixture(reportingRowsAsKids: false)
+
+        let dump = AppControlAX.dump(f.host.drawer, 0, allowsSynthetic: false)
+
+        XCTAssertEqual(dump["label"] as? String, AppControlAX.stagedHiddenText)
+        XCTAssertEqual(dump["type"] as? String, "StagingDrawerView")
+        XCTAssertEqual(dump["role"] as? String, NSAccessibility.Role.group.rawValue)
+        XCTAssertNil(dump["children"], "nothing below the drawer is read")
+        XCTAssertNil(dump["value"])
+        XCTAssertFalse(try json(dump).contains(stagedCanary))
+
+        let parent = try json(AppControlAX.dump(f.container, 0, allowsSynthetic: false))
+        XCTAssertFalse(parent.contains(stagedCanary), "a parent's dump does not read it either: \(parent)")
+        XCTAssertTrue(parent.contains(AppControlAX.stagedHiddenText), parent)
+        XCTAssertFalse(try json(AppControlAX.dump(try XCTUnwrap(f.host.rows.first), 0, allowsSynthetic: false)).contains(stagedCanary),
+                       "a dump that starts at a row")
+    }
+
+    func testTheStagedRowsAreReadableWhenTheBuildRelaxesTheGate() throws {
+        let f = stagedFixture(reportingRowsAsKids: true)
+
+        let hits = AppControlAX.hits(under: f.container, in: f.host.window, allowsSynthetic: true)
+        XCTAssertTrue(hits.contains { $0.text?.contains(stagedCanary) == true }, "the probe must see the rows when the gate allows it: \(hits)")
+        XCTAssertFalse(hits.contains { $0.text == AppControlAX.stagedHiddenText })
+
+        let dump = try json(AppControlAX.dump(f.container, 0, allowsSynthetic: true))
+        XCTAssertTrue(dump.contains(stagedCanary), dump)
+
+        let g = stagedFixture(reportingRowsAsKids: false)
+        let drawerHits = AppControlAX.hits(under: g.container, in: g.host.window, allowsSynthetic: true)
+        XCTAssertFalse(drawerHits.contains { $0.text == AppControlAX.stagedHiddenText }, "\(drawerHits)")
+    }
+
+    func testIsWithheldIsTrueForTheDrawerAndEverythingInsideItOnlyInTheRealApp() throws {
+        let f = stagedFixture(reportingRowsAsKids: false)
+        let inside: [NSView] = [f.host.drawer] + f.host.allViews
+        XCTAssertGreaterThan(inside.count, 10)
+
+        for view in inside {
+            XCTAssertTrue(AppControlAX.isWithheld(view, allowsSynthetic: false), "\(type(of: view))")
+            XCTAssertFalse(AppControlAX.isWithheld(view, allowsSynthetic: true), "\(type(of: view)) in the QA build")
+        }
+        XCTAssertFalse(AppControlAX.isWithheld(f.container, allowsSynthetic: false), "a view beside the drawer")
+        XCTAssertFalse(AppControlAX.isWithheld(f.host.container, allowsSynthetic: false), "the pane around the drawer")
+        XCTAssertFalse(AppControlAX.isWithheld(NSView(), allowsSynthetic: false))
+    }
+
+    // MARK: - `AppControlAX.text(of:)`: what `layout-issues`, `tree` and `find` read out of a view
+
+    private let secretCommand = "echo SECRET-STAGED"
+
+    private func secretFixture() -> (host: StagingDrawerHost, rig: StagingRig) {
+        let rig = StagingRig()
+        let host = StagingDrawerHost(rig: rig, width: 400, bodyHeight: 600)
+        addTeardownBlock {
+            host.tearDown()
+            rig.tearDown()
+        }
+        rig.ingest([StagingFixtures.entry("s-1", 1, secretCommand),
+                    StagingFixtures.entry("s-2", 2, String(repeating: "word ", count: 190))])
+        rig.settle()
+        host.drawer.refresh()
+        host.relayout()
+        return (host, rig)
+    }
+
+    func testTheTextReaderGivesNothingForTheDrawerItsRowsCommandOrItsShowAllInTheRealApp() throws {
+        let (host, _) = secretFixture()
+        let command = try XCTUnwrap(host.textFields.first { $0.stringValue == secretCommand }, "harness: the command's label")
+        let longRow = try XCTUnwrap(host.rows.first { $0.model.command.hasPrefix("word ") })
+        let showAll = try XCTUnwrap(host.showAll(of: longRow), "harness: the long row offers Show all")
+        XCTAssertEqual(showAll.title, "Show all")
+
+        XCTAssertNil(AppControlAX.text(of: host.drawer, allowsSynthetic: false))
+        XCTAssertNil(AppControlAX.text(of: command, allowsSynthetic: false), "a row's command")
+        XCTAssertNil(AppControlAX.text(of: showAll.label, allowsSynthetic: false), "Show all's own text field")
+        for field in host.textFields {
+            XCTAssertNil(AppControlAX.text(of: field, allowsSynthetic: false), "\"\(field.stringValue.prefix(30))\" was read")
+        }
+        for view in [host.drawer as NSView] + host.allViews {
+            XCTAssertNil(AppControlAX.text(of: view, allowsSynthetic: false), "\(type(of: view))")
+        }
+    }
+
+    func testTheTextReaderGivesTheTextOfTheSameViewsWhenTheBuildRelaxesTheGate() throws {
+        let (host, _) = secretFixture()
+        let command = try XCTUnwrap(host.textFields.first { $0.stringValue == secretCommand })
+        let longRow = try XCTUnwrap(host.rows.first { $0.model.command.hasPrefix("word ") })
+        let showAll = try XCTUnwrap(host.showAll(of: longRow))
+
+        XCTAssertEqual(AppControlAX.text(of: command, allowsSynthetic: true), secretCommand)
+        XCTAssertEqual(AppControlAX.text(of: showAll.label, allowsSynthetic: true), "Show all")
+        XCTAssertNil(AppControlAX.text(of: host.drawer, allowsSynthetic: true), "the drawer itself holds no text of its own")
+    }
+
+    func testTheTextReaderReadsAnOrdinaryViewBesideTheDrawerInBothModes() throws {
+        let (host, _) = secretFixture()
+        let field = NSTextField(labelWithString: "Terminal 1")
+        let button = NSButton(title: "Close", target: nil, action: nil)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 20))
+        textView.string = "prose"
+        for view in [field, button, textView] as [NSView] { host.container.addSubview(view) }
+
+        for allowsSynthetic in [false, true] {
+            XCTAssertEqual(AppControlAX.text(of: field, allowsSynthetic: allowsSynthetic), "Terminal 1", "synthetic \(allowsSynthetic)")
+            XCTAssertEqual(AppControlAX.text(of: button, allowsSynthetic: allowsSynthetic), "Close", "synthetic \(allowsSynthetic)")
+            XCTAssertEqual(AppControlAX.text(of: textView, allowsSynthetic: allowsSynthetic), "prose", "synthetic \(allowsSynthetic)")
+            XCTAssertNil(AppControlAX.text(of: NSView(), allowsSynthetic: allowsSynthetic), "a view with no text")
+            XCTAssertNil(AppControlAX.text(of: NSTextField(labelWithString: ""), allowsSynthetic: allowsSynthetic), "an empty field")
+        }
+    }
+
+    func testTheTextReaderCutsLongTextAtOneHundredSixtyCharactersAndMarksTheCut() {
+        let exactly = NSTextField(labelWithString: String(repeating: "x", count: 160))
+        let over = NSTextField(labelWithString: String(repeating: "y", count: 161))
+        let long = NSTextField(labelWithString: String(repeating: "z", count: 1_000))
+
+        for allowsSynthetic in [false, true] {
+            XCTAssertEqual(AppControlAX.text(of: exactly, allowsSynthetic: allowsSynthetic), String(repeating: "x", count: 160))
+            XCTAssertEqual(AppControlAX.text(of: over, allowsSynthetic: allowsSynthetic), String(repeating: "y", count: 160) + "\u{2026}")
+            XCTAssertEqual(AppControlAX.text(of: long, allowsSynthetic: allowsSynthetic), String(repeating: "z", count: 160) + "\u{2026}")
+        }
+    }
 }

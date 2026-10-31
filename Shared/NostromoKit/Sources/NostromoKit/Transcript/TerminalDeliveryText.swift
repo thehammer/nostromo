@@ -38,6 +38,9 @@ public enum TerminalDeliveryText {
         case "stopped":
             let why = item.reason.flatMap { stopReason($0) }.map { " (\($0))" } ?? ""
             return "Following stopped: \(item.pane)\(why)"
+        case "staged_inserted":
+            // The entry number comes from the reason (`entry_<n>`, 1...12), which `isGenuine` has checked.
+            return "Staged entry \(stagedEntryNumber(item.reason) ?? 0) placed at the prompt: \(item.pane)"
         case "paused":
             // The pane is shown too: a genuine notice is only treated as one when every field it
             // carries is displayed (or is a bounded, meaningless value such as a UUID).
@@ -189,7 +192,7 @@ public enum TerminalDeliveryText {
     /// known event, a terminal id, a pane name), because `item` is parsed from the same text and
     /// so cannot vouch for a value that is itself the payload.
     private static func isGenuine(_ element: String, for item: TerminalOriginItem) -> Bool {
-        guard let event = item.event, ["started", "resumed", "paused", "stopped"].contains(event),
+        guard let event = item.event, ["started", "resumed", "paused", "stopped", "staged_inserted"].contains(event),
               isUUIDShape(item.terminalId),
               item.pane.utf8.count <= maxPaneBytes,
               !item.pane.utf8.contains(where: { isControl($0) }),
@@ -210,6 +213,8 @@ public enum TerminalDeliveryText {
     private static func isDaemonReason(_ reason: String?, event: String) -> Bool {
         guard let reason else { return event == "started" || event == "resumed" }
         switch event {
+        case "staged_inserted":
+            return stagedEntryNumber(reason) != nil
         case "paused":
             return ["too_much_output", "too_many_deliveries"].contains(reason)
         case "stopped":
@@ -223,6 +228,15 @@ public enum TerminalDeliveryText {
         default:
             return false
         }
+    }
+
+    /// `entry_1` ... `entry_12` and nothing else (no sign, no leading zero, no spaces): the staged entry the
+    /// user placed at the prompt (`staged_inserted_notice` in `follow/manager.rs`).
+    private static func stagedEntryNumber(_ reason: String?) -> Int? {
+        guard let reason, reason.hasPrefix("entry_") else { return nil }
+        let digits = reason.dropFirst("entry_".count)
+        guard let number = Int(digits), (1 ... 12).contains(number), reason == "entry_\(number)" else { return nil }
+        return number
     }
 
     /// A terminal id is shown nowhere in the transcript, so a genuine notice may carry only the
@@ -267,6 +281,9 @@ public enum TerminalDeliveryText {
             sentence = "You are now following \(pane). Output it produces from now on will be delivered to you; you cannot type into it."
         case "resumed":
             sentence = "Following \(pane) resumed. Output it produces from now on will be delivered to you."
+        case "staged_inserted":
+            guard let number = stagedEntryNumber(item.reason) else { return nil }
+            sentence = "The user placed staged entry \(number) at the prompt of \(pane). Only the user's Enter runs it; any output arrives as usual."
         case "paused":
             let why: String
             switch item.reason {

@@ -78,10 +78,15 @@ enum ScreenshotRedaction {
         var areas: [Target] = []
         func walk(_ view: NSView) throws {
             if let source = view as? TerminalPixelSource {
-                let view = source.terminalPixelArea
-                areas.append(Target(rect: try area(of: view, in: window),
-                                    isHidden: source.isHiddenOrHasHiddenAncestor || view.isHiddenOrHasHiddenAncestor))
-                return   // everything below it is covered by its area
+                let area = source.terminalPixelArea
+                areas.append(Target(rect: try self.area(of: area, in: window),
+                                    isHidden: source.isHiddenOrHasHiddenAncestor || area.isHiddenOrHasHiddenAncestor))
+                // Everything inside its area is covered by it. Its other parts (a pane's staged-commands
+                // drawer, which sits beside the terminal) are walked for sources of their own.
+                if area !== view {
+                    for sub in view.subviews where !(sub === area || area.isDescendant(of: sub)) { try walk(sub) }
+                }
+                return
             }
             for sub in view.subviews { try walk(sub) }
         }

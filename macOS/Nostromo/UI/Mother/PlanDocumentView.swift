@@ -1140,7 +1140,9 @@ final class PlanDocumentView: NSView {
         let showsDocument = state == .document
         header.isHidden = state == .empty
         // A file name is as untrusted as the file: no bidi override or zero-width character in it.
-        header.nameLabel.stringValue = planPath.map { FoldTextSanitizer.sanitize(($0 as NSString).lastPathComponent) } ?? ""
+        // The document rules, not the row rules: the name is read as a whole, so the soft hyphen and a
+        // joiner next to ASCII must not survive in it either.
+        header.nameLabel.stringValue = planPath.map { FoldTextSanitizer.sanitizeInline(($0 as NSString).lastPathComponent) } ?? ""
         header.criteriaLabel.isHidden = !showsDocument || checklistCounts.total == 0
         if !header.criteriaLabel.isHidden {
             header.criteriaLabel.stringValue = "✓ \(checklistCounts.done)/\(checklistCounts.total) criteria"
@@ -1179,7 +1181,9 @@ final class PlanDocumentView: NSView {
             messageLabel.isHidden = false
             messageCopyButton.isHidden = false
             // A file that is not markdown is never handed to the system to open: show it in Finder instead.
-            messageRevealButton.isHidden = result != .notMarkdown
+            // Showing is also the way to a file that cannot be read (permissions) or is not UTF-8 text:
+            // Finder selects it, nothing opens it.
+            messageRevealButton.isHidden = ![.notMarkdown, .notReadable, .notUTF8].contains(result)
             messageOpenButton.isHidden = result != .tooLarge
         }
         rebuildOutlineMenu()

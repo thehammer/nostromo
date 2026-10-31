@@ -82,11 +82,18 @@ pub async fn enqueue_job(state: &McpSharedState, args: &Value, pty_id: Option<&s
 
 /// Put the calling focus's origin on a `mother add` request: its session
 /// always (that flag exists in every `mother`), its tag and name only when
-/// this `mother` takes them (an older one dies on an unknown flag).
+/// this `mother` takes them (an older one dies on an unknown flag) and the
+/// focus is not sensitive.
+///
+/// A sensitive focus hands over its session id alone. Its tag can be a slug of
+/// a work item's title, so it stays out of argv and Mother's record too; the
+/// daemon still vouches for the job, because the session id alone names the one
+/// focus whose history holds it (`SessionHistory::tag_of`), and it stamps the
+/// tag and name into its own book.
 pub(crate) async fn apply_origin(req: &mut AddJobRequest, caller: &OriginCaller) {
     let (session, name) = caller.flag_values();
     req.origin_session = session;
-    if !caller.tag.starts_with('-') && origin::supports_origin_focus().await {
+    if !caller.sensitive && !caller.tag.starts_with('-') && origin::supports_origin_focus().await {
         req.origin_focus = Some(caller.tag.clone());
         req.origin_focus_name = name;
     }

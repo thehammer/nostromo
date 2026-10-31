@@ -82,11 +82,16 @@ mod inject;
 mod inject_tests;
 mod login;
 mod model_switch;
+#[cfg(test)]
+mod notice_inject_tests;
 mod task_runtime;
 use control::ControlReply;
 pub use control::CONTROL_TIMEOUT;
 use inject::PendingOrigin;
-pub use inject::{SessionEndHook, INJECT_MERGE_CAP, SELECTION_KEY_PREFIX};
+pub use inject::{
+    NoticeDelivery, SessionEndHook, TurnAuthor, TurnEvent, TurnHook, INJECT_MERGE_CAP,
+    MOTHER_NOTICE_KEY_PREFIX, SELECTION_KEY_PREFIX,
+};
 pub use login::{ResendOutcome, ResendTrigger};
 use model_switch::{
     emit_note, model_args, on_model_report, publish_model_state, spawn_apply, ModelRuntime,
@@ -228,7 +233,14 @@ struct Shared {
     /// The message of a turn that failed to authenticate, held while the session
     /// waits for a Claude sign-in (a leaf lock; see `login.rs`).
     login: Arc<login::LoginLink>,
+    /// The manager's turn hook (see [`TurnHook`]); shared by every session, so
+    /// one set later reaches sessions already running. A leaf lock: the hook is
+    /// cloned out and called with nothing held.
+    turn_hook: TurnHookCell,
 }
+
+/// Where the manager keeps its [`TurnHook`] for every session's reader.
+type TurnHookCell = Arc<std::sync::RwLock<Option<TurnHook>>>;
 
 /// Lock `m`, taking the data even if a panicking holder poisoned it. For the
 /// switch machinery's own cleanup, which must still run after such a panic.
@@ -249,6 +261,19 @@ impl Shared {
     fn set_state(&self, s: SessionState) {
         *lock_recover(&self.state) = s;
         self.broadcast(SessionEvent::State(s));
+    }
+
+    /// Tell the turn hook, if any, about `event` in `tag`. Nothing is held
+    /// while it runs.
+    fn turn_event(&self, tag: &str, event: TurnEvent) {
+        let hook = self
+            .turn_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(tag, &event);
+        }
     }
 }
 
@@ -592,6 +617,11 @@ pub struct SessionManager {
     task_io: TaskIoConfig,
     /// Told when a session ends (terminal follow ends with it).
     session_end_hook: Option<SessionEndHook>,
+    /// Told when a turn starts (and who wrote its message) or ends.
+    turn_hook: TurnHookCell,
+    /// Mother job notices, when the daemon wires them in: told about focus
+    /// registry pushes and reachable by the IPC server.
+    notice_engine: Option<Arc<crate::mother::notices::NoticeEngine>>,
 }
 
 impl SessionManager {
@@ -671,6 +701,8 @@ impl SessionManager {
             claude_bin_cache: Mutex::new(None),
             task_io: TaskIoConfig::default(),
             session_end_hook: None,
+            turn_hook: Arc::new(std::sync::RwLock::new(None)),
+            notice_engine: None,
         }
     }
 
@@ -690,6 +722,32 @@ impl SessionManager {
     #[doc(hidden)]
     pub fn omit_guard_hook_for_test(&mut self) {
         self.omit_guard_hook = true;
+    }
+
+    /// Run `program args` as `tag`'s session (its stdout read as stream-json,
+    /// its stdin given the messages) instead of `claude`. For integration
+    /// tests: a stub agent, never the real CLI or the network.
+    #[doc(hidden)]
+    pub fn spawn_program_for_test(
+        &mut self,
+        tag: &str,
+        program: PathBuf,
+        args: Vec<String>,
+    ) -> Result<()> {
+        let managed = self.spawn_managed(
+            tag.to_string(),
+            "agent".into(),
+            "View".into(),
+            None,
+            false,
+            format!("stub-{tag}"),
+            false,
+            program.clone(),
+            args.clone(),
+            Some((program, args)),
+        )?;
+        self.sessions.insert(tag.to_string(), managed);
+        Ok(())
     }
 
     /// The guard binary sessions spawned from now on run as their PreToolUse hook.
@@ -995,7 +1053,15 @@ impl SessionManager {
 
         // Note the id in the history Mother jobs' claimed sessions are checked
         // against *before* the child exists: a `mother add` it runs at once
-        // must already find it.
+        // must already find it (the child is handed this id in its
+        // environment, so there is no later moment that is early enough).
+        //
+        // A spawn that then fails (no `claude` binary, `resolve_claude()?` or
+        // the spawn itself) leaves an id here that never ran. That is
+        // harmless: the history only vouches that a claim's session belongs to
+        // this tag. A minted id was never handed to anyone, so nothing can
+        // quote it; an explicit or stored id was already this focus's own, and
+        // a retry reuses it. Entries age out after 90 days.
         self.session_history.record(&tag, &effective_id);
 
         let program = resolve_claude()?;
@@ -1223,6 +1289,7 @@ impl SessionManager {
             runtime: tokio::runtime::Handle::current(),
             tasks,
             login: login::LoginLink::new(self.login.clone()),
+            turn_hook: Arc::clone(&self.turn_hook),
         };
         // Ends vanished tasks and flushes coalesced task snapshots; stops
         // when the CLI has exited.
@@ -2163,6 +2230,11 @@ impl SessionManager {
         }
         self.focus_registry = focuses;
         self.note_origin_registry(true);
+        if let Some(engine) = &self.notice_engine {
+            // The engine's lock is a leaf: it only records the departures here.
+            let present: Vec<String> = new_tags.iter().cloned().collect();
+            engine.on_registry(&present, &departed);
+        }
         (self.focus_registry.clone(), departed)
     }
 
@@ -2298,6 +2370,16 @@ impl SessionManager {
     /// The origin book, when the daemon wired one in.
     pub fn origin_book(&self) -> Option<OriginBook> {
         self.origin_book.clone()
+    }
+
+    /// Tell `engine` about focus registry pushes from now on.
+    pub fn configure_notice_engine(&mut self, engine: Arc<crate::mother::notices::NoticeEngine>) {
+        self.notice_engine = Some(engine);
+    }
+
+    /// The Mother notice engine, when the daemon wired one in.
+    pub fn notice_engine(&self) -> Option<Arc<crate::mother::notices::NoticeEngine>> {
+        self.notice_engine.clone()
     }
 
     /// Who `tag` is for the purpose of stamping a Mother job it queues: its
@@ -2734,25 +2816,40 @@ fn run_reader(
         }
 
         let deltas = lock_recover(&shared.transcript).ingest_parsed(parsed);
-        for delta in deltas {
-            match &delta {
-                TurnDelta::TurnStarted { .. } => {
+        for mut delta in deltas {
+            match &mut delta {
+                TurnDelta::TurnStarted { turn } => {
                     auth.begin_turn();
-                    login::on_turn_started(&shared);
+                    let author = login::on_turn_started(&shared);
+                    // The transcript read a notice origin from the prompt's
+                    // text; only a turn the daemon wrote as a notice keeps it.
+                    if !author.is_notice()
+                        && lock_recover(&shared.transcript).disown_notice_origin(&turn.id)
+                    {
+                        turn.origin = None;
+                    }
                     shared.set_state(SessionState::MidTurn);
+                    shared.turn_event(&tag, TurnEvent::Started { author });
                 }
                 // A phantom dropped as the real prompt arrives is no turn
                 // end: that prompt's turn is live, and advancing would write
                 // the next queued message into it or start a switch mid-turn.
                 TurnDelta::TurnErrored {
                     discarded: true, ..
-                } => {}
+                } => {
+                    // The phantom took the written message when it "started":
+                    // give it back to the real prompt arriving now, and tell
+                    // the hook the phantom was never a turn.
+                    login::on_turn_discarded(&shared);
+                    shared.turn_event(&tag, TurnEvent::Discarded);
+                }
                 TurnDelta::TurnCompleted { .. } | TurnDelta::TurnErrored { .. } => {
                     shared.broadcast(SessionEvent::Delta(delta.clone()));
                     // A turn that failed to authenticate makes a hold, and `step`
                     // does not drain the queue while one exists.
                     login::on_turn_end(&shared, &tag, auth.finish());
                     advance(&shared);
+                    shared.turn_event(&tag, TurnEvent::Completed);
                     continue;
                 }
                 _ => {}
@@ -2777,6 +2874,7 @@ fn run_reader(
     }
     shared.broadcast(SessionEvent::Exited { exit_code: None });
     publish_model_state(&shared);
+    shared.turn_event(&tag, TurnEvent::Exited);
     tracing::warn!(tag = %tag, "session reader EOF — child stdout closed (crash or clean exit)");
 }
 
