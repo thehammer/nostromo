@@ -1,4 +1,5 @@
 import XCTest
+import NostromoKit
 
 // MotherJobGrouping / MotherJob are compiled into this target directly (logic test).
 
