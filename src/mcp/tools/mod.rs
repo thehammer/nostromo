@@ -594,7 +594,7 @@ pub fn tool_descriptors() -> Vec<Value> {
         // ── Phase 3: Mother mutations ──────────────────────────────────────
         json!({
             "name": "mother.enqueue_job",
-            "description": "Enqueue a plan file as a new Mother job via `mother add`. Returns { id }. `repo` (a bare repo NAME such as `nostromo`, as `mother add --repo NAME` takes — not an owner/slug) and `branch` are required. The plan file must contain a `suggested_config` block. Values for repo/branch/base/label/repo_path/depends_on must not start with `-`.",
+            "description": "Enqueue a plan file as a new Mother job via `mother add`. Returns { id, origin?, origin_overridden? }. `repo` (a bare repo NAME such as `nostromo`, as `mother add --repo NAME` takes — not an owner/slug) and `branch` are required. The plan file must contain a `suggested_config` block. Values for repo/branch/base/label/repo_path/depends_on must not start with `-`. The daemon records the calling focus as the job's origin. Arguments that name another origin (`origin`, `origin_focus`, `origin_focus_name`, `origin_session`, `focus`) are ignored and the result says `origin_overridden: true`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -605,7 +605,8 @@ pub fn tool_descriptors() -> Vec<Value> {
                     "base": { "type": "string", "description": "Base branch" },
                     "max_cost": { "type": "number", "description": "Maximum cost in dollars" },
                     "label": { "type": "string", "description": "Job label" },
-                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Job ids this job depends on" }
+                    "depends_on": { "type": "array", "items": { "type": "string" }, "description": "Job ids this job depends on" },
+                    "notify": { "type": "string", "enum": ["wake", "quiet", "off"], "description": "How this focus is told about the job: wake, quiet or off. Lowers, never raises, how this focus is told about the job." }
                 },
                 "required": ["plan_path", "repo", "branch"]
             }
@@ -1218,7 +1219,7 @@ async fn dispatch_inner(
         // ── Phase 3: Mother mutations ──────────────────────────────────────
         "mother.enqueue_job" => {
             let args = arguments.cloned().unwrap_or_default();
-            mother_mutators::enqueue_job(state, &args).await
+            mother_mutators::enqueue_job(state, &args, pty_id).await
         }
         "mother.cancel_job" => {
             let args = arguments.cloned().unwrap_or_default();

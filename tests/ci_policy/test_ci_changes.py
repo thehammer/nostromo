@@ -168,6 +168,20 @@ class DefaultRunTests(unittest.TestCase):
         self.assertIs(swift_needed(["tests/fixtures/tracker/pane.json"]), True)
         self.assertIs(swift_needed(["tests/fixtures/approvals/q.json"]), True)
         self.assertIs(swift_needed(["tests/fixtures/mother-contract/x.json"]), True)
+        # A Rust-only golden regeneration (tests/mother_origin.rs writes it, the
+        # Kit tests read it) must still run the Swift jobs.
+        self.assertIs(
+            swift_needed(["tests/fixtures/mother-v2/mother-jobs-annotated.json"]), True
+        )
+        self.assertIs(
+            swift_needed(
+                [
+                    "tests/mother_origin.rs",
+                    "tests/fixtures/mother-v2/mother-jobs-annotated.json",
+                ]
+            ),
+            True,
+        )
 
     def test_rust_file_inside_fixtures_runs_swift(self):
         self.assertIs(swift_needed(["tests/fixtures/sample.rs"]), True)

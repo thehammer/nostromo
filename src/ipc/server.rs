@@ -1934,6 +1934,7 @@ fn handle_client_msg(
         ClientMsg::MotherAction { job_id, action } => {
             let btx = broadcast_tx.clone();
             let conn = conn_key.to_string();
+            let origins = session_mgr.lock().unwrap().origin_book();
             tokio::spawn(async move {
                 let res = match action {
                     MotherActionKind::Cancel => crate::mother::cancel(&job_id).await,
@@ -1945,7 +1946,11 @@ fn handle_client_msg(
                     tracing::warn!(conn, %job_id, ?action, "MotherAction failed: {e:#}");
                 }
                 match crate::mother::list_jobs().await {
-                    Ok(jobs) => {
+                    Ok(mut jobs) => {
+                        // Every job in the feed carries who queued it.
+                        if let Some(book) = &origins {
+                            book.annotate(&mut jobs);
+                        }
                         let _ = btx.send(ServerMsg::MotherJobs { jobs });
                     }
                     Err(e) => tracing::warn!("MotherAction re-poll failed: {e:#}"),
@@ -1971,12 +1976,16 @@ fn handle_client_msg(
             }
             let btx = broadcast_tx.clone();
             let conn = conn_key.to_string();
+            let origins = session_mgr.lock().unwrap().origin_book();
             tokio::spawn(async move {
                 if let Err(e) = crate::mother::resume(&job_id, &answer).await {
                     tracing::warn!(conn, %job_id, "MotherResume failed: {e:#}");
                 }
                 match crate::mother::list_jobs().await {
-                    Ok(jobs) => {
+                    Ok(mut jobs) => {
+                        if let Some(book) = &origins {
+                            book.annotate(&mut jobs);
+                        }
                         let _ = btx.send(ServerMsg::MotherJobs { jobs });
                     }
                     Err(e) => tracing::warn!("MotherResume re-poll failed: {e:#}"),

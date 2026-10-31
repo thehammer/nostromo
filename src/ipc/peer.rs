@@ -1232,6 +1232,14 @@ pub fn redact_for_network(msg: ServerMsg, tags: &SensitiveTags) -> ServerMsg {
             // has registered the new job's id, and the job feed must not
             // include it in that gap.
             jobs.retain(|j| !j.is_work_send() && !tags.job_is_sensitive(&j.id));
+            // Who queued a job is the daemon's own knowledge: a peer gets the
+            // kind and the names, never the focus tag or the session prefix,
+            // and a sensitive focus's name and notice are replaced (SR6).
+            for job in &mut jobs {
+                if let Some(annotation) = &mut job.nostromo {
+                    annotation.redact_for_network(|tag| tags.tag_is_sensitive(tag));
+                }
+            }
             ServerMsg::MotherJobs { jobs }
         }
         other => other,

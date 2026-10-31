@@ -12,7 +12,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::watch;
 
-use super::MotherJob;
+use super::{MotherJob, OriginBook};
 
 /// Whether the job list can be trusted.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -71,6 +71,10 @@ pub struct JobsFeed {
     applied: Arc<AtomicU64>,
     /// Jobs in the latest published `mother list` that could not be read.
     skipped: Arc<AtomicUsize>,
+    /// The daemon's record of who queued each job. When present, every job is
+    /// annotated (`MotherJob.nostromo`) on every publish path, so every reader
+    /// of the feed sees the same thing.
+    origins: Option<OriginBook>,
 }
 
 impl Default for JobsFeed {
@@ -87,7 +91,19 @@ impl JobsFeed {
             issued: Arc::new(AtomicU64::new(0)),
             applied: Arc::new(AtomicU64::new(0)),
             skipped: Arc::new(AtomicUsize::new(0)),
+            origins: None,
         }
+    }
+
+    /// A feed whose jobs are annotated with their origin ([`OriginBook`]).
+    pub fn with_origins(mut self, origins: OriginBook) -> Self {
+        self.origins = Some(origins);
+        self
+    }
+
+    /// The origin book annotating this feed, if it has one.
+    pub fn origins(&self) -> Option<&OriginBook> {
+        self.origins.as_ref()
     }
 
     /// Take a ticket BEFORE starting a `mother list`; pass it to
@@ -128,12 +144,23 @@ impl JobsFeed {
         jobs: Vec<MotherJob>,
         skipped: usize,
     ) -> bool {
+        self.publish_annotated_at(ticket, jobs, skipped).is_some()
+    }
+
+    /// [`JobsFeed::publish_jobs_counted_at`], returning the jobs as published
+    /// (annotated) so the caller broadcasts exactly what readers see. `None`
+    /// when a newer list already landed.
+    pub fn publish_annotated_at(
+        &self,
+        ticket: u64,
+        jobs: Vec<MotherJob>,
+        skipped: usize,
+    ) -> Option<Vec<MotherJob>> {
         if !self.claim(ticket) {
-            return false;
+            return None;
         }
         self.skipped.store(skipped, Ordering::SeqCst);
-        self.publish_jobs(jobs);
-        true
+        Some(self.publish_jobs(jobs))
     }
 
     /// How many jobs in the latest published list could not be read.
@@ -158,12 +185,17 @@ impl JobsFeed {
         self.source_tx.subscribe()
     }
 
-    /// Publish a successful `mother list`.
-    pub fn publish_jobs(&self, jobs: Vec<MotherJob>) {
-        self.jobs_tx.send_replace(jobs);
+    /// Publish a successful `mother list`, annotated with each job's origin.
+    /// Returns the jobs as published.
+    pub fn publish_jobs(&self, mut jobs: Vec<MotherJob>) -> Vec<MotherJob> {
+        if let Some(origins) = &self.origins {
+            origins.annotate(&mut jobs);
+        }
+        self.jobs_tx.send_replace(jobs.clone());
         self.source_tx.send_replace(MotherSourceState::Fresh {
             updated_at: Utc::now(),
         });
+        jobs
     }
 
     /// Record a failed `mother list`. The previous jobs stay readable but the
@@ -178,12 +210,20 @@ impl JobsFeed {
     }
 
     /// Re-list jobs from the CLI and publish the outcome. Returns the jobs on
-    /// success.
+    /// success (annotated, as published; when a newer list already landed,
+    /// this one as listed, annotated the same way).
     pub async fn refresh(&self) -> anyhow::Result<Vec<MotherJob>> {
         let ticket = self.begin();
         match super::list_jobs_counted().await {
-            Ok((jobs, skipped)) => {
-                self.publish_jobs_counted_at(ticket, jobs.clone(), skipped);
+            Ok((mut jobs, skipped)) => {
+                match self.publish_annotated_at(ticket, jobs.clone(), skipped) {
+                    Some(published) => jobs = published,
+                    None => {
+                        if let Some(origins) = &self.origins {
+                            origins.annotate(&mut jobs);
+                        }
+                    }
+                }
                 Ok(jobs)
             }
             Err(e) => {
