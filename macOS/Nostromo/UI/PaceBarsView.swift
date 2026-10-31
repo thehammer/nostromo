@@ -12,6 +12,26 @@ import Combine
 /// exactly as before.
 class PaceBarsView: NSView {
 
+    // MARK: - Value texts
+
+    /// What is printed to the right of one bar: used percentage, time to reset, pace.
+    struct ValueTexts: Equatable {
+        let used:  String
+        let reset: String
+        let pace:  String
+    }
+
+    /// The real used percentage (floored, so 99.6% never reads as 100%), the time left in the
+    /// window ("2d 4h", "3h 12m", "45m"; "–" while the window has not started), and the pace.
+    static func valueTexts(for window: WindowPace, now: TimeInterval) -> ValueTexts {
+        let used = Int(max(0, window.usedPct).rounded(.down))
+        let reset = window.resetsAt > now ? Theme.formatResetPrecise(window.resetsAt - now) : "–"
+        return ValueTexts(used: "\(used)%", reset: reset, pace: String(format: "%.1fx", window.pace))
+    }
+
+    /// The rail never gets narrower than this: below it the reset time, then the percentage, are dropped.
+    static let minRailWidth: CGFloat = 56
+
     // MARK: - Layout
 
     private let labelWidth:      CGFloat = 28
@@ -151,14 +171,17 @@ class PaceBarsView: NSView {
         let barsRegion = bounds.height - agentLineHeight
         let totalVPad  = barVPad * CGFloat(bars.count + 1)
         let barHeight  = max(4, (barsRegion - totalVPad) / CGFloat(bars.count))
+        let now        = Date().timeIntervalSince1970
+        let texts      = bars.map { Self.valueTexts(for: $0.window, now: now) }
+        let columns    = valueColumns(texts)
         let railX      = labelWidth
-        let railW      = bounds.width - labelWidth - valueWidth - barHPad * 2
+        let railW      = bounds.width - labelWidth - columns.total - barHPad * 2
 
         for (i, (label, window)) in bars.enumerated() {
             let y = agentLineHeight + barsRegion
                   - barVPad   * CGFloat(i + 1)
                   - barHeight * CGFloat(i + 1)
-            drawBar(label: label, window: window,
+            drawBar(label: label, window: window, texts: texts[i], columns: columns,
                     railX: railX, railY: y, railW: railW, barH: barHeight)
         }
 
@@ -195,7 +218,36 @@ class PaceBarsView: NSView {
         text.draw(at: NSPoint(x: labelWidth, y: 3), withAttributes: attrs)
     }
 
-    private func drawBar(label: String, window: WindowPace,
+    /// Widths of the three value columns (right-aligned, shared by every bar so they line up).
+    /// A zero width means the column is not drawn: the reset time goes first, then the percentage,
+    /// so the rail keeps at least `minRailWidth`.
+    private struct ValueColumns {
+        var used:  CGFloat
+        var reset: CGFloat
+        var pace:  CGFloat
+        let gap:   CGFloat
+        var total: CGFloat {
+            var t = pace
+            if used  > 0 { t += used  + gap }
+            if reset > 0 { t += reset + gap }
+            return t
+        }
+    }
+
+    private func valueColumns(_ texts: [ValueTexts]) -> ValueColumns {
+        let attrs: [NSAttributedString.Key: Any] = [.font: Theme.paceBarFont]
+        func widest(_ pick: (ValueTexts) -> String) -> CGFloat {
+            ceil(texts.map { pick($0).size(withAttributes: attrs).width }.max() ?? 0)
+        }
+        var cols = ValueColumns(used: widest(\.used), reset: widest(\.reset),
+                                pace: max(valueWidth, widest(\.pace)), gap: 6)
+        let room = bounds.width - labelWidth - barHPad * 2
+        if room - cols.total < Self.minRailWidth { cols.reset = 0 }
+        if room - cols.total < Self.minRailWidth { cols.used = 0 }
+        return cols
+    }
+
+    private func drawBar(label: String, window: WindowPace, texts: ValueTexts, columns: ValueColumns,
                          railX: CGFloat, railY: CGFloat, railW: CGFloat, barH: CGFloat) {
         // ── Label ──────────────────────────────────────────────────────────
         let labelAttrs: [NSAttributedString.Key: Any] = [
@@ -227,15 +279,22 @@ class PaceBarsView: NSView {
             }
         }
 
-        // ── Pace value ─────────────────────────────────────────────────────
-        let paceStr   = String(format: "%.1fx", window.pace)
-        let paceColor = Theme.paceColor(window.pace)
-        let paceAttrs: [NSAttributedString.Key: Any] = [
-            .font:            Theme.paceBarFont,
-            .foregroundColor: paceColor,
-        ]
-        let paceSize = paceStr.size(withAttributes: paceAttrs)
-        let paceX = bounds.width - valueWidth + (valueWidth - paceSize.width) / 2
-        paceStr.draw(at: NSPoint(x: paceX, y: railY + (barH - 10) / 2), withAttributes: paceAttrs)
+        // ── Values: used %, time to reset, pace (right-aligned columns) ─────
+        let textY = railY + (barH - 10) / 2
+        func draw(_ text: String, rightEdge: CGFloat, color: NSColor) {
+            let attrs: [NSAttributedString.Key: Any] = [.font: Theme.paceBarFont, .foregroundColor: color]
+            let w = text.size(withAttributes: attrs).width
+            text.draw(at: NSPoint(x: rightEdge - w, y: textY), withAttributes: attrs)
+        }
+        var edge = bounds.width - barHPad
+        draw(texts.pace, rightEdge: edge, color: Theme.paceColor(window.pace))
+        edge -= columns.pace + columns.gap
+        if columns.reset > 0 {
+            draw(texts.reset, rightEdge: edge, color: Theme.fgMuted)
+            edge -= columns.reset + columns.gap
+        }
+        if columns.used > 0 {
+            draw(texts.used, rightEdge: edge, color: Theme.fg)
+        }
     }
 }

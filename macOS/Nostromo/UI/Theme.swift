@@ -323,6 +323,15 @@ enum Theme {
     }
 
     /// Format remaining seconds as "Xh" or "Xm".
+    /// Time left, two units: "2d 4h", "3h 12m", "45m". Under a minute reads "1m".
+    static func formatResetPrecise(_ secs: TimeInterval) -> String {
+        let total = max(60, Int(secs))
+        let days = total / 86_400, hours = (total % 86_400) / 3600, mins = (total % 3600) / 60
+        if days > 0 { return hours > 0 ? "\(days)d \(hours)h" : "\(days)d" }
+        if hours > 0 { return mins > 0 ? "\(hours)h \(mins)m" : "\(hours)h" }
+        return "\(mins)m"
+    }
+
     static func formatReset(_ secs: TimeInterval) -> String {
         if secs >= 3600 { return "\(Int(secs / 3600))h" }
         return "\(max(1, Int(secs / 60)))m"
