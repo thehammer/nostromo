@@ -121,7 +121,8 @@ final class MotherListResizeTests: XCTestCase {
         resize(window, view, to: 600)
         XCTAssertEqual(view.listColumnWidth, 280, "the column gives way so the detail keeps 320")
         let detail = try XCTUnwrap(tabRegion(in: view))
-        XCTAssertGreaterThanOrEqual(detail.frame.width, 320 - 0.5)
+        // The maximum is view width − 320 (Q2), so the 1 pt divider comes out of the detail's 320.
+        XCTAssertGreaterThanOrEqual(detail.frame.width, 320 - 1.5)
     }
 
     func testAWiderWindowGivesBackWhatTheReaderAskedFor() {
