@@ -182,36 +182,38 @@ final class PlanMarkdownDepthTests: XCTestCase {
     /// A hostile plan's biggest shape: `levels` quote markers, then short emphasis spans to fill 256 KiB.
     /// Foundation takes time that grows with depth times the number of inline runs, cannot be cancelled,
     /// and the app does it again at every file-watch reload (7 s at 2,500 levels, 23 s at 10,000).
-    private func quotesThenSpans(levels: Int) -> String {
+    private func quotesThenSpans(levels: Int, spans: Int? = nil) -> String {
         let total = 256 * 1024
-        return String(repeating: ">", count: levels) + " " + String(repeating: "*a* ", count: (total - levels) / 4)
+        return String(repeating: ">", count: levels) + " " + String(repeating: "*a* ", count: spans ?? (total - levels - 1) / 4)
     }
 
+    /// The whole 256 KiB file. The emphasis spans alone cost Foundation a few seconds on a CI runner (they
+    /// are the part no bound on nesting can remove), so the bound is that plus room; the unbounded parse of
+    /// this file takes about a minute there (23 s on a developer Mac) and the harness gives up on it at 30 s.
     func testDeepQuotesFollowedByManyEmphasisSpansAreParsedInBoundedTime() throws {
-        for levels in [2_500, 10_000] {
-            let text = quotesThenSpans(levels: levels)
-            XCTAssertLessThanOrEqual(text.utf8.count, 256 * 1024)
-            let run = try XCTUnwrap(parseOnSmallStack(text))
-            XCTAssertLessThan(run.seconds, wellInside, "\(levels) levels took \(run.seconds) s")
-            let deepest = nesting(of: run.doc.blocks)
-            XCTAssertLessThanOrEqual(deepest, depthLimit, "\(levels) levels: the model nests \(deepest) deep")
-            XCTAssertTrue(leafTexts(run.doc.blocks).contains { $0.hasPrefix("a a a") }, "\(levels) levels: the spans' text is still there")
-        }
+        let levels = 10_000
+        let text = quotesThenSpans(levels: levels)
+        XCTAssertLessThanOrEqual(text.utf8.count, 256 * 1024)
+        let run = try XCTUnwrap(parseOnSmallStack(text))
+        XCTAssertLessThan(run.seconds, 15, "\(levels) levels took \(run.seconds) s")
+        let deepest = nesting(of: run.doc.blocks)
+        XCTAssertLessThanOrEqual(deepest, depthLimit, "\(levels) levels: the model nests \(deepest) deep")
+        XCTAssertTrue(leafTexts(run.doc.blocks).contains { $0.hasPrefix("a a a") }, "\(levels) levels: the spans' text is still there")
     }
 
     // [work-count] The same shapes, counted in operations so a slow machine cannot flake it.
     func testDeepQuotesAndIndentsFollowedByManySpansStayWithinAWorkBudget() throws {
         // Each run's block path is walked: with the markers unbounded that is levels x runs (hundreds of
         // millions); bounded it is the depth limit x runs, a few million.
-        let budget = 20_000_000
+        let budget = 8_000_000
         let indented = (0 ..< 3_000).map { String(repeating: " ", count: 2 * $0) + "- item" }.joined(separator: "\n")
-            + "\n" + String(repeating: " ", count: 6_000) + String(repeating: "*a* ", count: 40_000)
-        let bullets = String(repeating: "- ", count: 5_000) + String(repeating: "*a* ", count: 60_000)
-        let numbered = String(repeating: "1. ", count: 5_000) + String(repeating: "*a* ", count: 60_000)
-        let mixed = String(repeating: "> - ", count: 2_500) + String(repeating: "*a* ", count: 60_000)
+            + "\n" + String(repeating: " ", count: 6_000) + String(repeating: "*a* ", count: 15_000)
+        let bullets = String(repeating: "- ", count: 5_000) + String(repeating: "*a* ", count: 15_000)
+        let numbered = String(repeating: "1. ", count: 5_000) + String(repeating: "*a* ", count: 15_000)
+        let mixed = String(repeating: "> - ", count: 2_500) + String(repeating: "*a* ", count: 15_000)
         for (name, text) in [("5,000 bullets", bullets), ("5,000 numbered items", numbered), ("2,500 quote-bullet pairs", mixed),
-                             ("2,500 quotes", quotesThenSpans(levels: 2_500)),
-                             ("10,000 quotes", quotesThenSpans(levels: 10_000)),
+                             ("2,500 quotes", quotesThenSpans(levels: 2_500, spans: 15_000)),
+                             ("10,000 quotes", quotesThenSpans(levels: 10_000, spans: 15_000)),
                              ("3,000 nested list levels", indented)] {
             let run = try XCTUnwrap(onSmallStack({ PlanMarkdown.parseCounting(text) }))
             XCTAssertLessThan(run.value.pathComponents, budget, "\(name): \(run.value.pathComponents) path components walked")
