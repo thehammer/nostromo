@@ -157,6 +157,71 @@ final class FoldTextSanitizerEdgeTests: XCTestCase {
         XCTAssertEqual(FoldTextSanitizer.sanitize("a\u{85}b"), "a b")
     }
 
+    func testUnassignedInvisibleCodePointsAreDroppedLikeTheDaemonsSet() {
+        XCTAssertEqual(
+            FoldTextSanitizer.sanitize("a\u{2065}b\u{FFF0}c\u{FFF8}d\u{E01F0}e\u{E0FFF}f"), "abcdef")
+        XCTAssertEqual(FoldTextSanitizer.sanitize("a\u{FFFC}b"), "a\u{FFFC}b")
+    }
+
+    /// The daemon drops all of U+E0000...E0FFF (tags and the variation selectors supplement). The gap
+    /// between the tags (E0000-E007F) and the old upper range (E01F0-E0FFF) held E0100...E01EF, which can
+    /// carry one byte per character and draw as nothing.
+    func testTheWholeTagAndVariationSelectorSupplementBlockIsDroppedWithNoGap() {
+        for value: UInt32 in [0xE0000, 0xE0001, 0xE007F, 0xE0080, 0xE00FF, 0xE0100, 0xE0101, 0xE017F,
+                              0xE01EE, 0xE01EF, 0xE01F0, 0xE0FFE, 0xE0FFF] {
+            let scalar = Unicode.Scalar(value)!
+            XCTAssertEqual(FoldTextSanitizer.sanitize("a\(scalar)b"), "ab", "U+\(String(value, radix: 16, uppercase: true)) survived")
+        }
+        // Every code point of the block, in one run.
+        let block = String(String.UnicodeScalarView((UInt32(0xE0000)...UInt32(0xE0FFF)).compactMap { Unicode.Scalar($0) }))
+        XCTAssertEqual(FoldTextSanitizer.sanitize("a" + block + "b"), "ab")
+        XCTAssertEqual(FoldTextSanitizer.sanitize("a" + block + "b").unicodeScalars.count, 2)
+    }
+
+    func testABytePerCharacterPayloadInVariationSelectorsSupplementLeavesNothingBehind() {
+        // "hi" hidden as variation selectors E0100 + byte, after a visible base character.
+        let payload = [UInt8]("hi".utf8).map { Unicode.Scalar(0xE0100 + UInt32($0))! }
+        let text = "ok" + String(String.UnicodeScalarView(payload))
+        XCTAssertEqual(FoldTextSanitizer.sanitize(text), "ok")
+    }
+
+    func testTheCodePointsOfTheDaemonsInvisibleSetThatWereMissingAreDropped() {
+        let dropped: [(String, UInt32)] = [
+            ("soft hyphen", 0x00AD), ("combining grapheme joiner", 0x034F), ("Arabic number sign", 0x0600),
+            ("Arabic end of ayah", 0x06DD), ("Syriac abbreviation mark", 0x070F), ("Arabic pound mark above", 0x0890),
+            ("Arabic disputed end of ayah", 0x08E2), ("Hangul choseong filler", 0x115F),
+            ("Hangul jungseong filler", 0x1160), ("Khmer inherent vowel Aq", 0x17B4),
+            ("Mongolian free variation selector one", 0x180B), ("Mongolian vowel separator", 0x180E),
+            ("inhibit symmetric swapping", 0x206A), ("nominal digit shapes", 0x206F), ("braille pattern blank", 0x2800),
+            ("Hangul filler", 0x3164), ("halfwidth Hangul filler", 0xFFA0), ("Kaithi number sign above", 0x110BD),
+            ("Kaithi number sign", 0x110CD), ("Egyptian hieroglyph format", 0x13430),
+            ("Egyptian hieroglyph format end", 0x1343F), ("shorthand format letter overlap", 0x1BCA0),
+            ("shorthand format up step", 0x1BCA3), ("musical symbol begin beam", 0x1D173),
+            ("musical symbol end phrase", 0x1D17A),
+        ]
+        for (name, value) in dropped {
+            let scalar = Unicode.Scalar(value)!
+            XCTAssertEqual(FoldTextSanitizer.sanitize("a\(scalar)b"), "ab", "\(name) U+\(String(value, radix: 16, uppercase: true)) survived")
+        }
+    }
+
+    func testTheCodePointsNextToTheDroppedRangesAreStillDrawn() {
+        // Neighbours of the daemon's set that it does not list: they stay.
+        for value: UInt32 in [0x00AC, 0x00AE, 0x0606, 0x06DE, 0x0710, 0x0892, 0x115E, 0x1161, 0x17B3, 0x17B6,
+                              0x1810, 0x2070, 0x2801, 0x3165, 0xFF9F, 0xFFA1, 0x110BE, 0x13440, 0x1BCA4,
+                              0x1D172, 0x1D17B, 0xE1000] {
+            let scalar = Unicode.Scalar(value)!
+            XCTAssertEqual(FoldTextSanitizer.sanitize("a\(scalar)b"), "a\(scalar)b", "U+\(String(value, radix: 16, uppercase: true)) was dropped")
+        }
+    }
+
+    func testJoinersAndEmojiVariationSelectorsStayOnPurpose() {
+        let family = "👩\u{200D}👩"
+        XCTAssertEqual(FoldTextSanitizer.sanitize(family), family, "ZWJ keeps an emoji sequence together")
+        XCTAssertEqual(FoldTextSanitizer.sanitize("❤\u{FE0F}"), "❤\u{FE0F}", "VS16 keeps the emoji presentation")
+        XCTAssertEqual(FoldTextSanitizer.sanitize("a\u{200C}b"), "a\u{200C}b", "ZWNJ is needed by some scripts")
+    }
+
     func testInvisibleFormatCharactersAreDroppedButJoinersStay() {
         XCTAssertEqual(FoldTextSanitizer.sanitize("a\u{200B}b\u{2060}c\u{FEFF}d\u{FFF9}e"), "abcde")
         let family = "👩\u{200D}👩\u{200D}👧"
@@ -399,20 +464,25 @@ final class FoldTextSanitizerDocumentTextTests: XCTestCase {
     }
 
     func testScalarsJustOutsideTheRemovedRangesAreLeftAlone() {
-        for value: UInt32 in [0x00AC, 0x00AE, 0xFE10, 0xE01F0] {
+        for value: UInt32 in [0x00AC, 0x00AE, 0xFE10] {
             let s = "a" + String(Unicode.Scalar(value)!) + "b"
             assertBoth(s, s, "U+\(String(value, radix: 16, uppercase: true)) is not one of them")
         }
     }
 
     func testARowKeepsEverythingDocumentTextDrops() {
-        // Row mode did not change: these are what it has always kept.
-        let kept = ["a\u{00AD}b", "a\u{180E}b", "a\u{FE00}b", "a\u{E0100}b", "\u{2764}\u{FE0F}", "a\(vs16)", "a\(vs15)b",
+        // Rows keep what emoji and scripts need next to ordinary text: ZWJ/ZWNJ and U+FE00-FE0F. Rows now match
+        // the daemon's `is_invisible` for the rest (U+00AD, U+180B-180F, U+E0100-E0FFF): a hidden payload can ride
+        // in the variation selectors supplement after a visible base character, so a row must not carry it.
+        let kept = ["a\u{FE00}b", "\u{2764}\u{FE0F}", "a\(vs16)", "a\(vs15)b",
                     "a\(zwj)b", "a\(zwnj)b", "\(zwj)\(eAcute)", "\(eAcute)\(zwj)", "\(eAcute)\(zwj)\(zwj)\(eAcute)"]
         for text in kept {
             XCTAssertEqual(row(text), text, "a row keeps \(hex(text))")
         }
         XCTAssertEqual(row("👩\(zwj)👩\(zwj)👧"), "👩\(zwj)👩\(zwj)👧")
+        for dropped in ["a\u{00AD}b", "a\u{180E}b", "a\u{E0100}b", "a\u{E01F0}b"] {
+            XCTAssertEqual(row(dropped), "ab", "a row drops \(hex(dropped))")
+        }
     }
 
     // MARK: U+FE0F and U+FE0E (text and emoji presentation)

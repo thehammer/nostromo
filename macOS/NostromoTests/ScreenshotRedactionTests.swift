@@ -164,6 +164,23 @@ private final class SRForeignAreaPane: NSView, TerminalPixelSource {
     required init?(coder: NSCoder) { fatalError("not used") }
 }
 
+/// Shaped like the real pane host for the staged-commands drawer: a terminal body that is the pane's
+/// `terminalPixelArea`, and the drawer BESIDE it (a sibling subview, so the body's area does not cover it).
+private final class SRDrawerPane: NSView, TerminalPixelSource {
+    let body = SRSolidView(color: SRPalette.canaryA)
+    var terminalPixelArea: NSView { body }
+
+    init(frame: NSRect, drawer: StagingDrawerView) {
+        super.init(frame: frame)
+        body.frame = NSRect(x: 0, y: 100, width: frame.width, height: frame.height - 100)
+        drawer.frame = NSRect(x: 0, y: 0, width: frame.width, height: 100)
+        addSubview(body)
+        addSubview(drawer)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+}
+
 // MARK: - Rig
 
 /// An offscreen titled window (never ordered front):
@@ -957,5 +974,91 @@ final class ScreenshotRedactionTests: XCTestCase {
         XCTAssertGreaterThan(output.loudCount(in: region), 0, "an unregistered view's pixels are not redacted")
         XCTAssertEqual(output.mismatches(against: baseline, excluding: [], tolerance: 2), 0, "with no terminals the capture is unchanged")
         XCTAssertEqual(output.fillCount(in: output.fullRect), 0)
+    }
+    // MARK: The staged-commands drawer (what an agent staged for a person is read on screen only)
+
+    private struct StagedPane {
+        let staging: StagingRig
+        let pane: SRDrawerPane
+        let drawer: StagingDrawerView
+    }
+
+    /// A pane with a terminal body and a drawer holding a list (or none), inside `rig`'s window. A loud lime
+    /// view is laid inside the drawer, so the detector can tell its pixels from the window's.
+    private func addPaneWithDrawer(to rig: SRRig, listed: Bool) -> StagedPane {
+        let staging = StagingRig()
+        addTeardownBlock { staging.tearDown() }
+        let drawer = StagingDrawerView(controller: staging.controller, staging: staging.staging, paneKey: UUID().uuidString,
+                                       date: { StagingFixtures.baseDate }, reduceMotion: { true })
+        let pane = SRDrawerPane(frame: NSRect(x: 20, y: 20, width: 300, height: 300), drawer: drawer)
+        rig.stage.addSubview(pane)
+        if listed { staging.ingest(StagingFixtures.entries(["ls -la", "pwd", "git status --short"])) }
+        drawer.layoutSubtreeIfNeeded()
+        drawer.addSubview(SRSolidView(frame: NSRect(x: 200, y: 50, width: 60, height: 30), color: SRPalette.canaryB))
+        return StagedPane(staging: staging, pane: pane, drawer: drawer)
+    }
+
+    func test_real_app_screenshot_paints_over_the_staged_commands_drawer_beside_the_terminal() throws {
+        let rig = makeRig()
+        let staged = addPaneWithDrawer(to: rig, listed: true)
+        XCTAssertFalse(staged.drawer.isHidden, "harness: the drawer shows a list")
+
+        let baseCapture = try rig.capture(rig.cv)
+        let baseline = try XCTUnwrap(SRPixels(rep: baseCapture.rep))
+        let region = baseCapture.pixelRect(of: staged.drawer.convert(staged.drawer.bounds, to: nil))
+        XCTAssertGreaterThan(baseline.loudCount(in: region), 0, "harness: the drawer's canary is in the unredacted capture")
+
+        let capture = try rig.capture(rig.cv)
+        let data = try ScreenshotRedaction.pngData(of: capture.rep, window: rig.window, captureRect: capture.rect, allowsSynthetic: false)
+        let output = try XCTUnwrap(SRPixels(png: data))
+
+        XCTAssertEqual(output.width, baseline.width)
+        XCTAssertEqual(output.loudCount(in: region), 0, "pixels of the staged-commands drawer survive")
+        XCTAssertEqual(output.loudCount(in: output.fullRect), 0, "no canary pixel anywhere: the terminal body and the drawer are both hidden")
+        let corners = [(region.x0, region.y0), (region.x1 - 1, region.y0), (region.x0, region.y1 - 1), (region.x1 - 1, region.y1 - 1),
+                       (region.x0 + region.width / 4, region.y0 + region.height / 4),
+                       (region.x0 + 3 * region.width / 4, region.y0 + 3 * region.height / 4)]
+        for (x, y) in corners {
+            XCTAssertTrue(output.isFill(x, y), "(\(x),\(y)) of the drawer is not the redaction colour: \(output.rgb(x, y))")
+        }
+    }
+
+    func test_qa_build_screenshot_leaves_the_staged_commands_drawer_unchanged() throws {
+        let rig = makeRig()
+        let staged = addPaneWithDrawer(to: rig, listed: true)
+
+        let baseCapture = try rig.capture(rig.cv)
+        let baseline = try XCTUnwrap(SRPixels(rep: baseCapture.rep))
+        let region = baseCapture.pixelRect(of: staged.drawer.convert(staged.drawer.bounds, to: nil))
+        let capture = try rig.capture(rig.cv)
+        let data = try ScreenshotRedaction.pngData(of: capture.rep, window: rig.window, captureRect: capture.rect, allowsSynthetic: true)
+        let output = try XCTUnwrap(SRPixels(png: data))
+
+        XCTAssertGreaterThan(output.loudCount(in: region), 0, "the QA build's screenshot shows the drawer")
+        XCTAssertEqual(output.mismatches(against: baseline, excluding: [], tolerance: 2), 0,
+                       "the QA build's screenshot is the capture, pixel for pixel")
+    }
+
+    func test_the_drawer_is_one_of_the_terminal_areas_of_its_window() throws {
+        let rig = makeRig()
+        let staged = addPaneWithDrawer(to: rig, listed: true)
+
+        let areas = try ScreenshotRedaction.terminalAreas(in: rig.window)
+
+        XCTAssertEqual(areas.count, 2, "the pane's body and the drawer beside it: \(areas)")
+        XCTAssertTrue(areas.contains(staged.drawer.convert(staged.drawer.bounds, to: nil).standardized), "\(areas)")
+        XCTAssertTrue(areas.contains(staged.pane.body.convert(staged.pane.body.bounds, to: nil).standardized), "\(areas)")
+    }
+
+    func test_a_drawer_with_no_list_does_not_stop_a_real_app_screenshot() throws {
+        let rig = makeRig()
+        let staged = addPaneWithDrawer(to: rig, listed: false)
+        XCTAssertTrue(staged.drawer.isHidden, "harness: no list, no drawer")
+
+        let capture = try rig.capture(rig.cv)
+        let data = try ScreenshotRedaction.pngData(of: capture.rep, window: rig.window, captureRect: capture.rect, allowsSynthetic: false)
+        let output = try XCTUnwrap(SRPixels(png: data))
+
+        XCTAssertEqual(output.loudCount(in: output.fullRect), 0, "the terminal body is still hidden")
     }
 }

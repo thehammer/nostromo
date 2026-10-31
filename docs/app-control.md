@@ -170,6 +170,12 @@ show terminal pixels in the real app (`com.hammer.nostromo`, where
   labelled `terminal hidden from app-control`. The header, the red remote frame and the environment
   label stay visible, so layout QA still works. Every window's screenshot hides the terminals in
   that window, mirrors included.
+- A pane's **staged-commands drawer** (what an agent staged for the person, see `terminal.md` "Command staging") is
+  a terminal pixel area of its own: it is painted over the same way. In the real app `tree`, `find` and `ax` also
+  read it as one entry with the fixed text `staged commands hidden from app-control` and no children, so
+  neither a staged command nor its note can reach an agent through app-control (`AppControlAX.isWithheld`).
+  The QA instance (the synthetic-input gate relaxed) is unchanged and reads the rows, which is what
+  `scripts/qa/terminal-staging.sh` relies on. VoiceOver is unaffected: it uses the system accessibility API.
 - The capture is made in memory and painted over **before** the PNG is encoded. The unredacted image
   is never written to disk, not even to a temp file (`ScreenshotRedaction.pngData`; the server writes
   only what it returns).

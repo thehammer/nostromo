@@ -13,6 +13,7 @@ pub mod broker_client;
 pub mod crew;
 pub mod decode;
 pub mod feed;
+pub mod notices;
 pub mod origin;
 pub mod protocol;
 
@@ -220,6 +221,21 @@ pub struct MotherJob {
     /// on every publish of the job feed; never read from Mother.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nostromo: Option<JobAnnotation>,
+    /// Mother's free-form `.failure_reason` of the latest `failed` transition
+    /// (a notice names only its class, `notices::element::failure_class`).
+    #[serde(
+        default,
+        deserialize_with = "lenient_reason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub failure_reason: Option<String>,
+    /// Mother's `.actual_cost_usd` (cumulative spend; a notice's `cost_usd`).
+    #[serde(
+        default,
+        deserialize_with = "lenient_cost",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub actual_cost_usd: Option<f64>,
 
     // ── headless-crew keys ────────────────────────────────────────────────
     //
@@ -335,6 +351,23 @@ where
     let text: Option<String> =
         crew::lenient::decode_key(d, "origin", crew::lenient::Shape::Scalar)?;
     Ok(text.filter(|t| !t.trim().is_empty()))
+}
+
+fn lenient_reason<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let text: Option<String> =
+        crew::lenient::decode_key(d, "failure_reason", crew::lenient::Shape::Scalar)?;
+    Ok(text.filter(|t| !t.trim().is_empty()))
+}
+
+fn lenient_cost<'de, D>(d: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_f64().filter(|c| c.is_finite() && *c >= 0.0))
 }
 
 /// The `--label` of every Mother job queued from a work item (Send to agent).
@@ -628,6 +661,23 @@ fn trimmed_stderr(stderr: &[u8]) -> String {
         .collect()
 }
 
+/// [`trimmed_stderr`] with every Claude session id removed: `session` as given
+/// and anything shaped like one (a UUID). The scrub runs before the cap, so a
+/// cut cannot leave half an id behind.
+fn scrubbed_stderr(stderr: &[u8], session: Option<&str>) -> String {
+    static UUID: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let uuid = UUID.get_or_init(|| {
+        regex::Regex::new("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+            .expect("a valid pattern")
+    });
+    let mut text = String::from_utf8_lossy(stderr).into_owned();
+    if let Some(session) = session.filter(|s| !s.is_empty()) {
+        text = text.replace(session, "<session>");
+    }
+    let text = uuid.replace_all(&text, "<session>");
+    trimmed_stderr(text.as_bytes())
+}
+
 /// Archive every terminal-state job, regardless of age
 /// (`mother archive --older-than 0`).
 pub async fn archive_all() -> Result<()> {
@@ -740,8 +790,9 @@ pub async fn add_job(req: AddJobRequest) -> Result<String> {
     let out = output_bounded(cmd, "add").await?;
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || id.is_empty() {
-        let detail = trimmed_stderr(&out.stderr);
-        // No plan path in the log: a plan is the user's text.
+        let detail = scrubbed_stderr(&out.stderr, req.origin_session.as_deref());
+        // No plan path in the log: a plan is the user's text. No session id
+        // either: argv carries `--origin-session <sid>` and Mother may echo it.
         warn!("mother add failed: {detail}");
         return Err(cli_failure("add", detail).into());
     }

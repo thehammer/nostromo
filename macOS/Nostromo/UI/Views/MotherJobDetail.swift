@@ -10,6 +10,83 @@ import os
 
 private let log = Logger(subsystem: "com.hammer.nostromo", category: "mother-detail")
 
+// MARK: - JobViewSwitch
+
+/// The Overview · Plan · Log switch, with a say in what a screen reader reads for each segment.
+///
+/// AppKit builds a segmented control's accessibility children itself, as private proxies it makes again at
+/// every query, so a label set on one of them is gone by the next (and they are not `NSAccessibilityElement`s
+/// to begin with). The visible label of the Log segment is "Log •", which a screen reader reads as "Log
+/// bullet". So the control answers `accessibilityChildren()` itself: one radio-button element per segment,
+/// named from `spokenLabels` (the segment's own label while there is none), carrying whether it is the
+/// selected one and pressing it as a click would. The elements are kept, so their identity is stable.
+final class JobViewSwitch: NSSegmentedControl {
+
+    /// What is read for each segment, by index. Missing entries fall back to the visible label.
+    var spokenLabels: [String] = []
+
+    private var elements: [SegmentElement] = []
+
+    /// The segment's name as a screen reader gets it.
+    func spokenLabel(forSegment index: Int) -> String? {
+        guard index >= 0, index < segmentCount else { return nil }
+        if index < spokenLabels.count { return spokenLabels[index] }
+        return label(forSegment: index)
+    }
+
+    override func accessibilityChildren() -> [Any]? {
+        while elements.count < segmentCount {
+            let element = SegmentElement()
+            element.setAccessibilityRole(.radioButton)
+            element.setAccessibilityParent(self)
+            elements.append(element)
+        }
+        if elements.count > segmentCount { elements.removeLast(elements.count - segmentCount) }
+        let frames = segmentFrames()
+        for (index, element) in elements.enumerated() {
+            element.setAccessibilityLabel(spokenLabel(forSegment: index))
+            element.setAccessibilityFrameInParentSpace(frames[index])
+            element.isSelectedSegment = selectedSegment == index
+            element.press = { [weak self] in self?.pressSegment(index) }
+        }
+        return elements
+    }
+
+    /// Where each segment is, in the control's own coordinates: the control's width shared out by the width
+    /// of each label (the segments size themselves to their labels, with the same padding each).
+    private func segmentFrames() -> [NSRect] {
+        let count = segmentCount
+        guard count > 0, bounds.width > 0 else { return Array(repeating: bounds, count: count) }
+        let attributes: [NSAttributedString.Key: Any] = [.font: font ?? NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
+        let widths = (0 ..< count).map { NSAttributedString(string: label(forSegment: $0) ?? "", attributes: attributes).size().width }
+        let padding = max(0, (bounds.width - widths.reduce(0, +)) / CGFloat(count))
+        var x = bounds.minX
+        return widths.map { width in
+            defer { x += width + padding }
+            return NSRect(x: x, y: bounds.minY, width: width + padding, height: bounds.height)
+        }
+    }
+
+    private func pressSegment(_ index: Int) {
+        guard index >= 0, index < segmentCount else { return }
+        selectedSegment = index
+        if let action { NSApplication.shared.sendAction(action, to: target, from: self) }
+    }
+
+    private final class SegmentElement: NSAccessibilityElement {
+        var isSelectedSegment = false
+        var press: (() -> Void)?
+
+        override func accessibilityValue() -> Any? { isSelectedSegment ? 1 : 0 }
+
+        override func accessibilityPerformPress() -> Bool {
+            guard let press else { return false }
+            press()
+            return true
+        }
+    }
+}
+
 // MARK: - MotherJobDetailHost
 
 /// What `MotherJobDetail` needs from the app. `AppStore` conforms; tests pass a stub.
@@ -330,7 +407,7 @@ final class MotherJobDetail: NSView {
     }
 
     /// Overview · Plan · Log. The Plan segment exists only while the job has a plan path.
-    let segmentControl = NSSegmentedControl()
+    let segmentControl = JobViewSwitch()
     /// The segment on show. Per detail (so per job tab): `select` starts at Overview, `update` never changes it.
     private(set) var selectedSegment: Segment = .overview
     /// New log lines arrived while another segment was showing; cleared by showing the Log.
@@ -941,11 +1018,7 @@ final class MotherJobDetail: NSView {
     }
 
     private func applySegmentAccessibility(_ segments: [Segment]) {
-        let children = segmentControl.accessibilityChildren() ?? []
-        for (child, segment) in zip(children, segments) {
-            guard let label = segmentAccessibilityLabel(segment) else { continue }
-            (child as? NSAccessibilityElement)?.setAccessibilityLabel(label)
-        }
+        segmentControl.spokenLabels = segments.map { segmentAccessibilityLabel($0) ?? $0.title }
     }
 
     /// Only the selected segment is on show; the others are hidden. The plan view reads and watches

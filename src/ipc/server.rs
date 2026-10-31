@@ -61,6 +61,11 @@ const PTY_HOST_REMOVED: &str =
 /// The refusal a `DecisionAnswer` from anyone but the verified Mac app gets.
 const NOT_OPERATOR_APP: &str = "not_operator_app: only the verified Nostromo app may answer";
 
+/// What a local peer that is not the operator app is told when it tries to
+/// change a Mother notice switch.
+const NOT_OPERATOR_APP_NOTICES: &str =
+    "not_operator_app: only the verified Nostromo app may change Mother notice settings";
+
 /// The optional capability advertised in `Welcome.features`: this daemon serves
 /// the `work` topic and its frames.
 const FEATURE_WORK: &str = "work";
@@ -1336,6 +1341,12 @@ fn handle_client_msg(
     if trust.is_network() && refuse_for_network(&msg, sensitive) {
         log_network_model_refusal(&msg, session_mgr, sensitive);
         log_network_task_refusal(&msg, session_mgr, sensitive);
+        if matches!(msg, ClientMsg::MotherNoticeSettingsSet { .. }) {
+            let engine = session_mgr.lock().unwrap().notice_engine();
+            if let Some(engine) = engine {
+                engine.audit_settings_refused("network");
+            }
+        }
         // A terminal verb over the network is audited too (before the reply).
         if let Some(op) = terminal::op_of(&msg) {
             lock_terminals(terminals).audit_refused(
@@ -2287,6 +2298,44 @@ fn handle_client_msg(
             });
         }
 
+        // ── Mother notice switches (the verified app only; network refused above)
+        ClientMsg::MotherNoticeSettingsSet { .. } if trust != PeerTrust::OperatorApp => {
+            warn!(
+                conn_key,
+                ?trust,
+                "MotherNoticeSettingsSet refused: not the verified Nostromo app"
+            );
+            let engine = session_mgr.lock().unwrap().notice_engine();
+            if let Some(engine) = engine {
+                engine.audit_settings_refused("local_other");
+            }
+            let _ = targeted_tx.send(ServerMsg::Error {
+                message: NOT_OPERATOR_APP_NOTICES.to_string(),
+            });
+        }
+
+        ClientMsg::MotherNoticeSettingsSet {
+            scope,
+            tag,
+            mode,
+            enabled,
+        } => {
+            // Taken out of the manager's lock first: applying a switch may take
+            // back a queued notice, which takes the manager's lock.
+            let engine = session_mgr.lock().unwrap().notice_engine();
+            let outcome = match engine {
+                Some(engine) => engine
+                    .apply_settings(scope, tag.as_deref(), mode, enabled)
+                    .map_err(|e| e.code()),
+                None => Err("mother_notices_unavailable"),
+            };
+            if let Err(code) = outcome {
+                let _ = targeted_tx.send(ServerMsg::Error {
+                    message: code.to_string(),
+                });
+            }
+        }
+
         ClientMsg::ModelDefaultsRequest {} => {
             let msg = session_mgr.lock().unwrap().model_defaults_msg();
             let _ = targeted_tx.send(msg);
@@ -3220,6 +3269,8 @@ fn retain_key(msg: &ServerMsg) -> Option<String> {
             group.as_deref().unwrap_or("")
         )),
         ServerMsg::TeriPicks { .. } => Some("picks".to_string()),
+        // Replayed to a local client that subscribes after the last change.
+        ServerMsg::MotherNoticeState { .. } => Some("mother_notice_state".to_string()),
         _ => None,
     }
 }
@@ -3428,6 +3479,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherJobs { .. } => subscribed(topics, Topic::MotherJobs),
         ServerMsg::MotherStatusline(_) => subscribed(topics, Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => subscribed(topics, Topic::MotherJobs),
+        ServerMsg::MotherNoticeState { .. } => subscribed(topics, Topic::MotherJobs),
         ServerMsg::MotherPeek { .. } => subscribed(topics, Topic::MotherPeek),
         ServerMsg::TeriState { .. } => subscribed(topics, Topic::Teri),
         ServerMsg::WorkSourceStatus { .. }

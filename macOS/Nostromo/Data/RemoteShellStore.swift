@@ -253,35 +253,14 @@ final class RemoteShellStore {
         return "Requested by \(agent) in \(focus)"
     }
 
-    /// Agent-supplied text as plain text: format characters (bidi overrides, zero-width, BOM) are
-    /// dropped, control characters and newlines become spaces, runs of spaces collapse, and anything
-    /// past `limit` is cut (the last character is "…"). Nil when nothing is left.
+    /// Agent-supplied text as plain text (`AgentDisplayText.plain`). Nil when nothing is left.
     private static func plainText(_ text: String?, limit: Int) -> String? {
-        guard let text else { return nil }
-        let spaced = String(String.UnicodeScalarView(text.unicodeScalars.compactMap { scalar -> Unicode.Scalar? in
-            if scalar.properties.generalCategory == .format || invisibleFillers.contains(scalar.value) { return nil }
-            return CharacterSet.controlCharacters.contains(scalar) || CharacterSet.newlines.contains(scalar)
-                ? " " : scalar
-        }))
-        let collapsed = spaced.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
-        guard !collapsed.isEmpty else { return nil }
-        guard collapsed.count > limit else { return collapsed }
-        return String(collapsed.prefix(limit - 1)) + "\u{2026}"
+        AgentDisplayText.plain(text, limit: limit)
     }
-
-    /// Not format characters (so `generalCategory == .format` misses them) but they draw nothing: Hangul
-    /// filler (U+3164, U+115F, U+1160, U+FFA0), the combining grapheme joiner (U+034F) and braille blank (U+2800).
-    private static let invisibleFillers: Set<UInt32> = [0x3164, 0x115F, 0x1160, 0xFFA0, 0x034F, 0x2800]
 
     /// Text with something visible in it: whitespace, format characters and the fillers do not count.
     private static func nonBlank(_ text: String?) -> String? {
-        guard let text else { return nil }
-        let visible = text.unicodeScalars.contains { scalar in
-            !CharacterSet.whitespacesAndNewlines.contains(scalar)
-                && scalar.properties.generalCategory != .format
-                && !invisibleFillers.contains(scalar.value)
-        }
-        return visible ? text : nil
+        AgentDisplayText.hasVisibleContent(text) ? text : nil
     }
 
     private static func nonEmpty(_ text: String?) -> String? {
