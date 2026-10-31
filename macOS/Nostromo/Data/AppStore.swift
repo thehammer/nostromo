@@ -1996,6 +1996,21 @@ struct MotherResnapshotGuard {
     }
 }
 
+/// The one way to open a Mother job: a "needs you" notification and a transcript marker both go
+/// through it.
+enum MotherJobRouting {
+    /// The existing "open this Mother job" navigation (see `TeriBindings`): select the Mother
+    /// focus (the key window's layout switches to it), then open the job's tab. Never activates
+    /// the app; a caller that was clicked does that.
+    static func open(jobId: String) {
+        MotherView.requestedJobId = jobId
+        if let mother = FocusStore.shared.focuses.first(where: { $0.id == "mother" }) {
+            AppStore.shared.focusSelectionRequests.send(mother)
+        }
+        NotificationCenter.default.post(name: MotherView.openJobNotification, object: nil)
+    }
+}
+
 /// Where a click on a "needs you" notification goes.
 enum NeedsYouRouting {
     /// Route a delivered notification's `userInfo`. Returns false when it is not one this
@@ -2005,13 +2020,7 @@ enum NeedsYouRouting {
     static func route(userInfo: [AnyHashable: Any]) -> Bool {
         guard userInfo["producer"] as? String == MotherNeedsYouProducer.name,
               let jobId = userInfo["jobId"] as? String, !jobId.isEmpty else { return false }
-        // The existing "open this Mother job" navigation (see `TeriBindings`): select the Mother
-        // focus (the key window's layout switches to it), then open the job's tab.
-        MotherView.requestedJobId = jobId
-        if let mother = FocusStore.shared.focuses.first(where: { $0.id == "mother" }) {
-            AppStore.shared.focusSelectionRequests.send(mother)
-        }
-        NotificationCenter.default.post(name: MotherView.openJobNotification, object: nil)
+        MotherJobRouting.open(jobId: jobId)
         return true
     }
 }

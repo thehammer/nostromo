@@ -198,7 +198,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// Gap below the last block.
     private static let bottomPadding: CGFloat = 14
     /// Gap between the bubble and the first block.
-    private static let bubbleGap: CGFloat = 8
+    private static let bubbleGap: CGFloat = TurnHeightEstimator.userSlotGap
     /// Leading inset of the block column.
     private static let blocksLeadingInset: CGFloat = 14
     /// Trailing inset of the user bubble.
@@ -238,6 +238,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     private var needsFullRemeasure = true
 
     private var bubble: UserBubbleView?
+    /// The muted marker a Mother job notice turn shows in the user slot, in place of `bubble`.
+    private var wakeMarker: WakeMarkerView?
+    /// Height of whichever fills the user slot (the bubble, or the fixed-height marker).
     private var bubbleHeight: CGFloat = 0
 
     /// The frame-positioned column under the bubble: the truncation banner when
@@ -409,9 +412,16 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         // Unless it holds text the blocks do not show, or attachments: then an "also sent" bubble
         // keeps what the agent received visible.
         let bubbleText = turn.hasTerminalOrigin ? turn.terminalOriginBubbleText : turn.userInput
+        if let content = turn.motherNoticeMarker {
+            // A Mother job notice is one muted marker in the user slot, never the raw element and
+            // never a bubble. Its Copy Notice Text menu keeps the agent's text reachable. The confirm
+            // sentinel does not apply: this turn is not a confirm-card reply.
+            let marker = WakeMarkerView(content: content, noticeText: turn.userInput)
+            wakeMarker = marker
+            bubbleWidthConstraint = attachIsland(marker, width: slotWidth())
         // The sentinel only ever marks a confirm-card reply, which has no terminal origin: on a
         // terminal-origin turn it is just text, and hiding it would hide what the agent received.
-        if let bubbleText, turn.hasTerminalOrigin || !turn.userInput.contains(Self.confirmReplySentinel) {
+        } else if let bubbleText, turn.hasTerminalOrigin || !turn.userInput.contains(Self.confirmReplySentinel) {
             let bubble = UserBubbleView(text: bubbleText, imageURLs: turn.imageURLs)
             self.bubble = bubble
             bubbleIsImageOnly = bubbleText == ChatSession.imageOnlyText && !turn.imageURLs.isEmpty
@@ -456,6 +466,19 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
 
     /// Whether the turn shows the user's message as a bubble.
     var hasUserBubble: Bool { bubble != nil }
+
+    /// The marker in the user slot of a Mother job notice turn (nil for any other turn).
+    var wakeMarkerView: WakeMarkerView? { wakeMarker }
+
+    /// What fills the user slot: the bubble, or a notice turn's marker.
+    private var userSlot: NSView? { bubble ?? wakeMarker }
+
+    /// Width of the user slot: the bubble's fraction of the pane, or the whole row for the marker
+    /// (one line, tail-truncated, trailing like the bubble).
+    private func slotWidth() -> CGFloat {
+        if wakeMarker != nil { return max(islandWidth - Self.blocksLeadingInset - Self.bubbleTrailingInset, 1) }
+        return Self.bubbleWidth(paneWidth: islandWidth, imageOnly: bubbleIsImageOnly)
+    }
 
     /// The text and attachment count the user bubble shows (nil without a bubble).
     var userBubbleContent: (text: String, imageCount: Int)? {
@@ -1065,10 +1088,10 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         guard needsFullRemeasure else { return }
         needsFullRemeasure = false
 
-        if let bubble {
-            let width = Self.bubbleWidth(paneWidth: islandWidth, imageOnly: bubbleIsImageOnly)
+        if let userSlot {
+            let width = slotWidth()
             bubbleWidthConstraint?.constant = width
-            bubbleHeight = Self.measureIsland(bubble, width: width)
+            bubbleHeight = Self.measureIsland(userSlot, width: width)
         }
         let blocksWidth = Self.blockWidth(paneWidth: islandWidth)
         for (i, view) in columnViews.enumerated() {
@@ -1089,7 +1112,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// estimator and the renderer converge rather than drift.
     private var contentHeight: CGFloat {
         var height = Self.topPadding
-        if bubble != nil { height += bubbleHeight + Self.bubbleGap }
+        if userSlot != nil { height += bubbleHeight + Self.bubbleGap }
         for (i, blockHeight) in columnHeights.enumerated() {
             if i > 0 { height += TurnHeightEstimator.blockSpacing }
             height += blockHeight
@@ -1103,7 +1126,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
 
     /// Top of the first column (under the bubble).
     private var columnsTop: CGFloat {
-        Self.topPadding + (bubble != nil ? bubbleHeight + Self.bubbleGap : 0)
+        Self.topPadding + (userSlot != nil ? bubbleHeight + Self.bubbleGap : 0)
     }
 
     /// Calls `body` with each column's index and top, in order, until it returns a value.
@@ -1345,9 +1368,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         remeasureIfNeeded()
 
         var y = Self.topPadding
-        if let bubble {
-            let width = Self.bubbleWidth(paneWidth: islandWidth, imageOnly: bubbleIsImageOnly)
-            place(bubble, alignmentRect:
+        if let userSlot {
+            let width = slotWidth()
+            place(userSlot, alignmentRect:
                     NSRect(x: islandWidth - Self.bubbleTrailingInset - width,
                            y: y, width: width, height: bubbleHeight))
             y += bubbleHeight + Self.bubbleGap

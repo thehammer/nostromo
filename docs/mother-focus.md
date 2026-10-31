@@ -270,12 +270,39 @@ transcript).
 
 **Transcript**: a notice turn's origin is `{"type": "mother_job_notice", "items": [{job_id, title, state,
 since, pr_url?, pr_number?}]}` (`TurnOrigin::MotherJobNotice`). It counts as a prompt like any other but
-is never the session's title. The golden turn is `tests/fixtures/mother-v2/turn-mother-notice.json`. Until
-the Mac renders the marker (MF2c), a notice turn shows as a plain bubble with the element text. The
+is never the session's title. The golden turn is `tests/fixtures/mother-v2/turn-mother-notice.json`. On the
+Mac a notice turn shows as a marker (below); iOS shows a plain bubble with the element text. The
 origin is first read from the turn's text (a stored transcript has nothing else), but on a live session
 the daemon takes it back from any turn it did not write as a notice (`TurnAuthor::Injected` with the
 notice key), so a pasted message that starts with the notice tag is a plain user turn and may be the
 session's title. A reloaded transcript still reads it from the text.
+
+### The marker in the transcript
+
+The Mac draws a notice turn as one muted line in the user slot, not as a bubble and never as the raw
+element:
+
+- one job: `⟲ Mother: "MF4: In-pane plan viewer" succeeded · PR #391`;
+- several: `⟲ 3 Mother updates`, the tooltip one line per job (at most 20, then `…and K more`).
+
+State words: `succeeded`, `failed`, `cancelled`, `needs you`, `PR merged`, `PR opened`, `running`, `queued`.
+The text is built by Kit `WakeMarkerText` and drawn as plain text, so the only untrusted part, a title, is
+sanitised (`FoldTextSanitizer`), capped (80 characters in the line, 120 in a tooltip) and sits inside
+quotes. A title cannot draw a second `⟲`, a badge or a tick: every mark is app-built. An unknown state is
+shown as plain words only. A turn whose origin is malformed or unknown decodes to no origin and shows as
+a plain bubble with the full text.
+
+Clicking the marker (or Return or Space on it, when focused) opens the job in the Mother focus through
+`MotherJobRouting.open(jobId:)`, the same route as a "needs you" notification; for several jobs the
+first opens, with the Mother focus's list in view. That is navigation, so it is a view action and is
+not gesture-gated. The context menu's **Copy Notice Text** copies the turn's raw `userInput`, the
+text the agent received, so nothing the agent was told is hidden.
+
+The marker has a fixed height (`TurnHeightEstimator.wakeMarkerHeight`, 22 pt) and one tail-truncating
+line, so the height estimate equals the drawn height and a notice arriving moves nothing the reader is
+looking at. Notice turns are ordinary turns: `identityKey` and `contentKey` still hash `userInput`.
+`WakeMarkerView`, `WakeMarkerContent`/`WakeMarkerText` and `wakeMarkerHeight` are generic: the
+background-activity wake turns reuse them.
 
 ### Logging
 
@@ -289,4 +316,5 @@ the log and the audit file.
 `src/mother/audit.rs`, `src/mother/feed.rs` (annotates on every publish), `src/mother/notices/` (the
 notice engine: `detect`, `batch`, `element`, `limits`, `store`), `src/mcp/tools/mother_mutators.rs`
 and `create_focus.rs` (stamping), `src/ipc/session_manager/mod.rs` (the session id in the environment, the
-history), `src/ipc/peer.rs` (network redaction), Kit `Wire/MotherJobAnnotation.swift`.
+history), `src/ipc/peer.rs` (network redaction), Kit `Wire/MotherJobAnnotation.swift`, Kit
+`Wire/MotherNoticeItemWire.swift` and `Transcript/WakeMarkerText.swift`, Mac `UI/Background/WakeMarkerView.swift`.
