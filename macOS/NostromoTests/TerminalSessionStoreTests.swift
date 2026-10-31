@@ -469,6 +469,52 @@ final class TerminalSessionStoreTests: XCTestCase {
         XCTAssertTrue(sent.isEmpty)
     }
 
+    // MARK: - Input: whether the bytes were taken
+
+    func testSendInputSaysTrueWhenTheBytesWereSentOrQueuedAndFalseWhenTheyWereDropped() {
+        state(info("t1", pane: "p1", status: .running))
+        state(info("ended", pane: "p2", status: .ended))
+        state(info("connecting", pane: "p3", status: .connecting))
+
+        XCTAssertTrue(store.sendInput(terminalId: "t1", bytes: Array("ls".utf8), fromWindow: "w1"), "a running terminal takes it")
+        XCTAssertEqual(sent, [.input(terminalId: "t1", bytes: Array("ls".utf8))], "and it went out")
+        let big = pasteBytes(TerminalSessionStore.inputChunkBytes + 1)
+        XCTAssertTrue(store.sendInput(terminalId: "t1", bytes: big, fromWindow: "w1"), "a paste in several frames is taken (sent or queued)")
+        drainScheduled()
+        XCTAssertEqual(inputFrames.flatMap { $0.bytes }.suffix(big.count).map { $0 }, big)
+
+        let before = sent.count
+        XCTAssertFalse(store.sendInput(terminalId: "t1", bytes: [], fromWindow: "w1"), "nothing to send")
+        XCTAssertFalse(store.sendInput(terminalId: "ended", bytes: [0x61], fromWindow: "w1"), "an ended terminal")
+        XCTAssertFalse(store.sendInput(terminalId: "connecting", bytes: [0x61], fromWindow: "w1"), "a terminal still connecting")
+        XCTAssertFalse(store.sendInput(terminalId: "nope", bytes: [0x61], fromWindow: "w1"), "a terminal nobody described")
+        XCTAssertEqual(sent.count, before, "a false answer means nothing went out")
+    }
+
+    func testSendInputSaysFalseWhenTheDaemonIsUnavailable() {
+        store.connectionChanged(true)
+        state(info())
+        XCTAssertTrue(store.sendInput(terminalId: "t1", bytes: [0x61], fromWindow: "w1"))
+
+        store.connectionChanged(false)
+        let before = sent.count
+        XCTAssertFalse(store.sendInput(terminalId: "t1", bytes: [0x62], fromWindow: "w1"), "the daemon cannot be reached")
+        XCTAssertEqual(sent.count, before)
+    }
+
+    func testSendInputSaysFalseForAnAutoReplyFromAWindowThatDoesNotDriveAndTrueFromTheDriver() {
+        attachedTerminal(window: "w-driver")
+        let mirror = sink(window: "w-mirror")
+        store.register(mirror, tag: "core-1", paneId: "terminal-a")
+        sent.removeAll()
+
+        XCTAssertTrue(store.sendInput(terminalId: "t1", bytes: [0x61], fromWindow: "w-driver"), "typing in the driver")
+        XCTAssertFalse(store.sendInput(terminalId: "t1", bytes: [0x72], fromWindow: "w-mirror", autoReply: true),
+                       "the driver's emulator answers; a mirror's reply is dropped")
+        XCTAssertTrue(store.sendInput(terminalId: "t1", bytes: [0x72], fromWindow: "w-driver", autoReply: true))
+        XCTAssertEqual(inputFrames.map { $0.autoReply }, [false, true], "the mirror's reply never went out")
+    }
+
     // MARK: - Input: auto replies
 
     func testAnAutoReplyIsSentMarkedAndAnOrdinaryInputIsNot() {

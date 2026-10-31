@@ -1803,6 +1803,19 @@ pub enum ClientMsg {
     TerminalStagingClear {
         terminal_id: String,
     },
+    /// Change a Mother job notice switch: a focus's mode (`scope: focus`, with
+    /// `tag` and `mode`) or the global one (`scope: global`, with `enabled`).
+    /// Operator app only; refused for any other local peer and for a network
+    /// peer. The new state is broadcast as `MotherNoticeState`.
+    MotherNoticeSettingsSet {
+        scope: crate::mother::notices::NoticeScope,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<crate::mother::origin::NotifyLevel>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -2812,6 +2825,12 @@ pub enum ServerMsg {
     /// successful reconnect so subscribers (e.g. `DaemonPtyClient`) can
     /// re-issue their attach/subscribe commands.
     DaemonReconnected,
+    /// The Mother notice switches and each focus's notice state (plan index
+    /// §W). Local peers only; sent on every change and after Subscribe.
+    MotherNoticeState {
+        enabled: bool,
+        focuses: Vec<crate::mother::notices::FocusNoticeState>,
+    },
 }
 
 #[cfg(test)]

@@ -108,10 +108,10 @@ pub struct JobAnnotation {
     /// The job's own notify level, if the enqueue gave one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<NotifyLevel>,
-    /// Placeholder: the notice state (MF2a gives it a type). Removed for a
-    /// network peer when the origin focus is sensitive.
+    /// The notice state (`notices::NoticeView`). Removed for a network peer
+    /// when the origin focus is sensitive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notice: Option<serde_json::Value>,
+    pub notice: Option<super::notices::NoticeView>,
     /// The focus was sensitive when it queued the job (see
     /// [`OriginEntry::sensitive`]). Never serialised: the daemon uses it to
     /// withhold the names from a network peer after the cause has lapsed.
@@ -482,12 +482,18 @@ impl Drop for EnqueueGuard {
     }
 }
 
+/// Told `(job_id, focus_tag)` when a job is first recorded as queued by a
+/// verified focus (an MCP stamp or a shell claim evaluated). Called with the
+/// book's lock released. The notice engine uses it to spot notice-born jobs.
+pub type FocusJobHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// The daemon's record of every job's origin. Cheap to clone; clones share it.
 #[derive(Clone)]
 pub struct OriginBook {
     state: Arc<Mutex<BookState>>,
     history: SessionHistory,
     audit: MotherAudit,
+    focus_job_hook: Arc<Mutex<Option<FocusJobHook>>>,
 }
 
 impl OriginBook {
@@ -525,6 +531,25 @@ impl OriginBook {
             })),
             history,
             audit,
+            focus_job_hook: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Be told about every job newly recorded as a verified focus's (see
+    /// [`FocusJobHook`]).
+    pub fn set_focus_job_hook(&self, hook: FocusJobHook) {
+        *lock(&self.focus_job_hook) = Some(hook);
+    }
+
+    fn focus_job_recorded(&self, recorded: &[(String, String)]) {
+        if recorded.is_empty() {
+            return;
+        }
+        let hook = lock(&self.focus_job_hook).clone();
+        if let Some(hook) = hook {
+            for (job, tag) in recorded {
+                hook(job, tag);
+            }
         }
     }
 
@@ -631,6 +656,9 @@ impl OriginBook {
                 focus: stamp.focus_tag.clone(),
                 via: stamp.via,
             };
+            let recorded = (stamp.kind == OriginKind::Focus)
+                .then(|| stamp.focus_tag.clone().map(|t| (job_id.to_owned(), t)))
+                .flatten();
             state.entries.insert(
                 job_id.to_owned(),
                 OriginEntry {
@@ -646,9 +674,11 @@ impl OriginBook {
                 },
             );
             state.persist();
-            event
+            (event, recorded)
         };
+        let (audit, recorded) = audit;
         self.audit.record(&audit);
+        self.focus_job_recorded(&recorded.into_iter().collect::<Vec<_>>());
         true
     }
 
@@ -658,6 +688,7 @@ impl OriginBook {
     pub fn annotate(&self, jobs: &mut [MotherJob]) {
         let now = now_ms();
         let mut unverified = Vec::new();
+        let mut recorded = Vec::new();
         {
             let mut state = lock(&self.state);
             let sensitivity = state.sensitivity.clone();
@@ -689,6 +720,11 @@ impl OriginBook {
                                     .unwrap_or_else(|| "invalid".to_owned()),
                             });
                         }
+                        if entry.kind == OriginKind::Focus {
+                            if let Some(tag) = &entry.focus_tag {
+                                recorded.push((job.id.clone(), tag.clone()));
+                            }
+                        }
                         state.entries.insert(job.id.clone(), entry.clone());
                         dirty = true;
                         entry
@@ -714,6 +750,7 @@ impl OriginBook {
         for event in &unverified {
             self.audit.record(event);
         }
+        self.focus_job_recorded(&recorded);
     }
 
     /// Decide the origin of a job the book has not seen, from its claim. The
@@ -830,7 +867,7 @@ pub fn session_prefix(sid: &str) -> Option<String> {
 
 /// Does `s` look like a focus tag (`claudia-C9D6B773`, `teri:fred`)? A claim
 /// that does not never reaches the audit file or the wire.
-fn is_tag_like(s: &str) -> bool {
+pub(crate) fn is_tag_like(s: &str) -> bool {
     !s.is_empty()
         && s.chars().count() <= MAX_TAG_CHARS
         && s.chars()
@@ -851,10 +888,18 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `<file>.bak.<ms>` when a `.bak` already exists) and a warning says so. The
 /// warning carries the path and the byte count, never a byte of the content
 /// (it holds session ids and focus names).
-fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+pub(crate) fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
+    load_json_checked(path).0
+}
+
+/// [`load_json`], also saying whether the file was read and parsed (`false`:
+/// it is missing, or unreadable or unparseable and so started empty).
+pub(crate) fn load_json_checked<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+) -> (T, bool) {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return T::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (T::default(), false),
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
@@ -862,11 +907,11 @@ fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
                 "a Mother origin file could not be read; starting empty"
             );
             keep_backup(path);
-            return T::default();
+            return (T::default(), false);
         }
     };
     match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
+        Ok(value) => (value, true),
         Err(_) => {
             let backup = keep_backup(path);
             tracing::warn!(
@@ -875,7 +920,7 @@ fn load_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
                 backed_up = backup.is_some(),
                 "a Mother origin file could not be parsed; starting empty (the file is kept as a backup)"
             );
-            T::default()
+            (T::default(), false)
         }
     }
 }
@@ -950,7 +995,7 @@ fn numbered_backups(path: &Path, name: &str) -> Vec<(i64, PathBuf)> {
 
 /// Write `value` as JSON to `path`, atomically (a temp file in the same
 /// directory, renamed over it), with the file mode `0600`.
-fn write_private<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+pub(crate) fn write_private<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1287,7 +1332,10 @@ mod tests {
                 session_prefix: Some("abcd1234".into()),
             },
             notify: Some(NotifyLevel::Wake),
-            notice: Some(serde_json::json!({"status": "told"})),
+            notice: Some(crate::mother::notices::NoticeView {
+                status: crate::mother::notices::NoticeStatus::Told,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let mut plain = a.clone();

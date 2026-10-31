@@ -633,20 +633,25 @@ fn bypass_no_invisible_character_survives_sanitizing() {
         "the predicate covers many code points: {}",
         hidden.len()
     );
-    let input: String = hidden.iter().map(|c| format!("[{c}]")).collect();
-    let expected: String = hidden
-        .iter()
-        .map(|c| format!("[\u{27E8}U+{:04X}\u{27E9}]", *c as u32))
-        .collect();
+    // The predicate now covers several thousand code points (the whole tag block up to U+E0FFF), more than
+    // one recorded string can hold: check them in chunks, each one under the cap. Every code point is still
+    // checked, through the same sanitizer.
+    for chunk in hidden.chunks(1000) {
+        let input: String = chunk.iter().map(|c| format!("[{c}]")).collect();
+        let expected: String = chunk
+            .iter()
+            .map(|c| format!("[\u{27E8}U+{:04X}\u{27E9}]", *c as u32))
+            .collect();
 
-    assert!(
-        input.len() < MAX_RECORDED_STRING_BYTES && expected.len() < MAX_RECORDED_STRING_BYTES,
-        "the cap is not in play here"
-    );
+        assert!(
+            input.len() < MAX_RECORDED_STRING_BYTES && expected.len() < MAX_RECORDED_STRING_BYTES,
+            "the cap is not in play here"
+        );
 
-    let out = sanitized(&input);
+        let out = sanitized(&input);
 
-    assert_eq!(out, expected);
+        assert_eq!(out, expected);
+    }
 }
 
 #[test]

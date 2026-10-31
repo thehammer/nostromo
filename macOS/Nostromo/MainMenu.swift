@@ -13,6 +13,7 @@ import AppKit
     func newRemoteShell(_ sender: Any?)
     func closeTerminalPane(_ sender: Any?)
     func terminalSendSelection(_ sender: Any?)
+    func focusStagedCommands(_ sender: Any?)
     func showTerminalAuditLog(_ sender: Any?)
     func revealTerminalAuditLog(_ sender: Any?)
     func terminalFind(_ sender: Any?)
@@ -92,6 +93,13 @@ enum MainMenu {
                                            action: #selector(MainMenuActions.terminalSendSelection(_:)), keyEquivalent: "")
         sendSelectionItem.target = target
         terminalMenu.addItem(sendSelectionItem)
+        // ⇧⌘J moves the keyboard into the pane's staged-commands drawer (focus only: it inserts nothing;
+        // Space on a selected row does, and only for a person). There is no per-command shortcut, ever.
+        let focusStagedItem = NSMenuItem(title: "Focus Staged Commands",
+                                         action: #selector(MainMenuActions.focusStagedCommands(_:)), keyEquivalent: "j")
+        focusStagedItem.keyEquivalentModifierMask = [.command, .shift]
+        focusStagedItem.target = target
+        terminalMenu.addItem(focusStagedItem)
         // The daemon's trail of terminal events (no keystrokes, no output). No shortcuts.
         terminalMenu.addItem(.separator())
         let showAuditItem = NSMenuItem(title: "Show Terminal Audit Log",

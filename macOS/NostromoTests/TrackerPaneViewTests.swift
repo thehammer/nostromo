@@ -1122,11 +1122,12 @@ final class TrackerPaneViewTests: XCTestCase {
     /// BA3 added ⇧⌘B (Session ▸ Background Activity…) and moved Debug ▸ Capture render state now
     /// from ⇧⌘B to ⌥⇧⌘B; the tracker itself still adds nothing. The terminal pane (1d) added ⌘T and ⇧⌘W
     /// (Terminal menu) and ⌘F and ⌘G (Edit ▸ Find…, Find Next). Terminal 1e added ⌃⌥⌘N (Debug ▸ Open
-    /// Second Window (QA), enabled only outside the real app).
+    /// Second Window (QA), enabled only outside the real app). Terminal staging (S1b) added ⇧⌘J (Terminal ▸
+    /// Focus Staged Commands: it moves the keyboard into the staged-commands drawer and inserts nothing).
     private static let pinnedKeyEquivalents: Set<String> = [
         "⌘q", "⌘x", "⌘c", "⌘v", "⌘a", "⌘z", "⌘Z",
         "⇧⌘d", "⇧⌘i", "⇧⌘k", "⇧⌘p", "⌥⇧⌘b", "⇧⌘m", "⇧⌘b", "⌥⌘a",
-        "⌘t", "⇧⌘t", "⇧⌘w", "⌘f", "⌘g", "⌃⌥⌘n",
+        "⌘t", "⇧⌘t", "⇧⌘w", "⌘f", "⌘g", "⌃⌥⌘n", "⇧⌘j",
     ]
 
     private func groups(_ pattern: String, in text: String, options: NSRegularExpression.Options = []) throws -> [[String]] {

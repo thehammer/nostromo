@@ -23,6 +23,7 @@
       "origin": {
         "label": ""
       },
+      "actual_cost_usd": 0.0,
       "activity": "gate_fix",
       "pr_url": "https://github.com/Carefeed/admin-portal/pull/42",
       "crew_opt_in": true,
@@ -287,6 +288,7 @@
       "origin": {
         "label": ""
       },
+      "actual_cost_usd": 0.0,
       "activity": "gate_hold",
       "pr_url": "https://github.com/Carefeed/admin-portal/pull/42",
       "crew_opt_in": true,

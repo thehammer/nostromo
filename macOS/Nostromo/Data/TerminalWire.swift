@@ -210,6 +210,9 @@ enum TerminalRefusedOp: String, Equatable {
     case keepAlive = "keep_alive"
     /// The Connect button on a remote shell's confirm sheet.
     case connect
+    /// The staging drawer's controls (a click, Space or VoiceOver press on a staged command; Copy, Remove, Clear all).
+    case stageInsert = "stage_insert", stagingCopy = "staging_copy"
+    case stagingRemove = "staging_remove", stagingClear = "staging_clear"
 }
 
 /// Every terminal frame this app sends. `encoded()` is the JSON body the daemon reads; the optional
@@ -238,6 +241,13 @@ enum TerminalClientMessage: Equatable {
     case followResume(terminalId: String)
     /// Send the user's selected `text` to focus `targetTag`, once. It never starts following.
     case sendSelection(terminalId: String, targetTag: String, text: String)
+    /// The app placed staged entry `entryId` at the prompt (`bytes` UTF-8 bytes of its text; the text itself
+    /// never goes in this frame). `confirmed` is S2's destructive-pattern sheet: always false in S1.
+    case stagingInserted(terminalId: String, entryId: String, bytes: Int, confirmed: Bool)
+    /// The user's Remove for one staged entry.
+    case stagingRemove(terminalId: String, entryId: String)
+    /// The user's Clear for the whole staged list.
+    case stagingClear(terminalId: String)
 
     var wireType: String {
         switch self {
@@ -254,6 +264,9 @@ enum TerminalClientMessage: Equatable {
         case .followStop:    return "terminal_follow_stop"
         case .followResume:  return "terminal_follow_resume"
         case .sendSelection: return "terminal_send_selection"
+        case .stagingInserted: return "terminal_staging_inserted"
+        case .stagingRemove: return "terminal_staging_remove"
+        case .stagingClear:  return "terminal_staging_clear"
         }
     }
 
@@ -268,7 +281,7 @@ enum TerminalClientMessage: Equatable {
             if let position { o["position"] = position }
             if let cwd { o["cwd"] = cwd }
         case .attach(let id), .detach(let id), .close(let id), .restart(let id), .keepAlive(let id),
-             .followStop(let id), .followResume(let id):
+             .followStop(let id), .followResume(let id), .stagingClear(let id):
             o["terminal_id"] = id
         case .input(let id, let bytes, let autoReply):
             o["terminal_id"] = id
@@ -290,6 +303,14 @@ enum TerminalClientMessage: Equatable {
             o["terminal_id"] = id
             o["target_tag"] = targetTag
             o["text"] = text
+        case .stagingInserted(let id, let entryId, let bytes, let confirmed):
+            o["terminal_id"] = id
+            o["entry_id"] = entryId
+            o["bytes"] = bytes
+            o["confirmed"] = confirmed
+        case .stagingRemove(let id, let entryId):
+            o["terminal_id"] = id
+            o["entry_id"] = entryId
         }
         return o
     }
