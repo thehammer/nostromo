@@ -388,6 +388,10 @@
 		KK000000000000000000102 /* DecisionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO000000000000000000100 /* DecisionStoreTests.swift */; };
 		MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
 		MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
+		MF000000000000000000A101 /* PlanDocumentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A001 /* PlanDocumentView.swift */; };
+		MF000000000000000000A201 /* PlanDocumentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A001 /* PlanDocumentView.swift */; };
+		MF000000000000000000A102 /* PlanFileLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A002 /* PlanFileLoader.swift */; };
+		MF000000000000000000A202 /* PlanFileLoader.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A002 /* PlanFileLoader.swift */; };
 		MM0000000000000000000102 /* ConversationContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000002 /* ConversationContentView.swift */; };
 		OO0000000000000000000101 /* TicketBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000001 /* TicketBlockDocument.swift */; };
 		HY0000000000000000000101 /* DocumentBlockDocument.swift in Sources */ = {isa = PBXBuildFile; fileRef = HY0000000000000000000001 /* DocumentBlockDocument.swift */; };
@@ -396,6 +400,12 @@
 		OO0000000000000000000102 /* TicketContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = OO0000000000000000000002 /* TicketContentView.swift */; };
 		HY0000000000000000000102 /* DocumentContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = HY0000000000000000000002 /* DocumentContentView.swift */; };
 		NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */; };
+		MF000000000000000000B101 /* PlanDocumentViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B001 /* PlanDocumentViewTests.swift */; };
+		MF000000000000000000B102 /* PlanFileLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B002 /* PlanFileLoaderTests.swift */; };
+		MF000000000000000000B103 /* MotherDetailSwitchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B003 /* MotherDetailSwitchTests.swift */; };
+		MF000000000000000000B104 /* MotherFocusFitnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B004 /* MotherFocusFitnessTests.swift */; };
+		MF000000000000000000B105 /* PlanFixupRedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B005 /* PlanFixupRedTests.swift */; };
+		MF000000000000000000B106 /* PlanFixupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B006 /* PlanFixupTests.swift */; };
 		MG0000000000000000000A1 /* MotherJobGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = MG0000000000000000000A0 /* MotherJobGrouping.swift */; };
 		MG0000000000000000000A2 /* MotherJobGrouping.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MG0000000000000000000A0 /* MotherJobGrouping.swift */; };
 		MG0000000000000000000B1 /* MotherJobGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MG0000000000000000000B0 /* MotherJobGroupingTests.swift */; };
@@ -947,8 +957,16 @@
 		OO0000000000000000001B0 /* ImagePasteboardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImagePasteboardTests.swift; sourceTree = "<group>"; };
 		OO000000000000000000100 /* DecisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStoreTests.swift; sourceTree = "<group>"; };
 		MM0000000000000000000001 /* MarkdownBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocument.swift; sourceTree = "<group>"; };
+		MF000000000000000000A001 /* PlanDocumentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanDocumentView.swift; sourceTree = "<group>"; };
+		MF000000000000000000A002 /* PlanFileLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanFileLoader.swift; sourceTree = "<group>"; };
 		MM0000000000000000000002 /* ConversationContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationContentView.swift; sourceTree = "<group>"; };
 		NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocumentTests.swift; sourceTree = "<group>"; };
+		MF000000000000000000B001 /* PlanDocumentViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanDocumentViewTests.swift; sourceTree = "<group>"; };
+		MF000000000000000000B002 /* PlanFileLoaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanFileLoaderTests.swift; sourceTree = "<group>"; };
+		MF000000000000000000B003 /* MotherDetailSwitchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDetailSwitchTests.swift; sourceTree = "<group>"; };
+		MF000000000000000000B004 /* MotherFocusFitnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherFocusFitnessTests.swift; sourceTree = "<group>"; };
+		MF000000000000000000B005 /* PlanFixupRedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanFixupRedTests.swift; sourceTree = "<group>"; };
+		MF000000000000000000B006 /* PlanFixupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanFixupTests.swift; sourceTree = "<group>"; };
 		MG0000000000000000000A0 /* MotherJobGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobGrouping.swift; sourceTree = "<group>"; };
 		MG0000000000000000000B0 /* MotherJobGroupingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobGroupingTests.swift; sourceTree = "<group>"; };
 		MD0000000000000000000A0 /* MotherDaemonStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDaemonStatus.swift; sourceTree = "<group>"; };
@@ -1300,6 +1318,7 @@
 			isa = PBXGroup;
 			children = (
 				TP000000000000000000G001 /* Terminal */,
+				MF000000000000000000G001 /* Mother */,
 				TP000000000000000000G002 /* Toast */,
 				WK0000000000000000000046 /* SendToAgentSheet.swift */,
 				WK0000000000000000000049 /* FocusBadges.swift */,
@@ -1577,6 +1596,12 @@
 				OO0000000000000000001B0 /* ImagePasteboardTests.swift */,
 				OO0000000000000000001A0 /* PostureScopedTests.swift */,
 				NN0000000000000000000001 /* MarkdownBlockDocumentTests.swift */,
+				MF000000000000000000B001 /* PlanDocumentViewTests.swift */,
+				MF000000000000000000B002 /* PlanFileLoaderTests.swift */,
+				MF000000000000000000B003 /* MotherDetailSwitchTests.swift */,
+				MF000000000000000000B004 /* MotherFocusFitnessTests.swift */,
+				MF000000000000000000B005 /* PlanFixupRedTests.swift */,
+				MF000000000000000000B006 /* PlanFixupTests.swift */,
 				PP000000000000000000006 /* ActivityEventDecodeTests.swift */,
 				PP000000000000000000008 /* ActivityStreamModelTests.swift */,
 				PP000000000000000000010 /* ActivityTickerWiringTests.swift */,
@@ -1728,6 +1753,15 @@
 				TP000000000000000000F014 /* ToastAction.swift */,
 			);
 			path = Toast;
+			sourceTree = "<group>";
+		};
+		MF000000000000000000G001 /* Mother */ = {
+			isa = PBXGroup;
+			children = (
+				MF000000000000000000A001 /* PlanDocumentView.swift */,
+				MF000000000000000000A002 /* PlanFileLoader.swift */,
+			);
+			path = Mother;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -1975,6 +2009,8 @@
 				LL0000000000000000000106 /* RowOffsetIndex.swift in Sources */,
 				LL0000000000000000000107 /* CodePaneRenderAudit.swift in Sources */,
 				MM0000000000000000000101 /* MarkdownBlockDocument.swift in Sources */,
+				MF000000000000000000A101 /* PlanDocumentView.swift in Sources */,
+				MF000000000000000000A102 /* PlanFileLoader.swift in Sources */,
 				MM0000000000000000000102 /* ConversationContentView.swift in Sources */,
 				OO0000000000000000000101 /* TicketBlockDocument.swift in Sources */,
 				HY0000000000000000000101 /* DocumentBlockDocument.swift in Sources */,
@@ -2268,6 +2304,8 @@
 				LL0000000000000000000205 /* RowOffsetIndex.swift in TestSources */,
 				LL0000000000000000000206 /* CodePaneRenderAudit.swift in TestSources */,
 				MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */,
+				MF000000000000000000A201 /* PlanDocumentView.swift in TestSources */,
+				MF000000000000000000A202 /* PlanFileLoader.swift in TestSources */,
 				OO0000000000000000000201 /* TicketBlockDocument.swift in TestSources */,
 				HY0000000000000000000201 /* DocumentBlockDocument.swift in TestSources */,
 				LL0000000000000000000301 /* CodeDocumentTests.swift in Sources */,
@@ -2373,6 +2411,12 @@
 				AC0000000000000000000031 /* AppControlProtocolTests.swift in Sources */,
 				KK0000000000000000001A2 /* PostureScopedTests.swift in Sources */,
 				NN0000000000000000000101 /* MarkdownBlockDocumentTests.swift in Sources */,
+				MF000000000000000000B101 /* PlanDocumentViewTests.swift in Sources */,
+				MF000000000000000000B102 /* PlanFileLoaderTests.swift in Sources */,
+				MF000000000000000000B103 /* MotherDetailSwitchTests.swift in Sources */,
+				MF000000000000000000B104 /* MotherFocusFitnessTests.swift in Sources */,
+				MF000000000000000000B105 /* PlanFixupRedTests.swift in Sources */,
+				MF000000000000000000B106 /* PlanFixupTests.swift in Sources */,
 				PP000000000000000000003 /* ActivityStreamModel.swift in TestSources */,
 				MD0000000000000000000A2 /* MotherDaemonStatus.swift in TestSources */,
 				MG0000000000000000000A2 /* MotherJobGrouping.swift in TestSources */,

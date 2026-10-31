@@ -1753,6 +1753,46 @@ async fn a_failing_mother_add_is_mother_failed_and_records_nothing() {
     assert!(rig.preview(DOC_BUG).await.existing.is_empty());
 }
 
+/// MF1-3: Send to agent is the user queueing the job: the daemon records "you" (via the
+/// app), and the job's `--label` is still `teri-send`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mother_job_sent_from_the_app_is_recorded_as_queued_by_you_and_keeps_its_label() {
+    use nostromo::mother::audit::MotherAudit;
+    use nostromo::mother::origin::{OriginKind, Via};
+    use nostromo::mother::{OriginBook, SessionHistory};
+
+    let rig = Rig::local().await;
+    let book = OriginBook::in_memory(SessionHistory::in_memory(), MotherAudit::disabled());
+    rig.sessions
+        .lock()
+        .unwrap()
+        .configure_origin_book(book.clone());
+    let alpha = rig.alpha();
+
+    let outcome = rig
+        .send(send_req(
+            DOC_BUG,
+            "mother_job",
+            "claudia",
+            Some(&alpha),
+            "Fix coupons",
+            "MOTHER-INSTRUCTION-LINE",
+        ))
+        .await
+        .expect("send");
+
+    assert_eq!(outcome.kind, "mother_job", "{outcome:?}");
+    let job_id = outcome.job_id.expect("a job id");
+    let adds = rig.mother_adds();
+    assert_eq!(adds.len(), 1, "{adds:?}");
+    assert_eq!(add_flags(&adds[0])["--label"], "teri-send", "{}", adds[0]);
+    let entry = book.entry(&job_id).expect("the book holds the sent job");
+    assert_eq!(
+        (entry.kind, entry.via, entry.focus_tag),
+        (OriginKind::You, Via::App, None)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mother_job_in_a_directory_that_is_not_a_git_repo_is_not_a_git_repo() {
     let rig = Rig::local().await;

@@ -384,9 +384,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         }
     }
 
-    /// Edit > Find… (⌘F) and Find Next (⌘G): the find bar of the terminal pane that holds the keyboard.
-    /// Nothing else answers them (see `MainMenu`), so a text view elsewhere behaves as it did before.
+    /// Edit > Find… (⌘F) and Find Next (⌘G): the find bar of the terminal pane that holds the keyboard,
+    /// or the find field of the Mother plan view that does. Nothing else answers them (see `MainMenu`),
+    /// so a text view elsewhere behaves as it did before.
     @objc func terminalFind(_ sender: Any?) {
+        if let plan = PlanDocumentView.containing(NSApp.keyWindow?.firstResponder) {
+            plan.performFind(sender)
+            return
+        }
         guard let host = TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) else {
             NSSound.beep()
             return
@@ -420,7 +425,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(terminalFind(_:)) {
-            return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
+            let responder = NSApp.keyWindow?.firstResponder
+            return TerminalPaneHostView.containing(responder) != nil || PlanDocumentView.containing(responder) != nil
         }
         if menuItem.action == #selector(terminalSendSelection(_:)) {
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)?.hasSelection ?? false

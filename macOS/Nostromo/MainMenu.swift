@@ -51,8 +51,9 @@ enum MainMenu {
         editMenu.addItem(.separator())
         editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
         editMenu.addItem(NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "Z"))
-        // Find acts on a terminal pane only: the items target the app delegate, which enables them (and
-        // forwards the action to SwiftTerm's find bar) only while a terminal pane holds the keyboard.
+        // Find acts on a terminal pane (or a Mother plan view) only: the items target the app delegate, which
+        // enables them (and forwards the action to SwiftTerm's find bar, or to the plan view's find field) only
+        // while one of those holds the keyboard.
         // They are not first-responder actions on purpose: an NSTextView (the REPL's input and
         // transcript) would otherwise answer `performFindPanelAction:` and open a find panel it never had.
         editMenu.addItem(.separator())

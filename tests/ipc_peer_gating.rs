@@ -2810,6 +2810,388 @@ async fn a_job_queued_from_a_work_item_is_withheld_from_a_tcp_peer_by_its_label_
     );
 }
 
+// ── MF1: who queued a job, for a network peer ────────────────────────────────
+
+/// A Mother job as the daemon publishes it once it has annotated it: `origin`
+/// is the annotation's origin object, `notice` an opaque notice state.
+fn annotated_mother_job(
+    id: &str,
+    origin: Value,
+    notify: Option<&str>,
+    notice: Option<Value>,
+) -> nostromo::mother::MotherJob {
+    let mut annotation = json!({ "origin": origin });
+    if let Some(n) = notify {
+        annotation["notify"] = json!(n);
+    }
+    if let Some(n) = notice {
+        annotation["notice"] = n;
+    }
+    serde_json::from_value(json!({
+        "id": id,
+        "state": "awaiting",
+        "title": format!("title of {id}"),
+        "nostromo": annotation,
+    }))
+    .expect("an annotated mother job")
+}
+
+/// The `nostromo` object of job `id` in the `mother_jobs` frame among `frames`.
+fn raw_annotation_of(frames: &[Value], id: &str) -> Value {
+    frames
+        .iter()
+        .filter(|f| f["type"] == "mother_jobs")
+        .flat_map(|f| f["jobs"].as_array().expect("jobs").clone())
+        .find(|j| j["id"] == id)
+        .unwrap_or_else(|| panic!("job {id} is in a mother_jobs frame: {frames:?}"))["nostromo"]
+        .clone()
+}
+
+fn raw_origin_of(frames: &[Value], id: &str) -> Value {
+    raw_annotation_of(frames, id)["origin"].clone()
+}
+
+/// A Unix peer and a TCP peer, both subscribed to everything and caught up.
+async fn raw_unix_and_tcp(h: &Harness) -> (UnixStream, TcpStream) {
+    let (mut tcp, mut unix) = (raw_tcp(h).await, raw_unix(h).await);
+    let everything = json!({"type": "subscribe", "topics": [], "renders_decisions": false});
+    raw_handshake(&mut tcp, everything.clone())
+        .await
+        .expect("tcp handshake");
+    raw_handshake(&mut unix, everything)
+        .await
+        .expect("unix handshake");
+    (unix, tcp)
+}
+
+#[tokio::test]
+async fn a_tcp_peer_sees_who_queued_a_job_by_kind_and_name_but_never_the_focus_tag_or_session_prefix(
+) {
+    let h = spawn_server().await;
+    let (mut unix, mut tcp) = raw_unix_and_tcp(&h).await;
+    let jobs = || {
+        vec![
+            annotated_mother_job(
+                "job-focus",
+                json!({
+                    "kind": "focus", "focus_tag": "claudia-AAAA1111",
+                    "name_snapshot": "Snapshot name", "focus_name": "Current name",
+                    "closed": false, "session_prefix": "5f3c9a10",
+                }),
+                Some("wake"),
+                Some(json!({"status": "told"})),
+            ),
+            annotated_mother_job(
+                "job-unverified",
+                json!({
+                    "kind": "unverified", "focus_tag": "claudia-BBBB2222",
+                    "name_snapshot": "Claimed name",
+                }),
+                None,
+                None,
+            ),
+            annotated_mother_job("job-you", json!({"kind": "you"}), Some("off"), None),
+            annotated_mother_job("job-unknown", json!({"kind": "unknown"}), None, None),
+        ]
+    };
+
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
+    let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
+
+    // Control: the Unix peer (the app) sees all of it.
+    let all = raw_origin_of(&unix_frames, "job-focus");
+    assert_eq!(all["focus_tag"], "claudia-AAAA1111", "{all}");
+    assert_eq!(all["session_prefix"], "5f3c9a10", "{all}");
+    assert_eq!(
+        raw_origin_of(&unix_frames, "job-unverified")["focus_tag"],
+        "claudia-BBBB2222"
+    );
+
+    // The TCP peer sees the kind and the names, and nothing that identifies the session or focus.
+    let focus = raw_annotation_of(&tcp_frames, "job-focus");
+    let origin = &focus["origin"];
+    assert_eq!(origin["kind"], "focus", "{focus}");
+    assert_eq!(origin["name_snapshot"], "Snapshot name", "{focus}");
+    assert_eq!(origin["focus_name"], "Current name", "{focus}");
+    assert_eq!(origin["closed"], false, "{focus}");
+    assert!(
+        origin.get("focus_tag").is_none(),
+        "no focus tag for a network peer: {focus}"
+    );
+    assert!(
+        origin.get("session_prefix").is_none(),
+        "no session prefix for a network peer: {focus}"
+    );
+    assert_eq!(focus["notify"], "wake", "{focus}");
+    assert_eq!(
+        focus["notice"],
+        json!({"status": "told"}),
+        "a non-sensitive focus keeps its notice: {focus}"
+    );
+    let unverified = raw_origin_of(&tcp_frames, "job-unverified");
+    assert_eq!(unverified["kind"], "unverified");
+    assert_eq!(unverified["name_snapshot"], "Claimed name");
+    assert!(
+        unverified.get("focus_tag").is_none(),
+        "the claimed tag is no more for a peer: {unverified}"
+    );
+    assert_eq!(raw_origin_of(&tcp_frames, "job-you")["kind"], "you");
+    assert_eq!(raw_origin_of(&tcp_frames, "job-unknown")["kind"], "unknown");
+    let wire = serde_json::to_string(&tcp_frames).unwrap();
+    for secret in ["claudia-AAAA1111", "claudia-BBBB2222", "5f3c9a10"] {
+        assert!(
+            !wire.contains(secret),
+            "{secret} reached a network peer: {wire}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_tcp_peer_sees_a_sensitive_focus_as_a_sensitive_focus_with_no_notice() {
+    let h = spawn_server().await;
+    // Registered sensitive the way a work-derived focus is.
+    h.session_mgr
+        .lock()
+        .unwrap()
+        .sensitive_tags()
+        .mark_tag("cody-secret-work");
+    let (mut unix, mut tcp) = raw_unix_and_tcp(&h).await;
+    let origin = |tag: &str, name: &str| {
+        json!({
+            "kind": "focus", "focus_tag": tag, "name_snapshot": name, "focus_name": name,
+            "closed": false, "session_prefix": "abcd1234",
+        })
+    };
+    let notice = || Some(json!({"status": "told"}));
+    let jobs = || {
+        vec![
+            // A Teri/Fred tag is sensitive by what it is.
+            annotated_mother_job(
+                "job-fred",
+                origin("fred", "Fred mailbox triage"),
+                Some("wake"),
+                notice(),
+            ),
+            annotated_mother_job(
+                "job-teri",
+                origin("teri", "Teri todo sweep"),
+                None,
+                notice(),
+            ),
+            // A tag registered sensitive.
+            annotated_mother_job(
+                "job-marked",
+                origin("cody-secret-work", "Secret payroll work"),
+                None,
+                notice(),
+            ),
+            annotated_mother_job(
+                "job-plain",
+                origin("claudia-AAAA1111", "Ordinary work"),
+                None,
+                notice(),
+            ),
+        ]
+    };
+
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
+    let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
+
+    assert_eq!(
+        raw_origin_of(&unix_frames, "job-fred")["focus_name"],
+        "Fred mailbox triage",
+        "control: the app sees the real name"
+    );
+    for id in ["job-fred", "job-teri", "job-marked"] {
+        let annotation = raw_annotation_of(&tcp_frames, id);
+        let o = &annotation["origin"];
+        assert_eq!(
+            o["kind"], "focus",
+            "{id}: the kind still shows: {annotation}"
+        );
+        assert_eq!(o["focus_name"], "a sensitive focus", "{id}: {annotation}");
+        assert_eq!(
+            o["name_snapshot"], "a sensitive focus",
+            "{id}: {annotation}"
+        );
+        assert!(
+            o.get("focus_tag").is_none() && o.get("session_prefix").is_none(),
+            "{id}: {annotation}"
+        );
+        assert!(
+            annotation.get("notice").is_none(),
+            "{id}: a sensitive focus's notice is dropped: {annotation}"
+        );
+    }
+    let plain = raw_annotation_of(&tcp_frames, "job-plain");
+    assert_eq!(plain["origin"]["focus_name"], "Ordinary work", "{plain}");
+    assert_eq!(plain["notice"], json!({"status": "told"}), "{plain}");
+    let wire = serde_json::to_string(&tcp_frames).unwrap();
+    for secret in [
+        "Fred mailbox triage",
+        "Teri todo sweep",
+        "Secret payroll work",
+        "cody-secret-work",
+        "abcd1234",
+    ] {
+        assert!(
+            !wire.contains(secret),
+            "{secret} reached a network peer: {wire}"
+        );
+    }
+}
+
+#[test]
+fn redacting_for_the_network_removes_the_notice_of_a_sensitive_origin_and_keeps_a_plain_ones() {
+    use nostromo::ipc::peer::{redact_for_network, SensitiveTags};
+    use nostromo::mother::origin::{NotifyLevel, OriginKind, OriginView};
+    use nostromo::mother::JobAnnotation;
+
+    let tags = SensitiveTags::in_memory();
+    tags.mark_tag("cody-secret-work");
+    let annotated = |id: &str, tag: Option<&str>, kind: OriginKind| {
+        let mut j = mother_job(id);
+        j.nostromo = Some(JobAnnotation {
+            origin: OriginView {
+                kind,
+                focus_tag: tag.map(str::to_owned),
+                name_snapshot: Some("A snapshot".into()),
+                focus_name: Some("A name".into()),
+                closed: Some(false),
+                session_prefix: Some("abcd1234".into()),
+            },
+            notify: Some(NotifyLevel::Wake),
+            notice: Some(json!({"status": "told"})),
+            ..Default::default()
+        });
+        j
+    };
+
+    let ServerMsg::MotherJobs { jobs } = redact_for_network(
+        ServerMsg::MotherJobs {
+            jobs: vec![
+                annotated(
+                    "sensitive-marked",
+                    Some("cody-secret-work"),
+                    OriginKind::Focus,
+                ),
+                annotated("sensitive-fred", Some("fred"), OriginKind::Focus),
+                annotated("plain", Some("claudia-AAAA1111"), OriginKind::Focus),
+                annotated("you", None, OriginKind::You),
+            ],
+        },
+        &tags,
+    ) else {
+        panic!("still a MotherJobs frame");
+    };
+
+    let by_id = |id: &str| {
+        jobs.iter()
+            .find(|j| j.id == id)
+            .and_then(|j| j.nostromo.clone())
+            .unwrap_or_else(|| panic!("{id} is still listed and annotated"))
+    };
+    for id in ["sensitive-marked", "sensitive-fred"] {
+        let a = by_id(id);
+        assert_eq!(a.notice, None, "{id}");
+        assert_eq!(
+            a.origin.focus_name.as_deref(),
+            Some("a sensitive focus"),
+            "{id}"
+        );
+        assert_eq!(
+            a.origin.name_snapshot.as_deref(),
+            Some("a sensitive focus"),
+            "{id}"
+        );
+        assert_eq!(
+            a.notify,
+            Some(NotifyLevel::Wake),
+            "the notify level is not secret"
+        );
+    }
+    for id in ["plain", "you"] {
+        let a = by_id(id);
+        assert_eq!(a.notice, Some(json!({"status": "told"})), "{id}");
+        assert_eq!(
+            a.origin.name_snapshot.as_deref(),
+            Some("A snapshot"),
+            "{id}"
+        );
+        assert_eq!(a.origin.focus_name.as_deref(), Some("A name"), "{id}");
+    }
+    for id in ["sensitive-marked", "sensitive-fred", "plain", "you"] {
+        let a = by_id(id);
+        assert_eq!(a.origin.focus_tag, None, "{id}: no tag for a network peer");
+        assert_eq!(
+            a.origin.session_prefix, None,
+            "{id}: no session prefix for a network peer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_annotated_work_send_job_and_an_annotated_sensitive_job_are_still_withheld_from_a_tcp_peer(
+) {
+    let h = spawn_server().await;
+    // A job the daemon registered sensitive (a Teri/Fred derived job).
+    h.session_mgr
+        .lock()
+        .unwrap()
+        .sensitive_tags()
+        .mark_job("job-registered");
+    let (mut unix, mut tcp) = raw_unix_and_tcp(&h).await;
+    let with_label = |id: &str, label: &str, origin: Value| -> nostromo::mother::MotherJob {
+        serde_json::from_value(json!({
+            "id": id, "state": "awaiting", "title": format!("title of {id}"),
+            "origin": {"label": label},
+            "nostromo": {"origin": origin},
+        }))
+        .expect("job")
+    };
+    let jobs = || {
+        vec![
+            // What Send to agent queues: kind you, label teri-send.
+            with_label("job-sent", "teri-send", json!({"kind": "you"})),
+            // A focus's own work-derived job (create_focus from a focus keeps the label).
+            with_label(
+                "job-sent-by-focus",
+                "teri-send",
+                json!({"kind": "focus", "focus_tag": "claudia-AAAA1111", "focus_name": "A focus"}),
+            ),
+            with_label("job-registered", "nightly", json!({"kind": "you"})),
+            with_label("job-ordinary", "nightly", json!({"kind": "you"})),
+        ]
+    };
+
+    h.broadcast(ServerMsg::MotherJobs { jobs: jobs() });
+    let unix_frames = raw_sync_via_broadcast(&h, &mut unix).await;
+    let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
+
+    assert_eq!(
+        raw_mother_ids(&unix_frames).0,
+        vec![
+            "job-sent",
+            "job-sent-by-focus",
+            "job-registered",
+            "job-ordinary"
+        ],
+        "control: the app sees every job"
+    );
+    assert_eq!(
+        raw_mother_ids(&tcp_frames).0,
+        vec!["job-ordinary"],
+        "a TCP peer sees the ordinary job only: {tcp_frames:?}"
+    );
+    let wire = serde_json::to_string(&tcp_frames).unwrap();
+    assert!(
+        !wire.contains("job-sent") && !wire.contains("job-registered") && !wire.contains("A focus"),
+        "no trace of the withheld jobs or their origin: {wire}"
+    );
+}
+
 #[tokio::test]
 async fn a_tcp_client_cannot_answer_a_decision_request_of_a_sensitive_focus_even_with_its_id() {
     use nostromo::ipc::protocol::DecisionChoice;

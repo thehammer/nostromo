@@ -29,9 +29,13 @@ public struct MotherJob: Codable, Identifiable, Equatable {
     /// Headless-crew data (gates, review wave, decision, attention, progress),
     /// read leniently key by key. Empty for a job with none.
     public let crew:       MotherCrewState
+    /// What the daemon knows that Mother does not: who queued the job, how its
+    /// focus is told. `nil` for a job the daemon did not annotate, and for a
+    /// malformed annotation (it never costs the job).
+    public let nostromo:   MotherJobAnnotation?
 
     enum CodingKeys: String, CodingKey {
-        case id, state, title, repo, branch, question, origin
+        case id, state, title, repo, branch, question, origin, nostromo
         case prUrl      = "pr_url"
         case createdAt  = "created_at"
         case startedAt  = "started_at"
@@ -50,7 +54,8 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         finishedAt: String? = nil,
         question: String? = nil,
         originLabel: String? = nil,
-        crew: MotherCrewState = MotherCrewState()
+        crew: MotherCrewState = MotherCrewState(),
+        nostromo: MotherJobAnnotation? = nil
     ) {
         self.id         = id
         self.state      = state
@@ -64,6 +69,7 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         self.question   = question
         self.originLabel = originLabel
         self.crew       = crew
+        self.nostromo   = nostromo
     }
 
     private struct Origin: Codable {
@@ -85,6 +91,9 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         question   = try c.decodeIfPresent(String.self, forKey: .question)
         originLabel = (try? c.decodeIfPresent(Origin.self, forKey: .origin))?.label
         crew       = (try? MotherCrewState(jobDecoder: decoder)) ?? MotherCrewState()
+        // The daemon's annotation: additive, and a malformed one never costs the
+        // job (iOS decodes the whole `mother_jobs` frame all-or-nothing).
+        nostromo   = (try? c.decodeIfPresent(MotherJobAnnotation.self, forKey: .nostromo)) ?? nil
     }
 
     /// Writes the crew keys flat, next to the job's own, in the daemon's form.
@@ -101,6 +110,7 @@ public struct MotherJob: Codable, Identifiable, Equatable {
         try c.encodeIfPresent(finishedAt, forKey: .finishedAt)
         try c.encodeIfPresent(question, forKey: .question)
         if let originLabel { try c.encode(Origin(label: originLabel), forKey: .origin) }
+        try c.encodeIfPresent(nostromo, forKey: .nostromo)
         try crew.encode(to: encoder)
     }
 }

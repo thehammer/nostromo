@@ -111,4 +111,31 @@ final class StatusBarPostureWindowsTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Quota bar value texts
+
+    func testQuotaBarShowsFlooredPercentTimeToResetAndPace() {
+        let now: TimeInterval = 1_000_000
+        let w = WindowPace(usedPct: 99.6, elapsedPct: 50, pace: 1.25, paceSmoothed: nil,
+                           resetsAt: now + 2 * 86_400 + 4 * 3600 + 30, level: "normal")
+        XCTAssertEqual(PaceBarsView.valueTexts(for: w, now: now),
+                       PaceBarsView.ValueTexts(used: "99%", reset: "2d 4h", pace: "1.2x"))
+    }
+
+    func testQuotaBarResetShowsDashWhileTheWindowHasNotStarted() {
+        let now: TimeInterval = 1_000_000
+        let idle = WindowPace(usedPct: 0, elapsedPct: 0, pace: 0, paceSmoothed: nil, resetsAt: 0, level: "normal")
+        XCTAssertEqual(PaceBarsView.valueTexts(for: idle, now: now).reset, "–")
+        let past = WindowPace(usedPct: 10, elapsedPct: 100, pace: 1, paceSmoothed: nil, resetsAt: now - 5, level: "normal")
+        XCTAssertEqual(PaceBarsView.valueTexts(for: past, now: now).reset, "–")
+    }
+
+    func testFormatResetPreciseUsesTwoUnits() {
+        XCTAssertEqual(Theme.formatResetPrecise(20), "1m")
+        XCTAssertEqual(Theme.formatResetPrecise(45 * 60), "45m")
+        XCTAssertEqual(Theme.formatResetPrecise(3 * 3600 + 12 * 60), "3h 12m")
+        XCTAssertEqual(Theme.formatResetPrecise(3 * 3600), "3h")
+        XCTAssertEqual(Theme.formatResetPrecise(2 * 86_400), "2d")
+        XCTAssertEqual(Theme.formatResetPrecise(6 * 86_400 + 23 * 3600 + 59 * 60), "6d 23h")
+    }
 }

@@ -420,7 +420,31 @@ async fn main() -> Result<()> {
     });
 
     // ── Mother jobs channel (spawned early so MCP state and Huey get the live list)
-    let jobs_feed = nostromo::mother::JobsFeed::new();
+    // Who queued each job: the daemon's own record (`~/.nostromo/mother-origins.json`),
+    // checked against the per-focus session history the session manager keeps. The
+    // feed annotates every job with it; the session manager feeds it the focus registry.
+    let origin_book = {
+        let audit = match nostromo::mother::audit::MotherAudit::open(
+            &nostromo::mother::audit::default_path(),
+        ) {
+            Ok(audit) => audit,
+            Err(e) => {
+                warn!("mother audit unavailable: {e}");
+                nostromo::mother::audit::MotherAudit::disabled()
+            }
+        };
+        let mut mgr = session_mgr.lock().unwrap();
+        let book = nostromo::mother::OriginBook::open(
+            nostromo::mother::OriginBook::path_beside(
+                &nostromo::ipc::session_manager::default_store_path(),
+            ),
+            mgr.session_history(),
+            audit,
+        );
+        mgr.configure_origin_book(book.clone());
+        book
+    };
+    let jobs_feed = nostromo::mother::JobsFeed::new().with_origins(origin_book);
 
     // ── Daemon-hosted MCP server (agent-driven pane layout) ─────────────────────
     // A disabled agent still hands its consumers a live `watch::Receiver`:
@@ -813,12 +837,13 @@ async fn run_job_poller(
                 // Publish live job list to the peek poller and MCP readers, unless a
                 // newer list (e.g. a mutator's refresh) already landed; then do not
                 // re-broadcast the older state either.
-                if !jobs_feed.publish_jobs_counted_at(ticket, jobs.clone(), skipped) {
+                // The jobs come back annotated with their origin: broadcast what readers see.
+                let Some(jobs) = jobs_feed.publish_annotated_at(ticket, jobs, skipped) else {
                     tracing::debug!(
                         "mother poll result superseded by a newer list; skipping publish"
                     );
                     continue;
-                }
+                };
 
                 match tx.send(ServerMsg::MotherJobs { jobs }) {
                     Ok(n) => tracing::debug!(receivers = n, "MotherJobs broadcast sent"),

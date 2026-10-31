@@ -4,12 +4,12 @@ import NostromoKit
 
 // MV-2: the job detail scrolls internally. Content taller than the pane is reached by scrolling, not
 // by growing the window (MV-1), so the detail holds a vertical `NSScrollView`
-// (`MotherJobDetail.contentScrollView`, the scroll view of everything except the log tail and the
-// reply box, which keep their own).
+// (`MotherJobDetail.contentScrollView`, the scroll view of the Overview: everything except the title and
+// switch above it, the Plan and Log segments, and the reply box, which keeps its own).
 //
 // The reader's place is theirs: data arriving for the job they are reading (a state change, a progress
 // tick, a todo list, log lines, gates, an error, a longer or shorter plan) must not move what they are
-// looking at. That is measured on a row they can see (a `PLAN-n` row, the `LOG TAIL` label): its offset
+// looking at. That is measured on a row they can see (a `PLAN-n` row): its offset
 // from the viewport's top edge holds within 1 pt while the sections above it grow and shrink. The clip's
 // own origin is NOT the measure: it has to change when the content above changes height. A document that
 // shrinks clamps the position, and opening a different job starts at the top.
@@ -71,23 +71,17 @@ final class MotherDetailScrollTests: XCTestCase {
                 ("last visible plan row", try XCTUnwrap(rows.last, file: file, line: line))]
     }
 
-    /// The reader is on the log tail: `slack` pt above the very end of the document (0 is the end itself,
-    /// where a shrinking document clamps to the same place with or without an anchor; the slack makes a
-    /// shrink above the reader a real test). Returns what they see.
-    private func scrollToLogTail(_ rig: MDRig, slack: CGFloat = 0,
-                                 file: StaticString = #filePath, line: UInt = #line) throws -> [(String, NSView)] {
+    /// The reader is at the end of the Overview (which now ends with the plan checklist; the log has a segment
+    /// of its own): `slack` pt above the very end of the document (0 is the end itself, where a shrinking
+    /// document clamps to the same place with or without an anchor; the slack makes a shrink above the reader
+    /// a real test). Returns what they see: the last plan rows in view.
+    private func scrollToOverviewEnd(_ rig: MDRig, slack: CGFloat = 0,
+                                     file: StaticString = #filePath, line: UInt = #line) throws -> [(String, NSView)] {
         scrollAndConfirm(rig, toY: maxScrollY(rig) - slack, file: file, line: line)
-        let title = try XCTUnwrap(visibleLabels(rig, prefix: "LOG TAIL").first, "precondition: the LOG TAIL label is in view", file: file, line: line)
-        return [("LOG TAIL label", title), ("log scroll view", rig.detail.logScrollView)]
-    }
-
-    /// The same, with a plan row above the log that the reader can also see.
-    private func scrollToLogTailWithPlanRow(_ rig: MDRig, slack: CGFloat = 0,
-                                            file: StaticString = #filePath, line: UInt = #line) throws -> [(String, NSView)] {
-        var anchors = try scrollToLogTail(rig, slack: slack, file: file, line: line)
-        let row = try XCTUnwrap(visibleLabels(rig, prefix: "PLAN-").last, "precondition: a plan row is in view above the log", file: file, line: line)
-        anchors.append(("last visible plan row", row))
-        return anchors
+        let rows = visibleLabels(rig, prefix: "PLAN-")
+        XCTAssertGreaterThanOrEqual(rows.count, 2, "precondition: plan rows are in view at the end of the Overview", file: file, line: line)
+        return [("last visible plan row", try XCTUnwrap(rows.last, file: file, line: line)),
+                ("first visible plan row", try XCTUnwrap(rows.first, file: file, line: line))]
     }
 
     /// `makeRig` ends by showing a short action error that clears itself 5 s later; wait for that, so a
@@ -177,7 +171,7 @@ final class MotherDetailScrollTests: XCTestCase {
         let sv = scrollView(rig)
 
         XCTAssertTrue(sv.isDescendant(of: rig.detail), "the content scroll view is inside the detail")
-        XCTAssertFalse(sv === rig.detail.logScrollView, "it is not the log tail's scroll view")
+        XCTAssertFalse(sv === rig.detail.logScrollView, "it is not the log's scroll view")
         let doc = try XCTUnwrap(sv.documentView, "the content scroll view has a document")
         let clip = sv.contentView
 
@@ -227,12 +221,12 @@ final class MotherDetailScrollTests: XCTestCase {
         }
     }
 
-    func testTheLogTailInViewStaysPutWhileTheSectionsAboveItGrowAndShrink() throws {
+    func testTheEndOfTheOverviewInViewStaysPutWhileTheSectionsAboveItGrowAndShrink() throws {
         // At the very end of the document, and a little above it (where a shrink cannot hide in the clamp).
         for (index, slack) in [(941, CGFloat(0)), (947, 150)] {
             let rig = try MD.makeRig(self, long: [.planChecklist], index: index)
             waitForTheStartupErrorToClear(rig)
-            let anchors = try scrollToLogTailWithPlanRow(rig, slack: slack)
+            let anchors = try scrollToOverviewEnd(rig, slack: slack)
             for (name, change, event) in liveEvents(rig) {
                 try assertAnchorsHold(rig, "\(name) (\(slack) pt above the end)", change, anchors: anchors, event: event)
             }
