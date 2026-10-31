@@ -9,7 +9,8 @@ import Foundation
 ///   daemon forgets its lists when it restarts, so a drawer must not outlive it).
 /// - For every entry, the local monotonic time its current `(command, note)` was first received, or
 ///   the time the list's rows last changed (`shownSince`): the drawer will not insert an entry a person
-///   has had under 1.5 s to read, and none whose row may just have moved under the pointer.
+///   has had under 1.5 s to read, and none whose row may just have moved under the pointer. Any change to
+///   any entry's text or note, or to which entries there are, restarts every entry's time.
 /// - Observers are tokens: dropping one (or its `deinit`) removes the observation. A frame that changes
 ///   nothing (same revision) notifies nobody.
 ///
@@ -95,19 +96,16 @@ final class TerminalStagingStore {
             return
         }
         let at = clock()
-        // An entry added, removed or moved shifts the rows (and a growing drawer moves them all on screen):
-        // nothing is under the pointer where the person last saw it, so every entry counts as just
-        // changed. A frame that only edits an entry's text restarts that entry alone.
-        let sameRows = lists[id]?.entries.map(\.id) == frame.entries.map(\.id)
-        let previous = sameRows ? (shownSince[id] ?? [:]) : [:]
+        // Any change to what the rows say (an entry added, removed, moved, or its command or note edited)
+        // can change a row's height, shift every row below it and grow the drawer: nothing is under the
+        // pointer where the person last saw it. So one change restarts the delay for EVERY entry.
+        let fingerprints = frame.entries.map { Fingerprint(command: $0.command, note: $0.note) }
+        let previous = shownSince[id] ?? [:]
+        let unchanged = lists[id]?.entries.map(\.id) == frame.entries.map(\.id)
+            && zip(frame.entries, fingerprints).allSatisfy { previous[$0.id]?.fingerprint == $1 }
         var next: [String: (fingerprint: Fingerprint, at: TimeInterval)] = [:]
-        for entry in frame.entries {
-            let fp = Fingerprint(command: entry.command, note: entry.note)
-            if let before = previous[entry.id], before.fingerprint == fp {
-                next[entry.id] = before
-            } else {
-                next[entry.id] = (fp, at)
-            }
+        for (entry, fp) in zip(frame.entries, fingerprints) {
+            next[entry.id] = unchanged ? previous[entry.id] : (fp, at)
         }
         shownSince[id] = next
         lists[id] = frame

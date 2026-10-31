@@ -605,6 +605,7 @@ final class StagingDrawerViewTests: XCTestCase {
         let mirror = makeHost(rig, side: mirrorSide)
         let driver = makeHost(rig)
         rig.ingest(StagingFixtures.entries(["ls"]))
+        rig.settle()   // Copy is enabled once the text has been readable for 1.5 s
 
         let event = StagingEvents.mouse(.leftMouseDown, in: mirror.window, at: NSPoint(x: 5, y: 5))
         let mirrorMenu = try XCTUnwrap(try XCTUnwrap(mirror.rows.first).menu(for: event))
@@ -1286,6 +1287,7 @@ final class StagingDrawerViewTests: XCTestCase {
 
                 XCTAssertEqual(row.layer?.masksToBounds, true, name)
                 let label = try XCTUnwrap(row.subviews.compactMap { $0 as? NSTextField }.first { $0.attributedStringValue.string == command }, name)
+                XCTAssertTrue(label.clipsToBounds, "\(name): the command's own label clips (macOS 14+ does not clip a text field by default)")
                 XCTAssertTrue(row.bounds.insetBy(dx: -0.5, dy: -0.5).contains(label.frame), "\(name) at \(width): \(label.frame) in \(row.bounds)")
             }
         }
@@ -1383,8 +1385,11 @@ final class StagingDrawerViewTests: XCTestCase {
     }
 
     func testANewRevisionWithOneEntryChangedRebuildsOnlyThatRow() {
-        let (rig, host) = readyHost()
-        rig.settle()
+        // Every entry is still inside its reading delay (nothing was settled), so the only thing that
+        // differs between the two revisions is the one command: only that row has anything to redraw.
+        let rig = makeRig(gate: StagingGates.real())
+        let host = makeHost(rig)
+        rig.ingest(StagingFixtures.entries(["ls -la", "pwd", "date"]))
         host.drawer.refresh()
         let rowUpdates = host.drawer.rowUpdateCount
         let before = host.rows
@@ -1394,6 +1399,23 @@ final class StagingDrawerViewTests: XCTestCase {
         XCTAssertEqual(host.drawer.rowUpdateCount, rowUpdates + 1, "one row redrawn")
         XCTAssertEqual(host.rows.map { $0.model.command }, ["ls -la", "pwd --changed", "date"])
         XCTAssertTrue(zip(before, host.rows).allSatisfy { $0 === $1 }, "rows are reused by entry id, not rebuilt")
+    }
+
+    /// One entry changing restarts the reading delay of every entry (the rows below it may have moved), so
+    /// every row that was ready now says "Just changed": each is redrawn, and still in the same view.
+    func testWhenOneEntryChangesEveryReadyRowGoesBackToJustChangedInTheSameRowViews() {
+        let (rig, host) = readyHost()
+        XCTAssertEqual(host.rows.map { $0.model.state }, [.ready, .ready, .ready], "harness")
+        let before = host.rows
+
+        rig.ingest(StagingFixtures.entries(["ls -la", "pwd --changed", "date"]))
+
+        XCTAssertEqual(host.rows.map { $0.model.state }, Array(repeating: StagingRowModel.State.disabled(.justChanged), count: 3))
+        XCTAssertTrue(zip(before, host.rows).allSatisfy { $0 === $1 }, "rows are reused by entry id, not rebuilt")
+
+        rig.settle()
+        host.drawer.refresh()
+        XCTAssertEqual(host.rows.map { $0.model.state }, [.ready, .ready, .ready], "all readable again together")
     }
 
     func testTheClockAdvancingRedrawsRowsOnlyWhenTheirStateChanges() {
@@ -1451,6 +1473,482 @@ final class StagingDrawerViewTests: XCTestCase {
         let notifications = rig.staging.notificationCount
         rig.ingest(StagingFixtures.entries(["ls"]))
         XCTAssertEqual(rig.staging.notificationCount, notifications + 1)
+    }
+
+    // MARK: - A terminal that does not take the bytes
+
+    func testAClickWhoseBytesTheTerminalDoesNotTakeShowsTheNotSentNoticeAndPlacesNothing() throws {
+        let (rig, host) = readyHost()
+        rig.target.sendResult = false
+        let row = try XCTUnwrap(host.rows.first)
+
+        rig.click(row, in: host.window)
+
+        XCTAssertEqual(host.drawer.notice, StagingDisabledReason.notSent.text)
+        XCTAssertTrue(host.visibleTexts.contains(StagingDisabledReason.notSent.text), "\(host.visibleTexts)")
+        XCTAssertTrue(rig.target.sent.isEmpty, "nothing reached the shell")
+        XCTAssertEqual(rig.target.focusCount, 0, "the terminal does not take the keyboard")
+        XCTAssertTrue(rig.insertedFrames.isEmpty, "nothing is reported as inserted")
+        XCTAssertEqual(host.rows.first?.model.state, .ready, "the row does not claim it was inserted")
+
+        // Not a state of the terminal: once it takes bytes again, the same row places its command.
+        rig.target.sendResult = true
+        rig.click(try XCTUnwrap(host.rows.first), in: host.window)
+        XCTAssertEqual(rig.target.sent, [Array("ls -la".utf8)])
+        XCTAssertNil(host.drawer.notice, "a placement that worked clears the refusal")
+        XCTAssertEqual(rig.insertedFrames.count, 1)
+    }
+
+    func testASpaceWhoseBytesTheTerminalDoesNotTakeShowsTheSameNotice() {
+        let (rig, host) = readyHost()
+        rig.target.sendResult = false
+        host.drawer.focusRows()
+
+        host.drawer.keyDown(with: StagingEvents.space(in: host.window))
+
+        XCTAssertEqual(host.drawer.notice, StagingDisabledReason.notSent.text)
+        XCTAssertTrue(rig.target.sent.isEmpty)
+        XCTAssertEqual(rig.target.focusCount, 0)
+        XCTAssertTrue(rig.insertedFrames.isEmpty)
+    }
+
+    func testTheNotSentNoticeGoesAwayWhenWhatItWasAboutChanges() throws {
+        let (rig, host) = readyHost()
+        rig.target.sendResult = false
+        rig.click(try XCTUnwrap(host.rows.first), in: host.window)
+        XCTAssertEqual(host.drawer.notice, StagingDisabledReason.notSent.text)
+
+        rig.ingest(StagingFixtures.entries(["ls -la --changed", "pwd", "date"]))
+
+        XCTAssertNil(host.drawer.notice)
+        XCTAssertFalse(host.visibleTexts.contains(StagingDisabledReason.notSent.text))
+    }
+
+    // MARK: - Ages tick in place
+
+    func testAClockTickInTheFirstMinuteUpdatesTheAgeInPlaceAndKeepsTheRefusalNoticeAndTheLayout() throws {
+        let rig = makeRig(gate: StagingGates.real())
+        let host = makeHost(rig)
+        rig.ingest(StagingFixtures.entries(["echo one"]))   // just changed: a click is refused
+        host.drawer.refresh()
+        let row = try XCTUnwrap(host.rows.first)
+        let age = try XCTUnwrap(host.label(of: row, text: "10s"), "harness: the row's age label")
+        rig.click(row, in: host.window)
+        XCTAssertEqual(host.drawer.notice, StagingDisabledReason.justChanged.text, "harness: a refusal notice is showing")
+        let rowUpdates = host.drawer.rowUpdateCount
+        let layoutRequests = host.state.layoutRequests
+        let heightBefore = host.height
+
+        for seconds in 1...3 {
+            host.state.date = host.state.date.addingTimeInterval(1)
+            host.drawer.refresh()
+            XCTAssertEqual(age.stringValue, "\(10 + seconds)s", "the age moves on every tick")
+        }
+
+        XCTAssertEqual(host.drawer.notice, StagingDisabledReason.justChanged.text, "an age tick is not a change: the reason stays")
+        XCTAssertTrue(host.visibleTexts.contains(StagingDisabledReason.justChanged.text))
+        XCTAssertEqual(host.drawer.rowUpdateCount, rowUpdates, "no row is redrawn for an age")
+        XCTAssertEqual(host.state.layoutRequests, layoutRequests, "the host is not asked to lay out again for an age")
+        XCTAssertEqual(host.height, heightBefore)
+        XCTAssertTrue(host.rows.first === row, "the same row view")
+        XCTAssertEqual(host.rows.first?.model.age, "13s", "the model the row holds is current too")
+    }
+
+    func testAnInsertedRowsAgoTextUpdatesInPlaceWithoutALayoutRequest() throws {
+        let rig = makeRig(gate: StagingGates.real())
+        let host = makeHost(rig)
+        rig.ingest([StagingFixtures.entry("s-1", 1, "ls -la", insertedCount: 1,
+                                          lastInsertedAt: StagingFixtures.baseDate.addingTimeInterval(8))])
+        rig.settle()
+        host.drawer.refresh()
+        let row = try XCTUnwrap(host.rows.first)
+        let ago = try XCTUnwrap(host.label(of: row, text: "inserted 2s ago"), "harness: \(host.visibleTexts)")
+        let rowUpdates = host.drawer.rowUpdateCount
+        let layoutRequests = host.state.layoutRequests
+
+        host.state.date = host.state.date.addingTimeInterval(3)
+        host.drawer.refresh()
+
+        XCTAssertEqual(ago.stringValue, "inserted 5s ago")
+        XCTAssertEqual(host.drawer.rowUpdateCount, rowUpdates)
+        XCTAssertEqual(host.state.layoutRequests, layoutRequests)
+        XCTAssertEqual(host.rows.first?.accessibilityLabel(), host.rows.first?.model.accessibilityLabel,
+                       "what VoiceOver says is current as well")
+        XCTAssertTrue(host.rows.first?.accessibilityLabel()?.contains("inserted 5s ago") == true)
+    }
+
+    func testANewRevisionStillClearsTheRefusalNoticeThatAnAgeTickKept() throws {
+        let rig = makeRig(gate: StagingGates.real())
+        let host = makeHost(rig)
+        rig.ingest(StagingFixtures.entries(["echo one"]))
+        host.drawer.refresh()
+        rig.click(try XCTUnwrap(host.rows.first), in: host.window)
+        XCTAssertEqual(host.drawer.notice, StagingDisabledReason.justChanged.text)
+        host.state.date = host.state.date.addingTimeInterval(3)
+        host.drawer.refresh()
+        XCTAssertNotNil(host.drawer.notice, "harness: the age tick kept it")
+
+        rig.ingest(StagingFixtures.entries(["echo one", "echo two"]))
+
+        XCTAssertNil(host.drawer.notice)
+    }
+
+    func testARowChangingStateStillClearsTheRefusalNoticeThatAnAgeTickKept() throws {
+        let rig = makeRig(gate: StagingGates.real())
+        let host = makeHost(rig)
+        rig.ingest(StagingFixtures.entries(["echo one"]))
+        host.drawer.refresh()
+        rig.click(try XCTUnwrap(host.rows.first), in: host.window)
+        XCTAssertEqual(host.drawer.notice, StagingDisabledReason.justChanged.text)
+
+        rig.settle()          // the reading delay is over: the row is ready, which is a real change to it
+        host.drawer.refresh()
+
+        XCTAssertEqual(host.rows.first?.model.state, .ready)
+        XCTAssertNil(host.drawer.notice)
+    }
+
+    // MARK: - The drawer gives the keyboard back when it goes away
+
+    func testADrawerThatHoldsTheKeyboardGivesItBackExactlyOnceWhenItsListGoesAway() {
+        let ways: [(String, (StagingRig) -> Void)] = [
+            ("a none frame", { rig in rig.ingest([], state: .none) }),
+            ("the terminal closing", { rig in rig.staging.terminalClosed(StagingFixtures.terminalId) }),
+        ]
+        for (name, goAway) in ways {
+            let (rig, host) = readyHost()
+            var returned = 0
+            host.drawer.onReturnToTerminal = { returned += 1 }
+            XCTAssertTrue(host.drawer.focusRows(), name)
+            XCTAssertTrue(host.window.firstResponder === host.drawer, "harness: \(name)")
+
+            goAway(rig)
+
+            XCTAssertEqual(returned, 1, name)
+            XCTAssertFalse(host.drawer.hasList, name)
+            host.drawer.refresh()
+            XCTAssertEqual(returned, 1, "\(name): not again on the next refresh")
+        }
+    }
+
+    func testADrawerThatNeverHeldTheKeyboardDoesNotAskForItToBeGivenBack() {
+        let (rig, host) = readyHost()
+        var returned = 0
+        host.drawer.onReturnToTerminal = { returned += 1 }
+
+        rig.ingest([], state: .none)
+
+        XCTAssertEqual(returned, 0, "the keyboard was never the drawer's")
+        XCTAssertFalse(host.drawer.hasList)
+    }
+
+    func testADrawerWhileSomethingElseHoldsTheKeyboardLeavesItThere() {
+        let (rig, host) = readyHost()
+        var returned = 0
+        host.drawer.onReturnToTerminal = { returned += 1 }
+        let probe = StagingFocusProbe()
+        probe.frame = NSRect(x: 0, y: 300, width: 20, height: 20)
+        host.container.addSubview(probe)
+        XCTAssertTrue(host.window.makeFirstResponder(probe))
+
+        rig.staging.terminalClosed(StagingFixtures.terminalId)
+
+        XCTAssertEqual(returned, 0, "something else held the keyboard")
+        XCTAssertTrue(host.window.firstResponder === probe)
+        XCTAssertFalse(host.drawer.hasList)
+    }
+
+    // MARK: - Copy and the reading delay (the row's context menu)
+
+    private func copyItem(of row: StagingRowView, in window: NSWindow) throws -> NSMenuItem {
+        let menu = try XCTUnwrap(row.menu(for: StagingEvents.mouse(.leftMouseDown, in: window, at: NSPoint(x: 5, y: 5))))
+        return try XCTUnwrap(menu.items.first { $0.title == "Copy" })
+    }
+
+    func testTheContextMenusCopyIsDisabledWithinTheReadingDelayAndEnabledAfterIt() throws {
+        let rig = makeRig()
+        let host = makeHost(rig)
+        rig.ingest(StagingFixtures.entries(["ls -la"]))
+        let row = try XCTUnwrap(host.rows.first)
+
+        XCTAssertFalse(try copyItem(of: row, in: host.window).isEnabled, "the text has just appeared")
+        rig.settle(1.0)
+        XCTAssertFalse(try copyItem(of: row, in: host.window).isEnabled, "one second is not enough")
+        rig.settle(0.5)
+        XCTAssertTrue(try copyItem(of: row, in: host.window).isEnabled, "one and a half seconds")
+
+        rig.ingest(StagingFixtures.entries(["ls -la --changed"]))
+        XCTAssertFalse(try copyItem(of: row, in: host.window).isEnabled, "a change starts the delay again")
+        rig.settle()
+        XCTAssertTrue(try copyItem(of: row, in: host.window).isEnabled)
+    }
+
+    func testTheContextMenusCopyIsStillEnabledAfterTheDelayOnARowThatCannotBePlaced() throws {
+        let rig = makeRig()
+        let mirrorSide = rig.makeSide(isMirror: true)
+        let mirror = makeHost(rig, side: mirrorSide)
+        rig.ingest(StagingFixtures.entries(["ls -la"]))
+
+        XCTAssertFalse(try copyItem(of: try XCTUnwrap(mirror.rows.first), in: mirror.window).isEnabled, "inside the delay, even in a mirror")
+        rig.settle()
+        XCTAssertTrue(try copyItem(of: try XCTUnwrap(mirror.rows.first), in: mirror.window).isEnabled)
+        XCTAssertEqual(mirror.rows.first?.model.disabledReason, .mirror, "harness: the row is one that cannot be placed")
+    }
+
+    // MARK: - The reason under the header wraps and is never cut
+
+    /// The height the text needs in a text field's own cell `width` wide, with no line limit.
+    private func neededCellHeight(of text: String, font: NSFont, width: CGFloat) -> CGFloat {
+        let field = NSTextField(labelWithString: text)
+        field.font = font
+        field.lineBreakMode = .byWordWrapping
+        field.cell?.wraps = true
+        field.maximumNumberOfLines = 0
+        return ceil(field.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: 10_000)).height)
+    }
+
+    private func reasonLabel(in host: StagingDrawerHost, text: String) -> NSTextField? {
+        host.drawer.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == text }
+    }
+
+    private func mirrorHost(width: CGFloat) -> (rig: StagingRig, host: StagingDrawerHost) {
+        let rig = makeRig(gate: StagingGates.real())
+        let side = rig.makeSide(isMirror: true, gate: StagingGates.real())
+        let host = makeHost(rig, side: side, width: width, bodyHeight: 1_000)
+        rig.ingest(StagingFixtures.entries(["ls -la"]))
+        rig.settle()
+        host.drawer.refresh()
+        host.relayout()
+        return (rig, host)
+    }
+
+    func testTheMirrorReasonIsFullyShownAtEveryNarrowWidthAndTheRowsStartBelowIt() throws {
+        let text = StagingDisabledReason.mirror.text
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: Theme.statusFont)
+        for width in [200.0, 280.0, 600.0] {
+            let w = CGFloat(width)
+            let tag = "width \(Int(width))"
+            let (_, host) = mirrorHost(width: w)
+            let label = try XCTUnwrap(reasonLabel(in: host, text: text), "the reason is in the drawer at \(tag)")
+
+            XCTAssertFalse(label.isHiddenOrHasHiddenAncestor, tag)
+            XCTAssertGreaterThan(label.frame.width, 0, tag)
+            XCTAssertTrue(host.drawer.bounds.insetBy(dx: -0.5, dy: -0.5).contains(label.frame), "\(tag): \(label.frame) in \(host.drawer.bounds)")
+
+            // Not cut: the text, wrapped as its own cell wraps it at the label's width, needs no more than the label has.
+            let needed = neededCellHeight(of: text, font: Theme.statusFont, width: label.frame.width)
+            XCTAssertLessThanOrEqual(needed, label.frame.height + 0.5, "\(tag): the reason needs \(needed) pt but the label is \(label.frame.height) pt high")
+            XCTAssertLessThanOrEqual(needed, lineHeight * CGFloat(StagingDrawerView.reasonLines) + 2, "\(tag): at most \(StagingDrawerView.reasonLines) lines")
+
+            // The rows begin below it.
+            let scroll = try XCTUnwrap(host.scroll, tag)
+            XCTAssertGreaterThanOrEqual(scroll.frame.minY, label.frame.maxY - 0.5, "\(tag): the rows overlap the reason")
+            XCTAssertFalse(overlaps(scroll.frame, label.frame), tag)
+            // And the header above it.
+            for field in host.drawer.subviews.compactMap({ $0 as? NSTextField }) where field !== label && !field.isHidden {
+                XCTAssertFalse(overlaps(field.frame, label.frame), "\(tag): \"\(field.stringValue)\" overlaps the reason")
+            }
+        }
+    }
+
+    func testTheMirrorReasonTakesTwoLinesAtTwoHundredPointsAndOneLineWhenThereIsRoom() throws {
+        let text = StagingDisabledReason.mirror.text
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: Theme.statusFont)
+
+        let narrow = mirrorHost(width: 200)
+        let wide = mirrorHost(width: 600)
+        let narrowLabel = try XCTUnwrap(reasonLabel(in: narrow.host, text: text))
+        let wideLabel = try XCTUnwrap(reasonLabel(in: wide.host, text: text))
+
+        XCTAssertGreaterThanOrEqual(narrowLabel.frame.height, 2 * lineHeight - 0.5, "the text needs two lines at 200 pt")
+        XCTAssertLessThan(wideLabel.frame.height, 2 * lineHeight - 0.5, "one line is enough at 600 pt")
+        XCTAssertGreaterThanOrEqual(wideLabel.frame.height, lineHeight - 0.5)
+
+        // The drawer asks the host for the extra line, and about one line more.
+        let extra = narrow.host.height - wide.host.height
+        XCTAssertGreaterThan(extra, lineHeight * 0.5, "a narrow drawer is taller by the second line of the reason")
+        XCTAssertLessThan(extra, lineHeight * 1.5 + 1, "and by about one line, not more")
+        XCTAssertGreaterThan(narrow.host.drawer.preferredHeight(forBodyHeight: 1_000, width: 200),
+                             wide.host.drawer.preferredHeight(forBodyHeight: 1_000, width: 600))
+    }
+
+    // MARK: - Stacked combining marks cannot cover the lines below the command
+
+    func testTheLinesBelowACommandOfStackedCombiningMarksSitBelowItsClippedLabel() throws {
+        let command = "e" + String(repeating: "\u{0301}", count: 30) + "cho <name>"
+        for width in [200.0, 280.0, 400.0] {
+            let rig = makeRig()
+            let host = makeHost(rig, width: CGFloat(width), bodyHeight: 1_000)
+            rig.ingest([StagingFixtures.entry("s-1", 1, command, note: "check the path first", insertedCount: 1,
+                                              lastInsertedAt: StagingFixtures.baseDate.addingTimeInterval(8))])
+            rig.settle()
+            host.drawer.refresh()
+            host.relayout()
+            let row = try XCTUnwrap(host.rows.first)
+            row.needsLayout = true
+            row.layoutSubtreeIfNeeded()
+            let tag = "width \(Int(width))"
+
+            let label = try XCTUnwrap(host.commandLabel(of: row), tag)
+            XCTAssertTrue(label.clipsToBounds, "\(tag): the command's label clips its own drawing")
+            let below: [(String, NSTextField?)] = [
+                ("placeholder warning", host.label(of: row, text: StagingDrawerModel.placeholderLabel)),
+                ("state line", host.label(of: row, text: "inserted 2s ago")),
+                ("note", row.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue.contains("(unverified)") }),
+            ]
+            for (name, field) in below {
+                let f = try XCTUnwrap(field, "\(name) at \(tag)")
+                XCTAssertFalse(f.isHidden, "\(name) at \(tag)")
+                XCTAssertGreaterThan(f.frame.height, 0, "\(name) at \(tag)")
+                XCTAssertGreaterThanOrEqual(f.frame.minY, label.frame.maxY - 0.5, "\(name) is not below the command at \(tag)")
+                XCTAssertFalse(overlaps(f.frame, label.frame), "\(name) intersects the command at \(tag)")
+                XCTAssertTrue(row.bounds.insetBy(dx: -0.5, dy: -0.5).contains(f.frame), "\(name) leaves its row at \(tag): \(f.frame) in \(row.bounds)")
+            }
+        }
+    }
+
+    func testThePlaceholderWarningIsTallEnoughForEveryLineItsOwnCellDrawsAtNarrowWidths() throws {
+        for width in [200.0, 280.0, 400.0] {
+            let rig = makeRig()
+            let host = makeHost(rig, width: CGFloat(width), bodyHeight: 1_000)
+            rig.ingest(StagingFixtures.entries(["scp <file> host:/tmp"]))
+            rig.settle()
+            host.drawer.refresh()
+            host.relayout()
+            let row = try XCTUnwrap(host.rows.first)
+            row.needsLayout = true
+            row.layoutSubtreeIfNeeded()
+            let tag = "width \(Int(width))"
+
+            let warning = try XCTUnwrap(host.label(of: row, text: StagingDrawerModel.placeholderLabel), tag)
+            XCTAssertFalse(warning.isHidden, tag)
+
+            // What the label's own cell needs at the label's width, with no line limit.
+            let savedLines = warning.maximumNumberOfLines
+            warning.maximumNumberOfLines = 0
+            let needed = ceil(warning.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: warning.frame.width, height: 10_000)).height)
+            warning.maximumNumberOfLines = savedLines
+
+            XCTAssertGreaterThanOrEqual(warning.frame.height, needed - 0.5,
+                                        "\(tag): the warning needs \(needed) pt but its label is \(warning.frame.height) pt high, so a line is cut")
+            XCTAssertTrue(row.bounds.insetBy(dx: -0.5, dy: -0.5).contains(warning.frame), "\(tag): \(warning.frame) in \(row.bounds)")
+            if let command = host.commandLabel(of: row) {
+                XCTAssertGreaterThanOrEqual(warning.frame.minY, command.frame.maxY - 0.5, tag)
+            }
+        }
+    }
+
+    // MARK: - "Show all" and the command's drawn lines
+
+    /// What the real command label draws (its own cell, no line limit) in points, for `text` at `width`.
+    private func drawnHeight(of label: NSTextField, showing text: NSAttributedString, width: CGFloat) -> CGFloat {
+        let savedText = label.attributedStringValue
+        let savedLines = label.maximumNumberOfLines
+        defer {
+            label.attributedStringValue = savedText
+            label.maximumNumberOfLines = savedLines
+        }
+        label.attributedStringValue = text
+        label.maximumNumberOfLines = 0
+        return ceil(label.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: 10_000)).height)
+    }
+
+    private struct DrawnCommand {
+        let length: Int
+        let lines: Int
+        let frameHeight: CGFloat
+        let fitsAllLines: Bool
+        let fitsExactlyThree: Bool
+        let showAllVisible: Bool
+        let showAllTitle: String?
+    }
+
+    /// Lays `command` out in a 280 pt drawer and reports what the row did against what its cell draws.
+    private func drawn(_ command: String, host: StagingDrawerHost, rig: StagingRig) throws -> DrawnCommand {
+        rig.ingest([StagingFixtures.entry("s-1", 1, command)])
+        host.relayout()
+        let row = try XCTUnwrap(host.rows.first)
+        row.needsLayout = true
+        row.layoutSubtreeIfNeeded()
+        let label = try XCTUnwrap(host.commandLabel(of: row))
+        let width = label.frame.width
+
+        let one = drawnHeight(of: label, showing: StagingRowView.commandText("X", dimmed: false), width: width)
+        let two = drawnHeight(of: label, showing: StagingRowView.commandText("X\nX", dimmed: false), width: width)
+        let perLine = two - one
+        XCTAssertGreaterThan(perLine, 5, "harness: a line is more than 5 pt high in the label's own cell")
+        let all = drawnHeight(of: label, showing: label.attributedStringValue, width: width)
+        let lines = 1 + Int(((all - one) / perLine).rounded())
+        let threeLines = one + 2 * perLine
+        let fourLines = one + 3 * perLine
+
+        let showAll = host.showAll(of: row)
+        return DrawnCommand(length: command.count, lines: lines, frameHeight: label.frame.height,
+                            fitsAllLines: label.frame.height >= all - 0.5,
+                            fitsExactlyThree: label.frame.height >= threeLines - 0.5 && label.frame.height < fourLines - 0.5,
+                            showAllVisible: showAll?.isHidden == false, showAllTitle: showAll?.title)
+    }
+
+    private var commandShapes: [(name: String, make: (Int) -> String)] {
+        let alphabet = Array("a1b2c3d4e5f6g7h8i9j0")
+        let words = Array("echo word  ls -la /tmp/x ")
+        return [("no spaces", { n in String((0..<n).map { alphabet[$0 % alphabet.count] }) }),
+                ("with spaces", { n in String((0..<n).map { words[$0 % words.count] }) })]
+    }
+
+    private var commandLengths: [Int] { Array(1...200) + Array(stride(from: 207, through: 400, by: 7)) }
+
+    func testTheLastLineOfACommandIsNeverCutAndShowAllAppearsExactlyWhenMoreThanThreeLinesAreDrawn() throws {
+        for shape in commandShapes {
+            let rig = makeRig()
+            let host = makeHost(rig, width: 280, bodyHeight: 1_000)
+            rig.ingest(StagingFixtures.entries(["x"]))
+            var results: [DrawnCommand] = []
+            for length in commandLengths {
+                let result = try drawn(shape.make(length), host: host, rig: rig)
+                results.append(result)
+                let tag = "\(shape.name), \(length) characters, \(result.lines) lines"
+
+                if result.lines > StagingRowView.collapsedLines {
+                    XCTAssertTrue(result.showAllVisible, "\(tag): more than three lines are drawn, so Show all must be offered")
+                    XCTAssertEqual(result.showAllTitle, "Show all", tag)
+                    XCTAssertTrue(result.fitsExactlyThree, "\(tag): collapsed, the label is exactly three lines high (frame \(result.frameHeight))")
+                } else {
+                    XCTAssertFalse(result.showAllVisible, "\(tag): it all fits in three lines, so there is nothing to show")
+                    XCTAssertTrue(result.fitsAllLines, "\(tag): the label is too short for what its cell draws, so the last line is cut (frame \(result.frameHeight))")
+                }
+            }
+            XCTAssertTrue(results.contains { $0.lines == 1 }, "\(shape.name): harness covers one line")
+            XCTAssertTrue(results.contains { $0.lines > 6 }, "\(shape.name): harness covers many lines")
+            XCTAssertEqual(results.map { $0.lines }, results.map { $0.lines }.sorted(), "\(shape.name): a longer command never draws fewer lines")
+        }
+    }
+
+    func testTheLongestCommandThatDrawsThreeLinesHasNoShowAllAndTheNextOneDoes() throws {
+        for shape in commandShapes {
+            let rig = makeRig()
+            let host = makeHost(rig, width: 280, bodyHeight: 1_000)
+            rig.ingest(StagingFixtures.entries(["x"]))
+
+            // Find the boundary by measuring: the first length that draws a fourth line.
+            var firstWithFourLines: Int?
+            for length in 1...400 {
+                let result = try drawn(shape.make(length), host: host, rig: rig)
+                if result.lines > 3 { firstWithFourLines = length; break }
+            }
+            let boundary = try XCTUnwrap(firstWithFourLines, "\(shape.name): some length draws four lines")
+            XCTAssertGreaterThan(boundary, 3, shape.name)
+
+            let three = try drawn(shape.make(boundary - 1), host: host, rig: rig)
+            XCTAssertEqual(three.lines, 3, "\(shape.name): \(boundary - 1) characters draw exactly three lines")
+            XCTAssertFalse(three.showAllVisible, "\(shape.name): three lines, no Show all")
+            XCTAssertTrue(three.fitsAllLines, "\(shape.name): the label holds all three lines (frame \(three.frameHeight))")
+
+            let four = try drawn(shape.make(boundary), host: host, rig: rig)
+            XCTAssertEqual(four.lines, 4, "\(shape.name): \(boundary) characters draw four lines")
+            XCTAssertTrue(four.showAllVisible, "\(shape.name): the fourth line exists, so Show all is offered")
+            XCTAssertTrue(four.fitsExactlyThree, "\(shape.name): collapsed to exactly three lines")
+        }
     }
 
     // MARK: - The divider

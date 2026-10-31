@@ -13,10 +13,14 @@ final class StagingClickableLabel: NSView {
         label.lineBreakMode = .byClipping
         label.isSelectable = false
         addSubview(label)
+        setAccessibilityElement(true)
         setAccessibilityRole(.button)
     }
 
     required init?(coder: NSCoder) { fatalError("StagingClickableLabel is created in code") }
+
+    /// One button: its own text field is not a second element.
+    override func accessibilityChildren() -> [Any]? { [] }
 
     var title: String {
         get { label.stringValue }
@@ -105,6 +109,9 @@ final class StagingRowView: NSView {
             addSubview(label)
         }
         commandLabel.lineBreakMode = .byCharWrapping
+        // Stacked combining marks can draw far outside their line (macOS 14+ no longer clips a text field
+        // to its bounds): the command's own label clips, so the lines below it stay readable.
+        commandLabel.clipsToBounds = true
         for label in [numberLabel, glyphLabel, ageLabel, labelsLabel, stateLabel, noteLabel] { label.font = Theme.statusFont }
         showAll.title = "Show all"
         showAll.onClick = { [weak self] in
@@ -116,6 +123,7 @@ final class StagingRowView: NSView {
             self.onNeedsLayout?()
         }
         addSubview(showAll)
+        setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityIdentifier("staging-row")
         render()
@@ -136,6 +144,25 @@ final class StagingRowView: NSView {
         render()
         needsLayout = true
         return true
+    }
+
+    /// Only the ages moved (the clock ticked): updates those texts in place. The row is not laid out again
+    /// unless the state line it shows now needs a different height.
+    func updateAges(_ model: StagingRowModel) {
+        guard model != self.model else { return }
+        let heightBefore = cache?.layout.height
+        self.model = model
+        ageLabel.stringValue = model.age
+        ageLabel.textColor = model.ageIsStale ? Theme.amber : Theme.fgMuted
+        if let line = stateLine, stateLabel.stringValue != line {
+            stateLabel.stringValue = line
+            cache = nil
+            if let heightBefore, heightBefore != layoutInfo(width: bounds.width).height {
+                needsLayout = true
+                onNeedsLayout?()
+            }
+        }
+        setAccessibilityLabel(model.accessibilityLabel)
     }
 
     private func render() {
@@ -224,12 +251,16 @@ final class StagingRowView: NSView {
         let textX = pad + Self.numberWidth + Self.glyphWidth + 4
         let textWidth = max(20, width - textX - Self.ageWidth - pad)
         let lineHeight = ceil(NSLayoutManager().defaultLineHeight(for: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)))
-        let fullHeight = Self.measure(commandLabel.attributedStringValue, width: textWidth)
-        let fullLines = max(1, Int((fullHeight / lineHeight).rounded()))
+        // The command is measured by the cell it is drawn in, so its internal padding (which narrows the
+        // wrap width and adds to the height) is counted: a command that draws as 4 lines is never taken
+        // for 3, which would cut the last line with no Show all.
+        let chrome = max(0, Self.cellHeight(of: Self.commandText("X", dimmed: false), width: textWidth) - lineHeight)
+        let fullHeight = Self.cellHeight(of: commandLabel.attributedStringValue, width: textWidth)
+        let fullLines = max(1, Int(((fullHeight - chrome) / lineHeight).rounded()))
         let truncated = !isExpanded && fullLines > Self.collapsedLines
         let shownLines = isExpanded ? fullLines : min(fullLines, Self.collapsedLines)
         var y = Self.verticalPadding
-        let commandRect = NSRect(x: textX, y: y, width: textWidth, height: CGFloat(shownLines) * lineHeight)
+        let commandRect = NSRect(x: textX, y: y, width: textWidth, height: CGFloat(shownLines) * lineHeight + chrome)
         y = commandRect.maxY
         var showAllRect = NSRect.zero
         if fullLines > Self.collapsedLines {
@@ -238,9 +269,12 @@ final class StagingRowView: NSView {
         }
         func secondary(_ label: NSTextField, lines: Int) -> NSRect {
             guard !label.isHidden else { return .zero }
-            let full = Self.measure(NSAttributedString(string: label.stringValue, attributes: [.font: Theme.statusFont]), width: textWidth)
-            let one = ceil(NSLayoutManager().defaultLineHeight(for: Theme.statusFont))
-            let h = lines == 0 ? full : min(full, one * CGFloat(lines))
+            // The label's own cell measures it, so its internal padding is counted here too.
+            let attributed = NSAttributedString(string: label.stringValue, attributes: [.font: Theme.statusFont])
+            let full = Self.cellHeight(of: attributed, width: textWidth)
+            let one = Self.cellHeight(of: NSAttributedString(string: "X", attributes: [.font: Theme.statusFont]), width: textWidth)
+            let chrome = max(0, one - ceil(NSLayoutManager().defaultLineHeight(for: Theme.statusFont)))
+            let h = lines == 0 ? full : min(full, (one - chrome) * CGFloat(lines) + chrome)
             let rect = NSRect(x: textX, y: y + 1, width: textWidth, height: ceil(h))
             y = rect.maxY
             return rect
@@ -260,12 +294,14 @@ final class StagingRowView: NSView {
         return info
     }
 
-    /// Height of `text` wrapped to `width`. Characters wrap anywhere for the command (its paragraph style
-    /// says so), at words otherwise.
-    private static func measure(_ text: NSAttributedString, width: CGFloat) -> CGFloat {
+    /// The height a text field's own cell needs for `text` at `width` (no line limit): what it draws.
+    private static func cellHeight(of text: NSAttributedString, width: CGFloat) -> CGFloat {
         guard text.length > 0 else { return 0 }
-        return ceil(text.boundingRect(with: NSSize(width: width, height: .greatestFiniteMagnitude),
-                                      options: [.usesLineFragmentOrigin, .usesFontLeading]).height)
+        let field = NSTextField(labelWithString: "")
+        field.attributedStringValue = text
+        field.maximumNumberOfLines = 0
+        guard let cell = field.cell else { return 0 }
+        return ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)).height)
     }
 
     override var isFlipped: Bool { true }
@@ -324,6 +360,12 @@ final class StagingRowView: NSView {
         activate(with: NSApp.currentEvent) != nil
     }
 
+    /// One VoiceOver button per row, spoken from the model's label: the command, note and state fields are
+    /// not elements of their own. Show all (when the row shows it) is the only child.
+    override func accessibilityChildren() -> [Any]? {
+        layoutInfo(width: bounds.width).truncatedCommand ? [showAll] : []
+    }
+
     // MARK: - Context menu: Copy and Remove (each is gated inside `StagingInsertController`)
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -331,6 +373,8 @@ final class StagingRowView: NSView {
         menu.autoenablesItems = false
         let copy = NSMenuItem(title: "Copy", action: #selector(copyStagedCommand(_:)), keyEquivalent: "")
         copy.target = self
+        // Copy works on a row that cannot be placed, but not within the reading delay of a change.
+        copy.isEnabled = controller?.isReadable(entryId: model.entryId) ?? false
         let remove = NSMenuItem(title: "Remove", action: #selector(removeStagedCommand(_:)), keyEquivalent: "")
         remove.target = self
         remove.isEnabled = canModify

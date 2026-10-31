@@ -10,7 +10,7 @@ import Foundation
 /// - Drops invisible format characters (zero-width space, word joiner and invisible
 ///   operators, BOM, interlinear annotation). ZWJ/ZWNJ stay: emoji and scripts need them.
 /// - Drops bidi embeddings/overrides/isolates and marks (U+202A–202E, U+2066–2069,
-///   U+200E/F, U+061C) and tag characters (U+E0000–E007F), which can make a row read differently
+///   U+200E/F, U+061C) and tag characters and variation selectors supplement (U+E0000–E0FFF), which can make a row read differently
 ///   from what it holds.
 /// - Stops at `maxUTF16` units, on a character boundary, so a megabyte of input costs no more
 ///   to lay out than a line.
@@ -64,7 +64,13 @@ public enum FoldTextSanitizer {
             case 0x00...0x1F, 0x7F...0x9F,
                  0x061C, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069,
                  0x200B, 0x2060...0x2065, 0xFEFF, 0xFFF0...0xFFFB,
-                 0xE0000...0xE007F, 0xE01F0...0xE0FFF:
+                 0xE0000...0xE0FFF,
+                 // The rest of the daemon's `is_invisible` set (`src/data/work/untrusted.rs`, the
+                 // reference), except ZWJ/ZWNJ (U+200C/D) and the variation selectors (U+FE00-FE0F),
+                 // which stay for emoji and scripts:
+                 0x00AD, 0x034F, 0x0600...0x0605, 0x06DD, 0x070F, 0x0890...0x0891, 0x08E2,
+                 0x115F, 0x1160, 0x17B4...0x17B5, 0x180B...0x180F, 0x206A...0x206F, 0x2800, 0x3164,
+                 0xFFA0, 0x110BD, 0x110CD, 0x13430...0x1343F, 0x1BCA0...0x1BCA3, 0x1D173...0x1D17A:
                 break
             default:
                 let width = s.utf16.count

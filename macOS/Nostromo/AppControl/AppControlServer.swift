@@ -238,13 +238,7 @@ final class AppControlServer {
     // MARK: - Tree / find
 
     private func text(of v: NSView) -> String? {
-        var s: String?
-        if let f = v as? NSTextField { s = f.stringValue }
-        else if let b = v as? NSButton { s = b.title }
-        else if let t = v as? NSTextView { s = t.string }
-        guard var out = s, !out.isEmpty else { return nil }
-        if out.count > 160 { out = String(out.prefix(160)) + "…" }
-        return out
+        AppControlAX.text(of: v)
     }
 
     private func node(_ v: NSView, in w: NSWindow, depth: Int, maxDepth: Int, visibleOnly: Bool) -> [String: Any]? {

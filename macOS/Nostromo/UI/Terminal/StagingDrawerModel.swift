@@ -5,6 +5,8 @@ import Foundation
 enum StagingDisabledReason: Equatable {
     case mirror, daemonDisconnected, connecting, ended, notLocal, alternateScreen, sendingPaste
     case justChanged, notInsertable
+    /// Decided only when a placement was tried: the terminal view did not take the bytes.
+    case notSent
 
     var text: String {
         switch self {
@@ -17,11 +19,12 @@ enum StagingDisabledReason: Equatable {
         case .sendingPaste:       return "A paste is still being sent"
         case .justChanged:        return "Just changed: read it again"
         case .notInsertable:      return "Nostromo will not insert this text"
+        case .notSent:            return "Nothing was placed: the terminal did not take it"
         }
     }
 
     /// The reasons that apply to every row of a drawer (as opposed to one entry).
-    var appliesToEveryRow: Bool { self != .justChanged && self != .notInsertable }
+    var appliesToEveryRow: Bool { self != .justChanged && self != .notInsertable && self != .notSent }
 }
 
 /// What the drawer needs to know about the terminal and this window to decide anything.
@@ -73,6 +76,19 @@ struct StagingRowModel: Equatable {
         case .ready: return "\u{25B8}"
         case .inserted: return "\u{2713}"
         case .disabled: return "\u{2298}"
+        }
+    }
+
+    /// Whether `other` shows the same row apart from what the clock moves: the age, its amber, and the
+    /// `inserted 2m ago` text (and the spoken label that repeats them). Those update in place, and do not
+    /// count as a change (which would re-lay out the rows and clear a refusal's reason every second).
+    func matchesApartFromAges(_ other: StagingRowModel) -> Bool {
+        guard entryId == other.entryId, number == other.number, command == other.command,
+              noteText == other.noteText, labels == other.labels else { return false }
+        switch (state, other.state) {
+        case (.ready, .ready), (.inserted, .inserted): return true
+        case (.disabled(let a), .disabled(let b)): return a == b
+        default: return false
         }
     }
 
@@ -155,13 +171,16 @@ enum StagingDrawerModel {
     static func reason(for entry: StagingEntry, env: StagingEnvironment,
                        shownSince: TimeInterval?, now: TimeInterval) -> StagingDisabledReason? {
         if let shared = sharedReason(env) { return shared }
-        if let shownSince {
-            if now - shownSince < readingDelay { return .justChanged }
-        } else {
-            return .justChanged
-        }
+        if !hasBeenReadable(shownSince: shownSince, now: now) { return .justChanged }
         if !AgentDisplayText.isInsertable(entry.command) { return .notInsertable }
         return nil
+    }
+
+    /// Whether an entry text first shown at `shownSince` has been on screen long enough to be read.
+    /// An entry with no known time counts as just changed.
+    static func hasBeenReadable(shownSince: TimeInterval?, now: TimeInterval) -> Bool {
+        guard let shownSince else { return false }
+        return now - shownSince >= readingDelay
     }
 
     static func snapshot(terminalId: String, entry: StagingEntry, env: StagingEnvironment,

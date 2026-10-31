@@ -1843,6 +1843,13 @@ class NostromodClient {
             if let m = try? decoder.decode(TerminalStagingList.self, from: raw) {
                 return .terminalStagingList(m)
             }
+            // A newer frame that does not decode must not leave the older list on screen: the agent has
+            // replaced it. If the frame still names its terminal, that terminal's list is dropped.
+            if let terminalId = json["terminal_id"] as? String {
+                log.warning("terminal_staging_list did not decode; dropping that terminal's staged list")
+                return .terminalStagingUnreadable(terminalId: terminalId)
+            }
+            log.warning("terminal_staging_list did not decode and names no terminal")
 
         case "remote_shell_targets":
             if let m = try? decoder.decode(RemoteShellTargets.self, from: raw) {

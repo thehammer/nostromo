@@ -134,12 +134,23 @@ final class FakeStagingTarget: StagingInsertTarget {
     var isAlternateScreen = false
     var bracketedPasteMode = false
     var log: StagingCallLog?
+    /// What the terminal answers: true when it took the bytes, false when nothing went out.
+    var sendResult = true
+    /// The bytes the terminal took (what reached the shell).
     private(set) var sent: [[UInt8]] = []
+    /// Every call to `sendStagedBytes`, taken or not.
+    private(set) var attempts: [[UInt8]] = []
     private(set) var focusCount = 0
 
-    func sendStagedBytes(_ bytes: [UInt8]) {
+    func sendStagedBytes(_ bytes: [UInt8]) -> Bool {
+        attempts.append(bytes)
+        guard sendResult else {
+            log?.entries.append("send-refused")
+            return false
+        }
         sent.append(bytes)
         log?.entries.append("send")
+        return true
     }
 
     func focusTerminal() {
@@ -435,6 +446,82 @@ final class StagingInsertControllerTests: XCTestCase {
         }
         XCTAssertEqual(rig.target.sent, [Array("ls".utf8), Array("ls".utf8)])
         XCTAssertEqual(rig.insertedFrames.count, 2)
+    }
+
+    // MARK: - A terminal that does not take the bytes places nothing
+
+    func testATerminalThatDoesNotTakeTheBytesIsNotFocusedAndNothingIsReportedAsPlaced() throws {
+        let rig = makeRig()
+        rig.target.sendResult = false
+        rig.ingest([StagingFixtures.entry("s-1", 1, "ls -la")])
+        rig.settle()
+
+        let snapshot = try XCTUnwrap(rig.controller.snapshot(entryId: "s-1"))
+        XCTAssertEqual(rig.controller.insert(snapshot, event: nil, control: NSView()), .refused(.notSent))
+
+        XCTAssertEqual(rig.target.attempts, [Array("ls -la".utf8)], "the terminal was asked exactly once, and not asked again")
+        XCTAssertTrue(rig.target.sent.isEmpty, "nothing reached the shell")
+        XCTAssertEqual(rig.target.focusCount, 0, "the terminal must not take the keyboard for a placement that did not happen")
+        XCTAssertTrue(rig.insertedFrames.isEmpty, "the daemon is not told something was inserted")
+        XCTAssertTrue(rig.stagingFrames.isEmpty, "no staging frame of any kind goes out")
+        XCTAssertEqual(rig.log.entries, ["send-refused"], "no focus and no report after a refusal")
+    }
+
+    func testTheReasonForANotSentRefusalIsAnAppWrittenNonEmptyTextOfItsOwn() {
+        let text = StagingDisabledReason.notSent.text
+        XCTAssertFalse(text.isEmpty)
+        let others: [StagingDisabledReason] = [.mirror, .daemonDisconnected, .connecting, .ended, .notLocal, .alternateScreen,
+                                               .sendingPaste, .justChanged, .notInsertable]
+        XCTAssertFalse(others.map { $0.text }.contains(text), "the person is told what actually happened")
+    }
+
+    func testAnEntryRefusedByTheTerminalCanBePlacedOnceTheTerminalTakesBytesAgainAndThenReportsOnce() throws {
+        let rig = makeRig()
+        rig.ingest([StagingFixtures.entry("s-1", 1, "ls -la")])
+        rig.settle()
+
+        rig.target.sendResult = false
+        let refused = try XCTUnwrap(rig.controller.snapshot(entryId: "s-1"))
+        XCTAssertEqual(rig.controller.insert(refused, event: nil, control: NSView()), .refused(.notSent))
+        XCTAssertNil(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, "a refusal by the terminal does not disable the row")
+
+        rig.target.sendResult = true
+        let again = try XCTUnwrap(rig.controller.snapshot(entryId: "s-1"))
+        XCTAssertEqual(rig.controller.insert(again, event: nil, control: NSView()), .inserted(bytes: 6))
+
+        XCTAssertEqual(rig.target.sent, [Array("ls -la".utf8)], "placed exactly once")
+        XCTAssertEqual(rig.target.focusCount, 1)
+        XCTAssertEqual(rig.stagingFrames,
+                       [.stagingInserted(terminalId: StagingFixtures.terminalId, entryId: "s-1", bytes: 6, confirmed: false)],
+                       "reported once, for the placement that happened")
+        XCTAssertEqual(rig.log.entries, ["send-refused", "send", "focus", "report:terminal_staging_inserted"])
+    }
+
+    func testAClickOnARowWhoseTerminalDoesNotTakeTheBytesEndsInANotSentRefusal() {
+        let (rig, window, row) = readyRow()
+        rig.target.sendResult = false
+
+        rig.click(row, in: window)
+
+        XCTAssertEqual(rig.rowResults, [.refused(.notSent)])
+        XCTAssertTrue(rig.target.sent.isEmpty)
+        XCTAssertEqual(rig.target.focusCount, 0)
+        XCTAssertTrue(rig.insertedFrames.isEmpty)
+        XCTAssertTrue(rig.refusals.isEmpty, "the person did click: this is not a non-human refusal")
+    }
+
+    func testAnAcceptedPlacementIsStillReportedAsPlacedExactlyOnce() throws {
+        let rig = makeRig()
+        rig.ingest([StagingFixtures.entry("s-1", 1, "ls -la")])
+        rig.settle()
+
+        let snapshot = try XCTUnwrap(rig.controller.snapshot(entryId: "s-1"))
+        XCTAssertEqual(rig.controller.insert(snapshot, event: nil, control: NSView()), .inserted(bytes: 6))
+
+        XCTAssertEqual(rig.target.attempts, [Array("ls -la".utf8)])
+        XCTAssertEqual(rig.target.focusCount, 1)
+        XCTAssertEqual(rig.insertedFrames.count, 1)
+        XCTAssertEqual(rig.log.entries, ["send", "focus", "report:terminal_staging_inserted"])
     }
 
     // MARK: - Defence in depth: the controller re-checks what the snapshot says
@@ -894,6 +981,7 @@ final class StagingInsertControllerTests: XCTestCase {
         for command in try StagingFixtures.commands() {
             let rig = makeRig()
             rig.ingest([StagingFixtures.entry("s-1", 1, command)])
+            rig.settle()   // Copy waits out the reading delay too
             XCTAssertTrue(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()), command)
             XCTAssertEqual(rig.pasteboard.string(forType: .string), command)
             XCTAssertEqual(rig.pasteboard.pasteboardItems?.count, 1, "nothing else is put on the pasteboard")
@@ -904,6 +992,7 @@ final class StagingInsertControllerTests: XCTestCase {
     func testCopyWorksFromAMirrorWindow() {
         let rig = makeRig(isMirror: true)
         rig.ingest([StagingFixtures.entry("s-1", 1, "ls -la")])
+        rig.settle()
         XCTAssertTrue(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()))
         XCTAssertEqual(rig.pasteboard.string(forType: .string), "ls -la")
     }
@@ -921,6 +1010,7 @@ final class StagingInsertControllerTests: XCTestCase {
     func testCopyRefusesNonHumanEventsLeavesThePasteboardAloneAndReportsStagingCopy() throws {
         let rig = makeRig(gate: StagingGates.real())
         rig.ingest([StagingFixtures.entry("s-1", 1, "ls -la")])
+        rig.settle()   // so the gate is the only thing that can refuse
         let window = rig.makeWindow()
         let control = GestureFixtures.control(in: window)
         rig.pasteboard.clearContents()
@@ -942,6 +1032,7 @@ final class StagingInsertControllerTests: XCTestCase {
     func testAMenuSelectionIsPermittedToCopyEvenThoughItsMouseEventBelongsToTheMenu() {
         let rig = makeRig(gate: StagingGates.real())
         rig.ingest([StagingFixtures.entry("s-1", 1, "ls -la")])
+        rig.settle()
         let window = rig.makeWindow()
         let menuWindow = rig.makeWindow()
         let control = GestureFixtures.control(in: window)
@@ -950,6 +1041,88 @@ final class StagingInsertControllerTests: XCTestCase {
         XCTAssertTrue(rig.controller.copy(entryId: "s-1", event: fromMenu, control: control))
         XCTAssertEqual(rig.pasteboard.string(forType: .string), "ls -la")
         XCTAssertTrue(rig.refusals.isEmpty)
+    }
+
+    // MARK: - Copy waits out the reading delay, and only that
+
+    func testCopyOfAnEntryShownLessThanOneAndAHalfSecondsAgoCopiesNothingAndLeavesThePasteboardAlone() {
+        let rig = makeRig()
+        rig.ingest([StagingFixtures.entry("s-1", 1, "echo just-arrived")])
+        rig.pasteboard.clearContents()
+        rig.pasteboard.setString("sentinel", forType: .string)
+
+        XCTAssertFalse(rig.controller.isReadable(entryId: "s-1"))
+        XCTAssertFalse(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()), "no time at all")
+        rig.settle(1.0)
+        XCTAssertFalse(rig.controller.isReadable(entryId: "s-1"))
+        XCTAssertFalse(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()), "one second")
+
+        XCTAssertEqual(rig.pasteboard.string(forType: .string), "sentinel", "an unread command is never put on the pasteboard")
+        assertNothingPlaced(rig, "Copy places nothing at the prompt")
+    }
+
+    func testCopyWorksExactlyOneAndAHalfSecondsAfterTheTextFirstAppeared() {
+        let rig = makeRig()
+        rig.ingest([StagingFixtures.entry("s-1", 1, "echo read-me")])
+        rig.settle(1.0)
+        rig.settle(0.5)
+
+        XCTAssertTrue(rig.controller.isReadable(entryId: "s-1"))
+        XCTAssertTrue(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()))
+        XCTAssertEqual(rig.pasteboard.string(forType: .string), "echo read-me")
+    }
+
+    func testCopyOfAChangedCommandWaitsAgainAndTheOldTextIsNotWhatIsCopied() {
+        let rig = makeRig()
+        rig.ingest([StagingFixtures.entry("s-1", 1, "echo first")])
+        rig.settle()
+        XCTAssertTrue(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()))
+        rig.pasteboard.clearContents()
+        rig.pasteboard.setString("sentinel", forType: .string)
+
+        rig.ingest([StagingFixtures.entry("s-1", 1, "echo second")])
+
+        XCTAssertFalse(rig.controller.isReadable(entryId: "s-1"))
+        XCTAssertFalse(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()), "the new text has not been readable yet")
+        XCTAssertEqual(rig.pasteboard.string(forType: .string), "sentinel")
+
+        rig.settle()
+        XCTAssertTrue(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()))
+        XCTAssertEqual(rig.pasteboard.string(forType: .string), "echo second")
+    }
+
+    func testAChangeToAnotherEntryAlsoMakesEveryEntryWaitBeforeItCanBeCopied() {
+        let rig = makeRig()
+        rig.ingest(StagingFixtures.entries(["ls", "pwd"]))
+        rig.settle()
+        XCTAssertTrue(rig.controller.isReadable(entryId: "s-1"))
+
+        rig.ingest(StagingFixtures.entries(["ls", "pwd --changed"]))   // the rows below or above may have moved
+
+        XCTAssertFalse(rig.controller.isReadable(entryId: "s-1"), "an entry that did not change waits too")
+        XCTAssertFalse(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()))
+        rig.settle()
+        XCTAssertTrue(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()))
+    }
+
+    /// Copy is not a placement: whatever else disables a row, Copy still works once its text has been readable.
+    func testCopyStillWorksAfterTheDelayOnARowThatIsDisabledForAnotherReason() throws {
+        let cases: [(name: String, command: String, isMirror: Bool, alternateScreen: Bool, expected: StagingDisabledReason)] = [
+            ("a mirror window", "ls -la", true, false, .mirror),
+            ("a full-screen program", "ls -la", false, true, .alternateScreen),
+            ("a text the app will not insert", "ls\u{09}-la", false, false, .notInsertable),
+        ]
+        for c in cases {
+            let rig = makeRig(isMirror: c.isMirror)
+            rig.target.isAlternateScreen = c.alternateScreen
+            rig.ingest([StagingFixtures.entry("s-1", 1, c.command)])
+            rig.settle()
+            XCTAssertEqual(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, c.expected, "harness: \(c.name) disables the row")
+
+            XCTAssertTrue(rig.controller.copy(entryId: "s-1", event: nil, control: NSView()), c.name)
+            XCTAssertEqual(rig.pasteboard.string(forType: .string), c.command, c.name)
+            assertNothingPlaced(rig, c.name)
+        }
     }
 
     // MARK: - Remove and Clear all

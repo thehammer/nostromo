@@ -27,6 +27,8 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
     static let maxVisibleRows = 5
     static let maxBodyFraction: CGFloat = 0.45
     static let maxDragFraction: CGFloat = 0.6
+    /// A reason ("Click the terminal to drive it from this window") wraps to this many lines at narrow widths.
+    static let reasonLines = 2
     /// A pane body shorter than this shows only the strip.
     static let minBodyForRows: CGFloat = 120
 
@@ -93,6 +95,7 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         layer?.masksToBounds = true
         isHidden = true
         setAccessibilityIdentifier("staging-drawer")
+        setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("Staged commands")
         leadLabel.font = Theme.statusFont
@@ -105,6 +108,7 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         reasonLabel.font = Theme.statusFont
         reasonLabel.textColor = Theme.amber
         reasonLabel.lineBreakMode = .byTruncatingTail
+        reasonLabel.maximumNumberOfLines = Self.reasonLines
         reasonLabel.isSelectable = false
         chevron.title = "\u{25BE}"
         chevron.setAccessibilityLabel("Collapse staged commands")
@@ -158,12 +162,21 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         let now = staging.now
         let models = StagingDrawerModel.rows(for: list, env: env, shownSince: { staging.shownSince(terminalId: id, entryId: $0) },
                                              now: now, date: date())
-        let changed = wasEmpty || list.revision != lastRevision || env != self.env || models != lastModels
+        let structural = wasEmpty || list.revision != lastRevision || env != self.env || !sameRows(models, lastModels)
         if let previous = lastCount, isCollapsed, list.entries.count > previous { pulse() }
         lastCount = list.entries.count
-        guard changed else { updateTimer(); return }
+        guard structural else {
+            // Only the clock moved (an age, `inserted 2m ago`): update those texts in place. The rows are
+            // not laid out again, and a refusal's reason stays.
+            if models != lastModels {
+                for model in models { rowViews[model.entryId]?.updateAges(model) }
+                lastModels = models
+            }
+            updateTimer()
+            return
+        }
         // A refusal's reason stays only until what it was about changes (a revision, a row's state).
-        if list.revision != lastRevision || models != lastModels { notice = nil }
+        if list.revision != lastRevision || !sameRows(models, lastModels) { notice = nil }
         self.list = list
         self.env = env
         lastRevision = list.revision
@@ -175,7 +188,14 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         askForLayoutIfNeeded()
     }
 
+    /// The same rows, in the same order, apart from what the clock moves.
+    private func sameRows(_ a: [StagingRowModel], _ b: [StagingRowModel]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy { $0.matchesApartFromAges($1) }
+    }
+
     private func clearList() {
+        // The drawer is about to hide: if it holds the keyboard, give it back to the terminal.
+        if window?.firstResponder === self { onReturnToTerminal?() }
         hasList = false
         list = nil
         env = nil
@@ -312,7 +332,7 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
             return min(header, bodyHeight)
         }
         let cap = bodyHeight * Self.maxBodyFraction
-        let natural = header + reasonHeight() + visibleRowsHeight(width: width)
+        let natural = header + reasonHeight(width: width) + visibleRowsHeight(width: width)
         var height = min(natural, cap)
         if let userHeight {
             height = min(max(userHeight, strip), bodyHeight * Self.maxDragFraction)
@@ -332,9 +352,23 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         return max(Self.stripHeight, h + 8)
     }
 
-    private func reasonHeight() -> CGFloat {
-        reasonLabel.isHidden ? 0 : 16
+    /// The reason's label height at `width` (one or two lines; wrapping is by word, inside the cell's padding).
+    private func reasonLabelHeight(width: CGFloat) -> CGFloat {
+        let text = reasonLabel.stringValue
+        guard !text.isEmpty else { return 0 }
+        let one = ceil(NSLayoutManager().defaultLineHeight(for: Theme.statusFont))
+        let available = max(20, width - 16 - 4)
+        let full = ceil(NSAttributedString(string: text, attributes: [.font: Theme.statusFont])
+            .boundingRect(with: NSSize(width: available, height: .greatestFiniteMagnitude),
+                          options: [.usesLineFragmentOrigin]).height)
+        return min(max(full, one), one * CGFloat(Self.reasonLines))
     }
+
+    private func reasonHeight(width: CGFloat) -> CGFloat {
+        reasonStringIsEmpty ? 0 : reasonLabelHeight(width: width) + 2
+    }
+
+    private var reasonStringIsEmpty: Bool { reasonLabel.stringValue.isEmpty }
 
     private func visibleRowsHeight(width: CGFloat) -> CGFloat {
         orderedRows.prefix(Self.maxVisibleRows).reduce(0) { $0 + $1.height(forWidth: max(0, width - 12)) }
@@ -379,8 +413,8 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         }
         y += headerH
         if !reasonLabel.isHidden {
-            reasonLabel.frame = NSRect(x: 8, y: y, width: max(0, w - 16), height: 14)
-            y += reasonHeight()
+            reasonLabel.frame = NSRect(x: 8, y: y, width: max(0, w - 16), height: reasonLabelHeight(width: w))
+            y += reasonHeight(width: w)
         }
         let scrollHeight = max(0, bounds.height - y)
         scroll.frame = NSRect(x: 0, y: y, width: w, height: scrollHeight)
@@ -439,12 +473,18 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         return window.makeFirstResponder(self)
     }
 
+    private static let spaceBlockingModifiers: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
+
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {
         case 126: moveSelection(by: -1)
         case 125: moveSelection(by: 1)
         case 48:  moveSelection(by: event.modifierFlags.contains(.shift) ? -1 : 1)
-        case 49:  if let id = selectedEntryId { rowViews[id]?.activate(with: event) }
+        case 49:
+            // Only a plain, first Space places a row: a held key repeats key-downs (each would take a fresh
+            // snapshot), and a Space with a modifier is some other shortcut.
+            guard !event.isARepeat, event.modifierFlags.isDisjoint(with: Self.spaceBlockingModifiers) else { return }
+            if let id = selectedEntryId { rowViews[id]?.activate(with: event) }
         case 53:  onReturnToTerminal?()
         default:  break    // Return and Enter (main and keypad) land here too: swallowed, never forwarded.
         }

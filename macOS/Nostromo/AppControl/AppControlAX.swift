@@ -35,6 +35,20 @@ enum AppControlAX {
         return false
     }
 
+    /// The text a view shows (a text field, button or text view), cut at 160 characters. Nil for a view that
+    /// is, or is inside, a staging drawer in the real app: staged commands are never read from a view,
+    /// whichever tool asks (`isWithheld`).
+    static func text(of view: NSView, allowsSynthetic: Bool = SyntheticInputGate.allowsSynthetic) -> String? {
+        if isWithheld(view, allowsSynthetic: allowsSynthetic) { return nil }
+        var s: String?
+        if let f = view as? NSTextField { s = f.stringValue }
+        else if let b = view as? NSButton { s = b.title }
+        else if let t = view as? NSTextView { s = t.string }
+        guard var out = s, !out.isEmpty else { return nil }
+        if out.count > 160 { out = String(out.prefix(160)) + "…" }
+        return out
+    }
+
     /// Read an accessibility property from an element that may not formally
     /// conform to `NSAccessibilityProtocol` (AppKit's `NSOutlineRow` row proxies
     /// do not), via KVC on the getter of the same name.

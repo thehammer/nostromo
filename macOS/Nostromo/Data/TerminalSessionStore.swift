@@ -256,12 +256,14 @@ final class TerminalSessionStore {
     /// Bytes over `inputChunkBytes` go out in several frames, in order, a few milliseconds apart. While
     /// they are going out, anything else for that terminal (a key, a reply) queues behind them, so a
     /// paste is never split by what the person types next.
-    func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String, autoReply: Bool = false) {
+    /// Returns whether the bytes were sent or queued (false: dropped, nothing will go out).
+    @discardableResult
+    func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String, autoReply: Bool = false) -> Bool {
         guard !bytes.isEmpty, terminals[terminalId]?.status == .running,
-              !daemonUnavailable.contains(terminalId) else { return }
+              !daemonUnavailable.contains(terminalId) else { return false }
         // Every window's emulator answers the same output; only the driver's reply reaches the process.
         if autoReply {
-            if let driver = effectiveDriver(of: terminalId), driver != windowId { return }
+            if let driver = effectiveDriver(of: terminalId), driver != windowId { return false }
         } else {
             takeDriver(of: terminalId, window: windowId)
         }
@@ -275,11 +277,12 @@ final class TerminalSessionStore {
         }
         if inputBacklog[terminalId] == nil && frames.count == 1 {
             transport(frames[0])
-            return
+            return true
         }
         let draining = inputBacklog[terminalId] != nil
         inputBacklog[terminalId, default: []].append(contentsOf: frames)
         if !draining { drainInput(terminalId) }
+        return true
     }
 
     /// A person clicked in `windowId`'s view of the terminal: it drives from now on.

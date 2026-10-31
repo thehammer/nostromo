@@ -330,12 +330,12 @@ extension NostromoTerminalView: StagingInsertTarget {
 
     var bracketedPasteMode: Bool { getTerminal().bracketedPasteMode }
 
-    func sendStagedBytes(_ bytes: [UInt8]) {
+    func sendStagedBytes(_ bytes: [UInt8]) -> Bool {
         guard let terminalId, TerminalInputGuard.verdict(origin: .typed, event: NSApp.currentEvent) == .keystroke else {
             refuse(.stageInsert)
-            return
+            return false
         }
-        store.sendInput(terminalId: terminalId, bytes: bytes, fromWindow: windowId, autoReply: false)
+        return store.sendInput(terminalId: terminalId, bytes: bytes, fromWindow: windowId, autoReply: false)
     }
 
     func focusTerminal() {

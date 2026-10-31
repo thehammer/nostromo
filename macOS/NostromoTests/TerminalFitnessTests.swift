@@ -1149,6 +1149,16 @@ final class TerminalFitnessTests: XCTestCase {
         XCTAssertTrue(code.contains("if AppControlAX.isWithheld(t) { return o }"), "`ax` must not add view properties for a withheld view")
     }
 
+    /// The behaviour is covered in TerminalScreenAccessTests (`AppControlAX.text(of:)`); this pins that the
+    /// server reads view text only through it (`layout-issues`, `tree` and `find` all go through `text(of:)`).
+    func testAppControlServerReadsViewTextOnlyThroughAppControlAX() throws {
+        let server = try Repo.read(Repo.app.appendingPathComponent("AppControl/AppControlServer.swift"))
+        let code = Repo.codeLines(server).joined(separator: "\n")
+        XCTAssertFalse(code.contains(".stringValue"), "AppControlServer reads a text field's value itself instead of AppControlAX.text(of:)")
+        XCTAssertTrue(code.contains("AppControlAX.text(of: v)"), "the server's `text(of:)` must call AppControlAX.text(of:)")
+        XCTAssertTrue(code.contains("if let t = text(of: v) { d[\"text\"] = t }"), "layout-issues reads view text through `text(of:)`")
+    }
+
     func testEveryStagingProjectIdIsUniqueAndTwentyFourCharacters() throws {
         let project = try Project()
 

@@ -309,4 +309,81 @@ final class TerminalScreenAccessTests: XCTestCase {
         XCTAssertFalse(AppControlAX.isWithheld(f.host.container, allowsSynthetic: false), "the pane around the drawer")
         XCTAssertFalse(AppControlAX.isWithheld(NSView(), allowsSynthetic: false))
     }
+
+    // MARK: - `AppControlAX.text(of:)`: what `layout-issues`, `tree` and `find` read out of a view
+
+    private let secretCommand = "echo SECRET-STAGED"
+
+    private func secretFixture() -> (host: StagingDrawerHost, rig: StagingRig) {
+        let rig = StagingRig()
+        let host = StagingDrawerHost(rig: rig, width: 400, bodyHeight: 600)
+        addTeardownBlock {
+            host.tearDown()
+            rig.tearDown()
+        }
+        rig.ingest([StagingFixtures.entry("s-1", 1, secretCommand),
+                    StagingFixtures.entry("s-2", 2, String(repeating: "word ", count: 190))])
+        rig.settle()
+        host.drawer.refresh()
+        host.relayout()
+        return (host, rig)
+    }
+
+    func testTheTextReaderGivesNothingForTheDrawerItsRowsCommandOrItsShowAllInTheRealApp() throws {
+        let (host, _) = secretFixture()
+        let command = try XCTUnwrap(host.textFields.first { $0.stringValue == secretCommand }, "harness: the command's label")
+        let longRow = try XCTUnwrap(host.rows.first { $0.model.command.hasPrefix("word ") })
+        let showAll = try XCTUnwrap(host.showAll(of: longRow), "harness: the long row offers Show all")
+        XCTAssertEqual(showAll.title, "Show all")
+
+        XCTAssertNil(AppControlAX.text(of: host.drawer, allowsSynthetic: false))
+        XCTAssertNil(AppControlAX.text(of: command, allowsSynthetic: false), "a row's command")
+        XCTAssertNil(AppControlAX.text(of: showAll.label, allowsSynthetic: false), "Show all's own text field")
+        for field in host.textFields {
+            XCTAssertNil(AppControlAX.text(of: field, allowsSynthetic: false), "\"\(field.stringValue.prefix(30))\" was read")
+        }
+        for view in [host.drawer as NSView] + host.allViews {
+            XCTAssertNil(AppControlAX.text(of: view, allowsSynthetic: false), "\(type(of: view))")
+        }
+    }
+
+    func testTheTextReaderGivesTheTextOfTheSameViewsWhenTheBuildRelaxesTheGate() throws {
+        let (host, _) = secretFixture()
+        let command = try XCTUnwrap(host.textFields.first { $0.stringValue == secretCommand })
+        let longRow = try XCTUnwrap(host.rows.first { $0.model.command.hasPrefix("word ") })
+        let showAll = try XCTUnwrap(host.showAll(of: longRow))
+
+        XCTAssertEqual(AppControlAX.text(of: command, allowsSynthetic: true), secretCommand)
+        XCTAssertEqual(AppControlAX.text(of: showAll.label, allowsSynthetic: true), "Show all")
+        XCTAssertNil(AppControlAX.text(of: host.drawer, allowsSynthetic: true), "the drawer itself holds no text of its own")
+    }
+
+    func testTheTextReaderReadsAnOrdinaryViewBesideTheDrawerInBothModes() throws {
+        let (host, _) = secretFixture()
+        let field = NSTextField(labelWithString: "Terminal 1")
+        let button = NSButton(title: "Close", target: nil, action: nil)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 100, height: 20))
+        textView.string = "prose"
+        for view in [field, button, textView] as [NSView] { host.container.addSubview(view) }
+
+        for allowsSynthetic in [false, true] {
+            XCTAssertEqual(AppControlAX.text(of: field, allowsSynthetic: allowsSynthetic), "Terminal 1", "synthetic \(allowsSynthetic)")
+            XCTAssertEqual(AppControlAX.text(of: button, allowsSynthetic: allowsSynthetic), "Close", "synthetic \(allowsSynthetic)")
+            XCTAssertEqual(AppControlAX.text(of: textView, allowsSynthetic: allowsSynthetic), "prose", "synthetic \(allowsSynthetic)")
+            XCTAssertNil(AppControlAX.text(of: NSView(), allowsSynthetic: allowsSynthetic), "a view with no text")
+            XCTAssertNil(AppControlAX.text(of: NSTextField(labelWithString: ""), allowsSynthetic: allowsSynthetic), "an empty field")
+        }
+    }
+
+    func testTheTextReaderCutsLongTextAtOneHundredSixtyCharactersAndMarksTheCut() {
+        let exactly = NSTextField(labelWithString: String(repeating: "x", count: 160))
+        let over = NSTextField(labelWithString: String(repeating: "y", count: 161))
+        let long = NSTextField(labelWithString: String(repeating: "z", count: 1_000))
+
+        for allowsSynthetic in [false, true] {
+            XCTAssertEqual(AppControlAX.text(of: exactly, allowsSynthetic: allowsSynthetic), String(repeating: "x", count: 160))
+            XCTAssertEqual(AppControlAX.text(of: over, allowsSynthetic: allowsSynthetic), String(repeating: "y", count: 160) + "\u{2026}")
+            XCTAssertEqual(AppControlAX.text(of: long, allowsSynthetic: allowsSynthetic), String(repeating: "z", count: 160) + "\u{2026}")
+        }
+    }
 }

@@ -6,7 +6,8 @@ protocol StagingInsertTarget: AnyObject {
     var isAlternateScreen: Bool { get }
     var bracketedPasteMode: Bool { get }
     /// Sends `bytes` to the shell as the user's own input (`autoReply: false`: the daemon counts it as activity).
-    func sendStagedBytes(_ bytes: [UInt8])
+    /// False when nothing went out (refused, or the terminal could not take it): nothing was placed.
+    func sendStagedBytes(_ bytes: [UInt8]) -> Bool
     /// The terminal view takes the keyboard, so the next Enter goes to the shell.
     func focusTerminal()
 }
@@ -41,8 +42,8 @@ struct StagingContext: Equatable {
 ///    what may have changed since: the entry still exists, the shell is running, this window still
 ///    drives it, no full-screen program, no paste still going out, the text insertable and the paste
 ///    policy says `.send`.
-/// 3. The bytes are built from the **snapshot's** text, sent exactly once, then the terminal takes the
-///    keyboard and the daemon is told how many bytes were placed. A line break is never added: only the
+/// 3. The bytes are built from the **snapshot's** text, sent exactly once, then (only if the terminal took
+///    them) the terminal takes the keyboard and the daemon is told how many bytes were placed. A line break is never added: only the
 ///    user's Enter runs it.
 ///
 /// Remove, Clear all and Copy are gated here too. Holds its target weakly.
@@ -116,7 +117,7 @@ final class StagingInsertController {
               PastePolicy.decide(kind: ctx.kind, text: snapshot.command) == .send,
               let target else { return .refused(.notInsertable) }
         let bytes = StagingDrawerModel.bytes(for: snapshot.command, bracketedPaste: target.bracketedPasteMode)
-        target.sendStagedBytes(bytes)
+        guard target.sendStagedBytes(bytes) else { return .refused(.notSent) }
         target.focusTerminal()
         let count = snapshot.command.utf8.count
         staging.reportInserted(terminalId: ctx.terminalId, entryId: snapshot.entryId, bytes: count)
@@ -125,7 +126,16 @@ final class StagingInsertController {
 
     // MARK: - Copy, Remove, Clear (menus)
 
-    /// Copy: exactly the command, as a string. Works in a mirror too.
+    /// Whether the entry's current text has been on screen long enough to be read (the 1.5 s rule).
+    /// Copy asks it too: a command that just changed is not put on the pasteboard unread.
+    func isReadable(entryId: String) -> Bool {
+        guard let id = terminalId else { return false }
+        return StagingDrawerModel.hasBeenReadable(shownSince: staging.shownSince(terminalId: id, entryId: entryId),
+                                                  now: staging.now)
+    }
+
+    /// Copy: exactly the command, as a string. Works in a mirror and on a row that cannot be placed, but
+    /// not within the reading delay of a change.
     @discardableResult
     func copy(entryId: String, event: NSEvent?, control: NSView) -> Bool {
         guard let id = terminalId else { return false }
@@ -133,7 +143,7 @@ final class StagingInsertController {
             sessions.reportRefusal(terminalId: id, op: .stagingCopy)
             return false
         }
-        guard let entry = staging.entry(terminalId: id, entryId: entryId) else { return false }
+        guard let entry = staging.entry(terminalId: id, entryId: entryId), isReadable(entryId: entryId) else { return false }
         pasteboard.clearContents()
         return pasteboard.setString(entry.command, forType: .string)
     }
