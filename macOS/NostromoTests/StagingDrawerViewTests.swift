@@ -497,7 +497,12 @@ final class StagingDrawerViewTests: XCTestCase {
 
         rig.ingest(StagingFixtures.entries(["echo two"]))    // replaced: its reading delay starts again
         let row = try XCTUnwrap(host.rows.first)
-        XCTAssertTrue(host.visibleTexts.contains("Just changed: read it again"), "\(host.visibleTexts)")
+        // The row says it is unavailable by its dimming, its glyph and its spoken label, not by a line of
+        // text that would make it taller until the delay ends (which moves every row below it).
+        XCTAssertEqual(row.model.state, .disabled(.justChanged))
+        XCTAssertEqual(row.model.glyph, "\u{2298}")
+        XCTAssertTrue(row.accessibilityLabel()?.contains("unavailable: Just changed: read it again") ?? false, "\(String(describing: row.accessibilityLabel()))")
+        XCTAssertFalse(host.visibleTexts.contains("Just changed: read it again"), "\(host.visibleTexts)")
 
         rig.mouseDown(row, in: host.window)
         rig.mouseUp(row, in: host.window)

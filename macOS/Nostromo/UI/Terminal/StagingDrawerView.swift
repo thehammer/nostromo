@@ -12,7 +12,10 @@ import QuartzCore
 /// does not shrink while entries remain unless the user collapses or drags it, so a shell is not resized
 /// for every change.
 ///
-/// A frame arriving never changes the first responder and never scrolls the terminal. Everything the
+/// A frame arriving never takes the keyboard for the drawer and never scrolls the terminal (when the list
+/// goes away, a drawer that held the keyboard hands it back to the terminal). Nothing a row shows changes
+/// height across the 1.5 s reading delay, and the room for the one-or-two-line reason is always reserved
+/// while there are rows, so no row moves at the moment it becomes clickable. Everything the
 /// agent wrote appears only inside a row's command and note slots. In the real app app-control sees none
 /// of it (`AppControlAX`, `ScreenshotRedaction`).
 ///
@@ -69,6 +72,7 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
     private var lastCount: Int?
     /// The pane body is too short for rows: only the strip shows.
     private var stripOnly = false
+    private var reasonSlot: (width: CGFloat, height: CGFloat)?
 
     private let divider = StagingDividerView()
     private let chevron = StagingClickableLabel()
@@ -107,8 +111,11 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         countLabel.isSelectable = false
         reasonLabel.font = Theme.statusFont
         reasonLabel.textColor = Theme.amber
-        reasonLabel.lineBreakMode = .byTruncatingTail
+        // Word wrapping, at most two lines, the last one cut with an ellipsis. (`.byTruncatingTail` would
+        // switch the cell's wrapping off: one truncated line in a two-line frame.)
+        reasonLabel.lineBreakMode = .byWordWrapping
         reasonLabel.maximumNumberOfLines = Self.reasonLines
+        reasonLabel.cell?.truncatesLastVisibleLine = true
         reasonLabel.isSelectable = false
         chevron.title = "\u{25BE}"
         chevron.setAccessibilityLabel("Collapse staged commands")
@@ -352,10 +359,9 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         return max(Self.stripHeight, h + 8)
     }
 
-    /// The reason's label height at `width`: one or two lines, as the label's own cell draws them (its
+    /// `text`'s label height at `width`: one or two lines, as the label's own cell draws them (its
     /// internal padding included).
-    private func reasonLabelHeight(width: CGFloat) -> CGFloat {
-        let text = reasonLabel.stringValue
+    private func reasonLabelHeight(of text: String, width: CGFloat) -> CGFloat {
         guard !text.isEmpty else { return 0 }
         let available = max(20, width - 16)
         let full = StagingRowView.cellHeight(of: text, font: Theme.statusFont, width: available)
@@ -363,11 +369,20 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         return min(full, capped)
     }
 
-    private func reasonHeight(width: CGFloat) -> CGFloat {
-        reasonStringIsEmpty ? 0 : reasonLabelHeight(width: width) + 2
+    private func reasonLabelHeight(width: CGFloat) -> CGFloat {
+        reasonLabelHeight(of: reasonLabel.stringValue, width: width)
     }
 
-    private var reasonStringIsEmpty: Bool { reasonLabel.stringValue.isEmpty }
+    /// The room above the rows for the reason: the most any reason needs at `width`, whether one is showing
+    /// or not, so a reason appearing (a refusal) or clearing (a change, the delay ending, this window
+    /// becoming the driver) never moves a row or resizes the drawer. None while there are no rows.
+    private func reasonHeight(width: CGFloat) -> CGFloat {
+        guard list?.entries.isEmpty == false else { return 0 }
+        if let cached = reasonSlot, cached.width == width { return cached.height }
+        let tallest = StagingDisabledReason.allCases.map { reasonLabelHeight(of: $0.text, width: width) }.max() ?? 0
+        reasonSlot = (width, tallest + 2)
+        return tallest + 2
+    }
 
     private func visibleRowsHeight(width: CGFloat) -> CGFloat {
         orderedRows.prefix(Self.maxVisibleRows).reduce(0) { $0 + $1.height(forWidth: max(0, width - 12)) }
@@ -413,8 +428,8 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         y += headerH
         if !reasonLabel.isHidden {
             reasonLabel.frame = NSRect(x: 8, y: y, width: max(0, w - 16), height: reasonLabelHeight(width: w))
-            y += reasonHeight(width: w)
         }
+        y += reasonHeight(width: w)     // reserved whether or not a reason shows
         let scrollHeight = max(0, bounds.height - y)
         scroll.frame = NSRect(x: 0, y: y, width: w, height: scrollHeight)
         let rowWidth = max(0, w - (scroll.hasVerticalScroller && scroll.scrollerStyle == .legacy ? 15 : 0))

@@ -109,6 +109,10 @@ final class StagingRowView: NSView {
             addSubview(label)
         }
         commandLabel.lineBreakMode = .byCharWrapping
+        // At most two lines, the last one cut with an ellipsis. Word wrapping first and no later
+        // `.byTruncatingTail`: that would switch the cell's wrapping off and draw one line.
+        noteLabel.maximumNumberOfLines = Self.noteLines
+        noteLabel.cell?.truncatesLastVisibleLine = true
         // Stacked combining marks can draw far outside their line (macOS 14+ no longer clips a text field
         // to its bounds): the command's own label clips, so the lines below it stay readable.
         commandLabel.clipsToBounds = true
@@ -189,19 +193,20 @@ final class StagingRowView: NSView {
         stateLabel.isHidden = stateLine == nil
         noteLabel.stringValue = model.noteText ?? ""
         noteLabel.textColor = Theme.fgMuted
-        noteLabel.maximumNumberOfLines = Self.noteLines
-        noteLabel.lineBreakMode = .byTruncatingTail
         noteLabel.isHidden = model.noteText == nil
         showAll.title = isExpanded ? "Show less" : "Show all"
         setAccessibilityLabel(model.accessibilityLabel)
         toolTip = nil
     }
 
-    /// The second line under the command: `inserted 2m ago`, or this row's own reason.
+    /// The line under the command: `inserted 2m ago`, or this row's own reason. A row that is only waiting
+    /// out the reading delay shows what it will show afterwards (nothing, for a ready row; the dimming
+    /// and the spoken label say it is unavailable), so its height is the same on both sides of the delay.
     private var stateLine: String? {
         switch model.state {
         case .ready: return nil
         case .inserted(let ago): return ago
+        case .disabled(.justChanged): return model.lineAfterDelay
         case .disabled(let reason): return showsReason || !reason.appliesToEveryRow ? reason.text : nil
         }
     }

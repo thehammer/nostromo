@@ -2,7 +2,7 @@ import Foundation
 
 /// Why a staged command cannot be placed at the prompt right now. Fixed strings: nothing an agent
 /// wrote ever appears in one. Listed in the order they are checked; the first that applies wins.
-enum StagingDisabledReason: Equatable {
+enum StagingDisabledReason: Equatable, CaseIterable {
     case mirror, daemonDisconnected, connecting, ended, notLocal, alternateScreen, sendingPaste
     case justChanged, notInsertable
     /// Decided only when a placement was tried: the terminal view did not take the bytes.
@@ -69,6 +69,10 @@ struct StagingRowModel: Equatable {
     let noteText: String?
     /// The app's own labels (never the agent's). In S1: the placeholder warning.
     let labels: [String]
+    /// For a row that is only waiting out the reading delay: the line it will show once it can be read
+    /// (`inserted 2m ago`, or why its text is not insertable), shown now so the row's height does not
+    /// change at the moment it becomes clickable. nil for every other row.
+    let lineAfterDelay: String?
     let accessibilityLabel: String
 
     var glyph: String {
@@ -216,6 +220,14 @@ enum StagingDrawerModel {
         } else {
             state = .ready
         }
+        var lineAfterDelay: String?
+        if state == .disabled(.justChanged) {
+            if !AgentDisplayText.isInsertable(entry.command) {
+                lineAfterDelay = StagingDisabledReason.notInsertable.text
+            } else if entry.insertedCount > 0, let last = entry.lastInsertedAt {
+                lineAfterDelay = "inserted \(ageText(since: last, now: date)) ago"
+            }
+        }
         let name = agentName(list)
         let note = AgentDisplayText.plain(entry.note, limit: noteLimit)
         let noteText = note.map { "\(possessive(name)) note (unverified): \($0)" }
@@ -231,7 +243,7 @@ enum StagingDrawerModel {
         let age = ageText(since: entry.changedAt, now: date)
         return StagingRowModel(entryId: entry.id, number: entry.number, command: entry.command, age: age,
                                ageIsStale: date.timeIntervalSince(entry.changedAt) > staleAfter,
-                               state: state, noteText: noteText, labels: labels,
+                               state: state, noteText: noteText, labels: labels, lineAfterDelay: lineAfterDelay,
                                accessibilityLabel: parts.joined(separator: ", "))
     }
 
