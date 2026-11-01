@@ -22,7 +22,12 @@ final class StagingConfirmSheetTests: XCTestCase {
     private var rigs: [StagingRig] = []
 
     override func tearDown() {
-        for rig in rigs { rig.tearDown() }
+        // A sheet still up when its parent closes could be left behind in the app: end it first, then close.
+        for rig in rigs {
+            rig.controller.dismissConfirmation()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            rig.tearDown()
+        }
         rigs = []
         super.tearDown()
     }

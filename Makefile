@@ -193,8 +193,8 @@ mac:
 ## tell you whether the suite passed.
 mac-test:
 	set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
-	  -destination 'platform=macOS' -derivedDataPath build -test-timeouts-enabled YES -default-test-execution-time-allowance 120 -only-testing:NostromoTests/StagingConfirmSheetTests -only-testing:NostromoTests/StagingDrawerViewTests -only-testing:NostromoTests/StagingDrawerModelTests -only-testing:NostromoTests/StagingHazardsTests -only-testing:NostromoTests/StagingInsertControllerTests -only-testing:NostromoTests/TerminalPaneHeaderViewTests -only-testing:NostromoTests/TerminalSessionStoreTests -only-testing:NostromoTests/TerminalStagingStatsTests -only-testing:NostromoTests/TerminalStagingStoreTests -only-testing:NostromoTests/TerminalStagingWireTests -only-testing:NostromoTests/TerminalFitnessTests -only-testing:NostromoTests/ToolGroupRowTests -only-testing:NostromoTests/ToolGroupSelectionTests -only-testing:NostromoTests/ToolGroupViewTests -only-testing:NostromoTests/ToolGroupIslandTests test \
-	  2>&1 | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST|MEMORY-CAPTURE-COST|exceeded|timed out|Restarting|crash"
+	  -destination 'platform=macOS' -derivedDataPath build test \
+	  2>&1 | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST|MEMORY-CAPTURE-COST"
 
 ## Measure the bounded-transcript acceptance criteria against a Release build.
 ## Takes several minutes; drives synthetic traffic through the real code path.
