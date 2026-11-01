@@ -200,12 +200,13 @@ mac:
 MAC_TEST_ALLOWANCE     ?= 120
 MAC_TEST_MAX_ALLOWANCE ?= 300
 mac-test:
-	set -o pipefail; mkdir -p macOS/build; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
-	  -destination 'platform=macOS' -derivedDataPath build \
-	  -test-timeouts-enabled YES -default-test-execution-time-allowance $(MAC_TEST_ALLOWANCE) \
-	  -maximum-test-execution-time-allowance $(MAC_TEST_MAX_ALLOWANCE) test \
-	  2>&1 | tee build/mac-test-full.log \
-	  | grep --line-buffered -E "error:|Executed [0-9]+ tests|Test Case .* failed|\*\* TEST|MEMORY-CAPTURE-COST|exceeded its execution time"
+	mkdir -p macOS/build; cd macOS && XB="xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests -destination platform=macOS -derivedDataPath build -test-timeouts-enabled YES -default-test-execution-time-allowance 120"; \
+	$$XB build-for-testing 2>&1 | grep -E "error:|BUILD|TEST BUILD"; \
+	for C in NONE StagingConfirmSheetTests StagingDrawerModelTests StagingDrawerViewTests StagingHazardsTests StagingInsertControllerTests TerminalPaneHeaderViewTests TerminalSessionStoreTests TerminalStagingStatsTests TerminalStagingStoreTests TerminalStagingWireTests BackgroundRowMarkTests; do \
+	  echo "DIAG-PAIR $$C"; \
+	  if [ $$C = NONE ]; then OT=""; else OT="-only-testing:NostromoTests/$$C"; fi; \
+	  $$XB test-without-building -only-testing:NostromoTests/ToolGroupRowTests $$OT 2>&1 | grep -E "error: -|\*\* TEST|Executed [0-9]+ tests, with [0-9]+ failures? " | tail -4; \
+	done; true
 
 ## Measure the bounded-transcript acceptance criteria against a Release build.
 ## Takes several minutes; drives synthetic traffic through the real code path.
