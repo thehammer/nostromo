@@ -2498,9 +2498,7 @@ fn notice_state_frame() -> String {
 /// (a wake, a queued-behind-a-turn delivery, a hold, a drop).
 fn notice_history_frame() -> String {
     use nostromo::mother::notices::detect::JobEvent;
-    use nostromo::mother::notices::{
-        NoticeHistoryEntry, NoticeReason, NoticeStatus, NoticeView,
-    };
+    use nostromo::mother::notices::{NoticeHistoryEntry, NoticeReason, NoticeStatus, NoticeView};
 
     let focus_origin = || OriginView {
         kind: OriginKind::Focus,
