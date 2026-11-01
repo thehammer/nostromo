@@ -193,7 +193,7 @@ mac:
 ## tell you whether the suite passed.
 mac-test:
 	set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
-	  -destination 'platform=macOS' -derivedDataPath build test \
+	  -destination 'platform=macOS' -derivedDataPath build -test-timeouts-enabled YES -default-test-execution-time-allowance 120  test \
 	  2>&1 | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST|MEMORY-CAPTURE-COST"
 
 ## Measure the bounded-transcript acceptance criteria against a Release build.
