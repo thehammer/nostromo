@@ -350,7 +350,7 @@ final class WakeMarkerTextTests: XCTestCase {
     }
 
     func testWakeDescriptionCapsAtEightyInTheLineAndOneHundredTwentyInTheTooltip() {
-        let content = WakeMarkerText.taskWake([wake(description: String(repeating: "x", count: 500))], omitted: 0)
+        let content = WakeMarkerText.taskWake([wake("monitor", "new_output", String(repeating: "x", count: 500))], omitted: 0)
 
         XCTAssertEqual(quotedTitle(in: content.line)?.count, 80)
         XCTAssertTrue(content.line.hasSuffix("…\""))
