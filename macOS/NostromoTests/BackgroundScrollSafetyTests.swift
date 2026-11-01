@@ -348,6 +348,7 @@ final class BackgroundScrollSafetyTests: XCTestCase {
                 p.rig.assertNoMove(name(what), following: following) {
                     gate.world.clock.advance(1)
                     event()
+                    gate.flushDeliveries()
                 }
                 if rowsKeepTheirHeight {
                     XCTAssertEqual(heights(), rows, "\(name(what)): a row changed height")
@@ -432,6 +433,7 @@ final class BackgroundScrollSafetyTests: XCTestCase {
                 p.rig.assertNoMove(name(what), following: following) {
                     gate.world.clock.advance(1)
                     event()
+                    gate.flushDeliveries()
                     opened.forEach { $0.panel.contentView?.layoutSubtreeIfNeeded() }
                 }
                 if headersKeepTheirHeight {
@@ -707,8 +709,14 @@ private final class BA5StopGate {
     }
 
     /// The daemon's `session_task_stop_result` for the latest stop sent.
+    /// The store's deferred, coalesced deliveries (not its 10 s confirmation timers).
+    func flushDeliveries() {
+        storeHand.fire(where: { $0 < BackgroundTaskStore.confirmationTimeout })
+    }
+
     func answer(_ outcome: String, message: String? = nil, taskId: String, file: StaticString = #filePath, line: UInt = #line) {
         guard let requestId = sender.stops.last else { return XCTFail("no stop was sent", file: file, line: line) }
+        world.clock.advance(1)
         var object: [String: Any] = ["request_id": requestId, "tag": "gate", "task_id": taskId, "outcome": outcome]
         if let message { object["message"] = message }
         guard let data = try? JSONSerialization.data(withJSONObject: object),
