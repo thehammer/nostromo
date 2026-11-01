@@ -52,6 +52,17 @@ func longTranscript(_ count: Int = 8) -> [ChatTurn] {
     return turns
 }
 
+/// A fold store for a rig: a file in a fresh temp directory, a private defaults suite, and a
+/// scheduler that never runs, so a test never touches `~/.nostromo` or the real defaults domain.
+func scrollRigFoldStore() -> TranscriptFoldStore {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("scroll-rig-\(UUID().uuidString)")
+    let suite = "scroll-rig-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.removePersistentDomain(forName: suite)
+    return TranscriptFoldStore(fileURL: dir.appendingPathComponent("transcript-folds.v1.json"), defaults: defaults,
+                               scheduler: WorkScheduler { _, _ in {} })
+}
+
 private func errorChip() -> TurnBlock {
     .resultSummary(ResultSummaryData(durationMs: 5, costUSD: 0.01, isError: true))
 }
@@ -107,7 +118,12 @@ final class ScrollRig {
     let overlay: JumpToLatestOverlay
     let followTail: FollowTailController
     let virtualizer = TurnListVirtualizer()
+    /// The pane's holds and answers (the fold choices are in `foldStore`).
     let store = TurnInteractionStore()
+    /// The focus's persisted folds and mode, shared by every rig built on it (two windows).
+    let foldStore: TranscriptFoldStore
+    /// The pane's end of `foldStore`: the same `PaneFoldSync` `ReplView` owns.
+    var sync: PaneFoldSync!
 
     var turns: [ChatTurn]
     var materialized: [UUID: ChatTurnView] = [:]
@@ -136,9 +152,11 @@ final class ScrollRig {
     /// responder). Held here so a test decides when the event ends and no run loop is spun.
     private var afterEventQueue: [() -> Void] = []
 
-    init(_ testCase: XCTestCase, turns: [ChatTurn], size: NSSize = NSSize(width: 900, height: 600)) {
+    init(_ testCase: XCTestCase, turns: [ChatTurn], size: NSSize = NSSize(width: 900, height: 600),
+         foldStore: TranscriptFoldStore? = nil, tag: String = "rig") {
         window = makeRigWindow(testCase, size: size)
         self.turns = turns
+        self.foldStore = foldStore ?? scrollRigFoldStore()
         let content = window.contentView!
         overlay = JumpToLatestOverlay(frame: content.bounds)
         overlay.autoresizingMask = [.width, .height]
@@ -170,6 +188,8 @@ final class ScrollRig {
         }
         followTail.onScroll = { [unowned self] in self.rollInHolds.scrolled() }
         virtualizer.foldState = { [unowned self] turn in self.store.state(for: turn.id) }
+        sync = PaneFoldSync(tag: tag, store: self.foldStore)
+        virtualizer.foldResolver = { [unowned self] turn in self.resolver(for: turn) }
 
         coordinator = TranscriptViewportCoordinator(virtualizer: virtualizer, scrollView: scrollView,
                                                     followTail: followTail, islandFor: { [unowned self] index in
@@ -191,6 +211,53 @@ final class ScrollRig {
         rollInHolds.animator = animator
         rollInHolds.isLeftMouseDown = { [unowned self] in self.mouseDown }
         rollInHolds.afterEvent = { [unowned self] work in self.afterEventQueue.append(work) }
+        rollInHolds.recordCarried = { [unowned self] id, states in
+            guard let key = self.turns.first(where: { $0.id == id })?.identityKey else { return }
+            for (row, open) in states { self.sync.recordFold(key: row, turnKey: key, open: open) }
+        }
+        // What `ReplView` hands its `PaneFoldSync`.
+        sync.loadedTurnIDs = { [unowned self] in Set(self.turns.map(\.id)) }
+        sync.stuckGroupKeys = { [unowned self] in self.stuckGroupKeys() }
+        sync.applyChange = { [unowned self] ids, mutation in self.coordinator.applyFoldChange(turnIds: ids, mutation: mutation) }
+        sync.reresolve = { [unowned self] in
+            for turn in self.turns { self.materialized[turn.id]?.applyFolds(self.resolver(for: turn)) }
+        }
+    }
+
+    /// How the turn's folds resolve in this pane: the focus's mode and persisted choices
+    /// (`expandedByDefault` forces All activity, as the load harness does).
+    func resolver(for turn: ChatTurn) -> FoldResolver {
+        var resolver = sync.resolver(turnKey: turn.identityKey)
+        if expandedByDefault { resolver.mode = .allActivity }
+        return resolver
+    }
+
+    func resolver(forTurn id: UUID) -> FoldResolver {
+        resolver(for: turns.first { $0.id == id }!)
+    }
+
+    /// The operator's earlier choice for a group of `id`, recorded in the store without a view
+    /// being toggled (a test follows with `applyFolds` where it wants the view to follow).
+    func setGroup(turn id: UUID, key: String, _ open: Bool) {
+        sync.recordFold(key: key, turnKey: turns.first { $0.id == id }!.identityKey, open: open)
+    }
+
+    /// As `setGroup`, for an activity row.
+    func setActivity(turn id: UUID, key: String, _ open: Bool) {
+        setGroup(turn: id, key: key, open)
+    }
+
+    private func stuckGroupKeys() -> [String] {
+        var keys: [String] = []
+        func collect(_ item: FoldShape.Item) {
+            switch item {
+            case .group(let group): if group.isStuck { keys.append(group.key) }
+            case .activity(_, let members): members.forEach(collect)
+            case .block, .message: break
+            }
+        }
+        for turn in turns where turn.isComplete { virtualizer.foldShape(for: turn)?.items.forEach(collect) }
+        return keys
     }
 
     /// How many pieces of work are waiting for the end of the event.
@@ -225,8 +292,7 @@ final class ScrollRig {
     private func makeView(for turn: ChatTurn) -> ChatTurnView {
         let state = store.state(for: turn.id)
         let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: state,
-                                folds: FoldResolver(state: state, expandedByDefault: expandedByDefault),
-                                heldOrdinals: state.heldOrdinals)
+                                folds: resolver(for: turn), heldOrdinals: state.heldOrdinals)
         let id = turn.id
         rollInHolds.wire(view, turn: id)
         let recorded = view.onHold
@@ -236,7 +302,7 @@ final class ScrollRig {
         }
         view.onActivityToggle = { [unowned self] key, open in
             self.activityToggles.append("\(key)=\(open)")
-            self.store.setActivity(turn: id, key: key, open)
+            self.setActivity(turn: id, key: key, open)
             self.pending.insert(id)
             if let index = self.turns.firstIndex(where: { $0.id == id }) {
                 self.coordinator.noteUserToggle(turnIndex: index, itemKey: key)
@@ -244,14 +310,18 @@ final class ScrollRig {
         }
         view.onGroupToggle = { [unowned self] key, open in
             self.groupToggles.append("\(key)=\(open)")
-            self.store.setGroup(turn: id, key: key, open)
+            self.setGroup(turn: id, key: key, open)
             self.pending.insert(id)
             if let index = self.turns.firstIndex(where: { $0.id == id }) {
                 self.coordinator.noteUserToggle(turnIndex: index, itemKey: key)
             }
         }
         view.onBlockExpansion = { [unowned self] blockIndex, open in
-            self.store.setExpanded(turn: id, block: blockIndex, open)
+            if let turn = self.turns.first(where: { $0.id == id }) {
+                let block = turn.blocks.indices.contains(blockIndex) && blockIndex >= 0 ? turn.blocks[blockIndex] : nil
+                self.sync.recordResult(key: FoldKey.result(block: block, index: blockIndex, turnKey: turn.identityKey),
+                                       turnKey: turn.identityKey, open: open)
+            }
             self.pending.insert(id)
             if let index = self.turns.firstIndex(where: { $0.id == id }) {
                 self.coordinator.noteUserToggle(turnIndex: index, itemKey: "b\(blockIndex)")
@@ -262,7 +332,9 @@ final class ScrollRig {
         view.onWillChangeHeight = { [unowned self] in self.coordinator.noteProgrammaticChange() }
         view.onAutoOpen = { [unowned self] key in
             self.autoOpened.append(key)
-            self.store.recordAuto(turn: id, key: key)
+            if let turn = self.turns.first(where: { $0.id == id }) {
+                self.sync.recordAuto(key: key, turnKey: turn.identityKey)
+            }
         }
         return view
     }
@@ -271,8 +343,7 @@ final class ScrollRig {
         view.setIslandWidth(contentWidth)
         let height = view.islandHeight()
         view.setFrameSize(NSSize(width: contentWidth, height: height))
-        let digest = ToolFoldAdapter.foldDigest(turn: turn, state: store.state(for: turn.id),
-                                                expandedByDefault: virtualizer.foldsExpandedByDefault)
+        let digest = virtualizer.foldDigest(for: turn)
         virtualizer.recordMeasured(height, at: index, isComplete: turn.isComplete, foldDigest: digest)
     }
 
@@ -596,8 +667,8 @@ final class ToolFoldScrollTests: XCTestCase {
 
         // The same turn, a group above the viewport top.
         rig.coordinator.applyFoldChange(turnIds: [target]) {
-            rig.store.setGroup(turn: target, key: "g:L4_0", true)
-            let changed = rig.materialized[target]?.applyFolds(FoldResolver(state: rig.store.state(for: target)))
+            rig.setGroup(turn: target, key: "g:L4_0", true)
+            let changed = rig.materialized[target]?.applyFolds(rig.resolver(forTurn: target))
             XCTAssertEqual(changed, true, "the view followed the store")
         }
         XCTAssertEqual(rig.groupView(turn: target, key: "g:L4_0")?.isExpanded, true)
@@ -608,7 +679,7 @@ final class ToolFoldScrollTests: XCTestCase {
         let far = rig.turns[0].id
         XCTAssertNil(rig.materialized[far], "precondition: no view for a turn this far away")
         rig.coordinator.applyFoldChange(turnIds: [far]) {
-            rig.store.setGroup(turn: far, key: "g:L0_0", true)
+            rig.setGroup(turn: far, key: "g:L0_0", true)
         }
         assertStill(rig, probe, "after another window opened a group in a turn that has no view")
         XCTAssertFalse(rig.followTail.isPinned)
@@ -712,7 +783,7 @@ final class ToolFoldScrollTests: XCTestCase {
     func testCollapsingAGroupAtTheTailKeepsAPinnedPaneAtTheTrueBottom() throws {
         let tail = F.turn([.text("Tail opening.")] + F.run(5, prefix: "g"), user: "tail")
         let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [tail])
-        rig.store.setGroup(turn: tail.id, key: "g:g0", true)
+        rig.setGroup(turn: tail.id, key: "g:g0", true)
         rig.start()
         XCTAssertTrue(rig.followTail.isPinned)
         XCTAssertEqual(rig.groupView(turn: tail.id, key: "g:g0")?.isExpanded, true, "precondition")
@@ -741,7 +812,7 @@ final class ToolFoldScrollTests: XCTestCase {
         all.append(contentsOf: (3 ..< 6).map(longTurn))
         all.append(F.turn([.text("Tail.")], user: "tail"))
         let rig = ScrollRig(self, turns: all)
-        rig.store.setGroup(turn: results.id, key: "g:m0", true)
+        rig.setGroup(turn: results.id, key: "g:m0", true)
         rig.start()
         let placed = try XCTUnwrap(rig.placeRow(turn: results.id, key: "g:m0", atScreenY: 60))
         XCTAssertEqual(placed, 60, accuracy: 2)
@@ -770,7 +841,7 @@ final class ToolFoldScrollTests: XCTestCase {
     func testExpandingAResultInsideAnOpenGroupKeepsItsHeaderStillInAPinnedPane() throws {
         let results = resultTurn(filler: 0)
         let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [results])
-        rig.store.setGroup(turn: results.id, key: "g:m0", true)
+        rig.setGroup(turn: results.id, key: "g:m0", true)
         rig.start()
         XCTAssertTrue(rig.followTail.isPinned)
         let group = try XCTUnwrap(rig.groupView(turn: results.id, key: "g:m0"))
@@ -800,8 +871,8 @@ final class ToolFoldScrollTests: XCTestCase {
         rig.toggleRow(turn: operatorTurn, key: "g:L2_0")                    // one group opened by the operator
         let other = rig.turns[history.count + 1].id
         rig.coordinator.applyFoldChange(turnIds: [other]) {                // another opened from elsewhere
-            rig.store.setGroup(turn: other, key: "g:L1_0", true)
-            _ = rig.materialized[other]?.applyFolds(FoldResolver(state: rig.store.state(for: other)))
+            rig.setGroup(turn: other, key: "g:L1_0", true)
+            _ = rig.materialized[other]?.applyFolds(rig.resolver(forTurn: other))
         }
         XCTAssertFalse(rig.followTail.isPinned, "precondition: the operator is reading history")
         rig.flips = []
@@ -1221,9 +1292,8 @@ final class ToolGroupExpandScrollTests: XCTestCase {
         while collector.runNext() { rig.runPass() }
         rig.settle()
 
-        var open = TurnInteractionState()
-        open.groupStates["g:B0"] = true
-        let fresh = ChatTurnView(turn: big, contentAvailable: true, interaction: open, folds: FoldResolver(state: open))
+        let fresh = ChatTurnView(turn: big, contentAvailable: true, interaction: TurnInteractionState(),
+                                 folds: FoldResolver(groupStates: ["g:B0": true]))
         fresh.setIslandWidth(rig.contentWidth)
         XCTAssertEqual(rig.virtualizer.height(at: index), fresh.islandHeight(), accuracy: 1,
                        "the virtualizer still holds an estimate for the turn")
@@ -1290,7 +1360,7 @@ final class TranscriptViewportAnticipationTests: XCTestCase {
 
         rig.coordinator.noteProgrammaticChange()
         // A geometry change above the reader: a group in an earlier turn opened elsewhere.
-        rig.store.setGroup(turn: rig.turns[2].id, key: "g:L2_0", true)
+        rig.setGroup(turn: rig.turns[2].id, key: "g:L2_0", true)
         rig.virtualizer.splice(turns: rig.turns, from: 0)
         let growth = rig.virtualizer.offset(of: 4) - turnTopBefore
         XCTAssertGreaterThan(growth, 50, "precondition: the turns above grew")
@@ -1309,7 +1379,7 @@ final class TranscriptViewportAnticipationTests: XCTestCase {
         let turnTopBefore = rig.virtualizer.offset(of: 4)
 
         rig.coordinator.noteUserToggle(turnIndex: 4, itemKey: "g:L4_0")
-        rig.store.setGroup(turn: rig.turns[2].id, key: "g:L2_0", true)
+        rig.setGroup(turn: rig.turns[2].id, key: "g:L2_0", true)
         rig.virtualizer.splice(turns: rig.turns, from: 0)
         let growth = rig.virtualizer.offset(of: 4) - turnTopBefore
         XCTAssertGreaterThan(growth, 50, "precondition: the turns above grew")
@@ -1574,7 +1644,7 @@ extension TranscriptViewportAnticipationTests {
         let top = rig.clip.bounds.minY
         let turnTopBefore = rig.virtualizer.offset(of: 4)
         rig.coordinator.noteProgrammaticChange()
-        rig.store.setGroup(turn: rig.turns[2].id, key: "g:L2_0", true)
+        rig.setGroup(turn: rig.turns[2].id, key: "g:L2_0", true)
         rig.virtualizer.splice(turns: rig.turns, from: 0)
         XCTAssertGreaterThan(rig.virtualizer.offset(of: 4) - turnTopBefore, 50, "precondition: restoring would move the viewport")
 
@@ -1613,7 +1683,7 @@ final class ToolFoldSubagentScrollTests: XCTestCase {
         ]
         let tail = F.turn(blocks, complete: false, user: "tail", textParents: [4: "toolu_agent"])
         let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [tail])
-        rig.store.setGroup(turn: tail.id, key: "g:toolu_agent", true)
+        rig.setGroup(turn: tail.id, key: "g:toolu_agent", true)
         rig.start()
         XCTAssertTrue(rig.followTail.isPinned)
         let group = try XCTUnwrap(rig.groupView(turn: tail.id, key: "g:toolu_agent"))
@@ -1809,7 +1879,7 @@ final class FocusScrollTests: XCTestCase {
     func testAnExpandedRowThatAbsorbsARollInStaysOpenAndTheFirstVisibleLineDoesNotMove() throws {
         let tail = openLaneTail()
         let rig = ScrollRig(self, turns: (0 ..< 3).map(longTurn) + [tail])
-        rig.store.setActivity(turn: tail.id, key: FocusFixtures.segments(of: tail)[0].key, true)
+        rig.setActivity(turn: tail.id, key: FocusFixtures.segments(of: tail)[0].key, true)
         rig.start()
         let tailIndex = rig.turns.count - 1
         rig.userScroll(to: rig.virtualizer.offset(of: tailIndex) + 300)
@@ -1844,7 +1914,7 @@ final class FocusScrollTests: XCTestCase {
     func testAnExpandedRowInAFollowingPaneStaysOpenAndThePaneStaysAtTheBottom() throws {
         let live = F.turn([focusMessage("First")] + F.run(2, prefix: "a") + [focusMessage("Second")], complete: false, user: "live")
         let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
-        rig.store.setActivity(turn: live.id, key: FocusFixtures.segments(of: live)[0].key, true)
+        rig.setActivity(turn: live.id, key: FocusFixtures.segments(of: live)[0].key, true)
         rig.start()
         XCTAssertTrue(rig.followTail.isPinned)
 

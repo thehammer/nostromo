@@ -66,6 +66,10 @@ enum MainMenu {
         findNextItem.target = target
         editMenu.addItem(findNextItem)
 
+        // View menu (between Edit and Terminal): Focus ⌥⌘← / Show All Activity ⌥⌘→ for the focused pane's
+        // transcript, and the default mode for focuses with no choice of their own.
+        TranscriptViewMenu.install(in: mainMenu)
+
         // Terminal menu: ⌘T opens a shell in the key window's focus; ⇧⌘W closes the terminal pane that
         // holds the keyboard (only for a person: the item does nothing for a synthetic key or click).
         let terminalMenuItem = NSMenuItem()

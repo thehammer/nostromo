@@ -55,7 +55,8 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     /// make every block the session appends to that turn copy the whole array.
     private var blocks: [Int: TurnBlock] = [:]
     private let contentAvailable: Bool
-    private let interaction: TurnInteractionState
+    /// How the turn's result folds resolve (the operator's saved choices), for members built from here on.
+    private let folds: FoldResolver
     private(set) var isExpanded: Bool
 
     private enum MemberKey: Equatable {
@@ -85,22 +86,22 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     private let rule = NSView()
 
     convenience init(group: ToolGroup, blocks: [TurnBlock],
-                     contentAvailable: Bool, interaction: TurnInteractionState, isExpanded: Bool,
+                     contentAvailable: Bool, folds: FoldResolver, isExpanded: Bool,
                      reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
                      now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
         self.init(group: group, blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil },
-                  contentAvailable: contentAvailable, interaction: interaction, isExpanded: isExpanded,
+                  contentAvailable: contentAvailable, folds: folds, isExpanded: isExpanded,
                   reduceMotion: reduceMotion, now: now, approvals: approvals)
     }
 
     /// `blockAt`: the turn's block at an index (read during the call only).
     init(group: ToolGroup, blockAt: (Int) -> TurnBlock?,
-         contentAvailable: Bool, interaction: TurnInteractionState, isExpanded: Bool,
+         contentAvailable: Bool, folds: FoldResolver, isExpanded: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
          now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
         self.group = group
         self.contentAvailable = contentAvailable
-        self.interaction = interaction
+        self.folds = folds
         self.isExpanded = isExpanded
         self.row = ToolGroupRowView(group: group, isExpanded: isExpanded, payloadAvailable: contentAvailable,
                                     reduceMotion: reduceMotion, now: now, approvals: approvals)
@@ -269,7 +270,7 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
             return ToolCallView(data: d)
         case .toolResult(let d):
             let view = ToolResultView(data: d, contentAvailable: contentAvailable,
-                                      startExpanded: interaction.expandedBlocks.contains(index))
+                                      explicitState: folds.explicitResult(block: block, index: index))
             view.onExpansionChange = { [weak self, weak view] isExpanded in
                 guard let self, let view else { return }
                 self.onBlockExpansion?(index, isExpanded)
@@ -285,8 +286,8 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
 
     private func makeActivityView(agentIndex: Int, blockIndices: [Int]) -> AgentActivityView {
         let view = AgentActivityView(blockIndices: blockIndices, blocks: blocks, contentAvailable: contentAvailable,
-                                     interaction: interaction,
-                                     startExpanded: interaction.expandedBlocks.contains(agentIndex))
+                                     folds: folds,
+                                     startExpanded: folds.explicitResult(block: blocks[agentIndex], index: agentIndex) ?? false)
         view.onExpansionChange = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.onBlockExpansion?(agentIndex, isExpanded)
@@ -975,6 +976,7 @@ final class ToolGroupRowView: FoldRowView {
         let menu = NSMenu()
         menu.addItem(withTitle: "Copy Commands", action: #selector(copyCommandsAction), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy Summary", action: #selector(copySummaryAction), keyEquivalent: "").target = self
+        TranscriptViewMenu.appendModeItems(to: menu)
         return menu
     }
 
@@ -1017,18 +1019,18 @@ final class AgentActivityView: NSView {
     /// Its blocks by block index (see `ToolGroupView.blocks`).
     private var blocks: [Int: TurnBlock]
     private let contentAvailable: Bool
-    private let interaction: TurnInteractionState
+    private let folds: FoldResolver
     private(set) var isExpanded: Bool
     private let disclosure = NSButton()
     private let content = NSStackView()
     private var contentBuilt = false
 
     init(blockIndices: [Int], blocks: [Int: TurnBlock], contentAvailable: Bool,
-         interaction: TurnInteractionState, startExpanded: Bool) {
+         folds: FoldResolver, startExpanded: Bool) {
         self.blockIndices = blockIndices
         self.blocks = blocks
         self.contentAvailable = contentAvailable
-        self.interaction = interaction
+        self.folds = folds
         self.isExpanded = startExpanded
         super.init(frame: .zero)
         wantsLayer = true
@@ -1102,7 +1104,7 @@ final class AgentActivityView: NSView {
             view = ToolCallView(data: d)
         case .toolResult(let d):
             let result = ToolResultView(data: d, contentAvailable: contentAvailable,
-                                        startExpanded: interaction.expandedBlocks.contains(index))
+                                        explicitState: folds.explicitResult(block: block, index: index))
             result.onExpansionChange = { [weak self] isExpanded in
                 self?.onBlockExpansion?(index, isExpanded)
                 self?.onHeightChange?()

@@ -53,7 +53,6 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     /// The blocks the segment's members use, by block index (see `ToolGroupView.blocks`).
     private var blocks: [Int: TurnBlock]
     private let contentAvailable: Bool
-    private var interaction: TurnInteractionState
     private var folds: FoldResolver
     private let reduceMotion: () -> Bool
     private let now: () -> Date
@@ -83,12 +82,11 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     private var membersStale = false
 
     init(segment: ActivitySegment, blocks: [Int: TurnBlock], contentAvailable: Bool,
-         interaction: TurnInteractionState, folds: FoldResolver, isExpanded: Bool,
+         folds: FoldResolver, isExpanded: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
          now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
         self.blocks = blocks
         self.contentAvailable = contentAvailable
-        self.interaction = interaction
         self.folds = folds
         self.isExpanded = isExpanded
         self.reduceMotion = reduceMotion
@@ -143,10 +141,9 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
         applyExpanded(expanded)
     }
 
-    /// The turn's interaction and fold state as they are now, for lane members built from here
-    /// on (members already built keep theirs).
-    func updateState(interaction: TurnInteractionState, folds: FoldResolver) {
-        self.interaction = interaction
+    /// The turn's fold state as it is now, for lane members built from here on (members already
+    /// built keep theirs).
+    func updateState(folds: FoldResolver) {
         self.folds = folds
     }
 
@@ -263,7 +260,7 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
 
     private func makeGroupView(_ group: ToolGroup) -> ToolGroupView {
         let view = ToolGroupView(group: group, blockAt: { self.blocks[$0] },
-                                 contentAvailable: contentAvailable, interaction: interaction,
+                                 contentAvailable: contentAvailable, folds: folds,
                                  isExpanded: folds.isExpanded(group), reduceMotion: reduceMotion, now: now,
                                  approvals: approvals)
         view.onToggle = { [weak self, weak view] isExpanded in
@@ -481,6 +478,7 @@ final class ActivityRowHeaderView: FoldRowView {
         menu.addItem(withTitle: "Copy Messages", action: #selector(copyMessagesAction), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy Commands", action: #selector(copyCommandsAction), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy Summary", action: #selector(copySummaryAction), keyEquivalent: "").target = self
+        TranscriptViewMenu.appendModeItems(to: menu)
         return menu
     }
 

@@ -60,9 +60,9 @@ extension ChatTurn {
 /// How a delivery block is addressed inside a turn, apart from the turn's own blocks.
 enum TerminalDeliveryBlockKey {
 
-    /// The index under which item `item`'s expansion is kept in `TurnInteractionState`
-    /// (`expandedBlocks`), and named in `onBlockExpansion`. Negative, so it can never be the
-    /// index of one of the turn's own blocks, which share that set.
+    /// The index under which item `item`'s expansion is kept (`FoldKey.result`), and named in
+    /// `onBlockExpansion`. Negative, so it can never be the index of one of the turn's own blocks,
+    /// which share that numbering.
     static func blockIndex(item: Int) -> Int { -(item + 1) }
 
     /// The turn view's column key of item `item` (`b<blockIndex>`, the form `ReplView` hands the

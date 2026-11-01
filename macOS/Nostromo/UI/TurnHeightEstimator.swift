@@ -68,7 +68,7 @@ enum TurnHeightEstimator {
     static let questionChrome: CGFloat      = 46
     static let questionOptionHeight: CGFloat = 36
     /// `TerminalDeliveryBlockView` collapsed: laid out like a collapsed `ToolResultView`. Also
-    /// used for a block restored expanded (`TurnInteractionState.expandedBlocks`): harmless, the
+    /// used for a block restored expanded (a saved result fold, `TranscriptFoldStore`): harmless, the
     /// measured height replaces the estimate once the row is laid out.
     static let deliveryCollapsed: CGFloat   = 32
     /// `TerminalDeliveryBlockView` as a follow notice: one muted 10 pt line, 4+4 padding.

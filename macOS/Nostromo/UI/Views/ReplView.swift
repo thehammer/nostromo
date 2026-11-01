@@ -111,10 +111,13 @@ class ReplView: NSView {
     /// Run once at the end of the next materialization pass (the load harness's
     /// `group-expand` timing).
     private var afterNextPass: (() -> Void)?
-    /// Tool groups and activity rows the operator has not opened or closed start open (Show
-    /// All). Only the load harness sets it (`NOSTROMO_LOAD_FOLD_DEFAULT=expanded`); the app is
-    /// in Focus (collapsed) until FV4 adds the toggle.
+    /// The load harness's Show All (`NOSTROMO_LOAD_FOLD_DEFAULT=expanded`): every focus is in All
+    /// activity, whatever the store says. Outside the harness the mode is the focus's own (View ▸
+    /// Focus / Show All Activity), else the global default.
     private let foldsExpandedByDefault = TranscriptLoadHarness.foldsExpandedByDefault
+    /// This pane's end of the focus's persisted folds and mode (shared with the other windows on
+    /// the focus through `TranscriptFoldStore`).
+    private let foldSync: PaneFoldSync
 
     /// "Jump to latest" pill, shown while the pane is not following the tail.
     private let jumpOverlay = JumpToLatestOverlay()
@@ -146,12 +149,23 @@ class ReplView: NSView {
     private var shedInFlight = false
     /// How many times the document view's draw heartbeat has fired (a test proves it is alive).
     private(set) var documentWillDrawCount = 0
+    /// Tells VoiceOver about a mode switch made in this pane. A seam: tests capture the text.
+    lazy var announceModeChange: (String) -> Void = { [weak self] text in
+        guard let self else { return }
+        NSAccessibility.post(element: self, notification: .announcementRequested, userInfo: [
+            .announcement: text,
+            .priority: NSAccessibilityPriorityLevel.high.rawValue,
+        ])
+    }
     /// "Tool activity finished, N failed calls", for VoiceOver, when this pane is focused.
     private lazy var announcer = ToolActivityAnnouncer(post: ToolActivityAnnouncer.voiceOver(from: self))
 
     init(tag: String, agentName: String? = nil, displayName: String? = nil,
-         workingDirectory: String? = nil, quickActions: [QuickAction] = []) {
+         workingDirectory: String? = nil, quickActions: [QuickAction] = [],
+         foldStore: TranscriptFoldStore = .shared) {
         self.quickActions = quickActions
+        foldSync = PaneFoldSync(tag: tag, store: foldStore,
+                                harnessMode: TranscriptLoadHarness.foldsExpandedByDefault ? .allActivity : nil)
         // Use the shared registry so multiple windows showing the same tag
         // observe the same session and stay in sync (mirrored).
         let shared = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
@@ -276,6 +290,10 @@ class ReplView: NSView {
                 }
             },
             applyChange: { [weak self] turnIds, mutation in self?.applyFoldChange(turnIds: turnIds, mutation: mutation) })
+        rollInHolds.recordCarried = { [weak self] turn, states in
+            guard let self, let key = self.session.turns.first(where: { $0.id == turn })?.identityKey else { return }
+            for (row, open) in states { self.foldSync.recordFold(key: row, turnKey: key, open: open) }
+        }
         rollInHolds.isFollowingTail = { [weak self] in self?.isPinnedToBottom ?? true }
         elapsedTicker.islands = { [weak self] in
             self?.turnViews.values.compactMap { $0 as? ElapsedTicking } ?? []
@@ -288,7 +306,15 @@ class ReplView: NSView {
         virtualizer.foldState = { [weak self] turn in
             self?.interactions.state(for: turn.id) ?? TurnInteractionState()
         }
-        virtualizer.foldsExpandedByDefault = foldsExpandedByDefault
+        virtualizer.foldResolver = { [weak self] turn in
+            self?.foldSync.resolver(turnKey: turn.identityKey) ?? FoldResolver(turnKey: turn.identityKey)
+        }
+        // Another window's toggle, a mode switch or a default change re-resolves this pane's folds
+        // with the reading position kept (`applyFoldChange`).
+        foldSync.loadedTurnIDs = { [weak self] in Set(self?.session.turns.map(\.id) ?? []) }
+        foldSync.stuckGroupKeys = { [weak self] in self?.loadedStuckGroupKeys() ?? [] }
+        foldSync.applyChange = { [weak self] turnIds, mutation in self?.applyFoldChange(turnIds: turnIds, mutation: mutation) }
+        foldSync.reresolve = { [weak self] in self?.resolveMaterializedFolds() }
 
         // Scripted scroll for the acceptance run — see TranscriptLoadHarness.
         NotificationCenter.default.addObserver(
@@ -321,6 +347,9 @@ class ReplView: NSView {
         // any of them (or by an agent, or a script) reaches all their chips.
         inputBar.bindModel(tag: session.tag, agentName: session.agentName, store: ModelStore.shared)
         inputBar.bindBackground(tag: session.tag, store: BackgroundTaskStore.shared, displayName: session.displayName)
+        inputBar.bindMode(tag: session.tag, store: foldSync.store,
+                          harnessMode: foldsExpandedByDefault ? .allActivity : nil)
+        inputBar.onSetMode = { [weak self] mode in self?.setTranscriptViewMode(mode) }
         addSubview(inputBar)
 
         // "Jump to latest" — covers exactly the transcript area (so it sits above
@@ -518,6 +547,10 @@ class ReplView: NSView {
             // would put an O(turns) walk on the hot path, and between splices
             // growth is bounded by the turns a human actually interacted with.
             interactions.prune(keeping: Set(turns.map(\.id)))
+            // The same for the persisted choices, which are keyed by durable ids. Only a splice
+            // from the start can drop turns; nothing is forgotten on `.cleared` (Clear Context keeps
+            // the focus's mode and its folds).
+            if from == 0 { foldSync.prune(keepingTurnKeys: Set(turns.map(\.identityKey))) }
             virtualizer.splice(turns: turns, from: from)
 
         case .appended(let index):
@@ -576,6 +609,43 @@ class ReplView: NSView {
         viewport.applyFoldChange(turnIds: turnIds, mutation: mutation)
     }
 
+    /// The turn's block at `index` as it stands (hydrated), nil for a negative (terminal delivery)
+    /// or unknown index.
+    private func currentBlock(ofTurn id: UUID, at index: Int) -> TurnBlock? {
+        guard index >= 0, let turn = session.turns.first(where: { $0.id == id }) else { return nil }
+        let blocks: [TurnBlock]
+        switch session.hydrated(turn) {
+        case .full(let hydrated), .unavailable(let hydrated): blocks = hydrated.blocks
+        }
+        return blocks.indices.contains(index) ? blocks[index] : nil
+    }
+
+    /// Every stuck tool group (derived, `ToolGroup.isStuck`) in the turns the pane holds, folded
+    /// into activity rows or not: a mode switch writes these explicitly.
+    private func loadedStuckGroupKeys() -> [String] {
+        var keys: [String] = []
+        func collect(_ item: FoldShape.Item) {
+            switch item {
+            case .group(let group): if group.isStuck { keys.append(group.key) }
+            case .activity(_, let members): members.forEach(collect)
+            case .block, .message: break
+            }
+        }
+        for turn in session.turns where turn.isComplete && turn.marker == nil {
+            virtualizer.foldShape(for: turn)?.items.forEach(collect)
+        }
+        return keys
+    }
+
+    /// Set the folds of the materialized turn views from the store (the mode or another window's
+    /// choice changed them). Called inside `applyFoldChange`, which re-measures afterwards.
+    private func resolveMaterializedFolds() {
+        for turn in session.turns {
+            guard let view = turnViews[turn.id] as? ChatTurnView else { continue }
+            view.applyFolds(foldSync.resolver(turnKey: turn.identityKey))
+        }
+    }
+
     /// The pane's half of `applyFoldChange`: each changed turn is re-estimated with its new fold
     /// state (or handed back a height measured with it), those on screen are measured again, and
     /// a pass runs. One walk over the geometry, refreshing only the changed turns in place: a
@@ -604,9 +674,7 @@ class ReplView: NSView {
         guard case .group(let group)? = ToolFoldAdapter.plan(turn).last(where: {
             if case .group = $0 { return true } else { return false }
         }), group.isStuck else { return }
-        let state = interactions.state(for: turn.id)
-        guard state.groupStates[group.key] == nil, !state.groupAuto.contains(group.key) else { return }
-        interactions.recordAuto(turn: turn.id, key: group.key)
+        foldSync.recordAuto(key: group.key, turnKey: turn.identityKey)
     }
 
     /// Tell VoiceOver about a transcript note, when this pane is the one being looked at.
@@ -832,8 +900,9 @@ class ReplView: NSView {
         RebuildCounters.note(.turnViewBuilt)
 
         let state = interactions.state(for: turn.id)
+        let turnKey = turn.identityKey
         let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable, interaction: state,
-                                folds: FoldResolver(state: state, expandedByDefault: foldsExpandedByDefault),
+                                folds: foldSync.resolver(turnKey: turnKey),
                                 heldOrdinals: state.heldOrdinals, approvals: ApprovalStore.shared)
         view.onSend = { [weak self] text in
             guard let self else { return }
@@ -853,7 +922,9 @@ class ReplView: NSView {
         // The toggled row stays where it is on screen (`noteUserToggle`).
         view.onBlockExpansion = { [weak self] blockIndex, isExpanded in
             guard let self else { return }
-            self.interactions.setExpanded(turn: turn.id, block: blockIndex, isExpanded)
+            let key = FoldKey.result(block: self.currentBlock(ofTurn: turn.id, at: blockIndex), index: blockIndex,
+                                     turnKey: turnKey)
+            self.foldSync.recordResult(key: key, turnKey: turnKey, open: isExpanded)
             if let index = self.index(ofTurn: turn.id) {
                 self.viewport.noteUserToggle(turnIndex: index, itemKey: "b\(blockIndex)")
             }
@@ -863,17 +934,17 @@ class ReplView: NSView {
         // clicked row stays where it is on screen.
         view.onGroupToggle = { [weak self] key, isExpanded in
             guard let self else { return }
-            self.interactions.setGroup(turn: turn.id, key: key, isExpanded)
+            self.foldSync.recordFold(key: key, turnKey: turnKey, open: isExpanded)
             if let index = self.index(ofTurn: turn.id) {
                 self.viewport.noteUserToggle(turnIndex: index, itemKey: key)
             }
             self.pendingRemeasure.insert(turn.id)
             self.schedulePass()
         }
-        // An activity row opened or closed: as for a group (in memory per pane until FV4).
+        // An activity row opened or closed: as for a group.
         view.onActivityToggle = { [weak self] key, isExpanded in
             guard let self else { return }
-            self.interactions.setActivity(turn: turn.id, key: key, isExpanded)
+            self.foldSync.recordFold(key: key, turnKey: turnKey, open: isExpanded)
             if let index = self.index(ofTurn: turn.id) {
                 self.viewport.noteUserToggle(turnIndex: index, itemKey: key)
             }
@@ -892,7 +963,7 @@ class ReplView: NSView {
         view.onAutoOpen = { [weak self] key in
             guard let self else { return }
             self.applyFoldChange(turnIds: [turn.id]) {
-                self.interactions.recordAuto(turn: turn.id, key: key)
+                self.foldSync.recordAuto(key: key, turnKey: turnKey)
             }
         }
         view.onGroupSettled = { [weak self] group in
@@ -952,8 +1023,7 @@ class ReplView: NSView {
         view.setIslandWidth(contentWidth)
         let height = max(view.islandHeight(), TurnHeightEstimator.minimumTurnHeight)
         view.setFrameSize(NSSize(width: contentWidth, height: height))
-        let digest = ToolFoldAdapter.foldDigest(turn: turn, state: interactions.state(for: turn.id),
-                                                expandedByDefault: foldsExpandedByDefault)
+        let digest = virtualizer.foldDigest(for: turn)
         virtualizer.recordMeasured(height, at: index, isComplete: turn.isComplete, foldDigest: digest)
 
         superview?.addSubview(view)
@@ -1295,8 +1365,8 @@ extension ReplView: TranscriptDiagnostics.Reporting {
     /// Rows the pane shows with folding, and its tool groups (the PRD's rows-per-turn
     /// metric). One walk over the turns, through the virtualizer's cached fold shapes.
     var foldRowCounts: (rows: Int, groups: Int) {
-        ToolFoldAdapter.rowCounts(turns: session.turns, resolver: { [interactions, foldsExpandedByDefault] turn in
-            FoldResolver(state: interactions.state(for: turn.id), expandedByDefault: foldsExpandedByDefault)
+        ToolFoldAdapter.rowCounts(turns: session.turns, resolver: { [foldSync] turn in
+            foldSync.resolver(turnKey: turn.identityKey)
         }, shape: { [virtualizer] turn in virtualizer.foldShape(for: turn) })
     }
 }
@@ -1417,10 +1487,9 @@ extension ReplView: ToolGroupHarnessDriving {
             return key
         }.first
         if let segmentKey {
-            interactions.setActivity(turn: found.turn.id, key: segmentKey, true)
+            foldSync.recordFold(key: segmentKey, turnKey: found.turn.identityKey, open: true)
             if let view = turnViews[found.turn.id] as? ChatTurnView {
-                view.applyFolds(FoldResolver(state: interactions.state(for: found.turn.id),
-                                             expandedByDefault: foldsExpandedByDefault))
+                view.applyFolds(foldSync.resolver(turnKey: found.turn.identityKey))
             }
             virtualizer.refresh(found.turn, at: found.index)
             pendingRemeasure.insert(found.turn.id)
@@ -1541,5 +1610,40 @@ class ContextMeterView: NSView {
         // Subtle: fgMuted at 60% opacity — visible but not competing with content.
         Theme.fgMuted.withAlphaComponent(0.6).setFill()
         fillRect.fill()
+    }
+}
+
+// MARK: - Transcript view mode (FV4)
+
+extension ReplView: TranscriptViewModeTarget, NSMenuItemValidation {
+
+    /// View ▸ Focus (⌥⌘←), the chip, a fold row's context menu.
+    @objc func setTranscriptFocusMode(_ sender: Any?) { setTranscriptViewMode(.focus) }
+
+    /// View ▸ Show All Activity (⌥⌘→), the chip, a fold row's context menu.
+    @objc func setTranscriptAllActivityMode(_ sender: Any?) { setTranscriptViewMode(.allActivity) }
+
+    /// The pane's focus is in All activity (its effective mode).
+    @objc var transcriptShowsAllActivity: Bool { foldSync.mode == .allActivity }
+
+    /// The mode chip in this pane's input bar.
+    var transcriptModeChip: TranscriptModeChip { inputBar.modeChip }
+
+    /// This pane's input bar (the composer and its chips).
+    var composerBar: ReplInputBar { inputBar }
+
+    /// Switch this pane's focus to `mode`: every fold in the focus takes the mode's state, in every
+    /// window on the focus (the store's event reaches them in this same call), and this pane, the
+    /// one that performed it, announces it once.
+    func setTranscriptViewMode(_ mode: TranscriptViewMode) {
+        foldSync.setMode(mode)
+        announceModeChange(mode == .focus ? "Focus: activity folded" : "Showing all activity")
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == TranscriptViewMenu.focusAction || menuItem.action == TranscriptViewMenu.allActivityAction {
+            return TranscriptViewMenu.validate(menuItem, target: self)
+        }
+        return true
     }
 }
