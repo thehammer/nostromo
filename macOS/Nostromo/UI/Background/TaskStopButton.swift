@@ -41,6 +41,10 @@ enum BackgroundGesture {
 /// Proof that a Stop went through both gesture steps (a permitted arm, then a permitted, distinct confirm).
 /// `BackgroundTaskStore.requestStop` takes one, and only `TaskStopButton` can make one: the initializer is
 /// `fileprivate` to this file, so a call from anywhere else does not compile.
+///
+/// It is only ever handed to the two button closures (`requestStop`); the source scan catches any extra
+/// caller. It is copyable and not bound to a (tag, taskId), so it proves a gesture happened, not which
+/// task it was for.
 struct StopConfirmation {
     fileprivate init() {}
 }
@@ -210,11 +214,13 @@ final class TaskStopButton: NSButton {
     /// Space, Return, keypad Enter.
     private static let activationKeyCodes: Set<UInt16> = [49, 36, 76]
 
-    /// Seconds from the arming event to this one: event time when both exist (the handler can run late or
-    /// bunched, the events cannot), otherwise the injected clock.
+    /// Seconds from the arm to this confirm. Both clocks must agree: event timestamps can be forged by a
+    /// process posting CGEvents, and the handler clock can bunch for a legitimate pair, so when both events
+    /// exist the smaller gap wins. A confirm stamped before the arm is negative and refused.
     private func secondsSinceArm(_ event: NSEvent?) -> TimeInterval {
-        if let event, let armedBy { return event.timestamp - armedBy.timestamp }
-        return BackgroundGesture.now() - armedAt
+        let handlerGap = BackgroundGesture.now() - armedAt
+        if let event, let armedBy { return min(event.timestamp - armedBy.timestamp, handlerGap) }
+        return handlerGap
     }
 
     private func advance(by event: NSEvent?) {

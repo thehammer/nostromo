@@ -81,6 +81,10 @@ cannot compile a call. A fitness test (`TaskStopGateFitnessTests`) backs this wi
 - With VoiceOver on, an action with no current event is accepted (an Accessibility press). It has
   no event to compare, so only the 0.3 s spacing on the handler clock separates its arm from its confirm,
   and a local process with Accessibility permission can do it while VoiceOver is on.
+- **A process that can post real CGEvents** (Accessibility permission) can click at the button's
+  coordinates. `HumanGesture` records the source pid without judging it. This is the real ceiling of the
+  Mac gate: the 0.3 s real-time wait (both the event clock and the handler clock must show it) and the
+  two-step are the only barriers.
 - **Any local process of the same uid that can reach the client socket can send `SessionTaskStop` to the
   daemon directly** (`src/ipc/peer.rs`: local-only, no operator nonce). The Mac gate protects only the UI
   route. Gating `session_task_stop` with an operator nonce in the daemon is the larger residual and needs

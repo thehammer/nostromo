@@ -617,7 +617,6 @@ final class BackgroundScrollSafetyTests: XCTestCase {
         _ = p.rig.window.performKeyEquivalent(with: try XCTUnwrap(passedOn))
         XCTAssertEqual(interrupts, 1, "the event the monitor leaves alone is the composer's interrupt")
         XCTAssertEqual(gate.sender.stops.count, 0, "and no stop was sent")
-        XCTAssertEqual(gate.sender.stops.count, 0)
     }
 
     // MARK: BA4: a task window
