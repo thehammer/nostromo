@@ -27,7 +27,7 @@ struct TaskWindowContent: Equatable {
     let isEnded: Bool
     /// `Started 2:03:07 PM`; nil when the daemon did not say when.
     let startedText: String?
-    /// `Running for 1 m 3 s` or `Ran for 5 s`; nil when unknown.
+    /// `Running for 1 m 03 s` or `Ran for 5.0 s` (the duration text of a tool group); nil when unknown.
     let timeText: String?
     /// An ended task's closing words: the completion summary; a running one's progress summary.
     let summary: String?
@@ -81,7 +81,7 @@ struct TaskWindowContent: Equatable {
             return "Started " + formatter.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
         }
         let description = oneLine(meta.description)
-        let summary = ended ? detail?.completionSummary : (detail?.progressSummary ?? detail?.completionSummary)
+        let summary = ended ? detail?.completionSummary : detail?.progressSummary
         let activity = meta.kind == .agent ? agentActivity(meta) : nil
         return TaskWindowContent(
             focusTag: tag,

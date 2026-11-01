@@ -183,11 +183,13 @@ final class TaskOutputView: NSView, TaskWindowBody {
     private func replaceAll() {
         guard let storage = textView.textStorage else { return }
         let origin = clipView.bounds.origin
+        let hadText = storage.length > 0
         storage.beginEditing()
         storage.replaceCharacters(in: NSRange(location: 0, length: storage.length),
                                   with: NSAttributedString(string: model.text, attributes: attributes))
         storage.endEditing()
-        replaceOps += 1
+        // The first fill of an empty view replaces nothing.
+        if hadText { replaceOps += 1 }
         if isFollowing {
             scrollToBottom()
         } else {
