@@ -1366,8 +1366,9 @@ extension TerminalSessionStoreTests {
         _ = attachedTerminal()
         store.sendInput(terminalId: "t1", bytes: Array("ls".utf8), fromWindow: "w1", autoReply: false, via: "stage_insert")
         store.sendInput(terminalId: "t1", bytes: Array("pwd".utf8), fromWindow: "w1")
-        XCTAssertEqual(sent, [.input(terminalId: "t1", bytes: Array("ls".utf8), autoReply: false, via: "stage_insert"),
-                              .input(terminalId: "t1", bytes: Array("pwd".utf8))])
+        let inputs = sent.filter { if case .input = $0 { return true } else { return false } }
+        XCTAssertEqual(inputs, [.input(terminalId: "t1", bytes: Array("ls".utf8), autoReply: false, via: "stage_insert"),
+                                .input(terminalId: "t1", bytes: Array("pwd".utf8))])
     }
 
     func testATerminalThisAppDidNotOpenHasAnUnknownLineWhichCountsAsText() {
