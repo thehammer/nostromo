@@ -492,6 +492,10 @@
 		ZZ0000000000000000BA0802 /* TaskWindowController.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0800 /* TaskWindowController.swift */; };
 		ZZ0000000000000000BA0901 /* TaskOutputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0900 /* TaskOutputView.swift */; };
 		ZZ0000000000000000BA0902 /* TaskOutputView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0900 /* TaskOutputView.swift */; };
+		ZZ0000000000000000BA4101 /* TaskWindowHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA4100 /* TaskWindowHeaderView.swift */; };
+		ZZ0000000000000000BA4102 /* TaskWindowHeaderView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA4100 /* TaskWindowHeaderView.swift */; };
+		ZZ0000000000000000BA4001 /* TaskWindowContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA4000 /* TaskWindowContent.swift */; };
+		ZZ0000000000000000BA4002 /* TaskWindowContent.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA4000 /* TaskWindowContent.swift */; };
 		ZZ0000000000000000BA1001 /* SubagentTaskView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA1000 /* SubagentTaskView.swift */; };
 		ZZ0000000000000000BA1002 /* SubagentTaskView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA1000 /* SubagentTaskView.swift */; };
 		ZZ0000000000000000BA1101 /* TaskStopButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA1100 /* TaskStopButton.swift */; };
@@ -517,6 +521,11 @@
 		ZZ0000000000000000BA3301 /* TaskStopTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3300 /* TaskStopTests.swift */; };
 		ZZ0000000000000000BA3401 /* WakeMarkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */; };
 		ZZ0000000000000000BA3501 /* WakeMarkerAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */; };
+		ZZ0000000000000000BA5401 /* TaskWindowFitnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5400 /* TaskWindowFitnessTests.swift */; };
+		ZZ0000000000000000BA5301 /* TaskWindowAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5300 /* TaskWindowAppearanceTests.swift */; };
+		ZZ0000000000000000BA5201 /* TaskOutputViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5200 /* TaskOutputViewTests.swift */; };
+		ZZ0000000000000000BA5101 /* TaskWindowContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5100 /* TaskWindowContentTests.swift */; };
+		ZZ0000000000000000BA5001 /* TaskRequestsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5000 /* TaskRequestsTests.swift */; };
 		WCO000000000000000000001 /* ActivityTickerView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = PP000000000000000000004 /* ActivityTickerView.swift */; };
 		WCO000000000000000000002 /* AppStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000004 /* AppStore.swift */; };
 		WCO000000000000000000003 /* CodeContentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = LL0000000000000000000005 /* CodeContentView.swift */; };
@@ -1032,6 +1041,8 @@
 		ZZ0000000000000000BA0700 /* BackgroundShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundShortcut.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA0800 /* TaskWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskWindowController.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA0900 /* TaskOutputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskOutputView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000BA4100 /* TaskWindowHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskWindowHeaderView.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000BA4000 /* TaskWindowContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskWindowContent.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA1000 /* SubagentTaskView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubagentTaskView.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA1100 /* TaskStopButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskStopButton.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA1200 /* WakeMarkerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerView.swift; sourceTree = "<group>"; };
@@ -1052,6 +1063,11 @@
 		ZZ0000000000000000BA3300 /* TaskStopTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskStopTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000BA5400 /* TaskWindowFitnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskWindowFitnessTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000BA5300 /* TaskWindowAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskWindowAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000BA5200 /* TaskOutputViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskOutputViewTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000BA5100 /* TaskWindowContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskWindowContentTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000BA5000 /* TaskRequestsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskRequestsTests.swift; sourceTree = "<group>"; };
 		MDW000000000000000000001 /* MotherDetailLabelWidthTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDetailLabelWidthTests.swift; sourceTree = "<group>"; };
 		MVC000000000000000000001 /* MotherOverviewAndCrewOverflowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherOverviewAndCrewOverflowTests.swift; sourceTree = "<group>"; };
 		MVT000000000000000000001 /* FocusSplitOversizedChildTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusSplitOversizedChildTests.swift; sourceTree = "<group>"; };
@@ -1666,6 +1682,11 @@
 				ZZ0000000000000000BA3300 /* TaskStopTests.swift */,
 				ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */,
 				ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */,
+				ZZ0000000000000000BA5400 /* TaskWindowFitnessTests.swift */,
+				ZZ0000000000000000BA5300 /* TaskWindowAppearanceTests.swift */,
+				ZZ0000000000000000BA5200 /* TaskOutputViewTests.swift */,
+				ZZ0000000000000000BA5100 /* TaskWindowContentTests.swift */,
+				ZZ0000000000000000BA5000 /* TaskRequestsTests.swift */,
 				ZZ0000000000000000TK1500 /* TrackerStoreTests.swift */,
 				ZZ0000000000000000TK1600 /* TrackerPaneViewTests.swift */,
 				ZZ0000000000000000TK1700 /* TrackerScrollSafetyTests.swift */,
@@ -1693,6 +1714,8 @@
 				ZZ0000000000000000BA0700 /* BackgroundShortcut.swift */,
 				ZZ0000000000000000BA0800 /* TaskWindowController.swift */,
 				ZZ0000000000000000BA0900 /* TaskOutputView.swift */,
+				ZZ0000000000000000BA4100 /* TaskWindowHeaderView.swift */,
+				ZZ0000000000000000BA4000 /* TaskWindowContent.swift */,
 				ZZ0000000000000000BA1000 /* SubagentTaskView.swift */,
 				ZZ0000000000000000BA1100 /* TaskStopButton.swift */,
 				ZZ0000000000000000BA1200 /* WakeMarkerView.swift */,
@@ -2076,6 +2099,8 @@
 				ZZ0000000000000000BA0701 /* BackgroundShortcut.swift in Sources */,
 				ZZ0000000000000000BA0801 /* TaskWindowController.swift in Sources */,
 				ZZ0000000000000000BA0901 /* TaskOutputView.swift in Sources */,
+				ZZ0000000000000000BA4101 /* TaskWindowHeaderView.swift in Sources */,
+				ZZ0000000000000000BA4001 /* TaskWindowContent.swift in Sources */,
 				ZZ0000000000000000BA1001 /* SubagentTaskView.swift in Sources */,
 				ZZ0000000000000000BA1101 /* TaskStopButton.swift in Sources */,
 				ZZ0000000000000000BA1201 /* WakeMarkerView.swift in Sources */,
@@ -2473,6 +2498,8 @@
 				ZZ0000000000000000BA0702 /* BackgroundShortcut.swift in TestSources */,
 				ZZ0000000000000000BA0802 /* TaskWindowController.swift in TestSources */,
 				ZZ0000000000000000BA0902 /* TaskOutputView.swift in TestSources */,
+				ZZ0000000000000000BA4102 /* TaskWindowHeaderView.swift in TestSources */,
+				ZZ0000000000000000BA4002 /* TaskWindowContent.swift in TestSources */,
 				ZZ0000000000000000BA1002 /* SubagentTaskView.swift in TestSources */,
 				ZZ0000000000000000BA1102 /* TaskStopButton.swift in TestSources */,
 				ZZ0000000000000000BA1202 /* WakeMarkerView.swift in TestSources */,
@@ -2522,6 +2549,11 @@
 				ZZ0000000000000000BA3301 /* TaskStopTests.swift in Sources */,
 				ZZ0000000000000000BA3401 /* WakeMarkerTests.swift in Sources */,
 				ZZ0000000000000000BA3501 /* WakeMarkerAppearanceTests.swift in Sources */,
+				ZZ0000000000000000BA5401 /* TaskWindowFitnessTests.swift in Sources */,
+				ZZ0000000000000000BA5301 /* TaskWindowAppearanceTests.swift in Sources */,
+				ZZ0000000000000000BA5201 /* TaskOutputViewTests.swift in Sources */,
+				ZZ0000000000000000BA5101 /* TaskWindowContentTests.swift in Sources */,
+				ZZ0000000000000000BA5001 /* TaskRequestsTests.swift in Sources */,
 				ZZ0000000000000000TK0102 /* TrackerStore.swift in TestSources */,
 				ZZ0000000000000000TK0202 /* TrackerPaneView.swift in TestSources */,
 				ZZ0000000000000000TK0302 /* TrackerViewportAnchor.swift in TestSources */,

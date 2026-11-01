@@ -359,13 +359,64 @@ class TasksCommandTests(unittest.TestCase):
     # -- what the CLI refuses ---------------------------------------------------------
 
     def test_tasks_needs_a_known_subcommand_and_sends_nothing_otherwise(self):
-        # `stop` and `output` are not part of this slice: they must not reach the app from this CLI.
-        for argv in (["tasks"], ["tasks", "stop"], ["tasks", "stop", "b1"], ["tasks", "output"], ["tasks", "output", "b1"],
-                     ["tasks", "kill"], ["tasks", "clear"]):
+        # `stop` is not part of this slice (BA5): it must not reach the app from this CLI.
+        for argv in (["tasks"], ["tasks", "stop"], ["tasks", "stop", "b1"], ["tasks", "output"],
+                     ["tasks", "kill"], ["tasks", "clear"], ["tasks", "list", "b1"], ["tasks", "chip", "b1"]):
             with self.subTest(argv=argv):
                 code, sent = self.rejected(argv)
                 self.assertEqual(code, 2)
                 self.assertEqual(sent, [], "an unknown tasks subcommand must send nothing")
+
+    # -- tasks output -----------------------------------------------------------------
+
+    def test_output_maps_the_task_and_focus(self):
+        reply = {"tag": "kate", "task_id": "b1", "state": "ready", "text": "hi\n", "truncated": False,
+                 "total_bytes": 3, "source": "file"}
+        sent, code, out = self.run_cli(["tasks", "output", "b1", "--focus", "kate"], reply)
+        self.assertEqual(sent, [{"cmd": "tasks", "window": 0, "sub": "output", "task": "b1", "focus": "kate"}])
+        self.assertEqual(code, 0)
+        import json
+        self.assertEqual(json.loads(out), reply)
+
+    def test_output_asks_again_while_the_state_is_loading_then_prints_the_last_answer(self):
+        import json
+        replies = [{"state": "loading"}, {"state": "loading"}, {"state": "ready", "text": "x"}]
+        sent = []
+        def fake(req):
+            sent.append(req)
+            return replies[min(len(sent), len(replies)) - 1]
+        out = io.StringIO()
+        with mock.patch.object(cli, "call", fake), mock.patch("time.sleep", lambda s: None), \
+                mock.patch("sys.argv", ["nostromo-app", "tasks", "output", "b1"]), redirect_stdout(out):
+            cli.main()
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(json.loads(out.getvalue())["state"], "ready")
+
+    def test_output_gives_up_waiting_after_wait_seconds_and_prints_loading(self):
+        import json
+        sent = []
+        def fake(req):
+            sent.append(req)
+            return {"state": "loading"}
+        out = io.StringIO()
+        with mock.patch.object(cli, "call", fake), mock.patch("time.sleep", lambda s: None), \
+                mock.patch("sys.argv", ["nostromo-app", "tasks", "output", "b1", "--wait", "0"]), redirect_stdout(out):
+            cli.main()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(json.loads(out.getvalue())["state"], "loading")
+
+    def test_output_never_sends_anything_that_acts(self):
+        acting = {"click", "drag", "key", "type", "paste", "drop", "activate", "restore"}
+        sent, _, _ = self.run_cli(["tasks", "output", "b1"], {"state": "ready"})
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn(sent[0]["cmd"], acting)
+
+    def test_output_is_documented_as_read_only_and_withheld_in_the_real_app(self):
+        doc = cli.__doc__ or ""
+        lines = [l for l in doc.splitlines() if l.strip().startswith("nostromo-app tasks output")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("READ-ONLY", lines[0])
+        self.assertIn("WITHHOLDS", lines[0])
 
     # -- failures ---------------------------------------------------------------------
 
@@ -389,7 +440,7 @@ class TasksCommandTests(unittest.TestCase):
 
     def test_help_documents_the_subcommands_and_options(self):
         text = self.help_text(["tasks"])
-        for word in ("list", "chip", "--focus", "--all"):
+        for word in ("list", "chip", "output", "--focus", "--all", "--wait"):
             with self.subTest(word=word):
                 self.assertIn(word, text)
 
