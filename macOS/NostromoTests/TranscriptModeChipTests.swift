@@ -216,7 +216,9 @@ final class TranscriptModeChipTests: XCTestCase {
         XCTAssertFalse(chip.hasKeyboardFocus)
     }
 
-    func testTheKeyLoopFromTheComposerReachesTheChip() throws {
+    /// The loop is what ⌃Tab walks, and Tab from another control with Full Keyboard Access on; Tab inside
+    /// the composer types a tab, so this does not claim that key. Skips on CI (Full Keyboard Access is off).
+    func testTheKeyViewLoopAfterTheComposerReachesTheChipWithFullKeyboardAccessOn() throws {
         try XCTSkipUnless(NSApp.isFullKeyboardAccessEnabled,
                           "a button joins the Tab loop only with Full Keyboard Access on; this Mac has it off")
         let rig = makeRig(width: 600, model: false)
@@ -230,7 +232,7 @@ final class TranscriptModeChipTests: XCTestCase {
             if cursor === rig.bar.modeChip { reached = true; break }
             if cursor == nil || cursor === rig.bar.textView { break }
         }
-        XCTAssertTrue(reached, "Tab from the composer arrives at the transcript view chip")
+        XCTAssertTrue(reached, "the key view loop after the composer arrives at the transcript view chip")
     }
 
     func testChangingTheModeNeverTakesTheKeyboardOrMovesTheInsertionPoint() {

@@ -663,6 +663,7 @@
 		TS000000000000000000T007 /* StagingRowView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F007 /* StagingRowView.swift */; };
 		TS000000000000000000T008 /* TerminalStagingWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F008 /* TerminalStagingWireTests.swift */; };
 		TS000000000000000000T009 /* TerminalStagingStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F009 /* TerminalStagingStoreTests.swift */; };
+		BP000000000000000000T001 /* BudgetPostureTests.swift in TestSources */ = {isa = PBXBuildFile; fileRef = BP000000000000000000F001 /* BudgetPostureTests.swift */; };
 		TS000000000000000000T010 /* StagingDrawerModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F010 /* StagingDrawerModelTests.swift */; };
 		TS000000000000000000T011 /* StagingInsertControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F011 /* StagingInsertControllerTests.swift */; };
 		TS000000000000000000T012 /* StagingDrawerViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F012 /* StagingDrawerViewTests.swift */; };
@@ -1133,6 +1134,7 @@
 		TS000000000000000000F007 /* StagingRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingRowView.swift; sourceTree = "<group>"; };
 		TS000000000000000000F008 /* TerminalStagingWireTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStagingWireTests.swift; sourceTree = "<group>"; };
 		TS000000000000000000F009 /* TerminalStagingStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStagingStoreTests.swift; sourceTree = "<group>"; };
+		BP000000000000000000F001 /* BudgetPostureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BudgetPostureTests.swift; sourceTree = "<group>"; };
 		TS000000000000000000F010 /* StagingDrawerModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingDrawerModelTests.swift; sourceTree = "<group>"; };
 		TS000000000000000000F011 /* StagingInsertControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingInsertControllerTests.swift; sourceTree = "<group>"; };
 		TS000000000000000000F012 /* StagingDrawerViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StagingDrawerViewTests.swift; sourceTree = "<group>"; };
@@ -1486,6 +1488,7 @@
 				TP000000000000000000F034 /* FollowModelTests.swift */,
 				TS000000000000000000F008 /* TerminalStagingWireTests.swift */,
 				TS000000000000000000F009 /* TerminalStagingStoreTests.swift */,
+				BP000000000000000000F001 /* BudgetPostureTests.swift */,
 				TS000000000000000000F010 /* StagingDrawerModelTests.swift */,
 				TS000000000000000000F011 /* StagingInsertControllerTests.swift */,
 				TS000000000000000000F012 /* StagingDrawerViewTests.swift */,
@@ -2153,6 +2156,7 @@
 				TS000000000000000000T007 /* StagingRowView.swift in TestSources */,
 				TS000000000000000000T008 /* TerminalStagingWireTests.swift in Sources */,
 				TS000000000000000000T009 /* TerminalStagingStoreTests.swift in Sources */,
+				BP000000000000000000T001 /* BudgetPostureTests.swift in TestSources */,
 				TS000000000000000000T010 /* StagingDrawerModelTests.swift in Sources */,
 				TS000000000000000000T011 /* StagingInsertControllerTests.swift in Sources */,
 				TS000000000000000000T012 /* StagingDrawerViewTests.swift in Sources */,

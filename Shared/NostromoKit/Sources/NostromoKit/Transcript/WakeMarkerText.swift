@@ -43,6 +43,12 @@ public enum WakeMarkerText {
     /// Most jobs listed in a tooltip; the rest are counted.
     public static let tooltipJobLimit = 20
 
+    /// Every double-quote scalar a title could use to close the quoted region.
+    private static let doubleQuotes: Set<Unicode.Scalar> = [
+        "\"", "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{2033}", "\u{2036}",
+        "\u{FF02}", "\u{275D}", "\u{275E}", "\u{301D}", "\u{301E}", "\u{301F}", "\u{02BA}",
+    ]
+
     /// Longest unknown state shown as text.
     private static let stateLimit = 24
 
@@ -58,7 +64,7 @@ public enum WakeMarkerText {
             return WakeMarkerContent(
                 line: "\(mark) Mother: \(stateWords(first.state)) \"\(title(first, limit: lineTitleLimit))\"\(prSuffix(first))",
                 tooltipLines: [tooltip],
-                accessibilityLabel: "Mother update: \(title(first, limit: tooltipTitleLimit)) \(stateWords(first.state))\(pull).",
+                accessibilityLabel: "Mother update: \(stateWords(first.state)), \(title(first, limit: tooltipTitleLimit))\(pull).",
                 target: .motherJob(id: first.jobId))
         }
         var lines = items.prefix(tooltipJobLimit).map { detail($0, titleLimit: tooltipTitleLimit) }
@@ -83,10 +89,8 @@ public enum WakeMarkerText {
 
     private static func title(_ item: MotherNoticeItemWire, limit: Int) -> String {
         // Double quotes become `'` so the title cannot close the quoted region and forge what follows.
-        let quotes: Set<Unicode.Scalar> = ["\"", "\u{201C}", "\u{201D}", "\u{201E}", "\u{201F}", "\u{2033}", "\u{2036}",
-                                           "\u{FF02}", "\u{275D}", "\u{275E}", "\u{301D}", "\u{301E}", "\u{301F}", "\u{02BA}"]
         // Scalar level: a quote with a combining mark after it is one Character, but still a quote.
-        let scalars = FoldTextSanitizer.sanitize(item.title).unicodeScalars.map { quotes.contains($0) ? "'" : $0 }
+        let scalars = FoldTextSanitizer.sanitize(item.title).unicodeScalars.map { doubleQuotes.contains($0) ? "'" : $0 }
         let clean = String(String.UnicodeScalarView(scalars))
             .trimmingCharacters(in: .whitespaces)
         return capped(clean.isEmpty ? "Untitled job" : clean, to: limit)

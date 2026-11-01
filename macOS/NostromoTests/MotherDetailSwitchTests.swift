@@ -409,15 +409,15 @@ final class MotherDetailSwitchTests: XCTestCase {
     // MARK: - Where each segment is (the frames VoiceOver outlines and a click-by-position tool aims at)
 
     /// A `JobViewSwitch` of its own, set up the way the detail sets it up (Overview, Plan, Log; automatic widths;
-    /// small and rounded), 300 pt wide, in a window that is never shown. The window lives until the test ends.
-    private func makeSwitch(_ distribution: NSSegmentedControl.Distribution) -> JobViewSwitch {
+    /// small and rounded), `width` pt wide, in a window that is never shown. The window lives until the test ends.
+    private func makeSwitch(_ distribution: NSSegmentedControl.Distribution, width: CGFloat = 300) -> JobViewSwitch {
         _ = NSApplication.shared
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 80),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width + 60, height: 80),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         addTeardownBlock { window.close() }
 
-        let control = JobViewSwitch(frame: NSRect(x: 20, y: 28, width: 300, height: 24))
+        let control = JobViewSwitch(frame: NSRect(x: 20, y: 28, width: width, height: 24))
         control.segmentStyle = .rounded
         control.controlSize = .small
         control.segmentCount = 3
@@ -469,26 +469,41 @@ final class MotherDetailSwitchTests: XCTestCase {
         }
     }
 
-    func testSegmentsOfEqualWidthAreGivenEqualFramesThatSpanTheControl() {
-        let control = makeSwitch(.fillEqually)
-        let frames = spokenFrames(control)
-        assertLaidOutLeftToRight(frames, in: control, "fillEqually")
-        guard frames.count == 3 else { return }
+    /// 180 is narrower than the labels need (the padding clamps to 0), 300 is the usual width, 600 is roomy.
+    private static let switchWidths: [CGFloat] = [180, 300, 600]
 
-        let widths = frames.map { $0.width }
-        XCTAssertLessThanOrEqual((widths.max() ?? 0) - (widths.min() ?? 0), 1.5,
-                                 "the segments are one width, so their frames are: \(widths)")
-        XCTAssertEqual(frames[0].minX, control.bounds.minX, accuracy: 4, "the first segment starts at the control's left edge")
-        XCTAssertEqual(frames[2].maxX, control.bounds.maxX, accuracy: 4, "the last segment ends at the control's right edge")
+    func testSegmentsOfEqualWidthAreGivenEqualFramesThatSpanTheControl() {
+        for width in Self.switchWidths {
+            let control = makeSwitch(.fillEqually, width: width)
+            let frames = spokenFrames(control)
+            assertLaidOutLeftToRight(frames, in: control, "fillEqually at \(width)")
+            guard frames.count == 3 else { continue }
+
+            let widths = frames.map { $0.width }
+            XCTAssertLessThanOrEqual((widths.max() ?? 0) - (widths.min() ?? 0), 1.5,
+                                     "width \(width): the segments are one width, so their frames are: \(widths)")
+            XCTAssertEqual(frames[0].minX, control.bounds.minX, accuracy: 4, "width \(width): the first segment starts at the control's left edge")
+            XCTAssertEqual(frames[2].maxX, control.bounds.maxX, accuracy: 4, "width \(width): the last segment ends at the control's right edge")
+        }
     }
 
     func testSegmentsSizedToTheirLabelsAreGivenFramesInOrderWithOverviewWiderThanLog() {
-        let control = makeSwitch(.fill)
-        let frames = spokenFrames(control)
-        assertLaidOutLeftToRight(frames, in: control, "fill")
-        guard frames.count == 3 else { return }
+        for distribution in [NSSegmentedControl.Distribution.fill, .fillProportionally] {
+            for width in Self.switchWidths {
+                let control = makeSwitch(distribution, width: width)
+                let frames = spokenFrames(control)
+                assertLaidOutLeftToRight(frames, in: control, "\(distribution.rawValue) at \(width)")
+                guard frames.count == 3 else { continue }
 
-        XCTAssertGreaterThan(frames[0].width, frames[2].width, "Overview is the longer label, so it has the wider segment: \(frames)")
+                XCTAssertGreaterThan(frames[0].width, frames[2].width,
+                                     "\(distribution.rawValue) at \(width): Overview is the longer label, so it has the wider segment: \(frames)")
+            }
+        }
+    }
+
+    func testTheDetailsOwnSwitchIsEqualWidthSoTheEqualWidthFramesAreWhatIsDrawn() {
+        let detail = MotherJobDetail(host: MDStubHost(), logDirectory: FileManager.default.temporaryDirectory)
+        XCTAssertEqual(detail.segmentControl.segmentDistribution, .fillEqually)
     }
 
     func testTheFramesFollowTheDistributionAsItChangesBackAndForth() {

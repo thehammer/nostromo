@@ -551,6 +551,41 @@ final class FocusModeSyncTests: XCTestCase {
         XCTAssertEqual(store.foldState(tag: "fv4-a", key: "g:pinned")?.open, true, "a pin belongs to no turn: only the LRU bound removes it")
     }
 
+    // MARK: A remote toggle re-estimates only the turns it touches
+
+    private func syncRecordingEstimates(_ world: FV4StoreWorld, tag: String, turns: [String: UUID])
+        -> (sync: PaneFoldSync, estimated: () -> [Set<UUID>]) {
+        let sync = PaneFoldSync(tag: tag, store: world.store)
+        var estimated: [Set<UUID>] = []
+        sync.loadedTurnIDs = { Set(turns.values) }
+        sync.turnIDsForTurnKeys = { keys in Set(turns.filter { keys.contains($0.key) }.map(\.value)) }
+        sync.applyChange = { ids, mutation in estimated.append(ids); mutation() }
+        return (sync, { estimated })
+    }
+
+    func testAnotherWindowsFoldToggleReEstimatesOnlyTheTurnItBelongsTo() {
+        let world = FV4StoreWorld(self)
+        let turns = ["t1": UUID(), "t2": UUID(), "t3": UUID()]
+        let pane = syncRecordingEstimates(world, tag: "fv4-keys", turns: turns)
+
+        world.store.setResult(tag: "fv4-keys", key: "r:t2#b1", turnKey: "t2", open: true)
+        world.store.setFold(tag: "fv4-keys", key: "g:t3#c0", turnKey: "t3", open: true, origin: .user)
+
+        XCTAssertEqual(pane.estimated(), [[turns["t2"]!], [turns["t3"]!]], "each event re-estimates its own turn, not all three")
+        withExtendedLifetime(pane.sync) {}
+    }
+
+    func testAChangeWhoseTurnsAreNotKnownReEstimatesEveryLoadedTurn() {
+        let world = FV4StoreWorld(self)
+        let turns = ["t1": UUID(), "t2": UUID()]
+        let pane = syncRecordingEstimates(world, tag: "fv4-pin", turns: turns)
+
+        world.store.pinStuck(tag: "fv4-pin", keys: ["g:stuck"], open: true)   // a pin belongs to no turn
+
+        XCTAssertEqual(pane.estimated(), [Set(turns.values)])
+        withExtendedLifetime(pane.sync) {}
+    }
+
     // MARK: The global default
 
     func testTheDefaultOnlyMovesFocusesWithNoChoiceOfTheirOwn() {

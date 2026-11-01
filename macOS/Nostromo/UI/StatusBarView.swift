@@ -207,7 +207,7 @@ class StatusBarView: NSView {
     private func postureChipColor(_ p: BudgetPosture) -> NSColor {
         switch p {
         case .flush, .putTheHammerDown: return Theme.sage
-        case .critical, .pumpTheBrakes: return Theme.redSweater
+        case .critical, .pumpTheBrakes, .conservative: return Theme.redSweater
         default: return Theme.amber
         }
     }

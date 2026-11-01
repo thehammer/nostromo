@@ -139,6 +139,19 @@ final class TranscriptFoldStore {
         entryWritten(tag: tag, key: key)
     }
 
+    /// The turns these entries were written for, or nil when any key has no entry (it was removed) or an
+    /// entry with no turn key (`pinStuck`): then the turns it touches are not known.
+    func turnKeys(tag: String, keys: [String]) -> Set<String>? {
+        var turns = Set<String>()
+        for key in keys {
+            let entry = EntryKey(tag: tag, key: key)
+            let found = [folds[entry]?.turnKey, results[entry]?.turnKey].compactMap { $0 }
+            guard !found.isEmpty, !found.contains("") else { return nil }
+            turns.formUnion(found)
+        }
+        return turns
+    }
+
     /// Writes explicit fold entries (no turn key, so `prune` leaves them to LRU).
     func pinStuck(tag: String, keys: [String], open: Bool) {
         guard !keys.isEmpty else { return }
@@ -378,6 +391,8 @@ final class PaneFoldSync {
 
     /// Every turn the pane holds, loaded or not: a mode change re-estimates all of them.
     var loadedTurnIDs: () -> Set<UUID> = { [] }
+    /// The loaded turns with these `identityKey`s. Nil (the default) means not known: every loaded turn.
+    var turnIDsForTurnKeys: (_ turnKeys: Set<String>) -> Set<UUID>? = { _ in nil }
     /// The keys of the pane's tool groups that are stuck (derived), in every loaded turn: a mode
     /// switch writes them explicitly, so Focus closes even those.
     var stuckGroupKeys: () -> [String] = { [] }
@@ -448,13 +463,15 @@ final class PaneFoldSync {
     private func storeChanged(_ change: FoldStoreChange) {
         guard !writing else { return }
         switch change {
-        case .folds(let changedTag, _):
+        case .folds(let changedTag, let keys):
             guard changedTag == tag else { return }
             // A mode switch in another pane writes its pins before this pane has heard of the switch.
             if (harnessMode ?? store.mode(tag: tag)) != mode {
                 modeChanged()
             } else {
-                applyChange(loadedTurnIDs()) { [self] in reresolve() }
+                // Only the turns the event's keys belong to are re-estimated; unknown keys mean all of them.
+                let affected = store.turnKeys(tag: tag, keys: keys).flatMap(turnIDsForTurnKeys)
+                applyChange(affected ?? loadedTurnIDs()) { [self] in reresolve() }
             }
         case .mode(let tags):
             guard tags.contains(tag) else { return }

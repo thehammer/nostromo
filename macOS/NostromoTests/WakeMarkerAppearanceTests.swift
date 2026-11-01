@@ -165,4 +165,20 @@ final class WakeMarkerAppearanceTests: XCTestCase {
                            own, accuracy: 0.001, "width \(width)")
         }
     }
+
+    /// The second block adds `blockSpacing` exactly once (not per block) plus its own height.
+    func testASecondBlockOfANoticeTurnAddsItsOwnHeightAndBlockSpacingExactlyOnce() {
+        let one = MotherNoticeFixtures.turn(blocks: [.text("Noted.")])
+        let two = MotherNoticeFixtures.turn(blocks: [.text("Noted."), .text("Done.")])
+        for width: CGFloat in [220, 700, 900] {
+            let textWidth = width * TurnHeightEstimator.blocksWidthFraction - 14
+            let second = TurnHeightEstimator.estimate(block: .text("Done."), characters: 5, width: textWidth)
+            XCTAssertEqual(TurnHeightEstimator.estimate(two, width: width) - TurnHeightEstimator.estimate(one, width: width),
+                           TurnHeightEstimator.blockSpacing + second, accuracy: 0.001, "width \(width)")
+        }
+        let view = MotherNoticeFixtures.turnView(two)
+        view.setIslandWidth(700)
+        XCTAssertEqual(view.islandHeight(), TurnHeightEstimator.estimate(two, width: 700), accuracy: 1,
+                       "the estimate matches the drawn two-block turn")
+    }
 }

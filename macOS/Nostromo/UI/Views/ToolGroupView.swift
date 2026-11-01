@@ -160,7 +160,9 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
                 followed = result.apply(explicitState: folds.explicitResult(block: blocks[index], index: index))
             case .activity(let agentIndex):
                 guard let activity = members[i].view as? AgentActivityView else { continue }
-                followed = activity.apply(explicitState: folds.explicitResult(block: blocks[agentIndex], index: agentIndex))
+                let own = activity.apply(explicitState: folds.explicitResult(block: blocks[agentIndex], index: agentIndex))
+                let inner = activity.applyResultFolds(folds)
+                followed = own || inner
             }
             if followed {
                 remeasureMember(at: i)
@@ -1044,7 +1046,9 @@ final class AgentActivityView: NSView {
     /// Its blocks by block index (see `ToolGroupView.blocks`).
     private var blocks: [Int: TurnBlock]
     private let contentAvailable: Bool
-    private let folds: FoldResolver
+    private var folds: FoldResolver
+    /// The built result rows by block index, so a fold changed elsewhere reaches them.
+    private var resultViews: [Int: ToolResultView] = [:]
     private(set) var isExpanded: Bool
     private let disclosure = NSButton()
     private let content = NSStackView()
@@ -1111,6 +1115,19 @@ final class AgentActivityView: NSView {
         return true
     }
 
+    /// Follow the result folds in `folds` (a change made elsewhere) for the result rows built so far and
+    /// the ones built from here on. Quiet. Returns whether any row changed.
+    @discardableResult
+    func applyResultFolds(_ folds: FoldResolver) -> Bool {
+        self.folds = folds
+        var changed = false
+        for (index, result) in resultViews {
+            guard let block = blocks[index] else { continue }
+            if result.apply(explicitState: folds.explicitResult(block: block, index: index)) { changed = true }
+        }
+        return changed
+    }
+
     @objc private func toggleExpand() {
         isExpanded.toggle()
         applyState()
@@ -1144,6 +1161,7 @@ final class AgentActivityView: NSView {
                 self?.onBlockExpansion?(index, isExpanded)
                 self?.onHeightChange?()
             }
+            resultViews[index] = result
             view = result
         case .text(let text):
             // The subagent's prose: dimmed, so it never reads as the main agent speaking.

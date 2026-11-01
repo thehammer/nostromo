@@ -141,9 +141,9 @@ final class BranchProvider {
 
     private func run(_ paths: [String]) {
         inFlight = true
-        queue.async { [lookup] in
+        queue.async { [weak self, lookup] in
             let results = paths.map { ($0, lookup($0)) }
-            DispatchQueue.main.async { [weak self] in self?.finish(results) }
+            DispatchQueue.main.async { self?.finish(results) }
         }
     }
 

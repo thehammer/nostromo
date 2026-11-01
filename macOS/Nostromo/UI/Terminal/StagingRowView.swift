@@ -264,7 +264,6 @@ final class StagingRowView: NSView {
         let chrome = max(0, Self.cellHeight(of: Self.commandText("X", dimmed: false), width: textWidth, wrapping: .byCharWrapping) - lineHeight)
         let fullHeight = Self.cellHeight(of: commandLabel.attributedStringValue, width: textWidth, wrapping: .byCharWrapping)
         let fullLines = max(1, Int(((fullHeight - chrome) / lineHeight).rounded()))
-        let truncated = !isExpanded && fullLines > Self.collapsedLines
         let shownLines = isExpanded ? fullLines : min(fullLines, Self.collapsedLines)
         var y = Self.verticalPadding
         let commandRect = NSRect(x: textX, y: y, width: textWidth, height: CGFloat(shownLines) * lineHeight + chrome)

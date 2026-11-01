@@ -313,6 +313,9 @@ class ReplView: NSView {
         // Another window's toggle, a mode switch or a default change re-resolves this pane's folds
         // with the reading position kept (`applyFoldChange`).
         foldSync.loadedTurnIDs = { [weak self] in Set(self?.session.turns.map(\.id) ?? []) }
+        foldSync.turnIDsForTurnKeys = { [weak self] keys in
+            Set(self?.session.turns.filter { keys.contains($0.identityKey) }.map(\.id) ?? [])
+        }
         foldSync.stuckGroupKeys = { [weak self] in self?.loadedStuckGroupKeys() ?? [] }
         foldSync.applyChange = { [weak self] turnIds, mutation in self?.applyFoldChange(turnIds: turnIds, mutation: mutation) }
         foldSync.reresolve = { [weak self] in self?.resolveMaterializedFolds() }

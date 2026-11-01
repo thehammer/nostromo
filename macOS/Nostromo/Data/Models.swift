@@ -805,8 +805,9 @@ enum BudgetPosture: String {
         case .flush:                    return "Flush"
         case .normal, .cruise:          return ""
         case .elevated, .push:          return "Push"
-        case .conservative, .easeUp:    return "Ease up"
-        case .pumpTheBrakes:            return "Pump the brakes"
+        case .easeUp:                   return "Ease up"
+        // Legacy `conservative` is what Mother maps to Pump the brakes; Ease up is advisory only.
+        case .conservative, .pumpTheBrakes: return "Pump the brakes"
         case .critical:                 return "Critical"
         }
     }

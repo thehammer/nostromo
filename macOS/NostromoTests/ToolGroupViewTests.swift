@@ -820,6 +820,29 @@ final class ToolGroupIslandTests: XCTestCase {
                       "the subagent's call is listed inside its activity")
     }
 
+    /// Two windows on one focus: a result fold opened in the other window reaches the subagent's result
+    /// row inside an already built activity, and one built after the change starts with the new folds.
+    func testASubagentResultFoldChangedInAnotherWindowReachesTheRowInsideTheActivity() throws {
+        var open = FoldResolver()
+        open.resultStates[1] = true   // the activity is open, so its rows are built
+        let view = makeGroupView(agentBlocks, expanded: true, folds: open, textParents: agentParents)
+        let activity = try XCTUnwrap(view.memberViews[1] as? AgentActivityView)
+        let subResult = try XCTUnwrap(rigAllSubviews(of: activity).compactMap { $0 as? ToolResultView }.first)
+        let button = try XCTUnwrap(disclosure(of: subResult))
+        XCTAssertFalse(isOpenArrow(button), "the subagent's result starts closed")
+
+        var other = open
+        other.resultStates[3] = true   // the other window opened the subagent's result (block 3)
+        var quietToggles = 0
+        view.onBlockExpansion = { _, _ in quietToggles += 1 }
+        XCTAssertTrue(view.applyResultFolds(other), "the group reports the change")
+        XCTAssertTrue(isOpenArrow(button), "the row inside the activity followed the other window")
+        XCTAssertEqual(quietToggles, 0, "following is not the operator's click")
+
+        XCTAssertTrue(view.applyResultFolds(open))
+        XCTAssertFalse(isOpenArrow(button), "and followed it back")
+    }
+
     func testTheActivityIsNotBuiltOutOfThinAirWhileTheGroupIsCollapsed() {
         let view = makeGroupView(agentBlocks, expanded: false, textParents: agentParents)
         XCTAssertTrue(view.memberViews.isEmpty)
