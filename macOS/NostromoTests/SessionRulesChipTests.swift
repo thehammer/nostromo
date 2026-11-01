@@ -111,9 +111,12 @@ final class SessionRuleGestureTests: XCTestCase {
         super.tearDown()
     }
 
-    /// The gate with a person's permit and a handler clock the test moves.
-    private func gate(clock: @escaping () -> TimeInterval = { 100 }) -> SessionRuleGesture {
-        SessionRuleGesture(permit: anyHuman, uptime: clock)
+    /// The gate with a person's permit and a handler clock the test moves. Without a `clock` the handler
+    /// clock ticks half a second per reading, as two real clicks would (a frozen clock is refused as too soon).
+    private func gate(clock: (() -> TimeInterval)? = nil) -> SessionRuleGesture {
+        var ticks: TimeInterval = 100
+        let uptime = clock ?? { ticks += 0.5; return ticks }
+        return SessionRuleGesture(permit: anyHuman, uptime: uptime)
     }
 
     // MARK: HumanGesture
