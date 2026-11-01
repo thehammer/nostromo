@@ -110,7 +110,6 @@ final class SubagentTaskView: NSView, TaskWindowBody {
     private let messageLabel = SubagentTaskView.makeBody()
     private let resultHeadingLabel = SubagentTaskView.makeHeading(SubagentTaskView.resultHeading)
     private let resultLabel = SubagentTaskView.makeBody()
-    private let interactions = TurnInteractionStore()
     private let turnId = UUID()
     private var content: TaskWindowContent?
     private var toolUseId: String?
@@ -269,22 +268,13 @@ final class SubagentTaskView: NSView, TaskWindowBody {
 
     private func rebuildTurnView(_ turn: ChatTurn) {
         dropTurnView()
-        let state = interactions.state(for: turn.id)
-        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: state,
-                                folds: FoldResolver(state: state, expandedByDefault: true))
-        let id = turn.id
-        view.onGroupToggle = { [weak self] key, open in
-            self?.interactions.setGroup(turn: id, key: key, open)
-            self?.relayout()
-        }
-        view.onActivityToggle = { [weak self] key, open in
-            self?.interactions.setActivity(turn: id, key: key, open)
-            self?.relayout()
-        }
-        view.onBlockExpansion = { [weak self] block, open in
-            self?.interactions.setExpanded(turn: id, block: block, open)
-            self?.relayout()
-        }
+        // In-memory folds: the view's own resolver mirrors the toggles (no `choices`, so nothing reaches
+        // the focus's shared `TranscriptFoldStore`), and a toggle only re-lays the view out.
+        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(),
+                                folds: FoldResolver(expandedByDefault: true, turnKey: turn.identityKey))
+        view.onGroupToggle = { [weak self] _, _ in self?.relayout() }
+        view.onActivityToggle = { [weak self] _, _ in self?.relayout() }
+        view.onBlockExpansion = { [weak self] _, _ in self?.relayout() }
         view.onIntrinsicHeightChange = { [weak self] in self?.relayout() }
         document.addSubview(view)
         turnView = view
