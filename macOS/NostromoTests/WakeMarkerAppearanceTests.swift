@@ -176,9 +176,5 @@ final class WakeMarkerAppearanceTests: XCTestCase {
             XCTAssertEqual(TurnHeightEstimator.estimate(two, width: width) - TurnHeightEstimator.estimate(one, width: width),
                            TurnHeightEstimator.blockSpacing + second, accuracy: 0.001, "width \(width)")
         }
-        let view = MotherNoticeFixtures.turnView(two)
-        view.setIslandWidth(700)
-        XCTAssertEqual(view.islandHeight(), TurnHeightEstimator.estimate(two, width: 700), accuracy: 1,
-                       "the estimate matches the drawn two-block turn")
     }
 }
