@@ -371,6 +371,8 @@ class AppStore: ObservableObject {
         // `scope` is the watchdog's: its own polling asks for `.offscreenOnly`, so a pane the operator
         // is looking at keeps its views; only critical OS pressure asks for `.everything`.
         watchdog.onShedScoped = { [weak self] scope, done in
+            // Task output nothing is showing goes before anything on screen does.
+            TaskOutputRegistry.shared.evictUnheld()
             guard let self else { done(); return }
             let panes = self.transcriptPanes.allObjects
             guard !panes.isEmpty else { done(); return }
@@ -498,6 +500,7 @@ class AppStore: ObservableObject {
     func start() {
         log.info("AppStore starting")
         ModelStore.shared.sender = client
+        TaskRequests.shared.sender = client
 
         // IPC messages (session, activity)
         client.messages
@@ -629,6 +632,7 @@ class AppStore: ObservableObject {
                     WorkStore.shared.reset()
                 } else {
                     WorkStore.shared.failPendingRequests(reason: "The daemon connection was lost")
+                    TaskRequests.shared.failPendingRequests(reason: "The daemon connection was lost")
                     // The CLI dies with the daemon: nothing shows running until a new snapshot says so.
                     BackgroundTaskStore.shared.daemonDisconnected()
                     // Tracker panes keep their last board; the reconnect's replay replaces it in place.
@@ -713,6 +717,7 @@ class AppStore: ObservableObject {
         TranscriptDiagnostics.forgetTag(tag)
         TrackerStore.shared.forget(tag: tag)
         BackgroundTaskStore.shared.forget(tag: tag)
+        TaskWindowManager.shared.closeWindows(forFocus: tag)
     }
 
     // MARK: - Broker event fold
@@ -1713,8 +1718,9 @@ class AppStore: ObservableObject {
         case .sessionTasks, .sessionTaskDetail:
             BackgroundTaskStore.shared.ingest(msg)
 
+        // The answers to the output reads (the task window, `tasks output`) and, with BA5, to Stop.
         case .sessionTaskStopResult, .sessionTaskOutputResult:
-            break   // BA4/BA5 route: the output viewer and the Stop control wait on these
+            TaskRequests.shared.ingest(msg)
 
         // The tracker pane's board and the focus's counts: every window's pane reads them from the store.
         case .trackerBoard, .trackerSummary:

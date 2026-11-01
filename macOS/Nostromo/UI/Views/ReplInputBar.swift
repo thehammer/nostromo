@@ -56,7 +56,7 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     /// The Background activity popover, while it is open.
     private(set) var backgroundPopover: BackgroundPopover?
     /// Open, Stop, Show in Transcript: none until later slices provide them.
-    var backgroundActions: BackgroundTaskActions = NoBackgroundTaskActions.shared
+    var backgroundActions: BackgroundTaskActions = BackgroundTaskWindowActions.shared
     private var backgroundStore: BackgroundTaskStore?
     private var backgroundTag: String?
     private var backgroundDisplayName: String?

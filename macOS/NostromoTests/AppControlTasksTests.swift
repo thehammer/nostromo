@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import NostromoKit
 
 // `nostromo-app tasks list [--all]` and `tasks chip` (BA3): read-only probes whose answers must equal
@@ -15,10 +16,10 @@ final class AppControlTasksTests: XCTestCase {
     private let startMs: UInt64 = 1_760_000_000_000
     private let tag = "kate"
 
-    /// The fifteen keys every task has, and no others.
+    /// The sixteen keys every task has, and no others (`window_open` is the one BA4 added).
     private let rowKeys: Set<String> = [
         "id", "section", "kind", "kind_name", "title", "description", "status", "elapsed_ms", "duration_ms",
-        "ended_ago_ms", "sign_of_life", "parent_id", "depth", "housekeeping", "stop_offered",
+        "ended_ago_ms", "sign_of_life", "parent_id", "depth", "housekeeping", "stop_offered", "window_open",
     ]
 
     // MARK: - Fixture
@@ -398,5 +399,435 @@ final class AppControlTasksTests: XCTestCase {
             }
             XCTAssertTrue(detail.contains("kate"), detail)
         }
+    }
+
+    // MARK: - tasks list: window_open
+
+    func testEveryRowSaysWhetherItsTaskHasAWindowOpenFromTheWindowOpenClosure() throws {
+        let store = try makeBusyStore()
+        let report = AppControlTasks.list(tag: tag, list: store.list(for: tag), all: true,
+                                          windowOpen: { $0 == "b1" || $0 == "e1" })
+        let byId = indexed(objects(report["tasks"], "tasks"))
+
+        XCTAssertEqual(byId.count, 7)
+        for (id, json) in byId {
+            XCTAssertEqual(json["window_open"] as? Bool, id == "b1" || id == "e1", "\(id).window_open")
+            XCTAssertEqual(Set(json.keys), rowKeys, id)
+        }
+        assertValidJSON(report, "tasks list with windows open")
+    }
+
+    func testTheWindowOpenClosureIsAskedAboutEachTaskByItsId() throws {
+        let store = try makeBusyStore()
+        var asked: [String] = []
+        let list = store.list(for: tag)
+        _ = AppControlTasks.list(tag: tag, list: list, all: true, windowOpen: { id in asked.append(id); return false })
+
+        XCTAssertEqual(asked.sorted(), list.allRows.map(\.id).sorted())
+    }
+
+    func testTasksListWithoutAWindowOpenClosureSaysNoWindowIsOpenForEveryTask() throws {
+        let store = try makeBusyStore()
+        let report = AppControlTasks.list(tag: tag, list: store.list(for: tag), all: true)
+        let tasks = objects(report["tasks"], "tasks")
+
+        XCTAssertEqual(tasks.count, 7)
+        for json in tasks {
+            XCTAssertEqual(json["window_open"] as? Bool, false, "\(json["id"] as? String ?? "?")")
+        }
+    }
+
+    func testARowReportsWindowOpenAsGiven() throws {
+        let store = try makeBusyStore()
+        let row = try XCTUnwrap(store.list(for: tag).running.first)
+        XCTAssertEqual(AppControlTasks.row(row, windowOpen: true)["window_open"] as? Bool, true)
+        XCTAssertEqual(AppControlTasks.row(row, windowOpen: false)["window_open"] as? Bool, false)
+        XCTAssertEqual(AppControlTasks.row(row)["window_open"] as? Bool, false, "no window unless told")
+    }
+
+    // MARK: - tasks output
+
+    private let outputKeys: Set<String> = ["tag", "task_id", "state", "truncated", "total_bytes", "source", "text"]
+
+    private func visible(_ range: Range<Int>) -> String {
+        TaskOutputFakeDaemon.visibleText(range)
+    }
+
+    /// A model over the rig's daemon, loaded, and released when the test ends.
+    private func loadedModel(_ rig: TaskOutputRig, taskId: String = "b1") -> TaskOutputModel {
+        let model = rig.makeModel(tag: tag, taskId: taskId)
+        model.acquire()
+        rig.drainAnswers()
+        rig.flushDeliveries()
+        addTeardownBlock { model.release() }
+        return model
+    }
+
+    private func makePasteboard() -> NSPasteboard {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name(UUID().uuidString))
+        addTeardownBlock { pasteboard.releaseGlobally() }
+        return pasteboard
+    }
+
+    func testTasksOutputReportsTheStateTheSizeTheSourceAndTheText() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(10)
+        let model = loadedModel(rig)
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(Set(payload.keys), outputKeys, "exactly these keys: no `refusal` when the text is returned")
+        XCTAssertEqual(payload["tag"] as? String, tag)
+        XCTAssertEqual(payload["task_id"] as? String, "b1")
+        XCTAssertEqual(payload["state"] as? String, "ready")
+        XCTAssertEqual(payload["truncated"] as? Bool, false)
+        XCTAssertEqual(number(payload["total_bytes"]), 640)
+        XCTAssertEqual(payload["source"] as? String, "file")
+        XCTAssertEqual(payload["text"] as? String, visible(0..<10))
+        assertValidJSON(payload, "tasks output")
+    }
+
+    func testTasksOutputNamesTheCliTailAsItsSource() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.source = .cliTail
+        rig.daemon.setLines(20)
+        let model = loadedModel(rig)
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["source"] as? String, "cli_tail")
+        XCTAssertEqual(payload["state"] as? String, "ready")
+    }
+
+    // MARK: Withheld in the real app
+
+    func testWithheldOutputHasNullTextAndARefusalButStillAnswersStateSizeSourceAndTruncation() throws {
+        let rig = TaskOutputRig()
+        let secret = "SECRET-OUTPUT-MARKER the command printed this\n"
+        rig.daemon.setText(secret)
+        let model = loadedModel(rig)
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: false)
+
+        XCTAssertEqual(Set(payload.keys), outputKeys.union(["refusal"]))
+        XCTAssertTrue(isNull(payload["text"]), "the text is null, not an empty string")
+        let refusal = try XCTUnwrap(payload["refusal"] as? String)
+        XCTAssertFalse(refusal.isEmpty, "and the refusal says why")
+        XCTAssertEqual(payload["state"] as? String, "ready")
+        XCTAssertEqual(number(payload["total_bytes"]), UInt64(secret.utf8.count))
+        XCTAssertEqual(payload["source"] as? String, "file")
+        XCTAssertEqual(payload["truncated"] as? Bool, false)
+        assertValidJSON(payload, "withheld tasks output")
+
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("SECRET-OUTPUT-MARKER"),
+                       "nothing the task printed leaves in a withheld answer")
+    }
+
+    func testWithheldOutputStillSaysTruncatedForALongOutput() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.source = .cliTail
+        rig.daemon.setLines(625)
+        let model = loadedModel(rig)
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: false)
+
+        XCTAssertEqual(payload["truncated"] as? Bool, true)
+        XCTAssertEqual(number(payload["total_bytes"]), 40_000)
+        XCTAssertTrue(isNull(payload["text"]))
+    }
+
+    func testAllowedOutputCarriesNoRefusal() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(3)
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: loadedModel(rig), allowsText: true)
+        XCTAssertNil(payload["refusal"])
+        XCTAssertFalse(isNull(payload["text"]))
+    }
+
+    // MARK: The one-mebibyte cap
+
+    func testTheTextCapKeepsTheEndOfTheOutputAndSetsTruncated() throws {
+        let rig = TaskOutputRig()
+        let lines = 3 * 1_048_576 / 64      // 3 MiB: the model holds all of it (it is under the 10 MB window)
+        rig.daemon.setLines(lines)
+        let model = loadedModel(rig)
+        XCTAssertFalse(model.truncatedHead, "the model cut nothing: any cut is the cap's")
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        let text = try XCTUnwrap(payload["text"] as? String)
+        XCTAssertLessThanOrEqual(text.utf8.count, AppControlTasks.outputTextLimit, "at most 1 MiB")
+        XCTAssertGreaterThan(text.utf8.count, AppControlTasks.outputTextLimit - 256, "and not much less: it is the end, not a sliver")
+        XCTAssertTrue(text.hasSuffix(TaskOutputFakeDaemon.visibleLine(lines - 1)), "the end is kept")
+        XCTAssertFalse(text.contains(TaskOutputFakeDaemon.visibleLine(0)), "the start is not")
+        XCTAssertTrue(model.text.hasSuffix("\n" + text), "it is one piece of the end of the output, cut at a line start")
+        XCTAssertEqual(payload["truncated"] as? Bool, true)
+        XCTAssertEqual(number(payload["total_bytes"]), UInt64(3 * 1_048_576), "the total is the output's, not the cap's")
+    }
+
+    func testAnOutputExactlyAtTheCapIsReturnedWholeAndNotTruncated() throws {
+        let rig = TaskOutputRig()
+        let lines = 1_048_576 / 64
+        rig.daemon.setLines(lines)
+        let model = loadedModel(rig)
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual((payload["text"] as? String)?.utf8.count, AppControlTasks.outputTextLimit)
+        assertSameLargeText(payload["text"] as? String ?? "", model.text, "text at the cap")
+        XCTAssertEqual(payload["truncated"] as? Bool, false)
+    }
+
+    func testOneLineOverTheCapIsCutAndFlagged() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(1_048_576 / 64 + 1)
+        let model = loadedModel(rig)
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        let text = try XCTUnwrap(payload["text"] as? String)
+        XCTAssertLessThanOrEqual(text.utf8.count, AppControlTasks.outputTextLimit)
+        XCTAssertTrue(text.hasSuffix(TaskOutputFakeDaemon.visibleLine(1_048_576 / 64)))
+        XCTAssertEqual(payload["truncated"] as? Bool, true)
+    }
+
+    // MARK: Same model, same answer as the viewer
+
+    func testAViewerOverTheSameModelShowsTheTextTheCommandReturns() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(14_400)                      // 900 KB: under the cap, no head to fetch
+        let model = rig.makeModel(tag: tag, taskId: "b1")
+        let view = TaskOutputView(focusTag: tag, taskId: "b1", model: model, pasteboard: makePasteboard())
+        model.acquire()
+        rig.drainAnswers()
+        rig.flushDeliveries()
+        addTeardownBlock { model.release() }
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        assertSameLargeText(payload["text"] as? String ?? "", view.shownText, "the command's text against the viewer's")
+        XCTAssertEqual(payload["truncated"] as? Bool, view.noticeText != nil, "the same truncation flag")
+        XCTAssertNil(view.noticeText)
+        XCTAssertEqual(number(payload["total_bytes"]), model.totalBytes)
+        XCTAssertEqual(number(payload["total_bytes"]), 14_400 * 64)
+    }
+
+    func testForALongTailOnlyOutputTheCommandAndTheViewerAgreeOnTextTruncationAndSize() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.source = .cliTail
+        rig.daemon.setLines(625)                          // 40 000 bytes, of which the CLI keeps 8 KiB
+        let model = rig.makeModel(tag: tag, taskId: "b1")
+        let view = TaskOutputView(focusTag: tag, taskId: "b1", model: model, pasteboard: makePasteboard())
+        model.acquire()
+        rig.drainAnswers()
+        rig.flushDeliveries()
+        addTeardownBlock { model.release() }
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["text"] as? String, view.shownText)
+        XCTAssertNotNil(view.noticeText, "the viewer says the start is cut")
+        XCTAssertEqual(view.noticeText, "Showing the last 8 KB of 39 KB")
+        XCTAssertEqual(payload["truncated"] as? Bool, true, "and so does the command")
+        XCTAssertEqual(number(payload["total_bytes"]), 40_000)
+        XCTAssertEqual(payload["source"] as? String, "cli_tail")
+    }
+
+    func testForAnOutputPastTheCapTheCommandReturnsTheEndOfWhatTheViewerShows() throws {
+        let rig = TaskOutputRig()
+        let lines = 3 * 1_048_576 / 64
+        rig.daemon.setLines(lines)
+        let model = rig.makeModel(tag: tag, taskId: "b1")
+        let view = TaskOutputView(focusTag: tag, taskId: "b1", model: model, pasteboard: makePasteboard())
+        model.acquire()
+        rig.drainAnswers()
+        rig.flushDeliveries()
+        addTeardownBlock { model.release() }
+        assertSameLargeText(view.shownText, model.text, "the viewer shows what the model holds")
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        let text = try XCTUnwrap(payload["text"] as? String)
+        XCTAssertTrue(view.shownText.hasSuffix(text), "the command's text is the end of the viewer's")
+        XCTAssertEqual(payload["truncated"] as? Bool, true, "the cap cut the start of what the viewer shows")
+        XCTAssertEqual(number(payload["total_bytes"]), model.totalBytes)
+    }
+
+    func testAnOutputTheModelCutIsTruncatedAndKeepsTheModelsTotal() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(12 * 1_048_576 / 64)
+        let model = loadedModel(rig)
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["truncated"] as? Bool, true)
+        XCTAssertEqual(number(payload["total_bytes"]), UInt64(12 * 1_048_576))
+        XCTAssertEqual(payload["state"] as? String, "ready")
+        let text = try XCTUnwrap(payload["text"] as? String)
+        XCTAssertTrue(text.hasSuffix(TaskOutputFakeDaemon.visibleLine(12 * 1_048_576 / 64 - 1)), "it is the end")
+    }
+
+    // MARK: Loading, unavailable, error
+
+    func testWhileTheModelIsStillLoadingTheStateIsLoadingAndTheTotalIsNull() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(10)
+        rig.daemon.defersAnswers = true
+        let model = rig.makeModel(tag: tag, taskId: "b1")
+        model.acquire()
+        addTeardownBlock { model.release() }
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["state"] as? String, "loading")
+        XCTAssertTrue(isNull(payload["total_bytes"]), "an unknown size is null, never zero")
+        XCTAssertTrue(isNull(payload["source"]))
+        XCTAssertEqual(payload["truncated"] as? Bool, false)
+        assertValidJSON(payload, "loading tasks output")
+
+        rig.drainAnswers()
+        let ready = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+        XCTAssertEqual(ready["state"] as? String, "ready")
+        XCTAssertEqual(number(ready["total_bytes"]), 640)
+    }
+
+    func testWhileTheHeadOfALongOutputIsStillBeingReadTheStateIsStillLoading() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(3 * 1_048_576 / 64)
+        rig.daemon.defersAnswers = true
+        let model = rig.makeModel(tag: tag, taskId: "b1")
+        model.acquire()
+        addTeardownBlock { model.release() }
+        rig.daemon.answerNext()      // the tail only
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+        XCTAssertEqual(payload["state"] as? String, "loading", "ask again: the first lines are not in yet")
+        XCTAssertTrue(isNull(payload["total_bytes"]))
+
+        rig.drainAnswers()
+        let done = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+        XCTAssertEqual(done["state"] as? String, "ready")
+        XCTAssertEqual(number(done["total_bytes"]), UInt64(3 * 1_048_576))
+    }
+
+    func testAnOutputThatIsNotThereIsUnavailableWithANullTotalAndNoSource() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.content = nil
+        let model = loadedModel(rig)
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["state"] as? String, "unavailable")
+        XCTAssertTrue(isNull(payload["total_bytes"]))
+        XCTAssertTrue(isNull(payload["source"]))
+        XCTAssertEqual(payload["text"] as? String, "", "no output is an empty text, not null: the answer is allowed")
+        assertValidJSON(payload, "unavailable tasks output")
+    }
+
+    func testADaemonErrorIsReportedAsTheErrorState() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.failure = ("error", "the output file is not readable")
+        let model = loadedModel(rig)
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["state"] as? String, "error")
+        XCTAssertTrue(isNull(payload["total_bytes"]))
+    }
+
+    // MARK: Asking opens nothing
+
+    func testAskingForOutputOpensNoWindow() throws {
+        let store = try makeBusyStore()
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(5)
+        let registry = rig.makeRegistry(store: store)
+        let suite = "AppControlTasksTests-windows-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let manager = TaskWindowManager(store: store, registry: registry, focusName: { $0 }, source: { _ in nil },
+                                        defaults: defaults, pasteboard: makePasteboard(), visibleScreens: { [] },
+                                        keyWindow: { nil }, now: { Date(timeIntervalSince1970: 1_760_000_000) })
+
+        let model = registry.model(tag: tag, taskId: "b1")
+        model.acquire()
+        addTeardownBlock { model.release() }
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["state"] as? String, "ready", "the task is real and has output")
+        XCTAssertEqual(manager.openCount, 0, "reading a task's output does not open its window")
+        XCTAssertFalse(manager.isOpen(tag: tag, taskId: "b1"))
+    }
+}
+
+// MARK: - Review fixes: one huge line, repeat asks
+
+extension AppControlTasksTests {
+
+    func testAnOutputThatIsOneHugeLineIsCutToTheEndOfItNotToAnEmptyText() throws {
+        let rig = TaskOutputRig()
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8)
+        let file = Data((0..<(3 * 1_048_576)).map { alphabet[$0 % 64] })       // 3 MiB, no newline
+        rig.daemon.content = file
+        let model = loadedModel(rig)
+        XCTAssertGreaterThan(model.text.utf8.count, 2 * AppControlTasks.outputTextLimit, "premise: the model holds all of it")
+        XCTAssertFalse(model.text.utf8.contains(0x0A), "premise: there is no line to cut at")
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        let text = try XCTUnwrap(payload["text"] as? String)
+        XCTAssertFalse(text.isEmpty, "a line with no newline is not cut to nothing")
+        XCTAssertLessThanOrEqual(text.utf8.count, AppControlTasks.outputTextLimit)
+        XCTAssertGreaterThan(text.utf8.count, AppControlTasks.outputTextLimit - 8, "about 1 MiB of it")
+        XCTAssertTrue(text.utf8.elementsEqual(file.suffix(text.utf8.count)), "and it is the end of the output")
+        XCTAssertEqual(payload["truncated"] as? Bool, true)
+        XCTAssertEqual(number(payload["total_bytes"]), UInt64(3 * 1_048_576))
+    }
+
+    func testARepeatAskReportsLoadingUntilTheRefreshLandsAndThenTheNewText() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(10)
+        let model = loadedModel(rig)
+        model.release()                          // the first ask's hold ran out
+        rig.daemon.appendLines(3)                // the file grew in the meantime
+        rig.daemon.defersAnswers = true
+
+        model.acquire()                          // the second ask, as the app control server does it
+        addTeardownBlock { model.release() }
+        let during = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(during["state"] as? String, "loading", "what the model holds may be older than the file: ask again")
+        XCTAssertTrue(isNull(during["total_bytes"]), "an unknown size is null, never the old one")
+        assertValidJSON(during, "the refreshing answer")
+
+        rig.daemon.answerNext()
+        rig.flushDeliveries()
+        let after = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(after["state"] as? String, "ready")
+        XCTAssertEqual(after["text"] as? String, visible(0..<13), "the lines written since the last ask")
+        XCTAssertEqual(number(after["total_bytes"]), 13 * 64)
+    }
+
+    func testARefreshTheDaemonNeverAnswersDoesNotLeaveTheOutputLoadingForever() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(10)
+        let model = loadedModel(rig)
+        model.release()
+        rig.daemon.appendLines(3)
+        rig.daemon.defersAnswers = true
+
+        model.acquire()
+        addTeardownBlock { model.release() }
+        XCTAssertEqual(AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)["state"] as? String,
+                       "loading", "premise: the refresh is out")
+        rig.timeouts.fireAll()                   // the daemon never answered
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["state"] as? String, "ready", "held text is not turned into a permanent loading")
+        XCTAssertEqual(payload["text"] as? String, visible(0..<10))
+        XCTAssertEqual(number(payload["total_bytes"]), 640)
     }
 }

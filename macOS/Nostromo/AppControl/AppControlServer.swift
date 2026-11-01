@@ -476,14 +476,15 @@ final class AppControlServer {
         throw AppControlError.notFound("no pane to pick (\(panes.count) visible); pass focus=TAG; visible tags: \(tags)")
     }
 
-    /// READ-ONLY (`tasks list [--all] | chip [--focus TAG]`): what the Background activity popover
-    /// lists and what the chip shows, from the same model they render (`AppControlTasks`). With
-    /// `focus`, that focus's tasks whether or not a pane shows it. Sends no event, changes no focus,
-    /// stops nothing, marks nothing seen.
+    /// READ-ONLY (`tasks list [--all] | chip | output TASK_ID [--focus TAG]`): what the Background activity
+    /// popover lists and what the chip shows, from the same model they render (`AppControlTasks`), and a
+    /// task's output from the model its window reads (`output`; withheld in the real app). With `focus`,
+    /// that focus's tasks whether or not a pane shows it. Sends no event, changes no focus, stops nothing,
+    /// marks nothing seen, opens no window.
     private func tasks(_ req: AppControlRequest) throws -> Any {
         let sub = req.string("sub") ?? "list"
-        guard sub == "list" || sub == "chip" else {
-            throw AppControlError.badRequest("tasks: only `list` and `chip` exist (both read-only)")
+        guard sub == "list" || sub == "chip" || sub == "output" else {
+            throw AppControlError.badRequest("tasks: only `list`, `chip` and `output` exist (all read-only)")
         }
         let tag: String
         if let focus = req.string("focus") {
@@ -492,9 +493,26 @@ final class AppControlServer {
         } else {
             tag = try pickPane(req, in: try window(req)).diagnosticsTag
         }
+        if sub == "output" {
+            guard let taskId = req.string("task") else {
+                throw AppControlError.badRequest("tasks output: needs a task id")
+            }
+            guard BackgroundTaskStore.shared.state(for: tag)?.allTasks.contains(where: { $0.id == taskId }) == true else {
+                throw AppControlError.notFound("no task \"\(taskId)\" in focus \"\(tag)\"")
+            }
+            // A first ask starts the read and answers `loading`; ask again.
+            let model = TaskOutputRegistry.shared.model(tag: tag, taskId: taskId)
+            // Held a few seconds past this answer: acquiring refreshes a model already ready, and the
+            // hold lets that read (and the next polls) land before the next ask.
+            model.acquire()
+            DispatchQueue.main.asyncAfter(deadline: .now() + AppControlTasks.outputHoldSeconds) { model.release() }
+            return AppControlTasks.output(tag: tag, taskId: taskId, model: model,
+                                          allowsText: SyntheticInputGate.allowsSynthetic)
+        }
         let list = BackgroundTaskStore.shared.list(for: tag)
         if sub == "chip" { return AppControlTasks.chip(tag: tag, list: list) }
-        return AppControlTasks.list(tag: tag, list: list, all: (req.args["all"] as? Bool) == true)
+        return AppControlTasks.list(tag: tag, list: list, all: (req.args["all"] as? Bool) == true,
+                                    windowOpen: { TaskWindowManager.shared.isOpen(tag: tag, taskId: $0) })
     }
 
     /// Every focus tag the app knows: each pane in every window (visible or not) and each the task store
