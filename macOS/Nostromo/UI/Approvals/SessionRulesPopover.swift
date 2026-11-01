@@ -23,7 +23,7 @@ final class SessionRulesPopoverContent: NSView {
     private static let padding: CGFloat = 12
     private static let rowGap: CGFloat = 10
 
-    private let tag: String
+    private let focusTag: String
     private let store: ApprovalStore
     private let gesture: SessionRuleGesture
     private let currentEvent: () -> NSEvent?
@@ -38,7 +38,7 @@ final class SessionRulesPopoverContent: NSView {
 
     init(tag: String, store: ApprovalStore, gesture: SessionRuleGesture = SessionRuleGesture(),
          currentEvent: @escaping () -> NSEvent? = { NSApp.currentEvent }, timeZone: TimeZone = .current) {
-        self.tag = tag
+        self.focusTag = tag
         self.store = store
         self.gesture = gesture
         self.currentEvent = currentEvent
@@ -74,7 +74,7 @@ final class SessionRulesPopoverContent: NSView {
     private func rebuild() {
         subviews.forEach { $0.removeFromSuperview() }
         revokeButtons = [:]
-        let rules = store.sessionRules(tag: tag)
+        let rules = store.sessionRules(tag: focusTag)
         rows = rules.map {
             SessionRuleRowListing(ruleID: $0.id, ruleText: $0.ruleText, summary: $0.summary,
                                   detail: Self.detailText(for: $0, timeZone: timeZone))
@@ -138,7 +138,7 @@ final class SessionRulesPopoverContent: NSView {
     func revoke(ruleID: String, button: ApprovalButton) -> Bool {
         switch gesture.single(event: currentEvent(), button: button) {
         case .allowed:
-            return store.revoke(tag: tag, ruleId: ruleID)
+            return store.revoke(tag: focusTag, ruleId: ruleID)
         case .refused(let refusal):
             if case .notHuman(let reason) = refusal {
                 let channel: ApprovalRefusalChannel
