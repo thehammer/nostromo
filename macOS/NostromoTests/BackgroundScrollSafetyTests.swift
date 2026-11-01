@@ -602,6 +602,7 @@ final class BackgroundScrollSafetyTests: XCTestCase {
         let p = pane(following: true, world: gate.world)
         var interrupts = 0
         p.bar.onInterrupt = { interrupts += 1 }
+        p.bar.setRunning(true)   // the bar's Stop (⌘.) is only live while a turn runs
         gate.world.ingest(gate.world.running(1))
         p.bar.toggleBackgroundPopover(takeKeyboard: false)
         let popover = try XCTUnwrap(p.bar.backgroundPopover)
