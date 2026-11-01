@@ -102,6 +102,7 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
         translatesAutoresizingMaskIntoConstraints = true
         wantsLayer = true
 
+        row.subagentToolUseIds = subagentToolUseIds(of: segment)
         row.blockText = { [weak self] index in
             guard case .text(let text)? = self?.blocks[index] else { return nil }
             return text
@@ -176,6 +177,7 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     @discardableResult
     func update(segment: ActivitySegment, blockAt: (Int) -> TurnBlock?) -> Bool {
         takeBlocks(of: segment, from: blockAt)
+        row.subagentToolUseIds = subagentToolUseIds(of: segment)
         row.update(segment: segment)
         guard laneBuilt else { return false }
         let before = contentHeight
@@ -190,6 +192,16 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     }
 
     // MARK: - Lane
+
+    private func subagentToolUseIds(of segment: ActivitySegment) -> [String] {
+        segment.members.flatMap { member -> [String] in
+            guard case .group(let group) = member else { return [] }
+            return group.subagentBlocks.values.flatMap { $0 }.compactMap { index in
+                guard case .toolCall(let call)? = blocks[index] else { return nil }
+                return call.toolUseId
+            }
+        }
+    }
 
     private func takeBlocks(of segment: ActivitySegment, from blockAt: (Int) -> TurnBlock?) {
         Self.collectBlocks(of: segment, from: blockAt, into: &blocks)
@@ -468,6 +480,14 @@ final class ActivityRowHeaderView: FoldRowView {
     required init?(coder: NSCoder) { fatalError() }
 
     override var approvalToolUseIds: [String] { segment.calls.compactMap(\.toolUseId) }
+
+    /// `tool_use_id`s of the calls subagents made under the segment's Agent/Task calls: a task one of them
+    /// started shows its `◷` on this row too (set by `ActivityRowView`, which holds the blocks).
+    var subagentToolUseIds: [String] = [] {
+        didSet { if subagentToolUseIds != oldValue { refreshBackground() } }
+    }
+
+    override var backgroundToolUseIds: [String] { approvalToolUseIds + subagentToolUseIds }
 
     /// Show `segment` as it stands. In place: the row's height never changes, and nothing is
     /// announced (no announcement per roll-in).

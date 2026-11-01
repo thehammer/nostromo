@@ -319,7 +319,8 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     private func makeActivityView(agentIndex: Int, blockIndices: [Int]) -> AgentActivityView {
         let view = AgentActivityView(blockIndices: blockIndices, blocks: blocks, contentAvailable: contentAvailable,
                                      folds: folds,
-                                     startExpanded: folds.explicitResult(block: blocks[agentIndex], index: agentIndex) ?? false)
+                                     startExpanded: folds.explicitResult(block: blocks[agentIndex], index: agentIndex) ?? false,
+                                     backgroundTasks: backgroundTasks)
         view.onExpansionChange = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.onBlockExpansion?(agentIndex, isExpanded)
@@ -650,8 +651,12 @@ class FoldRowView: NSView {
     // MARK: Approval status (AP2b)
 
     /// The `tool_use_id`s of the calls this row stands for, its member calls (a subclass says which).
-    /// Approval statuses and background tasks are both read through them.
+    /// Approval statuses are read through them, and background tasks too (`backgroundToolUseIds`).
     var approvalToolUseIds: [String] { [] }
+
+    /// The calls whose background tasks this row shows `◷` for: its member calls, and for a row that
+    /// folds subagent calls in, theirs too.
+    var backgroundToolUseIds: [String] { approvalToolUseIds }
 
     /// Read approval statuses from `store`: the row updates in place whenever one of its calls changes.
     /// Call before the first `refreshApproval()`.
@@ -700,7 +705,7 @@ class FoldRowView: NSView {
     /// the transcript never do, and nothing is announced.
     func refreshBackground() {
         let task = backgroundBinding.flatMap {
-            $0.store.runningTask(tag: $0.tag, toolUseIds: approvalToolUseIds)
+            $0.store.runningTask(tag: $0.tag, toolUseIds: backgroundToolUseIds)
         }
         guard task?.id != runningTaskId else { return }
         runningTaskId = task?.id
@@ -729,7 +734,7 @@ class FoldRowView: NSView {
     /// responder chain (a split window has other panes' views in it).
     func openInBackgroundActivityItem() -> NSMenuItem? {
         backgroundBinding.flatMap {
-            BackgroundOpenMenu.item(tasks: $0.tasks(toolUseIds: approvalToolUseIds), binding: $0)
+            BackgroundOpenMenu.item(tasks: $0.tasks(toolUseIds: backgroundToolUseIds), binding: $0)
         }
     }
 
@@ -1146,6 +1151,7 @@ final class AgentActivityView: NSView {
     /// Its blocks by block index (see `ToolGroupView.blocks`).
     private var blocks: [Int: TurnBlock]
     private let contentAvailable: Bool
+    private let backgroundTasks: BackgroundRowBinding?
     private var folds: FoldResolver
     /// The built result rows by block index, so a fold changed elsewhere reaches them.
     private var resultViews: [Int: ToolResultView] = [:]
@@ -1155,7 +1161,8 @@ final class AgentActivityView: NSView {
     private var contentBuilt = false
 
     init(blockIndices: [Int], blocks: [Int: TurnBlock], contentAvailable: Bool,
-         folds: FoldResolver, startExpanded: Bool) {
+         folds: FoldResolver, startExpanded: Bool, backgroundTasks: BackgroundRowBinding? = nil) {
+        self.backgroundTasks = backgroundTasks
         self.blockIndices = blockIndices
         self.blocks = blocks
         self.contentAvailable = contentAvailable

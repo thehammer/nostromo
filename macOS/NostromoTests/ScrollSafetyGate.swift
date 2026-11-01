@@ -79,8 +79,12 @@ final class SafetyRig {
     /// constraint drives the clip height.
     let inputBar = ReplInputBar()
     let barHeight: NSLayoutConstraint
+    /// What the turn views read background tasks from (BA6c); nil: their rows show none, as before.
+    let backgroundTasks: BackgroundRowBinding?
 
-    init(_ testCase: XCTestCase, turns: [ChatTurn], size: NSSize = NSSize(width: 900, height: 600)) {
+    init(_ testCase: XCTestCase, turns: [ChatTurn], size: NSSize = NSSize(width: 900, height: 600),
+         backgroundTasks: BackgroundRowBinding? = nil) {
+        self.backgroundTasks = backgroundTasks
         window = makeRigWindow(testCase, size: NSSize(width: size.width, height: size.height + ReplInputBar.minHeight))
         self.turns = turns
         let content = window.contentView!
@@ -229,7 +233,7 @@ final class SafetyRig {
         let state = store.state(for: turn.id)
         let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: state,
                                 folds: resolver(for: turn),
-                                heldOrdinals: state.heldOrdinals)
+                                heldOrdinals: state.heldOrdinals, backgroundTasks: backgroundTasks)
         let id = turn.id
         rollInHolds.wire(view, turn: id)
         view.onActivityToggle = { [unowned self] key, open in

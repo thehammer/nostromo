@@ -33,6 +33,13 @@ import NostromoKit
 // A two-window variant keeps the panel open across the events and closes it with Esc; a terminal variant
 // holds the keyboard in a terminal stand-in and asserts the daemon connection saw no byte at all.
 //
+// BA6c adds the `◷` on a transcript row (PRD "Scroll and focus safety", criteria 1 and 2): a rig whose turn
+// views read a real `BackgroundTaskStore` through a `BackgroundRowBinding` shows the mark on a row that is on
+// screen, in a following pane (the last turn's group row) and in one scrolled up (turn 3's activity row). The
+// mark appearing, going and flickering ten times, and a click on it opening the task's window (a real panel,
+// closed again with Esc), move the first visible line by at most 1 pt, keep a following pane at the bottom, and
+// leave the composer's text, selection and first responder alone.
+//
 // On key status: `RigWindow` (the shared test window) overrides `isKeyWindow` to always answer true, and a
 // headless runner may not make any window key, so "the rig window is key again after the panel closes" is
 // asserted in the strongest form that holds there: the rig window's first responder is still the composer
@@ -63,9 +70,10 @@ final class BackgroundScrollSafetyTests: XCTestCase {
 
     /// `SafetyRig.followingTail` / `.scrolledUp`, with the Background slot bound before layout and
     /// the composer focused after.
-    private func pane(following: Bool, world given: BA3UIWorld? = nil) -> Pane {
+    private func pane(following: Bool, world given: BA3UIWorld? = nil, turns: [ChatTurn]? = nil,
+                      backgroundTasks: BackgroundRowBinding? = nil) -> Pane {
         let world = given ?? BA3UIWorld(self)
-        let rig = SafetyRig(self, turns: SafetyFixtures.transcript())
+        let rig = SafetyRig(self, turns: turns ?? SafetyFixtures.transcript(), backgroundTasks: backgroundTasks)
         rig.window.animationBehavior = .none
         rig.window.orderFront(nil)
         rig.inputBar.bindBackground(tag: "gate", store: world.store, displayName: "Claudia")
@@ -721,6 +729,111 @@ final class BackgroundScrollSafetyTests: XCTestCase {
         }
     }
 
+    // MARK: BA6c: the mark on a row
+
+    /// Seven tall turns and a short last one whose calls (`toolu_vis_0`, `toolu_vis_1`) form a group row at the
+    /// very bottom. Turn 3's calls (`s3_0` ... `s3_3`) are folded into an activity row (Focus).
+    private static func markTurns() -> [ChatTurn] {
+        (0 ..< 8).map { SafetyFixtures.tallTurn($0) }
+            + [FoldFixtures.turn([.text("Opening the last turn. \(FoldFixtures.prose)")]
+                                 + FoldFixtures.run(2, prefix: "toolu_vis_"), user: "last")]
+    }
+
+    /// The row that is on screen: the last turn's group row in a following pane, turn 3's activity row in one
+    /// scrolled up into it. Its call: one of that row's.
+    private func markRow(_ rig: SafetyRig, following: Bool) throws -> (row: FoldRowView, call: String) {
+        if following {
+            let view = try XCTUnwrap(rig.materialized[rig.turns[rig.turns.count - 1].id], "the last turn is built")
+            let row = try XCTUnwrap(rigAllSubviews(of: view).compactMap { ($0 as? ToolGroupView)?.row }.first, "it has a group row")
+            return (row, "toolu_vis_1")
+        }
+        let view = try XCTUnwrap(rig.materialized[rig.turns[3].id], "turn 3 is built")
+        let row = try XCTUnwrap(view.activityRowViews.first?.row, "it has an activity row")
+        return (row, "s3_2")
+    }
+
+    private func assertOnScreen(_ row: FoldRowView, in rig: SafetyRig, _ name: String,
+                                file: StaticString = #filePath, line: UInt = #line) {
+        let y = rig.screenY(of: row)
+        XCTAssertGreaterThanOrEqual(y, 0, "\(name): the row is on screen", file: file, line: line)
+        XCTAssertLessThan(y, rig.viewportHeight, "\(name): the row is on screen", file: file, line: line)
+    }
+
+    func testTheMarkAppearingGoingAndFlickeringOnAVisibleRowMovesNothingAndTakesNoFocus() throws {
+        for following in [true, false] {
+            let world = BA3UIWorld(self)
+            let tw = BA4TWWorld(self, tag: "gate", world: world)
+            let binding = BackgroundRowBinding(store: world.store, tag: "gate", open: { _ = tw.open($0) })
+            let p = pane(following: following, world: world, turns: Self.markTurns(), backgroundTasks: binding)
+            let (row, call) = try markRow(p.rig, following: following)
+            let name = { (step: String) in "\(step) (following: \(following))" }
+            assertOnScreen(row, in: p.rig, name("precondition"))
+            XCTAssertTrue(row.backgroundField.isHidden, name("precondition: no task yet"))
+
+            p.rig.assertNoMove(name("the mark appears"), following: following) {
+                tw.ingest([tw.task("job0", toolUseId: call)])
+            }
+            XCTAssertFalse(row.backgroundField.isHidden, name("the mark is showing on the visible row"))
+            XCTAssertEqual(row.backgroundTaskId, "job0")
+            assertComposerIntact(p.rig, name("after the mark appeared"))
+
+            p.rig.assertNoMove(name("the mark goes when the task ends"), following: following) {
+                tw.ingest([tw.task("job0", status: .completed, toolUseId: call)])
+            }
+            XCTAssertTrue(row.backgroundField.isHidden, name("the mark is gone"))
+            assertComposerIntact(p.rig, name("after the mark went"))
+
+            p.rig.assertNoMove(name("the mark comes and goes ten times"), following: following) {
+                for n in 1 ... 10 {
+                    tw.ingest([tw.task("job\(n)", toolUseId: call)])
+                    tw.ingest([tw.task("job\(n)", status: .failed, toolUseId: call)])
+                }
+            }
+            XCTAssertTrue(row.backgroundField.isHidden)
+            assertOnScreen(row, in: p.rig, name("afterwards"))
+            assertComposerIntact(p.rig, name("after the flicker"))
+        }
+    }
+
+    func testOpeningATaskWindowFromTheMarkMovesNothingAndTheComposerKeepsTheKeyboardWhenItCloses() throws {
+        for following in [true, false] {
+            let world = BA3UIWorld(self)
+            let tw = BA4TWWorld(self, tag: "gate", world: world)
+            let opened = BA6cOpenedWindow()
+            let binding = BackgroundRowBinding(store: world.store, tag: "gate", open: { opened.controller = tw.open($0) })
+            let p = pane(following: following, world: world, turns: Self.markTurns(), backgroundTasks: binding)
+            tw.keyWindow = p.rig.window
+            let (row, call) = try markRow(p.rig, following: following)
+            let name = { (step: String) in "\(step) (following: \(following))" }
+            tw.ingest([tw.task("job0", toolUseId: call)])
+            tw.outputs["job0"] = Self.lines(0 ..< 60)
+            XCTAssertFalse(row.backgroundField.isHidden, name("precondition: the mark is showing"))
+            // The click lands where the laid-out mark is.
+            p.rig.window.contentView?.layoutSubtreeIfNeeded()
+
+            p.rig.assertNoMove(name("a click on the mark opens the task's window"), following: following) {
+                ba6cClickMark(of: row, in: p.rig.window)
+                tw.pump()
+                opened.controller?.panel.contentView?.layoutSubtreeIfNeeded()
+            }
+            let controller = try XCTUnwrap(opened.controller, name("the click opened a window"))
+            XCTAssertTrue(tw.isOpen("job0"), name("it is the task's window"))
+            XCTAssertTrue(controller.isOpen && controller.panel.isVisible, name("the panel is open alongside the rig window"))
+            assertComposerIntact(p.rig, name("with the panel open"))
+
+            p.rig.assertNoMove(name("Esc closes the panel"), following: following) {
+                XCTAssertTrue(controller.panel.performKeyEquivalent(with: BA3UIKey.keyDown(BA3UIKey.escape)), "Esc is consumed")
+            }
+
+            XCTAssertFalse(controller.isOpen, name("the panel is closed"))
+            XCTAssertEqual(tw.manager.openCount, 0)
+            XCTAssertFalse(NSApplication.shared.keyWindow === controller.panel, name("the closed panel is not the key window"))
+            XCTAssertTrue(p.rig.window.firstResponder === p.rig.textView, name("the composer has the keyboard back"))
+            assertComposerIntact(p.rig, name("after the panel closed"))
+            XCTAssertFalse(row.backgroundField.isHidden, name("the task still runs: the mark stays"))
+        }
+    }
+
     func testATaskWindowOpeningAndClosingSendsNoBytesToATerminalThatHoldsTheKeyboard() throws {
         // `NostromoTerminalView` and `TerminalPaneHostView` link SwiftTerm, which the test bundle does not,
         // so the terminal is a stand-in that does what the real one does with the keyboard: keys go to
@@ -869,4 +982,11 @@ private final class BA4TerminalStandIn: NSView {
     private func send(_ text: String, autoReply: Bool) {
         _ = store.sendInput(terminalId: terminalId, bytes: Array(text.utf8), fromWindow: windowId, autoReply: autoReply)
     }
+}
+
+// MARK: - BA6c: what a row's click opened
+
+/// The window the last click on a mark opened.
+private final class BA6cOpenedWindow {
+    var controller: TaskWindowController?
 }
