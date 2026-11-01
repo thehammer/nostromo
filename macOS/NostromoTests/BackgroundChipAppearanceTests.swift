@@ -310,6 +310,28 @@ final class BackgroundChipAppearanceTests: XCTestCase {
         }
     }
 
+    /// BA5: `Couldn't stop: <reason>` is drawn in the failure colour on the popover background.
+    func testTheCouldntStopNoticeMeetsContrastInTheKeyWindowAndAnInactiveOne() throws {
+        let running = fixtureList().running[0]
+        XCTAssertFalse(running.isEnded, "precondition: a running row")
+        let display = BackgroundTaskStore.StopDisplay(offered: true, failure: "Task is protected")
+        for key in [true, false] {
+            let rendered = renderRow(running, key: key)
+            rendered.view.applyStop(display)
+            rendered.host.layoutSubtreeIfNeeded()
+            XCTAssertEqual(rendered.view.stopNoticeText, "Couldn't stop: Task is protected", "precondition: the notice shows")
+            assertContrast("couldn't-stop notice", text: rendered.view.stopNoticeText, in: rendered, key: key)
+            XCTAssertEqual(rendered.view.stopNoticeColor, BackgroundPalette.failed, "drawn in the failure colour")
+        }
+    }
+
+    func testTheCouldntStopColourMeetsContrastOnThePopoverBackgroundByArithmetic() {
+        let background = bgaOver(NSColor(cgColor: popoverBackground()) ?? .black, .black)
+        let ratio = bgaRatio(bgaLuminance(BackgroundPalette.failed), bgaLuminance(background))
+        record("couldn't-stop colour pair", ratio)
+        XCTAssertGreaterThanOrEqual(ratio, 4.5)
+    }
+
     func testHousekeepingRowsAreDimmedByColourAndStillMeetContrast() throws {
         let chore = try XCTUnwrap(fixtureList().housekeeping.first)
         XCTAssertTrue(chore.isHousekeeping)
