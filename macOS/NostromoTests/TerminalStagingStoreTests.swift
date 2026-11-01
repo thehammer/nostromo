@@ -529,3 +529,253 @@ private final class ObservationOwner {
     var token: TerminalStagingStore.Observation?
     var calls = 0
 }
+
+
+// MARK: - S2: switches, archive, auto-archive, reading-delay restarts, UI events
+
+extension TerminalStagingStoreTests {
+
+    private func makeStore(defaults: UserDefaults? = nil) -> (TerminalStagingStore, UserDefaults) {
+        let suite = defaults ?? UserDefaults(suiteName: "redd.store.\(UUID().uuidString)")!
+        let made = TerminalStagingStore(clock: { [unowned self] in self.clock }, transport: { [unowned self] in self.frames.append($0) },
+                                        defaults: suite)
+        return (made, suite)
+    }
+
+    private func placed(_ id: String, _ command: String, number: Int = 1) -> StagingEntry {
+        StagingFixtures.entry(id, number, command, insertedCount: 1, lastInsertedAt: StagingFixtures.baseDate)
+    }
+
+    private func listFrame(_ entries: [StagingEntry], owner: String = "owner-tag", enabled: Bool = true, foreground: String? = nil,
+                       state: TerminalStagingState = .active) -> TerminalStagingList {
+        revision += 1
+        return StagingFixtures.list(terminalId: id, state: state, owner: owner, revision: revision, entries: entries,
+                                    enabled: enabled, foreground: foreground)
+    }
+
+    // MARK: Global switch
+
+    func testTheGlobalSwitchDefaultsOnIsSavedAndRestoredByANewStoreWithNoLists() {
+        let (first, suite) = makeStore()
+        XCTAssertTrue(first.globalEnabled, "registered default true")
+        first.ingest(listFrame([entry("a", "ls")]))
+        first.setGlobalEnabled(false)
+        XCTAssertEqual(suite.object(forKey: TerminalStagingStore.globalEnabledKey) as? Bool, false)
+        XCTAssertEqual(frames.last, .stagingSetGlobal(enabled: false))
+        XCTAssertNil(first.list(for: id), "off hides every drawer at once")
+
+        let (second, _) = makeStore(defaults: suite)   // a relaunch
+        XCTAssertFalse(second.globalEnabled, "the setting survives a relaunch")
+        XCTAssertNil(second.list(for: id), "the lists never do")
+    }
+
+    func testTheGlobalSwitchIsReadOnceAtLaunchAndNeverObserved() {
+        let (made, suite) = makeStore()
+        suite.set(false, forKey: TerminalStagingStore.globalEnabledKey)    // another process: `defaults write`
+        made.ingest(listFrame([entry("a", "ls")]))
+        XCTAssertTrue(made.globalEnabled, "a write by another process changes nothing while the app runs")
+        XCTAssertNotNil(made.list(for: id))
+    }
+
+    func testWhileTheGlobalSwitchIsOffIncomingListsAreIgnoredAndTurningOnSendsTrue() {
+        let (made, _) = makeStore()
+        made.setGlobalEnabled(false)
+        made.ingest(listFrame([entry("a", "ls")]))
+        XCTAssertNil(made.list(for: id))
+        made.setGlobalEnabled(true)
+        XCTAssertEqual(frames.last, .stagingSetGlobal(enabled: true))
+        made.ingest(listFrame([entry("a", "ls")]))
+        XCTAssertNotNil(made.list(for: id))
+        frames.removeAll()
+        made.resendGlobal()
+        XCTAssertEqual(frames, [.stagingSetGlobal(enabled: true)])
+    }
+
+    // MARK: Per-terminal switch
+
+    func testEnabledIsTheLastValueTheDaemonSentAndSurvivesNoneFramesUntilTheTerminalClosesOrTheConnectionDrops() {
+        XCTAssertTrue(store.isEnabled(terminalId: id), "every terminal starts enabled")
+        store.ingest(listFrame([], enabled: false, state: .none))
+        XCTAssertFalse(store.isEnabled(terminalId: id))
+        store.ingest(listFrame([], enabled: false, state: .none))
+        XCTAssertFalse(store.isEnabled(terminalId: id))
+        store.terminalClosed(id)
+        XCTAssertTrue(store.isEnabled(terminalId: id))
+
+        store.ingest(listFrame([], enabled: false, state: .none))
+        store.connectionChanged(false)
+        XCTAssertTrue(store.isEnabled(terminalId: id))
+        store.setEnabled(terminalId: id, enabled: false)
+        XCTAssertEqual(frames.last, .stagingSetEnabled(terminalId: id, enabled: false))
+        XCTAssertTrue(store.isEnabled(terminalId: id), "the check follows the daemon's frame, not the request")
+    }
+
+    func testANoneFrameThatOnlyChangesEnabledNotifiesTheMenuObservers() {
+        var calls = 0
+        let token = store.observe(terminalId: id) { calls += 1 }
+        store.ingest(listFrame([], enabled: false, state: .none))
+        XCTAssertEqual(calls, 1)
+        _ = token
+    }
+
+    // MARK: Archive
+
+    func testArchiveSendsTheFrameMovesTheEntryToTheFooterAndOutOfTheList() {
+        store.ingest(listFrame([placed("a", "ls", number: 1), entry("b", "pwd")]))
+        store.archive(terminalId: id, entryId: "a", auto: false)
+
+        XCTAssertEqual(frames.last, .stagingRemove(terminalId: id, entryId: "a", archive: "manual"))
+        XCTAssertEqual(store.list(for: id)?.entries.map(\.id), ["b"], "gone from the list at once")
+        XCTAssertNil(store.entry(terminalId: id, entryId: "a"), "an archived entry can never be inserted")
+        XCTAssertEqual(store.archivedEntries(for: id).map(\.entryId), ["a"])
+        XCTAssertEqual(store.archivedEntries(for: id).first?.command, "ls")
+
+        store.archive(terminalId: id, entryId: "b", auto: true)
+        XCTAssertEqual(frames.last, .stagingRemove(terminalId: id, entryId: "b", archive: "auto"))
+        store.archive(terminalId: id, entryId: "zzz", auto: false)
+        XCTAssertEqual(store.archivedEntries(for: id).count, 2, "nothing for an entry that is not there")
+    }
+
+    func testAtMostTwelveArchivedEntriesAreKeepAndTheOldestIsDropped() {
+        let entries = (1...14).map { placed("e\($0)", "echo \($0)", number: $0) }
+        store.ingest(listFrame(entries))
+        for entry in entries { store.archive(terminalId: id, entryId: entry.id, auto: false) }
+        let kept = store.archivedEntries(for: id).map(\.entryId)
+        XCTAssertEqual(kept.count, 12)
+        XCTAssertEqual(kept.first, "e3")
+        XCTAssertEqual(kept.last, "e14")
+    }
+
+    func testArchivedEntriesAreForgottenWhenTheOwnerChangesTheListGoesTheTerminalClosesTheConnectionDropsOrStagingIsOff() {
+        func archiveOne() {
+            store.ingest(listFrame([placed("a", "ls"), entry("b", "pwd")]))
+            store.archive(terminalId: id, entryId: "a", auto: false)
+            XCTAssertEqual(store.archivedEntries(for: id).count, 1)
+        }
+        archiveOne()
+        store.ingest(listFrame([entry("b", "pwd")], owner: "another-focus"))
+        XCTAssertTrue(store.archivedEntries(for: id).isEmpty, "a new owner")
+
+        archiveOne()
+        store.ingest(listFrame([], state: .none))
+        XCTAssertTrue(store.archivedEntries(for: id).isEmpty, "the list went none")
+
+        archiveOne()
+        store.terminalClosed(id)
+        XCTAssertTrue(store.archivedEntries(for: id).isEmpty, "the terminal closed")
+
+        archiveOne()
+        store.connectionChanged(false)
+        XCTAssertTrue(store.archivedEntries(for: id).isEmpty, "the connection dropped")
+
+        let (made, _) = makeStore()
+        made.ingest(listFrame([placed("a", "ls")]))
+        made.archive(terminalId: id, entryId: "a", auto: false)
+        made.setGlobalEnabled(false)
+        XCTAssertTrue(made.archivedEntries(for: id).isEmpty, "staging is off")
+    }
+
+    // MARK: Reading delay
+
+    func testRestartingTheReadingDelayRestartsEveryEntryAndNotifies() {
+        store.ingest(listFrame([entry("a", "ls"), entry("b", "pwd")]))
+        clock += 10
+        var calls = 0
+        let token = store.observe(terminalId: id) { calls += 1 }
+        store.restartReadingDelay(terminalId: id)
+        XCTAssertEqual(shown("a"), clock)
+        XCTAssertEqual(shown("b"), clock)
+        XCTAssertEqual(calls, 1)
+        store.restartReadingDelay(terminalId: "another")
+        XCTAssertEqual(calls, 1, "no list, nothing to restart")
+        _ = token
+    }
+
+    func testAChangeOfTheForegroundProgramRestartsTheReadingDelay() {
+        store.ingest(listFrame([entry("a", "ls")]))
+        let first = shown("a")
+        clock += 5
+        store.ingest(listFrame([entry("a", "ls")]))
+        XCTAssertEqual(shown("a"), first, "nothing changed")
+        clock += 5
+        store.ingest(listFrame([entry("a", "ls")], foreground: "ssh"))
+        XCTAssertEqual(shown("a"), clock, "ssh started: read it again")
+    }
+
+    // MARK: UI events
+
+    func testJustChangedIsSentAtMostOncePerSecondPerTerminalAndCancelIsNeverThrottled() {
+        store.reportUIEvent(.justChanged, terminalId: id)
+        store.reportUIEvent(.justChanged, terminalId: id)
+        XCTAssertEqual(frames, [.stagingUIEvent(terminalId: id, event: "just_changed")])
+        store.reportUIEvent(.justChanged, terminalId: "another")
+        XCTAssertEqual(frames.count, 2)
+        clock += 1.1
+        store.reportUIEvent(.justChanged, terminalId: id)
+        XCTAssertEqual(frames.count, 3)
+        store.reportUIEvent(.confirmCancelled, terminalId: id)
+        store.reportUIEvent(.confirmCancelled, terminalId: id)
+        XCTAssertEqual(frames.suffix(2), [.stagingUIEvent(terminalId: id, event: "confirm_cancelled"),
+                                          .stagingUIEvent(terminalId: id, event: "confirm_cancelled")])
+    }
+
+    func testAConfirmedInsertIsReportedAsConfirmed() {
+        store.reportInserted(terminalId: id, entryId: "a", bytes: 3, confirmed: true)
+        XCTAssertEqual(frames, [.stagingInserted(terminalId: id, entryId: "a", bytes: 3, confirmed: true)])
+    }
+
+    // MARK: Auto-archive (memory only, off by default)
+
+    func testAutoArchiveIsOffInAFreshProcessAndNoUserDefaultsWriteTurnsItOn() {
+        XCTAssertFalse(TerminalStagingStore.autoArchiveEnabled)
+        let (made, suite) = makeStore()
+        for key in ["nostromo.terminal.autoArchive", "nostromo.terminal.stagingAutoArchive", "autoArchive", TerminalStagingStore.globalEnabledKey] {
+            suite.set(true, forKey: key)
+        }
+        _ = made
+        let (another, _) = makeStore(defaults: suite)
+        _ = another
+        XCTAssertFalse(TerminalStagingStore.autoArchiveEnabled, "it is never read from UserDefaults")
+        another.ingest(listFrame([placed("a", "ls")]))
+        another.notePlaced(terminalId: id, entryId: "a", command: "ls")
+        XCTAssertFalse(another.hasPendingAutoArchive(terminalId: id), "off: an insert waits for nothing")
+    }
+
+    func testAutoArchiveArchivesAPlacedEntryOnlyAfterAPersonsEnterForTheIdenticalCommand() {
+        TerminalStagingStore.setAutoArchive(true)
+        addTeardownBlock { TerminalStagingStore.setAutoArchive(false) }
+        store.ingest(listFrame([placed("a", "ls"), placed("b", "pwd", number: 2)]))
+        store.notePlaced(terminalId: id, entryId: "a", command: "ls")
+        XCTAssertTrue(store.hasPendingAutoArchive(terminalId: id))
+
+        store.personTyped(terminalId: id, bytes: Array("ls".utf8))
+        XCTAssertTrue(store.archivedEntries(for: id).isEmpty, "no Enter yet")
+        store.personTyped(terminalId: id, bytes: [0x0D])
+        XCTAssertEqual(store.archivedEntries(for: id).map(\.entryId), ["a"])
+        XCTAssertEqual(frames.last, .stagingRemove(terminalId: id, entryId: "a", archive: "auto"))
+        XCTAssertFalse(store.hasPendingAutoArchive(terminalId: id))
+    }
+
+    func testCtrlUOrCtrlCBeforeTheEnterDropsThePendingEntries() {
+        TerminalStagingStore.setAutoArchive(true)
+        addTeardownBlock { TerminalStagingStore.setAutoArchive(false) }
+        for key: UInt8 in [0x15, 0x03] {
+            store.ingest(listFrame([placed("a", "ls")]))
+            store.notePlaced(terminalId: id, entryId: "a", command: "ls")
+            store.personTyped(terminalId: id, bytes: [key, 0x0D])
+            XCTAssertTrue(store.archivedEntries(for: id).isEmpty, "\(key)")
+            XCTAssertFalse(store.hasPendingAutoArchive(terminalId: id))
+        }
+    }
+
+    func testAReplaceThatChangedTheCommandDropsTheAutoArchivePending() {
+        TerminalStagingStore.setAutoArchive(true)
+        addTeardownBlock { TerminalStagingStore.setAutoArchive(false) }
+        store.ingest(listFrame([placed("a", "ls")]))
+        store.notePlaced(terminalId: id, entryId: "a", command: "ls")
+        store.ingest(listFrame([placed("a", "rm -rf /tmp/x")]))
+        XCTAssertFalse(store.hasPendingAutoArchive(terminalId: id))
+        store.personTyped(terminalId: id, bytes: [0x0D])
+        XCTAssertTrue(store.archivedEntries(for: id).isEmpty)
+    }
+}

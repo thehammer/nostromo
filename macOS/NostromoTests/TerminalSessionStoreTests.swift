@@ -122,7 +122,7 @@ final class TerminalSessionStoreTests: XCTestCase {
     /// The terminal_input frames sent so far, as (bytes, autoReply), in the order they were sent.
     private var inputFrames: [(bytes: [UInt8], autoReply: Bool)] {
         sent.compactMap { message in
-            if case .input(_, let bytes, let autoReply) = message { return (bytes: bytes, autoReply: autoReply) }
+            if case .input(_, let bytes, let autoReply, _) = message { return (bytes: bytes, autoReply: autoReply) }
             return nil
         }
     }
@@ -1354,5 +1354,81 @@ final class RemoteShellClosedToastTests: XCTestCase {
 
         XCTAssertEqual(toasts.first?.message,
                        "production \u{00B7} admin-portal \u{00B7} scheduler shell closed: Nostromo daemon restarted")
+    }
+}
+
+
+// MARK: - S2: `via`, the line state and the person-input hook
+
+extension TerminalSessionStoreTests {
+
+    func testAStagedInsertGoesOutWithViaAndTypedInputDoesNot() {
+        _ = attachedTerminal()
+        store.sendInput(terminalId: "t1", bytes: Array("ls".utf8), fromWindow: "w1", autoReply: false, via: "stage_insert")
+        store.sendInput(terminalId: "t1", bytes: Array("pwd".utf8), fromWindow: "w1")
+        let inputs = sent.filter { if case .input = $0 { return true } else { return false } }
+        XCTAssertEqual(inputs, [.input(terminalId: "t1", bytes: Array("ls".utf8), autoReply: false, via: "stage_insert"),
+                                .input(terminalId: "t1", bytes: Array("pwd".utf8))])
+    }
+
+    func testATerminalThisAppDidNotOpenHasAnUnknownLineWhichCountsAsText() {
+        _ = attachedTerminal()
+        XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "re-attached after launch: unknown counts as text")
+        store.sendInput(terminalId: "t1", bytes: [0x0D], fromWindow: "w1")
+        XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"), "the first Enter clears it")
+    }
+
+    func testATerminalFirstSeenConnectingOrOpenedByThisAppStartsWithAnEmptyLine() {
+        store.connectionChanged(true)
+        state(info("c1", pane: "terminal-c", status: .connecting))
+        XCTAssertFalse(store.lineMayHaveText(terminalId: "c1"))
+
+        store.expectKeyboardFocus(clientRequestId: "req-9", windowId: "w1")
+        state(info("o1", pane: "terminal-o", openedBy: "req-9"))
+        XCTAssertFalse(store.lineMayHaveText(terminalId: "o1"))
+
+        state(info("x1", pane: "terminal-x"))
+        XCTAssertTrue(store.lineMayHaveText(terminalId: "x1"))
+    }
+
+    func testTheLineIsEmptyOnlyWhenTheLastOfEnterCtrlCAndCtrlUIsTheFinalByte() {
+        _ = attachedTerminal()
+        func line(_ bytes: [UInt8]) -> Bool {
+            store.sendInput(terminalId: "t1", bytes: bytes, fromWindow: "w1")
+            return store.lineMayHaveText(terminalId: "t1")
+        }
+        XCTAssertTrue(line(Array("ls".utf8)), "typed, no Enter")
+        XCTAssertFalse(line(Array("ls\r".utf8)), "ends with Enter")
+        XCTAssertTrue(line(Array("\rls".utf8)), "a byte follows the Enter")
+        XCTAssertFalse(line([0x15]), "Ctrl-U")
+        XCTAssertTrue(line([0x1B, 0x5B, 0x41]), "an arrow key: none of them")
+        XCTAssertFalse(line([0x03]), "Ctrl-C")
+        XCTAssertTrue(line(Array("abc".utf8)))
+        XCTAssertFalse(line(Array("abc".utf8) + [0x15]), "typed then Ctrl-U")
+    }
+
+    func testAnAutoReplyNeverChangesTheLineState() {
+        _ = attachedTerminal()
+        store.sendInput(terminalId: "t1", bytes: [0x0D], fromWindow: "w1")
+        store.sendInput(terminalId: "t1", bytes: Array("\u{1b}[0;0R".utf8), fromWindow: "w1", autoReply: true)
+        XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"))
+    }
+
+    func testAReconnectMakesEveryLineUnknownAgain() {
+        _ = attachedTerminal()
+        store.sendInput(terminalId: "t1", bytes: [0x0D], fromWindow: "w1")
+        store.connectionChanged(false)
+        store.connectionChanged(true)
+        XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"))
+    }
+
+    func testThePersonInputHookHearsEveryTypedInputAndNeverAnAutoReply() {
+        _ = attachedTerminal()
+        var heard: [(String, [UInt8])] = []
+        store.onPersonInput = { heard.append(($0, $1)) }
+        store.sendInput(terminalId: "t1", bytes: [0x61], fromWindow: "w1")
+        store.sendInput(terminalId: "t1", bytes: [0x62], fromWindow: "w1", autoReply: false, via: "stage_insert")
+        store.sendInput(terminalId: "t1", bytes: [0x63], fromWindow: "w1", autoReply: true)
+        XCTAssertEqual(heard.map { $0.1 }, [[0x61], [0x62]])
     }
 }

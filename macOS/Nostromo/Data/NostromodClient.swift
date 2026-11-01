@@ -951,7 +951,12 @@ class NostromodClient {
                              capabilities: terminals ? NostromodClient.operatorCapabilities : [],
                              operatorNonce: nonce),
              type: "subscribe")
+        // The subscribe declared `terminal_staging_ui`: the daemon now needs the app's global switch.
+        if terminals { onStagingUISubscribed?() }
     }
+
+    /// Called right after a Subscribe that declares `terminal_staging_ui` (`AppStore` sends the global switch).
+    var onStagingUISubscribed: (() -> Void)?
 
     /// The topic that carries terminal metadata (`terminal_state`, `terminal_closed`).
     static let terminalTopic = "terminal"
@@ -1203,7 +1208,7 @@ class NostromodClient {
     /// queue, so the daemon still receives them in the order they were sent.
     func sendTerminal(_ msg: TerminalClientMessage) {
         var large = false
-        if case .input(_, let bytes, _) = msg { large = bytes.count > Self.terminalInlineInputBytes }
+        if case .input(_, let bytes, _, _) = msg { large = bytes.count > Self.terminalInlineInputBytes }
         terminalWritesLock.lock()
         let queued = large || terminalWritesPending > 0
         if queued { terminalWritesPending += 1 }

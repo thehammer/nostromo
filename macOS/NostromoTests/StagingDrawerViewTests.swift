@@ -118,7 +118,7 @@ final class StagingDrawerHost {
     }
 
     func label(of row: StagingRowView, text: String) -> NSTextField? {
-        row.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == text }
+        row.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == text || $0.stringValue.components(separatedBy: "\n").contains(text) }
     }
 
     func showAll(of row: StagingRowView) -> StagingClickableLabel? {
@@ -621,9 +621,9 @@ final class StagingDrawerViewTests: XCTestCase {
         let mirrorMenu = try XCTUnwrap(try XCTUnwrap(mirror.rows.first).menu(for: event))
         let driverMenu = try XCTUnwrap(try XCTUnwrap(driver.rows.first).menu(for: event))
 
-        XCTAssertEqual(mirrorMenu.items.map { $0.title }, ["Copy", "Remove"])
-        XCTAssertEqual(mirrorMenu.items.map { $0.isEnabled }, [true, false], "Copy works anywhere, Remove only where the terminal is driven")
-        XCTAssertEqual(driverMenu.items.map { $0.isEnabled }, [true, true])
+        XCTAssertEqual(mirrorMenu.items.map { $0.title }, ["Copy", "Archive", "Remove"])
+        XCTAssertEqual(mirrorMenu.items.map { $0.isEnabled }, [true, false, false], "Copy works anywhere, Archive and Remove only where the terminal is driven")
+        XCTAssertEqual(driverMenu.items.map { $0.isEnabled }, [true, false, true], "Archive only for a row that was placed")
     }
 
     // MARK: - SB-8: the list goes away with its source
@@ -2490,5 +2490,284 @@ final class StagingDrawerViewTests: XCTestCase {
         try XCTUnwrap(host.divider).onDrag?(300)
         XCTAssertEqual(host.height, StagingDrawerView.dividerHeight + StagingDrawerView.stripHeight)
         XCTAssertEqual(host.divider?.isHidden, true)
+    }
+}
+
+
+// MARK: - S2: production header, hazards, archive and footer, close and reopen, switches
+
+extension StagingDrawerViewTests {
+
+    /// A drawer in a production pane (ECS with a target, or `kind`) whose line is known empty, with the commands
+    /// staged and readable.
+    private func productionHost(width: CGFloat = 400, agent: String = "Triage", commands list: [String] = ["ls -la", "pwd"],
+                                gate: @escaping StagingInsertController.Gate = StagingGates.allowAll, foreground: String? = nil,
+                                kind: TerminalKind? = .ecs, entries: [StagingEntry]? = nil)
+        -> (rig: StagingRig, host: StagingDrawerHost) {
+        let rig = makeRig(gate: gate, kind: kind)
+        if kind != .local { rig.context?.target = StagingFixtures.productionTarget }
+        rig.typeEnter()
+        let host = makeHost(rig, width: width)
+        rig.ingest(entries ?? StagingFixtures.entries(list), agent: agent, foreground: foreground)
+        rig.settle()
+        host.drawer.refresh()
+        host.relayout()
+        return (rig, host)
+    }
+
+    private func clickable(_ title: String, in host: StagingDrawerHost) -> StagingClickableLabel? {
+        host.clickables.first { $0.title == title }
+    }
+
+    private func leadLabel(in host: StagingDrawerHost) -> NSTextField? {
+        host.drawer.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue.contains("Staged by") }
+    }
+
+    // MARK: M1/M2: remote rows are live and the header repeats the environment inside the red frame
+
+    func testAnEcsRowIsLiveNotDisabledAsNotLocal() throws {
+        let (_, host) = productionHost()
+        XCTAssertEqual(host.rows.map { $0.model.state }, [.ready, .ready])
+    }
+
+    func testTheEnvironmentTokenIsNeverClippedAtAnyWidthAndTheCloseHidesBeforeAnythingElse() throws {
+        for width in [CGFloat(120), 200, 280, 400, 700] {
+            let (_, host) = productionHost(width: width, agent: String(repeating: "A", count: 40))
+            let token = host.drawer.tokenLabel
+            XCTAssertFalse(token.isHidden, "\(width) pt")
+            XCTAssertEqual(token.stringValue, "PRODUCTION")
+            XCTAssertGreaterThanOrEqual(token.frame.width, token.intrinsicContentSize.width, "\(width) pt: the token is whole")
+            XCTAssertGreaterThanOrEqual(token.frame.minX, 0, "\(width) pt")
+            XCTAssertLessThanOrEqual(token.frame.maxX, host.drawer.bounds.width + 0.5, "\(width) pt")
+            if let lead = leadLabel(in: host), !lead.isHidden {
+                XCTAssertFalse(overlaps(lead.frame, token.frame), "\(width) pt: the text starts after the token")
+            }
+            let visible = host.clickables.filter { !$0.isHidden }
+            for control in visible { XCTAssertFalse(overlaps(control.frame, token.frame), "\(width) pt: \(control.title)") }
+            let close = try XCTUnwrap(clickable("\u{00D7}", in: host))
+            let menu = try XCTUnwrap(host.clickables.first { $0.accessibilityLabel() == "Staged commands menu" })
+            if !close.isHidden { XCTAssertFalse(menu.isHidden, "\(width) pt: the close hides before the menu does") }
+            if width == 120 { XCTAssertTrue(close.isHidden, "below the width that fits token, chevron, menu and ×, the × hides") }
+            if width == 700 { XCTAssertFalse(close.isHidden); XCTAssertFalse(menu.isHidden) }
+        }
+    }
+
+    func testTheHeaderTextSaysYouPressEnterAndTheSpokenLabelNamesTheEnvironment() throws {
+        let (_, host) = productionHost()
+        XCTAssertEqual(leadLabel(in: host)?.stringValue, "Staged by Triage (2) \u{00B7} you press Enter")
+        XCTAssertEqual(host.drawer.accessibilityLabel(), "Staged by Triage \u{00B7} PRODUCTION \u{00B7} you press Enter")
+        XCTAssertEqual(host.drawer.tokenLabel.accessibilityIdentifier(), "staging-drawer-environment")
+    }
+
+    func testAnUnknownKindWithNoTargetSaysRemote() throws {
+        let rig = makeRig(kind: .unknown)
+        rig.context?.target = nil
+        rig.typeEnter()
+        let host = makeHost(rig)
+        rig.ingest(StagingFixtures.entries(["ls"]))
+        rig.settle()
+        host.drawer.refresh()
+        XCTAssertEqual(host.drawer.tokenLabel.stringValue, "REMOTE")
+        XCTAssertFalse(host.drawer.tokenLabel.isHidden)
+    }
+
+    func testALocalPaneHasNoTokenAndALocalPaneRunningAProgramSaysRunning() throws {
+        let (_, local) = productionHost(kind: .local)
+        XCTAssertTrue(local.drawer.tokenLabel.isHidden)
+        XCTAssertEqual(local.drawer.accessibilityLabel(), "Staged commands")
+
+        let (_, running) = productionHost(foreground: "ssh", kind: .local)
+        XCTAssertFalse(running.drawer.tokenLabel.isHidden)
+        XCTAssertEqual(running.drawer.tokenLabel.stringValue, "RUNNING")
+        XCTAssertEqual(leadLabel(in: running)?.stringValue, "ssh is running \u{00B7} Staged by Triage (2) \u{00B7} you press Enter")
+        XCTAssertEqual(running.drawer.accessibilityLabel(), "Staged by Triage \u{00B7} running ssh \u{00B7} you press Enter")
+    }
+
+    func testTheCollapsedStripKeepsTheTokenFirst() throws {
+        let (_, host) = productionHost()
+        host.drawer.setCollapsed(true)
+        host.relayout()
+        let token = host.drawer.tokenLabel
+        let strip = try XCTUnwrap(host.stripButton)
+        XCTAssertFalse(token.isHidden)
+        XCTAssertLessThanOrEqual(token.frame.maxX, strip.frame.minX)
+        XCTAssertEqual(strip.title, "2 staged by Triage \u{25B8}")
+    }
+
+    // MARK: M4: hazards
+
+    func testAProductionRowWithHistoryExpansionIsDisabledAndTellsWhy() throws {
+        let (_, host) = productionHost(commands: ["!!", "ls"])
+        XCTAssertEqual(host.rows[0].model.state, .disabled(.historyExpansion))
+        XCTAssertEqual(host.rows[1].model.state, .ready)
+        let (_, local) = productionHost(commands: ["!!"], kind: .local)
+        XCTAssertEqual(local.rows[0].model.state, .ready)
+        XCTAssertEqual(local.rows[0].model.labels, [StagingHazards.localHistoryLabel])
+    }
+
+    func testTheNonASCIIAndPlaceholderLabelsAreDrawn() throws {
+        let (_, host) = productionHost(commands: ["echo \u{0430} <name>"])
+        let row = try XCTUnwrap(host.rows.first)
+        XCTAssertNotNil(host.label(of: row, text: StagingDrawerModel.placeholderLabel))
+        let nonASCII = row.model.labels.first { $0.contains("U+0430") }
+        XCTAssertNotNil(nonASCII)
+        XCTAssertNotNil(host.label(of: row, text: nonASCII ?? ""), "drawn on the row")
+    }
+
+    func testAProductionRowNeverCollapsesAndOffersNoShowAll() throws {
+        let long = "echo " + Array(repeating: "word", count: 190).joined(separator: " ")
+        let (_, remote) = productionHost(width: 300, commands: [long])
+        let (_, local) = productionHost(width: 300, commands: [long], kind: .local)
+        let remoteRow = try XCTUnwrap(remote.rows.first)
+        let localRow = try XCTUnwrap(local.rows.first)
+        XCTAssertEqual(remote.showAll(of: remoteRow)?.isHidden, true, "no Show all in a production pane")
+        XCTAssertEqual(local.showAll(of: localRow)?.isHidden, false, "a local row still collapses")
+        XCTAssertGreaterThan(remoteRow.height(forWidth: 300), localRow.height(forWidth: 300), "the whole command is laid out")
+        let label = try XCTUnwrap(remote.commandLabel(of: remoteRow))
+        XCTAssertEqual(label.maximumNumberOfLines, 0)
+        XCTAssertGreaterThan(label.frame.height, localRow.height(forWidth: 300) - 20, "full height, not three lines")
+    }
+
+    func testMovingTheDrawerRestartsTheReadingDelayButAHeightChangeDoesNot() throws {
+        let (rig, host) = productionHost()
+        let id = StagingFixtures.terminalId
+        let before = try XCTUnwrap(rig.staging.shownSince(terminalId: id, entryId: "s-1"))
+        host.bodyHeight = 500
+        host.relayout()
+        host.drawer.needsLayout = true
+        host.drawer.layoutSubtreeIfNeeded()
+        _ = waitUntil(timeout: 0.3) { false }
+        XCTAssertEqual(rig.staging.shownSince(terminalId: id, entryId: "s-1"), before, "a bottom-anchored drawer growing is not a move")
+
+        host.container.setFrameOrigin(NSPoint(x: 40, y: 0))
+        host.drawer.needsLayout = true
+        host.drawer.layoutSubtreeIfNeeded()
+        XCTAssertTrue(waitUntil { rig.staging.shownSince(terminalId: id, entryId: "s-1") == rig.staging.now }, "the drawer moved 40 pt")
+        let row = try XCTUnwrap(host.rows.first)
+        XCTAssertEqual(row.activate(with: StagingEvents.space(in: host.window)), .refused(.justChanged))
+        XCTAssertTrue(rig.target.attempts.isEmpty)
+    }
+
+    // MARK: M9: archive and the footer
+
+    private func archiveHost() -> (rig: StagingRig, host: StagingDrawerHost) {
+        let placed = StagingFixtures.entry("s-1", 1, "ls -la", insertedCount: 1, lastInsertedAt: StagingFixtures.baseDate)
+        return productionHost(kind: .local, entries: [placed, StagingFixtures.entry("s-2", 2, "pwd")])
+    }
+
+    func testAPlacedRowShowsArchiveAndAnUnplacedOneDoesNot() throws {
+        let (_, host) = archiveHost()
+        XCTAssertEqual(host.rows[0].archiveLabel.isHidden, false)
+        XCTAssertEqual(host.rows[0].archiveLabel.title, "Archive")
+        XCTAssertTrue(host.rows[1].archiveLabel.isHidden)
+        XCTAssertTrue(host.rows[0].accessibilityChildren()?.contains { ($0 as AnyObject) === host.rows[0].archiveLabel } ?? false)
+        XCTAssertEqual(host.rows[0].accessibilityCustomActions()?.map(\.name), ["Archive"])
+        XCTAssertNil(host.rows[1].accessibilityCustomActions())
+        XCTAssertEqual(host.rows[0].menu(for: StagingEvents.mouse(.rightMouseDown, in: host.window, at: .zero))?.items.map(\.title),
+                       ["Copy", "Archive", "Remove"])
+    }
+
+    func testArchiveSendsTheFrameAndTheRowMovesToTheFooterWhichIsReadOnly() throws {
+        let (rig, host) = archiveHost()
+        host.rows[0].archiveLabel.onClick?()
+        XCTAssertEqual(rig.stagingFrames.last, .stagingRemove(terminalId: StagingFixtures.terminalId, entryId: "s-1", archive: "manual"))
+        XCTAssertEqual(host.rows.map { $0.model.entryId }, ["s-2"], "the row left the list")
+        XCTAssertTrue(host.visibleTexts.contains("(1)"), "archived entries are not counted in the header: \(host.visibleTexts)")
+
+        let toggle = try XCTUnwrap(stagingDescendants(host.drawer).compactMap { $0 as? StagingClickableLabel }
+            .first { $0.title.hasPrefix("Archived (1)") })
+        toggle.onClick?()
+        host.relayout()
+        let footer = try XCTUnwrap(stagingDescendants(host.drawer).compactMap { $0 as? StagingArchivedRowView }.first)
+        XCTAssertFalse(footer.isHidden)
+        XCTAssertTrue(footer.stateText.hasPrefix("placed "), footer.stateText)
+        XCTAssertNil(footer.hitTest(NSPoint(x: 5, y: 5)), "no click")
+        XCTAssertNil(footer.menu(for: StagingEvents.mouse(.rightMouseDown, in: host.window, at: .zero)), "no context menu, no Copy")
+        XCTAssertEqual(footer.accessibilityRole(), .staticText, "not a button: nothing to press")
+        XCTAssertTrue(rig.target.attempts.isEmpty)
+    }
+
+    func testTheHeaderMenuHasTheS2ItemsAllWithoutKeyEquivalentsAndArchivePlacedIsEnabledOnlyWithAPlacedRow() throws {
+        let (_, host) = archiveHost()
+        let menu = host.drawer.makeHeaderMenu()
+        XCTAssertEqual(menu.items.filter { !$0.isSeparatorItem }.map(\.title),
+                       ["Archive Placed Commands", "Archive Commands After I Run Them", "Let Agents Stage Commands Here",
+                        "Hide Staged Commands", "Clear all"])
+        for item in menu.items { XCTAssertEqual(item.keyEquivalent, "", item.title) }
+        XCTAssertTrue(try XCTUnwrap(menu.items.first { $0.title == "Archive Placed Commands" }).isEnabled)
+        XCTAssertEqual(try XCTUnwrap(menu.items.first { $0.title == "Archive Commands After I Run Them" }).state, .off, "off by default")
+        XCTAssertEqual(try XCTUnwrap(menu.items.first { $0.title == "Let Agents Stage Commands Here" }).state, .on)
+
+        let (_, none) = productionHost(kind: .local)
+        XCTAssertFalse(try XCTUnwrap(none.drawer.makeHeaderMenu().items.first { $0.title == "Archive Placed Commands" }).isEnabled)
+    }
+
+    func testTheCheckmarkOfLetAgentsStageHereFollowsTheDaemonsEnabled() throws {
+        let (rig, host) = productionHost(kind: .local)
+        rig.ingest([], state: .none, enabled: false)
+        let item = try XCTUnwrap(host.drawer.makeHeaderMenu().items.first { $0.title == "Let Agents Stage Commands Here" })
+        XCTAssertEqual(item.state, .off)
+        XCTAssertTrue(host.drawer.isHidden, "off hides the drawer: its list is gone")
+    }
+
+    // MARK: M10: close and reopen
+
+    func testTheCloseControlHidesTheDrawerAndTheListSurvivesBehindIt() throws {
+        let (rig, host) = productionHost(width: 400)
+        var chips: [Int?] = []
+        host.drawer.onChipChange = { count, _ in chips.append(count) }
+        let close = try XCTUnwrap(clickable("\u{00D7}", in: host))
+        close.onClick?()
+
+        XCTAssertTrue(host.drawer.isUserHidden)
+        XCTAssertTrue(host.drawer.isHidden)
+        XCTAssertEqual(host.drawer.preferredHeight(forBodyHeight: 400, width: 400), 0)
+        XCTAssertNotNil(rig.staging.list(for: StagingFixtures.terminalId), "the daemon's list is untouched")
+        XCTAssertTrue(host.drawer.hasList)
+        XCTAssertEqual(chips, [2], "the pane header shows `2 staged`")
+
+        rig.ingest(StagingFixtures.entries(["ls -la", "pwd", "date"]))
+        XCTAssertEqual(chips.last, 3, "the chip follows new entries")
+
+        XCTAssertTrue(host.drawer.setUserHidden(false, event: nil, control: host.drawer, fromMenu: true))
+        XCTAssertFalse(host.drawer.isUserHidden)
+        XCTAssertFalse(host.drawer.isHidden)
+        XCTAssertEqual(chips.last, .some(nil), "the chip goes")
+    }
+
+    func testClosingAndReopeningAreGated() throws {
+        let (rig, host) = productionHost(gate: StagingGates.refuseAll)
+        XCTAssertFalse(host.drawer.setUserHidden(true, event: nil, control: host.drawer, fromMenu: true))
+        XCTAssertFalse(host.drawer.isUserHidden)
+        XCTAssertEqual(rig.refusals, [.stagingHide])
+    }
+
+    func testTheKeyboardShortcutReopensAClosedDrawer() throws {
+        let (_, host) = productionHost()
+        host.drawer.setUserHidden(true, event: nil, control: host.drawer, fromMenu: true)
+        XCTAssertTrue(host.drawer.focusRows(), "⇧⌘J reopens it and takes the keyboard")
+        XCTAssertFalse(host.drawer.isUserHidden)
+    }
+
+    func testAClosedDrawerReopensWhenTheOwnerChangesAndForgetsItWhenTheListGoes() throws {
+        let (rig, host) = productionHost()
+        host.drawer.setUserHidden(true, event: nil, control: host.drawer, fromMenu: true)
+        rig.ingest(StagingFixtures.entries(["ls"]), owner: "another-focus")
+        XCTAssertFalse(host.drawer.isUserHidden, "a new owner")
+
+        host.drawer.setUserHidden(true, event: nil, control: host.drawer, fromMenu: true)
+        rig.ingest([], state: .none)
+        XCTAssertFalse(host.drawer.isUserHidden, "the list went")
+        rig.ingest(StagingFixtures.entries(["ls"]))
+        XCTAssertFalse(host.drawer.isUserHidden)
+        XCTAssertFalse(host.drawer.isHidden)
+    }
+
+    func testTurningStagingOffGloballyHidesTheDrawerAtOnce() throws {
+        let (rig, host) = productionHost()
+        XCTAssertFalse(host.drawer.isHidden)
+        rig.staging.setGlobalEnabled(false)
+        XCTAssertTrue(host.drawer.isHidden, "no waiting for the daemon")
+        XCTAssertFalse(host.drawer.hasList)
     }
 }

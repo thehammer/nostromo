@@ -60,10 +60,15 @@ enum StagingFixtures {
     }
 
     static func list(terminalId: String = StagingFixtures.terminalId, state: TerminalStagingState = .active,
-                     agent: String = "Claudia", revision: Int, entries: [StagingEntry]) -> TerminalStagingList {
-        TerminalStagingList(terminalId: terminalId, paneId: "terminal-a", state: state, ownerTag: "owner-tag",
-                            agentName: agent, revision: revision, entries: entries)
+                     agent: String = "Claudia", owner: String = "owner-tag", revision: Int, entries: [StagingEntry],
+                     enabled: Bool = true, foreground: String? = nil) -> TerminalStagingList {
+        TerminalStagingList(terminalId: terminalId, paneId: "terminal-a", state: state, ownerTag: owner,
+                            agentName: agent, revision: revision, entries: entries, enabled: enabled, foreground: foreground)
     }
+
+    /// `PRODUCTION · admin-portal · scheduler · shell`.
+    static let productionTarget = TerminalTarget(project: "admin-portal", environment: "production", service: "scheduler",
+                                                 shellType: "shell")
 
     static func terminalInfo(kind: TerminalKind = .local, status: TerminalStatus = .running) -> TerminalInfo {
         TerminalInfo(terminalId: terminalId, tag: "core-1", paneId: "terminal-a", kind: kind, label: "Terminal",
@@ -216,16 +221,30 @@ final class StagingRig {
          status: TerminalStatus? = .running, isMirror: Bool = false) {
         let s = StagingRigState()
         box = s
+        // A private suite: a test of the global switch must never write the real preferences.
+        let suite = UserDefaults(suiteName: "redd.staging.\(UUID().uuidString)")!
         staging = TerminalStagingStore(clock: { s.storeClock }, transport: { frame in
             s.stagingFrames.append(frame)
             s.log.entries.append("report:" + frame.wireType)
-        })
+        }, defaults: suite)
         sessions = TerminalSessionStore(now: { s.sessionDate },
                                         schedule: { _, work in s.scheduled.append(work) },
                                         transport: { s.sessionFrames.append($0) })
         pasteboard = NSPasteboard(name: NSPasteboard.Name("redd.staging.\(UUID().uuidString)"))
         sessions.ingest(.terminalState(StagingFixtures.terminalInfo()))
+        // As `AppStore` wires it: a person's input feeds auto-archive.
+        sessions.onPersonInput = { [weak self] id, bytes in self?.staging.personTyped(terminalId: id, bytes: bytes) }
         connect(primary, gate: gate, kind: kind, status: status, isMirror: isMirror)
+    }
+
+    /// The person pressed Enter in the shell: the line is known empty.
+    func typeEnter(_ bytes: [UInt8] = [0x0D]) {
+        sessions.sendInput(terminalId: StagingFixtures.terminalId, bytes: bytes, fromWindow: "w-test")
+    }
+
+    /// Input frames sent for the shell (typed, or placed).
+    var inputFrames: [TerminalClientMessage] {
+        sessionFrames.filter { if case .input = $0 { return true } else { return false } }
     }
 
     private func connect(_ side: StagingSide, gate: @escaping StagingInsertController.Gate, kind: TerminalKind?,
@@ -256,9 +275,11 @@ final class StagingRig {
 
     /// A frame for the terminal with the next revision.
     @discardableResult
-    func ingest(_ entries: [StagingEntry], state: TerminalStagingState = .active, agent: String = "Claudia") -> TerminalStagingList {
+    func ingest(_ entries: [StagingEntry], state: TerminalStagingState = .active, agent: String = "Claudia",
+                owner: String = "owner-tag", enabled: Bool = true, foreground: String? = nil) -> TerminalStagingList {
         revision += 1
-        let list = StagingFixtures.list(state: state, agent: agent, revision: revision, entries: entries)
+        let list = StagingFixtures.list(state: state, agent: agent, owner: owner, revision: revision, entries: entries,
+                                        enabled: enabled, foreground: foreground)
         staging.ingest(list)
         return list
     }
@@ -291,6 +312,18 @@ final class StagingRig {
     }
 
     // MARK: Windows and rows
+
+    /// A titled window, like the app's: a borderless one cannot host a sheet properly (the confirm sheet tests).
+    func makeTitledWindow(size: NSSize = NSSize(width: 900, height: 700)) -> NSWindow {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+        window.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        windows.append(window)
+        return window
+    }
 
     func makeWindow(size: NSSize = NSSize(width: 900, height: 700)) -> NSWindow {
         let window = GestureFixtures.offscreenWindow(size: size)
@@ -470,8 +503,8 @@ final class StagingInsertControllerTests: XCTestCase {
     func testTheReasonForANotSentRefusalIsAnAppWrittenNonEmptyTextOfItsOwn() {
         let text = StagingDisabledReason.notSent.text
         XCTAssertFalse(text.isEmpty)
-        let others: [StagingDisabledReason] = [.mirror, .daemonDisconnected, .connecting, .ended, .notLocal, .alternateScreen,
-                                               .sendingPaste, .justChanged, .notInsertable]
+        let others: [StagingDisabledReason] = [.mirror, .daemonDisconnected, .connecting, .ended, .alternateScreen,
+                                               .sendingPaste, .lineMayHaveText, .historyExpansion, .justChanged, .notInsertable]
         XCTAssertFalse(others.map { $0.text }.contains(text), "the person is told what actually happened")
     }
 
@@ -548,13 +581,15 @@ final class StagingInsertControllerTests: XCTestCase {
         assertNothingPlaced(rig)
     }
 
-    func testACommandIsNeverPlacedInARemoteTerminalEvenWithAHandBuiltSnapshot() {
+    func testACommandIsNotPlacedInARemoteTerminalWhoseLineMayHaveTextEvenWithAHandBuiltSnapshot() {
+        // S2 inverts the S1 rule (`.notLocal`): a remote pane is live, but a terminal this app did not open (its
+        // line is unknown, which counts as text) refuses until the first Enter.
         for kind in [TerminalKind.ecs, .unknown] {
             let rig = makeRig(kind: kind)
             rig.ingest([StagingFixtures.entry("s-1", 1, "ls")])
             rig.settle()
             let snapshot = StagingSnapshot(terminalId: StagingFixtures.terminalId, entryId: "s-1", command: "ls", reason: nil)
-            XCTAssertEqual(rig.controller.insert(snapshot, event: nil, control: NSView()), .refused(.notLocal), "\(kind)")
+            XCTAssertEqual(rig.controller.insert(snapshot, event: nil, control: NSView()), .refused(.lineMayHaveText), "\(kind)")
             assertNothingPlaced(rig)
         }
     }
@@ -878,10 +913,10 @@ final class StagingInsertControllerTests: XCTestCase {
         try assertDisabled(.ended, status: .ended)
     }
 
-    func testARemoteUnknownOrUnidentifiedTerminalInsertsNothing() throws {
-        try assertDisabled(.notLocal, kind: .ecs)
-        try assertDisabled(.notLocal, kind: .unknown)
-        try assertDisabled(.notLocal, kind: nil)
+    func testARemoteUnknownOrUnidentifiedTerminalWithAnUnknownLineInsertsNothingUntilAnEnter() throws {
+        try assertDisabled(.lineMayHaveText, kind: .ecs)
+        try assertDisabled(.lineMayHaveText, kind: .unknown)
+        try assertDisabled(.lineMayHaveText, kind: nil)
     }
 
     func testAFullScreenProgramInsertsNothing() throws {
@@ -927,10 +962,10 @@ final class StagingInsertControllerTests: XCTestCase {
         rig.context?.isMirror = false
         XCTAssertEqual(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, .ended)
         rig.context?.status = .running
-        XCTAssertEqual(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, .notLocal)
-        rig.context?.kind = .local
         XCTAssertEqual(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, .alternateScreen)
         rig.target.isAlternateScreen = false
+        XCTAssertEqual(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, .lineMayHaveText)
+        rig.context?.kind = .local
         XCTAssertEqual(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, .justChanged)
         rig.settle()
         XCTAssertEqual(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, .notInsertable)
@@ -964,7 +999,7 @@ final class StagingInsertControllerTests: XCTestCase {
     }
 
     func testThePaneBecomingRemoteBetweenMouseDownAndMouseUpInsertsNothing() {
-        assertTurnsBadBetweenDownAndUp(.notLocal) { $0.context?.kind = .ecs }
+        assertTurnsBadBetweenDownAndUp(.lineMayHaveText) { $0.context?.kind = .ecs }
     }
 
     func testAPasteStartingBetweenMouseDownAndMouseUpInsertsNothing() {
@@ -1193,5 +1228,227 @@ final class StagingInsertControllerTests: XCTestCase {
         XCTAssertEqual(rig.controller.clearAll(event: fromMenu, control: control), .done)
         XCTAssertEqual(rig.stagingFrames, [.stagingRemove(terminalId: StagingFixtures.terminalId, entryId: "s-1"),
                                            .stagingClear(terminalId: StagingFixtures.terminalId)])
+    }
+}
+
+
+// MARK: - S2: archive, switches, auto-archive, line state, hazards, UI events
+
+extension StagingInsertControllerTests {
+
+    private func placedEntry(_ id: String, _ number: Int, _ command: String) -> StagingEntry {
+        StagingFixtures.entry(id, number, command, insertedCount: 1, lastInsertedAt: StagingFixtures.baseDate)
+    }
+
+    private var archiveFrame: (String) -> TerminalClientMessage {
+        { .stagingRemove(terminalId: StagingFixtures.terminalId, entryId: $0, archive: "manual") }
+    }
+
+    // MARK: Archive
+
+    func testArchivingAPlacedRowSendsTheFrameAndTheRowMovesToTheFooter() {
+        let rig = makeRig()
+        rig.ingest([placedEntry("s-1", 1, "ls"), StagingFixtures.entry("s-2", 2, "pwd")])
+        XCTAssertEqual(rig.controller.archive(entryIds: ["s-1"], event: nil, control: NSView(), fromMenu: false), .done)
+        XCTAssertEqual(rig.stagingFrames, [archiveFrame("s-1")])
+        XCTAssertEqual(rig.staging.archivedEntries(for: StagingFixtures.terminalId).map(\.entryId), ["s-1"])
+        XCTAssertEqual(rig.staging.list(for: StagingFixtures.terminalId)?.entries.map(\.id), ["s-2"])
+    }
+
+    func testOnlyAPlacedEntryCanBeArchived() {
+        let rig = makeRig()
+        rig.ingest([StagingFixtures.entry("s-1", 1, "ls")])
+        XCTAssertEqual(rig.controller.archive(entryIds: ["s-1", "s-404"], event: nil, control: NSView(), fromMenu: false), .gone)
+        XCTAssertTrue(rig.stagingFrames.isEmpty)
+    }
+
+    func testArchivePlacedArchivesOnlyTheCheckedRows() {
+        let rig = makeRig()
+        rig.ingest([placedEntry("s-1", 1, "ls"), StagingFixtures.entry("s-2", 2, "pwd"), placedEntry("s-3", 3, "date")])
+        XCTAssertEqual(rig.controller.archivePlaced(event: nil, control: NSView(), fromMenu: true), .done)
+        XCTAssertEqual(rig.stagingFrames, [archiveFrame("s-1"), archiveFrame("s-3")])
+        XCTAssertEqual(rig.staging.list(for: StagingFixtures.terminalId)?.entries.map(\.id), ["s-2"])
+    }
+
+    func testAMirrorWindowCannotArchive() {
+        let rig = makeRig(isMirror: true)
+        rig.ingest([placedEntry("s-1", 1, "ls")])
+        XCTAssertEqual(rig.controller.archive(entryIds: ["s-1"], event: nil, control: NSView(), fromMenu: false), .refused(.mirror))
+        XCTAssertTrue(rig.stagingFrames.isEmpty)
+    }
+
+    func testASyntheticEventArchivesNothingAndIsReported() {
+        let rig = makeRig(gate: StagingGates.real())
+        rig.ingest([placedEntry("s-1", 1, "ls")])
+        XCTAssertEqual(rig.controller.archive(entryIds: ["s-1"], event: nil, control: NSView(), fromMenu: true), .notAPerson)
+        XCTAssertEqual(rig.controller.archivePlaced(event: nil, control: NSView(), fromMenu: true), .notAPerson)
+        XCTAssertTrue(rig.stagingFrames.isEmpty)
+        XCTAssertEqual(rig.refusals, [.stagingArchive], "reported (throttled to one a second)")
+    }
+
+    // MARK: Switches
+
+    func testTheSwitchesAreGatedAndSendTheirFrames() {
+        let id = StagingFixtures.terminalId
+        let allowed = makeRig()
+        XCTAssertTrue(allowed.controller.setStagingEnabledHere(false, event: nil, control: NSView(), fromMenu: true))
+        XCTAssertEqual(allowed.stagingFrames, [.stagingSetEnabled(terminalId: id, enabled: false)])
+
+        let refused = makeRig(gate: StagingGates.real())
+        XCTAssertFalse(refused.controller.setStagingEnabledHere(false, event: nil, control: NSView(), fromMenu: true))
+        XCTAssertTrue(refused.stagingFrames.isEmpty)
+        XCTAssertEqual(refused.refusals, [.stagingSwitch])
+
+        let global = makeRig()
+        XCTAssertTrue(StagingInsertController.setGlobalStaging(false, event: nil, control: NSView(), staging: global.staging,
+                                                               sessions: global.sessions, gate: StagingGates.allowAll))
+        XCTAssertFalse(global.staging.globalEnabled)
+        XCTAssertEqual(global.stagingFrames, [.stagingSetGlobal(enabled: false)])
+        XCTAssertFalse(StagingInsertController.setGlobalStaging(true, event: nil, control: NSView(), staging: global.staging,
+                                                                sessions: global.sessions, gate: StagingGates.refuseAll))
+        XCTAssertFalse(global.staging.globalEnabled, "a refused press changes nothing")
+    }
+
+    func testTheHideAndReopenControlsAreGated() {
+        let rig = makeRig(gate: StagingGates.real())
+        XCTAssertFalse(rig.controller.allowsHideControl(event: nil, control: NSView(), fromMenu: false))
+        XCTAssertEqual(rig.refusals, [.stagingHide])
+        let open = makeRig()
+        XCTAssertTrue(open.controller.allowsHideControl(event: nil, control: NSView(), fromMenu: true))
+    }
+
+    // MARK: Auto-archive
+
+    func testAutoArchiveIsOffByDefaultAndASyntheticEventCannotTurnItOn() {
+        XCTAssertFalse(TerminalStagingStore.autoArchiveEnabled)
+        let rig = makeRig(gate: StagingGates.real())
+        XCTAssertFalse(rig.controller.setAutoArchive(true, event: nil, control: NSView()))
+        XCTAssertFalse(TerminalStagingStore.autoArchiveEnabled)
+        XCTAssertEqual(rig.refusals, [.stagingSwitch])
+    }
+
+    private func autoArchiveRig() -> (rig: StagingRig, window: NSWindow, row: StagingRowView) {
+        let (rig, window, row) = readyRow(command: "ls -la")
+        XCTAssertTrue(rig.controller.setAutoArchive(true, event: StagingEvents.mouse(.leftMouseUp, in: window, at: .zero), control: row))
+        addTeardownBlock { _ = TerminalStagingStore.setAutoArchive(false) }
+        return (rig, window, row)
+    }
+
+    func testAutoArchiveArchivesAfterAPersonsEnterForTheIdenticalCommandOnly() {
+        let (rig, window, row) = autoArchiveRig()
+        rig.click(row, in: window)
+        XCTAssertEqual(rig.rowResults, [.inserted(bytes: 6)])
+        XCTAssertTrue(rig.stagingFrames.filter { if case .stagingRemove = $0 { return true } else { return false } }.isEmpty,
+                      "not before the Enter")
+        rig.typeEnter()
+        XCTAssertEqual(rig.stagingFrames.last, .stagingRemove(terminalId: StagingFixtures.terminalId, entryId: "s-1", archive: "auto"))
+        XCTAssertEqual(rig.staging.archivedEntries(for: StagingFixtures.terminalId).map(\.entryId), ["s-1"])
+    }
+
+    func testCtrlUBeforeTheEnterOrAReplaceThatChangedTheCommandDropsTheAutoArchive() {
+        let (rig, window, row) = autoArchiveRig()
+        rig.click(row, in: window)
+        rig.typeEnter([0x15, 0x0D])
+        XCTAssertTrue(rig.staging.archivedEntries(for: StagingFixtures.terminalId).isEmpty, "Ctrl-U before the Enter")
+
+        let again = makeRig()
+        again.ingest([StagingFixtures.entry("s-1", 1, "ls -la")])
+        again.settle()
+        let window2 = again.makeWindow()
+        let row2 = again.makeRow(in: window2)
+        again.click(row2, in: window2)
+        again.ingest([StagingFixtures.entry("s-1", 1, "rm -rf /srv")])
+        again.typeEnter()
+        XCTAssertTrue(again.staging.archivedEntries(for: StagingFixtures.terminalId).isEmpty, "the command was replaced")
+    }
+
+    func testWithAutoArchiveOffAnEnterArchivesNothing() {
+        let (rig, window, row) = readyRow(command: "ls -la")
+        rig.click(row, in: window)
+        rig.typeEnter()
+        XCTAssertTrue(rig.staging.archivedEntries(for: StagingFixtures.terminalId).isEmpty)
+    }
+
+    // MARK: Line state, hazards, foreground
+
+    func testAProductionRowRefusesUntilAnEnterAndAfterEveryPlacementUntilTheNext() {
+        let rig = makeRig(gate: StagingGates.real(), kind: .ecs)
+        rig.context?.target = StagingFixtures.productionTarget
+        rig.ingest([StagingFixtures.entry("s-1", 1, "ls"), StagingFixtures.entry("s-2", 2, "pwd")])
+        rig.settle()
+        let window = rig.makeWindow()
+        let first = rig.makeRow(entryId: "s-1", in: window)
+
+        rig.click(first, in: window)
+        XCTAssertEqual(rig.rowResults, [.refused(.lineMayHaveText)], "unknown counts as text")
+
+        rig.typeEnter()
+        let fresh = rig.makeRow(entryId: "s-1", in: window)
+        rig.click(fresh, in: window)
+        XCTAssertEqual(rig.rowResults.last, .inserted(bytes: 2))
+        rig.typeEnter(Array("ls".utf8))     // the real terminal view sends the placed bytes through the session store
+
+        let second = rig.makeRow(entryId: "s-2", in: window)
+        rig.click(second, in: window)
+        XCTAssertEqual(rig.rowResults.last, .refused(.lineMayHaveText), "text may be on the line: the Enter first")
+    }
+
+    func testAHandBuiltSnapshotForAHistoryExpansionRowIsRefusedInProduction() {
+        let rig = makeRig(kind: .ecs)
+        rig.context?.target = StagingFixtures.productionTarget
+        rig.typeEnter()
+        rig.ingest([StagingFixtures.entry("s-1", 1, "!!")])
+        rig.settle()
+        let snapshot = StagingSnapshot(terminalId: StagingFixtures.terminalId, entryId: "s-1", command: "!!", reason: nil)
+        XCTAssertEqual(rig.controller.insert(snapshot, event: nil, control: NSView()), .refused(.historyExpansion))
+        XCTAssertTrue(rig.target.attempts.isEmpty)
+    }
+
+    func testALocalPaneWhoseListSaysAProgramIsRunningGetsTheProductionRules() throws {
+        let rig = makeRig(kind: .local)
+        rig.typeEnter()
+        rig.ingest([StagingFixtures.entry("s-1", 1, "!!")], foreground: "ssh")
+        rig.settle()
+        XCTAssertEqual(rig.controller.environment()?.safety, .localRunning(program: "ssh"))
+        XCTAssertEqual(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, .historyExpansion)
+        rig.ingest([StagingFixtures.entry("s-1", 1, "!!")], foreground: nil)
+        rig.settle()
+        XCTAssertNil(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason, "the program ended: a local row again")
+    }
+
+    func testAnActivationRefusedByTheReadingDelayIsCountedOncePerSecond() {
+        let (rig, window, row) = readyRow(settle: false)
+        rig.click(row, in: window)
+        rig.click(row, in: window)
+        let events = rig.stagingFrames.filter { $0 == .stagingUIEvent(terminalId: StagingFixtures.terminalId, event: "just_changed") }
+        XCTAssertEqual(events.count, 1, "throttled to one a second")
+        XCTAssertEqual(rig.rowResults, [.refused(.justChanged), .refused(.justChanged)])
+    }
+
+    func testRestartingTheReadingDelayMakesAnImmediateClickJustChanged() throws {
+        let (rig, window, row) = readyRow()
+        XCTAssertNil(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason)
+        rig.staging.restartReadingDelay(terminalId: StagingFixtures.terminalId)
+        rig.click(row, in: window)
+        XCTAssertEqual(rig.rowResults, [.refused(.justChanged)])
+        XCTAssertTrue(rig.target.attempts.isEmpty)
+        rig.settle()
+        XCTAssertNil(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason)
+    }
+}
+
+
+extension StagingInsertControllerTests {
+
+    func testADrawerMoveBetweenMouseDownAndMouseUpInsertsNothingEvenAfterTheDelayRanOut() {
+        let (rig, window, row) = readyRow()
+        rig.mouseDown(row, in: window)
+        rig.staging.restartReadingDelay(terminalId: StagingFixtures.terminalId)
+        rig.settle(5)
+        rig.mouseUp(row, in: window)
+
+        XCTAssertEqual(rig.rowResults, [.refused(.justChanged)])
+        XCTAssertTrue(rig.target.attempts.isEmpty)
+        XCTAssertTrue(rig.insertedFrames.isEmpty)
     }
 }

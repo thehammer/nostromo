@@ -47,7 +47,10 @@ final class StagingDrawerModelTests: XCTestCase {
         XCTAssertEqual(StagingDisabledReason.daemonDisconnected.text, "Nostromo's daemon is not connected")
         XCTAssertEqual(StagingDisabledReason.connecting.text, "The shell is still connecting")
         XCTAssertEqual(StagingDisabledReason.ended.text, "The shell has ended")
-        XCTAssertEqual(StagingDisabledReason.notLocal.text, "Staging into remote shells is not available yet")
+        XCTAssertEqual(StagingDisabledReason.lineMayHaveText.text,
+                       "Something may already be on the line: press Ctrl-U or Enter in the shell first")
+        XCTAssertEqual(StagingDisabledReason.historyExpansion.text,
+                       "Uses shell history (! ^ r fc): Nostromo will not place it here")
         XCTAssertEqual(StagingDisabledReason.alternateScreen.text, "A full-screen program is running")
         XCTAssertEqual(StagingDisabledReason.sendingPaste.text, "A paste is still being sent")
         XCTAssertEqual(StagingDisabledReason.justChanged.text, "Just changed: read it again")
@@ -55,10 +58,12 @@ final class StagingDrawerModelTests: XCTestCase {
     }
 
     func testOnlyTheTwoPerEntryReasonsAreNotSharedByEveryRow() {
-        let shared: [StagingDisabledReason] = [.mirror, .daemonDisconnected, .connecting, .ended, .notLocal, .alternateScreen, .sendingPaste]
+        let shared: [StagingDisabledReason] = [.mirror, .daemonDisconnected, .connecting, .ended, .alternateScreen, .sendingPaste,
+                                               .lineMayHaveText]
         for reason in shared { XCTAssertTrue(reason.appliesToEveryRow, "\(reason)") }
         XCTAssertFalse(StagingDisabledReason.justChanged.appliesToEveryRow)
         XCTAssertFalse(StagingDisabledReason.notInsertable.appliesToEveryRow)
+        XCTAssertFalse(StagingDisabledReason.historyExpansion.appliesToEveryRow)
     }
 
     // MARK: The reasons: priority
@@ -77,12 +82,13 @@ final class StagingDrawerModelTests: XCTestCase {
         e.status = .ended
         XCTAssertEqual(StagingDrawerModel.sharedReason(e), .ended)
         e.status = .running
-        XCTAssertEqual(StagingDrawerModel.sharedReason(e), .notLocal)
-        e.kind = .local
         XCTAssertEqual(StagingDrawerModel.sharedReason(e), .alternateScreen)
         e.isAlternateScreen = false
         XCTAssertEqual(StagingDrawerModel.sharedReason(e), .sendingPaste)
         e.isSendingInput = false
+        e.lineMayHaveText = true
+        XCTAssertEqual(StagingDrawerModel.sharedReason(e), .lineMayHaveText, "a production-treated pane (ECS)")
+        e.lineMayHaveText = false
         XCTAssertNil(StagingDrawerModel.sharedReason(e))
     }
 
@@ -93,11 +99,17 @@ final class StagingDrawerModelTests: XCTestCase {
         XCTAssertEqual(StagingDrawerModel.sharedReason(env(status: .ended)), .ended)
     }
 
-    func testAnythingButALocalKindIsNotLocalIncludingMissingAndUnknown() {
-        XCTAssertEqual(StagingDrawerModel.sharedReason(env(kind: .ecs)), .notLocal)
-        XCTAssertEqual(StagingDrawerModel.sharedReason(env(kind: .unknown)), .notLocal)
-        XCTAssertEqual(StagingDrawerModel.sharedReason(env(kind: nil)), .notLocal)
-        XCTAssertNil(StagingDrawerModel.sharedReason(env(kind: .local)))
+    func testARemotePaneIsLiveNotDisabledAsNotLocalAndAnUnknownKindIsRemote() {
+        // S2: remote rows are live. (On the S1 code an ECS row was disabled with `.notLocal`.)
+        for kind in [TerminalKind.ecs, .unknown, nil] {
+            XCTAssertNil(StagingDrawerModel.sharedReason(env(kind: kind)), "\(String(describing: kind))")
+            XCTAssertNil(StagingDrawerModel.row(entry(), index: 0, of: list([entry()]), env: env(kind: kind),
+                                                shownSince: 0, now: 100, date: now).disabledReason)
+        }
+        XCTAssertEqual(env(kind: .ecs).safety, .remote(token: "REMOTE"))
+        XCTAssertEqual(env(kind: .unknown).safety, .remote(token: "REMOTE"))
+        XCTAssertEqual(env(kind: nil).safety, .remote(token: "REMOTE"))
+        XCTAssertEqual(env(kind: .local).safety, .local)
     }
 
     func testTheOneAndAHalfSecondReadingDelayBoundary() {
@@ -338,7 +350,7 @@ final class StagingDrawerModelTests: XCTestCase {
             XCTAssertTrue(StagingDrawerModel.isPlaceholderCommand(command), command)
             XCTAssertEqual(r.labels, [StagingDrawerModel.placeholderLabel], command)
         }
-        XCTAssertEqual(StagingDrawerModel.placeholderLabel, "Contains <\u{2026}>: edit it before pressing Enter")
+        XCTAssertEqual(StagingDrawerModel.placeholderLabel, "Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects)")
     }
 
     func testOrdinaryAngleBracketsAreNotPlaceholders() {
@@ -370,7 +382,7 @@ final class StagingDrawerModelTests: XCTestCase {
 
     func testTheAccessibilityLabelPutsThePlaceholderWarningAfterTheCommand() {
         XCTAssertEqual(row(entry("scp <file> host")).accessibilityLabel,
-                       "Staged command 1 of 1, scp <file> host, Contains <\u{2026}>: edit it before pressing Enter, ready to place at the prompt")
+                       "Staged command 1 of 1, scp <file> host, Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects), ready to place at the prompt")
     }
 
     func testTheAccessibilityLabelSaysWhyARowIsUnavailable() {
@@ -388,5 +400,116 @@ final class StagingDrawerModelTests: XCTestCase {
         let r = row(entry("ls", note: "a\u{202E}b\nc"))
         XCTAssertEqual(r.accessibilityLabel,
                        "Staged command 1 of 1, ls, Claudia's note, unverified, ab c, ready to place at the prompt")
+    }
+}
+
+
+// MARK: - S2: pane safety, labels, the production header
+
+extension StagingDrawerModelTests {
+
+    private var production: TerminalTarget { StagingFixtures.productionTarget }
+
+    private func ecs(line: Bool = false) -> StagingEnvironment {
+        var e = env(kind: .ecs)
+        e.target = production
+        e.lineMayHaveText = line
+        return e
+    }
+
+    func testAnEcsRowWithHistoryExpansionIsDisabledAndALocalOneIsLabelled() {
+        XCTAssertEqual(row(entry("!!"), env: ecs()).state, .disabled(.historyExpansion))
+        XCTAssertEqual(row(entry("ssh prod; r"), env: ecs()).disabledReason, .historyExpansion)
+        let local = row(entry("!!"))
+        XCTAssertEqual(local.state, .ready, "a local row is live")
+        XCTAssertEqual(local.labels, [StagingHazards.localHistoryLabel])
+        XCTAssertEqual(StagingHazards.localHistoryLabel, "\u{26A0} Uses shell history: what runs may differ from what you see.")
+    }
+
+    func testPaneSafetyDecidesOnTheKindNeverOnWhetherATargetIsPresent() {
+        XCTAssertEqual(StagingPaneSafety.make(kind: .ecs, target: production, foreground: nil), .remote(token: "PRODUCTION"))
+        XCTAssertEqual(StagingPaneSafety.make(kind: .ecs, target: nil, foreground: nil), .remote(token: "REMOTE"))
+        XCTAssertEqual(StagingPaneSafety.make(kind: .unknown, target: nil, foreground: nil), .remote(token: "REMOTE"))
+        XCTAssertEqual(StagingPaneSafety.make(kind: .unknown, target: production, foreground: nil), .remote(token: "PRODUCTION"))
+        XCTAssertEqual(StagingPaneSafety.make(kind: nil, target: nil, foreground: nil), .remote(token: "REMOTE"))
+        XCTAssertEqual(StagingPaneSafety.make(kind: nil, target: production, foreground: "ssh"), .remote(token: "PRODUCTION"),
+                       "a missing kind is remote whatever else is known")
+        XCTAssertEqual(StagingPaneSafety.make(kind: .local, target: production, foreground: nil), .local,
+                       "a local pane is local even if a target were present")
+        let empty = TerminalTarget(project: "p", environment: "", service: "s", shellType: "shell")
+        XCTAssertEqual(StagingPaneSafety.make(kind: .ecs, target: empty, foreground: nil), .remote(token: "REMOTE"))
+        XCTAssertEqual(StagingPaneSafety.make(kind: .local, target: nil, foreground: "ssh"), .localRunning(program: "ssh"))
+        XCTAssertEqual(StagingPaneSafety.make(kind: .local, target: nil, foreground: "ss\u{1B}h"), .localRunning(program: "ss h"),
+                       "the program name is shown as plain text")
+        let long = String(repeating: "p", count: 60)
+        if case .localRunning(let program) = StagingPaneSafety.make(kind: .local, target: nil, foreground: long) {
+            XCTAssertLessThanOrEqual(program.count, 24)
+        } else { XCTFail("a local pane with a foreground program is localRunning") }
+        XCTAssertEqual(StagingPaneSafety.remote(token: "PRODUCTION").token, "PRODUCTION")
+        XCTAssertEqual(StagingPaneSafety.localRunning(program: "ssh").token, "RUNNING")
+        XCTAssertNil(StagingPaneSafety.local.token)
+    }
+
+    func testALocalPaneRunningAnotherProgramGetsTheProductionRules() {
+        var e = env(kind: .local)
+        e.foreground = "ssh"
+        XCTAssertTrue(e.safety.isProduction)
+        XCTAssertEqual(row(entry("!!"), env: e).disabledReason, .historyExpansion)
+        XCTAssertFalse(row(entry("ls"), env: e).collapses)
+        e.lineMayHaveText = true
+        XCTAssertEqual(StagingDrawerModel.sharedReason(e), .lineMayHaveText)
+        e.foreground = nil
+        XCTAssertNil(StagingDrawerModel.sharedReason(e), "local panes are unchanged")
+    }
+
+    func testProductionRowsNeverCollapseAndLocalRowsDo() {
+        XCTAssertFalse(row(entry(String(repeating: "x", count: 900)), env: ecs()).collapses)
+        XCTAssertTrue(row(entry(String(repeating: "x", count: 900))).collapses)
+    }
+
+    func testTheDestructivePatternLabelIsTheAppsAndSaysInsertAsksFirstOnlyInProduction() {
+        let command = "php artisan queue:flush"
+        XCTAssertEqual(row(entry(command), env: ecs()).labels,
+                       ["\u{26A0} Matches a destructive pattern (queue:flush). Insert asks first. No label does not mean safe."])
+        XCTAssertEqual(row(entry(command)).labels,
+                       ["\u{26A0} Matches a destructive pattern (queue:flush). No label does not mean safe."])
+        XCTAssertEqual(row(entry(command), env: ecs()).destructive, ["queue:flush"])
+        XCTAssertEqual(row(entry("ls -la"), env: ecs()).labels, [], "rows without a match show no pattern label, and no safe label either")
+    }
+
+    func testThePlaceholderAndNonASCIILabelsAppearInEveryPane() {
+        XCTAssertEqual(StagingDrawerModel.placeholderLabel,
+                       "Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects)")
+        for e in [env(), ecs()] {
+            XCTAssertTrue(row(entry("echo <name>"), env: e).labels.contains(StagingDrawerModel.placeholderLabel))
+            let label = row(entry("echo \u{0430}"), env: e).labels.first { $0.contains("non-ASCII") }
+            XCTAssertEqual(label, "\u{26A0} Contains non-ASCII: \u{0430} U+0430 CYRILLIC SMALL LETTER A")
+        }
+    }
+
+    func testTheProductionHeaderAndTheSpokenLabelRepeatTheEnvironment() {
+        let two = list(agent: "Triage", StagingFixtures.entries(["ls", "pwd"]))
+        XCTAssertEqual(StagingDrawerModel.productionHeaderText(two, safety: .remote(token: "PRODUCTION")),
+                       "Staged by Triage (2) \u{00B7} you press Enter")
+        XCTAssertEqual(StagingDrawerModel.productionHeaderText(two, safety: .localRunning(program: "ssh")),
+                       "ssh is running \u{00B7} Staged by Triage (2) \u{00B7} you press Enter")
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(two, safety: .remote(token: "PRODUCTION")),
+                       "Staged by Triage \u{00B7} PRODUCTION \u{00B7} you press Enter")
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(two, safety: .localRunning(program: "ssh")),
+                       "Staged by Triage \u{00B7} running ssh \u{00B7} you press Enter")
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(two, safety: .local), "Staged commands")
+        XCTAssertEqual(StagingDrawerModel.stripText(two), "2 staged by Triage \u{25B8}")
+        let frozen = list(agent: "Triage", state: .frozen, StagingFixtures.entries(["ls"]))
+        XCTAssertEqual(StagingDrawerModel.productionHeaderText(frozen, safety: .remote(token: "PRODUCTION")),
+                       StagingDrawerModel.headerParts(frozen).lead, "a stopped list keeps its own text")
+    }
+
+    func testTheConfirmSheetTitleAndTargetLine() {
+        XCTAssertEqual(StagingDrawerModel.confirmTitle(.remote(token: "PRODUCTION")), "Insert into PRODUCTION?")
+        XCTAssertEqual(StagingDrawerModel.confirmTitle(.remote(token: "REMOTE")), "Insert into REMOTE?")
+        XCTAssertEqual(StagingDrawerModel.confirmTitle(.localRunning(program: "ssh")), "Insert into a shell running ssh?")
+        XCTAssertEqual(StagingDrawerModel.confirmTargetLine(.remote(token: "PRODUCTION"), target: production),
+                       "admin-portal \u{00B7} scheduler \u{00B7} shell")
+        XCTAssertEqual(StagingDrawerModel.confirmTargetLine(.remote(token: "REMOTE"), target: nil), "REMOTE shell")
     }
 }

@@ -384,6 +384,34 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         host.showSendSelectionMenu()
     }
 
+    /// Terminal > Let Agents Stage Commands Here: the focused terminal pane's switch (gated, checkable).
+    @objc func toggleStagingHere(_ sender: Any?) {
+        guard let host = TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) else {
+            NSSound.beep()
+            return
+        }
+        host.toggleStagingFromMenu()
+    }
+
+    /// Terminal > Let Agents Stage Commands in Terminals: the global switch (gated, checkable). Saved for
+    /// the next launch; every drawer hides at once when it goes off.
+    @objc func toggleStagingGlobal(_ sender: Any?) {
+        guard let view = NSApp.keyWindow?.contentView else {
+            NSSound.beep()
+            return
+        }
+        StagingInsertController.setGlobalStaging(!TerminalStagingStore.shared.globalEnabled,
+                                                 event: NSApp.currentEvent, control: view)
+    }
+
+    /// Debug > Copy Terminal Staging Stats: counts from the terminal audit trail (read-only), never text.
+    @objc func copyTerminalStagingStats() {
+        let text = TerminalStagingStats.summary(auditDirectory: terminalAuditLogURL.deletingLastPathComponent())
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
     /// Terminal > Focus Staged Commands (⇧⌘J): the keyboard moves into the drawer of the terminal pane that
     /// holds it. Focus only: nothing is inserted here.
     @objc func focusStagedCommands(_ sender: Any?) {
@@ -456,6 +484,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         }
         if menuItem.action == #selector(focusStagedCommands(_:)) {
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)?.hasStagedCommands ?? false
+        }
+        if menuItem.action == #selector(toggleStagingHere(_:)) {
+            let host = TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder)
+            menuItem.state = (host?.stagingEnabledHere ?? true) ? .on : .off
+            return host != nil
+        }
+        if menuItem.action == #selector(toggleStagingGlobal(_:)) {
+            menuItem.state = TerminalStagingStore.shared.globalEnabled ? .on : .off
+            return true
         }
         if menuItem.action == #selector(closeTerminalPane(_:)) {
             return TerminalPaneHostView.containing(NSApp.keyWindow?.firstResponder) != nil
