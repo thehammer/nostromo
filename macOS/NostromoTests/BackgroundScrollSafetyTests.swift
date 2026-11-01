@@ -436,8 +436,11 @@ final class BackgroundScrollSafetyTests: XCTestCase {
                     gate.flushDeliveries()
                     opened.forEach { $0.panel.contentView?.layoutSubtreeIfNeeded() }
                 }
-                if headersKeepTheirHeight {
-                    XCTAssertEqual(opened.map { header($0).frame.height }, heights, "\(name(what)): a header changed height")
+                // An ended task's own header may differ (its status line); the other window's may not.
+                let checked = headersKeepTheirHeight ? Array(opened.indices) : [1]
+                for index in checked {
+                    XCTAssertEqual(header(opened[index]).frame.height, heights[index], accuracy: 0.5,
+                                   "\(name(what)): window \(index)'s header changed height")
                 }
                 XCTAssertEqual(opened.map { $0.panel.frame }, frames, "\(name(what)): a window moved or resized")
                 for (index, panel) in opened.enumerated() {
@@ -471,7 +474,7 @@ final class BackgroundScrollSafetyTests: XCTestCase {
             XCTAssertEqual(header(c1).stopNoticeText, "Couldn't stop: Task is protected")
             XCTAssertEqual(title(header(c1).stopButton), "Stop")
 
-            step("the snapshot reports the task stopped") {
+            step("the snapshot reports the task stopped", headersKeepTheirHeight: false) {
                 tw.ingest([tw.task("job0", "npm run dev", status: .stopped), tw.task("job1", "npm run build")])
             }
             XCTAssertTrue(header(c0).stopButton?.isHidden ?? true, "a stopped task offers no Stop")
