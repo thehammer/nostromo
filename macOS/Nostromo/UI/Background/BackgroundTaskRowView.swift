@@ -51,6 +51,9 @@ final class BackgroundTaskRowView: NSView {
     private let timeField = NSTextField(labelWithString: "")
     private let agoField = NSTextField(labelWithString: "")
     private let signOfLifeField = NSTextField(labelWithString: "")
+    private let stopNoticeField = TaskStopNotice.makeLabel()
+    /// The row's Stop (the popover installs it; rows of a list without Stop have none).
+    private(set) var stopButton: TaskStopButton?
     private let line = NSStackView()
     private var leadingConstraint: NSLayoutConstraint!
 
@@ -66,6 +69,9 @@ final class BackgroundTaskRowView: NSView {
     var statusColor: NSColor? { statusField.textColor }
     var signOfLifeColor: NSColor? { signOfLifeField.textColor }
     var endedAgoColor: NSColor? { agoField.textColor }
+    /// `Couldn't stop: <reason>` as drawn; empty when there is none.
+    var stopNoticeText: String { stopNoticeField.isHidden ? "" : stopNoticeField.stringValue }
+    var stopNoticeColor: NSColor? { stopNoticeField.textColor }
     var indentation: CGFloat { leadingConstraint.constant - Self.horizontalInset }
 
     init(row: BackgroundTaskRow) {
@@ -95,9 +101,12 @@ final class BackgroundTaskRowView: NSView {
         line.alignment = .firstBaseline
         line.spacing = 6
         line.translatesAutoresizingMaskIntoConstraints = false
-        for field in [iconField, kindField, titleField, statusField, timeField, agoField] {
+        for field in [iconField, kindField, titleField, statusField, stopNoticeField, timeField, agoField] {
             line.addArrangedSubview(field)
         }
+        // The notice gives way right after the title, and never wider than a third of the row.
+        stopNoticeField.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
+        stopNoticeField.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
         line.setCustomSpacing(4, after: iconField)
         line.setCustomSpacing(10, after: titleField)
         // The title gives way first: everything else keeps its natural width.
@@ -136,8 +145,26 @@ final class BackgroundTaskRowView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Put a Stop button at the end of the line. Once only.
+    func installStop(_ button: TaskStopButton) {
+        guard stopButton == nil else { return }
+        stopButton = button
+        line.addArrangedSubview(button)
+        setAccessibilityChildren([button])
+        applyStop(.init(offered: row.stopOffered))
+    }
+
+    /// Show what the store says about Stop for this row: the button's state and the failure text.
+    func applyStop(_ display: BackgroundTaskStore.StopDisplay) {
+        var display = display
+        display.offered = row.stopOffered
+        stopButton?.update(display, description: row.title)
+        TaskStopNotice.apply(display.failure.map(TaskStopNotice.failureText), unsupported: false, to: stopNoticeField)
+        stopNoticeField.setAccessibilityElement(false)
+    }
+
     /// Show `row` (a later state of the same task, or the next tick). Never resizes the row's width.
-    func apply(_ row: BackgroundTaskRow) {
+    func apply(_ row: BackgroundTaskRow, stop: BackgroundTaskStore.StopDisplay? = nil) {
         self.row = row
         iconField.stringValue = row.statusIcon
         kindField.stringValue = row.kindLabel
@@ -165,6 +192,7 @@ final class BackgroundTaskRowView: NSView {
         if frame.height != Self.height(for: row) {
             setFrameSize(NSSize(width: frame.width, height: Self.height(for: row)))
         }
+        if let stop { applyStop(stop) } else if stopButton != nil, !row.stopOffered { applyStop(.init()) }
     }
 
     func setSelected(_ on: Bool) {

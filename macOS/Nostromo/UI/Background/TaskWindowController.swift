@@ -45,10 +45,14 @@ enum TaskWindowFrame {
 /// (`screenshot`, `tree`, `find`, `click`, `ax` address those lists): deliberate, since its text
 /// would otherwise bypass the screenshot redaction policy.
 ///
-/// Esc closes it (`SendToAgentWindow`'s pattern: `performKeyEquivalent`, key code 53). ⌘. is taken here
-/// and does nothing: the window has no Stop yet, and it must never reach a main window's interrupt.
+/// Esc closes it (`SendToAgentWindow`'s pattern: `performKeyEquivalent`, key code 53). ⌘. is taken here:
+/// it is the two-step Stop of this window's task (`onStopShortcut`), and it never reaches a main
+/// window's interrupt.
 final class TaskPanel: NSPanel {
     static let escapeKeyCode: UInt16 = 53
+
+    /// ⌘.: arm or confirm this window's Stop (the button runs the human-gesture check itself).
+    var onStopShortcut: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
     /// The main window stays the main window while a task window is key.
@@ -62,7 +66,10 @@ final class TaskPanel: NSPanel {
             close()
             return true
         }
-        if flags == .command, event.charactersIgnoringModifiers == "." { return true }
+        if flags == .command, event.charactersIgnoringModifiers == "." {
+            onStopShortcut?()
+            return true
+        }
         return super.performKeyEquivalent(with: event)
     }
 
@@ -126,6 +133,7 @@ final class TaskWindowController: NSObject, NSWindowDelegate {
         panel.delegate = self
         panel.title = content.windowTitle
         if let output = body as? TaskOutputView { panel.initialFirstResponder = output.textView }
+        panel.onStopShortcut = { [weak self] in self?.body.header.stopButton?.shortcut() }
         body.apply(content: content)
         model?.acquire()
         subscription = store.changes
@@ -178,6 +186,8 @@ final class TaskWindowController: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard !isClosed else { return }
         isClosed = true
+        body.header.stopButton?.invalidate()
+        panel.onStopShortcut = nil
         subscription = nil
         model?.release()
         panel.delegate = nil
@@ -217,6 +227,9 @@ final class TaskWindowManager {
     private let visibleScreens: () -> [NSRect]
     private let keyWindow: () -> NSWindow?
     private let now: () -> Date
+    /// The human-gesture check and the revert timer of new windows' Stop buttons (tests replace them).
+    var stopPermit: BackgroundGesture.Permit = BackgroundGesture.defaultPermit
+    var stopSchedule: (TimeInterval, @escaping () -> Void) -> Void = TaskStopWiring().schedule
 
     /// `focusName` and `source` read the focus's session without creating one.
     init(store: BackgroundTaskStore = .shared,
@@ -262,17 +275,19 @@ final class TaskWindowManager {
 
         let model: TaskOutputModel?
         let body: NSView & TaskWindowBody
+        let stopWiring = TaskStopWiring(store: store, permit: stopPermit, schedule: stopSchedule)
         switch content.kind {
         case .shell, .monitor:
             let held = registry.model(tag: tag, taskId: taskId)
             model = held
-            body = TaskOutputView(focusTag: tag, taskId: taskId, model: held, pasteboard: pasteboard)
+            body = TaskOutputView(focusTag: tag, taskId: taskId, model: held, pasteboard: pasteboard,
+                                      stop: stopWiring)
         case .agent:
             model = nil
-            body = SubagentTaskView(focusTag: tag, taskId: taskId, source: source(tag))
+            body = SubagentTaskView(focusTag: tag, taskId: taskId, source: source(tag), stop: stopWiring)
         case .workflow, .other, .unknown:
             model = nil
-            body = TaskNoOutputView(focusTag: tag, taskId: taskId)
+            body = TaskNoOutputView(focusTag: tag, taskId: taskId, stop: stopWiring)
         }
         let controller = TaskWindowController(
             focusTag: tag, taskId: taskId, content: content, body: body, model: model, store: store,
@@ -324,8 +339,9 @@ final class TaskWindowManager {
 
 // MARK: - The popover's actions
 
-/// What a Background activity row does when it is opened: show the task's window. (Stop is BA5's, Show
-/// in Transcript is BA6's: they extend this object, so until then their items are not offered.)
+/// What a Background activity row does when it is opened: show the task's window, and offer Stop for a
+/// task the CLI can stop (the popover arms the row's own two-step button; this object has nothing to
+/// send). Show in Transcript is BA6's: it extends this object, so until then its item is not offered.
 final class BackgroundTaskWindowActions: BackgroundTaskActions {
     static let shared = BackgroundTaskWindowActions()
 
@@ -337,6 +353,12 @@ final class BackgroundTaskWindowActions: BackgroundTaskActions {
     }
 
     func canOpen(_ row: BackgroundTaskRow, tag: String) -> Bool { true }
+
+    func canStop(_ row: BackgroundTaskRow, tag: String) -> Bool { row.stopOffered }
+
+    /// Stop is never sent from here: it would skip the second click. The popover's menu item puts the
+    /// row's button into `Stop?` instead.
+    func stop(_ row: BackgroundTaskRow, tag: String) {}
 
     func open(_ row: BackgroundTaskRow, tag: String) {
         (manager ?? TaskWindowManager.shared).open(tag: tag, taskId: row.id)

@@ -258,13 +258,16 @@ final class BackgroundPopoverViewController: NSViewController {
         var used = Set<String>()
         func rowView(_ row: BackgroundTaskRow) -> BackgroundTaskRowView {
             used.insert(row.id)
+            let display = stopDisplay(for: row)
             if let existing = rowViews[row.id] {
-                existing.apply(row)
+                existing.apply(row, stop: display)
                 return existing
             }
             let view = BackgroundTaskRowView(row: row)
             view.onClick = { [weak self] clicked in self?.clicked(clicked) }
             view.menuProvider = { [weak self] in self?.contextMenu(for: $0) }
+            if actions.canStop(row, tag: tag) || row.stopOffered { view.installStop(makeStopButton(taskId: row.id)) }
+            view.applyStop(display)
             rowViews[row.id] = view
             return view
         }
@@ -301,6 +304,7 @@ final class BackgroundPopoverViewController: NSViewController {
             housekeepingHeader = nil
         }
         for (id, v) in rowViews where !used.contains(id) {
+            v.stopButton?.invalidate()
             v.removeFromSuperview()
             rowViews.removeValue(forKey: id)
         }
@@ -388,6 +392,10 @@ final class BackgroundPopoverViewController: NSViewController {
     /// ↑/↓ between rows, Return opens (or toggles Housekeeping), ←/→ collapse/expand Housekeeping,
     /// Esc closes. True when the key was the popover's.
     func handleKey(_ event: NSEvent) -> Bool {
+        if BackgroundGesture.isStopShortcut(event) {
+            stopSelected()
+            return true
+        }
         switch event.keyCode {
         case 125: // down
             guard !selectables.isEmpty else { return true }
@@ -417,6 +425,35 @@ final class BackgroundPopoverViewController: NSViewController {
         }
     }
 
+    /// ⌘. on the selected row: its two-step Stop (each keypress behind the human-gesture check). Nothing
+    /// when no row is selected or the row cannot be stopped; the key is the popover's either way.
+    func stopSelected() {
+        guard let row = selectedRow else { return }
+        rowViews[row.id]?.stopButton?.shortcut()
+    }
+
+    /// Stop the revert timers of every row's button (the popover closed).
+    func invalidateStops() {
+        for view in rowViews.values { view.stopButton?.invalidate() }
+    }
+
+    private func stopDisplay(for row: BackgroundTaskRow) -> BackgroundTaskStore.StopDisplay {
+        store.stopDisplay(tag: tag, taskId: row.id, ended: row.isEnded)
+    }
+
+    private func makeStopButton(taskId: String) -> TaskStopButton {
+        TaskStopButton(
+            permit: { [weak self] in self?.stopPermit($0) ?? .refused(reason: .notAUserEvent) },
+            menuPermit: { [weak self] in self?.stopMenuPermit($0) ?? .refused(reason: .notAUserEvent) },
+            schedule: { [weak self] delay, work in
+                if let self { self.stopSchedule(delay, work) }
+            },
+            requestStop: { [weak self] in
+                guard let self else { return }
+                self.store.requestStop(tag: self.tag, taskId: taskId)
+            })
+    }
+
     /// Return on the selection: open the task (BA4), or toggle Housekeeping.
     func activateSelection() {
         guard let selectedIndex, selectables.indices.contains(selectedIndex) else { return }
@@ -431,6 +468,13 @@ final class BackgroundPopoverViewController: NSViewController {
         if let index = selectables.firstIndex(where: { $0 === rowView }) { select(index, scroll: false) }
         onRowClick?(rowView.row)
         if actions.canOpen(rowView.row, tag: tag) { actions.open(rowView.row, tag: tag) }
+    }
+
+    /// The human-gesture checks and the revert timer of the rows' Stop buttons (tests replace them).
+    var stopPermit: BackgroundGesture.Permit = BackgroundGesture.defaultPermit
+    var stopMenuPermit: BackgroundGesture.Permit = BackgroundGesture.defaultMenuPermit
+    var stopSchedule: (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// A row was clicked (the popover then takes the keyboard: the user is in it).
@@ -452,7 +496,8 @@ final class BackgroundPopoverViewController: NSViewController {
             menu.addItem(item("Open") { actions.open(row, tag: tag) })
         }
         if actions.canStop(row, tag: tag) {
-            menu.addItem(item("Stop") { actions.stop(row, tag: tag) })
+            // The row's button goes to `Stop?`; the second click is still required.
+            menu.addItem(item("Stop") { [weak self] in self?.rowViews[row.id]?.stopButton?.arm() })
         }
         menu.addItem(item("Copy Description") { [weak self] in self?.copyDescription(row) })
         if actions.canShowInTranscript(row, tag: tag) {
@@ -603,7 +648,13 @@ final class BackgroundPopover: NSObject, NSPopoverDelegate {
     /// What the local key monitor does with a key-down while the popover is shown: Esc closes it
     /// and is consumed; every other key goes on unchanged.
     func handleMonitoredKey(_ event: NSEvent) -> NSEvent? {
-        guard popover.isShown, event.type == .keyDown, event.keyCode == 53 else { return event }
+        guard popover.isShown, event.type == .keyDown else { return event }
+        if tookKeyboard, BackgroundGesture.isStopShortcut(event) {
+            // ⌘. in the popover is the selected row's Stop, never the input bar's interrupt.
+            viewController.stopSelected()
+            return nil
+        }
+        guard event.keyCode == 53 else { return event }
         close()
         return nil
     }
@@ -611,6 +662,7 @@ final class BackgroundPopover: NSObject, NSPopoverDelegate {
     // MARK: NSPopoverDelegate
 
     func popoverDidClose(_ notification: Notification) {
+        viewController.invalidateStops()
         tearDown()
         store.markSeen(tag: tag)
         let hadKeyboard = tookKeyboard
