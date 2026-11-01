@@ -29,7 +29,7 @@ use crate::ipc::claude_login::{
     CredentialStamp, LoginCoordinator, AUTO_RESEND_TTL, MAX_AUTO_RESENDS,
 };
 use crate::ipc::protocol::{ClaudeLoginPhase, ClaudeLoginSession, ClaudeLoginWatch, ServerMsg};
-use crate::ipc::stream_json::SessionState;
+use crate::ipc::stream_json::{strip_nostromo_note, SessionState, TASK_NOTIFICATION_OPEN};
 
 /// What asked for a held message to be sent again.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,6 +297,28 @@ pub(super) fn on_turn_started(shared: &Shared) -> TurnAuthor {
     TurnAuthor::of(cell.bound.as_ref())
 }
 
+/// A turn the transcript read as a wake (`task_wake` origin) started. It is
+/// the message the daemon last wrote only if that message's own text starts
+/// with `<task-notification>` (a user or injected message that quotes one):
+/// then the turn is that message's, as in [`on_turn_started`]. Otherwise the
+/// CLI began it: the turn binds to nothing, and a message written meanwhile
+/// stays waiting for its own turn. Decided from the daemon's own queue, never
+/// from the turn's text alone.
+pub(super) fn on_wake_turn_started(shared: &Shared) -> TurnAuthor {
+    let mut cell = lock_recover(&shared.login.cell);
+    let is_ours = cell.written.as_ref().is_some_and(|msg| {
+        strip_nostromo_note(msg.text.trim_start())
+            .trim_start()
+            .starts_with(TASK_NOTIFICATION_OPEN)
+    });
+    if is_ours {
+        cell.bound = cell.written.take();
+    } else {
+        cell.bound = None;
+    }
+    TurnAuthor::of(cell.bound.as_ref())
+}
+
 /// The turn that last started was a phantom (a replayed system entry), dropped
 /// as the real prompt arrives: the message it took belongs to that prompt.
 pub(super) fn on_turn_discarded(shared: &Shared) {
@@ -315,8 +337,11 @@ pub(super) fn on_turn_end(shared: &Shared, tag: &str, outcome: Option<TurnAuthOu
         // A turn that did not fail ends a resend: the message went through.
         let cleared = {
             let mut cell = lock_recover(&link.cell);
-            cell.bound = None;
-            cell.written = None;
+            // A turn the CLI began itself (a wake) bound nothing: a message
+            // written meanwhile is still waiting for its own turn.
+            if cell.bound.take().is_some() {
+                cell.written = None;
+            }
             let resending = cell
                 .hold
                 .as_ref()

@@ -732,6 +732,7 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         ServerMsg::SessionSpawned { tag, .. }
         | ServerMsg::SessionTurns { tag, .. }
         | ServerMsg::SessionTurnDelta { tag, .. }
+        | ServerMsg::SessionTurnOrigin { tag, .. }
         | ServerMsg::SessionState { tag, .. }
         | ServerMsg::SessionBridge { tag, .. }
         | ServerMsg::SessionExited { tag, .. }
@@ -1444,6 +1445,55 @@ mod tests {
         let tags = SensitiveTags::in_memory();
         tags.mark_tag(tag);
         tags
+    }
+
+    fn turn_origin_frame(tag: &str) -> ServerMsg {
+        ServerMsg::SessionTurnOrigin {
+            tag: tag.into(),
+            turn_id: "t3".into(),
+            origin: crate::ipc::stream_json::TurnOrigin::TaskWake {
+                items: vec![crate::ipc::stream_json::TaskWakeItem {
+                    task_id: Some("b1".into()),
+                    tool_use_id: None,
+                    kind: "shell".into(),
+                    outcome: "failed".into(),
+                    description: "make test".into(),
+                }],
+                omitted: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn a_turn_origin_update_is_classified_with_its_focus() {
+        assert_eq!(
+            classify_server_msg(&turn_origin_frame("cody-x")),
+            ServerClass::Focus("cody-x")
+        );
+    }
+
+    #[test]
+    fn a_turn_origin_update_of_an_ordinary_focus_reaches_a_network_peer_unchanged() {
+        let tags = tags_with("cody-sensitive");
+        let msg = turn_origin_frame("cody-ordinary");
+        let sent = outbound(PeerTrust::Tcp, msg.clone(), &tags)
+            .expect("an ordinary focus's origin update is delivered");
+        assert_eq!(
+            serde_json::to_value(&sent).unwrap(),
+            serde_json::to_value(&msg).unwrap()
+        );
+        assert!(outbound(PeerTrust::LocalOther, msg, &tags).is_some());
+    }
+
+    #[test]
+    fn a_turn_origin_update_of_a_sensitive_focus_is_withheld_from_a_network_peer() {
+        let tags = tags_with("cody-sensitive");
+        let msg = turn_origin_frame("cody-sensitive");
+        assert!(outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none());
+        assert!(
+            outbound(PeerTrust::LocalOther, msg, &tags).is_some(),
+            "a local client still receives it"
+        );
     }
 
     #[test]

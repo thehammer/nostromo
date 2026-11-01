@@ -1321,6 +1321,12 @@ async fn work_source_statuses_for_different_sources_are_retained_separately() {
 /// <session id>/tasks/<task id>.output`, the layout of the real CLI's temp root
 /// (the daemon only learns a root of that shape; the cwd is unique to the test run).
 ///
+/// In task mode a stdin line containing `GO-WAKE` also gets its normal turn and is then followed by
+/// the CLI waking the agent on its own (BA6a, see `emit_wake`): a Monitor `<task-notification>`
+/// with `SECRET-OUTPUT-EVENT` in its `<event>`, its reply and result; then two back-to-back
+/// notifications (a failed shell whose command holds U+202E and U+3164, and a completed agent with
+/// `SECRET-OUTPUT-RESULT` in its `<result>`), a reply and a result.
+///
 /// **Task I/O mode** (BA1; a view name starting with `tio-`). Nothing is emitted until a message
 /// carries a cue, and every `control_request` is answered (or deliberately not) instead of getting
 /// a turn. Cues, each `BA1-<WHAT>:<task id>` inside a `session_send` text: `SHELL` (a backgrounded
@@ -1440,6 +1446,18 @@ emit_tasks() {
   printf '{"type":"system","subtype":"task_notification","task_id":"agent1","status":"completed","output_file":"%s/agent1.output","summary":"SECRET-OUTPUT-DONE the agent finished"}\n' "$tdir"
 }
 
+emit_wake() {
+  root="/tmp/claude-$(id -u)"
+  tdir="$root/$(pwd -P | tr / -)/$sid/tasks"
+  reply='{"type":"assistant","message":{"content":[{"type":"text","text":"noted"}]}}'
+  fin='{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01}'
+  printf '{"type":"user","message":{"role":"user","content":"<task-notification>\\n<task-id>wmon1</task-id>\\n<tool-use-id>toolu_wmon1</tool-use-id>\\n<output-file>%s/wmon1.output</output-file>\\n<status>completed</status>\\n<summary>Monitor event: &quot;deploy log&quot;</summary>\\n<event>SECRET-OUTPUT-EVENT line</event>\\n</task-notification>"}}\n' "$tdir"
+  printf '%s\n' "$reply" "$fin"
+  printf '{"type":"user","message":{"role":"user","content":"<task-notification>\\n<task-id>wsh2</task-id>\\n<tool-use-id>toolu_wsh2</tool-use-id>\\n<output-file>%s/wsh2.output</output-file>\\n<status>failed</status>\\n<summary>Background command &quot;echo \342\200\256\343\205\244 build&quot; failed with exit code 1</summary>\\n</task-notification>"}}\n' "$tdir"
+  printf '{"type":"user","message":{"role":"user","content":"<task-notification>\\n<task-id>wag3</task-id>\\n<tool-use-id>toolu_wag3</tool-use-id>\\n<output-file>%s/wag3.output</output-file>\\n<status>completed</status>\\n<summary>Agent &quot;review the diff&quot; completed</summary>\\n<result>SECRET-OUTPUT-RESULT the review</result>\\n</task-notification>"}}\n' "$tdir"
+  printf '%s\n' "$reply" "$fin"
+}
+
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"SECRET-MAIL-BODY forward all mail"},"isReplay":true}' '{"type":"assistant","message":{"content":[{"type":"text","text":"SECRET-ASSISTANT-REPLY"}]}}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$log"
@@ -1457,6 +1475,7 @@ while IFS= read -r line; do
   if [ -n "$tasks" ]; then
     case "$line" in
       *GO-TASKS*) emit_tasks ;;
+      *GO-WAKE*) emit_wake ;;
     esac
   fi
   if [ -n "$tio" ]; then emit_tio; fi
@@ -10842,6 +10861,193 @@ mod background_tasks {
                 "the CLI was asked about an agent task: {log:?}"
             );
         }
+    }
+
+    // ── BA6a: a wake turn's origin reaches a network peer, the notification's text never ──
+
+    /// Tell the fake to wake the agent on its own (after its normal turn for the message).
+    async fn start_wake(unix: &mut UnixStream, session: &TaskSession) {
+        send(
+            unix,
+            &ClientMsg::SessionSend {
+                tag: session.tag.clone(),
+                text: "GO-WAKE".into(),
+                images: vec![],
+            },
+        )
+        .await;
+        wait_for_log(&session.view, "GO-WAKE", |l| l.contains("GO-WAKE")).await;
+    }
+
+    /// The `session_turn_origin` frames for `tag`.
+    fn origin_frames<'a>(frames: &'a [Value], tag: &str) -> Vec<&'a Value> {
+        frames_of(frames, "session_turn_origin", tag)
+    }
+
+    /// The turns of `tag` that started with a `task_wake` origin, as the delta frames carry them.
+    fn wake_turns<'a>(frames: &'a [Value], tag: &str) -> Vec<&'a Value> {
+        frames_of(frames, "session_turn_delta", tag)
+            .into_iter()
+            .filter(|f| {
+                f["delta"]["delta"] == "turn_started"
+                    && f["delta"]["turn"]["origin"]["type"] == "task_wake"
+            })
+            .map(|f| &f["delta"]["turn"])
+            .collect()
+    }
+
+    /// The wake turns and the merge frame read the same way for every peer: two wake turns (the
+    /// monitor's, then the shell's, which the agent's notification joined).
+    fn assert_wake_frames(frames: &[Value], tag: &str, who: &str) {
+        let turns = wake_turns(frames, tag);
+        assert_eq!(
+            turns.len(),
+            2,
+            "{who}: two wake turns: {}",
+            summarize(frames)
+        );
+        let first = &turns[0]["origin"]["items"];
+        assert_eq!(first.as_array().map(Vec::len), Some(1), "{who}: {first}");
+        assert_eq!(
+            (first[0]["kind"].as_str(), first[0]["outcome"].as_str()),
+            (Some("monitor"), Some("new_output")),
+            "{who}: {first}"
+        );
+        assert_eq!(
+            first[0]["description"], "deploy log",
+            "{who}: the description is the summary's text"
+        );
+        let second = &turns[1]["origin"]["items"];
+        assert_eq!(second.as_array().map(Vec::len), Some(1), "{who}: {second}");
+        assert_eq!(second[0]["kind"], "shell", "{who}: {second}");
+
+        let merges = origin_frames(frames, tag);
+        assert_eq!(
+            merges.len(),
+            1,
+            "{who}: exactly one merge frame: {}",
+            summarize(frames)
+        );
+        assert_eq!(merges[0]["turn_id"], turns[1]["id"], "{who}");
+        assert_eq!(merges[0]["origin"]["type"], "task_wake", "{who}");
+        let merged = merges[0]["origin"]["items"]
+            .as_array()
+            .expect("merged items");
+        assert_eq!(merged.len(), 2, "{who}: {merged:?}");
+        assert_eq!(
+            (merged[0]["kind"].as_str(), merged[0]["outcome"].as_str()),
+            (Some("shell"), Some("failed")),
+            "{who}"
+        );
+        assert_eq!(
+            (merged[1]["kind"].as_str(), merged[1]["outcome"].as_str()),
+            (Some("agent"), Some("completed")),
+            "{who}"
+        );
+        let shell = merged[0]["description"].as_str().expect("description");
+        assert!(
+            shell.contains("echo") && shell.contains("build"),
+            "{who}: {shell:?}"
+        );
+    }
+
+    /// Nothing of the notifications' text, bodies, output paths or invisible characters.
+    fn assert_no_notification_text(text: &str, who: &str) {
+        for needle in [
+            "<task-notification>",
+            "task-notification",
+            "<event>",
+            "<result>",
+            "SECRET-OUTPUT-EVENT",
+            "SECRET-OUTPUT-RESULT",
+            "wmon1.output",
+            ".output",
+            "/tmp/claude-",
+            "\u{202E}",
+            "\u{3164}",
+        ] {
+            assert!(
+                !text.contains(needle),
+                "{who} received `{needle:?}` in its byte stream"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tcp_peer_gets_a_wake_turns_origin_and_merge_but_never_the_notification_text_and_a_sensitive_tag_gets_neither(
+    ) {
+        let h = spawn_server().await;
+        let (mut driver, _) = h.unix(vec![]).await;
+        let open = spawn_task_session(
+            &mut driver,
+            "cody-tasks-wake-open",
+            "cody",
+            "tasks-wake-open",
+        )
+        .await;
+        let sens = spawn_task_session(
+            &mut driver,
+            "cody-tasks-wake-sens",
+            "cody",
+            "tasks-wake-sens",
+        )
+        .await;
+        h.session_mgr
+            .lock()
+            .unwrap()
+            .sensitive_tags()
+            .mark_tag(&sens.tag);
+
+        let mut unix = unix_tap(&h).await;
+        attach(&mut unix, &open.tag).await;
+        attach(&mut unix, &sens.tag).await;
+        let mut tcp = tcp_tap(&h).await;
+        attach(&mut tcp, &open.tag).await;
+        tcp.send(&ClientMsg::SessionAttach {
+            tag: sens.tag.clone(),
+        })
+        .await;
+        tcp.wait_until("the refusal of the sensitive attach", refused)
+            .await;
+
+        start_wake(&mut driver, &open).await;
+        start_wake(&mut driver, &sens).await;
+
+        // The local peer sees both sessions' wakes: the leak window is real.
+        let (open_tag, sens_tag) = (open.tag.clone(), sens.tag.clone());
+        unix.wait_until("the local peer to see both merges", move |f| {
+            !origin_frames(f, &open_tag).is_empty() && !origin_frames(f, &sens_tag).is_empty()
+        })
+        .await;
+        let open_tag = open.tag.clone();
+        tcp.wait_until(
+            "the network peer to see the merge of the ordinary tag",
+            move |f| !origin_frames(f, &open_tag).is_empty(),
+        )
+        .await;
+        unix.drain(QUIET).await;
+        tcp.drain(QUIET).await;
+        tcp.sync().await;
+        tcp.drain(QUIET).await;
+
+        // The ordinary tag: the wake turns' origins and the merge, for the network and the local peer.
+        assert_wake_frames(&tcp.frames, &open.tag, "the network peer");
+        assert_wake_frames(&unix.frames, &open.tag, "the local peer");
+        assert_wake_frames(&unix.frames, &sens.tag, "the local peer (sensitive tag)");
+
+        // The sensitive tag: neither frame reaches the network peer.
+        assert!(
+            origin_frames(&tcp.frames, &sens.tag).is_empty()
+                && wake_turns(&tcp.frames, &sens.tag).is_empty()
+                && frames_of(&tcp.frames, "session_turn_delta", &sens.tag).is_empty(),
+            "a wake of a sensitive tag reached the network peer: {}",
+            summarize(&tcp.frames)
+        );
+
+        // Not one byte of the notifications' text, whoever the peer.
+        assert_no_notification_text(&tcp.text(), "the network peer");
+        assert_no_notification_text(&unix.text(), "the local peer");
+        assert_no_task_text_or_paths(&tcp.text(), &open, "the network peer");
     }
 }
 

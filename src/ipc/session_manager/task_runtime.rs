@@ -576,6 +576,11 @@ pub(super) async fn forward_session_events(
                         tag: tag.clone(),
                         delta,
                     },
+                    SessionEvent::TurnOrigin { turn_id, origin } => ServerMsg::SessionTurnOrigin {
+                        tag: tag.clone(),
+                        turn_id,
+                        origin,
+                    },
                     SessionEvent::State(state) => ServerMsg::SessionState {
                         tag: tag.clone(),
                         state,
