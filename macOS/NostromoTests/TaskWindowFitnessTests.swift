@@ -229,6 +229,17 @@ final class TaskWindowFitnessTests: XCTestCase {
 
     // MARK: (g) The daemon's output answers reach the requests
 
+    /// `tasks output` returns raw task output, which terminals and screenshots never give an agent in the real
+    /// app: the server (not in the test bundle) must hand `AppControlTasks.output` the synthetic-input gate.
+    func testTheTasksOutputVerbIsGatedOnTheSyntheticInputGate() throws {
+        let server = try Self.source("Nostromo/AppControl/AppControlServer.swift")
+        let body = try Self.isolatedFunctionBody(named: "private func tasks(", in: server, sourceFile: "AppControlServer.swift")
+        XCTAssertTrue(body.contains("AppControlTasks.output("), "`tasks output` must answer from AppControlTasks.output")
+        XCTAssertTrue(body.contains("allowsText: SyntheticInputGate.allowsSynthetic"),
+                      "the text of `tasks output` must be withheld unless SyntheticInputGate.allowsSynthetic")
+        XCTAssertFalse(body.contains("TaskWindowManager.shared.open"), "`tasks output` must never open a window")
+    }
+
     func testAppStoreRoutesTaskOutputResultsToTheSharedRequests() throws {
         let code = try Self.code("Nostromo/Data/AppStore.swift")
         let body = try Self.isolatedFunctionBody(named: "func handle(_ msg: ServerMsg)", in: code, sourceFile: "AppStore.swift")
