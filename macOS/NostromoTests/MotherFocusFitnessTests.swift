@@ -448,6 +448,16 @@ extension MotherFocusFitnessTests {
         }
     }
 
+    /// The list column's width is remembered per focus window; a `MotherView` built without the window's
+    /// id would share one key across every window.
+    func testEachFocusWindowsMotherPaneIsKeyedByItsWindowId() throws {
+        let text = try Self.repoSource("macOS/Nostromo/UI/Views/DynamicFocusView.swift")
+        XCTAssertTrue(matches("MotherView\\(\\s*storageKey:\\s*windowId\\s*\\)", in: text),
+                      "DynamicFocusView must build MotherView(storageKey: windowId)")
+        XCTAssertFalse(matches("MotherView\\(\\s*(frame:[^)]*)?\\)", in: text),
+                       "a MotherView built without a storage key shares one width across windows")
+    }
+
     func testTheCondensedRowAndTheDividerDeclareNoViewTag() throws {
         for path in Self.rowAndDividerSources {
             let text = try Self.repoSource(path)

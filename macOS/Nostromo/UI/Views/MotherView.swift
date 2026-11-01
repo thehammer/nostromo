@@ -378,6 +378,8 @@ class MotherCountsStrip: NSView {
     private let startButton = NSButton()
     /// The global notice switch, at the right of the strip.
     let bell = MotherNoticeBell()
+    /// The daemon's refusal of a notice switch, one line next to the bell.
+    let refusalLabel = NSTextField.boundedLabel("", maxLines: 1, truncating: true)
     private var cancellables = Set<AnyCancellable>()
 
     override init(frame: NSRect) {
@@ -416,7 +418,20 @@ class MotherCountsStrip: NSView {
         startButton.action = #selector(startDaemon)
         startButton.isHidden = true
         startButton.translatesAutoresizingMaskIntoConstraints = false
-        let daemonStack = NSStackView(views: [bell, daemonLabel, startButton])
+        refusalLabel.font = .systemFont(ofSize: 10)
+        refusalLabel.textColor = Theme.amber
+        refusalLabel.isHidden = true
+        refusalLabel.translatesAutoresizingMaskIntoConstraints = false
+        refusalLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        AppStore.shared.$motherNoticeRefusal
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] line in
+                self?.refusalLabel.stringValue = line ?? ""
+                self?.refusalLabel.toolTip = line
+                self?.refusalLabel.isHidden = line == nil
+            }
+            .store(in: &cancellables)
+        let daemonStack = NSStackView(views: [refusalLabel, bell, daemonLabel, startButton])
         daemonStack.orientation = .horizontal
         daemonStack.spacing = 10
         daemonStack.alignment = .centerY
@@ -648,10 +663,25 @@ final class MotherJobListViewModel: ObservableObject {
         AppStore.shared.focusSelectionRequests.send(focus)
     }
 
+    /// Bumped by `refreshRelativeTimes()`: the list reads it, so a tick redraws every row.
+    @Published private(set) var timeTick = 0
+    /// The time relative phrases ("told 4m ago") are measured against. Injected so tests need no clock.
+    let clock: () -> Date
+    /// How often relative times are redrawn; the coarsest unit they show is a minute.
+    static let relativeTimeRefresh: TimeInterval = 60
+
     private var cancellables = Set<AnyCancellable>()
 
-    init(focusStore: FocusStore = .shared) {
+    init(focusStore: FocusStore = .shared, clock: @escaping () -> Date = Date.init,
+         timerEvery interval: TimeInterval? = MotherJobListViewModel.relativeTimeRefresh) {
+        self.clock = clock
         focuses = focusStore.focuses
+        if let interval {
+            Timer.publish(every: interval, tolerance: 5, on: .main, in: .common)
+                .autoconnect()
+                .sink { [weak self] _ in self?.refreshRelativeTimes() }
+                .store(in: &cancellables)
+        }
         // No `receive(on:)`: the new names land in the same run-loop turn as the publish. The sink
         // runs before the store property holds the value, so it uses the value it is handed.
         focusStore.$focuses
@@ -669,6 +699,12 @@ final class MotherJobListViewModel: ObservableObject {
         guard isKeyWindow, let tag = MotherView.requestedFilterTag else { return }
         MotherView.requestedFilterTag = nil
         filter = .focus(tag: tag)
+    }
+
+    /// Redraws rows and the open job's Overview so "told 4m ago" and the tooltips catch up with the clock.
+    func refreshRelativeTimes() {
+        timeTick += 1
+        onOriginsChanged?()
     }
 
     func setAnnotations(_ new: [String: MotherJobAnnotation]) {
@@ -692,7 +728,8 @@ final class MotherJobListViewModel: ObservableObject {
                               currentName: { [self] in currentName(forTag: $0) })
     }
 
-    func rowModel(for job: MotherJob, now: Date = Date()) -> MotherJobRowModel {
+    func rowModel(for job: MotherJob, now: Date? = nil) -> MotherJobRowModel {
+        let now = now ?? clock()
         let progress = job.state == "running" || job.state == "awaiting"
             ? MotherProgressLine.make(progress: job.crew.progress, gates: job.crew.gates) : nil
         let origin = originDisplay(forJobId: job.id)
@@ -713,7 +750,7 @@ final class MotherJobListViewModel: ObservableObject {
             failureReason: job.failureReason,
             cost: job.costUsd.flatMap { $0.isFinite && $0 >= 0 ? String(format: "$%.2f", $0) : nil },
             noticeMark: MotherNoticeMark.make(notice: annotations[job.id]?.notice,
-                                              originName: origin.kind == .focus ? origin.name : nil, now: now)
+                                              originName: origin.kind == .focus && origin.isClickable ? origin.name : nil, now: now)
         )
     }
 
@@ -753,6 +790,7 @@ struct MotherJobListSwiftUI: View {
 
     var body: some View {
         let result = vm.filtered
+        let _ = vm.timeTick   // rows are rebuilt on each refresh tick
         VStack(spacing: 0) {
             MotherFromHeader(vm: vm, result: result)
             list(result)
@@ -908,7 +946,7 @@ private final class MotherJobList: NSView {
     func applyShowJobsRequest(isKeyWindow: Bool) { viewModel.applyShowJobsRequest(isKeyWindow: isKeyWindow) }
     func originDisplay(forJobId id: String) -> MotherOriginDisplay { viewModel.originDisplay(forJobId: id) }
     func noticeSection(forJobId id: String, origin: MotherOriginDisplay) -> MotherNoticeSectionModel? {
-        MotherNoticeSectionModel.make(annotation: viewModel.annotations[id], origin: origin, now: Date())
+        MotherNoticeSectionModel.make(annotation: viewModel.annotations[id], origin: origin, now: viewModel.clock())
     }
     func openFocus(tag: String) { viewModel.openFocus(tag) }
     func update(annotations: [String: MotherJobAnnotation]) { viewModel.setAnnotations(annotations) }

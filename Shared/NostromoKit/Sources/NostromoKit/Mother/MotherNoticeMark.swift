@@ -13,11 +13,19 @@ import Foundation
 public enum MotherNoticeText {
     public static let nameCap = 24
     /// Glyphs only the app draws as marks.
-    static let markGlyphs: Set<Character> = ["✓", "✔", "⏸", "⟲", "⚑"]
+    /// Matched per unicode scalar, so a variation selector (`⏸\u{FE0F}`) cannot hide one, and the
+    /// look-alikes (`✅ ☑ ⏯`) go too.
+    static let markScalars: Set<Unicode.Scalar> = [
+        "\u{2713}", "\u{2714}", "\u{23F8}", "\u{27F2}", "\u{2691}",   // ✓ ✔ ⏸ ⟲ ⚑
+        "\u{2705}", "\u{2611}", "\u{23EF}", "\u{2612}", "\u{2610}",   // ✅ ☑ ⏯ ☒ ☐
+        "\u{23F5}", "\u{23F6}", "\u{23F7}", "\u{23F9}", "\u{23FA}", "\u{FE0E}", "\u{FE0F}",
+    ]
 
     /// A focus name for a mark: sanitised, without mark glyphs, capped at `nameCap`.
     public static func cleanName(_ raw: String?) -> String {
-        let stripped = String((raw ?? "").filter { !markGlyphs.contains($0) })
+        var scalars = String.UnicodeScalarView()
+        scalars.append(contentsOf: (raw ?? "").unicodeScalars.filter { !markScalars.contains($0) })
+        let stripped = String(scalars)
         return MotherOriginDisplay.clean(stripped, cap: nameCap)
     }
 
@@ -48,6 +56,18 @@ public enum MotherNoticeText {
         case "not_notifiable":       return "not notifiable"
         default:                     return "no reason given"
         }
+    }
+
+    /// One line for a daemon refusal of a notice switch (`not_operator_app`, `requires_secure_connection`);
+    /// nil for any other daemon error.
+    public static func refusalLine(forDaemonError message: String) -> String? {
+        if message.hasPrefix("not_operator_app"), message.contains("notice settings") {
+            return "Notice switch refused: only the verified Nostromo app can change it."
+        }
+        if message.hasPrefix("requires_secure_connection") {
+            return "Notice switch refused: this connection is not secure."
+        }
+        return nil
     }
 
     /// The text of the held bar in a focus.

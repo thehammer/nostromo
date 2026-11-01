@@ -1,0 +1,159 @@
+{
+  "jobs": [
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-history",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": {
+        "notice": {
+          "at_ms": 1800000000000,
+          "history": [
+            {
+              "at_ms": 1799999400000,
+              "states": [
+                "running",
+                "pr_opened"
+              ],
+              "status": "told",
+              "wake": true
+            },
+            {
+              "at_ms": 1799999700000,
+              "states": [
+                "awaiting"
+              ],
+              "status": "told",
+              "wake": false
+            },
+            {
+              "at_ms": 1799999940000,
+              "reason": "cap",
+              "states": [
+                "succeeded"
+              ],
+              "status": "held",
+              "wake": false
+            },
+            {
+              "at_ms": 1800000000000,
+              "reason": "focus_off",
+              "states": [
+                "failed"
+              ],
+              "status": "dropped",
+              "wake": false
+            }
+          ],
+          "last_state": "succeeded",
+          "reason": "batching",
+          "status": "held"
+        },
+        "notify": "wake",
+        "origin": {
+          "closed": false,
+          "focus_name": "Fix the login flow",
+          "focus_tag": "claudia-C9D6B773",
+          "kind": "focus",
+          "name_snapshot": "Fix login",
+          "session_prefix": "5f3c9a10"
+        }
+      },
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "succeeded",
+      "title": "A job with a notice"
+    },
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-told",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": {
+        "notice": {
+          "at_ms": 1800000000000,
+          "last_state": "succeeded",
+          "status": "told"
+        },
+        "notify": "wake",
+        "origin": {
+          "closed": false,
+          "focus_name": "Fix the login flow",
+          "focus_tag": "claudia-C9D6B773",
+          "kind": "focus",
+          "name_snapshot": "Fix login",
+          "session_prefix": "5f3c9a10"
+        }
+      },
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "succeeded",
+      "title": "A job with a notice"
+    },
+    {
+      "adherence_notes": null,
+      "adherence_status": null,
+      "created_at": "2026-10-20T15:00:00Z",
+      "current_activity": null,
+      "current_tier": null,
+      "cycles": [],
+      "finished_at": null,
+      "id": "j-not-sent",
+      "isolation": "worktree",
+      "kind": null,
+      "nostromo": {
+        "notice": {
+          "reason": "focus_closed",
+          "status": "not_sent"
+        },
+        "notify": "wake",
+        "origin": {
+          "closed": false,
+          "focus_name": "Fix the login flow",
+          "focus_tag": "claudia-C9D6B773",
+          "kind": "focus",
+          "name_snapshot": "Fix login",
+          "session_prefix": "5f3c9a10"
+        }
+      },
+      "origin": {
+        "label": "nightly"
+      },
+      "paused_reason": null,
+      "phases": [],
+      "plan_path": null,
+      "question": null,
+      "repo": "nostromo",
+      "started_at": null,
+      "state": "failed",
+      "title": "A job with a notice"
+    }
+  ],
+  "type": "mother_jobs"
+}

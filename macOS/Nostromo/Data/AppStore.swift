@@ -43,6 +43,8 @@ class AppStore: ObservableObject {
     /// `mother_notice_state` frame; published only when it changes. The UI reflects this alone: a
     /// switch is never shown as changed before the daemon says so.
     @Published private(set) var motherNoticeState: MotherNoticeStateWire?
+    /// The daemon's last refusal of a notice switch, as one line; cleared by the next state frame or a disconnect.
+    @Published private(set) var motherNoticeRefusal: String?
     /// Live peek snapshots keyed by job id. Cleared on disconnect and on terminal transition.
     @Published private(set) var motherPeeks:        [String: MotherPeekPayload] = [:]
     /// True while the broker socket is connected (hello received + subscribe sent).
@@ -612,6 +614,7 @@ class AppStore: ObservableObject {
                 // The Perri queue held from a dropped connection is stale until a fresh
                 // perri_state frame arrives; a new connection has not delivered one yet.
                 self?.perriHealth.connectionChanged(connected)
+                if !connected { self?.daemonDisconnected() }
                 // Tells every chip whether the daemon is reachable, and on a new connection
                 // asks for the model catalogue and the per-agent defaults.
                 ModelStore.shared.connectionChanged(connected)
@@ -1397,6 +1400,16 @@ class AppStore: ObservableObject {
     /// starts the file watchers under the real home directory).
     func applyForTesting(_ msg: ServerMsg) { handle(msg) }
 
+    /// Test seam: the nostromod connection dropped.
+    func daemonDisconnectedForTesting() { daemonDisconnected() }
+
+    /// A dropped daemon connection cannot take a notice switch, so the bell and the held bars must not
+    /// look live: the state goes, and the reconnect replay brings it back.
+    private func daemonDisconnected() {
+        if motherNoticeState != nil { motherNoticeState = nil }
+        if motherNoticeRefusal != nil { motherNoticeRefusal = nil }
+    }
+
     /// Test seam: the same for a Mother broker event (the job list the Mother pane shows).
     func applyBrokerEventForTesting(_ event: BrokerEvent) { applyBrokerEvent(event) }
 
@@ -1417,6 +1430,7 @@ class AppStore: ObservableObject {
 
         case .motherNoticeState(let state):
             if state != motherNoticeState { motherNoticeState = state }
+            if motherNoticeRefusal != nil { motherNoticeRefusal = nil }
 
         case .motherPeek(let payload):
             if payload.isEmpty {
@@ -1467,6 +1481,7 @@ class AppStore: ObservableObject {
 
         case .error(let msg):
             log.error("Daemon error: \(msg, privacy: .public)")
+            if let line = MotherNoticeText.refusalLine(forDaemonError: msg) { motherNoticeRefusal = line }
             // The daemon refused a resend/discard: the card's buttons come back with a notice.
             if isClaudeLoginRefusal(msg) { ClaudeLoginStore.shared.actionRefused() }
 

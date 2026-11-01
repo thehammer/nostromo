@@ -74,6 +74,8 @@ final class MotherNoticeMarkTests: XCTestCase {
             "nul\u{0}byte",
             String(repeating: "W", count: 500),
             "✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓",
+            // Variation selectors and look-alikes: one Character, but not the single glyph the app drew.
+            "⏸\u{FE0F}", "✔\u{FE0F}", "✅ ⏸\u{FE0F}", "☑ ⏯", "✓\u{FE0E}", "Fix ✅ it ⏯\u{FE0F} now",
         ]
     }
 
@@ -199,6 +201,68 @@ final class MotherNoticeMarkTests: XCTestCase {
         XCTAssertTrue(name.hasSuffix("…"))
         XCTAssertEqual(MotherNoticeText.cleanName("Claudia"), "Claudia")
         XCTAssertEqual(MotherNoticeText.cleanName(nil), "")
+    }
+
+    /// Scalars only the app may draw (apart from its own leading ✓ / ⏸), plus the selectors that
+    /// turn a glyph into an emoji and the look-alikes.
+    private let forbiddenInAName: Set<Unicode.Scalar> = [
+        "\u{2713}", "\u{2714}", "\u{23F8}", "\u{27F2}", "\u{2691}", "\u{2705}", "\u{2611}", "\u{23EF}",
+        "\u{FE0E}", "\u{FE0F}",
+    ]
+
+    private func assertNameCarriesNoMarkScalars(_ part: String, _ context: String,
+                                                file: StaticString = #filePath, line: UInt = #line) {
+        for scalar in part.unicodeScalars where forbiddenInAName.contains(scalar) {
+            XCTFail("U+\(String(scalar.value, radix: 16, uppercase: true)) in the name part of \(context): \(part)",
+                    file: file, line: line)
+        }
+    }
+
+    func testNoNamePartCarriesAMarkScalarOrVariationSelectorForAnyHostileName() throws {
+        for raw in hostileNames() {
+            let t = try XCTUnwrap(mark(told(), name: raw), raw)
+            XCTAssertTrue(t.wide.hasPrefix("✓ told"), t.wide)
+            assertNameCarriesNoMarkScalars(String(t.wide.dropFirst("✓".count)), "wide for \(raw.prefix(30))")
+            assertNameCarriesNoMarkScalars(t.tooltip, "tooltip for \(raw.prefix(30))")
+            assertNameCarriesNoMarkScalars(t.accessibilitySentence, "sentence for \(raw.prefix(30))")
+            assertNameCarriesNoMarkScalars(MotherNoticeText.cleanName(raw), "cleanName for \(raw.prefix(30))")
+
+            let h = try XCTUnwrap(mark(held("busy"), name: raw), raw)
+            XCTAssertEqual(h.wide, "⏸ held", "the held mark never carries a name")
+            assertNameCarriesNoMarkScalars(String(h.tooltip), "held tooltip for \(raw.prefix(30))")
+            assertNameCarriesNoMarkScalars(String(h.accessibilitySentence), "held sentence for \(raw.prefix(30))")
+        }
+    }
+
+    func testANameOfOnlyEmojiStyleLookAlikesFallsBackToAPlainToldMark() throws {
+        for raw in ["✅ ⏸\u{FE0F}", "☑ ⏯", "⏸\u{FE0F}", "✔\u{FE0F}", "✓\u{FE0E}"] {
+            XCTAssertEqual(MotherNoticeText.cleanName(raw), "", raw)
+            XCTAssertEqual(try XCTUnwrap(mark(told(), name: raw)).wide, "✓ told", raw)
+        }
+    }
+
+    func testCleanNameKeepsTheRestOfAMixedName() {
+        XCTAssertTrue(MotherNoticeText.cleanName("Fix ✅ it").hasPrefix("Fix"))
+        XCTAssertTrue(MotherNoticeText.cleanName("Fix ✅ it").hasSuffix("it"))
+    }
+
+    // MARK: - Daemon refusals of a notice switch
+
+    func testTheTwoNoticeSwitchRefusalsEachHaveTheirOwnLine() throws {
+        let notOperator = try XCTUnwrap(MotherNoticeText.refusalLine(
+            forDaemonError: "not_operator_app: only the verified Nostromo app may change Mother notice settings"))
+        let insecure = try XCTUnwrap(MotherNoticeText.refusalLine(
+            forDaemonError: "requires_secure_connection: notice settings need an authenticated connection"))
+        XCTAssertFalse(notOperator.isEmpty)
+        XCTAssertFalse(insecure.isEmpty)
+        XCTAssertNotEqual(notOperator, insecure)
+        XCTAssertFalse(notOperator.contains("\n") || insecure.contains("\n"), "one line")
+    }
+
+    func testOtherDaemonErrorsHaveNoRefusalLine() {
+        for message in ["", "bad request", "not_operator_app: other thing", "unknown_frame", "internal error"] {
+            XCTAssertNil(MotherNoticeText.refusalLine(forDaemonError: message), message)
+        }
     }
 
     // MARK: - Relative time
