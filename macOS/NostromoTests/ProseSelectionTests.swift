@@ -189,10 +189,11 @@ private enum ProseElement: CaseIterable {
         }
     }
 
-    var interaction: TurnInteractionState {
-        var s = TurnInteractionState()
-        if self == .toolResultOutput { s.expandedBlocks = [0] }   // the label is built on expand
-        return s
+    /// Every group open (Show All), and the output result open when it is the element.
+    var folds: FoldResolver {
+        var f = FoldResolver(expandedByDefault: true)
+        if self == .toolResultOutput { f.resultStates[0] = true }   // the label is built on expand
+        return f
     }
 
     /// A word that sits on the first line and does not wrap.
@@ -349,8 +350,7 @@ final class ProseSelectionTests: XCTestCase {
     private func rig(for element: ProseElement, width: CGFloat = 900, overlay: Bool = false)
         -> (TranscriptRig, Target)? {
         // A call row lives inside its tool group: open the group to reach it.
-        let rig = makeTranscriptRig(self, blocks: element.blocks, interaction: element.interaction,
-                                    folds: FoldResolver(state: element.interaction, expandedByDefault: true),
+        let rig = makeTranscriptRig(self, blocks: element.blocks, folds: element.folds,
                                     paneWidth: width, withOverlay: overlay)
         guard let target = Target.locate(element, in: rig) else {
             XCTFail("\(element.name): not found in the turn (subviews: \(rigAllSubviews(of: rig.turn).map { String(describing: type(of: $0)) }))")

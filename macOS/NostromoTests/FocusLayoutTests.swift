@@ -608,10 +608,8 @@ final class FocusLaneTests: XCTestCase {
     func testTheOperatorsChoicesResolveTheRowAndItsGroupsSeparately() throws {
         let turn = F.turn(threeMessageBlocks())
         let key = try XCTUnwrap(X.segments(of: turn).first).key
-        var state = TurnInteractionState()
-        state.activityStates[key] = true
-        state.groupStates["g:b0"] = true
-        let view = X.view(turn, interaction: state, folds: FoldResolver(state: state))
+        let folds = FoldResolver(groupStates: ["g:b0": true], activityStates: [key: true])
+        let view = X.view(turn, folds: folds)
 
         let row = try XCTUnwrap(view.activityRowViews.first)
         XCTAssertTrue(row.isExpanded)

@@ -357,7 +357,7 @@ final class ApprovalScrollSafetyTests: XCTestCase {
             guard let turn = rig.turns.first(where: { $0.id == id }) else { continue }
             let state = rig.store.state(for: id)
             let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: state,
-                                    folds: FoldResolver(state: state, expandedByDefault: rig.expandedByDefault),
+                                    folds: rig.resolver(for: turn),
                                     heldOrdinals: state.heldOrdinals, approvals: p.store)
             rig.rollInHolds.wire(view, turn: id)
             view.onIntrinsicHeightChange = { heightChanges.count += 1 }

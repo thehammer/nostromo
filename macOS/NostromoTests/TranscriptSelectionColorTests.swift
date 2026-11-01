@@ -96,7 +96,7 @@ private let bubbleText = "what the operator typed into the input bar"
 private let labelCases: [LabelCase] = [
     LabelCase(name: "ToolResultView expanded output label", expectedFont: Theme.monoFont) { window in
         let v = ToolResultView(data: ToolResultData(content: toolOutput, isError: false),
-                               contentAvailable: true, startExpanded: true)
+                               contentAvailable: true, explicitState: true)
         place(v, in: window)
         return label(in: v) { $0.stringValue == toolOutput }
     },

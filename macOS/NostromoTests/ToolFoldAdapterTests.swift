@@ -240,11 +240,11 @@ extension FoldFixtures {
             .compactMap { if case .activity(let segment) = $0 { return segment.key } else { return nil } }
     }
 
-    /// `state` with every activity row of `turn` opened by the operator. Tool groups are untouched.
-    static func rowsOpen(_ turn: ChatTurn, in state: TurnInteractionState = TurnInteractionState()) -> TurnInteractionState {
-        var state = state
-        for key in activityKeys(of: turn) { state.activityStates[key] = true }
-        return state
+    /// `folds` with every activity row of `turn` opened by the operator. Tool groups are untouched.
+    static func rowsOpen(_ turn: ChatTurn, in folds: FoldResolver = FoldResolver()) -> FoldResolver {
+        var folds = folds
+        for key in activityKeys(of: turn) { folds.activityStates[key] = true }
+        return folds
     }
 }
 
@@ -414,12 +414,19 @@ final class ToolFoldAdapterTests: XCTestCase {
                       "another group's choice does not apply")
     }
 
-    func testAResolverFromInteractionStateReadsItsGroupStates() {
+    func testTheResolversExplicitLookupsReadItsOwnChoices() {
         let group = F.plainGroup(calls: 2)
-        var state = TurnInteractionState()
-        state.groupStates[group.key] = true
-        XCTAssertTrue(FoldResolver(state: state).isExpanded(group))
-        XCTAssertTrue(FoldResolver(state: TurnInteractionState(), expandedByDefault: true).isExpanded(group))
+        var folds = FoldResolver(groupStates: [group.key: true], groupAuto: ["g:auto"],
+                                 activityStates: ["a:x": false])
+        XCTAssertEqual(folds.explicitGroup(group.key), true)
+        XCTAssertNil(folds.explicitGroup("g:other"))
+        XCTAssertTrue(folds.isAuto("g:auto"))
+        XCTAssertFalse(folds.isAuto(group.key))
+        XCTAssertEqual(folds.explicitActivity("a:x"), false)
+        XCTAssertNil(folds.explicitActivity("a:y"))
+        folds.resultStates[4] = true
+        XCTAssertEqual(folds.explicitResult(block: nil, index: 4), true)
+        XCTAssertNil(folds.explicitResult(block: nil, index: 5))
     }
 
     // MARK: height-cache digest
@@ -428,20 +435,20 @@ final class ToolFoldAdapterTests: XCTestCase {
         F.turn(F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b"))
     }
 
+    /// The digest of `turn` as `TurnListVirtualizer` builds it: through the turn's fold shape.
+    private func digest(_ turn: ChatTurn, _ folds: FoldResolver = FoldResolver(), held: Set<Int> = []) -> String {
+        ToolFoldAdapter.foldDigest(turn: turn, shape: FoldShape(turn), folds: folds, held: held)
+    }
+
     func testTheDigestIsEmptyWhenTheOperatorHasChosenNothing() {
-        XCTAssertEqual(ToolFoldAdapter.foldDigest(turn: twoGroupTurn(), state: TurnInteractionState()), "")
-        var answered = TurnInteractionState()
-        answered.answeredOptions[3] = 1
-        XCTAssertEqual(ToolFoldAdapter.foldDigest(turn: twoGroupTurn(), state: answered), "",
-                       "an answered question does not change any height this digest covers")
+        XCTAssertEqual(digest(twoGroupTurn()), "")
+        XCTAssertNotEqual(digest(twoGroupTurn(), held: [1]), "", "a held roll-in changes the rows")
     }
 
     func testDifferentExplicitGroupChoicesDigestDifferently() {
         let turn = twoGroupTurn()
         func digest(_ states: [String: Bool]) -> String {
-            var s = TurnInteractionState()
-            s.groupStates = states
-            return ToolFoldAdapter.foldDigest(turn: turn, state: s)
+            self.digest(turn, FoldResolver(groupStates: states))
         }
         let none = digest([:])
         let openA = digest(["g:a0": true])
@@ -455,26 +462,26 @@ final class ToolFoldAdapterTests: XCTestCase {
 
     func testAnExpandedResultInsideAnOpenGroupChangesTheDigest() {
         let turn = twoGroupTurn()
-        var groupOnly = TurnInteractionState()
+        var groupOnly = FoldResolver()
         groupOnly.groupStates["g:a0"] = true
         var withResult = groupOnly
-        withResult.expandedBlocks = [1]
+        withResult.resultStates = [1: true]
         var otherResult = groupOnly
-        otherResult.expandedBlocks = [3]
-        let a = ToolFoldAdapter.foldDigest(turn: turn, state: groupOnly)
-        let b = ToolFoldAdapter.foldDigest(turn: turn, state: withResult)
-        let c = ToolFoldAdapter.foldDigest(turn: turn, state: otherResult)
+        otherResult.resultStates = [3: true]
+        let a = digest(turn, groupOnly)
+        let b = digest(turn, withResult)
+        let c = digest(turn, otherResult)
         XCTAssertNotEqual(a, b)
         XCTAssertNotEqual(b, c)
     }
 
     func testTheDigestIsDeterministic() {
         let turn = twoGroupTurn()
-        var s = TurnInteractionState()
+        var s = FoldResolver()
         s.groupStates = ["g:a0": true, "g:b0": false]
-        s.expandedBlocks = [1, 3]
-        XCTAssertEqual(ToolFoldAdapter.foldDigest(turn: turn, state: s), ToolFoldAdapter.foldDigest(turn: turn, state: s))
-        XCTAssertEqual(ToolFoldAdapter.foldDigest(turn: turn, state: s), ToolFoldAdapter.foldDigest(turn: turn, state: s))
+        s.resultStates = [1: true, 3: true]
+        XCTAssertEqual(digest(turn, s), digest(turn, s))
+        XCTAssertEqual(digest(turn, s), digest(turn, s))
     }
 
     func testTheDigestDoesNotDependOnTheOrderChoicesWereMade() {
@@ -483,20 +490,19 @@ final class ToolFoldAdapterTests: XCTestCase {
         let blocks = (0 ..< 30).flatMap { F.run(1, prefix: "k\($0)_") + [TurnBlock.text("p\($0)")] }
         let turn = F.turn(blocks)
         let keys = (0 ..< 30).map { "g:k\($0)_0" }
-        var forward = TurnInteractionState(), backward = TurnInteractionState()
+        var forward = FoldResolver(), backward = FoldResolver()
         for (i, key) in keys.enumerated() { forward.groupStates[key] = i % 2 == 0 }
         for (i, key) in keys.enumerated().reversed() { backward.groupStates[key] = i % 2 == 0 }
-        for i in 0 ..< 30 { forward.expandedBlocks.insert(i * 3 + 1) }
-        for i in (0 ..< 30).reversed() { backward.expandedBlocks.insert(i * 3 + 1) }
+        for i in 0 ..< 30 { forward.resultStates[i * 3 + 1] = true }
+        for i in (0 ..< 30).reversed() { backward.resultStates[i * 3 + 1] = true }
         XCTAssertEqual(forward, backward)
-        XCTAssertEqual(ToolFoldAdapter.foldDigest(turn: turn, state: forward),
-                       ToolFoldAdapter.foldDigest(turn: turn, state: backward))
+        XCTAssertEqual(digest(turn, forward), digest(turn, backward))
     }
 
     func testAnExpandedDefaultDigestsDifferentlyFromACollapsedOne() {
         let turn = twoGroupTurn()
-        XCTAssertNotEqual(ToolFoldAdapter.foldDigest(turn: turn, state: TurnInteractionState(), expandedByDefault: true),
-                          ToolFoldAdapter.foldDigest(turn: turn, state: TurnInteractionState(), expandedByDefault: false),
+        XCTAssertNotEqual(digest(turn, FoldResolver(expandedByDefault: true)),
+                          digest(turn, FoldResolver(expandedByDefault: false)),
                           "a height measured with every group open must not be reused for a collapsed pane")
     }
 

@@ -813,7 +813,7 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
         try request(store, "sub")
 
         let view = ToolGroupView(group: group, blocks: turn.blocks, contentAvailable: true,
-                                 interaction: TurnInteractionState(), isExpanded: false, approvals: store)
+                                 folds: FoldResolver(), isExpanded: false, approvals: store)
 
         XCTAssertEqual(view.row.approvalField.stringValue, "· awaiting your approval", "the subagent's request shows on the Agent's row")
         try resolve(store, "sub", "denied")
@@ -825,7 +825,7 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
         let (store, _) = makeStore()
         try request(store, "sub")
         let view = ToolGroupView(group: try XCTUnwrap(F.groups(of: early).first), blocks: early.blocks, contentAvailable: true,
-                                 interaction: TurnInteractionState(), isExpanded: false, approvals: store)
+                                 folds: FoldResolver(), isExpanded: false, approvals: store)
         XCTAssertTrue(view.row.approvalField.isHidden, "precondition: the subagent has not shown its call yet")
 
         let later = agentTurn
@@ -969,7 +969,7 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
         let (store, _) = makeStore()
         let group = settledGroup(["toolu_a"])
         let blocks: [TurnBlock] = [F.call("Bash", id: "toolu_a", summary: "cmd a"), F.result("ok", id: "toolu_a")]
-        let view = ToolGroupView(group: group, blocks: blocks, contentAvailable: true, interaction: TurnInteractionState(),
+        let view = ToolGroupView(group: group, blocks: blocks, contentAvailable: true, folds: FoldResolver(),
                                  isExpanded: false, approvals: store)
         view.setFrameSize(NSSize(width: 600, height: view.row.frame.height))
         view.layoutSubtreeIfNeeded()

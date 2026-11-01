@@ -28,9 +28,8 @@ private final class LiveClock {
     init(_ now: Date) { self.now = now }
 }
 
-private func makeLive(_ turn: ChatTurn, _ clock: LiveClock, interaction: TurnInteractionState = TurnInteractionState(),
-                      folds: FoldResolver? = nil) -> ChatTurnView {
-    let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: interaction, folds: folds,
+private func makeLive(_ turn: ChatTurn, _ clock: LiveClock, folds: FoldResolver? = nil) -> ChatTurnView {
+    let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(), folds: folds,
                             now: { clock.now })
     view.setIslandWidth(livePaneWidth)
     return view
@@ -87,11 +86,11 @@ private final class LiveStream {
     private(set) var toggles: [String] = []
 
     init(_ blocks: [TurnBlock], complete: Bool = false, clock: LiveClock = LiveClock(F.at(0)),
-         interaction: TurnInteractionState = TurnInteractionState(), folds: FoldResolver? = nil) {
+         folds: FoldResolver? = nil) {
         let built = F.turn(blocks, complete: complete)
         self.clock = clock
         self.turn = built
-        self.view = makeLive(built, clock, interaction: interaction, folds: folds)
+        self.view = makeLive(built, clock, folds: folds)
         view.onAutoOpen = { [weak self] in self?.autoOpened.append($0) }
         view.onGroupSettled = { [weak self] in self?.settled.append($0) }
         view.onGroupToggle = { [weak self] key, open in self?.toggles.append("\(key)=\(open)") }
@@ -594,7 +593,7 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
     func testOnlyTheTurnsLastGroupCanOpenAndItOnlyWhenItHasAFailure() throws {
         // Group a has the message after it: it is in an activity row, opened here so it can be looked at.
         let blocks = failingRun("a") + [.text("between")] + F.run(2, prefix: "z")
-        let stream = LiveStream(blocks, interaction: F.rowsOpen(F.turn(blocks)))
+        let stream = LiveStream(blocks, folds: F.rowsOpen(F.turn(blocks)))
 
         stream.append([errorChip()], complete: true)
 
@@ -605,7 +604,7 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
 
     func testAnAutoOpenNeverClosesAnythingTheOperatorOpened() throws {
         let blocks = F.run(2, prefix: "a") + [.text("between")] + failingRun("b")
-        let stream = LiveStream(blocks, interaction: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) activity row
+        let stream = LiveStream(blocks, folds: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) activity row
         try stream.group(0).row.toggle()
         XCTAssertTrue(try stream.group(0).isExpanded)
 
@@ -629,7 +628,7 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
 
     func testACompletedOkTurnLeavesFailedAndUntouchedGroupsClosed() throws {
         let blocks = failingRun("a") + [.text("between")] + F.run(3, prefix: "z")
-        let stream = LiveStream(blocks, interaction: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) activity row
+        let stream = LiveStream(blocks, folds: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) activity row
 
         stream.append([F.chip()], complete: true)
 
@@ -640,7 +639,7 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
 
     func testAGroupTheOperatorOpenedWhileRunningStaysOpenAfterACleanCompletionAndAnUntouchedOneStaysClosed() throws {
         let blocks = F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b")
-        let stream = LiveStream(blocks, interaction: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) activity row
+        let stream = LiveStream(blocks, folds: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) activity row
         try stream.group(0).row.toggle()
 
         stream.append([F.chip()], complete: true)
@@ -675,9 +674,7 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
 
     func testAnExplicitClosedChoiceHandedToApplyFoldsKeepsAStuckGroupClosed() throws {
         let stream = LiveStream([.text(F.prose)] + failingRun())
-        var state = TurnInteractionState()
-        state.groupStates["g:s0"] = false
-        _ = stream.view.applyFolds(FoldResolver(state: state))
+        _ = stream.view.applyFolds(FoldResolver(groupStates: ["g:s0": false]))
 
         stream.append([errorChip()], complete: true)
 
@@ -695,20 +692,16 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
     }
 
     func testACompletedStuckTurnBuiltFreshHonoursAnExplicitClosedChoice() throws {
-        var state = TurnInteractionState()
-        state.groupStates["g:s0"] = false
         let stream = LiveStream([.text(F.prose)] + failingRun() + [errorChip()], complete: true,
-                                interaction: state, folds: FoldResolver(state: state))
+                                folds: FoldResolver(groupStates: ["g:s0": false]))
 
         XCTAssertFalse(try stream.group().isExpanded)
     }
 
     func testAGroupTheStuckRuleOpenedBeforeComesBackOpenWhenItsKeyIsRecordedAsAutomatic() throws {
         // What the pane does when it rebuilds an evicted view: the automatic open was recorded.
-        var state = TurnInteractionState()
-        state.groupAuto = ["g:a0"]
         let stream = LiveStream(F.run(2, prefix: "a") + [F.chip()], complete: true,
-                                interaction: state, folds: FoldResolver(state: state))
+                                folds: FoldResolver(groupAuto: ["g:a0"]))
 
         XCTAssertTrue(try stream.group().isExpanded)
     }
@@ -737,10 +730,8 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
 
     func testApplyFoldsLetsAnExplicitChoiceBeatTheDefault() throws {
         let stream = LiveStream(F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b"), complete: true)
-        var state = TurnInteractionState()
-        state.groupStates["g:a0"] = false
 
-        _ = stream.view.applyFolds(FoldResolver(state: state, expandedByDefault: true))
+        _ = stream.view.applyFolds(FoldResolver(groupStates: ["g:a0": false], expandedByDefault: true))
 
         XCTAssertFalse(try stream.group(0).isExpanded)
         XCTAssertTrue(try stream.group(1).isExpanded)
@@ -748,11 +739,11 @@ final class ToolGroupLiveStreamingTests: XCTestCase {
 
     func testApplyFoldsOpensAGroupRecordedAsAutomatic() throws {
         let blocks = F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b")
-        let stream = LiveStream(blocks, complete: true, interaction: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) row
-        var state = F.rowsOpen(F.turn(blocks))
-        state.groupAuto = ["g:b0"]
+        let stream = LiveStream(blocks, complete: true, folds: F.rowsOpen(F.turn(blocks)))   // group a is in an (open) row
+        var folds = F.rowsOpen(F.turn(blocks))
+        folds.groupAuto = ["g:b0"]
 
-        let changed = stream.view.applyFolds(FoldResolver(state: state))
+        let changed = stream.view.applyFolds(folds)
 
         XCTAssertTrue(changed)
         XCTAssertFalse(try stream.group(0).isExpanded)
@@ -1355,32 +1346,29 @@ final class FoldResolverAutoOpenTests: XCTestCase {
     }
 
     func testAStuckGroupOpensByItself() {
-        XCTAssertTrue(FoldResolver(state: TurnInteractionState()).isExpanded(group(stuck: true)))
-        XCTAssertFalse(FoldResolver(state: TurnInteractionState()).isExpanded(group(stuck: false)))
+        XCTAssertTrue(FoldResolver().isExpanded(group(stuck: true)))
+        XCTAssertFalse(FoldResolver().isExpanded(group(stuck: false)))
     }
 
     func testAGroupRecordedAsAutomaticOpensEvenWhenNotStuck() {
-        var state = TurnInteractionState()
-        state.groupAuto = ["g:x"]
+        let folds = FoldResolver(groupAuto: ["g:x"])
 
-        XCTAssertTrue(FoldResolver(state: state).isExpanded(group(stuck: false)))
-        XCTAssertFalse(FoldResolver(state: state).isExpanded(key: "g:other", isStuck: false))
+        XCTAssertTrue(folds.isExpanded(group(stuck: false)))
+        XCTAssertFalse(folds.isExpanded(key: "g:other", isStuck: false))
     }
 
     func testAnExplicitChoiceBeatsBothAutomaticRules() {
-        var state = TurnInteractionState()
-        state.groupAuto = ["g:x"]
-        state.groupStates["g:x"] = false
+        let folds = FoldResolver(groupStates: ["g:x": false], groupAuto: ["g:x"])
+        let expandedByDefault = FoldResolver(groupStates: ["g:x": false], groupAuto: ["g:x"], expandedByDefault: true)
 
-        XCTAssertFalse(FoldResolver(state: state).isExpanded(group(stuck: true)))
-        XCTAssertFalse(FoldResolver(state: state, expandedByDefault: true).isExpanded(group(stuck: false)))
+        XCTAssertFalse(folds.isExpanded(group(stuck: true)))
+        XCTAssertFalse(expandedByDefault.isExpanded(group(stuck: false)))
     }
 
     func testAnExplicitOpenChoiceOpensAGroupNothingElseWouldOpen() {
-        var state = TurnInteractionState()
-        state.groupStates["g:x"] = true
+        let folds = FoldResolver(groupStates: ["g:x": true])
 
-        XCTAssertTrue(FoldResolver(state: state).isExpanded(group(stuck: false)))
+        XCTAssertTrue(folds.isExpanded(group(stuck: false)))
     }
 
     func testWithNoChoiceAndNoAutomaticReasonTheDefaultDecides() {
@@ -1389,74 +1377,30 @@ final class FoldResolverAutoOpenTests: XCTestCase {
     }
 
     func testTheKeyAndStuckFormAgreesWithTheGroupForm() {
-        var state = TurnInteractionState()
-        let resolver = FoldResolver(state: state)
+        let resolver = FoldResolver()
         XCTAssertTrue(resolver.isExpanded(key: "g:x", isStuck: true))
         XCTAssertFalse(resolver.isExpanded(key: "g:x", isStuck: false))
 
-        state.groupStates["g:x"] = false
-        XCTAssertFalse(FoldResolver(state: state).isExpanded(key: "g:x", isStuck: true))
+        XCTAssertFalse(FoldResolver(groupStates: ["g:x": false]).isExpanded(key: "g:x", isStuck: true))
     }
 
-    func testAResolverBuiltFromAStateCarriesItsAutomaticKeys() {
-        var state = TurnInteractionState()
-        state.groupAuto = ["g:a", "g:b"]
+    func testAResolverCarriesItsAutomaticKeys() {
+        let folds = FoldResolver(groupAuto: ["g:a", "g:b"])
 
-        XCTAssertEqual(FoldResolver(state: state).groupAuto, ["g:a", "g:b"])
+        XCTAssertEqual(folds.groupAuto, ["g:a", "g:b"])
+        XCTAssertTrue(folds.isAuto("g:a"))
+        XCTAssertFalse(folds.isAuto("g:c"))
     }
 
-    // MARK: state and store
-
-    func testAStateWithOnlyAutomaticKeysIsNotEmpty() {
-        var state = TurnInteractionState()
-        XCTAssertTrue(state.isEmpty)
-
-        state.groupAuto = ["g:a"]
-
-        XCTAssertFalse(state.isEmpty)
-    }
-
-    func testTheStoreRecordsAutomaticOpensPerTurnAndKeepsThemBesideOtherState() {
-        let store = TurnInteractionStore()
-        let turn = UUID()
-        let other = UUID()
-
-        store.recordAuto(turn: turn, key: "g:a")
-        store.recordAuto(turn: turn, key: "g:b")
-        store.setGroup(turn: turn, key: "g:c", false)
-        store.setExpanded(turn: turn, block: 3, true)
-        store.setExpanded(turn: turn, block: 3, false)
-
-        XCTAssertEqual(store.state(for: turn).groupAuto, ["g:a", "g:b"])
-        XCTAssertEqual(store.state(for: turn).groupStates, ["g:c": false])
-        XCTAssertTrue(store.state(for: other).groupAuto.isEmpty)
-        XCTAssertEqual(store.trackedTurnCount, 1)
-    }
-
-    func testAnAutomaticOpenKeepsATurnTrackedUntilItIsPrunedOrCleared() {
-        let store = TurnInteractionStore()
-        let turn = UUID()
-        store.recordAuto(turn: turn, key: "g:a")
-        store.setExpanded(turn: turn, block: 1, true)
-        store.setExpanded(turn: turn, block: 1, false)
-        XCTAssertEqual(store.trackedTurnCount, 1, "the automatic key is still state")
-
-        store.prune(keeping: [])
-        XCTAssertEqual(store.trackedTurnCount, 0)
-
-        store.recordAuto(turn: turn, key: "g:a")
-        store.removeAll()
-        XCTAssertTrue(store.state(for: turn).groupAuto.isEmpty)
-    }
+    // MARK: digest
 
     func testTheFoldDigestChangesWhenAnAutomaticKeyIsRecorded() {
         let turn = F.turn(F.run(3), complete: true)
-        let plain = TurnInteractionState()
-        var automatic = TurnInteractionState()
-        automatic.groupAuto = ["g:t0"]
+        let plain = FoldResolver()
+        let automatic = FoldResolver(groupAuto: ["g:t0"])
 
-        XCTAssertNotEqual(ToolFoldAdapter.foldDigest(turn: turn, state: plain, expandedByDefault: false),
-                          ToolFoldAdapter.foldDigest(turn: turn, state: automatic, expandedByDefault: false),
+        XCTAssertNotEqual(ToolFoldAdapter.foldDigest(turn: turn, shape: FoldShape(turn), folds: plain, held: []),
+                          ToolFoldAdapter.foldDigest(turn: turn, shape: FoldShape(turn), folds: automatic, held: []),
                           "a height measured with the group closed must not be reused once it is open")
     }
 }
@@ -1551,7 +1495,7 @@ final class ToolGroupExpandCostTests: XCTestCase {
         let big = try XCTUnwrap(turn, "the benchmark has no 60-call group")
         let key = try XCTUnwrap(F.groups(of: big).first { $0.callCount == 60 }?.key)
         // The group has a message after it in the benchmark turn: it is in an activity row, open here.
-        let view = makeLive(big, LiveClock(F.at(0)), interaction: F.rowsOpen(big))
+        let view = makeLive(big, LiveClock(F.at(0)), folds: F.rowsOpen(big))
         let group = try XCTUnwrap(view.groupView(forKey: key))
         let collector = BatchCollector()
         group.scheduleBatch = { collector.schedule($0) }
@@ -1594,9 +1538,8 @@ final class ToolGroupExpandCostTests: XCTestCase {
 
     func testAfterTheLastBatchTheTurnIsTheHeightOfOneBuiltOpenFromTheStart() throws {
         let (stream, group, collector) = try makeFixture()
-        var open = TurnInteractionState()
-        open.groupStates["g:t0"] = true
-        let fresh = makeLive(stream.turn, LiveClock(F.at(0)), interaction: open, folds: FoldResolver(state: open))
+        let open = FoldResolver(groupStates: ["g:t0": true])
+        let fresh = makeLive(stream.turn, LiveClock(F.at(0)), folds: open)
         let expected = fresh.islandHeight()
         let collapsed = stream.view.islandHeight()
 
@@ -1611,9 +1554,7 @@ final class ToolGroupExpandCostTests: XCTestCase {
     }
 
     func testAGroupExpandedWhenItsViewIsBuiltBuildsEveryMemberAtOnce() throws {
-        var open = TurnInteractionState()
-        open.groupStates["g:t0"] = true
-        let stream = LiveStream(sixty, complete: true, interaction: open, folds: FoldResolver(state: open))
+        let stream = LiveStream(sixty, complete: true, folds: FoldResolver(groupStates: ["g:t0": true]))
 
         let group = try stream.group()
 
@@ -1725,7 +1666,7 @@ final class ChatTurnViewReadingOrderTests: XCTestCase {
         let blocks: [TurnBlock] = [.text("Before. \(F.prose)")] + F.run(3, prefix: "a") + [.text("Between. \(F.prose)")]
             + F.run(2, prefix: "b") + [.text("After. \(F.prose)")]
         // Both groups have a message after them: they are in the activity row, open here.
-        let view = makeLive(F.turn(blocks), LiveClock(F.at(0)), interaction: F.rowsOpen(F.turn(blocks)))
+        let view = makeLive(F.turn(blocks), LiveClock(F.at(0)), folds: F.rowsOpen(F.turn(blocks)))
         let before = order(view)
         XCTAssertTrue(view.subviews.first is UserBubbleView)
         let middle = try XCTUnwrap(view.groupView(forKey: "g:a0"))
@@ -1744,7 +1685,7 @@ final class ChatTurnViewReadingOrderTests: XCTestCase {
         let blocks: [TurnBlock] = F.run(2, prefix: "a") + [.text("Between. \(F.prose)")] + F.run(2, prefix: "b")
             + [.text("Then. \(F.prose)")] + F.run(2, prefix: "c")
         // Groups a and b are in the activity row (open here); c is the trailing group.
-        let view = makeLive(F.turn(blocks), LiveClock(F.at(0)), interaction: F.rowsOpen(F.turn(blocks)))
+        let view = makeLive(F.turn(blocks), LiveClock(F.at(0)), folds: F.rowsOpen(F.turn(blocks)))
         let before = order(view)
 
         for key in ["g:a0", "g:b0", "g:c0"] { try XCTUnwrap(view.groupView(forKey: key)).row.toggle() }

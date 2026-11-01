@@ -1124,10 +1124,13 @@ final class TrackerPaneViewTests: XCTestCase {
     /// (Terminal menu) and ⌘F and ⌘G (Edit ▸ Find…, Find Next). Terminal 1e added ⌃⌥⌘N (Debug ▸ Open
     /// Second Window (QA), enabled only outside the real app). Terminal staging (S1b) added ⇧⌘J (Terminal ▸
     /// Focus Staged Commands: it moves the keyboard into the staged-commands drawer and inserts nothing).
+    /// FV4 added ⌥⌘← and ⌥⌘→ (View ▸ Focus, View ▸ Show All Activity); the arrows are written as the
+    /// function-key characters AppKit uses for them (U+F702 left, U+F703 right).
     private static let pinnedKeyEquivalents: Set<String> = [
         "⌘q", "⌘x", "⌘c", "⌘v", "⌘a", "⌘z", "⌘Z",
         "⇧⌘d", "⇧⌘i", "⇧⌘k", "⇧⌘p", "⌥⇧⌘b", "⇧⌘m", "⇧⌘b", "⌥⌘a",
         "⌘t", "⇧⌘t", "⇧⌘w", "⌘f", "⌘g", "⌃⌥⌘n", "⇧⌘j",
+        "⌥⌘\u{F702}", "⌥⌘\u{F703}",
     ]
 
     private func groups(_ pattern: String, in text: String, options: NSRegularExpression.Options = []) throws -> [[String]] {

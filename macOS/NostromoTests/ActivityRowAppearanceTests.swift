@@ -83,9 +83,8 @@ final class ActivityRowAppearanceTests: XCTestCase {
     private func render(keyWindow: Bool, hovered: Bool, file: StaticString = #filePath, line: UInt = #line) -> Sample? {
         _ = NSApplication.shared
         let turn = F.turn(blocks())
-        var state = TurnInteractionState()
-        state.activityStates[X.segments(of: turn)[0].key] = true
-        let view = X.view(turn, interaction: state, folds: FoldResolver(state: state))
+        let folds = FoldResolver(activityStates: [X.segments(of: turn)[0].key: true])
+        let view = X.view(turn, folds: folds)
         let size = NSSize(width: X.paneWidth, height: view.islandHeight())
 
         let window: NSWindow
@@ -271,9 +270,8 @@ final class ActivityRowAppearanceTests: XCTestCase {
 
     func testTheViewsTextColoursAreTheExplicitOnes() throws {
         let turn = F.turn(blocks())
-        var state = TurnInteractionState()
-        state.activityStates[X.segments(of: turn)[0].key] = true
-        let view = X.view(turn, interaction: state, folds: FoldResolver(state: state))
+        let folds = FoldResolver(activityStates: [X.segments(of: turn)[0].key: true])
+        let view = X.view(turn, folds: folds)
         let activity = try XCTUnwrap(view.activityRowViews.first)
 
         XCTAssertTrue(X.same(activity.row.summaryField.textColor, Theme.fgMuted) || activity.row.summaryField.textColor == Theme.fgMuted,
