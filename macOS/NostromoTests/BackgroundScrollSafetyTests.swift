@@ -24,6 +24,21 @@ import NostromoKit
 // `NSPopover` can anchor to the input bar. No wall clock (injected store clock), no real pasteboard or
 // UserDefaults, no daemon.
 
+// BA4 adds the task window to the gate (PRD "Scroll and focus safety", criteria 1 and 2, for the slice that
+// opens windows): a `TaskWindowManager` over the pane's own store, with a fake daemon behind its output
+// requests, opens a REAL `TaskPanel` for a running shell task. Opening it, 50 store snapshots and 50 output
+// appends reaching it, scrolling its own text and closing it must move the main transcript's first visible
+// line by at most 1 pt (and keep a following pane at the bottom), and leave the main window's first
+// responder, composer text and selection exactly as they were: in a following pane and in one scrolled up.
+// A two-window variant keeps the panel open across the events and closes it with Esc; a terminal variant
+// holds the keyboard in a terminal stand-in and asserts the daemon connection saw no byte at all.
+//
+// On key status: `RigWindow` (the shared test window) overrides `isKeyWindow` to always answer true, and a
+// headless runner may not make any window key, so "the rig window is key again after the panel closes" is
+// asserted in the strongest form that holds there: the rig window's first responder is still the composer
+// (a window that lost key status and got it back keeps its first responder, one that was cleared does not),
+// the panel is not the key window afterwards, and it cannot become the main window at all.
+
 final class BackgroundScrollSafetyTests: XCTestCase {
 
     private struct Pane {
@@ -287,5 +302,207 @@ final class BackgroundScrollSafetyTests: XCTestCase {
             }
             assertComposerIntact(p.rig, name("after the second window's keyboard visit"))
         }
+    }
+
+    // MARK: BA4: a task window
+
+    private static func lines(_ range: Range<Int>) -> String {
+        range.map { "output line \($0)\n" }.joined()
+    }
+
+    /// A task-window manager over the pane's own store, its key window the rig window, with a running
+    /// shell task `job0` and some output behind it.
+    private func taskWindows(_ p: Pane, keyWindow: NSWindow? = nil) -> BA4TWWorld {
+        let tw = BA4TWWorld(self, tag: "gate", world: p.world, keyWindow: keyWindow ?? p.rig.window)
+        tw.ingest([tw.task("job0", "npm run dev")])
+        tw.outputs["job0"] = Self.lines(0 ..< 60)
+        return tw
+    }
+
+    /// 50 rounds of what a live task window receives: a new snapshot (new description) and a poll that
+    /// finds more output.
+    private func feed(_ tw: BA4TWWorld, rounds: Int = 50) {
+        for n in 1 ... rounds {
+            tw.ingest([tw.task("job0", "npm run dev (step \(n))")])
+            tw.outputs["job0", default: ""] += Self.lines((60 + (n - 1) * 5) ..< (60 + n * 5))
+            tw.poll()
+        }
+    }
+
+    /// The window's own text scrolled to its top and back to the tail.
+    private func scrollOwnText(of controller: TaskWindowController) {
+        guard let output = controller.body as? TaskOutputView else { return XCTFail("a shell window shows output") }
+        output.scrollView.contentView.scroll(to: .zero)
+        output.scrollView.reflectScrolledClipView(output.scrollView.contentView)
+        output.jumpToLatest()
+    }
+
+    func testATaskWindowOpeningUpdatingScrollingAndClosingMovesNothingInTheMainPane() {
+        for following in [true, false] {
+            let p = pane(following: following)
+            let tw = taskWindows(p)
+            let name = { (step: String) in "\(step) (following: \(following))" }
+            var shown = ""
+            var title = ""
+
+            p.rig.assertNoMove(name("a task window opens, takes 50 updates, scrolls and closes"), following: following) {
+                guard let controller = tw.open("job0") else { return XCTFail("the task window did not open") }
+                tw.pump()
+                controller.panel.contentView?.layoutSubtreeIfNeeded()
+                feed(tw)
+                scrollOwnText(of: controller)
+                shown = (controller.body as? TaskOutputView)?.shownText ?? ""
+                title = controller.panel.title
+                controller.close()
+            }
+
+            XCTAssertTrue(shown.contains("output line 309"), "precondition: the window really received its 50 appends")
+            XCTAssertEqual(title, "Claudia \u{00B7} Shell: npm run dev (step 50)", "and its 50 snapshots")
+            XCTAssertEqual(tw.manager.openCount, 0)
+            XCTAssertEqual(tw.pollScheduler.liveCount, 0, "nothing keeps polling after it closed")
+            assertComposerIntact(p.rig, name("after the task window closed"))
+        }
+    }
+
+    func testEachStepOfATaskWindowsLifeMovesNothingInTheMainPaneWhileItStaysOpenAlongsideIt() {
+        for following in [true, false] {
+            let p = pane(following: following)
+            let tw = taskWindows(p)
+            let name = { (step: String) in "\(step) (following: \(following))" }
+            var opened: TaskWindowController?
+
+            p.rig.assertNoMove(name("the task window opens"), following: following) {
+                opened = tw.open("job0")
+                tw.pump()
+                opened?.panel.contentView?.layoutSubtreeIfNeeded()
+            }
+            guard let controller = opened, let output = controller.body as? TaskOutputView else {
+                XCTFail("the task window did not open (following: \(following))")
+                continue
+            }
+            XCTAssertTrue(controller.isOpen && controller.panel.isVisible, "precondition: the panel is open alongside the rig window")
+
+            p.rig.assertNoMove(name("the task window takes the keyboard in its own text"), following: following) {
+                _ = controller.panel.makeFirstResponder(output.textView)
+            }
+
+            p.rig.assertNoMove(name("50 updates reach the open task window"), following: following) {
+                feed(tw)
+            }
+            XCTAssertTrue(output.shownText.contains("output line 309"), "precondition: the updates reached it")
+
+            p.rig.assertNoMove(name("its own text scrolls"), following: following) {
+                scrollOwnText(of: controller)
+            }
+
+            p.rig.assertNoMove(name("its text is selected and copied"), following: following) {
+                output.textView.selectAll(nil)
+                output.copyAll()
+            }
+            XCTAssertEqual(tw.pasteboard.string(forType: .string), tw.outputs["job0"], "Copy All went to the injected pasteboard")
+
+            p.rig.assertNoMove(name("Esc closes it"), following: following) {
+                XCTAssertTrue(controller.panel.performKeyEquivalent(with: BA3UIKey.keyDown(BA3UIKey.escape)), "Esc is consumed")
+            }
+
+            XCTAssertFalse(controller.isOpen)
+            XCTAssertEqual(tw.manager.openCount, 0)
+            XCTAssertTrue(p.rig.window.isKeyWindow, "the rig window is key (always true for this test window: see the file comment)")
+            XCTAssertFalse(NSApplication.shared.keyWindow === controller.panel, "the closed panel is not the key window")
+            XCTAssertFalse(controller.panel.canBecomeMain, "and it never was the main window")
+            assertComposerIntact(p.rig, name("after the task window closed"))
+        }
+    }
+
+    func testATaskWindowOpeningAndClosingSendsNoBytesToATerminalThatHoldsTheKeyboard() throws {
+        // `NostromoTerminalView` and `TerminalPaneHostView` link SwiftTerm, which the test bundle does not,
+        // so the terminal is a stand-in that does what the real one does with the keyboard: keys go to
+        // `TerminalSessionStore.sendInput`, and it reports focus changes (a terminal with focus reporting
+        // writes ESC [ I / ESC [ O when it gains or loses first responder). Whatever reaches the daemon
+        // connection is recorded by the store's transport.
+        let wire = BA4TerminalWire()
+        let store = TerminalSessionStore(now: { Date(timeIntervalSinceReferenceDate: 1_000_000) },
+                                         schedule: { _, _ in }, transport: { wire.sent.append($0) })
+        store.connectionChanged(true)
+        store.ingest(.terminalState(TerminalInfo(
+            terminalId: "t1", tag: "gate", paneId: "terminal-a", kind: .local, label: "zsh", cwd: "/tmp",
+            target: nil, status: .running, exitCode: nil, endedReason: nil, cols: 80, rows: 24,
+            requestedBy: TerminalRequester(kind: "user", tag: nil), openedByRequest: nil, follower: nil,
+            idleClosesAt: nil)))
+
+        let host = ba3uiVisibleWindow(self, size: NSSize(width: 600, height: 300))
+        let terminal = BA4TerminalStandIn(frame: host.contentView!.bounds, store: store, terminalId: "t1", windowId: "w1")
+        host.contentView?.addSubview(terminal)
+        XCTAssertTrue(host.makeFirstResponder(terminal), "precondition: the terminal holds the keyboard")
+        terminal.type("l")
+        XCTAssertFalse(wire.inputFrames.isEmpty, "precondition: what the terminal sends does reach the recorded connection")
+        let before = wire.sent.count
+
+        let tw = BA4TWWorld(self, tag: "gate", keyWindow: host)
+        tw.ingest([tw.task("job0", "npm run dev")])
+        tw.outputs["job0"] = Self.lines(0 ..< 60)
+        let controller = try XCTUnwrap(tw.open("job0"))
+        tw.pump()
+        feed(tw)
+        XCTAssertTrue(controller.panel.performKeyEquivalent(with: BA3UIKey.keyDown(47, ".", flags: .command)), "Cmd-. stays in the panel")
+        XCTAssertTrue(controller.panel.performKeyEquivalent(with: BA3UIKey.keyDown(BA3UIKey.escape)), "Esc closes it")
+
+        XCTAssertEqual(tw.manager.openCount, 0, "precondition: the window opened and closed")
+        XCTAssertEqual(wire.sent.count, before, "no frame at all reached the terminal's connection: \(wire.sent.dropFirst(before))")
+        XCTAssertTrue(host.firstResponder === terminal, "the terminal still holds the keyboard")
+
+        terminal.type("x")
+        XCTAssertGreaterThan(wire.sent.count, before, "and it is still wired to the connection")
+    }
+}
+
+// MARK: - A terminal that holds the keyboard
+
+/// What reached the daemon connection from the terminal store.
+private final class BA4TerminalWire {
+    var sent: [TerminalClientMessage] = []
+
+    var inputFrames: [TerminalClientMessage] {
+        sent.filter { if case .input = $0 { return true } else { return false } }
+    }
+}
+
+/// Stands in for the SwiftTerm views: keys and focus reports go to the store like the real terminal's do.
+private final class BA4TerminalStandIn: NSView {
+    private let store: TerminalSessionStore
+    private let terminalId: String
+    private let windowId: String
+
+    init(frame: NSRect, store: TerminalSessionStore, terminalId: String, windowId: String) {
+        self.store = store
+        self.terminalId = terminalId
+        self.windowId = windowId
+        super.init(frame: frame)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        send("\u{1B}[I", autoReply: true)
+        return true
+    }
+
+    override func resignFirstResponder() -> Bool {
+        send("\u{1B}[O", autoReply: true)
+        return true
+    }
+
+    override func keyDown(with event: NSEvent) {
+        type(event.characters ?? "")
+    }
+
+    func type(_ text: String) {
+        send(text, autoReply: false)
+    }
+
+    private func send(_ text: String, autoReply: Bool) {
+        _ = store.sendInput(terminalId: terminalId, bytes: Array(text.utf8), fromWindow: windowId, autoReply: autoReply)
     }
 }

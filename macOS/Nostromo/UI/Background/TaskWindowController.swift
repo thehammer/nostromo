@@ -114,6 +114,7 @@ final class TaskWindowController: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.becomesKeyOnlyIfNeeded = false
+        panel.animationBehavior = .none
         panel.collectionBehavior = [.fullScreenAuxiliary]
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.backgroundColor = TaskWindowPalette.background

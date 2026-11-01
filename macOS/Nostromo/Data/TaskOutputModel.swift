@@ -124,7 +124,9 @@ final class TaskOutputModel {
 
     private(set) var isTaskEnded: Bool
 
-    private enum Phase { case idle, loadingTail, ready, failed, vanished }
+    /// `failed`: a try that may work next time (no answer, unavailable): polls and `acquire()` try again.
+    /// `errored`: the daemon refused or could not read: only a new holder (`acquire()`) tries again.
+    private enum Phase { case idle, loadingTail, ready, failed, errored, vanished }
 
     private var phase = Phase.idle
     private var cursor: UInt64 = 0
@@ -195,7 +197,7 @@ final class TaskOutputModel {
         switch phase {
         case .idle:
             loadTail()
-        case .failed where !isTaskEnded || text.isEmpty:
+        case .failed where !isTaskEnded || text.isEmpty, .errored:
             loadTail()
         default:
             break
@@ -248,22 +250,22 @@ final class TaskOutputModel {
             case .ok:
                 applyTail(wire)
             case .unavailable:
-                failLoad(.unavailable, retry: true)
+                failLoad(.unavailable, phase: .failed)
             case .refused, .error, .unknown:
-                failLoad(.error(wire.message ?? "The daemon could not read this task's output"), retry: false)
+                failLoad(.error(wire.message ?? "The daemon could not read this task's output"), phase: .errored)
             }
         case .timedOut:
-            failLoad(.error("The daemon did not answer in time"), retry: true)
+            failLoad(.error("The daemon did not answer in time"), phase: .failed)
         case .failed(let reason):
-            failLoad(.error(reason), retry: true)
+            failLoad(.error(reason), phase: .failed)
         }
         if needsFinalRead && phase == .ready { finalRead() }
         scheduleNextPollIfNeeded()
     }
 
-    private func failLoad(_ newState: State, retry: Bool) {
+    private func failLoad(_ newState: State, phase failedPhase: Phase) {
         // Held text survives a later failure; the state only speaks while there is none.
-        phase = retry ? .failed : .vanished
+        phase = failedPhase
         guard text.isEmpty, state != newState else { return }
         state = newState
         record(.status)
@@ -313,12 +315,12 @@ final class TaskOutputModel {
     // MARK: Polling
 
     private func startPollingIfNeeded() {
-        guard holderCount > 0, !isTaskEnded, pollTimer == nil, !readInFlight, phase != .vanished else { return }
+        guard holderCount > 0, !isTaskEnded, pollTimer == nil, !readInFlight, phase != .vanished, phase != .errored else { return }
         scheduleNextPoll()
     }
 
     private func scheduleNextPollIfNeeded() {
-        guard holderCount > 0, !isTaskEnded, pollTimer == nil, phase != .vanished else { return }
+        guard holderCount > 0, !isTaskEnded, pollTimer == nil, phase != .vanished, phase != .errored else { return }
         scheduleNextPoll()
     }
 
@@ -338,7 +340,7 @@ final class TaskOutputModel {
             read(final: false)
         case .failed:
             loadTail()
-        case .idle, .loadingTail, .vanished:
+        case .idle, .loadingTail, .errored, .vanished:
             scheduleNextPollIfNeeded()
         }
     }

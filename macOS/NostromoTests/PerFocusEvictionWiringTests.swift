@@ -379,6 +379,22 @@ final class PerFocusEvictionWiringTests: XCTestCase {
             """)
     }
 
+    // MARK: - BA4: a closed focus takes its task windows with it
+
+    /// A task window is bound to a `(focus tag, task id)`. When the focus is removed its session, its task
+    /// list and its output models all go, so a window left open would poll a session that no longer exists
+    /// and show a task nothing can update. Scoped to the isolated body, as the siblings above are: the
+    /// manager is named nowhere else in `AppStore.swift` that would keep the string present.
+    func testEvictPerFocusStateClosesTheFocusTaskWindows() throws {
+        let source = try Self.appStoreSource()
+        let body = try Self.isolatedFunctionBody(named: "func evictPerFocusState", in: source, sourceFile: "AppStore.swift")
+        XCTAssertTrue(body.contains("TaskWindowManager.shared.closeWindows(forFocus: tag)"), """
+            evictPerFocusState must call TaskWindowManager.shared.closeWindows(forFocus: tag) — without it a \
+            closed focus's task windows stay open on a session that no longer exists, still polling for \
+            output nothing will ever answer.
+            """)
+    }
+
     // MARK: - FV1: built-in focuses never lose their fold state
 
     /// Built-ins (fred/mother/perri/teri) can never be removed, so
