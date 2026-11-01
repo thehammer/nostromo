@@ -57,6 +57,7 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     private let reduceMotion: () -> Bool
     private let now: () -> Date
     private let approvals: ApprovalStore?
+    private let backgroundTasks: BackgroundRowBinding?
 
     private struct Member {
         /// Anchor key: the message key (`<segmentKey>/m<ordinal>`) for a message's first text
@@ -84,7 +85,8 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
     init(segment: ActivitySegment, blocks: [Int: TurnBlock], contentAvailable: Bool,
          folds: FoldResolver, isExpanded: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-         now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
+         now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil,
+         backgroundTasks: BackgroundRowBinding? = nil) {
         self.blocks = blocks
         self.contentAvailable = contentAvailable
         self.folds = folds
@@ -92,9 +94,10 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
         self.reduceMotion = reduceMotion
         self.now = now
         self.approvals = approvals
+        self.backgroundTasks = backgroundTasks
         row = ActivityRowHeaderView(segment: segment, isExpanded: isExpanded,
                                     payloadAvailable: contentAvailable, reduceMotion: reduceMotion,
-                                    approvals: approvals)
+                                    approvals: approvals, backgroundTasks: backgroundTasks)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = true
         wantsLayer = true
@@ -266,7 +269,7 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
         let view = ToolGroupView(group: group, blockAt: { self.blocks[$0] },
                                  contentAvailable: contentAvailable, folds: folds,
                                  isExpanded: folds.isExpanded(group), reduceMotion: reduceMotion, now: now,
-                                 approvals: approvals)
+                                 approvals: approvals, backgroundTasks: backgroundTasks)
         view.onToggle = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.folds.groupStates[view.group.key] = isExpanded
@@ -452,11 +455,12 @@ final class ActivityRowHeaderView: FoldRowView {
 
     init(segment: ActivitySegment, isExpanded: Bool, payloadAvailable: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-         approvals: ApprovalStore? = nil) {
+         approvals: ApprovalStore? = nil, backgroundTasks: BackgroundRowBinding? = nil) {
         self.segment = segment
         self.payloadAvailable = payloadAvailable
         super.init(reduceMotion: reduceMotion)
         attachApprovals(approvals)
+        attachBackgroundTasks(backgroundTasks)
         update(segment: segment)
         setExpanded(isExpanded, animated: false)
     }
@@ -470,6 +474,7 @@ final class ActivityRowHeaderView: FoldRowView {
     func update(segment: ActivitySegment) {
         self.segment = segment
         refreshApproval()
+        refreshBackground()
         setSummary(ActivitySummary.title(for: segment))
         setFailure(ActivitySummary.failureText(for: segment))
         setTime(ActivitySummary.durationText(for: segment))
@@ -482,6 +487,7 @@ final class ActivityRowHeaderView: FoldRowView {
         menu.addItem(withTitle: "Copy Messages", action: #selector(copyMessagesAction), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy Commands", action: #selector(copyCommandsAction), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy Summary", action: #selector(copySummaryAction), keyEquivalent: "").target = self
+        if let open = openInBackgroundActivityItem() { menu.addItem(open) }
         TranscriptViewMenu.appendModeItems(to: menu)
         return menu
     }
