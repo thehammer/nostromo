@@ -364,3 +364,39 @@ final class BackgroundTaskWindowActions: BackgroundTaskActions {
         (manager ?? TaskWindowManager.shared).open(tag: tag, taskId: row.id)
     }
 }
+
+/// A pane's popover actions (BA6c): what `BackgroundTaskWindowActions` does, plus Show in Transcript,
+/// which scrolls that pane's transcript to the call that started the task. Open, Stop and their
+/// offers are forwarded unchanged: Stop's gesture gate lives in the popover and the window header.
+final class PaneBackgroundActions: BackgroundTaskActions {
+    weak var pane: ReplView?
+
+    private let base: BackgroundTaskWindowActions
+    private let store: BackgroundTaskStore
+
+    init(pane: ReplView?, base: BackgroundTaskWindowActions = .shared, store: BackgroundTaskStore = .shared) {
+        self.pane = pane
+        self.base = base
+        self.store = store
+    }
+
+    func canOpen(_ row: BackgroundTaskRow, tag: String) -> Bool { base.canOpen(row, tag: tag) }
+    func open(_ row: BackgroundTaskRow, tag: String) { base.open(row, tag: tag) }
+    func canStop(_ row: BackgroundTaskRow, tag: String) -> Bool { base.canStop(row, tag: tag) }
+    func stop(_ row: BackgroundTaskRow, tag: String) { base.stop(row, tag: tag) }
+
+    /// The task's call is in this pane's retained transcript.
+    func canShowInTranscript(_ row: BackgroundTaskRow, tag: String) -> Bool {
+        guard let toolUseId = toolUseId(of: row, tag: tag), let pane, pane.focusTag == tag else { return false }
+        return pane.canRevealToolCall(toolUseId: toolUseId)
+    }
+
+    func showInTranscript(_ row: BackgroundTaskRow, tag: String) {
+        guard let toolUseId = toolUseId(of: row, tag: tag), let pane, pane.focusTag == tag else { return }
+        pane.showToolCallFromBackgroundActivity(toolUseId: toolUseId)
+    }
+
+    private func toolUseId(of row: BackgroundTaskRow, tag: String) -> String? {
+        store.state(for: tag)?.allTasks.last { $0.id == row.id }?.toolUseId
+    }
+}

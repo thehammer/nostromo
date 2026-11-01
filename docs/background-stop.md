@@ -61,3 +61,30 @@ Consequence: **app-control Stop clicks are refused in the real app** (`appContro
 AX press with VoiceOver off is refused. They work only in the isolated QA instance started with
 synthetic input allowed (`NOSTROMO_QA_ALLOW_SYNTHETIC_INPUT`, `qa-instance.sh start`). A QA script
 must expect the refusal on the real app. Task windows are not reachable by app-control at all.
+
+## Transcript rows (BA6c)
+
+Three touches in the transcript itself, all built on the pane's `BackgroundRowBinding` (the store, the
+focus tag, and what "open a task" does). A view that is not a pane's transcript (a subagent window, the
+scroll-safety rig) passes no binding and gets none of them.
+
+- **`· ◷` after a row's summary** while a member call's task is pending, running or paused. It lives on
+  `FoldRowView`, so a tool group's row and a collapsed activity row (the Focus view, where the owning call
+  usually sits) both show it. It is a hidden-or-shown field in the row's stack: the row stays 22 pt and
+  nothing moves. It hides when the task ends. Clicking it opens that task's window; a click elsewhere on
+  the row toggles as before, and a press that starts on the `◷` and ends elsewhere does nothing. VoiceOver
+  reads "background task running" in the row's label and offers an "Open background task" action; nothing
+  is announced when it appears.
+- **Open in Background Activity** in the context menu of a row or a tool call whose call started a known
+  task (any status): one item, or a submenu `<Kind>: <description>` for several (sanitized, one line, at most
+  60 characters). It targets a retained object, not the responder chain, so it cannot reach another pane in
+  a split window.
+- **Show in Transcript** in the popover's row menu, offered by `PaneBackgroundActions` only when the task's
+  call is in that pane's retained transcript. It closes the popover and calls `ReplView.revealToolCall`,
+  which scrolls to the item that shows the call (the call's row, its collapsed group's row, or its collapsed
+  activity row), a third of the way down the viewport, and stops following the tail. It expands nothing.
+
+Which are gated: none of these. Opening a window and scrolling are view actions that change nothing in the
+world, so there is no human-gesture check (unlike Stop, which is untouched: `PaneBackgroundActions` forwards
+Open and Stop to `BackgroundTaskWindowActions.shared` and never calls `requestStop`). Show in Transcript is the
+only action of the feature that moves the transcript, and only because the person asked.

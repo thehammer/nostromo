@@ -55,6 +55,7 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     /// make every block the session appends to that turn copy the whole array.
     private var blocks: [Int: TurnBlock] = [:]
     private let contentAvailable: Bool
+    private let backgroundTasks: BackgroundRowBinding?
     /// How the turn's result folds resolve (the operator's saved choices), for members built from here on.
     private var folds: FoldResolver
     private(set) var isExpanded: Bool
@@ -88,23 +89,27 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     convenience init(group: ToolGroup, blocks: [TurnBlock],
                      contentAvailable: Bool, folds: FoldResolver, isExpanded: Bool,
                      reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-                     now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
+                     now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil,
+                     backgroundTasks: BackgroundRowBinding? = nil) {
         self.init(group: group, blockAt: { blocks.indices.contains($0) ? blocks[$0] : nil },
                   contentAvailable: contentAvailable, folds: folds, isExpanded: isExpanded,
-                  reduceMotion: reduceMotion, now: now, approvals: approvals)
+                  reduceMotion: reduceMotion, now: now, approvals: approvals, backgroundTasks: backgroundTasks)
     }
 
     /// `blockAt`: the turn's block at an index (read during the call only).
     init(group: ToolGroup, blockAt: (Int) -> TurnBlock?,
          contentAvailable: Bool, folds: FoldResolver, isExpanded: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-         now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
+         now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil,
+         backgroundTasks: BackgroundRowBinding? = nil) {
         self.group = group
         self.contentAvailable = contentAvailable
         self.folds = folds
         self.isExpanded = isExpanded
+        self.backgroundTasks = backgroundTasks
         self.row = ToolGroupRowView(group: group, isExpanded: isExpanded, payloadAvailable: contentAvailable,
-                                    reduceMotion: reduceMotion, now: now, approvals: approvals)
+                                    reduceMotion: reduceMotion, now: now, approvals: approvals,
+                                    backgroundTasks: backgroundTasks)
         super.init(frame: .zero)
         takeBlocks(of: group, from: blockAt)
         row.subagentToolUseIds = subagentToolUseIds(of: group)
@@ -294,7 +299,7 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
         guard let block = blocks[index] else { return NSView() }
         switch block {
         case .toolCall(let d):
-            return ToolCallView(data: d)
+            return ToolCallView(data: d, backgroundTasks: backgroundTasks)
         case .toolResult(let d):
             let view = ToolResultView(data: d, contentAvailable: contentAvailable,
                                       explicitState: folds.explicitResult(block: block, index: index))
@@ -314,7 +319,8 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     private func makeActivityView(agentIndex: Int, blockIndices: [Int]) -> AgentActivityView {
         let view = AgentActivityView(blockIndices: blockIndices, blocks: blocks, contentAvailable: contentAvailable,
                                      folds: folds,
-                                     startExpanded: folds.explicitResult(block: blocks[agentIndex], index: agentIndex) ?? false)
+                                     startExpanded: folds.explicitResult(block: blocks[agentIndex], index: agentIndex) ?? false,
+                                     backgroundTasks: backgroundTasks)
         view.onExpansionChange = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.onBlockExpansion?(agentIndex, isExpanded)
@@ -527,6 +533,13 @@ class FoldRowView: NSView {
     private let time = NSTextField(labelWithString: "")
     private let stopped = NSTextField(labelWithString: "")
     private let approval = NSTextField(labelWithString: "")
+    /// `· ◷` while a member call's background task is not over (BA6c); a click on it opens the task.
+    private let background = NSTextField(labelWithString: "")
+    private var backgroundBinding: BackgroundRowBinding?
+    private var backgroundSubscription: AnyCancellable?
+    private var runningTaskId: String?
+    /// The press began on the `◷` (it ends there, or does nothing).
+    private var pressedBackground = false
     /// Where the approval status is read from (AP2b), and what the row shows of it now.
     private var approvalStore: ApprovalStore?
     private var approvalSubscription: AnyCancellable?
@@ -552,6 +565,7 @@ class FoldRowView: NSView {
         time.isHidden = true
         stopped.isHidden = true
         approval.isHidden = true
+        background.isHidden = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -576,6 +590,10 @@ class FoldRowView: NSView {
     /// `· awaiting your approval`, `· approved by you · 14:02`, …: a tool call's permission request
     /// in place (AP2b). Hidden when no call of the row has one.
     var approvalField: NSTextField { approval }
+    /// `· ◷`, shown while a member call's background task is pending, running or paused (BA6c).
+    var backgroundField: NSTextField { background }
+    /// The id of the task the `◷` stands for (a click on it opens that task), nil while hidden.
+    var backgroundTaskId: String? { runningTaskId }
     /// The running row's activity dot.
     var activityLayer: CALayer { activityView.layer! }
     /// Whether the activity dot is showing (the group is running).
@@ -632,8 +650,13 @@ class FoldRowView: NSView {
 
     // MARK: Approval status (AP2b)
 
-    /// The `tool_use_id`s of the calls this row stands for (a subclass says which).
+    /// The `tool_use_id`s of the calls this row stands for, its member calls (a subclass says which).
+    /// Approval statuses are read through them, and background tasks too (`backgroundToolUseIds`).
     var approvalToolUseIds: [String] { [] }
+
+    /// The calls whose background tasks this row shows `◷` for: its member calls, and for a row that
+    /// folds subagent calls in, theirs too.
+    var backgroundToolUseIds: [String] { approvalToolUseIds }
 
     /// Read approval statuses from `store`: the row updates in place whenever one of its calls changes.
     /// Call before the first `refreshApproval()`.
@@ -658,10 +681,72 @@ class FoldRowView: NSView {
         applyActivity()
     }
 
-    /// `label`, then the approval status when there is one (read when the row is focused; never posted).
+    /// `label`, then the approval status and the background-task note when there are any (read when the
+    /// row is focused; never posted).
     func accessibilityLabel(adding label: String?) -> String? {
-        guard let text = approvalStatus?.text() else { return label }
-        return [label, text].compactMap { $0 }.joined(separator: ", ")
+        let extras = [approvalStatus?.text(), runningTaskId == nil ? nil : "background task running"].compactMap { $0 }
+        guard !extras.isEmpty else { return label }
+        return ([label].compactMap { $0 } + extras).joined(separator: ", ")
+    }
+
+    // MARK: Background task mark (BA6c)
+
+    /// Show `◷` while a member call's task is running, read from `binding.store`. Call before the first
+    /// `refreshBackground()`. Without a binding the row never shows it.
+    func attachBackgroundTasks(_ binding: BackgroundRowBinding?) {
+        backgroundBinding = binding
+        guard let binding else { backgroundSubscription = nil; return }
+        backgroundSubscription = binding.store.changes
+            .filter { $0 == binding.tag }
+            .sink { [weak self] _ in self?.refreshBackground() }
+    }
+
+    /// Re-read the member calls' tasks. In place: the field's visibility changes, the row's height and
+    /// the transcript never do, and nothing is announced.
+    func refreshBackground() {
+        let task = backgroundBinding.flatMap {
+            $0.store.runningTask(tag: $0.tag, toolUseIds: backgroundToolUseIds)
+        }
+        guard task?.id != runningTaskId else { return }
+        runningTaskId = task?.id
+        background.isHidden = task == nil
+        setText(task == nil ? "" : "· \u{25F7}", on: background, color: Theme.fgMuted)
+        background.setAccessibilityLabel(task == nil ? nil : "background task running")
+        if task != nil { background.toolTip = "Open background task" } else { background.toolTip = nil }
+        updateBackgroundAccessibility()
+    }
+
+    /// Open the task the `◷` stands for.
+    @discardableResult
+    func openBackgroundTask() -> Bool {
+        guard let id = runningTaskId, let binding = backgroundBinding else { return false }
+        binding.open(id)
+        return true
+    }
+
+    private func isOnBackgroundField(_ event: NSEvent) -> Bool {
+        guard !background.isHidden else { return false }
+        return background.frame.contains(background.superview.map { $0.convert(event.locationInWindow, from: nil) } ?? .zero)
+    }
+
+    /// The menu items that open each known task of the member calls (any status): one item, or a submenu
+    /// of `<Kind>: <description>`. Nil when no member maps to a task. They target the binding, never the
+    /// responder chain (a split window has other panes' views in it).
+    func openInBackgroundActivityItem() -> NSMenuItem? {
+        backgroundBinding.flatMap {
+            BackgroundOpenMenu.item(tasks: $0.tasks(toolUseIds: backgroundToolUseIds), binding: $0)
+        }
+    }
+
+    private func updateBackgroundAccessibility() {
+        var actions = accessibilityCustomActions() ?? []
+        actions.removeAll { $0.name == "Open background task" }
+        if runningTaskId != nil {
+            actions.append(NSAccessibilityCustomAction(name: "Open background task") { [weak self] in
+                self?.openBackgroundTask() ?? false
+            })
+        }
+        setAccessibilityCustomActions(actions)
     }
 
     private func setUpActivityDot() {
@@ -732,7 +817,16 @@ class FoldRowView: NSView {
         approval.cell?.truncatesLastVisibleLine = true
         approval.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(rawValue: 260), for: .horizontal)
 
-        let stack = NSStackView(views: [triangleView, activityView, iconField, summary, badge, time, stopped, approval])
+        // The `◷` is a few points wide; it gives way after the summary, just below the approval status.
+        background.font = Self.font
+        background.textColor = Theme.fgMuted
+        background.lineBreakMode = .byClipping
+        background.maximumNumberOfLines = 1
+        background.usesSingleLineMode = true
+        background.setContentHuggingPriority(.required, for: .horizontal)
+        background.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(rawValue: 255), for: .horizontal)
+
+        let stack = NSStackView(views: [triangleView, activityView, iconField, summary, badge, time, stopped, approval, background])
         stack.orientation = .horizontal
         stack.alignment = .centerY
         stack.spacing = 5
@@ -794,9 +888,11 @@ class FoldRowView: NSView {
     override func mouseDown(with event: NSEvent) {
         mouseDownEvent = event
         forwardedDrag = false
+        pressedBackground = isOnBackgroundField(event)
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard !pressedBackground else { return }
         guard let down = mouseDownEvent, !forwardedDrag,
               distance(event.locationInWindow, down.locationInWindow) > Self.clickSlop
         else { return }
@@ -807,7 +903,12 @@ class FoldRowView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { mouseDownEvent = nil; forwardedDrag = false }
+        defer { mouseDownEvent = nil; forwardedDrag = false; pressedBackground = false }
+        if pressedBackground {
+            // A press that began on the `◷` opens the task only if it ends there; otherwise nothing.
+            if isOnBackgroundField(event) { openBackgroundTask() }
+            return
+        }
         guard let down = mouseDownEvent, !forwardedDrag,
               distance(event.locationInWindow, down.locationInWindow) <= Self.clickSlop
         else { return }
@@ -935,12 +1036,14 @@ final class ToolGroupRowView: FoldRowView {
 
     init(group: ToolGroup, isExpanded: Bool, payloadAvailable: Bool,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
-         now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil) {
+         now: @escaping () -> Date = Date.init, approvals: ApprovalStore? = nil,
+         backgroundTasks: BackgroundRowBinding? = nil) {
         self.group = group
         self.payloadAvailable = payloadAvailable
         self.now = now
         super.init(reduceMotion: reduceMotion)
         attachApprovals(approvals)
+        attachBackgroundTasks(backgroundTasks)
         update(group: group)
         setExpanded(isExpanded, animated: false)
     }
@@ -949,7 +1052,7 @@ final class ToolGroupRowView: FoldRowView {
 
     /// `tool_use_id`s of subagent calls under this group's Agent/Task members (their requests belong to this row too).
     var subagentToolUseIds: [String] = [] {
-        didSet { if subagentToolUseIds != oldValue { refreshApproval() } }
+        didSet { if subagentToolUseIds != oldValue { refreshApproval(); refreshBackground() } }
     }
 
     override var approvalToolUseIds: [String] {
@@ -971,6 +1074,7 @@ final class ToolGroupRowView: FoldRowView {
         #endif
         self.group = group
         refreshApproval()
+        refreshBackground()
         let running = ToolGroupSummary.runningTitle(for: group)
         if let running {
             iconField.isHidden = true
@@ -1003,6 +1107,7 @@ final class ToolGroupRowView: FoldRowView {
         let menu = NSMenu()
         menu.addItem(withTitle: "Copy Commands", action: #selector(copyCommandsAction), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy Summary", action: #selector(copySummaryAction), keyEquivalent: "").target = self
+        if let open = openInBackgroundActivityItem() { menu.addItem(open) }
         TranscriptViewMenu.appendModeItems(to: menu)
         return menu
     }
@@ -1046,6 +1151,7 @@ final class AgentActivityView: NSView {
     /// Its blocks by block index (see `ToolGroupView.blocks`).
     private var blocks: [Int: TurnBlock]
     private let contentAvailable: Bool
+    private let backgroundTasks: BackgroundRowBinding?
     private var folds: FoldResolver
     /// The built result rows by block index, so a fold changed elsewhere reaches them.
     private var resultViews: [Int: ToolResultView] = [:]
@@ -1055,7 +1161,8 @@ final class AgentActivityView: NSView {
     private var contentBuilt = false
 
     init(blockIndices: [Int], blocks: [Int: TurnBlock], contentAvailable: Bool,
-         folds: FoldResolver, startExpanded: Bool) {
+         folds: FoldResolver, startExpanded: Bool, backgroundTasks: BackgroundRowBinding? = nil) {
+        self.backgroundTasks = backgroundTasks
         self.blockIndices = blockIndices
         self.blocks = blocks
         self.contentAvailable = contentAvailable
@@ -1153,7 +1260,7 @@ final class AgentActivityView: NSView {
         guard let block = blocks[index] else { return }
         switch block {
         case .toolCall(let d):
-            view = ToolCallView(data: d)
+            view = ToolCallView(data: d, backgroundTasks: backgroundTasks)
         case .toolResult(let d):
             let result = ToolResultView(data: d, contentAvailable: contentAvailable,
                                         explicitState: folds.explicitResult(block: block, index: index))
@@ -1333,5 +1440,77 @@ final class ToolActivityAnnouncer {
                 .priority: NSAccessibilityPriorityLevel.medium.rawValue,
             ])
         }
+    }
+}
+
+// MARK: - BackgroundOpenMenu
+
+/// "Open in Background Activity" for a row or call whose call started a background task (BA6c).
+/// Opening a task window is a view action that changes nothing in the world, so it is not
+/// gesture-gated (as in the popover's Open).
+enum BackgroundOpenMenu {
+
+    static let title = "Open in Background Activity"
+    static let titleLimit = 60
+
+    /// Holds a task id and what opening does. The item targets it explicitly, never the responder chain
+    /// (a split window has other panes' views in it); `representedObject` keeps it alive, as a menu
+    /// item's target is weak.
+    final class Target: NSObject {
+        let taskId: String
+        private let open: (String) -> Void
+
+        init(taskId: String, open: @escaping (String) -> Void) {
+            self.taskId = taskId
+            self.open = open
+        }
+
+        @objc func fire(_ sender: Any?) { open(taskId) }
+    }
+
+    /// One item for one task, a submenu (one item per task) for several, nil for none.
+    static func item(tasks: [TaskMetaWire], binding: BackgroundRowBinding) -> NSMenuItem? {
+        switch tasks.count {
+        case 0:
+            return nil
+        case 1:
+            return leaf(title: title, task: tasks[0], binding: binding)
+        default:
+            let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            let submenu = NSMenu(title: title)
+            for task in tasks {
+                submenu.addItem(leaf(title: itemTitle(for: task), task: task, binding: binding))
+            }
+            parent.submenu = submenu
+            return parent
+        }
+    }
+
+    /// `<Kind>: <description>`: sanitized, one line, at most `titleLimit` characters.
+    static func itemTitle(for task: TaskMetaWire) -> String {
+        let text = "\(BackgroundTaskList.kindLabel(task.kind)): \(task.description)"
+        return clean(text)
+    }
+
+    /// Sanitized, one line, cut to `titleLimit` characters (and scalars: one grapheme can hold thousands).
+    static func clean(_ raw: String) -> String {
+        let text = FoldTextSanitizer.sanitizeInline(raw)
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+        guard text.count > titleLimit || text.unicodeScalars.count > titleLimit else { return text }
+        var cut = String(text.prefix(titleLimit - 1))
+        if cut.unicodeScalars.count > titleLimit - 1 {
+            cut = String(String.UnicodeScalarView(cut.unicodeScalars.prefix(titleLimit - 1)))
+        }
+        return cut + "\u{2026}"
+    }
+
+    private static func leaf(title: String, task: TaskMetaWire, binding: BackgroundRowBinding) -> NSMenuItem {
+        let target = Target(taskId: task.id, open: binding.open)
+        let item = NSMenuItem(title: title, action: #selector(Target.fire(_:)), keyEquivalent: "")
+        item.target = target
+        item.representedObject = target
+        item.toolTip = clean(task.description)
+        return item
     }
 }

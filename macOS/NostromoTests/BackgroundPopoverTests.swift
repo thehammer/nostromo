@@ -35,6 +35,24 @@ private final class BA3UIActionSpy: BackgroundTaskActions {
     func showInTranscript(_ row: BackgroundTaskRow, tag: String) { shown.append(row.id) }
 }
 
+/// Actions that can show only some rows in the transcript (BA6c: a pane holds some tasks' calls and not others').
+private final class BA6cRowActions: BackgroundTaskActions {
+    var showable: Set<String> = []
+    private(set) var shown: [String] = []
+    private(set) var shownTags: [String] = []
+    private(set) var asked: [String] = []
+
+    func canShowInTranscript(_ row: BackgroundTaskRow, tag: String) -> Bool {
+        asked.append(row.id)
+        return showable.contains(row.id)
+    }
+
+    func showInTranscript(_ row: BackgroundTaskRow, tag: String) {
+        shown.append(row.id)
+        shownTags.append(tag)
+    }
+}
+
 private final class BA3UIFocusView: NSView {
     override var acceptsFirstResponder: Bool { true }
 }
@@ -407,6 +425,52 @@ final class BackgroundPopoverTests: XCTestCase {
         XCTAssertEqual(spy.opened, ["child"])
         XCTAssertEqual(spy.stopped, ["child"])
         XCTAssertEqual(spy.shown, ["child"])
+    }
+
+    // BA6c: Show in Transcript is per row. A pane holds the call that started some tasks and not others
+    // (it may be far back, or from an earlier session), so the offer follows the row and is asked again each time.
+
+    func testShowInTranscriptIsOfferedOnlyForTheRowsTheActionsCanShow() throws {
+        loadFixture()
+        let actions = BA6cRowActions()
+        actions.showable = ["built", "child"]
+        let vc = makeController(actions: actions)
+
+        for id in ["agent", "child", "built", "explore", "dev"] {
+            let titles = vc.contextMenu(for: try rowView(vc, id).row).items.map(\.title)
+            XCTAssertEqual(titles.contains("Show in Transcript"), actions.showable.contains(id), "row \(id): \(titles)")
+            XCTAssertTrue(titles.contains("Copy Description"), "row \(id) keeps its other items")
+        }
+    }
+
+    func testChoosingShowInTranscriptRunsTheActionOnThatRowAndTagOnly() throws {
+        loadFixture()
+        let actions = BA6cRowActions()
+        actions.showable = ["built", "child"]
+        let vc = makeController(actions: actions)
+        let menu = vc.contextMenu(for: try rowView(vc, "built").row)
+        let index = try XCTUnwrap(menu.items.firstIndex { $0.title == "Show in Transcript" })
+
+        XCTAssertTrue(actions.shown.isEmpty, "building the menu shows nothing")
+        menu.performActionForItem(at: index)
+
+        XCTAssertEqual(actions.shown, ["built"])
+        XCTAssertEqual(actions.shownTags, [tag])
+    }
+
+    func testTheOfferIsAskedAgainEachTimeTheMenuIsBuilt() throws {
+        loadFixture()
+        let actions = BA6cRowActions()
+        let vc = makeController(actions: actions)
+        let row = try rowView(vc, "built").row
+        XCTAssertFalse(vc.contextMenu(for: row).items.map(\.title).contains("Show in Transcript"), "the pane holds nothing yet")
+
+        actions.showable = ["built"]
+        XCTAssertTrue(vc.contextMenu(for: row).items.map(\.title).contains("Show in Transcript"), "now it does")
+
+        actions.showable = []
+        XCTAssertFalse(vc.contextMenu(for: row).items.map(\.title).contains("Show in Transcript"), "and now it is gone again")
+        XCTAssertEqual(actions.asked.filter { $0 == "built" }.count, 3, "asked once per menu")
     }
 
     func testRightClickingARowShowsItsContextMenu() throws {

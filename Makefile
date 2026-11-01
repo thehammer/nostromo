@@ -191,10 +191,21 @@ mac:
 ## Same pipefail rationale as `mac`: this target reported success on a failing
 ## suite, which is the worst possible thing for a target whose entire job is to
 ## tell you whether the suite passed.
+## Per-test hang bound: a test that blocks longer than the allowance FAILS (and is
+## named in the log) instead of wedging the run until the job timeout. The slowest
+## legitimate tests take ~6 s, so 120 s is generous. The old filter's bare `failed`
+## matched test NAMES containing "failed" (a_failed_full_screen_entry...), which made
+## two innocent placement tests look like the hang site. The full log is kept in
+## macOS/build/mac-test-full.log so the last started test can always be named.
+MAC_TEST_ALLOWANCE     ?= 120
+MAC_TEST_MAX_ALLOWANCE ?= 300
 mac-test:
-	set -o pipefail; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
-	  -destination 'platform=macOS' -derivedDataPath build test \
-	  2>&1 | grep -E "error:|Executed [0-9]+ tests|failed|\*\* TEST|MEMORY-CAPTURE-COST"
+	set -o pipefail; mkdir -p macOS/build; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
+	  -destination 'platform=macOS' -derivedDataPath build \
+	  -test-timeouts-enabled YES -default-test-execution-time-allowance $(MAC_TEST_ALLOWANCE) \
+	  -maximum-test-execution-time-allowance $(MAC_TEST_MAX_ALLOWANCE) test \
+	  2>&1 | tee build/mac-test-full.log \
+	  | grep --line-buffered -E "error:|Executed [0-9]+ tests|Test Case .* failed|\*\* TEST|MEMORY-CAPTURE-COST|exceeded its execution time"
 
 ## Measure the bounded-transcript acceptance criteria against a Release build.
 ## Takes several minutes; drives synthetic traffic through the real code path.

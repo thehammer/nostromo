@@ -352,6 +352,7 @@ class ReplView: NSView {
         inputBar.bindModel(tag: session.tag, agentName: session.agentName, store: ModelStore.shared)
         inputBar.bindBackground(tag: session.tag, store: BackgroundTaskStore.shared, displayName: session.displayName)
         inputBar.bindSessionRules(tag: session.tag, store: ApprovalStore.shared)
+        inputBar.backgroundActions = PaneBackgroundActions(pane: self)
         inputBar.bindMode(tag: session.tag, store: foldSync.store,
                           harnessMode: foldsExpandedByDefault ? .allActivity : nil)
         inputBar.onSetMode = { [weak self] mode in self?.setTranscriptViewMode(mode) }
@@ -908,7 +909,8 @@ class ReplView: NSView {
         let turnKey = turn.identityKey
         let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable, interaction: state,
                                 folds: foldSync.resolver(turnKey: turnKey),
-                                heldOrdinals: state.heldOrdinals, approvals: ApprovalStore.shared)
+                                heldOrdinals: state.heldOrdinals, approvals: ApprovalStore.shared,
+                                backgroundTasks: BackgroundRowBinding(store: BackgroundTaskStore.shared, tag: session.tag))
         view.onSend = { [weak self] text in
             guard let self else { return }
             self.followTail.setPinned(true, cause: .send)
@@ -1650,5 +1652,121 @@ extension ReplView: TranscriptViewModeTarget, NSMenuItemValidation {
             return TranscriptViewMenu.validate(menuItem, target: self)
         }
         return true
+    }
+}
+
+// MARK: - Show in Transcript (BA6c)
+
+/// Which visible item stands for a tool call, without changing any fold.
+enum ToolCallLocator {
+
+    /// The newest block of `turn` that is the call `toolUseId`.
+    static func blockIndex(of toolUseId: String, in turn: ChatTurn) -> Int? {
+        turn.blocks.indices.last { index in
+            if case .toolCall(let call) = turn.blocks[index] { return call.toolUseId == toolUseId }
+            return false
+        }
+    }
+
+    /// The anchor key of what shows the call at block `index` as the folds stand: the activity row
+    /// when it is folded into a collapsed one, the group's row when its group is collapsed, else the
+    /// call's own block (`b<i>`). A subagent's call stands for the Agent/Task call it ran under.
+    static func itemKey(forBlock index: Int, in turn: ChatTurn, shape: FoldShape, folds: FoldResolver) -> String? {
+        var target = index
+        if case .toolCall(let call) = turn.blocks[index], let parent = call.parentToolUseId,
+           let parentIndex = blockIndex(of: parent, in: turn) {
+            target = parentIndex
+        }
+
+        func holds(_ items: [FoldShape.Item]) -> Bool {
+            items.contains { item in
+                switch item {
+                case .block(let i): return i == target
+                case .message: return false
+                case .group(let group): return group.members.contains(target)
+                case .activity(_, let members): return holds(members)
+                }
+            }
+        }
+
+        func resolve(_ items: [FoldShape.Item]) -> String? {
+            for item in items {
+                switch item {
+                case .block(let i):
+                    if i == target { return "b\(i)" }
+                case .message:
+                    continue
+                case .group(let group):
+                    if group.members.contains(target) {
+                        return folds.isExpanded(key: group.key, isStuck: group.isStuck) ? "b\(target)" : group.key
+                    }
+                case .activity(let key, let members):
+                    guard holds(members) else { continue }
+                    return folds.isActivityExpanded(key: key) ? resolve(members) : key
+                }
+            }
+            return nil
+        }
+        return resolve(shape.items)
+    }
+}
+
+extension ReplView {
+
+    /// Whether the pane's transcript holds a turn with the call `toolUseId` that shows somewhere.
+    func canRevealToolCall(toolUseId: String) -> Bool {
+        revealTarget(toolUseId: toolUseId) != nil
+    }
+
+    /// Scroll the transcript so the item that shows the call `toolUseId` is a third of the way down the
+    /// viewport (see `TranscriptViewportCoordinator.reveal`). Expands nothing. False, moving nothing,
+    /// if no retained turn holds the call. The only code path of Background Activity that moves the transcript.
+    @discardableResult
+    func revealToolCall(toolUseId: String) -> Bool {
+        guard let target = revealTarget(toolUseId: toolUseId) else { return false }
+        var y = documentY(of: target)
+        if y == nil {
+            // Not materialized: go to the turn, build it, then place the item.
+            viewport.reveal(documentY: virtualizer.offset(of: target.index) + scrollView.contentView.bounds.height / 3)
+            if contentWidth > 1 { materialize() }
+            y = documentY(of: target)
+        }
+        guard let y else { return true }
+        viewport.reveal(documentY: y)
+        return true
+    }
+
+    /// Show in Transcript, chosen in the Background activity popover: it closes, then the transcript moves.
+    func showToolCallFromBackgroundActivity(toolUseId: String) {
+        inputBar.closeBackgroundPopover()
+        revealToolCall(toolUseId: toolUseId)
+    }
+
+    /// This pane's focus tag (the task actions compare it with the popover's).
+    var focusTag: String { session.tag }
+
+    private struct RevealTarget {
+        let turnID: UUID
+        let index: Int
+        let itemKey: String
+    }
+
+    /// The newest retained turn holding the call, and the item that shows it.
+    private func revealTarget(toolUseId: String) -> RevealTarget? {
+        for turn in session.turns.reversed() where turn.marker == nil {
+            guard let block = ToolCallLocator.blockIndex(of: toolUseId, in: turn),
+                  let index = index(ofTurn: turn.id), let shape = virtualizer.foldShape(for: turn)
+            else { continue }
+            let folds = (turnViews[turn.id] as? ChatTurnView)?.currentFolds ?? foldSync.resolver(turnKey: turn.identityKey)
+            if let key = ToolCallLocator.itemKey(forBlock: block, in: turn, shape: shape, folds: folds) {
+                return RevealTarget(turnID: turn.id, index: index, itemKey: key)
+            }
+        }
+        return nil
+    }
+
+    private func documentY(of target: RevealTarget) -> CGFloat? {
+        guard let island = island(at: target.index), let offset = island.offset(ofItemKey: target.itemKey) else { return nil }
+        return virtualizer.offset(of: target.index) + offset
     }
 }
