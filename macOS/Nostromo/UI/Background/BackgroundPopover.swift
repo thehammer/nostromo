@@ -450,9 +450,9 @@ final class BackgroundPopoverViewController: NSViewController {
             schedule: { [weak self] delay, work in
                 if let self { self.stopSchedule(delay, work) }
             },
-            requestStop: { [weak self] in
+            requestStop: { [weak self] confirmation in
                 guard let self else { return }
-                self.store.requestStop(tag: self.tag, taskId: taskId)
+                self.store.requestStop(tag: self.tag, taskId: taskId, confirmation: confirmation)
             })
     }
 
