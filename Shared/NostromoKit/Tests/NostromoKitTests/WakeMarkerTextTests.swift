@@ -284,4 +284,106 @@ final class WakeMarkerTextTests: XCTestCase {
             XCTAssertLessThan(content.line.count, 80, "state \(state.debugDescription): a state is never long")
         }
     }
+
+    // MARK: - Background task wakes (BA6b)
+
+    private func wake(_ kind: String = "monitor", _ outcome: String = "new_output",
+                      _ description: String = "CI for PR #251", id: String? = "bmon01") -> TaskWakeItemWire {
+        TaskWakeItemWire(taskId: id, toolUseId: nil, kind: kind, outcome: outcome, description: description)
+    }
+
+    func testOneWakeIsStateFirstWithTheQuotedDescription() {
+        let content = WakeMarkerText.taskWake([wake()], omitted: 0)
+
+        XCTAssertEqual(content.line, "⟲ Monitor: new output \"CI for PR #251\"")
+        XCTAssertEqual(content.tooltipLines, ["Monitor: new output \"CI for PR #251\""])
+        XCTAssertEqual(content.accessibilityLabel, "Background Monitor: new output, CI for PR #251.")
+        XCTAssertEqual(content.target, .backgroundTask(id: "bmon01"))
+    }
+
+    func testEveryKindAndOutcomeHasItsWords() {
+        let cases: [(String, String, String)] = [
+            ("shell", "completed", "⟲ Shell: completed \"d\""), ("shell", "failed", "⟲ Shell: failed \"d\""),
+            ("shell", "stopped", "⟲ Shell: stopped \"d\""), ("monitor", "ended", "⟲ Monitor: ended \"d\""),
+            ("monitor", "new_output", "⟲ Monitor: new output \"d\""), ("agent", "completed", "⟲ Agent: finished \"d\""),
+            ("agent", "failed", "⟲ Agent: failed \"d\""), ("other", "event", "⟲ Background task: event \"d\""),
+            ("weird", "odd_thing", "⟲ Background task: odd thing \"d\""),
+        ]
+        for (kind, outcome, expected) in cases {
+            XCTAssertEqual(WakeMarkerText.taskWake([wake(kind, outcome, "d")], omitted: 0).line, expected, "\(kind)/\(outcome)")
+        }
+    }
+
+    func testNoDescriptionDropsTheQuotesAndAnOtherEventReadsBackgroundEvent() {
+        XCTAssertEqual(WakeMarkerText.taskWake([wake("shell", "failed", "")], omitted: 0).line, "⟲ Shell: failed")
+        XCTAssertEqual(WakeMarkerText.taskWake([wake("shell", "failed", "")], omitted: 0).accessibilityLabel,
+                       "Background Shell: failed.")
+        XCTAssertEqual(WakeMarkerText.taskWake([wake("other", "event", "", id: nil)], omitted: 0).line, "⟲ Background event")
+    }
+
+    func testAWakeWithoutATaskIdHasNoTarget() {
+        XCTAssertEqual(WakeMarkerText.taskWake([wake(id: nil)], omitted: 0).target, .none)
+    }
+
+    func testSeveralWakesAreOneCountedLineWithOneTooltipLineEach() {
+        let content = WakeMarkerText.taskWake([wake(id: "a"), wake("shell", "failed", "npm run build", id: "b"),
+                                               wake("agent", "completed", "Find callers", id: nil)], omitted: 0)
+
+        XCTAssertEqual(content.line, "⟲ 3 background events")
+        XCTAssertEqual(content.tooltipLines, ["Monitor: new output \"CI for PR #251\"", "Shell: failed \"npm run build\"",
+                                              "Agent: finished \"Find callers\""])
+        XCTAssertEqual(content.accessibilityLabel, "3 background events. " + content.tooltipLines.joined(separator: "; "))
+        XCTAssertEqual(content.target, .backgroundTasks(ids: ["a", "b"]))
+    }
+
+    func testTwentyOneWakesListTwentyThenCountTheRestAndOmittedCounts() {
+        let many = (0 ..< 21).map { wake("shell", "completed", "c\($0)", id: "t\($0)") }
+        let content = WakeMarkerText.taskWake(many, omitted: 4)
+
+        XCTAssertEqual(content.line, "⟲ 25 background events")
+        XCTAssertEqual(content.tooltipLines.count, 21)
+        XCTAssertEqual(content.tooltipLines.last, "…and 5 more")
+    }
+
+    func testOmittedMakesASingleItemACountedLine() {
+        XCTAssertEqual(WakeMarkerText.taskWake([wake()], omitted: 2).line, "⟲ 3 background events")
+    }
+
+    func testWakeDescriptionCapsAtEightyInTheLineAndOneHundredTwentyInTheTooltip() {
+        let content = WakeMarkerText.taskWake([wake(description: String(repeating: "x", count: 500))], omitted: 0)
+
+        XCTAssertEqual(quotedTitle(in: content.line)?.count, 80)
+        XCTAssertTrue(content.line.hasSuffix("…\""))
+        XCTAssertEqual(quotedTitle(in: content.tooltipLines[0])?.count, 120)
+    }
+
+    func testHostileWakeDescriptionsLeaveNothingForbiddenAndKeepTheAppsStructure() {
+        for (index, text) in hostileTitles.enumerated() {
+            let single = WakeMarkerText.taskWake([wake("shell", "failed", text)], omitted: 0)
+            assertClean(single, "single #\(index)")
+            assertClean(WakeMarkerText.taskWake([wake("shell", "failed", text), wake()], omitted: 0), "several #\(index)")
+            XCTAssertTrue(single.line.hasPrefix("⟲ Shell: failed") , "#\(index)")
+            XCTAssertFalse(single.line.contains("\n"), "#\(index)")
+            XCTAssertLessThanOrEqual(single.line.count, "⟲ Shell: failed \"\"".count + 80, "#\(index)")
+        }
+    }
+
+    func testADescriptionThatLooksLikeTheMarkersOwnMarksStaysInsideTheQuotes() {
+        for text in ["⟲ Shell: \"fake\" completed", "✓ done", "x\u{201D} : failed \u{201C}y", "⟲"] {
+            let content = WakeMarkerText.taskWake([wake("monitor", "new_output", text)], omitted: 0)
+
+            XCTAssertEqual(content.line.first, "⟲", text)
+            XCTAssertTrue(content.line.hasPrefix("⟲ Monitor: new output \""), text)
+            XCTAssertEqual(content.line.filter { $0 == "\"" }.count, 2, "\(text): only the app's own two quotes")
+            XCTAssertEqual(content.line.filter { $0 == "⟲" }.count, text.contains("⟲") ? 2 : 1,
+                           "\(text): the description's mark is plain text inside the quotes")
+            XCTAssertEqual(content.accessibilityLabel.filter { $0 == "\"" }.count, 0, "\(text): AX label has no quotes")
+        }
+    }
+
+    func testAHostileKindOrOutcomeIsPlainWords() {
+        let content = WakeMarkerText.taskWake([wake("⟲ \"x\"", "✓ failed \"", "d")], omitted: 0)
+
+        XCTAssertEqual(content.line, "⟲ Background task: failed \"d\"")
+    }
 }

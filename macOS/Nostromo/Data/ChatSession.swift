@@ -305,6 +305,9 @@ class ChatSession: ObservableObject {
         case .sessionTurnDelta(let t, let delta) where t == tag:
             apply(delta)
 
+        case .sessionTurnOrigin(let t, let turnId, let origin) where t == tag:
+            applyOrigin(origin, toDaemonTurn: turnId)
+
         case .sessionState(let t, let state) where t == tag:
             isRunning = (state == .midTurn || state == .awaitingPermission)
             switch state {
@@ -418,6 +421,18 @@ class ChatSession: ObservableObject {
     /// `t7` of a previous daemon lifetime, five hundred turns back.
     private func index(ofDaemonId turnId: String) -> Int? {
         turns.lastIndex { $0.daemonId == turnId && $0.epoch == currentEpoch }
+    }
+
+    /// A background wake merged another event into an open wake turn. Only a turn that already has a
+    /// `task_wake` origin takes it, and only a `task_wake` one: a frame can never turn a bubble into a
+    /// marker or change a terminal or Mother origin. Identity (text, timestamp) and blocks stay as
+    /// they are; the turn view is rebuilt so the marker reads the new count at the same fixed height.
+    private func applyOrigin(_ origin: TurnOriginWire, toDaemonTurn turnId: String) {
+        guard case .taskWake = origin,
+              let i = index(ofDaemonId: turnId),
+              turns[i].hasTaskWakeOrigin else { return }
+        turns[i].origin = origin
+        changes.send(.spliced(replacedFrom: i))
     }
 
     private func apply(_ delta: DaemonTurnDelta) {

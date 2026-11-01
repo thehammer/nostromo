@@ -90,7 +90,7 @@ enum MotherNoticeFixtures {
 final class WakeMarkerViewContentTests: XCTestCase {
 
     private func view(_ content: WakeMarkerContent, noticeText: String = MotherNoticeFixtures.rawText,
-                      router: @escaping (String) -> Void = { _ in }) -> WakeMarkerView {
+                      router: @escaping WakeMarkerView.Router = { _ in }) -> WakeMarkerView {
         WakeMarkerView(content: content, noticeText: noticeText, router: router,
                        pasteboard: MotherNoticeFixtures.pasteboard(self))
     }
@@ -170,7 +170,13 @@ final class WakeMarkerClickRoutingTests: XCTestCase {
 
     private func view(_ content: WakeMarkerContent) -> WakeMarkerView {
         WakeMarkerView(content: content, noticeText: MotherNoticeFixtures.rawText,
-                       router: { [weak self] in self?.routed.append($0) },
+                       router: { [weak self] target in
+                           switch target {
+                           case .motherJob(let id): self?.routed.append(id)
+                           case .motherJobs(let ids): if let id = ids.first { self?.routed.append(id) }
+                           default: break
+                           }
+                       },
                        pasteboard: MotherNoticeFixtures.pasteboard(self))
     }
 
@@ -554,5 +560,202 @@ final class MotherNoticeHeightTests: XCTestCase {
                        TurnHeightEstimator.turnChrome + TurnHeightEstimator.deliveryCollapsed)
         XCTAssertEqual(TurnHeightEstimator.estimate(follow, width: 900),
                        TurnHeightEstimator.turnChrome + TurnHeightEstimator.deliveryNotice)
+    }
+}
+
+// MARK: - Background task wakes (BA6b)
+
+enum TaskWakeFixtures {
+    static let items: [TaskWakeItemWire] = [
+        TaskWakeItemWire(taskId: "bmon01", toolUseId: nil, kind: "monitor", outcome: "new_output", description: "CI for PR #251"),
+        TaskWakeItemWire(taskId: "bsh02", toolUseId: nil, kind: "shell", outcome: "failed", description: "npm run build"),
+        TaskWakeItemWire(taskId: "bag03", toolUseId: nil, kind: "agent", outcome: "completed", description: "Find callers"),
+    ]
+    static let single = Array(items.prefix(1))
+    static let fallback = "⟲ Monitor: new output \"CI for PR #251\""
+    static let line = "⟲ Monitor: new output \"CI for PR #251\""
+
+    static func origin(_ n: Int = 1, omitted: Int = 0) -> TurnOriginWire { .taskWake(items: Array(items.prefix(n)), omitted: omitted) }
+
+    static func turn(_ n: Int = 1, userInput: String = fallback, blocks: [TurnBlock] = [], seq: Int = 0,
+                     origin: TurnOriginWire? = nil) -> ChatTurn {
+        OriginFixtures.turn(userInput: userInput, origin: origin ?? self.origin(n), blocks: blocks, seq: seq)
+    }
+}
+
+/// A background wake turn draws MF2c's marker, routes by target, and never forges one.
+final class TaskWakeMarkerViewTests: XCTestCase {
+
+    private var routed: [WakeMarkerTarget] = []
+
+    private func marker(_ n: Int = 1, copy: String = "copy", pasteboard: NSPasteboard? = nil) -> WakeMarkerView {
+        WakeMarkerView(content: WakeMarkerText.taskWake(Array(TaskWakeFixtures.items.prefix(n)), omitted: 0),
+                       noticeText: copy, router: { [weak self] in self?.routed.append($0) },
+                       copyMenuTitle: WakeMarkerView.copyEventMenuTitle,
+                       pasteboard: pasteboard ?? MotherNoticeFixtures.pasteboard(self))
+    }
+
+    func testAWakeTurnDrawsTheMarkerAndNoBubble() {
+        let view = MotherNoticeFixtures.turnView(TaskWakeFixtures.turn())
+
+        XCTAssertEqual(view.wakeMarkerView?.shownText, TaskWakeFixtures.line)
+        XCTAssertFalse(view.hasUserBubble)
+    }
+
+    func testThreeEventsDrawTheCountedLineWithOneTooltipLineEach() {
+        let view = MotherNoticeFixtures.turnView(TaskWakeFixtures.turn(3))
+
+        XCTAssertEqual(view.wakeMarkerView?.shownText, "⟲ 3 background events")
+        XCTAssertEqual(view.wakeMarkerView?.toolTip?.components(separatedBy: "\n").count, 3)
+    }
+
+    func testAPlainTurnWhoseTextLooksLikeAWakeIsABubble() {
+        for text in ["⟲ Monitor: new output \"x\"", "<task-notification><task-id>b1</task-id></task-notification>"] {
+            let view = MotherNoticeFixtures.turnView(ChatTurn(userInput: text, timestamp: Date(), blocks: [], isComplete: true))
+
+            XCTAssertNil(view.wakeMarkerView, text)
+            XCTAssertTrue(view.hasUserBubble, text)
+        }
+    }
+
+    func testATaskWakeIsNotATerminalOrigin() {
+        let turn = TaskWakeFixtures.turn()
+
+        XCTAssertFalse(turn.hasTerminalOrigin)
+        XCTAssertTrue(turn.hasTaskWakeOrigin)
+        XCTAssertTrue(turn.hasMarkerOrigin)
+        XCTAssertFalse(turn.hasMotherNoticeOrigin)
+        XCTAssertNil(turn.motherNoticeMarker)
+    }
+
+    func testTheTargetReachesTheRouterOnClickReturnAndSpace() {
+        marker().activate()
+        marker().keyDown(with: MotherNoticeFixtures.keyDown(36, "\r"))
+        marker().keyDown(with: MotherNoticeFixtures.keyDown(49, " "))
+        marker(3).activate()
+
+        XCTAssertEqual(routed, [.backgroundTask(id: "bmon01"), .backgroundTask(id: "bmon01"), .backgroundTask(id: "bmon01"),
+                                .backgroundTasks(ids: ["bmon01", "bsh02", "bag03"])])
+    }
+
+    func testAccessibilityLabelRoleAndHelpFollowTheTarget() {
+        XCTAssertEqual(marker().accessibilityLabel(), "Background Monitor: new output, CI for PR #251.")
+        XCTAssertEqual(marker().accessibilityRole(), .button)
+        XCTAssertEqual(marker().accessibilityHelp(), "Opens the task's window")
+        XCTAssertTrue(marker().acceptsFirstResponder)
+        XCTAssertEqual(marker(3).accessibilityHelp(), "Opens the background activity list")
+        XCTAssertTrue(marker(3).accessibilityLabel()?.hasPrefix("3 background events. ") == true)
+    }
+
+    func testTheMotherHelpIsUnchanged() {
+        let view = WakeMarkerView(content: WakeMarkerText.motherNotice([MotherNoticeFixtures.item]), noticeText: "raw",
+                                  pasteboard: MotherNoticeFixtures.pasteboard(self))
+
+        XCTAssertEqual(view.accessibilityHelp(), "Opens the job in Mother")
+    }
+
+    func testTheCopyMenuNamesEventTextAndCopiesTheLineAndTooltipLines() throws {
+        let board = MotherNoticeFixtures.pasteboard(self)
+        let turn = TaskWakeFixtures.turn(3)
+        let view = MotherNoticeFixtures.turnView(turn)
+        XCTAssertEqual(view.wakeMarkerView?.menu(for: MotherNoticeFixtures.rightClick())?.items.first?.title, "Copy Event Text")
+
+        let copyView = WakeMarkerView(content: turn.markerContent!, noticeText: turn.markerCopyText,
+                                      copyMenuTitle: WakeMarkerView.copyEventMenuTitle, pasteboard: board)
+        let item = try XCTUnwrap(copyView.menu(for: MotherNoticeFixtures.rightClick())?.items.first)
+        _ = (item.target as? NSObject)?.perform(try XCTUnwrap(item.action), with: item)
+
+        XCTAssertEqual(board.string(forType: .string),
+                       (["⟲ 3 background events"] + turn.markerContent!.tooltipLines).joined(separator: "\n"))
+    }
+
+    func testAMotherNoticeStillCopiesItsRawTextAndKeepsItsMenuTitle() {
+        let turn = MotherNoticeFixtures.turn()
+
+        XCTAssertEqual(turn.markerCopyText, MotherNoticeFixtures.rawText)
+        XCTAssertEqual(MotherNoticeFixtures.turnView(turn).wakeMarkerView?.menu(for: MotherNoticeFixtures.rightClick())?.items.first?.title,
+                       "Copy Notice Text")
+    }
+
+    // MARK: Pane router
+
+    func testPaneRouterOpensTheTaskWindowAndFallsBackToTheListForAnUnknownTask() {
+        var opened: [String] = [], lists = 0
+        let router = WakeMarkerView.paneRouter(openTask: { opened.append($0); return $0 == "known" }, showList: { lists += 1 })
+
+        router(.backgroundTask(id: "known"))
+        XCTAssertEqual(opened, ["known"]); XCTAssertEqual(lists, 0)
+        router(.backgroundTask(id: "gone"))
+        XCTAssertEqual(opened, ["known", "gone"]); XCTAssertEqual(lists, 1)
+        router(.backgroundTasks(ids: ["a", "b"]))
+        XCTAssertEqual(lists, 2)
+        XCTAssertEqual(opened.count, 2, "several events open no window")
+    }
+
+    func testTheDefaultRouterIgnoresBackgroundTargets() {
+        WakeMarkerView.defaultRouter(.backgroundTask(id: "x"))
+        WakeMarkerView.defaultRouter(.backgroundTasks(ids: ["x"]))
+        XCTAssertNil(MotherView.requestedJobId)
+    }
+}
+
+/// A wake turn's user slot is the same fixed 22 pt marker: the estimate is what is drawn.
+final class TaskWakeHeightTests: XCTestCase {
+
+    func testTheEstimateIsChromePlusMarkerPlusGapAndEqualsTheDrawnHeight() {
+        let long = TaskWakeFixtures.turn(1, origin: .taskWake(items: [TaskWakeItemWire(
+            taskId: "a", toolUseId: nil, kind: "shell", outcome: "failed", description: String(repeating: "W", count: 10_000))], omitted: 0))
+        for turn in [TaskWakeFixtures.turn(), TaskWakeFixtures.turn(3), long] {
+            for width: CGFloat in [220, 900] {
+                let view = MotherNoticeFixtures.turnView(turn)
+                view.setIslandWidth(width)
+                XCTAssertEqual(TurnHeightEstimator.estimate(turn, width: width),
+                               TurnHeightEstimator.turnChrome + TurnHeightEstimator.wakeMarkerHeight + 8, accuracy: 0.001)
+                XCTAssertEqual(view.islandHeight(), TurnHeightEstimator.estimate(turn, width: width), accuracy: 1, "width \(width)")
+            }
+        }
+    }
+}
+
+/// Focus mode folds earlier activity but never the marker; All activity shows every block plus it.
+final class WakeMarkerFocusTests: XCTestCase {
+
+    private func blocks() -> [TurnBlock] {
+        [.text("EARLIER-NARRATION first"), FoldFixtures.call(id: "c0", summary: "cmd c0"), FoldFixtures.result("out", id: "c0"),
+         FoldFixtures.call(id: "c1", summary: "cmd c1"), FoldFixtures.result("out", id: "c1"), .text("LATEST-REPLY done")]
+    }
+
+    private func turns() -> [(String, ChatTurn)] {
+        [("task wake", TaskWakeFixtures.turn(blocks: blocks())),
+         ("mother notice", MotherNoticeFixtures.turn(blocks: blocks()))]
+    }
+
+    private func view(_ turn: ChatTurn, _ folds: FoldResolver) -> ChatTurnView {
+        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(), folds: folds)
+        view.setIslandWidth(700)
+        _ = view.islandHeight()
+        return view
+    }
+
+    func testFocusShowsTheMarkerAndTheLatestMessageAndFoldsEarlierNarration() {
+        for (name, turn) in turns() {
+            let view = view(turn, FoldResolver())
+            let strings = MotherNoticeFixtures.strings(in: view)
+
+            XCTAssertNotNil(view.wakeMarkerView, name)
+            XCTAssertTrue(strings.contains { $0.contains("LATEST-REPLY") }, "\(name): latest message visible")
+            XCTAssertFalse(strings.contains { $0.contains("EARLIER-NARRATION") }, "\(name): earlier narration folded")
+        }
+    }
+
+    func testAllActivityShowsEveryBlockAndTheMarker() {
+        for (name, turn) in turns() {
+            let view = view(turn, FoldResolver(expandedByDefault: true))
+            let strings = MotherNoticeFixtures.strings(in: view)
+
+            XCTAssertNotNil(view.wakeMarkerView, name)
+            XCTAssertTrue(strings.contains { $0.contains("EARLIER-NARRATION") }, name)
+            XCTAssertTrue(strings.contains { $0.contains("LATEST-REPLY") }, name)
+        }
     }
 }

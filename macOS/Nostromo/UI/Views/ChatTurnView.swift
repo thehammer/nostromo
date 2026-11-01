@@ -390,7 +390,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     ///   - heldOrdinals: messages whose roll-in the pane is holding back (`decideRollIn`).
     init(turn: ChatTurn, contentAvailable: Bool, interaction: TurnInteractionState,
          folds: FoldResolver? = nil, heldOrdinals: Set<Int> = [], now: @escaping () -> Date = Date.init,
-         approvals: ApprovalStore? = nil, backgroundTasks: BackgroundRowBinding? = nil) {
+         approvals: ApprovalStore? = nil, backgroundTasks: BackgroundRowBinding? = nil,
+         markerRouter: WakeMarkerView.Router? = nil) {
         self.approvals        = approvals
         self.backgroundTasks  = backgroundTasks
         self.contentAvailable = contentAvailable
@@ -416,11 +417,14 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         // Unless it holds text the blocks do not show, or attachments: then an "also sent" bubble
         // keeps what the agent received visible.
         let bubbleText = turn.hasTerminalOrigin ? turn.terminalOriginBubbleText : turn.userInput
-        if let content = turn.motherNoticeMarker {
-            // A Mother job notice is one muted marker in the user slot, never the raw element and
-            // never a bubble. Its Copy Notice Text menu keeps the agent's text reachable. The confirm
-            // sentinel does not apply: this turn is not a confirm-card reply.
-            let marker = WakeMarkerView(content: content, noticeText: turn.userInput)
+        if let content = turn.markerContent {
+            // A Mother job notice or a background wake is one muted marker in the user slot, never the
+            // raw element and never a bubble. Its Copy menu keeps the agent's text reachable. The
+            // confirm sentinel does not apply: this turn is not a confirm-card reply.
+            let marker = WakeMarkerView(content: content, noticeText: turn.markerCopyText,
+                                        router: markerRouter ?? WakeMarkerView.defaultRouter,
+                                        copyMenuTitle: turn.hasTaskWakeOrigin ? WakeMarkerView.copyEventMenuTitle
+                                                                              : WakeMarkerView.copyMenuTitle)
             wakeMarker = marker
             bubbleWidthConstraint = attachIsland(marker, width: slotWidth())
         // The sentinel only ever marks a confirm-card reply, which has no terminal origin: on a

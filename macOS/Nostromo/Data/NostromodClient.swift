@@ -176,6 +176,8 @@ enum ServerMsg {
     case sessionSpawned(tag: String, sessionId: String?)
     case sessionTurns(tag: String, turns: [DaemonTurn])
     case sessionTurnDelta(tag: String, delta: DaemonTurnDelta)
+    /// A turn's origin changed in place (a background wake merged another event).
+    case sessionTurnOrigin(tag: String, turnId: String, origin: TurnOriginWire)
     case sessionState(tag: String, state: DaemonSessionState)
     /// The session's MCP bridge (the process carrying its `mcp__nostromo__*` tools to the daemon)
     /// connected to, or was lost from, the daemon. Absent from daemons that predate it.
@@ -1557,6 +1559,13 @@ class NostromodClient {
                 return .sessionTurns(tag: m.tag, turns: m.turns)
             }
 
+        case "session_turn_origin":
+            if let m = try? decoder.decode(SessionTurnOriginResp.self, from: raw) {
+                return .sessionTurnOrigin(tag: m.tag, turnId: m.turnId, origin: m.origin)
+            } else {
+                log.error("failed to decode session_turn_origin")
+            }
+
         case "session_turn_delta":
             if let m = try? decoder.decode(SessionTurnDeltaResp.self, from: raw) {
                 return .sessionTurnDelta(tag: m.tag, delta: m.delta)
@@ -2012,6 +2021,10 @@ private struct NotificationResp: Decodable {
 private struct SessionSpawnedResp: Decodable { let tag: String; let session_id: String? }
 private struct SessionTurnsResp:   Decodable { let tag: String; let turns: [DaemonTurn] }
 private struct SessionTurnDeltaResp: Decodable { let tag: String; let delta: DaemonTurnDelta }
+private struct SessionTurnOriginResp: Decodable {
+    let tag: String; let turnId: String; let origin: TurnOriginWire
+    enum CodingKeys: String, CodingKey { case tag, turnId = "turn_id", origin }
+}
 private struct SessionStateResp:   Decodable { let tag: String; let state: DaemonSessionState }
 private struct SessionBridgeResp:  Decodable { let tag: String; let connected: Bool }
 private struct SessionPermResp:    Decodable { let tag: String; let request_id: String; let tool: String }

@@ -607,3 +607,173 @@ final class MotherNoticeReattachTests: XCTestCase {
         XCTAssertEqual(session.turns[1].userInput, Self.raw(1), "the raw text is kept for Copy Notice Text")
     }
 }
+
+// MARK: - Background wake: scroll safety
+
+/// BA6b: a wake turn is a fixed 22 pt marker, so one arriving, merging or being clicked moves nothing
+/// (the gate is `SafetyRig`).
+final class TaskWakeScrollSafetyTests: XCTestCase {
+
+    private func wake(seq: Int, items: Int = 1) -> ChatTurn {
+        TaskWakeFixtures.turn(items, userInput: TaskWakeFixtures.fallback + "\n\(seq)", blocks: [.text("Both reported back.")], seq: seq)
+    }
+
+    func testAWakeArrivingWhileScrolledUpDoesNotMoveWhatIsOnScreen() {
+        let rig = SafetyRig.scrolledUp(self)
+
+        rig.assertNoMove("wake arrives", following: false) {
+            rig.appendTurn(wake(seq: 30))
+        }
+    }
+
+    func testAWakeArrivingWhileFollowingTheTailStaysAtTheBottom() {
+        let rig = SafetyRig.followingTail(self)
+        XCTAssertTrue(rig.followTail.isPinned)
+
+        rig.appendTurn(wake(seq: 31))
+        rig.settle()
+
+        XCTAssertTrue(rig.followTail.isPinned)
+        XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1)
+        XCTAssertEqual(rig.snapshot().bottomOffsetPt, 0, accuracy: 1)
+    }
+
+    func testAMergeOnTheNewestTurnMovesNothingAndKeepsTheComposer() {
+        let rig = SafetyRig.scrolledUp(self)
+        rig.appendTurn(wake(seq: 32))
+        rig.focusComposer()
+        rig.settle()
+        let last = rig.turns.count - 1
+
+        rig.assertNoMove("origin merged", following: false) {
+            rig.turns[last].origin = TaskWakeFixtures.origin(3)
+            let id = rig.turns[last].id
+            rig.materialized[id]?.removeFromSuperview()
+            rig.materialized.removeValue(forKey: id)
+            rig.virtualizer.refresh(rig.turns[last], at: last)
+            rig.runPass()
+        }
+    }
+
+    func testClickingAWakeMarkerDoesNotMoveTheTranscript() {
+        var turns = SafetyFixtures.transcript()
+        let turn = wake(seq: 33)
+        turns.insert(turn, at: 3)
+        let rig = SafetyRig(self, turns: turns)
+        rig.start()
+        rig.focusComposer()
+        rig.userScroll(to: rig.virtualizer.offset(of: 3))
+        rig.followTail.setPinned(false, cause: .harness)
+        rig.settle()
+        rig.userScroll(to: max(rig.clip.bounds.minY - 60, 0))
+        rig.settle()
+
+        guard let marker = rig.materialized[turn.id]?.wakeMarkerView else { return XCTFail("the wake marker is not on screen") }
+        rig.assertNoMove("wake marker clicked", following: false) {
+            marker.activate()
+            rig.runPass()
+        }
+    }
+}
+
+// MARK: - Background wake: session frame rules and reattach
+
+final class TaskWakeSessionTests: XCTestCase {
+
+    private func makeSession() -> (ChatSession, NostromodClient) {
+        let client = NostromodClient(socketPath: "/dev/null")
+        return (ChatSession(tag: "test", agentName: "cody", displayName: "Cody", workingDirectory: nil, client: client), client)
+    }
+
+    private func daemonTurn(_ n: Int, input: String? = nil, origin: TurnOriginWire? = nil) -> DaemonTurn {
+        DaemonTurn(id: "d\(n)", userInput: input ?? "message \(n)", timestamp: "2026-11-01T15:00:0\(n).000Z",
+                   blocks: [], isComplete: true, origin: origin)
+    }
+
+    private func load(_ turns: [DaemonTurn], into client: NostromodClient, session: ChatSession) {
+        client.messages.send(.sessionTurns(tag: "test", turns: turns))
+        _ = modelWaitUntil { session.turns.count == turns.count }
+        modelFlushMain()
+    }
+
+    private func frame(_ client: NostromodClient, id: String, _ origin: TurnOriginWire, tag: String = "test") {
+        client.messages.send(.sessionTurnOrigin(tag: tag, turnId: id, origin: origin))
+        modelFlushMain()
+    }
+
+    func testAFrameUpdatesAWakeTurnsMarkerAndKeepsItsIdentityAndText() {
+        let (session, client) = makeSession()
+        load([daemonTurn(0), daemonTurn(1, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(1))], into: client, session: session)
+        let before = session.turns[1]
+        var changes: [TurnChange] = []
+        let sub = session.changes.sink { changes.append($0) }
+
+        frame(client, id: "d1", TaskWakeFixtures.origin(3))
+
+        XCTAssertEqual(session.turns[1].origin, TaskWakeFixtures.origin(3))
+        XCTAssertEqual(session.turns[1].id, before.id)
+        XCTAssertEqual(session.turns[1].userInput, before.userInput)
+        XCTAssertEqual(session.turns[1].identityKey, before.identityKey)
+        XCTAssertEqual(session.turns[1].markerContent?.line, "⟲ 3 background events")
+        XCTAssertTrue(changes.contains { if case .spliced(let from) = $0 { return from == 1 } else { return false } })
+        sub.cancel()
+    }
+
+    func testAFrameNeverTurnsABubbleOrAnotherOriginIntoAWakeMarker() {
+        let (session, client) = makeSession()
+        let mother = MotherNoticeFixtures.singleOrigin
+        let terminal = OriginFixtures.combinedOrigin
+        load([daemonTurn(0), daemonTurn(1, origin: mother), daemonTurn(2, input: OriginFixtures.combinedText, origin: terminal)],
+             into: client, session: session)
+
+        for id in ["d0", "d1", "d2", "nope"] { frame(client, id: id, TaskWakeFixtures.origin(2)) }
+
+        XCTAssertNil(session.turns[0].origin)
+        XCTAssertEqual(session.turns[1].origin, mother)
+        XCTAssertEqual(session.turns[2].origin, terminal)
+    }
+
+    func testAFrameWithANonWakeOriginOrAnotherTagChangesNothing() {
+        let (session, client) = makeSession()
+        load([daemonTurn(0, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(1))], into: client, session: session)
+
+        frame(client, id: "d0", MotherNoticeFixtures.singleOrigin)
+        frame(client, id: "d0", TaskWakeFixtures.origin(3), tag: "other")
+
+        XCTAssertEqual(session.turns[0].origin, TaskWakeFixtures.origin(1))
+    }
+
+    func testAMergeMissedWhileDisconnectedShowsAfterReattachWithoutGapOrDuplicate() {
+        let (session, client) = makeSession()
+        load([daemonTurn(0), daemonTurn(1, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(1))], into: client, session: session)
+        let ids = session.turns.map(\.id)
+
+        client.messages.send(.sessionTurns(tag: "test", turns: [daemonTurn(0),
+            daemonTurn(1, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(2))]))
+        modelFlushMain()
+
+        XCTAssertEqual(session.turns.count, 2)
+        XCTAssertEqual(session.turns.filter { $0.isGapMarker }.count, 0)
+        XCTAssertEqual(session.turns.map(\.id), ids)
+        XCTAssertEqual(session.turns[1].markerContent?.line, "⟲ 2 background events")
+    }
+
+    func testReattachingWithWakeTurnsAddsNoGapMarkerAndNoDuplicate() {
+        func turns(epoch: Int) -> [ChatTurn] {
+            (0 ..< 10).map { i in
+                let wake = i % 4 == 3
+                return ChatTurn(userInput: wake ? "⟲ wake \(i)" : "message \(i)", timestamp: Date(timeIntervalSince1970: 1_770_000_000 + Double(i)),
+                                timestampRaw: String(format: "2026-11-01T15:00:00.%04dZ", i), blocks: [], isComplete: true,
+                                daemonId: "t\(i)", epoch: epoch, origin: wake ? TaskWakeFixtures.origin(1) : nil)
+            }
+        }
+        let retained = turns(epoch: 0)
+
+        let outcome = TurnReconciler.reconcile(retained: retained, snapshot: turns(epoch: 1), sessionIdChanged: false)
+
+        XCTAssertEqual(outcome.turns.count, 10)
+        XCTAssertFalse(outcome.insertedGapMarker)
+        XCTAssertEqual(outcome.turns.map(\.id), retained.map(\.id))
+        XCTAssertEqual(outcome.turns.filter(\.hasTaskWakeOrigin).count, 2)
+    }
+}

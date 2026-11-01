@@ -178,3 +178,80 @@ final class WakeMarkerAppearanceTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Background task wakes (BA6b)
+
+private final class WakeNotKeyWindow: NSWindow {
+    override var canBecomeKey: Bool { false }
+    override var isKeyWindow: Bool { false }
+}
+
+final class TaskWakeMarkerAppearanceTests: XCTestCase {
+
+    private static let hostileDescription = "\u{1B}[31mred\u{1B}[0m safe\u{202E}evil\u{2066}iso\u{2069} a\u{034F}b\u{115F}c\u{3164}d\u{2028}e "
+        + String(repeating: "W", count: 10_240)
+
+    private func content(_ description: String, n: Int = 1) -> WakeMarkerContent {
+        WakeMarkerText.taskWake(Array(repeating: TaskWakeItemWire(taskId: "b1", toolUseId: nil, kind: "shell", outcome: "failed",
+                                                                 description: description), count: n), omitted: 0)
+    }
+
+    private func laidOut(_ content: WakeMarkerContent, width: CGFloat) -> WakeMarkerView {
+        let view = WakeMarkerView(content: content, noticeText: "raw", router: { _ in }, pasteboard: MotherNoticeFixtures.pasteboard(self))
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.widthAnchor.constraint(equalToConstant: width).isActive = true
+        view.frame = NSRect(x: 0, y: 0, width: width, height: TurnHeightEstimator.wakeMarkerHeight)
+        view.layoutSubtreeIfNeeded()
+        return view
+    }
+
+    func testAHugeHostileDescriptionIsOneFixedHeightLineThatNeverWidensThePane() {
+        let tall = laidOut(content("short"), width: 220).fittingSize.height
+        for width: CGFloat in [220, 700] {
+            let view = laidOut(content(Self.hostileDescription), width: width)
+
+            XCTAssertEqual(view.arithmeticHeight(atWidth: width), TurnHeightEstimator.wakeMarkerHeight)
+            XCTAssertEqual(view.fittingSize.height, tall, accuracy: 0.5)
+            XCTAssertLessThanOrEqual(view.fittingSize.width, width + 0.5)
+            XCTAssertFalse(view.shownText.contains("\n"))
+            XCTAssertLessThan(view.shownText.count, 140)
+            XCTAssertTrue((view.toolTip ?? "").contains("…"), "the tooltip carries what the line cuts off, capped")
+            let label = MotherNoticeFixtures.descendants(of: view).compactMap { $0 as? NSTextField }.first
+            XCTAssertEqual(label?.lineBreakMode, .byTruncatingTail)
+            XCTAssertEqual(label?.maximumNumberOfLines, 1)
+        }
+    }
+
+    func testTheRealStateStaysVisibleAt220ForALongDescription() throws {
+        let view = laidOut(content(String(repeating: " padding", count: 30)), width: 220)
+        let label = try XCTUnwrap(MotherNoticeFixtures.descendants(of: view).compactMap { $0 as? NSTextField }.first)
+        let font = try XCTUnwrap(label.font)
+        let leading = String(label.stringValue.prefix(while: { $0 != "\"" }))
+
+        XCTAssertEqual(leading, "⟲ Shell: failed ")
+        XCTAssertLessThan((leading as NSString).size(withAttributes: [.font: font]).width, 220 - 16)
+    }
+
+    func testMutedTextMeasuresAtLeastFourPointFiveToOneInKeyAndNonKeyWindows() throws {
+        func luminance(_ color: NSColor) -> Double {
+            let c = color.usingColorSpace(.sRGB) ?? color
+            func lin(_ v: CGFloat) -> Double { let s = Double(v); return s <= 0.04045 ? s / 12.92 : pow((s + 0.055) / 1.055, 2.4) }
+            return 0.2126 * lin(c.redComponent) + 0.7152 * lin(c.greenComponent) + 0.0722 * lin(c.blueComponent)
+        }
+        for keyWindow in [true, false] {
+            let window: NSWindow = keyWindow
+                ? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 60), styleMask: [.titled], backing: .buffered, defer: true)
+                : WakeNotKeyWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 60), styleMask: [.titled], backing: .buffered, defer: true)
+            let view = laidOut(content("CI"), width: 300)
+            window.contentView?.addSubview(view)
+            let label = try XCTUnwrap(MotherNoticeFixtures.descendants(of: view).compactMap { $0 as? NSTextField }.first)
+            let text = try XCTUnwrap(label.textColor)
+            let (a, b) = (luminance(text), luminance(Theme.bg))
+            let ratio = (max(a, b) + 0.05) / (min(a, b) + 0.05)
+            print("[TaskWakeMarkerAppearance key=\(keyWindow)] fgMuted on transcript background \(String(format: "%.2f", ratio)):1")
+
+            XCTAssertGreaterThanOrEqual(ratio, 4.5, "key window: \(keyWindow)")
+            XCTAssertEqual(text, Theme.fgMuted)
+        }
+    }
+}

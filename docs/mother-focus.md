@@ -392,6 +392,9 @@ element:
 - one job: `⟲ Mother: succeeded "MF4: In-pane plan viewer" · PR #391`;
 - several: `⟲ 3 Mother updates`, the tooltip one line per job (at most 20, then `…and K more`).
 
+The same marker, view and router also draw a background task wake (`docs/background-wake.md`, "The Mac and
+Kit: the wake marker").
+
 State words: `succeeded`, `failed`, `cancelled`, `needs you`, `PR merged`, `PR opened`, `running`, `queued`.
 The text is built by Kit `WakeMarkerText` and drawn as plain text, so the only untrusted part, a title, is
 sanitised (`FoldTextSanitizer`), capped (80 characters in the line, 120 in a tooltip) and sits inside

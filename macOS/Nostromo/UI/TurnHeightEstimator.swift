@@ -104,7 +104,7 @@ enum TurnHeightEstimator {
         let blockWidth = paneWidth * blocksWidthFraction - 14
         var columns = 0
         let bubbleWidth = paneWidth * bubbleWidthFraction - 24
-        if turn.hasMotherNoticeOrigin {
+        if turn.hasMarkerOrigin {
             // A Mother job notice is one fixed-height marker in the user slot: the element's length
             // is never measured, because the marker never shows it.
             height += wakeMarkerHeight + userSlotGap

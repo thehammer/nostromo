@@ -34,6 +34,8 @@ public enum ServerMsg {
     case sessionTurns(tag: String, turns: [DaemonTurn])
     /// Incremental turn update.
     case sessionTurnDelta(tag: String, delta: DaemonTurnDelta)
+    /// A turn's origin changed in place (a background wake merged another event).
+    case sessionTurnOrigin(tag: String, turnId: String, origin: TurnOriginWire)
     /// A permission request surfaced on the stream.
     case sessionPermissionRequest(tag: String, requestId: String, tool: String)
     /// The session's child process exited.
@@ -355,8 +357,11 @@ public enum TurnOriginWire: Codable, Equatable {
     case terminalFollowNotice(items: [TerminalOriginItem])
     /// Mother jobs the focus queued that moved, as the daemon told the agent.
     case motherJobNotice(items: [MotherNoticeItemWire])
+    /// Background task events (a Monitor line, a finished shell or agent) that woke the agent;
+    /// `omitted` counts events the daemon dropped past its cap.
+    case taskWake(items: [TaskWakeItemWire], omitted: Int)
 
-    private enum K: String, CodingKey { case type, items }
+    private enum K: String, CodingKey { case type, items, omitted }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -375,6 +380,14 @@ public enum TurnOriginWire: Codable, Equatable {
                     debugDescription: "mother_job_notice without a readable item")
             }
             self = .motherJobNotice(items: items)
+        case "task_wake":
+            let items = try c.decode([LossyWakeItem].self, forKey: .items).compactMap(\.value)
+            guard !items.isEmpty else {
+                throw DecodingError.dataCorruptedError(forKey: .items, in: c,
+                    debugDescription: "task_wake without a readable item")
+            }
+            let omitted = (try? c.decodeIfPresent(Int.self, forKey: .omitted)) ?? 0
+            self = .taskWake(items: items, omitted: max(0, omitted))
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c,
                 debugDescription: "unknown TurnOrigin type: \(other)")
@@ -393,6 +406,10 @@ public enum TurnOriginWire: Codable, Equatable {
         case .motherJobNotice(let items):
             try c.encode("mother_job_notice", forKey: .type)
             try c.encode(items, forKey: .items)
+        case .taskWake(let items, let omitted):
+            try c.encode("task_wake", forKey: .type)
+            try c.encode(items, forKey: .items)
+            if omitted > 0 { try c.encode(omitted, forKey: .omitted) }
         }
     }
 
@@ -400,14 +417,31 @@ public enum TurnOriginWire: Codable, Equatable {
     public var items: [TerminalOriginItem] {
         switch self {
         case .terminalDelivery(let items), .terminalFollowNotice(let items): return items
-        case .motherJobNotice: return []
+        case .motherJobNotice, .taskWake: return []
         }
+    }
+
+    /// Events the daemon dropped past its cap; 0 for any other origin.
+    public var taskWakeOmitted: Int {
+        if case .taskWake(_, let omitted) = self { return omitted }
+        return 0
+    }
+
+    /// The events of a task wake; empty for any other origin.
+    public var taskWakeItems: [TaskWakeItemWire] {
+        if case .taskWake(let items, _) = self { return items }
+        return []
     }
 
     /// The jobs of a Mother job notice; empty for a terminal origin.
     public var motherNoticeItems: [MotherNoticeItemWire] {
         if case .motherJobNotice(let items) = self { return items }
         return []
+    }
+
+    private struct LossyWakeItem: Decodable {
+        let value: TaskWakeItemWire?
+        init(from decoder: Decoder) throws { value = try? TaskWakeItemWire(from: decoder) }
     }
 
     private struct LossyItem: Decodable {
@@ -722,6 +756,10 @@ extension ServerMsg {
     private struct SessionSummaryWrapper:    Decodable { let tag: String; let summary: String }
     private struct SessionTurnsWrapper:      Decodable { let tag: String; let turns: [DaemonTurn] }
     private struct SessionTurnDeltaWrapper:  Decodable { let tag: String; let delta: DaemonTurnDelta }
+    private struct SessionTurnOriginWrapper: Decodable {
+        let tag: String; let turnId: String; let origin: TurnOriginWire
+        enum CodingKeys: String, CodingKey { case tag, turnId = "turn_id", origin }
+    }
     private struct SessionPermWrapper:       Decodable { let tag: String; let request_id: String; let tool: String }
     private struct SessionExitedWrapper:     Decodable { let tag: String; let exit_code: Int? }
     private struct FocusListWrapper:         Decodable { let focuses: [FocusMeta] }
@@ -823,6 +861,11 @@ extension ServerMsg {
         case "session_turn_delta":
             if let m = try? dec.decode(SessionTurnDeltaWrapper.self, from: data) {
                 return .sessionTurnDelta(tag: m.tag, delta: m.delta)
+            }
+
+        case "session_turn_origin":
+            if let m = try? dec.decode(SessionTurnOriginWrapper.self, from: data) {
+                return .sessionTurnOrigin(tag: m.tag, turnId: m.turnId, origin: m.origin)
             }
 
         case "session_permission_request":
