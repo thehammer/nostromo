@@ -21,6 +21,10 @@ final class TaskWindowFitnessTests: XCTestCase {
         "Nostromo/UI/Background/TaskOutputView.swift",
         "Nostromo/UI/Background/SubagentTaskView.swift",
         "Nostromo/UI/Background/TaskWindowController.swift",
+        // BA6c: the store's lookups and binding, and the rows' `◷` (whole files; they already pass).
+        "Nostromo/Data/BackgroundTaskStore.swift",
+        "Nostromo/UI/Views/ToolGroupView.swift",
+        "Nostromo/UI/Views/ActivityRowView.swift",
     ]
     private static let stopButton = "Nostromo/UI/Background/TaskStopButton.swift"
     private static let controller = "Nostromo/UI/Background/TaskWindowController.swift"

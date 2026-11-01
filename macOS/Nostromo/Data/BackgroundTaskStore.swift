@@ -130,6 +130,25 @@ final class BackgroundTaskStore {
         states[tag]
     }
 
+    /// The task the call `toolUseId` started, in any status; the newest when several share the id.
+    func task(tag: String, toolUseId: String) -> TaskMetaWire? {
+        guard let all = states[tag]?.allTasks else { return nil }
+        var best: TaskMetaWire?
+        for task in all where task.toolUseId == toolUseId {
+            // `>=`: on a tie the later entry (the daemon's, over a local one) wins.
+            if best == nil || (task.startedAtMs ?? 0) >= (best?.startedAtMs ?? 0) { best = task }
+        }
+        return best
+    }
+
+    /// The first of `toolUseIds` whose task is not over (pending, running, paused).
+    func runningTask(tag: String, toolUseIds: [String]) -> TaskMetaWire? {
+        for id in toolUseIds {
+            if let task = task(tag: tag, toolUseId: id), !task.status.isTerminal { return task }
+        }
+        return nil
+    }
+
     /// The daemon has sent at least one snapshot for `tag` on some connection.
     func hasSnapshot(tag: String) -> Bool {
         states[tag]?.hasSnapshot == true
@@ -375,5 +394,27 @@ final class BackgroundTaskStore {
         guard seen.count > Self.seenCapacity else { return }
         let oldest = seen.sorted { $0.value.usedAt < $1.value.usedAt }.prefix(seen.count - Self.seenCapacity)
         for (tag, _) in oldest { seen.removeValue(forKey: tag) }
+    }
+}
+
+/// What a transcript row needs to show the `◷` for a background task and to open its window (BA6c):
+/// the store, the pane's focus tag and what opening a task does (by task id). Absent in views that
+/// are not a pane's transcript (a subagent window, the test rigs): no mark, no menu item.
+struct BackgroundRowBinding {
+    let store: BackgroundTaskStore
+    let tag: String
+    let open: (String) -> Void
+
+    init(store: BackgroundTaskStore = .shared, tag: String,
+         open: ((String) -> Void)? = nil) {
+        self.store = store
+        self.tag = tag
+        self.open = open ?? { [tag] taskId in TaskWindowManager.shared.open(tag: tag, taskId: taskId) }
+    }
+
+    /// The tasks started by `toolUseIds` (any status), one per call, in order, without repeats.
+    func tasks(toolUseIds: [String]) -> [TaskMetaWire] {
+        var seen = Set<String>()
+        return toolUseIds.compactMap { store.task(tag: tag, toolUseId: $0) }.filter { seen.insert($0.id).inserted }
     }
 }

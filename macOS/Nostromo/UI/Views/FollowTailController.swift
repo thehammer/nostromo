@@ -297,6 +297,18 @@ final class TranscriptViewportCoordinator {
         pendingViewportTop = clip.bounds.minY
     }
 
+    /// Show the item at `documentY` (a document coordinate): its top goes to one third of the
+    /// viewport height, clamped to the document. The operator asked for it, so it stops following
+    /// the tail exactly as a scroll would, and it is the one programmatic move of the transcript in
+    /// the background-activity feature (Show in Transcript). Expands nothing.
+    func reveal(documentY: CGFloat) {
+        // A stale pending position (a change captured before this) must not pull the view back.
+        pending = nil
+        followTail.setPinned(false, cause: .userScroll)
+        scroll(toTop: clamped(documentY - clip.bounds.height / 3))
+        followTail.requestPass()
+    }
+
     /// Forget a pending position: the transcript it named is gone (cleared).
     func discardPending() {
         pending = nil
