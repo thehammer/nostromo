@@ -111,6 +111,9 @@ final class SubagentTaskView: NSView, TaskWindowBody {
     private let resultHeadingLabel = SubagentTaskView.makeHeading(SubagentTaskView.resultHeading)
     private let resultLabel = SubagentTaskView.makeBody()
     private let turnId = UUID()
+    /// The operator's folds in this viewer, kept across rebuilds of the turn view. No `choices`: nothing
+    /// reaches the focus's shared `TranscriptFoldStore`.
+    private var folds = FoldResolver(expandedByDefault: true)
     private var content: TaskWindowContent?
     private var toolUseId: String?
     private var subscription: AnyCancellable?
@@ -268,13 +271,20 @@ final class SubagentTaskView: NSView, TaskWindowBody {
 
     private func rebuildTurnView(_ turn: ChatTurn) {
         dropTurnView()
-        // In-memory folds: the view's own resolver mirrors the toggles (no `choices`, so nothing reaches
-        // the focus's shared `TranscriptFoldStore`), and a toggle only re-lays the view out.
-        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(),
-                                folds: FoldResolver(expandedByDefault: true, turnKey: turn.identityKey))
-        view.onGroupToggle = { [weak self] _, _ in self?.relayout() }
-        view.onActivityToggle = { [weak self] _, _ in self?.relayout() }
-        view.onBlockExpansion = { [weak self] _, _ in self?.relayout() }
+        folds.turnKey = turn.identityKey
+        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(), folds: folds)
+        view.onGroupToggle = { [weak self] key, open in
+            self?.folds.groupStates[key] = open
+            self?.relayout()
+        }
+        view.onActivityToggle = { [weak self] key, open in
+            self?.folds.activityStates[key] = open
+            self?.relayout()
+        }
+        view.onBlockExpansion = { [weak self] block, open in
+            self?.folds.resultStates[block] = open
+            self?.relayout()
+        }
         view.onIntrinsicHeightChange = { [weak self] in self?.relayout() }
         document.addSubview(view)
         turnView = view
