@@ -687,10 +687,16 @@ fileprivate final class TSGestureRig {
 
 final class TaskStopRealGestureTests: XCTestCase {
 
+    private var clock: TSGestureClock!
+
     override func setUp() {
         super.setUp()
-        TSGestureSeams.install(on: self)
+        clock = TSGestureSeams.install(on: self)
+        clock.step = 0   // the handler clock moves only when a test advances it
     }
+
+    /// An event stamped `ago` seconds before now: fresh to `HumanGesture`.
+    private func uptime(ago: TimeInterval) -> TimeInterval { ProcessInfo.processInfo.systemUptime - ago }
 
     private func makeRig() -> TSGestureRig {
         let rig = TSGestureRig()
@@ -701,11 +707,13 @@ final class TaskStopRealGestureTests: XCTestCase {
 
     func testAFreshClickInTheButtonsOwnWindowIsAHumanGesture() {
         let rig = makeRig()
-        rig.event = GestureFixtures.mouse(.leftMouseUp, in: rig.window)
+        rig.event = GestureFixtures.mouse(.leftMouseUp, in: rig.window, timestamp: uptime(ago: 0.6))
 
         rig.button.clicked(nil)
         XCTAssertEqual(rig.title, "Stop?")
-        rig.event = GestureFixtures.mouse(.leftMouseUp, in: rig.window)   // a second, distinct click
+        clock.now += 0.5
+        // a second, distinct click, 0.5 s later on both clocks
+        rig.event = GestureFixtures.mouse(.leftMouseUp, in: rig.window, timestamp: uptime(ago: 0.1))
         rig.button.clicked(nil)
 
         XCTAssertEqual(rig.stops, 1)
@@ -719,14 +727,15 @@ final class TaskStopRealGestureTests: XCTestCase {
         rig.button.clicked(nil)
         XCTAssertEqual(rig.title, "Stop", "a stale event cannot start the two steps")
 
-        rig.event = GestureFixtures.mouse(.leftMouseUp, in: rig.window)
+        rig.event = GestureFixtures.mouse(.leftMouseUp, in: rig.window, timestamp: uptime(ago: 0.6))
         rig.button.clicked(nil)
+        clock.now += 0.5
         rig.event = stale
         rig.button.clicked(nil)
         XCTAssertEqual(rig.title, "Stop?", "nor finish them")
         XCTAssertEqual(rig.stops, 0)
 
-        rig.event = GestureFixtures.mouse(.leftMouseUp, in: rig.window)
+        rig.event = GestureFixtures.mouse(.leftMouseUp, in: rig.window, timestamp: uptime(ago: 0.1))
         rig.button.clicked(nil)
         XCTAssertEqual(rig.stops, 1)
     }
@@ -765,12 +774,33 @@ final class TaskStopRealGestureTests: XCTestCase {
 
     func testAKeyPressInTheButtonsWindowDrivesTheShortcut() {
         let rig = makeRig()
-        rig.event = GestureFixtures.key(in: rig.window, characters: ".", keyCode: 47)
+        rig.event = GestureFixtures.key(in: rig.window, characters: ".", keyCode: 47, timestamp: uptime(ago: 0.6))
         rig.button.shortcut()
-        rig.event = GestureFixtures.key(in: rig.window, characters: ".", keyCode: 47)   // a second, distinct press
+        clock.now += 0.5
+        // a second, distinct press, 0.5 s later on both clocks
+        rig.event = GestureFixtures.key(in: rig.window, characters: ".", keyCode: 47, timestamp: uptime(ago: 0.1))
         rig.button.shortcut()
 
         XCTAssertEqual(rig.stops, 1)
+    }
+
+    func testTwoFreshEventsNeedBothClocksToBeAtLeastPointThreeApart() {
+        let tooSoon = makeRig()
+        tooSoon.event = GestureFixtures.mouse(.leftMouseUp, in: tooSoon.window, timestamp: uptime(ago: 0.2))
+        tooSoon.button.clicked(nil)
+        clock.now += 0.1
+        tooSoon.event = GestureFixtures.mouse(.leftMouseUp, in: tooSoon.window, timestamp: uptime(ago: 0.1))
+        tooSoon.button.clicked(nil)
+        XCTAssertEqual(tooSoon.stops, 0, "0.1 s apart on both clocks is not a deliberate second click")
+        XCTAssertEqual(tooSoon.title, "Stop?")
+
+        let apart = makeRig()
+        apart.event = GestureFixtures.mouse(.leftMouseUp, in: apart.window, timestamp: uptime(ago: 0.5))
+        apart.button.clicked(nil)
+        clock.now += 0.4
+        apart.event = GestureFixtures.mouse(.leftMouseUp, in: apart.window, timestamp: uptime(ago: 0.1))
+        apart.button.clicked(nil)
+        XCTAssertEqual(apart.stops, 1, "0.4 s apart on both clocks confirms")
     }
 
     func testAMenuSelectionMayCarryTheMenusMouseEventButNotAStaleOrKeyEventOfAnotherWindow() {
