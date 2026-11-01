@@ -18,7 +18,7 @@ final class StagingHazardsTests: XCTestCase {
         let positives: [(command: String, names: [String])] = [
             ("rm -rf /tmp/x", ["rm -rf"]), ("rm -fr /tmp/x", ["rm -rf"]), ("rm -Rf /tmp/x", ["rm -rf"]),
             ("rm -r -f x", ["rm -rf"]), ("rm -f -r x", ["rm -rf"]),
-            ("rm --recursive --force x", ["rm -rf"]), ("rm -r --force x", ["rm -rf"]), ("sudo rm -rf x && ls", ["rm -rf"]),
+            ("rm --recursive --force x", ["rm -rf", "--force"]), ("rm -r --force x", ["rm -rf", "--force"]), ("sudo rm -rf x && ls", ["rm -rf"]),
             ("ls; rm -rf x", ["rm -rf"]),
             ("DROP TABLE users", ["DROP"]), ("drop table users", ["DROP"]), ("psql -c 'drop database x'", ["DROP"]),
             ("TRUNCATE TABLE users", ["TRUNCATE"]), ("truncate users", ["TRUNCATE"]),

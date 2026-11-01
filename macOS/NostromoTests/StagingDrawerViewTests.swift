@@ -118,7 +118,7 @@ final class StagingDrawerHost {
     }
 
     func label(of row: StagingRowView, text: String) -> NSTextField? {
-        row.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == text }
+        row.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == text || $0.stringValue.components(separatedBy: "\n").contains(text) }
     }
 
     func showAll(of row: StagingRowView) -> StagingClickableLabel? {
@@ -621,9 +621,9 @@ final class StagingDrawerViewTests: XCTestCase {
         let mirrorMenu = try XCTUnwrap(try XCTUnwrap(mirror.rows.first).menu(for: event))
         let driverMenu = try XCTUnwrap(try XCTUnwrap(driver.rows.first).menu(for: event))
 
-        XCTAssertEqual(mirrorMenu.items.map { $0.title }, ["Copy", "Remove"])
-        XCTAssertEqual(mirrorMenu.items.map { $0.isEnabled }, [true, false], "Copy works anywhere, Remove only where the terminal is driven")
-        XCTAssertEqual(driverMenu.items.map { $0.isEnabled }, [true, true])
+        XCTAssertEqual(mirrorMenu.items.map { $0.title }, ["Copy", "Archive", "Remove"])
+        XCTAssertEqual(mirrorMenu.items.map { $0.isEnabled }, [true, false, false], "Copy works anywhere, Archive and Remove only where the terminal is driven")
+        XCTAssertEqual(driverMenu.items.map { $0.isEnabled }, [true, false, true], "Archive only for a row that was placed")
     }
 
     // MARK: - SB-8: the list goes away with its source

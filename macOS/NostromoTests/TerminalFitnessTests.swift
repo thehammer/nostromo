@@ -306,12 +306,20 @@ final class TerminalFitnessTests: XCTestCase {
     ///    `StagingInsertController`, proven by `StagingInsertControllerTests` and pinned below
     ///    (`testTheStagingMenuActionsGoThroughTheControllerWhichAsksTheGateFirst`); `focusStagedCommands` moves
     ///    keyboard focus only and inserts nothing.
+    ///  - S2's staging actions each delegate to a gated entry point (pinned in
+    ///    `testTheStagingS2ActionsEachReachAGatedEntryPoint`): `archiveStagedCommand`, `archivePlacedStaged`,
+    ///    `toggleAutoArchive`, `toggleStagingHere`, `stagingSwitchChosen` go through `StagingInsertController`;
+    ///    `hideStaged`, `showStagedCommandsChosen` and `stagedChipTapped` go through the drawer's
+    ///    `setUserHidden`, which asks the controller; `insertTapped` (the confirm sheet's Insert) asks the gate it
+    ///    was given, which is the real guard.
     /// Every other action, `connectTapped` included, must ask `TerminalInputGuard`.
     private let guardExemptActions: [String] = [
         "cancelTapped", "dismissTapped", "okTapped", "copyTapped", "submitTapped",
         "popupChanged", "projectChanged", "environmentChanged", "serviceChanged", "shellTypeChanged",
         "followBadgeTapped", "moveTapped",
         "focusStagedCommands", "copyStagedCommand", "removeStagedCommand", "clearAllStaged",
+        "archiveStagedCommand", "archivePlacedStaged", "toggleAutoArchive", "toggleStagingHere", "stagingSwitchChosen",
+        "hideStaged", "showStagedCommandsChosen", "stagedChipTapped", "insertTapped",
     ]
 
     func testEveryObjcActionInTheTerminalViewsAsksTheInputGuard() throws {
@@ -1075,6 +1083,35 @@ final class TerminalFitnessTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testTheStagingS2ActionsEachReachAGatedEntryPoint() throws {
+        func body(_ name: String, in file: String) throws -> String {
+            let source = try terminalViewSource(file)
+            let found = declarations(in: source.name, lines: source.lines) { source.lines[$0].contains("func \(name)(") }
+            XCTAssertEqual(found.count, 1, "\(file) should declare exactly one `\(name)`")
+            return try XCTUnwrap(found.first, "\(file): \(name)").body
+        }
+        XCTAssertTrue(try body("archiveStagedCommand", in: "StagingRowView.swift").contains("controller.archive("))
+        XCTAssertTrue(try body("archivePlacedStaged", in: "StagingDrawerView.swift").contains("controller.archivePlaced("))
+        XCTAssertTrue(try body("toggleAutoArchive", in: "StagingDrawerView.swift").contains("controller.setAutoArchive("))
+        XCTAssertTrue(try body("toggleStagingHere", in: "StagingDrawerView.swift").contains("controller.setStagingEnabledHere("))
+        XCTAssertTrue(try body("hideStaged", in: "StagingDrawerView.swift").contains("setUserHidden("))
+        XCTAssertTrue(try body("stagingSwitchChosen", in: "TerminalPaneHostView.swift").contains("toggleStagingFromMenu()"))
+        XCTAssertTrue(try body("showStagedCommandsChosen", in: "TerminalPaneHostView.swift").contains("setUserHidden("))
+        XCTAssertTrue(try body("stagedChipTapped", in: "TerminalPaneHostView.swift").contains("setUserHidden("))
+        XCTAssertTrue(try body("toggleStagingFromMenu", in: "TerminalPaneHostView.swift").contains("controller.setStagingEnabledHere("))
+        let drawer = try terminalViewSource("StagingDrawerView.swift")
+        let hide = declarations(in: drawer.name, lines: drawer.lines) { drawer.lines[$0].contains("func setUserHidden(") }
+        XCTAssertTrue(try XCTUnwrap(hide.first).body.contains("controller.allowsHideControl("), "closing and reopening ask the gate")
+        // The confirm sheet's Insert asks the gate it was given, and that gate defaults to the real guard.
+        let sheet = try terminalViewSource("StagingConfirmSheet.swift")
+        let insert = declarations(in: sheet.name, lines: sheet.lines) { sheet.lines[$0].contains("func insertTapped(") }
+        XCTAssertTrue(try XCTUnwrap(insert.first).body.contains("gate(NSApp.currentEvent, sender)"))
+        XCTAssertTrue(sheet.lines.joined(separator: "\n").contains("TerminalInputGuard.allowsControl(event: $0, control: $1)"))
+        // The global switch menu action asks the guard through the controller's static entry point.
+        let delegate = try Repo.read(Repo.app.appendingPathComponent("AppDelegate.swift"))
+        XCTAssertTrue(Repo.codeLines(delegate).joined(separator: "\n").contains("StagingInsertController.setGlobalStaging("))
     }
 
     func testTheStagingSwitchesAndArchiveControlsAreGatedAndTheAutoArchiveSwitchIsMemoryOnly() throws {

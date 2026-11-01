@@ -562,8 +562,9 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         stripButton.isHidden = expanded || !hasList
         let hasToken = hasList && !tokenLabel.stringValue.isEmpty
         tokenLabel.isHidden = !hasToken
-        for view in [chevron, leadLabel, countLabel, reasonLabel, scroll] as [NSView] { view.isHidden = !expanded || (view === reasonLabel && reasonLabel.stringValue.isEmpty) }
+        for view in [leadLabel, countLabel, reasonLabel, scroll] as [NSView] { view.isHidden = !expanded || (view === reasonLabel && reasonLabel.stringValue.isEmpty) }
         if !expanded {
+            chevron.isHidden = true
             menuButton.isHidden = true
             closeLabel.isHidden = true
             var stripX: CGFloat = 8

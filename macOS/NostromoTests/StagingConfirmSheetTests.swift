@@ -194,7 +194,8 @@ final class StagingConfirmSheetTests: XCTestCase {
         s.rig.click(s.row, in: s.window)
         let sheet = try sheet(s)
         XCTAssertEqual(sheet.insertButton.keyEquivalent, "")
-        XCTAssertEqual(sheet.cancelButton.keyEquivalent, "\r")
+        // Once shown, AppKit moves Cancel's Return into the window's default button cell.
+        XCTAssertTrue(sheet.window?.defaultButtonCell === sheet.cancelButton.cell, "Return is Cancel")
         XCTAssertEqual(sheet.escapeButton.keyEquivalent, "\u{1b}")
         for button in buttons(in: sheet.window!.contentView!) where button !== sheet.cancelButton {
             XCTAssertTrue(button.keyEquivalent.isEmpty || button.keyEquivalent == "\u{1b}", button.keyEquivalent.debugDescription)

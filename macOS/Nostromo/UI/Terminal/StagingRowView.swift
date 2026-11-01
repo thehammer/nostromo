@@ -89,13 +89,14 @@ final class StagingRowView: NSView {
     private let showAll = StagingClickableLabel()
     /// `inserted 2m ago · Archive`: only on a row that was placed, in the driver window.
     let archiveLabel = StagingClickableLabel()
+    private let separatorLabel = NSTextField(labelWithString: "\u{00B7}")
     /// A left click went down on this row (nil: none, or one that can never insert).
     private var pending: StagingSnapshot?
     private var cache: (width: CGFloat, layout: Layout)?
 
     private struct Layout {
         var height: CGFloat
-        var number, glyph, command, age, labels, state, note, showAll, archive: NSRect
+        var number, glyph, command, age, labels, state, note, showAll, archive, separator: NSRect
         var truncatedCommand: Bool
     }
 
@@ -131,6 +132,11 @@ final class StagingRowView: NSView {
         addSubview(showAll)
         archiveLabel.title = "Archive"
         archiveLabel.onClick = { [weak self] in self?.archiveFromLabel() }
+        separatorLabel.font = Theme.statusFont
+        separatorLabel.textColor = Theme.fgMuted
+        separatorLabel.isSelectable = false
+        separatorLabel.setAccessibilityElement(false)
+        addSubview(separatorLabel)
         addSubview(archiveLabel)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
@@ -163,8 +169,7 @@ final class StagingRowView: NSView {
         self.model = model
         ageLabel.stringValue = model.age
         ageLabel.textColor = model.ageIsStale ? Theme.amber : Theme.fgMuted
-        let shown = stateLine.map { $0 + (showsArchiveInline ? " \u{00B7}" : "") }
-        if let line = shown, stateLabel.stringValue != line {
+        if let line = stateLine, stateLabel.stringValue != line {
             stateLabel.stringValue = line
             cache = nil
             if let heightBefore, heightBefore != layoutInfo(width: bounds.width).height {
@@ -194,7 +199,7 @@ final class StagingRowView: NSView {
         labelsLabel.stringValue = model.labels.joined(separator: "\n")
         labelsLabel.textColor = Theme.amber
         labelsLabel.isHidden = model.labels.isEmpty
-        stateLabel.stringValue = (stateLine ?? "") + (showsArchiveInline ? " \u{00B7}" : "")
+        stateLabel.stringValue = stateLine ?? ""
         stateLabel.textColor = Theme.fgMuted
         stateLabel.isHidden = stateLine == nil
         noteLabel.stringValue = model.noteText ?? ""
@@ -264,6 +269,8 @@ final class StagingRowView: NSView {
         showAll.isHidden = !info.truncatedCommand
         archiveLabel.frame = info.archive
         archiveLabel.isHidden = info.archive.isEmpty
+        separatorLabel.frame = info.separator
+        separatorLabel.isHidden = info.archive.isEmpty
     }
 
     private func layoutInfo(width: CGFloat) -> Layout {
@@ -303,9 +310,13 @@ final class StagingRowView: NSView {
         let stateRect = secondary(stateLabel, lines: 2)
         let noteRect = secondary(noteLabel, lines: Self.noteLines)
         var archiveRect = NSRect.zero
+        var separatorRect = NSRect.zero
         if showsArchiveInline, !stateRect.isEmpty {
-            let used = ceil(stateLabel.attributedStringValue.size().width) + 10
-            if used + 48 <= textWidth { archiveRect = NSRect(x: textX + used, y: stateRect.minY, width: 48, height: stateRect.height) }
+            let used = ceil(stateLabel.attributedStringValue.size().width) + 14
+            if used + 48 <= textWidth {
+                archiveRect = NSRect(x: textX + used, y: stateRect.minY, width: 48, height: stateRect.height)
+                separatorRect = NSRect(x: textX + used - 10, y: stateRect.minY, width: 10, height: stateRect.height)
+            }
         }
         let height = y + Self.verticalPadding
         let info = Layout(
@@ -314,7 +325,7 @@ final class StagingRowView: NSView {
             glyph: NSRect(x: pad + Self.numberWidth, y: Self.verticalPadding, width: Self.glyphWidth, height: lineHeight),
             command: commandRect,
             age: NSRect(x: width - pad - Self.ageWidth, y: Self.verticalPadding, width: Self.ageWidth, height: lineHeight),
-            labels: labelsRect, state: stateRect, note: noteRect, showAll: showAllRect, archive: archiveRect,
+            labels: labelsRect, state: stateRect, note: noteRect, showAll: showAllRect, archive: archiveRect, separator: separatorRect,
             truncatedCommand: collapses && fullLines > Self.collapsedLines)
         cache = (width, info)
         return info

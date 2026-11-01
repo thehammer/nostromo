@@ -350,7 +350,7 @@ final class StagingDrawerModelTests: XCTestCase {
             XCTAssertTrue(StagingDrawerModel.isPlaceholderCommand(command), command)
             XCTAssertEqual(r.labels, [StagingDrawerModel.placeholderLabel], command)
         }
-        XCTAssertEqual(StagingDrawerModel.placeholderLabel, "Contains <\u{2026}>: edit it before pressing Enter")
+        XCTAssertEqual(StagingDrawerModel.placeholderLabel, "Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects)")
     }
 
     func testOrdinaryAngleBracketsAreNotPlaceholders() {
@@ -382,7 +382,7 @@ final class StagingDrawerModelTests: XCTestCase {
 
     func testTheAccessibilityLabelPutsThePlaceholderWarningAfterTheCommand() {
         XCTAssertEqual(row(entry("scp <file> host")).accessibilityLabel,
-                       "Staged command 1 of 1, scp <file> host, Contains <\u{2026}>: edit it before pressing Enter, ready to place at the prompt")
+                       "Staged command 1 of 1, scp <file> host, Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects), ready to place at the prompt")
     }
 
     func testTheAccessibilityLabelSaysWhyARowIsUnavailable() {

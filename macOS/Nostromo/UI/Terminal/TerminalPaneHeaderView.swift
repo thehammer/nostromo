@@ -135,7 +135,7 @@ final class TerminalPaneHeaderView: NSView {
             stagedChip.setAccessibilityLabel("\(count) staged commands, hidden. Show staged commands")
             stagedChip.toolTip = "Show the staged commands"
         }
-        stagedChip.isHidden = count == nil
+        if count == nil { setChipHidden(true) }
         if pulse, count != nil {
             chipPulseCount += 1
             if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let layer = stagedChip.layer {
@@ -153,13 +153,18 @@ final class TerminalPaneHeaderView: NSView {
     /// Whether the chip is on screen (it hides when there is no room that does not belong to the token).
     var isChipShown: Bool { !stagedChip.isHidden }
 
+    private func setChipHidden(_ hidden: Bool) {
+        if stagedChip.isHidden != hidden { stagedChip.isHidden = hidden }
+    }
+
     private var chipWidth: CGFloat {
         ceil(stagedChip.attributedTitle.size().width) + 14
     }
 
     override func layout() {
         super.layout()
-        stagedChip.isHidden = chipCount == nil
+        // Decided here and assigned once at the end: flipping `isHidden` inside `layout` would ask for another pass.
+        var chipShown = chipCount != nil
         let h = bounds.height
         closeButton.frame = NSRect(x: bounds.width - Self.closeWidth - 2, y: 0, width: Self.closeWidth, height: h)
         let labelSize = titleLabel.intrinsicContentSize
@@ -173,15 +178,16 @@ final class TerminalPaneHeaderView: NSView {
             // The hint keeps its width unless the pane is very narrow; the title gives way to it.
             var start: CGFloat = 10
             var available = contentEnd - 10
-            if !stagedChip.isHidden {
+            if chipShown {
                 if available >= chipWidth + Self.gap + 40 {
                     stagedChip.frame = NSRect(x: start, y: (h - Self.badgeMaxHeight) / 2 + 1, width: chipWidth, height: min(h, Self.badgeMaxHeight))
                     start += chipWidth + Self.gap
                     available -= chipWidth + Self.gap
                 } else {
-                    stagedChip.isHidden = true
+                    chipShown = false
                 }
             }
+            setChipHidden(!chipShown)
             let hintW = mirrorHint.isHidden ? 0 : min(mirrorHint.intrinsicContentSize.width, available * 0.6)
             let gap = mirrorHint.isHidden ? 0 : Self.gap
             mirrorHint.frame = NSRect(x: start + available - hintW, y: (h - labelSize.height) / 2, width: hintW, height: labelSize.height)
@@ -195,15 +201,16 @@ final class TerminalPaneHeaderView: NSView {
         var restStart = 10 + envSize.width + Self.gap
         var rest = max(0, contentEnd - restStart)
         // The chip only takes room the token does not need, and only while some is left for the title too.
-        if !stagedChip.isHidden {
+        if chipShown {
             if rest >= chipWidth + Self.gap + 24 {
                 stagedChip.frame = NSRect(x: restStart, y: (h - Self.badgeMaxHeight) / 2 + 1, width: chipWidth, height: min(h, Self.badgeMaxHeight))
                 restStart += chipWidth + Self.gap
                 rest -= chipWidth + Self.gap
             } else {
-                stagedChip.isHidden = true
+                chipShown = false
             }
         }
+        setChipHidden(!chipShown)
         var hintW: CGFloat = 0
         if !mirrorHint.isHidden {
             hintW = min(mirrorHint.intrinsicContentSize.width, max(0, rest - labelSize.width - Self.gap))
