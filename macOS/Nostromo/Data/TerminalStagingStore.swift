@@ -77,6 +77,9 @@ final class TerminalStagingStore {
     private var archived: [String: [ArchivedStagedEntry]] = [:]
     private var pendingAuto: [String: [PendingAutoArchive]] = [:]
     private var lastJustChanged: [String: TimeInterval] = [:]
+    /// Counts the restarts of a terminal's reading delay (a drawer move, a foreground change): a click that
+    /// began under an older count must not insert, however long ago the delay ran out.
+    private var readingGeneration: [String: Int] = [:]
     private var observers: [ObjectIdentifier: Observer] = [:]
 
     private struct Fingerprint: Equatable {
@@ -145,6 +148,12 @@ final class TerminalStagingStore {
     /// The terminal's archived entries, newest last.
     func archivedEntries(for terminalId: String) -> [ArchivedStagedEntry] {
         globalEnabled ? (archived[terminalId] ?? []) : []
+    }
+
+    /// How many times the reading delay of `terminalId` was restarted by a move of the drawer. A snapshot
+    /// remembers it; an insert whose snapshot is older than this is refused.
+    func readingGeneration(for terminalId: String) -> Int {
+        readingGeneration[terminalId] ?? 0
     }
 
     /// Seconds on the store's clock at which the entry's current text was first received.
@@ -220,6 +229,7 @@ final class TerminalStagingStore {
         enabled.removeValue(forKey: terminalId)
         pendingAuto.removeValue(forKey: terminalId)
         lastJustChanged.removeValue(forKey: terminalId)
+        readingGeneration.removeValue(forKey: terminalId)
         let hadArchive = archived.removeValue(forKey: terminalId) != nil
         guard lists.removeValue(forKey: terminalId) != nil else {
             if hadArchive { notify(terminalId) }
@@ -322,11 +332,14 @@ final class TerminalStagingStore {
 
     /// The drawer moved under the pointer (or the pane's foreground changed): every row of `terminalId`
     /// must be read again for the reading delay.
-    func restartReadingDelay(terminalId: String) {
+    /// `notify: false` changes the state at once and leaves the observers to be told later (the drawer calls it
+    /// from inside its own layout).
+    func restartReadingDelay(terminalId: String, notify tell: Bool = true) {
         guard let current = shownSince[terminalId], !current.isEmpty else { return }
         let at = clock()
         shownSince[terminalId] = current.mapValues { ($0.fingerprint, at) }
-        notify(terminalId)
+        readingGeneration[terminalId, default: 0] += 1
+        if tell { notify(terminalId) }
     }
 
     // MARK: - Auto-archive (memory only)

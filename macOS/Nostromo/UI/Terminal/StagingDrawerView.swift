@@ -665,7 +665,9 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         guard let last = lastWindowRect else { return }
         guard abs(rect.minX - last.minX) > 0.5 || abs(rect.minY - last.minY) > 0.5 || abs(rect.width - last.width) > 0.5 else { return }
         guard let id = controller.terminalId else { return }
-        DispatchQueue.main.async { [weak self] in self?.staging.restartReadingDelay(terminalId: id) }
+        // At once (a click that began before the move must not insert), without telling observers from inside layout.
+        staging.restartReadingDelay(terminalId: id, notify: false)
+        DispatchQueue.main.async { [weak self] in self?.refresh() }
     }
 
     // MARK: - Timer (only while visible, in a window, with entries)

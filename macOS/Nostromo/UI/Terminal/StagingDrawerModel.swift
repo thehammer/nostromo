@@ -99,6 +99,8 @@ struct StagingSnapshot: Equatable {
     let reason: StagingDisabledReason?
     /// How the pane was treated when the click began.
     var safety: StagingPaneSafety = .local
+    /// The store's reading-delay generation when the click began (a drawer move since then refuses the insert).
+    var generation = 0
 }
 
 /// One row, ready to draw. Pure: no views, no SwiftTerm.

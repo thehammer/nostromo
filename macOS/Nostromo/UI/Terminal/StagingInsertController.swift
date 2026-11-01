@@ -113,9 +113,11 @@ final class StagingInsertController {
     func snapshot(entryId: String) -> StagingSnapshot? {
         guard let ctx = context(), let env = environment(),
               let entry = staging.entry(terminalId: ctx.terminalId, entryId: entryId) else { return nil }
-        return StagingDrawerModel.snapshot(terminalId: ctx.terminalId, entry: entry, env: env,
-                                           shownSince: staging.shownSince(terminalId: ctx.terminalId, entryId: entryId),
-                                           now: staging.now)
+        var snapshot = StagingDrawerModel.snapshot(terminalId: ctx.terminalId, entry: entry, env: env,
+                                                   shownSince: staging.shownSince(terminalId: ctx.terminalId, entryId: entryId),
+                                                   now: staging.now)
+        snapshot.generation = staging.readingGeneration(for: ctx.terminalId)
+        return snapshot
     }
 
     /// A click that can never insert (a right or control click, the second click of a double-click):
@@ -141,6 +143,12 @@ final class StagingInsertController {
               staging.entry(terminalId: ctx.terminalId, entryId: snapshot.entryId) != nil,
               staging.isStagingOn(terminalId: ctx.terminalId),
               let env = environment() else { return .gone }
+        // The drawer moved (or the pane's foreground changed) since the click began: nothing is where it was.
+        // The confirm sheet's own Insert is exempt: the person has been reading the sheet, not the row.
+        if !confirmed && snapshot.generation != staging.readingGeneration(for: ctx.terminalId) {
+            staging.reportUIEvent(.justChanged, terminalId: ctx.terminalId)
+            return .refused(.justChanged)
+        }
         if let reason = StagingDrawerModel.sharedReason(env) { return .refused(reason) }
         let production = snapshot.safety.isProduction || env.safety.isProduction
         if production && StagingHazards.usesHistoryExpansion(snapshot.command) { return .refused(.historyExpansion) }

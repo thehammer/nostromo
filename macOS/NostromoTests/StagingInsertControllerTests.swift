@@ -1424,3 +1424,19 @@ extension StagingInsertControllerTests {
         XCTAssertNil(try XCTUnwrap(rig.controller.snapshot(entryId: "s-1")).reason)
     }
 }
+
+
+extension StagingInsertControllerTests {
+
+    func testADrawerMoveBetweenMouseDownAndMouseUpInsertsNothingEvenAfterTheDelayRanOut() {
+        let (rig, window, row) = readyRow()
+        rig.mouseDown(row, in: window)
+        rig.staging.restartReadingDelay(terminalId: StagingFixtures.terminalId)
+        rig.settle(5)
+        rig.mouseUp(row, in: window)
+
+        XCTAssertEqual(rig.rowResults, [.refused(.justChanged)])
+        XCTAssertTrue(rig.target.attempts.isEmpty)
+        XCTAssertTrue(rig.insertedFrames.isEmpty)
+    }
+}
