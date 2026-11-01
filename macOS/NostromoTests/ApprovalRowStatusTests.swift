@@ -38,9 +38,10 @@ enum ApprovalAP2bFixtures {
     }
 
     static func resolved(id: String, outcome: String, tag: String = "cody-1", byWindow: String? = "w-other",
-                         atMs: UInt64 = ApprovalAP2bFixtures.atMs) throws -> ApprovalResolvedFrame {
+                         atMs: UInt64 = ApprovalAP2bFixtures.atMs, toolUseId: String? = nil) throws -> ApprovalResolvedFrame {
         var json: [String: Any] = ["tag": tag, "request_id": id, "outcome": outcome, "at_ms": NSNumber(value: atMs)]
         if let byWindow = byWindow { json["by_window"] = byWindow }
+        if let toolUseId = toolUseId { json["tool_use_id"] = toolUseId }
         return try JSONDecoder().decode(ApprovalResolvedFrame.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
@@ -375,6 +376,30 @@ final class ApprovalStatusStoreTests: XCTestCase {
         XCTAssertEqual(store.statusCount(tag: "cody-1"), 500)
         XCTAssertEqual(store.statusCount(tag: "ada-1"), 3, "a busy focus does not evict another's")
         XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_ada0"]), .deniedByYou)
+    }
+
+    // MARK: Session rules (AP4)
+
+    func testACallASessionRuleAllowedNeverShownStillReadsAllowedBySessionRuleOnItsRow() throws {
+        let (store, _) = make()
+        let statuses = ApprovalTap(store.statusChanges)
+        // No request was ever sent for it: the daemon allowed it itself and says which call.
+        store.handle(.resolved(try ApprovalAP2bFixtures.resolved(id: "never-seen", outcome: "allowed_by_session_rule",
+                                                                 toolUseId: "toolu_rule")))
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_rule"]), .allowedBySessionRule)
+        XCTAssertEqual(store.rowStatus(toolUseIds: ["toolu_rule"])?.text(), "allowed by session rule")
+        XCTAssertEqual(statuses.values, ["toolu_rule"])
+    }
+
+    func testAnyOtherOutcomeForARequestTheAppNeverSawChangesNothing() throws {
+        let (store, _) = make()
+        for outcome in ["allowed_once", "allowed_for_session", "denied", "timed_out", "guard_blocked", "something_new"] {
+            store.handle(.resolved(try ApprovalAP2bFixtures.resolved(id: "never-seen", outcome: outcome, toolUseId: "toolu_x")))
+            XCTAssertNil(store.rowStatus(toolUseIds: ["toolu_x"]), outcome)
+        }
+        // And without a tool-use id there is nothing to mark.
+        store.handle(.resolved(try ApprovalAP2bFixtures.resolved(id: "never-seen", outcome: "allowed_by_session_rule")))
+        XCTAssertEqual(store.statusCount(tag: "cody-1"), 0)
     }
 
     // MARK: The guard (no card)
