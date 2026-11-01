@@ -15,7 +15,7 @@ use crate::{
     },
     ipc::{
         session_manager::StopReason,
-        stream_json::{SessionState, Turn, TurnDelta},
+        stream_json::{SessionState, Turn, TurnDelta, TurnOrigin},
     },
     mother::{MotherJob, MotherStatus},
 };
@@ -2283,6 +2283,17 @@ pub enum ServerMsg {
         delta: TurnDelta,
     },
 
+    /// A turn's origin changed without the turn changing otherwise: a second
+    /// `<task-notification>` merged into the open wake turn. The full new
+    /// origin (REPLACE). A top-level frame because a client that does not know
+    /// a `TurnDelta` kind fails the whole frame, while an unknown frame type is
+    /// ignored.
+    SessionTurnOrigin {
+        tag: String,
+        turn_id: String,
+        origin: TurnOrigin,
+    },
+
     /// Session lifecycle state changed.
     SessionState {
         tag: String,
@@ -2855,6 +2866,61 @@ mod tests {
     }
 
     #[test]
+    fn a_session_turn_origin_frame_has_the_pinned_wire_shape_and_decodes_back() {
+        let msg = ServerMsg::SessionTurnOrigin {
+            tag: "claudia-ABCD1234".into(),
+            turn_id: "t0".into(),
+            origin: TurnOrigin::TaskWake {
+                items: vec![crate::ipc::stream_json::TaskWakeItem {
+                    task_id: Some("b1".into()),
+                    tool_use_id: None,
+                    kind: "shell".into(),
+                    outcome: "failed".into(),
+                    description: "make".into(),
+                }],
+                omitted: 0,
+            },
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["type"], "session_turn_origin");
+        assert_eq!(v["tag"], "claudia-ABCD1234");
+        assert_eq!(v["turn_id"], "t0");
+        assert_eq!(v["origin"]["type"], "task_wake");
+        assert_eq!(v["origin"]["items"][0]["kind"], "shell");
+        assert!(
+            v["origin"].get("omitted").is_none(),
+            "omitted is absent when 0: {v}"
+        );
+
+        let ServerMsg::SessionTurnOrigin {
+            tag,
+            turn_id,
+            origin: TurnOrigin::TaskWake { items, omitted },
+        } = serde_json::from_value(v).unwrap()
+        else {
+            panic!("decodes back to the same frame");
+        };
+        assert_eq!(
+            (tag.as_str(), turn_id.as_str(), omitted),
+            ("claudia-ABCD1234", "t0", 0)
+        );
+        assert_eq!(items.len(), 1);
+
+        let more = serde_json::json!({
+            "type": "session_turn_origin", "tag": "x", "turn_id": "t1",
+            "origin": {"type": "task_wake", "items": [], "omitted": 7}
+        });
+        let ServerMsg::SessionTurnOrigin {
+            origin: TurnOrigin::TaskWake { omitted, .. },
+            ..
+        } = serde_json::from_value(more).unwrap()
+        else {
+            panic!("decodes");
+        };
+        assert_eq!(omitted, 7);
+    }
+
+    #[test]
     fn session_client_messages_round_trip() {
         round_trip_client(ClientMsg::SessionSpawn {
             tag: "fred".into(),
@@ -2921,6 +2987,20 @@ mod tests {
                     is_complete: false,
                     origin: None,
                 },
+            },
+        });
+        round_trip_server(ServerMsg::SessionTurnOrigin {
+            tag: "fred".into(),
+            turn_id: "t0".into(),
+            origin: TurnOrigin::TaskWake {
+                items: vec![crate::ipc::stream_json::TaskWakeItem {
+                    task_id: Some("b1".into()),
+                    tool_use_id: Some("toolu_1".into()),
+                    kind: "monitor".into(),
+                    outcome: "new_output".into(),
+                    description: "CI".into(),
+                }],
+                omitted: 2,
             },
         });
         round_trip_server(ServerMsg::SessionState {
