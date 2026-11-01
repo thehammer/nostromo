@@ -600,14 +600,22 @@ final class BackgroundScrollSafetyTests: XCTestCase {
     func testTheMonitorLeavesCommandPeriodToTheWindowWhenThePopoverDoesNotHoldTheKeyboard() throws {
         let gate = BA5StopGate(self)
         let p = pane(following: true, world: gate.world)
+        var interrupts = 0
+        p.bar.onInterrupt = { interrupts += 1 }
         gate.world.ingest(gate.world.running(1))
         p.bar.toggleBackgroundPopover(takeKeyboard: false)
         let popover = try XCTUnwrap(p.bar.backgroundPopover)
         XCTAssertFalse(popover.tookKeyboard, "precondition: the composer keeps the keyboard")
         let event = tsCommandPeriod()
 
-        XCTAssertTrue(popover.handleMonitoredKey(event) === event,
+        let passedOn = popover.handleMonitoredKey(event)
+        XCTAssertTrue(passedOn === event,
                       "with the composer holding the keyboard, ⌘. is the composer's (its interrupt), not a Stop")
+
+        // Positive control: what the monitor hands back does reach the main window's interrupt.
+        _ = p.rig.window.performKeyEquivalent(with: try XCTUnwrap(passedOn))
+        XCTAssertEqual(interrupts, 1, "the event the monitor leaves alone is the composer's interrupt")
+        XCTAssertEqual(gate.sender.stops.count, 0, "and no stop was sent")
         XCTAssertEqual(gate.sender.stops.count, 0)
     }
 

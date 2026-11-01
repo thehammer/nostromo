@@ -38,6 +38,13 @@ enum BackgroundGesture {
     }
 }
 
+/// Proof that a Stop went through both gesture steps (a permitted arm, then a permitted, distinct confirm).
+/// `BackgroundTaskStore.requestStop` takes one, and only `TaskStopButton` can make one: the initializer is
+/// `fileprivate` to this file, so a call from anywhere else does not compile.
+struct StopConfirmation {
+    fileprivate init() {}
+}
+
 /// What identifies the event that armed Stop, so the confirming one can be told apart from it.
 private struct GestureStamp {
     let timestamp: TimeInterval
@@ -111,18 +118,19 @@ final class TaskStopButton: NSButton {
     private let permit: BackgroundGesture.Permit
     private let menuPermit: BackgroundGesture.Permit
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
-    private let requestStop: () -> Void
+    private let requestStop: (StopConfirmation) -> Void
 
     /// - Parameters:
     ///   - permit: the human-gesture check, given this button; `menuPermit` the context menu's.
     ///   - schedule: runs the 3 s revert after a delay on the main thread (tests pass a manual one).
-    ///   - requestStop: sends the stop (the store's `requestStop`); runs only after a permitted second click.
+    ///   - requestStop: sends the stop (the store's `requestStop`, with the `StopConfirmation` it is handed);
+    ///     runs only after a permitted second click.
     init(permit: @escaping BackgroundGesture.Permit = BackgroundGesture.defaultPermit,
          menuPermit: @escaping BackgroundGesture.Permit = BackgroundGesture.defaultMenuPermit,
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          },
-         requestStop: @escaping () -> Void) {
+         requestStop: @escaping (StopConfirmation) -> Void) {
         self.permit = permit
         self.menuPermit = menuPermit
         self.schedule = schedule
@@ -159,9 +167,12 @@ final class TaskStopButton: NSButton {
     }
 
     /// The button was clicked (or activated by Space or Return): `Stop` → `Stop?`, `Stop?` → send.
+    /// The current event must also have been aimed at this button (see `isAimedAtThisButton`): a fresh
+    /// click on another part of the window does not count for a press that arrives without its own event.
     @objc func clicked(_ sender: Any?) {
-        guard BackgroundGesture.isHuman(permit(self)) else { return }
-        advance(by: BackgroundGesture.currentEvent())
+        let event = BackgroundGesture.currentEvent()
+        guard BackgroundGesture.isHuman(permit(self)), isAimedAtThisButton(event) else { return }
+        advance(by: event)
     }
 
     /// ⌘. (the caller checked the key; `event` is that key event): the same two steps, each behind its own permit.
@@ -184,6 +195,28 @@ final class TaskStopButton: NSButton {
 
     // MARK: Private
 
+    /// A mouse event must land inside the button; a key event must reach it as the first responder and be
+    /// Space or Return. No event (an Accessibility press with VoiceOver on) has nothing to aim, so the
+    /// gate's own rule for it stands.
+    private func isAimedAtThisButton(_ event: NSEvent?) -> Bool {
+        guard let event else { return true }
+        if event.isMouse {
+            return bounds.contains(convert(event.locationInWindow, from: nil))
+        }
+        guard event.type == .keyDown, window?.firstResponder === self else { return false }
+        return Self.activationKeyCodes.contains(event.keyCode)
+    }
+
+    /// Space, Return, keypad Enter.
+    private static let activationKeyCodes: Set<UInt16> = [49, 36, 76]
+
+    /// Seconds from the arming event to this one: event time when both exist (the handler can run late or
+    /// bunched, the events cannot), otherwise the injected clock.
+    private func secondsSinceArm(_ event: NSEvent?) -> TimeInterval {
+        if let event, let armedBy { return event.timestamp - armedBy.timestamp }
+        return BackgroundGesture.now() - armedAt
+    }
+
     private func advance(by event: NSEvent?) {
         guard isOffered else { return }
         if let event, event.continuesAGesture { return }
@@ -202,10 +235,10 @@ final class TaskStopButton: NSButton {
         case .confirm:
             // The same gesture as the arm is not a confirmation: nothing changes, the revert still runs.
             if let event, armedBy?.isSame(as: event) == true { return }
-            guard BackgroundGesture.now() - armedAt >= BackgroundGesture.minConfirmDelay else { return }
+            guard secondsSinceArm(event) >= BackgroundGesture.minConfirmDelay else { return }
             invalidate()
             phase = .stopping
-            requestStop()
+            requestStop(StopConfirmation())
         case .stopping:
             break
         }

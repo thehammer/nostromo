@@ -162,12 +162,13 @@ final class BackgroundTaskStore {
 
     // MARK: Stop
 
-    /// Ask the CLI to stop `taskId`. The store does **not** enforce the human-gesture gate: the caller
-    /// must already have passed it (`TaskStopButton`'s permitted, distinct arm and confirm gestures).
-    /// Only the button closures in the popover and the task window may call this; a fitness test
-    /// (`TaskStopGateFitnessTests`) fails on any other caller. Nothing here changes a task's status,
-    /// only what Stop shows next to it.
-    func requestStop(tag: String, taskId: String) {
+    /// Ask the CLI to stop `taskId`. The store does **not** check the human-gesture gate itself: the
+    /// `StopConfirmation` is the proof that `TaskStopButton`'s permitted, distinct arm and confirm gestures
+    /// both passed. Only the button mints one (its initializer is `fileprivate` to `TaskStopButton.swift`),
+    /// so no other code compiles a call. The button closures in the popover and the task window are the
+    /// only callers; a fitness test (`TaskStopGateFitnessTests`) also scans for any other route. Nothing
+    /// here changes a task's status, only what Stop shows next to it.
+    func requestStop(tag: String, taskId: String, confirmation _: StopConfirmation) {
         var state = states[tag] ?? TagState()
         if state.stops[taskId]?.phase == .stopping { return }
         nextStopToken += 1
