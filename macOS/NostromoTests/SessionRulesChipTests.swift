@@ -177,9 +177,18 @@ final class SessionRuleGestureTests: XCTestCase {
         XCTAssertTrue(gesture.hasSelection)
     }
 
-    func testAConfirmAThirdOfASecondLaterInEventTimeIsAllowedEvenIfTheHandlersRanTogether() {
-        let gesture = gate(clock: { 100 })   // the handler clock never moved
+    func testAConfirmLaterInEventTimeButHandledTogetherWithThePickIsRefused() {
+        let gesture = gate(clock: { 100 })   // the handler clock never moved: forged event stamps
         XCTAssertEqual(gesture.select(event: rig.mouse(number: 1, time: 10.0), control: rig.button), .allowed)
+        XCTAssertEqual(gesture.confirm(event: rig.mouse(number: 2, time: 10.4), button: rig.button), .refused(.tooSoon))
+        XCTAssertTrue(gesture.hasSelection)
+    }
+
+    func testAConfirmZeroPointFourSecondsLaterOnBothClocksIsAllowed() {
+        var clock: TimeInterval = 100
+        let gesture = gate(clock: { clock })
+        XCTAssertEqual(gesture.select(event: rig.mouse(number: 1, time: 10.0), control: rig.button), .allowed)
+        clock = 100.4
         XCTAssertEqual(gesture.confirm(event: rig.mouse(number: 2, time: 10.4), button: rig.button), .allowed)
         XCTAssertFalse(gesture.hasSelection, "a confirm uses the pick up")
     }

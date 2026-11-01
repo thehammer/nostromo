@@ -36,8 +36,9 @@ struct SessionRuleEventStamp: Equatable {
 /// choosing the rule (a menu pick: `HumanGesture.permit(menuSelection: true, contextMenuPick: true)`,
 /// which is allowed only because the pick cannot itself confirm), then pressing `Allow for this session`
 /// (`permit` with the strict defaults). The confirm refuses, changing nothing and keeping the selection:
-/// the same event as the pick, an event less than `minimumGap` after it (measured on the events' own
-/// timestamps, so a slow main thread cannot make two instants of one gesture look apart), a held-key
+/// the same event as the pick, an event less than `minimumGap` after it (the smaller of the events' own
+/// timestamp gap and the handlers' clock gap, so neither forged timestamps handled back to back nor a
+/// slow main thread can pass), a held-key
 /// repeat, a multi-click, a mouse event outside the button, and a key while the button is not the first
 /// responder or is not Space/Return. A selection also expires (`selectionLifetime`).
 ///
@@ -106,14 +107,14 @@ final class SessionRuleGesture {
             return .refused(.expired)
         }
         let stamp = SessionRuleEventStamp(event)
+        // The gap is the smaller of the two clocks: forged event timestamps handled back to back
+        // (handler gap ~0) must not pass, nor events stamped close together but handled far apart.
+        var gap = now - pick.handlerTime
         if let stamp, let first = pick.stamp {
             if stamp == first { return .refused(.sameEvent) }
-            // Both events exist: the gap is theirs, not the handlers'.
-            if stamp.timestamp - first.timestamp < Self.minimumGap { return .refused(.tooSoon) }
-        } else if now - pick.handlerTime < Self.minimumGap {
-            // An event-less press (VoiceOver): only the handler clock is there to measure with.
-            return .refused(.tooSoon)
+            gap = min(gap, stamp.timestamp - first.timestamp)
         }
+        if gap < Self.minimumGap { return .refused(.tooSoon) }
         if let refusal = targeting(event, button) { return .refused(refusal) }
         selection = nil
         return .allowed

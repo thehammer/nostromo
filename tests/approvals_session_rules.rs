@@ -1444,8 +1444,10 @@ async fn without_an_app_that_renders_approvals_a_matching_request_is_denied_as_b
     rig.assert_allowed_by_rule("toolu_3", CACHES_A).await;
 }
 
-// Fails if the guard is consulted after a rule: a hand-built rule that would match a guarded
-// command must not turn a guard block into an allow.
+// A hand-built rule whose text equals a guarded command must not turn a guard block into an
+// allow. Note: `rules::eligible` also refuses every one of these commands (tmux, ecs_, aws ecs),
+// so this pins the end result (`guard_blocked`), not the guard-before-rule order by itself; the
+// order is `process` running `guard_block` before `matching_session_rule`.
 #[tokio::test(start_paused = true)]
 async fn a_rule_never_overrides_the_guard() {
     let mut rig = Rig::with_app();

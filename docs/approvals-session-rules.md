@@ -18,7 +18,9 @@ A candidate exists only for a **plain Bash command**:
 - The command is at most 300 bytes of ASCII words joined by **single spaces**, each byte in
   `[A-Za-z0-9_./~+=,:@%-]`. No quote, `$`, backtick, `; & | < > ( ) { } [ ] * ? ! # \`, tab, newline or non-ASCII
   byte, so compound commands, substitutions, redirections, globs and here-docs never get a rule.
-- The command word is a bare name or an absolute path and is **not**: a shell or interpreter (`sh bash zsh python*
+- The command word is a bare name (any word containing `/` gets nothing) and is **not**: a task runner or package
+  manager (`make npm npx yarn pnpm cargo go pip pip3 uv gradle mvn find git`), an exec wrapper (`arch caffeinate stdbuf
+  script watch`), a shell or interpreter (`sh bash zsh python*
   node perl* ruby* php osascript …`), a wrapper (`sudo env xargs exec eval nohup time timeout nice …`), a remote or
   cloud tool (`ssh scp aws kubectl session-manager-plugin …`), `tmux` (or anything that could be it), anything Nostromo
   or Claude itself (`nostromo-app nostromo nostromd nostromo-guard claude`), `launchctl security defaults crontab open`,
@@ -27,16 +29,22 @@ A candidate exists only for a **plain Bash command**:
   `send-prefix`, `paste-buffer`, `pipe-pane` or `respawn-pane`, and `remote_shell_marker` finds nothing. Production-shell
   and ECS commands never get a rule, even ones the guard allows.
 - No word is, or points inside, a protected place: `/`, `~`, `~/`, `~user`, `/etc`, `/private/etc`, `/System`, `/usr`,
-  `/bin`, `/sbin`, `/Library`, `/Applications`, `/var`, `/dev`, `~/.ssh`, `~/.aws`, `~/.kube`, `~/.gnupg`, `~/.config/gh`,
-  `~/.claude`, `~/.nostromo`, `~/Library/Keychains`, or any `.git` component. (Allow once still works for all of them.)
+  `/bin`, `/sbin`, `/Library`, `/Applications`, `/var`, `/dev`, `~/.ssh`, `~/.aws`, `~/.kube`, `~/.gnupg`, `~/.config` (all of it),
+  `~/.docker`, `~/.npmrc`, `~/.netrc`, `~/.zshrc`, `~/.zprofile`, `~/.bashrc`, `~/.gitconfig`, `~/.claude`, `~/.nostromo`,
+  `~/Library/Keychains`, `~/Library/LaunchAgents`, or any `.git` component. (Allow once still works for all of them.)
 
 The candidates, in order:
 
 1. **Exact**: `Bash(<command>)`, matched byte for byte. "Allows exactly this command again".
 2. **Path prefix**, only for `rm rmdir mkdir touch ls du stat file cat head tail wc` with `<command> <flags…> <path…>`
    (flags are `-[A-Za-z]+`, at least one path, every path absolute or `~/`, no `.` or `..` component, no `//`): the
-   deepest common parent of the paths, which must have at least two components below `/` or `~/` and not be protected
-   (`Bash(rm -rf ~/Library/Caches/:*)` yes; `~/Code/` and `/tmp/` no). Relative paths never get a prefix.
+   deepest common parent of the paths. Paths under your home are first rewritten to `~/…` (so `/Users/you/Code/x` is
+   exactly as shallow as `~/Code/x`, whatever the case or a symlinked home), and then the parent needs at least two
+   components below `~/`; elsewhere at least three below `/`, and never inside `/Volumes /Users /opt /usr /etc /var
+   /private /Library /System /Applications` (and similar roots). It must not be protected (`Bash(rm -rf
+   ~/Library/Caches/:*)` yes; `~/Code/`, `/tmp/x/`, `/Volumes/Backup/` no). Relative paths never get a prefix.
+- A request with `default_to_no`, `classifier_approvable: false` or `decision_reason_type: safetyCheck` (read from the
+  raw field, not from the displayed reason) gets no candidate and never matches a rule.
 
 For a request raised by the user's own ask rule the card says `Overrides your rule <rule> for matching commands, this
 session only`.
@@ -49,7 +57,7 @@ session only`.
 
 Both steps go through `HumanGesture.permit` (the pick as a menu selection, which is allowed only because it cannot
 confirm; the confirm with the strict defaults). The confirm also refuses, changing nothing: the same event as the pick;
-less than 0.3 s after it on **event** timestamps; a key repeat; a double click; a mouse event outside the button; a key
+less than 0.3 s after it on **either clock** (the smaller of the events' own timestamp gap and the handlers' clock gap); a key repeat; a double click; a mouse event outside the button; a key
 while the button is not first responder or is not Space/Return. The pick reverts after 15 s, when the request changes
 and when the card leaves its window. No app-control command and no Accessibility press (VoiceOver off) completes
 either step. The button has no key equivalent and is never the default.
@@ -92,6 +100,14 @@ allowed_by_session_rule` per use (the outcome's `rule` names the rule and its gr
 ## Limits (decision D-1)
 
 - Bash only, plain commands only; widening (quoted commands, MCP, Edit/Write, relative prefixes) is a follow-up.
-- A relative-path exact rule (`rm build`) is matched on the command text, not on the directory the CLI is in when it
-  runs it. The card shows the session's directory; the rule does not bind it.
+- **A rule ignores the working directory** (open, S2). Any exact rule with a relative path or a relative effect
+  (`rm build`, `rm -rf build`, `ls out`) is matched on the command text only, and the broker's `cwd` is the directory the
+  session started in, not the Bash tool's current directory: after a `cd`, the same text acts somewhere else and still
+  matches. Treat an exact rule as "this text", not "this effect".
+- Exact rules cover the same **text**, not the same **effect**. The refusal list is a denylist (see above); whether to
+  move to an allowlist of commands is an open product question.
+- The grant audit does not yet record gesture provenance (source pid and state, event timestamp of the pick and the
+  confirm): `approval_answer` has no field for it and widening the wire is a follow-up.
+- The matcher resolves symlinks with `canonicalize` on the broker's worker; a symlink into a hung network mount could
+  stall it (follow-up: bound it). Prefix rules are never offered under `/Volumes`.
 - Persisted rules ("Always allow…") are AP6.

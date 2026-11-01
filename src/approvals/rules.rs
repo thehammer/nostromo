@@ -187,6 +187,28 @@ const NEVER_COMMANDS: &[&str] = &[
     "security",
     "defaults",
     "crontab",
+    // Task runners, package managers and exec wrappers: the same text runs different
+    // code depending on the project (or runs another command entirely).
+    "make",
+    "npm",
+    "npx",
+    "yarn",
+    "pnpm",
+    "cargo",
+    "go",
+    "pip",
+    "pip3",
+    "uv",
+    "gradle",
+    "mvn",
+    "arch",
+    "caffeinate",
+    "stdbuf",
+    "script",
+    "watch",
+    "find",
+    // A rule for `git` is too broad to offer anything.
+    "git",
 ];
 
 /// Versioned interpreters (`python3.12`, `perl5.34`, `node18`): never a rule either.
@@ -228,10 +250,18 @@ const PROTECTED_HOME: &[&str] = &[
     ".aws",
     ".kube",
     ".gnupg",
-    ".config/gh",
+    ".config",
+    ".docker",
+    ".npmrc",
+    ".netrc",
+    ".zshrc",
+    ".zprofile",
+    ".bashrc",
+    ".gitconfig",
     ".claude",
     ".nostromo",
     "library/keychains",
+    "library/launchagents",
 ];
 
 /// The file utilities a path-prefix rule may be offered for.
@@ -336,7 +366,16 @@ fn eligible(
     {
         return None;
     }
-    if req.suppress_always_allow_rule == Some(true) || req.requires_user_interaction == Some(true) {
+    // `default_to_no`: the CLI wants this one answered deliberately. `classifier_approvable:
+    // false`: not even the auto-mode classifier may approve it. A safety check is read from
+    // the raw field, because `Reason::kind` calls it `Other` when the text is empty (or an
+    // ask rule matched first).
+    if req.suppress_always_allow_rule == Some(true)
+        || req.requires_user_interaction == Some(true)
+        || req.default_to_no == Some(true)
+        || req.classifier_approvable == Some(false)
+        || req.decision_reason_type.as_deref() == Some("safetyCheck")
+    {
         return None;
     }
     if matches!(
@@ -360,7 +399,9 @@ fn eligible(
     if first.contains('=') || first.starts_with('-') || first.starts_with('~') {
         return None;
     }
-    if first.contains('/') && !first.starts_with('/') {
+    // A command word with a `/` names a file (relative to who knows where, or an
+    // arbitrary absolute binary): never a rule.
+    if first.contains('/') {
         return None;
     }
     let basename = first
@@ -588,10 +629,13 @@ fn prefix_of(plain: &Plain, home: &Path) -> Option<(Vec<String>, String)> {
     if paths.is_empty() || !paths.iter().all(|p| plain_path(p)) {
         return None;
     }
-    // The deepest directory that contains every path's parent: as component lists.
+    // The deepest directory that contains every path's parent: as component lists. Paths
+    // under the user's home are normalised to `~/...` first, so `/Users/me/Code/x` counts
+    // exactly as deep as `~/Code/x`.
+    let home_forms = home_forms(home);
     let mut common: Option<Vec<String>> = None;
     for p in paths {
-        let (root, parts) = split_root(p);
+        let (root, parts) = split_root(p, &home_forms);
         let mut parent = parts[..parts.len().checked_sub(1)?].to_vec();
         parent.insert(0, root.to_owned());
         common = Some(match common {
@@ -605,13 +649,18 @@ fn prefix_of(plain: &Plain, home: &Path) -> Option<(Vec<String>, String)> {
         });
     }
     let common = common?;
-    // `common[0]` is the root marker (`/` or `~`); at least two components below it.
-    if common.len() < 3 {
-        return None;
-    }
+    // `common[0]` is the root marker (`/` or `~`). Under home: at least two components
+    // below `~` (R1). Elsewhere: at least three below `/`, and never inside a broad root
+    // such as `/Volumes`, `/Users` (another user), `/opt` or `/private`.
     let prefix = if common[0] == "~" {
+        if common.len() < 3 {
+            return None;
+        }
         format!("~/{}/", common[1..].join("/"))
     } else {
+        if common.len() < 4 || BROAD_ROOTS.contains(&common[1].to_ascii_lowercase().as_str()) {
+            return None;
+        }
         format!("/{}/", common[1..].join("/"))
     };
     let dir = expand(prefix.trim_end_matches('/'), home);
@@ -621,22 +670,74 @@ fn prefix_of(plain: &Plain, home: &Path) -> Option<(Vec<String>, String)> {
     Some((head, prefix))
 }
 
+/// First components under which an absolute (non-home) prefix rule is never offered.
+const BROAD_ROOTS: &[&str] = &[
+    "volumes",
+    "users",
+    "opt",
+    "usr",
+    "etc",
+    "var",
+    "private",
+    "library",
+    "system",
+    "applications",
+    "home",
+    "mnt",
+    "net",
+    "cores",
+];
+
+/// The home directory as lower-cased components, as given and as the file system
+/// resolves it (a symlinked home), without duplicates.
+fn home_forms(home: &Path) -> Vec<Vec<String>> {
+    let lower = |p: &Path| -> Option<Vec<String>> {
+        normalize(p).map(|v| v.iter().map(|c| c.to_ascii_lowercase()).collect())
+    };
+    let mut out: Vec<Vec<String>> = Vec::new();
+    for form in [Some(home.to_path_buf()), canonical_lenient(home)]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(v) = lower(&form) {
+            if !v.is_empty() && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
 fn is_flag(word: &str) -> bool {
     word.len() > 1 && word.starts_with('-') && word[1..].bytes().all(|b| b.is_ascii_alphabetic())
 }
 
-/// `("~", components)` for a `~/…` word, `("/", components)` for an absolute one.
-fn split_root(word: &str) -> (&'static str, Vec<String>) {
+/// `("~", components)` for a `~/…` word or an absolute word under the home directory
+/// (matched case-insensitively against each of `home_forms`), `("/", components)` for
+/// any other absolute word.
+fn split_root(word: &str, home_forms: &[Vec<String>]) -> (&'static str, Vec<String>) {
     let (root, rest) = match word.strip_prefix("~/") {
         Some(rest) => ("~", rest),
         None => ("/", word.trim_start_matches('/')),
     };
-    let parts = rest
+    let mut parts: Vec<String> = rest
         .trim_end_matches('/')
         .split('/')
         .filter(|c| !c.is_empty())
         .map(str::to_owned)
         .collect();
+    if root == "/" {
+        for h in home_forms {
+            let under = parts.len() > h.len()
+                && parts[..h.len()]
+                    .iter()
+                    .map(|c| c.to_ascii_lowercase())
+                    .eq(h.iter().cloned());
+            if under {
+                return ("~", parts.split_off(h.len()));
+            }
+        }
+    }
     (root, parts)
 }
 
@@ -746,10 +847,189 @@ mod tests {
         assert!(texts_of("rm -rf /etc/a/b").is_empty());
     }
 
+    fn assert_exact_only(commands: &[&str]) {
+        for c in commands {
+            let t = texts_of(c);
+            assert!(!t.iter().any(|r| r.ends_with(":*)")), "{c}: {t:?}");
+        }
+    }
+
+    // Fails on the old depth check, which counted `/Users/tester/Code` as three components.
+    #[test]
+    fn the_absolute_form_of_a_home_path_is_no_deeper_than_its_tilde_form() {
+        assert_exact_only(&[
+            "rm -rf /Users/tester/Code/x",
+            "rm -rf /Users/tester/Documents/x",
+            "rm -rf /Users/tester/Desktop/x",
+            "rm -rf /Users/tester/Downloads/x",
+            "rm -rf /USERS/Tester/code/x",
+            "rm -rf /Users/tester/Code/x /Users/tester/Code/y",
+        ]);
+        // The same depth as `~/Library/Caches/`: still offered.
+        assert_eq!(
+            texts_of("rm -rf /Users/tester/Library/Caches/foo"),
+            [
+                "Bash(rm -rf /Users/tester/Library/Caches/foo)",
+                "Bash(rm -rf ~/Library/Caches/:*)"
+            ]
+        );
+    }
+
+    // Fails on the old code: `/Volumes/Backup/`, `/opt/homebrew/` and `/Users/other/..`
+    // were all offered as prefixes.
+    #[test]
+    fn broad_absolute_roots_never_become_prefix_rules() {
+        assert_exact_only(&[
+            "rm -rf /Volumes/Backup/x",
+            "rm -rf /Volumes/Backup/a/b/c",
+            "rm -rf /opt/homebrew/x",
+            "rm -rf /opt/homebrew/Cellar/a/b",
+            "rm -rf /Users/otheruser/x",
+            "rm -rf /Users/otheruser/Code/proj/x",
+            "rm -rf /private/tmp/a/b/c",
+            "rm -rf /tmp/x",
+            "rm -rf /tmp/a/x",
+        ]);
+        // Three components below `/` outside a broad root is still fine.
+        assert_eq!(
+            texts_of("rm -rf /tmp/a/b/x"),
+            ["Bash(rm -rf /tmp/a/b/x)", "Bash(rm -rf /tmp/a/b/:*)"]
+        );
+    }
+
+    #[test]
+    fn dot_dot_after_normalisation_never_gets_a_prefix() {
+        assert_exact_only(&[
+            "rm -rf /Users/tester/Library/Caches/../../Code/x",
+            "rm -rf ~/Library/Caches/a/../../Code/x",
+        ]);
+    }
+
+    #[test]
+    fn a_symlinked_home_counts_its_resolved_form_as_home_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().canonicalize().unwrap().join("real");
+        std::fs::create_dir_all(real.join("Code")).unwrap();
+        let link = tmp.path().canonicalize().unwrap().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        for word in [link.join("Code/f"), real.join("Code/f")] {
+            let command = format!("rm -rf {}", word.display());
+            let req = cmd(&command);
+            let reason = req.reason(None, &NoSettings);
+            let c = candidates(&req, &reason, &link, None);
+            assert!(
+                !c.iter()
+                    .any(|c| c.kind == CandidateKind::PathPrefix && c.rule_text.ends_with(":*)")),
+                "{command}: {:?}",
+                c.iter().map(|c| &c.rule_text).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn task_runners_package_managers_and_exec_wrappers_get_no_rule() {
+        for c in [
+            "make test",
+            "npm test",
+            "npx foo",
+            "yarn test",
+            "pnpm test",
+            "cargo test",
+            "go test",
+            "pip install x",
+            "pip3 install x",
+            "uv run x",
+            "gradle build",
+            "mvn test",
+            "arch -x86_64 ls",
+            "caffeinate ls",
+            "stdbuf -o0 ls",
+            "script out.txt",
+            "watch ls",
+            "xargs ls",
+            "env ls",
+            "nohup ls",
+            "time ls",
+            "find build -delete",
+            "git push",
+            "git status",
+            "/bin/ls build",
+            "/opt/x/tool build",
+            "./gradlew build",
+            "bin/tool x",
+            "/Users/tester/bin/tool x",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
+        }
+    }
+
+    #[test]
+    fn the_new_protected_home_locations_get_no_rule_at_all() {
+        for c in [
+            "cat ~/.config/gcloud/credentials.db",
+            "cat ~/.docker/config.json",
+            "cat ~/.npmrc",
+            "cat ~/.netrc",
+            "cat ~/.zshrc",
+            "cat ~/.zprofile",
+            "cat ~/.bashrc",
+            "cat ~/.gitconfig",
+            "ls ~/Library/LaunchAgents/a",
+            "cat /Users/tester/.netrc",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
+        }
+    }
+
+    #[test]
+    fn request_flags_and_a_raw_safety_check_block_every_candidate() {
+        let base = || json!({ "command": "ls build" });
+        let flagged = [
+            ("default_to_no", json!({ "default_to_no": true })),
+            (
+                "not classifier approvable",
+                json!({ "classifier_approvable": false }),
+            ),
+            // Empty text: `Reason::kind` calls this `Other`.
+            (
+                "safety check, no text",
+                json!({ "decision_reason_type": "safetyCheck" }),
+            ),
+            (
+                "safety check, blank text",
+                json!({ "decision_reason_type": "safetyCheck", "decision_reason": "  " }),
+            ),
+            (
+                "safety check behind an ask rule",
+                json!({
+                    "decision_reason_type": "safetyCheck",
+                    "matched_ask_rule": { "source": "userSettings", "tool_name": "Bash", "rule_content": "ls:*" }
+                }),
+            ),
+        ];
+        for (name, extra) in flagged {
+            let req = request(base(), extra);
+            assert!(texts(&req).is_empty(), "{name}");
+            // and a rule never matches it either
+            let rule = rule_for("ls build", 0);
+            let kind = req.reason(None, &NoSettings).kind;
+            assert!(!matches(&rule, &req, kind, &home(), None), "{name}");
+        }
+        // The same command without the flags is offered.
+        assert_eq!(texts(&request(base(), json!({}))), ["Bash(ls build)"]);
+        assert_eq!(
+            texts(&request(
+                base(),
+                json!({ "default_to_no": false, "classifier_approvable": true })
+            )),
+            ["Bash(ls build)"]
+        );
+    }
+
     #[test]
     fn a_relative_path_never_gets_a_prefix() {
         assert_eq!(texts_of("rm build"), ["Bash(rm build)"]);
-        assert_eq!(texts_of("git push"), ["Bash(git push)"]);
+        assert_eq!(texts_of("git push"), Vec::<String>::new());
     }
 
     #[test]
@@ -860,12 +1140,12 @@ mod tests {
 
     #[test]
     fn an_exact_rule_matches_only_the_same_command() {
-        let r = rule_for("git push", 0);
-        assert!(hit(&r, "git push"));
-        assert!(hit(&r, " git push "));
-        assert!(!hit(&r, "git push -f"));
-        assert!(!hit(&r, "git  push"));
-        assert!(!hit(&r, "git push && curl x"));
+        let r = rule_for("rm build", 0);
+        assert!(hit(&r, "rm build"));
+        assert!(hit(&r, " rm build "));
+        assert!(!hit(&r, "rm build -f"));
+        assert!(!hit(&r, "rm  build"));
+        assert!(!hit(&r, "rm build && curl x"));
     }
 
     #[test]
