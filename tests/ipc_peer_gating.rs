@@ -11704,3 +11704,174 @@ async fn a_local_script_s_staging_frames_are_refused_and_change_nothing() {
         );
     }
 }
+
+// ── AP4: session rules ───────────────────────────────────────────────────────
+//
+// `approval_revoke_session_rule` removes a rule that lets the daemon allow commands without a
+// card, so like `approval_answer` it is the verified Mac app's alone (with its connection's
+// nonce), and never a network peer's. `approval_session_rules` names commands and paths, so it
+// is local-only. (The refusal log, the broker and the revoke itself are in
+// `tests/approvals_wire.rs` and `tests/approvals_session_rules.rs`.)
+
+fn revoke_rule_msg(nonce: Option<&str>) -> ClientMsg {
+    ClientMsg::ApprovalRevokeSessionRule {
+        tag: "cody-plain".into(),
+        rule_id: "rule-1".into(),
+        operator_nonce: nonce.map(str::to_owned),
+    }
+}
+
+fn is_not_operator_app_error(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::Error { message } if message.starts_with("not_operator_app"))
+}
+
+fn is_network_refusal(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::Error { message } if message.contains("requires_secure_connection"))
+}
+
+/// Send `msg` and read until an `error` frame that `want` accepts. The refusal is logged before the
+/// peer is told, off the connection's task, so it can arrive after a following `Pong`: wait for it.
+async fn send_and_expect_error<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    msg: ClientMsg,
+    want: fn(&ServerMsg) -> bool,
+    what: &str,
+) -> Vec<ServerMsg> {
+    send(stream, &msg).await;
+    let frames = recv_until(stream, want).await;
+    assert!(want(frames.last().unwrap()), "{what}: {frames:?}");
+    frames
+}
+
+#[tokio::test]
+async fn a_tcp_peer_cannot_revoke_a_session_rule_but_a_unix_peer_reaches_the_handler() {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    let (mut unix, nonce) = h.unix_operator(vec![]).await;
+
+    // Control: on the Unix socket the verb is decoded and gated by the operator check, which
+    // answers with its own error: without the nonce it is `not_operator_app`, not the network one.
+    let frames = send_and_expect_error(
+        &mut unix,
+        revoke_rule_msg(None),
+        is_not_operator_app_error,
+        "unix",
+    )
+    .await;
+    assert!(!frames.iter().any(is_network_refusal), "{frames:?}");
+
+    // A TCP peer is refused outright, with and without a nonce (even the app's own).
+    for nonce in [None, Some("guess"), nonce.as_deref()] {
+        let frames = send_and_expect_error(
+            &mut tcp,
+            revoke_rule_msg(nonce),
+            is_network_refusal,
+            "approval_revoke_session_rule",
+        )
+        .await;
+        assert!(!frames.iter().any(is_not_operator_app_error), "{frames:?}");
+    }
+    assert_still_usable(&mut tcp).await;
+}
+
+#[tokio::test]
+async fn a_raw_tcp_revoke_of_a_session_rule_is_refused_whatever_it_claims() {
+    let h = spawn_server().await;
+    let mut s = raw_tcp(&h).await;
+    raw_handshake(
+        &mut s,
+        json!({"type": "subscribe", "topics": [], "renders_decisions": false, "renders_approvals": true}),
+    )
+    .await
+    .expect("handshake");
+
+    send_json(
+        &mut s,
+        &json!({"type": "approval_revoke_session_rule", "tag": "cody-plain", "rule_id": "rule-1", "operator_nonce": "x"}),
+    )
+    .await;
+
+    let mut seen = Vec::new();
+    loop {
+        let frame = try_recv_json(&mut s)
+            .await
+            .expect("the connection stays open and answers");
+        let refused = frame["type"] == "error"
+            && frame["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("requires_secure_connection"));
+        seen.push(frame);
+        if refused {
+            break;
+        }
+    }
+    assert!(!seen.is_empty());
+}
+
+#[tokio::test]
+async fn a_local_script_cannot_revoke_a_session_rule_even_with_a_nonce() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+
+    for nonce in [None, Some("made-up")] {
+        send_and_expect_error(
+            &mut script,
+            revoke_rule_msg(nonce),
+            is_not_operator_app_error,
+            "a local process that is not the app is refused",
+        )
+        .await;
+    }
+    assert_still_usable(&mut script).await;
+}
+
+#[tokio::test]
+async fn an_approval_session_rules_frame_is_never_sent_to_a_tcp_peer() {
+    let h = spawn_server().await;
+    let (mut all, _) = h.tcp(vec![]).await;
+    let (mut named, _) = h
+        .tcp(vec![
+            Topic::Activity,
+            Topic::MotherJobs,
+            Topic::MotherStatusline,
+            Topic::Focuses,
+            Topic::MotherPeek,
+            Topic::Perri,
+            Topic::Fred,
+            Topic::Teri,
+            Topic::Work,
+            Topic::Layout,
+            Topic::Decision,
+            Topic::Model,
+        ])
+        .await;
+
+    h.broadcast(ServerMsg::ApprovalSessionRules {
+        tag: "cody-plain".into(),
+        rules: vec![nostromo::approvals::wire::SessionRuleWire {
+            id: "rule-1".into(),
+            rule_text: "Bash(rm -rf ~/Library/Caches/:*)".into(),
+            summary: "s".into(),
+            kind: nostromo::approvals::rules::CandidateKind::PathPrefix,
+            created_at_ms: 1,
+            uses: 0,
+            agent_id: None,
+        }],
+    });
+    // Control: a frame the peers are allowed to see arrives after it, so the rules frame
+    // had its chance.
+    h.broadcast(health_probe());
+    for (who, s) in [("topics []", &mut all), ("every topic", &mut named)] {
+        let frames = recv_until(s, |m| matches!(m, ServerMsg::ActivityHealth { .. })).await;
+        assert!(
+            !frames
+                .iter()
+                .any(|m| matches!(m, ServerMsg::ApprovalSessionRules { .. })),
+            "{who}: {frames:?}"
+        );
+        assert!(
+            !json_of(&frames).contains("Library/Caches"),
+            "{who}: the rule text reached a network peer"
+        );
+    }
+}

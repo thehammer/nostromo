@@ -16,13 +16,19 @@
 //!
 //! # Invariants
 //!
-//! - **Never auto-approve (T-INV-3).** Exactly one function writes
-//!   `"behavior":"allow"`: [`ApprovalBroker::answer`], with `allow_once` or (AP2c)
-//!   with `answer_questions` whose answers fit the held `AskUserQuestion`
-//!   request's own questions, which the server calls only for the verified app's
-//!   connection. Every other ending
-//!   (timeout, error, restart, no app, a closed channel, a failed write) writes a
-//!   deny or nothing.
+//! - **Never auto-approve (T-INV-3).** `"behavior":"allow"` is written by exactly
+//!   four endings, and only they set [`Ending::allow`]. Three are the human's answer
+//!   to that very request ([`ApprovalBroker::answer`], which the server calls only
+//!   for the verified app's connection): `allow_once` (`allowed_once`),
+//!   `answer_questions` (`answered`; the answers fit the held `AskUserQuestion`
+//!   request's own questions) and `allow_session` (`allowed_for_session`; it also
+//!   creates the session rule the human chose from that request's own candidates).
+//!   The fourth is `allowed_by_session_rule`: [`Inner::process`] answers a later
+//!   request itself, after the guard, only when it matches a rule created by that
+//!   third ending for the same session process (tag + generation) and the same
+//!   requester, while an app that can show and revoke rules is connected. Every other
+//!   ending (timeout, error, restart, no app, a closed channel, a failed write) writes
+//!   a deny or nothing. `updatedPermissions` is never sent (the CLI keeps its own rules).
 //! - **Exactly one ending per request.** A request lives in `pending` until one
 //!   path removes it (the answer path, the guard, the timeout, a cancel, the
 //!   session going away, shutdown, the watchdog). Whoever removes it owns the
@@ -63,10 +69,12 @@ use super::audit::{sanitize_string, AuditFilter, AuditLog, Entry, Event};
 use super::display::ApprovalDisplay;
 use super::guard::{self, GuardVerdict, HookPayload, PaneProbe, SystemPaneProbe};
 use super::questions;
-use super::request::{FileSettings, PermissionRequest, SettingsSource};
+use super::request::{FileSettings, PermissionRequest, Reason, SettingsSource};
+use super::rules::{self, Candidate, SessionRule};
 use super::wire::{
     clean_note, AgentWire, AnswerRefusal, ApprovalDecision, ApprovalFlags, ApprovalOption,
-    ApprovalRequestWire, DecisionKind, RefusalChannel, SubagentWire,
+    ApprovalRequestWire, DecisionKind, RefusalChannel, SessionRuleCandidateWire, SessionRuleWire,
+    SubagentWire,
 };
 use super::ApprovalsPaths;
 use crate::data::work::is_invisible;
@@ -139,6 +147,10 @@ pub enum Outcome {
     DenyWriteFailed,
     TimedOut,
     AllowedOnce,
+    /// The human allowed this call and created a session rule from it.
+    AllowedForSession,
+    /// A session rule the human created covers this call: the daemon allowed it.
+    AllowedBySessionRule,
     /// The human answered an `AskUserQuestion` request (an allow whose input carries the answers).
     Answered,
     Denied,
@@ -162,6 +174,8 @@ impl Outcome {
             Self::DenyWriteFailed => "deny_write_failed",
             Self::TimedOut => "timed_out",
             Self::AllowedOnce => "allowed_once",
+            Self::AllowedForSession => "allowed_for_session",
+            Self::AllowedBySessionRule => "allowed_by_session_rule",
             Self::Answered => "answered",
             Self::Denied => "denied",
             Self::DeniedAndStopped => "denied_and_stopped",
@@ -185,8 +199,10 @@ struct Ending {
     rule: Option<Value>,
     watchdog: bool,
     /// Write `{"behavior":"allow","updatedInput":<this>}` instead of a deny. Set
-    /// only by [`Ending::allow_once`] and [`Ending::answered`], which only
-    /// [`ApprovalBroker::answer`] calls.
+    /// only by [`Ending::allow_once`], [`Ending::answered`] and
+    /// [`Ending::allowed_for_session`] (which only [`ApprovalBroker::answer`] calls) and
+    /// [`Ending::allowed_by_session_rule`] (which only [`Inner::process`] calls, for a rule
+    /// the human created).
     allow: Option<Value>,
     /// The deny also interrupts the agent (`deny_and_stop`).
     interrupt: bool,
@@ -221,6 +237,25 @@ impl Ending {
             allow: Some(input),
             by_window: Some(by_window.to_owned()),
             ..Self::silent(Outcome::AllowedOnce)
+        }
+    }
+
+    /// The human allowed this call and chose the session rule `rule` (its identity, for the log).
+    fn allowed_for_session(input: Value, by_window: &str, rule: Value) -> Self {
+        Self {
+            allow: Some(input),
+            by_window: Some(by_window.to_owned()),
+            rule: Some(rule),
+            ..Self::silent(Outcome::AllowedForSession)
+        }
+    }
+
+    /// A rule the human created covers this call (`rule`: its identity, for the log).
+    fn allowed_by_session_rule(input: Value, rule: Value) -> Self {
+        Self {
+            allow: Some(input),
+            rule: Some(rule),
+            ..Self::silent(Outcome::AllowedBySessionRule)
         }
     }
 
@@ -473,6 +508,18 @@ pub enum AnswerResult {
     NotPresenter,
     /// An `answer_questions` decision that does not fit the request. The request is still held.
     InvalidAnswer,
+    /// An `allow_session` decision that names no candidate of the request, or other text. Still held.
+    InvalidRule,
+}
+
+/// What [`ApprovalBroker::revoke_session_rule`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeResult {
+    Revoked,
+    /// No such rule in this focus's current session: nothing changed.
+    Unknown,
+    /// The connection is not one that renders approvals.
+    NotPresenter,
 }
 
 impl AnswerResult {
@@ -486,6 +533,7 @@ impl AnswerResult {
             Self::UnknownRequest => Some((AnswerRefusal::UnknownRequest, None)),
             Self::NotPresenter => Some((AnswerRefusal::NotOperatorApp, None)),
             Self::InvalidAnswer => Some((AnswerRefusal::InvalidAnswer, None)),
+            Self::InvalidRule => Some((AnswerRefusal::InvalidRule, None)),
         }
     }
 }
@@ -530,6 +578,8 @@ struct Inner {
     /// Bumped whenever a presenter connects or the last one leaves: a grace timer
     /// acts only if nothing changed since it was armed.
     grace_epoch: AtomicU64,
+    /// The home directory `~/` in a session rule means (the user's; tests set their own).
+    home: Mutex<PathBuf>,
     weak: Weak<Inner>,
 }
 
@@ -546,9 +596,23 @@ struct State {
     /// late answer is told what happened. Oldest first in `ended_order`.
     ended: HashMap<String, String>,
     ended_order: VecDeque<String>,
+    /// The session rules the human created, by the process they were created in
+    /// `(tag, generation)`: a rule can never match another process.
+    session_rules: HashMap<(String, u64), Vec<SessionRule>>,
 }
 
 impl State {
+    /// `tag`'s current session's rules, oldest first.
+    fn rules_wire(&self, tag: &str) -> Vec<SessionRuleWire> {
+        let Some(generation) = self.sessions.get(tag).map(|r| r.generation) else {
+            return Vec::new();
+        };
+        self.session_rules
+            .get(&(tag.to_owned(), generation))
+            .map(|rules| rules.iter().map(rule_wire).collect())
+            .unwrap_or_default()
+    }
+
     /// Held requests of `tag` still pending.
     fn held_count(&self, tag: &str) -> u32 {
         self.pending
@@ -636,6 +700,8 @@ struct Pending {
     input: Option<Value>,
     /// What the Mac app was shown (set when the request is held).
     wire: Option<ApprovalRequestWire>,
+    /// The session rules this held request offered: the only ones an `allow_session` may name.
+    candidates: Vec<Candidate>,
 }
 
 /// Who a request belongs to, for the audit entries.
@@ -722,6 +788,9 @@ impl ApprovalBroker {
             runtime: Mutex::new(tokio::runtime::Handle::try_current().ok()),
             events: Mutex::new(None),
             grace_epoch: AtomicU64::new(0),
+            home: Mutex::new(
+                dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/nonexistent-home")),
+            ),
             weak: weak.clone(),
         });
         let worker = Arc::downgrade(&inner);
@@ -744,17 +813,25 @@ impl ApprovalBroker {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             *lock(&self.inner.runtime) = Some(handle);
         }
-        let mut st = lock(&self.inner.state);
-        st.next_generation += 1;
-        let generation = st.next_generation;
-        st.sessions.insert(
-            info.tag.clone(),
-            Registered {
-                generation,
-                info,
-                sink,
-            },
-        );
+        let tag = info.tag.clone();
+        let generation = {
+            let mut st = lock(&self.inner.state);
+            st.next_generation += 1;
+            let generation = st.next_generation;
+            st.sessions.insert(
+                info.tag.clone(),
+                Registered {
+                    generation,
+                    info,
+                    sink,
+                },
+            );
+            generation
+        };
+        // A rule of an earlier process of this focus is gone, whether or not its
+        // `session_gone` was ever delivered.
+        self.inner
+            .drop_session_rules(|(t, g)| *t == tag && *g != generation, "session_ended");
         generation
     }
 
@@ -948,6 +1025,7 @@ impl ApprovalBroker {
                 }
             }
         }
+        self.inner.drop_session_rules(|_| true, "session_ended");
         written
     }
 
@@ -1197,6 +1275,26 @@ impl ApprovalBroker {
             DecisionKind::AllowOnce => Ending::allow_once(input, window_id),
             DecisionKind::Deny => Ending::denied(note.as_deref(), false, window_id),
             DecisionKind::DenyAndStop => Ending::denied(note.as_deref(), true, window_id),
+            DecisionKind::AllowSession => {
+                // Only a candidate this very request offered, with its exact text: anything
+                // else leaves the request held, sends nothing and creates no rule.
+                let Some(choice) = self
+                    .inner
+                    .session_rule_choice(request_id, decision, window_id)
+                else {
+                    debug!(
+                        conn_key,
+                        request_id, "allow_session refused: not one of the request's candidates"
+                    );
+                    return AnswerResult::InvalidRule;
+                };
+                let ending = Ending::allowed_for_session(
+                    input,
+                    window_id,
+                    rules::rule_identity(&choice.rule),
+                );
+                return self.finish_allow_session(request_id, ending, choice, conn_key);
+            }
             DecisionKind::AnswerQuestions => {
                 // Only a request the daemon itself listed as answerable, and only with answers
                 // that fit its questions: anything else leaves the request held and sends nothing.
@@ -1234,6 +1332,119 @@ impl ApprovalBroker {
             // the look above and the removal.
             None => lock(&self.inner.state).answer_to_ended(request_id),
         }
+    }
+
+    /// End the request with `allow_session`; the rule exists only if the allow was written
+    /// and the session process it belongs to is still the registered one.
+    fn finish_allow_session(
+        &self,
+        request_id: &str,
+        ending: Ending,
+        choice: SessionRuleChoice,
+        conn_key: &str,
+    ) -> AnswerResult {
+        match self.inner.finish(request_id, ending) {
+            Some(done) => {
+                if done.wrote && done.outcome == Outcome::AllowedForSession {
+                    self.inner.insert_session_rule(choice);
+                }
+                debug!(
+                    conn_key,
+                    request_id,
+                    outcome = done.outcome.as_str(),
+                    "approval answered"
+                );
+                AnswerResult::Applied {
+                    outcome: done.outcome.as_str().to_owned(),
+                }
+            }
+            None => lock(&self.inner.state).answer_to_ended(request_id),
+        }
+    }
+
+    /// The human revoked rule `rule_id` of `tag`'s current session, from `window_id` of
+    /// connection `conn_key` (the server has already checked the connection is the verified
+    /// app and sent the nonce).
+    pub fn revoke_session_rule(
+        &self,
+        tag: &str,
+        rule_id: &str,
+        conn_key: &str,
+        window_id: &str,
+    ) -> RevokeResult {
+        if !self.inner.parts.presenters.is_presenter(conn_key) {
+            return RevokeResult::NotPresenter;
+        }
+        let removed = {
+            let mut st = lock(&self.inner.state);
+            let generation = st.sessions.get(tag).map(|r| r.generation);
+            generation.and_then(|generation| {
+                let key = (tag.to_owned(), generation);
+                let list = st.session_rules.get_mut(&key)?;
+                let at = list.iter().position(|r| r.id == rule_id)?;
+                let rule = list.remove(at);
+                if list.is_empty() {
+                    st.session_rules.remove(&key);
+                }
+                Some((rule, generation))
+            })
+        };
+        let Some((rule, generation)) = removed else {
+            return RevokeResult::Unknown;
+        };
+        self.inner.log_rule_event(
+            false,
+            tag,
+            generation,
+            &rule,
+            json!({ "reason": "user", "by_window": sanitize_string(window_id) }),
+        );
+        self.inner.broadcast(self.session_rules_frame(tag));
+        RevokeResult::Revoked
+    }
+
+    /// `tag`'s active session rules as one frame (the current session's, oldest first).
+    pub fn session_rules_frame(&self, tag: &str) -> ServerMsg {
+        let st = lock(&self.inner.state);
+        ServerMsg::ApprovalSessionRules {
+            tag: tag.to_owned(),
+            rules: st.rules_wire(tag),
+        }
+    }
+
+    /// One frame per focus that has rules, for a connection that has just started
+    /// rendering approvals.
+    pub fn session_rules_replay(&self) -> Vec<ServerMsg> {
+        let st = lock(&self.inner.state);
+        let mut tags: Vec<&String> = st.session_rules.keys().map(|(t, _)| t).collect();
+        tags.sort();
+        tags.dedup();
+        tags.into_iter()
+            .filter_map(|tag| {
+                let rules = st.rules_wire(tag);
+                (!rules.is_empty()).then(|| ServerMsg::ApprovalSessionRules {
+                    tag: tag.clone(),
+                    rules,
+                })
+            })
+            .collect()
+    }
+
+    /// Use `home` as the directory `~/` in session rules means. For tests.
+    #[doc(hidden)]
+    pub fn set_home_for_test(&self, home: PathBuf) {
+        *lock(&self.inner.home) = home;
+    }
+
+    /// Put a hand-built rule on `tag`'s process `generation`, as if the human had created it.
+    /// For tests of the matcher's guard ordering and scope; nothing in production calls it.
+    #[doc(hidden)]
+    pub fn inject_session_rule_for_test(&self, tag: &str, generation: u64, rule: SessionRule) {
+        lock(&self.inner.state)
+            .session_rules
+            .entry((tag.to_owned(), generation))
+            .or_default()
+            .push(rule);
     }
 
     /// [`Self::answer`], and if it was not applied: log the refusal (`peer` is
@@ -1330,6 +1541,7 @@ impl Inner {
                 cwd,
                 input: None,
                 wire: None,
+                candidates: Vec::new(),
             },
         );
         ident
@@ -1417,14 +1629,19 @@ impl Inner {
         );
         let latency_ms = pending.arrived.elapsed().as_millis() as u64;
         let entry_id = self.log_outcome(&pending.ident, outcome, &ending, latency_ms);
-        if pending.held {
+        // A request answered by a session rule was never held (never shown), but the
+        // app still needs to mark its row.
+        if pending.held || outcome == Outcome::AllowedBySessionRule {
             self.broadcast(ServerMsg::ApprovalResolved {
                 tag: pending.ident.tag.clone(),
                 request_id: request_id.to_owned(),
                 outcome: outcome.as_str().to_owned(),
                 by_window: ending.by_window.clone(),
                 at_ms: now_ms(),
+                tool_use_id: pending.ident.tool_use_id.clone(),
             });
+        }
+        if pending.held {
             self.broadcast(ServerMsg::ApprovalPending {
                 tag: pending.ident.tag.clone(),
                 count: held_after,
@@ -1550,6 +1767,213 @@ impl Inner {
         for id in ids {
             self.finish(&id, Ending::silent(Outcome::Cancelled));
         }
+        // Rules die with the process they were created in, for every reason.
+        self.drop_session_rules(|(t, g)| t == tag && *g == generation, "session_ended");
+    }
+
+    // ── session rules (AP4) ──────────────────────────────────────────────────
+
+    /// Validate an `allow_session` decision against the held request's own candidates:
+    /// it must be listed on the wire, name one of the request's stored candidates and carry
+    /// its text byte for byte, the session process must still be registered and under the
+    /// cap. The rule is built from the stored candidate; the text is never parsed.
+    fn session_rule_choice(
+        &self,
+        request_id: &str,
+        decision: &ApprovalDecision,
+        window: &str,
+    ) -> Option<SessionRuleChoice> {
+        let (candidate_id, rule_text) = (
+            decision.candidate_id.as_deref()?,
+            decision.rule_text.as_deref()?,
+        );
+        let st = lock(&self.state);
+        let p = st.pending.get(request_id).filter(|p| p.held)?;
+        if !p
+            .wire
+            .as_ref()?
+            .options
+            .contains(&ApprovalOption::AllowSession)
+        {
+            return None;
+        }
+        let candidate = p
+            .candidates
+            .iter()
+            .find(|c| c.id == candidate_id && c.rule_text == rule_text)?;
+        let tag = p.ident.tag.clone();
+        st.session(&tag, p.generation)?;
+        if st
+            .session_rules
+            .get(&(tag.clone(), p.generation))
+            .is_some_and(|r| r.len() >= rules::MAX_RULES_PER_SESSION)
+        {
+            return None;
+        }
+        let mut rule = SessionRule::from_candidate(
+            candidate,
+            p.ident
+                .subagent
+                .as_ref()
+                .and_then(|s| s.get("agent_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            now_ms(),
+            request_id,
+            window,
+        );
+        rule.session_id = p.ident.session_id.clone();
+        Some(SessionRuleChoice {
+            rule,
+            generation: p.generation,
+            ident: p.ident.clone(),
+        })
+    }
+
+    /// Keep the rule the human just created, if its session process is still the registered one.
+    fn insert_session_rule(&self, choice: SessionRuleChoice) {
+        let SessionRuleChoice {
+            rule,
+            generation,
+            ident,
+        } = choice;
+        {
+            let mut st = lock(&self.state);
+            if st.session(&ident.tag, generation).is_none() {
+                return;
+            }
+            let list = st
+                .session_rules
+                .entry((ident.tag.clone(), generation))
+                .or_default();
+            if list.len() >= rules::MAX_RULES_PER_SESSION {
+                return;
+            }
+            list.push(rule.clone());
+        }
+        self.log_rule_event(true, &ident.tag, generation, &rule, json!({}));
+        self.broadcast_rules(&ident.tag);
+    }
+
+    /// The rule of `(tag, generation)` that covers `req`, if any: same requester, and the
+    /// session process is still the registered one.
+    fn matching_session_rule(
+        &self,
+        tag: &str,
+        generation: u64,
+        req: &PermissionRequest,
+        reason: &Reason,
+        cwd: Option<&Path>,
+    ) -> Option<SessionRule> {
+        let candidates: Vec<SessionRule> = {
+            let st = lock(&self.state);
+            st.session(tag, generation)?;
+            st.session_rules
+                .get(&(tag.to_owned(), generation))?
+                .iter()
+                .filter(|r| r.agent_id == req.agent_id)
+                .cloned()
+                .collect()
+        };
+        let home = lock(&self.home).clone();
+        // Outside the lock: a prefix match looks at the file system.
+        candidates
+            .into_iter()
+            .find(|r| rules::matches(r, req, reason.kind, &home, cwd))
+    }
+
+    /// One more use of rule `rule_id` was allowed: count it and tell the app.
+    fn count_rule_use(&self, tag: &str, generation: u64, rule_id: &str) {
+        {
+            let mut st = lock(&self.state);
+            let Some(rule) = st
+                .session_rules
+                .get_mut(&(tag.to_owned(), generation))
+                .and_then(|l| l.iter_mut().find(|r| r.id == rule_id))
+            else {
+                return;
+            };
+            rule.uses += 1;
+        }
+        self.broadcast_rules(tag);
+    }
+
+    fn broadcast_rules(&self, tag: &str) {
+        let rules = lock(&self.state).rules_wire(tag);
+        self.broadcast(ServerMsg::ApprovalSessionRules {
+            tag: tag.to_owned(),
+            rules,
+        });
+    }
+
+    /// Remove every rule whose `(tag, generation)` satisfies `pick`: one
+    /// `session_rule_revoked` entry each, then an empty `approval_session_rules` per focus.
+    fn drop_session_rules(&self, pick: impl Fn(&(String, u64)) -> bool, reason: &str) {
+        let removed: Vec<((String, u64), Vec<SessionRule>)> = {
+            let mut st = lock(&self.state);
+            let keys: Vec<(String, u64)> = st
+                .session_rules
+                .keys()
+                .filter(|k| pick(k))
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|k| st.session_rules.remove(&k).map(|v| (k, v)))
+                .collect()
+        };
+        let mut tags = std::collections::BTreeSet::new();
+        for ((tag, generation), rules) in removed {
+            for rule in &rules {
+                self.log_rule_event(false, &tag, generation, rule, json!({ "reason": reason }));
+            }
+            tags.insert(tag);
+        }
+        for tag in tags {
+            self.broadcast_rules(&tag);
+        }
+    }
+
+    /// Append `session_rule_granted` (`granted`) or `session_rule_revoked`; `extra` is
+    /// merged into the rule object (`reason`, `by_window`).
+    fn log_rule_event(
+        &self,
+        granted: bool,
+        tag: &str,
+        generation: u64,
+        rule: &SessionRule,
+        extra: Value,
+    ) {
+        let mut body = json!({
+            "id": rule.id,
+            "rule_text": rule.rule_text,
+            "kind": rule.kind.as_str(),
+            "summary": rule.summary,
+            "tag": tag,
+            "generation": generation,
+            "session_id": rule.session_id,
+            "agent_id": rule.agent_id,
+            "granted_by_request_id": rule.granted_by_request_id,
+            "granted_by_window": rule.granted_by_window,
+            "created_at": DateTime::<Utc>::from_timestamp_millis(rule.created_at_ms as i64)
+                .map(|t| t.to_rfc3339()),
+            "uses": rule.uses,
+        });
+        if let (Some(map), Some(more)) = (body.as_object_mut(), extra.as_object()) {
+            map.extend(more.clone());
+        }
+        let body = super::audit::sanitize_recorded(&body);
+        let event = if granted {
+            Event::SessionRuleGranted { rule: body }
+        } else {
+            Event::SessionRuleRevoked { rule: body }
+        };
+        let mut e = Entry::new(event, Utc::now());
+        e.tag = Some(tag.to_owned());
+        e.session_id = rule.session_id.clone();
+        if granted {
+            e.request_id = Some(rule.granted_by_request_id.clone());
+        }
+        self.append(e);
     }
 
     fn handle(&self, job: Job) {
@@ -1629,16 +2053,41 @@ impl Inner {
         // The ordering rule, in code: a request is held for a human only if the
         // session carries the guard hook *and* someone who can answer is there.
         if session.guarded && self.parts.presenter.can_present(&ident.tag) {
+            let reason = req.reason(cwd.as_deref(), &*self.parts.settings);
+            // After the guard, before a card: a rule the human created for this very
+            // session process and requester. Only while an app that can show and revoke
+            // rules is connected (the check above).
+            if let Some(rule) =
+                self.matching_session_rule(&ident.tag, generation, &req, &reason, cwd.as_deref())
+            {
+                let ending =
+                    Ending::allowed_by_session_rule(req.input.clone(), rules::rule_identity(&rule));
+                if let Some(done) = self.finish(request_id, ending) {
+                    if done.wrote && done.outcome == Outcome::AllowedBySessionRule {
+                        self.count_rule_use(&ident.tag, generation, &rule.id);
+                    }
+                }
+                return;
+            }
+            let home = lock(&self.home).clone();
+            let candidates = rules::candidates(&req, &reason, &home, cwd.as_deref());
             let wire = approval_wire(
                 request_id,
                 &ident.tag,
                 &session.agent,
                 &req,
+                reason,
+                &candidates,
                 cwd.as_deref(),
-                &*self.parts.settings,
                 self.parts.timeout,
             );
-            self.hold(request_id, wire, req.input.clone(), epoch_at_check);
+            self.hold(
+                request_id,
+                wire,
+                candidates,
+                req.input.clone(),
+                epoch_at_check,
+            );
         } else {
             self.finish(
                 request_id,
@@ -1681,7 +2130,14 @@ impl Inner {
     /// Keep the request until its deadline (or until something else ends it), and
     /// show it to the presenters. `epoch_at_check`: the presenter epoch when the
     /// presenter was asked; a change since means one came or went in between.
-    fn hold(&self, request_id: &str, wire: ApprovalRequestWire, input: Value, epoch_at_check: u64) {
+    fn hold(
+        &self,
+        request_id: &str,
+        wire: ApprovalRequestWire,
+        candidates: Vec<Candidate>,
+        input: Value,
+        epoch_at_check: u64,
+    ) {
         if wire_len(&wire) > MAX_FRAME_LEN - FRAME_MARGIN {
             self.finish(
                 request_id,
@@ -1697,6 +2153,7 @@ impl Inner {
         p.held = true;
         p.input = Some(input);
         p.wire = Some(wire.clone());
+        p.candidates = candidates;
         // The arrival watchdog is replaced by the deadline and its watchdog. (Both
         // need the tokio runtime the daemon always has; see the module docs.)
         p.timers = Timers::default();
@@ -1759,6 +2216,25 @@ impl Inner {
     }
 }
 
+/// A validated `allow_session` choice: the rule to keep once the allow is written.
+struct SessionRuleChoice {
+    rule: SessionRule,
+    generation: u64,
+    ident: Ident,
+}
+
+fn rule_wire(rule: &SessionRule) -> SessionRuleWire {
+    SessionRuleWire {
+        id: rule.id.clone(),
+        rule_text: rule.rule_text.clone(),
+        summary: rule.summary.clone(),
+        kind: rule.kind,
+        created_at_ms: rule.created_at_ms,
+        uses: rule.uses,
+        agent_id: rule.agent_id.clone(),
+    }
+}
+
 /// What [`Inner::finish`] did.
 struct Finished {
     tag: String,
@@ -1781,19 +2257,24 @@ fn now_ms() -> u64 {
 }
 
 /// What the Mac app is shown of a held request.
+#[allow(clippy::too_many_arguments)] // one call site; a parameter struct would only rename them
 fn approval_wire(
     request_id: &str,
     tag: &str,
     agent: &str,
     req: &PermissionRequest,
+    reason: Reason,
+    candidates: &[Candidate],
     cwd: Option<&Path>,
-    settings: &dyn SettingsSource,
     timeout: Duration,
 ) -> ApprovalRequestWire {
     let created_at_ms = now_ms();
     let mut options = ApprovalOption::ALL.to_vec();
     if req.tool_name == "AskUserQuestion" && questions::parse_questions(&req.input).is_some() {
         options.push(ApprovalOption::AnswerQuestions);
+    }
+    if !candidates.is_empty() {
+        options.push(ApprovalOption::AllowSession);
     }
     ApprovalRequestWire {
         request_id: request_id.to_owned(),
@@ -1816,7 +2297,7 @@ fn approval_wire(
         input: req.input.clone(),
         display: ApprovalDisplay::build(req.tool_kind, &req.input),
         cwd: cwd.map(|c| c.to_string_lossy().into_owned()),
-        reason: req.reason(cwd, settings),
+        reason,
         flags: ApprovalFlags {
             default_to_no: req.default_to_no.unwrap_or(false),
             suppress_always_allow_rule: req.suppress_always_allow_rule.unwrap_or(false),
@@ -1825,7 +2306,16 @@ fn approval_wire(
         },
         description: req.description.clone(),
         options,
-        session_rule_candidates: Vec::new(),
+        session_rule_candidates: candidates
+            .iter()
+            .map(|c| SessionRuleCandidateWire {
+                id: c.id.clone(),
+                rule_text: c.rule_text.clone(),
+                summary: c.summary.clone(),
+                kind: c.kind,
+                overrides: c.overrides.clone(),
+            })
+            .collect(),
         created_at_ms,
         deadline_at_ms: created_at_ms + timeout.as_millis() as u64,
     }
