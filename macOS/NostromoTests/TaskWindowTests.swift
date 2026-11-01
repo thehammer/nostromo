@@ -854,20 +854,20 @@ final class TaskWindowTests: XCTestCase {
     func testClampPutsAFrameOnTheScreenItOverlapsMost() {
         let left = NSRect(x: 0, y: 0, width: 1_000, height: 800)
         let right = NSRect(x: 1_000, y: 0, width: 1_000, height: 800)
-        let straddling = NSRect(x: 900, y: 100, width: 400, height: 300)
+        let straddling = NSRect(x: 900, y: 100, width: 500, height: 300)
 
         let clamped = TaskWindowFrame.clamp(straddling, to: [left, right])
 
-        XCTAssertEqual(clamped, NSRect(x: 1_000, y: 100, width: 400, height: 300), "300 of 400 points are on the right screen")
+        XCTAssertEqual(clamped, NSRect(x: 1_000, y: 100, width: 500, height: 300), "400 of 500 points are on the right screen")
     }
 
     func testClampPullsAFramePartlyOffAScreenBackOnto() {
         let screen = NSRect(x: 0, y: 0, width: 1_000, height: 800)
 
-        XCTAssertEqual(TaskWindowFrame.clamp(NSRect(x: 900, y: 100, width: 400, height: 300), to: [screen]),
-                       NSRect(x: 600, y: 100, width: 400, height: 300))
-        XCTAssertEqual(TaskWindowFrame.clamp(NSRect(x: -200, y: -150, width: 400, height: 300), to: [screen]),
-                       NSRect(x: 0, y: 0, width: 400, height: 300))
+        XCTAssertEqual(TaskWindowFrame.clamp(NSRect(x: 900, y: 100, width: 500, height: 300), to: [screen]),
+                       NSRect(x: 500, y: 100, width: 500, height: 300))
+        XCTAssertEqual(TaskWindowFrame.clamp(NSRect(x: -200, y: -150, width: 500, height: 300), to: [screen]),
+                       NSRect(x: 0, y: 0, width: 500, height: 300))
     }
 
     func testClampGivesNothingForAFrameOnNoScreen() {
@@ -1033,7 +1033,7 @@ final class TaskWindowTests: XCTestCase {
         XCTAssertEqual(leaked, [], "alive after 50 open/close rounds (of \(all.count) watched)")
     }
 
-    func testOpeningFiftyDifferentTasksAndClosingThemAllLeavesNothingBehind() {
+    func testOpeningAndClosingFiftyDifferentTasksLeavesNothingBehind() {
         let tasks = (0 ..< 50).map { w.task("job\($0)", "task number \($0)") }
         w.ingest(tasks)
         for task in tasks { w.outputs[task.id] = "output of \(task.id)\n" }
@@ -1044,14 +1044,11 @@ final class TaskWindowTests: XCTestCase {
             autoreleasepool {
                 guard let controller = w.open(task.id) else { return XCTFail("\(task.id) did not open") }
                 all += probes(of: controller, seen: &seen)
+                w.pump()
+                XCTAssertGreaterThanOrEqual(w.pollScheduler.liveCount, 1, "precondition: the open window polls")
+                controller.close()
             }
         }
-        w.pump()
-        XCTAssertEqual(w.manager.openCount, 50)
-        XCTAssertGreaterThanOrEqual(w.pollScheduler.liveCount, 50, "precondition: every open window polls")
-
-        // Inside a pool of its own: what AppKit autoreleases while closing is gone when this returns.
-        autoreleasepool { w.manager.closeAll() }
 
         XCTAssertEqual(w.manager.openCount, 0)
         XCTAssertEqual(w.pollScheduler.liveCount, 0, "no timer is live after the last window closed")
@@ -1059,6 +1056,25 @@ final class TaskWindowTests: XCTestCase {
         drainRunLoop()
 
         let leaked = all.filter { $0.object != nil }.map(\.label)
-        XCTAssertEqual(leaked, [], "alive after 50 windows closed (of \(all.count) watched)")
+        XCTAssertEqual(leaked, [], "alive after 50 distinct windows closed (of \(all.count) watched)")
+    }
+
+    func testFiftyWindowsOpenAtOnceAreAllClosedByCloseAllAndHoldNoTimer() {
+        let tasks = (0 ..< 50).map { w.task("job\($0)", "task number \($0)") }
+        w.ingest(tasks)
+        for task in tasks { w.outputs[task.id] = "output of \(task.id)\n" }
+        for task in tasks { autoreleasepool { _ = w.open(task.id) } }
+        w.pump()
+        XCTAssertEqual(w.manager.openCount, 50)
+        XCTAssertGreaterThanOrEqual(w.pollScheduler.liveCount, 50, "precondition: every open window polls")
+
+        autoreleasepool { w.manager.closeAll() }
+
+        XCTAssertEqual(w.manager.openCount, 0)
+        XCTAssertEqual(w.pollScheduler.liveCount, 0, "no timer is live after the last window closed")
+        XCTAssertEqual(w.registry.modelCount, 50, "the models stay cached until the focus goes")
+        XCTAssertTrue(w.registry.totalHeldBytes > 0)
+        w.registry.forget(tag: "claudia")
+        XCTAssertEqual(w.registry.modelCount, 0)
     }
 }
