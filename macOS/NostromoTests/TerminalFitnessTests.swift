@@ -457,7 +457,10 @@ final class TerminalFitnessTests: XCTestCase {
                      // Command staging (S1b): the drawer is AppKit only, so it is driven for real in the tests.
                      "Data/TerminalStagingWire.swift", "Data/TerminalStagingStore.swift", "Data/AgentDisplayText.swift",
                      "UI/Terminal/StagingDrawerModel.swift", "UI/Terminal/StagingInsertController.swift",
-                     "UI/Terminal/StagingDrawerView.swift", "UI/Terminal/StagingRowView.swift"],
+                     "UI/Terminal/StagingDrawerView.swift", "UI/Terminal/StagingRowView.swift",
+                     // S2: the destructive patterns and hazards, the confirm sheet (AppKit only, driven for real) and the stats.
+                     "UI/Terminal/StagingHazards.swift", "UI/Terminal/StagingConfirmSheet.swift",
+                     "Data/TerminalStagingStats.swift"],
                     underApp: true, inApp: true, inTests: true, project: try Project())
     }
 
@@ -480,7 +483,8 @@ final class TerminalFitnessTests: XCTestCase {
                      "NavTabItemEnvironmentBadgeTests.swift", "MainLayoutWindowTitleTests.swift",
                      "RemotePasteGateTests.swift", "TerminalPaneHeaderViewTests.swift", "IdleBannerViewTests.swift",
                      "TerminalStagingWireTests.swift", "TerminalStagingStoreTests.swift", "AgentDisplayTextTests.swift",
-                     "StagingDrawerModelTests.swift", "StagingInsertControllerTests.swift", "StagingDrawerViewTests.swift"],
+                     "StagingDrawerModelTests.swift", "StagingInsertControllerTests.swift", "StagingDrawerViewTests.swift",
+                     "StagingHazardsTests.swift", "StagingConfirmSheetTests.swift", "TerminalStagingStatsTests.swift"],
                     underApp: false, inApp: false, inTests: true, project: try Project())
     }
 
@@ -1028,7 +1032,7 @@ final class TerminalFitnessTests: XCTestCase {
             .filter { $0.lastPathComponent.hasPrefix("Staging") }
         urls += Repo.swiftFiles(under: Repo.app.appendingPathComponent("Data"))
             .filter { $0.lastPathComponent.hasPrefix("TerminalStaging") || $0.lastPathComponent == "AgentDisplayText.swift" }
-        XCTAssertEqual(urls.count, 7, "the staging files should be found: \(urls.map { $0.lastPathComponent })")
+        XCTAssertEqual(urls.count, 10, "the staging files should be found: \(urls.map { $0.lastPathComponent })")
         return try urls.map { url in
             let text = try Repo.read(url)
             return (name: url.lastPathComponent, text: text, code: Repo.codeLines(text).joined(separator: "\n"))
@@ -1048,14 +1052,65 @@ final class TerminalFitnessTests: XCTestCase {
 
     func testNoStagingFileSetsAKeyEquivalentOrAFocusDefault() throws {
         for file in try stagingFiles() {
-            for pattern in [#"\.keyEquivalent\b"#, "keyEquivalentModifierMask", "performKeyEquivalent", "setAccessibility\\w*keyEquivalent",
-                            "defaultButton", "isDefault"] {
+            // The confirm sheet is the one exception: its Cancel button answers Return and a hidden button answers
+            // Escape. Nothing else, and never the Insert button.
+            let sheetAllowed = file.name == "StagingConfirmSheet.swift"
+            let allowedLines = [#"cancelButton.keyEquivalent = "\r""#, #"escapeButton.keyEquivalent = "\u{1b}""#]
+            let assignment = #"\.keyEquivalent\b"#
+            var patterns = ["keyEquivalentModifierMask", "performKeyEquivalent", "setAccessibility\\w*keyEquivalent",
+                            "defaultButton", "isDefault"]
+            if !sheetAllowed { patterns.append(assignment) }
+            for pattern in patterns {
                 XCTAssertNil(Repo.firstMatch(pattern, in: file.code), "\(file.name) matches `\(pattern)`: nothing staged may answer to a key")
             }
             // The only allowed use of the word is an item built with an empty key.
             for line in file.code.components(separatedBy: "\n") where line.contains("keyEquivalent") {
-                XCTAssertTrue(line.contains(#"keyEquivalent: """#), "\(file.name): \(line.trimmingCharacters(in: .whitespaces))")
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if sheetAllowed, allowedLines.contains(trimmed) { continue }
+                XCTAssertTrue(line.contains(#"keyEquivalent: """#), "\(file.name): \(trimmed)")
             }
+            if sheetAllowed {
+                for line in file.code.components(separatedBy: "\n") where line.lowercased().contains("insertbutton") {
+                    XCTAssertFalse(line.contains("keyEquivalent") || line.contains("isDefault"), "the Insert button answers to no key: \(line)")
+                }
+            }
+        }
+    }
+
+    func testTheStagingSwitchesAndArchiveControlsAreGatedAndTheAutoArchiveSwitchIsMemoryOnly() throws {
+        let controller = try terminalViewSource("StagingInsertController.swift")
+        for name in ["archive(entryIds", "setAutoArchive", "setStagingEnabledHere", "allowsHideControl", "setGlobalStaging"] {
+            let found = declarations(in: controller.name, lines: controller.lines) { controller.lines[$0].contains("func \(name)") }
+            let decl = try XCTUnwrap(found.first, "StagingInsertController.\(name)")
+            XCTAssertTrue(decl.body.contains("gate(event, control,"), "\(name) must ask the gate (a person's gesture) first:\n\(decl.body)")
+        }
+        // Auto-archive is never stored: only the controller (after the gate) flips it, and nothing writes it anywhere.
+        var setters: [String] = []
+        for file in try stagingFiles() {
+            XCTAssertNil(Repo.firstMatch(#"autoArchive\w*[^\n]*(UserDefaults|\.set\(forKey|write\()"#, in: file.code), file.name)
+            for line in file.code.components(separatedBy: "\n") where line.contains("setAutoArchive(") && !line.contains("func setAutoArchive") { setters.append(file.name) }
+        }
+        XCTAssertTrue(Set(setters).isSubset(of: ["StagingInsertController.swift", "StagingDrawerView.swift"]), "\(setters)")
+        let store = try Repo.read(Repo.app.appendingPathComponent("Data/TerminalStagingStore.swift"))
+        XCTAssertFalse(Repo.codeLines(store).contains { $0.contains("autoArchive") && $0.contains("defaults") }, "auto-archive never touches UserDefaults")
+        XCTAssertFalse(Repo.codeLines(store).contains { $0.contains("addObserver") || $0.contains("didChangeNotification") },
+                       "the global switch is read once and never observed")
+    }
+
+    func testDebugHasCopyTerminalStagingStatsWithNoKeyEquivalent() throws {
+        _ = NSApplication.shared
+        let main = MainMenu.make(target: nil)
+        let debug = try XCTUnwrap(topLevelMenu("Debug", in: main)).menu
+        let stats = try XCTUnwrap(item("Copy Terminal Staging Stats", in: debug))
+        XCTAssertEqual(stats.keyEquivalent, "")
+    }
+
+    func testTheStagingSwitchesInTheTerminalMenuHaveNoKeyEquivalent() throws {
+        _ = NSApplication.shared
+        let main = MainMenu.make(target: nil)
+        let terminal = try XCTUnwrap(topLevelMenu("Terminal", in: main)).menu
+        for title in ["Let Agents Stage Commands Here", "Let Agents Stage Commands in Terminals"] {
+            XCTAssertEqual(try XCTUnwrap(item(title, in: terminal), title).keyEquivalent, "", title)
         }
     }
 

@@ -34,12 +34,17 @@ struct TerminalStagingList: Equatable {
     let agentName: String
     let revision: Int
     let entries: [StagingEntry]
+    /// Whether staging is on for this terminal (the daemon sends it with every frame, even a `none` one).
+    var enabled: Bool = true
+    /// Set while a Local terminal's foreground is a program other than its shell (`ssh`, `kubectl`): the
+    /// pane is treated like a remote one. Only for the app's own rules: never sent to the agent.
+    var foreground: String? = nil
 }
 
 extension TerminalStagingList: Decodable {
     enum CodingKeys: String, CodingKey {
         case terminalId = "terminal_id", paneId = "pane_id", state, ownerTag = "owner_tag"
-        case agentName = "agent_name", revision, entries
+        case agentName = "agent_name", revision, entries, enabled, foreground
     }
 
     init(from decoder: Decoder) throws {
@@ -52,6 +57,8 @@ extension TerminalStagingList: Decodable {
         agentName = try c.decodeIfPresent(String.self, forKey: .agentName) ?? ""
         revision = try c.decode(Int.self, forKey: .revision)
         entries = try c.decodeIfPresent([StagingEntry].self, forKey: .entries) ?? []
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        foreground = try c.decodeIfPresent(String.self, forKey: .foreground)
     }
 }
 

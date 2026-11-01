@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 /// The band at the top of a terminal pane: the environment of a remote shell, then what it is (project,
 /// service, shell, or a local shell's directory), the mirror hint, the Follow badge and a close x. No
@@ -25,6 +26,12 @@ final class TerminalPaneHeaderView: NSView {
     let closeButton = NSButton()
     /// The Follow badge. The host wires its action (it opens the invite or manage popover).
     let followButton = NSButton()
+    /// `3 staged`: shown while the staged-commands drawer is closed and a list exists; a gated click reopens it.
+    /// In a remote pane it sits after the environment token and is hidden before it would displace or clip it.
+    let stagedChip = NSButton()
+    /// How many times the chip pulsed for a new entry (tests).
+    private(set) var chipPulseCount = 0
+    private var chipCount: Int?
 
     private let environmentLabel = NSTextField(labelWithString: "")
     private let titleLabel = NSTextField(labelWithString: "")
@@ -65,7 +72,13 @@ final class TerminalPaneHeaderView: NSView {
         followButton.layer?.cornerRadius = 4
         followButton.lineBreakMode = .byTruncatingTail
         followButton.setAccessibilityIdentifier("terminal-follow")
-        for view in [environmentLabel, titleLabel, mirrorHint, followButton, closeButton] { addSubview(view) }
+        stagedChip.isBordered = false
+        stagedChip.wantsLayer = true
+        stagedChip.layer?.cornerRadius = 4
+        stagedChip.lineBreakMode = .byClipping
+        stagedChip.isHidden = true
+        stagedChip.setAccessibilityIdentifier("terminal-staged-chip")
+        for view in [environmentLabel, titleLabel, mirrorHint, stagedChip, followButton, closeButton] { addSubview(view) }
         apply(info: nil, mirrorHint: "")
     }
 
@@ -107,8 +120,46 @@ final class TerminalPaneHeaderView: NSView {
         needsLayout = true
     }
 
+    /// Shows `n staged` (nil hides it). `pulse`: a new entry arrived (a short pulse, none under Reduce Motion).
+    func setStagedChip(count: Int?, pulse: Bool = false) {
+        chipCount = count
+        if let count {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .center
+            stagedChip.attributedTitle = NSAttributedString(string: "\(count) staged", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: isRemote ? Theme.hazardText : Theme.bg,
+                .paragraphStyle: paragraph,
+            ])
+            stagedChip.layer?.backgroundColor = (isRemote ? Theme.bg : Theme.followBlue).cgColor
+            stagedChip.setAccessibilityLabel("\(count) staged commands, hidden. Show staged commands")
+            stagedChip.toolTip = "Show the staged commands"
+        }
+        stagedChip.isHidden = count == nil
+        if pulse, count != nil {
+            chipPulseCount += 1
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let layer = stagedChip.layer {
+                let animation = CABasicAnimation(keyPath: "opacity")
+                animation.fromValue = 1
+                animation.toValue = 0.3
+                animation.duration = 0.35
+                animation.autoreverses = true
+                layer.add(animation, forKey: "staging-chip-pulse")
+            }
+        }
+        needsLayout = true
+    }
+
+    /// Whether the chip is on screen (it hides when there is no room that does not belong to the token).
+    var isChipShown: Bool { !stagedChip.isHidden }
+
+    private var chipWidth: CGFloat {
+        ceil(stagedChip.attributedTitle.size().width) + 14
+    }
+
     override func layout() {
         super.layout()
+        stagedChip.isHidden = chipCount == nil
         let h = bounds.height
         closeButton.frame = NSRect(x: bounds.width - Self.closeWidth - 2, y: 0, width: Self.closeWidth, height: h)
         let labelSize = titleLabel.intrinsicContentSize
@@ -120,19 +171,39 @@ final class TerminalPaneHeaderView: NSView {
         let contentEnd = max(10, followButton.frame.minX - Self.gap)
         guard isRemote else {
             // The hint keeps its width unless the pane is very narrow; the title gives way to it.
-            let available = contentEnd - 10
+            var start: CGFloat = 10
+            var available = contentEnd - 10
+            if !stagedChip.isHidden {
+                if available >= chipWidth + Self.gap + 40 {
+                    stagedChip.frame = NSRect(x: start, y: (h - Self.badgeMaxHeight) / 2 + 1, width: chipWidth, height: min(h, Self.badgeMaxHeight))
+                    start += chipWidth + Self.gap
+                    available -= chipWidth + Self.gap
+                } else {
+                    stagedChip.isHidden = true
+                }
+            }
             let hintW = mirrorHint.isHidden ? 0 : min(mirrorHint.intrinsicContentSize.width, available * 0.6)
             let gap = mirrorHint.isHidden ? 0 : Self.gap
-            mirrorHint.frame = NSRect(x: 10 + available - hintW, y: (h - labelSize.height) / 2, width: hintW, height: labelSize.height)
-            titleLabel.frame = NSRect(x: 10, y: (h - labelSize.height) / 2, width: max(0, available - hintW - gap), height: labelSize.height)
+            mirrorHint.frame = NSRect(x: start + available - hintW, y: (h - labelSize.height) / 2, width: hintW, height: labelSize.height)
+            titleLabel.frame = NSRect(x: start, y: (h - labelSize.height) / 2, width: max(0, available - hintW - gap), height: labelSize.height)
             return
         }
         // The environment is laid out first, at its full width; then the title; the mirror hint gets only
         // what the title does not need.
         let envSize = fitEnvironmentLabel(width: contentEnd - 10, height: h)
         environmentLabel.frame = NSRect(x: 10, y: (h - envSize.height) / 2, width: envSize.width, height: envSize.height)
-        let restStart = 10 + envSize.width + Self.gap
-        let rest = max(0, contentEnd - restStart)
+        var restStart = 10 + envSize.width + Self.gap
+        var rest = max(0, contentEnd - restStart)
+        // The chip only takes room the token does not need, and only while some is left for the title too.
+        if !stagedChip.isHidden {
+            if rest >= chipWidth + Self.gap + 24 {
+                stagedChip.frame = NSRect(x: restStart, y: (h - Self.badgeMaxHeight) / 2 + 1, width: chipWidth, height: min(h, Self.badgeMaxHeight))
+                restStart += chipWidth + Self.gap
+                rest -= chipWidth + Self.gap
+            } else {
+                stagedChip.isHidden = true
+            }
+        }
         var hintW: CGFloat = 0
         if !mirrorHint.isHidden {
             hintW = min(mirrorHint.intrinsicContentSize.width, max(0, rest - labelSize.width - Self.gap))

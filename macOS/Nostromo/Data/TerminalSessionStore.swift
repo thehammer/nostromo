@@ -93,6 +93,10 @@ final class TerminalSessionStore {
     /// Sends one frame to the daemon (`AppStore` points it at the client; dropped when not connected).
     var transport: (TerminalClientMessage) -> Void
 
+    /// Told, with the bytes, of every input a person's own (keys, paste, a staged insert) that went to a
+    /// terminal; never of a terminal's auto-reply. `AppStore` points it at the staging store (auto-archive).
+    var onPersonInput: ((_ terminalId: String, _ bytes: [UInt8]) -> Void)?
+
     private(set) var terminals: [String: TerminalInfo] = [:]
     /// The window a person last typed or clicked in, per terminal. A terminal nobody has used yet is
     /// driven by its first view (`isDriver`).
@@ -133,6 +137,10 @@ final class TerminalSessionStore {
     /// terminal id -> (window id, when the claim was made), once the daemon said the terminal exists.
     private var focusClaims: [String: (windowId: String, at: Date)] = [:]
     private var lastRefusalReport: [String: Date] = [:]
+    /// Whether something may be on the shell's current line (false: known empty). A terminal not in here is
+    /// UNKNOWN, which counts as true: a terminal this app did not open or first see connecting (re-attached
+    /// after a launch or a reconnect) may have anything typed on its line.
+    private var lineHasText: [String: Bool] = [:]
 
     /// Where Reconnect on a closed remote shell sends its request.
     private let remoteShells: RemoteShellStore
@@ -169,6 +177,12 @@ final class TerminalSessionStore {
     /// The daemon is unreachable (or has not yet described this terminal since it came back).
     func isDaemonUnavailable(terminalId: String) -> Bool {
         daemonUnavailable.contains(terminalId)
+    }
+
+    /// Something typed or placed since the last Enter, Ctrl-C or Ctrl-U may still be on the line. True when
+    /// that is unknown. Only a production-treated staging pane reads it (a command is not placed next to it).
+    func lineMayHaveText(terminalId: String) -> Bool {
+        lineHasText[terminalId] ?? true
     }
 
     /// A large paste is still going out in frames: anything else for this terminal queues behind it.
@@ -234,6 +248,7 @@ final class TerminalSessionStore {
     func connectionChanged(_ isConnected: Bool) {
         connected = isConnected
         if !isConnected {
+            lineHasText.removeAll()
             attached.removeAll()
             inputBacklog.removeAll()
             if !terminals.isEmpty, daemonUnavailable.isEmpty {
@@ -257,8 +272,11 @@ final class TerminalSessionStore {
     /// they are going out, anything else for that terminal (a key, a reply) queues behind them, so a
     /// paste is never split by what the person types next.
     /// Returns whether the bytes were sent or queued (false: dropped, nothing will go out).
+    ///
+    /// `via` says where a person's input came from (`"stage_insert"`: a staged command placed at the prompt).
     @discardableResult
-    func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String, autoReply: Bool = false) -> Bool {
+    func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String, autoReply: Bool = false,
+                   via: String? = nil) -> Bool {
         guard !bytes.isEmpty, terminals[terminalId]?.status == .running,
               !daemonUnavailable.contains(terminalId) else { return false }
         // Every window's emulator answers the same output; only the driver's reply reaches the process.
@@ -272,8 +290,12 @@ final class TerminalSessionStore {
         while start < bytes.count {
             let end = min(start + Self.inputChunkBytes, bytes.count)
             let chunk = (start == 0 && end == bytes.count) ? bytes : Array(bytes[start..<end])
-            frames.append(.input(terminalId: terminalId, bytes: chunk, autoReply: autoReply))
+            frames.append(.input(terminalId: terminalId, bytes: chunk, autoReply: autoReply, via: via))
             start = end
+        }
+        if !autoReply {
+            noteLine(terminalId: terminalId, bytes: bytes)
+            onPersonInput?(terminalId, bytes)
         }
         if inputBacklog[terminalId] == nil && frames.count == 1 {
             transport(frames[0])
@@ -389,6 +411,9 @@ final class TerminalSessionStore {
     private func apply(_ info: TerminalInfo) {
         let id = info.terminalId
         let sizeChanged = terminals[id].map { ($0.cols, $0.rows) != (info.cols, info.rows) } ?? false
+        // A terminal this app opened, or first seen still connecting, starts with an empty line.
+        let appOpened = info.openedByRequest.map { pendingFocus[$0] != nil } ?? false
+        if terminals[id] == nil, lineHasText[id] == nil, appOpened || info.status == .connecting { lineHasText[id] = false }
         terminals[id] = info
         knownSize[id] = [info.cols, info.rows]
         // A restart replaces the terminal in the same pane under a new id; the old record is gone.
@@ -580,7 +605,15 @@ final class TerminalSessionStore {
         }
     }
 
+    /// After a person's bytes: the line is known empty only when the last of Enter (CR), Ctrl-C and Ctrl-U is the
+    /// final byte; any byte after it, or none of them at all, may have put text on the line.
+    private func noteLine(terminalId: String, bytes: [UInt8]) {
+        let enders: Set<UInt8> = [0x0D, 0x03, 0x15]
+        lineHasText[terminalId] = bytes.lastIndex(where: { enders.contains($0) }).map { $0 != bytes.count - 1 } ?? true
+    }
+
     private func forget(_ id: String) {
+        lineHasText.removeValue(forKey: id)
         terminals.removeValue(forKey: id)
         replayCopy.removeValue(forKey: id)
         inputBacklog.removeValue(forKey: id)

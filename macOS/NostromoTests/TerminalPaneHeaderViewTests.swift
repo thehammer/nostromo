@@ -350,3 +350,55 @@ final class TerminalPaneHeaderViewTests: XCTestCase {
         XCTAssertEqual(TerminalPaneHeaderView().followButton.accessibilityIdentifier(), "terminal-follow")
     }
 }
+
+
+// MARK: - S2: the `3 staged` chip
+
+extension TerminalPaneHeaderViewTests {
+
+    func testTheChipNeverDisplacesOrClipsTheEnvironmentTokenAtAnyWidth() throws {
+        let pane = info(kind: .ecs, target: longTarget)
+        for width in [CGFloat(120), 200, 280, 400, 700] {
+            let plain = makeHeader(pane, width: width)
+            let withChip = makeHeader(pane, width: width)
+            withChip.setStagedChip(count: 3)
+            withChip.layoutSubtreeIfNeeded()
+            let token = try label("terminal-environment", in: withChip)
+            let reference = try label("terminal-environment", in: plain)
+            XCTAssertEqual(token.frame, reference.frame, "\(width) pt: the token is where it was, whole")
+            if withChip.isChipShown {
+                XCTAssertFalse(overlaps(withChip.stagedChip.frame, token.frame), "\(width) pt: the chip sits after the token")
+                XCTAssertGreaterThanOrEqual(withChip.stagedChip.frame.minX, token.frame.maxX, "\(width)")
+                XCTAssertLessThanOrEqual(withChip.stagedChip.frame.maxX, withChip.followButton.frame.minX + 0.5, "\(width)")
+            }
+        }
+        XCTAssertFalse(makeHeaderWithChip(width: 120).isChipShown, "no room at 120 pt: the chip hides before the token would clip")
+        XCTAssertTrue(makeHeaderWithChip(width: 700).isChipShown)
+    }
+
+    private func makeHeaderWithChip(width: CGFloat) -> TerminalPaneHeaderView {
+        let header = makeHeader(info(kind: .ecs, target: shortTarget), width: width)
+        header.setStagedChip(count: 3)
+        header.layoutSubtreeIfNeeded()
+        return header
+    }
+
+    func testTheChipSaysHowManyAndHidesWhenTheCountIsNil() {
+        let header = makeHeaderWithChip(width: 700)
+        XCTAssertEqual(header.stagedChip.attributedTitle.string, "3 staged")
+        XCTAssertFalse(header.stagedChip.isHidden)
+        header.setStagedChip(count: nil)
+        header.layoutSubtreeIfNeeded()
+        XCTAssertTrue(header.stagedChip.isHidden)
+    }
+
+    func testALocalHeaderShowsTheChipBeforeTheTitleAndPulsesOnANewEntry() {
+        let header = makeHeader(info(kind: .local, target: nil, label: "zsh"), width: 400)
+        header.setStagedChip(count: 2)
+        header.layoutSubtreeIfNeeded()
+        XCTAssertTrue(header.isChipShown)
+        XCTAssertEqual(header.chipPulseCount, 0)
+        header.setStagedChip(count: 3, pulse: true)
+        XCTAssertEqual(header.chipPulseCount, 1)
+    }
+}

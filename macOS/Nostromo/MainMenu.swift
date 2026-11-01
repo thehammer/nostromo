@@ -14,11 +14,14 @@ import AppKit
     func closeTerminalPane(_ sender: Any?)
     func terminalSendSelection(_ sender: Any?)
     func focusStagedCommands(_ sender: Any?)
+    func toggleStagingHere(_ sender: Any?)
+    func toggleStagingGlobal(_ sender: Any?)
     func showTerminalAuditLog(_ sender: Any?)
     func revealTerminalAuditLog(_ sender: Any?)
     func terminalFind(_ sender: Any?)
     func copyTerminalLatencyStats()
     func copyMotherNoticeStats()
+    func copyTerminalStagingStats()
     func openSecondWindowQA(_ sender: Any?)
 }
 
@@ -105,6 +108,15 @@ enum MainMenu {
         focusStagedItem.keyEquivalentModifierMask = [.command, .shift]
         focusStagedItem.target = target
         terminalMenu.addItem(focusStagedItem)
+        // The staging switches (checkable, gated like every control, no shortcut). Off clears the lists and tells agents.
+        let stagingHereItem = NSMenuItem(title: "Let Agents Stage Commands Here",
+                                         action: #selector(MainMenuActions.toggleStagingHere(_:)), keyEquivalent: "")
+        stagingHereItem.target = target
+        terminalMenu.addItem(stagingHereItem)
+        let stagingGlobalItem = NSMenuItem(title: "Let Agents Stage Commands in Terminals",
+                                           action: #selector(MainMenuActions.toggleStagingGlobal(_:)), keyEquivalent: "")
+        stagingGlobalItem.target = target
+        terminalMenu.addItem(stagingGlobalItem)
         // The daemon's trail of terminal events (no keystrokes, no output). No shortcuts.
         terminalMenu.addItem(.separator())
         let showAuditItem = NSMenuItem(title: "Show Terminal Audit Log",
@@ -159,6 +171,12 @@ enum MainMenu {
                                          keyEquivalent: "")
         noticeStatsItem.target = target
         debugMenu.addItem(noticeStatsItem)
+        // Counts only, never a command or a note. No key equivalent.
+        let stagingStatsItem = NSMenuItem(title: "Copy Terminal Staging Stats",
+                                          action: #selector(MainMenuActions.copyTerminalStagingStats),
+                                          keyEquivalent: "")
+        stagingStatsItem.target = target
+        debugMenu.addItem(stagingStatsItem)
         // QA only (enabled when the bundle id is not the real app's): a second window on the main
         // display's focus, so one terminal can be mirrored without a second display. ⌃⌥⌘N lets the
         // QA scripts press it through app-control.

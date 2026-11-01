@@ -213,6 +213,10 @@ enum TerminalRefusedOp: String, Equatable {
     /// The staging drawer's controls (a click, Space or VoiceOver press on a staged command; Copy, Remove, Clear all).
     case stageInsert = "stage_insert", stagingCopy = "staging_copy"
     case stagingRemove = "staging_remove", stagingClear = "staging_clear"
+    /// S2: Archive (a placed row, Archive Placed Commands), the drawer's close and reopen controls, the
+    /// staging switches and the destructive-pattern sheet's Insert.
+    case stagingArchive = "staging_archive", stagingHide = "staging_hide"
+    case stagingSwitch = "staging_switch", stagingConfirm = "staging_confirm"
 }
 
 /// Every terminal frame this app sends. `encoded()` is the JSON body the daemon reads; the optional
@@ -225,7 +229,10 @@ enum TerminalClientMessage: Equatable {
     /// reply, a focus report), not a person's typing or paste. The daemon writes it to the shell but
     /// does not count it as activity for the remote idle rule. Omitted from the frame when false, so
     /// an older daemon sees what it always saw (and counts every input as a keystroke).
-    case input(terminalId: String, bytes: [UInt8], autoReply: Bool = false)
+    ///
+    /// `via`: where a person's input came from. Only `"stage_insert"` (a staged command a person placed at
+    /// the prompt) means anything to the daemon (it counts as idle activity); omitted from the frame when nil.
+    case input(terminalId: String, bytes: [UInt8], autoReply: Bool = false, via: String? = nil)
     case resize(terminalId: String, cols: Int, rows: Int)
     case close(terminalId: String)
     case restart(terminalId: String)
@@ -244,10 +251,17 @@ enum TerminalClientMessage: Equatable {
     /// The app placed staged entry `entryId` at the prompt (`bytes` UTF-8 bytes of its text; the text itself
     /// never goes in this frame). `confirmed` is S2's destructive-pattern sheet: always false in S1.
     case stagingInserted(terminalId: String, entryId: String, bytes: Int, confirmed: Bool)
-    /// The user's Remove for one staged entry.
-    case stagingRemove(terminalId: String, entryId: String)
+    /// The user's Remove for one staged entry. `archive` (`"manual"` or `"auto"`) says it was an Archive of a
+    /// placed entry, not a Remove; omitted from the frame when nil.
+    case stagingRemove(terminalId: String, entryId: String, archive: String? = nil)
     /// The user's Clear for the whole staged list.
     case stagingClear(terminalId: String)
+    /// The per-terminal switch (Let Agents Stage Commands Here).
+    case stagingSetEnabled(terminalId: String, enabled: Bool)
+    /// The global switch (Let Agents Stage Commands in Terminals).
+    case stagingSetGlobal(enabled: Bool)
+    /// A counted event of the staging UI, from a fixed set (`confirm_cancelled`, `just_changed`). No text.
+    case stagingUIEvent(terminalId: String, event: String)
 
     var wireType: String {
         switch self {
@@ -267,6 +281,9 @@ enum TerminalClientMessage: Equatable {
         case .stagingInserted: return "terminal_staging_inserted"
         case .stagingRemove: return "terminal_staging_remove"
         case .stagingClear:  return "terminal_staging_clear"
+        case .stagingSetEnabled: return "terminal_staging_set_enabled"
+        case .stagingSetGlobal: return "terminal_staging_set_global"
+        case .stagingUIEvent: return "terminal_staging_ui_event"
         }
     }
 
@@ -283,10 +300,11 @@ enum TerminalClientMessage: Equatable {
         case .attach(let id), .detach(let id), .close(let id), .restart(let id), .keepAlive(let id),
              .followStop(let id), .followResume(let id), .stagingClear(let id):
             o["terminal_id"] = id
-        case .input(let id, let bytes, let autoReply):
+        case .input(let id, let bytes, let autoReply, let via):
             o["terminal_id"] = id
             o["bytes"] = Data(bytes).base64EncodedString()
             if autoReply { o["auto_reply"] = true }
+            if let via { o["via"] = via }
         case .resize(let id, let cols, let rows):
             o["terminal_id"] = id
             o["cols"] = cols
@@ -308,9 +326,18 @@ enum TerminalClientMessage: Equatable {
             o["entry_id"] = entryId
             o["bytes"] = bytes
             o["confirmed"] = confirmed
-        case .stagingRemove(let id, let entryId):
+        case .stagingRemove(let id, let entryId, let archive):
             o["terminal_id"] = id
             o["entry_id"] = entryId
+            if let archive { o["archive"] = archive }
+        case .stagingSetEnabled(let id, let enabled):
+            o["terminal_id"] = id
+            o["enabled"] = enabled
+        case .stagingSetGlobal(let enabled):
+            o["enabled"] = enabled
+        case .stagingUIEvent(let id, let event):
+            o["terminal_id"] = id
+            o["event"] = event
         }
         return o
     }
