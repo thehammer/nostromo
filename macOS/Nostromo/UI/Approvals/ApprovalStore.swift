@@ -25,6 +25,10 @@ enum ApprovalEvent {
     case answerRefused(ApprovalAnswerRefusedFrame)
     /// The production-shell guard blocked a tool call (no request, no card).
     case guardBlocked(ApprovalGuardBlockedFrame)
+    /// A focus's active session rules (REPLACE for that focus).
+    case sessionRules(ApprovalSessionRulesFrame)
+    /// A new daemon connection was established: every session rule held here is stale until the daemon replays.
+    case connectionStarted
 }
 
 /// A guard block the bar is showing for a focus (AP2b).
@@ -79,6 +83,9 @@ final class ApprovalStore {
     /// Fires with a tool call's `tool_use_id` whenever the status its row shows may have changed (AP2b).
     let statusChanges = PassthroughSubject<String, Never>()
 
+    /// Fires with the focus tag whenever the session rules it shows (the chip, the popover) changed (AP4).
+    let sessionRulesChanges = PassthroughSubject<String, Never>()
+
     /// `answer` sends this, once per id. `(requestId, decision, windowID)`.
     private let send: (String, ApprovalDecisionWire, String) -> Void
     /// A refused gesture, reported so the daemon can log it. `(requestId, control, channel)`.
@@ -87,6 +94,10 @@ final class ApprovalStore {
     /// False while there is no daemon connection to write to: an answer is then not sent and
     /// not counted, so the person can press again once the connection is back.
     private let canSend: () -> Bool
+    /// Revoke a session rule. `(tag, ruleId)`.
+    private let revokeRule: (String, String) -> Void
+    /// The active session rules per focus: only ever what `approval_session_rules` last said.
+    private var sessionRulesByTag: [String: [ApprovalSessionRule]] = [:]
 
     private var entries: [String: ApprovalEntry] = [:]
     /// Arrival order per focus (oldest first).
@@ -122,11 +133,13 @@ final class ApprovalStore {
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          },
-         canSend: @escaping () -> Bool = { true }) {
+         canSend: @escaping () -> Bool = { true },
+         revoke: @escaping (String, String) -> Void = { _, _ in }) {
         self.send = send
         self.report = report
         self.schedule = schedule
         self.canSend = canSend
+        self.revokeRule = revoke
     }
 
     // MARK: Feeding
@@ -144,13 +157,48 @@ final class ApprovalStore {
             replaceAll(with: requests)
         case .resolved(let frame):
             // The first ending stands: a second frame for a request that already ended says nothing new.
-            if let entry = entries[frame.requestId] { endWait(of: entry.request, outcome: frame.outcome, atMs: frame.atMs) }
+            if let entry = entries[frame.requestId] {
+                endWait(of: entry.request, outcome: frame.outcome, atMs: frame.atMs)
+            } else if frame.outcome == "allowed_by_session_rule", let toolUseId = frame.toolUseId {
+                // A call a session rule allowed was never shown, so no request is known for it: its row still says so.
+                // Only this outcome: any other ending of an unknown request changes nothing.
+                setStatus(.allowedBySessionRule, toolUseId: toolUseId, tag: frame.tag)
+            }
             end(frame.requestId, text: Self.outcomeText(frame.outcome))
         case .answerRefused(let frame):
             refused(frame)
         case .guardBlocked(let frame):
             guardBlocked(frame)
+        case .sessionRules(let frame):
+            setSessionRules(frame.rules, tag: frame.tag)
+        case .connectionStarted:
+            let tags = Array(sessionRulesByTag.keys)
+            sessionRulesByTag.removeAll()
+            tags.forEach { sessionRulesChanges.send($0) }
         }
+    }
+
+    // MARK: Session rules (AP4)
+
+    /// The focuses that have at least one active session rule.
+    var sessionRuleTags: [String] { Array(sessionRulesByTag.keys) }
+
+    /// The active session rules of a focus, oldest first.
+    func sessionRules(tag: String) -> [ApprovalSessionRule] { sessionRulesByTag[tag] ?? [] }
+
+    /// Revoke rule `ruleId` of `tag`. Sends nothing without a connection. The rule leaves the list
+    /// only when the daemon's next `approval_session_rules` says so.
+    @discardableResult
+    func revoke(tag: String, ruleId: String) -> Bool {
+        guard canSend(), sessionRulesByTag[tag]?.contains(where: { $0.id == ruleId }) == true else { return false }
+        revokeRule(tag, ruleId)
+        return true
+    }
+
+    private func setSessionRules(_ rules: [ApprovalSessionRule], tag: String) {
+        let before = sessionRulesByTag[tag] ?? []
+        if rules.isEmpty { sessionRulesByTag.removeValue(forKey: tag) } else { sessionRulesByTag[tag] = rules }
+        if before != rules { sessionRulesChanges.send(tag) }
     }
 
     // MARK: Reading
@@ -278,6 +326,8 @@ final class ApprovalStore {
     static func outcomeText(_ outcome: String) -> String {
         switch outcome {
         case "allowed_once": return "Allowed once"
+        case "allowed_for_session": return "Allowed for this session"
+        case "allowed_by_session_rule": return "Allowed by session rule"
         case "answered": return "Answered"
         case "denied": return "Denied"
         case "denied_and_stopped": return "Denied and stopped"
@@ -299,6 +349,7 @@ final class ApprovalStore {
         case "timed_out": return "Already denied (timed out)"
         case "denied", "denied_and_stopped": return "Already denied"
         case "allowed_once": return "Already allowed once"
+        case "allowed_for_session": return "Already allowed for this session"
         case .some(let other): return "Already resolved: \(other.replacingOccurrences(of: "_", with: " "))"
         case nil: return "Already resolved"
         }
@@ -408,6 +459,8 @@ final class ApprovalStore {
             hold(frame.requestId, text: "Not sent: this connection can't answer approvals")
         case .invalidAnswer:
             hold(frame.requestId, text: "Not sent: the daemon refused these answers")
+        case .invalidRule:
+            hold(frame.requestId, text: "Not sent: the daemon refused this session rule")
         case .unknown:
             hold(frame.requestId, text: "Not sent: the daemon refused the answer")
         }

@@ -38,9 +38,10 @@ use nostromo::approvals::guard::{
     self, hook_settings_json, PaneInfo, PaneProbe, ProbeError, TmuxSocket, GUARD_MESSAGE,
 };
 use nostromo::approvals::request::{AskRule, SettingsSource};
+use nostromo::approvals::rules::CandidateKind;
 use nostromo::approvals::wire::{
     AnswerRefusal, ApprovalDecision, ApprovalOption, ApprovalRequestWire, DecisionKind,
-    QuestionAnswer, RefusalChannel,
+    QuestionAnswer, RefusalChannel, SessionRuleWire,
 };
 use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::decisions::DecisionRegistry;
@@ -758,6 +759,8 @@ fn allow_once() -> ApprovalDecision {
         kind: DecisionKind::AllowOnce,
         note: None,
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -766,6 +769,8 @@ fn deny(note: Option<&str>) -> ApprovalDecision {
         kind: DecisionKind::Deny,
         note: note.map(str::to_owned),
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -774,6 +779,8 @@ fn deny_and_stop(note: Option<&str>) -> ApprovalDecision {
         kind: DecisionKind::DenyAndStop,
         note: note.map(str::to_owned),
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -2564,6 +2571,8 @@ fn answer_questions(answers: Vec<QuestionAnswer>) -> ApprovalDecision {
         kind: DecisionKind::AnswerQuestions,
         note: None,
         answers: Some(answers),
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -2587,6 +2596,8 @@ fn ask_invalid_decisions() -> Vec<(&'static str, ApprovalDecision)> {
                 kind: DecisionKind::AnswerQuestions,
                 note: None,
                 answers: None,
+                candidate_id: None,
+                rule_text: None,
             },
         ),
     ]
@@ -2681,7 +2692,11 @@ fn a_request_for_another_tool_is_not_offered_answer_questions() {
             "{:?}",
             wire.options
         );
-        assert_eq!(wire.options, ApprovalOption::ALL.to_vec());
+        // The usual four (and, since AP4, `allow_session` for a plain rm; that is covered
+        // where session rules are).
+        for usual in ApprovalOption::ALL.iter() {
+            assert!(wire.options.contains(usual), "{:?}", wire.options);
+        }
     });
 }
 
@@ -3073,6 +3088,8 @@ fn deny_on_a_question_request_tells_the_cli_the_usual_words_and_a_late_answer_is
             kind: DecisionKind::Deny,
             note: Some("not now".into()),
             answers: Some(ask_valid_answers()),
+            candidate_id: None,
+            rule_text: None,
         };
 
         app.answer(&wire.request_id, decision, "win-d").await;
@@ -3350,5 +3367,823 @@ fn a_tcp_peer_learns_only_a_count_about_a_question_and_never_its_text_or_its_ans
                 "{who}: the count, and only the count"
             );
         }
+    });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 5. AP4: "allow for this session" rules, over the sockets
+//
+// The broker-level matrix is in `tests/approvals_session_rules.rs`; these prove the same
+// behaviour through the real daemon, the fake CLI and every kind of peer.
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn is_session_rules(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::ApprovalSessionRules { .. })
+}
+
+fn is_not_operator_error(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::Error { message } if message.starts_with("not_operator_app"))
+}
+
+/// `~/` means a directory of the test's own (the daemon's `HOME` is already pointed there).
+fn use_tmp_home(rig: &Rig) {
+    let home = rig.tmp.path().join("home");
+    std::fs::create_dir_all(home.join("Library/Caches")).unwrap();
+    rig.broker.set_home_for_test(home);
+}
+
+fn allow_session_with(candidate_id: &str, rule_text: &str) -> ApprovalDecision {
+    ApprovalDecision {
+        kind: DecisionKind::AllowSession,
+        note: None,
+        answers: None,
+        candidate_id: Some(candidate_id.into()),
+        rule_text: Some(rule_text.into()),
+    }
+}
+
+fn allow_session_of(wire: &ApprovalRequestWire, kind: CandidateKind) -> ApprovalDecision {
+    let c = wire
+        .session_rule_candidates
+        .iter()
+        .find(|c| c.kind == kind)
+        .unwrap_or_else(|| panic!("no {kind:?} candidate: {:?}", wire.session_rule_candidates));
+    allow_session_with(&c.id, &c.rule_text)
+}
+
+fn refusal_control(e: &Entry) -> Option<&str> {
+    match &e.event {
+        Event::Refusal { control, .. } => control.as_deref(),
+        other => panic!("not a refusal: {other:?}"),
+    }
+}
+
+impl Conn {
+    /// The next `approval_session_rules` frame not handed out yet.
+    async fn next_rules(&mut self) -> (String, Vec<SessionRuleWire>) {
+        match self.nth("approval_session_rules", is_session_rules).await {
+            ServerMsg::ApprovalSessionRules { tag, rules } => (tag, rules),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Every `approval_session_rules` frame received so far.
+    fn rule_frames(&mut self) -> Vec<(String, Vec<SessionRuleWire>)> {
+        self.all()
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::ApprovalSessionRules { tag, rules } => {
+                    Some((tag.clone(), rules.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every `approval_resolved` frame received so far, as JSON.
+    fn resolved_frames(&mut self) -> Vec<Value> {
+        self.pump();
+        self.raw
+            .iter()
+            .filter_map(|b| serde_json::from_slice::<Value>(b).ok())
+            .filter(|v| v["type"] == "approval_resolved")
+            .collect()
+    }
+}
+
+impl Fake {
+    /// The CLI keeps its own rules: nothing the daemon wrote to it is a permission update.
+    #[track_caller]
+    fn assert_no_updated_permissions(&self) {
+        let raw = self.raw_stdin();
+        assert!(!raw.contains("updatedPermissions"), "{raw}");
+    }
+}
+
+fn revoke_msg(tag: &str, rule_id: &str, nonce: Option<&str>) -> ClientMsg {
+    ClientMsg::ApprovalRevokeSessionRule {
+        tag: tag.into(),
+        rule_id: rule_id.into(),
+        operator_nonce: nonce.map(str::to_owned),
+    }
+}
+
+/// Grant the exact rule of a held `session_rule_rm_a` request from `app`; returns the rule.
+async fn grant_rm_a(app: &mut Conn, fake: &Fake, wire: &ApprovalRequestWire) -> SessionRuleWire {
+    app.answer(
+        &wire.request_id,
+        allow_session_of(wire, CandidateKind::Exact),
+        "win-grant",
+    )
+    .await;
+    fake.wait_responses(1).await;
+    let (_, mut rules) = app.next_rules().await;
+    assert_eq!(rules.len(), 1);
+    rules.remove(0)
+}
+
+// Fails on the old code: no `allow_session` option, candidates always `[]`.
+#[test]
+fn a_held_rm_is_offered_allow_session_with_two_candidates_on_the_wire_and_other_tools_are_not() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let (_fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+
+        let frame = app.request_frame(&wire.request_id);
+        let options: Vec<&str> = frame["request"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o.as_str().unwrap())
+            .collect();
+        for usual in ["allow_once", "deny", "deny_and_stop", "deny_with_note"] {
+            assert!(options.contains(&usual), "{options:?}");
+        }
+        assert!(options.contains(&"allow_session"), "{options:?}");
+        let candidates = frame["request"]["session_rule_candidates"]
+            .as_array()
+            .unwrap();
+        let kinds: Vec<&str> = candidates
+            .iter()
+            .map(|c| c["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["exact", "path_prefix"]);
+        for c in candidates {
+            assert!(!c["id"].as_str().unwrap().is_empty());
+            assert!(!c["summary"].as_str().unwrap().is_empty());
+            assert_eq!(
+                c["overrides"], "Bash(rm:*)",
+                "the user's ask rule it overrides"
+            );
+        }
+        assert_eq!(
+            candidates[0]["rule_text"],
+            "Bash(rm -rf ~/Library/Caches/a)"
+        );
+        assert_eq!(
+            candidates[1]["rule_text"],
+            "Bash(rm -rf ~/Library/Caches/:*)"
+        );
+        app.deny(&wire.request_id, "w").await;
+
+        // Not offered: a compound command, an Edit, an MCP tool.
+        for (cue, tool_use_id) in [
+            ("FIXTURE:compound", "toolu_compound_0"),
+            ("FIXTURE:edit", "toolu_edit_0"),
+            ("FIXTURE:mcp", "toolu_mcp_0"),
+        ] {
+            rig.say("cody-1", cue);
+            let other = app.next_request().await;
+            assert_eq!(other.tool_use_id, tool_use_id, "{cue}");
+            let frame = app.request_frame(&other.request_id);
+            let options = frame["request"]["options"].as_array().unwrap();
+            assert!(
+                !options.iter().any(|o| o == "allow_session"),
+                "{cue}: {options:?}"
+            );
+            assert_eq!(
+                frame["request"]["session_rule_candidates"],
+                json!([]),
+                "{cue}"
+            );
+            app.deny(&other.request_id, "w").await;
+        }
+    });
+}
+
+// Fails on the old code (no allow_session, so the second request is a card) and if the CLI is
+// ever sent anything but the plain allow.
+#[test]
+fn allow_session_tells_the_cli_allow_and_the_next_matching_request_is_allowed_without_a_card() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        let input = fixture("session_rule_rm_a")["requests"][0]["request"]["input"].clone();
+        let c = wire
+            .session_rule_candidates
+            .iter()
+            .find(|c| c.kind == CandidateKind::Exact)
+            .unwrap()
+            .clone();
+
+        app.answer(
+            &wire.request_id,
+            allow_session_of(&wire, CandidateKind::Exact),
+            "win-1",
+        )
+        .await;
+
+        let responses = fake.wait_responses(1).await;
+        assert_eq!(
+            responses[0]["response"],
+            json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": cli_request_id(&responses[0]),
+                    "response": { "behavior": "allow", "updatedInput": input }
+                }
+            }),
+            "exactly the plain allow, no permission update"
+        );
+        assert_eq!(
+            app.next_resolved().await,
+            (
+                wire.request_id.clone(),
+                "allowed_for_session".to_owned(),
+                Some("win-1".to_owned())
+            )
+        );
+        let (tag, rules) = app.next_rules().await;
+        assert_eq!(tag, "cody-1");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_text, c.rule_text);
+        assert_eq!(rules[0].uses, 0);
+
+        // The same command again: the CLI is told allow, nobody is asked.
+        rig.say("cody-1", "FIXTURE:session_rule_rm_a");
+        let responses = fake.wait_responses(2).await;
+        assert_eq!(
+            responses[1]["response"]["response"]["response"],
+            json!({ "behavior": "allow", "updatedInput": input })
+        );
+        let (request_id, outcome, by_window) = app.next_resolved().await;
+        assert_eq!(
+            (outcome.as_str(), by_window),
+            ("allowed_by_session_rule", None)
+        );
+        let (_, rules) = app.next_rules().await;
+        assert_eq!((rules.len(), rules[0].uses), (1, 1), "one more use");
+        let s = rig.sentinel();
+        app.through(&s).await;
+        assert_eq!(
+            app.all().iter().filter(|m| is_request(m)).count(),
+            1,
+            "the second request never became a card"
+        );
+        assert!(rig.broker.snapshot().is_empty());
+        let second = app.resolved_frames().remove(1);
+        assert_eq!(second["tool_use_id"], "toolu_session_rule_rm_a_0");
+        assert_eq!(second["request_id"], request_id.as_str());
+        let audit = wait_until("both outcomes", || {
+            let o = rig.outcomes();
+            (o.len() >= 2).then_some(o)
+        })
+        .await;
+        let names: Vec<&str> = audit.iter().map(outcome_name).collect();
+        assert_eq!(names, ["allowed_for_session", "allowed_by_session_rule"]);
+        fake.assert_no_updated_permissions();
+    });
+}
+
+// Fails if any peer but the verified app with its nonce, or any answer that does not name one of
+// this request's candidates, can create a rule.
+#[test]
+fn only_a_valid_allow_session_from_the_operator_app_creates_a_rule() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let mut agent = rig.agent(vec![Topic::Decision]).await;
+        let mut tcp = rig.tcp(vec![]).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        let nonce = app.nonce.clone().unwrap();
+        let good = allow_session_of(&wire, CandidateKind::Exact);
+
+        agent
+            .send(&approval_answer(
+                &wire.request_id,
+                good.clone(),
+                "w",
+                Some(&nonce),
+            ))
+            .await;
+        tcp.send(&approval_answer(
+            &wire.request_id,
+            good.clone(),
+            "w",
+            Some(&nonce),
+        ))
+        .await;
+        app.send(&approval_answer(&wire.request_id, good.clone(), "w", None))
+            .await;
+        app.send(&approval_answer(
+            &wire.request_id,
+            good.clone(),
+            "w",
+            Some("wrong"),
+        ))
+        .await;
+        let exact = wire.session_rule_candidates[0].clone();
+        app.answer(
+            &wire.request_id,
+            allow_session_with("not-an-id", &exact.rule_text),
+            "w",
+        )
+        .await;
+        app.answer(
+            &wire.request_id,
+            allow_session_with(&exact.id, "Bash(rm:*)"),
+            "w",
+        )
+        .await;
+        app.answer(
+            &wire.request_id,
+            ApprovalDecision {
+                kind: DecisionKind::AllowSession,
+                note: None,
+                answers: None,
+                candidate_id: None,
+                rule_text: None,
+            },
+            "w",
+        )
+        .await;
+
+        assert_eq!(agent.next_refused().await.1, AnswerRefusal::NotOperatorApp);
+        tcp.next("a refusal", is_secure_connection_refusal).await;
+        assert_eq!(
+            refused_codes(&mut app, 5).await,
+            [
+                "invalid_rule",
+                "invalid_rule",
+                "invalid_rule",
+                "not_operator_app",
+                "not_operator_app"
+            ]
+        );
+        settle().await;
+        fake.assert_no_control_responses();
+        assert_eq!(rig.broker.snapshot().len(), 1, "still held");
+        app.sync().await;
+        assert!(!app.saw(is_resolved));
+        assert!(!app.saw(is_session_rules), "no rule was created");
+        let mut codes: Vec<String> = rig
+            .wait_refusals(7)
+            .await
+            .iter()
+            .map(|e| refusal_code(e).to_owned())
+            .collect();
+        codes.sort();
+        assert_eq!(
+            codes,
+            [
+                "invalid_rule",
+                "invalid_rule",
+                "invalid_rule",
+                "not_operator_app",
+                "not_operator_app",
+                "not_operator_app",
+                "requires_secure_connection"
+            ],
+            "every refusal was logged"
+        );
+
+        // Proof that nothing was created: the same command, once denied, is a card again.
+        app.deny(&wire.request_id, "w").await;
+        fake.wait_responses(1).await;
+        rig.say("cody-1", "FIXTURE:session_rule_rm_a");
+        let again = app.next_request().await;
+        app.allow(&again.request_id, "w").await;
+        fake.wait_responses(2).await;
+        settle().await;
+        let raw = fake.raw_stdin();
+        assert_eq!(raw.matches("\"behavior\":\"allow\"").count(), 1, "{raw}");
+        let outcomes = rig.outcomes();
+        let names: Vec<&str> = outcomes.iter().map(outcome_name).collect();
+        assert_eq!(names, ["denied", "allowed_once"]);
+        fake.assert_no_updated_permissions();
+    });
+}
+
+// Fails if an allow_session for a request whose session ended is accepted or leaves a rule.
+#[test]
+fn allow_session_for_a_stopped_session_is_refused_already_resolved_and_creates_no_rule() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        app.send(&ClientMsg::SessionControl {
+            tag: "cody-1".into(),
+            action: SessionAction::Stop,
+        })
+        .await;
+        assert_eq!(app.next_resolved().await.1, "cancelled");
+
+        app.answer(
+            &wire.request_id,
+            allow_session_of(&wire, CandidateKind::Exact),
+            "late",
+        )
+        .await;
+
+        let (_, code, outcome) = app.next_refused().await;
+        assert_eq!(
+            (code, outcome.as_deref()),
+            (AnswerRefusal::AlreadyResolved, Some("cancelled"))
+        );
+        settle().await;
+        fake.assert_no_control_responses();
+        assert!(!app.saw(is_session_rules));
+        assert!(rig.broker.session_rules_replay().is_empty());
+    });
+}
+
+#[derive(Clone, Copy, Debug)]
+enum End {
+    Stop,
+    Restart,
+    NewSession,
+    Exit,
+}
+
+/// Grant the rm_a rule, end the session's process in `end`, and check the rule went with it.
+async fn a_rule_does_not_survive(mut rig: Rig, end: End) {
+    use_tmp_home(&rig);
+    let mut app = rig.app(true).await;
+    let (fake, wire) = rig
+        .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+        .await;
+    let rule = grant_rm_a(&mut app, &fake, &wire).await;
+    match end {
+        End::Stop => {
+            app.send(&ClientMsg::SessionControl {
+                tag: "cody-1".into(),
+                action: SessionAction::Stop,
+            })
+            .await
+        }
+        End::Restart => {
+            app.send(&ClientMsg::SessionControl {
+                tag: "cody-1".into(),
+                action: SessionAction::Restart,
+            })
+            .await
+        }
+        End::NewSession => {
+            app.send(&ClientMsg::SessionControl {
+                tag: "cody-1".into(),
+                action: SessionAction::NewSession,
+            })
+            .await
+        }
+        End::Exit => rig.say("cody-1", "DIE_MIDTURN"),
+    }
+
+    let (tag, rules) = app.next_rules().await;
+    assert_eq!(
+        (tag.as_str(), rules.len()),
+        ("cody-1", 0),
+        "{end:?}: the app is told the list is empty"
+    );
+    let revoked = wait_until("the revoke entry", || {
+        rig.audit()
+            .into_iter()
+            .find(|e| matches!(e.event, Event::SessionRuleRevoked { .. }))
+    })
+    .await;
+    match &revoked.event {
+        Event::SessionRuleRevoked { rule: body } => {
+            assert_eq!(body["reason"], "session_ended", "{end:?}");
+            assert_eq!(body["id"], rule.id.as_str(), "{end:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(rig.broker.session_rules_replay().is_empty(), "{end:?}");
+
+    // The same command in the focus's next process is a card.
+    let next_fake = match end {
+        End::Restart => None,
+        _ => Some(rig.spawn("cody-1")),
+    };
+    rig.say("cody-1", "FIXTURE:session_rule_rm_a");
+    let again = app.next_request().await;
+    assert_eq!(again.tool_use_id, "toolu_session_rule_rm_a_0", "{end:?}");
+    settle().await;
+    match &next_fake {
+        Some(f) => f.assert_no_control_responses(),
+        None => assert_eq!(fake.responses().len(), 1, "no second allow"),
+    }
+    assert_eq!(rig.broker.snapshot().len(), 1, "{end:?}: held for a human");
+    fake.assert_no_updated_permissions();
+}
+
+// R4. Fails if stopping the session leaves its rule.
+#[test]
+fn a_rule_does_not_survive_a_stop() {
+    run(GUARDED, |rig| a_rule_does_not_survive(rig, End::Stop));
+}
+
+// R4. Fails if a restart keeps the rule for the new process.
+#[test]
+fn a_rule_does_not_survive_a_restart() {
+    run(GUARDED, |rig| a_rule_does_not_survive(rig, End::Restart));
+}
+
+// R4. Fails if Clear Context keeps the rule.
+#[test]
+fn a_rule_does_not_survive_a_new_session_clear_context() {
+    run(GUARDED, |rig| a_rule_does_not_survive(rig, End::NewSession));
+}
+
+// R4. Fails if the process dying on its own keeps the rule.
+#[test]
+fn a_rule_does_not_survive_the_process_exiting() {
+    run(GUARDED, |rig| a_rule_does_not_survive(rig, End::Exit));
+}
+
+// R6. Fails if anyone but the verified app with its nonce can revoke, if a refusal is not logged,
+// or if a valid revoke does not remove the rule at once and tell the app.
+#[test]
+fn only_the_operator_app_with_its_nonce_revokes_a_rule_and_the_next_request_is_a_card() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let mut other_app = rig.app(true).await;
+        let mut agent = rig.agent(vec![Topic::Decision]).await;
+        let mut tcp = rig.tcp(vec![]).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        let rule = grant_rm_a(&mut app, &fake, &wire).await;
+        other_app.next_rules().await;
+        let nonce = app.nonce.clone().unwrap();
+
+        agent
+            .send(&revoke_msg("cody-1", &rule.id, Some(&nonce)))
+            .await;
+        agent.next("a refusal", is_not_operator_error).await;
+        tcp.send(&revoke_msg("cody-1", &rule.id, Some(&nonce)))
+            .await;
+        tcp.next("a refusal", is_secure_connection_refusal).await;
+        app.send(&revoke_msg("cody-1", &rule.id, None)).await;
+        app.send(&revoke_msg("cody-1", &rule.id, Some("wrong")))
+            .await;
+        app.next("a refusal", is_not_operator_error).await;
+        app.next("a refusal", is_not_operator_error).await;
+        let refusals = rig.wait_refusals(4).await;
+        let mut codes: Vec<(&str, Option<&str>)> = refusals
+            .iter()
+            .map(|e| (refusal_code(e), refusal_control(e)))
+            .collect();
+        codes.sort();
+        assert_eq!(
+            codes,
+            [
+                ("not_operator_app", Some("revoke_session_rule")),
+                ("not_operator_app", Some("revoke_session_rule")),
+                ("not_operator_app", Some("revoke_session_rule")),
+                ("requires_secure_connection", Some("revoke_session_rule"))
+            ]
+        );
+        assert_eq!(
+            entry_peer(
+                refusals
+                    .iter()
+                    .find(|e| refusal_code(e) == "requires_secure_connection")
+                    .unwrap()
+            )["trust"],
+            "tcp"
+        );
+        settle().await;
+        match rig.broker.session_rules_frame("cody-1") {
+            ServerMsg::ApprovalSessionRules { rules, .. } => {
+                assert_eq!(rules, vec![rule.clone()], "no refused revoke removed it")
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // An unknown rule changes nothing and the asker alone is told what is true now.
+        app.send(&revoke_msg("cody-1", "no-such-rule", Some(&nonce)))
+            .await;
+        let (tag, rules) = app.next_rules().await;
+        assert_eq!(
+            (tag.as_str(), rules.clone()),
+            ("cody-1", vec![rule.clone()])
+        );
+        let s = rig.sentinel();
+        other_app.through(&s).await;
+        assert_eq!(
+            other_app.rule_frames().len(),
+            1,
+            "only the grant's list: the unknown revoke's answer went to the asker alone"
+        );
+        assert!(rig
+            .audit()
+            .iter()
+            .all(|e| !matches!(e.event, Event::SessionRuleRevoked { .. })));
+
+        // The real revoke: at once, logged, broadcast, and the next request is a card.
+        app.send(&revoke_msg("cody-1", &rule.id, Some(&nonce)))
+            .await;
+        let (_, rules) = app.next_rules().await;
+        assert!(rules.is_empty());
+        let (_, rules) = other_app.next_rules().await;
+        assert!(rules.is_empty(), "every app is told");
+        let revoked = wait_until("the revoke entry", || {
+            rig.audit()
+                .into_iter()
+                .find(|e| matches!(e.event, Event::SessionRuleRevoked { .. }))
+        })
+        .await;
+        match &revoked.event {
+            Event::SessionRuleRevoked { rule: body } => {
+                assert_eq!(body["reason"], "user");
+                assert_eq!(body["id"], rule.id.as_str());
+            }
+            other => panic!("{other:?}"),
+        }
+        rig.say("cody-1", "FIXTURE:session_rule_rm_a");
+        let again = app.next_request().await;
+        assert_eq!(again.tool_use_id, "toolu_session_rule_rm_a_0");
+        settle().await;
+        assert_eq!(fake.responses().len(), 1, "only the grant's allow");
+        fake.assert_no_updated_permissions();
+    });
+}
+
+// R7. Fails if a network peer ever receives a rule list (it names commands and paths).
+#[test]
+fn a_tcp_peer_subscribed_to_everything_never_receives_a_session_rules_frame() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let mut tcp_all = rig.tcp(ALL_TOPICS.to_vec()).await;
+        let mut tcp_none = rig.tcp(vec![]).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        let rule = grant_rm_a(&mut app, &fake, &wire).await;
+        rig.say("cody-1", "FIXTURE:session_rule_rm_a");
+        fake.wait_responses(2).await;
+        app.next_rules().await;
+        let nonce = app.nonce.clone().unwrap();
+        app.send(&revoke_msg("cody-1", &rule.id, Some(&nonce)))
+            .await;
+        app.next_rules().await;
+        let s = rig.sentinel();
+        app.through(&s).await;
+
+        for (who, c) in [("every topic", &mut tcp_all), ("no topics", &mut tcp_none)] {
+            c.through(&s).await;
+            assert!(!c.saw(is_session_rules), "{who}: {:?}", c.all());
+            for raw in &c.raw {
+                let text = String::from_utf8_lossy(raw);
+                for needle in [
+                    "approval_session_rules",
+                    "Library/Caches",
+                    "rule_text",
+                    "rm -rf",
+                ] {
+                    assert!(!text.contains(needle), "{who}: {text} leaks {needle:?}");
+                }
+            }
+        }
+    });
+}
+
+// R7. Fails if the rule lists are not replayed (one frame per focus that has rules) to a
+// connection that starts rendering approvals, at connect or by resubscribing.
+#[test]
+fn session_rules_are_replayed_once_per_focus_to_a_connection_that_renders_approvals() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let (f1, w1) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        grant_rm_a(&mut app, &f1, &w1).await;
+        let (f2, w2) = rig
+            .held(&mut app, "cody-2", "FIXTURE:session_rule_rm_b")
+            .await;
+        app.answer(
+            &w2.request_id,
+            allow_session_of(&w2, CandidateKind::Exact),
+            "w",
+        )
+        .await;
+        f2.wait_responses(1).await;
+        app.next_rules().await;
+        let _f3 = rig.spawn("cody-3"); // a focus without rules
+
+        // At connect.
+        let fresh = rig.app(true).await;
+        let replay: Vec<(String, Vec<String>)> = fresh
+            .connect_frames
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::ApprovalSessionRules { tag, rules } => Some((
+                    tag.clone(),
+                    rules.iter().map(|r| r.rule_text.clone()).collect(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            replay,
+            [
+                (
+                    "cody-1".to_owned(),
+                    vec!["Bash(rm -rf ~/Library/Caches/a)".to_owned()]
+                ),
+                (
+                    "cody-2".to_owned(),
+                    vec!["Bash(rm -rf ~/Library/Caches/b)".to_owned()]
+                ),
+            ],
+            "one frame per focus with rules, none for cody-3"
+        );
+
+        // A connection that does not render approvals gets none; resubscribing makes it a presenter.
+        let mut quiet = rig.app(false).await;
+        assert!(!quiet.connect_frames.iter().any(is_session_rules));
+        quiet
+            .send(&ClientMsg::Subscribe {
+                topics: vec![Topic::Decision],
+                renders_decisions: false,
+                renders_approvals: true,
+                capabilities: vec![],
+                operator_nonce: None,
+            })
+            .await;
+        quiet.next("the snapshot", is_snapshot).await;
+        let (a, _) = quiet.next_rules().await;
+        let (b, _) = quiet.next_rules().await;
+        assert_eq!((a.as_str(), b.as_str()), ("cody-1", "cody-2"));
+        quiet.sync().await;
+        assert_eq!(quiet.rule_frames().len(), 2, "no more than one per focus");
+    });
+}
+
+// R3 over the real daemon. Fails if a path-prefix rule also covers another prefix, an extra flag,
+// a compound command or another agent, or if it fails to cover another path inside its prefix.
+#[test]
+fn a_path_prefix_rule_over_the_wire_allows_a_sibling_path_and_leaves_every_other_request_a_card() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        app.answer(
+            &wire.request_id,
+            allow_session_of(&wire, CandidateKind::PathPrefix),
+            "w",
+        )
+        .await;
+        fake.wait_responses(1).await;
+        let (_, rules) = app.next_rules().await;
+        assert_eq!(rules[0].rule_text, "Bash(rm -rf ~/Library/Caches/:*)");
+
+        // A sibling path inside the prefix: allowed without a card.
+        rig.say("cody-1", "FIXTURE:session_rule_rm_b");
+        let responses = fake.wait_responses(2).await;
+        assert_eq!(
+            responses[1]["response"]["response"]["response"]["behavior"],
+            "allow"
+        );
+        assert_eq!(
+            responses[1]["response"]["response"]["response"]["updatedInput"],
+            fixture("session_rule_rm_b")["requests"][0]["request"]["input"]
+        );
+        assert_eq!(app.next_resolved().await.1, "allowed_for_session");
+        assert_eq!(app.next_resolved().await.1, "allowed_by_session_rule");
+
+        // Everything else is a card: another prefix, an extra flag, a compound command, a sub-agent.
+        for (cue, tool_use_id) in [
+            ("session_rule_rm_other", "toolu_session_rule_rm_other_0"),
+            ("session_rule_rm_flag", "toolu_session_rule_rm_flag_0"),
+            (
+                "session_rule_rm_compound",
+                "toolu_session_rule_rm_compound_0",
+            ),
+            (
+                "session_rule_rm_a_subagent",
+                "toolu_session_rule_rm_a_sub_0",
+            ),
+        ] {
+            rig.say("cody-1", &format!("FIXTURE:{cue}"));
+            let card = app.next_request().await;
+            assert_eq!(card.tool_use_id, tool_use_id, "{cue}");
+            app.deny(&card.request_id, "w").await;
+            app.next_resolved().await;
+        }
+        settle().await;
+        let allows = fake
+            .responses()
+            .iter()
+            .filter(|l| l["response"]["response"]["response"]["behavior"] == "allow")
+            .count();
+        assert_eq!(allows, 2, "the grant and the one covered request only");
+        fake.assert_no_updated_permissions();
     });
 }

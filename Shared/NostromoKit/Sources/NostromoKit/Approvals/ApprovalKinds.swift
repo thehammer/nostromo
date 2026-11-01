@@ -5,8 +5,9 @@
 // the card (macOS) only draws what these return.
 //
 // Rules, from the PRD's "Kinds of request with narrower options":
-//   * Allow once, Deny and Deny & stop are the whole menu. There are no
-//     "remember" options yet, and none are ever modelled here.
+//   * Allow once, Deny and Deny & stop are the menu, plus (AP4) "This session" only when the
+//     daemon listed `allow_session` AND sent at least one candidate that decodes. There is no
+//     "always" option here (AP6).
 //   * `requires_user_interaction`: Deny only, plus the explanation. The exception
 //     (AP2c) is an `AskUserQuestion` request the daemon lists as answerable: Deny
 //     and the answer form's Submit.
@@ -22,6 +23,8 @@ public enum ApprovalControl: String, Equatable, CaseIterable {
     case denyWithNote = "deny_with_note"
     case denyAndStop = "deny_and_stop"
     case allowOnce = "allow_once"
+    /// Allow this call and create a session rule (a two-step gesture: choose, then confirm).
+    case allowSession = "allow_session"
     /// Submit the answers to an `AskUserQuestion` request.
     case answerQuestions = "answer_questions"
 }
@@ -32,7 +35,7 @@ public struct ApprovalCardOptions: Equatable {
     public static let requiresInteractionNotice =
         "This tool needs Claude Code's own interface; Nostromo can't approve it"
 
-    /// What is offered, in display order: deny, deny_with_note, deny_and_stop, allow_once
+    /// What is offered, in display order: deny, deny_with_note, deny_and_stop, allow_once, allow_session
     /// (for a question request: deny, answer_questions).
     public let controls: [ApprovalControl]
     /// The questions to show a form for: set only for an `AskUserQuestion` request the daemon listed
@@ -44,7 +47,23 @@ public struct ApprovalCardOptions: Equatable {
     /// (the input, its extra fields, the text around it) has invisible or direction-changing characters.
     public let defaultsToDeny: Bool
 
+    /// The rules the human may choose "for this session": set only when the daemon listed `allow_session`,
+    /// the request is not interaction-only and not a question, and a candidate decoded.
+    public let sessionRules: [ApprovalSessionRuleCandidate]
+
+    /// "This session" is offered only for a plain Bash request the daemon listed `allow_session` for (beside
+    /// `allow_once`) and sent a candidate for; never for a safety check, a settings write, or a request
+    /// that asked for no always-allow rule. The daemon already withholds all of these: this repeats it.
+    private static func mayOfferAllowSession(_ request: ApprovalRequestWire, listed: Set<ApprovalOption>) -> Bool {
+        listed.contains(.allowSession) && listed.contains(.allowOnce)
+            && !request.sessionRuleCandidates.isEmpty
+            && request.toolKind == .bash
+            && !request.flags.suppressAlwaysAllowRule
+            && request.reason.kind != .safetyCheck && request.reason.kind != .settingsWrite
+    }
+
     public var offersAllowOnce: Bool { controls.contains(.allowOnce) }
+    public var offersAllowSession: Bool { controls.contains(.allowSession) }
 
     public init(request: ApprovalRequestWire) {
         let listed = Set(request.options)
@@ -58,7 +77,9 @@ public struct ApprovalCardOptions: Equatable {
             if listed.contains(.denyWithNote) { controls.append(.denyWithNote) }
             if listed.contains(.denyAndStop) { controls.append(.denyAndStop) }
             if listed.contains(.allowOnce) { controls.append(.allowOnce) }
+            if Self.mayOfferAllowSession(request, listed: listed) { controls.append(.allowSession) }
         }
+        self.sessionRules = controls.contains(.allowSession) ? request.sessionRuleCandidates : []
         self.controls = controls
         self.questions = questions
         self.notice = interactionOnly ? Self.requiresInteractionNotice : nil

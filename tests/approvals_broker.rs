@@ -2366,6 +2366,14 @@ async fn drive(ending: &str) -> Run {
     }
 }
 
+/// T-INV-3 (AP4): the only outcomes that write `behavior: allow`. Every ending below is none of them.
+const ALLOW_OUTCOMES: [&str; 4] = [
+    "allowed_once",
+    "answered",
+    "allowed_for_session",
+    "allowed_by_session_rule",
+];
+
 #[tokio::test(start_paused = true)]
 async fn every_ending_writes_the_right_deny_or_nothing_logs_one_outcome_and_never_allows() {
     // (ending, the outcome entry it leaves, what the agent is told, if anything)
@@ -2438,7 +2446,11 @@ async fn every_ending_writes_the_right_deny_or_nothing_logs_one_outcome_and_neve
                 "{ending}: {e:?}"
             );
             if let Event::Outcome { outcome, .. } = &e.event {
-                assert!(!outcome.starts_with("allow"), "{ending}: {outcome}");
+                // AP4: exactly four outcomes are allows (`answered` does not start with "allow").
+                assert!(
+                    !ALLOW_OUTCOMES.contains(&outcome.as_str()) && !outcome.starts_with("allow"),
+                    "{ending}: {outcome}"
+                );
             }
         }
     }

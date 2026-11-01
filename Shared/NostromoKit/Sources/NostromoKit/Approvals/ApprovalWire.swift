@@ -72,6 +72,8 @@ public enum ApprovalOption: String, Codable, Equatable {
     case denyWithNote = "deny_with_note"
     /// Listed only on an `AskUserQuestion` request the daemon can take answers for.
     case answerQuestions = "answer_questions"
+    /// Listed only on a request the daemon derived session-rule candidates for.
+    case allowSession = "allow_session"
     case unknown
 
     public init(from decoder: Decoder) throws {
@@ -131,6 +133,8 @@ public enum ApprovalAnswerRefusalCode: String, Codable, Equatable {
     case unknownRequest = "unknown_request"
     /// An `answer_questions` decision that does not fit the request's questions.
     case invalidAnswer = "invalid_answer"
+    /// An `allow_session` decision that names no candidate of the request, or other text.
+    case invalidRule = "invalid_rule"
     case unknown
 
     public init(from decoder: Decoder) throws {
@@ -145,6 +149,94 @@ public enum ApprovalDecisionKind: String, Codable, Equatable {
     case deny
     case denyAndStop = "deny_and_stop"
     case answerQuestions = "answer_questions"
+    /// Allow this call and create the session rule the decision's `candidate_id` names.
+    case allowSession = "allow_session"
+}
+
+/// What a session rule covers (`kind`).
+public enum ApprovalSessionRuleKind: String, Codable, Equatable {
+    case exact
+    case pathPrefix = "path_prefix"
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ApprovalSessionRuleKind(rawValue: raw) ?? .unknown
+    }
+}
+
+/// A rule the human may choose "for this session" on one held request. The daemon derives
+/// it; the app only shows it and echoes `id` and `ruleText` back.
+public struct ApprovalSessionRuleCandidate: Codable, Equatable {
+    public let id: String
+    /// The rule exactly as the card shows it: `Bash(rm -rf ~/Library/Caches/:*)`.
+    public let ruleText: String
+    public let summary: String
+    public let kind: ApprovalSessionRuleKind
+    /// The user's own ask rule this overrides, for an ask-rule request.
+    public let overrides: String?
+
+    public init(id: String, ruleText: String, summary: String, kind: ApprovalSessionRuleKind, overrides: String? = nil) {
+        self.id = id
+        self.ruleText = ruleText
+        self.summary = summary
+        self.kind = kind
+        self.overrides = overrides
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case ruleText = "rule_text"
+        case summary, kind, overrides
+    }
+}
+
+/// One active session rule (`approval_session_rules.rules[]`).
+public struct ApprovalSessionRule: Decodable, Equatable, Identifiable {
+    public let id: String
+    public let ruleText: String
+    public let summary: String
+    public let kind: ApprovalSessionRuleKind
+    public let createdAtMs: UInt64
+    public let uses: UInt64
+    /// The sub-agent the rule is bound to, if any.
+    public let agentId: String?
+
+    public init(id: String, ruleText: String, summary: String, kind: ApprovalSessionRuleKind,
+                createdAtMs: UInt64, uses: UInt64, agentId: String? = nil) {
+        self.id = id
+        self.ruleText = ruleText
+        self.summary = summary
+        self.kind = kind
+        self.createdAtMs = createdAtMs
+        self.uses = uses
+        self.agentId = agentId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case ruleText = "rule_text"
+        case summary, kind
+        case createdAtMs = "created_at_ms"
+        case uses
+        case agentId = "agent_id"
+    }
+}
+
+/// An array whose entries that do not decode are dropped, never guessed.
+struct ApprovalLossyArray<Element: Decodable>: Decodable {
+    let elements: [Element]
+
+    private struct Skip: Decodable {}
+
+    init(from decoder: Decoder) throws {
+        var c = try decoder.unkeyedContainer()
+        var out: [Element] = []
+        while !c.isAtEnd {
+            if let e = try? c.decode(Element.self) { out.append(e) } else { _ = try? c.decode(Skip.self) }
+        }
+        elements = out
+    }
 }
 
 /// How a refused input reached a control (`approval_refusal_report.channel`).
@@ -275,8 +367,8 @@ public struct ApprovalRequestWire: Codable, Equatable, Identifiable {
     /// The agent's own description of the call: a claim, not a fact.
     public let description: String?
     public let options: [ApprovalOption]
-    /// Session-rule candidates (a later slice; empty until then).
-    public let sessionRuleCandidates: [ApprovalJSON]
+    /// The rules the human may choose "for this session". An entry that does not decode is dropped.
+    public let sessionRuleCandidates: [ApprovalSessionRuleCandidate]
     public let createdAtMs: UInt64
     public let deadlineAtMs: UInt64
 
@@ -311,7 +403,8 @@ public struct ApprovalRequestWire: Codable, Equatable, Identifiable {
         flags = try c.decode(ApprovalFlags.self, forKey: .flags)
         description = try c.decodeIfPresent(String.self, forKey: .description)
         options = try c.decode([ApprovalOption].self, forKey: .options)
-        sessionRuleCandidates = try c.decodeIfPresent([ApprovalJSON].self, forKey: .sessionRuleCandidates) ?? []
+        sessionRuleCandidates = try c.decodeIfPresent(ApprovalLossyArray<ApprovalSessionRuleCandidate>.self,
+                                                      forKey: .sessionRuleCandidates)?.elements ?? []
         createdAtMs = try c.decode(UInt64.self, forKey: .createdAtMs)
         deadlineAtMs = try c.decode(UInt64.self, forKey: .deadlineAtMs)
     }
@@ -338,6 +431,8 @@ public struct ApprovalResolvedFrame: Decodable, Equatable {
     public let outcome: String
     public let byWindow: String?
     public let atMs: UInt64
+    /// The CLI's tool-use id: lets the row of a call that was never shown (`allowed_by_session_rule`) be marked.
+    public let toolUseId: String?
 
     enum CodingKeys: String, CodingKey {
         case tag
@@ -345,6 +440,26 @@ public struct ApprovalResolvedFrame: Decodable, Equatable {
         case outcome
         case byWindow = "by_window"
         case atMs = "at_ms"
+        case toolUseId = "tool_use_id"
+    }
+}
+
+/// `approval_session_rules`: a focus's active session rules as a whole (REPLACE semantics).
+public struct ApprovalSessionRulesFrame: Decodable, Equatable {
+    public let tag: String
+    public let rules: [ApprovalSessionRule]
+
+    public init(tag: String, rules: [ApprovalSessionRule]) {
+        self.tag = tag
+        self.rules = rules
+    }
+
+    enum CodingKeys: String, CodingKey { case tag, rules }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tag = try c.decode(String.self, forKey: .tag)
+        rules = try c.decode(ApprovalLossyArray<ApprovalSessionRule>.self, forKey: .rules).elements
     }
 }
 
@@ -416,20 +531,32 @@ public struct ApprovalDecisionWire: Encodable, Equatable {
     public let kind: ApprovalDecisionKind
     public let note: String?
     public let answers: [ApprovalQuestionAnswer]?
+    /// `allow_session` only: the id of one of the request's own candidates, and its text as shown.
+    public let candidateId: String?
+    public let ruleText: String?
 
-    public init(kind: ApprovalDecisionKind, note: String? = nil, answers: [ApprovalQuestionAnswer]? = nil) {
+    public init(kind: ApprovalDecisionKind, note: String? = nil, answers: [ApprovalQuestionAnswer]? = nil,
+                candidateId: String? = nil, ruleText: String? = nil) {
         self.kind = kind
         self.note = note
         self.answers = answers
+        self.candidateId = candidateId
+        self.ruleText = ruleText
     }
 
-    enum CodingKeys: String, CodingKey { case kind, note, answers }
+    enum CodingKeys: String, CodingKey {
+        case kind, note, answers
+        case candidateId = "candidate_id"
+        case ruleText = "rule_text"
+    }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(kind, forKey: .kind)
         try c.encodeIfPresent(note, forKey: .note)
         try c.encodeIfPresent(answers, forKey: .answers)
+        try c.encodeIfPresent(candidateId, forKey: .candidateId)
+        try c.encodeIfPresent(ruleText, forKey: .ruleText)
     }
 }
 
@@ -464,6 +591,36 @@ public struct ClientApprovalAnswer: Encodable, Equatable {
         try c.encode(requestId, forKey: .requestId)
         try c.encode(decision, forKey: .decision)
         try c.encode(windowId, forKey: .windowId)
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
+    }
+}
+
+/// `approval_revoke_session_rule`: the human revoked one active session rule. `operatorNonce`
+/// echoes the nonce this connection's `welcome` carried (the daemon refuses it without).
+public struct ClientApprovalRevokeSessionRule: Encodable, Equatable {
+    let type_ = "approval_revoke_session_rule"
+    public let tag: String
+    public let ruleId: String
+    public let operatorNonce: String?
+
+    public init(tag: String, ruleId: String, operatorNonce: String?) {
+        self.tag = tag
+        self.ruleId = ruleId
+        self.operatorNonce = operatorNonce
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type"
+        case tag
+        case ruleId = "rule_id"
+        case operatorNonce = "operator_nonce"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encode(tag, forKey: .tag)
+        try c.encode(ruleId, forKey: .ruleId)
         try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
     }
 }

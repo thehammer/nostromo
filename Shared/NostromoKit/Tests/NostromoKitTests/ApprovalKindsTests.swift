@@ -53,22 +53,71 @@ final class ApprovalKindsTests: XCTestCase {
         XCTAssertNil(options.notice)
     }
 
-    func testThereIsNoRememberControlAndNoControlBeyondTheFourAndSubmitEverCanBeOffered() throws {
-        // AP2c added Submit (`answer_questions`) for an AskUserQuestion the daemon can take answers for. It is the only
-        // addition: nothing that remembers, persists or allows for a session or for good.
-        XCTAssertEqual(Set(ApprovalControl.allCases), [.deny, .denyWithNote, .denyAndStop, .allowOnce, .answerQuestions])
-        XCTAssertEqual(ApprovalControl.allCases.count, 5)
+    func testThereIsNoRememberControlAndNoControlBeyondTheFiveAndSubmitEverCanBeOffered() throws {
+        // AP2c added Submit (`answer_questions`), AP4 added "This session" (`allow_session`). Nothing remembers,
+        // persists or allows for good.
+        XCTAssertEqual(Set(ApprovalControl.allCases),
+                       [.deny, .denyWithNote, .denyAndStop, .allowOnce, .allowSession, .answerQuestions])
+        XCTAssertEqual(ApprovalControl.allCases.count, 6)
         XCTAssertEqual(ApprovalControl.answerQuestions.rawValue, "answer_questions")
+        XCTAssertEqual(ApprovalControl.allowSession.rawValue, "allow_session")
         for control in ApprovalControl.allCases {
             let raw = control.rawValue.lowercased()
-            XCTAssertFalse(raw.contains("remember") || raw.contains("session") || raw.contains("always"), raw)
+            XCTAssertFalse(raw.contains("remember") || raw.contains("always") || raw.contains("forever"), raw)
         }
-        // Whatever the daemon lists for an ordinary tool, only the original four can come back.
+        // Whatever the daemon lists for an ordinary tool WITHOUT candidates, only the original four can come back,
+        // `allow_session` included: it is never offered without a candidate to show.
         let allowed: Set<ApprovalControl> = [.deny, .denyWithNote, .denyAndStop, .allowOnce]
         let hostile = try bash(options: ["allow_once", "allow_session", "remember_always", "allow_always", "deny",
                                          "deny_and_stop", "deny_with_note"])
         XCTAssertTrue(Set(ApprovalCardOptions(request: hostile).controls).isSubset(of: allowed))
         XCTAssertEqual(ApprovalCardOptions(request: hostile).controls, [.deny, .denyWithNote, .denyAndStop, .allowOnce])
+    }
+
+    // MARK: - "This session" (AP4)
+
+    func testAllowSessionIsOfferedOnlyWhenListedWithCandidatesOnAPlainBashRequest() throws {
+        let offered = ApprovalCardOptions(request: try bash(options: Fx.sessionOptions, candidates: Fx.cacheCandidates))
+        XCTAssertEqual(offered.controls, [.deny, .denyWithNote, .denyAndStop, .allowOnce, .allowSession])
+        XCTAssertTrue(offered.offersAllowSession)
+        XCTAssertEqual(offered.sessionRules.map(\.ruleText),
+                       ["Bash(rm -rf ~/Library/Caches/a)", "Bash(rm -rf ~/Library/Caches/:*)"])
+        XCTAssertEqual(offered.sessionRules.map(\.overrides), ["Bash(rm:*)", "Bash(rm:*)"])
+
+        // Candidates the daemon did not list `allow_session` for: nothing.
+        let unlisted = ApprovalCardOptions(request: try bash(candidates: Fx.cacheCandidates))
+        XCTAssertFalse(unlisted.offersAllowSession)
+        XCTAssertTrue(unlisted.sessionRules.isEmpty)
+        // Listed, but nothing to show: nothing.
+        let none = ApprovalCardOptions(request: try bash(options: Fx.sessionOptions))
+        XCTAssertFalse(none.offersAllowSession)
+        // Listed without `allow_once`: nothing (a session allow is never offered alone).
+        let alone = ApprovalCardOptions(request: try bash(options: ["deny", "allow_session"], candidates: Fx.cacheCandidates))
+        XCTAssertEqual(alone.controls, [.deny])
+    }
+
+    func testAllowSessionIsNeverOfferedForInteractionOnlySafetyChecksSettingsWritesOrNoAlwaysAllowRequests() throws {
+        let cases: [(String, Fx.Obj, String)] = [
+            ("interaction-only", [:], "ask_rule"),
+            ("suppress", [:], "ask_rule"),
+            ("safety", [:], "safety_check"),
+            ("settings", [:], "settings_write"),
+        ]
+        for (name, _, kind) in cases {
+            var flags: [String: Bool] = [:]
+            if name == "interaction-only" { flags["requires_user_interaction"] = true }
+            if name == "suppress" { flags["suppress_always_allow_rule"] = true }
+            let options = ApprovalCardOptions(request: try bash(reasonKind: kind, flags: flags,
+                                                                options: Fx.sessionOptions, candidates: Fx.cacheCandidates))
+            XCTAssertFalse(options.offersAllowSession, name)
+            XCTAssertTrue(options.sessionRules.isEmpty, name)
+        }
+    }
+
+    func testAllowSessionIsNeverOfferedOnAQuestionRequest() throws {
+        let options = ApprovalCardOptions(request: try Fx.askUserQuestionRequest(options: Fx.askUserQuestionOptions + ["allow_session"]))
+        XCTAssertFalse(options.offersAllowSession)
+        XCTAssertEqual(options.controls, [.deny, .answerQuestions])
     }
 
     func testARequestThatNeedsClaudeCodesOwnInterfaceOffersDenyOnlyWithTheExplanation() throws {
@@ -429,11 +478,12 @@ final class ApprovalKindsTests: XCTestCase {
                       reasonKind: String = "ask_rule",
                       reasonText: String = "your rule Bash(rm:*) in ~/.claude/settings.json",
                       flags: [String: Bool] = [:],
-                      options: [String] = Fx.allOptions) throws -> ApprovalRequestWire {
+                      options: [String] = Fx.allOptions,
+                      candidates: [Fx.Obj] = []) throws -> ApprovalRequestWire {
         let fixture = Fx.bashCase("simple_rm")
         return try Fx.request(agentName: agentName, subagent: subagent,
                               input: ["command": fixture.command], display: fixture.display(),
                               reasonKind: reasonKind, reasonText: reasonText,
-                              flags: flags, options: options)
+                              flags: flags, options: options, sessionRuleCandidates: candidates)
     }
 }

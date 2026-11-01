@@ -1456,6 +1456,17 @@ pub enum ClientMsg {
         operator_nonce: Option<String>,
     },
 
+    /// The human revoked one active session rule (AP4). Applied only from the
+    /// verified Mac app with the connection's `operator_nonce`; an unknown rule
+    /// changes nothing and is answered with the tag's current rules. Refused for
+    /// network peers.
+    ApprovalRevokeSessionRule {
+        tag: String,
+        rule_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
     /// The Mac app reports an input it refused to treat as a human's: a
     /// synthetic click or key aimed at an Allow control. Written to the audit
     /// log; accepted only from the verified app. Refused for network peers.
@@ -2467,6 +2478,16 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by_window: Option<String>,
         at_ms: u64,
+        /// The CLI's tool-use id: lets the app mark the row of a call that was never
+        /// shown (`allowed_by_session_rule`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+    },
+    /// A focus's active session rules as a whole (REPLACE semantics), broadcast on
+    /// every change and replayed to a connection that renders approvals. `LocalOnly`.
+    ApprovalSessionRules {
+        tag: String,
+        rules: Vec<crate::approvals::wire::SessionRuleWire>,
     },
     /// How many requests are held for a focus. The count only: the one approval
     /// frame a network peer may receive (for a non-sensitive focus).
@@ -6459,6 +6480,7 @@ mod work_wire_tests {
                 outcome: "allowed_once".into(),
                 by_window: Some("win-1".into()),
                 at_ms: 1_760_000_000_123,
+                tool_use_id: None,
             },
             r#"{"type":"approval_resolved","tag":"cody-1","request_id":"r1","outcome":"allowed_once","by_window":"win-1","at_ms":1760000000123}"#,
         );
@@ -6469,8 +6491,86 @@ mod work_wire_tests {
                 outcome: "timed_out".into(),
                 by_window: None,
                 at_ms: 7,
+                tool_use_id: None,
             },
             r#"{"type":"approval_resolved","tag":"cody-1","request_id":"r1","outcome":"timed_out","at_ms":7}"#,
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalResolved {
+                tag: "cody-1".into(),
+                request_id: "r1".into(),
+                outcome: "allowed_by_session_rule".into(),
+                by_window: None,
+                at_ms: 7,
+                tool_use_id: Some("toolu_1".into()),
+            },
+            r#"{"type":"approval_resolved","tag":"cody-1","request_id":"r1","outcome":"allowed_by_session_rule","at_ms":7,"tool_use_id":"toolu_1"}"#,
+        );
+    }
+
+    #[test]
+    fn session_rule_frames_have_these_exact_wire_forms() {
+        use crate::approvals::rules::CandidateKind;
+        use crate::approvals::wire::{
+            ApprovalDecision, DecisionKind, SessionRuleCandidateWire, SessionRuleWire,
+        };
+        assert_server_golden(
+            ServerMsg::ApprovalSessionRules {
+                tag: "cody-1".into(),
+                rules: vec![SessionRuleWire {
+                    id: "rule-1".into(),
+                    rule_text: "Bash(rm -rf ~/Library/Caches/:*)".into(),
+                    summary: "s".into(),
+                    kind: CandidateKind::PathPrefix,
+                    created_at_ms: 5,
+                    uses: 2,
+                    agent_id: None,
+                }],
+            },
+            r#"{"type":"approval_session_rules","tag":"cody-1","rules":[{"id":"rule-1","rule_text":"Bash(rm -rf ~/Library/Caches/:*)","summary":"s","kind":"path_prefix","created_at_ms":5,"uses":2}]}"#,
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalSessionRules {
+                tag: "cody-1".into(),
+                rules: vec![],
+            },
+            r#"{"type":"approval_session_rules","tag":"cody-1","rules":[]}"#,
+        );
+        let candidate = SessionRuleCandidateWire {
+            id: "c1".into(),
+            rule_text: "Bash(ls /a/b)".into(),
+            summary: "Allows exactly this command again".into(),
+            kind: CandidateKind::Exact,
+            overrides: Some("Bash(ls:*)".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&candidate).unwrap(),
+            r#"{"id":"c1","rule_text":"Bash(ls /a/b)","summary":"Allows exactly this command again","kind":"exact","overrides":"Bash(ls:*)"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ClientMsg::ApprovalAnswer {
+                request_id: "r1".into(),
+                decision: ApprovalDecision {
+                    kind: DecisionKind::AllowSession,
+                    note: None,
+                    answers: None,
+                    candidate_id: Some("c1".into()),
+                    rule_text: Some("Bash(ls /a/b)".into()),
+                },
+                window_id: "w".into(),
+                operator_nonce: None,
+            })
+            .unwrap(),
+            r#"{"type":"approval_answer","request_id":"r1","decision":{"kind":"allow_session","candidate_id":"c1","rule_text":"Bash(ls /a/b)"},"window_id":"w"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ClientMsg::ApprovalRevokeSessionRule {
+                tag: "cody-1".into(),
+                rule_id: "rule-1".into(),
+                operator_nonce: Some("n".into()),
+            })
+            .unwrap(),
+            r#"{"type":"approval_revoke_session_rule","tag":"cody-1","rule_id":"rule-1","operator_nonce":"n"}"#
         );
     }
 
@@ -6555,6 +6655,8 @@ mod work_wire_tests {
                     kind: DecisionKind::AllowOnce,
                     note: None,
                     answers: None,
+                    candidate_id: None,
+                    rule_text: None,
                 },
                 window_id: "win-1".into(),
                 operator_nonce: Some("ab12".into()),
@@ -6568,6 +6670,8 @@ mod work_wire_tests {
                     kind: DecisionKind::Deny,
                     note: Some("use /tmp/y".into()),
                     answers: None,
+                    candidate_id: None,
+                    rule_text: None,
                 },
                 window_id: "win-1".into(),
                 operator_nonce: Some("ab12".into()),
@@ -6581,6 +6685,8 @@ mod work_wire_tests {
                     kind: DecisionKind::DenyAndStop,
                     note: None,
                     answers: None,
+                    candidate_id: None,
+                    rule_text: None,
                 },
                 window_id: "win-2".into(),
                 operator_nonce: None,
@@ -6611,7 +6717,14 @@ mod work_wire_tests {
 
     #[test]
     fn an_unknown_decision_kind_does_not_decode_so_it_can_never_be_read_as_an_allow() {
-        for kind in ["allow", "allow_session", "approve", "", "ALLOW_ONCE"] {
+        for kind in [
+            "allow",
+            "approve",
+            "",
+            "ALLOW_ONCE",
+            "ALLOW_SESSION",
+            "allow_always",
+        ] {
             let text = format!(
                 r#"{{"type":"approval_answer","request_id":"r1","decision":{{"kind":"{kind}"}},"window_id":"w"}}"#
             );
@@ -6619,6 +6732,25 @@ mod work_wire_tests {
                 serde_json::from_str::<ClientMsg>(&text).is_err(),
                 "{kind:?} must not decode"
             );
+        }
+    }
+
+    #[test]
+    fn allow_session_decodes_with_its_candidate_and_text() {
+        let msg: ClientMsg = serde_json::from_str(
+            r#"{"type":"approval_answer","request_id":"r1","decision":{"kind":"allow_session","candidate_id":"c1","rule_text":"Bash(ls /a/b)"},"window_id":"w"}"#,
+        )
+        .unwrap();
+        match msg {
+            ClientMsg::ApprovalAnswer { decision, .. } => {
+                assert_eq!(
+                    decision.kind,
+                    crate::approvals::wire::DecisionKind::AllowSession
+                );
+                assert_eq!(decision.candidate_id.as_deref(), Some("c1"));
+                assert_eq!(decision.rule_text.as_deref(), Some("Bash(ls /a/b)"));
+            }
+            other => panic!("{other:?}"),
         }
     }
 

@@ -16,6 +16,10 @@ final class ApprovalRowStatusTextTests: XCTestCase {
         XCTAssertEqual(ApprovalRowStatus.forOutcome("allowed_once", atMs: 1_234), .approved(atMs: 1_234))
     }
 
+    func testAnAllowedForSessionOutcomeReadsAsApprovedAtThatTime() {
+        XCTAssertEqual(ApprovalRowStatus.forOutcome("allowed_for_session", atMs: 5), .approved(atMs: 5))
+    }
+
     func testAnAnsweredOutcomeReadsAsApprovedAtThatTime() {
         XCTAssertEqual(ApprovalRowStatus.forOutcome("answered", atMs: 99), .approved(atMs: 99))
     }

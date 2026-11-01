@@ -762,6 +762,7 @@ where
             approvals_replay.push(ServerMsg::ApprovalsSnapshot {
                 requests: broker.presenter_connected(&conn_key),
             });
+            approvals_replay.extend(broker.session_rules_replay());
         }
     }
 
@@ -1129,7 +1130,9 @@ where
                                 if let Some(broker) = &broker {
                                     presents_approvals = true;
                                     let requests = broker.presenter_connected(&conn_key);
-                                    replay_messages(&mut writer, [ServerMsg::ApprovalsSnapshot { requests }]).await;
+                                    let mut frames = vec![ServerMsg::ApprovalsSnapshot { requests }];
+                                    frames.extend(broker.session_rules_replay());
+                                    replay_messages(&mut writer, frames).await;
                                 }
                             } else if presents_approvals && !renders_approvals {
                                 // Resubscribing without it gives the status up.
@@ -1163,6 +1166,7 @@ where
                         let answer_check = match &msg {
                             ClientMsg::DecisionAnswer { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalAnswer { operator_nonce: sent, .. }
+                            | ClientMsg::ApprovalRevokeSessionRule { operator_nonce: sent, .. }
                             | ClientMsg::ClaudeLoginAction { operator_nonce: sent, .. }
                             | ClientMsg::PaneAction { operator_nonce: sent, .. }
                                 if trust == PeerTrust::OperatorApp =>
@@ -1368,6 +1372,23 @@ fn handle_client_msg(
                 AnswerRefusal::RequiresSecureConnection,
                 network_refusal_reply(&msg),
                 peer_json(trust, peer),
+            );
+            return;
+        }
+        // Revoking a session rule is likewise logged before the peer is told no.
+        if let ClientMsg::ApprovalRevokeSessionRule { .. } = &msg {
+            let tx = targeted_tx.clone();
+            let reply = network_refusal_reply(&msg);
+            audit_refusal_then(
+                session_mgr.lock().unwrap().approvals().cloned(),
+                None,
+                AnswerRefusal::RequiresSecureConnection.as_str(),
+                peer_json(trust, peer),
+                None,
+                Some("revoke_session_rule".to_string()),
+                move || {
+                    let _ = tx.send(reply);
+                },
             );
             return;
         }
@@ -1660,6 +1681,63 @@ fn handle_client_msg(
                     broker.answer_or_refusal(&request_id, &decision, &window_id, &conn, peer)
                 {
                     let _ = tx.send(refusal);
+                }
+            });
+        }
+
+        ClientMsg::ApprovalRevokeSessionRule { tag, rule_id, .. } => {
+            let broker = session_mgr.lock().unwrap().approvals().cloned();
+            // Same gate as an answer: only the verified Mac app, with the connection's
+            // nonce from a process still verified. Anything else changes nothing and is logged.
+            let not_allowed = if trust != PeerTrust::OperatorApp {
+                Some("not the verified Nostromo app".to_string())
+            } else {
+                match answer_check {
+                    Some(Ok(())) => None,
+                    Some(Err(why)) => Some(why),
+                    None => Some("ApprovalRevokeSessionRule refused: not checked".to_string()),
+                }
+            };
+            if let Some(why) = not_allowed {
+                warn!(conn_key, tag = %log_safe(&tag), ?trust, peer_pid = peer.map(|p| p.pid), "ApprovalRevokeSessionRule refused: {why}");
+                let tx = targeted_tx.clone();
+                audit_refusal_then(
+                    broker,
+                    None,
+                    AnswerRefusal::NotOperatorApp.as_str(),
+                    peer_json(trust, peer),
+                    None,
+                    Some("revoke_session_rule".to_string()),
+                    move || {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "not_operator_app: only the Nostromo app can revoke a session rule".to_string(),
+                        });
+                    },
+                );
+                return;
+            }
+            let Some(broker) = broker else { return };
+            let (tx, conn, peer) = (
+                targeted_tx.clone(),
+                conn_key.to_string(),
+                peer_json(trust, peer),
+            );
+            tokio::task::spawn_blocking(move || {
+                match broker.revoke_session_rule(&tag, &rule_id, &conn, "app") {
+                    crate::approvals::broker::RevokeResult::Revoked => {}
+                    // Nothing changed: tell the asker what is true now.
+                    crate::approvals::broker::RevokeResult::Unknown => {
+                        let _ = tx.send(broker.session_rules_frame(&tag));
+                    }
+                    crate::approvals::broker::RevokeResult::NotPresenter => {
+                        broker.record_refusal(
+                            None,
+                            AnswerRefusal::NotOperatorApp.as_str(),
+                            peer,
+                            None,
+                            Some("revoke_session_rule"),
+                        );
+                    }
                 }
             });
         }
@@ -3453,6 +3531,7 @@ fn is_approval_frame(msg: &ServerMsg) -> bool {
         ServerMsg::ApprovalRequest { .. }
             | ServerMsg::ApprovalsSnapshot { .. }
             | ServerMsg::ApprovalResolved { .. }
+            | ServerMsg::ApprovalSessionRules { .. }
             | ServerMsg::ApprovalGuardBlocked { .. }
             | ServerMsg::ApprovalAnswerRefused { .. }
             | ServerMsg::ApprovalPending { .. }
@@ -3465,6 +3544,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::ApprovalRequest { .. }
         | ServerMsg::ApprovalsSnapshot { .. }
         | ServerMsg::ApprovalResolved { .. }
+        | ServerMsg::ApprovalSessionRules { .. }
         | ServerMsg::ApprovalGuardBlocked { .. }
         | ServerMsg::ApprovalAnswerRefused { .. }
         | ServerMsg::SessionPermissionRequest { .. } => false,
