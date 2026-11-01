@@ -678,3 +678,201 @@ final class TaskOutputViewTests: XCTestCase {
         XCTAssertTrue(rig.model.text.hasSuffix(Self.line(13)), "the model goes on without the view")
     }
 }
+
+// MARK: - Display soft breaks (one huge line)
+
+final class TaskOutputDisplayTests: XCTestCase {
+
+    private let limit = TaskOutputDisplay.lineLimit
+
+    private func broken(_ text: String, from column: Int = 0) -> (text: String, column: Int) {
+        var column = column
+        let shown = TaskOutputDisplay.softBroken(text, column: &column)
+        return (shown, column)
+    }
+
+    private func lineLengths(_ text: String) -> [Int] {
+        text.split(separator: "\n", omittingEmptySubsequences: false).map { $0.utf16.count }
+    }
+
+    func testTheLimitIsSixtyFiveThousandFiveHundredThirtySixUnits() {
+        XCTAssertEqual(limit, 65_536)
+    }
+
+    func testALineUnderTheLimitIsLeftAloneAndTheColumnIsWhereItEnds() {
+        let result = broken("short line\nanother")
+
+        XCTAssertEqual(result.text, "short line\nanother")
+        XCTAssertEqual(result.column, 7, "the length of the last line")
+        XCTAssertEqual(broken("done\n").column, 0, "a text ending in a newline leaves the next line at its start")
+        let empty = broken("", from: 5)
+        XCTAssertEqual(empty.text, "")
+        XCTAssertEqual(empty.column, 5, "nothing added: the column stays")
+    }
+
+    func testALineOfExactlyTheLimitIsNotBrokenAndOneMoreUnitIs() {
+        let exact = String(repeating: "x", count: limit)
+        XCTAssertEqual(broken(exact).text, exact)
+        XCTAssertEqual(broken(exact).column, limit)
+
+        let over = broken(exact + "x")
+        XCTAssertEqual(over.text, exact + "\nx", "the break goes before the unit that would pass the limit")
+        XCTAssertEqual(over.column, 1)
+    }
+
+    func testNewlinesInTheTextStartTheCountAgain() {
+        let almost = String(repeating: "x", count: limit - 1)
+        let text = almost + "\n" + almost + "\n" + almost
+
+        XCTAssertEqual(broken(text).text, text, "no line is long enough to break")
+    }
+
+    func testALongLineIsBrokenEverySixtyFiveThousandFiveHundredThirtySixUnitsAcrossCalls() {
+        let letters = Array("abcdefghijklmnopqrstuvwxyz".utf16)
+        let units = (0..<(3 * limit + 10)).map { letters[$0 % letters.count] }
+        let original = String(decoding: units, as: UTF16.self)
+        let cuts = [limit - 3, limit - 3 + 5, limit - 3 + 5 + 2 * limit, units.count]   // chunks of every awkward size
+        var column = 0
+        var shown = ""
+        var previous = 0
+        for cut in cuts {
+            shown += TaskOutputDisplay.softBroken(String(decoding: units[previous..<cut], as: UTF16.self), column: &column)
+            previous = cut
+        }
+
+        XCTAssertEqual(lineLengths(shown), [limit, limit, limit, 10], "a break every 65,536 units however the text arrived")
+        XCTAssertEqual(shown.replacingOccurrences(of: "\n", with: ""), original, "nothing but newlines was added")
+        XCTAssertEqual(shown, broken(original).text, "the same as when it all arrives at once")
+        XCTAssertEqual(column, 10)
+    }
+
+    func testABreakNeverSplitsASurrogatePair() {
+        for padding in (limit - 3)...(limit + 1) {
+            let text = String(repeating: "x", count: padding) + "\u{1F600}\u{1F600}\u{1F600}"
+
+            let shown = broken(text).text
+
+            XCTAssertFalse(shown.unicodeScalars.contains("\u{FFFD}"), "padding \(padding): no pair was cut in two")
+            XCTAssertEqual(shown.replacingOccurrences(of: "\n", with: ""), text, "padding \(padding): nothing was lost")
+            for length in lineLengths(shown) {
+                XCTAssertLessThanOrEqual(length, limit + 1, "padding \(padding): a line may pass the limit by the second half of a pair")
+            }
+        }
+    }
+
+    func testTextOutsideAsciiIsOnlyEverGivenNewlines() {
+        let unit = "\u{65E5}\u{672C}\u{1F600}\u{2502}"                                  // four characters, five UTF-16 units
+        let text = String(repeating: unit, count: 2 * limit / 5 + 1)                    // more than the limit in units
+
+        let shown = broken(text).text
+
+        XCTAssertTrue(shown.contains("\n"), "premise: the text is long enough to break")
+        XCTAssertFalse(shown.unicodeScalars.contains("\u{FFFD}"))
+        XCTAssertEqual(shown.replacingOccurrences(of: "\n", with: ""), text)
+        for length in lineLengths(shown) { XCTAssertLessThanOrEqual(length, limit + 1) }
+    }
+}
+
+extension TaskOutputViewTests {
+
+    private static let flatAlphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8)
+
+    /// Characters `range` of one endless line with no newline in it (minified JSON, base64).
+    fileprivate static func flat(_ range: Range<Int>) -> String {
+        String(decoding: range.map { flatAlphabet[$0 % 64] }, as: UTF8.self)
+    }
+
+    /// The length of the longest paragraph the text view holds (without its newline).
+    private func longestParagraph(_ view: TaskOutputView) -> Int {
+        guard let storage = view.textView.textStorage else { return 0 }
+        let string = storage.mutableString
+        var longest = 0
+        string.enumerateSubstrings(in: NSRange(location: 0, length: string.length),
+                                   options: [.byParagraphs, .substringNotRequired]) { _, range, _, _ in
+            longest = max(longest, range.length)
+        }
+        return longest
+    }
+
+    private func newlineCount(_ text: String) -> Int {
+        text.utf8.reduce(0) { $1 == 0x0A ? $0 + 1 : $0 }
+    }
+
+    func testAFiveMegabyteSingleLineIsDrawnInShortParagraphsAndEveryDeliveryStaysQuick() throws {
+        let limit = TaskOutputDisplay.lineLimit
+        let rig = makeRig(initial: "")
+        let total = 5 * 1_048_576
+        var sent = 0
+        var slowest: TimeInterval = 0
+
+        while sent < total {
+            let count = min(300_000, total - sent)
+            rig.daemon.append(Self.flat(sent..<(sent + count)))
+            let started = ProcessInfo.processInfo.systemUptime
+            rig.poll()                                   // one poll: the read, the model's delivery, the append
+            slowest = max(slowest, ProcessInfo.processInfo.systemUptime - started)
+            sent += count
+
+            let storage = try XCTUnwrap(rig.view.textView.textStorage).mutableString
+            let last = storage.paragraphRange(for: NSRange(location: max(0, storage.length - 1), length: 0))
+            guard last.length <= limit + 1 else {
+                return XCTFail("after \(sent) characters the last paragraph is \(last.length) long: the line is not broken")
+            }
+        }
+
+        XCTAssertEqual(rig.model.text.utf8.count, total, "premise: the model holds all of it")
+        XCTAssertLessThanOrEqual(longestParagraph(rig.view), limit + 1, "no paragraph passes the limit")
+        let shown = rig.view.shownText
+        XCTAssertEqual(newlineCount(shown), (total - 1) / limit, "a break every 65,536 characters, and no other")
+        XCTAssertTrue(shown.utf8.filter { $0 != 0x0A }.elementsEqual(rig.daemon.bytes), "the breaks are all that was added")
+        XCTAssertFalse(rig.model.text.utf8.contains(0x0A), "the model holds the line as it came")
+        XCTAssertLessThan(slowest, 1.0, "no delivery took long on the main thread (the slowest took \(slowest) s)")
+
+        rig.view.copyAll()
+        let copied = rig.pasteboard.string(forType: .string) ?? ""
+        XCTAssertTrue(copied.utf8.elementsEqual(rig.daemon.bytes), "Copy All gives the original line, with no break in it")
+    }
+
+    func testAViewOpenedOnAModelThatAlreadyHoldsAHugeLineBreaksItToo() {
+        let limit = TaskOutputDisplay.lineLimit
+        let rig = makeRig(initial: Self.flat(0..<200_000))
+        XCTAssertEqual(rig.model.text.utf8.count, 200_000, "premise: the model holds the line")
+
+        XCTAssertLessThanOrEqual(longestParagraph(rig.view), limit + 1)
+        XCTAssertEqual(newlineCount(rig.view.shownText), 200_000 / limit)
+        rig.view.copyAll()
+        XCTAssertEqual(rig.pasteboard.string(forType: .string), rig.model.text, "Copy All is the original")
+    }
+
+    func testAFileRewrittenAsOneHugeLineIsDrawnInShortParagraphsAfterTheReplacement() {
+        let limit = TaskOutputDisplay.lineLimit
+        let rig = makeRig(initial: Self.lines(0 ..< 10_000))      // 400 000 bytes in short lines
+        rig.daemon.bytes = Array(Self.flat(0..<200_000).utf8)     // rewritten: shorter, and one line
+
+        rig.poll()
+
+        XCTAssertEqual(rig.view.replaceOps, 1, "premise: the view was told to read the text again")
+        XCTAssertEqual(rig.model.text.utf8.count, 200_000)
+        XCTAssertLessThanOrEqual(longestParagraph(rig.view), limit + 1)
+        XCTAssertEqual(newlineCount(rig.view.shownText), 200_000 / limit)
+        XCTAssertTrue(rig.view.shownText.utf8.filter { $0 != 0x0A }.elementsEqual(rig.model.text.utf8))
+    }
+
+    func testTheHeaderCarriesAtMostTwoHundredCharactersOfADescriptionAndASummary() {
+        let rig = makeRig(initial: Self.lines(0 ..< 5))
+        let long = String(repeating: "abcdefghij", count: 40)       // 400 characters
+        let meta = TaskMetaWire(id: "t1", kind: .shell, description: long, status: .running, startedAtMs: 1_000)
+        let detail = SessionTaskDetailWire(tag: "kate", taskId: "t1", progressSummary: long)
+        let content = TaskWindowContent.make(tag: "kate", focusName: "kate", meta: meta, row: nil, detail: detail, nowMs: 31_000)
+
+        rig.view.apply(content: content)
+        rig.layout()
+
+        XCTAssertEqual(rig.view.header.descriptionText.count, 200)
+        XCTAssertTrue(rig.view.header.descriptionText.hasSuffix("\u{2026}"), "and it says it was cut")
+        XCTAssertEqual(rig.view.header.descriptionToolTip, rig.view.header.descriptionText, "the tooltip is not the 400 characters either")
+        XCTAssertEqual(rig.view.header.summaryText.count, 200)
+        XCTAssertTrue(rig.view.header.summaryText.hasSuffix("\u{2026}"))
+        XCTAssertLessThan(rig.view.header.toolTip?.count ?? 0, 300, "nor the header's tooltip")
+    }
+}

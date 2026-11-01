@@ -11,6 +11,8 @@ import NostromoKit
 struct TaskWindowContent: Equatable {
     /// The longest description the window title carries (the header has all of it).
     static let titleDescriptionLimit = 80
+    /// The longest description or summary the header, tooltip and accessibility label carry.
+    static let textLimit = 200
 
     let focusTag: String
     let taskId: String
@@ -80,7 +82,7 @@ struct TaskWindowContent: Equatable {
             formatter.timeStyle = .medium
             return "Started " + formatter.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
         }
-        let description = oneLine(meta.description)
+        let description = cut(oneLine(meta.description))
         let summary = ended ? detail?.completionSummary : detail?.progressSummary
         let activity = meta.kind == .agent ? agentActivity(meta) : nil
         return TaskWindowContent(
@@ -95,7 +97,7 @@ struct TaskWindowContent: Equatable {
             isEnded: ended,
             startedText: started,
             timeText: time,
-            summary: summary.flatMap(multiline),
+            summary: summary.flatMap(multiline).map(cut),
             prompt: detail?.prompt.flatMap(multiline),
             activityText: activity,
             toolUseId: meta.toolUseId,
@@ -111,6 +113,10 @@ struct TaskWindowContent: Equatable {
     }
 
     // MARK: Private
+
+    private static func cut(_ text: String) -> String {
+        text.count > textLimit ? String(text.prefix(textLimit - 1)) + "\u{2026}" : text
+    }
 
     private static func oneLine(_ text: String) -> String {
         FoldTextSanitizer.sanitizeInline(text)

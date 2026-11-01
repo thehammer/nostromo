@@ -105,6 +105,9 @@ final class TaskOutputFakeDaemon: TaskRequestSending {
     var failure: (outcome: String, message: String?)?
     /// Hold reads until `answerNext()`.
     var defersAnswers = false
+    /// Test hook: every ranged file read answers from this many bytes later than the daemon would (a
+    /// `start_offset` that is further from the request than a split scalar can explain).
+    var rangedStartShift = 0
 
     private var files: [String: Data] = [:]
     private var queue: [Read] = []
@@ -183,6 +186,32 @@ final class TaskOutputFakeDaemon: TaskRequestSending {
         queue.removeAll()
     }
 
+    /// How many of the (up to three) bytes at `from` are the continuation bytes of a scalar the read
+    /// started inside (`leading_skip` in `src/ipc/task_output.rs`).
+    private static func leadingContinuationBytes(_ data: Data, from: Int, limit: Int) -> Int {
+        var skip = 0
+        while skip < 3, from + skip < limit, data[from + skip] & 0xC0 == 0x80 { skip += 1 }
+        return skip
+    }
+
+    /// Where a chunk that stopped short of the end of the file ends (`safe_end`): after the last newline in
+    /// `[from, to)` when it holds one, else not inside a UTF-8 scalar.
+    private static func safeEnd(_ data: Data, from: Int, to: Int) -> Int {
+        guard from < to else { return to }
+        if let newline = data[from..<to].lastIndex(of: 0x0A) { return newline + 1 }
+        var back = 0
+        while back < 3, back < to - from {
+            let byte = data[to - 1 - back]
+            if byte & 0xC0 == 0x80 {
+                back += 1
+                continue
+            }
+            let needed = byte >= 0xF0 ? 4 : (byte >= 0xE0 ? 3 : (byte >= 0xC0 ? 2 : 1))
+            return needed > back + 1 ? to - (back + 1) : to
+        }
+        return to
+    }
+
     private func answer(_ read: Read) {
         var json: [String: Any] = ["request_id": read.requestId, "tag": read.tag, "task_id": read.taskId]
         let served = files[read.taskId] ?? content
@@ -195,12 +224,22 @@ final class TaskOutputFakeDaemon: TaskRequestSending {
             let end: UInt64
             switch source {
             case .file:
-                let wanted = min(UInt64(read.maxBytes), UInt64(Self.chunkLimit))
+                // Like the real daemon: a read starts at an arbitrary byte, skips the rest of a scalar it
+                // began inside, and (short of the end of the file) stops after the last newline it holds.
+                let wanted = Int(min(UInt64(read.maxBytes), UInt64(Self.chunkLimit)))
+                let size = served.count
                 if let offset = read.offset {
-                    start = min(offset, total)
-                    end = min(total, start + wanted)
+                    var from = Int(min(offset, total))
+                    let windowEnd = min(size, from + wanted)
+                    if offset > 0 { from += Self.leadingContinuationBytes(served, from: from, limit: windowEnd) }
+                    from = min(from + Int(rangedStartShift), size)
+                    let to = windowEnd < size ? max(from, Self.safeEnd(served, from: from, to: windowEnd)) : max(from, windowEnd)
+                    start = UInt64(from)
+                    end = UInt64(to)
                 } else {
-                    start = total - min(total, wanted)
+                    var from = size - min(size, wanted)
+                    if from > 0 { from += Self.leadingContinuationBytes(served, from: from, limit: size) }
+                    start = UInt64(from)
                     end = total
                 }
             case .cliTail:
@@ -1504,5 +1543,360 @@ final class TaskOutputRegistryTests: XCTestCase {
         world.registry.evictUnheld()
 
         XCTAssertNil(probe)
+    }
+}
+
+// MARK: - Review fixes: multi-byte windows, one huge line, refresh, reopen, catching up
+
+extension TaskOutputModelTests {
+
+    // MARK: Fixtures
+
+    /// Seven CJK characters (3 bytes each), an emoji (4), four box-drawing characters (3 each) and a newline.
+    fileprivate static let multibyteLine = "\u{65E5}\u{672C}\u{8A9E}\u{30C6}\u{30AD}\u{30B9}\u{30C8}\u{1F600}\u{2502}\u{2500}\u{253C}\u{2524}\n"
+
+    private static let base64Alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8)
+
+    /// Bytes `range` of one endless line with no newline in it (what minified JSON or base64 looks like).
+    fileprivate static func oneLine(_ range: Range<Int>) -> Data {
+        Data(range.map { base64Alphabet[$0 % 64] })
+    }
+
+    private func continuationRun(in bytes: [UInt8], at index: Int) -> Int {
+        var run = 0
+        while run < 3, index + run < bytes.count, bytes[index + run] & 0xC0 == 0x80 { run += 1 }
+        return run
+    }
+
+    /// A file of multi-byte lines and a short ASCII closing line, with the closing line's length picked so
+    /// that `total - 10 MiB` (the start of the viewer's window) falls inside a character, `skip` continuation
+    /// bytes before the next one starts. Nil when no closing line does it.
+    private func multibyteFile(skip: Int, lines: Int = 300_000) -> (data: Data, windowStart: Int)? {
+        let unit = Array(Self.multibyteLine.utf8)
+        guard unit.count == 38 else { return nil }
+        for closing in 0..<unit.count {
+            let total = unit.count * lines + closing
+            let windowStart = total - 10 * mib
+            let inLine = windowStart % unit.count
+            guard unit[inLine] & 0xC0 == 0x80, continuationRun(in: unit, at: inLine) == skip else { continue }
+            var data = Data()
+            data.reserveCapacity(total)
+            for _ in 0..<lines { data.append(contentsOf: unit) }
+            if closing > 0 { data.append(contentsOf: [UInt8](repeating: 0x78, count: closing - 1) + [0x0A]) }
+            return (data, windowStart)
+        }
+        return nil
+    }
+
+    private func appendedText(_ log: TaskOutputChangeLog) -> String {
+        log.events.compactMap { event -> String? in
+            if case .appended(let text) = event { return text }
+            return nil
+        }.joined()
+    }
+
+    // MARK: - M1: a window that starts inside a character
+
+    func testAWindowThatStartsInsideACharacterStillHoldsTheWholeTenMegabytesFromTheNextCharacter() throws {
+        // The window start (total - 10 MiB) is an arbitrary byte. In the box-drawing, CJK and emoji lines
+        // below it lands 1, 2 and 3 continuation bytes before a character begins.
+        for skip in 1...3 {
+            let (data, windowStart) = try XCTUnwrap(multibyteFile(skip: skip), "a fixture with a skip of \(skip)")
+            XCTAssertEqual(data[windowStart] & 0xC0, 0x80, "premise (skip \(skip)): the window starts inside a character")
+            XCTAssertNotEqual(data[windowStart + skip] & 0xC0, 0x80, "premise: the character after it starts \(skip) bytes on")
+            XCTAssertGreaterThan(data.count, 10 * mib)
+
+            let rig = TaskOutputRig()
+            rig.daemon.content = data
+            let model = rig.makeModel()
+            model.acquire()
+            rig.drainAnswers()
+
+            let first = windowStart + skip
+            XCTAssertEqual(model.state, .ready, "skip \(skip)")
+            XCTAssertFalse(model.isFillingHead, "skip \(skip)")
+            XCTAssertEqual(model.text.utf8.count, data.count - first, "skip \(skip): the whole window, from its first whole character")
+            XCTAssertTrue(model.text.utf8.elementsEqual(data[first...]), "skip \(skip): the held text is the file from there to its end")
+            XCTAssertFalse(model.text.unicodeScalars.contains("\u{FFFD}"), "skip \(skip): no split character")
+            XCTAssertTrue(model.truncatedHead, "skip \(skip)")
+            XCTAssertEqual(model.truncationNotice, "Showing the last 10 MB of 11 MB", "skip \(skip)")
+            model.release()
+        }
+    }
+
+    func testAHeadThatStartsFurtherFromTheRequestThanASplitCharacterCanExplainIsRefusedAndTheNoticeSaysWhatIsHeld() {
+        // The daemon skips at most three continuation bytes; any other start is a head that does not line up.
+        for shift in [4, 5] {
+            let rig = TaskOutputRig()
+            let lineCount = 12 * mib / 64
+            rig.daemon.setLines(lineCount)
+            rig.daemon.rangedStartShift = shift
+            let model = rig.makeModel()
+            model.acquire()
+            rig.drainAnswers()
+
+            XCTAssertEqual(model.state, .ready, "shift \(shift)")
+            XCTAssertFalse(model.isFillingHead, "shift \(shift)")
+            XCTAssertEqual(model.text.utf8.count, mib, "shift \(shift): only the tail is held")
+            assertSameLargeText(model.text, visible((11 * mib / 64)..<lineCount), "shift \(shift): the tail, whole, to the last line")
+            XCTAssertTrue(model.truncatedHead, "shift \(shift)")
+            XCTAssertEqual(model.truncationNotice, "Showing the last 1 MB of 12 MB",
+                           "shift \(shift): the notice reports what is held, not the 10 MB it could not fetch")
+            model.release()
+        }
+    }
+
+    // MARK: - S1: one huge line
+
+    func testASingleHugeLineGrowingPastTheCeilingIsTrimmedToTheWindowNotToNothing() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.content = Self.oneLine(0..<mib)
+        let model = rig.makeModel()
+        model.acquire()
+        rig.drainAnswers()
+        addTeardownBlock { model.release() }
+        let log = TaskOutputChangeLog(model)
+
+        func growByOneMiB() throws {
+            let have = rig.daemon.content?.count ?? 0
+            rig.daemon.content = (rig.daemon.content ?? Data()) + Self.oneLine(have..<(have + mib))
+            rig.clock.advance(0.5)
+            try rig.firePoll()
+        }
+        for _ in 0..<19 { try growByOneMiB() }                      // 20 MiB: at the ceiling
+        XCTAssertEqual(model.text.utf8.count, 20 * mib)
+        XCTAssertFalse(log.events.contains(.replaced), "nothing is dropped at the ceiling")
+
+        try growByOneMiB()                                          // 21 MiB: past it, with no newline to cut at
+        rig.flushDeliveries()
+
+        let file = try XCTUnwrap(rig.daemon.content)
+        let held = model.text.utf8.count
+        XCTAssertGreaterThan(held, 0, "a line with no newline is not trimmed to nothing")
+        XCTAssertLessThanOrEqual(held, 10 * mib, "back to the 10 MB window")
+        XCTAssertGreaterThan(held, 10 * mib - 8, "and not far under it")
+        XCTAssertTrue(model.text.utf8.elementsEqual(file.suffix(held)), "what is left is the end of the file, to its last byte")
+        XCTAssertTrue(model.truncatedHead)
+        XCTAssertEqual(model.truncationNotice, "Showing the last 10 MB of 21 MB")
+        XCTAssertTrue(log.contentEvents.last == .replaced, "a subscriber reads the text again: \(log.kinds.suffix(3))")
+
+        try growByOneMiB()
+        let grown = try XCTUnwrap(rig.daemon.content)
+        XCTAssertTrue(model.text.utf8.elementsEqual(grown.suffix(model.text.utf8.count)), "polling carries on after the trim")
+        XCTAssertGreaterThan(model.text.utf8.count, 10 * mib)
+    }
+
+    func testLastBytesOfALongTextWithNoNewlineIsTheEndOfItNotNothing() {
+        let text = String(decoding: Self.oneLine(0..<(3 * mib)), as: UTF8.self)
+
+        let end = TaskOutputModel.lastBytes(of: text, mib)
+
+        XCTAssertEqual(end.utf8.count, mib)
+        XCTAssertTrue(text.hasSuffix(end))
+    }
+
+    func testLastBytesStartsAtAWholeCharacter() {
+        let text = String(repeating: "\u{65E5}", count: 400_000)         // 1.2 MB of three-byte characters
+
+        let end = TaskOutputModel.lastBytes(of: text, mib)
+
+        XCTAssertLessThanOrEqual(end.utf8.count, mib)
+        XCTAssertGreaterThan(end.utf8.count, mib - 3)
+        XCTAssertEqual(end.utf8.count % 3, 0, "whole characters only")
+        XCTAssertFalse(end.unicodeScalars.contains("\u{FFFD}"))
+        XCTAssertTrue(text.utf8.suffix(end.utf8.count).elementsEqual(end.utf8), "it is the end of the text")
+    }
+
+    func testLastBytesPrefersALineStartWhenThatKeepsMostOfTheLimit() {
+        let lines = TaskOutputFakeDaemon.visibleText(0..<(2 * mib / 64))
+        let limit = 1_000_010                                          // not a multiple of the 64-byte lines
+
+        let end = TaskOutputModel.lastBytes(of: lines, limit)
+
+        XCTAssertTrue(end.hasPrefix("L"), "cut at a line start")
+        XCTAssertEqual(end.utf8.count % 64, 0)
+        XCTAssertLessThanOrEqual(end.utf8.count, limit)
+        XCTAssertGreaterThan(end.utf8.count, limit - 64)
+        XCTAssertTrue(lines.hasSuffix(end))
+        XCTAssertEqual(end.utf8.count, 1_000_000, "the 10 bytes of the line the limit fell inside are dropped")
+    }
+
+    func testLastBytesOfAHugeLineFollowedByAShortOneKeepsTheWindowNotJustTheShortLine() {
+        let text = String(decoding: Self.oneLine(0..<(3 * mib)), as: UTF8.self) + "\nshort\n"
+
+        let end = TaskOutputModel.lastBytes(of: text, mib)
+
+        XCTAssertGreaterThan(end.utf8.count, mib / 2, "a short last line does not stand for the window")
+        XCTAssertLessThanOrEqual(end.utf8.count, mib)
+        XCTAssertTrue(end.hasSuffix("\nshort\n"))
+    }
+
+    func testLastBytesOfATextUnderTheLimitIsTheTextItself() {
+        XCTAssertEqual(TaskOutputModel.lastBytes(of: "abc\ndef\n", 100), "abc\ndef\n")
+    }
+
+    // MARK: - S4: a file that came back
+
+    private func vanish(_ rig: TaskOutputRig) throws {
+        rig.daemon.content = nil
+        for _ in 0..<3 {
+            rig.clock.advance(0.5)
+            try rig.firePoll()
+        }
+        XCTAssertTrue(rig.scheduler.live.isEmpty, "premise: a vanished file is not polled")
+    }
+
+    func testAFileThatCameBackForARunningTaskIsReadAgainWhenSomeoneOpensTheOutputAgain() throws {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 20)
+        try vanish(rig)
+        rig.daemon.setLines(25)
+
+        model.release()
+        rig.clock.advance(5)
+        model.acquire()
+
+        XCTAssertEqual(model.text, visible(0..<25), "reading resumed from where it had got to")
+        XCTAssertEqual(rig.scheduler.pollSlots.count, 1, "and polling is live again")
+
+        rig.daemon.appendLines(2)
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+        XCTAssertEqual(model.text, visible(0..<27))
+    }
+
+    func testAFileThatIsStillGoneWhenTheOutputIsOpenedAgainGoesQuietAfterThreeMoreFailedPolls() throws {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 20)
+        try vanish(rig)
+
+        model.release()
+        model.acquire()
+
+        XCTAssertEqual(model.text, visible(0..<20), "the held text stays")
+        XCTAssertEqual(rig.scheduler.pollSlots.count, 1, "a running task's file is tried again")
+        for _ in 0..<2 {
+            rig.clock.advance(0.5)
+            try rig.firePoll()
+        }
+        XCTAssertTrue(rig.scheduler.live.isEmpty, "a few failures in a row make it vanished again: no endless polling")
+        XCTAssertEqual(model.text, visible(0..<20))
+    }
+
+    func testAnEndedTaskWhoseFileVanishedIsNotReadAgainWhenTheOutputIsOpenedAgain() throws {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 20)
+        try vanish(rig)
+        model.taskEnded()
+        rig.daemon.setLines(25)
+        model.release()
+        let readsBefore = rig.daemon.reads.count
+
+        model.acquire()
+
+        XCTAssertEqual(rig.daemon.reads.count, readsBefore, "an ended task is not retried")
+        XCTAssertEqual(model.text, visible(0..<20))
+        XCTAssertTrue(rig.scheduler.live.isEmpty)
+    }
+
+    // MARK: - S5: an answer that lands after the last holder left
+
+    func testAnAnswerThatLandsWithNoHolderLeavesNoTimerAndTheReopenedViewShowsTheTextOnce() throws {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 10)
+        rig.daemon.defersAnswers = true
+        rig.daemon.appendLines(2)
+        try rig.firePoll()                      // a read is out, inside the quarter second of the load's delivery
+        model.release()                         // the window closes while it is out
+
+        rig.daemon.answerNext()                 // it lands with nobody holding the model
+
+        XCTAssertEqual(model.text, visible(0..<12), "the model took the text")
+        XCTAssertFalse(model.hasLiveTimer, "and started no timer for nobody")
+        XCTAssertTrue(rig.scheduler.live.isEmpty)
+
+        // The window opens again: the view reads `text` as it stands, then listens, then the model is acquired.
+        let pasteboard = rigPrivatePasteboard(self)
+        let view = TaskOutputView(focusTag: "kate", taskId: "t1", model: model, pasteboard: pasteboard)
+        let log = TaskOutputChangeLog(model)
+        rig.daemon.defersAnswers = false
+        model.acquire()
+        addTeardownBlock { model.release() }
+        rig.flushDeliveries()
+
+        XCTAssertEqual(view.shownText, model.text, "no line is drawn twice")
+        XCTAssertEqual(view.shownText, visible(0..<12))
+        XCTAssertEqual(log.contentEvents, [], "nothing is delivered that the view already has")
+        XCTAssertTrue(rig.scheduler.deliverySlots.isEmpty, "no stale delivery is waiting")
+    }
+
+    // MARK: - S6: a file far ahead of the cursor
+
+    func testAFileFourMegabytesAheadIsCaughtUpByOnePollWithoutWaitingForMore() throws {
+        let rig = TaskOutputRig()
+        let perMiB = mib / 64
+        let model = open(rig, lines: perMiB)
+        let log = TaskOutputChangeLog(model)
+        rig.daemon.appendLines(4 * perMiB)       // the file is 4 MiB past what was read
+        rig.clock.advance(0.5)
+        let readsBefore = rig.daemon.reads.count
+
+        try rig.firePoll()                       // the one poll
+        rig.flushDeliveries()
+
+        assertSameLargeText(model.text, visible(0..<(5 * perMiB)), "all of the file, in order")
+        XCTAssertEqual(model.totalBytes, UInt64(5 * mib))
+        XCTAssertGreaterThan(rig.daemon.reads.count - readsBefore, 1, "chained reads, not one chunk per poll")
+        XCTAssertEqual(rig.scheduler.pollSlots.count, 1, "the next poll is the only timer waiting")
+        assertSameLargeText(appendedText(log), visible(perMiB..<(5 * perMiB)), "a subscriber got every byte once, appended")
+    }
+
+    func testAFileMoreThanTheWindowAheadReloadsTheTailInsteadOfAppendingChunkByChunk() throws {
+        let rig = TaskOutputRig()
+        let perMiB = mib / 64
+        let model = open(rig, lines: perMiB)
+        let log = TaskOutputChangeLog(model)
+        rig.daemon.appendLines(13 * perMiB)      // 14 MiB in all: 13 MiB past the cursor, more than the window
+        rig.clock.advance(0.5)
+
+        try rig.firePoll()
+        rig.flushDeliveries()
+
+        assertSameLargeText(model.text, visible((4 * perMiB)..<(14 * perMiB)), "the last 10 MB of the file")
+        XCTAssertEqual(model.truncationNotice, "Showing the last 10 MB of 14 MB")
+        XCTAssertTrue(model.truncatedHead)
+        XCTAssertTrue(log.contentEvents.contains(.replaced), "the tail was loaded again: \(log.kinds)")
+        XCTAssertEqual(appendedText(log), "", "no 1 MiB chunk of the old stretch was appended and then thrown away")
+        XCTAssertEqual(rig.scheduler.pollSlots.count, 1)
+    }
+
+    // MARK: - Nit: a CLI tail that turns into a file
+
+    func testACliTailModelUpgradesToTheFileWhenTheDaemonStartsAnsweringFromIt() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.source = .cliTail
+        let model = open(rig, lines: 625)       // 40 000 bytes; the CLI keeps 8 KiB
+        XCTAssertEqual(model.source, .cliTail)
+        XCTAssertTrue(model.truncatedHead)
+        XCTAssertEqual(rig.scheduler.pollSlots.map { $0.delay }, [1])
+        let log = TaskOutputChangeLog(model)
+
+        rig.daemon.source = .file               // the output file appeared
+        rig.clock.advance(1)
+        try rig.firePoll()
+        rig.flushDeliveries()
+
+        XCTAssertEqual(model.source, .file, "it reads the file from now on")
+        XCTAssertEqual(model.text, visible(0..<625), "the whole file, not an 8 KB tail")
+        XCTAssertNil(model.truncationNotice)
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertTrue(log.contentEvents.contains(.replaced), "a subscriber reads the text again")
+        XCTAssertEqual(rig.scheduler.pollSlots.map { $0.delay }, [0.5], "and polls it as a file")
+
+        rig.daemon.appendLines(2)
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+        XCTAssertEqual(model.text, visible(0..<627))
+        XCTAssertEqual(log.contentEvents.last, .appended(visible(625..<627)), "new lines are appended, as for any file")
     }
 }

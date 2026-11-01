@@ -760,3 +760,74 @@ final class AppControlTasksTests: XCTestCase {
         XCTAssertFalse(manager.isOpen(tag: tag, taskId: "b1"))
     }
 }
+
+// MARK: - Review fixes: one huge line, repeat asks
+
+extension AppControlTasksTests {
+
+    func testAnOutputThatIsOneHugeLineIsCutToTheEndOfItNotToAnEmptyText() throws {
+        let rig = TaskOutputRig()
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8)
+        let file = Data((0..<(3 * 1_048_576)).map { alphabet[$0 % 64] })       // 3 MiB, no newline
+        rig.daemon.content = file
+        let model = loadedModel(rig)
+        XCTAssertGreaterThan(model.text.utf8.count, 2 * AppControlTasks.outputTextLimit, "premise: the model holds all of it")
+        XCTAssertFalse(model.text.utf8.contains(0x0A), "premise: there is no line to cut at")
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        let text = try XCTUnwrap(payload["text"] as? String)
+        XCTAssertFalse(text.isEmpty, "a line with no newline is not cut to nothing")
+        XCTAssertLessThanOrEqual(text.utf8.count, AppControlTasks.outputTextLimit)
+        XCTAssertGreaterThan(text.utf8.count, AppControlTasks.outputTextLimit - 8, "about 1 MiB of it")
+        XCTAssertTrue(text.utf8.elementsEqual(file.suffix(text.utf8.count)), "and it is the end of the output")
+        XCTAssertEqual(payload["truncated"] as? Bool, true)
+        XCTAssertEqual(number(payload["total_bytes"]), UInt64(3 * 1_048_576))
+    }
+
+    func testARepeatAskReportsLoadingUntilTheRefreshLandsAndThenTheNewText() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(10)
+        let model = loadedModel(rig)
+        model.release()                          // the first ask's hold ran out
+        rig.daemon.appendLines(3)                // the file grew in the meantime
+        rig.daemon.defersAnswers = true
+
+        model.acquire()                          // the second ask, as the app control server does it
+        addTeardownBlock { model.release() }
+        let during = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(during["state"] as? String, "loading", "what the model holds may be older than the file: ask again")
+        XCTAssertTrue(isNull(during["total_bytes"]), "an unknown size is null, never the old one")
+        assertValidJSON(during, "the refreshing answer")
+
+        rig.daemon.answerNext()
+        rig.flushDeliveries()
+        let after = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(after["state"] as? String, "ready")
+        XCTAssertEqual(after["text"] as? String, visible(0..<13), "the lines written since the last ask")
+        XCTAssertEqual(number(after["total_bytes"]), 13 * 64)
+    }
+
+    func testARefreshTheDaemonNeverAnswersDoesNotLeaveTheOutputLoadingForever() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(10)
+        let model = loadedModel(rig)
+        model.release()
+        rig.daemon.appendLines(3)
+        rig.daemon.defersAnswers = true
+
+        model.acquire()
+        addTeardownBlock { model.release() }
+        XCTAssertEqual(AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)["state"] as? String,
+                       "loading", "premise: the refresh is out")
+        rig.timeouts.fireAll()                   // the daemon never answered
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["state"] as? String, "ready", "held text is not turned into a permanent loading")
+        XCTAssertEqual(payload["text"] as? String, visible(0..<10))
+        XCTAssertEqual(number(payload["total_bytes"]), 640)
+    }
+}

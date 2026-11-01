@@ -32,7 +32,6 @@ enum AppControlTasks {
     /// The most text `tasks output` returns (the end of the output), whatever the model holds.
     static let outputTextLimit = 1_048_576
 
-    /// Why `text` is `null` in the real app.
     /// How long a `tasks output` ask keeps the model held after answering, so its reads can finish.
     static let outputHoldSeconds: TimeInterval = 3
 
@@ -47,7 +46,7 @@ enum AppControlTasks {
     /// `unavailable` or `error`.
     static func output(tag: String, taskId: String, model: TaskOutputModel, allowsText: Bool) -> [String: Any] {
         let text = capped(model.text)
-        let loading = model.state == .loading || model.isFillingHead
+        let loading = model.state == .loading || model.isFillingHead || model.isRefreshing
         let total: Any = (loading || model.state != .ready) ? NSNull() : model.totalBytes
         let shownText: Any = allowsText ? text.text : NSNull()
         var result: [String: Any] = [
@@ -74,12 +73,8 @@ enum AppControlTasks {
 
     /// The last `outputTextLimit` UTF-8 bytes of `text`, cut at a line start when it has to be cut.
     private static func capped(_ text: String) -> (text: String, wasCut: Bool) {
-        let utf8 = text.utf8
-        guard utf8.count > outputTextLimit else { return (text, false) }
-        var index = utf8.index(utf8.endIndex, offsetBy: -outputTextLimit)
-        while index < utf8.endIndex, utf8[index] != 0x0A { index = utf8.index(after: index) }
-        if index < utf8.endIndex { index = utf8.index(after: index) }
-        return (String(text[index...]), true)
+        guard text.utf8.count > outputTextLimit else { return (text, false) }
+        return (TaskOutputModel.lastBytes(of: text, outputTextLimit), true)
     }
 
     /// `tasks chip`: the chip's text (null when hidden) and state.

@@ -295,7 +295,8 @@ final class TaskWindowContentTests: XCTestCase {
             XCTAssertTrue(text.contains("label"))
             XCTAssertFalse(text.contains("evil title"), "an OSC title is dropped whole")
         }
-        XCTAssertGreaterThanOrEqual(content.description.count, 10_240, "the header keeps the whole description")
+        XCTAssertEqual(content.description.count, TaskWindowContent.textLimit, "the header carries 200 characters of it, not all 10 KB")
+        XCTAssertTrue(content.description.hasSuffix("\u{2026}"), "and says it was cut")
     }
 
     func testTheTitleStaysShortForA10KBDescription() {
@@ -356,5 +357,50 @@ final class TaskWindowContentTests: XCTestCase {
         let content = make(meta(description: ""))
 
         XCTAssertEqual(content.accessibilityLabel, "Shell, running")
+    }
+
+    // MARK: Description and summary are capped at 200 characters
+
+    func testADescriptionOverTwoHundredCharactersIsCutWithAnEllipsisInTheHeaderAndTheAccessibilityLabel() {
+        let long = String(repeating: "abcdefghij", count: 30)    // 300 characters
+
+        let content = make(meta(description: long))
+
+        XCTAssertEqual(content.description.count, 200)
+        XCTAssertTrue(content.description.hasSuffix("\u{2026}"), "it says it was cut")
+        XCTAssertTrue(long.hasPrefix(String(content.description.dropLast())), "what is kept is the start of it")
+        XCTAssertTrue(content.accessibilityLabel.contains(content.description))
+        XCTAssertFalse(content.accessibilityLabel.contains(String(long.prefix(201))), "the label does not carry the rest")
+        XCTAssertLessThan(content.accessibilityLabel.count, 260)
+    }
+
+    func testADescriptionOfExactlyTwoHundredCharactersIsNotCutAndTwoHundredAndOneIs() {
+        let exact = String(repeating: "x", count: 200)
+
+        XCTAssertEqual(make(meta(description: exact)).description, exact)
+        let over = make(meta(description: exact + "x")).description
+        XCTAssertEqual(over.count, 200)
+        XCTAssertTrue(over.hasSuffix("\u{2026}"))
+    }
+
+    func testASummaryOverTwoHundredCharactersIsCutWithAnEllipsis() {
+        let long = String(repeating: "abcdefghij", count: 30)
+
+        let running = make(meta(status: .running), detail: detail(progress: long))
+        let completed = make(meta(status: .completed), detail: detail(completion: long))
+        let lines = make(meta(status: .completed), detail: detail(completion: String(repeating: "a line\n", count: 100)))
+
+        for (name, content) in [("progress", running), ("completion", completed), ("many lines", lines)] {
+            let summary = content.summary ?? ""
+            XCTAssertEqual(summary.count, 200, name)
+            XCTAssertTrue(summary.hasSuffix("\u{2026}"), "\(name): it says it was cut")
+        }
+        XCTAssertTrue(long.hasPrefix(String((running.summary ?? "").dropLast())))
+    }
+
+    func testAShortMultiLineSummaryIsKeptWhole() {
+        let summary = "Done.\nTwo files changed."
+
+        XCTAssertEqual(make(meta(status: .completed), detail: detail(completion: summary)).summary, summary)
     }
 }

@@ -113,6 +113,10 @@ final class TaskOutputModel {
     private(set) var state: State = .loading
     /// The head of the file is still being fetched in front of the tail.
     private(set) var isFillingHead = false
+    /// A reload of the tail is in flight because a holder arrived on a ready model (a repeat ask): what
+    /// `text` holds may be older than the file, so `tasks output` says `loading` until it lands.
+    private(set) var isRefreshing = false
+    private var headFetchFailed = false
     /// UTF-8 bytes of `text` (what the registry's cap counts).
     private(set) var heldBytes = 0
     /// Windows and app-control readers using the model now.
@@ -173,8 +177,11 @@ final class TaskOutputModel {
     var truncationNotice: String? {
         guard truncatedHead else { return nil }
         switch source {
-        case .file?:
+        case .file? where !headFetchFailed:
             return "Showing the last \(TaskOutputSize.text(min(Self.windowBytes, totalBytes))) of \(TaskOutputSize.text(totalBytes))"
+        case .file?:
+            // The head did not come: say what is actually held.
+            return "Showing the last \(TaskOutputSize.text(UInt64(heldBytes))) of \(TaskOutputSize.text(totalBytes))"
         default:
             let tailBytes = UInt64(heldBytes)
             return "Showing the last \(tailBytes / 1_024) KB of \(TaskOutputSize.text(totalBytes))"
@@ -204,13 +211,21 @@ final class TaskOutputModel {
             loadTail()
         case .failed where !isTaskEnded || text.isEmpty, .errored:
             loadTail()
+        case .vanished where !isTaskEnded:
+            // The file may be back (a running task): read from where we were; a few more failures
+            // in a row make it vanished again.
+            phase = .ready
+            failedPolls = 0
         default:
             break
         }
         if needsFinalRead { finalRead() }
         // A holder arriving on a model that was last read a while ago (a repeat `tasks output`) must see
         // what the file holds now, not wait out a poll.
-        if phase == .ready, !isTaskEnded, !readInFlight, pollTimer == nil { read(final: false) }
+        if phase == .ready, !isTaskEnded, !readInFlight, pollTimer == nil {
+            isRefreshing = true
+            read(final: false)
+        }
         startPollingIfNeeded()
     }
 
@@ -222,9 +237,15 @@ final class TaskOutputModel {
         pollTimer = nil
         coalesceTimer?.invalidate()
         coalesceTimer = nil
-        deliveryScheduled = false
         // Nobody is listening, and the next holder reads `text` as it stands: a queued delivery would
         // add the same text a second time.
+        dropPending()
+    }
+
+    private func dropPending() {
+        coalesceTimer?.invalidate()
+        coalesceTimer = nil
+        deliveryScheduled = false
         pendingAppend = ""
         pendingPrepend = ""
         pendingReplace = false
@@ -251,6 +272,7 @@ final class TaskOutputModel {
         phase = .loadingTail
         loadGeneration += 1
         failedPolls = 0
+        headFetchFailed = false
         readInFlight = true
         requests.requestOutput(tag: tag, taskId: taskId, offset: nil) { [weak self] reply in
             guard let self else { return }
@@ -320,7 +342,12 @@ final class TaskOutputModel {
             guard let self, self.loadGeneration == generation else { return }
             var parts = parts
             var complete = false
-            if case .answered(let wire) = reply, wire.outcome == .ok, wire.startOffset == offset, wire.endOffset > offset {
+            // The window start is an arbitrary byte: for the first chunk the daemon skips up to three
+            // continuation bytes of a split character and answers from there. Later chunks start at
+            // a line boundary and must match exactly.
+            let skipAllowed: UInt64 = parts.isEmpty ? 3 : 0
+            if case .answered(let wire) = reply, wire.outcome == .ok,
+               wire.startOffset >= offset, wire.startOffset - offset <= skipAllowed, wire.endOffset > offset {
                 parts.append(Self.sanitize(wire.text))
                 if wire.endOffset < limit {
                     self.fetchHeadChunk(at: wire.endOffset, limit: limit, generation: generation, parts: parts)
@@ -335,6 +362,7 @@ final class TaskOutputModel {
             } else {
                 // The daemon could not give the whole head: the tail alone stays, and says it is cut.
                 self.truncatedHead = true
+                self.headFetchFailed = true
                 self.queue(.status)
             }
             self.flush()
@@ -388,22 +416,32 @@ final class TaskOutputModel {
         requests.requestOutput(tag: tag, taskId: taskId, offset: offset) { [weak self] reply in
             guard let self else { return }
             self.readInFlight = false
-            if viaFile { self.fileReadArrived(reply) } else { self.tailReadArrived(reply) }
+            self.isRefreshing = false
+            var more = false
+            if viaFile { more = self.fileReadArrived(reply) } else { self.tailReadArrived(reply) }
             if self.needsFinalRead { self.finalRead() }
+            // A file that is ahead of what was read is caught up now, not one chunk per poll.
+            if more, !final, self.holderCount > 0, !self.isTaskEnded, !self.readInFlight, self.phase == .ready {
+                self.read(final: false)
+                return
+            }
             if !final { self.scheduleNextPollIfNeeded() }
         }
     }
 
-    private func fileReadArrived(_ reply: TaskReply<SessionTaskOutputResultWire>) {
-        guard case .answered(let wire) = reply else { return }   // no answer: try again at the next poll
+    /// True when the file holds more past what this read returned, and the next read should follow at once.
+    private func fileReadArrived(_ reply: TaskReply<SessionTaskOutputResultWire>) -> Bool {
+        guard case .answered(let wire) = reply else { return false }   // no answer: try again at the next poll
         switch wire.outcome {
         case .ok:
-            if wire.totalBytes < cursor {
-                // The file got shorter (rewritten): what we hold no longer matches it.
+            if wire.totalBytes < cursor || (wire.totalBytes > wire.endOffset && wire.totalBytes - wire.endOffset > Self.windowBytes) {
+                // The file got shorter (rewritten), or is further ahead than the window: reading it
+                // chunk by chunk would only be trimmed away; start again from its end.
                 phase = .idle
                 loadTail()
-                return
+                return false
             }
+            let before = cursor
             let added = Self.sanitize(wire.text)
             if wire.endOffset > cursor { cursor = wire.endOffset }
             let sizeChanged = wire.totalBytes != totalBytes
@@ -412,8 +450,10 @@ final class TaskOutputModel {
             if sizeChanged { queue(.status) }
             failedPolls = 0
             flush()
+            return cursor > before && cursor < totalBytes
         case .unavailable, .refused, .error, .unknown:
             noteFailedPoll()
+            return false
         }
     }
 
@@ -421,6 +461,12 @@ final class TaskOutputModel {
         guard case .answered(let wire) = reply else { return }
         guard wire.outcome == .ok else {
             noteFailedPoll()
+            return
+        }
+        if wire.source == .file {
+            // The output file appeared after the first load: read it as a file from now on.
+            phase = .idle
+            loadTail()
             return
         }
         failedPolls = 0
@@ -467,14 +513,28 @@ final class TaskOutputModel {
 
     /// A file that keeps growing: drop the oldest lines so the model stays near the window.
     private func trimOldest() {
-        let utf8 = text.utf8
-        var index = utf8.index(utf8.endIndex, offsetBy: -Int(Self.windowBytes))
-        while index < utf8.endIndex, utf8[index] != 0x0A { index = utf8.index(after: index) }
-        if index < utf8.endIndex { index = utf8.index(after: index) }
-        text = String(text[index...])
+        text = Self.lastBytes(of: text, Int(Self.windowBytes))
         heldBytes = text.utf8.count
         truncatedHead = true
         queue(.replaced)
+    }
+
+    /// The last `limit` UTF-8 bytes of `text`, starting at a line start when that keeps at least half of
+    /// them; otherwise (one huge line) at the first unicode scalar inside the limit. Never empty for a
+    /// non-empty text.
+    static func lastBytes(of text: String, _ limit: Int) -> String {
+        let utf8 = text.utf8
+        guard utf8.count > limit else { return text }
+        let start = utf8.index(utf8.endIndex, offsetBy: -limit)
+        var index = start
+        while index < utf8.endIndex, utf8[index] != 0x0A { index = utf8.index(after: index) }
+        if index < utf8.endIndex {
+            let lineStart = utf8.index(after: index)
+            if utf8.distance(from: lineStart, to: utf8.endIndex) >= limit / 2 { return String(text[lineStart...]) }
+        }
+        index = start
+        while index < utf8.endIndex, utf8[index] & 0xC0 == 0x80 { index = utf8.index(after: index) }
+        return String(text[index...])
     }
 
     /// The daemon already strips escapes and controls; this is the second line of defence for text
@@ -506,6 +566,8 @@ final class TaskOutputModel {
     /// (once) when that quarter second is up.
     private func flush() {
         guard pendingReplace || pendingStatus || !pendingAppend.isEmpty || !pendingPrepend.isEmpty else { return }
+        // No holder: nobody to tell, and the next one reads `text` as it stands.
+        guard holderCount > 0 else { return dropPending() }
         let elapsed = lastDelivery.map { now().timeIntervalSince($0) } ?? .infinity
         if elapsed >= Self.minimumInterval {
             coalesceTimer?.invalidate()

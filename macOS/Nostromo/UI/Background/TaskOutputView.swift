@@ -22,6 +22,49 @@ final class TaskOutputTextView: NSTextView {
     }
 }
 
+/// Display-only soft line breaks. TextKit lays a paragraph out whole, so one multi-megabyte line (minified
+/// JSON, base64) would be laid out in full on the main thread at every append. A line break every
+/// `lineLimit` characters keeps each paragraph small. Only the text view's storage carries them: Copy All
+/// and the model hold the original text.
+enum TaskOutputDisplay {
+    static let lineLimit = 65_536
+
+    /// `text` with a newline inserted wherever a line would pass `lineLimit` UTF-16 units. `column` is
+    /// the length of the line the text continues (0 at a line start) and is updated to where `text` ends.
+    static func softBroken(_ text: String, column: inout Int) -> String {
+        var col = column
+        var breaks: [Int] = []
+        var index = 0
+        let units = text.utf16
+        for unit in units {
+            if unit == 0x0A {
+                col = 0
+            } else if col >= lineLimit && !UTF16.isTrailSurrogate(unit) {
+                breaks.append(index)
+                col = 1
+            } else {
+                col += 1
+            }
+            index += 1
+        }
+        column = col
+        guard !breaks.isEmpty else { return text }
+        var out: [UInt16] = []
+        out.reserveCapacity(index + breaks.count)
+        var next = 0
+        var position = 0
+        for unit in units {
+            if next < breaks.count, breaks[next] == position {
+                out.append(0x0A)
+                next += 1
+            }
+            out.append(unit)
+            position += 1
+        }
+        return String(decoding: out, as: UTF16.self)
+    }
+}
+
 /// A shell or monitor task's output: the header, a truncation line when the start is cut, and the
 /// text in monospace from the model's first line, following the tail.
 ///
@@ -66,6 +109,8 @@ final class TaskOutputView: NSView, TaskWindowBody {
     private var observers: [NSObjectProtocol] = []
     private var lastClipBounds: CGRect = .zero
     private var isScrollingOurselves = false
+    /// Length of the last line in the text view's storage (for the display's soft breaks).
+    private var lastLineLength = 0
 
     // What is drawn, for tests.
     var shownText: String { textView.string }
@@ -160,7 +205,8 @@ final class TaskOutputView: NSView, TaskWindowBody {
     private func append(_ added: String) {
         guard let storage = textView.textStorage else { return }
         storage.beginEditing()
-        storage.append(NSAttributedString(string: added, attributes: attributes))
+        let shown = TaskOutputDisplay.softBroken(added, column: &lastLineLength)
+        storage.append(NSAttributedString(string: shown, attributes: attributes))
         storage.endEditing()
         appendOps += 1
         if isFollowing { scrollToBottom() }
@@ -169,8 +215,10 @@ final class TaskOutputView: NSView, TaskWindowBody {
     private func prepend(_ head: String) {
         guard let storage = textView.textStorage else { return }
         let distance = distanceFromBottom
+        var column = 0
+        let shown = TaskOutputDisplay.softBroken(head, column: &column)
         storage.beginEditing()
-        storage.insert(NSAttributedString(string: head, attributes: attributes), at: 0)
+        storage.insert(NSAttributedString(string: shown, attributes: attributes), at: 0)
         storage.endEditing()
         prependOps += 1
         if isFollowing {
@@ -185,8 +233,10 @@ final class TaskOutputView: NSView, TaskWindowBody {
         let origin = clipView.bounds.origin
         let hadText = storage.length > 0
         storage.beginEditing()
+        lastLineLength = 0
+        let shown = TaskOutputDisplay.softBroken(model.text, column: &lastLineLength)
         storage.replaceCharacters(in: NSRange(location: 0, length: storage.length),
-                                  with: NSAttributedString(string: model.text, attributes: attributes))
+                                  with: NSAttributedString(string: shown, attributes: attributes))
         storage.endEditing()
         // The first fill of an empty view replaces nothing.
         if hadText { replaceOps += 1 }
@@ -200,8 +250,10 @@ final class TaskOutputView: NSView, TaskWindowBody {
     private func showModelText() {
         guard let storage = textView.textStorage else { return }
         storage.beginEditing()
+        lastLineLength = 0
+        let shown = TaskOutputDisplay.softBroken(model.text, column: &lastLineLength)
         storage.replaceCharacters(in: NSRange(location: 0, length: storage.length),
-                                  with: NSAttributedString(string: model.text, attributes: attributes))
+                                  with: NSAttributedString(string: shown, attributes: attributes))
         storage.endEditing()
     }
 
