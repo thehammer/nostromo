@@ -475,7 +475,7 @@ final class SessionRuleCardTests: XCTestCase {
         super.tearDown()
     }
 
-    private func harness(_ request: ApprovalRequestWire, permit: SessionRuleGesture.Permit = anyHuman,
+    private func harness(_ request: ApprovalRequestWire, permit: @escaping SessionRuleGesture.Permit = anyHuman,
                          clock: @escaping () -> TimeInterval = { 100 }) -> ApprovalCardHarness {
         ApprovalCardHarness(self, request: request,
                             gesture: SessionRuleGesture(permit: permit, uptime: clock),
