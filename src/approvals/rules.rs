@@ -189,6 +189,9 @@ const NEVER_COMMANDS: &[&str] = &[
     "crontab",
 ];
 
+/// Versioned interpreters (`python3.12`, `perl5.34`, `node18`): never a rule either.
+const INTERPRETER_PREFIXES: &[&str] = &["python", "perl", "ruby", "node", "php"];
+
 /// Words (lower-cased) that must not appear inside any word of the command.
 const NEVER_SUBSTRINGS: &[&str] = &[
     "ecs",
@@ -368,6 +371,7 @@ fn eligible(
     if basename.is_empty()
         || NEVER_COMMANDS.contains(&basename.as_str())
         || basename.starts_with("ecs_")
+        || INTERPRETER_PREFIXES.iter().any(|p| basename.starts_with(p))
     {
         return None;
     }
@@ -772,6 +776,8 @@ mod tests {
             "echo `id`",
             "FOO=bar ls",
             "./run.sh",
+            "python3.12 /a/b/c.py",
+            "/usr/bin/perl5.34 /a/b/c.pl",
             "~/bin/tool",
             "",
         ] {
