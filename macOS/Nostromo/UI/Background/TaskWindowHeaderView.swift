@@ -154,7 +154,9 @@ final class TaskWindowHeaderView: NSView {
         let store = wiring.store
         stopWiring = (store, tag, taskId)
         let button = TaskStopButton(permit: wiring.permit, menuPermit: wiring.permit, schedule: wiring.schedule,
-                                    requestStop: { [weak store] in store?.requestStop(tag: tag, taskId: taskId) })
+                                    requestStop: { [weak store] confirmation in
+                                        store?.requestStop(tag: tag, taskId: taskId, confirmation: confirmation)
+                                    })
         stopButton = button
         titleLine.addArrangedSubview(button)
         refreshStop()
