@@ -97,13 +97,13 @@ public struct MotherJobAnnotation: Codable, Equatable, Sendable {
     public let origin: MotherOriginView?
     /// The job's own notify level (`wake`, `quiet` or `off`), if the enqueue gave one.
     public let notify: String?
-    /// The notice state (a later slice gives it a shape); kept as opaque JSON and
-    /// decoded with `try?` so it can never cost the annotation.
-    public let notice: MotherJSON?
+    /// How the job's focus is told (`nostromo.notice`), decoded with `try?` so a malformed
+    /// one can never cost the annotation.
+    public let notice: MotherNoticeAnnotation?
 
     enum CodingKeys: String, CodingKey { case origin, notify, notice }
 
-    public init(origin: MotherOriginView? = nil, notify: String? = nil, notice: MotherJSON? = nil) {
+    public init(origin: MotherOriginView? = nil, notify: String? = nil, notice: MotherNoticeAnnotation? = nil) {
         self.origin = origin
         self.notify = notify
         self.notice = notice
@@ -116,7 +116,7 @@ public struct MotherJobAnnotation: Codable, Equatable, Sendable {
         // it can never drop a valid `origin`.
         origin = try c.decodeIfPresent(MotherOriginView.self, forKey: .origin)
         notify = (try? c.decodeIfPresent(String.self, forKey: .notify)) ?? nil
-        notice = (try? c.decodeIfPresent(MotherJSON.self, forKey: .notice)) ?? nil
+        notice = (try? c.decodeIfPresent(MotherNoticeAnnotation.self, forKey: .notice)) ?? nil
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -156,5 +156,99 @@ public enum MotherJSON: Codable, Equatable, Sendable {
         case .array(let v):     try c.encode(v)
         case .object(let v):    try c.encode(v)
         }
+    }
+}
+
+// MARK: - Notice
+
+/// One of the daemon's notice statuses (`nostromo.notice.status`). A word this build does not know
+/// reads as `.none`: nothing is shown for it.
+public enum MotherNoticeStatus: String, Equatable, Sendable {
+    case told, held, dropped
+    case notSent = "not_sent"
+    case none
+
+    init(wire: String?) { self = wire.flatMap(Self.init(rawValue:)) ?? .none }
+}
+
+/// One entry of `nostromo.notice.history`.
+public struct MotherNoticeHistoryEntry: Equatable, Sendable {
+    /// The job states the notice named (`succeeded`, `pr_opened`, …), as sent.
+    public let states: [String]
+    public let status: MotherNoticeStatus
+    public let reason: String?
+    /// The notice woke the session (it was idle); otherwise it queued behind a turn.
+    public let wake: Bool
+    public let atMs: Int64?
+}
+
+/// `MotherJob.nostromo.notice` (Mother focus v2, plan index §W). Decoded tolerantly: a missing or
+/// wrong-typed field costs only itself, and a malformed history entry is skipped.
+public struct MotherNoticeAnnotation: Codable, Equatable, Sendable {
+    public let status: MotherNoticeStatus
+    /// Why a held, dropped or unsent notice is that way (a fixed word, kept as sent).
+    public let reason: String?
+    public let lastState: String?
+    public let atMs: Int64?
+    /// The newest deliveries, holds and drops, newest last.
+    public let history: [MotherNoticeHistoryEntry]
+
+    public init(status: MotherNoticeStatus = .none, reason: String? = nil, lastState: String? = nil,
+                atMs: Int64? = nil, history: [MotherNoticeHistoryEntry] = []) {
+        self.status = status
+        self.reason = reason
+        self.lastState = lastState
+        self.atMs = atMs
+        self.history = history
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status, reason, history
+        case lastState = "last_state"
+        case atMs      = "at_ms"
+    }
+
+    private struct EntryWire: Decodable {
+        let states: [String]?
+        let status: String?
+        let reason: String?
+        let wake: Bool?
+        let at_ms: Int64?
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            states = (try? c.decodeIfPresent([String].self, forKey: .states)) ?? nil
+            status = (try? c.decodeIfPresent(String.self, forKey: .status)) ?? nil
+            reason = (try? c.decodeIfPresent(String.self, forKey: .reason)) ?? nil
+            wake   = (try? c.decodeIfPresent(Bool.self, forKey: .wake)) ?? nil
+            at_ms  = (try? c.decodeIfPresent(Int64.self, forKey: .at_ms)) ?? nil
+        }
+        enum Keys: String, CodingKey { case states, status, reason, wake, at_ms }
+    }
+
+    /// Lets one bad entry fall out of the array instead of failing it.
+    private struct Lossy<T: Decodable>: Decodable {
+        let value: T?
+        init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = MotherNoticeStatus(wire: (try? c.decodeIfPresent(String.self, forKey: .status)) ?? nil)
+        reason = (try? c.decodeIfPresent(String.self, forKey: .reason)) ?? nil
+        lastState = (try? c.decodeIfPresent(String.self, forKey: .lastState)) ?? nil
+        atMs = (try? c.decodeIfPresent(Int64.self, forKey: .atMs)) ?? nil
+        let entries = (try? c.decodeIfPresent([Lossy<EntryWire>].self, forKey: .history)) ?? nil
+        history = (entries ?? []).compactMap { $0.value }.map {
+            MotherNoticeHistoryEntry(states: $0.states ?? [], status: MotherNoticeStatus(wire: $0.status),
+                                     reason: $0.reason, wake: $0.wake ?? false, atMs: $0.at_ms)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(status.rawValue, forKey: .status)
+        try c.encodeIfPresent(reason, forKey: .reason)
+        try c.encodeIfPresent(lastState, forKey: .lastState)
+        try c.encodeIfPresent(atMs, forKey: .atMs)
     }
 }

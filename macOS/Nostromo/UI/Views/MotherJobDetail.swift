@@ -367,6 +367,122 @@ private class PhaseRibbonView: NSView {
 
 /// The job detail's scroll document: flipped, so its top stays put as its content grows and
 /// the scroll position (measured from the top) survives updates.
+/// The Overview's "Notices" section: one summary line (wrapped, never truncated into nothing) and a
+/// `[Details]` toggle that expands one line per history entry. Shown only for jobs the daemon annotated.
+/// A view action: the toggle changes only what is drawn, so it is not gesture-gated.
+final class MotherNoticeSectionView: NSView {
+    /// A wrapping label with no intrinsic width: it takes the pane's width and wraps inside it, so a long
+    /// name can never set the detail's fitting width.
+    private final class WrapLabel: NSTextField {
+        override var intrinsicContentSize: NSSize {
+            var size = super.intrinsicContentSize
+            size.width = NSView.noIntrinsicMetric
+            return size
+        }
+        override func layout() {
+            super.layout()
+            if preferredMaxLayoutWidth != bounds.width {
+                preferredMaxLayoutWidth = bounds.width
+                invalidateIntrinsicContentSize()
+            }
+        }
+        static func make(maxLines: Int) -> NSTextField {
+            let f = WrapLabel(wrappingLabelWithString: "")
+            f.maximumNumberOfLines = maxLines
+            f.lineBreakMode = .byWordWrapping
+            f.isSelectable = false
+            f.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            f.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            return f
+        }
+    }
+
+    let summaryLabel = WrapLabel.make(maxLines: 4)
+    let detailsButton = NSButton()
+    let detailsLabel = WrapLabel.make(maxLines: 12)
+    private let stack = NSStackView()
+    private var collapsed: NSLayoutConstraint!
+    private(set) var shown: MotherNoticeSectionModel?
+    private(set) var isExpanded = false
+
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        summaryLabel.font = .systemFont(ofSize: 11)
+        detailsLabel.font = .systemFont(ofSize: 10)
+        detailsLabel.textColor = Theme.fgMuted
+        detailsButton.isBordered = false
+        detailsButton.setButtonType(.momentaryChange)
+        detailsButton.font = .systemFont(ofSize: 10, weight: .medium)
+        detailsButton.target = self
+        detailsButton.action = #selector(toggleDetails)
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 3
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        for v in [summaryLabel, detailsButton, detailsLabel] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            stack.addArrangedSubview(v)
+        }
+        addSubview(stack)
+        let bottom = stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+        bottom.priority = .defaultHigh
+        collapsed = heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bottom,
+            summaryLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            detailsLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            collapsed,
+        ])
+        for v in [summaryLabel, detailsButton, detailsLabel] as [NSView] { v.isHidden = true }
+        isHidden = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Applies only what changed: an unrelated job update leaves the section (and its expansion) alone.
+    func show(_ model: MotherNoticeSectionModel?) {
+        guard model != shown else { return }
+        shown = model
+        guard let model else {
+            for v in [summaryLabel, detailsButton, detailsLabel] as [NSView] { v.isHidden = true }
+            isExpanded = false
+            isHidden = true
+            collapsed.isActive = true
+            return
+        }
+        isHidden = false
+        collapsed.isActive = false
+        summaryLabel.isHidden = false
+        summaryLabel.stringValue = model.summary
+        summaryLabel.textColor = model.isMuted ? Theme.fgMuted : Theme.fg
+        summaryLabel.setAccessibilityLabel(model.summary)
+        detailsButton.isHidden = model.details.isEmpty
+        if model.details.isEmpty { isExpanded = false }
+        renderDetails()
+    }
+
+    @objc func toggleDetails() {
+        guard let shown, !shown.details.isEmpty else { return }
+        isExpanded.toggle()
+        renderDetails()
+    }
+
+    private func renderDetails() {
+        let lines = isExpanded ? (shown?.details ?? []) : []
+        detailsLabel.isHidden = lines.isEmpty
+        detailsLabel.stringValue = lines.joined(separator: "\n")
+        detailsLabel.setAccessibilityLabel(lines.joined(separator: ". "))
+        let title = NSAttributedString(string: isExpanded ? "Hide details" : "Details", attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .medium), .foregroundColor: Theme.fgMuted])
+        detailsButton.attributedTitle = title
+        detailsButton.setAccessibilityLabel(isExpanded ? "Hide notice details" : "Show notice details")
+    }
+}
+
 final class DetailDocumentView: NSView {
     override var isFlipped: Bool { true }
     var onLayout: (() -> Void)?
@@ -461,6 +577,8 @@ final class MotherJobDetail: NSView {
     private var ribbonHeight:   NSLayoutConstraint!
     /// Gates, lens rows, progress and the hold banner (hidden at zero height without crew data).
     let crewSection = MotherCrewSectionView()
+    /// Who was told about the job and when, at the top of the Overview. Hidden without an annotation.
+    let noticeSection = MotherNoticeSectionView()
     private var crewTopGap:     NSLayoutConstraint!
     /// Live todo list for running/awaiting jobs — hidden when no peek data.
     private let todoStack       = NSStackView()
@@ -640,7 +758,7 @@ final class MotherJobDetail: NSView {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
-        for v in [phaseRibbonView, crewSection, actionsContainer, todoStack, metaStack,
+        for v in [noticeSection, phaseRibbonView, crewSection, actionsContainer, todoStack, metaStack,
                   planSectionLabel, planChecklistView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
@@ -699,7 +817,10 @@ final class MotherJobDetail: NSView {
             logScrollView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
 
             // Phase ribbon — the top of the Overview; height is 0 when hidden
-            phaseRibbonView.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
+            noticeSection.topAnchor.constraint(equalTo: content.topAnchor),
+            noticeSection.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            noticeSection.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            phaseRibbonView.topAnchor.constraint(equalTo: noticeSection.bottomAnchor, constant: 8),
             phaseRibbonView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             phaseRibbonView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
@@ -862,6 +983,11 @@ final class MotherJobDetail: NSView {
         self.origin = origin
         originLine.onTap = onTap
         refreshOriginLine()
+    }
+
+    /// The Overview's Notices section for the shown job; nil hides it.
+    func setNotices(_ model: MotherNoticeSectionModel?) {
+        noticeSection.show(model)
     }
 
     private var origin: MotherOriginDisplay = .unknown

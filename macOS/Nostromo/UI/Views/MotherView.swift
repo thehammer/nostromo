@@ -73,6 +73,8 @@ class MotherView: NSView {
     private let countsStrip = MotherCountsStrip()
     /// One line under the strip; zero height unless the "staying quiet" note is raised.
     private let notifyNote  = MotherNotifyNoteRow()
+    /// "Session notices off": zero height unless the global switch is off.
+    private let offStrip    = MotherNoticesOffStrip()
     private let jobList     = MotherJobList()
     /// Right-hand side: one closable tab per opened job, plus a fixed
     /// "Overview" tab holding the empty state. See docs/plans/mother-pane.md (P2).
@@ -152,7 +154,7 @@ class MotherView: NSView {
         handle.onResize = { [weak self] in self?.setListWidth($0) }
         handle.onCommit = { [weak self] in self?.rememberListWidth() }
 
-        for v in [countsStrip, notifyNote, jobList, divider, tabRegion, handle] as [NSView] {
+        for v in [countsStrip, notifyNote, offStrip, jobList, divider, tabRegion, handle] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -169,8 +171,13 @@ class MotherView: NSView {
             notifyNote.leadingAnchor.constraint(equalTo: leadingAnchor),
             notifyNote.trailingAnchor.constraint(equalTo: trailingAnchor),
 
+            // Off strip — under the note row, zero height unless the global switch is off
+            offStrip.topAnchor.constraint(equalTo: notifyNote.bottomAnchor),
+            offStrip.leadingAnchor.constraint(equalTo: leadingAnchor),
+            offStrip.trailingAnchor.constraint(equalTo: trailingAnchor),
+
             // Job list — left pane; its width is `listWidth`, changed only through `listWidthConstraint`
-            jobList.topAnchor.constraint(equalTo: notifyNote.bottomAnchor),
+            jobList.topAnchor.constraint(equalTo: offStrip.bottomAnchor),
             jobList.leadingAnchor.constraint(equalTo: leadingAnchor),
             listWidthConstraint,
             jobList.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -182,13 +189,13 @@ class MotherView: NSView {
             handle.widthAnchor.constraint(equalToConstant: MotherListDivider.hitWidth),
 
             // Divider — 1px, full height of content area
-            divider.topAnchor.constraint(equalTo: notifyNote.bottomAnchor),
+            divider.topAnchor.constraint(equalTo: offStrip.bottomAnchor),
             divider.leadingAnchor.constraint(equalTo: jobList.trailingAnchor),
             divider.widthAnchor.constraint(equalToConstant: 1),
             divider.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             // Job tabs — fill remaining width
-            tabRegion.topAnchor.constraint(equalTo: notifyNote.bottomAnchor),
+            tabRegion.topAnchor.constraint(equalTo: offStrip.bottomAnchor),
             tabRegion.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
             tabRegion.trailingAnchor.constraint(equalTo: trailingAnchor),
             tabRegion.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -297,6 +304,7 @@ class MotherView: NSView {
         let origin = jobList.originDisplay(forJobId: jobId)
         let tag = origin.isClickable ? origin.focusTag : nil
         detail.setOrigin(origin, onTap: tag.map { tag in { [weak jobList] in jobList?.openFocus(tag: tag) } })
+        detail.setNotices(jobList.noticeSection(forJobId: jobId, origin: origin))
     }
 
     private func jobsDidChange(_ jobs: [MotherJob]) {
@@ -363,11 +371,13 @@ private class MotherOverviewView: NSView {
 
 // MARK: - MotherCountsStrip
 
-private class MotherCountsStrip: NSView {
+class MotherCountsStrip: NSView {
 
     private let chips = MotherCountsChips()
     private let daemonLabel = NSTextField.boundedLabel("", maxLines: 1, truncating: true)
     private let startButton = NSButton()
+    /// The global notice switch, at the right of the strip.
+    let bell = MotherNoticeBell()
     private var cancellables = Set<AnyCancellable>()
 
     override init(frame: NSRect) {
@@ -406,7 +416,7 @@ private class MotherCountsStrip: NSView {
         startButton.action = #selector(startDaemon)
         startButton.isHidden = true
         startButton.translatesAutoresizingMaskIntoConstraints = false
-        let daemonStack = NSStackView(views: [daemonLabel, startButton])
+        let daemonStack = NSStackView(views: [bell, daemonLabel, startButton])
         daemonStack.orientation = .horizontal
         daemonStack.spacing = 10
         daemonStack.alignment = .centerY
@@ -456,6 +466,101 @@ private class MotherCountsStrip: NSView {
         var shown = s
         shown.needsYou = needsYou
         chips.render(shown)
+    }
+}
+
+// MARK: - MotherNoticeBell
+
+/// "Notify sessions: On / Off", the global notice switch. A press runs `HumanGesture.permit` and then
+/// sends the flipped value; the bell redraws only when the daemon's `mother_notice_state` says so.
+/// Hidden until the daemon has reported a state.
+final class MotherNoticeBell: NSButton {
+    var switches = MotherNoticeSwitches()
+    private var cancellables = Set<AnyCancellable>()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        isBordered = false
+        imagePosition = .imageOnly
+        setButtonType(.momentaryChange)
+        target = self
+        action = #selector(pressed)
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 22).isActive = true
+        render(AppStore.shared.motherNoticeState)
+        AppStore.shared.$motherNoticeState
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.render($0) }
+            .store(in: &cancellables)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// What the bell shows now: the daemon's value, On when it has reported none.
+    private(set) var isOn = true
+
+    private func render(_ state: MotherNoticeStateWire?) {
+        isHidden = state == nil
+        isOn = state?.enabled ?? true
+        let word = isOn ? "On" : "Off"
+        let symbol = isOn ? "bell" : "bell.slash"
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        contentTintColor = isOn ? Theme.fgMuted : Theme.amber
+        toolTip = "Notify sessions: \(word). Click to turn \(isOn ? "off" : "on")."
+        setAccessibilityLabel("Notify sessions")
+        setAccessibilityValue(word)
+    }
+
+    @objc func pressed() {
+        switches.setGlobal(enabled: !isOn, control: self)
+    }
+}
+
+// MARK: - MotherNoticesOffStrip
+
+/// "Session notices off": a muted line under the counts strip while the global switch is off.
+final class MotherNoticesOffStrip: NSView {
+    static let visibleHeight: CGFloat = 24
+    static let text = "Session notices off"
+    static let spokenText = "Session notices are off. Sessions are not told about their jobs."
+
+    let label = NSTextField(labelWithString: MotherNoticesOffStrip.text)
+    private var heightConstraint: NSLayoutConstraint!
+    private var cancellables = Set<AnyCancellable>()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 0.13, alpha: 1).cgColor
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = Theme.fgMuted
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.toolTip = Self.spokenText
+        label.setAccessibilityLabel(Self.spokenText)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addSubview(label)
+        heightConstraint = heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            heightConstraint,
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        apply(AppStore.shared.motherNoticeState)
+        AppStore.shared.$motherNoticeState
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.apply($0) }
+            .store(in: &cancellables)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func apply(_ state: MotherNoticeStateWire?) {
+        let off = state?.enabled == false
+        isHidden = !off
+        heightConstraint.constant = off ? Self.visibleHeight : 0
     }
 }
 
@@ -590,6 +695,7 @@ final class MotherJobListViewModel: ObservableObject {
     func rowModel(for job: MotherJob, now: Date = Date()) -> MotherJobRowModel {
         let progress = job.state == "running" || job.state == "awaiting"
             ? MotherProgressLine.make(progress: job.crew.progress, gates: job.crew.gates) : nil
+        let origin = originDisplay(forJobId: job.id)
         return MotherJobRowModel(
             id: job.id,
             state: job.state,
@@ -602,10 +708,12 @@ final class MotherJobListViewModel: ObservableObject {
             attentionBadges: MotherAttentionBadges.make(job.crew.attention).filter { !$0.acked }.map(\.label),
             progressAccessibility: progress?.accessibility,
             showsProgressLine: true,
-            origin: originDisplay(forJobId: job.id),
+            origin: origin,
             prNumber: Self.prNumber(fromURL: job.crew.prUrl),
             failureReason: job.failureReason,
-            cost: job.costUsd.flatMap { $0.isFinite && $0 >= 0 ? String(format: "$%.2f", $0) : nil }
+            cost: job.costUsd.flatMap { $0.isFinite && $0 >= 0 ? String(format: "$%.2f", $0) : nil },
+            noticeMark: MotherNoticeMark.make(notice: annotations[job.id]?.notice,
+                                              originName: origin.kind == .focus ? origin.name : nil, now: now)
         )
     }
 
@@ -799,6 +907,9 @@ private final class MotherJobList: NSView {
     }
     func applyShowJobsRequest(isKeyWindow: Bool) { viewModel.applyShowJobsRequest(isKeyWindow: isKeyWindow) }
     func originDisplay(forJobId id: String) -> MotherOriginDisplay { viewModel.originDisplay(forJobId: id) }
+    func noticeSection(forJobId id: String, origin: MotherOriginDisplay) -> MotherNoticeSectionModel? {
+        MotherNoticeSectionModel.make(annotation: viewModel.annotations[id], origin: origin, now: Date())
+    }
     func openFocus(tag: String) { viewModel.openFocus(tag) }
     func update(annotations: [String: MotherJobAnnotation]) { viewModel.setAnnotations(annotations) }
     private var hostingView: NSHostingView<MotherJobListSwiftUI>!

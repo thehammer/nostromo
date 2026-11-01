@@ -38,6 +38,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
     public let prMerged: Bool
     public let failureReason: String?
     public let cost: String?
+    /// The notified mark (`✓ told Claudia`, `⏸ held`); nil when the job's focus is not notified.
+    public let noticeMark: MotherNoticeMark?
 
     public init(
         id: String,
@@ -55,7 +57,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         prNumber: Int? = nil,
         prMerged: Bool = false,
         failureReason: String? = nil,
-        cost: String? = nil
+        cost: String? = nil,
+        noticeMark: MotherNoticeMark? = nil
     ) {
         self.id               = id
         self.state            = state
@@ -73,6 +76,7 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         self.prMerged = prMerged
         self.failureReason = failureReason
         self.cost = cost
+        self.noticeMark = noticeMark
     }
 
     /// The row's spoken form. Without an origin (iOS) just the title. With one: the title, `From <origin>.`,

@@ -406,6 +406,39 @@ looking at. Notice turns are ordinary turns: `identityKey` and `contentKey` stil
 `WakeMarkerView`, `WakeMarkerContent`/`WakeMarkerText` and `wakeMarkerHeight` are generic: the
 background-activity wake turns reuse them.
 
+### Seeing and setting notices on the Mac
+
+**Row mark.** Line two of a Mother row ends with the notified mark (`MotherNoticeMark`, Kit): `✓ told
+Claudia` once the focus was told, `⏸ held` while a notice waits. From 340 pt up the wide form shows (when it
+takes at most 40% of the line); below, just `✓` or `⏸`. The tooltip says what happened (`Claudia was told
+'PR opened' 4 minutes ago`, or why it is held: batching, busy, cap, loop guard, session not running,
+quiet). VoiceOver appends `Told <name> 4 minutes ago.` or `Notice held: <reason>.` to the row's sentence.
+Nothing shows for `dropped`, `not_sent`, `none`, or an origin that is not a verified focus. The name is the
+origin's name, sanitised, stripped of `✓ ⏸ ⟲ ⚑` and capped at 24 characters, so a title or a name cannot
+draw a mark.
+
+**Notices section.** The Overview tab shows, below the state line, `Notices to Claudia: succeeded, told 4m
+ago (with PR opened).` and a **Details** toggle with one line per history entry (`4m ago · succeeded · delivered ·
+woke the session`). A closed origin reads `Not notified: the focus that queued this is closed.`; an
+unverified, `you` or unknown origin reads `Not notified: <reason>.` The toggle is a view action.
+
+**Switches.** A focus's context menu has **Mother Notices ▸ Wake · Quiet · Off**; the Mother header has a bell
+(**Notify sessions: On / Off**) and, while it is off, a muted `Session notices off` strip. Both change what
+agents receive and what turns cost, so each runs `HumanGesture.permit` first (`menuSelection: true` for the
+menu items) and sends `mother_notice_settings_set` only for a person; a refused event sends nothing and
+changes nothing. Nothing is applied locally: the checkmark and the bell follow the daemon's
+`mother_notice_state` frame (`AppStore.motherNoticeState`).
+
+**Held bar.** While a focus's notices are held by the loop guard (`chain_held`) or the cap, that focus's
+transcript shows a muted 28 pt bar (`MotherNoticeHeldBar`, a sibling of the guard bar in
+`ApprovalOverlayHost`, above it when both show): `Mother notices held: 3 automatic wakes in a row. Your next
+message here releases them.` or `... 6 wakes this hour. They resume when the hour rolls or after your next
+message.` It has no buttons, never moves the transcript or the composer and never takes focus.
+
+**Debug ▸ Copy Mother Notice Stats** (no key equivalent) copies the global switch, each focus's tag, mode and
+wakes per day for the last seven days, held counts by reason and the share of annotated jobs with a verified
+origin. Never a title or a focus name. Like the Details toggle it is a view action, not gesture-gated.
+
 ### Logging
 
 Nothing in the notice path logs or audits a title, a reason, a question, a PR URL, a focus name or a

@@ -166,6 +166,8 @@ enum ServerMsg {
     /// The daemon's per-job notes (who queued each job), keyed by job id. The jobs themselves come
     /// from the broker; only `id` and `nostromo` are read here, never a date.
     case motherAnnotations([String: MotherJobAnnotation])
+    /// The notice switches and each focus's notice state (`mother_notice_state`).
+    case motherNoticeState(MotherNoticeStateWire)
     case motherStatusline(MotherStatus)
     case motherPeek(MotherPeekPayload)
     case pong
@@ -1059,6 +1061,17 @@ class NostromodClient {
              type: "model_default_set")
     }
 
+    // MARK: - Mother notice switches
+
+    /// Change a Mother notice switch: one focus's mode (`scope: .focus`, `tag`, `mode`) or the global
+    /// one (`scope: .global`, `enabled`). Operator app only. Nothing is applied here: the new state
+    /// comes back as `ServerMsg.motherNoticeState`.
+    func sendMotherNoticeSettings(scope: ClientMotherNoticeSettingsSet.Scope, tag: String? = nil,
+                                  mode: MotherNoticeMode? = nil, enabled: Bool? = nil) {
+        send(ClientMotherNoticeSettingsSet(scope: scope, tag: tag, mode: mode?.rawValue, enabled: enabled),
+             type: "mother_notice_settings_set")
+    }
+
     // MARK: - Background task commands
 
     /// Stop a background task; answered with `ServerMsg.sessionTaskStopResult`.
@@ -1503,6 +1516,10 @@ class NostromodClient {
             // Jobs are sourced from the broker. This frame is read lightly, for `jobs[].id` and
             // `jobs[].nostromo` only: a full decode trips on the fractional-seconds dates.
             return .motherAnnotations(Self.motherAnnotations(from: json))
+
+        case "mother_notice_state":
+            if let state = MotherNoticeStateWire.decode(from: json) { return .motherNoticeState(state) }
+            log.error("failed to decode mother_notice_state")
 
         case "mother_statusline":
             return .motherStatusline(MotherStatus(

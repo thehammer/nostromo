@@ -472,4 +472,18 @@ final class PerFocusEvictionWiringTests: XCTestCase {
         XCTFail("could not find a matching closing brace for \(signature) in \(sourceFile)", file: file, line: line)
         return ""
     }
+
+    // MARK: - MF6: evictPerFocusState also evicts the focus's Mother notice entry
+
+    /// `motherNoticeState.focuses` is keyed by focus tag, and a focus's held bar reads it. A closed
+    /// focus's entry must go at eviction, not at the daemon's next frame.
+    func testEvictPerFocusStateRemovesTheFocusFromMotherNoticeState() throws {
+        let source = try Self.appStoreSource()
+        let body = try Self.isolatedFunctionBody(named: "func evictPerFocusState", in: source, sourceFile: "AppStore.swift")
+        XCTAssertTrue(body.contains("motherNoticeState") && body.contains("removing(tag: tag)"), """
+            evictPerFocusState must drop the closed focus's entry from motherNoticeState (removing(tag:)); \
+            otherwise its held-bar state outlives the focus.
+            """)
+    }
+
 }

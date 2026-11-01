@@ -51,6 +51,10 @@ final class ApprovalOverlayHost: NSView {
     /// The guard bar on screen, if the guard blocked something in the last minute (AP2b).
     private(set) var guardBar: GuardBlockedBar?
 
+    /// The Mother notices held bar on screen, while this focus's notices are held by the loop guard or
+    /// the cap (MF6). A sibling of the guard bar, stacked above it; it has no buttons.
+    private(set) var heldBar: MotherNoticeHeldBar?
+
     /// What the guard bar says now, for `approvals list`.
     var guardBarText: String? { guardBar?.textLabel.stringValue }
 
@@ -82,6 +86,7 @@ final class ApprovalOverlayHost: NSView {
     /// by the pane that owns the composer.
     var focusComposer: (() -> Void)?
     private var subscription: AnyCancellable?
+    private var noticeSubscription: AnyCancellable?
     /// Set while a card is fading out; a newer card or a refresh cancels it.
     private var fadingCard: ApprovalCardView?
 
@@ -91,6 +96,7 @@ final class ApprovalOverlayHost: NSView {
          permit: ApprovalCardView.GesturePermit? = nil,
          armDelay: TimeInterval = ApprovalOverlayHost.armDelay,
          isOnScreen: (() -> Bool)? = nil,
+         noticeStates: AnyPublisher<MotherNoticeStateWire?, Never>? = nil,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }) {
         self.focusTag = tag
         self.store = store
@@ -105,6 +111,8 @@ final class ApprovalOverlayHost: NSView {
             .filter { [focusTag] in $0 == focusTag }
             .sink { [weak self] _ in self?.refresh() }
         refresh()
+        // The held bar follows the daemon's notice state for this focus only.
+        noticeSubscription = noticeStates?.sink { [weak self] state in self?.refreshHeldBar(state) }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -144,7 +152,8 @@ final class ApprovalOverlayHost: NSView {
     private func layoutCard() {
         let width = max(0, bounds.width - Self.leadingInset - Self.trailingInset)
         guard width > 0 else { return }
-        let barSpace = guardBar == nil ? 0 : GuardBlockedBar.height + Self.barGap
+        let barSpace = (guardBar == nil ? 0 : GuardBlockedBar.height + Self.barGap)
+            + (heldBar == nil ? 0 : MotherNoticeHeldBar.height + Self.barGap)
         var top = Self.bottomInset
         if let bar = collapsedBar {
             let frame = NSRect(x: Self.leadingInset, y: Self.bottomInset, width: width, height: ApprovalCollapsedBar.height)
@@ -159,6 +168,11 @@ final class ApprovalOverlayHost: NSView {
         }
         if let bar = guardBar {
             let frame = NSRect(x: Self.leadingInset, y: top, width: width, height: GuardBlockedBar.height)
+            if bar.frame != frame { bar.frame = frame }
+            top = frame.maxY + Self.barGap
+        }
+        if let bar = heldBar {
+            let frame = NSRect(x: Self.leadingInset, y: top, width: width, height: MotherNoticeHeldBar.height)
             if bar.frame != frame { bar.frame = frame }
         }
     }
@@ -304,6 +318,25 @@ final class ApprovalOverlayHost: NSView {
         }
         addSubview(bar)
         guardBar = bar
+        needsLayout = true
+    }
+
+    /// The held bar follows this focus's entry in the notice state. Never announced, never takes focus.
+    func refreshHeldBar(_ state: MotherNoticeStateWire?) {
+        guard let reason = state?.focus(tag: focusTag)?.heldBarReason else {
+            guard let bar = heldBar else { return }
+            bar.removeFromSuperview()
+            heldBar = nil
+            needsLayout = true
+            return
+        }
+        if let bar = heldBar {
+            if bar.reason != reason { bar.setReason(reason) }
+            return
+        }
+        let bar = MotherNoticeHeldBar(reason: reason)
+        addSubview(bar)
+        heldBar = bar
         needsLayout = true
     }
 
