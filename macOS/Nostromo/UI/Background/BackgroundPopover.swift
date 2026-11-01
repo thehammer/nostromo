@@ -304,7 +304,7 @@ final class BackgroundPopoverViewController: NSViewController {
             housekeepingHeader = nil
         }
         for (id, v) in rowViews where !used.contains(id) {
-            v.stopButton?.invalidate()
+            v.tearDown()
             v.removeFromSuperview()
             rowViews.removeValue(forKey: id)
         }
@@ -434,7 +434,7 @@ final class BackgroundPopoverViewController: NSViewController {
 
     /// Stop the revert timers of every row's button (the popover closed).
     func invalidateStops() {
-        for view in rowViews.values { view.stopButton?.invalidate() }
+        for view in rowViews.values { view.tearDown() }
     }
 
     private func stopDisplay(for row: BackgroundTaskRow) -> BackgroundTaskStore.StopDisplay {
@@ -497,7 +497,10 @@ final class BackgroundPopoverViewController: NSViewController {
         }
         if actions.canStop(row, tag: tag) {
             // The row's button goes to `Stop?`; the second click is still required.
-            menu.addItem(item("Stop") { [weak self] in self?.rowViews[row.id]?.stopButton?.arm() })
+            menu.addItem(item("Stop") { [weak self] in
+                self?.rowViews[row.id]?.stopButton?.arm()
+                actions.stop(row, tag: tag)
+            })
         }
         menu.addItem(item("Copy Description") { [weak self] in self?.copyDescription(row) })
         if actions.canShowInTranscript(row, tag: tag) {

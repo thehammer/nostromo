@@ -1,4 +1,5 @@
 import XCTest
+import QuartzCore
 import AppKit
 import Combine
 import NostromoKit
@@ -32,7 +33,10 @@ fileprivate func tsTitle(_ button: TaskStopButton?) -> String { button?.attribut
 
 fileprivate func tsDrain() {
     for _ in 0 ..< 5 {
-        autoreleasepool { RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02)) }
+        autoreleasepool {
+            CATransaction.flush()
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
     }
 }
 
@@ -1423,19 +1427,26 @@ final class TaskStopPopoverTests: XCTestCase {
 
     func testARowViewItsButtonAndTheControllerAreReleasedOnceTheirTaskIsForgotten() throws {
         loadList()
-        var vc: BackgroundPopoverViewController? = rig.makeController()
+        var vc: BackgroundPopoverViewController?
         weak var weakRow: BackgroundTaskRowView?
         weak var weakButton: TaskStopButton?
-        weak var weakController = vc
+        weak var weakController: BackgroundPopoverViewController?
+        // Everything that touches the views runs inside a pool: AppKit hands back autoreleased
+        // `subviews` arrays that would otherwise keep the rows alive until the test method ends.
         try autoreleasepool {
-            let view = try rowView(try XCTUnwrap(vc), "job1")
+            let made = rig.makeController()
+            vc = made
+            weakController = made
+            let view = try rowView(made, "job1")
             weakRow = view
             weakButton = view.stopButton
             view.stopButton?.clicked(nil)               // a revert timer is pending
         }
 
-        rig.store.forget(tag: TSRig.tag)
-        vc?.reload()
+        autoreleasepool {
+            rig.store.forget(tag: TSRig.tag)
+            vc?.reload()
+        }
         tsDrain()
 
         XCTAssertNil(weakRow, "the row view of a forgotten task is gone")

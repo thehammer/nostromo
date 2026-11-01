@@ -62,7 +62,13 @@ final class BackgroundTaskStore {
         static func clean(_ raw: String?, fallback: String) -> String {
             let text = FoldTextSanitizer.sanitizeInline(raw ?? "").trimmingCharacters(in: .whitespaces)
             guard !text.isEmpty else { return fallback }
-            return text.count > limit ? String(text.prefix(limit - 1)) + "\u{2026}" : text
+            // Cut by characters and by scalars: one grapheme can hold thousands of combining marks.
+            guard text.count > limit || text.unicodeScalars.count > limit else { return text }
+            var cut = String(text.prefix(limit - 1))
+            if cut.unicodeScalars.count > limit - 1 {
+                cut = String(String.UnicodeScalarView(cut.unicodeScalars.prefix(limit - 1)))
+            }
+            return cut + "\u{2026}"
         }
     }
 

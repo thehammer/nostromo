@@ -145,6 +145,11 @@ final class BackgroundTaskRowView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// The row is going away (its task left the list, or the popover closed): stop its Stop timer.
+    func tearDown() {
+        stopButton?.invalidate()
+    }
+
     /// Put a Stop button at the end of the line. Once only.
     func installStop(_ button: TaskStopButton) {
         guard stopButton == nil else { return }
