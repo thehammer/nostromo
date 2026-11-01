@@ -505,11 +505,19 @@ final class BackgroundScrollSafetyTests: XCTestCase {
             XCTAssertEqual(header(c1).stopNoticeText, "Couldn't stop: Task is protected")
             XCTAssertEqual(gate.sender.stops.count, 2)
 
-            step("the CLI turns out not to support Stop") {
+            // A new daemon epoch clears the failure, so the header can say why there is no button. Its height
+            // may change (the button goes), so this is not a `step`: the pane and the panels still must not move.
+            let frames = opened.map { $0.panel.frame }
+            p.rig.assertNoMove(name("the CLI turns out not to support Stop"), following: following) {
+                gate.world.clock.advance(1)
                 tw.world.store.ingest(.sessionTasks(SessionTasksWire(
-                    tag: "gate", sessionId: "session-1", daemonEpoch: "epoch-1", stopSupported: false,
+                    tag: "gate", sessionId: "session-1", daemonEpoch: "epoch-2", stopSupported: false,
                     tasks: [tw.task("job0", "npm run dev", status: .stopped), tw.task("job1", "npm run build")])))
+                gate.flushDeliveries()
+                opened.forEach { $0.panel.contentView?.layoutSubtreeIfNeeded() }
             }
+            XCTAssertEqual(opened.map { $0.panel.frame }, frames, "\(name("unsupported")): a window moved or resized")
+            assertComposerIntact(p.rig, name("unsupported"))
             XCTAssertEqual(header(c1).stopNoticeText, "This Claude Code version can't stop tasks from Nostromo")
             XCTAssertTrue(header(c1).stopButton?.isHidden ?? true)
         }

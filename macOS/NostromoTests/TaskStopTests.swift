@@ -2112,7 +2112,7 @@ final class TaskStopGateFitnessTests: XCTestCase {
     func testTheTwoCallersAreInsideTheButtonsRequestStopClosure() throws {
         for path in ["UI/Background/BackgroundPopover.swift", "UI/Background/TaskWindowHeaderView.swift"] {
             let code = try Self.code(Self.nostromo.appendingPathComponent(path))
-            XCTAssertNotNil(code.range(of: #"requestStop:\s*\{[^}]*\.requestStop\("#, options: .regularExpression),
+            XCTAssertNotNil(code.range(of: #"requestStop:\s*\{[\s\S]{0,200}?\.requestStop\("#, options: .regularExpression),
                             "\(path): the call must sit in a TaskStopButton's requestStop closure")
         }
     }
