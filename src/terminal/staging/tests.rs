@@ -421,6 +421,8 @@ struct Frame {
     agent_name: String,
     revision: u64,
     entries: Vec<StagedEntryWire>,
+    enabled: bool,
+    foreground: Option<String>,
 }
 
 struct World {
@@ -520,6 +522,7 @@ impl World {
                 stream,
                 capabilities: caps.iter().map(|c| c.to_string()).collect(),
                 targeted,
+                staging_enabled: true,
             },
         );
         rx
@@ -717,6 +720,8 @@ impl World {
                 agent_name,
                 revision,
                 entries,
+                enabled,
+                foreground,
             } = msg
             {
                 out.push(Frame {
@@ -731,6 +736,8 @@ impl World {
                     agent_name,
                     revision,
                     entries,
+                    enabled,
+                    foreground,
                 });
             }
         }
@@ -979,7 +986,7 @@ fn stopping_freezes_the_list_for_the_user_and_the_former_follower_is_locked_out(
     w.terminals
         .lock()
         .unwrap()
-        .staging_remove(&cap(), &t.id, &drop)
+        .staging_remove(&cap(), &t.id, &drop, None)
         .unwrap();
     let after_remove = w.frames();
     assert!(after_remove.iter().all(|f| f.state == "frozen"));
@@ -1043,6 +1050,7 @@ fn freezing_a_list_that_is_already_frozen_or_missing_audits_and_sends_nothing() 
             by: "follow_ended",
             entries: 1,
             bytes: "echo hi".len(),
+            unused: 0,
         }]
     );
     assert_eq!(first.frames.len(), 1, "the frozen frame");
@@ -1236,72 +1244,55 @@ fn without_an_app_every_call_is_no_operator_and_nothing_changes() {
     assert_eq!(w.refusal(A, &t, StagingOp::List), "no_operator");
 }
 
-// There is no test for a terminal of an unknown kind: `TerminalKind` has only
-// `Local` and `Ecs` today, so one cannot be constructed yet.
+// S2 inverts the two S1 tests that pinned remote panes as refused:
+// `a_remote_terminal_is_staging_disabled` and
+// `following_a_remote_terminal_creates_no_staging_list_and_sends_the_app_no_frame`.
 #[test]
-fn a_remote_terminal_is_staging_disabled() {
+fn the_follower_of_a_remote_terminal_can_stage_on_it() {
     let mut w = World::new();
     let t = w.ecs(A);
     w.follow(&t, A);
-    let before = w.peek(&t);
-    w.frames();
-    for op in [
-        StagingOp::List,
-        stage_op("ls", None, None),
-        StagingOp::Clear,
-    ] {
-        let refusal = w.call(A, &t, op).unwrap_err();
-        assert_eq!(refusal.code, "staging_disabled");
-        assert_eq!(
-            refusal.detail.as_deref(),
-            Some("staging into remote shells is not available yet")
-        );
-    }
-    assert_untouched(&mut w, &t, &before);
+    let id = w.staged_id(A, &t, "ls -la");
+    let list = w.list(A, &t).expect("the follower may list");
+    assert_eq!(list.entries.len(), 1);
+    assert_eq!(list.entries[0].id, id);
+    // Every other S1 rule still holds on it.
+    assert_eq!(
+        w.refusal(A, &t, stage_op("a\nb", None, None)),
+        "invalid_text"
+    );
+    assert_eq!(
+        w.refusal(B, &t, stage_op("ls", None, None)),
+        "not_following"
+    );
+    let exec = ecs_exec_command();
+    assert_eq!(
+        w.refusal(A, &t, stage_op(&exec, None, None)),
+        "remote_shell_command"
+    );
 }
 
 #[test]
-fn following_a_remote_terminal_creates_no_staging_list_and_sends_the_app_no_frame() {
+fn following_a_remote_terminal_creates_an_active_list_and_sends_the_app_the_frame() {
     let mut w = World::new();
     let t = w.ecs(A);
     w.frames();
 
     w.follow(&t, A);
-    assert!(
-        w.peek(&t).is_none(),
-        "a list was created for a remote shell"
-    );
-    assert!(
-        w.frames().is_empty(),
-        "the app was sent a staging frame for a remote shell"
-    );
+    let list = w.peek(&t).expect("a list was created for a remote shell");
+    assert_eq!((list.owner_tag.as_str(), list.entries.len()), (A, 0));
+    assert_eq!(list.state, ListState::Active);
+    let frames = w.frames();
+    assert_eq!(frames.len(), 1, "the app was sent the list frame");
+    assert_eq!(frames[0].state, "active");
+    assert_eq!(frames[0].terminal_id, t.id);
 
-    // Moving the follow to another agent, and stopping it, are no different.
+    // Moving the follow to another agent starts a list for it; stopping freezes it.
     w.follow(&t, B);
+    assert_eq!(w.peek(&t).unwrap().owner_tag, B);
     w.stop(&t);
-    assert!(w.peek(&t).is_none());
-    assert!(w.frames().is_empty());
-    assert!(
-        w.audit_named("staging_changed").is_empty(),
-        "a staging change was audited for a remote shell"
-    );
-
-    // The agent is still refused exactly as before.
-    w.follow(&t, A);
-    for op in [
-        StagingOp::List,
-        stage_op("ls", None, None),
-        StagingOp::Clear,
-    ] {
-        let refusal = w.call(A, &t, op).unwrap_err();
-        assert_eq!(refusal.code, "staging_disabled");
-        assert_eq!(
-            refusal.detail.as_deref(),
-            Some("staging into remote shells is not available yet")
-        );
-    }
-    assert!(w.peek(&t).is_none());
-    assert!(w.frames().is_empty());
+    assert_eq!(w.peek(&t).unwrap().state, ListState::Frozen);
+    assert_eq!(w.refusal(B, &t, StagingOp::List), "not_following");
 }
 
 #[test]
@@ -1535,9 +1526,9 @@ fn the_user_removing_and_clearing_push_frames_and_are_audited_by_user() {
     w.frames();
     {
         let mut m = w.terminals.lock().unwrap();
-        m.staging_remove(&cap(), &t.id, &a).unwrap();
+        m.staging_remove(&cap(), &t.id, &a, None).unwrap();
         assert_eq!(
-            m.staging_remove(&cap(), &t.id, &a),
+            m.staging_remove(&cap(), &t.id, &a, None),
             Err(crate::terminal::TerminalError::UnknownEntry)
         );
         m.staging_clear(&cap(), &t.id).unwrap();
@@ -1637,6 +1628,7 @@ fn a_canary_staged_inserted_and_cleared_never_reaches_the_audit_a_log_or_the_sto
             "by",
             "entries",
             "bytes",
+            "unused",
         ]
         .into();
         assert!(keys.is_subset(&allowed), "{keys:?}");
@@ -1866,8 +1858,14 @@ fn timing_attacks(w: &Arc<World>, t: &Arc<Term>) {
 
 #[test]
 fn nothing_an_agent_can_do_with_staging_puts_a_byte_into_the_shell() {
+    for ecs in [false, true] {
+        nothing_an_agent_can_do_puts_a_byte_into_the_shell(ecs);
+    }
+}
+
+fn nothing_an_agent_can_do_puts_a_byte_into_the_shell(ecs: bool) {
     let mut w = World::new();
-    let t = w.local(A);
+    let t = if ecs { w.ecs(A) } else { w.local(A) };
     w.follow(&t, A);
     let mcp = Mcp::new(&w, &[A, B]);
 
@@ -1901,8 +1899,14 @@ fn nothing_an_agent_can_do_with_staging_puts_a_byte_into_the_shell() {
 
 #[test]
 fn the_operators_own_input_delivers_exactly_the_entrys_bytes_once_with_no_line_break() {
+    for ecs in [false, true] {
+        the_operators_insert_delivers_exactly_the_entrys_bytes(ecs);
+    }
+}
+
+fn the_operators_insert_delivers_exactly_the_entrys_bytes(ecs: bool) {
     let mut w = World::new();
-    let t = w.local(A);
+    let t = if ecs { w.ecs(A) } else { w.local(A) };
     w.follow(&t, A);
     for entry in commands() {
         // One entry at a time keeps the log readable; the clock keeps the limit away.

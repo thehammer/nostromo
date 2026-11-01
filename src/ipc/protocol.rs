@@ -1684,6 +1684,12 @@ pub enum ClientMsg {
         bytes: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         auto_reply: bool,
+        /// Where a person's input came from, when not the keyboard: only
+        /// `stage_insert` (a staged command placed at the prompt by a click)
+        /// is known, and it counts as activity for the idle rule. Anything
+        /// else counts as a keystroke. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<String>,
     },
     /// Operator app only.
     TerminalResize {
@@ -1798,10 +1804,30 @@ pub enum ClientMsg {
     TerminalStagingRemove {
         terminal_id: String,
         entry_id: String,
+        /// Set when the removal is an archive (the app keeps the entry in its
+        /// own footer): `manual` or `auto`. Absent for a plain removal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        archive: Option<StagingArchive>,
     },
     /// The user cleared the staging list. Operator app only.
     TerminalStagingClear {
         terminal_id: String,
+    },
+    /// The user turned staging on or off for one terminal. Operator app only.
+    TerminalStagingSetEnabled {
+        terminal_id: String,
+        enabled: bool,
+    },
+    /// The user turned staging on or off for every terminal, as this
+    /// connection sees it. Operator app only.
+    TerminalStagingSetGlobal {
+        enabled: bool,
+    },
+    /// Something the user did in the staging UI that is only counted
+    /// (`confirm_cancelled`, `just_changed`). Operator app only.
+    TerminalStagingUiEvent {
+        terminal_id: String,
+        event: String,
     },
     /// Change a Mother job notice switch: a focus's mode (`scope: focus`, with
     /// `tag` and `mode`) or the global one (`scope: global`, with `enabled`).
@@ -2117,6 +2143,16 @@ pub struct TerminalInfo {
     /// figure (a QA daemon scales it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_warn_after_secs: Option<u64>,
+}
+
+/// Why a staged entry was removed by `terminal_staging_remove`'s `archive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StagingArchive {
+    /// The user archived it.
+    Manual,
+    /// The app archived it after the user ran it (the opt-in setting).
+    Auto,
 }
 
 /// The state of a staging list in `ServerMsg::TerminalStagingList`.
@@ -2755,6 +2791,15 @@ pub enum ServerMsg {
         agent_name: String,
         revision: u64,
         entries: Vec<StagedEntryWire>,
+        /// Is staging on for this terminal (the per-terminal switch)? Always
+        /// sent; an older daemon's frames read as `true`.
+        #[serde(default = "default_true")]
+        enabled: bool,
+        /// A non-shell program is in the foreground of a local terminal (its
+        /// name, or `unknown program`): the app treats the pane as production.
+        /// Never told to the agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        foreground: Option<String>,
     },
 
     // ── remote shells (2a; all `LocalOnly`) ───────────────────────────────────
@@ -7147,6 +7192,7 @@ mod terminal_wire_tests {
                     terminal_id: "t1".into(),
                     bytes: "bHMK".into(),
                     auto_reply: false,
+                    via: None,
                 },
                 "terminal_input",
             ),
@@ -7264,6 +7310,7 @@ mod terminal_wire_tests {
             terminal_id: "t1".into(),
             bytes: "bHMK".into(),
             auto_reply: false,
+            via: None,
         })
         .unwrap();
         assert!(key.get("auto_reply").is_none(), "{key}");
@@ -7283,6 +7330,7 @@ mod terminal_wire_tests {
             terminal_id: "t1".into(),
             bytes: "G1syNDs4MFI=".into(),
             auto_reply: true,
+            via: None,
         };
         let v = serde_json::to_value(&reply).unwrap();
         assert_eq!(v["auto_reply"], true, "{v}");
@@ -7837,4 +7885,8 @@ mod huey_document_wire_tests {
             other => panic!("expected PaneActionResult, got {other:?}"),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }

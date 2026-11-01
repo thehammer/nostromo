@@ -251,8 +251,9 @@ pub enum AuditEvent {
         kind: TerminalKind,
         closes_at: DateTime<Utc>,
     },
-    /// After an idle warning the shell was kept open: `via` is `keystroke`
-    /// or `button`.
+    /// After an idle warning the shell was kept open: `via` is `keystroke`,
+    /// `button` or `stage_insert` (a person placed a staged command at the
+    /// prompt; an agent's staging never counts).
     IdleKeptOpen {
         terminal_id: String,
         pane_id: String,
@@ -303,15 +304,18 @@ pub enum AuditEvent {
         terminal_id: String,
         /// The list's owner (the focus that followed the terminal).
         tag: String,
-        /// `stage`, `replace`, `remove` or `clear`.
+        /// `stage`, `replace`, `remove`, `archive`, `clear` or `freeze`.
         op: String,
-        /// `agent`, `user`, `follow_moved`, `follow_started`,
-        /// `terminal_closed` or `app_closed`.
+        /// `agent`, `user`, `auto`, `follow_moved`, `follow_started`,
+        /// `terminal_closed`, `app_closed`, `disabled` or `enabled`.
         by: String,
         /// Entries in the list after the change.
         entries: usize,
         /// Total command bytes in the list after the change.
         bytes: usize,
+        /// Entries this change removed that were never inserted (0 for
+        /// stage, replace and archive).
+        unused: usize,
     },
     /// The app reported inserting a staged entry at the prompt. `entry_number`
     /// is null when the entry was already gone.
@@ -320,6 +324,15 @@ pub enum AuditEvent {
         entry_number: Option<u8>,
         bytes: usize,
         confirmed: bool,
+        /// This entry's first insert.
+        first: bool,
+    },
+    /// Something the user did in the staging UI that is only counted. Counts
+    /// only: `event` is from a fixed set, never text.
+    StagingUiEvent {
+        terminal_id: Option<String>,
+        /// The `event` tag names the line, so the field is `ui_event`.
+        ui_event: String,
     },
     /// A staging call was refused.
     StagingRefused {

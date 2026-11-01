@@ -803,6 +803,7 @@ where
                     stream: terminal_stream_tx.clone(),
                     capabilities,
                     targeted: targeted_tx.clone(),
+                    staging_enabled: true,
                 },
             );
             *cap = Some(granted);
@@ -1394,7 +1395,10 @@ fn handle_client_msg(
         // Operator app only; none of them writes to a terminal.
         | ClientMsg::TerminalStagingInserted { .. }
         | ClientMsg::TerminalStagingRemove { .. }
-        | ClientMsg::TerminalStagingClear { .. }) => {
+        | ClientMsg::TerminalStagingClear { .. }
+        | ClientMsg::TerminalStagingSetEnabled { .. }
+        | ClientMsg::TerminalStagingSetGlobal { .. }
+        | ClientMsg::TerminalStagingUiEvent { .. }) => {
             handle_terminal_msg(msg, cap, peer, conn_key, terminals, targeted_tx);
         }
 
@@ -2550,11 +2554,12 @@ fn handle_terminal_msg(
             terminal_id,
             bytes,
             auto_reply,
+            via,
         } => {
             use base64::Engine as _;
             match base64::engine::general_purpose::STANDARD.decode(bytes.as_bytes()) {
                 Ok(bytes) if auto_reply => mgr.auto_reply(cap, &terminal_id, &bytes),
-                Ok(bytes) => mgr.input(cap, &terminal_id, &bytes),
+                Ok(bytes) => mgr.input_via(cap, &terminal_id, &bytes, via.as_deref()),
                 Err(_) => Err(terminal::TerminalError::InvalidBytes),
             }
         }
@@ -2575,8 +2580,19 @@ fn handle_terminal_msg(
         ClientMsg::TerminalStagingRemove {
             terminal_id,
             entry_id,
-        } => mgr.staging_remove(cap, &terminal_id, &entry_id),
+            archive,
+        } => mgr.staging_remove(cap, &terminal_id, &entry_id, archive),
         ClientMsg::TerminalStagingClear { terminal_id } => mgr.staging_clear(cap, &terminal_id),
+        ClientMsg::TerminalStagingSetEnabled {
+            terminal_id,
+            enabled,
+        } => mgr.staging_set_enabled(cap, &terminal_id, enabled),
+        ClientMsg::TerminalStagingSetGlobal { enabled } => {
+            mgr.staging_set_global(cap, conn_key, enabled)
+        }
+        ClientMsg::TerminalStagingUiEvent { terminal_id, event } => {
+            mgr.staging_ui_event(cap, &terminal_id, &event)
+        }
         ClientMsg::TerminalRefusalReport {
             terminal_id,
             op,

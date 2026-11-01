@@ -166,6 +166,9 @@ pub struct TerminalSession {
     /// the reader holds an `Arc` of the session, which owns the master.
     master_fd: Option<RawFd>,
     pid: Option<u32>,
+    /// The shell's process name as it was just after spawn, so a later `exec
+    /// ssh …` (same pid, new program) is told apart from the shell itself.
+    shell_name: Option<String>,
     ops: SignalOps,
     /// Held while checking `reaped` and signalling, and by the waiter while it
     /// reaps and sets `reaped`: see the module docs.
@@ -315,6 +318,7 @@ impl TerminalSession {
             master: Mutex::new(pair.master),
             master_fd,
             pid,
+            shell_name: pid.and_then(process_name),
             ops,
             signal_lock: Mutex::new(()),
             reaped: AtomicBool::new(false),
@@ -441,6 +445,42 @@ impl TerminalSession {
     /// The child's pid, if the platform reported one.
     pub fn pid(&self) -> Option<u32> {
         self.pid
+    }
+
+    /// What has the terminal in the foreground: the shell itself (at its
+    /// prompt, or running a builtin), or another program (`ssh`, `sleep`, an
+    /// `exec`ed replacement). `Unknown` when the platform cannot say. Like
+    /// tmux: `tcgetpgrp` on the pty master against the shell's pid.
+    ///
+    /// Not a prompt detector: a builtin waiting for input (`read`) is still the
+    /// shell. Cheap (a syscall and a name lookup), safe to call from a timer.
+    pub fn foreground(&self) -> Foreground {
+        let (Some(fd), Some(pid)) = (self.master_fd, self.pid) else {
+            return Foreground::Unknown;
+        };
+        if self.is_exited() {
+            return Foreground::Unknown;
+        }
+        // SAFETY: `fd` is the pty master this session owns (kept open for the
+        // session's life); tcgetpgrp only reads.
+        let group = unsafe { libc::tcgetpgrp(fd) };
+        if group <= 0 {
+            return Foreground::Unknown;
+        }
+        let group = group as u32;
+        if group != pid {
+            return match process_name(group) {
+                Some(name) => Foreground::Program(sanitize_program_name(&name)),
+                None => Foreground::Unknown,
+            };
+        }
+        match (process_name(pid), &self.shell_name) {
+            (Some(now), Some(then)) if now != *then => {
+                Foreground::Program(sanitize_program_name(&now))
+            }
+            (None, _) => Foreground::Unknown,
+            _ => Foreground::Shell,
+        }
     }
 
     /// Queue bytes for the child's terminal. Never blocks: [`InputError::TooLarge`]
@@ -748,4 +788,61 @@ fn repaint(parser: &vt100::Parser) -> Vec<u8> {
     }
     out.extend(screen.state_formatted());
     out
+}
+
+/// What [`TerminalSession::foreground`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Foreground {
+    Shell,
+    /// Another program (its sanitised name).
+    Program(String),
+    Unknown,
+}
+
+/// The longest program name kept, in Unicode scalars.
+const MAX_PROGRAM_NAME_CHARS: usize = 24;
+
+/// `name` as printable text of at most [`MAX_PROGRAM_NAME_CHARS`] scalars.
+fn sanitize_program_name(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .filter(|c| !c.is_control() && !crate::data::work::is_invisible(*c))
+        .take(MAX_PROGRAM_NAME_CHARS)
+        .collect();
+    if clean.is_empty() {
+        "unknown program".to_string()
+    } else {
+        clean
+    }
+}
+
+/// The name of process `pid` (macOS: `proc_name`).
+#[cfg(target_os = "macos")]
+fn process_name(pid: u32) -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for its length; proc_name writes at most that.
+    let n = unsafe {
+        libc::proc_name(
+            pid as libc::c_int,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len() as u32,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+/// The name of process `pid` (Linux: `/proc/<pid>/comm`).
+#[cfg(target_os = "linux")]
+fn process_name(pid: u32) -> Option<String> {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|s| s.trim_end().to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_name(_pid: u32) -> Option<String> {
+    None
 }

@@ -38,13 +38,13 @@ pub mod text;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use chrono::{DateTime, SubsecRound, Utc};
 
-use crate::ipc::protocol::{ServerMsg, StagedEntryWire, TerminalStagingState};
+use crate::ipc::protocol::{ServerMsg, StagedEntryWire, StagingArchive, TerminalStagingState};
 use limits::StagingLimits;
 pub use text::StagingTextCode;
 
@@ -100,9 +100,21 @@ pub struct StagingList {
     pub state: ListState,
     pub revision: u64,
     pub entries: Vec<StagedEntry>,
+    /// What runs in the foreground of a local terminal when it is not the
+    /// shell (see [`crate::terminal::session::Foreground`]). Shown to the user
+    /// only: never told to the agent, never audited or logged.
+    pub foreground: Option<String>,
 }
 
 impl StagingList {
+    /// Entries that were never inserted.
+    fn unused(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.inserted_count == 0)
+            .count()
+    }
+
     fn command_bytes(&self) -> usize {
         self.entries.iter().map(|e| e.command.len()).sum()
     }
@@ -131,12 +143,16 @@ pub(crate) enum StagingAudit {
         by: &'static str,
         entries: usize,
         bytes: usize,
+        /// Entries this change removed that were never inserted.
+        unused: usize,
     },
     Inserted {
         terminal_id: String,
         entry_number: Option<u8>,
         bytes: usize,
         confirmed: bool,
+        /// This entry's first insert.
+        first: bool,
     },
 }
 
@@ -159,6 +175,9 @@ pub(crate) struct InsertReport {
 #[derive(Default)]
 struct State {
     lists: HashMap<String, StagingList>,
+    /// Terminals the user turned staging off for (memory only; an id leaves
+    /// when its terminal closes or restarts).
+    disabled: HashSet<String>,
     limits: StagingLimits,
     /// Never reused, so a frame of an older list cannot look newer.
     next_revision: u64,
@@ -182,7 +201,13 @@ impl State {
         }
     }
 
-    fn audit_changed(&mut self, terminal_id: &str, op: &'static str, by: &'static str) {
+    fn audit_changed(
+        &mut self,
+        terminal_id: &str,
+        op: &'static str,
+        by: &'static str,
+        unused: usize,
+    ) {
         if let Some(list) = self.lists.get(terminal_id) {
             let audit = StagingAudit::Changed {
                 terminal_id: terminal_id.to_string(),
@@ -191,6 +216,7 @@ impl State {
                 by,
                 entries: list.entries.len(),
                 bytes: list.command_bytes(),
+                unused,
             };
             self.outbox.audits.push(audit);
         }
@@ -202,9 +228,11 @@ impl State {
             return;
         };
         let revision = self.bump();
+        let enabled = !self.disabled.contains(terminal_id);
         self.outbox
             .frames
-            .push(none_frame(terminal_id, &list.pane_id, revision));
+            .push(none_frame(terminal_id, &list.pane_id, revision, enabled));
+        let unused = list.unused();
         self.outbox.audits.push(StagingAudit::Changed {
             terminal_id: terminal_id.to_string(),
             owner_tag: list.owner_tag,
@@ -212,7 +240,35 @@ impl State {
             by,
             entries: 0,
             bytes: 0,
+            unused,
         });
+    }
+
+    /// An empty active list for `owner`, replacing whatever list there was.
+    fn create_list(
+        &mut self,
+        terminal_id: &str,
+        pane_id: &str,
+        owner: &str,
+        agent_name: &str,
+        by: &'static str,
+    ) {
+        let unused = self.lists.get(terminal_id).map_or(0, StagingList::unused);
+        self.lists.insert(
+            terminal_id.to_string(),
+            StagingList {
+                terminal_id: terminal_id.to_string(),
+                pane_id: pane_id.to_string(),
+                owner_tag: owner.to_string(),
+                agent_name: agent_name.to_string(),
+                state: ListState::Active,
+                revision: 0,
+                entries: Vec::new(),
+                foreground: None,
+            },
+        );
+        self.emit(terminal_id);
+        self.audit_changed(terminal_id, "clear", by, unused);
     }
 
     fn new_entry_id(&mut self) -> String {
@@ -290,14 +346,37 @@ impl StagingStore {
         note: Option<&str>,
         position: Option<usize>,
     ) -> Result<(String, usize, usize), StagingError> {
-        let command_ok =
-            text::validate_command(command).map_err(|c| StagingError::Text(c, "command"));
+        self.stage_in(
+            caller,
+            terminal_id,
+            agent_name,
+            command,
+            note,
+            position,
+            false,
+        )
+    }
+
+    /// [`Self::stage`] for a terminal that is `remote` (not a local shell, or
+    /// of an unknown kind): history expansion is refused there, and in any
+    /// list that has a foreground program.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stage_in(
+        &self,
+        caller: &str,
+        terminal_id: &str,
+        agent_name: &str,
+        command: &str,
+        note: Option<&str>,
+        position: Option<usize>,
+        remote: bool,
+    ) -> Result<(String, usize, usize), StagingError> {
         let note = note
             .map(|n| text::clean_note(n).map_err(|c| StagingError::Text(c, "note")))
             .transpose();
         let mut state = self.lock();
-        state.owned_by(caller, terminal_id)?;
-        command_ok?;
+        let strict = remote || state.owned_by(caller, terminal_id)?.foreground.is_some();
+        text::validate_command_in(command, strict).map_err(|c| StagingError::Text(c, "command"))?;
         let note = note?.flatten();
         let count = state.owned_by(caller, terminal_id)?.entries.len();
         let at = match position {
@@ -326,7 +405,7 @@ impl StagingStore {
         );
         let len = list.entries.len();
         state.emit(terminal_id);
-        state.audit_changed(terminal_id, "stage", "agent");
+        state.audit_changed(terminal_id, "stage", "agent", 0);
         Ok((id, at + 1, len))
     }
 
@@ -341,15 +420,38 @@ impl StagingStore {
         command: Option<&str>,
         note: Option<&str>,
     ) -> Result<usize, StagingError> {
-        let command_ok = command
-            .map(|c| text::validate_command(c).map_err(|c| StagingError::Text(c, "command")))
-            .transpose();
+        self.replace_in(
+            caller,
+            terminal_id,
+            agent_name,
+            entry_id,
+            command,
+            note,
+            false,
+        )
+    }
+
+    /// [`Self::replace`] with [`Self::stage_in`]'s `remote`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_in(
+        &self,
+        caller: &str,
+        terminal_id: &str,
+        agent_name: &str,
+        entry_id: &str,
+        command: Option<&str>,
+        note: Option<&str>,
+        remote: bool,
+    ) -> Result<usize, StagingError> {
         let note = note
             .map(|n| text::clean_note(n).map_err(|c| StagingError::Text(c, "note")))
             .transpose();
         let mut state = self.lock();
-        state.owned_by(caller, terminal_id)?;
-        command_ok?;
+        let strict = remote || state.owned_by(caller, terminal_id)?.foreground.is_some();
+        if let Some(command) = command {
+            text::validate_command_in(command, strict)
+                .map_err(|c| StagingError::Text(c, "command"))?;
+        }
         let note = note?;
         let list = state.owned_by(caller, terminal_id)?;
         let at = list
@@ -371,7 +473,7 @@ impl StagingStore {
         }
         entry.changed_at = now_utc();
         state.emit(terminal_id);
-        state.audit_changed(terminal_id, "replace", "agent");
+        state.audit_changed(terminal_id, "replace", "agent", 0);
         Ok(at + 1)
     }
 
@@ -391,10 +493,10 @@ impl StagingStore {
             .position(|e| e.id == entry_id)
             .ok_or(StagingError::UnknownEntry)?;
         list.agent_name = agent_name.to_string();
-        list.entries.remove(at);
+        let unused = usize::from(list.entries.remove(at).inserted_count == 0);
         let len = list.entries.len();
         state.emit(terminal_id);
-        state.audit_changed(terminal_id, "remove", "agent");
+        state.audit_changed(terminal_id, "remove", "agent", unused);
         Ok(len)
     }
 
@@ -408,9 +510,10 @@ impl StagingStore {
         let mut state = self.lock();
         let list = state.owned_by(caller, terminal_id)?;
         list.agent_name = agent_name.to_string();
+        let unused = list.unused();
         list.entries.clear();
         state.emit(terminal_id);
-        state.audit_changed(terminal_id, "clear", "agent");
+        state.audit_changed(terminal_id, "clear", "agent", unused);
         Ok(())
     }
 
@@ -426,10 +529,12 @@ impl StagingStore {
         confirmed: bool,
     ) -> InsertReport {
         let mut state = self.lock();
+        let mut first = false;
         let found = state.lists.get_mut(terminal_id).and_then(|list| {
             let at = list.entries.iter().position(|e| e.id == entry_id)?;
             let now = now_utc();
             let entry = &mut list.entries[at];
+            first = entry.inserted_count == 0;
             entry.inserted_count = entry.inserted_count.saturating_add(1);
             entry.last_inserted_at = Some(now);
             let number = u8::try_from(at + 1).ok()?;
@@ -444,6 +549,7 @@ impl StagingStore {
             entry_number: found.as_ref().map(|(n, _)| *n),
             bytes: bytes as usize,
             confirmed,
+            first: found.is_some() && first,
         });
         InsertReport {
             entry_number: found.as_ref().map(|(n, _)| *n),
@@ -452,7 +558,15 @@ impl StagingStore {
     }
 
     /// The user removed an entry. `false` when there was no such entry.
-    pub(crate) fn user_remove(&self, terminal_id: &str, entry_id: &str) -> bool {
+    ///
+    /// With `archive` the removal is an archive (the app keeps the entry in
+    /// its own footer): audited as `op: archive` and never counted unused.
+    pub(crate) fn user_remove(
+        &self,
+        terminal_id: &str,
+        entry_id: &str,
+        archive: Option<StagingArchive>,
+    ) -> bool {
         let mut state = self.lock();
         let Some(list) = state.lists.get_mut(terminal_id) else {
             return false;
@@ -460,13 +574,23 @@ impl StagingStore {
         let Some(at) = list.entries.iter().position(|e| e.id == entry_id) else {
             return false;
         };
-        list.entries.remove(at);
+        let removed_unused = list.entries.remove(at).inserted_count == 0;
         let emptied_frozen = list.state == ListState::Frozen && list.entries.is_empty();
         if emptied_frozen {
             state.remove_list(terminal_id, "user");
         } else {
             state.emit(terminal_id);
-            state.audit_changed(terminal_id, "remove", "user");
+            match archive {
+                None => {
+                    state.audit_changed(terminal_id, "remove", "user", usize::from(removed_unused))
+                }
+                Some(StagingArchive::Manual) => {
+                    state.audit_changed(terminal_id, "archive", "user", 0)
+                }
+                Some(StagingArchive::Auto) => {
+                    state.audit_changed(terminal_id, "archive", "auto", 0)
+                }
+            }
         }
         true
     }
@@ -481,9 +605,10 @@ impl StagingStore {
         if list.state == ListState::Frozen {
             state.remove_list(terminal_id, "user");
         } else {
+            let unused = list.unused();
             list.entries.clear();
             state.emit(terminal_id);
-            state.audit_changed(terminal_id, "clear", "user");
+            state.audit_changed(terminal_id, "clear", "user", unused);
         }
         true
     }
@@ -500,32 +625,41 @@ impl StagingStore {
         agent_name: &str,
     ) {
         let mut state = self.lock();
+        if state.disabled.contains(terminal_id) {
+            // The user turned staging off here: no list, and the app is told.
+            let revision = state.bump();
+            state
+                .outbox
+                .frames
+                .push(none_frame(terminal_id, pane_id, revision, false));
+            return;
+        }
         let moved = state
             .lists
             .get(terminal_id)
             .is_some_and(|l| l.owner_tag != owner);
-        state.lists.insert(
-            terminal_id.to_string(),
-            StagingList {
-                terminal_id: terminal_id.to_string(),
-                pane_id: pane_id.to_string(),
-                owner_tag: owner.to_string(),
-                agent_name: agent_name.to_string(),
-                state: ListState::Active,
-                revision: 0,
-                entries: Vec::new(),
-            },
-        );
-        state.emit(terminal_id);
-        state.audit_changed(
-            terminal_id,
-            "clear",
-            if moved {
-                "follow_moved"
-            } else {
-                "follow_started"
-            },
-        );
+        let by = if moved {
+            "follow_moved"
+        } else {
+            "follow_started"
+        };
+        state.create_list(terminal_id, pane_id, owner, agent_name, by);
+    }
+
+    /// The user turned staging back on (here or everywhere) while `owner`
+    /// follows `terminal_id`: an empty list, if there is none.
+    pub(crate) fn enabled_for_follower(
+        &self,
+        terminal_id: &str,
+        pane_id: &str,
+        owner: &str,
+        agent_name: &str,
+    ) {
+        let mut state = self.lock();
+        if state.disabled.contains(terminal_id) || state.lists.contains_key(terminal_id) {
+            return;
+        }
+        state.create_list(terminal_id, pane_id, owner, agent_name, "enabled");
     }
 
     /// The follow ended by the user (or the follower's session ended): the list
@@ -540,12 +674,91 @@ impl StagingStore {
         }
         list.state = ListState::Frozen;
         state.emit(terminal_id);
-        state.audit_changed(terminal_id, "freeze", "follow_ended");
+        state.audit_changed(terminal_id, "freeze", "follow_ended", 0);
     }
 
     /// The terminal is gone (closed, restarted, its focus removed).
     pub(crate) fn terminal_gone(&self, terminal_id: &str) {
-        self.drop_list(terminal_id, "terminal_closed");
+        let mut state = self.lock();
+        state.disabled.remove(terminal_id);
+        state.remove_list(terminal_id, "terminal_closed");
+    }
+
+    /// The user turned staging off or on for `terminal_id`.
+    ///
+    /// Off: the list goes and the app is told (`none`, `enabled: false`). On:
+    /// `follower` (the current follower's tag and name, when the terminal is
+    /// followed) gets an empty active list; otherwise the app is told
+    /// `none`, `enabled: true`.
+    pub(crate) fn set_enabled(
+        &self,
+        terminal_id: &str,
+        pane_id: &str,
+        enabled: bool,
+        follower: Option<(&str, &str)>,
+    ) {
+        let mut state = self.lock();
+        if !enabled {
+            state.disabled.insert(terminal_id.to_string());
+            if state.lists.contains_key(terminal_id) {
+                state.remove_list(terminal_id, "disabled");
+                return;
+            }
+        } else {
+            state.disabled.remove(terminal_id);
+            if let (Some((owner, name)), false) = (follower, state.lists.contains_key(terminal_id))
+            {
+                state.create_list(terminal_id, pane_id, owner, name, "enabled");
+                return;
+            }
+            if state.lists.contains_key(terminal_id) {
+                return;
+            }
+        }
+        let revision = state.bump();
+        state
+            .outbox
+            .frames
+            .push(none_frame(terminal_id, pane_id, revision, enabled));
+    }
+
+    /// Is staging switched off for `terminal_id`?
+    pub(crate) fn is_disabled(&self, terminal_id: &str) -> bool {
+        self.lock().disabled.contains(terminal_id)
+    }
+
+    /// Remove every list (the global switch went off).
+    pub(crate) fn clear_all(&self, by: &'static str) {
+        let mut state = self.lock();
+        let ids: Vec<String> = state.lists.keys().cloned().collect();
+        for id in ids {
+            state.remove_list(&id, by);
+        }
+    }
+
+    /// The terminals whose foreground is worth probing: a list with entries,
+    /// or one that still shows a foreground program.
+    pub(crate) fn probe_targets(&self) -> Vec<String> {
+        self.lock()
+            .lists
+            .values()
+            .filter(|l| !l.entries.is_empty() || l.foreground.is_some())
+            .map(|l| l.terminal_id.clone())
+            .collect()
+    }
+
+    /// The foreground program of `terminal_id` as the app is shown it. A frame
+    /// is emitted only when the value changed. Not audited, not logged.
+    pub(crate) fn set_foreground(&self, terminal_id: &str, foreground: Option<String>) {
+        let mut state = self.lock();
+        let Some(list) = state.lists.get_mut(terminal_id) else {
+            return;
+        };
+        if list.foreground == foreground {
+            return;
+        }
+        list.foreground = foreground;
+        state.emit(terminal_id);
     }
 
     /// Drop `terminal_id`'s list, whatever its state; `by` is what the audit
@@ -556,11 +769,7 @@ impl StagingStore {
 
     /// The last operator app is gone: no one is left to see a list.
     pub(crate) fn app_closed(&self) {
-        let mut state = self.lock();
-        let ids: Vec<String> = state.lists.keys().cloned().collect();
-        for id in ids {
-            state.remove_list(&id, "app_closed");
-        }
+        self.clear_all("app_closed");
     }
 
     // ── reads and the outbox ──────────────────────────────────────────────────
@@ -616,11 +825,18 @@ pub(crate) fn frame_of(list: &StagingList) -> ServerMsg {
         agent_name: list.agent_name.clone(),
         revision: list.revision,
         entries: wire_entries(list),
+        enabled: true,
+        foreground: list.foreground.clone(),
     }
 }
 
 /// "No list": the app closes the drawer.
-pub(crate) fn none_frame(terminal_id: &str, pane_id: &str, revision: u64) -> ServerMsg {
+pub(crate) fn none_frame(
+    terminal_id: &str,
+    pane_id: &str,
+    revision: u64,
+    enabled: bool,
+) -> ServerMsg {
     ServerMsg::TerminalStagingList {
         terminal_id: terminal_id.to_string(),
         pane_id: pane_id.to_string(),
@@ -629,5 +845,7 @@ pub(crate) fn none_frame(terminal_id: &str, pane_id: &str, revision: u64) -> Ser
         agent_name: String::new(),
         revision,
         entries: Vec::new(),
+        enabled,
+        foreground: None,
     }
 }

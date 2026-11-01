@@ -56,8 +56,9 @@ use store::{TerminalRecord, TerminalStore};
 use crate::ipc::pane_registry::{PaneError, PaneRegistry, SplitPosition};
 use crate::ipc::peer::SensitiveTags;
 use crate::ipc::protocol::{
-    ClientMsg, PaneContentWire, PaneTree, RemoteShellSummary, ServerMsg, TerminalClosedInfo,
-    TerminalInfo, TerminalKind, TerminalRequester, TerminalStatus, TerminalTarget,
+    ClientMsg, PaneContentWire, PaneTree, RemoteShellSummary, ServerMsg, StagingArchive,
+    TerminalClosedInfo, TerminalInfo, TerminalKind, TerminalRequester, TerminalStatus,
+    TerminalTarget,
 };
 
 /// Frames for one connection's terminal stream, queued together (a replay
@@ -112,6 +113,9 @@ pub struct OperatorConn {
     /// The connection's targeted channel: frames meant for this connection
     /// alone (a remote shell's confirm request and outcome).
     pub targeted: mpsc::UnboundedSender<ServerMsg>,
+    /// This connection's global staging switch (`terminal_staging_set_global`).
+    /// On until the app says otherwise, so an app that never sends it works.
+    pub staging_enabled: bool,
 }
 
 /// The capability an operator connection declares when it can show a
@@ -126,6 +130,32 @@ pub const TERMINAL_FOLLOW_UI: &str = "terminal_follow_ui";
 /// staging drawer: the only connections `terminal_staging_list` frames go to,
 /// and one must be connected before an agent may stage.
 pub const TERMINAL_STAGING_UI: &str = "terminal_staging_ui";
+
+/// How often the foreground program of a staged terminal is looked at.
+const FOREGROUND_PROBE_EVERY: Duration = Duration::from_millis(250);
+
+/// What the staging switch of every connected app adds up to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StagingGlobal {
+    /// No app that can show the drawer is connected.
+    NoOperator,
+    /// Apps are connected and every one has staging off.
+    Off,
+    On,
+}
+
+/// Looks at what is in the foreground of a terminal (tests fake it).
+pub(crate) trait ForegroundProbe: Send + Sync {
+    fn probe(&self, terminal_id: &str, session: &TerminalSession) -> session::Foreground;
+}
+
+struct RealForegroundProbe;
+
+impl ForegroundProbe for RealForegroundProbe {
+    fn probe(&self, _terminal_id: &str, session: &TerminalSession) -> session::Foreground {
+        session.foreground()
+    }
+}
 
 /// Why a terminal request failed. Nothing changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +189,8 @@ pub enum TerminalError {
     InvalidSize,
     /// The bytes were not valid base64.
     InvalidBytes,
+    /// A `terminal_staging_ui_event` named an event outside the fixed set.
+    InvalidStagingEvent,
     Pane(PaneError),
     /// The process could not be started.
     OpenFailed,
@@ -181,6 +213,7 @@ impl TerminalError {
             TerminalError::InvalidWorkingDirectory => "invalid_working_directory",
             TerminalError::InvalidSize => "invalid_size",
             TerminalError::InvalidBytes => "invalid_bytes",
+            TerminalError::InvalidStagingEvent => "invalid_event",
             TerminalError::Pane(e) => e.code(),
             TerminalError::OpenFailed => "terminal_open_failed",
         }
@@ -343,6 +376,12 @@ enum RefusalKey {
         focus: Option<String>,
         code: String,
     },
+    /// A counted staging UI event of one terminal (its own budget, so an app
+    /// bug cannot grow the audit file without bound).
+    StagingUi {
+        terminal_id: String,
+        event: String,
+    },
 }
 
 impl RefusalKey {
@@ -370,12 +409,16 @@ impl RefusalKey {
         match self {
             Self::Channel(channel) => *channel,
             Self::Read { .. } | Self::Staging { .. } => RefusalChannel::Mcp,
+            Self::StagingUi { .. } => RefusalChannel::Ipc,
         }
     }
 
     /// Is this a (focus, code) budget, which ends with its window?
     fn is_per_focus(&self) -> bool {
-        matches!(self, Self::Read { .. } | Self::Staging { .. })
+        matches!(
+            self,
+            Self::Read { .. } | Self::Staging { .. } | Self::StagingUi { .. }
+        )
     }
 }
 
@@ -594,8 +637,13 @@ impl TerminalManager {
         for t in self.terminals.values() {
             t.fanout.detach(conn_key);
         }
+        let before = self.staging_global();
         self.operator_conns.remove(conn_key);
         self.end_remote_request_if_unanswerable();
+        // The last enabled app went and others stay off: nothing may be staged.
+        if before == StagingGlobal::On && self.staging_global() == StagingGlobal::Off {
+            self.staging_global_changed(before);
+        }
     }
 
     // ── opening ──────────────────────────────────────────────────────────────
@@ -945,7 +993,26 @@ impl TerminalManager {
         terminal_id: &str,
         bytes: &[u8],
     ) -> Result<(), TerminalError> {
-        self.write_bytes(cap, terminal_id, bytes, true)
+        self.write_bytes(cap, terminal_id, bytes, Some("keystroke"))
+    }
+
+    /// [`Self::input`] with where it came from (`terminal_input.via`). Only
+    /// `stage_insert` is known: a person placed a staged command at the prompt,
+    /// which counts as activity under that name. Any other value counts as a
+    /// keystroke: an unknown value is never trusted.
+    pub fn input_via(
+        &mut self,
+        cap: &OperatorCap,
+        terminal_id: &str,
+        bytes: &[u8],
+        via: Option<&str>,
+    ) -> Result<(), TerminalError> {
+        let activity = if via == Some("stage_insert") {
+            "stage_insert"
+        } else {
+            "keystroke"
+        };
+        self.write_bytes(cap, terminal_id, bytes, Some(activity))
     }
 
     /// Bytes the terminal emulator sent by itself (`terminal_input` with
@@ -960,7 +1027,7 @@ impl TerminalManager {
         terminal_id: &str,
         bytes: &[u8],
     ) -> Result<(), TerminalError> {
-        self.write_bytes(cap, terminal_id, bytes, false)
+        self.write_bytes(cap, terminal_id, bytes, None)
     }
 
     fn write_bytes(
@@ -968,7 +1035,7 @@ impl TerminalManager {
         _cap: &OperatorCap,
         terminal_id: &str,
         bytes: &[u8],
-        is_keystroke: bool,
+        activity: Option<&'static str>,
     ) -> Result<(), TerminalError> {
         let t = self
             .terminals
@@ -987,8 +1054,8 @@ impl TerminalManager {
         });
         // Only the operator's keystrokes count as activity: this is the one
         // place (with keep-alive) the idle clock is reset.
-        if written.is_ok() && is_keystroke {
-            self.reset_idle(terminal_id, "keystroke");
+        if let (true, Some(via)) = (written.is_ok(), activity) {
+            self.reset_idle(terminal_id, via);
         }
         written
     }
@@ -1382,10 +1449,183 @@ impl TerminalManager {
         Arc::clone(&self.staging)
     }
 
-    /// Is a verified operator app that declared [`TERMINAL_STAGING_UI`] still
-    /// connected? Nothing may be staged without one: no one would see it.
-    pub(crate) fn staging_ui_connected(&self) -> bool {
-        !self.staging_conns().is_empty()
+    /// Is staging on? `NoOperator`: no app that can show the drawer is
+    /// connected. `Off`: some are, and every one has the global switch off.
+    pub(crate) fn staging_global(&self) -> StagingGlobal {
+        let mut any = false;
+        for c in self.operator_conns.values().filter(|c| {
+            !c.targeted.is_closed() && c.capabilities.iter().any(|cap| cap == TERMINAL_STAGING_UI)
+        }) {
+            any = true;
+            if c.staging_enabled {
+                return StagingGlobal::On;
+            }
+        }
+        if any {
+            StagingGlobal::Off
+        } else {
+            StagingGlobal::NoOperator
+        }
+    }
+
+    /// The user turned staging off or on for one terminal.
+    pub fn staging_set_enabled(
+        &mut self,
+        _cap: &OperatorCap,
+        terminal_id: &str,
+        enabled: bool,
+    ) -> Result<(), TerminalError> {
+        let pane_id = self
+            .terminals
+            .get(terminal_id)
+            .map(|t| t.info.pane_id.clone())
+            .ok_or(TerminalError::UnknownTerminal)?;
+        let follower = self
+            .follow
+            .as_ref()
+            .and_then(|f| f.current_follower(terminal_id))
+            .map(|f| {
+                let name = staging::text::sanitize_agent_name(None, &f.tag);
+                (f.tag, name)
+            });
+        self.staging.set_enabled(
+            terminal_id,
+            &pane_id,
+            enabled,
+            follower.as_ref().map(|(t, n)| (t.as_str(), n.as_str())),
+        );
+        self.flush_staging();
+        Ok(())
+    }
+
+    /// One connection's global staging switch. When the last enabled
+    /// connection goes off every list is cleared; when staging comes back on
+    /// every followed terminal gets an empty list for its current follower.
+    pub fn staging_set_global(
+        &mut self,
+        _cap: &OperatorCap,
+        conn_key: &str,
+        enabled: bool,
+    ) -> Result<(), TerminalError> {
+        let before = self.staging_global();
+        if let Some(conn) = self.operator_conns.get_mut(conn_key) {
+            conn.staging_enabled = enabled;
+        }
+        self.staging_global_changed(before);
+        Ok(())
+    }
+
+    /// React to the global state moving from `before`.
+    fn staging_global_changed(&self, before: StagingGlobal) {
+        match (before, self.staging_global()) {
+            (StagingGlobal::On, StagingGlobal::Off) => self.staging.clear_all("disabled"),
+            (StagingGlobal::Off | StagingGlobal::NoOperator, StagingGlobal::On) => {
+                self.enable_staging_for_followers()
+            }
+            _ => return,
+        }
+        self.flush_staging();
+    }
+
+    fn enable_staging_for_followers(&self) {
+        let Some(follow) = &self.follow else {
+            return;
+        };
+        for (id, t) in &self.terminals {
+            if let Some(f) = follow.current_follower(id) {
+                let name = staging::text::sanitize_agent_name(None, &f.tag);
+                self.staging
+                    .enabled_for_follower(id, &t.info.pane_id, &f.tag, &name);
+            }
+        }
+    }
+
+    /// A counted UI event (`confirm_cancelled`, `just_changed`). Anything else
+    /// is refused and writes nothing. Audited within a per-(terminal, event)
+    /// budget.
+    pub fn staging_ui_event(
+        &mut self,
+        _cap: &OperatorCap,
+        terminal_id: &str,
+        event: &str,
+    ) -> Result<(), TerminalError> {
+        if !matches!(event, "confirm_cancelled" | "just_changed") {
+            self.audit_refused(
+                RefusalChannel::Ipc,
+                "staging_ui_event",
+                Some(TerminalError::InvalidStagingEvent.code()),
+                Some(terminal_id),
+                None,
+                None,
+            );
+            return Err(TerminalError::InvalidStagingEvent);
+        }
+        if !self.terminals.contains_key(terminal_id) {
+            return Err(TerminalError::UnknownTerminal);
+        }
+        if self.take_refusal_budget(RefusalKey::StagingUi {
+            terminal_id: terminal_id.to_string(),
+            event: event.to_string(),
+        }) {
+            self.record(AuditEvent::StagingUiEvent {
+                terminal_id: Some(terminal_id.to_string()).filter(|id| is_id_shaped(id)),
+                ui_event: event.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Probe the foreground of every local, running terminal whose staging
+    /// list is worth it, outside every lock but the manager's brief ones, and
+    /// tell the store (which emits a frame only when the value changed).
+    pub(crate) fn foreground_tick(mgr: &Arc<Mutex<TerminalManager>>, probe: &dyn ForegroundProbe) {
+        let (store, sessions) = {
+            let m = mgr.lock().unwrap_or_else(|e| e.into_inner());
+            let targets = m.staging.probe_targets();
+            let sessions: Vec<(String, Arc<TerminalSession>)> = targets
+                .into_iter()
+                .filter_map(|id| {
+                    let t = m.terminals.get(&id)?;
+                    (t.info.kind == TerminalKind::Local && t.info.status == TerminalStatus::Running)
+                        .then(|| Some((id, Arc::clone(t.session.as_ref()?))))
+                        .flatten()
+                })
+                .collect();
+            (m.staging(), sessions)
+        };
+        if sessions.is_empty() {
+            return;
+        }
+        for (id, session) in sessions {
+            let value = match probe.probe(&id, &session) {
+                session::Foreground::Shell => None,
+                session::Foreground::Program(name) => Some(name),
+                // Fails toward production treatment.
+                session::Foreground::Unknown => Some("unknown program".to_string()),
+            };
+            store.set_foreground(&id, value);
+        }
+        mgr.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .flush_staging();
+    }
+
+    /// Start the foreground check for `mgr` (every 250 ms). Ends with the manager.
+    pub fn start_foreground_monitor(mgr: &Arc<Mutex<TerminalManager>>) {
+        let weak = Arc::downgrade(mgr);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(FOREGROUND_PROBE_EVERY);
+            loop {
+                tick.tick().await;
+                let Some(mgr) = weak.upgrade() else {
+                    return;
+                };
+                let _ = tokio::task::spawn_blocking(move || {
+                    Self::foreground_tick(&mgr, &RealForegroundProbe)
+                })
+                .await;
+            }
+        });
     }
 
     /// The targeted channels of the operator connections that declared
@@ -1429,6 +1669,7 @@ impl TerminalManager {
                     by,
                     entries,
                     bytes,
+                    unused,
                 } => AuditEvent::StagingChanged {
                     terminal_id,
                     tag: self.audit_tag(&owner_tag),
@@ -1436,17 +1677,20 @@ impl TerminalManager {
                     by: by.to_string(),
                     entries,
                     bytes,
+                    unused,
                 },
                 StagingAudit::Inserted {
                     terminal_id,
                     entry_number,
                     bytes,
                     confirmed,
+                    first,
                 } => AuditEvent::StagingInserted {
                     terminal_id: Some(terminal_id).filter(|id| is_id_shaped(id)),
                     entry_number,
                     bytes,
                     confirmed,
+                    first,
                 },
             });
         }
@@ -1491,8 +1735,9 @@ impl TerminalManager {
         _cap: &OperatorCap,
         terminal_id: &str,
         entry_id: &str,
+        archive: Option<StagingArchive>,
     ) -> Result<(), TerminalError> {
-        let found = self.staging.user_remove(terminal_id, entry_id);
+        let found = self.staging.user_remove(terminal_id, entry_id, archive);
         self.flush_staging();
         found.then_some(()).ok_or(TerminalError::UnknownEntry)
     }
@@ -1701,6 +1946,7 @@ impl TerminalManager {
     fn refusal_key_fields(&self, key: &RefusalKey) -> (Option<String>, Option<String>) {
         match key {
             RefusalKey::Channel(_) => (None, None),
+            RefusalKey::StagingUi { event, .. } => (Some(event.clone()), None),
             RefusalKey::Read { focus, code } | RefusalKey::Staging { focus, code } => (
                 Some(code.clone()),
                 focus.as_deref().map(|f| self.audit_tag(f)),
@@ -1958,6 +2204,9 @@ pub fn op_of(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::TerminalStagingInserted { .. } => "staging_inserted",
         ClientMsg::TerminalStagingRemove { .. } => "staging_remove",
         ClientMsg::TerminalStagingClear { .. } => "staging_clear",
+        ClientMsg::TerminalStagingSetEnabled { .. } => "staging_set_enabled",
+        ClientMsg::TerminalStagingSetGlobal { .. } => "staging_set_global",
+        ClientMsg::TerminalStagingUiEvent { .. } => "staging_ui_event",
         // The remote-shell verbs are all "control" to the audit trail.
         ClientMsg::RemoteShellTargetsRequest
         | ClientMsg::RemoteShellOpen { .. }
@@ -1982,7 +2231,9 @@ pub fn terminal_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::TerminalSendSelection { terminal_id, .. }
         | ClientMsg::TerminalStagingInserted { terminal_id, .. }
         | ClientMsg::TerminalStagingRemove { terminal_id, .. }
-        | ClientMsg::TerminalStagingClear { terminal_id } => Some(terminal_id),
+        | ClientMsg::TerminalStagingClear { terminal_id }
+        | ClientMsg::TerminalStagingSetEnabled { terminal_id, .. }
+        | ClientMsg::TerminalStagingUiEvent { terminal_id, .. } => Some(terminal_id),
         ClientMsg::TerminalRefusalReport { terminal_id, .. } => terminal_id.as_deref(),
         _ => None,
     }

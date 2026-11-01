@@ -169,6 +169,7 @@ async fn type_line(app: &mut Unix, terminal_id: &str, line: &str) {
         terminal_id: terminal_id.into(),
         bytes: B64.encode(format!("{line}\r")),
         auto_reply: false,
+        via: None,
     })
     .await;
 }
@@ -185,6 +186,7 @@ where
         terminal_id: terminal_id.into(),
         bytes: B64.encode(bytes),
         auto_reply: true,
+        via: None,
     })
     .await;
 }
@@ -1042,6 +1044,7 @@ where
         terminal_id: terminal_id.into(),
         bytes: B64.encode(format!("{line}\r")),
         auto_reply: false,
+        via: None,
     })
     .await;
 }

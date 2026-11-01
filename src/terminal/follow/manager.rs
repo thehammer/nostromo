@@ -668,17 +668,15 @@ impl FollowManager {
                     self.audit_delivery(terminal_id, &follow, DeliveryKind::Screen, &delivery);
                 }
             }
-            // A new local follower starts with an empty staging list (the
-            // store's lock is a leaf: held only inside this call). A remote
-            // terminal gets none: staging into one is opened deliberately later.
-            if info.kind == TerminalKind::Local {
-                self.staging.follow_started(
-                    terminal_id,
-                    &info.pane_id,
-                    follower_tag,
-                    &sanitize_agent_name(None, follower_tag),
-                );
-            }
+            // A new follower of any terminal starts with an empty staging list
+            // (the store's lock is a leaf: held only inside this call), unless
+            // the user turned staging off for it.
+            self.staging.follow_started(
+                terminal_id,
+                &info.pane_id,
+                follower_tag,
+                &sanitize_agent_name(None, follower_tag),
+            );
             state.follows.insert(terminal_id.to_string(), follow);
             self.spawn_pump(terminal_id, id, receiver);
         }

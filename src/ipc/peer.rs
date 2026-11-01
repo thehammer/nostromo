@@ -1063,6 +1063,9 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::TerminalStagingInserted { .. }
         | ClientMsg::TerminalStagingRemove { .. }
         | ClientMsg::TerminalStagingClear { .. }
+        | ClientMsg::TerminalStagingSetEnabled { .. }
+        | ClientMsg::TerminalStagingSetGlobal { .. }
+        | ClientMsg::TerminalStagingUiEvent { .. }
         // Mother notice switches decide what wakes the user's sessions: the
         // operator app only.
         | ClientMsg::MotherNoticeSettingsSet { .. } => NetworkPolicy::Refused,
@@ -1155,6 +1158,9 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::TerminalStagingInserted { .. }
         | ClientMsg::TerminalStagingRemove { .. }
         | ClientMsg::TerminalStagingClear { .. }
+        | ClientMsg::TerminalStagingSetEnabled { .. }
+        | ClientMsg::TerminalStagingSetGlobal { .. }
+        | ClientMsg::TerminalStagingUiEvent { .. }
         // Names a focus tag, but is refused for a network peer whatever it names.
         | ClientMsg::MotherNoticeSettingsSet { .. } => false,
     }
@@ -2002,6 +2008,7 @@ mod tests {
                 terminal_id: "t".into(),
                 bytes: "bHMK".into(),
                 auto_reply: false,
+                via: None,
             },
             ClientMsg::TerminalResize {
                 terminal_id: "t".into(),
@@ -2061,9 +2068,19 @@ mod tests {
             ClientMsg::TerminalStagingRemove {
                 terminal_id: "t".into(),
                 entry_id: "s-00000001".into(),
+                archive: None,
             },
             ClientMsg::TerminalStagingClear {
                 terminal_id: "t".into(),
+            },
+            ClientMsg::TerminalStagingSetEnabled {
+                terminal_id: "t".into(),
+                enabled: false,
+            },
+            ClientMsg::TerminalStagingSetGlobal { enabled: false },
+            ClientMsg::TerminalStagingUiEvent {
+                terminal_id: "t".into(),
+                event: "just_changed".into(),
             },
             ClientMsg::MotherNoticeSettingsSet {
                 scope: crate::mother::notices::NoticeScope::Focus,
@@ -2109,7 +2126,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 66;
+    const CLIENT_MSG_VARIANTS: usize = 69;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2180,6 +2197,9 @@ mod tests {
             ClientMsg::TerminalStagingRemove { .. } => 63,
             ClientMsg::TerminalStagingClear { .. } => 64,
             ClientMsg::MotherNoticeSettingsSet { .. } => 65,
+            ClientMsg::TerminalStagingSetEnabled { .. } => 66,
+            ClientMsg::TerminalStagingSetGlobal { .. } => 67,
+            ClientMsg::TerminalStagingUiEvent { .. } => 68,
         }
     }
 

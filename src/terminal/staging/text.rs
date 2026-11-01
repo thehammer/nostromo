@@ -25,6 +25,12 @@ pub enum StagingTextCode {
     LooksLikeSecret,
     /// It starts an ECS exec session, an SSM session or the like.
     RemoteShellCommand,
+    /// Shell history expansion (`!!`, `^a^b`, `r`, `fc`, `history`) in a
+    /// terminal that is not a plain local shell at a prompt: what runs may
+    /// differ from what the user reads.
+    HistoryExpansion,
+    /// It would type into another terminal (tmux `send-keys`, screen `stuff`).
+    TypesIntoAnotherTerminal,
 }
 
 impl StagingTextCode {
@@ -36,6 +42,8 @@ impl StagingTextCode {
             Self::NoteTooLong => "note_too_long",
             Self::LooksLikeSecret => "looks_like_secret",
             Self::RemoteShellCommand => "remote_shell_command",
+            Self::HistoryExpansion => "history_expansion",
+            Self::TypesIntoAnotherTerminal => "types_into_another_terminal",
         }
     }
 
@@ -49,12 +57,23 @@ impl StagingTextCode {
             Self::NoteTooLong => "a note is at most 120 characters",
             Self::LooksLikeSecret => "it contains something that looks like a secret or personal data; do not stage it",
             Self::RemoteShellCommand => "ask with nostromo.request_remote_shell instead",
+            Self::HistoryExpansion => {
+                "history expansion runs something other than what the user reads; spell the command out"
+            }
+            Self::TypesIntoAnotherTerminal => "staging never types into another pane",
         }
     }
 }
 
 /// May `text` be staged as a command? The first failing rule wins.
 pub fn validate_command(text: &str) -> Result<(), StagingTextCode> {
+    validate_command_in(text, false)
+}
+
+/// [`validate_command`], and when `no_history_expansion` also refuse text that
+/// uses shell history expansion (set for a terminal that is not a plain local
+/// shell: remote, or a local one with a program in the foreground).
+pub fn validate_command_in(text: &str, no_history_expansion: bool) -> Result<(), StagingTextCode> {
     use StagingTextCode as Code;
     if text.trim().is_empty() {
         return Err(Code::InvalidText);
@@ -78,7 +97,46 @@ pub fn validate_command(text: &str) -> Result<(), StagingTextCode> {
     if crate::approvals::guard::remote_shell_marker(text).is_some() {
         return Err(Code::RemoteShellCommand);
     }
+    if types_into_another_terminal(text) {
+        return Err(Code::TypesIntoAnotherTerminal);
+    }
+    if no_history_expansion && uses_history_expansion(text) {
+        return Err(Code::HistoryExpansion);
+    }
     Ok(())
+}
+
+/// tmux input verbs, or GNU screen's `-X stuff`.
+fn types_into_another_terminal(text: &str) -> bool {
+    if crate::approvals::guard::tmux_input_marker(text) {
+        return true;
+    }
+    static SCREEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    SCREEN
+        .get_or_init(|| regex::Regex::new(r"(?is)screen.*-X.*stuff").unwrap())
+        .is_match(text)
+}
+
+/// Would a shell expand history in `text`? Quotes are not parsed: asking or
+/// refusing is the cheap side. A `!` followed by anything but a space, `=` or
+/// `(`; text starting with `^`; or a command segment (split on `;`, `&&`,
+/// `||`, `|`) whose first word is exactly `r`, `fc` or `history`.
+pub fn uses_history_expansion(text: &str) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.iter().enumerate().any(|(i, c)| {
+        *c == '!'
+            && chars
+                .get(i + 1)
+                .is_some_and(|n| !matches!(n, ' ' | '=' | '('))
+    }) {
+        return true;
+    }
+    if text.starts_with('^') {
+        return true;
+    }
+    text.split([';', '|', '&'])
+        .filter_map(|seg| seg.split_whitespace().next())
+        .any(|w| matches!(w, "r" | "fc" | "history"))
 }
 
 /// The note as it is kept: `Ok(None)` when nothing is left of it (so a note of
