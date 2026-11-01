@@ -64,7 +64,7 @@ decode.
 
 **Merging.** A second notification while the newest turn is an open wake with no reply yet (only notes)
 joins that turn: its items are appended (50 cap, then `omitted`), `user_input` and `timestamp` stay the
-first's (the Mac identity key stays stable), and no `TurnDelta` is emitted. The reader instead broadcasts
+first's (the Mac identity key stays stable; a merged two-event wake reads `⟲ Monitor: new output "…"`, the first event's line, not `⟲ 2 background events`), and no `TurnDelta` is emitted. The reader instead broadcasts
 `SessionEvent::TurnOrigin`, which the forwarder sends as the top-level frame
 
 ```json
@@ -92,8 +92,12 @@ stored session draws as a wake marker. That is navigation only, the same caveat 
 
 Ledger notes are positioned by prompt number. Wake turns are not prompts, so `merge_ledger_notes` counts
 only turns whose origin is not `TaskWake`: a note after prompt N attaches to the last turn of prompt N's
-group (the counted turn and the wake turns after it, before the next counted turn), where a live
-`add_note` puts it. Notes past the newest group follow the newest turn; notes whose prompt was trimmed are
+group (the counted turn and the wake turns after it, before the next counted turn). A live `add_note`
+puts a note on the newest turn, which is the same turn only when no wake came between the note and the
+next prompt. **Known limitation:** a model switch made while idle after prompt N and before the wake that
+follows lands live on prompt N's turn, but after a reload `after_prompt` is still N and wakes do not
+count, so it moves to the wake turn. The effect is cosmetic (a "switched to X" note drifts past one turn);
+a proper fix needs a wake count in the stored note. Notes past the newest group follow the newest turn; notes whose prompt was trimmed are
 dropped even if its wake turns survive.
 
 ## Network peers

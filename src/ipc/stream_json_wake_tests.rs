@@ -719,6 +719,15 @@ fn an_escaped_hostile_summary_stays_one_plain_item() {
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0].task_id.as_deref(), Some("real1"));
     assert_eq!(items[0].kind, "shell");
+    // An entity-decoded `<task-notification>` in a description is plain,
+    // capped, one-line text: data, never an element. It still carries none of
+    // the body or path sentinels.
+    let description = &items[0].description;
+    assert!(description.contains("<task-notification>"), "{description}");
+    assert!(description.chars().count() <= 200 && !description.contains('\n'));
+    for bad in FORBIDDEN.iter().filter(|b| !b.contains("task-")) {
+        assert!(!description.contains(bad), "holds {bad:?}: {description}");
+    }
 }
 
 #[test]
@@ -1517,9 +1526,10 @@ fn notes_agree_live_and_rebuilt_when_trimmed_at_a_group_boundary() {
 }
 
 #[test]
-fn a_note_made_before_a_wake_goes_after_the_last_turn_of_its_prompts_group() {
-    // Made after prompt 1, before the wake that came later: after a rebuild it
-    // sits after the group's last turn.
+fn a_rebuild_puts_a_note_after_the_last_turn_of_its_prompts_group() {
+    // After a rebuild a note for prompt 1 sits after the group's last turn
+    // (the wake turn). This pins the rebuilt side only; see the next test for
+    // where a live `add_note` put the same note.
     let steps = [Step::P("p1"), Step::W("a"), Step::P("p2")];
 
     let t = rebuilt(&steps, &[ledger(1, "switch")], 100);
@@ -1983,5 +1993,172 @@ fn the_golden_frame_carries_the_turn_id_and_the_full_merged_origin() {
     assert_eq!(
         v["origin"],
         serde_json::to_value(turn.origin.as_ref().unwrap()).unwrap()
+    );
+}
+
+// ── review fix-ups ────────────────────────────────────────────────────────────
+
+#[test]
+fn a_note_made_between_a_prompt_and_the_wake_after_it_sits_differently_live_and_rebuilt() {
+    // KNOWN LIMITATION, pinned so a fix knows what to change. Live, a switch
+    // made while idle after prompt 1 and before the wake lands on prompt 1's
+    // turn (`add_note` uses `turns.last()`). The stored note only records
+    // `after_prompt = 1`, and wakes do not count, so a rebuild puts it on the
+    // wake turn. A proper fix needs a wake count in the stored note.
+    let steps = [
+        Step::P("p1"),
+        Step::Note("switch"),
+        Step::W("a"),
+        Step::P("p2"),
+    ];
+    let (live, notes) = run_live(&steps);
+
+    let rebuilt = rebuilt(&steps, &notes, 100);
+
+    assert_eq!(
+        notes_per_turn(&live.snapshot()),
+        vec![s(&["switch"]), vec![], vec![]],
+        "live"
+    );
+    assert_eq!(
+        notes_per_turn(&rebuilt.snapshot()),
+        vec![vec![], s(&["switch"]), vec![]],
+        "rebuilt"
+    );
+}
+
+#[test]
+fn a_resumed_transcript_broadcasts_no_origin_frame_for_an_old_merge() {
+    // Two wakes with no reply between merge while the stored history replays.
+    let stored = [
+        stored_user("p1"),
+        reply("ok"),
+        stored_user(&wake_content("a")),
+        stored_user(&wake_content("b")),
+        reply("ok"),
+    ]
+    .join("\n");
+    let mut resumed = transcript_from_jsonl(&stored, 100);
+    resumed.set_live(true);
+
+    resumed.ingest_line(&live_user("next"));
+
+    assert_eq!(resumed.take_origin_update(), None);
+}
+
+#[test]
+fn decoding_a_megabyte_of_ampersands_takes_bounded_time() {
+    let input = "&".repeat(1 << 20);
+
+    let started = std::time::Instant::now();
+    let out = decode_xml_entities(&input);
+
+    assert_eq!(out, input);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn entity_decoding_is_unchanged_for_normal_and_multibyte_input() {
+    assert_eq!(
+        decode_xml_entities("a &lt;b&gt; &amp;lt; &#65;&#x42;"),
+        "a <b> &lt; AB"
+    );
+    assert_eq!(decode_xml_entities("&;&nope;&"), "&;&nope;&");
+    // Multi-byte characters straddling the 11-byte window.
+    assert_eq!(decode_xml_entities("&ééééé;x"), "&ééééé;x");
+    assert_eq!(decode_xml_entities("&éééééé &lt;"), "&éééééé <");
+    assert_eq!(decode_xml_entities("😀&amp;😀&"), "😀&😀&");
+    // An entity name of the longest accepted length still decodes.
+    assert_eq!(decode_xml_entities("&#x1F600;"), "😀");
+}
+
+#[test]
+fn a_reloaded_transcript_cannot_tell_who_wrote_a_turn_so_a_pasted_notification_reads_back_as_a_wake(
+) {
+    // KNOWN CAVEAT: the stored session has no author. A notification the user
+    // pasted is indistinguishable from the CLI's own, so a reload draws it as
+    // a wake marker. Navigation only; the live path disowns it.
+    let pasted = notification("completed", "Monitor event: \"pasted by a person\"");
+    let stored = [
+        stored_user("p1"),
+        reply("ok"),
+        stored_user(&pasted),
+        reply("ok"),
+    ]
+    .join("\n");
+
+    let t = transcript_from_jsonl(&stored, 100);
+
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 2);
+    assert!(is_wake(&turns[1]), "{:?}", turns[1].origin);
+}
+
+/// The text of every logging macro call in `source`.
+fn log_calls(source: &str) -> Vec<String> {
+    let mut calls = Vec::new();
+    for mac in ["info!(", "warn!(", "debug!(", "trace!(", "error!("] {
+        let mut from = 0;
+        while let Some(at) = source[from..].find(mac) {
+            let start = from + at;
+            let mut depth = 0i32;
+            let mut end = source.len();
+            for (i, c) in source[start..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = start + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            calls.push(source[start..end].to_owned());
+            from = start + mac.len();
+        }
+    }
+    calls
+}
+
+const LOGGED_FIELDS: &[&str] = &[
+    "title",
+    "summary",
+    "description",
+    "path",
+    "output_file",
+    "user_input",
+];
+
+fn leaking_calls(source: &str, only_wake: bool) -> Vec<String> {
+    log_calls(source)
+        .into_iter()
+        .filter(|c| !only_wake || c.to_lowercase().contains("wake"))
+        .filter(|c| LOGGED_FIELDS.iter().any(|f| c.contains(f)))
+        .collect()
+}
+
+#[test]
+fn no_log_line_in_the_wake_code_holds_a_title_summary_or_path() {
+    // BA6a-4 canary: a source scan. The parser logs nothing of an item; the
+    // session manager logs nothing about a wake that names those fields.
+    let parser = include_str!("stream_json.rs");
+    let manager = include_str!("session_manager/mod.rs");
+    let login = include_str!("session_manager/login.rs");
+
+    assert_eq!(leaking_calls(parser, false), Vec::<String>::new());
+    assert_eq!(leaking_calls(manager, true), Vec::<String>::new());
+    assert_eq!(leaking_calls(login, true), Vec::<String>::new());
+    // The scan is not vacuous: it sees logging calls, and it flags a leak.
+    assert!(!log_calls(manager).is_empty());
+    assert_eq!(
+        leaking_calls("info!(tag, \"wake {}\", item.description);", true).len(),
+        1
     );
 }

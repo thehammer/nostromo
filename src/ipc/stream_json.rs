@@ -1065,9 +1065,15 @@ fn decode_xml_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let tail = &rest[amp..];
-        let decoded = tail
+        // Look for the `;` in a bounded window only: a scan to the end of the
+        // string for every `&` is quadratic. The window is cut on a char
+        // boundary so a multi-byte character never splits.
+        let mut window_end = tail.len().min(11);
+        while !tail.is_char_boundary(window_end) {
+            window_end -= 1;
+        }
+        let decoded = tail[..window_end]
             .find(';')
-            .filter(|&end| end <= 10)
             .and_then(|end| decode_entity(&tail[1..end]).map(|c| (c, end)));
         match decoded {
             Some((c, end)) => {
@@ -2352,6 +2358,8 @@ pub fn transcript_from_jsonl(content: &str, max_turns: usize) -> SessionTranscri
     }
     t.flush();
     t.truncate_to_last(max_turns);
+    // A wake merged while replaying is history, not news: no origin frame.
+    t.origin_update = None;
     // Rebase to the oldest SURVIVING turn, matching what `derive_summary`
     // reads via `turns.first()` today — preserves today's resume-summary
     // behavior exactly, even though the true first prompt of the whole
