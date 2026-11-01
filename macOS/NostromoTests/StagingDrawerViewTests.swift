@@ -2576,7 +2576,7 @@ extension StagingDrawerViewTests {
         XCTAssertTrue(local.drawer.tokenLabel.isHidden)
         XCTAssertEqual(local.drawer.accessibilityLabel(), "Staged commands")
 
-        let (_, running) = productionHost(kind: .local, foreground: "ssh")
+        let (_, running) = productionHost(foreground: "ssh", kind: .local)
         XCTAssertFalse(running.drawer.tokenLabel.isHidden)
         XCTAssertEqual(running.drawer.tokenLabel.stringValue, "RUNNING")
         XCTAssertEqual(leadLabel(in: running)?.stringValue, "ssh is running \u{00B7} Staged by Triage (2) \u{00B7} you press Enter")
