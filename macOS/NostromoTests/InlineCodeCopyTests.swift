@@ -213,7 +213,7 @@ final class InlineCodeCopyTests: XCTestCase {
     }
 
     func testHoveringAnUncopyableSpanShowsNoButton() {
-        let card = attachedCard("Link [`x`](http://u) and empty `` and `   ` here.")
+        let card = attachedCard("Link [`x`](http://u) and blank `   ` here.")
         var y = card.bounds.maxY - 1
         while y > 0 {
             var x: CGFloat = 1
