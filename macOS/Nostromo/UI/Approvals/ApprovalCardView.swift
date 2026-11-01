@@ -945,10 +945,12 @@ final class ApprovalCardView: NSView {
                 label.maximumNumberOfLines = 0
                 label.lineBreakMode = .byWordWrapping
                 label.isSelectable = true
-                label.isHidden = true
             }
             sessionOverridesLabel.textColor = ApprovalPalette.warning
         }
+        // Hidden until a rule is picked, and always hidden on a card with no candidates: a card without a
+        // `This session` menu takes no more room than it did before AP4.
+        for label in sessionLabels { label.isHidden = true }
 
         for v in [headlineLabel, pageLabel, pagePreviousButton, pageNextButton, collapseButton, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
                   formScroll, inputView, agentSaysLabel, noticeLabel, noteRow,

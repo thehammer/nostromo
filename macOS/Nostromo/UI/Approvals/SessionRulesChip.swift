@@ -172,17 +172,19 @@ final class SessionRulesChip: NSButton {
     /// The most rules a session may hold; the slot fits its text.
     static let countCap = 32
 
-    /// The width the input bar reserves when there is room: the longest text (`32 session rules`).
-    static let slotWidth: CGFloat = {
-        let width = NSAttributedString(string: text(count: countCap, fit: .full), attributes: [.font: font]).size().width
-        return ceil(width) + 2 * horizontalPadding
-    }()
+    /// The width the input bar reserves when there is room: the widest `N session rules` for any N up to the cap
+    /// (proportional digits make `20` wider than `32`), plus padding.
+    static let slotWidth: CGFloat = widest(.full)
 
-    /// The narrowest slot the bare count fits (`32`), plus padding.
-    static let countWidth: CGFloat = {
-        let width = NSAttributedString(string: text(count: countCap, fit: .countOnly), attributes: [.font: font]).size().width
+    /// The narrowest slot the bare count fits, plus padding.
+    static let countWidth: CGFloat = widest(.countOnly)
+
+    private static func widest(_ fit: Fit) -> CGFloat {
+        let width = (1 ... countCap)
+            .map { NSAttributedString(string: text(count: $0, fit: fit), attributes: [.font: font]).size().width }
+            .max() ?? 0
         return ceil(width) + 2 * horizontalPadding
-    }()
+    }
 
     /// What the chip says for `count` rules at `fit`.
     static func text(count: Int, fit: Fit) -> String {

@@ -494,6 +494,9 @@ final class SessionRuleCardTests: XCTestCase {
         let button = h.card.sessionButton!
         current = click(button, number: 1, time: time, in: h.window)
         XCTAssertTrue(h.card.selectSessionRule(h.card.options.sessionRules[index], control: button))
+        // What the host does when the card asks for more room (`onNeedsLayout`): measure again and lay out.
+        h.card.frame.size.height = h.card.preferredHeight(forWidth: h.card.frame.width, maxHeight: 520)
+        h.relayout()
     }
 
     // MARK: What the card offers
