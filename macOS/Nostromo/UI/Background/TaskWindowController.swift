@@ -20,8 +20,8 @@ enum TaskWindowFrame {
     static func clamp(_ frame: NSRect, to screens: [NSRect]) -> NSRect? {
         let best = screens.max { overlapArea(frame, $0) < overlapArea(frame, $1) }
         guard let screen = best, overlapArea(frame, screen) > 0 else { return nil }
-        let width = min(max(frame.width, minimumSize.width), screen.width)
-        let height = min(max(frame.height, minimumSize.height), screen.height)
+        let width = min(frame.width, screen.width)
+        let height = min(frame.height, screen.height)
         let x = min(max(frame.minX, screen.minX), screen.maxX - width)
         let y = min(max(frame.minY, screen.minY), screen.maxY - height)
         return NSRect(x: x, y: y, width: width, height: height)

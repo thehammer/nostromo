@@ -117,7 +117,7 @@ final class SubagentTaskView: NSView, TaskWindowBody {
     private var subscription: AnyCancellable?
     private var isRelayingOut = false
     private var isFollowing = true
-    private var lastBlockSignature = ""
+    private var lastBlockSignature: [String] = []
 
     /// The message shown instead of a conversation (`unavailableMessage`, `waitingMessage`); nil with one.
     var conversationMessage: String? { messageLabel.isHidden ? nil : messageLabel.stringValue }
@@ -253,8 +253,10 @@ final class SubagentTaskView: NSView, TaskWindowBody {
         let message = prompt.map { FoldTextSanitizer.sanitizeMultiline($0) } ?? Self.missingPrompt
         let turn = ChatTurn(id: turnId, userInput: message, timestamp: Date(timeIntervalSince1970: 0),
                             blocks: found.blocks, isComplete: ended)
-        let signature = found.blocks.map(\.kindCode).joined()
-        if let existing = turnView, signature.hasPrefix(lastBlockSignature), message == lastPrompt {
+        let signature = found.blocks.map { Self.signature(of: $0) }
+        // Blocks only added at the end go in through `update`; a text that changed where it stood (the
+        // attach snapshot replaced it) is not something `update` repaints, so that one is a new view.
+        if let existing = turnView, signature.starts(with: lastBlockSignature), message == lastPrompt {
             existing.update(turn: turn)
         } else {
             rebuildTurnView(turn)
@@ -291,7 +293,7 @@ final class SubagentTaskView: NSView, TaskWindowBody {
     private func dropTurnView() {
         turnView?.removeFromSuperview()
         turnView = nil
-        lastBlockSignature = ""
+        lastBlockSignature = []
         lastPrompt = ""
     }
 
@@ -304,6 +306,12 @@ final class SubagentTaskView: NSView, TaskWindowBody {
         label.isHidden = text == nil
         let new = text ?? ""
         if label.stringValue != new { label.stringValue = new }
+    }
+
+    /// What a block is, for telling "more blocks" from "a block changed": its kind, and a text's length.
+    private static func signature(of block: TurnBlock) -> String {
+        if case .text(let text) = block { return "t\(text.utf16.count)" }
+        return block.kindCode
     }
 
     private static func clipped(_ text: String) -> String {

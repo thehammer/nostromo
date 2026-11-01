@@ -1050,7 +1050,8 @@ final class TaskWindowTests: XCTestCase {
         XCTAssertEqual(w.manager.openCount, 50)
         XCTAssertGreaterThanOrEqual(w.pollScheduler.liveCount, 50, "precondition: every open window polls")
 
-        w.manager.closeAll()
+        // Inside a pool of its own: what AppKit autoreleases while closing is gone when this returns.
+        autoreleasepool { w.manager.closeAll() }
 
         XCTAssertEqual(w.manager.openCount, 0)
         XCTAssertEqual(w.pollScheduler.liveCount, 0, "no timer is live after the last window closed")

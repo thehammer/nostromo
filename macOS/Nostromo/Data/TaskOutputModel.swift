@@ -268,7 +268,8 @@ final class TaskOutputModel {
         phase = failedPhase
         guard text.isEmpty, state != newState else { return }
         state = newState
-        record(.status)
+        queue(.status)
+        flush()
     }
 
     private func applyTail(_ wire: SessionTaskOutputResultWire) {
@@ -289,6 +290,7 @@ final class TaskOutputModel {
         }
         isFillingHead = headStart != nil
         setText(Self.sanitize(wire.text), as: .replaced)
+        flush()
         if let headStart { fetchHeadChunk(at: headStart, limit: wire.startOffset, parts: []) }
     }
 
@@ -308,7 +310,8 @@ final class TaskOutputModel {
             // Done, or the daemon could not give the rest: what arrived is the head.
             self.isFillingHead = false
             let head = parts.joined()
-            if !head.isEmpty { self.insertHead(head) } else { self.record(.status) }
+            if !head.isEmpty { self.insertHead(head) } else { self.queue(.status) }
+            self.flush()
         }
     }
 
@@ -380,7 +383,8 @@ final class TaskOutputModel {
             let sizeChanged = wire.totalBytes != totalBytes
             totalBytes = wire.totalBytes
             if !added.isEmpty { appendText(added) }
-            if sizeChanged { record(.status) }
+            if sizeChanged { queue(.status) }
+            flush()
         case .unavailable, .refused, .error, .unknown:
             // The file is gone (or unreadable). Held text stays; nothing more is read for it.
             phase = .vanished
@@ -399,7 +403,8 @@ final class TaskOutputModel {
         let statusChanged = wire.totalBytes != totalBytes || cut != truncatedHead
         totalBytes = wire.totalBytes
         truncatedHead = cut
-        if textChanged { setText(fresh, as: .replaced) } else if statusChanged { record(.status) }
+        if textChanged { setText(fresh, as: .replaced) } else if statusChanged { queue(.status) }
+        flush()
     }
 
     // MARK: Text
@@ -407,14 +412,14 @@ final class TaskOutputModel {
     private func setText(_ new: String, as change: Change) {
         text = new
         heldBytes = new.utf8.count
-        record(change)
+        queue(change)
         onHeldBytesChanged?(self)
     }
 
     private func appendText(_ added: String) {
         text += added
         heldBytes += added.utf8.count
-        record(.appended(added))
+        queue(.appended(added))
         if heldBytes > Self.ceilingBytes { trimOldest() }
         onHeldBytesChanged?(self)
     }
@@ -422,7 +427,7 @@ final class TaskOutputModel {
     private func insertHead(_ head: String) {
         text = head + text
         heldBytes += head.utf8.count
-        record(.prepended(head))
+        queue(.prepended(head))
         onHeldBytesChanged?(self)
     }
 
@@ -435,7 +440,7 @@ final class TaskOutputModel {
         text = String(text[index...])
         heldBytes = text.utf8.count
         truncatedHead = true
-        record(.replaced)
+        queue(.replaced)
     }
 
     /// The daemon already strips escapes and controls; this is the second line of defence for text
@@ -449,7 +454,9 @@ final class TaskOutputModel {
 
     // MARK: Publishing
 
-    private func record(_ change: Change) {
+    /// Note a change. Nothing is delivered until `flush()`, so what one read changed (the text and the
+    /// size line) goes out as one delivery, not two.
+    private func queue(_ change: Change) {
         switch change {
         case .appended(let added): pendingAppend += added
         case .prepended(let head): pendingPrepend = head + pendingPrepend
@@ -459,11 +466,19 @@ final class TaskOutputModel {
             pendingPrepend = ""
         case .status: pendingStatus = true
         }
-        guard !deliveryScheduled else { return }
+    }
+
+    /// Deliver what is queued: at once when the last delivery was a quarter second ago or more, else
+    /// (once) when that quarter second is up.
+    private func flush() {
+        guard pendingReplace || pendingStatus || !pendingAppend.isEmpty || !pendingPrepend.isEmpty else { return }
         let elapsed = lastDelivery.map { now().timeIntervalSince($0) } ?? .infinity
         if elapsed >= Self.minimumInterval {
+            coalesceTimer?.invalidate()
+            coalesceTimer = nil
+            deliveryScheduled = false
             deliver()
-        } else {
+        } else if !deliveryScheduled {
             deliveryScheduled = true
             coalesceTimer = schedule(Self.minimumInterval - elapsed) { [weak self] in
                 guard let self else { return }

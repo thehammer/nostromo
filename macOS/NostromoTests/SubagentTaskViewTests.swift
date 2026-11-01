@@ -370,18 +370,17 @@ final class SubagentTaskViewTests: XCTestCase {
         XCTAssertTrue(rig.view.turnView === before, "an append does not rebuild what is on screen")
     }
 
-    func testAMessageStreamingInPlaceGrowsWithoutARebuild() throws {
+    func testAMessageThatChangedWhereItStoodShowsItsNewText() throws {
         let rig = makeRig(turns: [Fx.turn(complete: false, withResult: false)])
         rig.show(content())
-        let before = try XCTUnwrap(rig.view.turnView)
 
         var turn = rig.source!.turns[0]
         turn.blocks[7] = .text("SUB: Found two callers. And a third in a test.")
         rig.source!.turns[0] = turn
         rig.send(.updatedBlocks(index: 0, addedCount: 0))
 
-        XCTAssertTrue(rig.view.turnView === before)
-        XCTAssertTrue(FocusFixtures.contains("And a third in a test", in: before))
+        let shown = try XCTUnwrap(rig.view.turnView)
+        XCTAssertTrue(FocusFixtures.contains("And a third in a test", in: shown))
         XCTAssertEqual(rig.view.conversationBlockCount, 6)
     }
 
