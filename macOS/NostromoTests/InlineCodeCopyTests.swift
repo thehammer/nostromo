@@ -379,9 +379,9 @@ final class InlineCodeCopyTests: XCTestCase {
     }
 
     func testPointerOverANeighbouringSpansTextSwitchesHoverEvenNearTheButton() throws {
-        let card = attachedCard("`a` `b`")
+        let card = attachedCard("`a` `bbbbbbbb`")
         let pa = try hoverPoint(card, on: "a")
-        let bHits = hitPoints(card, for: "b")
+        let bHits = hitPoints(card, for: "bbbbbbbb")
         card.updateInlineHover(at: nil)
         card.updateInlineHover(at: pa)
         let aButton = try XCTUnwrap(card.inlineCopyButton)
@@ -390,7 +390,7 @@ final class InlineCodeCopyTests: XCTestCase {
         let candidates = bHits.filter { !aFrame.contains($0) }.sorted { $0.x < $1.x }
         let target = try XCTUnwrap(candidates.first, "no point over b's text outside a's button")
         card.updateInlineHover(at: target)
-        XCTAssertEqual(card.inlineCopyButton?.code, "b")
+        XCTAssertEqual(card.inlineCopyButton?.code, "bbbbbbbb")
     }
 
     func testRelayoutUnderAStationaryPointerShowsAndClearsTheButton() throws {
@@ -418,11 +418,12 @@ final class InlineCodeCopyTests: XCTestCase {
 
     func testDetachedCardReleasesItsTrackingAreaAndDeallocates() throws {
         weak var weakCard: MarkdownCardView?
-        var card: MarkdownCardView? = nil
         let md = "Run `make x` then ok"
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600),
                          styleMask: [.titled], backing: .buffered, defer: true)
         w.isReleasedWhenClosed = false
+        // Everything that touches the card, including detaching, stays inside the pool so
+        // autoreleased references from AppKit calls can't outlive it.
         try autoreleasepool {
             let c = MarkdownCardView(markdown: md, pasteboard: pb)
             c.presetWidth = 400
@@ -434,12 +435,10 @@ final class InlineCodeCopyTests: XCTestCase {
             c.updateInlineHover(at: try hoverPoint(c, on: "make x"))
             XCTAssertNotNil(c.inlineCopyButton)
             weakCard = c
-            card = c
+            c.removeFromSuperview()
+            XCTAssertTrue(c.trackingAreas.isEmpty, "detached card kept its tracking area")
+            XCTAssertNil(c.inlineCopyButton, "detached card kept its hover")
         }
-        card!.removeFromSuperview()
-        XCTAssertTrue(card!.trackingAreas.isEmpty, "detached card kept its tracking area")
-        XCTAssertNil(card!.inlineCopyButton, "detached card kept its hover")
-        autoreleasepool { card = nil }
         w.contentView = nil
         w.close()
         XCTAssertNil(weakCard, "card leaked after being detached and released")
