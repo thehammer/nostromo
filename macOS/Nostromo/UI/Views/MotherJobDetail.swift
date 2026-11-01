@@ -371,9 +371,35 @@ private class PhaseRibbonView: NSView {
 /// `[Details]` toggle that expands one line per history entry. Shown only for jobs the daemon annotated.
 /// A view action: the toggle changes only what is drawn, so it is not gesture-gated.
 final class MotherNoticeSectionView: NSView {
-    let summaryLabel = NSTextField.boundedLabel("", maxLines: 4)
+    /// A wrapping label with no intrinsic width: it takes the pane's width and wraps inside it, so a long
+    /// name can never set the detail's fitting width.
+    private final class WrapLabel: NSTextField {
+        override var intrinsicContentSize: NSSize {
+            var size = super.intrinsicContentSize
+            size.width = NSView.noIntrinsicMetric
+            return size
+        }
+        override func layout() {
+            super.layout()
+            if preferredMaxLayoutWidth != bounds.width {
+                preferredMaxLayoutWidth = bounds.width
+                invalidateIntrinsicContentSize()
+            }
+        }
+        static func make(maxLines: Int) -> NSTextField {
+            let f = WrapLabel(wrappingLabelWithString: "")
+            f.maximumNumberOfLines = maxLines
+            f.lineBreakMode = .byWordWrapping
+            f.isSelectable = false
+            f.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            f.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            return f
+        }
+    }
+
+    let summaryLabel = WrapLabel.make(maxLines: 4)
     let detailsButton = NSButton()
-    let detailsLabel = NSTextField.boundedLabel("", maxLines: 12)
+    let detailsLabel = WrapLabel.make(maxLines: 12)
     private let stack = NSStackView()
     private var collapsed: NSLayoutConstraint!
     private(set) var shown: MotherNoticeSectionModel?
