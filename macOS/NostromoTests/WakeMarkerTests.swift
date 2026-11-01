@@ -123,7 +123,7 @@ final class WakeMarkerViewContentTests: XCTestCase {
         XCTAssertTrue(marker.isAccessibilityElement())
         XCTAssertEqual(marker.accessibilityRole(), .button)
         XCTAssertEqual(marker.accessibilityLabel(), content.accessibilityLabel)
-        XCTAssertEqual(marker.accessibilityLabel(), "Mother update: MF4: In-pane plan viewer succeeded, pull request 391.")
+        XCTAssertEqual(marker.accessibilityLabel(), "Mother update: succeeded, MF4: In-pane plan viewer, pull request 391.")
     }
 
     func testAMarkerWithATargetHasAccessibilityHelp() {

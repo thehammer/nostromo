@@ -79,7 +79,7 @@ final class WakeMarkerTextTests: XCTestCase {
             let content = WakeMarkerText.motherNotice([item(title: "T", state: state)])
 
             XCTAssertEqual(content.line, "⟲ Mother: \(expected) \"T\"", state)
-            XCTAssertEqual(content.accessibilityLabel, "Mother update: T \(expected).", state)
+            XCTAssertEqual(content.accessibilityLabel, "Mother update: \(expected), T.", state)
         }
     }
 
@@ -91,9 +91,15 @@ final class WakeMarkerTextTests: XCTestCase {
 
     func testOneJobsAccessibilityLabelNamesTheStateAndThePullRequest() {
         XCTAssertEqual(WakeMarkerText.motherNotice([item(pr: 391)]).accessibilityLabel,
-                       "Mother update: MF4: In-pane plan viewer succeeded, pull request 391.")
+                       "Mother update: succeeded, MF4: In-pane plan viewer, pull request 391.")
         XCTAssertEqual(WakeMarkerText.motherNotice([item(state: "awaiting")]).accessibilityLabel,
-                       "Mother update: MF4: In-pane plan viewer needs you.")
+                       "Mother update: needs you, MF4: In-pane plan viewer.")
+    }
+
+    func testTheAccessibilityLabelReadsTheStateBeforeATitleThatNamesAnotherState() {
+        let content = WakeMarkerText.motherNotice([item(title: "Deploy failed", state: "succeeded")])
+
+        XCTAssertEqual(content.accessibilityLabel, "Mother update: succeeded, Deploy failed.")
     }
 
     func testAJobWithNoTitleStillMakesAMarkerWithItsState() {
@@ -190,8 +196,8 @@ final class WakeMarkerTextTests: XCTestCase {
     func testTheAccessibilityLabelTitleIsCappedAtOneHundredAndTwenty() {
         let content = WakeMarkerText.motherNotice([item(title: String(repeating: "e", count: 300), state: "failed")])
 
-        let prefix = "Mother update: "
-        let suffix = " failed."
+        let prefix = "Mother update: failed, "
+        let suffix = "."
         XCTAssertTrue(content.accessibilityLabel.hasPrefix(prefix))
         XCTAssertTrue(content.accessibilityLabel.hasSuffix(suffix))
         let title = String(content.accessibilityLabel.dropFirst(prefix.count).dropLast(suffix.count))

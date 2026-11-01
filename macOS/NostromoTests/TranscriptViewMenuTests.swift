@@ -507,6 +507,27 @@ final class TranscriptViewMenuTests: XCTestCase {
         XCTAssertEqual([items.focus.state, items.allActivity.state], [.off, .on], "the effective mode, not only the explicit one")
     }
 
+    /// Pure helpers, no key window and no menu routing: so the key-equivalent criterion has a test
+    /// that never skips (the chord tests above need the main menu to route).
+    func testTargetInAndValidateWorkOnAWindowThatIsNotKey() throws {
+        let world = FV4StoreWorld(self)
+        let window = windows.make(width: 900, height: 700)
+        let pane = fv4MakePane(store: world.store, in: window)
+        let items = try modeItems()
+        XCTAssertFalse(window.isKeyWindow, "this window was never made key")
+
+        XCTAssertTrue(TranscriptViewMenu.target(in: window) === pane, "the window's single visible pane")
+        XCTAssertTrue(window.makeFirstResponder(pane.composerBar.textView))
+        XCTAssertTrue(TranscriptViewMenu.target(in: window) === pane, "the pane around the first responder")
+
+        pane.setTranscriptAllActivityMode(nil)
+        let target = TranscriptViewMenu.target(in: window)
+        XCTAssertTrue(TranscriptViewMenu.validate(items.focus, target: target))
+        XCTAssertTrue(TranscriptViewMenu.validate(items.allActivity, target: target))
+        XCTAssertEqual([items.focus.state, items.allActivity.state], [.off, .on])
+        XCTAssertNil(TranscriptViewMenu.target(in: nil))
+    }
+
     func testTheItemsAreDisabledAndUncheckedWithNoTarget() throws {
         let items = try modeItems()
         items.focus.state = .on

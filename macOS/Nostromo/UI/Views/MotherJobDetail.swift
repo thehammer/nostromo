@@ -705,6 +705,8 @@ final class MotherJobDetail: NSView {
         segmentControl.segmentStyle = .rounded
         segmentControl.trackingMode = .selectOne
         segmentControl.controlSize = .small
+        // Equal widths, so the frames the switch reports (`JobViewSwitch.segmentFrames`) are what is drawn.
+        segmentControl.segmentDistribution = .fillEqually
         segmentControl.target = self
         segmentControl.action = #selector(segmentChanged(_:))
         segmentControl.setAccessibilityLabel("Job view")

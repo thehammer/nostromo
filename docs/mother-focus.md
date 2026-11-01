@@ -138,11 +138,11 @@ the job, because nothing else says the focus was sensitive when it queued it. Th
 seconds, but holds live in memory only, so a daemon restart between the queue and the first sight, or
 a `mother list` that is slow or failing, widens that gap. While the sensitive-tag registry cannot be
 read every tag counts as sensitive: a job decided then is flagged for good, even after the registry is
-repaired. A job already in the book is never
-re-evaluated, and the flag is only ever set, never cleared. A sensitive focus's tag and display name are also not written into
-Mother's record or argv (`--origin-focus` and `--origin-focus-name` are omitted); the daemon's own
-book keeps the snapshot, which only the local Mac sees. Work-send jobs and sensitive jobs are
-withheld from them entirely, as before.
+repaired. A job already in the book is never re-evaluated, and the flag is only ever set, never
+cleared. A sensitive focus's tag and display name are also not written into Mother's record or argv
+(`--origin-focus` and `--origin-focus-name` are omitted); the daemon's own book keeps the snapshot,
+which only the local Mac sees. Work-send jobs and sensitive jobs are withheld from them entirely, as
+before.
 
 When `mother add` fails, the daemon logs Mother's stderr with session ids removed (the one it was
 given and anything UUID-shaped), since the argv carries `--origin-session <sid>`.
@@ -376,8 +376,9 @@ Mac a notice turn shows as a marker (below); iOS shows a plain bubble with the e
 origin is first read from the turn's text (a stored transcript has nothing else), but on a live session
 the daemon takes it back from any turn it did not write as a notice (`TurnAuthor::Injected` with the
 notice key), so a pasted message that starts with the notice tag is a plain user turn and may be the
-session's title. A reloaded transcript still reads it from the text, so there a user-pasted notice is rebuilt by the
-daemon and draws as a marker (navigation only; the pasted text stays reachable through Copy Notice Text).
+session's title. A reloaded transcript still reads it from the text, so there a user-pasted notice is
+rebuilt by the daemon and draws as a marker (navigation only; the pasted text stays reachable through
+Copy Notice Text).
 
 ### The marker in the transcript
 

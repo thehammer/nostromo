@@ -405,4 +405,28 @@ final class PlanMarkdownDepthTests: XCTestCase {
         XCTAssertTrue(code.first?.hasPrefix(indent + "x") == true,
                       "the 200 spaces survive: \(code.first?.prefix(140).debugDescription ?? "no code block")")
     }
+
+    /// [guard] A GFM table row followed, with no blank line, by a fence line at column 0: the tracker takes
+    /// the line for a fence opener, so the parser must too (a fence interrupts a table), or the wide line
+    /// would be copied whole as "code" while the parser reads it as table text.
+    func testAFenceLineRightAfterATableRowIsACodeBlockForTheParserAndTheTracker() throws {
+        let indent = String(repeating: " ", count: 200)
+        let text = "| a | b |\n|---|---|\n| 1 | 2 |\n```\n\(indent)x\n```\n"
+
+        assertSameText(PlanMarkdown.boundingNesting(text), text, "the tracker keeps the fenced line whole")
+        let run = try XCTUnwrap(parseOnSmallStack(text))
+        var code: [String] = []
+        var tables = 0
+        for block in run.doc.blocks {
+            switch block.kind {
+            case .codeBlock(_, let body): code.append(body)
+            case .table: tables += 1
+            default: break
+            }
+        }
+        XCTAssertEqual(tables, 1, "the table is one block")
+        XCTAssertEqual(code.count, 1, "the fence after it is one code block")
+        XCTAssertTrue(code.first?.hasPrefix(indent + "x") == true,
+                      "the parser keeps the 200 spaces: \(code.first?.prefix(140).debugDescription ?? "no code block")")
+    }
 }
