@@ -349,3 +349,130 @@ final class TranscriptFoldStore {
         }
     }
 }
+
+// MARK: - A pane's side of the shared fold state
+
+/// One transcript pane's end of the fold store (FV4): it resolves the pane's folds from the store
+/// (`resolver(turnKey:)`), records what the operator does in the pane, and re-applies what another
+/// pane (or a mode switch, or the default) changed. `ReplView` owns one; the scroll rigs of the
+/// tests own one the same way, so what they prove is this logic.
+///
+/// A change reaches every pane on the focus **in the same call** as the store event: the store's
+/// `changes` is a synchronous subject and nothing here defers.
+///
+/// A pane's own toggles are written to the store here but are not re-applied to the pane that
+/// made them: it already shows them, and its viewport keeps the clicked row in place
+/// (`noteUserToggle`) instead of anchoring at the top.
+final class PaneFoldSync {
+
+    let tag: String
+    let store: TranscriptFoldStore
+    /// How this pane's views resolve explicit choices (the store's, for the pane's focus).
+    let choices: FoldChoices
+
+    /// The mode the pane shows: its focus's explicit mode, else the default (or All activity under
+    /// the load harness's `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`). Changes only through `changes`.
+    private(set) var mode: TranscriptViewMode
+
+    // MARK: Pane hooks
+
+    /// Every turn the pane holds, loaded or not: a mode change re-estimates all of them.
+    var loadedTurnIDs: () -> Set<UUID> = { [] }
+    /// The keys of the pane's tool groups that are stuck (derived), in every loaded turn: a mode
+    /// switch writes them explicitly, so Focus closes even those.
+    var stuckGroupKeys: () -> [String] = { [] }
+    /// Run `mutation` with the reading position kept, then re-estimate `turnIds`
+    /// (`ReplView.applyFoldChange`).
+    var applyChange: (_ turnIds: Set<UUID>, _ mutation: () -> Void) -> Void = { _, mutation in mutation() }
+    /// Set the folds of the pane's materialized views from the store (`FoldResolver` per turn).
+    var reresolve: () -> Void = {}
+
+    // MARK: Init
+
+    /// - Parameter harnessMode: the load harness's Show All; overrides the store's mode.
+    init(tag: String, store: TranscriptFoldStore, harnessMode: TranscriptViewMode? = nil) {
+        self.tag = tag
+        self.store = store
+        self.harnessMode = harnessMode
+        self.choices = FoldChoices(tag: tag, store: store)
+        self.mode = harnessMode ?? store.mode(tag: tag)
+        subscription = store.changes.sink { [weak self] change in self?.storeChanged(change) }
+    }
+
+    /// The pane's resolver for the turn with this identity.
+    func resolver(turnKey: String) -> FoldResolver {
+        FoldResolver(mode: mode, turnKey: turnKey, choices: choices)
+    }
+
+    // MARK: What the operator does here
+
+    /// Switch the focus's mode: every fold in it takes the new mode's state. Applied to every pane
+    /// on the focus, this one included, through the store's event.
+    func setMode(_ mode: TranscriptViewMode) {
+        store.setMode(tag: tag, mode)
+    }
+
+    func recordFold(key: String, turnKey: String, open: Bool) {
+        ownWrite { store.setFold(tag: tag, key: key, turnKey: turnKey, open: open, origin: .user) }
+    }
+
+    func recordResult(key: String, turnKey: String, open: Bool) {
+        ownWrite { store.setResult(tag: tag, key: key, turnKey: turnKey, open: open) }
+    }
+
+    /// The stuck-turn rule opened a group; unless the operator or an earlier auto entry decided it.
+    func recordAuto(key: String, turnKey: String) {
+        guard store.foldState(tag: tag, key: key) == nil else { return }
+        ownWrite { store.setFold(tag: tag, key: key, turnKey: turnKey, open: true, origin: .auto) }
+    }
+
+    /// A splice replaced the turns from the start: forget choices about turns no longer held.
+    func prune(keepingTurnKeys keep: Set<String>) {
+        guard !keep.isEmpty else { return }
+        ownWrite { store.prune(tag: tag, keepingTurnKeys: keep) }
+    }
+
+    // MARK: Private
+
+    private let harnessMode: TranscriptViewMode?
+    private var subscription: AnyCancellable?
+    private var writing = false
+
+    private func ownWrite(_ work: () -> Void) {
+        let outer = writing
+        writing = true
+        defer { writing = outer }
+        work()
+    }
+
+    private func storeChanged(_ change: FoldStoreChange) {
+        guard !writing else { return }
+        switch change {
+        case .folds(let changedTag, _):
+            guard changedTag == tag else { return }
+            // A mode switch in another pane writes its pins before this pane has heard of the switch.
+            if (harnessMode ?? store.mode(tag: tag)) != mode {
+                modeChanged()
+            } else {
+                applyChange(loadedTurnIDs()) { [self] in reresolve() }
+            }
+        case .mode(let tags):
+            guard tags.contains(tag) else { return }
+            modeChanged()
+        case .defaultMode:
+            guard store.explicitMode(tag: tag) == nil, harnessMode == nil, store.mode(tag: tag) != mode else { return }
+            modeChanged()
+        }
+    }
+
+    /// The effective mode may have changed, and the store has dropped the focus's fold choices.
+    private func modeChanged() {
+        let new = harnessMode ?? store.mode(tag: tag)
+        applyChange(loadedTurnIDs()) { [self] in
+            mode = new
+            let stuck = stuckGroupKeys()
+            if !stuck.isEmpty { ownWrite { store.pinStuck(tag: tag, keys: stuck, open: new == .allActivity) } }
+            reresolve()
+        }
+    }
+}

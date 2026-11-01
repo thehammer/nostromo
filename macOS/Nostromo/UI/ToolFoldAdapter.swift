@@ -1,53 +1,133 @@
 import Foundation
 import NostromoKit
 
+/// A pane's read-only window onto the persisted fold choices of its focus (`TranscriptFoldStore`,
+/// namespace = the focus's session tag). Entries live in the store, which every window of the
+/// focus shares; writing them is the pane's job (`ReplView`), so a toggle reaches the other
+/// windows through the store's `changes`.
+final class FoldChoices: Equatable {
+    let tag: String
+    let store: TranscriptFoldStore
+
+    init(tag: String, store: TranscriptFoldStore) {
+        self.tag = tag
+        self.store = store
+    }
+
+    /// The operator's own choice for an activity row or tool group (`a:…` / `g:…`).
+    func explicit(_ key: String) -> Bool? {
+        guard let state = store.foldState(tag: tag, key: key), state.origin == .user else { return nil }
+        return state.open
+    }
+
+    /// The stuck-turn rule opened this group.
+    func isAuto(_ key: String) -> Bool {
+        guard let state = store.foldState(tag: tag, key: key) else { return false }
+        return state.origin == .auto && state.open
+    }
+
+    /// A result fold's explicit state (`r:…`).
+    func result(_ key: String) -> Bool? {
+        store.resultState(tag: tag, key: key)
+    }
+
+    static func == (a: FoldChoices, b: FoldChoices) -> Bool {
+        a === b || (a.tag == b.tag && a.store === b.store)
+    }
+}
+
+/// Durable keys of folds that are not tool groups or activity rows (contract §2.3).
+enum FoldKey {
+    /// A tool result's fold: `r:` + its `tool_use_id`. An Agent call's subagent-activity fold:
+    /// `r:agent:` + the call's id (the call's own result has the same id). Without an id (an old
+    /// daemon, a terminal delivery item): `r:<turn identity>#b<block index>`.
+    static func result(block: TurnBlock?, index: Int, turnKey: String) -> String {
+        switch block {
+        case .toolResult(let data)? where data.toolUseId != nil:
+            return "r:\(data.toolUseId!)"
+        case .toolCall(let data)? where data.toolUseId != nil:
+            return "r:agent:\(data.toolUseId!)"
+        default:
+            return "r:\(turnKey)#b\(index)"
+        }
+    }
+}
+
 /// How a turn's foldables resolve open or closed (FV contract §2.2, `FocusFoldResolver`), first
 /// match wins:
 /// 1. the operator's explicit choice;
 /// 2. (tool groups only) the stuck-turn auto-open: a recorded auto entry, or the derived
 ///    `ToolGroup.isStuck`. Activity rows never auto-open;
-/// 3. the mode: Focus closes, All activity opens (`NOSTROMO_LOAD_FOLD_DEFAULT=expanded` in the
-///    load harness). Every pane is in Focus until FV4 adds the toggle.
+/// 3. the mode: Focus closes, All activity opens.
+///
+/// The choices live in the focus's `TranscriptFoldStore` (`choices`). The dictionaries below only
+/// mirror what the operator did in the view that holds this resolver since it was built, for
+/// items the view rebuilds (a roll-in) and for a view with no store behind it; the pane records
+/// the same toggles in the store. A resolver made afresh (`ReplView.foldResolver(for:)`) starts
+/// with empty mirrors.
 struct FoldResolver: Equatable {
-    /// `ToolGroup.key` → explicit choice.
-    var groupStates: [String: Bool] = [:]
-    /// Keys the stuck-turn rule opened.
-    var groupAuto: Set<String> = []
-    /// `ActivitySegment.key` → explicit choice.
-    var activityStates: [String: Bool] = [:]
     var mode: TranscriptViewMode = .focus
+    /// The turn's identity (`ChatTurn.identityKey`): the fallback result keys use it.
+    var turnKey: String = ""
+    var choices: FoldChoices?
+    /// `ToolGroup.key` → explicit choice made in this view.
+    var groupStates: [String: Bool] = [:]
+    /// Keys the stuck-turn rule opened in this view.
+    var groupAuto: Set<String> = []
+    /// `ActivitySegment.key` → explicit choice made in this view.
+    var activityStates: [String: Bool] = [:]
+    /// Block index → result fold state chosen in this view.
+    var resultStates: [Int: Bool] = [:]
 
-    /// Everything starts open: All activity (the harness's "Show All").
+    /// Everything starts open: All activity.
     var expandedByDefault: Bool {
         get { mode == .allActivity }
         set { mode = newValue ? .allActivity : .focus }
     }
 
+    init(mode: TranscriptViewMode, turnKey: String, choices: FoldChoices?) {
+        self.mode = mode
+        self.turnKey = turnKey
+        self.choices = choices
+    }
+
     init(groupStates: [String: Bool] = [:], groupAuto: Set<String> = [],
-         activityStates: [String: Bool] = [:], expandedByDefault: Bool = false) {
+         activityStates: [String: Bool] = [:], expandedByDefault: Bool = false, turnKey: String = "") {
         self.groupStates = groupStates
         self.groupAuto = groupAuto
         self.activityStates = activityStates
         self.mode = expandedByDefault ? .allActivity : .focus
+        self.turnKey = turnKey
     }
 
-    init(state: TurnInteractionState, expandedByDefault: Bool = false) {
-        self.init(groupStates: state.groupStates, groupAuto: state.groupAuto,
-                  activityStates: state.activityStates, expandedByDefault: expandedByDefault)
+    // MARK: Explicit choices
+
+    func explicitGroup(_ key: String) -> Bool? { groupStates[key] ?? choices?.explicit(key) }
+
+    func isAuto(_ key: String) -> Bool { groupAuto.contains(key) || choices?.isAuto(key) == true }
+
+    func explicitActivity(_ key: String) -> Bool? { activityStates[key] ?? choices?.explicit(key) }
+
+    /// The operator's choice for the result fold (or subagent-activity fold) of `block`, the
+    /// block at `index` of the turn. Nil: it follows the default (open when the call failed).
+    func explicitResult(block: TurnBlock?, index: Int) -> Bool? {
+        resultStates[index] ?? choices?.result(FoldKey.result(block: block, index: index, turnKey: turnKey))
     }
+
+    // MARK: Resolution
 
     func isExpanded(_ group: ToolGroup) -> Bool {
         isExpanded(key: group.key, isStuck: group.isStuck)
     }
 
     func isExpanded(key: String, isStuck: Bool = false) -> Bool {
-        FocusFoldResolver.isOpen(.toolGroup, mode: mode, explicit: groupStates[key],
-                                 auto: groupAuto.contains(key), derivedStuck: isStuck)
+        FocusFoldResolver.isOpen(.toolGroup, mode: mode, explicit: explicitGroup(key),
+                                 auto: isAuto(key), derivedStuck: isStuck)
     }
 
     /// Whether the activity row `key` (`ActivitySegment.key`) is open.
     func isActivityExpanded(key: String) -> Bool {
-        FocusFoldResolver.isOpen(.activityRow, mode: mode, explicit: activityStates[key],
+        FocusFoldResolver.isOpen(.activityRow, mode: mode, explicit: explicitActivity(key),
                                  auto: nil, derivedStuck: false)
     }
 }
@@ -183,29 +263,48 @@ enum ToolFoldAdapter {
     }
 
     /// Stable digest of the fold state a turn renders with, for the height-cache key.
-    /// Empty when the turn carries no explicit choice, no expanded result and no hold.
+    /// Empty when the turn is in Focus with no explicit choice, no expanded result and no hold.
     ///
-    /// Built from the state alone (sorted, so dictionary order cannot change it): the
-    /// resolver is "explicit choice, else the default", so the explicit choices, the holds and
-    /// the default are everything that decides what is open.
-    static func foldDigest(turn: ChatTurn, state: TurnInteractionState, expandedByDefault: Bool = false) -> String {
-        guard !state.groupStates.isEmpty || !state.expandedBlocks.isEmpty || !state.groupAuto.isEmpty
-                || !state.activityStates.isEmpty || !state.heldOrdinals.isEmpty
-                || expandedByDefault else { return "" }
-        var text = expandedByDefault ? "E" : "C"
-        for key in state.groupStates.keys.sorted() {
-            text += "|\(key)=\(state.groupStates[key]! ? 1 : 0)"
+    /// Built from what decides what is open: the mode, the explicit choices for the turn's own
+    /// groups, activity rows (found through `shape`, in its order; nil skips them) and result
+    /// folds (through the blocks), the recorded auto-opens and the holds.
+    static func foldDigest(turn: ChatTurn, shape: FoldShape?, folds: FoldResolver, held: Set<Int>) -> String {
+        var text = ""
+        var any = false
+        func note(_ kind: String, _ key: String, _ state: Bool?) {
+            guard let state else { return }
+            any = true
+            text += "|\(kind)\(key)=\(state ? 1 : 0)"
         }
-        if !state.groupAuto.isEmpty { text += "|a" + state.groupAuto.sorted().joined(separator: ",") }
-        text += "|b" + state.expandedBlocks.sorted().map(String.init).joined(separator: ",")
-        if !state.activityStates.isEmpty {
-            text += "|A" + state.activityStates.keys.sorted()
-                .map { "\($0)=\(state.activityStates[$0]! ? 1 : 0)" }.joined(separator: ",")
+        func visit(_ item: FoldShape.Item) {
+            switch item {
+            case .group(let group):
+                note("g", group.key, folds.explicitGroup(group.key))
+                if folds.isAuto(group.key) { any = true; text += "|a\(group.key)" }
+            case .activity(let key, let members):
+                note("A", key, folds.explicitActivity(key))
+                members.forEach(visit)
+            case .block, .message:
+                break
+            }
         }
-        if !state.heldOrdinals.isEmpty {
-            text += "|h" + state.heldOrdinals.sorted().map(String.init).joined(separator: ",")
+        shape?.items.forEach(visit)
+        for (index, block) in turn.blocks.enumerated() {
+            switch block {
+            case .toolResult, .toolCall: note("r", "\(index)", folds.explicitResult(block: block, index: index))
+            default: break
+            }
         }
-        return fnv1a(text)
+        for item in turn.terminalOriginItems.indices {
+            let index = TerminalDeliveryBlockKey.blockIndex(item: item)
+            note("t", "\(index)", folds.explicitResult(block: nil, index: index))
+        }
+        if !held.isEmpty {
+            any = true
+            text += "|h" + held.sorted().map(String.init).joined(separator: ",")
+        }
+        guard any || folds.mode == .allActivity else { return "" }
+        return fnv1a((folds.mode == .allActivity ? "E" : "C") + text)
     }
 
     /// Rows a pane shows in the Focus view, and its tool groups (every group, also those

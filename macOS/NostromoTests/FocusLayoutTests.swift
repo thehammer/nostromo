@@ -608,10 +608,8 @@ final class FocusLaneTests: XCTestCase {
     func testTheOperatorsChoicesResolveTheRowAndItsGroupsSeparately() throws {
         let turn = F.turn(threeMessageBlocks())
         let key = try XCTUnwrap(X.segments(of: turn).first).key
-        var state = TurnInteractionState()
-        state.activityStates[key] = true
-        state.groupStates["g:b0"] = true
-        let view = X.view(turn, interaction: state, folds: FoldResolver(state: state))
+        let folds = FoldResolver(groupStates: ["g:b0": true], activityStates: [key: true])
+        let view = X.view(turn, folds: folds)
 
         let row = try XCTUnwrap(view.activityRowViews.first)
         XCTAssertTrue(row.isExpanded)
@@ -648,7 +646,7 @@ final class FocusLaneTests: XCTestCase {
         row.row.pasteboard = pb
 
         let items = row.row.contextMenu().items.filter { !$0.isSeparatorItem }
-        XCTAssertEqual(items.map(\.title), ["Copy Messages", "Copy Commands", "Copy Summary"])
+        XCTAssertEqual(items.map(\.title), ["Copy Messages", "Copy Commands", "Copy Summary", "Focus", "Show All Activity"])
         let expected = ["ALPHA-ONLY", "cmd a0\ncmd a1", "1 message, ran 2 commands"]
         for (item, text) in zip(items, expected) {
             pb.clearContents()

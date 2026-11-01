@@ -20,23 +20,6 @@ struct TurnInteractionState: Equatable {
     /// and `OptionButton` is already constructed with `tag: idx`.
     var answeredOptions: [Int: Int] = [:]
 
-    /// Block indices whose tool result the operator expanded.
-    var expandedBlocks: Set<Int> = []
-
-    /// Tool group key (`ToolGroup.key`) → the operator's explicit open (`true`) or closed
-    /// (`false`) choice. Absent means the group follows the default.
-    var groupStates: [String: Bool] = [:]
-
-    /// Tool group keys the stuck-turn rule opened when the turn ended in error (contract §2.4).
-    /// Recorded rather than only derived because the error that made the turn stuck
-    /// (`resultSummary`, `errorMessage`) is not durable across a daemon restart. An explicit
-    /// choice in `groupStates` still wins.
-    var groupAuto: Set<String> = []
-
-    /// Activity row key (`ActivitySegment.key`) → the operator's explicit open or closed choice
-    /// (Focus view). In memory per pane until FV4 moves it, with `groupStates`, to the store.
-    var activityStates: [String: Bool] = [:]
-
     /// Ordinals of messages whose roll-in this pane is holding back (FV3's reader-protected
     /// roll-in): they stay on screen as conversation, at their place, until `RollInPolicy` lets
     /// them go. `FocusPlanner.leadingGroups` stands for the groups before the turn's first message.
@@ -44,8 +27,7 @@ struct TurnInteractionState: Equatable {
     var heldOrdinals: Set<Int> = []
 
     var isEmpty: Bool {
-        answeredOptions.isEmpty && expandedBlocks.isEmpty && groupStates.isEmpty && groupAuto.isEmpty
-            && activityStates.isEmpty && heldOrdinals.isEmpty
+        answeredOptions.isEmpty && heldOrdinals.isEmpty
     }
 }
 
@@ -80,31 +62,6 @@ final class TurnInteractionStore {
 
     func recordAnswer(turn: UUID, block: Int, option: Int) {
         states[turn, default: TurnInteractionState()].answeredOptions[block] = option
-    }
-
-    func setExpanded(turn: UUID, block: Int, _ isExpanded: Bool) {
-        if isExpanded {
-            states[turn, default: TurnInteractionState()].expandedBlocks.insert(block)
-        } else {
-            states[turn]?.expandedBlocks.remove(block)
-            if states[turn]?.isEmpty == true { states.removeValue(forKey: turn) }
-        }
-    }
-
-    /// Record the operator opening or closing a tool group. Kept either way: closing a group
-    /// is a choice too, and must survive the view.
-    func setGroup(turn: UUID, key: String, _ isExpanded: Bool) {
-        states[turn, default: TurnInteractionState()].groupStates[key] = isExpanded
-    }
-
-    /// Record that the stuck-turn rule opened a tool group.
-    func recordAuto(turn: UUID, key: String) {
-        states[turn, default: TurnInteractionState()].groupAuto.insert(key)
-    }
-
-    /// Record the operator opening or closing an activity row.
-    func setActivity(turn: UUID, key: String, _ isExpanded: Bool) {
-        states[turn, default: TurnInteractionState()].activityStates[key] = isExpanded
     }
 
     /// Hold back the roll-in of message `ordinal` of `turn`.

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import NostromoKit
 
 /// Vertical navigation sidebar — Org → Repo → Agent hierarchy, scrollable.
 ///
@@ -62,6 +63,18 @@ class TabBarView: NSView {
 
     /// Called when the user selects "Force Start" from a dynamic item's context menu.
     var onForceStart: ((Focus) -> Void)?
+
+    /// Mother Notices ▸ Wake · Quiet · Off. Gated by `HumanGesture.permit`; tests replace it.
+    var noticeSwitches = MotherNoticeSwitches()
+    /// The mode the daemon reports for a focus tag (Wake when it has no entry). Read when the menu opens.
+    var noticeMode: (String) -> MotherNoticeMode = { AppStore.shared.motherNoticeState?.mode(forTag: $0) ?? .wake }
+
+    static let noticeModes: [(mode: MotherNoticeMode, title: String, tip: String)] = [
+        (.wake,  "Wake",  "Wake: a job update wakes an idle session right away."),
+        (.quiet, "Quiet", "Quiet: no wakes; updates arrive after the session's next turn."),
+        (.off,   "Off",   "Off: this session is not told about its jobs."),
+    ]
+    static let noticeMenuId = NSUserInterfaceItemIdentifier("mother-notices")
 
     // Layout sub-views managed across reloads
     private var addButton: NSView?
@@ -297,6 +310,9 @@ class TabBarView: NSView {
                     showJobsItem.representedObject = focus
                     menu.addItem(showJobsItem)
 
+                    menu.addItem(makeNoticeItem(for: focus))
+                    menu.delegate = self
+
                     let forceStartItem = NSMenuItem(
                         title: "Force Start",
                         action: #selector(forceStartTapped(_:)),
@@ -367,6 +383,40 @@ class TabBarView: NSView {
     @objc private func showJobsTapped(_ sender: NSMenuItem) {
         guard let focus = sender.representedObject as? Focus else { return }
         onShowJobs?(focus)
+    }
+
+    private func makeNoticeItem(for focus: Focus) -> NSMenuItem {
+        let item = NSMenuItem(title: "Mother Notices", action: nil, keyEquivalent: "")
+        item.identifier = Self.noticeMenuId
+        item.representedObject = focus
+        let sub = NSMenu(title: "Mother Notices")
+        sub.autoenablesItems = false
+        for (index, entry) in Self.noticeModes.enumerated() {
+            let choice = NSMenuItem(title: entry.title, action: #selector(noticeModeTapped(_:)), keyEquivalent: "")
+            choice.target = self
+            choice.tag = index
+            choice.toolTip = entry.tip
+            choice.representedObject = focus
+            sub.addItem(choice)
+        }
+        item.submenu = sub
+        refreshNoticeChecks(sub, tag: focus.sessionTag)
+        return item
+    }
+
+    /// The checkmark follows the daemon's state, never the last click.
+    private func refreshNoticeChecks(_ sub: NSMenu, tag: String) {
+        let current = noticeMode(tag)
+        for choice in sub.items where Self.noticeModes.indices.contains(choice.tag) {
+            choice.state = Self.noticeModes[choice.tag].mode == current ? .on : .off
+        }
+    }
+
+    @objc func noticeModeTapped(_ sender: NSMenuItem) {
+        guard let focus = sender.representedObject as? Focus, Self.noticeModes.indices.contains(sender.tag)
+        else { return }
+        noticeSwitches.setFocusMode(tag: focus.sessionTag, mode: Self.noticeModes[sender.tag].mode,
+                                    control: self, menuSelection: true)
     }
 
     @objc private func forceStartTapped(_ sender: NSMenuItem) {
@@ -555,4 +605,14 @@ private class RepoGroupView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+}
+
+
+extension TabBarView: NSMenuDelegate {
+    /// Refresh the Mother Notices checkmarks from the daemon's state each time a focus menu opens.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let item = menu.items.first(where: { $0.identifier == Self.noticeMenuId }),
+              let sub = item.submenu, let focus = item.representedObject as? Focus else { return }
+        refreshNoticeChecks(sub, tag: focus.sessionTag)
+    }
 }

@@ -18,6 +18,7 @@ import AppKit
     func revealTerminalAuditLog(_ sender: Any?)
     func terminalFind(_ sender: Any?)
     func copyTerminalLatencyStats()
+    func copyMotherNoticeStats()
     func openSecondWindowQA(_ sender: Any?)
 }
 
@@ -65,6 +66,10 @@ enum MainMenu {
         findNextItem.tag = NSTextFinder.Action.nextMatch.rawValue
         findNextItem.target = target
         editMenu.addItem(findNextItem)
+
+        // View menu (between Edit and Terminal): Focus ⌥⌘← / Show All Activity ⌥⌘→ for the focused pane's
+        // transcript, and the default mode for focuses with no choice of their own.
+        TranscriptViewMenu.install(in: mainMenu)
 
         // Terminal menu: ⌘T opens a shell in the key window's focus; ⇧⌘W closes the terminal pane that
         // holds the keyboard (only for a person: the item does nothing for a synthetic key or click).
@@ -148,6 +153,12 @@ enum MainMenu {
                                              keyEquivalent: "")
         terminalLatencyItem.target = target
         debugMenu.addItem(terminalLatencyItem)
+        // Counts only, never a title or a focus name. No key equivalent.
+        let noticeStatsItem = NSMenuItem(title: "Copy Mother Notice Stats",
+                                         action: #selector(MainMenuActions.copyMotherNoticeStats),
+                                         keyEquivalent: "")
+        noticeStatsItem.target = target
+        debugMenu.addItem(noticeStatsItem)
         // QA only (enabled when the bundle id is not the real app's): a second window on the main
         // display's focus, so one terminal can be mirrored without a second display. ⌃⌥⌘N lets the
         // QA scripts press it through app-control.

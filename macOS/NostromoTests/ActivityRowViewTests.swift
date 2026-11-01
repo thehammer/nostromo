@@ -55,7 +55,7 @@ private func makeRig(_ testCase: XCTestCase, blocks: [TurnBlock] = standardBlock
     let segment = X.segments(of: turn)[0]
     let window = makeRigWindow(testCase, size: NSSize(width: 1000, height: 800))
     let view = ActivityRowView(segment: segment, blocks: X.blocks(for: segment, in: turn), contentAvailable: true,
-                               interaction: TurnInteractionState(), folds: folds, isExpanded: expanded,
+                               folds: folds, isExpanded: expanded,
                                reduceMotion: reduceMotion)
     window.contentView!.addSubview(view)
     let rig = RowRig(window: window, view: view, turn: turn)

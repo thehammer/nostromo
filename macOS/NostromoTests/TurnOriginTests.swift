@@ -282,12 +282,12 @@ final class TurnOriginTests: XCTestCase {
         assertSameBytes(view.deliveryBlockViews[2].expandedText, OriginFixtures.secondElement)
     }
 
-    func testExpansionIsRestoredFromTheTurnInteractionStore() {
+    func testExpansionIsRestoredFromTheFoldResolver() {
         let turn = OriginFixtures.turn()
-        let store = TurnInteractionStore()
-        store.setExpanded(turn: turn.id, block: -1, true)
+        var folds = FoldResolver(turnKey: turn.identityKey)
+        folds.resultStates[TerminalDeliveryBlockKey.blockIndex(item: 0)] = true   // -1
 
-        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: store.state(for: turn.id))
+        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(), folds: folds)
 
         XCTAssertEqual(view.deliveryBlockViews.map(\.isExpanded), [true, false, false])
     }

@@ -162,6 +162,9 @@ final class RollInHolds {
     var afterEvent: (@escaping () -> Void) -> Void = { work in DispatchQueue.main.async(execute: work) }
     /// Plays an on-screen collapse. Injected so a test completes it synchronously.
     var animator: RollInAnimating = SystemRollInAnimator()
+    /// A released hold moved the operator's open state of an activity row to the key the whole
+    /// segment has now (`ChatTurnView.releaseHolds`): the pane records it (the fold store).
+    var recordCarried: (_ turn: UUID, _ states: [String: Bool]) -> Void = { _, _ in }
 
     /// Messages examined by `reevaluate`, in the pane's lifetime.
     private(set) var evaluations = 0
@@ -315,7 +318,7 @@ final class RollInHolds {
             for (id, set) in ordinals {
                 guard let view = viewFor(id), let turn = turnFor(id) else { continue }
                 let carried = view.releaseHolds(turn: turn, ordinals: set, animation: animation[id] ?? .none)
-                for (key, isExpanded) in carried { store.setActivity(turn: id, key: key, isExpanded) }
+                if !carried.isEmpty { recordCarried(id, carried) }
             }
         }
     }

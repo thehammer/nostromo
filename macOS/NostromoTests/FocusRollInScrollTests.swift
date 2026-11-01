@@ -937,8 +937,8 @@ final class FocusRollInScrollTests: XCTestCase {
         // What the pane does for a change made in another window (no fold-store subscription yet:
         // the change is applied through the same entry point a subscription will use).
         rigA.coordinator.applyFoldChange(turnIds: [live.id]) {
-            rigA.store.setActivity(turn: live.id, key: key, true)
-            rigA.materialized[live.id]?.applyFolds(FoldResolver(state: rigA.store.state(for: live.id), expandedByDefault: false))
+            rigA.setActivity(turn: live.id, key: key, true)
+            rigA.materialized[live.id]?.applyFolds(rigA.resolver(forTurn: live.id))
         }
 
         assertReadingStill(rigA, reading, "after window B opened the row")
@@ -1018,7 +1018,7 @@ final class FocusRollInScrollTests: XCTestCase {
         let live = F.turn(F.run(6, prefix: "lead"), complete: false, user: "live")
         let key = F.groups(of: live).first?.key ?? "g:lead0"
         let rig = ScrollRig(self, turns: (0 ..< 4).map(longTurn) + [live])
-        rig.store.setGroup(turn: live.id, key: key, true)   // the operator opened it
+        rig.setGroup(turn: live.id, key: key, true)   // the operator opened it
         rig.start()
         return (rig, live, key)
     }
@@ -1111,7 +1111,7 @@ final class FocusRollInScrollTests: XCTestCase {
         let now = try XCTUnwrap(rig.materialized[live.id])
         XCTAssertEqual(now.activityRowViews.map { $0.segment.key }, [segmentKey], "one row, under the segment's key")
         XCTAssertEqual(now.activityRowViews.map(\.isExpanded), [true], "the whole row stays open")
-        XCTAssertEqual(rig.store.state(for: live.id).activityStates[segmentKey], true,
+        XCTAssertEqual(rig.resolver(forTurn: live.id).explicitActivity(segmentKey), true,
                        "the open state moved to the key the whole segment has")
         XCTAssertTrue(X.contains("FIRST-0", in: try XCTUnwrap(now.activityRowViews.first)), "the first message is in the open lane")
     }
@@ -1135,7 +1135,7 @@ final class FocusRollInScrollTests: XCTestCase {
         let now = try XCTUnwrap(rig.materialized[live.id])
         XCTAssertEqual(now.activityRowViews.map { $0.segment.key }, [segmentKey])
         XCTAssertEqual(now.activityRowViews.map(\.isExpanded), [true], "the toggle applies to the whole segment")
-        XCTAssertEqual(rig.store.state(for: live.id).activityStates[segmentKey], true)
+        XCTAssertEqual(rig.resolver(forTurn: live.id).explicitActivity(segmentKey), true)
         XCTAssertTrue(X.contains("HELD-0", in: try XCTUnwrap(now.activityRowViews.first)), "the released message is in the open lane")
     }
 

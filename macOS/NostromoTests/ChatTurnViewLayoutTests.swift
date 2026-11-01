@@ -379,6 +379,13 @@ final class ChatTurnViewLayoutTests: XCTestCase {
                trueGolden: 42, falseGolden: 61),
     ]
 
+    /// Folds with the results at `indices` opened by the operator (what `TurnInteractionState.expandedBlocks` was).
+    private func folds(expanding indices: [Int]) -> FoldResolver {
+        var folds = FoldResolver()
+        for index in indices { folds.resultStates[index] = true }
+        return folds
+    }
+
     private func buildTurn(_ f: Fixture) -> ChatTurn {
         ChatTurn(userInput: f.userInput, timestamp: Date(), blocks: f.blocks, isComplete: true)
     }
@@ -386,8 +393,8 @@ final class ChatTurnViewLayoutTests: XCTestCase {
     func testRenderedHeightMatchesGoldensWithContentAvailable() {
         for f in Self.fixtures {
             let turn = buildTurn(f)
-            let interaction = TurnInteractionState(expandedBlocks: Set(f.expanded))
-            let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: interaction)
+            let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(),
+                                    folds: folds(expanding: f.expanded))
             let height = measuredHeight(view)
             XCTAssertEqual(height, f.trueGolden, accuracy: 1.0,
                            "\(f.name) (contentAvailable: true): expected \(f.trueGolden) pt, got \(height) pt")
@@ -397,8 +404,8 @@ final class ChatTurnViewLayoutTests: XCTestCase {
     func testRenderedHeightMatchesGoldensWithContentUnavailable() {
         for f in Self.fixtures {
             let turn = buildTurn(f)
-            let interaction = TurnInteractionState(expandedBlocks: Set(f.expanded))
-            let view = ChatTurnView(turn: turn, contentAvailable: false, interaction: interaction)
+            let view = ChatTurnView(turn: turn, contentAvailable: false, interaction: TurnInteractionState(),
+                                    folds: folds(expanding: f.expanded))
             let height = measuredHeight(view)
             XCTAssertEqual(height, f.falseGolden, accuracy: 1.0,
                            "\(f.name) (contentAvailable: false): expected \(f.falseGolden) pt, got \(height) pt")
@@ -422,7 +429,7 @@ final class ChatTurnViewLayoutTests: XCTestCase {
         switch block {
         case .text(let t):          return TextBlockView(text: t)
         case .toolCall(let d):      return ToolCallView(data: d)
-        case .toolResult(let d):    return ToolResultView(data: d, contentAvailable: true, startExpanded: expanded)
+        case .toolResult(let d):    return ToolResultView(data: d, contentAvailable: true, explicitState: expanded ? true : nil)
         case .resultSummary(let d): return ResultChipView(data: d)
         case .errorMessage(let m):  return ErrorBlockView(message: m)
         case .askQuestion(let d):   return AskQuestionView(data: d, answeredOptionIndex: nil)
@@ -447,8 +454,8 @@ final class ChatTurnViewLayoutTests: XCTestCase {
             let f = try XCTUnwrap(Self.fixtures.first { $0.name == name },
                                   "fixture \(name) must exist")
             let turn = buildTurn(f)
-            let interaction = TurnInteractionState(expandedBlocks: Set(f.expanded))
-            let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: interaction)
+            let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(),
+                                    folds: folds(expanding: f.expanded))
             let actual = measuredHeight(view, paneWidth: paneWidth)
 
             let hasBubble = !f.userInput.contains("(This answers your question:")
@@ -495,9 +502,11 @@ final class ChatTurnViewLayoutTests: XCTestCase {
         var groupOpen = rowOpen
         groupOpen.groupStates[FoldFixtures.groups(of: turn)[0].key] = true
         let collapsed = measuredHeight(ChatTurnView(turn: turn, contentAvailable: true,
-                                                    interaction: rowOpen), paneWidth: paneWidth)
+                                                    interaction: TurnInteractionState(), folds: rowOpen),
+                                       paneWidth: paneWidth)
         let expanded = measuredHeight(ChatTurnView(turn: turn, contentAvailable: true,
-                                                   interaction: groupOpen), paneWidth: paneWidth)
+                                                   interaction: TurnInteractionState(), folds: groupOpen),
+                                      paneWidth: paneWidth)
         let laneWidth = ChatTurnView.blockWidth(paneWidth: paneWidth) - ActivityRowView.laneInset
         let members = [0, 1].map { i in
             ChatTurnView.measureIsland(freshBlockView(f.blocks[i], expanded: false), width: laneWidth)
@@ -581,11 +590,11 @@ final class ChatTurnViewLayoutTests: XCTestCase {
         let width = ChatTurnView.blockWidth(paneWidth: 900)
         let collapsedStandalone = ChatTurnView.measureIsland(
             ToolResultView(data: ToolResultData(content: toolResultContent, isError: false),
-                          contentAvailable: true, startExpanded: false),
+                          contentAvailable: true, explicitState: false),
             width: width)
         let expandedStandalone = ChatTurnView.measureIsland(
             ToolResultView(data: ToolResultData(content: toolResultContent, isError: false),
-                          contentAvailable: true, startExpanded: true),
+                          contentAvailable: true, explicitState: true),
             width: width)
         let delta = expandedStandalone - collapsedStandalone
 
@@ -594,7 +603,8 @@ final class ChatTurnViewLayoutTests: XCTestCase {
                        "that one block's own collapsed-to-expanded delta")
 
         let rebuilt = ChatTurnView(turn: turn, contentAvailable: true,
-                                  interaction: TurnInteractionState(expandedBlocks: [expandIndex]))
+                                  interaction: TurnInteractionState(),
+                                  folds: folds(expanding: [expandIndex]))
         let rebuiltHeight = measuredHeight(rebuilt)
 
         XCTAssertEqual(after, rebuiltHeight, accuracy: 1.0,

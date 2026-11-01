@@ -159,48 +159,69 @@ final class ToolResultViewTests: XCTestCase {
         return wrap
     }
 
-    // MARK: 6. startExpanded controls the initial state; init fires nothing
+    // MARK: 6. explicitState controls the initial state; init fires nothing
 
-    func testStartExpandedTrueOpensANonErrorResultWithNoInitialCallback() throws {
+    func testExplicitOpenStateOpensANonErrorResultWithNoInitialCallback() throws {
         let data = ToolResultData(content: "line one\nline two\nline three", isError: false)
-        let view = ToolResultView(data: data, contentAvailable: true, startExpanded: true)
+        let view = ToolResultView(data: data, contentAvailable: true, explicitState: true)
         var fired = false
         view.onExpansionChange = { _ in fired = true }
         XCTAssertFalse(fired, "construction must not fire onExpansionChange")
 
         let button = try disclosureButton(in: view)
-        XCTAssertTrue(button.title.hasPrefix("▼"), "startExpanded: true must render the open arrow")
+        XCTAssertTrue(button.title.hasPrefix("▼"), "explicitState: true must render the open arrow")
         let wrap = try contentWrap(in: view)
-        XCTAssertFalse(wrap.isHidden, "startExpanded: true must show the content")
+        XCTAssertFalse(wrap.isHidden, "explicitState: true must show the content")
     }
 
-    func testStartExpandedFalseCollapsesANonErrorResult() throws {
+    func testExplicitClosedStateCollapsesANonErrorResult() throws {
         let data = ToolResultData(content: "line one", isError: false)
-        let view = ToolResultView(data: data, contentAvailable: true, startExpanded: false)
+        let view = ToolResultView(data: data, contentAvailable: true, explicitState: false)
 
         let button = try disclosureButton(in: view)
-        XCTAssertTrue(button.title.hasPrefix("▶"), "startExpanded: false must render the closed arrow")
+        XCTAssertTrue(button.title.hasPrefix("▶"), "explicitState: false must render the closed arrow")
         let wrap = try contentWrap(in: view)
-        XCTAssertTrue(wrap.isHidden, "startExpanded: false must hide the content")
+        XCTAssertTrue(wrap.isHidden, "explicitState: false must hide the content")
     }
 
-    func testAnErrorResultStartsExpandedRegardlessOfStartExpanded() throws {
-        // Existing behaviour that must not regress: errors always open, even
-        // when the caller says the operator had collapsed it.
+    func testAnErrorResultWithNoExplicitStateStartsExpanded() throws {
+        // Existing behaviour that must not regress: with no choice from the operator
+        // an error opens.
         let data = ToolResultData(content: "boom", isError: true)
-        let view = ToolResultView(data: data, contentAvailable: true, startExpanded: false)
+        let view = ToolResultView(data: data, contentAvailable: true, explicitState: nil)
 
         let button = try disclosureButton(in: view)
-        XCTAssertTrue(button.title.hasPrefix("▼"), "an error result must ignore startExpanded and open")
+        XCTAssertTrue(button.title.hasPrefix("▼"), "an error result with no explicit state must open")
         let wrap = try contentWrap(in: view)
         XCTAssertFalse(wrap.isHidden)
+    }
+
+    func testAnExplicitClosedStateWinsOverAnErrorsOpenDefault() throws {
+        // Changed with FV4: an operator's explicit choice wins, so an error can be closed.
+        let data = ToolResultData(content: "boom", isError: true)
+        let view = ToolResultView(data: data, contentAvailable: true, explicitState: false)
+
+        let button = try disclosureButton(in: view)
+        XCTAssertTrue(button.title.hasPrefix("▶"), "an explicitly closed error result must stay closed")
+        let wrap = try contentWrap(in: view)
+        XCTAssertTrue(wrap.isHidden)
+    }
+
+    func testANonErrorResultWithNoExplicitStateStartsCollapsed() throws {
+        let data = ToolResultData(content: "line one", isError: false)
+        let view = ToolResultView(data: data, contentAvailable: true, explicitState: nil)
+
+        let button = try disclosureButton(in: view)
+        XCTAssertTrue(button.title.hasPrefix("▶"))
+        let wrap = try contentWrap(in: view)
+        XCTAssertTrue(wrap.isHidden)
     }
 
     // MARK: 7. Toggling fires the new value and flips the arrow
 
     func testTogglingTheDisclosureFiresTheNewValueAndFlipsTheArrowBothWays() throws {
         let data = ToolResultData(content: "line one\nline two", isError: false)
-        let view = ToolResultView(data: data, contentAvailable: true, startExpanded: false)
+        let view = ToolResultView(data: data, contentAvailable: true, explicitState: false)
         let button = try disclosureButton(in: view)
         XCTAssertTrue(button.title.hasPrefix("▶"))
 
@@ -243,24 +264,12 @@ final class TurnInteractionStoreTests: XCTestCase {
                       "recording an answer for one turn must not leak into another turn's state")
     }
 
-    func testSetExpandedTracksPerBlockExpansionIndependentlyOfAnswers() {
-        let store = TurnInteractionStore()
-        let turn = UUID()
-
-        store.setExpanded(turn: turn, block: 2, true)
-        XCTAssertTrue(store.state(for: turn).expandedBlocks.contains(2))
-
-        store.setExpanded(turn: turn, block: 2, false)
-        XCTAssertFalse(store.state(for: turn).expandedBlocks.contains(2))
-    }
-
     func testPruneDropsTurnsNotInTheKeepSetAndLeavesTheRestIntact() {
         let store = TurnInteractionStore()
         let kept = UUID()
         let evicted = UUID()
 
         store.recordAnswer(turn: kept, block: 0, option: 0)
-        store.setExpanded(turn: kept, block: 1, true)
         store.recordAnswer(turn: evicted, block: 0, option: 0)
 
         store.prune(keeping: [kept])
@@ -274,7 +283,6 @@ final class TurnInteractionStoreTests: XCTestCase {
         let store = TurnInteractionStore()
         let turn = UUID()
         store.recordAnswer(turn: turn, block: 0, option: 0)
-        store.setExpanded(turn: turn, block: 1, true)
 
         store.removeAll()
 
@@ -319,12 +327,12 @@ final class TurnInteractionWiringTests: XCTestCase {
         }
     }
 
-    func testToolResultViewIsNeverConstructedWithAHardcodedFalseStartExpanded() throws {
+    func testToolResultViewIsNeverConstructedWithAHardcodedNilExplicitState() throws {
         let calls = Self.balancedCalls(startingAt: "ToolResultView(", in: try Self.replViewSource())
         XCTAssertFalse(calls.isEmpty, "ToolResultView( construction site not found — did it move or rename?")
         for call in calls {
-            XCTAssertFalse(call.contains("startExpanded: false"), """
-                a hard-coded false forgets an operator's manual expand on every rebuild:
+            XCTAssertFalse(call.contains("explicitState: nil"), """
+                a hard-coded nil forgets an operator's manual expand or collapse on every rebuild:
                 \(call)
                 """)
         }
@@ -367,100 +375,6 @@ final class TurnInteractionWiringTests: XCTestCase {
             searchStart = idx
         }
         return calls
-    }
-}
-
-// MARK: - Tool group choices (TF2)
-
-/// The operator's open/closed choice for a tool group lives here, outside the turn's views, so
-/// it survives eviction and width changes like an expanded result or an answered question.
-final class TurnInteractionStoreGroupStateTests: XCTestCase {
-
-    func testAnOpenedGroupIsRemembered() {
-        let store = TurnInteractionStore()
-        let turn = UUID()
-        store.setGroup(turn: turn, key: "g:toolu_1", true)
-        XCTAssertEqual(store.state(for: turn).groupStates, ["g:toolu_1": true])
-    }
-
-    func testAClosedGroupIsRememberedToo() {
-        let store = TurnInteractionStore()
-        let turn = UUID()
-        store.setGroup(turn: turn, key: "g:toolu_1", true)
-        store.setGroup(turn: turn, key: "g:toolu_1", false)
-        XCTAssertEqual(store.state(for: turn).groupStates, ["g:toolu_1": false],
-                       "closing is a choice: it must survive the view like opening does")
-    }
-
-    func testGroupsOfOneTurnAreIndependentAndTurnsDoNotShareThem() {
-        let store = TurnInteractionStore()
-        let a = UUID(), b = UUID()
-        store.setGroup(turn: a, key: "g:one", true)
-        store.setGroup(turn: a, key: "g:two", false)
-        store.setGroup(turn: b, key: "g:one", false)
-        XCTAssertEqual(store.state(for: a).groupStates, ["g:one": true, "g:two": false])
-        XCTAssertEqual(store.state(for: b).groupStates, ["g:one": false])
-        XCTAssertEqual(store.state(for: UUID()).groupStates, [:])
-    }
-
-    func testAStateWithOnlyAGroupChoiceIsNotEmpty() {
-        XCTAssertTrue(TurnInteractionState().isEmpty)
-        var state = TurnInteractionState()
-        state.groupStates["g:x"] = false
-        XCTAssertFalse(state.isEmpty)
-    }
-
-    func testCollapsingTheLastExpandedResultDoesNotForgetGroupChoices() {
-        let store = TurnInteractionStore()
-        let turn = UUID()
-        store.setGroup(turn: turn, key: "g:toolu_1", true)
-        store.setExpanded(turn: turn, block: 2, true)
-        store.setExpanded(turn: turn, block: 2, false)
-        XCTAssertEqual(store.state(for: turn).groupStates, ["g:toolu_1": true])
-        XCTAssertEqual(store.trackedTurnCount, 1)
-    }
-
-    func testGroupChoicesAndResultExpansionsAreKeptSideBySide() {
-        let store = TurnInteractionStore()
-        let turn = UUID()
-        store.recordAnswer(turn: turn, block: 5, option: 1)
-        store.setExpanded(turn: turn, block: 2, true)
-        store.setGroup(turn: turn, key: "g:toolu_1", true)
-        let state = store.state(for: turn)
-        XCTAssertEqual(state.answeredOptions, [5: 1])
-        XCTAssertEqual(state.expandedBlocks, [2])
-        XCTAssertEqual(state.groupStates, ["g:toolu_1": true])
-    }
-
-    func testPruningForgetsGroupChoicesOfTurnsThatLeftTheTranscript() {
-        let store = TurnInteractionStore()
-        let kept = UUID(), gone = UUID()
-        store.setGroup(turn: kept, key: "g:a", true)
-        store.setGroup(turn: gone, key: "g:b", true)
-        store.prune(keeping: [kept])
-        XCTAssertEqual(store.state(for: kept).groupStates, ["g:a": true])
-        XCTAssertEqual(store.state(for: gone).groupStates, [:])
-        XCTAssertEqual(store.trackedTurnCount, 1)
-    }
-
-    func testClearingTheTranscriptForgetsEveryGroupChoice() {
-        let store = TurnInteractionStore()
-        let turn = UUID()
-        store.setGroup(turn: turn, key: "g:a", true)
-        store.removeAll()
-        XCTAssertEqual(store.state(for: turn).groupStates, [:])
-        XCTAssertEqual(store.trackedTurnCount, 0)
-    }
-
-    func testStatesThatDifferOnlyByAGroupChoiceAreNotEqual() {
-        var a = TurnInteractionState(), b = TurnInteractionState()
-        XCTAssertEqual(a, b)
-        a.groupStates["g:x"] = true
-        XCTAssertNotEqual(a, b)
-        b.groupStates["g:x"] = false
-        XCTAssertNotEqual(a, b)
-        b.groupStates["g:x"] = true
-        XCTAssertEqual(a, b)
     }
 }
 
@@ -572,15 +486,13 @@ final class TurnInteractionStoreHoldTests: XCTestCase {
     func testReleasingTheLastHoldOfATurnKeepsWhatTheOperatorDidToIt() {
         let store = TurnInteractionStore()
         let turn = UUID()
-        store.setGroup(turn: turn, key: "g:a", true)
-        store.setActivity(turn: turn, key: "a:m:T#0", true)
+        store.recordAnswer(turn: turn, block: 0, option: 1)
         store.hold(turn: turn, ordinal: 1)
 
         store.release(turn: turn, ordinals: [1])
 
         XCTAssertEqual(store.trackedTurnCount, 1)
-        XCTAssertEqual(store.state(for: turn).groupStates, ["g:a": true])
-        XCTAssertEqual(store.state(for: turn).activityStates, ["a:m:T#0": true])
+        XCTAssertEqual(store.state(for: turn).answeredOptions, [0: 1])
         XCTAssertTrue(store.state(for: turn).heldOrdinals.isEmpty)
         XCTAssertFalse(store.hasHolds)
     }
@@ -589,8 +501,6 @@ final class TurnInteractionStoreHoldTests: XCTestCase {
         let store = TurnInteractionStore()
         let turn = UUID()
 
-        store.setGroup(turn: turn, key: "g:a", true)
-        store.setActivity(turn: turn, key: "a:g:a", false)
         store.recordAnswer(turn: turn, block: 0, option: 1)
 
         XCTAssertFalse(store.hasHolds)
@@ -615,13 +525,13 @@ final class TurnInteractionStoreHoldTests: XCTestCase {
     func testDroppingTheHoldsOfATurnThatHasNoneChangesNothing() {
         let store = TurnInteractionStore()
         let known = UUID()
-        store.setGroup(turn: known, key: "g:a", true)
+        store.recordAnswer(turn: known, block: 0, option: 1)
 
         store.dropHolds(turn: known)
         store.dropHolds(turn: UUID())
 
         XCTAssertEqual(store.trackedTurnCount, 1)
-        XCTAssertEqual(store.state(for: known).groupStates, ["g:a": true])
+        XCTAssertEqual(store.state(for: known).answeredOptions, [0: 1])
     }
 
     func testReleasingAllHoldsReturnsTheTurnsThatHadAnyAndLeavesNothingHeld() {
@@ -630,7 +540,7 @@ final class TurnInteractionStoreHoldTests: XCTestCase {
         store.hold(turn: a, ordinal: 1)
         store.hold(turn: a, ordinal: 2)
         store.hold(turn: b, ordinal: 5)
-        store.setGroup(turn: none, key: "g:z", true)
+        store.recordAnswer(turn: none, block: 0, option: 1)
 
         let released = store.releaseAllHolds()
 

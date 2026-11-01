@@ -292,6 +292,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         pasteboard.setString(TerminalLatencyStats.shared.report(), forType: .string)
     }
 
+    /// Debug > Copy Mother Notice Stats: the notice switches, wakes per focus per day, held counts by reason and
+    /// the share of jobs with a verified origin. A view action (it only copies text), so not gesture-gated.
+    @objc func copyMotherNoticeStats() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(MotherNoticeStats.text(state: AppStore.shared.motherNoticeState,
+                                                    annotations: AppStore.shared.motherAnnotations), forType: .string)
+    }
+
     /// Terminal > New Terminal (⌘T): a login shell in the key window's focus, in its project directory,
     /// split below the pane that holds the keyboard (the REPL by default). That window's terminal takes
     /// the keyboard when the daemon reports it; an agent-opened terminal never does.
@@ -423,7 +432,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         BackgroundShortcut.bar(in: NSApp.keyWindow)?.showBackgroundPopover(sender)
     }
 
+    /// View ▸ Focus (⌥⌘←) with focus outside every transcript pane (a terminal pane, a list): act on
+    /// the key window's single visible transcript pane. A pane that holds focus handles it itself.
+    @objc func setTranscriptFocusMode(_ sender: Any?) {
+        TranscriptViewMenu.target(in: NSApp.keyWindow)?.setTranscriptFocusMode(sender)
+    }
+
+    /// View ▸ Show All Activity (⌥⌘→): as `setTranscriptFocusMode`.
+    @objc func setTranscriptAllActivityMode(_ sender: Any?) {
+        TranscriptViewMenu.target(in: NSApp.keyWindow)?.setTranscriptAllActivityMode(sender)
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == TranscriptViewMenu.focusAction || menuItem.action == TranscriptViewMenu.allActivityAction {
+            return TranscriptViewMenu.validate(menuItem, target: TranscriptViewMenu.target(in: NSApp.keyWindow))
+        }
         if menuItem.action == #selector(terminalFind(_:)) {
             let responder = NSApp.keyWindow?.firstResponder
             return TerminalPaneHostView.containing(responder) != nil || PlanDocumentView.containing(responder) != nil

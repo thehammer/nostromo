@@ -32,6 +32,14 @@ public struct MotherJobRowModel: Identifiable, Equatable {
     public let attentionBadges: [String]
     /// Who queued the job (Mother focus v2). Nil on iOS and wherever the surface does not show it.
     public let origin: MotherOriginDisplay?
+    /// Condensed row (line two): the job's PR number, whether it merged, why it failed, and its cost
+    /// (pre-formatted, e.g. `$2.14`). All nil/false where the surface has no such data.
+    public let prNumber: Int?
+    public let prMerged: Bool
+    public let failureReason: String?
+    public let cost: String?
+    /// The notified mark (`✓ told Claudia`, `⏸ held`); nil when the job's focus is not notified.
+    public let noticeMark: MotherNoticeMark?
 
     public init(
         id: String,
@@ -45,7 +53,12 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         attentionBadges: [String] = [],
         progressAccessibility: String? = nil,
         showsProgressLine: Bool = false,
-        origin: MotherOriginDisplay? = nil
+        origin: MotherOriginDisplay? = nil,
+        prNumber: Int? = nil,
+        prMerged: Bool = false,
+        failureReason: String? = nil,
+        cost: String? = nil,
+        noticeMark: MotherNoticeMark? = nil
     ) {
         self.id               = id
         self.state            = state
@@ -59,6 +72,11 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         self.progressAccessibility = progressAccessibility
         self.showsProgressLine = showsProgressLine
         self.origin = origin
+        self.prNumber = prNumber
+        self.prMerged = prMerged
+        self.failureReason = failureReason
+        self.cost = cost
+        self.noticeMark = noticeMark
     }
 
     /// The row's spoken form. Without an origin (iOS) just the title. With one: the title, `From <origin>.`,

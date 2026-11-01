@@ -429,7 +429,7 @@ final class DynamicFocusView: NSView {
             // Native Mother job queue: counts, grouped job list, job detail with
             // actions — fed straight from the broker via AppStore, so it has no
             // daemon source binding. See docs/plans/mother-pane.md.
-            let mother = MotherView()
+            let mother = MotherView(storageKey: windowId)
             leafViews[paneId] = mother
             return mother
         } else if paneId == "teri_surface" {

@@ -22,6 +22,9 @@ public struct MotherOriginDisplay: Equatable, Sendable {
     public let tooltip: String
     /// `From <origin>`.
     public let accessibilityText: String
+    /// The verified focus's name, sanitised and capped, without a `(closed)` suffix. Nil for every
+    /// other kind: only a verified focus is ever notified, so only it gets a notified mark.
+    public private(set) var name: String? = nil
 
     public static let rowCap = 40
     public static let tooltipCap = 120
@@ -81,10 +84,12 @@ public struct MotherOriginDisplay: Equatable, Sendable {
         let prefix = clean(o.sessionPrefix, cap: 16)
         if !prefix.isEmpty { lines.append("session \(prefix)") }
 
-        return MotherOriginDisplay(
+        var display = MotherOriginDisplay(
             kind: .focus, text: text, isMuted: !isOpen, isItalic: false, badge: nil,
             isClickable: isOpen, focusTag: tag,
             tooltip: lines.joined(separator: "\n"), accessibilityText: "From \(text)")
+        display.name = name
+        return display
     }
 
     private static func unverified(_ o: MotherOriginView) -> MotherOriginDisplay {

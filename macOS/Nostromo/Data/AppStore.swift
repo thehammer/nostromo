@@ -39,6 +39,10 @@ class AppStore: ObservableObject {
     /// Who queued each Mother job, from the daemon's `mother_jobs` frame, keyed by job id. Kept
     /// through a disconnect; published only when it changes.
     @Published private(set) var motherAnnotations:  [String: MotherJobAnnotation] = [:]
+    /// The daemon's notice switches and each focus's notice state. Nil until the first
+    /// `mother_notice_state` frame; published only when it changes. The UI reflects this alone: a
+    /// switch is never shown as changed before the daemon says so.
+    @Published private(set) var motherNoticeState: MotherNoticeStateWire?
     /// Live peek snapshots keyed by job id. Cleared on disconnect and on terminal transition.
     @Published private(set) var motherPeeks:        [String: MotherPeekPayload] = [:]
     /// True while the broker socket is connected (hello received + subscribe sent).
@@ -697,6 +701,8 @@ class AppStore: ObservableObject {
     /// bug (`.claude/bugs/open/2026-09-04-renderedtreeshapebytag-still-goes-
     /// stale-on-window-close.md`).
     private func evictPerFocusState(tag: String) {
+        // The closed focus's notice entry (and its held bar) goes now, not at the daemon's next frame.
+        if let state = motherNoticeState, state.focus(tag: tag) != nil { motherNoticeState = state.removing(tag: tag) }
         focusLayouts.removeValue(forKey: tag)
         sessionRegistry.removeValue(forKey: tag)?.detach()
         sessionHealth.removeValue(forKey: tag)
@@ -1414,6 +1420,9 @@ class AppStore: ObservableObject {
         case .motherAnnotations(let annotations):
             if annotations != motherAnnotations { motherAnnotations = annotations }
 
+        case .motherNoticeState(let state):
+            if state != motherNoticeState { motherNoticeState = state }
+
         case .motherPeek(let payload):
             if payload.isEmpty {
                 motherPeeks.removeValue(forKey: payload.jobId)
@@ -2038,3 +2047,42 @@ enum NeedsYouRouting {
 }
 
 extension MotherJob: MotherJobLike {}
+
+
+// MARK: - MotherNoticeSwitches
+
+/// The two Mother notice switches a person can flip: a focus's mode and the global bell. They change
+/// what agents receive and what turns cost, so each runs `HumanGesture.permit` first and sends nothing
+/// on a refusal. Nothing is applied locally: the UI follows `AppStore.motherNoticeState`.
+struct MotherNoticeSwitches {
+    var gesture = MotherGestureInputs()
+    var send: (ClientMotherNoticeSettingsSet.Scope, String?, MotherNoticeMode?, Bool?) -> Void = {
+        AppStore.shared.client.sendMotherNoticeSettings(scope: $0, tag: $1, mode: $2, enabled: $3)
+    }
+
+    /// - Returns: `true` when the frame was sent.
+    @discardableResult
+    func setFocusMode(tag: String, mode: MotherNoticeMode, control: NSView, menuSelection: Bool) -> Bool {
+        guard permitted(control: control, menuSelection: menuSelection, what: "notice mode") else { return false }
+        send(.focus, tag, mode, nil)
+        return true
+    }
+
+    @discardableResult
+    func setGlobal(enabled: Bool, control: NSView) -> Bool {
+        guard permitted(control: control, menuSelection: false, what: "notice switch") else { return false }
+        send(.global, nil, nil, enabled)
+        return true
+    }
+
+    private func permitted(control: NSView, menuSelection: Bool, what: String) -> Bool {
+        let verdict = HumanGesture.permit(gesture.currentEvent(), control: control, menuSelection: menuSelection,
+                                          voiceOverEnabled: gesture.voiceOverEnabled,
+                                          allowsSynthetic: gesture.allowsSynthetic)
+        if case .refused(let reason) = verdict {
+            log.info("\(what, privacy: .public) refused: \(reason.rawValue, privacy: .public)")
+            return false
+        }
+        return true
+    }
+}
