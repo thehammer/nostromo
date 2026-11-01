@@ -646,7 +646,7 @@ final class FocusLaneTests: XCTestCase {
         row.row.pasteboard = pb
 
         let items = row.row.contextMenu().items.filter { !$0.isSeparatorItem }
-        XCTAssertEqual(items.map(\.title), ["Copy Messages", "Copy Commands", "Copy Summary"])
+        XCTAssertEqual(items.map(\.title), ["Copy Messages", "Copy Commands", "Copy Summary", "Focus", "Show All Activity"])
         let expected = ["ALPHA-ONLY", "cmd a0\ncmd a1", "1 message, ran 2 commands"]
         for (item, text) in zip(items, expected) {
             pb.clearContents()

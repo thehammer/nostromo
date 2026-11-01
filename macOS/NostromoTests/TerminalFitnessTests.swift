@@ -520,7 +520,10 @@ final class TerminalFitnessTests: XCTestCase {
         let main = MainMenu.make(target: nil)
         let edit = try XCTUnwrap(topLevelMenu("Edit", in: main))
         let terminal = try XCTUnwrap(topLevelMenu("Terminal", in: main), "no top-level Terminal menu")
-        XCTAssertEqual(terminal.index, edit.index + 1, "Terminal comes right after Edit")
+        // The View menu (FV4) sits between Edit and Terminal.
+        let view = try XCTUnwrap(topLevelMenu(TranscriptViewMenu.menuTitle, in: main), "no top-level View menu")
+        XCTAssertEqual(view.index, edit.index + 1, "View comes right after Edit")
+        XCTAssertEqual(terminal.index, view.index + 1, "Terminal comes right after View")
 
         let new = try XCTUnwrap(item("New Terminal", in: terminal.menu))
         XCTAssertEqual(new.keyEquivalent, "t")
