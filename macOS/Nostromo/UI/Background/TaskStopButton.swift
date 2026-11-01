@@ -14,7 +14,7 @@ enum BackgroundGesture {
 
     /// A context menu's Stop: its mouse event belongs to the menu, not to the control's window.
     static let defaultMenuPermit: Permit = { control in
-        HumanGesture.permit(NSApp?.currentEvent, control: control, menuSelection: true)
+        HumanGesture.permit(NSApp?.currentEvent, control: control, menuSelection: true, contextMenuPick: true)
     }
 
     /// The event behind the action being handled (a seam: tests script it; `permit` still reads AppKit's).

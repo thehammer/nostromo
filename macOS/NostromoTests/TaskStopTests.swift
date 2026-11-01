@@ -648,7 +648,7 @@ fileprivate final class TSGestureRig {
                                     voiceOverEnabled: { self.voiceOver }, allowsSynthetic: { false })
             },
             menuPermit: { [unowned self] control in
-                HumanGesture.permit(self.event, control: control, menuSelection: true,
+                HumanGesture.permit(self.event, control: control, menuSelection: true, contextMenuPick: true,
                                     voiceOverEnabled: { self.voiceOver }, allowsSynthetic: { false })
             },
             schedule: { [unowned self] delay, work in self.reverts.schedule(delay, work) },
