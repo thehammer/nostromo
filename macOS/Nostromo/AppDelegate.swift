@@ -432,7 +432,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         BackgroundShortcut.bar(in: NSApp.keyWindow)?.showBackgroundPopover(sender)
     }
 
+    /// View ▸ Focus (⌥⌘←) with focus outside every transcript pane (a terminal pane, a list): act on
+    /// the key window's single visible transcript pane. A pane that holds focus handles it itself.
+    @objc func setTranscriptFocusMode(_ sender: Any?) {
+        TranscriptViewMenu.target(in: NSApp.keyWindow)?.setTranscriptFocusMode(sender)
+    }
+
+    /// View ▸ Show All Activity (⌥⌘→): as `setTranscriptFocusMode`.
+    @objc func setTranscriptAllActivityMode(_ sender: Any?) {
+        TranscriptViewMenu.target(in: NSApp.keyWindow)?.setTranscriptAllActivityMode(sender)
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == TranscriptViewMenu.focusAction || menuItem.action == TranscriptViewMenu.allActivityAction {
+            return TranscriptViewMenu.validate(menuItem, target: TranscriptViewMenu.target(in: NSApp.keyWindow))
+        }
         if menuItem.action == #selector(terminalFind(_:)) {
             let responder = NSApp.keyWindow?.firstResponder
             return TerminalPaneHostView.containing(responder) != nil || PlanDocumentView.containing(responder) != nil

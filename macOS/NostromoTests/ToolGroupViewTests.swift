@@ -18,9 +18,9 @@ private typealias F = FoldFixtures
 
 private let paneWidth: CGFloat = 900
 
-private func makeTurnView(_ turn: ChatTurn, interaction: TurnInteractionState = TurnInteractionState(),
-                          folds: FoldResolver? = nil, contentAvailable: Bool = true) -> ChatTurnView {
-    let view = ChatTurnView(turn: turn, contentAvailable: contentAvailable, interaction: interaction, folds: folds)
+private func makeTurnView(_ turn: ChatTurn, folds: FoldResolver? = nil, contentAvailable: Bool = true) -> ChatTurnView {
+    let view = ChatTurnView(turn: turn, contentAvailable: contentAvailable, interaction: TurnInteractionState(),
+                            folds: folds)
     view.setIslandWidth(paneWidth)
     return view
 }
@@ -36,10 +36,10 @@ private func columnKinds(_ turn: ChatTurnView) -> [String] {
     turn.subviews.filter { !($0 is UserBubbleView) }.map(typeName)
 }
 
-private func expanded(_ keys: String...) -> TurnInteractionState {
-    var state = TurnInteractionState()
-    for key in keys { state.groupStates[key] = true }
-    return state
+private func expanded(_ keys: String...) -> FoldResolver {
+    var folds = FoldResolver()
+    for key in keys { folds.groupStates[key] = true }
+    return folds
 }
 
 private func disclosure(of view: NSView) -> NSButton? {
@@ -122,7 +122,7 @@ final class ToolGroupViewTests: XCTestCase {
         let blocks: [TurnBlock] = [F.call(summary: "a"), F.result(), F.call(summary: "b"), .text("break"), F.call(summary: "c")]
         let turn = F.turn(blocks)
         // The first group has the message after it, so it is in the activity row: open the row.
-        let keys = groupViews(in: makeTurnView(turn, interaction: F.rowsOpen(turn))).map(\.group.key)
+        let keys = groupViews(in: makeTurnView(turn, folds: F.rowsOpen(turn))).map(\.group.key)
         XCTAssertEqual(keys, ["g:\(turn.identityKey)#c0", "g:\(turn.identityKey)#c2"])
     }
 
@@ -148,7 +148,7 @@ final class ToolGroupViewTests: XCTestCase {
     func testAnExpandedGroupShowsTheCallsAndResultsInBlockOrder() throws {
         let turn = F.turn([.text("before")] + F.run(4))
         let key = F.groups(of: turn)[0].key
-        for view in [makeTurnView(turn, interaction: expanded(key)),
+        for view in [makeTurnView(turn, folds: expanded(key)),
                      makeTurnView(turn, folds: FoldResolver(expandedByDefault: true))] {
             let group = try XCTUnwrap(groupViews(in: view).first)
             XCTAssertTrue(group.isExpanded)
@@ -168,14 +168,12 @@ final class ToolGroupViewTests: XCTestCase {
 
     func testExplicitChoicesBeatTheDefaultAndOnlyAffectTheirOwnGroup() throws {
         let turn = F.turn(F.run(2, prefix: "a") + [.text("between")] + F.run(2, prefix: "b"))
-        var state = TurnInteractionState()
-        state.groupStates["g:b0"] = true
+        let state = FoldResolver(groupStates: ["g:b0": true])
         // Group a has the message after it: open its activity row to see it.
-        let collapsedDefault = groupViews(in: makeTurnView(turn, interaction: F.rowsOpen(turn, in: state))).map(\.isExpanded)
+        let collapsedDefault = groupViews(in: makeTurnView(turn, folds: F.rowsOpen(turn, in: state))).map(\.isExpanded)
         XCTAssertEqual(collapsedDefault, [false, true])
-        var close = TurnInteractionState()
-        close.groupStates["g:a0"] = false
-        let expandedDefault = groupViews(in: makeTurnView(turn, interaction: close, folds: FoldResolver(state: close, expandedByDefault: true)))
+        let close = FoldResolver(groupStates: ["g:a0": false], expandedByDefault: true)
+        let expandedDefault = groupViews(in: makeTurnView(turn, folds: close))
             .map(\.isExpanded)
         XCTAssertEqual(expandedDefault, [false, true])
     }
@@ -220,9 +218,9 @@ final class ToolGroupViewTests: XCTestCase {
 
     func testAResultTheOperatorHadExpandedComesBackOpenInsideAnExpandedGroup() throws {
         let turn = F.turn([.text("before")] + F.run(2, output: { "line one of \($0)\nline two" }))
-        var state = expanded(F.groups(of: turn)[0].key)
-        state.expandedBlocks = [4]   // the second result
-        let view = makeTurnView(turn, interaction: state)
+        var folds = expanded(F.groups(of: turn)[0].key)
+        folds.resultStates[4] = true   // the second result
+        let view = makeTurnView(turn, folds: folds)
         let group = try XCTUnwrap(groupViews(in: view).first)
         let buttons = try group.memberViews.filter { $0 is ToolResultView }.map { try XCTUnwrap(disclosure(of: $0)) }
         XCTAssertEqual(buttons.map(isOpenArrow), [false, true])
@@ -260,7 +258,7 @@ final class ToolGroupViewTests: XCTestCase {
         let key = F.groups(of: turn)[0].key
         let clicked = makeTurnView(turn)
         try XCTUnwrap(groupViews(in: clicked).first).row.toggle()
-        let fresh = makeTurnView(turn, interaction: expanded(key))
+        let fresh = makeTurnView(turn, folds: expanded(key))
         XCTAssertEqual(clicked.islandHeight(), fresh.islandHeight(), accuracy: 0.5)
     }
 
@@ -281,8 +279,10 @@ final class ToolGroupViewTests: XCTestCase {
             // so its group can be looked at), and the prose, being the latest message, is not in it.
             let isProse = separator.name == "prose"
             let open = F.rowsOpen(turn)
-            for folds in [FoldResolver(state: open), FoldResolver(state: open, expandedByDefault: true)] {
-                let view = makeTurnView(turn, interaction: open, folds: folds)
+            var openByDefault = open
+            openByDefault.expandedByDefault = true
+            for folds in [open, openByDefault] {
+                let view = makeTurnView(turn, folds: folds)
                 let direct = view.subviews.filter { !($0 is UserBubbleView) }
                 XCTAssertEqual(direct.count, 3, "\(separator.name): \(isProse ? "row" : "group"), separator, group")
                 guard direct.count == 3 else { continue }
@@ -381,7 +381,7 @@ final class ToolGroupViewTests: XCTestCase {
         let turn = F.turn(blocks)
         let group = try XCTUnwrap(F.groups(of: turn).first)
         let view = ToolGroupView(group: group, blocks: turn.blocks, contentAvailable: true,
-                                 interaction: TurnInteractionState(), isExpanded: false)
+                                 folds: FoldResolver(), isExpanded: false)
         return ChatTurnView.measureIsland(view, width: ChatTurnView.blockWidth(paneWidth: paneWidth))
     }
 
@@ -401,7 +401,7 @@ final class ToolGroupViewTests: XCTestCase {
             switch block {
             case .toolCall(let d): return sum + 6 + ChatTurnView.measureIsland(ToolCallView(data: d), width: width)
             case .toolResult(let d):
-                return sum + 6 + ChatTurnView.measureIsland(ToolResultView(data: d, contentAvailable: true, startExpanded: false), width: width)
+                return sum + 6 + ChatTurnView.measureIsland(ToolResultView(data: d, contentAvailable: true, explicitState: nil), width: width)
             default: return sum
             }
         }
@@ -556,7 +556,7 @@ final class ToolGroupRowTests: XCTestCase {
         // A group built into the window, then grown, then a whole new group streamed in.
         let extra = F.turn(F.run(2, prefix: "x"))
         let built = ToolGroupView(group: F.groups(of: extra)[0], blocks: extra.blocks,
-                                  contentAvailable: true, interaction: TurnInteractionState(), isExpanded: true)
+                                  contentAvailable: true, folds: FoldResolver(), isExpanded: true)
         rig.content.addSubview(built)
         rig.window.makeKey()
         XCTAssertTrue(rig.window.firstResponder === composer, "building a group view took focus")
@@ -677,11 +677,11 @@ final class ToolGroupRowTests: XCTestCase {
 final class ToolGroupIslandTests: XCTestCase {
 
     private func makeGroupView(_ blocks: [TurnBlock], expanded: Bool = false,
-                               interaction: TurnInteractionState = TurnInteractionState(),
+                               folds: FoldResolver = FoldResolver(),
                                contentAvailable: Bool = true, textParents: [Int: String] = [:]) -> ToolGroupView {
         let turn = F.turn(blocks, textParents: textParents)
         return ToolGroupView(group: F.groups(of: turn)[0], blocks: turn.blocks,
-                             contentAvailable: contentAvailable, interaction: interaction, isExpanded: expanded)
+                             contentAvailable: contentAvailable, folds: folds, isExpanded: expanded)
     }
 
     private let width = ChatTurnView.blockWidth(paneWidth: paneWidth)
@@ -749,7 +749,7 @@ final class ToolGroupIslandTests: XCTestCase {
                 XCTAssertEqual(member.frame.height, ChatTurnView.measureIsland(ToolCallView(data: d), width: width), accuracy: 0.5)
             case .toolResult(let d):
                 XCTAssertEqual(member.frame.height,
-                               ChatTurnView.measureIsland(ToolResultView(data: d, contentAvailable: true, startExpanded: false), width: width),
+                               ChatTurnView.measureIsland(ToolResultView(data: d, contentAvailable: true, explicitState: nil), width: width),
                                accuracy: 0.5)
             default: XCTFail("unexpected block")
             }
@@ -811,9 +811,9 @@ final class ToolGroupIslandTests: XCTestCase {
     }
 
     func testTheActivityComesBackOpenWhenItsStateWasKept() throws {
-        var state = TurnInteractionState()
-        state.expandedBlocks = [1]
-        let view = makeGroupView(agentBlocks, expanded: true, interaction: state, textParents: agentParents)
+        var folds = FoldResolver()
+        folds.resultStates[1] = true
+        let view = makeGroupView(agentBlocks, expanded: true, folds: folds, textParents: agentParents)
         let activity = try XCTUnwrap(view.memberViews[1] as? AgentActivityView)
         XCTAssertTrue(activity.isExpanded)
         XCTAssertTrue(textFields(in: activity).contains { $0.stringValue.contains("grep -r foo") },
@@ -866,18 +866,18 @@ final class ToolGroupSelectionTests: XCTestCase {
 
     func testExpandingTheGroupAndItsResultsPutsTheOutputInTheTree() throws {
         let turn = turnWithHiddenOutput()
-        var state = expanded(F.groups(of: turn)[0].key)
-        state.expandedBlocks = [2, 4, 6]
-        let view = makeTurnView(turn, interaction: state)
+        var folds = expanded(F.groups(of: turn)[0].key)
+        folds.resultStates = [2: true, 4: true, 6: true]
+        let view = makeTurnView(turn, folds: folds)
         let labels = textFields(in: view).filter { $0.stringValue.contains(Self.sentinel) }
         XCTAssertEqual(labels.count, 3, "one output label per expanded result")
     }
 
     func testCollapsingAgainTakesTheOutputOutOfReachOfSelection() throws {
         let turn = turnWithHiddenOutput()
-        var state = expanded(F.groups(of: turn)[0].key)
-        state.expandedBlocks = [2, 4, 6]
-        let view = makeTurnView(turn, interaction: state)
+        var folds = expanded(F.groups(of: turn)[0].key)
+        folds.resultStates = [2: true, 4: true, 6: true]
+        let view = makeTurnView(turn, folds: folds)
         let group = try XCTUnwrap(groupViews(in: view).first)
         group.row.toggle()
         XCTAssertFalse(group.isExpanded)
@@ -961,9 +961,9 @@ final class ToolGroupColdTurnTests: XCTestCase {
 
     func testExpandingADroppedTurnsGroupAndResultSaysTheContentIsNoLongerRetained() throws {
         let skeleton = TurnPayloadStore.skeleton(of: fullTurn())
-        var state = expanded(F.groups(of: skeleton)[0].key)
-        state.expandedBlocks = [2]
-        let view = makeTurnView(skeleton, interaction: state, contentAvailable: false)
+        var folds = expanded(F.groups(of: skeleton)[0].key)
+        folds.resultStates[2] = true
+        let view = makeTurnView(skeleton, folds: folds, contentAvailable: false)
         let group = try XCTUnwrap(groupViews(in: view).first)
         XCTAssertTrue(group.isExpanded)
         // The result the operator expanded, and the failing one, which always opens.
@@ -1088,7 +1088,8 @@ final class ToolGroupReviewFollowUpTests: XCTestCase {
         let turn = F.turn([.text(F.prose)] + F.run(1_000, name: "Read") + [.text(F.prose)] + F.run(3, prefix: "b"))
         ToolGroupRowView.updateCount = 0
         // The 1,000-call group is in an activity row (a message follows it): open the row so it is built.
-        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: F.rowsOpen(turn))
+        let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: TurnInteractionState(),
+                                folds: F.rowsOpen(turn))
         XCTAssertEqual(rigAllSubviews(of: view).compactMap { $0 as? ToolGroupView }.count, 2)
         XCTAssertLessThanOrEqual(ToolGroupRowView.updateCount, 4, "one at creation and one with the final state, per group")
     }
@@ -1131,10 +1132,9 @@ final class ToolGroupReviewFollowUpTests: XCTestCase {
     /// Collapsing must not leave a selection alive in hidden output, where ⌘C would copy it.
     func testCollapsingAGroupTakesFocusOutOfItsHiddenMembers() throws {
         let turn = F.turn([.text(F.prose)] + F.run(1, output: { _ in "HIDDEN-OUTPUT-SENTINEL and more" }))
-        var state = TurnInteractionState()
-        state.expandedBlocks = [2]
-        let rig = makeTranscriptRig(self, blocks: turn.blocks, interaction: state,
-                                    folds: FoldResolver(expandedByDefault: true))
+        var folds = FoldResolver(expandedByDefault: true)
+        folds.resultStates[2] = true
+        let rig = makeTranscriptRig(self, blocks: turn.blocks, folds: folds)
         let group = try XCTUnwrap(rigAllSubviews(of: rig.turn).compactMap { $0 as? ToolGroupView }.first)
         let output = try XCTUnwrap(rigAllSubviews(of: group).compactMap { $0 as? NSTextField }
             .first { $0.stringValue.contains("HIDDEN-OUTPUT-SENTINEL") })

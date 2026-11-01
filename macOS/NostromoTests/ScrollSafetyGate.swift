@@ -44,7 +44,12 @@ final class SafetyRig {
     let overlay: JumpToLatestOverlay
     let followTail: FollowTailController
     let virtualizer = TurnListVirtualizer()
+    /// The pane's holds and answers (the fold choices are in `foldStore`).
     let store = TurnInteractionStore()
+    /// The focus's persisted folds and mode (a private file and defaults suite, see `scrollRigFoldStore`).
+    let foldStore = scrollRigFoldStore()
+    /// The pane's end of `foldStore`: the same `PaneFoldSync` `ReplView` owns.
+    var sync: PaneFoldSync!
 
     var turns: [ChatTurn]
     var materialized: [UUID: ChatTurnView] = [:]
@@ -123,6 +128,8 @@ final class SafetyRig {
         }
         followTail.onScroll = { [unowned self] in self.rollInHolds.scrolled() }
         virtualizer.foldState = { [unowned self] turn in self.store.state(for: turn.id) }
+        sync = PaneFoldSync(tag: "rig", store: foldStore)
+        virtualizer.foldResolver = { [unowned self] turn in self.resolver(for: turn) }
 
         coordinator = TranscriptViewportCoordinator(virtualizer: virtualizer, scrollView: scrollView,
                                                     followTail: followTail, islandFor: { [unowned self] index in
@@ -144,6 +151,49 @@ final class SafetyRig {
         rollInHolds.animator = animator
         rollInHolds.isLeftMouseDown = { [unowned self] in self.mouseDown }
         rollInHolds.afterEvent = { [unowned self] work in self.afterEventQueue.append(work) }
+        rollInHolds.recordCarried = { [unowned self] id, states in
+            guard let key = self.turns.first(where: { $0.id == id })?.identityKey else { return }
+            for (row, open) in states { self.sync.recordFold(key: row, turnKey: key, open: open) }
+        }
+        // What `ReplView` hands its `PaneFoldSync`.
+        sync.loadedTurnIDs = { [unowned self] in Set(self.turns.map(\.id)) }
+        sync.stuckGroupKeys = { [unowned self] in self.stuckGroupKeys() }
+        sync.applyChange = { [unowned self] ids, mutation in self.coordinator.applyFoldChange(turnIds: ids, mutation: mutation) }
+        sync.reresolve = { [unowned self] in
+            for turn in self.turns { self.materialized[turn.id]?.applyFolds(self.resolver(for: turn)) }
+        }
+    }
+
+    /// How the turn's folds resolve in this pane: the focus's mode and persisted choices
+    /// (`expandedByDefault` forces All activity).
+    func resolver(for turn: ChatTurn) -> FoldResolver {
+        var resolver = sync.resolver(turnKey: turn.identityKey)
+        if expandedByDefault { resolver.mode = .allActivity }
+        return resolver
+    }
+
+    /// The operator's earlier choice for a group of `id`, recorded in the store without a view
+    /// being toggled.
+    func setGroup(turn id: UUID, key: String, _ open: Bool) {
+        sync.recordFold(key: key, turnKey: turns.first { $0.id == id }!.identityKey, open: open)
+    }
+
+    /// As `setGroup`, for an activity row.
+    func setActivity(turn id: UUID, key: String, _ open: Bool) {
+        setGroup(turn: id, key: key, open)
+    }
+
+    private func stuckGroupKeys() -> [String] {
+        var keys: [String] = []
+        func collect(_ item: FoldShape.Item) {
+            switch item {
+            case .group(let group): if group.isStuck { keys.append(group.key) }
+            case .activity(_, let members): members.forEach(collect)
+            case .block, .message: break
+            }
+        }
+        for turn in turns where turn.isComplete { virtualizer.foldShape(for: turn)?.items.forEach(collect) }
+        return keys
     }
 
     /// How many pieces of work are waiting for the end of the event.
@@ -178,13 +228,13 @@ final class SafetyRig {
     private func makeView(for turn: ChatTurn) -> ChatTurnView {
         let state = store.state(for: turn.id)
         let view = ChatTurnView(turn: turn, contentAvailable: true, interaction: state,
-                                folds: FoldResolver(state: state, expandedByDefault: expandedByDefault),
+                                folds: resolver(for: turn),
                                 heldOrdinals: state.heldOrdinals)
         let id = turn.id
         rollInHolds.wire(view, turn: id)
         view.onActivityToggle = { [unowned self] key, open in
             self.activityToggles.append("\(key)=\(open)")
-            self.store.setActivity(turn: id, key: key, open)
+            self.setActivity(turn: id, key: key, open)
             self.pending.insert(id)
             if let index = self.turns.firstIndex(where: { $0.id == id }) {
                 self.coordinator.noteUserToggle(turnIndex: index, itemKey: key)
@@ -192,14 +242,18 @@ final class SafetyRig {
         }
         view.onGroupToggle = { [unowned self] key, open in
             self.groupToggles.append("\(key)=\(open)")
-            self.store.setGroup(turn: id, key: key, open)
+            self.setGroup(turn: id, key: key, open)
             self.pending.insert(id)
             if let index = self.turns.firstIndex(where: { $0.id == id }) {
                 self.coordinator.noteUserToggle(turnIndex: index, itemKey: key)
             }
         }
         view.onBlockExpansion = { [unowned self] blockIndex, open in
-            self.store.setExpanded(turn: id, block: blockIndex, open)
+            if let turn = self.turns.first(where: { $0.id == id }) {
+                let block = turn.blocks.indices.contains(blockIndex) && blockIndex >= 0 ? turn.blocks[blockIndex] : nil
+                self.sync.recordResult(key: FoldKey.result(block: block, index: blockIndex, turnKey: turn.identityKey),
+                                       turnKey: turn.identityKey, open: open)
+            }
             self.pending.insert(id)
             if let index = self.turns.firstIndex(where: { $0.id == id }) {
                 self.coordinator.noteUserToggle(turnIndex: index, itemKey: "b\(blockIndex)")
@@ -210,7 +264,9 @@ final class SafetyRig {
         view.onWillChangeHeight = { [unowned self] in self.coordinator.noteProgrammaticChange() }
         view.onAutoOpen = { [unowned self] key in
             self.autoOpened.append(key)
-            self.store.recordAuto(turn: id, key: key)
+            if let turn = self.turns.first(where: { $0.id == id }) {
+                self.sync.recordAuto(key: key, turnKey: turn.identityKey)
+            }
         }
         return view
     }
@@ -219,8 +275,7 @@ final class SafetyRig {
         view.setIslandWidth(contentWidth)
         let height = view.islandHeight()
         view.setFrameSize(NSSize(width: contentWidth, height: height))
-        let digest = ToolFoldAdapter.foldDigest(turn: turn, state: store.state(for: turn.id),
-                                                expandedByDefault: virtualizer.foldsExpandedByDefault)
+        let digest = virtualizer.foldDigest(for: turn)
         virtualizer.recordMeasured(height, at: index, isComplete: turn.isComplete, foldDigest: digest)
     }
 

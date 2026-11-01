@@ -91,12 +91,14 @@ final class TurnListVirtualizer {
     /// Index lookup for anchor re-resolution after a splice.
     private var indexByKey: [String: Int] = [:]
 
-    /// The fold state each turn renders with: its explicit group and activity-row choices,
-    /// expanded results and held roll-ins. Feeds both the estimate and the height-cache key
-    /// (`ToolFoldAdapter.foldDigest`).
+    /// The pane's per-turn state a turn renders with: its held roll-ins (the explicit fold choices
+    /// are `foldResolver`'s).
     var foldState: (ChatTurn) -> TurnInteractionState = { _ in TurnInteractionState() }
-    /// Groups and activity rows without an explicit choice open (harness
-    /// `NOSTROMO_LOAD_FOLD_DEFAULT=expanded`: Show All).
+    /// How each turn's groups, activity rows and result folds resolve (the pane's mode and the
+    /// focus's persisted choices). Feeds both the estimate and the height-cache key
+    /// (`ToolFoldAdapter.foldDigest`). Nil: no explicit choices, `foldsExpandedByDefault`.
+    var foldResolver: ((ChatTurn) -> FoldResolver)?
+    /// Without a `foldResolver`: groups and activity rows open by default (All activity).
     var foldsExpandedByDefault = false
 
     /// Completed turns' fold shapes, by turn id, with the signature they were planned from.
@@ -490,13 +492,21 @@ final class TurnListVirtualizer {
 
     // MARK: - Folds
 
-    private func foldDigest(for turn: ChatTurn) -> String {
-        ToolFoldAdapter.foldDigest(turn: turn, state: foldState(turn), expandedByDefault: foldsExpandedByDefault)
+    private func resolver(for turn: ChatTurn) -> FoldResolver {
+        foldResolver?(turn) ?? FoldResolver(expandedByDefault: foldsExpandedByDefault, turnKey: turn.identityKey)
+    }
+
+    /// The fold digest `turn` is cached under. A streaming turn's height is never cached, so its
+    /// digest skips the plan (planning it here as well as in the estimate would double the work
+    /// per streamed block): mode, results and holds only.
+    func foldDigest(for turn: ChatTurn) -> String {
+        ToolFoldAdapter.foldDigest(turn: turn, shape: turn.isComplete ? foldShape(for: turn) : nil,
+                                   folds: resolver(for: turn), held: foldState(turn).heldOrdinals)
     }
 
     private func estimate(_ turn: ChatTurn) -> CGFloat {
         TurnHeightEstimator.estimate(turn, width: width,
-                                     folds: FoldResolver(state: foldState(turn), expandedByDefault: foldsExpandedByDefault),
+                                     folds: resolver(for: turn),
                                      shape: foldShape(for: turn))
     }
 

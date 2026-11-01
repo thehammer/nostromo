@@ -64,14 +64,29 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private var backgroundSlotWidth: NSLayoutConstraint!
     private var backgroundSlotGap: NSLayoutConstraint!
 
+    /// The transcript view chip (FV4: `Focus` / `All activity`), between the background slot and the
+    /// model chip. It is its own fixed-width slot (`TranscriptModeChip.slotWidth`, the wider title)
+    /// once the bar is bound to a session, so toggling the mode never changes the composer's width.
+    let modeChip             = TranscriptModeChip()
+    /// A click on the chip: the mode to switch to. The pane (`ReplView`) performs it.
+    var onSetMode: ((TranscriptViewMode) -> Void)?
+    private var modeStore: TranscriptFoldStore?
+    private var modeTag: String?
+    private var modeHarnessMode: TranscriptViewMode?
+    private var modeBinding: AnyCancellable?
+    private var modeChipWidth: NSLayoutConstraint!
+    private var modeChipGap: NSLayoutConstraint!
+
     /// The composer never gets narrower than this, or than `composerMinimumFraction` of the bar,
-    /// whichever is more, while the bar is wide enough for it at all. What gives way for it: the
-    /// background slot first (its chip shows the icon alone, then nothing), then the model chip.
+    /// whichever is more, while the bar is wide enough for it at all. What gives way for it, in
+    /// this order: the background slot first (its chip shows the icon alone, then nothing), then
+    /// the transcript view chip (its label truncates, then it is gone), then the model chip.
     static let composerMinimumWidth: CGFloat = 120
     static let composerMinimumFraction: CGFloat = 0.35
     /// Priorities of what gives way, weakest first. All stay under `NSLayoutConstraint.Priority.windowSizeStayPut`
     /// (750): a bar too narrow for its parts must squeeze them, never widen its window.
     private static let slotPriority = NSLayoutConstraint.Priority(600)
+    private static let modeChipPriority = NSLayoutConstraint.Priority(650)
     private static let modelChipPriority = NSLayoutConstraint.Priority(700)
     private static let composerPriority = NSLayoutConstraint.Priority(740)
     private let spinner      = NSProgressIndicator()
@@ -217,9 +232,17 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
                                                                  multiplier: Self.composerMinimumFraction)
         composerMinimum.priority = Self.composerPriority
         composerFraction.priority = Self.composerPriority
-        // The gap between the slot and the model chip (or Send/Stop while the model chip is
-        // hidden: it is zero-wide then and sits flush against them).
-        backgroundSlotGap = backgroundSlot.trailingAnchor.constraint(equalTo: modelChip.leadingAnchor, constant: 0)
+        // The transcript view chip: zero-width until the bar is bound to a session, then fixed.
+        modeChip.target = self
+        modeChip.action = #selector(modeChipClicked(_:))
+        modeChip.isHidden = true
+        addSubview(modeChip)
+        modeChipWidth = modeChip.widthAnchor.constraint(equalToConstant: 0)
+        modeChipWidth.priority = Self.modeChipPriority
+        // The gap between the slot and the mode chip, and between the mode chip and the model chip
+        // (or Send/Stop while the model chip is hidden: it is zero-wide then and sits flush against them).
+        backgroundSlotGap = backgroundSlot.trailingAnchor.constraint(equalTo: modeChip.leadingAnchor, constant: 0)
+        modeChipGap = modeChip.trailingAnchor.constraint(equalTo: modelChip.leadingAnchor, constant: 0)
 
         textTopConstraint = textScroll.topAnchor.constraint(equalTo: border.bottomAnchor, constant: 9)
 
@@ -238,10 +261,15 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
             placeholder.leadingAnchor.constraint(equalTo: textScroll.leadingAnchor, constant: 4),
             placeholder.topAnchor.constraint(equalTo: textScroll.topAnchor, constant: 6),
 
-            // The text view stops short of the background slot, which sits left of the model chip.
-            // FV4: TranscriptModeChip goes between the background slot and modelChip.
+            // The text view stops short of the background slot, which sits left of the mode chip, which
+            // sits left of the model chip. Its trailing edge never depends on a chip's visibility.
             textScroll.trailingAnchor.constraint(equalTo: backgroundSlot.leadingAnchor, constant: -8),
             backgroundSlotGap,
+            modeChipGap,
+            modeChipWidth,
+            modeChip.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
+            modeChip.heightAnchor.constraint(equalToConstant: TranscriptModeChip.height),
+            modeChip.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
             backgroundSlotWidth,
             backgroundSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
             modelChip.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
@@ -375,6 +403,35 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private func setChipGap(_ gap: CGFloat) {
         chipTrailingToSend.constant = gap
         chipTrailingToStop.constant = gap
+    }
+
+    // MARK: Transcript view chip
+
+    /// Show `tag`'s mode in the chip, live from `store`: a switch made in any window (or by the
+    /// default changing) reaches every bar on that focus. Reserves the chip's slot. `harnessMode`
+    /// (the load harness's Show All) overrides what the chip reads.
+    func bindMode(tag: String, store: TranscriptFoldStore, harnessMode: TranscriptViewMode? = nil) {
+        modeTag = tag
+        modeStore = store
+        modeHarnessMode = harnessMode
+        modeChipWidth.constant = TranscriptModeChip.slotWidth
+        modeChipGap.constant = -6
+        modeChip.isHidden = false
+        modeBinding = store.changes.sink { [weak self] change in
+            if case .folds = change { return }
+            self?.refreshModeChip()
+        }
+        refreshModeChip()
+    }
+
+    /// Read the store and show its mode: only the chip's text and fill, inside its fixed slot.
+    private func refreshModeChip() {
+        guard let store = modeStore, let tag = modeTag else { return }
+        modeChip.apply(modeHarnessMode ?? store.mode(tag: tag))
+    }
+
+    @objc private func modeChipClicked(_ sender: Any?) {
+        onSetMode?(modeChip.mode == .focus ? .allActivity : .focus)
     }
 
     // MARK: Background activity chip

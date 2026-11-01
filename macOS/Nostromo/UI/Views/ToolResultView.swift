@@ -16,7 +16,7 @@ import NostromoKit
 /// geometry and view disagreeing until the next measure.
 final class ToolResultView: NSView {
 
-    private var isExpanded  = false
+    private(set) var isExpanded = false
     private let disclosure  = NSButton()
     private let contentWrap = NSView()
     private let lineCount:  Int
@@ -36,17 +36,18 @@ final class ToolResultView: NSView {
     /// re-measured and the operator's choice persisted outside this view.
     var onExpansionChange: ((Bool) -> Void)?
 
-    /// - Parameter startExpanded: restored from `TurnInteractionState`.
+    /// - Parameter explicitState: the operator's saved choice (`TranscriptFoldStore`), nil when
+    ///   there is none: the result is then open when it is an error (TF4's rule).
     ///   Deliberately has **no default value**: the compiler is then the wiring
-    ///   check for the single construction site in `ChatTurnView`.
-    init(data: ToolResultData, contentAvailable: Bool, startExpanded: Bool) {
+    ///   check for every construction site.
+    init(data: ToolResultData, contentAvailable: Bool, explicitState: Bool?) {
         let nonEmpty = data.content.components(separatedBy: "\n")
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         lineCount  = max(nonEmpty.count, 1)
         content    = data.content
         isError    = data.isError
         self.contentAvailable = contentAvailable
-        isExpanded = data.isError || startExpanded   // errors always open
+        isExpanded = explicitState ?? data.isError
 
         super.init(frame: .zero)
         wantsLayer = true
@@ -97,6 +98,18 @@ final class ToolResultView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Follow a choice made elsewhere (another window, a saved choice): the open state is
+    /// `explicitState`, else open for an error. Not the operator's click: `onExpansionChange` stays
+    /// quiet. Returns whether the state changed.
+    @discardableResult
+    func apply(explicitState: Bool?) -> Bool {
+        let target = explicitState ?? isError
+        guard target != isExpanded else { return false }
+        isExpanded = target
+        applyState()
+        return true
+    }
 
     @objc private func toggleExpand() {
         isExpanded.toggle()
@@ -194,7 +207,7 @@ final class ToolResultView: NSView {
 /// `[redacted: …]` markers highlighted (the user sees what was withheld). A follow notice is one
 /// muted line and does not expand.
 ///
-/// Expansion is kept outside the view (`TurnInteractionStore`, through `onExpansionChange` and
+/// Expansion is kept outside the view (`TranscriptFoldStore`, through `onExpansionChange` and
 /// `startExpanded`) for the reason `ToolResultView` gives: turn views are rebuilt routinely.
 final class TerminalDeliveryBlockView: NSView {
 

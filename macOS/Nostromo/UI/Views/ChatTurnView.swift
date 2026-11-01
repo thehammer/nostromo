@@ -391,7 +391,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         self.approvals        = approvals
         self.contentAvailable = contentAvailable
         self.interaction      = interaction
-        self.folds            = folds ?? FoldResolver(state: interaction)
+        self.folds            = folds ?? FoldResolver(turnKey: turn.identityKey)
         self.held             = heldOrdinals
         self.now              = now
         self.planner          = FocusPlanner(turnKey: turn.identityKey)
@@ -449,7 +449,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         for (i, item) in turn.terminalOriginItems.enumerated() {
             let index = TerminalDeliveryBlockKey.blockIndex(item: i)
             let view = TerminalDeliveryBlockView(item: item, text: texts[i],
-                                                 startExpanded: interaction.expandedBlocks.contains(index))
+                                                 startExpanded: folds.explicitResult(block: nil, index: index) ?? false)
             view.onExpansionChange = { [weak self, weak view] isExpanded in
                 guard let self, let view else { return }
                 self.noteBlockExpansion(index, isExpanded)
@@ -569,9 +569,14 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         var changed = false
         for (column, view) in columnViews.enumerated() {
             if let group = view as? ToolGroupView {
+                // Result folds first, so members a larger group builds on open use the new state.
+                var touched = group.applyResultFolds(folds)
                 let expanded = folds.isExpanded(group.group)
-                guard expanded != group.isExpanded else { continue }
-                group.setExpanded(expanded)
+                if expanded != group.isExpanded {
+                    group.setExpanded(expanded)
+                    touched = true
+                }
+                guard touched else { continue }
             } else if let row = view as? ActivityRowView {
                 let expanded = folds.isActivityExpanded(key: row.segment.key)
                 let opened = expanded != row.isExpanded
@@ -773,7 +778,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             guard let row = columnViews[column] as? ActivityRowView else { return false }
             // Members that joined (a trailing group the operator opened, results they expanded)
             // build from the state as it is now, not as it was when the row was made.
-            row.updateState(interaction: interaction, folds: folds)
+            row.updateState(folds: folds)
             if row.segment != segment, row.update(segment: segment, blockAt: blockAt) {
                 remeasureColumnIfMeasured(column)
             }
@@ -856,7 +861,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// row opens when the row is opened. Nothing ever closes here.
     private func openStuckGroup(live: Bool) {
         guard let id = groupViews.keys.max(), let view = groupViews[id], view.group.isStuck,
-              !view.isExpanded, folds.groupStates[view.group.key] == nil
+              !view.isExpanded, folds.explicitGroup(view.group.key) == nil
         else { return }
         let key = view.group.key
         folds.groupAuto.insert(key)
@@ -867,7 +872,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
 
     private func makeGroupView(_ group: ToolGroup, blockAt: (Int) -> TurnBlock?) -> ToolGroupView {
         let view = ToolGroupView(group: group, blockAt: blockAt,
-                                 contentAvailable: contentAvailable, interaction: interaction,
+                                 contentAvailable: contentAvailable, folds: folds,
                                  isExpanded: folds.isExpanded(group), now: now, approvals: approvals)
         view.onToggle = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
@@ -890,7 +895,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         var blocks: [Int: TurnBlock] = [:]
         ActivityRowView.collectBlocks(of: segment, from: blockAt, into: &blocks)
         let view = ActivityRowView(segment: segment, blocks: blocks, contentAvailable: contentAvailable,
-                                   interaction: interaction, folds: folds,
+                                   folds: folds,
                                    isExpanded: folds.isActivityExpanded(key: segment.key), now: now,
                                    approvals: approvals)
         view.onToggle = { [weak self, weak view] isExpanded in
@@ -919,11 +924,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// A result (or agent activity) fold was toggled somewhere in this turn: remember it here too,
     /// for items a roll-in rebuilds, and tell the owner.
     private func noteBlockExpansion(_ index: Int, _ isExpanded: Bool) {
-        if isExpanded {
-            interaction.expandedBlocks.insert(index)
-        } else {
-            interaction.expandedBlocks.remove(index)
-        }
+        folds.resultStates[index] = isExpanded
         onBlockExpansion?(index, isExpanded)
     }
 
@@ -942,7 +943,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         case .toolCall(let d):       return ToolCallView(data: d)
         case .toolResult(let d):
             let v = ToolResultView(data: d, contentAvailable: contentAvailable,
-                                   startExpanded: interaction.expandedBlocks.contains(index))
+                                   explicitState: folds.explicitResult(block: block, index: index))
             v.onExpansionChange = { [weak self, weak v] isExpanded in
                 guard let self, let v else { return }
                 self.noteBlockExpansion(index, isExpanded)
@@ -1300,11 +1301,11 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         let after = planner.items(holding: held.subtracting(released))
         var carried: [String: Bool] = [:]
         for case .activity(let row) in before {
-            guard let state = folds.activityStates[row.key], let first = row.members.first else { continue }
+            guard let state = folds.explicitActivity(row.key), let first = row.members.first else { continue }
             let id = Self.memberID(first)
             for case .activity(let target) in after
             where target.key != row.key && target.members.contains(where: { Self.memberID($0) == id }) {
-                guard folds.activityStates[target.key] == nil else { continue }
+                guard folds.explicitActivity(target.key) == nil else { continue }
                 folds.activityStates[target.key] = state
                 carried[target.key] = state
             }

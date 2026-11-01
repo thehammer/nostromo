@@ -750,7 +750,8 @@ final class ToolGroupCopyTests: XCTestCase {
 
     func testTheContextMenuOffersCopyCommandsAndCopySummary() {
         let (row, _, _) = makeRow(commandGroup())
-        XCTAssertEqual(row.contextMenu().items.map(\.title), ["Copy Commands", "Copy Summary"])
+        XCTAssertEqual(row.contextMenu().items.filter { !$0.isSeparatorItem }.map(\.title),
+                       ["Copy Commands", "Copy Summary", "Focus", "Show All Activity"])
     }
 
     func testCopySummaryPutsWhatTheRowReadsOnThePasteboard() {
