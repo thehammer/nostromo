@@ -313,6 +313,18 @@ final class StagingRig {
 
     // MARK: Windows and rows
 
+    /// A titled window, like the app's: a borderless one cannot host a sheet properly (the confirm sheet tests).
+    func makeTitledWindow(size: NSSize = NSSize(width: 900, height: 700)) -> NSWindow {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+        window.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        windows.append(window)
+        return window
+    }
+
     func makeWindow(size: NSSize = NSSize(width: 900, height: 700)) -> NSWindow {
         let window = GestureFixtures.offscreenWindow(size: size)
         windows.append(window)

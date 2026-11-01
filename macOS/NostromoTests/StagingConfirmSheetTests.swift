@@ -48,7 +48,7 @@ final class StagingConfirmSheetTests: XCTestCase {
         if enter { rig.typeEnter() }
         rig.ingest([StagingFixtures.entry("s-1", 1, command)], foreground: foreground)
         rig.settle()
-        let window = rig.makeWindow()
+        let window = rig.makeTitledWindow()
         return Setup(rig: rig, window: window, row: rig.makeRow(in: window), command: command)
     }
 
@@ -337,7 +337,7 @@ final class StagingConfirmSheetTests: XCTestCase {
         XCTAssertNil(s.rig.controller.confirmSheet, "the sheet state was cleared with the window")
         assertNothingTyped(s, before: before)
 
-        let window = s.rig.makeWindow()
+        let window = s.rig.makeTitledWindow()
         let row = s.rig.makeRow(in: window)
         s.rig.click(row, in: window)
         XCTAssertNotNil(s.rig.controller.confirmSheet, "a later activation asks again instead of finding a sheet 'on screen'")
