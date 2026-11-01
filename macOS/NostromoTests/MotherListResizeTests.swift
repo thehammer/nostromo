@@ -320,8 +320,9 @@ final class MotherListResizeTests: XCTestCase {
         let (window, view) = makeWindow(identifier: uniqueID(), width: 900)
         view.setListWidth(560)
         resize(window, view, to: 600)
-        XCTAssertTrue(view.listDivider.accessibilityPerformIncrement())
-        XCTAssertEqual(view.listColumnWidth, 300, "20 more than the 280 shown, not 20 more than the 560 asked for")
+        // 280 is the widest a 600 pt view allows, so only a decrement tells the shown width from the asked one.
+        XCTAssertTrue(view.listDivider.accessibilityPerformDecrement())
+        XCTAssertEqual(view.listColumnWidth, 260, "20 less than the 280 shown, not 20 less than the 560 asked for")
     }
 
     func testADragFromANarrowedColumnMovesFromTheShownWidth() {
@@ -330,8 +331,8 @@ final class MotherListResizeTests: XCTestCase {
         resize(window, view, to: 600)
         let divider = view.listDivider
         divider.mouseDown(with: mouse(.leftMouseDown, x: 100, in: window))
-        divider.mouseDragged(with: mouse(.leftMouseDragged, x: 130, in: window))
-        XCTAssertEqual(view.listColumnWidth, 310, "280 shown + a 30 pt drag")
+        divider.mouseDragged(with: mouse(.leftMouseDragged, x: 70, in: window))
+        XCTAssertEqual(view.listColumnWidth, 250, "280 shown - a 30 pt drag")
     }
 
     // MARK: - A click is not a choice of width
