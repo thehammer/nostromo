@@ -257,6 +257,199 @@ final class MotherNoticeRowTests: XCTestCase {
     }
 }
 
+// MARK: - Closed focus and relative times on the list's view model
+
+final class MotherNoticeListViewModelTests: XCTestCase {
+
+    private var tempDirs: [URL] = []
+    private var cancellables = Set<AnyCancellable>()
+
+    override func tearDown() {
+        for d in tempDirs { try? FileManager.default.removeItem(at: d) }
+        tempDirs = []
+        cancellables = []
+        super.tearDown()
+    }
+
+    private func makeStore() throws -> FocusStore {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mother-notice-vm-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        tempDirs.append(dir)
+        return FocusStore(storageURL: dir.appendingPathComponent("focuses.json"))
+    }
+
+    private func job(_ id: String = "j1") -> MotherJob {
+        MotherJob(id: id, state: "succeeded", repo: "nostromo", isolation: "worktree", title: id,
+                  createdAt: nil, startedAt: nil, finishedAt: nil, planPath: nil, question: nil,
+                  pausedReason: nil, adherenceStatus: nil, currentTier: nil)
+    }
+
+    private func openFocus(in store: FocusStore) -> Focus {
+        var focus = Focus(id: "ABCDEF12-0000-4000-8000-000000000001", agentTag: "claudia",
+                          projectPath: "/Users/hammer/Code/admin-portal", isBuiltIn: false, org: "Carefeed")
+        focus.label = "Fix the login flow"
+        store.add(focus)
+        return focus
+    }
+
+    private func focusAnnotation(tag: String, notice: MotherNoticeAnnotation) -> MotherJobAnnotation {
+        MotherJobAnnotation(origin: MotherOriginView(kind: .focus, focusTag: tag, nameSnapshot: "Fix the login flow"),
+                            notice: notice)
+    }
+
+    // MARK: Closed focus
+
+    func testAJobFromAClosedFocusShowsNoNoticeMarkWhateverItsNoticeSays() throws {
+        let store = try makeStore()   // no open focus carries this tag
+        let vm = MotherJobListViewModel(focusStore: store, timerEvery: nil)
+        let j = job()
+        vm.jobs = [j]
+        for notice in [toldNotice(), heldNotice()] {
+            vm.setAnnotations(["j1": focusAnnotation(tag: "claudia-ABCDEF12", notice: notice)])
+            XCTAssertNil(vm.rowModel(for: j, now: noticeNow).noticeMark,
+                         "a closed focus is not notified, so its row does not say it was (\(notice.status))")
+        }
+    }
+
+    func testTheSameJobGetsItsMarkWhileItsFocusIsOpenAndLosesItWhenTheFocusCloses() throws {
+        let store = try makeStore()
+        let focus = openFocus(in: store)
+        let vm = MotherJobListViewModel(focusStore: store, timerEvery: nil)
+        let j = job()
+        vm.jobs = [j]
+        vm.setAnnotations(["j1": focusAnnotation(tag: focus.sessionTag, notice: toldNotice())])
+        XCTAssertNotNil(vm.rowModel(for: j, now: noticeNow).noticeMark, "open focus")
+
+        store.remove(focus)
+        XCTAssertNil(vm.rowModel(for: j, now: noticeNow).noticeMark, "closed focus")
+    }
+
+    // MARK: Relative times
+
+    func testRefreshingRelativeTimesMovesAToldTooltipForwardWithTheClock() throws {
+        let store = try makeStore()
+        let focus = openFocus(in: store)
+        var current = noticeNow
+        let vm = MotherJobListViewModel(focusStore: store, clock: { current }, timerEvery: nil)
+        let j = job()
+        vm.jobs = [j]
+        vm.setAnnotations(["j1": focusAnnotation(tag: focus.sessionTag, notice: toldNotice(minutesAgo: 4))])
+
+        let before = try XCTUnwrap(vm.rowModel(for: j).noticeMark)
+        XCTAssertTrue(before.tooltip.hasSuffix("4 minutes ago"), before.tooltip)
+
+        current = noticeNow.addingTimeInterval(3600)
+        vm.refreshRelativeTimes()
+
+        let after = try XCTUnwrap(vm.rowModel(for: j).noticeMark)
+        XCTAssertTrue(after.tooltip.hasSuffix("1 hour ago"), after.tooltip)
+        XCTAssertTrue(after.accessibilitySentence.contains("1 hour ago"), after.accessibilitySentence)
+    }
+
+    func testRefreshingRelativeTimesRedrawsTheListAndTheOpenJobsOverview() throws {
+        let vm = MotherJobListViewModel(focusStore: try makeStore(), timerEvery: nil)
+        var ticks: [Int] = []
+        vm.$timeTick.dropFirst().sink { ticks.append($0) }.store(in: &cancellables)
+        var originsChanged = 0
+        vm.onOriginsChanged = { originsChanged += 1 }
+
+        vm.refreshRelativeTimes()
+        vm.refreshRelativeTimes()
+
+        XCTAssertEqual(ticks.count, 2, "each refresh publishes, so the list rebuilds its rows")
+        XCTAssertEqual(Set(ticks).count, 2, "each publish carries a new value")
+        XCTAssertEqual(originsChanged, 2, "the open job's Overview is told to redraw")
+    }
+}
+
+// MARK: - The daemon connection and the notice state
+
+final class MotherNoticeConnectionTests: XCTestCase {
+
+    private var window: NSWindow!
+
+    override func setUp() {
+        super.setUp()
+        window = GestureFixtures.offscreenWindow(size: NSSize(width: 800, height: 600))
+        AppStore.shared.daemonDisconnectedForTesting()
+    }
+
+    override func tearDown() {
+        window.close()
+        window = nil
+        AppStore.shared.daemonDisconnectedForTesting()
+        feed(true)   // leave the default the other suites expect
+        super.tearDown()
+    }
+
+    private let notOperator = "not_operator_app: only the verified Nostromo app may change Mother notice settings"
+    private let insecure = "requires_secure_connection: notice settings need an authenticated connection"
+
+    func testADisconnectClearsTheNoticeStateAndHidesTheBell() {
+        feed(true)
+        let bell = MotherNoticeBell()
+        window.contentView!.addSubview(bell)
+        XCTAssertFalse(bell.isHidden)
+
+        AppStore.shared.daemonDisconnectedForTesting()
+
+        XCTAssertNil(AppStore.shared.motherNoticeState)
+        XCTAssertTrue(MD.pumpUntil(window) { bell.isHidden }, "a dropped connection cannot take a switch")
+    }
+
+    func testTheNextNoticeStateFrameRestoresTheStateAndTheBell() {
+        feed(false)
+        let bell = MotherNoticeBell()
+        window.contentView!.addSubview(bell)
+        AppStore.shared.daemonDisconnectedForTesting()
+        XCTAssertTrue(MD.pumpUntil(window) { bell.isHidden })
+
+        feed(false)
+
+        XCTAssertEqual(AppStore.shared.motherNoticeState, MotherNoticeStateWire(enabled: false, focuses: []))
+        XCTAssertTrue(MD.pumpUntil(window) { !bell.isHidden && !bell.isOn })
+    }
+
+    func testTheTwoNoticeRefusalsAreShownAsALine() throws {
+        AppStore.shared.applyForTesting(.error(notOperator))
+        let first = try XCTUnwrap(AppStore.shared.motherNoticeRefusal)
+        XCTAssertFalse(first.isEmpty)
+
+        AppStore.shared.applyForTesting(.error(insecure))
+        let second = try XCTUnwrap(AppStore.shared.motherNoticeRefusal)
+        XCTAssertNotEqual(first, second, "each refusal says its own reason")
+    }
+
+    func testOtherDaemonErrorsShowNoRefusal() {
+        for message in ["something else broke", "not_operator_app: another thing", "bad request", ""] {
+            AppStore.shared.applyForTesting(.error(message))
+            XCTAssertNil(AppStore.shared.motherNoticeRefusal, message)
+        }
+    }
+
+    func testARefusalGoesAwayWithTheNextStateFrame() {
+        AppStore.shared.applyForTesting(.error(notOperator))
+        XCTAssertNotNil(AppStore.shared.motherNoticeRefusal)
+        feed(true)
+        XCTAssertNil(AppStore.shared.motherNoticeRefusal)
+    }
+
+    func testARefusalGoesAwayWithADisconnect() {
+        AppStore.shared.applyForTesting(.error(insecure))
+        XCTAssertNotNil(AppStore.shared.motherNoticeRefusal)
+        AppStore.shared.daemonDisconnectedForTesting()
+        XCTAssertNil(AppStore.shared.motherNoticeRefusal)
+    }
+
+    func testAnUnrelatedErrorLeavesAnExistingRefusalAlone() {
+        AppStore.shared.applyForTesting(.error(notOperator))
+        let line = AppStore.shared.motherNoticeRefusal
+        AppStore.shared.applyForTesting(.error("unrelated"))
+        XCTAssertEqual(AppStore.shared.motherNoticeRefusal, line)
+    }
+}
+
 // MARK: - The detail's Notices section
 
 final class MotherNoticeSectionTests: XCTestCase {

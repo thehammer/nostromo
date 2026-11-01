@@ -1,0 +1,37 @@
+{
+  "enabled": true,
+  "focuses": [
+    {
+      "chain_held": false,
+      "held": {
+        "count": 2,
+        "reason": "cap"
+      },
+      "mode": "quiet",
+      "tag": "claudia-C9D6B773",
+      "wakes_by_day": [
+        {
+          "count": 4,
+          "day": "2026-10-30"
+        },
+        {
+          "count": 1,
+          "day": "2026-10-31"
+        }
+      ]
+    },
+    {
+      "chain_held": true,
+      "mode": "wake",
+      "tag": "ada-1A2B3C4D",
+      "wakes_by_day": []
+    },
+    {
+      "chain_held": false,
+      "mode": "off",
+      "tag": "cody-0F0F0F0F",
+      "wakes_by_day": []
+    }
+  ],
+  "type": "mother_notice_state"
+}

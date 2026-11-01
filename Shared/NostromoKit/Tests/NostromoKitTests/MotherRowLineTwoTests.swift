@@ -331,13 +331,28 @@ final class MotherRowLineTwoTests: XCTestCase {
 
     func testTheSpokenLabelReadsStateTitleOriginFact() {
         let m = model(state: "running", title: "Fix login", progressLine: "≈60% · gates 2/3 · ETA ~5-15 min")
-        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Running. Fix login. From You. nostromo. ≈60% · gates 2/3. ≈60% · gates 2/3 · ETA ~5-15 min.")
+        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Running. Fix login. From You. nostromo. about 60% · gates 2/3 · ETA ~5-15 min.")
+    }
+
+    func testARunningRowSpeaksItsProgressOnceInWordsWithNoRawApproxSign() {
+        let m = model(state: "running", title: "T", progressLine: "≈60% · gates 2/3 · ETA ~5-15 min",
+                      progressAccessibility: "about 60 percent, gates 2 of 3, ETA 5 to 15 minutes")
+        let label = MotherRowLineTwo.accessibilityLabel(model: m)
+        XCTAssertEqual(label, "Running. T. From You. nostromo. about 60 percent, gates 2 of 3, ETA 5 to 15 minutes.")
+        XCTAssertFalse(label.contains("≈"))
+    }
+
+    func testAQuestionThatEndsInAQuestionMarkIsNotGivenAFullStopToo() {
+        let m = model(state: "awaiting", title: "T", question: "Which branch?")
+        let label = MotherRowLineTwo.accessibilityLabel(model: m)
+        XCTAssertTrue(label.contains("Which branch?"), label)
+        XCTAssertFalse(label.contains("?."), label)
     }
 
     func testTheSpokenLabelEndsWithTheBadges() {
         let m = model(state: "awaiting", title: "Ship it", question: "Which branch?", badges: ["Needs decision", "Stalled"])
         XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m),
-                       "Awaiting. Ship it. From You. nostromo. Which branch?. Needs decision. Stalled.")
+                       "Awaiting. Ship it. From You. nostromo. Which branch? Needs decision. Stalled.")
     }
 
     func testTheSpokenLabelForASucceededJobNamesThePullRequest() {
@@ -356,7 +371,7 @@ final class MotherRowLineTwoTests: XCTestCase {
                       question: "Which branch?", progressAccessibility: "about 60 percent, gates 2 of 3",
                       badges: ["Needs decision", "Stalled"], cost: "$0.80")
         XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m),
-                       "Awaiting. Ship it. From You. nostromo, branch feature/x. Which branch?. "
+                       "Awaiting. Ship it. From You. nostromo, branch feature/x. Which branch? "
                        + "about 60 percent, gates 2 of 3. Cost $0.80. Needs decision. Stalled.")
     }
 

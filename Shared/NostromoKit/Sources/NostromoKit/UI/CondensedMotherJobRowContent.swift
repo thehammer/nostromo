@@ -40,6 +40,21 @@ struct CondensedMotherJobRowContent: View {
         .modifier(OriginTapAction(origin: model.origin, onOriginTap: onOriginTap))
     }
 
+    /// The same two lines with no fixed height and no clipping, line two composed at `width`: what the
+    /// row would need if nothing forced its height. For tests that the fixed row height clips nothing.
+    func naturalLines(width: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: MotherRowMetrics.lineSpacing) {
+            lineOne
+            lineTwo(MotherRowLineTwo.compose(
+                model: model,
+                availableWidth: width - 2 * MotherRowMetrics.horizontalPadding,
+                measure: MotherRowTextMeasure.width))
+        }
+        .padding(.vertical, MotherRowMetrics.verticalPadding)
+        .padding(.horizontal, MotherRowMetrics.horizontalPadding)
+        .frame(width: width)
+    }
+
     private var lineOne: some View {
         HStack(spacing: 6) {
             Circle()

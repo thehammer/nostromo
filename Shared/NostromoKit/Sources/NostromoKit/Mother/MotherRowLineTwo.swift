@@ -165,19 +165,29 @@ public struct MotherRowLineTwo: Equatable, Sendable {
         case (nil, let b?):    parts.append("Branch \(b).")
         case (nil, nil):       break
         }
-        parts.append("\(stateFact(for: model)).")
+        // A running row's fact is its progress without the ETA: the progress sentence says it all, once.
+        var spokenProgress: String?
         if model.reservesProgressLine,
-           let progress = model.progressAccessibility ?? model.progressLine {
+           let progress = model.progressAccessibility
+               ?? model.progressLine?.replacingOccurrences(of: "≈", with: "about ") {
             let clean = MotherOriginDisplay.clean(progress, cap: 80)
-            if !clean.isEmpty { parts.append("\(clean).") }
+            if !clean.isEmpty { spokenProgress = clean }
         }
-        if let cost = model.cost, !cost.isEmpty { parts.append("Cost \(MotherOriginDisplay.clean(cost, cap: 20)).") }
+        if spokenProgress == nil || model.state != "running" { parts.append(sentence(stateFact(for: model))) }
+        if let spokenProgress { parts.append(sentence(spokenProgress)) }
+        if let cost = model.cost, !cost.isEmpty { parts.append(sentence("Cost \(MotherOriginDisplay.clean(cost, cap: 20))")) }
         for badge in model.attentionBadges {
             let clean = MotherOriginDisplay.clean(badge, cap: 30)
             if !clean.isEmpty { parts.append("\(clean).") }
         }
         if let sentence = model.noticeMark?.accessibilitySentence { parts.append(sentence) }
         return parts.joined(separator: " ")
+    }
+
+    /// `text` as a spoken sentence: a full stop unless it already ends in one (`Which branch?` stays).
+    private static func sentence(_ text: String) -> String {
+        guard let last = text.last else { return text }
+        return ".?!".contains(last) ? text : text + "."
     }
 
     /// The row's title, sanitised and capped at `titleCap` characters (spoken label and tooltip).

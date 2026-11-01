@@ -246,31 +246,8 @@ final class MotherRowLayoutTests: XCTestCase {
         XCTAssertEqual(vm.rowModel(for: zero, now: now).cost, "$0.00")
     }
 
-    // MARK: - The row's content is never clipped
-
-    /// The height the two lines need at the current system fonts, with nothing forcing a height.
-    func testTheTwoLinesFitTheFixedRowHeightWithoutClipping() {
-        func line(_ style: NSFont.TextStyle) -> CGFloat {
-            let f = NSFont.preferredFont(forTextStyle: style)
-            return ceil(f.ascender - f.descender + f.leading)
-        }
-        // The natural height of a body line and a caption line, as SwiftUI lays them out unframed.
-        let natural = VStack(alignment: .leading, spacing: MotherRowMetrics.lineSpacing) {
-            Text("Fix the login flow").font(.body).lineLimit(1)
-            Text("You · nostromo · running").font(.caption).lineLimit(1)
-        }
-        .padding(.vertical, MotherRowMetrics.verticalPadding)
-        .frame(width: 300)
-        let host = NSHostingView(rootView: natural)
-        host.frame = NSRect(x: 0, y: 0, width: 300, height: 400)
-        host.layoutSubtreeIfNeeded()
-
-        let computed = line(.body) + MotherRowMetrics.lineSpacing + line(.caption1)
-            + 2 * MotherRowMetrics.verticalPadding
-        XCTAssertLessThanOrEqual(computed, MotherRowMetrics.rowHeight + 0.01)
-        XCTAssertLessThanOrEqual(host.fittingSize.height, MotherRowMetrics.rowHeight + 0.5,
-                                 "the unframed lines are taller than the row: the row would clip them")
-    }
+    // The row's content is never clipped: see CondensedMotherJobRowNaturalHeightTests in NostromoKit,
+    // which hosts the real two lines without a forced height.
 
     func testAPullRequestNumberIsReadFromItsUrl() {
         XCTAssertEqual(MotherJobListViewModel.prNumber(fromURL: "https://github.com/org/repo/pull/907"), 907)

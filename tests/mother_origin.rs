@@ -2418,6 +2418,212 @@ fn the_golden_is_a_mother_jobs_frame_with_every_kind_a_malformed_annotation_and_
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// MF6  the golden `MotherNoticeState` frame and a notice with history
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/mother-v2")
+        .join(name)
+}
+
+/// The same convention as the MF1 golden: `UPDATE_GOLDEN=1` writes the file, otherwise the
+/// serialised frame must equal it byte for byte.
+fn check_or_update_golden(name: &str, frame: &str) {
+    let path = fixture_path(name);
+    if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create the fixture directory");
+        std::fs::write(&path, frame).expect("write golden");
+        return;
+    }
+    let golden = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {e} (UPDATE_GOLDEN=1 to create)", path.display()));
+    assert_eq!(
+        frame, golden,
+        "the {name} wire form changed; the Kit decodes this file, regenerate with UPDATE_GOLDEN=1 only if intended"
+    );
+}
+
+/// The `mother_notice_state` frame the daemon broadcasts: a quiet focus holding two notices at
+/// the cap with two days of notice turns, a focus the loop guard holds, and a focus that is off.
+fn notice_state_frame() -> String {
+    use nostromo::mother::notices::limits::DayCount;
+    use nostromo::mother::notices::{FocusNoticeState, HeldSummary, NoticeReason};
+    use nostromo::mother::origin::NotifyLevel;
+
+    let frame = serde_json::to_value(ServerMsg::MotherNoticeState {
+        enabled: true,
+        focuses: vec![
+            FocusNoticeState {
+                tag: "claudia-C9D6B773".into(),
+                mode: NotifyLevel::Quiet,
+                held: Some(HeldSummary {
+                    count: 2,
+                    reason: NoticeReason::Cap,
+                }),
+                chain_held: false,
+                wakes_by_day: vec![
+                    DayCount {
+                        day: "2026-10-30".into(),
+                        count: 4,
+                    },
+                    DayCount {
+                        day: "2026-10-31".into(),
+                        count: 1,
+                    },
+                ],
+            },
+            FocusNoticeState {
+                tag: "ada-1A2B3C4D".into(),
+                mode: NotifyLevel::Wake,
+                held: None,
+                chain_held: true,
+                wakes_by_day: vec![],
+            },
+            FocusNoticeState {
+                tag: "cody-0F0F0F0F".into(),
+                mode: NotifyLevel::Off,
+                held: None,
+                chain_held: false,
+                wakes_by_day: vec![],
+            },
+        ],
+    })
+    .expect("serialise the frame");
+    assert_eq!(frame["type"], "mother_notice_state", "the frame's tag");
+    serde_json::to_string_pretty(&frame).expect("print the frame")
+}
+
+/// A `mother_jobs` frame with one focus job per notice status, the first carrying history
+/// (a wake, a queued-behind-a-turn delivery, a hold, a drop).
+fn notice_history_frame() -> String {
+    use nostromo::mother::notices::detect::JobEvent;
+    use nostromo::mother::notices::{NoticeHistoryEntry, NoticeReason, NoticeStatus, NoticeView};
+
+    let focus_origin = || OriginView {
+        kind: OriginKind::Focus,
+        focus_tag: Some("claudia-C9D6B773".into()),
+        name_snapshot: Some("Fix login".into()),
+        focus_name: Some("Fix the login flow".into()),
+        closed: Some(false),
+        session_prefix: Some("5f3c9a10".into()),
+    };
+    let with_notice = |id: &str, state: &str, notice: NoticeView| {
+        annotated(
+            id,
+            "A job with a notice",
+            state,
+            Some(JobAnnotation {
+                origin: focus_origin(),
+                notify: Some(NotifyLevel::Wake),
+                notice: Some(notice),
+                ..Default::default()
+            }),
+        )
+    };
+    let at = 1_800_000_000_000_i64;
+    let history = with_notice(
+        "j-history",
+        "succeeded",
+        NoticeView {
+            status: NoticeStatus::Held,
+            reason: Some(NoticeReason::Batching),
+            last_state: Some(JobEvent::Succeeded),
+            at_ms: Some(at),
+            history: vec![
+                NoticeHistoryEntry {
+                    states: vec![JobEvent::Running, JobEvent::PrOpened],
+                    status: NoticeStatus::Told,
+                    reason: None,
+                    wake: true,
+                    at_ms: at - 600_000,
+                },
+                NoticeHistoryEntry {
+                    states: vec![JobEvent::Awaiting],
+                    status: NoticeStatus::Told,
+                    reason: None,
+                    wake: false,
+                    at_ms: at - 300_000,
+                },
+                NoticeHistoryEntry {
+                    states: vec![JobEvent::Succeeded],
+                    status: NoticeStatus::Held,
+                    reason: Some(NoticeReason::Cap),
+                    wake: false,
+                    at_ms: at - 60_000,
+                },
+                NoticeHistoryEntry {
+                    states: vec![JobEvent::Failed],
+                    status: NoticeStatus::Dropped,
+                    reason: Some(NoticeReason::FocusOff),
+                    wake: false,
+                    at_ms: at,
+                },
+            ],
+        },
+    );
+    let told = with_notice(
+        "j-told",
+        "succeeded",
+        NoticeView {
+            status: NoticeStatus::Told,
+            last_state: Some(JobEvent::Succeeded),
+            at_ms: Some(at),
+            ..Default::default()
+        },
+    );
+    let not_sent = with_notice(
+        "j-not-sent",
+        "failed",
+        NoticeView {
+            status: NoticeStatus::NotSent,
+            reason: Some(NoticeReason::FocusClosed),
+            ..Default::default()
+        },
+    );
+    let frame = serde_json::to_value(ServerMsg::MotherJobs {
+        jobs: vec![history, told, not_sent],
+    })
+    .expect("serialise the frame");
+    assert_eq!(frame["type"], "mother_jobs", "the frame's tag");
+    serde_json::to_string_pretty(&frame).expect("print the frame")
+}
+
+#[test]
+fn the_mother_notice_state_frame_matches_the_golden_the_kit_decodes() {
+    check_or_update_golden("mother-notice-state.json", &notice_state_frame());
+}
+
+#[test]
+fn the_mother_jobs_frame_with_notice_history_matches_the_golden_the_kit_decodes() {
+    check_or_update_golden("mother-jobs-notice-history.json", &notice_history_frame());
+}
+
+#[test]
+fn the_notice_goldens_hold_what_the_kit_tests_rely_on() {
+    // Independent of the comparisons above.
+    let state: Value = serde_json::from_str(&notice_state_frame()).unwrap();
+    let focuses = state["focuses"].as_array().unwrap();
+    assert_eq!(focuses.len(), 3);
+    assert_eq!(focuses[0]["held"]["reason"], "cap");
+    assert_eq!(focuses[0]["wakes_by_day"].as_array().unwrap().len(), 2);
+    assert_eq!(focuses[1]["chain_held"], true);
+    assert_eq!(focuses[2]["mode"], "off");
+
+    let jobs: Value = serde_json::from_str(&notice_history_frame()).unwrap();
+    let history = jobs["jobs"][0]["nostromo"]["notice"]["history"]
+        .as_array()
+        .unwrap();
+    assert_eq!(history.len(), 4);
+    assert_eq!(history[0]["wake"], true);
+    assert_eq!(history[3]["status"], "dropped");
+    assert_eq!(history[3]["reason"], "focus_off");
+    assert!(jobs["jobs"][1]["nostromo"]["notice"]
+        .get("history")
+        .is_none());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // review fix-ups
 // ═════════════════════════════════════════════════════════════════════════════
 

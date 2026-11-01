@@ -232,3 +232,96 @@ final class MotherNoticeStateWireTests: XCTestCase {
         XCTAssertNil(try decodeAnnotation(#"{"origin":{"kind":"you"}}"#).notice)
     }
 }
+
+// MARK: - Frames written by the daemon's own Rust types
+//
+// `tests/fixtures/mother-v2/mother-notice-state.json` and `mother-jobs-notice-history.json` are
+// serialised by `tests/mother_origin.rs` (`UPDATE_GOLDEN=1` rewrites them). Reading them here keeps
+// the Kit honest about what the daemon really sends, not what a test author remembers.
+
+final class MotherNoticeDaemonGoldenTests: XCTestCase {
+
+    private static func fixture(_ name: String) throws -> Data {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // NostromoKitTests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // NostromoKit
+            .deletingLastPathComponent()   // Shared
+            .deletingLastPathComponent()   // <repo>
+        return try Data(contentsOf: root.appendingPathComponent("tests/fixtures/mother-v2/\(name)"))
+    }
+
+    private func jobs() throws -> [MotherJob] {
+        let root = try JSONSerialization.jsonObject(with: try Self.fixture("mother-jobs-notice-history.json"))
+        let frame = try XCTUnwrap(root as? [String: Any])
+        XCTAssertEqual(frame["type"] as? String, "mother_jobs")
+        let objects = try XCTUnwrap(frame["jobs"] as? [[String: Any]])
+        return try objects.map {
+            try JSONDecoder().decode(MotherJob.self, from: try JSONSerialization.data(withJSONObject: $0))
+        }
+    }
+
+    func testTheDaemonsNoticeStateFrameDecodesWithEveryFocusItsModeHeldChainAndDays() throws {
+        let root = try JSONSerialization.jsonObject(with: try Self.fixture("mother-notice-state.json"))
+        let object = try XCTUnwrap(root as? [String: Any])
+        XCTAssertEqual(object["type"] as? String, "mother_notice_state")
+        let state = try XCTUnwrap(MotherNoticeStateWire.decode(from: object))
+
+        XCTAssertTrue(state.enabled)
+        XCTAssertEqual(state.focuses.map(\.tag), ["claudia-C9D6B773", "ada-1A2B3C4D", "cody-0F0F0F0F"])
+
+        let claudia = try XCTUnwrap(state.focus(tag: "claudia-C9D6B773"))
+        XCTAssertEqual(claudia.mode, .quiet)
+        XCTAssertEqual(claudia.held, MotherNoticeHeld(count: 2, reason: "cap"))
+        XCTAssertFalse(claudia.chainHeld)
+        XCTAssertEqual(claudia.heldBarReason, .cap)
+        XCTAssertEqual(claudia.wakesByDay, [MotherNoticeDayCount(day: "2026-10-30", count: 4),
+                                            MotherNoticeDayCount(day: "2026-10-31", count: 1)])
+
+        let ada = try XCTUnwrap(state.focus(tag: "ada-1A2B3C4D"))
+        XCTAssertEqual(ada.mode, .wake)
+        XCTAssertTrue(ada.chainHeld)
+        XCTAssertNil(ada.held)
+        XCTAssertEqual(ada.heldBarReason, .loopGuard)
+
+        let cody = try XCTUnwrap(state.focus(tag: "cody-0F0F0F0F"))
+        XCTAssertEqual(cody.mode, .off)
+        XCTAssertNil(cody.heldBarReason)
+    }
+
+    func testAJobNoticeWithHistoryDecodesEveryEntryNewestLast() throws {
+        let job = try XCTUnwrap(try jobs().first { $0.id == "j-history" })
+        let notice = try XCTUnwrap(job.nostromo?.notice)
+        XCTAssertEqual(notice.status, .held)
+        XCTAssertEqual(notice.reason, "batching")
+        XCTAssertEqual(notice.lastState, "succeeded")
+        XCTAssertEqual(notice.atMs, 1_800_000_000_000)
+
+        XCTAssertEqual(notice.history.map(\.status), [.told, .told, .held, .dropped])
+        XCTAssertEqual(notice.history.map(\.wake), [true, false, false, false])
+        XCTAssertEqual(notice.history.map(\.states), [["running", "pr_opened"], ["awaiting"], ["succeeded"], ["failed"]])
+        XCTAssertEqual(notice.history.map(\.reason), [nil, nil, "cap", "focus_off"])
+        XCTAssertEqual(notice.history.compactMap(\.atMs), [1_799_999_400_000, 1_799_999_700_000,
+                                                           1_799_999_940_000, 1_800_000_000_000])
+    }
+
+    func testANoticeWithoutHistoryOnTheWireDecodesWithAnEmptyHistory() throws {
+        let all = try jobs()
+        let told = try XCTUnwrap(all.first { $0.id == "j-told" }?.nostromo?.notice)
+        XCTAssertEqual(told.status, .told)
+        XCTAssertEqual(told.lastState, "succeeded")
+        XCTAssertTrue(told.history.isEmpty)
+
+        let notSent = try XCTUnwrap(all.first { $0.id == "j-not-sent" }?.nostromo?.notice)
+        XCTAssertEqual(notSent.status, .notSent)
+        XCTAssertEqual(notSent.reason, "focus_closed")
+    }
+
+    func testTheDaemonsNoticeFeedsTheRowMarkAndTheSectionLines() throws {
+        let job = try XCTUnwrap(try jobs().first { $0.id == "j-told" })
+        let now = Date(timeIntervalSince1970: 1_800_000_000 + 4 * 60)
+        let mark = try XCTUnwrap(MotherNoticeMark.make(notice: job.nostromo?.notice, originName: "Fix the login flow", now: now))
+        XCTAssertEqual(mark.wide, "✓ told Fix the login flow")
+        XCTAssertTrue(mark.tooltip.hasSuffix("4 minutes ago"), mark.tooltip)
+    }
+}
