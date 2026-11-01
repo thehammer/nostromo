@@ -409,6 +409,7 @@ impl Ipc {
             terminal_id: terminal_id.into(),
             bytes: B64.encode(bytes),
             auto_reply: false,
+            via: None,
         })
         .await;
     }
@@ -1370,6 +1371,7 @@ async fn a_process_that_only_claims_to_be_the_app_cannot_type_attach_or_close_an
                 terminal_id: live_id.clone(),
                 bytes: B64.encode("rm -rf ~\r"),
                 auto_reply: false,
+                via: None,
             },
             "input",
             "terminal_input_forbidden",

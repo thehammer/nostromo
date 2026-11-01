@@ -191,6 +191,16 @@ where
     .await;
 }
 
+async fn type_line_via(app: &mut Unix, terminal_id: &str, line: &str, via: &str) {
+    app.send(&ClientMsg::TerminalInput {
+        terminal_id: terminal_id.into(),
+        bytes: B64.encode(line),
+        auto_reply: false,
+        via: Some(via.into()),
+    })
+    .await;
+}
+
 async fn keep_open<S>(c: &mut Client<S>, terminal_id: &str)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -906,6 +916,8 @@ async fn assert_keeps_open_after_warning(how: &str, via: &str) {
     match how {
         "keystroke" => type_line(&mut i.s.app, &id, "still here").await,
         "keep_alive" => keep_open(&mut i.s.app, &id).await,
+        "stage_insert" => type_line_via(&mut i.s.app, &id, "ls -la", "stage_insert").await,
+        "bogus" => type_line_via(&mut i.s.app, &id, "ls -la", "bogus").await,
         other => panic!("unknown way to keep a shell open: {other}"),
     }
     sync(&mut i.s.app).await;
@@ -954,6 +966,35 @@ async fn assert_keeps_open_after_warning(how: &str, via: &str) {
 #[tokio::test]
 async fn typing_after_the_warning_keeps_the_shell_open_for_another_full_15_minutes() {
     assert_keeps_open_after_warning("keystroke", "keystroke").await;
+}
+
+/// SR10: a person placing a staged command at the prompt is activity, named
+/// `stage_insert` in the audit trail.
+#[tokio::test]
+async fn a_stage_insert_after_the_warning_keeps_the_shell_open_and_audits_stage_insert() {
+    assert_keeps_open_after_warning("stage_insert", "stage_insert").await;
+}
+
+/// An unknown `via` is never trusted: it counts as a keystroke.
+#[tokio::test]
+async fn an_unknown_via_counts_as_a_keystroke() {
+    assert_keeps_open_after_warning("bogus", "keystroke").await;
+}
+
+#[tokio::test]
+async fn a_stage_insert_at_13_30_clears_the_warning() {
+    let mut i = Idle::start(Extras::default()).await;
+    let t0 = i.t0;
+    i.until_warned(t0 + WARN + SLACK * 2).await;
+    i.vt.run_to(t0 + WARN + Duration::from_secs(30)).await;
+    assert!(i.warned());
+    let id = i.id.clone();
+    type_line_via(&mut i.s.app, &id, "ls", "stage_insert").await;
+    sync(&mut i.s.app).await;
+    assert!(!i.warned(), "the warning is cleared");
+    let audit = i.idle_audit();
+    assert_eq!(audit.last().unwrap()["event"], "idle_kept_open");
+    assert_eq!(audit.last().unwrap()["via"], "stage_insert");
 }
 
 #[tokio::test]

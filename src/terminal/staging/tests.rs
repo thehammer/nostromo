@@ -1977,3 +1977,5 @@ fn staging_insert_reports_and_follow_changes_from_threads_do_not_deadlock() {
     w.follow(&t, A);
     assert!(w.list(A, &t).is_ok());
 }
+
+mod s2;

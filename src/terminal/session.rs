@@ -166,9 +166,10 @@ pub struct TerminalSession {
     /// the reader holds an `Arc` of the session, which owns the master.
     master_fd: Option<RawFd>,
     pid: Option<u32>,
-    /// The shell's process name as it was just after spawn, so a later `exec
-    /// ssh …` (same pid, new program) is told apart from the shell itself.
-    shell_name: Option<String>,
+    /// What the shell's own process is called (the program started, and its
+    /// name just after spawn), so a later `exec ssh …` (same pid, new program)
+    /// is told apart from the shell itself.
+    shell_names: Vec<String>,
     ops: SignalOps,
     /// Held while checking `reaped` and signalling, and by the waiter while it
     /// reaps and sets `reaped`: see the module docs.
@@ -287,6 +288,11 @@ impl TerminalSession {
         }
         cmd.cwd(cwd);
 
+        let started_as = cmd
+            .get_argv()
+            .first()
+            .and_then(|a| Path::new(a).file_name())
+            .map(|n| n.to_string_lossy().trim_start_matches('-').to_string());
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -318,7 +324,10 @@ impl TerminalSession {
             master: Mutex::new(pair.master),
             master_fd,
             pid,
-            shell_name: pid.and_then(process_name),
+            shell_names: started_as
+                .into_iter()
+                .chain(pid.and_then(process_name))
+                .collect(),
             ops,
             signal_lock: Mutex::new(()),
             reaped: AtomicBool::new(false),
@@ -474,12 +483,18 @@ impl TerminalSession {
                 None => Foreground::Unknown,
             };
         }
-        match (process_name(pid), &self.shell_name) {
-            (Some(now), Some(then)) if now != *then => {
+        // The kernel truncates names (Linux: 15 bytes), so a prefix matches.
+        let is_shell = |now: &str| {
+            self.shell_names
+                .iter()
+                .any(|n| n.starts_with(now) || now.starts_with(n.as_str()))
+        };
+        match process_name(pid) {
+            None => Foreground::Unknown,
+            Some(now) if !self.shell_names.is_empty() && !is_shell(&now) => {
                 Foreground::Program(sanitize_program_name(&now))
             }
-            (None, _) => Foreground::Unknown,
-            _ => Foreground::Shell,
+            Some(_) => Foreground::Shell,
         }
     }
 

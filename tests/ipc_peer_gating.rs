@@ -11403,6 +11403,8 @@ fn staging_list_frame(state: &str, command: &str) -> ServerMsg {
             inserted_count: 1,
             last_inserted_at: None,
         }],
+        enabled: true,
+        foreground: Some("ssh".into()),
     }
 }
 
@@ -11422,12 +11424,39 @@ fn staging_client_frames() -> Vec<(&'static str, ClientMsg)> {
             ClientMsg::TerminalStagingRemove {
                 terminal_id: "t-staging".into(),
                 entry_id: "s-00000001".into(),
+                archive: None,
+            },
+        ),
+        (
+            "terminal_staging_remove",
+            ClientMsg::TerminalStagingRemove {
+                terminal_id: "t-staging".into(),
+                entry_id: "s-00000001".into(),
+                archive: Some(nostromo::ipc::protocol::StagingArchive::Auto),
             },
         ),
         (
             "terminal_staging_clear",
             ClientMsg::TerminalStagingClear {
                 terminal_id: "t-staging".into(),
+            },
+        ),
+        (
+            "terminal_staging_set_enabled",
+            ClientMsg::TerminalStagingSetEnabled {
+                terminal_id: "t-staging".into(),
+                enabled: false,
+            },
+        ),
+        (
+            "terminal_staging_set_global",
+            ClientMsg::TerminalStagingSetGlobal { enabled: false },
+        ),
+        (
+            "terminal_staging_ui_event",
+            ClientMsg::TerminalStagingUiEvent {
+                terminal_id: "t-staging".into(),
+                event: "just_changed".into(),
             },
         ),
     ]
@@ -11460,6 +11489,10 @@ async fn a_tcp_client_subscribed_to_everything_never_receives_a_terminal_staging
         "a staging list reached a network peer: {seen:?}"
     );
     assert!(!json_of(&seen).contains(CANARY));
+    assert!(
+        !json_of(&seen).contains("\"foreground\""),
+        "the foreground program reached a network peer"
+    );
 }
 
 #[tokio::test]

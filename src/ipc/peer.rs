@@ -2237,9 +2237,10 @@ mod tests {
         assert_eq!(by_name("PtyDetach"), 8);
         assert_eq!(by_name("PtyList"), 9);
         // 62 since `PaneAction` (H6) was added after the retired verbs, so no ordinal moved;
-        // 65 with the three command-staging verbs; 66 with `MotherNoticeSettingsSet`.
-        assert_eq!(CLIENT_MSG_VARIANTS, 66);
-        assert_eq!(every_client_msg().len(), 66);
+        // 65 with the three command-staging verbs; 66 with `MotherNoticeSettingsSet`;
+        // 69 with the S2 staging frames (set_enabled, set_global, ui_event).
+        assert_eq!(CLIENT_MSG_VARIANTS, 69);
+        assert_eq!(every_client_msg().len(), 69);
     }
 
     #[test]

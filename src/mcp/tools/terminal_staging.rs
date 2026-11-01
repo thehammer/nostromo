@@ -263,3 +263,10 @@ fn render_list(terminal_id: &str, list: &StagingList) -> Value {
         },
     })
 }
+
+/// [`render_list`] for the staging tests (which prove nothing of the list the
+/// app is shown reaches the agent).
+#[cfg(test)]
+pub(crate) fn render_list_for_tests(terminal_id: &str, list: &StagingList) -> Value {
+    render_list(terminal_id, list)
+}

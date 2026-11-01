@@ -513,6 +513,7 @@ impl Rig {
                 terminal_id: terminal_id.into(),
                 bytes: B64.encode(format!("{line}\r")),
                 auto_reply: false,
+                via: None,
             })
             .await;
     }

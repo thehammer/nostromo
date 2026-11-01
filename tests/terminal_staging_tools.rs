@@ -125,6 +125,8 @@ fn the_listed_schema_is_closed_and_has_exactly_the_documented_properties() {
         "note_too_long",
         "looks_like_secret",
         "remote_shell_command",
+        "history_expansion",
+        "types_into_another_terminal",
         "invalid_position",
         "unknown_entry",
         "list_full",
@@ -310,6 +312,8 @@ fn the_docs_document_the_tool_and_every_error() {
         "note_too_long",
         "looks_like_secret",
         "remote_shell_command",
+        "history_expansion",
+        "types_into_another_terminal",
         "invalid_position",
         "unknown_entry",
         "list_full",
@@ -318,5 +322,5 @@ fn the_docs_document_the_tool_and_every_error() {
     }
     let terminal_doc =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/terminal.md")).unwrap();
-    assert!(terminal_doc.contains("Command staging (S1)"));
+    assert!(terminal_doc.contains("Command staging (S1-S2)"));
 }
