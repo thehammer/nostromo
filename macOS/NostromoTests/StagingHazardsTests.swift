@@ -101,4 +101,17 @@ final class StagingHazardsTests: XCTestCase {
         XCTAssertTrue(label.hasSuffix("and 2 more"), label)
         XCTAssertEqual(label.components(separatedBy: "U+0430").count - 1, 1, "a repeated scalar is named once")
     }
+
+    /// The shared fixture the daemon's tests read too: every case's `history` flag is what the app computes.
+    func testTheSharedHazardsFixtureAgreesWithTheAppsHistoryRule() throws {
+        let data = try StagingFixtures.fixtureData("hazards.json")
+        let cases = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        XCTAssertGreaterThan(cases.count, 25, "hazards.json should be found")
+        for entry in cases {
+            let name = entry["name"] as? String ?? "?"
+            let text = try XCTUnwrap(entry["text"] as? String, name)
+            let expected = try XCTUnwrap(entry["history"] as? Bool, name)
+            XCTAssertEqual(StagingHazards.usesHistoryExpansion(text), expected, "\(name): \(text)")
+        }
+    }
 }
