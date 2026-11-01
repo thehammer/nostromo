@@ -203,7 +203,7 @@ line + bottom padding, about 36 pt at the default text size; it follows the syst
 depends on state, progress, badges or width). Line 1: state dot, one-line title (tail-truncated), age
 (`12m`, `4m ago`, `2h ago`, `3d`). Line 2: origin, repo, the state's one useful fact, then attention
 badges and a reserved slot for the notified mark. The full title is the tooltip and is in the VoiceOver
-label: `<state>. <title>. From <origin>. <state fact>.`, then the badges. Section headers are one compact
+label: `<state>. <title>. From <origin>. <repo, branch>. <state fact>. <progress>. <cost>.`, then the badges (the title is capped at 200 characters there and in the tooltip). Section headers are one compact
 line, `RUNNING 3`.
 
 | State | Fact |
@@ -216,12 +216,15 @@ line, `RUNNING 3`.
 
 Line 2 by list width: at 340 pt and up everything that fits shows. Below 340 pt cost goes first, then repo.
 Below 260 pt repo and cost are always dropped and each badge shows as just `⚑` (the label is the tooltip).
+Badges also collapse to `⚑` at any width when their labels would take more than 40% of the line; that
+protects the fixed row height. The words are never lost: the spoken label always has every badge, and the
+spoken label also reads the repo and branch, the progress (running and awaiting rows) and the cost.
 Origin and the state fact always stay; they truncate (the fact first, then the origin). iOS keeps the
 `.regular` row; only the Mac list passes `style: .condensed`.
 
 **List width.** The list column is resizable by dragging the divider (a 6 pt grab area over the 1 px line):
 280 pt by default, never under 220 pt, never wider than the view minus 320 pt (the detail's minimum). The
-width is remembered per window in `UserDefaults` as `MotherListWidth.<window autosave name or identifier>`
+width is remembered per window in `UserDefaults` as `MotherListWidth.<focus window id>` (falling back to the window's autosave name or identifier)
 and restored clamped. There is no resize shortcut; the divider is an accessibility splitter that VoiceOver
 adjusts in 20 pt steps. Rows never widen the column.
 

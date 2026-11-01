@@ -38,8 +38,10 @@ final class MotherRowLineTwoTests: XCTestCase {
         state: String,
         title: String = "Fix the login flow",
         repo: String? = "nostromo",
+        branch: String? = nil,
         question: String? = nil,
         progressLine: String? = nil,
+        progressAccessibility: String? = nil,
         badges: [String] = [],
         origin: MotherOriginDisplay? = nil,
         prNumber: Int? = nil,
@@ -48,8 +50,9 @@ final class MotherRowLineTwoTests: XCTestCase {
         cost: String? = nil
     ) -> MotherJobRowModel {
         MotherJobRowModel(
-            id: "job-1", state: state, title: title, repo: repo, question: question,
-            progressLine: progressLine, attentionBadges: badges, showsProgressLine: true,
+            id: "job-1", state: state, title: title, repo: repo, branch: branch, question: question,
+            progressLine: progressLine, attentionBadges: badges, progressAccessibility: progressAccessibility,
+            showsProgressLine: true,
             origin: origin ?? you, prNumber: prNumber, prMerged: prMerged,
             failureReason: failureReason, cost: cost)
     }
@@ -328,24 +331,82 @@ final class MotherRowLineTwoTests: XCTestCase {
 
     func testTheSpokenLabelReadsStateTitleOriginFact() {
         let m = model(state: "running", title: "Fix login", progressLine: "≈60% · gates 2/3 · ETA ~5-15 min")
-        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Running. Fix login. From You. ≈60% · gates 2/3.")
+        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Running. Fix login. From You. nostromo. ≈60% · gates 2/3. ≈60% · gates 2/3 · ETA ~5-15 min.")
     }
 
     func testTheSpokenLabelEndsWithTheBadges() {
         let m = model(state: "awaiting", title: "Ship it", question: "Which branch?", badges: ["Needs decision", "Stalled"])
         XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m),
-                       "Awaiting. Ship it. From You. Which branch?. Needs decision. Stalled.")
+                       "Awaiting. Ship it. From You. nostromo. Which branch?. Needs decision. Stalled.")
     }
 
     func testTheSpokenLabelForASucceededJobNamesThePullRequest() {
         let m = model(state: "succeeded", title: "Ship it", prNumber: 907, prMerged: true)
-        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Succeeded. Ship it. From You. PR #907 merged.")
+        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Succeeded. Ship it. From You. nostromo. PR #907 merged.")
     }
 
     func testTheSpokenLabelDoesNotDependOnTheWidth() {
         // It is built from the model alone: the spoken form never loses a segment to a narrow column.
         let m = model(state: "succeeded", title: "Ship it", prNumber: 907, cost: "$2.14")
-        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Succeeded. Ship it. From You. PR #907.")
+        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Succeeded. Ship it. From You. nostromo. PR #907. Cost $2.14.")
+    }
+
+    func testANeedsDecisionRowSpeaksEverythingItShowsInOrder() {
+        let m = model(state: "awaiting", title: "Ship it", repo: "nostromo", branch: "feature/x",
+                      question: "Which branch?", progressAccessibility: "about 60 percent, gates 2 of 3",
+                      badges: ["Needs decision", "Stalled"], cost: "$0.80")
+        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m),
+                       "Awaiting. Ship it. From You. nostromo, branch feature/x. Which branch?. "
+                       + "about 60 percent, gates 2 of 3. Cost $0.80. Needs decision. Stalled.")
+    }
+
+    func testTheRepoIsSpokenWithoutABranchAndTheBranchWithoutARepo() {
+        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: model(state: "queued", title: "T", repo: "nostromo")),
+                       "Queued. T. From You. nostromo. queued.")
+        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: model(state: "queued", title: "T", repo: nil, branch: "b1")),
+                       "Queued. T. From You. Branch b1. queued.")
+    }
+
+    func testProgressIsNotSpokenForAStateThatDoesNotReserveAProgressLine() {
+        let m = model(state: "succeeded", title: "T", progressLine: "≈60% · gates 2/3", prNumber: 1)
+        XCTAssertFalse(MotherRowLineTwo.accessibilityLabel(model: m).contains("gates"))
+    }
+
+    func testBadgesAreStillSpokenWhenTheWidthCollapsesThemToAFlag() {
+        let m = model(state: "awaiting", title: "Ship it", question: "Which branch?", badges: ["Needs decision", "Stalled"])
+        XCTAssertTrue(compose(m, 280).badgesCollapsed, "precondition: the badges show as bare flags")
+        XCTAssertTrue(compose(m, 220).badgesCollapsed)
+        XCTAssertTrue(MotherRowLineTwo.accessibilityLabel(model: m).hasSuffix("Needs decision. Stalled."))
+    }
+
+    func testALongTitleIsCappedAt200CharactersInTheSpokenLabelAndTooltip() {
+        let long = String(repeating: "a", count: 250)
+        let m = model(state: "queued", title: long)
+        let capped = String(repeating: "a", count: 200) + "…"
+        XCTAssertEqual(MotherRowLineTwo.cappedTitle(m), capped)
+        XCTAssertTrue(MotherRowLineTwo.accessibilityLabel(model: m).contains(". \(capped). "))
+        XCTAssertFalse(MotherRowLineTwo.accessibilityLabel(model: m).contains(String(repeating: "a", count: 201)))
+    }
+
+    func testATitleOfExactly200CharactersIsNotCapped() {
+        let exact = String(repeating: "b", count: 200)
+        XCTAssertEqual(MotherRowLineTwo.cappedTitle(model(state: "queued", title: exact)), exact)
+        XCTAssertEqual(MotherRowLineTwo.cappedTitle(model(state: "queued", title: "")), "job-1")
+    }
+
+    func testTwoBadgesCollapseToBareFlagsAt280BecauseTheyWouldTakeOver40PercentOfTheLine() {
+        // At 6 pt per character: "⚑ Needs decision" 96 + "⚑ Stalled" 54 + 6 spacing = 156 pt > 40% of 280 (112).
+        let m = model(state: "awaiting", question: "Which branch?", badges: ["Needs decision", "Stalled"])
+        let line = compose(m, 280)
+        XCTAssertEqual(line.badges, ["⚑", "⚑"])
+        XCTAssertTrue(line.badgesCollapsed)
+    }
+
+    func testAShortSingleBadgeStaysLabelledAt280WhenItFitsIn40PercentOfTheLine() {
+        // "⚑ Stalled" is 54 pt, under 112 pt.
+        let line = compose(model(state: "running", progressLine: "≈60%", badges: ["Stalled"]), 280)
+        XCTAssertEqual(line.badges, ["⚑ Stalled"])
+        XCTAssertFalse(line.badgesCollapsed)
     }
 
     func testTheSpokenLabelIsSanitised() {
@@ -357,7 +418,7 @@ final class MotherRowLineTwoTests: XCTestCase {
 
     func testAnEmptyTitleIsSpokenAsTheJobId() {
         let m = model(state: "queued", title: "")
-        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Queued. job-1. From You. queued.")
+        XCTAssertEqual(MotherRowLineTwo.accessibilityLabel(model: m), "Queued. job-1. From You. nostromo. queued.")
     }
 }
 

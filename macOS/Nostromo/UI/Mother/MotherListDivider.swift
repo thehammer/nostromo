@@ -36,7 +36,7 @@ final class MotherListDivider: NSView {
     var onResize: ((CGFloat) -> Void)?
     /// The drag ended (or an accessibility step finished) at this width: the moment to remember it.
     var onCommit: (() -> Void)?
-    /// The current list width, read when a drag starts and for the accessibility value.
+    /// The list width shown right now (not the wanted one), read when a drag starts and for the accessibility value.
     var currentWidth: () -> CGFloat = { MotherListWidth.defaultWidth }
 
     private var dragStartX: CGFloat = 0
@@ -62,7 +62,10 @@ final class MotherListDivider: NSView {
         onResize?(dragStartWidth + event.locationInWindow.x - dragStartX)
     }
 
-    override func mouseUp(with event: NSEvent) { onCommit?() }
+    override func mouseUp(with event: NSEvent) {
+        // A click with no drag is not a choice of width.
+        if currentWidth() != dragStartWidth { onCommit?() }
+    }
 
     // MARK: Accessibility: a splitter whose value is the list width
 

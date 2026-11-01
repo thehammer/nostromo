@@ -38,11 +38,12 @@ final class MotherListResizeTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func makeWindow(identifier: String?, width: CGFloat = 800) -> (NSWindow, MotherView) {
+    private func makeWindow(identifier: String?, storageKey: String? = nil, width: CGFloat = 800) -> (NSWindow, MotherView) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 600),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: true)
         if let identifier { window.identifier = NSUserInterfaceItemIdentifier(identifier) }
-        let view = MotherView(frame: NSRect(x: 0, y: 0, width: width, height: 600))
+        let frame = NSRect(x: 0, y: 0, width: width, height: 600)
+        let view = storageKey == nil ? MotherView(frame: frame) : MotherView(frame: frame, storageKey: storageKey)
         window.contentView = view
         view.layoutSubtreeIfNeeded()
         windows.append(window)
@@ -57,6 +58,16 @@ final class MotherListResizeTests: XCTestCase {
 
     private func tabRegion(in view: MotherView) -> NSView? {
         view.subviews.first { $0 is TabRegionView }
+    }
+
+    private func mouse(_ type: NSEvent.EventType, x: CGFloat, in window: NSWindow) -> NSEvent {
+        NSEvent.mouseEvent(with: type, location: NSPoint(x: x, y: 10), modifierFlags: [], timestamp: 0,
+                           windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                           clickCount: 1, pressure: 1)!
+    }
+
+    private func storedWidthKeys() -> [String] {
+        suite.dictionaryRepresentation().keys.filter { $0.hasPrefix("MotherListWidth.") }
     }
 
     private func uniqueID() -> String { "mother-list-test-\(UUID().uuidString)" }
@@ -255,5 +266,104 @@ final class MotherListResizeTests: XCTestCase {
         let (_, view) = makeWindow(identifier: uniqueID())
         view.layoutSubtreeIfNeeded()
         XCTAssertEqual(view.listDivider.frame.width, 6, accuracy: 0.5)
+    }
+
+    // MARK: - Storage key (the app's windows have neither an autosave name nor an identifier)
+
+    func testAViewWithAStorageKeyRemembersTheWidthInAWindowWithNoIdentifier() {
+        let key = uniqueID()
+        let (window, view) = makeWindow(identifier: nil, storageKey: key)
+        XCTAssertNil(window.identifier)
+        view.setListWidth(350)
+        view.rememberListWidth()
+        XCTAssertEqual(suite.object(forKey: "MotherListWidth.\(key)") as? Double, 350)
+    }
+
+    func testANewViewWithTheSameStorageKeyRestoresTheWidthInAnotherUnnamedWindow() {
+        let key = uniqueID()
+        let (_, first) = makeWindow(identifier: nil, storageKey: key, width: 1000)
+        first.setListWidth(350)
+        first.rememberListWidth()
+
+        let (second, view) = makeWindow(identifier: nil, storageKey: key, width: 1000)
+        XCTAssertNil(second.identifier)
+        XCTAssertEqual(view.listColumnWidth, 350)
+    }
+
+    func testADifferentStorageKeyGetsTheDefaultWidth() {
+        let (_, first) = makeWindow(identifier: nil, storageKey: uniqueID())
+        first.setListWidth(350)
+        first.rememberListWidth()
+        let (_, other) = makeWindow(identifier: nil, storageKey: uniqueID())
+        XCTAssertEqual(other.listColumnWidth, 280)
+    }
+
+    func testAViewWithNoStorageKeyInAnUnnamedWindowStoresNothing() {
+        let (_, view) = makeWindow(identifier: nil, storageKey: nil)
+        view.setListWidth(350)
+        view.rememberListWidth()
+        XCTAssertTrue(storedWidthKeys().isEmpty)
+    }
+
+    // MARK: - The divider reads the width that is shown, not the one asked for
+
+    func testWhenTheWindowIsTooNarrowTheDividerReportsTheShownWidth() {
+        let (window, view) = makeWindow(identifier: uniqueID(), width: 900)
+        view.setListWidth(560)
+        resize(window, view, to: 600)
+        XCTAssertEqual(view.listColumnWidth, 280)
+        XCTAssertEqual(view.listDivider.currentWidth(), 280)
+        XCTAssertEqual((view.listDivider.accessibilityValue() as? NSNumber)?.doubleValue, 280)
+    }
+
+    func testAnAccessibilityStepFromANarrowedColumnMovesFromTheShownWidth() {
+        let (window, view) = makeWindow(identifier: uniqueID(), width: 900)
+        view.setListWidth(560)
+        resize(window, view, to: 600)
+        XCTAssertTrue(view.listDivider.accessibilityPerformIncrement())
+        XCTAssertEqual(view.listColumnWidth, 300, "20 more than the 280 shown, not 20 more than the 560 asked for")
+    }
+
+    func testADragFromANarrowedColumnMovesFromTheShownWidth() {
+        let (window, view) = makeWindow(identifier: uniqueID(), width: 900)
+        view.setListWidth(560)
+        resize(window, view, to: 600)
+        let divider = view.listDivider
+        divider.mouseDown(with: mouse(.leftMouseDown, x: 100, in: window))
+        divider.mouseDragged(with: mouse(.leftMouseDragged, x: 130, in: window))
+        XCTAssertEqual(view.listColumnWidth, 310, "280 shown + a 30 pt drag")
+    }
+
+    // MARK: - A click is not a choice of width
+
+    func testAClickOnTheDividerWithoutADragDoesNotCommitOrStore() {
+        let key = uniqueID()
+        let (window, view) = makeWindow(identifier: nil, storageKey: key)
+        let divider = view.listDivider
+        var commits = 0
+        let original = divider.onCommit
+        divider.onCommit = { commits += 1; original?() }
+
+        divider.mouseDown(with: mouse(.leftMouseDown, x: 100, in: window))
+        divider.mouseUp(with: mouse(.leftMouseUp, x: 100, in: window))
+
+        XCTAssertEqual(commits, 0)
+        XCTAssertNil(suite.object(forKey: "MotherListWidth.\(key)"))
+    }
+
+    func testADragThatChangesTheWidthCommitsAndStoresIt() {
+        let key = uniqueID()
+        let (window, view) = makeWindow(identifier: nil, storageKey: key)
+        let divider = view.listDivider
+        var commits = 0
+        let original = divider.onCommit
+        divider.onCommit = { commits += 1; original?() }
+
+        divider.mouseDown(with: mouse(.leftMouseDown, x: 100, in: window))
+        divider.mouseDragged(with: mouse(.leftMouseDragged, x: 130, in: window))
+        divider.mouseUp(with: mouse(.leftMouseUp, x: 130, in: window))
+
+        XCTAssertEqual(commits, 1)
+        XCTAssertEqual(suite.object(forKey: "MotherListWidth.\(key)") as? Double, 310)
     }
 }

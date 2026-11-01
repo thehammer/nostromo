@@ -115,6 +115,13 @@ class MotherView: NSView {
     override init(frame: NSRect) { super.init(frame: frame); setup() }
     required init?(coder: NSCoder) { super.init(coder: coder); setup() }
 
+    /// `storageKey` (the focus window's id) is where the list width is remembered; the app's windows set
+    /// neither an autosave name nor an identifier, so without it nothing would be stored.
+    convenience init(frame: NSRect = .zero, storageKey: String?) {
+        self.init(frame: frame)
+        self.storageKey = storageKey
+    }
+
 
     private func setup() {
         wantsLayer = true
@@ -141,7 +148,7 @@ class MotherView: NSView {
         }
 
         let handle = listDivider
-        handle.currentWidth = { [weak self] in self?.listWidth ?? MotherListWidth.defaultWidth }
+        handle.currentWidth = { [weak self] in self?.listColumnWidth ?? MotherListWidth.defaultWidth }
         handle.onResize = { [weak self] in self?.setListWidth($0) }
         handle.onCommit = { [weak self] in self?.rememberListWidth() }
 
@@ -255,8 +262,12 @@ class MotherView: NSView {
         if listWidthConstraint.constant != shown { listWidthConstraint.constant = shown }
     }
 
-    /// `window.frameAutosaveName`, else its identifier; nil for a window with neither (the width is then not remembered).
+    /// The id the view was built with, else `window.frameAutosaveName`, else the window's identifier; nil
+    /// when there is none of them (the width is then not remembered).
+    private(set) var storageKey: String?
+
     private var listWidthWindowKey: String? {
+        if let key = storageKey, !key.isEmpty { return key }
         if let name = window?.frameAutosaveName, !name.isEmpty { return name }
         if let id = window?.identifier?.rawValue, !id.isEmpty { return id }
         return nil
@@ -594,7 +605,7 @@ final class MotherJobListViewModel: ObservableObject {
             origin: originDisplay(forJobId: job.id),
             prNumber: Self.prNumber(fromURL: job.crew.prUrl),
             failureReason: job.failureReason,
-            cost: job.costUsd.map { String(format: "$%.2f", $0) }
+            cost: job.costUsd.flatMap { $0.isFinite && $0 >= 0 ? String(format: "$%.2f", $0) : nil }
         )
     }
 
@@ -671,7 +682,7 @@ struct MotherJobListSwiftUI: View {
                     }
                 } header: {
                     // `RUNNING 3`: one compact line.
-                    Text("\(group.state.uppercased()) \(group.jobs.count)")
+                    Text(MotherSectionHeader.headerText(state: group.state, count: group.jobs.count))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 1)

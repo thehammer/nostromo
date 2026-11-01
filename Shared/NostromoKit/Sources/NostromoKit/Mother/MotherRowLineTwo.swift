@@ -28,6 +28,8 @@ public struct MotherRowLineTwo: Equatable, Sendable {
     /// Room kept at the right edge for MF6's notified mark. Empty in this slice, never collapsed.
     public static let notifiedSlotWidth: CGFloat = 14
     public static let factCap = 40
+    /// Longest title in the spoken label and the tooltip.
+    public static let titleCap = 200
     public static let separator = " · "
     public static let badgeSpacing: CGFloat = 6
 
@@ -48,6 +50,9 @@ public struct MotherRowLineTwo: Equatable, Sendable {
         let allBadges = model.attentionBadges.map { MotherOriginDisplay.clean($0, cap: 30) }.filter { !$0.isEmpty }
         let labelled = allBadges.map { "⚑ \($0)" }
         let labelledWidth = labelled.map(measure).reduce(0, +) + badgeSpacing * CGFloat(max(0, labelled.count - 1))
+        // Collapse to a bare `⚑` below 260 pt, and also when the labelled badges would take more than 40% of
+        // the line: that protects the fixed row height (the origin and fact need the room). The words stay
+        // in the tooltip and the spoken label.
         let collapsed = !allBadges.isEmpty
             && (availableWidth < narrowestWidth || labelledWidth > availableWidth * 0.4)
         let shownBadges = collapsed ? allBadges.map { _ in "⚑" } : labelled
@@ -133,19 +138,40 @@ public struct MotherRowLineTwo: Equatable, Sendable {
 
     // MARK: - VoiceOver
 
-    /// `<state>. <title>. From <origin>. <state fact>.` then the open attention badges.
+    /// `<state>. <title>. From <origin>. [<repo>, branch <b>.] <state fact>. [<progress>.] [Cost <c>.]` then
+    /// every attention badge. It is built from the model alone, so a narrow column or a badge collapsed to
+    /// `⚑` never removes words from it.
     public static func accessibilityLabel(model: MotherJobRowModel) -> String {
         let cleanState = MotherOriginDisplay.clean(model.state, cap: 20)
         let rawState = cleanState.isEmpty ? "unknown" : cleanState
         let state = rawState.prefix(1).uppercased() + rawState.dropFirst()
-        let title = FoldTextSanitizer.sanitizeInline(model.title.isEmpty ? model.id : model.title)
-        var parts = ["\(state).", "\(title)."]
+        var parts = ["\(state).", "\(cappedTitle(model))."]
         if let origin = model.origin { parts.append("\(origin.accessibilityText).") }
+        let repo = MotherOriginDisplay.clean(model.repo, cap: 60)
+        let branch = MotherOriginDisplay.clean(model.branch, cap: 60)
+        switch (repo.isEmpty ? nil : repo, branch.isEmpty ? nil : branch) {
+        case (let r?, let b?): parts.append("\(r), branch \(b).")
+        case (let r?, nil):    parts.append("\(r).")
+        case (nil, let b?):    parts.append("Branch \(b).")
+        case (nil, nil):       break
+        }
         parts.append("\(stateFact(for: model)).")
+        if model.reservesProgressLine,
+           let progress = model.progressAccessibility ?? model.progressLine {
+            let clean = MotherOriginDisplay.clean(progress, cap: 80)
+            if !clean.isEmpty { parts.append("\(clean).") }
+        }
+        if let cost = model.cost, !cost.isEmpty { parts.append("Cost \(MotherOriginDisplay.clean(cost, cap: 20)).") }
         for badge in model.attentionBadges {
             let clean = MotherOriginDisplay.clean(badge, cap: 30)
             if !clean.isEmpty { parts.append("\(clean).") }
         }
         return parts.joined(separator: " ")
+    }
+
+    /// The row's title, sanitised and capped at `titleCap` characters (spoken label and tooltip).
+    public static func cappedTitle(_ model: MotherJobRowModel) -> String {
+        let t = FoldTextSanitizer.sanitizeInline(model.title.isEmpty ? model.id : model.title)
+        return t.count > titleCap ? String(t.prefix(titleCap)) + "…" : t
     }
 }

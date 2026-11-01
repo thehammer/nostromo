@@ -20,6 +20,13 @@ public enum MotherJobRowStyle: Equatable, Sendable {
     case condensed
 }
 
+/// The condensed list's section header, `RUNNING 3`.
+public enum MotherSectionHeader {
+    public static func headerText(state: String, count: Int) -> String {
+        "\(state.uppercased()) \(count)"
+    }
+}
+
 /// Sizes of the condensed row, from the current system fonts, so its height scales with text size
 /// and never depends on what the row says.
 public enum MotherRowMetrics {

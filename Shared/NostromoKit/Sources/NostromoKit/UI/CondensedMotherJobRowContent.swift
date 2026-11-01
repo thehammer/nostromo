@@ -34,7 +34,7 @@ struct CondensedMotherJobRowContent: View {
         .padding(.horizontal, MotherRowMetrics.horizontalPadding)
         .frame(height: MotherRowMetrics.rowHeight)
         .clipped()
-        .help(title)
+        .help(MotherRowLineTwo.cappedTitle(model))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(MotherRowLineTwo.accessibilityLabel(model: model))
         .modifier(OriginTapAction(origin: model.origin, onOriginTap: onOriginTap))
