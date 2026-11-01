@@ -31,6 +31,14 @@ enum MarkdownRenderer {
     /// Longest inline span that gets a copy button; longer ones are not commands.
     static let maxCopyableInlineSpan = 400
 
+    /// Whitespace, or a zero-width / bidi / format character that draws nothing.
+    private static func isBlankOrInvisible(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x200B, 0x200E, 0x200F, 0x202A...0x202E, 0x2066...0x2069, 0xFEFF: return true
+        default: return CharacterSet.whitespacesAndNewlines.contains(scalar)
+        }
+    }
+
     struct Rendered {
         let text: NSAttributedString
         /// One entry per non-empty fenced block, in order. Empty blocks have nothing to copy.
@@ -348,7 +356,7 @@ enum MarkdownRenderer {
                     .ligature: 0,
                     .backgroundColor: NSColor.white.withAlphaComponent(0.12),
                 ]
-                let copyable = !inner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let copyable = !inner.unicodeScalars.allSatisfy({ Self.isBlankOrInvisible($0) })
                     && inner.count <= maxCopyableInlineSpan
                     && !linkRanges.contains { NSIntersectionRange($0, span.range).length > 0 }
                 if copyable {
@@ -457,6 +465,7 @@ final class MarkdownCardView: NSView {
     }
 
     deinit {
+        if let inlineTrackingArea { removeTrackingArea(inlineTrackingArea) }
         if let clipObserver { NotificationCenter.default.removeObserver(clipObserver) }
     }
 
@@ -591,6 +600,7 @@ final class MarkdownCardView: NSView {
         blockRects = nil
         updateCopyButtons()
         positionInlineButton()
+        reevaluateInlineHover()
     }
 
     // MARK: - Window attachment
@@ -618,7 +628,10 @@ final class MarkdownCardView: NSView {
         defer {
             blockRects = nil
             updateCopyButtons()
-            if window == nil { setHoveredSpan(nil) }
+            if window == nil {
+                setHoveredSpan(nil)
+                removeInlineTrackingArea()
+            }
         }
         guard window != nil,
               let layoutManager = textView.layoutManager,
@@ -732,7 +745,10 @@ final class MarkdownCardView: NSView {
         clip.postsBoundsChangedNotifications = true
         clipObserver = NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification, object: clip, queue: nil
-        ) { [weak self] _ in self?.updateCopyButtons() }
+        ) { [weak self] _ in
+            self?.updateCopyButtons()
+            self?.reevaluateInlineHover()
+        }
     }
 
     // MARK: - Inline code copy
@@ -744,15 +760,40 @@ final class MarkdownCardView: NSView {
     /// The button itself counts as part of its span, so moving onto it keeps it.
     func updateInlineHover(at pointInCard: NSPoint?) {
         guard let point = pointInCard, !inlineSpans.isEmpty else { return setHoveredSpan(nil) }
+        if hoveredSpan != nil, inlineButton?.frame.contains(point) == true { return }
+        // Text under the pointer wins over the current span's slack, so a neighbour stays reachable.
+        func overText(_ index: Int) -> Bool { inlineSpanRects(index).contains { $0.contains(point) } }
+        if let current = hoveredSpan, overText(current) { return }
+        if let other = inlineSpans.indices.first(where: overText) { return setHoveredSpan(other) }
         if let current = hoveredSpan, inlineHoverRect(for: current).contains(point) { return }
-        setHoveredSpan(inlineSpans.indices.first { inlineHoverRect(for: $0).contains(point) })
+        setHoveredSpan(nil)
+    }
+
+    /// Where the pointer is, in card coordinates; tests replace it.
+    var pointerLocationProvider: (() -> NSPoint?)?
+
+    /// Content moved under a stationary pointer (scroll, relayout): no mouseMoved arrives, so ask again.
+    private func reevaluateInlineHover() {
+        guard !inlineSpans.isEmpty, window != nil else { return }
+        let point: NSPoint?
+        if let pointerLocationProvider {
+            point = pointerLocationProvider()
+        } else {
+            point = window.map { convert($0.mouseLocationOutsideOfEventStream, from: nil) }
+        }
+        guard let point, bounds.contains(point) else { return setHoveredSpan(nil) }
+        updateInlineHover(at: point)
+    }
+
+    private func removeInlineTrackingArea() {
+        if let inlineTrackingArea { removeTrackingArea(inlineTrackingArea) }
+        inlineTrackingArea = nil
     }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let inlineTrackingArea { removeTrackingArea(inlineTrackingArea) }
-        inlineTrackingArea = nil
-        guard !inlineSpans.isEmpty else { return }
+        removeInlineTrackingArea()
+        guard !inlineSpans.isEmpty, window != nil else { return }
         let area = NSTrackingArea(rect: .zero,
                                   options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
                                   owner: self, userInfo: nil)
@@ -807,9 +848,14 @@ final class MarkdownCardView: NSView {
 
     private func inlineSpanLastFragment(_ index: Int) -> NSRect? { inlineSpanRects(index).last }
 
-    /// Where the pointer counts as "over" a span: any of its line fragments, or its button.
+    /// Where the pointer counts as "over" a span: any of its line fragments, its button, and the
+    /// slack between the last fragment and the button (the button is taller than a line fragment).
     private func inlineHoverRect(for index: Int) -> InlineHoverArea {
-        InlineHoverArea(rects: inlineSpanRects(index) + (hoveredSpan == index ? [inlineButton?.frame].compactMap { $0 } : []))
+        var rects = inlineSpanRects(index)
+        if hoveredSpan == index, let button = inlineButton, let last = rects.last {
+            rects.append(last.union(button.frame).insetBy(dx: -4, dy: -4))
+        }
+        return InlineHoverArea(rects: rects)
     }
 
     // MARK: - Appearance

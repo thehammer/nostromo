@@ -330,4 +330,117 @@ final class InlineCodeCopyTests: XCTestCase {
         XCTAssertEqual(card.subviews.count, subviewCount)
         XCTAssertEqual(copyButtonCount(card), buttonCount)
     }
+
+    // MARK: Invisible-only spans
+
+    func testSpansOfOnlyInvisibleOrFormatCharactersAreNotRecorded() {
+        let invisibles: [String] = [
+            "\u{200B}", "\u{200E}", "\u{200F}", "\u{FEFF}",
+            "\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}",
+            "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}",
+        ]
+        for ch in invisibles {
+            let code = String(ch.unicodeScalars.first!.value, radix: 16)
+            XCTAssertTrue(spans("a `\(ch)` b").isEmpty, "U+\(code) alone was recorded")
+            XCTAssertTrue(spans("a ` \(ch)  \(ch) ` b").isEmpty, "U+\(code) mixed with spaces was recorded")
+        }
+        XCTAssertTrue(spans("a `\u{200B}\u{200E}\u{FEFF} \u{202A}` b").isEmpty)
+    }
+
+    func testSpanWithAnInvisibleCharacterAndRealTextIsStillRecorded() {
+        XCTAssertEqual(spans("a `\u{200B}x` b").count, 1)
+    }
+
+    // MARK: View: hover slack, neighbours, staleness, teardown
+
+    func testHoverSurvivesTheGapAndSlackBetweenTheSpanAndItsButton() throws {
+        let card = attachedCard("Run `make x` then ok")
+        card.updateInlineHover(at: nil)
+        card.updateInlineHover(at: try hoverPoint(card, on: "make x"))
+        let button = try XCTUnwrap(card.inlineCopyButton)
+        let f = button.frame
+
+        // In the gap just left of the button, at its middle and near its top and bottom edges.
+        for y in [f.midY, f.minY + 0.5, f.maxY - 0.5] {
+            card.updateInlineHover(at: NSPoint(x: f.minX - 0.5, y: y))
+            XCTAssertEqual(card.inlineCopyButton?.code, "make x", "hover dropped in the gap at y=\(y)")
+        }
+        // Vertically between the button edge and the text line, x within the button.
+        for y in [f.minY - 1, f.maxY + 1] {
+            card.updateInlineHover(at: NSPoint(x: f.midX, y: y))
+            XCTAssertEqual(card.inlineCopyButton?.code, "make x", "hover dropped just beside the button at y=\(y)")
+        }
+        // On the button itself.
+        card.updateInlineHover(at: NSPoint(x: f.midX, y: f.midY))
+        XCTAssertEqual(card.inlineCopyButton?.code, "make x")
+        // Well away from the span: cleared.
+        card.updateInlineHover(at: NSPoint(x: card.bounds.maxX - 1, y: f.midY))
+        XCTAssertNil(card.inlineCopyButton)
+    }
+
+    func testPointerOverANeighbouringSpansTextSwitchesHoverEvenNearTheButton() throws {
+        let card = attachedCard("`a` `bbbbbbbb`")
+        let pa = try hoverPoint(card, on: "a")
+        let bHits = hitPoints(card, for: "bbbbbbbb")
+        card.updateInlineHover(at: nil)
+        card.updateInlineHover(at: pa)
+        let aButton = try XCTUnwrap(card.inlineCopyButton)
+        XCTAssertEqual(aButton.code, "a")
+        let aFrame = aButton.frame
+        let candidates = bHits.filter { !aFrame.contains($0) }.sorted { $0.x < $1.x }
+        let target = try XCTUnwrap(candidates.first, "no point over b's text outside a's button")
+        card.updateInlineHover(at: target)
+        XCTAssertEqual(card.inlineCopyButton?.code, "bbbbbbbb")
+    }
+
+    func testRelayoutUnderAStationaryPointerShowsAndClearsTheButton() throws {
+        let card = attachedCard("Run `make x` then ok")
+        let over = try hoverPoint(card, on: "make x")
+        card.updateInlineHover(at: nil)
+        XCTAssertNil(card.inlineCopyButton)
+
+        card.pointerLocationProvider = { over }
+        card.needsLayout = true
+        card.layoutSubtreeIfNeeded()
+        XCTAssertEqual(card.inlineCopyButton?.code, "make x")
+
+        card.pointerLocationProvider = { NSPoint(x: card.bounds.maxX - 1, y: 1) }
+        card.needsLayout = true
+        card.layoutSubtreeIfNeeded()
+        XCTAssertNil(card.inlineCopyButton)
+
+        card.pointerLocationProvider = { nil }
+        card.updateInlineHover(at: over)
+        card.needsLayout = true
+        card.layoutSubtreeIfNeeded()
+        XCTAssertNil(card.inlineCopyButton, "pointer outside the card must clear a stale hover")
+    }
+
+    func testDetachedCardReleasesItsTrackingAreaAndDeallocates() throws {
+        weak var weakCard: MarkdownCardView?
+        let md = "Run `make x` then ok"
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600),
+                         styleMask: [.titled], backing: .buffered, defer: true)
+        w.isReleasedWhenClosed = false
+        // Everything that touches the card, including detaching, stays inside the pool so
+        // autoreleased references from AppKit calls can't outlive it.
+        try autoreleasepool {
+            let c = MarkdownCardView(markdown: md, pasteboard: pb)
+            c.presetWidth = 400
+            c.frame = NSRect(x: 0, y: 0, width: 400, height: MarkdownCardView.measuredHeight(markdown: md, width: 400))
+            w.contentView!.addSubview(c)
+            c.layoutSubtreeIfNeeded()
+            c.updateTrackingAreas()
+            XCTAssertFalse(c.trackingAreas.isEmpty, "attached card with spans should track the pointer")
+            c.updateInlineHover(at: try hoverPoint(c, on: "make x"))
+            XCTAssertNotNil(c.inlineCopyButton)
+            weakCard = c
+            c.removeFromSuperview()
+            XCTAssertTrue(c.trackingAreas.isEmpty, "detached card kept its tracking area")
+            XCTAssertNil(c.inlineCopyButton, "detached card kept its hover")
+        }
+        w.contentView = nil
+        w.close()
+        XCTAssertNil(weakCard, "card leaked after being detached and released")
+    }
 }
