@@ -124,11 +124,13 @@ final class SubagentTaskView: NSView, TaskWindowBody {
     /// The message shown instead of a conversation (`unavailableMessage`, `waitingMessage`); nil with one.
     var conversationMessage: String? { messageLabel.isHidden ? nil : messageLabel.stringValue }
 
-    init(focusTag: String, taskId: String, source: SubagentTranscriptSource?) {
+    init(focusTag: String, taskId: String, source: SubagentTranscriptSource?,
+         stop: TaskStopWiring = TaskStopWiring()) {
         self.focusTag = focusTag
         self.taskId = taskId
         self.source = source
         super.init(frame: .zero)
+        header.configureStop(stop, tag: focusTag, taskId: taskId)
         wantsLayer = true
         layer?.backgroundColor = TaskWindowPalette.background.cgColor
 

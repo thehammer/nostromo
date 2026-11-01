@@ -4,8 +4,20 @@ import NostromoKit
 /// What a task window's body views share: they take new content (the header's text, the task's end)
 /// without the window changing size, order or key status.
 protocol TaskWindowBody: NSView {
+    /// The header every body has: it holds the window's Stop.
+    var header: TaskWindowHeaderView { get }
     /// Show `content` (called again whenever the task's entry changes).
     func apply(content: TaskWindowContent)
+}
+
+/// What a task window's Stop needs: the store that holds the shared stop state, the human-gesture
+/// check and the revert timer (tests replace the last two).
+struct TaskStopWiring {
+    var store: BackgroundTaskStore = .shared
+    var permit: BackgroundGesture.Permit = BackgroundGesture.defaultPermit
+    var schedule: (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
 }
 
 /// The colours a task window draws with, all explicit (the panel is Dark Aqua, but a contrast
@@ -39,6 +51,10 @@ final class TaskWindowHeaderView: NSView {
     private let activityLabel = NSTextField(wrappingLabelWithString: "")
     private let summaryLabel = NSTextField(wrappingLabelWithString: "")
     private let stack = NSStackView()
+    private let titleLine = NSStackView()
+    private let stopNoticeLabel = TaskStopNotice.makeLabel()
+    private var stopWiring: (store: BackgroundTaskStore, tag: String, taskId: String)?
+    private(set) var stopButton: TaskStopButton?
     private let rule = NSView()
     private var wrapping: [NSTextField] { [descriptionLabel, metaLabel, activityLabel, summaryLabel] }
 
@@ -57,6 +73,9 @@ final class TaskWindowHeaderView: NSView {
     var metaColor: NSColor? { metaLabel.textColor }
     var summaryColor: NSColor? { summaryLabel.textColor }
     var descriptionToolTip: String? { descriptionLabel.toolTip }
+    /// `Couldn't stop: <reason>` or the version message as drawn; empty when neither shows.
+    var stopNoticeText: String { stopNoticeLabel.isHidden ? "" : stopNoticeLabel.stringValue }
+    var stopNoticeColor: NSColor? { stopNoticeLabel.textColor }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -83,7 +102,9 @@ final class TaskWindowHeaderView: NSView {
         configure(summaryLabel, font: .systemFont(ofSize: 12), color: TaskWindowPalette.text,
                   lines: Self.summaryLineLimit)
 
-        let titleLine = NSStackView(views: [kindLabel, statusLabel])
+        stopNoticeLabel.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
+        stopNoticeLabel.setContentHuggingPriority(.defaultLow - 2, for: .horizontal)
+        for view in [kindLabel, statusLabel, stopNoticeLabel] { titleLine.addArrangedSubview(view) }
         titleLine.orientation = .horizontal
         titleLine.alignment = .firstBaseline
         titleLine.spacing = 8
@@ -111,7 +132,7 @@ final class TaskWindowHeaderView: NSView {
             rule.trailingAnchor.constraint(equalTo: trailingAnchor),
             rule.bottomAnchor.constraint(equalTo: bottomAnchor),
             rule.heightAnchor.constraint(equalToConstant: 1),
-            titleLine.trailingAnchor.constraint(lessThanOrEqualTo: stack.trailingAnchor),
+            titleLine.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
         ]
         // The wrapping labels take the header's width, whatever their text asks for.
         for label in wrapping {
@@ -127,8 +148,33 @@ final class TaskWindowHeaderView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Give the header its Stop button for the task `taskId` of focus `tag`. Once only.
+    func configureStop(_ wiring: TaskStopWiring, tag: String, taskId: String) {
+        guard stopButton == nil else { return }
+        let store = wiring.store
+        stopWiring = (store, tag, taskId)
+        let button = TaskStopButton(permit: wiring.permit, menuPermit: wiring.permit, schedule: wiring.schedule,
+                                    requestStop: { [weak store] in store?.requestStop(tag: tag, taskId: taskId) })
+        stopButton = button
+        titleLine.addArrangedSubview(button)
+        refreshStop()
+    }
+
+    /// Show what the store says about Stop for this task: the button and the notice beside the status.
+    func refreshStop() {
+        guard let (store, tag, taskId) = stopWiring else { return }
+        let ended = content?.isEnded ?? false
+        var display = store.stopDisplay(tag: tag, taskId: taskId, ended: ended)
+        if content == nil { display.offered = false }
+        let description = String((content?.description ?? "").prefix(TaskStopButton.maxDescriptionInLabel))
+        stopButton?.update(display, description: description)
+        let text = TaskStopNotice.text(for: display, showUnsupported: true)
+        TaskStopNotice.apply(text, unsupported: display.failure == nil, to: stopNoticeLabel)
+    }
+
     /// Show `content`; empty fields leave their line out.
     func apply(_ content: TaskWindowContent) {
+        defer { refreshStop() }
         guard self.content != content else { return }
         self.content = content
         kindLabel.stringValue = content.kindLabel

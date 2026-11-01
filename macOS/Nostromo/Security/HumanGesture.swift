@@ -60,7 +60,11 @@ enum HumanGesture {
     ///     the mouse event that tracked the menu, which belongs to the menu and not to the control's
     ///     window; with this set a mouse event is not held to the control's window (a key equivalent
     ///     still is). Every other check applies, so a synthetic, stale or missing event is refused.
+    ///   - contextMenuPick: with `menuSelection`, the item is in a context menu, which can also be chosen by
+    ///     the keyboard (a key event with no window, or the menu's own) or by releasing the right button.
+    ///     Off for every other caller.
     static func permit(_ event: NSEvent?, control: NSView, menuSelection: Bool = false,
+                       contextMenuPick: Bool = false,
                        voiceOverEnabled: () -> Bool = { NSWorkspace.shared.isVoiceOverEnabled },
                        allowsSynthetic: () -> Bool = { SyntheticInputGate.allowsSynthetic },
                        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
@@ -73,11 +77,14 @@ enum HumanGesture {
             return voiceOverEnabled() ? .human(sourcePid: nil, sourceState: nil)
                                       : .refused(reason: .accessibilityPress)
         }
-        guard [.leftMouseUp, .leftMouseDown, .keyDown].contains(event.type) else {
+        // A context menu (`contextMenuPick`) is also chosen by releasing the right button over an item.
+        let types: [NSEvent.EventType] = menuSelection && contextMenuPick ? [.leftMouseUp, .leftMouseDown, .rightMouseUp, .keyDown]
+                                                         : [.leftMouseUp, .leftMouseDown, .keyDown]
+        guard types.contains(event.type) else {
             return .refused(reason: .notAUserEvent)
         }
         guard let window = control.window else { return .refused(reason: .notAUserEvent) }
-        if event.window !== window && !(menuSelection && event.type != .keyDown) {
+        if event.window !== window && !(menuSelection && (event.type != .keyDown || (contextMenuPick && keyBelongsToMenu(event)))) {
             return .refused(reason: .notAUserEvent)
         }
         let age = now() - event.timestamp
@@ -90,5 +97,12 @@ enum HumanGesture {
         let source = event.cgEvent
         return .human(sourcePid: source?.getIntegerValueField(.eventSourceUnixProcessID),
                       sourceState: source?.getIntegerValueField(.eventSourceStateID))
+    }
+
+    /// A context-menu item chosen by keyboard carries a key event with no window or the menu's own
+    /// window. A key event of any other window is still refused.
+    private static func keyBelongsToMenu(_ event: NSEvent) -> Bool {
+        guard let window = event.window else { return true }
+        return String(describing: type(of: window)).contains("Menu")
     }
 }

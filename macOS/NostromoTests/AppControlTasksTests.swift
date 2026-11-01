@@ -142,6 +142,39 @@ final class AppControlTasksTests: XCTestCase {
         }
     }
 
+    /// BA5: `stop_offered` in `tasks list` is exactly whether the popover row has a visible Stop button.
+    func testStopOfferedMatchesTheStopButtonsPresenceInThePopover() throws {
+        _ = NSApplication.shared
+        func assertMatches(_ store: BackgroundTaskStore, _ what: String, file: StaticString = #filePath, line: UInt = #line) throws {
+            let vc = BackgroundPopoverViewController(tag: tag, displayName: "Claudia", store: store,
+                                                     actions: BackgroundTaskWindowActions(), announce: { _ in })
+            _ = vc.view
+            vc.setHousekeepingExpanded(true)
+            let report = AppControlTasks.list(tag: tag, list: store.list(for: tag), all: true)
+            let offered = indexed(objects(report["tasks"], "tasks"))
+            XCTAssertFalse(offered.isEmpty, "\(what): precondition: rows to compare", file: file, line: line)
+            for view in vc.visibleRowViews {
+                let hasButton = view.stopButton.map { !$0.isHidden } ?? false
+                XCTAssertEqual(offered[view.row.id]?["stop_offered"] as? Bool, hasButton,
+                               "\(what): \(view.row.id): stop_offered matches the button", file: file, line: line)
+            }
+        }
+
+        let store = try makeBusyStore()
+        try assertMatches(store, "stop supported")
+        let list = store.list(for: tag)
+        XCTAssertTrue(list.running.contains { $0.stopOffered } && list.ended.contains { !$0.stopOffered },
+                      "precondition: both a row with Stop and rows without")
+
+        store.ingest(.sessionTasks(SessionTasksWire(
+            tag: tag, sessionId: "s1", daemonEpoch: "e1", stopSupported: false,
+            tasks: [task("b1", .shell, description: "npm run dev", taskType: "local_bash", started: startMs - 4_100),
+                    task("e1", .shell, status: .completed, description: "npm run build", taskType: "local_bash",
+                         started: startMs - 300_000, ended: startMs - 240_000)])))
+        try assertMatches(store, "stop unsupported")
+        XCTAssertTrue(store.list(for: tag).running.allSatisfy { !$0.stopOffered }, "nothing is offered once the CLI cannot stop")
+    }
+
     func testTheReportedRowsCarryTheFactsTheRowsShow() throws {
         let store = try makeBusyStore()
         let report = AppControlTasks.list(tag: tag, list: store.list(for: tag), all: false)

@@ -32,6 +32,49 @@ final class BackgroundTaskStore {
     /// disabled.
     var tasksSupported = false
 
+    /// What Stop knows about one task. Never a status: the task is `stopped` only when a snapshot says so.
+    struct TaskStop: Equatable {
+        enum Phase: Equatable {
+            /// The request is out, or the CLI took it and no snapshot shows the task over yet.
+            case stopping
+            /// What went wrong, already sanitised and cut to `StopReason.limit`.
+            case failed(String)
+        }
+        var phase: Phase
+        /// Identifies the request: a late answer or timer for an older request changes nothing.
+        let token: Int
+    }
+
+    /// What a Stop control shows for one task.
+    struct StopDisplay: Equatable {
+        /// Stop can be offered (the task is not over and the CLI supports it).
+        var offered = false
+        var stopping = false
+        /// `Couldn't stop: <reason>` is shown with this reason.
+        var failure: String?
+        /// The CLI cannot stop tasks (`stop_supported == false`) for a task that is not over.
+        var unsupported = false
+    }
+
+    /// The reason text Stop shows: the CLI's words, one line, no invisible or control characters.
+    enum StopReason {
+        static let limit = 120
+        static func clean(_ raw: String?, fallback: String) -> String {
+            let text = FoldTextSanitizer.sanitizeInline(raw ?? "").trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty else { return fallback }
+            // Cut by characters and by scalars: one grapheme can hold thousands of combining marks.
+            guard text.count > limit || text.unicodeScalars.count > limit else { return text }
+            var cut = String(text.prefix(limit - 1))
+            if cut.unicodeScalars.count > limit - 1 {
+                cut = String(String.UnicodeScalarView(cut.unicodeScalars.prefix(limit - 1)))
+            }
+            return cut + "\u{2026}"
+        }
+    }
+
+    /// Seconds after the CLI took a stop within which a snapshot must show the task over.
+    static let confirmationTimeout: TimeInterval = 10
+
     /// What one focus holds.
     struct TagState: Equatable {
         /// The daemon's latest snapshot.
@@ -46,6 +89,9 @@ final class BackgroundTaskStore {
         /// next snapshot says whether the daemon restarted (keep them) or not (its snapshot is the truth).
         var awaitingReconnect: [TaskMetaWire] = []
         var hasSnapshot = false
+        /// Stop requests in flight or failed, per task id. Cleared by a snapshot that shows the task over
+        /// (or no longer lists it), a new session, a daemon restart and `forget`.
+        var stops: [String: TaskStop] = [:]
 
         /// Everything the list is built from; a daemon entry wins over a local one with its id.
         var allTasks: [TaskMetaWire] { restartStopped + awaitingReconnect + tasks }
@@ -56,6 +102,8 @@ final class BackgroundTaskStore {
     private let now: () -> Date
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     private let defaults: UserDefaults
+    private let requestsProvider: () -> TaskRequests
+    private var nextStopToken = 0
     private var lastDelivery: [String: Date] = [:]
     private var pending: Set<String> = []
     /// tag → (seen `ended_at_ms`, last used, seconds since 1970).
@@ -67,7 +115,9 @@ final class BackgroundTaskStore {
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          },
-         defaults: UserDefaults = .standard) {
+         defaults: UserDefaults = .standard,
+         requests: @escaping () -> TaskRequests = { TaskRequests.shared }) {
+        self.requestsProvider = requests
         self.now = now
         self.schedule = schedule
         self.defaults = defaults
@@ -95,6 +145,79 @@ final class BackgroundTaskStore {
         guard let state = states[tag] else { return .empty }
         return BackgroundTaskList.make(tasks: state.allTasks, details: state.details, nowMs: nowMs,
                                        seenEndedAtMs: seen[tag]?.mark, stopSupported: state.stopSupported)
+    }
+
+    /// What a Stop control for `taskId` shows. `ended`: the task is over as far as the list says.
+    func stopDisplay(tag: String, taskId: String, ended: Bool) -> StopDisplay {
+        let state = states[tag]
+        let supported = state?.stopSupported != false
+        var display = StopDisplay(offered: !ended && supported, unsupported: !ended && !supported)
+        guard !ended, let stop = state?.stops[taskId] else { return display }
+        switch stop.phase {
+        case .stopping: display.stopping = true
+        case .failed(let reason): display.failure = reason
+        }
+        return display
+    }
+
+    // MARK: Stop
+
+    /// Ask the CLI to stop `taskId`. The store does **not** enforce the human-gesture gate: the caller
+    /// must already have passed it (`TaskStopButton`'s permitted, distinct arm and confirm gestures).
+    /// Only the button closures in the popover and the task window may call this; a fitness test
+    /// (`TaskStopGateFitnessTests`) fails on any other caller. Nothing here changes a task's status,
+    /// only what Stop shows next to it.
+    func requestStop(tag: String, taskId: String) {
+        var state = states[tag] ?? TagState()
+        if state.stops[taskId]?.phase == .stopping { return }
+        nextStopToken += 1
+        let token = nextStopToken
+        state.stops[taskId] = TaskStop(phase: .stopping, token: token)
+        states[tag] = state
+        // With no connection the completion runs at once with the failure.
+        requestsProvider().requestStop(tag: tag, taskId: taskId) { [weak self] reply in
+            self?.stopAnswered(tag: tag, taskId: taskId, token: token, reply: reply)
+        }
+        noteChange(tag)
+    }
+
+    private func stopAnswered(tag: String, taskId: String, token: Int, reply: TaskReply<SessionTaskStopResultWire>) {
+        guard var state = states[tag], state.stops[taskId]?.token == token else { return }
+        switch reply {
+        case .timedOut:
+            state.stops[taskId]?.phase = .failed("Claude Code didn't answer")
+        case .failed(let reason):
+            state.stops[taskId]?.phase = .failed(StopReason.clean(reason, fallback: "Claude Code didn't answer"))
+        case .answered(let wire):
+            switch wire.outcome {
+            case .accepted:
+                // Stays `stopping` until a snapshot shows the task over; if none does, say so.
+                schedule(Self.confirmationTimeout) { [weak self] in
+                    self?.confirmationExpired(tag: tag, taskId: taskId, token: token)
+                }
+                return
+            case .refused:
+                state.stops[taskId]?.phase = .failed(StopReason.clean(wire.message, fallback: "Claude Code refused"))
+            case .timeout:
+                state.stops[taskId]?.phase = .failed("Claude Code didn't answer")
+            case .unsupported:
+                state.stops.removeValue(forKey: taskId)
+                state.stopSupported = false
+            case .notRunning:
+                state.stops.removeValue(forKey: taskId)
+            case .unknown(let raw):
+                state.stops[taskId]?.phase = .failed(StopReason.clean(raw, fallback: "Claude Code didn't answer"))
+            }
+        }
+        states[tag] = state
+        noteChange(tag)
+    }
+
+    private func confirmationExpired(tag: String, taskId: String, token: Int) {
+        guard var state = states[tag], let stop = state.stops[taskId], stop.token == token, stop.phase == .stopping else { return }
+        state.stops[taskId]?.phase = .failed("no confirmation from Claude Code")
+        states[tag] = state
+        noteChange(tag)
     }
 
     // MARK: Ingest
@@ -129,6 +252,7 @@ final class BackgroundTaskStore {
             state.restartStopped += state.awaitingReconnect
                 + state.tasks.filter { !$0.status.isTerminal }.map { $0.ended(as: .stopped, endReason: .restart, atMs: stamp) }
         }
+        if newDaemon || newSession { state.stops = [:] }
         // Either way the wait is over. Same daemon: its snapshot is the truth about every task it knows.
         state.awaitingReconnect = []
 
@@ -155,7 +279,10 @@ final class BackgroundTaskStore {
         state.restartStopped.removeAll { newIds.contains($0.id) }
 
         state.tasks = snapshot.tasks
-        state.stopSupported = snapshot.stopSupported
+        state.stopSupported = snapshot.stopSupported ?? (state.stopSupported == false && !newDaemon ? false : nil)
+        // What the snapshot shows over (or no longer lists) has nothing left to stop.
+        let liveIds = Set(snapshot.tasks.filter { !$0.status.isTerminal }.map(\.id))
+        state.stops = state.stops.filter { liveIds.contains($0.key) }
         state.daemonEpoch = epoch ?? state.daemonEpoch
         state.sessionId = snapshot.sessionId ?? state.sessionId
         state.hasSnapshot = true
@@ -174,6 +301,7 @@ final class BackgroundTaskStore {
             guard !live.isEmpty else { continue }
             state.awaitingReconnect += live.map { $0.ended(as: .stopped, endReason: .restart, atMs: stamp) }
             state.tasks.removeAll { !$0.status.isTerminal }
+            state.stops = [:]
             states[tag] = state
             noteChange(tag)
         }

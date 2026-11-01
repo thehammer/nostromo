@@ -124,7 +124,8 @@ final class TaskOutputView: NSView, TaskWindowBody {
     /// Distance from the bottom of the text to the bottom of the viewport.
     var distanceFromBottom: CGFloat { documentHeight - clipView.bounds.maxY }
 
-    init(focusTag: String, taskId: String, model: TaskOutputModel, pasteboard: NSPasteboard = .general) {
+    init(focusTag: String, taskId: String, model: TaskOutputModel, pasteboard: NSPasteboard = .general,
+         stop: TaskStopWiring = TaskStopWiring()) {
         self.focusTag = focusTag
         self.taskId = taskId
         self.model = model
@@ -142,6 +143,7 @@ final class TaskOutputView: NSView, TaskWindowBody {
         textView = TaskOutputTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100), textContainer: container)
 
         super.init(frame: .zero)
+        header.configureStop(stop, tag: focusTag, taskId: taskId)
         wantsLayer = true
         layer?.backgroundColor = TaskWindowPalette.background.cgColor
 
@@ -460,10 +462,11 @@ final class TaskNoOutputView: NSView, TaskWindowBody {
     var messageText: String { messageLabel.stringValue }
     var messageColor: NSColor? { messageLabel.textColor }
 
-    init(focusTag: String, taskId: String) {
+    init(focusTag: String, taskId: String, stop: TaskStopWiring = TaskStopWiring()) {
         self.focusTag = focusTag
         self.taskId = taskId
         super.init(frame: .zero)
+        header.configureStop(stop, tag: focusTag, taskId: taskId)
         wantsLayer = true
         layer?.backgroundColor = TaskWindowPalette.background.cgColor
         messageLabel.font = .systemFont(ofSize: 13)

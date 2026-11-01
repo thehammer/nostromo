@@ -129,16 +129,22 @@ final class BA3UIWorld {
     let storeScheduler: BA3UIStoreScheduler
     let store: BackgroundTaskStore
 
-    init(_ testCase: XCTestCase) {
+    /// `requests` and `schedule` are for BA5's Stop gate: a recording daemon behind `requestStop`, and timers
+    /// held by hand (the default scheduler runs its work at once).
+    init(_ testCase: XCTestCase, requests: (() -> TaskRequests)? = nil,
+         schedule hand: ((TimeInterval, @escaping () -> Void) -> Void)? = nil) {
         let clock = BA3UIClock()
         let scheduler = BA3UIStoreScheduler()
         self.clock = clock
         self.storeScheduler = scheduler
         let suite = "BA3-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
-        store = BackgroundTaskStore(now: { clock.date },
-                                    schedule: { delay, work in scheduler.schedule(delay, work) },
-                                    defaults: defaults)
+        let schedule: (TimeInterval, @escaping () -> Void) -> Void = hand ?? { delay, work in scheduler.schedule(delay, work) }
+        if let requests {
+            store = BackgroundTaskStore(now: { clock.date }, schedule: schedule, defaults: defaults, requests: requests)
+        } else {
+            store = BackgroundTaskStore(now: { clock.date }, schedule: schedule, defaults: defaults)
+        }
         store.tasksSupported = true
         testCase.addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
     }

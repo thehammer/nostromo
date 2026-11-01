@@ -52,6 +52,7 @@ final class BackgroundScrollSafetyTests: XCTestCase {
     override func setUp() {
         super.setUp()
         bars = []
+        TSGestureSeams.install(on: self)
     }
 
     override func tearDown() {
@@ -62,8 +63,8 @@ final class BackgroundScrollSafetyTests: XCTestCase {
 
     /// `SafetyRig.followingTail` / `.scrolledUp`, with the Background slot bound before layout and
     /// the composer focused after.
-    private func pane(following: Bool) -> Pane {
-        let world = BA3UIWorld(self)
+    private func pane(following: Bool, world given: BA3UIWorld? = nil) -> Pane {
+        let world = given ?? BA3UIWorld(self)
         let rig = SafetyRig(self, turns: SafetyFixtures.transcript())
         rig.window.animationBehavior = .none
         rig.window.orderFront(nil)
@@ -304,6 +305,312 @@ final class BackgroundScrollSafetyTests: XCTestCase {
         }
     }
 
+    // MARK: BA5: Stop
+
+    private static let human: HumanGestureVerdict = .human(sourcePid: nil, sourceState: nil)
+
+    private func title(_ button: TaskStopButton?) -> String { button?.attributedTitle.string ?? "<no button>" }
+
+    /// Every step of a Stop: the first click, the 3 s revert, the confirming click, `Stopping…`, the task
+    /// ending (`stopped`) and `Couldn't stop: …`, in the popover. Each runs inside `assertNoMove` (first
+    /// visible line <= 1 pt, composer text, selection and first responder unchanged) and also asserts that
+    /// no visible row changed height, the list's document kept its height and the popover's own first
+    /// responder stayed where it was (a notice or button that grew a row, or took the keyboard, fails here).
+    func testEachStepOfStoppingATaskInThePopoverMovesNothing() throws {
+        for following in [true, false] {
+            let gate = BA5StopGate(self)
+            let p = pane(following: following, world: gate.world)
+            let bar = p.bar
+            gate.world.ingest(gate.world.running(3))
+            let name = { (step: String) in "\(step) (following: \(following))" }
+
+            p.rig.assertNoMove(name("popover opens"), following: following) {
+                bar.toggleBackgroundPopover(takeKeyboard: false)
+            }
+            let popover = try XCTUnwrap(bar.backgroundPopover)
+            let vc = popover.viewController
+            vc.stopPermit = { _ in Self.human }
+            vc.stopMenuPermit = { _ in Self.human }
+            vc.stopSchedule = { delay, work in gate.buttonHand.schedule(delay, work) }
+            let popoverWindow = try XCTUnwrap(vc.view.window, "the list has a window")
+            func rowView(_ id: String) throws -> BackgroundTaskRowView {
+                try XCTUnwrap(vc.visibleRowViews.first { $0.row.id == id }, "no visible row \(id)")
+            }
+            func heights() -> [String: CGFloat] {
+                Dictionary(uniqueKeysWithValues: vc.visibleRowViews.map { ($0.row.id, $0.frame.height) })
+            }
+            func documentHeight() -> CGFloat { vc.scrollView.documentView?.frame.height ?? 0 }
+
+            func step(_ what: String, rowsKeepTheirHeight: Bool = true, _ event: () -> Void) {
+                let rows = heights()
+                let document = documentHeight()
+                let responder = popoverWindow.firstResponder
+                XCTAssertFalse(rows.isEmpty, "\(name(what)): precondition: rows are shown")
+                p.rig.assertNoMove(name(what), following: following) {
+                    gate.world.clock.advance(1)
+                    event()
+                    gate.flushDeliveries()
+                }
+                if rowsKeepTheirHeight {
+                    XCTAssertEqual(heights(), rows, "\(name(what)): a row changed height")
+                    XCTAssertEqual(documentHeight(), document, accuracy: 0.5, "\(name(what)): the list changed height")
+                }
+                XCTAssertTrue(popoverWindow.firstResponder === responder, "\(name(what)): the popover's first responder moved")
+                assertComposerIntact(p.rig, name(what))
+            }
+
+            step("first click on Stop") { try? rowView("job0").stopButton?.clicked(nil) }
+            XCTAssertEqual(title(try rowView("job0").stopButton), "Stop?")
+            XCTAssertEqual(gate.sender.stops.count, 0)
+
+            step("the 3 s revert") { gate.buttonHand.fire(where: { $0 == 3 }) }
+            XCTAssertEqual(title(try rowView("job0").stopButton), "Stop")
+
+            step("the confirm click") {
+                try? rowView("job0").stopButton?.clicked(nil)
+                try? rowView("job0").stopButton?.clicked(nil)
+            }
+            XCTAssertEqual(gate.sender.stops.count, 1, "exactly one stop was sent")
+            XCTAssertEqual(title(try rowView("job0").stopButton), "Stopping\u{2026}")
+
+            step("the daemon accepts: still Stopping\u{2026}") { gate.answer("accepted", taskId: "job0") }
+            XCTAssertEqual(title(try rowView("job0").stopButton), "Stopping\u{2026}")
+
+            step("a refusal shows Couldn't stop") {
+                try? rowView("job1").stopButton?.clicked(nil)
+                try? rowView("job1").stopButton?.clicked(nil)
+                gate.answer("refused", message: "Task is protected", taskId: "job1")
+            }
+            XCTAssertEqual(try rowView("job1").stopNoticeText, "Couldn't stop: Task is protected")
+            XCTAssertEqual(title(try rowView("job1").stopButton), "Stop")
+
+            step("a timeout shows Couldn't stop") {
+                try? rowView("job2").stopButton?.clicked(nil)
+                try? rowView("job2").stopButton?.clicked(nil)
+                gate.answer("timeout", taskId: "job2")
+            }
+            XCTAssertEqual(try rowView("job2").stopNoticeText, "Couldn't stop: Claude Code didn't answer")
+
+            // job0's stop was accepted at "the daemon accepts" and no snapshot has shown it over since.
+            step("10 s pass with no confirmation") {
+                gate.storeHand.fire(where: { $0 >= BackgroundTaskStore.confirmationTimeout })
+            }
+            XCTAssertEqual(try rowView("job0").stopNoticeText, "Couldn't stop: no confirmation from Claude Code")
+            XCTAssertEqual(title(try rowView("job0").stopButton), "Stop")
+
+            // The row leaves the running section for Ended, so its own height is allowed to differ.
+            step("the snapshot reports the task stopped", rowsKeepTheirHeight: false) {
+                gate.world.ingest([gate.world.task("job0", "job number 0", status: .stopped, startedAgo: 1_000, endedAgo: 1),
+                                   gate.world.task("job1", "job number 1", startedAgo: 999),
+                                   gate.world.task("job2", "job number 2", startedAgo: 998)])
+            }
+            let stopped = try rowView("job0")
+            XCTAssertEqual(stopped.statusText, "stopped")
+            XCTAssertTrue(stopped.stopButton?.isHidden ?? true, "a stopped task offers no Stop")
+            XCTAssertEqual(try rowView("job1").stopNoticeText, "Couldn't stop: Task is protected", "the failure survives the snapshot")
+            XCTAssertEqual(gate.sender.stops.count, 3)
+
+            step("the CLI turns out not to support Stop") {
+                gate.world.store.ingest(.sessionTasks(SessionTasksWire(
+                    tag: "gate", sessionId: "session-1", daemonEpoch: "epoch-1", stopSupported: false,
+                    tasks: [gate.world.task("job0", "job number 0", status: .stopped, startedAgo: 1_000, endedAgo: 1),
+                            gate.world.task("job1", "job number 1", startedAgo: 999),
+                            gate.world.task("job2", "job number 2", startedAgo: 998)])))
+            }
+            XCTAssertTrue(try rowView("job1").stopButton?.isHidden ?? true, "no Stop is offered once it is unsupported")
+        }
+    }
+
+    /// The same steps in a task window: its header holds the button and the notice (the title line is pinned
+    /// to the stack's trailing edge), so the header, the panel and the main pane must all stay put.
+    func testEachStepOfStoppingATaskInATaskWindowMovesNothing() throws {
+        for following in [true, false] {
+            let gate = BA5StopGate(self)
+            let p = pane(following: following, world: gate.world)
+            let tw = BA4TWWorld(self, tag: "gate", world: gate.world, keyWindow: p.rig.window)
+            tw.ingest([tw.task("job0", "npm run dev"), tw.task("job1", "npm run build")])
+            tw.manager.stopPermit = { _ in Self.human }
+            tw.manager.stopSchedule = { delay, work in gate.buttonHand.schedule(delay, work) }
+            let name = { (step: String) in "\(step) (following: \(following))" }
+
+            var opened: [TaskWindowController] = []
+            p.rig.assertNoMove(name("two task windows open"), following: following) {
+                opened = ["job0", "job1"].compactMap { tw.open($0) }
+                tw.pump()
+                opened.forEach { $0.panel.contentView?.layoutSubtreeIfNeeded() }
+            }
+            XCTAssertEqual(opened.count, 2, "precondition: both windows opened")
+            let (c0, c1) = (opened[0], opened[1])
+            func header(_ c: TaskWindowController) -> TaskWindowHeaderView { c.body.header }
+
+            func step(_ what: String, headersKeepTheirHeight: Bool = true, _ event: () -> Void) {
+                let heights = opened.map { header($0).frame.height }
+                let frames = opened.map { $0.panel.frame }
+                let responders = opened.map { $0.panel.firstResponder }
+                p.rig.assertNoMove(name(what), following: following) {
+                    gate.world.clock.advance(1)
+                    event()
+                    gate.flushDeliveries()
+                    opened.forEach { $0.panel.contentView?.layoutSubtreeIfNeeded() }
+                }
+                // An ended task's own header may differ (its status line); the other window's may not.
+                let checked = headersKeepTheirHeight ? Array(opened.indices) : [1]
+                for index in checked {
+                    XCTAssertEqual(header(opened[index]).frame.height, heights[index], accuracy: 0.5,
+                                   "\(name(what)): window \(index)'s header changed height")
+                }
+                XCTAssertEqual(opened.map { $0.panel.frame }, frames, "\(name(what)): a window moved or resized")
+                for (index, panel) in opened.enumerated() {
+                    XCTAssertTrue(panel.panel.firstResponder === responders[index], "\(name(what)): window \(index)'s first responder moved")
+                }
+                assertComposerIntact(p.rig, name(what))
+            }
+
+            step("first click on Stop") { header(c0).stopButton?.clicked(nil) }
+            XCTAssertEqual(title(header(c0).stopButton), "Stop?")
+            XCTAssertEqual(gate.sender.stops.count, 0)
+
+            step("the 3 s revert") { gate.buttonHand.fire(where: { $0 == 3 }) }
+            XCTAssertEqual(title(header(c0).stopButton), "Stop")
+
+            step("the confirm click") {
+                header(c0).stopButton?.clicked(nil)
+                header(c0).stopButton?.clicked(nil)
+            }
+            XCTAssertEqual(gate.sender.stops.count, 1)
+            XCTAssertEqual(title(header(c0).stopButton), "Stopping\u{2026}")
+
+            step("the daemon accepts: still Stopping\u{2026}") { gate.answer("accepted", taskId: "job0") }
+            XCTAssertEqual(title(header(c0).stopButton), "Stopping\u{2026}")
+
+            step("a refusal shows Couldn't stop") {
+                header(c1).stopButton?.clicked(nil)
+                header(c1).stopButton?.clicked(nil)
+                gate.answer("refused", message: "Task is protected", taskId: "job1")
+            }
+            XCTAssertEqual(header(c1).stopNoticeText, "Couldn't stop: Task is protected")
+            XCTAssertEqual(title(header(c1).stopButton), "Stop")
+
+            // job0's stop was accepted at "the daemon accepts" and no snapshot has shown it over since.
+            step("10 s pass with no confirmation") {
+                gate.storeHand.fire(where: { $0 >= BackgroundTaskStore.confirmationTimeout })
+            }
+            XCTAssertEqual(header(c0).stopNoticeText, "Couldn't stop: no confirmation from Claude Code")
+            XCTAssertEqual(title(header(c0).stopButton), "Stop")
+
+            step("the snapshot reports the task stopped", headersKeepTheirHeight: false) {
+                tw.ingest([tw.task("job0", "npm run dev", status: .stopped), tw.task("job1", "npm run build")])
+            }
+            XCTAssertTrue(header(c0).stopButton?.isHidden ?? true, "a stopped task offers no Stop")
+            XCTAssertEqual(header(c1).stopNoticeText, "Couldn't stop: Task is protected")
+            XCTAssertEqual(gate.sender.stops.count, 2)
+
+            // A new daemon epoch clears the failure, so the header can say why there is no button. Its height
+            // may change (the button goes), so this is not a `step`: the pane and the panels still must not move.
+            let frames = opened.map { $0.panel.frame }
+            p.rig.assertNoMove(name("the CLI turns out not to support Stop"), following: following) {
+                gate.world.clock.advance(1)
+                tw.world.store.ingest(.sessionTasks(SessionTasksWire(
+                    tag: "gate", sessionId: "session-1", daemonEpoch: "epoch-2", stopSupported: false,
+                    tasks: [tw.task("job0", "npm run dev", status: .stopped), tw.task("job1", "npm run build")])))
+                gate.flushDeliveries()
+                opened.forEach { $0.panel.contentView?.layoutSubtreeIfNeeded() }
+            }
+            XCTAssertEqual(opened.map { $0.panel.frame }, frames, "\(name("unsupported")): a window moved or resized")
+            assertComposerIntact(p.rig, name("unsupported"))
+            XCTAssertEqual(header(c1).stopNoticeText, "This Claude Code version can't stop tasks from Nostromo")
+            XCTAssertTrue(header(c1).stopButton?.isHidden ?? true)
+        }
+    }
+
+    /// Cmd-. in the popover and in a task window starts the two-step Stop of that task: two presses send exactly
+    /// one `session_task_stop` and the input bar's interrupt (its Stop button's Cmd-.) never runs. The task
+    /// requests' sender can only record outputs and stops, so the interrupt is watched where it would
+    /// start: the bar's `onInterrupt`, which `ReplView` wires to `session.interrupt()` (`session_interrupt`).
+    func testCommandPeriodInThePopoverAndAWindowSendsOnlyAStopAndNeverAnInterrupt() throws {
+        let gate = BA5StopGate(self)
+        let p = pane(following: true, world: gate.world)
+        var interrupts = 0
+        p.bar.onInterrupt = { interrupts += 1 }
+        gate.world.ingest(gate.world.running(2))
+        p.bar.toggleBackgroundPopover(takeKeyboard: true)
+        let popover = try XCTUnwrap(p.bar.backgroundPopover)
+        let vc = popover.viewController
+        vc.stopPermit = { _ in Self.human }
+        vc.stopSchedule = { delay, work in gate.buttonHand.schedule(delay, work) }
+        let index = try XCTUnwrap(vc.selectables.firstIndex { ($0 as? BackgroundTaskRowView)?.row.id == "job0" })
+        vc.select(index)
+
+        gate.world.clock.advance(1)
+        XCTAssertTrue(vc.handleKey(tsCommandPeriod()), "the popover consumes Cmd-.")
+        XCTAssertEqual(gate.sender.stops.count, 0, "one press only arms")
+        XCTAssertTrue(vc.handleKey(tsCommandPeriod()))
+        XCTAssertEqual(gate.sender.stops.count, 1, "the second press sends exactly one session_task_stop")
+        XCTAssertEqual(interrupts, 0, "and no interrupt")
+
+        let tw = BA4TWWorld(self, tag: "gate", world: gate.world, keyWindow: p.rig.window)
+        tw.manager.stopPermit = { _ in Self.human }
+        tw.manager.stopSchedule = { delay, work in gate.buttonHand.schedule(delay, work) }
+        let controller = try XCTUnwrap(tw.open("job1"))
+        XCTAssertTrue(controller.panel.performKeyEquivalent(with: tsCommandPeriod()), "the window consumes Cmd-.")
+        XCTAssertEqual(gate.sender.stops.count, 1)
+        XCTAssertTrue(controller.panel.performKeyEquivalent(with: tsCommandPeriod()))
+        XCTAssertEqual(gate.sender.stops.count, 2, "one more stop, for the window's own task")
+        XCTAssertEqual(interrupts, 0, "Cmd-. never reaches the input bar's interrupt")
+        XCTAssertTrue(gate.sender.outputs.isEmpty, "the sender saw stops and nothing else")
+    }
+
+    /// The branch that protects the composer is the popover's key monitor: with the popover holding the
+    /// keyboard it takes ⌘. for the selected row's Stop (returning nil, so AppKit never sends it on to the
+    /// main window's key-equivalent search, where the input bar's interrupt lives); without the keyboard
+    /// it hands the event back untouched. Both are checked here the way the monitor uses them: whatever it
+    /// returns is what the main window then gets.
+    func testTheMonitorTakesCommandPeriodWhenThePopoverHasTheKeyboardAndOtherwiseLeavesItAlone() throws {
+        let gate = BA5StopGate(self)
+        let p = pane(following: true, world: gate.world)
+        var interrupts = 0
+        p.bar.onInterrupt = { interrupts += 1 }
+        gate.world.ingest(gate.world.running(2))
+        p.bar.toggleBackgroundPopover(takeKeyboard: true)
+        let popover = try XCTUnwrap(p.bar.backgroundPopover)
+        XCTAssertTrue(popover.tookKeyboard, "precondition: the popover holds the keyboard")
+        let vc = popover.viewController
+        vc.stopPermit = { _ in Self.human }
+        vc.stopSchedule = { delay, work in gate.buttonHand.schedule(delay, work) }
+        let index = try XCTUnwrap(vc.selectables.firstIndex { ($0 as? BackgroundTaskRowView)?.row.id == "job0" })
+        vc.select(index)
+
+        func dispatch(_ event: NSEvent) -> NSEvent? {
+            let passedOn = popover.handleMonitoredKey(event)
+            if let passedOn { _ = p.rig.window.performKeyEquivalent(with: passedOn) }
+            return passedOn
+        }
+
+        XCTAssertNil(dispatch(tsCommandPeriod()), "the monitor consumes ⌘. while the popover has the keyboard")
+        XCTAssertEqual(gate.sender.stops.count, 0, "one press only arms")
+        XCTAssertNil(dispatch(tsCommandPeriod()))
+        XCTAssertEqual(gate.sender.stops.count, 1, "the second sends the one stop")
+        XCTAssertEqual(interrupts, 0, "and ⌘. never reached the main window's composer")
+        XCTAssertTrue(gate.sender.outputs.isEmpty)
+
+        let plain = BA3UIKey.keyDown(0, "a")
+        XCTAssertTrue(popover.handleMonitoredKey(plain) === plain, "other keys go on unchanged")
+    }
+
+    func testTheMonitorLeavesCommandPeriodToTheWindowWhenThePopoverDoesNotHoldTheKeyboard() throws {
+        let gate = BA5StopGate(self)
+        let p = pane(following: true, world: gate.world)
+        gate.world.ingest(gate.world.running(1))
+        p.bar.toggleBackgroundPopover(takeKeyboard: false)
+        let popover = try XCTUnwrap(p.bar.backgroundPopover)
+        XCTAssertFalse(popover.tookKeyboard, "precondition: the composer keeps the keyboard")
+        let event = tsCommandPeriod()
+
+        XCTAssertTrue(popover.handleMonitoredKey(event) === event,
+                      "with the composer holding the keyboard, ⌘. is the composer's (its interrupt), not a Stop")
+        XCTAssertEqual(gate.sender.stops.count, 0)
+    }
+
     // MARK: BA4: a task window
 
     private static func lines(_ range: Range<Int>) -> String {
@@ -453,6 +760,63 @@ final class BackgroundScrollSafetyTests: XCTestCase {
 
         terminal.type("x")
         XCTAssertGreaterThan(wire.sent.count, before, "and it is still wired to the connection")
+    }
+}
+
+// MARK: - BA5: a store with a recording daemon behind Stop
+
+/// Timers held by hand: what is asked for waits until the test fires it.
+private final class BA5Hand {
+    private var items: [(delay: TimeInterval, work: () -> Void)] = []
+
+    func schedule(_ delay: TimeInterval, _ work: @escaping () -> Void) {
+        items.append((delay, work))
+    }
+
+    func fire(where match: (TimeInterval) -> Bool) {
+        let due = items.filter { match($0.delay) }
+        items.removeAll { match($0.delay) }
+        due.forEach { $0.work() }
+    }
+}
+
+/// A `BA3UIWorld` whose store sends Stop through real `TaskRequests` to a recording sender, and whose
+/// store timers (4 Hz coalescing, the 10 s confirmation) and request timeouts do not run on their own.
+private final class BA5StopGate {
+    let sender = BA4TWSender()
+    let storeHand = BA5Hand()
+    let requestHand = BA5Hand()
+    /// The buttons' 3 s confirmation reverts.
+    let buttonHand = BA5Hand()
+    let requests: TaskRequests
+    let world: BA3UIWorld
+
+    init(_ testCase: XCTestCase) {
+        let ids = BA4TWCounter()
+        let requestHand = self.requestHand
+        let storeHand = self.storeHand
+        let requests = TaskRequests(makeRequestId: { ids.next() }, schedule: { delay, work in requestHand.schedule(delay, work) })
+        requests.sender = sender
+        self.requests = requests
+        world = BA3UIWorld(testCase, requests: { requests }, schedule: { delay, work in storeHand.schedule(delay, work) })
+    }
+
+    /// The daemon's `session_task_stop_result` for the latest stop sent.
+    /// The store's deferred, coalesced deliveries (not its 10 s confirmation timers).
+    func flushDeliveries() {
+        storeHand.fire(where: { $0 < BackgroundTaskStore.confirmationTimeout })
+    }
+
+    func answer(_ outcome: String, message: String? = nil, taskId: String, file: StaticString = #filePath, line: UInt = #line) {
+        guard let requestId = sender.stops.last else { return XCTFail("no stop was sent", file: file, line: line) }
+        world.clock.advance(1)
+        var object: [String: Any] = ["request_id": requestId, "tag": "gate", "task_id": taskId, "outcome": outcome]
+        if let message { object["message"] = message }
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let wire = try? JSONDecoder().decode(SessionTaskStopResultWire.self, from: data) else {
+            return XCTFail("could not build the daemon's answer", file: file, line: line)
+        }
+        requests.ingest(.sessionTaskStopResult(wire))
     }
 }
 
