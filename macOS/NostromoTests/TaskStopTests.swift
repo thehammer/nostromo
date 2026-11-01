@@ -27,7 +27,45 @@ fileprivate let tsHuman: HumanGestureVerdict = .human(sourcePid: nil, sourceStat
 
 fileprivate typealias TSDisplay = BackgroundTaskStore.StopDisplay
 
-fileprivate func tsCommandPeriod() -> NSEvent { BA3UIKey.keyDown(47, ".", flags: .command) }
+private var tsEventClock: TimeInterval = 0
+
+/// A fresh ⌘. key event each call: its own timestamp, so two presses are two events.
+func tsCommandPeriod(isARepeat: Bool = false) -> NSEvent {
+    tsEventClock += 1
+    return NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: tsEventClock,
+                            windowNumber: 0, context: nil, characters: ".", charactersIgnoringModifiers: ".",
+                            isARepeat: isARepeat, keyCode: 47)!
+}
+
+/// The clock the gesture gate reads (`BackgroundGesture.now`). Each read moves it `step` seconds, so
+/// two gestures in a test are 0.5 s apart unless it is set by hand (`step = 0`).
+final class TSGestureClock {
+    var now: TimeInterval = 1000
+    var step: TimeInterval = 0.5
+
+    func read() -> TimeInterval {
+        now += step
+        return now
+    }
+}
+
+/// Install the gate's seams for one test: the clock, and no current event (an event-less action). The
+/// real ones come back at teardown.
+enum TSGestureSeams {
+    @discardableResult
+    static func install(on testCase: XCTestCase) -> TSGestureClock {
+        let clock = TSGestureClock()
+        let oldNow = BackgroundGesture.now
+        let oldEvent = BackgroundGesture.currentEvent
+        BackgroundGesture.now = { clock.read() }
+        BackgroundGesture.currentEvent = { nil }
+        testCase.addTeardownBlock {
+            BackgroundGesture.now = oldNow
+            BackgroundGesture.currentEvent = oldEvent
+        }
+        return clock
+    }
+}
 
 fileprivate func tsTitle(_ button: TaskStopButton?) -> String { button?.attributedTitle.string ?? "<no button>" }
 
@@ -329,6 +367,11 @@ fileprivate final class TSButtonRig {
 
 final class TaskStopButtonTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        TSGestureSeams.install(on: self)
+    }
+
     private let refusals: [HumanGestureRefusal] = [.appControl, .staleEvent, .notAUserEvent, .accessibilityPress, .futureEvent]
 
     func testAFreshButtonSaysStopAndNamesTheTaskForVoiceOver() {
@@ -590,6 +633,9 @@ fileprivate final class TSGestureRig {
     let window: NSWindow
     let other: NSWindow
     var event: NSEvent?
+    /// `NSWorkspace.isVoiceOverEnabled`, as the gesture check sees it.
+    var voiceOver = false
+    let reverts = TSSchedule()
     private(set) var stops = 0
     private(set) var button: TaskStopButton!
 
@@ -599,13 +645,13 @@ fileprivate final class TSGestureRig {
         button = TaskStopButton(
             permit: { [unowned self] control in
                 HumanGesture.permit(self.event, control: control,
-                                    voiceOverEnabled: { false }, allowsSynthetic: { false })
+                                    voiceOverEnabled: { self.voiceOver }, allowsSynthetic: { false })
             },
             menuPermit: { [unowned self] control in
                 HumanGesture.permit(self.event, control: control, menuSelection: true,
-                                    voiceOverEnabled: { false }, allowsSynthetic: { false })
+                                    voiceOverEnabled: { self.voiceOver }, allowsSynthetic: { false })
             },
-            schedule: { _, _ in },
+            schedule: { [unowned self] delay, work in self.reverts.schedule(delay, work) },
             requestStop: { [unowned self] in self.stops += 1 })
         button.update(TSDisplay(offered: true), description: "npm run dev")
         window.contentView?.addSubview(button)
@@ -621,8 +667,14 @@ fileprivate final class TSGestureRig {
 
 final class TaskStopRealGestureTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        TSGestureSeams.install(on: self)
+    }
+
     private func makeRig() -> TSGestureRig {
         let rig = TSGestureRig()
+        BackgroundGesture.currentEvent = { [weak rig] in rig?.event }
         addTeardownBlock { rig.close() }
         return rig
     }
@@ -633,6 +685,7 @@ final class TaskStopRealGestureTests: XCTestCase {
 
         rig.button.clicked(nil)
         XCTAssertEqual(rig.title, "Stop?")
+        rig.event = GestureFixtures.mouse(.leftMouseUp, in: rig.window)   // a second, distinct click
         rig.button.clicked(nil)
 
         XCTAssertEqual(rig.stops, 1)
@@ -693,8 +746,8 @@ final class TaskStopRealGestureTests: XCTestCase {
     func testAKeyPressInTheButtonsWindowDrivesTheShortcut() {
         let rig = makeRig()
         rig.event = GestureFixtures.key(in: rig.window, characters: ".", keyCode: 47)
-
         rig.button.shortcut()
+        rig.event = GestureFixtures.key(in: rig.window, characters: ".", keyCode: 47)   // a second, distinct press
         rig.button.shortcut()
 
         XCTAssertEqual(rig.stops, 1)
@@ -716,6 +769,252 @@ final class TaskStopRealGestureTests: XCTestCase {
         key.event = GestureFixtures.key(in: key.other, characters: ".", keyCode: 47)
         key.button.arm()
         XCTAssertEqual(key.title, "Stop", "a key event must still be the button's own window's")
+    }
+}
+
+// MARK: - One gesture never arms and confirms
+
+private var tsUnique: TimeInterval = 0
+
+/// A mouse event for `window` stamped just now (so `HumanGesture` finds it fresh), each its own event number.
+fileprivate func tsMouse(_ type: NSEvent.EventType = .leftMouseUp, in window: NSWindow, clickCount: Int = 1,
+                         number: Int? = nil) -> NSEvent {
+    tsUnique += 0.001
+    return NSEvent.mouseEvent(with: type, location: NSPoint(x: 30, y: 30), modifierFlags: [],
+                              timestamp: ProcessInfo.processInfo.systemUptime + tsUnique,
+                              windowNumber: window.windowNumber, context: nil,
+                              eventNumber: number ?? Int(tsUnique * 1000), clickCount: clickCount, pressure: 1)!
+}
+
+/// A key event for `window` (nil: no window, as a chosen menu item's) stamped just now.
+fileprivate func tsKey(in window: NSWindow?, characters: String = ".", keyCode: UInt16 = 47,
+                       flags: NSEvent.ModifierFlags = .command, isARepeat: Bool = false) -> NSEvent {
+    tsUnique += 0.001
+    return NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
+                            timestamp: ProcessInfo.processInfo.systemUptime + tsUnique,
+                            windowNumber: window?.windowNumber ?? 0, context: nil,
+                            characters: characters, charactersIgnoringModifiers: characters,
+                            isARepeat: isARepeat, keyCode: keyCode)!
+}
+
+/// The arm and the confirm must be two gestures. Real `HumanGesture.permit` and real events; the gate's
+/// clock is set by hand (`step = 0`), so "0.1 s after the arm" is exactly that.
+final class TaskStopOneGestureTests: XCTestCase {
+
+    private var clock: TSGestureClock!
+
+    override func setUp() {
+        super.setUp()
+        clock = TSGestureSeams.install(on: self)
+        clock.step = 0
+    }
+
+    private func makeRig() -> TSGestureRig {
+        let rig = TSGestureRig()
+        BackgroundGesture.currentEvent = { [weak rig] in rig?.event }
+        addTeardownBlock { rig.close() }
+        return rig
+    }
+
+    private func click(_ rig: TSGestureRig, _ event: NSEvent) {
+        rig.event = event
+        rig.button.clicked(nil)
+    }
+
+    private func press(_ rig: TSGestureRig, _ event: NSEvent) {
+        rig.event = event
+        rig.button.shortcut(event)
+    }
+
+    func testADoubleClickArmsButNeverConfirms() {
+        let rig = makeRig()
+        click(rig, tsMouse(in: rig.window, clickCount: 1))
+        XCTAssertEqual(rig.title, "Stop?")
+
+        clock.now += 0.15   // the OS double-click interval
+        click(rig, tsMouse(in: rig.window, clickCount: 2))
+
+        XCTAssertEqual(rig.title, "Stop?", "the second click of a double-click leaves it armed")
+        XCTAssertEqual(rig.stops, 0, "and sends nothing: `Stop?` was never seen")
+        XCTAssertEqual(rig.reverts.count, 1, "the armed state and its revert are untouched")
+
+        clock.now += 1
+        click(rig, tsMouse(in: rig.window, clickCount: 1))
+        XCTAssertEqual(rig.stops, 1, "a deliberate click later does confirm")
+    }
+
+    func testAClickThatIsAlreadyTheSecondOfADoubleClickCannotArm() {
+        let rig = makeRig()
+        click(rig, tsMouse(in: rig.window, clickCount: 2))
+        XCTAssertEqual(rig.title, "Stop")
+        click(rig, tsMouse(in: rig.window, clickCount: 3))
+        XCTAssertEqual(rig.title, "Stop")
+        XCTAssertEqual(rig.stops, 0)
+    }
+
+    func testAHeldShortcutArmsAtMostAndNeverConfirms() {
+        let rig = makeRig()
+        press(rig, tsKey(in: rig.window))
+        XCTAssertEqual(rig.title, "Stop?")
+
+        clock.now += 0.5   // key repeat starts about half a second in
+        press(rig, tsKey(in: rig.window, isARepeat: true))
+        clock.now += 0.03
+        press(rig, tsKey(in: rig.window, isARepeat: true))
+
+        XCTAssertEqual(rig.title, "Stop?", "repeats of a held ⌘. do not confirm")
+        XCTAssertEqual(rig.stops, 0)
+
+        clock.now += 1
+        press(rig, tsKey(in: rig.window))
+        XCTAssertEqual(rig.stops, 1, "a fresh key press does")
+    }
+
+    func testAKeyRepeatCannotArm() {
+        let rig = makeRig()
+        press(rig, tsKey(in: rig.window, isARepeat: true))
+        XCTAssertEqual(rig.title, "Stop")
+        XCTAssertEqual(rig.reverts.count, 0, "nothing was armed, so no revert was scheduled")
+    }
+
+    func testTheSameEventTwiceIsOneGesture() {
+        let rig = makeRig()
+        let event = tsMouse(in: rig.window)
+        click(rig, event)
+        clock.now += 1   // plenty of time: only the event identity is in question
+        click(rig, event)
+
+        XCTAssertEqual(rig.title, "Stop?")
+        XCTAssertEqual(rig.stops, 0)
+
+        click(rig, tsMouse(in: rig.window))
+        XCTAssertEqual(rig.stops, 1)
+    }
+
+    func testTheSameKeyEventTwiceIsOneGesture() {
+        let rig = makeRig()
+        let event = tsKey(in: rig.window)
+        press(rig, event)
+        clock.now += 1
+        press(rig, event)
+        XCTAssertEqual(rig.title, "Stop?")
+        XCTAssertEqual(rig.stops, 0)
+    }
+
+    func testAConfirmAtOneTenthOfASecondIsRefusedAndAtFourTenthsAccepted() {
+        let rig = makeRig()
+        click(rig, tsMouse(in: rig.window))
+
+        clock.now += 0.1
+        click(rig, tsMouse(in: rig.window))
+        XCTAssertEqual(rig.stops, 0, "0.1 s after the arm is the same gesture")
+        XCTAssertEqual(rig.title, "Stop?")
+
+        clock.now += 0.3   // 0.4 s after the arm
+        click(rig, tsMouse(in: rig.window))
+        XCTAssertEqual(rig.stops, 1)
+        XCTAssertEqual(rig.title, "Stopping\u{2026}")
+    }
+
+    func testARefusedConfirmLeavesTheThreeSecondRevertRunning() {
+        let rig = makeRig()
+        click(rig, tsMouse(in: rig.window))
+        clock.now += 0.1
+        click(rig, tsMouse(in: rig.window))   // refused: too soon
+        XCTAssertEqual(rig.reverts.delays, [TaskStopButton.confirmInterval])
+
+        rig.reverts.fireAll()
+        XCTAssertEqual(rig.title, "Stop", "the original revert still puts the button back")
+        XCTAssertEqual(rig.stops, 0)
+    }
+
+    func testTwoDistinctGesturesHalfASecondApartStopOnce() {
+        let rig = makeRig()
+        click(rig, tsMouse(in: rig.window))
+        clock.now += 0.5
+        click(rig, tsMouse(in: rig.window))
+        XCTAssertEqual(rig.stops, 1)
+    }
+
+    // MARK: Space and Return on the focused button
+
+    func testSpaceOrReturnOnTheFocusedButtonFollowsTheSameRules() {
+        for (characters, code) in [(" ", UInt16(49)), ("\r", UInt16(36))] {
+            let rig = makeRig()
+            let first = tsKey(in: rig.window, characters: characters, keyCode: code, flags: [])
+            click(rig, first)
+            XCTAssertEqual(rig.title, "Stop?", "key \(code) arms")
+
+            click(rig, first)
+            clock.now += 1
+            click(rig, first)
+            XCTAssertEqual(rig.stops, 0, "key \(code): the same press is not a confirmation")
+
+            click(rig, tsKey(in: rig.window, characters: characters, keyCode: code, flags: [], isARepeat: true))
+            XCTAssertEqual(rig.stops, 0, "key \(code): a repeat of a held key is not one either")
+
+            click(rig, tsKey(in: rig.window, characters: characters, keyCode: code, flags: []))
+            XCTAssertEqual(rig.stops, 1, "key \(code): a second press does")
+        }
+    }
+
+    func testAHeldSpaceCannotArm() {
+        let rig = makeRig()
+        click(rig, tsKey(in: rig.window, characters: " ", keyCode: 49, flags: [], isARepeat: true))
+        XCTAssertEqual(rig.title, "Stop")
+    }
+
+    // MARK: An Accessibility press
+
+    func testAnAccessibilityPressWithVoiceOverOnIsSpacedByTheClock() {
+        let rig = makeRig()
+        rig.voiceOver = true
+        rig.event = nil
+
+        rig.button.clicked(nil)
+        XCTAssertEqual(rig.title, "Stop?", "with VoiceOver on, an event-less press is a person's")
+        clock.now += 0.1
+        rig.button.clicked(nil)
+        XCTAssertEqual(rig.stops, 0, "but a second one 0.1 s later is the same gesture")
+
+        clock.now += 0.3
+        rig.button.clicked(nil)
+        XCTAssertEqual(rig.stops, 1)
+    }
+
+    func testAnAccessibilityPressWithVoiceOverOffIsStillRefused() {
+        let rig = makeRig()
+        rig.event = nil
+        rig.button.clicked(nil)
+        XCTAssertEqual(rig.title, "Stop")
+    }
+
+    // MARK: The context menu
+
+    func testAMenuChosenByKeyboardOrByRightButtonReleaseArmsTheButton() {
+        let keyboard = makeRig()
+        keyboard.event = tsKey(in: nil, characters: "\r", keyCode: 36, flags: [])   // the menu's own key event
+        keyboard.button.arm()
+        XCTAssertEqual(keyboard.title, "Stop?", "a menu item chosen with Return arms")
+
+        let rightButton = makeRig()
+        rightButton.event = tsMouse(.rightMouseUp, in: rightButton.other)            // released over the item
+        rightButton.button.arm()
+        XCTAssertEqual(rightButton.title, "Stop?", "a menu item chosen by releasing the right button arms")
+
+        let elsewhere = makeRig()
+        elsewhere.event = tsKey(in: elsewhere.other, characters: "\r", keyCode: 36, flags: [])
+        elsewhere.button.arm()
+        XCTAssertEqual(elsewhere.title, "Stop", "a key event of another window is still refused")
+    }
+
+    func testAMenuPickDoesNotConfirmEvenWhenChosenTwice() {
+        let rig = makeRig()
+        rig.event = tsMouse(.rightMouseUp, in: rig.other)
+        rig.button.arm()
+        rig.button.arm()
+        XCTAssertEqual(rig.stops, 0, "the menu only arms")
+        XCTAssertEqual(rig.title, "Stop?")
     }
 }
 
@@ -1148,6 +1447,7 @@ final class TaskStopPopoverTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        TSGestureSeams.install(on: self)
         _ = NSApplication.shared
         rig = TSRig(self)
     }
@@ -1388,6 +1688,39 @@ final class TaskStopPopoverTests: XCTestCase {
         XCTAssertEqual(try rowView(second, "job2").stopNoticeText, "")
     }
 
+    func testVoiceOverHearsStoppingAndTheFailureAsTheRowsValue() throws {
+        loadList()
+        let vc = rig.makeController()
+        rig.store.changes.sink { _ in vc.reload() }.store(in: &bag)
+        try select(vc, "job1")
+        XCTAssertNil(try rowView(vc, "job1").accessibilityValue(), "nothing to add while all is well")
+
+        rig.clock.advance(1)
+        _ = vc.handleKey(tsCommandPeriod())
+        _ = vc.handleKey(tsCommandPeriod())
+        XCTAssertEqual(try rowView(vc, "job1").accessibilityValue() as? String, "Stopping\u{2026}")
+
+        rig.answer("refused", message: "Task is protected")
+        let view = try rowView(vc, "job1")
+        XCTAssertEqual(view.accessibilityValue() as? String, "Couldn't stop: Task is protected")
+        XCTAssertNil(try rowView(vc, "job2").accessibilityValue(), "only the failed row says it")
+    }
+
+    func testARowBuiltWhileStopWasUnsupportedGetsItsButtonWhenSupportTurnsOn() throws {
+        loadList(stop: false)
+        let vc = rig.makeController()
+        let view = try rowView(vc, "job1")
+        XCTAssertNil(view.stopButton, "precondition: no button while the CLI cannot stop tasks")
+
+        loadList(stop: true)
+        vc.reload()
+
+        let later = try rowView(vc, "job1")
+        XCTAssertTrue(later === view, "the same row view")
+        XCTAssertEqual(later.stopButton?.isHidden, false, "support turned on: the row now offers Stop")
+        XCTAssertEqual(tsTitle(later.stopButton), "Stop")
+    }
+
     func testAHostileFailureNeverChangesARowsSizeOrLeavesItsBounds() throws {
         rig.snapshot([rig.task("job1", "npm run dev")])
         let row = try XCTUnwrap(rig.row("job1"))
@@ -1468,6 +1801,7 @@ final class TaskStopWindowTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        TSGestureSeams.install(on: self)
         _ = NSApplication.shared
         rig = TSRig(self)
     }
@@ -1505,6 +1839,15 @@ final class TaskStopWindowTests: XCTestCase {
         }
     }
 
+    func testALongDescriptionIsCutInTheButtonsAccessibilityLabel() throws {
+        let long = String(repeating: "x", count: 200)
+        rig.snapshot([rig.task("wf", long, kind: .workflow)])
+
+        let button = try XCTUnwrap(try open("wf").body.header.stopButton)
+
+        XCTAssertEqual(button.accessibilityLabel(), "Stop " + String(repeating: "x", count: TaskStopButton.maxDescriptionInLabel))
+    }
+
     func testTheButtonGoesWhenTheTaskEnds() throws {
         rig.snapshot([rig.task("wf", "nightly", kind: .workflow)])
         let header = try open("wf").body.header
@@ -1539,7 +1882,7 @@ final class TaskStopWindowTests: XCTestCase {
         rig.snapshot([rig.task("wf", "nightly", kind: .workflow)])
         let controller = try open("wf")
         var calls = 0
-        controller.panel.onStopShortcut = { calls += 1 }
+        controller.panel.onStopShortcut = { _ in calls += 1 }
 
         let handled = controller.panel.performKeyEquivalent(with: tsCommandPeriod())
 
@@ -1703,7 +2046,7 @@ final class TaskStopLoggingTests: XCTestCase {
         XCTAssertFalse(Self.loggingCalls(in: "print(\"\\(reason)\")").isEmpty)
         XCTAssertFalse(Self.loggingCalls(in: "NSLog(\"%@\", text)").isEmpty)
         XCTAssertFalse(Self.loggingCalls(in: "let l = Logger(subsystem: \"a\", category: \"b\")").isEmpty)
-        XCTAssertTrue(Self.loggingCalls(in: "let blog = 1 // print(reason)").isEmpty == false || true)
+        XCTAssertTrue(Self.loggingCalls(in: "let blog = 1").isEmpty, "a word that merely contains `log` is not a call")
         XCTAssertTrue(Self.loggingCalls(in: "let total = 1").isEmpty)
     }
 
@@ -1717,5 +2060,60 @@ final class TaskStopLoggingTests: XCTestCase {
             Stop's files must not log: a refusal reason, a task description or an output line in a log line is \
             content in a log. Found: \(hits.joined(separator: "; "))
             """)
+    }
+}
+
+// MARK: - Only the button may ask for a stop
+
+/// The human-gesture gate lives in `TaskStopButton`; `BackgroundTaskStore.requestStop` takes no gesture. So
+/// nothing but the two button closures (the popover's row button and the task window's header button) may
+/// call it. A third caller would be a Stop that skipped the gate.
+final class TaskStopGateFitnessTests: XCTestCase {
+
+    private static let nostromo = URL(fileURLWithPath: #filePath)   // .../macOS/NostromoTests/TaskStopTests.swift
+        .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Nostromo")
+
+    /// Every call on an object (`x.requestStop(`, `x?.requestStop(`) in `code`; definitions and the button's
+    /// own closure (`requestStop()`) are not calls on one.
+    private static func calls(in code: String) -> Int {
+        code.components(separatedBy: ".requestStop(").count - 1
+    }
+
+    private static func code(_ url: URL) throws -> String {
+        try String(contentsOf: url, encoding: .utf8)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+    }
+
+    func testTheScanSeesACallOnAnObjectButNotADefinitionOrAComment() {
+        XCTAssertEqual(Self.calls(in: "store.requestStop(tag: t, taskId: i)"), 1)
+        XCTAssertEqual(Self.calls(in: "store?.requestStop(tag: t, taskId: i)"), 1)
+        XCTAssertEqual(Self.calls(in: "func requestStop(tag: String, taskId: String) {"), 0)
+        XCTAssertEqual(Self.calls(in: "requestStop()"), 0)
+    }
+
+    func testRequestStopIsCalledOnlyFromTheTwoButtonClosuresAndTheStoreItself() throws {
+        let allowed: [String: Int] = [
+            "UI/Background/BackgroundPopover.swift": 1,        // the row button's requestStop closure
+            "UI/Background/TaskWindowHeaderView.swift": 1,     // the header button's requestStop closure
+            "Data/BackgroundTaskStore.swift": 1,               // the store forwarding to TaskRequests
+        ]
+        var found: [String: Int] = [:]
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: Self.nostromo, includingPropertiesForKeys: nil))
+        for case let url as URL in files where url.pathExtension == "swift" {
+            let count = Self.calls(in: try Self.code(url))
+            if count > 0 { found[String(url.path.dropFirst(Self.nostromo.path.count + 1))] = count }
+        }
+
+        XCTAssertEqual(found, allowed, "requestStop( may be called only from the two button closures")
+    }
+
+    func testTheTwoCallersAreInsideTheButtonsRequestStopClosure() throws {
+        for path in ["UI/Background/BackgroundPopover.swift", "UI/Background/TaskWindowHeaderView.swift"] {
+            let code = try Self.code(Self.nostromo.appendingPathComponent(path))
+            XCTAssertNotNil(code.range(of: #"requestStop:\s*\{[^}]*\.requestStop\("#, options: .regularExpression),
+                            "\(path): the call must sit in a TaskStopButton's requestStop closure")
+        }
     }
 }

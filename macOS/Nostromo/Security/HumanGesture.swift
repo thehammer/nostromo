@@ -73,11 +73,14 @@ enum HumanGesture {
             return voiceOverEnabled() ? .human(sourcePid: nil, sourceState: nil)
                                       : .refused(reason: .accessibilityPress)
         }
-        guard [.leftMouseUp, .leftMouseDown, .keyDown].contains(event.type) else {
+        // A context menu is also chosen by releasing the right button over an item.
+        let types: [NSEvent.EventType] = menuSelection ? [.leftMouseUp, .leftMouseDown, .rightMouseUp, .keyDown]
+                                                       : [.leftMouseUp, .leftMouseDown, .keyDown]
+        guard types.contains(event.type) else {
             return .refused(reason: .notAUserEvent)
         }
         guard let window = control.window else { return .refused(reason: .notAUserEvent) }
-        if event.window !== window && !(menuSelection && event.type != .keyDown) {
+        if event.window !== window && !(menuSelection && belongsToMenu(event)) {
             return .refused(reason: .notAUserEvent)
         }
         let age = now() - event.timestamp
@@ -90,5 +93,13 @@ enum HumanGesture {
         let source = event.cgEvent
         return .human(sourcePid: source?.getIntegerValueField(.eventSourceUnixProcessID),
                       sourceState: source?.getIntegerValueField(.eventSourceStateID))
+    }
+
+    /// A chosen menu item's event is the menu's: a mouse event, or (chosen by keyboard) a key event
+    /// with no window or the menu's own window. A key event of another window is still refused.
+    private static func belongsToMenu(_ event: NSEvent) -> Bool {
+        if event.type != .keyDown { return true }
+        guard let window = event.window else { return true }
+        return String(describing: type(of: window)).contains("Menu")
     }
 }

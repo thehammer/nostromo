@@ -17,6 +17,13 @@ enum BackgroundGesture {
         HumanGesture.permit(NSApp?.currentEvent, control: control, menuSelection: true)
     }
 
+    /// The event behind the action being handled (a seam: tests script it; `permit` still reads AppKit's).
+    static var currentEvent: () -> NSEvent? = { NSApp?.currentEvent }
+    /// Seconds on `NSEvent.timestamp`'s clock; the arm/confirm spacing is measured with it (a seam).
+    static var now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// A confirm sooner than this after the arm is the same gesture (a double-click, a held key), not a second.
+    static let minConfirmDelay: TimeInterval = 0.3
+
     static func isHuman(_ verdict: HumanGestureVerdict) -> Bool {
         if case .human = verdict { return true }
         return false
@@ -31,12 +38,61 @@ enum BackgroundGesture {
     }
 }
 
+/// What identifies the event that armed Stop, so the confirming one can be told apart from it.
+private struct GestureStamp {
+    let timestamp: TimeInterval
+    let type: NSEvent.EventType
+    /// Mouse events only (`eventNumber` is not valid on a key event).
+    let eventNumber: Int?
+    let keyCode: UInt16?
+
+    init(_ event: NSEvent) {
+        timestamp = event.timestamp
+        type = event.type
+        if event.isMouse {
+            eventNumber = event.eventNumber
+            keyCode = nil
+        } else {
+            eventNumber = nil
+            keyCode = event.type == .keyDown ? event.keyCode : nil
+        }
+    }
+
+    func isSame(as event: NSEvent) -> Bool {
+        guard event.timestamp == timestamp, event.type == type else { return false }
+        return event.isMouse ? event.eventNumber == eventNumber : event.keyCode == keyCode
+    }
+}
+
+private extension NSEvent {
+    var isMouse: Bool {
+        switch type {
+        case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+             .otherMouseDown, .otherMouseUp, .otherMouseDragged:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// A key repeat or the second click of a multi-click: the continuation of a gesture, never a new one.
+    var continuesAGesture: Bool {
+        if type == .keyDown { return isARepeat }
+        return isMouse && clickCount > 1
+    }
+}
+
 /// A compact Stop button: `Stop` → (click) `Stop?` for `confirmInterval` seconds → (second click)
 /// `Stopping…`, disabled. It is hidden when Stop is not offered (the task is over, or the CLI cannot
 /// stop tasks). `update` feeds it what the store says; it never decides a task's status.
 ///
 /// Every click, ⌘. and menu selection runs the injected `permit` first and does nothing when refused.
 /// The revert timer sends nothing and needs no permit.
+///
+/// One human gesture never arms and confirms: the arm records its event and time, and the confirm is
+/// refused when it is the same event, comes within `BackgroundGesture.minConfirmDelay` of the arm, is a
+/// key repeat or is a click after the first of a double-click. Arming refuses repeats and multi-clicks
+/// too. A refused confirm leaves the armed state and its revert timer as they were.
 final class TaskStopButton: NSButton {
     enum Phase: Equatable {
         case stop, confirm, stopping
@@ -50,6 +106,8 @@ final class TaskStopButton: NSButton {
     /// The task's description (sanitised by the caller), for the accessibility label.
     private var taskDescription = ""
     private var timerToken = 0
+    private var armedAt: TimeInterval = 0
+    private var armedBy: GestureStamp?
     private let permit: BackgroundGesture.Permit
     private let menuPermit: BackgroundGesture.Permit
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
@@ -100,23 +158,23 @@ final class TaskStopButton: NSButton {
         refreshAppearance()
     }
 
-    /// The button was clicked: `Stop` → `Stop?`, `Stop?` → send.
+    /// The button was clicked (or activated by Space or Return): `Stop` → `Stop?`, `Stop?` → send.
     @objc func clicked(_ sender: Any?) {
         guard BackgroundGesture.isHuman(permit(self)) else { return }
-        advance()
+        advance(by: BackgroundGesture.currentEvent())
     }
 
-    /// ⌘. (the caller checked the key): the same two steps, each behind its own permit.
-    func shortcut() {
+    /// ⌘. (the caller checked the key; `event` is that key event): the same two steps, each behind its own permit.
+    func shortcut(_ event: NSEvent? = nil) {
         guard isOffered, BackgroundGesture.isHuman(permit(self)) else { return }
-        advance()
+        advance(by: event ?? BackgroundGesture.currentEvent())
     }
 
     /// The context menu's Stop: puts the button into `confirm`; the second click is still required.
     /// Runs `menuPermit` (`menuSelection: true`).
     func arm() {
         guard isOffered, phase == .stop, BackgroundGesture.isHuman(menuPermit(self)) else { return }
-        advance()
+        advance(by: BackgroundGesture.currentEvent())
     }
 
     /// Stop the revert timer (popover close, window close, focus eviction).
@@ -126,11 +184,14 @@ final class TaskStopButton: NSButton {
 
     // MARK: Private
 
-    private func advance() {
+    private func advance(by event: NSEvent?) {
         guard isOffered else { return }
+        if let event, event.continuesAGesture { return }
         switch phase {
         case .stop:
             phase = .confirm
+            armedAt = BackgroundGesture.now()
+            armedBy = event.map(GestureStamp.init)
             timerToken += 1
             let token = timerToken
             schedule(Self.confirmInterval) { [weak self] in
@@ -139,6 +200,9 @@ final class TaskStopButton: NSButton {
                 self.refreshAppearance()
             }
         case .confirm:
+            // The same gesture as the arm is not a confirmation: nothing changes, the revert still runs.
+            if let event, armedBy?.isSame(as: event) == true { return }
+            guard BackgroundGesture.now() - armedAt >= BackgroundGesture.minConfirmDelay else { return }
             invalidate()
             phase = .stopping
             requestStop()

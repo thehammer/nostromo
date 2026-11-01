@@ -166,7 +166,8 @@ final class TaskWindowHeaderView: NSView {
         let ended = content?.isEnded ?? false
         var display = store.stopDisplay(tag: tag, taskId: taskId, ended: ended)
         if content == nil { display.offered = false }
-        stopButton?.update(display, description: content?.description ?? "")
+        let description = String((content?.description ?? "").prefix(TaskStopButton.maxDescriptionInLabel))
+        stopButton?.update(display, description: description)
         let text = TaskStopNotice.text(for: display, showUnsupported: true)
         TaskStopNotice.apply(text, unsupported: display.failure == nil, to: stopNoticeLabel)
     }

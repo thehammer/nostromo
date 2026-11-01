@@ -166,6 +166,9 @@ final class BackgroundTaskRowView: NSView {
         stopButton?.update(display, description: row.title)
         TaskStopNotice.apply(display.failure.map(TaskStopNotice.failureText), unsupported: false, to: stopNoticeField)
         stopNoticeField.setAccessibilityElement(false)
+        // The notice is not an element of its own: VoiceOver hears it as the row's value.
+        let spoken = display.stopping ? "Stopping\u{2026}" : display.failure.map(TaskStopNotice.failureText)
+        setAccessibilityValue(spoken)
     }
 
     /// Show `row` (a later state of the same task, or the next tick). Never resizes the row's width.

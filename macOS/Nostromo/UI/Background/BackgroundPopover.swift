@@ -260,13 +260,15 @@ final class BackgroundPopoverViewController: NSViewController {
             used.insert(row.id)
             let display = stopDisplay(for: row)
             if let existing = rowViews[row.id] {
+                // Stop support can turn on after the row was built: the button follows it.
+                if existing.stopButton == nil, row.stopOffered { existing.installStop(makeStopButton(taskId: row.id)) }
                 existing.apply(row, stop: display)
                 return existing
             }
             let view = BackgroundTaskRowView(row: row)
             view.onClick = { [weak self] clicked in self?.clicked(clicked) }
             view.menuProvider = { [weak self] in self?.contextMenu(for: $0) }
-            if actions.canStop(row, tag: tag) || row.stopOffered { view.installStop(makeStopButton(taskId: row.id)) }
+            if row.stopOffered { view.installStop(makeStopButton(taskId: row.id)) }
             view.applyStop(display)
             rowViews[row.id] = view
             return view
@@ -393,7 +395,7 @@ final class BackgroundPopoverViewController: NSViewController {
     /// Esc closes. True when the key was the popover's.
     func handleKey(_ event: NSEvent) -> Bool {
         if BackgroundGesture.isStopShortcut(event) {
-            stopSelected()
+            stopSelected(event)
             return true
         }
         switch event.keyCode {
@@ -427,9 +429,9 @@ final class BackgroundPopoverViewController: NSViewController {
 
     /// ⌘. on the selected row: its two-step Stop (each keypress behind the human-gesture check). Nothing
     /// when no row is selected or the row cannot be stopped; the key is the popover's either way.
-    func stopSelected() {
+    func stopSelected(_ event: NSEvent? = nil) {
         guard let row = selectedRow else { return }
-        rowViews[row.id]?.stopButton?.shortcut()
+        rowViews[row.id]?.stopButton?.shortcut(event)
     }
 
     /// Stop the revert timers of every row's button (the popover closed).
@@ -654,7 +656,7 @@ final class BackgroundPopover: NSObject, NSPopoverDelegate {
         guard popover.isShown, event.type == .keyDown else { return event }
         if tookKeyboard, BackgroundGesture.isStopShortcut(event) {
             // ⌘. in the popover is the selected row's Stop, never the input bar's interrupt.
-            viewController.stopSelected()
+            viewController.stopSelected(event)
             return nil
         }
         guard event.keyCode == 53 else { return event }

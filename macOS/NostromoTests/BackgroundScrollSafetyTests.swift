@@ -52,6 +52,7 @@ final class BackgroundScrollSafetyTests: XCTestCase {
     override func setUp() {
         super.setUp()
         bars = []
+        TSGestureSeams.install(on: self)
     }
 
     override func tearDown() {
@@ -390,6 +391,13 @@ final class BackgroundScrollSafetyTests: XCTestCase {
             }
             XCTAssertEqual(try rowView("job2").stopNoticeText, "Couldn't stop: Claude Code didn't answer")
 
+            // job0's stop was accepted at "the daemon accepts" and no snapshot has shown it over since.
+            step("10 s pass with no confirmation") {
+                gate.storeHand.fire(where: { $0 >= BackgroundTaskStore.confirmationTimeout })
+            }
+            XCTAssertEqual(try rowView("job0").stopNoticeText, "Couldn't stop: no confirmation from Claude Code")
+            XCTAssertEqual(title(try rowView("job0").stopButton), "Stop")
+
             // The row leaves the running section for Ended, so its own height is allowed to differ.
             step("the snapshot reports the task stopped", rowsKeepTheirHeight: false) {
                 gate.world.ingest([gate.world.task("job0", "job number 0", status: .stopped, startedAgo: 1_000, endedAgo: 1),
@@ -401,6 +409,15 @@ final class BackgroundScrollSafetyTests: XCTestCase {
             XCTAssertTrue(stopped.stopButton?.isHidden ?? true, "a stopped task offers no Stop")
             XCTAssertEqual(try rowView("job1").stopNoticeText, "Couldn't stop: Task is protected", "the failure survives the snapshot")
             XCTAssertEqual(gate.sender.stops.count, 3)
+
+            step("the CLI turns out not to support Stop") {
+                gate.world.store.ingest(.sessionTasks(SessionTasksWire(
+                    tag: "gate", sessionId: "session-1", daemonEpoch: "epoch-1", stopSupported: false,
+                    tasks: [gate.world.task("job0", "job number 0", status: .stopped, startedAgo: 1_000, endedAgo: 1),
+                            gate.world.task("job1", "job number 1", startedAgo: 999),
+                            gate.world.task("job2", "job number 2", startedAgo: 998)])))
+            }
+            XCTAssertTrue(try rowView("job1").stopButton?.isHidden ?? true, "no Stop is offered once it is unsupported")
         }
     }
 
@@ -474,12 +491,27 @@ final class BackgroundScrollSafetyTests: XCTestCase {
             XCTAssertEqual(header(c1).stopNoticeText, "Couldn't stop: Task is protected")
             XCTAssertEqual(title(header(c1).stopButton), "Stop")
 
+            // job0's stop was accepted at "the daemon accepts" and no snapshot has shown it over since.
+            step("10 s pass with no confirmation") {
+                gate.storeHand.fire(where: { $0 >= BackgroundTaskStore.confirmationTimeout })
+            }
+            XCTAssertEqual(header(c0).stopNoticeText, "Couldn't stop: no confirmation from Claude Code")
+            XCTAssertEqual(title(header(c0).stopButton), "Stop")
+
             step("the snapshot reports the task stopped", headersKeepTheirHeight: false) {
                 tw.ingest([tw.task("job0", "npm run dev", status: .stopped), tw.task("job1", "npm run build")])
             }
             XCTAssertTrue(header(c0).stopButton?.isHidden ?? true, "a stopped task offers no Stop")
             XCTAssertEqual(header(c1).stopNoticeText, "Couldn't stop: Task is protected")
             XCTAssertEqual(gate.sender.stops.count, 2)
+
+            step("the CLI turns out not to support Stop") {
+                tw.world.store.ingest(.sessionTasks(SessionTasksWire(
+                    tag: "gate", sessionId: "session-1", daemonEpoch: "epoch-1", stopSupported: false,
+                    tasks: [tw.task("job0", "npm run dev", status: .stopped), tw.task("job1", "npm run build")])))
+            }
+            XCTAssertEqual(header(c1).stopNoticeText, "This Claude Code version can't stop tasks from Nostromo")
+            XCTAssertTrue(header(c1).stopButton?.isHidden ?? true)
         }
     }
 
@@ -500,12 +532,11 @@ final class BackgroundScrollSafetyTests: XCTestCase {
         vc.stopSchedule = { delay, work in gate.buttonHand.schedule(delay, work) }
         let index = try XCTUnwrap(vc.selectables.firstIndex { ($0 as? BackgroundTaskRowView)?.row.id == "job0" })
         vc.select(index)
-        let commandPeriod = BA3UIKey.keyDown(47, ".", flags: .command)
 
         gate.world.clock.advance(1)
-        XCTAssertTrue(vc.handleKey(commandPeriod), "the popover consumes Cmd-.")
+        XCTAssertTrue(vc.handleKey(tsCommandPeriod()), "the popover consumes Cmd-.")
         XCTAssertEqual(gate.sender.stops.count, 0, "one press only arms")
-        XCTAssertTrue(vc.handleKey(commandPeriod))
+        XCTAssertTrue(vc.handleKey(tsCommandPeriod()))
         XCTAssertEqual(gate.sender.stops.count, 1, "the second press sends exactly one session_task_stop")
         XCTAssertEqual(interrupts, 0, "and no interrupt")
 
@@ -513,12 +544,63 @@ final class BackgroundScrollSafetyTests: XCTestCase {
         tw.manager.stopPermit = { _ in Self.human }
         tw.manager.stopSchedule = { delay, work in gate.buttonHand.schedule(delay, work) }
         let controller = try XCTUnwrap(tw.open("job1"))
-        XCTAssertTrue(controller.panel.performKeyEquivalent(with: commandPeriod), "the window consumes Cmd-.")
+        XCTAssertTrue(controller.panel.performKeyEquivalent(with: tsCommandPeriod()), "the window consumes Cmd-.")
         XCTAssertEqual(gate.sender.stops.count, 1)
-        XCTAssertTrue(controller.panel.performKeyEquivalent(with: commandPeriod))
+        XCTAssertTrue(controller.panel.performKeyEquivalent(with: tsCommandPeriod()))
         XCTAssertEqual(gate.sender.stops.count, 2, "one more stop, for the window's own task")
         XCTAssertEqual(interrupts, 0, "Cmd-. never reaches the input bar's interrupt")
         XCTAssertTrue(gate.sender.outputs.isEmpty, "the sender saw stops and nothing else")
+    }
+
+    /// The branch that protects the composer is the popover's key monitor: with the popover holding the
+    /// keyboard it takes ⌘. for the selected row's Stop (returning nil, so AppKit never sends it on to the
+    /// main window's key-equivalent search, where the input bar's interrupt lives); without the keyboard
+    /// it hands the event back untouched. Both are checked here the way the monitor uses them: whatever it
+    /// returns is what the main window then gets.
+    func testTheMonitorTakesCommandPeriodWhenThePopoverHasTheKeyboardAndOtherwiseLeavesItAlone() throws {
+        let gate = BA5StopGate(self)
+        let p = pane(following: true, world: gate.world)
+        var interrupts = 0
+        p.bar.onInterrupt = { interrupts += 1 }
+        gate.world.ingest(gate.world.running(2))
+        p.bar.toggleBackgroundPopover(takeKeyboard: true)
+        let popover = try XCTUnwrap(p.bar.backgroundPopover)
+        XCTAssertTrue(popover.tookKeyboard, "precondition: the popover holds the keyboard")
+        let vc = popover.viewController
+        vc.stopPermit = { _ in Self.human }
+        vc.stopSchedule = { delay, work in gate.buttonHand.schedule(delay, work) }
+        let index = try XCTUnwrap(vc.selectables.firstIndex { ($0 as? BackgroundTaskRowView)?.row.id == "job0" })
+        vc.select(index)
+
+        func dispatch(_ event: NSEvent) -> NSEvent? {
+            let passedOn = popover.handleMonitoredKey(event)
+            if let passedOn { _ = p.rig.window.performKeyEquivalent(with: passedOn) }
+            return passedOn
+        }
+
+        XCTAssertNil(dispatch(tsCommandPeriod()), "the monitor consumes ⌘. while the popover has the keyboard")
+        XCTAssertEqual(gate.sender.stops.count, 0, "one press only arms")
+        XCTAssertNil(dispatch(tsCommandPeriod()))
+        XCTAssertEqual(gate.sender.stops.count, 1, "the second sends the one stop")
+        XCTAssertEqual(interrupts, 0, "and ⌘. never reached the main window's composer")
+        XCTAssertTrue(gate.sender.outputs.isEmpty)
+
+        let plain = BA3UIKey.keyDown(0, "a")
+        XCTAssertTrue(popover.handleMonitoredKey(plain) === plain, "other keys go on unchanged")
+    }
+
+    func testTheMonitorLeavesCommandPeriodToTheWindowWhenThePopoverDoesNotHoldTheKeyboard() throws {
+        let gate = BA5StopGate(self)
+        let p = pane(following: true, world: gate.world)
+        gate.world.ingest(gate.world.running(1))
+        p.bar.toggleBackgroundPopover(takeKeyboard: false)
+        let popover = try XCTUnwrap(p.bar.backgroundPopover)
+        XCTAssertFalse(popover.tookKeyboard, "precondition: the composer keeps the keyboard")
+        let event = tsCommandPeriod()
+
+        XCTAssertTrue(popover.handleMonitoredKey(event) === event,
+                      "with the composer holding the keyboard, ⌘. is the composer's (its interrupt), not a Stop")
+        XCTAssertEqual(gate.sender.stops.count, 0)
     }
 
     // MARK: BA4: a task window

@@ -52,7 +52,7 @@ final class TaskPanel: NSPanel {
     static let escapeKeyCode: UInt16 = 53
 
     /// ⌘.: arm or confirm this window's Stop (the button runs the human-gesture check itself).
-    var onStopShortcut: (() -> Void)?
+    var onStopShortcut: ((NSEvent) -> Void)?
 
     override var canBecomeKey: Bool { true }
     /// The main window stays the main window while a task window is key.
@@ -67,7 +67,7 @@ final class TaskPanel: NSPanel {
             return true
         }
         if flags == .command, event.charactersIgnoringModifiers == "." {
-            onStopShortcut?()
+            onStopShortcut?(event)
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -133,7 +133,7 @@ final class TaskWindowController: NSObject, NSWindowDelegate {
         panel.delegate = self
         panel.title = content.windowTitle
         if let output = body as? TaskOutputView { panel.initialFirstResponder = output.textView }
-        panel.onStopShortcut = { [weak self] in self?.body.header.stopButton?.shortcut() }
+        panel.onStopShortcut = { [weak self] event in self?.body.header.stopButton?.shortcut(event) }
         body.apply(content: content)
         model?.acquire()
         subscription = store.changes
