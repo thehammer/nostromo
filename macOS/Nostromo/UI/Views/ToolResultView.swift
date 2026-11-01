@@ -16,7 +16,7 @@ import NostromoKit
 /// geometry and view disagreeing until the next measure.
 final class ToolResultView: NSView {
 
-    private var isExpanded  = false
+    private(set) var isExpanded = false
     private let disclosure  = NSButton()
     private let contentWrap = NSView()
     private let lineCount:  Int
@@ -98,6 +98,18 @@ final class ToolResultView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Follow a choice made elsewhere (another window, a saved choice): the open state is
+    /// `explicitState`, else open for an error. Not the operator's click: `onExpansionChange` stays
+    /// quiet. Returns whether the state changed.
+    @discardableResult
+    func apply(explicitState: Bool?) -> Bool {
+        let target = explicitState ?? isError
+        guard target != isExpanded else { return false }
+        isExpanded = target
+        applyState()
+        return true
+    }
 
     @objc private func toggleExpand() {
         isExpanded.toggle()

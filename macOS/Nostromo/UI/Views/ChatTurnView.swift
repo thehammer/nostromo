@@ -569,9 +569,14 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         var changed = false
         for (column, view) in columnViews.enumerated() {
             if let group = view as? ToolGroupView {
+                // Result folds first, so members a larger group builds on open use the new state.
+                var touched = group.applyResultFolds(folds)
                 let expanded = folds.isExpanded(group.group)
-                guard expanded != group.isExpanded else { continue }
-                group.setExpanded(expanded)
+                if expanded != group.isExpanded {
+                    group.setExpanded(expanded)
+                    touched = true
+                }
+                guard touched else { continue }
             } else if let row = view as? ActivityRowView {
                 let expanded = folds.isActivityExpanded(key: row.segment.key)
                 let opened = expanded != row.isExpanded

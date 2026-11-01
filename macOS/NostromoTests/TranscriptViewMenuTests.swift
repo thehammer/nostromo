@@ -419,6 +419,7 @@ final class TranscriptViewMenuTests: XCTestCase {
         XCTAssertEqual(s.terminal.keyDowns, 0, "no key reached the terminal")
         XCTAssertTrue(delegate.validateMenuItem(items.allActivity))
         XCTAssertEqual(items.allActivity.state, .on, "the radio follows the pane's mode")
+        XCTAssertTrue(delegate.validateMenuItem(items.focus))
         XCTAssertEqual(items.focus.state, .off)
 
         delegate.setTranscriptFocusMode(items.focus)

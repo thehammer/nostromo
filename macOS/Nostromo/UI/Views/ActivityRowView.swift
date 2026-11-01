@@ -154,9 +154,13 @@ final class ActivityRowView: NSView, TurnIsland, ArithmeticIsland, WidthPresetta
         var changed = false
         for i in members.indices {
             guard let group = members[i].view as? ToolGroupView else { continue }
+            var touched = group.applyResultFolds(folds)
             let expanded = folds.isExpanded(group.group)
-            guard expanded != group.isExpanded else { continue }
-            group.setExpanded(expanded)
+            if expanded != group.isExpanded {
+                group.setExpanded(expanded)
+                touched = true
+            }
+            guard touched else { continue }
             remeasureMember(at: i)
             changed = true
         }

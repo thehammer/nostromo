@@ -237,12 +237,16 @@ private func fv4OpenState(_ rig: ScrollRig, n: Int = 0) -> FV4Open {
     guard rig.turns.count >= 3 else { return FV4Open(row: nil, rowGroupA: nil, rowGroupB: nil, group: nil, stuck: nil, results: []) }
     let rowTurn = rig.turns[0], groupTurn = rig.turns[1], stuckTurn = rig.turns[2]
     let lane = fv4RowGroupKeys(n)
-    return FV4Open(row: rig.activityRow(turn: rowTurn.id, key: fv4ActivityKey(of: rowTurn))?.isExpanded,
-                   rowGroupA: rig.groupView(turn: rowTurn.id, key: lane[0])?.isExpanded,
-                   rowGroupB: rig.groupView(turn: rowTurn.id, key: lane[1])?.isExpanded,
-                   group: rig.groupView(turn: groupTurn.id, key: fv4GroupKey(n))?.isExpanded,
+    // A view stays built (hidden) after it was open once, so what is reported is what is on screen:
+    // a lane's groups only while the row is open, a group's results only while the group is.
+    let row = rig.activityRow(turn: rowTurn.id, key: fv4ActivityKey(of: rowTurn))?.isExpanded
+    let group = rig.groupView(turn: groupTurn.id, key: fv4GroupKey(n))
+    return FV4Open(row: row,
+                   rowGroupA: row == true ? rig.groupView(turn: rowTurn.id, key: lane[0])?.isExpanded : nil,
+                   rowGroupB: row == true ? rig.groupView(turn: rowTurn.id, key: lane[1])?.isExpanded : nil,
+                   group: group?.isExpanded,
                    stuck: rig.groupView(turn: stuckTurn.id, key: fv4StuckKey(n))?.isExpanded,
-                   results: fv4ResultStates(rig.groupView(turn: groupTurn.id, key: fv4GroupKey(n))))
+                   results: group?.isExpanded == true ? fv4ResultStates(group) : [])
 }
 
 private func fv4ResultButton(_ group: ToolGroupView?, at index: Int) -> NSButton? {

@@ -56,7 +56,7 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
     private var blocks: [Int: TurnBlock] = [:]
     private let contentAvailable: Bool
     /// How the turn's result folds resolve (the operator's saved choices), for members built from here on.
-    private let folds: FoldResolver
+    private var folds: FoldResolver
     private(set) var isExpanded: Bool
 
     private enum MemberKey: Equatable {
@@ -143,6 +143,31 @@ final class ToolGroupView: NSView, WidthPresettable, ArithmeticIsland {
         guard expanded != isExpanded else { return }
         row.setExpanded(expanded, animated: false)
         applyExpanded(expanded)
+    }
+
+    /// Follow the result folds (and subagent-activity folds) in `folds`: a change made elsewhere
+    /// (another window). Not the operator's click, so `onBlockExpansion` stays quiet; members built
+    /// from here on use `folds` too. Returns whether any member changed.
+    @discardableResult
+    func applyResultFolds(_ folds: FoldResolver) -> Bool {
+        self.folds = folds
+        var changed = false
+        for i in members.indices {
+            let followed: Bool
+            switch members[i].key {
+            case .block(let index):
+                guard let result = members[i].view as? ToolResultView else { continue }
+                followed = result.apply(explicitState: folds.explicitResult(block: blocks[index], index: index))
+            case .activity(let agentIndex):
+                guard let activity = members[i].view as? AgentActivityView else { continue }
+                followed = activity.apply(explicitState: folds.explicitResult(block: blocks[agentIndex], index: agentIndex))
+            }
+            if followed {
+                remeasureMember(at: i)
+                changed = true
+            }
+        }
+        return changed
     }
 
     /// The group grew (or its counts changed). Returns whether this view's height changed.
@@ -1074,6 +1099,16 @@ final class AgentActivityView: NSView {
         self.blocks = blocks
         if contentBuilt { for index in added { appendRow(for: index) } }
         applyState()
+    }
+
+    /// Follow a choice made elsewhere: open is `explicitState`, else closed. Quiet (not a click).
+    @discardableResult
+    func apply(explicitState: Bool?) -> Bool {
+        let target = explicitState ?? false
+        guard target != isExpanded else { return false }
+        isExpanded = target
+        applyState()
+        return true
     }
 
     @objc private func toggleExpand() {
