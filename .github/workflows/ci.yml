@@ -307,9 +307,16 @@ jobs:
       # The same command a developer runs locally (the `NostromoTests` scheme).
       # Fully serial: see docs/ci.md ("Deliberately not done") for why parallel
       # testing is not enabled.
+      # Step timeout well under the 45-minute job limit (a green run takes ~21-25 min)
+      # so a hang fails the step and the next step can name the last running test.
       - name: make mac-test
         if: needs.changes.outputs.swift == 'true'
+        timeout-minutes: 35
         run: make mac-test
+
+      - name: Last tests started (diagnosis)
+        if: needs.changes.outputs.swift == 'true' && failure()
+        run: grep "Test Case .* started" macOS/build/mac-test-full.log | tail -5 || true
 
       # Compile gate for the app target. `make mac-test` builds only the
       # NostromoTests bundle, which does not include app-only sources such as
