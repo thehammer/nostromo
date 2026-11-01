@@ -131,6 +131,11 @@ final class TaskOutputModel {
     private var phase = Phase.idle
     private var cursor: UInt64 = 0
     private var readInFlight = false
+    /// Bumped by every tail load: a head chunk that answers for an older load is dropped.
+    private var loadGeneration = 0
+    /// Consecutive polls the daemon answered with an error outcome; a few in a row mean the file is gone.
+    private var failedPolls = 0
+    private static let failedPollLimit = 3
     private var needsFinalRead = false
     private var pollTimer: TaskPollTimer?
     private var coalesceTimer: TaskPollTimer?
@@ -169,7 +174,7 @@ final class TaskOutputModel {
         guard truncatedHead else { return nil }
         switch source {
         case .file?:
-            return "Showing the last \(TaskOutputSize.text(Self.windowBytes)) of \(TaskOutputSize.text(totalBytes))"
+            return "Showing the last \(TaskOutputSize.text(min(Self.windowBytes, totalBytes))) of \(TaskOutputSize.text(totalBytes))"
         default:
             let tailBytes = UInt64(heldBytes)
             return "Showing the last \(tailBytes / 1_024) KB of \(TaskOutputSize.text(totalBytes))"
@@ -203,6 +208,9 @@ final class TaskOutputModel {
             break
         }
         if needsFinalRead { finalRead() }
+        // A holder arriving on a model that was last read a while ago (a repeat `tasks output`) must see
+        // what the file holds now, not wait out a poll.
+        if phase == .ready, !isTaskEnded, !readInFlight, pollTimer == nil { read(final: false) }
         startPollingIfNeeded()
     }
 
@@ -215,6 +223,12 @@ final class TaskOutputModel {
         coalesceTimer?.invalidate()
         coalesceTimer = nil
         deliveryScheduled = false
+        // Nobody is listening, and the next holder reads `text` as it stands: a queued delivery would
+        // add the same text a second time.
+        pendingAppend = ""
+        pendingPrepend = ""
+        pendingReplace = false
+        pendingStatus = false
     }
 
     /// The task is over: one last read picks up what it wrote at the end, then polling stops.
@@ -235,6 +249,8 @@ final class TaskOutputModel {
         // Only the very first load shows as loading; a retry keeps saying what the last try said.
         if phase == .idle && text.isEmpty { state = .loading }
         phase = .loadingTail
+        loadGeneration += 1
+        failedPolls = 0
         readInFlight = true
         requests.requestOutput(tag: tag, taskId: taskId, offset: nil) { [weak self] reply in
             guard let self else { return }
@@ -281,6 +297,7 @@ final class TaskOutputModel {
         cursor = wire.endOffset
         phase = .ready
         state = .ready
+        let generation = loadGeneration
         if kind == .file {
             let windowStart = totalBytes > Self.windowBytes ? totalBytes - Self.windowBytes : 0
             truncatedHead = windowStart > 0
@@ -291,26 +308,35 @@ final class TaskOutputModel {
         isFillingHead = headStart != nil
         setText(Self.sanitize(wire.text), as: .replaced)
         flush()
-        if let headStart { fetchHeadChunk(at: headStart, limit: wire.startOffset, parts: []) }
+        if let headStart { fetchHeadChunk(at: headStart, limit: wire.startOffset, generation: generation, parts: []) }
     }
 
     /// Fetch `[offset, limit)` forward in chunks and put it in front of what is held.
-    private func fetchHeadChunk(at offset: UInt64, limit: UInt64, parts: [String]) {
+    /// Only a head that is contiguous from `offset` through `limit`, answered for the load still current,
+    /// goes in; anything else would leave a gap or a stale piece in front of the tail.
+    private func fetchHeadChunk(at offset: UInt64, limit: UInt64, generation: Int, parts: [String]) {
         let want = UInt32(min(UInt64(Self.readBytes), limit - offset))
         requests.requestOutput(tag: tag, taskId: taskId, offset: offset, maxBytes: want) { [weak self] reply in
-            guard let self else { return }
+            guard let self, self.loadGeneration == generation else { return }
             var parts = parts
-            if case .answered(let wire) = reply, wire.outcome == .ok {
+            var complete = false
+            if case .answered(let wire) = reply, wire.outcome == .ok, wire.startOffset == offset, wire.endOffset > offset {
                 parts.append(Self.sanitize(wire.text))
-                if wire.endOffset > offset, wire.endOffset < limit {
-                    self.fetchHeadChunk(at: wire.endOffset, limit: limit, parts: parts)
+                if wire.endOffset < limit {
+                    self.fetchHeadChunk(at: wire.endOffset, limit: limit, generation: generation, parts: parts)
                     return
                 }
+                complete = true
             }
-            // Done, or the daemon could not give the rest: what arrived is the head.
             self.isFillingHead = false
             let head = parts.joined()
-            if !head.isEmpty { self.insertHead(head) } else { self.queue(.status) }
+            if complete, !head.isEmpty {
+                self.insertHead(head)
+            } else {
+                // The daemon could not give the whole head: the tail alone stays, and says it is cut.
+                self.truncatedHead = true
+                self.queue(.status)
+            }
             self.flush()
         }
     }
@@ -384,19 +410,20 @@ final class TaskOutputModel {
             totalBytes = wire.totalBytes
             if !added.isEmpty { appendText(added) }
             if sizeChanged { queue(.status) }
+            failedPolls = 0
             flush()
         case .unavailable, .refused, .error, .unknown:
-            // The file is gone (or unreadable). Held text stays; nothing more is read for it.
-            phase = .vanished
+            noteFailedPoll()
         }
     }
 
     private func tailReadArrived(_ reply: TaskReply<SessionTaskOutputResultWire>) {
         guard case .answered(let wire) = reply else { return }
         guard wire.outcome == .ok else {
-            phase = .vanished
+            noteFailedPoll()
             return
         }
+        failedPolls = 0
         let fresh = Self.sanitize(wire.text)
         let cut = wire.startOffset > 0
         let textChanged = fresh != text
@@ -405,6 +432,13 @@ final class TaskOutputModel {
         truncatedHead = cut
         if textChanged { setText(fresh, as: .replaced) } else if statusChanged { queue(.status) }
         flush()
+    }
+
+    /// One error answer may be a blip: the poll after it tries again. A few in a row mean the file is
+    /// gone or unreadable; held text stays, nothing more is read for it.
+    private func noteFailedPoll() {
+        failedPolls += 1
+        if failedPolls >= Self.failedPollLimit { phase = .vanished }
     }
 
     // MARK: Text

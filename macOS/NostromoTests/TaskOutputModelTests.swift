@@ -743,13 +743,77 @@ final class TaskOutputModelTests: XCTestCase {
         let log = TaskOutputChangeLog(model)
 
         rig.daemon.content = nil
-        rig.clock.advance(0.5)
-        try rig.firePoll()
+        for _ in 0..<3 {
+            rig.clock.advance(0.5)
+            try rig.firePoll()
+        }
 
         XCTAssertEqual(model.text, visible(0..<20))
         XCTAssertEqual(model.state, .ready)
         XCTAssertEqual(log.events, [], "the held text is not touched")
         XCTAssertTrue(rig.scheduler.live.isEmpty, "a vanished file is not polled again")
+    }
+
+    func testOneErrorAnswerOnAPollDoesNotStopLiveOutput() throws {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 10)
+
+        rig.daemon.content = nil                // one blip: unavailable
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+        rig.daemon.setLines(12)                 // and it is back
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+
+        XCTAssertEqual(model.text, visible(0..<12), "the poll after the blip carried on")
+        XCTAssertEqual(rig.scheduler.pollSlots.count, 1, "still polling")
+    }
+
+    func testAcquiringAReadyRunningModelReadsAtOnceWithoutWaitingForAPoll() {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 10)
+        model.release()
+        rig.daemon.appendLines(3)
+
+        model.acquire()
+
+        XCTAssertEqual(model.text, visible(0..<13), "a repeat reader sees what the file holds now")
+    }
+
+    func testReleasingDropsQueuedChangesSoAReopenedWindowDoesNotSeeTheTextTwice() throws {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 10)
+        rig.daemon.appendLines(1)
+        try rig.firePoll()                      // inside the quarter second: the append is queued
+        XCTAssertEqual(rig.scheduler.deliverySlots.count, 1)
+        model.release()
+
+        let shown = model.text                  // a window opens: it reads `text`, then listens
+        let log = TaskOutputChangeLog(model)
+        model.acquire()
+        rig.daemon.appendLines(1)
+        rig.clock.advance(1)
+        try rig.firePoll()
+
+        XCTAssertEqual(shown, visible(0..<11))
+        XCTAssertEqual(model.text, visible(0..<12))
+        XCTAssertEqual(log.contentEvents, [.appended(visible(11..<12))],
+                       "only text the window has not read: the append queued before the release is gone")
+    }
+
+    func testAHeadThatDoesNotLineUpWithItsRequestIsNotInserted() {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(40_000)             // past 1 MiB, so there is a head to fetch
+        rig.daemon.defersAnswers = true
+        let model = rig.makeModel()
+        model.acquire()
+        rig.daemon.answerNext()                 // the tail
+        let tail = model.text
+        rig.daemon.content = nil                // the head's reads now answer `unavailable`
+        rig.daemon.answerNext()
+
+        XCTAssertEqual(model.text, tail, "no head is better than a gapped one")
+        XCTAssertFalse(model.isFillingHead)
     }
 
     func testAnEndedTaskWhoseFileWasNeverThereSaysNoOutputAvailable() {

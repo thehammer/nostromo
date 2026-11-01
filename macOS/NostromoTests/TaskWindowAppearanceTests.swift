@@ -33,10 +33,9 @@ private final class CutTailDaemon: TaskRequestSending {
         let object: [String: Any] = ["request_id": requestId, "tag": tag, "task_id": taskId, "outcome": "ok",
                                      "text": text, "start_offset": 32_768, "end_offset": 40_960, "total_bytes": 40_960,
                                      "source": "cli_tail"]
-        // swiftlint:disable:next force_try
-        let data = try! JSONSerialization.data(withJSONObject: object)
-        // swiftlint:disable:next force_try
-        let wire = try! JSONDecoder().decode(SessionTaskOutputResultWire.self, from: data)
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let wire = try? JSONDecoder().decode(SessionTaskOutputResultWire.self, from: data)
+        else { return XCTFail("the fake daemon built an answer that does not decode") }
         requests?.ingest(.sessionTaskOutputResult(wire))
     }
 

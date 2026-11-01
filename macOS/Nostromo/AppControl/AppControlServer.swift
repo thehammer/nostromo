@@ -500,10 +500,12 @@ final class AppControlServer {
             guard BackgroundTaskStore.shared.state(for: tag)?.allTasks.contains(where: { $0.id == taskId }) == true else {
                 throw AppControlError.notFound("no task \"\(taskId)\" in focus \"\(tag)\"")
             }
-            // Held for this one answer: a first ask starts the read and answers `loading`; ask again.
+            // A first ask starts the read and answers `loading`; ask again.
             let model = TaskOutputRegistry.shared.model(tag: tag, taskId: taskId)
+            // Held a few seconds past this answer: acquiring refreshes a model already ready, and the
+            // hold lets that read (and the next polls) land before the next ask.
             model.acquire()
-            defer { model.release() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + AppControlTasks.outputHoldSeconds) { model.release() }
             return AppControlTasks.output(tag: tag, taskId: taskId, model: model,
                                           allowsText: SyntheticInputGate.allowsSynthetic)
         }

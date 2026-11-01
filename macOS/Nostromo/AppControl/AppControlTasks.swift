@@ -33,6 +33,9 @@ enum AppControlTasks {
     static let outputTextLimit = 1_048_576
 
     /// Why `text` is `null` in the real app.
+    /// How long a `tasks output` ask keeps the model held after answering, so its reads can finish.
+    static let outputHoldSeconds: TimeInterval = 3
+
     static let outputWithheldReason = "task output is withheld in the real app (it can hold anything a command printed); "
         + "the isolated QA instance returns it"
 

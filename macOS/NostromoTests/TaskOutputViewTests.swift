@@ -136,10 +136,9 @@ private final class FakeTaskDaemon: TaskRequestSending {
                      end: total, total: total, source: "file")
             }
         }
-        // swiftlint:disable:next force_try
-        let data = try! JSONSerialization.data(withJSONObject: object)
-        // swiftlint:disable:next force_try
-        let wire = try! JSONDecoder().decode(SessionTaskOutputResultWire.self, from: data)
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
+              let wire = try? JSONDecoder().decode(SessionTaskOutputResultWire.self, from: data)
+        else { return XCTFail("the fake daemon built an answer that does not decode") }
         requests?.ingest(.sessionTaskOutputResult(wire))
     }
 
