@@ -598,11 +598,13 @@ final class SessionRuleCardTests: XCTestCase {
     // MARK: Step 2 confirms
 
     func testARealShapedConfirmAfterTheGapSendsExactlyOneAllowSessionNamingTheShownRule() throws {
-        let h = harness(try RuleFixtures.request())
+        var clock: TimeInterval = 100   // the handlers' clock must move too: both gaps count
+        let h = harness(try RuleFixtures.request(), clock: { clock })
         select(h, index: 1, time: 10)
         let confirm = h.card.sessionConfirmButton!
         XCTAssertTrue(confirm.isEnabled)
 
+        clock = 100.5
         current = click(confirm, number: 2, time: 10.5, in: h.window)
         confirm.performClick(nil)
         confirm.performClick(nil)   // a second press changes nothing: the store answers once
