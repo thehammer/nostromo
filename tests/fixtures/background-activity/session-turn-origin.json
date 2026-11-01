@@ -1,0 +1,24 @@
+{
+  "type": "session_turn_origin",
+  "tag": "claudia-ABCD1234",
+  "turn_id": "t0",
+  "origin": {
+    "type": "task_wake",
+    "items": [
+      {
+        "task_id": "bmon01",
+        "tool_use_id": "toolu_01MON",
+        "kind": "monitor",
+        "outcome": "new_output",
+        "description": "CI for PR #251"
+      },
+      {
+        "task_id": "bsh02",
+        "tool_use_id": "toolu_02SH",
+        "kind": "shell",
+        "outcome": "failed",
+        "description": "grep -r 'a<b' && echo \"x\""
+      }
+    ]
+  }
+}

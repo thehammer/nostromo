@@ -531,6 +531,7 @@
 		ZZ0000000000000000BA3401 /* WakeMarkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */; };
 		ZZ0000000000000000BA3501 /* WakeMarkerAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */; };
 		ZZ0000000000000000BA5401 /* TaskWindowFitnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5400 /* TaskWindowFitnessTests.swift */; };
+		ZZ0000000000000000BA5501 /* BackgroundRowMarkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5500 /* BackgroundRowMarkTests.swift */; };
 		ZZ0000000000000000BA5301 /* TaskWindowAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5300 /* TaskWindowAppearanceTests.swift */; };
 		ZZ0000000000000000BA5201 /* TaskOutputViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5200 /* TaskOutputViewTests.swift */; };
 		ZZ0000000000000000BA5101 /* TaskWindowContentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA5100 /* TaskWindowContentTests.swift */; };
@@ -1090,6 +1091,7 @@
 		ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerAppearanceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA5400 /* TaskWindowFitnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskWindowFitnessTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000BA5500 /* BackgroundRowMarkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundRowMarkTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA5300 /* TaskWindowAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskWindowAppearanceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA5200 /* TaskOutputViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskOutputViewTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA5100 /* TaskWindowContentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskWindowContentTests.swift; sourceTree = "<group>"; };
@@ -1727,6 +1729,7 @@
 				ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */,
 				ZZ0000000000000000BA3500 /* WakeMarkerAppearanceTests.swift */,
 				ZZ0000000000000000BA5400 /* TaskWindowFitnessTests.swift */,
+				ZZ0000000000000000BA5500 /* BackgroundRowMarkTests.swift */,
 				ZZ0000000000000000BA5300 /* TaskWindowAppearanceTests.swift */,
 				ZZ0000000000000000BA5200 /* TaskOutputViewTests.swift */,
 				ZZ0000000000000000BA5100 /* TaskWindowContentTests.swift */,
@@ -2616,6 +2619,7 @@
 				ZZ0000000000000000BA3401 /* WakeMarkerTests.swift in Sources */,
 				ZZ0000000000000000BA3501 /* WakeMarkerAppearanceTests.swift in Sources */,
 				ZZ0000000000000000BA5401 /* TaskWindowFitnessTests.swift in Sources */,
+				ZZ0000000000000000BA5501 /* BackgroundRowMarkTests.swift in Sources */,
 				ZZ0000000000000000BA5301 /* TaskWindowAppearanceTests.swift in Sources */,
 				ZZ0000000000000000BA5201 /* TaskOutputViewTests.swift in Sources */,
 				ZZ0000000000000000BA5101 /* TaskWindowContentTests.swift in Sources */,

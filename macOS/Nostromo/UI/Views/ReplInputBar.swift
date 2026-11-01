@@ -486,6 +486,11 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         backgroundTag != nil && backgroundStore?.tasksSupported == true
     }
 
+    /// Close the Background activity popover if it is open (an action in it is about to move the transcript).
+    func closeBackgroundPopover() {
+        if let open = backgroundPopover, open.isShown { open.close() }
+    }
+
     func toggleBackgroundPopover(takeKeyboard: Bool) {
         if let open = backgroundPopover, open.isShown {
             open.close()

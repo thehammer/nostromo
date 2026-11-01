@@ -312,6 +312,10 @@ already announced silences a later close.
   audited (`expired`).
 - Who wrote a turn's message comes from the session manager's queue (`TurnHook`, `TurnAuthor`), never
   from the prompt text: a user who types `<nostromo-mother-job` is still the user.
+- A background wake (a `<task-notification>` the CLI answers; see [background-wake.md](background-wake.md))
+  is a turn of its own, begun by the CLI (`Started { author: Cli }`). It is "the session's next turn" for
+  held notices: it ends a notice turn and releases `Quiet` and `SessionNotRunning` holds. It never counts
+  toward the notice cap or the loop-guard chain.
 
 ### Switches
 

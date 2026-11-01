@@ -67,7 +67,7 @@ use super::peer::{
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo, TaskDetailMsg, TasksSnapshot};
 use super::stream_json::{
     load_scrollback, parse_line, ParsedLine, SessionState, SessionTranscript, TurnDelta,
-    NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN, SCROLLBACK_TURNS,
+    TurnOrigin, NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN, SCROLLBACK_TURNS,
 };
 use crate::model::hub::ModelHub;
 use crate::model::notes::{self, NoteKind};
@@ -85,6 +85,8 @@ mod model_switch;
 #[cfg(test)]
 mod notice_inject_tests;
 mod task_runtime;
+#[cfg(test)]
+mod wake_tests;
 use control::ControlReply;
 pub use control::CONTROL_TIMEOUT;
 use inject::PendingOrigin;
@@ -159,6 +161,13 @@ pub enum SessionEvent {
     /// The text of one background task changed (preview, summaries, prompt).
     /// Carried only by a `LocalOnly` frame.
     TaskDetail(Arc<TaskDetailMsg>),
+    /// A turn's origin changed without the turn changing otherwise: a second
+    /// `<task-notification>` merged into the open wake turn (the full new
+    /// origin, REPLACE).
+    TurnOrigin {
+        turn_id: String,
+        origin: TurnOrigin,
+    },
 }
 
 // ── pending-message queue ─────────────────────────────────────────────────────
@@ -2819,16 +2828,32 @@ fn run_reader(
             _ => {}
         }
 
-        let deltas = lock_recover(&shared.transcript).ingest_parsed(parsed);
+        let (deltas, origin_update) = {
+            let mut transcript = lock_recover(&shared.transcript);
+            let deltas = transcript.ingest_parsed(parsed);
+            (deltas, transcript.take_origin_update())
+        };
         for mut delta in deltas {
             match &mut delta {
                 TurnDelta::TurnStarted { turn } => {
                     auth.begin_turn();
-                    let author = login::on_turn_started(&shared);
+                    let is_wake = matches!(turn.origin, Some(TurnOrigin::TaskWake { .. }));
+                    let author = if is_wake {
+                        login::on_wake_turn_started(&shared)
+                    } else {
+                        login::on_turn_started(&shared)
+                    };
                     // The transcript read a notice origin from the prompt's
                     // text; only a turn the daemon wrote as a notice keeps it.
                     if !author.is_notice()
                         && lock_recover(&shared.transcript).disown_notice_origin(&turn.id)
+                    {
+                        turn.origin = None;
+                    }
+                    // Likewise a wake: only a turn the CLI began itself is one.
+                    if is_wake
+                        && !matches!(author, TurnAuthor::Cli)
+                        && lock_recover(&shared.transcript).disown_wake_origin(&turn.id)
                     {
                         turn.origin = None;
                     }
@@ -2859,6 +2884,9 @@ fn run_reader(
                 _ => {}
             }
             shared.broadcast(SessionEvent::Delta(delta));
+        }
+        if let Some((turn_id, origin)) = origin_update {
+            shared.broadcast(SessionEvent::TurnOrigin { turn_id, origin });
         }
     }
 

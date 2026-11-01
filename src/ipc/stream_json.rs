@@ -213,10 +213,40 @@ pub enum TurnOrigin {
     /// A Mother job notice: one item per `<nostromo-mother-job …/>` element
     /// (see [`parse_mother_origin`]). Never the session's title.
     MotherJobNotice { items: Vec<MotherNoticeItem> },
+    /// The CLI woke the agent because a background task finished or a Monitor
+    /// emitted an event (see [`parse_task_wake`]): one item per
+    /// `<task-notification>` element, `omitted` more beyond the cap. Never the
+    /// session's title and never counted as a prompt.
+    TaskWake {
+        items: Vec<TaskWakeItem>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: u32,
+    },
     /// An origin this build does not know (a newer daemon wrote it): read as
     /// such rather than failing the whole turn.
     #[serde(other)]
     Unknown,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// One `<task-notification>` element of a [`TurnOrigin::TaskWake`]. Plain,
+/// sanitised and capped data: never an event, result, note, usage or output
+/// path. `kind` and `outcome` are strings so a newer value never fails a decode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskWakeItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+    /// `shell`, `monitor`, `agent` or `other`.
+    pub kind: String,
+    /// `new_output`, `completed`, `failed`, `stopped`, `ended` or `event`.
+    pub outcome: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// One `<nostromo-mother-job …/>` element of a [`TurnOrigin::MotherJobNotice`].
@@ -336,6 +366,13 @@ pub enum ParsedLine {
     UserPrompt {
         text: String,
         is_replay: bool,
+        timestamp: Option<String>,
+    },
+    /// A `<task-notification>` user event: the CLI woke the agent for a
+    /// finished background task or a Monitor event. Opens a turn of its own.
+    TaskWake {
+        items: Vec<TaskWakeItem>,
+        omitted: u32,
         timestamp: Option<String>,
     },
     /// Blocks to append to the current in-flight turn — assistant content
@@ -663,6 +700,9 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
     // Plain-string content → a human prompt (new turn), unless it's a
     // harness-injected notification (see is_harness_notification below).
     if let Some(s) = content.as_str() {
+        if s.trim_start().starts_with(TASK_NOTIFICATION_OPEN) {
+            return Some(task_wake_line_of(s, obj));
+        }
         if s.trim().is_empty() || is_harness_notification(s) {
             return None;
         }
@@ -713,6 +753,9 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
         .trim()
         .to_string();
 
+    if text.starts_with(TASK_NOTIFICATION_OPEN) {
+        return Some(task_wake_line_of(&text, obj));
+    }
     if text.is_empty() || is_harness_notification(&text) {
         return None;
     }
@@ -740,8 +783,7 @@ fn is_only_tool_results(content: &Value) -> bool {
 }
 
 /// Wrapper tags Claude Code's own harness injects as plain "user" events for
-/// out-of-band signals — a completed background task (`<task-notification>`),
-/// ambient context (`<system-reminder>`) — arriving on the wire in the exact
+/// out-of-band signals — ambient context (`<system-reminder>`) — arriving on the wire in the exact
 /// same shape as real human input. These are not something a human typed;
 /// rendering one as a chat bubble reads as garbled human input (see the
 /// isSidechain drop above for the same problem with sub-agent prompts).
@@ -756,10 +798,12 @@ fn is_only_tool_results(content: &Value) -> bool {
 /// their tags alone, not their wording: a CLI release that rewords the message
 /// must not turn it into a prompt. (Should the tags change too,
 /// `SessionTranscript::discard_orphan_prompt` is the net.)
+///
+/// `<task-notification>` is not here: it is the CLI waking the agent, and
+/// opens a turn of its own ([`ParsedLine::TaskWake`]).
 fn is_harness_notification(text: &str) -> bool {
     let trimmed = text.trim_start();
-    trimmed.starts_with("<task-notification>")
-        || trimmed.starts_with("<system-reminder>")
+    trimmed.starts_with("<system-reminder>")
         || trimmed.starts_with("<local-command-")
         || trimmed.starts_with("<command-name>")
         || trimmed.starts_with("<command-message>")
@@ -867,6 +911,246 @@ fn unescape_mother_attribute(v: &str) -> String {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
+}
+
+/// A background task's completion or a Monitor event starts its user event
+/// with this (the CLI's own wake-up; see [`parse_task_wake`]).
+pub const TASK_NOTIFICATION_OPEN: &str = "<task-notification>";
+const TASK_NOTIFICATION_CLOSE: &str = "</task-notification>";
+/// Items a wake turn's origin keeps; the rest are counted in `omitted`.
+pub const MAX_WAKE_ITEMS: usize = 50;
+const WAKE_DESCRIPTION_CHARS: usize = 200;
+const WAKE_LINE_DESCRIPTION_CHARS: usize = 80;
+const WAKE_ID_CHARS: usize = 128;
+
+fn task_wake_line_of(text: &str, obj: &serde_json::Map<String, Value>) -> ParsedLine {
+    let (items, omitted) = parse_task_wake(text);
+    ParsedLine::TaskWake {
+        items,
+        omitted,
+        timestamp: obj
+            .get("timestamp")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+    }
+}
+
+/// What a `<task-notification>` user event carries: one item per element, at
+/// most [`MAX_WAKE_ITEMS`], with the rest counted. Always at least one item:
+/// a wake opens a turn, so its reply never lands on the previous one.
+///
+/// Only the metadata before an element's first `<event>`, `<result>`,
+/// `<note>` or `<usage>` tag is read (`task-id`, `tool-use-id`, `status`,
+/// `summary`); those bodies, the output file and the summary's tail are never
+/// read. The summary's text is XML-unescaped, and its description (between
+/// the prefix's quote and the last `"`) is sanitised and capped. Ids outside
+/// `[A-Za-z0-9._:-]{1,128}` are dropped.
+pub fn parse_task_wake(text: &str) -> (Vec<TaskWakeItem>, u32) {
+    let mut items: Vec<TaskWakeItem> = Vec::new();
+    let mut omitted = 0u32;
+    let mut rest = text;
+    while let Some(start) = rest.find(TASK_NOTIFICATION_OPEN) {
+        let after = &rest[start + TASK_NOTIFICATION_OPEN.len()..];
+        let (body, next) = match after.find(TASK_NOTIFICATION_CLOSE) {
+            Some(end) => (&after[..end], &after[end + TASK_NOTIFICATION_CLOSE.len()..]),
+            None => (after, ""),
+        };
+        if items.len() < MAX_WAKE_ITEMS {
+            items.push(parse_wake_element(body));
+        } else {
+            omitted = omitted.saturating_add(1);
+        }
+        rest = next;
+    }
+    if items.is_empty() {
+        items.push(TaskWakeItem {
+            task_id: None,
+            tool_use_id: None,
+            kind: "other".to_owned(),
+            outcome: "event".to_owned(),
+            description: String::new(),
+        });
+    }
+    (items, omitted)
+}
+
+fn parse_wake_element(body: &str) -> TaskWakeItem {
+    let head_end = ["<event>", "<result>", "<note>", "<usage>"]
+        .iter()
+        .filter_map(|tag| body.find(tag))
+        .min()
+        .unwrap_or(body.len());
+    let head = &body[..head_end];
+
+    let task_id = tag_values(head, "task-id")
+        .find(|v| !v.starts_with("__"))
+        .and_then(wake_id);
+    let tool_use_id = tag_values(head, "tool-use-id").next().and_then(wake_id);
+    let status = tag_values(head, "status")
+        .next()
+        .map(|s| s.trim().to_owned());
+    let from_status = || match status.as_deref() {
+        Some("completed") => "completed",
+        Some("failed") => "failed",
+        Some("killed") | Some("stopped") => "stopped",
+        _ => "event",
+    };
+    let summary = tag_values(head, "summary")
+        .next()
+        .map(decode_xml_entities)
+        .unwrap_or_default();
+
+    let described = |prefix: &str| -> String {
+        let rest = summary.strip_prefix(prefix).unwrap_or(&summary);
+        let inner = rest.rfind('"').map_or(rest, |end| &rest[..end]);
+        let clean = crate::ipc::task_output::sanitize(inner.as_bytes());
+        crate::data::work::untrusted::one_line(&clean, WAKE_DESCRIPTION_CHARS)
+    };
+    let (kind, outcome, description) = if summary.starts_with("Monitor event: \"") {
+        ("monitor", "new_output", described("Monitor event: \""))
+    } else if summary.starts_with("Monitor \"") {
+        let outcome = if summary.contains("\" stream ended") {
+            "ended"
+        } else {
+            from_status()
+        };
+        ("monitor", outcome, described("Monitor \""))
+    } else if summary.starts_with("Background command \"") {
+        ("shell", from_status(), described("Background command \""))
+    } else if summary.starts_with("Agent \"") {
+        ("agent", from_status(), described("Agent \""))
+    } else if summary.starts_with("Background agent \"") {
+        ("agent", from_status(), described("Background agent \""))
+    } else {
+        ("other", from_status(), String::new())
+    };
+    TaskWakeItem {
+        task_id,
+        tool_use_id,
+        kind: kind.to_owned(),
+        outcome: outcome.to_owned(),
+        description,
+    }
+}
+
+/// The text of each `<tag>…</tag>` in `s`, in order.
+fn tag_values<'a>(s: &'a str, tag: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut rest = s;
+    std::iter::from_fn(move || {
+        let start = rest.find(&open)? + open.len();
+        let end = rest[start..].find(&close)?;
+        let value = &rest[start..start + end];
+        rest = &rest[start + end + close.len()..];
+        Some(value)
+    })
+}
+
+/// An id of 1-128 ASCII `[A-Za-z0-9._:-]` characters, or nothing.
+fn wake_id(v: &str) -> Option<String> {
+    let v = v.trim();
+    let ok = !v.is_empty()
+        && v.len() <= WAKE_ID_CHARS
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+    ok.then(|| v.to_owned())
+}
+
+/// Undo `&lt; &gt; &amp; &quot; &apos; &#NN; &#xHH;` in one pass (an escaped
+/// `&amp;lt;` stays `&lt;`). Anything else is left as written.
+fn decode_xml_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let tail = &rest[amp..];
+        // Look for the `;` in a bounded window only: a scan to the end of the
+        // string for every `&` is quadratic. The window is cut on a char
+        // boundary so a multi-byte character never splits.
+        let mut window_end = tail.len().min(11);
+        while !tail.is_char_boundary(window_end) {
+            window_end -= 1;
+        }
+        let decoded = tail[..window_end]
+            .find(';')
+            .and_then(|end| decode_entity(&tail[1..end]).map(|c| (c, end)));
+        match decoded {
+            Some((c, end)) => {
+                out.push(c);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn decode_entity(name: &str) -> Option<char> {
+    match name {
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "amp" => Some('&'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ => {
+            let digits = name.strip_prefix('#')?;
+            let code = match digits.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => digits.parse().ok()?,
+            };
+            char::from_u32(code)
+        }
+    }
+}
+
+/// The line a wake turn carries as its `user_input`: a fallback for clients
+/// that do not know `task_wake`, never the notification itself.
+/// `⟲ Monitor: new output "CI for PR #251"`, `⟲ Agent: finished "…"`,
+/// `⟲ 3 background events`, `⟲ Background event`.
+pub fn task_wake_line(items: &[TaskWakeItem], omitted: u32) -> String {
+    let total = items.len() + omitted as usize;
+    let [item] = items else {
+        return format!("⟲ {total} background events");
+    };
+    if omitted > 0 {
+        return format!("⟲ {total} background events");
+    }
+    let kind = match item.kind.as_str() {
+        "shell" => "Shell",
+        "monitor" => "Monitor",
+        "agent" => "Agent",
+        _ => "Background task",
+    };
+    let outcome = match (item.kind.as_str(), item.outcome.as_str()) {
+        ("agent", "completed") => "finished",
+        (_, "new_output") => "new output",
+        (_, "completed") => "completed",
+        (_, "failed") => "failed",
+        (_, "stopped") => "stopped",
+        (_, "ended") => "ended",
+        _ => "event",
+    };
+    let description: String = item.description.replace('"', "'");
+    let description = if description.chars().count() > WAKE_LINE_DESCRIPTION_CHARS {
+        let mut cut: String = description
+            .chars()
+            .take(WAKE_LINE_DESCRIPTION_CHARS - 1)
+            .collect();
+        cut.push('…');
+        cut
+    } else {
+        description
+    };
+    match (item.kind.as_str(), description.is_empty()) {
+        ("other", true) => "⟲ Background event".to_owned(),
+        (_, true) => format!("⟲ {kind}: {outcome}"),
+        _ => format!("⟲ {kind}: {outcome} \"{description}\""),
+    }
 }
 
 /// The PR number of a `…/pull/<n>` URL.
@@ -1323,6 +1607,9 @@ pub struct SessionTranscript {
     /// `Bash` writes its output: what the task registry needs to tell a
     /// `Monitor` from a `Bash` and to find an output file.
     tool_index: ToolIndex,
+    /// The newest wake merge not yet taken: the turn id and its full new
+    /// origin (see [`Self::take_origin_update`]).
+    origin_update: Option<(String, TurnOrigin)>,
 }
 
 impl SessionTranscript {
@@ -1447,11 +1734,24 @@ impl SessionTranscript {
     }
 
     /// Put ledger notes back in place after a rebuild from the session JSONL:
-    /// each after the turn of prompt number `after_prompt`. Notes older than
-    /// the retained turns are dropped; notes past the newest turn follow it.
+    /// each after the last turn of prompt `after_prompt`'s group (the counted
+    /// turn and the wake turns that follow it, before the next counted turn:
+    /// where a live `add_note` put it). Wake turns are not prompts and do not
+    /// count. Notes older than the retained turns are dropped; notes past the
+    /// newest group follow the newest turn.
     pub fn merge_ledger_notes(&mut self, notes: &[LedgerNote]) {
-        let retained = self.turns.len() as u64;
-        let first_retained = self.prompt_count.saturating_sub(retained) + 1;
+        let is_counted = |t: &Turn| !matches!(t.origin, Some(TurnOrigin::TaskWake { .. }));
+        let counted_retained = self.turns.iter().filter(|t| is_counted(t)).count() as u64;
+        let first_retained = self.prompt_count.saturating_sub(counted_retained) + 1;
+        // Index of the last turn of each retained prompt's group.
+        let mut group_last: Vec<usize> = Vec::new();
+        for (index, turn) in self.turns.iter().enumerate() {
+            if is_counted(turn) {
+                group_last.push(index);
+            } else if let Some(last) = group_last.last_mut() {
+                *last = index;
+            }
+        }
         let mut leading = 0usize;
         for note in notes {
             let block = TurnBlock::Note {
@@ -1474,7 +1774,12 @@ impl SessionTranscript {
             if note.after_prompt < first_retained {
                 continue;
             }
-            let index = ((note.after_prompt - first_retained) as usize)
+            let group = (note.after_prompt - first_retained) as usize;
+            let index = group_last
+                .get(group)
+                .or(group_last.last())
+                .copied()
+                .unwrap_or(0)
                 .min(self.turns.len().saturating_sub(1));
             match self.turns.get_mut(index) {
                 Some(turn) => {
@@ -1562,6 +1867,12 @@ impl SessionTranscript {
                 deltas
             }
 
+            ParsedLine::TaskWake {
+                items,
+                omitted,
+                timestamp,
+            } => self.ingest_task_wake(items, omitted, timestamp),
+
             ParsedLine::Blocks {
                 blocks,
                 context_tokens,
@@ -1624,6 +1935,85 @@ impl SessionTranscript {
                 deltas
             }
         }
+    }
+
+    /// A `<task-notification>` event. Two in a row with no reply between
+    /// them merge into the open wake turn (its `user_input` and timestamp stay
+    /// the first's, no delta, an origin update instead); otherwise it opens a
+    /// turn of its own. A wake is not a prompt: it is not counted in
+    /// `prompt_count` and is never the session's title.
+    fn ingest_task_wake(
+        &mut self,
+        items: Vec<TaskWakeItem>,
+        omitted: u32,
+        timestamp: Option<String>,
+    ) -> Vec<TurnDelta> {
+        if let Some(turn) = self.turns.last_mut() {
+            let bare = turn
+                .blocks
+                .iter()
+                .all(|b| matches!(b, TurnBlock::Note { .. }));
+            if let (
+                false,
+                true,
+                Some(TurnOrigin::TaskWake {
+                    items: have,
+                    omitted: more,
+                }),
+            ) = (turn.is_complete, bare, turn.origin.as_mut())
+            {
+                *more = more.saturating_add(omitted);
+                for item in items {
+                    if have.len() < MAX_WAKE_ITEMS {
+                        have.push(item);
+                    } else {
+                        *more = more.saturating_add(1);
+                    }
+                }
+                if let Some(origin) = turn.origin.clone() {
+                    self.origin_update = Some((turn.id.clone(), origin));
+                }
+                return vec![];
+            }
+        }
+        let mut deltas: Vec<TurnDelta> = self.discard_orphan_prompt().into_iter().collect();
+        if let Some(last) = self.turns.last_mut() {
+            last.is_complete = true;
+        }
+        let id = self.alloc_id();
+        let turn = Turn {
+            id,
+            user_input: task_wake_line(&items, omitted),
+            timestamp,
+            blocks: std::mem::take(&mut self.orphan_notes),
+            is_complete: false,
+            origin: Some(TurnOrigin::TaskWake { items, omitted }),
+        };
+        self.retained_bytes += turn_bytes(&turn);
+        self.turns.push(turn.clone());
+        deltas.push(TurnDelta::TurnStarted { turn });
+        self.enforce_limits();
+        deltas
+    }
+
+    /// The newest wake merge since the last call: the turn's id and its full
+    /// new origin. Holds at most one; a later merge overwrites it.
+    pub fn take_origin_update(&mut self) -> Option<(String, TurnOrigin)> {
+        self.origin_update.take()
+    }
+
+    /// Turn `turn_id` was written by the user or the daemon, whatever its text
+    /// says: take back the `TaskWake` origin read from that text. The turn
+    /// stays as it is otherwise. Returns whether anything changed.
+    pub fn disown_wake_origin(&mut self, turn_id: &str) -> bool {
+        let Some(turn) = self.turns.iter_mut().find(|t| t.id == turn_id) else {
+            return false;
+        };
+        if !matches!(turn.origin, Some(TurnOrigin::TaskWake { .. })) {
+            return false;
+        }
+        turn.origin = None;
+        true
     }
 
     /// The newest turn is a phantom if its "prompt" is a tag-wrapped system
@@ -1968,15 +2358,22 @@ pub fn transcript_from_jsonl(content: &str, max_turns: usize) -> SessionTranscri
     }
     t.flush();
     t.truncate_to_last(max_turns);
+    // A wake merged while replaying is history, not news: no origin frame.
+    t.origin_update = None;
     // Rebase to the oldest SURVIVING turn, matching what `derive_summary`
     // reads via `turns.first()` today — preserves today's resume-summary
     // behavior exactly, even though the true first prompt of the whole
     // session may have been trimmed away by `truncate_to_last` above.
-    // A Mother job notice is never the title: the oldest other turn is.
+    // A Mother job notice or a wake is never the title: the oldest other turn is.
     t.first_user_input = t
         .turns
         .iter()
-        .find(|turn| !matches!(turn.origin, Some(TurnOrigin::MotherJobNotice { .. })))
+        .find(|turn| {
+            !matches!(
+                turn.origin,
+                Some(TurnOrigin::MotherJobNotice { .. } | TurnOrigin::TaskWake { .. })
+            )
+        })
         .map(|turn| turn.user_input.clone());
     t
 }
@@ -2016,6 +2413,10 @@ mod origin_tests;
 #[cfg(test)]
 #[path = "stream_json_mother_tests.rs"]
 mod mother_tests;
+
+#[cfg(test)]
+#[path = "stream_json_wake_tests.rs"]
+mod wake_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2124,12 +2525,21 @@ mod tests {
     }
 
     #[test]
-    fn task_notification_user_event_is_dropped() {
+    fn task_notification_user_event_opens_a_wake() {
         // A completed background task delivers a <task-notification> block as
-        // a plain "user" event, same wire shape as real human input — must
-        // not open a spurious turn/chat bubble.
+        // a plain "user" event; the CLI answers it, so it opens a turn of its
+        // own (never a user bubble, never part of the previous turn).
         let line = r#"{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>abc123</task-id>\n<status>completed</status>\n</task-notification>"}}"#;
-        assert_eq!(parse_line(line), None);
+        let Some(ParsedLine::TaskWake { items, omitted, .. }) = parse_line(line) else {
+            panic!("expected a wake");
+        };
+        assert_eq!(omitted, 0);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].task_id.as_deref(), Some("abc123"));
+        assert_eq!(
+            (items[0].kind.as_str(), items[0].outcome.as_str()),
+            ("other", "completed")
+        );
     }
 
     #[test]
@@ -2139,17 +2549,23 @@ mod tests {
     }
 
     #[test]
-    fn task_notification_in_text_array_is_dropped() {
-        // Same drop must apply when the notification arrives as a
-        // text-array content shape rather than a plain string.
+    fn task_notification_in_text_array_opens_a_wake() {
+        // The same applies when the notification arrives as a text-array
+        // content shape rather than a plain string.
         let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<task-notification><status>completed</status></task-notification>"}]}}"#;
-        assert_eq!(parse_line(line), None);
+        assert!(matches!(
+            parse_line(line),
+            Some(ParsedLine::TaskWake { .. })
+        ));
     }
 
     #[test]
-    fn leading_whitespace_before_notification_tag_still_drops() {
+    fn leading_whitespace_before_notification_tag_still_opens_a_wake() {
         let line = r#"{"type":"user","message":{"role":"user","content":"\n\n<task-notification>...</task-notification>"}}"#;
-        assert_eq!(parse_line(line), None);
+        assert!(matches!(
+            parse_line(line),
+            Some(ParsedLine::TaskWake { .. })
+        ));
     }
 
     #[test]

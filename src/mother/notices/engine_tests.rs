@@ -1676,3 +1676,40 @@ fn a_replaced_notice_whose_turn_started_before_the_delivery_returned_loses_no_ol
         assert_eq!(told, 1, "{id} is told exactly once");
     }
 }
+
+#[test]
+fn a_wake_turn_releases_a_held_notice_without_touching_the_chain_or_the_cap() {
+    // A CLI-started turn (a background-task wake) is not a notice turn: it
+    // frees what Quiet and not-running holds kept, but it is no wake of ours,
+    // so it adds nothing to the chain or the hourly count.
+    let r = Rig::new();
+    set_focus(&r, F, NotifyLevel::Quiet);
+    r.jobs(&[job(F, "a", "succeeded")]);
+    r.after(30 * SEC);
+    assert_eq!(r.status("a").0, NoticeStatus::Held);
+    r.reply(F, Reply::Queued);
+
+    r.cli_turn_starts(F);
+    r.turn_ends(F);
+
+    assert_eq!(ids(&r.last_delivery(F).fresh), sorted(&["a"]));
+    assert_eq!(r.wakes(F), 0, "no notice turn was counted");
+    assert!(!r.focus(F).expect("F").chain_held, "no chain grew");
+
+    let r = Rig::new();
+    r.reply(F, Reply::Down);
+    r.jobs(&[job(F, "a", "succeeded")]);
+    r.after(30 * SEC);
+    assert_eq!(
+        r.status("a"),
+        (NoticeStatus::Held, Some(NoticeReason::SessionNotRunning))
+    );
+    r.reply(F, Reply::Queued);
+
+    r.cli_turn_starts(F);
+    r.turn_ends(F);
+
+    assert_eq!(ids(&r.last_delivery(F).fresh), sorted(&["a"]));
+    assert_eq!(r.wakes(F), 0);
+    assert!(!r.focus(F).expect("F").chain_held);
+}

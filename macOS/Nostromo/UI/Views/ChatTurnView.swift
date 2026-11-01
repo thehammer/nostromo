@@ -298,10 +298,13 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// How foldables resolve. Kept current: the operator's toggles here and `applyFolds` update
     /// it, so the stuck-turn rule at turn end sees choices made since the view was built.
     private var folds: FoldResolver
+    /// How foldables resolve now (read-only: Show in Transcript works out what stands for a call).
+    var currentFolds: FoldResolver { folds }
     /// The clock the running rows read their elapsed time from.
     private let now: () -> Date
     /// Where tool rows read their permission-request status from (AP2b). Nil: rows show none.
     private let approvals: ApprovalStore?
+    private let backgroundTasks: BackgroundRowBinding?
     /// The last group, while it may still change (no item after it, the turn still open).
     private var openGroupId: Int?
     /// Top-level calls fed unfinished, by `toolUseId`: a quiet completion arrives as an in-place
@@ -387,8 +390,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     ///   - heldOrdinals: messages whose roll-in the pane is holding back (`decideRollIn`).
     init(turn: ChatTurn, contentAvailable: Bool, interaction: TurnInteractionState,
          folds: FoldResolver? = nil, heldOrdinals: Set<Int> = [], now: @escaping () -> Date = Date.init,
-         approvals: ApprovalStore? = nil) {
+         approvals: ApprovalStore? = nil, backgroundTasks: BackgroundRowBinding? = nil) {
         self.approvals        = approvals
+        self.backgroundTasks  = backgroundTasks
         self.contentAvailable = contentAvailable
         self.interaction      = interaction
         self.folds            = folds ?? FoldResolver(turnKey: turn.identityKey)
@@ -873,7 +877,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     private func makeGroupView(_ group: ToolGroup, blockAt: (Int) -> TurnBlock?) -> ToolGroupView {
         let view = ToolGroupView(group: group, blockAt: blockAt,
                                  contentAvailable: contentAvailable, folds: folds,
-                                 isExpanded: folds.isExpanded(group), now: now, approvals: approvals)
+                                 isExpanded: folds.isExpanded(group), now: now, approvals: approvals,
+                                 backgroundTasks: backgroundTasks)
         view.onToggle = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.folds.groupStates[view.group.key] = isExpanded
@@ -897,7 +902,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         let view = ActivityRowView(segment: segment, blocks: blocks, contentAvailable: contentAvailable,
                                    folds: folds,
                                    isExpanded: folds.isActivityExpanded(key: segment.key), now: now,
-                                   approvals: approvals)
+                                   approvals: approvals, backgroundTasks: backgroundTasks)
         view.onToggle = { [weak self, weak view] isExpanded in
             guard let self, let view else { return }
             self.folds.activityStates[view.segment.key] = isExpanded
@@ -940,7 +945,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         guard let block else { return NSView() }
         switch block {
         case .text(let t):           return TextBlockView(text: t)
-        case .toolCall(let d):       return ToolCallView(data: d)
+        case .toolCall(let d):       return ToolCallView(data: d, backgroundTasks: backgroundTasks)
         case .toolResult(let d):
             let v = ToolResultView(data: d, contentAvailable: contentAvailable,
                                    explicitState: folds.explicitResult(block: block, index: index))
@@ -1855,8 +1860,10 @@ class ToolCallView: NSView {
     static let tooltipLimit = 2000
 
     private let data: ToolCallData
+    private let backgroundTasks: BackgroundRowBinding?
 
-    init(data: ToolCallData) {
+    init(data: ToolCallData, backgroundTasks: BackgroundRowBinding? = nil) {
+        self.backgroundTasks = backgroundTasks
         self.data = data
         super.init(frame: .zero)
         let command = data.fullCommand
@@ -1946,6 +1953,10 @@ class ToolCallView: NSView {
         }
         menu.addItem(withTitle: "Copy full input", action: #selector(copyFullInput), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Copy summary", action: #selector(copySummary), keyEquivalent: "").target = self
+        if let binding = backgroundTasks, let id = data.toolUseId,
+           let open = BackgroundOpenMenu.item(tasks: binding.tasks(toolUseIds: [id]), binding: binding) {
+            menu.addItem(open)
+        }
         return menu
     }
 
