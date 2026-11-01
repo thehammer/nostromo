@@ -169,8 +169,61 @@ final class ApprovalWireTests: XCTestCase {
             .replacingOccurrences(of: #""kind": "other""#, with: #""kind": "future_reason""#)
         let r = try decode(ApprovalRequestWire.self, json)
         XCTAssertEqual(r.toolKind, .other)
-        XCTAssertEqual(r.options, [.allowOnce, .unknown])
+        XCTAssertEqual(r.options, [.allowOnce, .allowSession])
         XCTAssertEqual(r.reason.kind, .other)
+    }
+
+    func testSessionRuleCandidatesDecodeAndAnEntryThatDoesNotDecodeIsDroppedNeverGuessed() throws {
+        let json = Self.minimalRequest.replacingOccurrences(
+            of: #""session_rule_candidates": []"#,
+            with: #""session_rule_candidates": [{"id":"c1","rule_text":"Bash(ls /a/b)","summary":"Allows exactly this command again","kind":"exact","overrides":"Bash(ls:*)"},{"id":"c2"},"junk",{"id":"c3","rule_text":"Bash(ls /a/)","summary":"s","kind":"future_kind"}]"#)
+        let r = try decode(ApprovalRequestWire.self, json)
+        XCTAssertEqual(r.sessionRuleCandidates.map(\.id), ["c1", "c3"])
+        XCTAssertEqual(r.sessionRuleCandidates[0].ruleText, "Bash(ls /a/b)")
+        XCTAssertEqual(r.sessionRuleCandidates[0].overrides, "Bash(ls:*)")
+        XCTAssertEqual(r.sessionRuleCandidates[0].kind, .exact)
+        XCTAssertEqual(r.sessionRuleCandidates[1].kind, .unknown)
+    }
+
+    func testTheSessionRulesFrameDecodesAndResolvedCarriesTheToolUseIdWhenPresent() throws {
+        let frame = try decode(ApprovalSessionRulesFrame.self, #"""
+        {"type":"approval_session_rules","tag":"cody-1","rules":[{"id":"r1","rule_text":"Bash(rm -rf ~/Library/Caches/:*)","summary":"s","kind":"path_prefix","created_at_ms":5,"uses":2,"agent_id":"agent_x"},{"id":"bad"}]}
+        """#)
+        XCTAssertEqual(frame.tag, "cody-1")
+        XCTAssertEqual(frame.rules, [ApprovalSessionRule(id: "r1", ruleText: "Bash(rm -rf ~/Library/Caches/:*)", summary: "s",
+                                                         kind: .pathPrefix, createdAtMs: 5, uses: 2, agentId: "agent_x")])
+        let empty = try decode(ApprovalSessionRulesFrame.self, #"{"type":"approval_session_rules","tag":"t","rules":[]}"#)
+        XCTAssertEqual(empty.rules, [])
+
+        let with = try decode(ApprovalResolvedFrame.self, #"{"type":"approval_resolved","tag":"t","request_id":"r","outcome":"allowed_by_session_rule","at_ms":7,"tool_use_id":"toolu_9"}"#)
+        XCTAssertEqual(with.toolUseId, "toolu_9")
+        let without = try decode(ApprovalResolvedFrame.self, #"{"type":"approval_resolved","tag":"t","request_id":"r","outcome":"denied","at_ms":7}"#)
+        XCTAssertNil(without.toolUseId)
+    }
+
+    func testAnAllowSessionDecisionAndARevokeEncodeExactly() throws {
+        let answer = ClientApprovalAnswer(
+            requestId: "r1",
+            decision: ApprovalDecisionWire(kind: .allowSession, candidateId: "c1", ruleText: "Bash(ls /a/b)"),
+            windowId: "w", operatorNonce: "n")
+        let o = try encode(answer)
+        XCTAssertEqual(o["type"] as? String, "approval_answer")
+        let d = try XCTUnwrap(o["decision"] as? [String: Any])
+        XCTAssertEqual(d["kind"] as? String, "allow_session")
+        XCTAssertEqual(d["candidate_id"] as? String, "c1")
+        XCTAssertEqual(d["rule_text"] as? String, "Bash(ls /a/b)")
+        XCTAssertNil(d["note"])
+        // Nothing but `kind` for the decisions that carry no rule.
+        let plain = try encode(ApprovalDecisionWire(kind: .allowOnce))
+        XCTAssertEqual(Set(plain.keys), ["kind"])
+
+        let revoke = try encode(ClientApprovalRevokeSessionRule(tag: "cody-1", ruleId: "r1", operatorNonce: "n"))
+        XCTAssertEqual(revoke["type"] as? String, "approval_revoke_session_rule")
+        XCTAssertEqual(revoke["tag"] as? String, "cody-1")
+        XCTAssertEqual(revoke["rule_id"] as? String, "r1")
+        XCTAssertEqual(revoke["operator_nonce"] as? String, "n")
+        let bare = try encode(ClientApprovalRevokeSessionRule(tag: "t", ruleId: "r", operatorNonce: nil))
+        XCTAssertNil(bare["operator_nonce"])
     }
 
     func testTheRequestFrameAndTheSnapshotFrameDecode() throws {
