@@ -530,7 +530,7 @@ final class FocusModeSyncTests: XCTestCase {
 
     func testASpliceFromTheStartForgetsChoicesAboutTurnsNoLongerHeld() {
         let world = FV4StoreWorld(self)
-        let store = world.store
+        let store: TranscriptFoldStore = world.store
         let sync = PaneFoldSync(tag: "fv4-a", store: store)
         sync.recordFold(key: "g:old", turnKey: "old-turn", open: true)
         sync.recordFold(key: "g:kept", turnKey: "kept-turn", open: true)
