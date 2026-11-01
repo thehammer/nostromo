@@ -18,6 +18,7 @@ import AppKit
     func revealTerminalAuditLog(_ sender: Any?)
     func terminalFind(_ sender: Any?)
     func copyTerminalLatencyStats()
+    func copyMotherNoticeStats()
     func openSecondWindowQA(_ sender: Any?)
 }
 
@@ -148,6 +149,12 @@ enum MainMenu {
                                              keyEquivalent: "")
         terminalLatencyItem.target = target
         debugMenu.addItem(terminalLatencyItem)
+        // Counts only, never a title or a focus name. No key equivalent.
+        let noticeStatsItem = NSMenuItem(title: "Copy Mother Notice Stats",
+                                         action: #selector(MainMenuActions.copyMotherNoticeStats),
+                                         keyEquivalent: "")
+        noticeStatsItem.target = target
+        debugMenu.addItem(noticeStatsItem)
         // QA only (enabled when the bundle id is not the real app's): a second window on the main
         // display's focus, so one terminal can be mirrored without a second display. ⌃⌥⌘N lets the
         // QA scripts press it through app-control.

@@ -157,7 +157,8 @@ class ReplView: NSView {
         let shared = AppStore.shared.session(for: tag, agentName: agentName, displayName: displayName, workingDirectory: workingDirectory)
         session = shared
         // The guard bar names who was blocked (`Blocked: Cody tried to …`).
-        approvalHost = ApprovalOverlayHost(tag: tag, store: ApprovalStore.shared, agentName: { shared.agentName })
+        approvalHost = ApprovalOverlayHost(tag: tag, store: ApprovalStore.shared, agentName: { shared.agentName },
+                                           noticeStates: AppStore.shared.$motherNoticeState.eraseToAnyPublisher())
         let approvals = approvalHost
         // Stacks above an approval card of the same pane without moving it.
         signInHost = ClaudeSignInOverlayHost(tag: tag, store: ClaudeLoginStore.shared, obstructionTop: { [weak approvals] in

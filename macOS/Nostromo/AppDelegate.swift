@@ -292,6 +292,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         pasteboard.setString(TerminalLatencyStats.shared.report(), forType: .string)
     }
 
+    /// Debug > Copy Mother Notice Stats: the notice switches, wakes per focus per day, held counts by reason and
+    /// the share of jobs with a verified origin. A view action (it only copies text), so not gesture-gated.
+    @objc func copyMotherNoticeStats() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(MotherNoticeStats.text(state: AppStore.shared.motherNoticeState,
+                                                    annotations: AppStore.shared.motherAnnotations), forType: .string)
+    }
+
     /// Terminal > New Terminal (⌘T): a login shell in the key window's focus, in its project directory,
     /// split below the pane that holds the keyboard (the REPL by default). That window's terminal takes
     /// the keyboard when the daemon reports it; an agent-opened terminal never does.

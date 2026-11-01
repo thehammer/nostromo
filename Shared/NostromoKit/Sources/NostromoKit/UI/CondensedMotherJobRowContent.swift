@@ -74,12 +74,25 @@ struct CondensedMotherJobRowContent: View {
                     .padding(.trailing, line.badgesCollapsed ? 2 : MotherRowLineTwo.badgeSpacing)
                     .help(badgeTooltip)
             }
-            // MF6 puts the notified mark here.
-            Color.clear.frame(width: MotherRowLineTwo.notifiedSlotWidth, height: 1)
+            notifiedMark(line.notifiedMark)
         }
         .font(.caption)
         .foregroundStyle(.secondary)
         .lineLimit(1)
+    }
+
+    /// The notified mark. App-drawn from the daemon's status; it never contains agent text except a
+    /// sanitised, capped name. Empty (but still reserving its slot) when the focus is not notified.
+    @ViewBuilder
+    private func notifiedMark(_ text: String?) -> some View {
+        if let text, let mark = model.noticeMark {
+            Text(text)
+                .lineLimit(1)
+                .fixedSize()
+                .help(mark.tooltip)
+        } else {
+            Color.clear.frame(width: MotherRowLineTwo.notifiedSlotWidth, height: 1)
+        }
     }
 
     private var badgeTooltip: String {

@@ -466,3 +466,82 @@ extension MotherFocusFitnessTests {
         }
     }
 }
+
+// MARK: - MF6: notice marks, switches, the held bar and the Debug stats copy
+//
+// Names and reasons are agent- or shell-controlled. The pure files and the bar log nothing; the gated
+// switches log only fixed words; none of the new views declares a `tag` that would collide with NSView.tag.
+
+extension MotherFocusFitnessTests {
+
+    private static let noticeSources = [
+        "Shared/NostromoKit/Sources/NostromoKit/Mother/MotherNoticeMark.swift",
+        "Shared/NostromoKit/Sources/NostromoKit/Wire/MotherNoticeStateWire.swift",
+        "macOS/Nostromo/UI/Approvals/MotherNoticeHeldBar.swift",
+    ]
+
+    func testTheNoticeFilesLogNothingAtAll() throws {
+        for path in Self.noticeSources {
+            let text = try Self.repoSource(path)
+            for pattern in ["\\blog\\.", "\\blayoutLog\\.", "\\bLogger\\b", "\\bprint\\(", "\\bNSLog\\(", "\\bos_log\\(", "\\bdebugPrint\\("] {
+                XCTAssertFalse(matches(pattern, in: text), "\(path) logs (\(pattern)): a name or reason is not for logs")
+            }
+        }
+    }
+
+    func testTheNoticeViewsDeclareNoViewTag() throws {
+        let bar = try Self.repoSource("macOS/Nostromo/UI/Approvals/MotherNoticeHeldBar.swift")
+        XCTAssertFalse(matches("\\b(var|let)\\s+tag\\b", in: bar), "MotherNoticeHeldBar declares a `tag` (NSView.tag, #356)")
+        let view = try Self.source("UI/Views/MotherView.swift")
+        let detail = try Self.source("UI/Views/MotherJobDetail.swift")
+        let blocks = [
+            block(from: "final class MotherNoticeBell", to: "\n}\n", in: view, "MotherNoticeBell"),
+            block(from: "final class MotherNoticesOffStrip", to: "\n}\n", in: view, "MotherNoticesOffStrip"),
+            block(from: "final class MotherNoticeSectionView", to: "\n}\n", in: detail, "MotherNoticeSectionView"),
+        ]
+        for text in blocks {
+            XCTAssertFalse(matches("\\b(var|let)\\s+tag\\b", in: text), "a notice view declares a `tag` (NSView.tag, #356)")
+        }
+    }
+
+    func testTheNoticeSwitchesLogOnlyFixedWords() throws {
+        let store = try Self.source("Data/AppStore.swift")
+        let switches = block(from: "struct MotherNoticeSwitches", to: "\n}\n", in: store, "MotherNoticeSwitches")
+        let statements = try logStatements(in: switches)
+        XCTAssertFalse(statements.isEmpty, "the switches log a refusal by its reason")
+        for statement in statements {
+            XCTAssertFalse(statement.contains("tag") || statement.contains("name") || statement.contains("mode"),
+                           "a switch log carries a focus tag, name or mode: \(statement)")
+        }
+        let client = try Self.source("Data/NostromodClient.swift")
+        let send = block(from: "func sendMotherNoticeSettings", to: "\n    }\n", in: client, "sendMotherNoticeSettings")
+        XCTAssertTrue(try logStatements(in: send).isEmpty, "sendMotherNoticeSettings logs a focus tag")
+    }
+
+    func testTheNoticeSwitchesAskAPersonBeforeSending() throws {
+        let store = try Self.source("Data/AppStore.swift")
+        let switches = block(from: "struct MotherNoticeSwitches", to: "\n}\n", in: store, "MotherNoticeSwitches")
+        XCTAssertTrue(switches.contains("HumanGesture.permit"), "the notice switches must run HumanGesture.permit")
+        let focusMode = block(from: "func setFocusMode", to: "\n    }\n", in: switches, "setFocusMode")
+        let global = block(from: "func setGlobal", to: "\n    }\n", in: switches, "setGlobal")
+        for body in [focusMode, global] {
+            let permit = body.range(of: "permitted(")?.lowerBound
+            let send = body.range(of: "send(")?.lowerBound
+            XCTAssertNotNil(permit); XCTAssertNotNil(send)
+            if let permit, let send { XCTAssertLessThan(permit, send, "the gate runs before the frame is sent") }
+        }
+        let tabBar = try Self.source("UI/TabBarView.swift")
+        XCTAssertFalse(tabBar.contains("sendMotherNoticeSettings"), "TabBarView sends only through the gated switches")
+        XCTAssertTrue(tabBar.contains("menuSelection: true"), "a menu item passes menuSelection: true")
+        let view = try Self.source("UI/Views/MotherView.swift")
+        XCTAssertFalse(view.contains("sendMotherNoticeSettings"), "the bell sends only through the gated switches")
+    }
+
+    func testCopyMotherNoticeStatsIsAViewAction() throws {
+        let delegate = try Self.source("AppDelegate.swift")
+        let copy = block(from: "func copyMotherNoticeStats", to: "\n    }\n", in: delegate, "copyMotherNoticeStats")
+        for needle in ["HumanGesture", "SyntheticInputGate", "sendMotherNoticeSettings"] {
+            XCTAssertFalse(copy.contains(needle), "copyMotherNoticeStats references \(needle): it only copies text")
+        }
+    }
+}
