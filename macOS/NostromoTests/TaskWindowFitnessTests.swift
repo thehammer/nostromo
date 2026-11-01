@@ -356,12 +356,12 @@ final class TaskWindowFitnessTests: XCTestCase {
             for range in matches(of: pattern, in: code) {
                 var closures: [String] = []
                 var index = skippingSpace(units, from: range.upperBound)
-                if index < units.count, units[index] == UInt16(ascii: "(") {
+                if index < units.count, units[index] == UInt16(UInt8(ascii: "(")) {
                     guard let close = closing(units, from: index, open: "(", close: ")") else { continue }
                     closures += braceGroups(units, in: (index + 1) ..< close)
                     index = skippingSpace(units, from: close + 1)
                 }
-                if index < units.count, units[index] == UInt16(ascii: "{"), let close = closing(units, from: index, open: "{", close: "}") {
+                if index < units.count, units[index] == UInt16(UInt8(ascii: "{")), let close = closing(units, from: index, open: "{", close: "}") {
                     closures.append(String(decoding: units[(index + 1) ..< close], as: UTF16.self))
                 }
                 for body in closures {
@@ -396,7 +396,7 @@ final class TaskWindowFitnessTests: XCTestCase {
 
     /// The index of the bracket that closes the one at `start`.
     private static func closing(_ units: [UInt16], from start: Int, open: Character, close: Character) -> Int? {
-        let (opener, closer) = (UInt16(ascii: open.unicodeScalars.first!), UInt16(ascii: close.unicodeScalars.first!))
+        let (opener, closer) = (UInt16(open.unicodeScalars.first!.value), UInt16(close.unicodeScalars.first!.value))
         var depth = 0
         var index = start
         while index < units.count {
@@ -416,7 +416,7 @@ final class TaskWindowFitnessTests: XCTestCase {
         var groups: [String] = []
         var index = range.lowerBound
         while index < range.upperBound {
-            if units[index] == UInt16(ascii: "{"), let close = closing(units, from: index, open: "{", close: "}"), close < range.upperBound {
+            if units[index] == UInt16(UInt8(ascii: "{")), let close = closing(units, from: index, open: "{", close: "}"), close < range.upperBound {
                 groups.append(String(decoding: units[(index + 1) ..< close], as: UTF16.self))
                 index = close
             }

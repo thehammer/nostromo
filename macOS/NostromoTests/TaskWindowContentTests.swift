@@ -235,7 +235,7 @@ final class TaskWindowContentTests: XCTestCase {
 
     func testALineBreakIsOneLineFeedAndTheDescriptionIsOneLine() {
         let content = make(meta(description: "first\r\nsecond\nthird"), detail: detail(completion: "a\r\nb"))
-        let ended = make(meta(status: .completed, description: "first\r\nsecond\nthird"), detail: detail(completion: "a\r\nb"))
+        let ended = make(meta(description: "first\r\nsecond\nthird", status: .completed), detail: detail(completion: "a\r\nb"))
 
         XCTAssertFalse(content.description.contains("\n"), "the description is one line in the header")
         XCTAssertFalse(content.description.contains("\r"))
