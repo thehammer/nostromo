@@ -167,7 +167,7 @@ public enum ApprovalSessionRuleKind: String, Codable, Equatable {
 
 /// A rule the human may choose "for this session" on one held request. The daemon derives
 /// it; the app only shows it and echoes `id` and `ruleText` back.
-public struct ApprovalSessionRuleCandidate: Decodable, Equatable {
+public struct ApprovalSessionRuleCandidate: Codable, Equatable {
     public let id: String
     /// The rule exactly as the card shows it: `Bash(rm -rf ~/Library/Caches/:*)`.
     public let ruleText: String

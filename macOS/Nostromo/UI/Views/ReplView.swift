@@ -351,6 +351,7 @@ class ReplView: NSView {
         // any of them (or by an agent, or a script) reaches all their chips.
         inputBar.bindModel(tag: session.tag, agentName: session.agentName, store: ModelStore.shared)
         inputBar.bindBackground(tag: session.tag, store: BackgroundTaskStore.shared, displayName: session.displayName)
+        inputBar.bindSessionRules(tag: session.tag, store: ApprovalStore.shared)
         inputBar.bindMode(tag: session.tag, store: foldSync.store,
                           harnessMode: foldsExpandedByDefault ? .allActivity : nil)
         inputBar.onSetMode = { [weak self] mode in self?.setTranscriptViewMode(mode) }

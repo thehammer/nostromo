@@ -277,6 +277,8 @@ enum ServerMsg {
     case approvalGuardBlocked(ApprovalGuardBlockedFrame)
     /// An `approval_answer` was not applied.
     case approvalAnswerRefused(ApprovalAnswerRefusedFrame)
+    /// A focus's active session rules (full picture; replaces the last).
+    case approvalSessionRules(ApprovalSessionRulesFrame)
 
     // ── Claude sign-in (CL1; CL2 renders it) ──────────────────────────────────
     /// Every session waiting for a Claude sign-in (full picture; replaces the last).
@@ -1134,6 +1136,17 @@ class NostromodClient {
         writeFrameLocked(body, to: curFd, type: "approval_answer", tag: nil)
     }
 
+    /// Revoke one active session rule. Carries the connection's `operator_nonce`, like `approvalAnswer`.
+    func approvalRevokeSessionRule(tag: String, ruleId: String) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("approval_revoke_session_rule dropped — not connected"); return }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(ClientApprovalRevokeSessionRule(tag: tag, ruleId: ruleId, operatorNonce: nonce))
+        else { return }
+        writeFrameLocked(body, to: curFd, type: "approval_revoke_session_rule", tag: tag)
+    }
+
     /// Whether the connection's last `welcome` advertised `tasks` (background task frames, BA0).
     var daemonAdvertisesTasks: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
@@ -1749,6 +1762,13 @@ class NostromodClient {
                 return .approvalResolved(m)
             } else {
                 log.error("failed to decode approval_resolved")
+            }
+
+        case "approval_session_rules":
+            if let m = try? decoder.decode(ApprovalSessionRulesFrame.self, from: raw) {
+                return .approvalSessionRules(m)
+            } else {
+                log.error("failed to decode approval_session_rules")
             }
 
         case "approval_pending":

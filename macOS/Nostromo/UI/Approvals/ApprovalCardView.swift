@@ -39,6 +39,14 @@ private let cardLog = Logger(subsystem: "com.hammer.nostromo", category: "approv
 //
 // Layout is by frame (top to bottom), not Auto Layout, so the height is exact.
 //
+// "This session" (AP4): when the daemon offers session-rule candidates, a `This session ▾` pop-up
+// sits beside Allow once. Choosing an item ONLY selects it (nothing is sent): the card then shows,
+// inside its own frame, the exact rule text, what it covers, who it is for and, for an ask-rule
+// request, that it overrides the user's rule, with an `Allow for this session` button. That button
+// is the second human gesture (`SessionRuleGesture`); it has no key equivalent and is never the
+// default. The pick reverts after 15 s, when the request's state changes and when the card leaves
+// its window.
+//
 // AskUserQuestion (AP2c): when the daemon lists `answer_questions` for the request, the input is
 // replaced by a form (`ApprovalQuestionFormView`, in a vertical scroll view) and Allow once by
 // Submit. Submit goes through the same gesture check and needs every question answered; the raw
@@ -151,6 +159,20 @@ struct ApprovalCardListing: Equatable {
     /// Where this window's card is among the focus's requests: `page` of `of` (`1 of 3`). 1 of 1 for a lone request.
     let page: Int
     let of: Int
+    /// The session-rule candidates the `This session` menu offers (additive: `session_rules`, empty when none).
+    var sessionRules: [SessionRule] = []
+    /// The candidate the person selected, and the panel text the card shows for it (additive; null when none).
+    var sessionSelectedID: String?
+    var sessionPanel: [String]?
+
+    /// One candidate of the `This session` menu: the exact rule text and what the daemon says it covers.
+    struct SessionRule: Equatable {
+        let id: String
+        let ruleText: String
+        let summary: String
+        let kind: String
+        let overrides: String?
+    }
 
     var jsonObject: [String: Any] {
         var json: [String: Any] = [
@@ -172,6 +194,12 @@ struct ApprovalCardListing: Equatable {
             "page": page,
             "of": of,
         ]
+        json["session_rules"] = sessionRules.map {
+            ["id": $0.id, "rule_text": $0.ruleText, "summary": $0.summary, "kind": $0.kind,
+             "overrides": $0.overrides ?? NSNull()] as [String: Any]
+        }
+        json["session_selected"] = sessionSelectedID ?? NSNull()
+        json["session_panel"] = sessionPanel ?? NSNull()
         json["questions"] = questions.map { $0.map(\.jsonObject) } ?? NSNull()
         json["command_count"] = commandCount ?? NSNull()
         json["banner"] = banner ?? NSNull()
@@ -193,6 +221,8 @@ final class ApprovalCardView: NSView {
     /// The least the `1 of 3` label gets; it grows to its measured text (`10 of 12`, `100 of 120`).
     static let pageLabelWidth: CGFloat = 50
     static let submitButtonWidth: CGFloat = 96
+    /// `This session ▾`, left of Allow once.
+    static let sessionButtonWidth: CGFloat = 108
     static let minimumInputHeight: CGFloat = 44
     /// A question card's form never gets less than this unless the pane is shorter, and its expanded raw input never more than `detailsInputHeight`.
     static let minimumFormHeight: CGFloat = 96
@@ -218,6 +248,19 @@ final class ApprovalCardView: NSView {
     private(set) var detailsButton: ApprovalButton?
     /// The raw input is shown (a question card starts with it collapsed).
     private(set) var detailsExpanded = false
+    /// AP4: the `This session ▾` pop-up, and the confirm button of the selected rule (nil without candidates).
+    private(set) var sessionButton: ApprovalButton?
+    private(set) var sessionConfirmButton: ApprovalButton?
+    /// The rule the person picked (step 1); nothing is sent for it until they confirm (step 2).
+    private(set) var selectedCandidate: ApprovalSessionRuleCandidate?
+    /// The gate of the two steps (see `SessionRuleGesture`).
+    private let gesture: SessionRuleGesture
+    private let currentEvent: () -> NSEvent?
+    private var selectionGeneration = 0
+    private let sessionRuleLabel = NSTextField(wrappingLabelWithString: "")
+    private let sessionSummaryLabel = NSTextField(wrappingLabelWithString: "")
+    private let sessionScopeLabel = NSTextField(wrappingLabelWithString: "")
+    private let sessionOverridesLabel = NSTextField(wrappingLabelWithString: "")
 
     /// Asked to re-measure the card (its content changed height: the note row opened).
     var onNeedsLayout: (() -> Void)?
@@ -270,7 +313,11 @@ final class ApprovalCardView: NSView {
     ///   coverage (a test's window is never ordered in). Nil asks the window. Ignored in release builds.
     init(entry: ApprovalEntry, store: ApprovalStore, windowID: @escaping () -> String,
          permit: GesturePermit? = nil, armDelay: TimeInterval = 0, isOnScreen: (() -> Bool)? = nil,
-         questionDraft: [ApprovalQuestionSelection]? = nil) {
+         questionDraft: [ApprovalQuestionSelection]? = nil,
+         gesture: SessionRuleGesture = SessionRuleGesture(),
+         currentEvent: @escaping () -> NSEvent? = { NSApp.currentEvent }) {
+        self.gesture = gesture
+        self.currentEvent = currentEvent
         self.questionDraft = questionDraft
         request = entry.request
         state = entry.state
@@ -354,11 +401,18 @@ final class ApprovalCardView: NSView {
     func update(entry: ApprovalEntry) {
         guard entry.request.id == request.id, entry.state != state else { return }
         state = entry.state
+        clearSessionSelection()   // the request changed: a pick made for the old state does not carry over
         refresh()
     }
 
     var canAllow: Bool {
         isArmed && options.offersAllowOnce && model.isVerified && !inputView.displayFailed && inputView.hasShownEveryLine
+    }
+
+    /// `Allow for this session` can be pressed: a rule is selected, the request is waiting, and everything
+    /// Allow once needs holds (armed, the whole input shown, a verified display).
+    var canAllowSession: Bool {
+        state == .pending && selectedCandidate != nil && canAllow
     }
 
     /// What Allow once says: the reason it can't be pressed yet, or `Allow once`.
@@ -438,9 +492,12 @@ final class ApprovalCardView: NSView {
                 options.append(.init(id: control.rawValue, enabled: allowButton?.isEnabled ?? false, label: allowButton?.title ?? ""))
             case .answerQuestions:
                 options.append(.init(id: control.rawValue, enabled: submitButton?.isEnabled ?? false, label: submitButton?.title ?? ""))
+            case .allowSession:
+                options.append(.init(id: control.rawValue, enabled: sessionConfirmButton?.isEnabled ?? false,
+                                     label: sessionConfirmButton?.title ?? ""))
             }
         }
-        return ApprovalCardListing(
+        var listing = ApprovalCardListing(
             requestID: request.id, focus: request.tag,
             agent: ApprovalDisplayModel.contextText(ApprovalKinds.asker(for: request), keepingLineFeeds: false),
             tool: request.toolName, headline: headlineLabel.stringValue,
@@ -453,6 +510,12 @@ final class ApprovalCardView: NSView {
             secondsLeft: countdown.secondsLeft, state: stateDescription,
             displayFailed: inputView.displayFailed, questions: questionListing,
             page: currentPage?.position ?? 1, of: currentPage?.count ?? 1)
+        listing.sessionRules = self.options.sessionRules.map {
+            .init(id: $0.id, ruleText: $0.ruleText, summary: $0.summary, kind: $0.kind.rawValue, overrides: $0.overrides)
+        }
+        listing.sessionSelectedID = selectedCandidate?.id
+        listing.sessionPanel = sessionPanelTexts
+        return listing
     }
 
     /// What the form shows and has chosen, for `approvals list`.
@@ -484,7 +547,7 @@ final class ApprovalCardView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { countdown.stop() } else { countdown.start() }
+        if window == nil { countdown.stop(); clearSessionSelection() } else { countdown.start() }
         startArming()
     }
 
@@ -508,6 +571,11 @@ final class ApprovalCardView: NSView {
 
     @objc private func controlPressed(_ sender: ApprovalButton) {
         guard let control = ApprovalControl(rawValue: sender.identifier?.rawValue ?? "") else { return }
+        if control == .allowSession {
+            // The second step has its own, stricter gate (it includes `HumanGesture.permit`).
+            confirmSession(from: sender)
+            return
+        }
         guard isHuman(on: sender, control: control.rawValue) else { return }
         switch control {
         case .deny: submit(ApprovalDecisionWire(kind: .deny))
@@ -517,11 +585,129 @@ final class ApprovalCardView: NSView {
             guard canAllow else { return }
             submit(ApprovalDecisionWire(kind: .allowOnce))
         case .denyWithNote: sendNote(from: sender)
+        case .allowSession: break   // handled above
         case .answerQuestions:
             // Disabled controls don't fire, but the rule is checked where it matters.
             guard canSubmit, let answers = questionForm?.answers else { return }
             submit(ApprovalDecisionWire(kind: .answerQuestions, answers: answers))
         }
+    }
+
+    // MARK: Session rules (AP4)
+
+    /// The pop-up: show the candidates' exact texts. Opening it selects nothing.
+    @objc private func showSessionMenu(_ sender: ApprovalButton) {
+        guard state == .pending else { return }
+        let menu = NSMenu()
+        for candidate in options.sessionRules {
+            let item = NSMenuItem(title: ApprovalDisplayModel.contextText(candidate.ruleText, keepingLineFeeds: false),
+                                  action: #selector(sessionItemChosen(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = candidate.id
+            item.toolTip = ApprovalDisplayModel.contextText(candidate.summary, keepingLineFeeds: false)
+            if candidate.id == selectedCandidate?.id { item.state = .on }
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
+    }
+
+    /// Step 1: a menu item was chosen. This only selects: nothing is sent.
+    @objc private func sessionItemChosen(_ item: NSMenuItem) {
+        guard let id = item.representedObject as? String,
+              let candidate = options.sessionRules.first(where: { $0.id == id }),
+              let button = sessionButton, state == .pending else { return }
+        selectSessionRule(candidate, control: button)
+    }
+
+    /// Step 1, by the gate. Returns whether the rule is now selected.
+    @discardableResult
+    func selectSessionRule(_ candidate: ApprovalSessionRuleCandidate, control: NSView) -> Bool {
+        switch gesture.select(event: currentEvent(), control: control) {
+        case .allowed:
+            selectedCandidate = candidate
+            selectionGeneration += 1
+            let generation = selectionGeneration
+            showSessionPanel(for: candidate)
+            DispatchQueue.main.asyncAfter(deadline: .now() + SessionRuleGesture.selectionLifetime) { [weak self] in
+                guard let self, self.selectionGeneration == generation else { return }
+                self.clearSessionSelection()
+            }
+            return true
+        case .refused(let refusal):
+            reportSessionRefusal(refusal)
+            return false
+        }
+    }
+
+    /// Step 2: `Allow for this session` pressed. Sends one `allow_session` naming the shown rule, or nothing.
+    private func confirmSession(from sender: NSView) {
+        // Disabled controls don't fire, but the rule is checked where it matters.
+        guard canAllowSession, let candidate = selectedCandidate else { return }
+        switch gesture.confirm(event: currentEvent(), button: sender) {
+        case .allowed:
+            submit(ApprovalDecisionWire(kind: .allowSession, candidateId: candidate.id, ruleText: candidate.ruleText))
+            clearSessionSelection()
+        case .refused(let refusal):
+            cardLog.notice("allow_session refused: \(String(describing: refusal), privacy: .public) on approval \(self.request.id, privacy: .public)")
+            reportSessionRefusal(refusal)
+        }
+    }
+
+    /// A refusal by `HumanGesture.permit` is reported to the daemon, which logs it; the others change nothing.
+    private func reportSessionRefusal(_ refusal: SessionRuleGesture.Refusal) {
+        guard case .notHuman(let reason) = refusal else { return }
+        let channel: ApprovalRefusalChannel
+        switch reason {
+        case .appControl: channel = .appControl
+        case .accessibilityPress: channel = .accessibility
+        default: channel = .unknown
+        }
+        store.reportRefusal(requestId: request.id, control: ApprovalControl.allowSession.rawValue, channel: channel)
+    }
+
+    /// Drop the pick: the panel and the confirm button go away.
+    func clearSessionSelection() {
+        gesture.clear()
+        selectionGeneration += 1
+        guard selectedCandidate != nil else { return }
+        selectedCandidate = nil
+        for label in sessionLabels { label.isHidden = true }
+        sessionConfirmButton?.isHidden = true
+        refresh()
+        needsLayout = true
+        onNeedsLayout?()
+    }
+
+    private var sessionLabels: [NSTextField] {
+        [sessionRuleLabel, sessionSummaryLabel, sessionScopeLabel, sessionOverridesLabel]
+    }
+
+    /// The panel's lines as shown, top to bottom, when a rule is selected.
+    private var sessionPanelTexts: [String]? {
+        guard selectedCandidate != nil else { return nil }
+        return sessionLabels.filter { !$0.isHidden }.map(\.stringValue)
+    }
+
+    /// The exact rule, what it covers, who it is for, and (for an ask-rule request) that it overrides the user's rule.
+    private func showSessionPanel(for candidate: ApprovalSessionRuleCandidate) {
+        ApprovalContextText.set(sessionRuleLabel, candidate.ruleText, wraps: false,
+                                font: .monospacedSystemFont(ofSize: 12, weight: .semibold), color: ApprovalPalette.commandText)
+        ApprovalContextText.set(sessionSummaryLabel, candidate.summary, font: .systemFont(ofSize: 11), color: ApprovalPalette.commandText)
+        let asker = ApprovalDisplayModel.contextText(ApprovalKinds.asker(for: request), keepingLineFeeds: false)
+        sessionScopeLabel.stringValue = "For \(asker) in this session only, until it stops, restarts or you Clear Context"
+        if request.reason.kind == .askRule {
+            let which = candidate.overrides.map { "your rule \(ApprovalDisplayModel.contextText($0, keepingLineFeeds: false))" } ?? "your ask rule"
+            sessionOverridesLabel.stringValue = "Overrides \(which) for matching commands, this session only"
+            sessionOverridesLabel.isHidden = false
+        } else {
+            sessionOverridesLabel.stringValue = ""
+            sessionOverridesLabel.isHidden = true
+        }
+        for label in [sessionRuleLabel, sessionSummaryLabel, sessionScopeLabel] { label.isHidden = false }
+        sessionConfirmButton?.isHidden = false
+        refresh()
+        needsLayout = true
+        onNeedsLayout?()
     }
 
     @objc private func detailsPressed(_ sender: ApprovalButton) {
@@ -744,9 +930,29 @@ final class ApprovalCardView: NSView {
                                      tip: "Run this one call only.")
             allowButton?.lineBreakMode = .byTruncatingTail
         }
+        if options.offersAllowSession {
+            let pop = ApprovalButton(title: "This session ▾", target: self, action: #selector(showSessionMenu(_:)))
+            configure(pop, id: "session_menu", action: #selector(showSessionMenu(_:)))
+            pop.title = "This session ▾"
+            pop.setAccessibilityLabel("Allow for this session: choose a rule")
+            pop.toolTip = "Choose a narrow rule to allow for this session only. Choosing does not allow anything yet."
+            sessionButton = pop
+            buttonRow.addSubview(pop)
+            sessionConfirmButton = makeConfirmButton()
+            for label in sessionLabels {
+                label.font = .systemFont(ofSize: 11)
+                label.textColor = ApprovalPalette.mutedText
+                label.maximumNumberOfLines = 0
+                label.lineBreakMode = .byWordWrapping
+                label.isSelectable = true
+                label.isHidden = true
+            }
+            sessionOverridesLabel.textColor = ApprovalPalette.warning
+        }
 
         for v in [headlineLabel, pageLabel, pagePreviousButton, pageNextButton, collapseButton, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
-                  formScroll, inputView, agentSaysLabel, noticeLabel, noteRow, statusLabel, buttonRow] {
+                  formScroll, inputView, agentSaysLabel, noticeLabel, noteRow,
+                  sessionRuleLabel, sessionSummaryLabel, sessionScopeLabel, sessionOverridesLabel, statusLabel, buttonRow] {
             v.translatesAutoresizingMaskIntoConstraints = true
             addSubview(v)
         }
@@ -765,7 +971,9 @@ final class ApprovalCardView: NSView {
         ring.append(denyButton)
         if let b = denyMoreButton { ring.append(b) }
         if let b = denyAndStopButton { ring.append(b) }
+        if let b = sessionButton { ring.append(b) }
         if let b = allowButton { ring.append(b) }
+        if let b = sessionConfirmButton { ring.append(b) }
         if let b = submitButton { ring.append(b) }
         ring.append(collapseButton)
         for (i, view) in ring.enumerated() { view.nextKeyView = ring[(i + 1) % ring.count] }
@@ -789,6 +997,18 @@ final class ApprovalCardView: NSView {
         refresh()
         needsLayout = true
         onNeedsLayout?()
+    }
+
+    /// `Allow for this session`: in the card's own rows (not the button row), hidden until a rule is selected.
+    private func makeConfirmButton() -> ApprovalButton {
+        let b = ApprovalButton(title: "Allow for this session", target: self, action: #selector(controlPressed(_:)))
+        configure(b, id: ApprovalControl.allowSession.rawValue, action: #selector(controlPressed(_:)))
+        b.title = "Allow for this session"
+        b.setAccessibilityLabel("Allow for this session")
+        b.toolTip = "Create this rule and allow this call. Matching calls in this session are then allowed without asking."
+        b.isHidden = true
+        addSubview(b)
+        return b
     }
 
     private func makeButton(title: String, control: ApprovalControl, label: String, tip: String) -> ApprovalButton {
@@ -847,6 +1067,9 @@ final class ApprovalCardView: NSView {
                 ? "This input can't be displayed safely. Deny it."
                 : "Scroll the input to its end before allowing")
         }
+        sessionButton?.isEnabled = pending
+        sessionConfirmButton?.isEnabled = canAllowSession
+        sessionConfirmButton?.setAccessibilityHelp(canAllowSession ? nil : "Scroll the input to its end before allowing")
         submitButton?.isEnabled = canSubmit
         submitButton?.setAccessibilityHelp(canSubmit ? nil : "Answer every question to submit")
         questionForm?.isEnabled = pending
@@ -864,6 +1087,7 @@ final class ApprovalCardView: NSView {
         case .inFlight(let kind):
             switch kind {
             case .allowOnce: statusLabel.stringValue = "Allowing…"
+            case .allowSession: statusLabel.stringValue = "Allowing for this session…"
             case .answerQuestions: statusLabel.stringValue = "Sending answers…"
             default: statusLabel.stringValue = "Denying…"
             }
@@ -995,6 +1219,11 @@ final class ApprovalCardView: NSView {
             if !agentSaysLabel.isHidden { place(agentSaysLabel, height: wrappedHeight(agentSaysLabel, width: inner)) }
         }
         if !noticeLabel.isHidden { place(noticeLabel, height: wrappedHeight(noticeLabel, width: inner)) }
+        for label in sessionLabels where !label.isHidden { place(label, height: wrappedHeight(label, width: inner)) }
+        if let confirm = sessionConfirmButton, !confirm.isHidden {
+            let w = min(Self.allowButtonWidth, inner)
+            place(confirm, height: Self.buttonHeight, x: pad + inner - w, width: w)
+        }
         if !noteRow.isHidden {
             if apply { layoutNoteRow(width: inner) }
             place(noteRow, height: 24)
@@ -1028,8 +1257,12 @@ final class ApprovalCardView: NSView {
             x += 104
         }
         if let allow = allowButton {
-            let w = min(Self.allowButtonWidth, max(100, width - x - 16))
+            // `This session ▾` sits left of Allow once and takes its room from it.
+            let sessionRoom: CGFloat = sessionButton == nil ? 0 : Self.sessionButtonWidth + 8
+            let w = min(Self.allowButtonWidth, max(100, width - x - 16 - sessionRoom))
             allow.frame = NSRect(x: width - w, y: 0, width: w, height: Self.buttonHeight)
+            sessionButton?.frame = NSRect(x: width - w - 8 - Self.sessionButtonWidth, y: 0,
+                                          width: Self.sessionButtonWidth, height: Self.buttonHeight)
         }
         if let submit = submitButton {
             let w = min(Self.submitButtonWidth, max(72, width - x - 16))

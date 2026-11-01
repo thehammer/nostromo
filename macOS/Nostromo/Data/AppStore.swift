@@ -467,6 +467,11 @@ class AppStore: ObservableObject {
         client.approvalAnswer(requestId: requestId, decision: decision, windowId: windowID)
     }
 
+    /// Revoke one active session rule (`ApprovalStore.revoke`).
+    func revokeSessionRule(tag: String, ruleId: String) {
+        client.approvalRevokeSessionRule(tag: tag, ruleId: ruleId)
+    }
+
     /// Report an input that was refused at an approval control (`ApprovalStore.reportRefusal`).
     func reportApprovalRefusal(requestId: String?, control: String, channel: ApprovalRefusalChannel) {
         client.approvalRefusalReport(requestId: requestId, control: control, channel: channel)
@@ -1424,6 +1429,9 @@ class AppStore: ObservableObject {
             log.info("nostromd v\(version, privacy: .public) pid \(pid, privacy: .public)")
             FocusStore.shared.applyEnabledAgents(enabled)
             if enabledAgents != enabled { enabledAgents = enabled }
+            // A new connection starts with no session rules: the daemon replays what it has, and a
+            // restarted daemon has none, so a stale chip can never outlive the rules it counts.
+            approvalEvents.send(.connectionStarted)
 
         case .motherJobs(let jobs):
             // Ignored — jobs now come from the broker
@@ -1737,6 +1745,8 @@ class AppStore: ObservableObject {
             approvalEvents.send(.resolved(frame))
         case .approvalAnswerRefused(let frame):
             approvalEvents.send(.answerRefused(frame))
+        case .approvalSessionRules(let frame):
+            approvalEvents.send(.sessionRules(frame))
         case .approvalGuardBlocked(let frame):
             approvalEvents.send(.guardBlocked(frame))
         case .approvalPending:
@@ -1882,7 +1892,8 @@ extension ApprovalStore {
         let store = ApprovalStore(
             send: { AppStore.shared.answerApproval(requestId: $0, decision: $1, windowID: $2) },
             report: { AppStore.shared.reportApprovalRefusal(requestId: $0, control: $1, channel: $2) },
-            canSend: { AppStore.shared.client.hasConnection })
+            canSend: { AppStore.shared.client.hasConnection },
+            revoke: { AppStore.shared.revokeSessionRule(tag: $0, ruleId: $1) })
         store.attach(to: AppStore.shared.approvalEvents)
         return store
     }()

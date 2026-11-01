@@ -598,8 +598,9 @@ final class AppControlServer {
     private func approvals(_ req: AppControlRequest) throws -> Any {
         let sub = req.string("sub") ?? "list"
         if sub == "badges" { return approvalBadges() }
+        if sub == "session-rules" { return approvalSessionRules(focus: req.string("focus")) }
         guard sub == "list" else {
-            throw AppControlError.badRequest("approvals: only `list` and `badges` exist (both read-only)")
+            throw AppControlError.badRequest("approvals: only `list`, `badges` and `session-rules` exist (all read-only)")
         }
         let focus = req.string("focus")
         let onlyWindow = req.int("only_window")
@@ -633,6 +634,22 @@ final class AppControlServer {
             }
         }
         return ["approvals": order.compactMap { byRequest[$0] }, "guard_bars": guardBars]
+    }
+
+    /// READ-ONLY: the active "Allow for this session" rules (`approvals session-rules [--focus TAG]`), as the
+    /// store holds them: `focuses: [{tag, rules: [{id, rule_text, summary, kind, created_at_ms, uses, agent_id}]}]`.
+    /// Presses, selects and revokes nothing: no app-control command can complete either step of the gate.
+    private func approvalSessionRules(focus: String?) -> Any {
+        let store = ApprovalStore.shared
+        let tags = store.sessionRuleTags.filter { focus == nil || $0 == focus }.sorted()
+        let focuses: [[String: Any]] = tags.map { tag in
+            ["tag": tag,
+             "rules": store.sessionRules(tag: tag).map { rule -> [String: Any] in
+                 ["id": rule.id, "rule_text": rule.ruleText, "summary": rule.summary, "kind": rule.kind.rawValue,
+                  "created_at_ms": rule.createdAtMs, "uses": rule.uses, "agent_id": rule.agentId ?? NSNull()]
+             }]
+        }
+        return ["focuses": focuses]
     }
 
     /// READ-ONLY: what the approvals surfaces outside the card show (`approvals badges`): the red "needs
