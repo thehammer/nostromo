@@ -246,7 +246,7 @@ final class ApprovalWireTests: XCTestCase {
         let answered = try decode(ApprovalResolvedFrame.self,
             #"{"type":"approval_resolved","tag":"cody-1","request_id":"r1","outcome":"allowed_once","by_window":"win-1","at_ms":1760000000123}"#)
         XCTAssertEqual(answered, ApprovalResolvedFrame(tag: "cody-1", requestId: "r1", outcome: "allowed_once",
-                                                       byWindow: "win-1", atMs: 1_760_000_000_123))
+                                                       byWindow: "win-1", atMs: 1_760_000_000_123, toolUseId: nil))
         let timedOut = try decode(ApprovalResolvedFrame.self,
             #"{"type":"approval_resolved","tag":"cody-1","request_id":"r1","outcome":"timed_out","at_ms":7}"#)
         XCTAssertNil(timedOut.byWindow)
