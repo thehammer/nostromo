@@ -21,11 +21,27 @@ enum MarkdownRenderer {
         let code: String
     }
 
+    /// An inline code span (`like this`): where it sits in the rendered text and its
+    /// exact text (no backticks).
+    struct InlineCodeSpan: Equatable {
+        let range: NSRange
+        let text: String
+    }
+
+    /// Longest inline span that gets a copy button; longer ones are not commands.
+    static let maxCopyableInlineSpan = 400
+
     struct Rendered {
         let text: NSAttributedString
         /// One entry per non-empty fenced block, in order. Empty blocks have nothing to copy.
         let codeBlocks: [CodeBlock]
+        /// Copyable inline code spans, in order. Empty, oversize and in-link spans are left out.
+        let inlineCodeSpans: [InlineCodeSpan]
     }
+
+    /// Marks a copyable inline span's run. The value is unique per span so adjacent
+    /// spans never coalesce into one run when read back.
+    private static let inlineSpanKey = NSAttributedString.Key("nostromo.inlineCodeSpan")
 
     /// `textColor`: every run's text colour, code included (code keeps its block background).
     /// `Theme.fg` is the conversation; a folded message in an activity lane passes
@@ -87,8 +103,13 @@ enum MarkdownRenderer {
         if endsWithEmptyCode {
             result.append(NSAttributedString(string: " ", attributes: previousCode))
         }
+        var inlineSpans: [InlineCodeSpan] = []
+        result.enumerateAttribute(inlineSpanKey, in: NSRange(location: 0, length: result.length)) { value, range, _ in
+            guard value != nil else { return }
+            inlineSpans.append(InlineCodeSpan(range: range, text: (result.string as NSString).substring(with: range)))
+        }
         finish(result, textColor: textColor, tokenRuns: tokenRuns)
-        return Rendered(text: result, codeBlocks: codeBlocks)
+        return Rendered(text: result, codeBlocks: codeBlocks, inlineCodeSpans: inlineSpans)
     }
 
     // MARK: - Private helpers
@@ -257,6 +278,8 @@ enum MarkdownRenderer {
         pattern: #"(\*\*|\*|__|_)(`[^`\n]+`)\1"#
     )
 
+    private static let linkRegex = try? NSRegularExpression(pattern: #"\[[^\]\n]*\]\([^)\n]*\)"#)
+
     private static func applyInlineSpans(to str: NSMutableAttributedString, baseFont: NSFont) {
         if let rx = emphasizedCodeRegex {
             let matches = rx.matches(in: str.string, range: NSRange(location: 0, length: str.length))
@@ -276,6 +299,11 @@ enum MarkdownRenderer {
         }
 
         var spans: [Span] = []
+        var linkRanges: [NSRange] = []
+        linkRegex?.enumerateMatches(in: text, range: full) { m, _, _ in
+            if let m { linkRanges.append(m.range) }
+        }
+        var spanCounter = 0
 
         if let rx = inlineCodeRegex {
             rx.enumerateMatches(in: text, range: full) { m, _, _ in
@@ -314,12 +342,19 @@ enum MarkdownRenderer {
                     .firstMatch(in: text, range: span.range)?
                     .range(at: 1) else { continue }
                 let inner = nsText.substring(with: contentRange)
-                let codeAttrs: [NSAttributedString.Key: Any] = [
+                var codeAttrs: [NSAttributedString.Key: Any] = [
                     .font: Theme.codeFont(size: 12),
                     .foregroundColor: Theme.fg,
                     .ligature: 0,
                     .backgroundColor: NSColor.white.withAlphaComponent(0.12),
                 ]
+                let copyable = !inner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && inner.count <= maxCopyableInlineSpan
+                    && !linkRanges.contains { NSIntersectionRange($0, span.range).length > 0 }
+                if copyable {
+                    spanCounter += 1
+                    codeAttrs[inlineSpanKey] = spanCounter
+                }
                 str.replaceCharacters(in: span.range, with: NSAttributedString(string: inner, attributes: codeAttrs))
 
             case .bold:
@@ -400,6 +435,12 @@ final class MarkdownCardView: NSView {
     private var spareButtons: [CodeCopyButton] = []
     private var clipObserver: NSObjectProtocol?
 
+    // Inline span hover button (see "Inline code copy" below).
+    private let inlineSpans: [MarkdownRenderer.InlineCodeSpan]
+    private var inlineButton: CodeCopyButton?
+    private var hoveredSpan: Int?
+    private var inlineTrackingArea: NSTrackingArea?
+
     /// `textColor`: see `MarkdownRenderer.render`. `pasteboard` is where the code
     /// blocks' copy buttons write; tests inject their own.
     init(markdown: String, textColor: NSColor = Theme.fg, pasteboard: NSPasteboard = .general) {
@@ -408,6 +449,7 @@ final class MarkdownCardView: NSView {
         let rendered = MarkdownRenderer.renderBlocks(markdown, baseFont: NSFont.systemFont(ofSize: 13),
                                                      textColor: textColor)
         self.codeBlocks = rendered.codeBlocks
+        self.inlineSpans = rendered.inlineCodeSpans
         super.init(frame: .zero)
         setupLayer()
         setupTextView()
@@ -548,6 +590,7 @@ final class MarkdownCardView: NSView {
 
         blockRects = nil
         updateCopyButtons()
+        positionInlineButton()
     }
 
     // MARK: - Window attachment
@@ -575,6 +618,7 @@ final class MarkdownCardView: NSView {
         defer {
             blockRects = nil
             updateCopyButtons()
+            if window == nil { setHoveredSpan(nil) }
         }
         guard window != nil,
               let layoutManager = textView.layoutManager,
@@ -691,6 +735,83 @@ final class MarkdownCardView: NSView {
         ) { [weak self] _ in self?.updateCopyButtons() }
     }
 
+    // MARK: - Inline code copy
+
+    /// The hover button, when one is showing. Exists for tests.
+    var inlineCopyButton: CodeCopyButton? { hoveredSpan == nil ? nil : inlineButton }
+
+    /// Which copyable span the pointer is over (`pointInCard`, nil when it left the card).
+    /// The button itself counts as part of its span, so moving onto it keeps it.
+    func updateInlineHover(at pointInCard: NSPoint?) {
+        guard let point = pointInCard, !inlineSpans.isEmpty else { return setHoveredSpan(nil) }
+        if let current = hoveredSpan, inlineHoverRect(for: current).contains(point) { return }
+        setHoveredSpan(inlineSpans.indices.first { inlineHoverRect(for: $0).contains(point) })
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let inlineTrackingArea { removeTrackingArea(inlineTrackingArea) }
+        inlineTrackingArea = nil
+        guard !inlineSpans.isEmpty else { return }
+        let area = NSTrackingArea(rect: .zero,
+                                  options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        inlineTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        updateInlineHover(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseExited(with event: NSEvent) { setHoveredSpan(nil) }
+
+    private func setHoveredSpan(_ index: Int?) {
+        guard index != hoveredSpan else { return }
+        hoveredSpan = index
+        guard let index else {
+            inlineButton?.removeFromSuperview()
+            inlineButton?.reset()
+            return
+        }
+        let button = inlineButton ?? CodeCopyButton(pasteboard: pasteboard)
+        inlineButton = button
+        button.configure(code: inlineSpans[index].text)
+        addSubview(button)
+        positionInlineButton()
+    }
+
+    private func positionInlineButton() {
+        guard let index = hoveredSpan, let button = inlineButton,
+              let rect = inlineSpanLastFragment(index) else { return }
+        // Overlay at the end of the span's last line, kept inside the card so it can never widen it.
+        let side = CodeCopyButton.side
+        let x = min(rect.maxX + 2, max(bounds.width - side - 2, 0))
+        let frame = NSRect(x: x, y: rect.midY - side / 2, width: side, height: side)
+        if button.frame != frame { button.frame = frame }
+    }
+
+    /// The span's line fragments, in card coordinates.
+    private func inlineSpanRects(_ index: Int) -> [NSRect] {
+        guard let layoutManager = textView.layoutManager, let container = textView.textContainer,
+              inlineSpans.indices.contains(index) else { return [] }
+        var count = 0
+        let none = NSRange(location: NSNotFound, length: 0)
+        guard let rects = layoutManager.rectArray(forCharacterRange: inlineSpans[index].range,
+                                                  withinSelectedCharacterRange: none,
+                                                  in: container, rectCount: &count),
+              count > 0 else { return [] }
+        let origin = textView.textContainerOrigin
+        return (0..<count).map { convert(rects[$0].offsetBy(dx: origin.x, dy: origin.y), from: textView) }
+    }
+
+    private func inlineSpanLastFragment(_ index: Int) -> NSRect? { inlineSpanRects(index).last }
+
+    /// Where the pointer counts as "over" a span: any of its line fragments, or its button.
+    private func inlineHoverRect(for index: Int) -> InlineHoverArea {
+        InlineHoverArea(rects: inlineSpanRects(index) + (hoveredSpan == index ? [inlineButton?.frame].compactMap { $0 } : []))
+    }
+
     // MARK: - Appearance
 
     /// Fixed dark-theme colors, not `NSColor.controlBackgroundColor`/`.separatorColor`.
@@ -711,6 +832,11 @@ final class MarkdownCardView: NSView {
         layer?.backgroundColor = Theme.bgBar.cgColor
         layer?.borderColor     = Theme.borderInactive.withAlphaComponent(0.6).cgColor
     }
+}
+
+private struct InlineHoverArea {
+    let rects: [NSRect]
+    func contains(_ point: NSPoint) -> Bool { rects.contains { $0.contains(point) } }
 }
 
 // MARK: - CodeCopyButton
