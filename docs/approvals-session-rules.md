@@ -26,7 +26,9 @@ A candidate exists only for a **plain Bash command**:
   cut tr basename dirname realpath readlink pwd which whoami id date uname sw_vers echo printf sleep jq shasum md5 xxd
   od strings tree lsof ps pgrep df`. Not `ln` (it makes the symlinks the prefix check depends on). The old denylists
   (`NEVER_COMMANDS`, interpreters, `NEVER_SUBSTRINGS`, `remote_shell_marker`) still apply on top, as defence in depth.
-- `rm rmdir mv cp chmod touch mkdir` with any **relative** path argument get nothing: the rule ignores the directory it
+- A word starting `--pre`, `--compress-program`, `--output`, `--exec` or `-o` (they run a program or write a file: `rg --pre`,
+  `sort -o`) gets nothing, and `uniq`/`xxd` take one operand at most (the second is an output file).
+- `rm rmdir mv cp chmod touch mkdir` with any **relative** (and `sort uniq tree xxd`, which can write a file) path argument get nothing: the rule ignores the directory it
   was granted in. No word may start with `=` (zsh `=cmd`) or `%`, or with `/.vol` (APFS volume paths name any file by
   number and bypass the path checks).
 - No word contains `ecs`, `ssm`, `execute-command`, `start-session`, `run-task`, `session-manager`, `send-keys`,

@@ -306,7 +306,14 @@ const EXACT_COMMANDS: &[&str] = &[
 
 /// Commands that change files: an exact rule for one is not offered when a path
 /// argument is relative, because the rule ignores the directory it was granted in.
-const RELATIVE_PATH_SENSITIVE: &[&str] = &["rm", "rmdir", "mv", "cp", "chmod", "touch", "mkdir"];
+const RELATIVE_PATH_SENSITIVE: &[&str] = &[
+    "rm", "rmdir", "mv", "cp", "chmod", "touch", "mkdir", // change files
+    "sort", "uniq", "tree", "xxd", // can write an output file
+];
+
+/// Flags (by prefix, lower-case) that run another program or write a file; an
+/// allowlisted command carrying one gets no rule (`rg --pre CMD`, `sort -o FILE`).
+const NEVER_FLAG_PREFIXES: &[&str] = &["--pre", "--compress-program", "--output", "-o", "--exec"];
 
 // ── candidates ────────────────────────────────────────────────────────────────
 
@@ -519,6 +526,18 @@ fn eligible(
     {
         return None;
     }
+    // `uniq IN OUT` and `xxd IN OUT` write their second operand.
+    if matches!(basename.as_str(), "uniq" | "xxd")
+        && words[1..].iter().filter(|w| !w.starts_with('-')).count() > 1
+    {
+        return None;
+    }
+    if words[1..].iter().any(|w| {
+        let w = w.to_ascii_lowercase();
+        NEVER_FLAG_PREFIXES.iter().any(|f| w.starts_with(f))
+    }) {
+        return None;
+    }
     // `=cmd` expands to a path in zsh; a leading `%` is a job spec or a format.
     if words
         .iter()
@@ -718,7 +737,7 @@ fn piece_is_protected(piece: &str, home: &Path, cwd: Option<&Path>) -> bool {
     }
     // APFS volume paths (`/.vol/<fsid>/<inode>`) name any file by number and bypass
     // every path check here.
-    if piece.to_ascii_lowercase().starts_with("/.vol") {
+    if piece.split('/').any(|c| c.eq_ignore_ascii_case(".vol")) {
         return true;
     }
     if piece.starts_with('/') || piece.starts_with("~/") {
@@ -1291,10 +1310,29 @@ mod tests {
             "ps aux",
             "pgrep foo",
             "df -h",
-            "tree build",
+            "tree /work/build",
+            "uniq /work/a",
+            "xxd /work/a",
             "lsof -i",
         ] {
             assert_eq!(texts_of(c), [format!("Bash({c})")], "{c:?}");
+        }
+    }
+
+    #[test]
+    fn an_allowlisted_command_that_runs_a_program_or_writes_a_file_gets_no_rule() {
+        for c in [
+            "rg --pre /work/x foo",
+            "rg --pre=/work/x foo",
+            "sort -o /work/a /work/b",
+            "sort --output=/work/a /work/b",
+            "sort --compress-program=/work/x /work/b",
+            "tree -o /work/a",
+            "uniq /work/a /work/b",
+            "xxd /work/a /work/b",
+            "sort a",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
         }
     }
 
@@ -1313,6 +1351,9 @@ mod tests {
             "rm -rf /.vol/1/2/Users/x/y/z",
             "ls /.VOL/1/2",
             "echo x=/.vol/1/2",
+            "ls //.vol/1/2",
+            "ls /./.vol/1/2",
+            "ls /work/../.vol/1/2",
         ] {
             assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
         }
