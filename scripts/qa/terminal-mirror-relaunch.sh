@@ -58,7 +58,12 @@ root="$(sed -n 's/^QA_ROOT=//p' <<<"$out")"
 sock="$root/app-control.sock"
 
 require_visible() {
-  if ! qa_wait_visible; then
+  wv=0; qa_wait_visible || wv=$?
+  if [ "$wv" = 2 ]; then
+    echo "RESULT: FAIL"
+    exit 1
+  fi
+  if [ "$wv" != 0 ]; then
     echo "INCONCLUSIVE: the QA window is not visible (display locked or asleep)"
     echo "RESULT: INCONCLUSIVE"
     echo "Manual checklist: see the PR body (two windows mirror, relaunch with top running, daemon stopped overlay)."

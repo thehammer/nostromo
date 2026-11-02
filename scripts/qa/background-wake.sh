@@ -238,7 +238,8 @@ for k in 1 2 3 4 5; do
         pass "escape-closes-window" "window_open is false after Escape"
       else
         inconclusive=1
-        echo "INCONCLUSIVE escape-closes-window: window_open stayed true after Escape (Escape may not reach the panel)"
+        monitor_window_open=1
+        echo "INCONCLUSIVE escape-closes-window: window_open stayed true after Escape (Escape may not reach the panel); the Monitor window stays open, so the 'absent' scan is skipped"
       fi
     else
       fail "marker-click-opens-window" "clicking marker 1 did not make window_open true within 10 s (may be scrolled out of view: enlarge the QA window)"
@@ -248,6 +249,10 @@ done
 
 # --- nothing raw is drawn ------------------------------------------------------------------------------
 while IFS= read -r name; do
+  if [ "${monitor_window_open:-0}" = 1 ]; then
+    echo "SKIPPED absent-$name: the Monitor window is still open, its text could match"
+    continue
+  fi
   text="$(python3 "$helper" absent "$name")"
   check "absent-$name" "not drawn anywhere in the window" ctl expect "$text" --absent
 done < <(python3 "$helper" absent-names)

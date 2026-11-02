@@ -734,6 +734,8 @@ def wake_main(S, argv):
             rest[1] in (W["label"], "Message\u2026", WAKE_MARKER_1)):
         if rest[1] == WAKE_MARKER_1:
             # Marker 1 is only on screen right after wake 1 (two anchor reads); later wakes scroll it away.
+            # Coupled to background-wake.sh: it clicks marker 1 right after wake 1, with exactly two
+            # transcript-anchor reads behind it. Adding an anchor read before that click needs this bound updated.
             if st["anchor_reads"] <= 2:
                 st["window_open"]["qa-mon1"] = True
             st.setdefault("marker_clicks", []).append(st["anchor_reads"])

@@ -236,6 +236,31 @@ class SnapshotTests(unittest.TestCase):
                 self.assertNotIn(secret, " ".join(probs))
                 self.assertEqual(notes, [])
 
+    def test_export_failing_after_the_run_fails_the_guard(self):
+        probs = qa.compare_snapshots(self.before, self.snap(defaults=""), notes=[])
+        self.assertTrue(any("defaults export" in p and "unavailable after" in p for p in probs), probs)
+
+    def test_export_failing_before_the_run_fails_the_guard(self):
+        before = self.snap(defaults="")
+        probs = qa.compare_snapshots(before, self.snap(), notes=[])
+        self.assertTrue(any("defaults export" in p and "unavailable before" in p for p in probs), probs)
+
+    def test_export_failing_both_times_keeps_old_behaviour_and_does_not_claim_a_scan(self):
+        before, after, notes = self.snap(defaults=""), self.snap(defaults=""), []
+        self.assertEqual(qa.compare_snapshots(before, after, notes=notes), [])
+        self.assertEqual(notes, [qa.DEFAULTS_UNCHECKED_NOTE])
+        line = qa.pass_line(before, after)
+        self.assertNotIn("no QA marker in defaults", line)
+        self.assertIn("NOT checked", line)
+        self.assertIn("no QA marker in defaults", qa.pass_line(self.before, self.snap()))
+
+    def test_task_and_label_names_are_markers(self):
+        for name in ("QA approvals", "qa-ticker", "qa-mon1", "qa-sleep", "qa-approvals"):
+            with self.subTest(name=name):
+                self.assertTrue(qa.defaults_markers("{ k = \"%s\"; }" % name), name)
+                probs = qa.compare_snapshots(self.before, self.snap(defaults="{ k = \"%s\"; }" % name), notes=[])
+                self.assertTrue(any("defaults export" in p for p in probs), probs)
+
     def test_users_daemon_vanishing_is_reported(self):
         after = self.snap(ps="  2 /A/Nostromo.app/Contents/MacOS/Nostromo\n")
         self.assertTrue(any("nostromd" in x for x in qa.compare_snapshots(self.before, after)))

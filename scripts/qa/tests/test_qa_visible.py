@@ -42,6 +42,33 @@ class WaitVisibleTest(unittest.TestCase):
             self.assertEqual(bash(script, "0"), "rc=1")
 
 
+class DeadAppTest(unittest.TestCase):
+    def test_ctl_that_never_answers_is_not_called_hidden(self):
+        script = ". '%s'\nctl() { return 1; }\nqa_wait_visible; echo rc=$?" % HELPER
+        out = bash(script, "0")
+        self.assertIn("app-control not answering", out)
+        self.assertTrue(out.endswith("rc=2"), out)
+
+    def test_answering_but_empty_stays_inconclusive_rc(self):
+        script = ". '%s'\nctl() { echo '[]'; }\nqa_wait_visible; echo rc=$?" % HELPER
+        self.assertEqual(bash(script, "0"), "rc=1")
+
+    def test_one_answer_among_failures_counts_as_answered(self):
+        script = (". '%s'\nf=$(mktemp); echo 0 > \"$f\"\n"
+                  "ctl() { n=$(( $(cat \"$f\") + 1 )); echo $n > \"$f\"; [ $n = 1 ] && return 1; echo '%s'; }\n"
+                  "qa_wait_visible; echo rc=$?") % (HELPER, HIDDEN)
+        self.assertEqual(bash(script, "0"), "rc=1")
+
+
+class SmokeScriptTest(unittest.TestCase):
+    def test_smoke_script_uses_the_shared_wait_once(self):
+        with open(os.path.join(QA_DIR, "approvals-qa-smoke.sh")) as f:
+            text = f.read()
+        self.assertIn("qa-visible.sh", text)
+        self.assertEqual(text.count("seq 1 90"), 0)
+        self.assertEqual(text.count("A fresh window is briefly invisible"), 1)
+
+
 class ScriptsUseTheWaitTest(unittest.TestCase):
     def test_every_terminal_script_with_a_visibility_check_waits_for_it(self):
         for name in ("terminal-staging.sh", "terminal-local.sh", "terminal-remote.sh", "terminal-hazard.sh",
@@ -50,6 +77,7 @@ class ScriptsUseTheWaitTest(unittest.TestCase):
                 text = f.read()
             self.assertIn("qa-visible.sh", text, name)
             self.assertIn("qa_wait_visible", text, name)
+            self.assertRegex(text, r"(?m)^[^#\n]*\bqa_wait_visible\b *(\|\||;|$)", f"{name} never calls it")
 
 
 if __name__ == "__main__":

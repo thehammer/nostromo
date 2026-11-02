@@ -39,7 +39,15 @@ MCP_SOCKET = "mcp.sock"
 # `.nostromo`; without it the app uses the system user database's home and writes into the user's own.
 QA_HOME_ENV = "NOSTROMO_QA_HOME"
 # What a QA run leaves in a file it should never have touched (besides `qa_markers`): the focus it makes.
-QA_NAME_MARKERS = {"a QA focus tag (`cody-qa-`)": b"cody-qa-", "the QA session title (`qa-approvals`)": b"qa-approvals"}
+QA_NAME_MARKERS = {
+    "a QA focus tag (`cody-qa-`)": b"cody-qa-",
+    "the QA session title (`qa-approvals`)": b"qa-approvals",
+    "the QA session label (`QA approvals`)": b"QA approvals",
+    # Task names the fake CLI's scenarios create; the app could persist them in per-tag defaults.
+    "a QA task name (`qa-ticker`)": b"qa-ticker",
+    "a QA task name (`qa-mon1`)": b"qa-mon1",
+    "a QA task name (`qa-sleep`)": b"qa-sleep",
+}
 # The session the harness drives: a daemon-created focus running the fake CLI, shown in the sidebar by its label.
 QA_FOCUS_LABEL = "QA approvals"
 QA_FOCUS_TITLE = "qa-approvals"
@@ -253,6 +261,16 @@ def defaults_markers(defaults_text, qa_root=None):
     return sorted(kind for kind, marker in markers.items() if marker and marker in data)
 
 
+DEFAULTS_UNCHECKED_NOTE = "`defaults export` was unavailable before and after the run: preferences were not checked"
+
+
+def pass_line(before, after):
+    """The final PASS line; it only claims a defaults scan when one could happen."""
+    scanned = before["defaults"] is not None and after["defaults"] is not None
+    tail = "no QA marker in defaults" if scanned else "defaults NOT checked (`defaults export` unavailable)"
+    return f"isolation guard: PASS (user's files, approvals dir, control socket and processes unchanged; {tail})"
+
+
 def compare_snapshots(before, after, approvals_dir=None, qa_root=None, nostromo_dir=None, notes=None):
     """Problems between two guard snapshots (see `take_snapshot`); empty means isolated.
 
@@ -292,7 +310,14 @@ def compare_snapshots(before, after, approvals_dir=None, qa_root=None, nostromo_
             problems.extend(state_file_problems(name, b_state.get(name), nostromo_dir, qa_root))
     if before["control_socket_inode"] != after["control_socket_inode"]:
         problems.append("~/.nostromo/app-control.sock inode changed (the user's socket was replaced)")
-    if before["defaults"] != after["defaults"]:
+    if (before["defaults"] is None) != (after["defaults"] is None):
+        # One side could not be exported: nothing was inspected, so "no QA marker" would be a false claim.
+        side = "after" if after["defaults"] is None else "before"
+        problems.append(f"`defaults export {USER_BUNDLE_ID}` unavailable {side} the run: cannot check for QA markers")
+    elif before["defaults"] is None:
+        if notes is not None:
+            notes.append(DEFAULTS_UNCHECKED_NOTE)
+    elif before["defaults"] != after["defaults"]:
         found = after.get("defaults_markers")
         if found:
             problems.append(f"`defaults export {USER_BUNDLE_ID}` changed and mentions {', '.join(found)} "
@@ -715,7 +740,8 @@ def cmd_stop(args):
     teardown(qa_root, state)
     problems = report_qa_mother(qa_root)
     notes = []
-    problems += compare_snapshots(state["before"], user_snapshot(qa_root), user_approvals_dir(), qa_root, user_nostromo_dir(),
+    after = user_snapshot(qa_root)
+    problems += compare_snapshots(state["before"], after, user_approvals_dir(), qa_root, user_nostromo_dir(),
                                   notes=notes)
     for n in notes:
         print(f"NOTE: {n}")
@@ -728,7 +754,7 @@ def cmd_stop(args):
             print(f"ISOLATION FAILURE: {p}", file=sys.stderr)
         print(f"QA root kept for debugging: {qa_root} (delete it when done)", file=sys.stderr)
         sys.exit(1)
-    print("isolation guard: PASS (user's files, approvals dir, control socket and processes unchanged; no QA marker in defaults)")
+    print(pass_line(state["before"], after))
 
 
 def main(argv):

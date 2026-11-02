@@ -90,7 +90,12 @@ root="$(sed -n 's/^QA_ROOT=//p' <<<"$out")"
 sock="$root/app-control.sock"
 audit="$root/home/.nostromo/audit/terminal.jsonl"
 
-if ! qa_wait_visible; then
+wv=0; qa_wait_visible || wv=$?
+if [ "$wv" = 2 ]; then
+  echo "RESULT: FAIL"
+  exit 1
+fi
+if [ "$wv" != 0 ]; then
   echo "INCONCLUSIVE: the QA window is not visible (display locked or asleep)"
   echo "RESULT: INCONCLUSIVE"
   exit 3

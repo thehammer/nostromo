@@ -91,7 +91,13 @@ stop_instance() {
 }
 
 require_visible() {
-  if ! qa_wait_visible; then
+  wv=0; qa_wait_visible || wv=$?
+  if [ "$wv" = 2 ]; then
+    stop_instance
+    echo "RESULT: FAIL"
+    exit 1
+  fi
+  if [ "$wv" != 0 ]; then
     echo "INCONCLUSIVE: the QA window is not visible (display locked or asleep)"
     stop_instance
     echo "RESULT: INCONCLUSIVE"
