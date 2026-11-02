@@ -12,11 +12,11 @@
 # three-element notification. For each wake the script checks:
 #   * `transcript-anchor` before and after: following the tail, bottomOffsetPt == 0 after;
 #   * the muted marker text (see lib/background_wake.py MARKERS) and the reply `ack <k>`.
-# Right after wake 1 (marker 1 and turn 1's rows are still near the bottom): the marker's accessibility label and
-# the row's "background task running" label. At the end: no raw notification text, no sentinels, no U+202E or
-# U+3164 anywhere in the window; a click on marker 1 (old content: may be scrolled out of a small QA window) opens the Monitor's task
-# window (`tasks list` window_open true), and Escape closes it (INCONCLUSIVE for that line if Escape cannot
-# reach the panel, never a FAIL).
+# Right after wake 1 (marker 1 and turn 1's rows are still near the bottom, so visible): the marker's
+# accessibility label, the row's "background task running" label, and a click on marker 1, which opens the
+# Monitor's task window (`tasks list` window_open true); Escape closes it BEFORE wake 2 (INCONCLUSIVE for that
+# line if Escape cannot reach the panel, never a FAIL). At the end: no raw notification text, no sentinels, no
+# U+202E or U+3164 anywhere in the window.
 #
 # Output is PASS/FAIL lines with fixed strings: the script never prints transcript text it did not put there.
 # Refuses (exit 2) when NOSTROMO_QA_CLAUDE_BIN is set: a real model would spend tokens.
@@ -201,6 +201,18 @@ listing="$(ctl tasks list "${focus_args[@]+"${focus_args[@]}"}")" || abort_fail 
 check "task-monitor" 'running Monitor "qa-ticker" is listed' python3 "$helper" has-task Monitor qa-ticker <<<"$listing"
 check "task-shell" 'running Shell "qa-sleep 60" is listed' python3 "$helper" has-task Shell "qa-sleep 60" <<<"$listing"
 
+# --- helpers: click marker 1 opens the Monitor's task window; Escape closes it (run right after wake 1) ----
+marker1="$(python3 "$helper" marker 1)"
+window_state() { ctl tasks list --all "${focus_args[@]+"${focus_args[@]}"}" | python3 "$helper" window-open qa-mon1; }
+wait_window() {
+  local want="$1" state
+  for _ in $(seq 1 "$(tries 40)"); do
+    state="$(window_state 2>/dev/null)" || state=error
+    [ "$state" != "$want" ] || return 0
+    nap 0.25
+  done
+  return 1
+}
 # --- the five wake groups -----------------------------------------------------------------------------
 for k in 1 2 3 4 5; do
   marker="$(python3 "$helper" marker "$k")"
@@ -217,39 +229,33 @@ for k in 1 2 3 4 5; do
       python3 "$helper" found < <(ctl find "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import background_wake as b; print(b.MARKER_AX_LABEL)' "$here/lib")")
     check_old "ax-row-label" "a row labelled 'background task running' found (the Monitor is still running)" \
       python3 "$helper" found < <(ctl find "background task running")
+    # Marker 1 is at the bottom and visible now, and nothing has scrolled it away: click it, then close the
+    # window again before wake 2.
+    if ctl click --text "$marker1" >/dev/null 2>&1 && wait_window true; then
+      pass "marker-click-opens-window" "tasks list shows window_open true for the Monitor"
+      ctl key $'\e' --key-code 53 >/dev/null 2>&1 || true
+      if wait_window false; then
+        pass "escape-closes-window" "window_open is false after Escape"
+      else
+        inconclusive=1
+        monitor_window_open=1
+        echo "INCONCLUSIVE escape-closes-window: window_open stayed true after Escape (Escape may not reach the panel); the Monitor window stays open, so the 'absent' scan is skipped"
+      fi
+    else
+      fail "marker-click-opens-window" "clicking marker 1 did not make window_open true within 10 s (may be scrolled out of view: enlarge the QA window)"
+    fi
   fi
 done
 
 # --- nothing raw is drawn ------------------------------------------------------------------------------
 while IFS= read -r name; do
+  if [ "${monitor_window_open:-0}" = 1 ]; then
+    echo "SKIPPED absent-$name: the Monitor window is still open, its text could match"
+    continue
+  fi
   text="$(python3 "$helper" absent "$name")"
   check "absent-$name" "not drawn anywhere in the window" ctl expect "$text" --absent
 done < <(python3 "$helper" absent-names)
-
-# --- click marker 1 opens the Monitor's task window; Escape closes it -------------------------------------
-marker1="$(python3 "$helper" marker 1)"
-window_state() { ctl tasks list --all "${focus_args[@]+"${focus_args[@]}"}" | python3 "$helper" window-open qa-mon1; }
-wait_window() {
-  local want="$1" state
-  for _ in $(seq 1 "$(tries 40)"); do
-    state="$(window_state 2>/dev/null)" || state=error
-    [ "$state" != "$want" ] || return 0
-    nap 0.25
-  done
-  return 1
-}
-if ctl click --text "$marker1" >/dev/null 2>&1 && wait_window true; then
-  pass "marker-click-opens-window" "tasks list shows window_open true for the Monitor"
-  ctl key $'\e' --key-code 53 >/dev/null 2>&1 || true
-  if wait_window false; then
-    pass "escape-closes-window" "window_open is false after Escape"
-  else
-    inconclusive=1
-    echo "INCONCLUSIVE escape-closes-window: window_open stayed true after Escape (Escape may not reach the panel)"
-  fi
-else
-  fail "marker-click-opens-window" "clicking marker 1 did not make window_open true within 10 s (may be scrolled out of view: enlarge the QA window)"
-fi
 
 if [ "$verdict" = PASS ] && [ "$inconclusive" = 1 ]; then echo "NOTE: one line was inconclusive; the rest passed"; fi
 finish 0

@@ -9,6 +9,8 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 instance="$here/qa-instance.sh"
+# shellcheck source=lib/qa-visible.sh
+. "$here/lib/qa-visible.sh"
 app="$repo/bin/nostromo-app"
 mode="synthetic input ON"
 for a in "$@"; do [ "$a" = "--no-synthetic" ] && mode="synthetic input OFF (--no-synthetic)"; done
@@ -34,13 +36,16 @@ trap cleanup EXIT
 sock="$root/app-control.sock"
 
 verdict=PASS
-windows="$("$app" --socket "$sock" windows)"
+# A fresh window is briefly invisible (alpha 0): wait up to 45 s before calling it a locked display.
+ctl() { "$app" --socket "$sock" "$@"; }
+wv=0; qa_wait_visible || wv=$?
+windows="$(ctl windows 2>/dev/null || true)"
 echo "$windows"
-if grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$windows"; then
+if [ "$wv" = 2 ]; then
+  verdict=FAIL; echo "FAIL: app-control not answering (the QA app or its socket is dead)"
+elif [ "$wv" = 1 ]; then
   verdict=INCONCLUSIVE
   echo "INCONCLUSIVE: window not visible (display locked or asleep)"
-elif [ -z "$windows" ] || [ "$windows" = "[]" ]; then
-  verdict=FAIL; echo "FAIL: no window listed"
 fi
 shot="${TMPDIR:-/tmp}/nostromo-qa-smoke-$$.png"
 if "$app" --socket "$sock" screenshot "$shot" >/dev/null 2>&1; then echo "screenshot: $shot"; else echo "WARN: screenshot failed"; fi

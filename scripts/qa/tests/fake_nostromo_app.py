@@ -684,6 +684,7 @@ WAKE_DEFAULTS = {
     "extra_texts": [],             # more text on screen (a sentinel, a raw notification, ...)
     "drop_texts": [],              # substrings: any default text containing one is not on screen
     "windows_hidden": False,       # alpha 0, as with a locked display
+    "hidden_reads": 0,             # windows reports hidden for this many reads, then visible (a fresh window)
     "escape_ignored": False,
     "first_responder": "ChatTextView",
 }
@@ -713,8 +714,10 @@ def wake_main(S, argv):
     if cmd == "ping":
         result = {"pid": S["pid"]}
     elif cmd == "windows":
-        result = [{"index": 0, "alpha": 0 if W["windows_hidden"] else 1,
-                    "visible": not W["windows_hidden"], "key": True, "firstResponder": W["first_responder"]}]
+        st["windows_reads"] = st.get("windows_reads", 0) + 1
+        hidden = W["windows_hidden"] or st["windows_reads"] <= W["hidden_reads"]
+        result = [{"index": 0, "alpha": 0 if hidden else 1,
+                    "visible": not hidden, "key": True, "firstResponder": W["first_responder"]}]
     elif cmd == "hittest":
         result = {"window": {"firstResponder": W["first_responder"]}, "chain": []}
     elif cmd == "find":
@@ -730,7 +733,12 @@ def wake_main(S, argv):
     elif cmd == "click" and len(rest) == 2 and rest[0] == "--text" and (
             rest[1] in (W["label"], "Message\u2026", WAKE_MARKER_1)):
         if rest[1] == WAKE_MARKER_1:
-            st["window_open"]["qa-mon1"] = True
+            # Marker 1 is only on screen right after wake 1 (two anchor reads); later wakes scroll it away.
+            # Coupled to background-wake.sh: it clicks marker 1 right after wake 1, with exactly two
+            # transcript-anchor reads behind it. Adding an anchor read before that click needs this bound updated.
+            if st["anchor_reads"] <= 2:
+                st["window_open"]["qa-mon1"] = True
+            st.setdefault("marker_clicks", []).append(st["anchor_reads"])
         result = {"hit": "NSView"}
     elif cmd == "key" and rest[:1] == ["\r"] and flag("--key-code") == "36":
         result = {"sent": "return"}
