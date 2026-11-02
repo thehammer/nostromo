@@ -141,6 +141,13 @@ final class TerminalSessionStore {
     /// UNKNOWN, which counts as true: a terminal this app did not open or first see connecting (re-attached
     /// after a launch or a reconnect) may have anything typed on its line.
     private var lineHasText: [String: Bool] = [:]
+    /// What was sent since the last Enter, Ctrl-C or Ctrl-U (printable bytes; Backspace removes one). Read at the
+    /// next Enter to tell whether the shell is now waiting for a continuation line.
+    private var pendingLine: [String: [UInt8]] = [:]
+    /// Terminals whose last Enter ended a line the shell may not have finished (`\` at the end, `|`, `&&`, an
+    /// open quote, `<<`): the prompt is a `> ` and the next Enter may complete a command assembled from two
+    /// rows. Cleared only by Ctrl-C or Ctrl-U, so Enter alone never makes the line "known empty" again.
+    private var awaitingContinuation: Set<String> = []
 
     /// Where Reconnect on a closed remote shell sends its request.
     private let remoteShells: RemoteShellStore
@@ -249,6 +256,8 @@ final class TerminalSessionStore {
         connected = isConnected
         if !isConnected {
             lineHasText.removeAll()
+            pendingLine.removeAll()
+            awaitingContinuation.removeAll()
             attached.removeAll()
             inputBacklog.removeAll()
             if !terminals.isEmpty, daemonUnavailable.isEmpty {
@@ -606,14 +615,75 @@ final class TerminalSessionStore {
     }
 
     /// After a person's bytes: the line is known empty only when the last of Enter (CR), Ctrl-C and Ctrl-U is the
-    /// final byte; any byte after it, or none of them at all, may have put text on the line.
+    /// final byte AND the Enter did not leave the shell waiting for a continuation line (the entry ended in `\`,
+    /// `|`, `&&`, an open quote or `<<`: then only Ctrl-C or Ctrl-U makes it known empty). Any byte after the
+    /// ender, or none of them at all, may have put text on the line.
     private func noteLine(terminalId: String, bytes: [UInt8]) {
         let enders: Set<UInt8> = [0x0D, 0x03, 0x15]
-        lineHasText[terminalId] = bytes.lastIndex(where: { enders.contains($0) }).map { $0 != bytes.count - 1 } ?? true
+        let base = bytes.lastIndex(where: { enders.contains($0) }).map { $0 != bytes.count - 1 } ?? true
+        var pending = pendingLine[terminalId] ?? []
+        for byte in Self.withoutPasteMarkers(bytes) {
+            switch byte {
+            case 0x03, 0x15:
+                awaitingContinuation.remove(terminalId)
+                pending = []
+            case 0x0D:
+                if Self.continuesOnTheNextLine(pending) { awaitingContinuation.insert(terminalId) }
+                pending = []
+            case 0x7F, 0x08:
+                if !pending.isEmpty { pending.removeLast() }
+            case 0x09, 0x20...0xFF:
+                if pending.count < 4096 { pending.append(byte) }
+            default:
+                pending = []    // an escape sequence or other control: what is on the line can no longer be followed
+            }
+        }
+        pendingLine[terminalId] = pending
+        lineHasText[terminalId] = base || awaitingContinuation.contains(terminalId)
+    }
+
+    private static func withoutPasteMarkers(_ bytes: [UInt8]) -> [UInt8] {
+        guard bytes.contains(0x1B) else { return bytes }
+        let markers = [Array("\u{1b}[200~".utf8), Array("\u{1b}[201~".utf8)]
+        var out: [UInt8] = []
+        var index = 0
+        while index < bytes.count {
+            if let marker = markers.first(where: { bytes[index...].starts(with: $0) }) {
+                index += marker.count
+            } else {
+                out.append(bytes[index])
+                index += 1
+            }
+        }
+        return out
+    }
+
+    /// Would a shell wait for more after this line? A trailing `\`, `|` or `&&`; an open quote, parenthesis or
+    /// brace; a here-document (`<<`); or a trailing `then`, `do`, `else` or `elif`. Over-approximates:
+    /// asking for Ctrl-C is the cheap side.
+    static func continuesOnTheNextLine(_ bytes: [UInt8]) -> Bool {
+        let text = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return false }
+        if text.hasSuffix("\\") || text.hasSuffix("|") || text.hasSuffix("&&") || text.contains("<<") { return true }
+        if let last = text.split(separator: " ").last, ["then", "do", "else", "elif"].contains(String(last)) { return true }
+        var single = false, double = false, escaped = false
+        var depth = 0
+        for character in text {
+            if escaped { escaped = false; continue }
+            if character == "\\" && !single { escaped = true; continue }
+            if character == "'" && !double { single.toggle(); continue }
+            if character == "\"" && !single { double.toggle(); continue }
+            guard !single && !double else { continue }
+            if character == "(" || character == "{" { depth += 1 }
+            if character == ")" || character == "}" { depth -= 1 }
+        }
+        return single || double || depth > 0
     }
 
     private func forget(_ id: String) {
         lineHasText.removeValue(forKey: id)
+        pendingLine.removeValue(forKey: id)
+        awaitingContinuation.remove(id)
         terminals.removeValue(forKey: id)
         replayCopy.removeValue(forKey: id)
         inputBacklog.removeValue(forKey: id)

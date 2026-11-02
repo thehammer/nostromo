@@ -239,17 +239,18 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
         XCTAssertEqual(s.rig.target.focusCount, 1)
     }
 
-    func testTextReplacedWhileTheSheetIsUpDoesNotChangeWhatIsInserted() throws {
+    func testTextReplacedWhileTheSheetIsUpClosesItSoNothingOldIsInserted() throws {
         let s = setup()
         s.rig.click(s.row, in: s.window)
         let sheet = try sheet(s)
+        let before = s.rig.inputFrames.count
 
         s.rig.ingest([StagingFixtures.entry("s-1", 1, "rm -rf /srv")])
-        XCTAssertNotNil(s.rig.controller.confirmSheet, "a replace does not close it")
-        XCTAssertEqual(sheet.commandText, s.command, "it still shows what the click began with")
-        sheet.insertButton.performClick(nil)
 
-        XCTAssertEqual(s.rig.target.sent, [Array(s.command.utf8)])
+        XCTAssertNil(s.rig.controller.confirmSheet, "the question was about other text: it closes")
+        XCTAssertNil(s.window.attachedSheet)
+        sheet.insertButton.performClick(nil)
+        assertNothingTyped(s, before: before)
     }
 
     func testAnInsertWhoseEntryWasRemovedMeanwhileInsertsNothing() throws {
@@ -287,6 +288,139 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
 
         XCTAssertTrue(s.rig.target.attempts.isEmpty)
         XCTAssertEqual(s.rig.inputFrames.count, before)
+    }
+
+    // MARK: Insert refuses accidental input (M1)
+
+    /// A sheet opened by a real single click on the row, on a clock the test moves. Event timestamps are
+    /// read from the same clock, so "0.1 s after the sheet appeared" is exact.
+    private final class Timed {
+        var clock = ProcessInfo.processInfo.systemUptime
+    }
+
+    private func openOnAClock(_ t: Timed) throws -> (Setup, StagingConfirmSheet) {
+        let s = setup()
+        s.rig.box.sheetClock = { t.clock }
+        s.rig.click(s.row, in: s.window)
+        return (s, try sheet(s))
+    }
+
+    private func insertPoint(_ sheet: StagingConfirmSheet) -> NSPoint {
+        sheet.window!.contentView!.layoutSubtreeIfNeeded()
+        let b = sheet.insertButton
+        return b.convert(NSPoint(x: b.bounds.midX, y: b.bounds.midY), to: nil)
+    }
+
+    private func clickEvent(_ sheet: StagingConfirmSheet, at point: NSPoint? = nil, clickCount: Int = 1, timestamp: TimeInterval) -> NSEvent {
+        StagingEvents.mouse(.leftMouseUp, in: sheet.window!, at: point ?? insertPoint(sheet), clickCount: clickCount, timestamp: timestamp)
+    }
+
+    private func spaceEvent(_ sheet: StagingConfirmSheet, repeating: Bool = false, timestamp: TimeInterval) -> NSEvent {
+        NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: timestamp,
+                         windowNumber: sheet.window!.windowNumber, context: nil, characters: " ",
+                         charactersIgnoringModifiers: " ", isARepeat: repeating, keyCode: 49)!
+    }
+
+    func testTheSecondClickOfADoubleClickOnTheRowDoesNotInsert() throws {
+        let t = Timed()
+        let (s, sheet) = try openOnAClock(t)
+        let before = s.rig.inputFrames.count
+        // Click 2 of the double-click lands on Insert as the sheet settles; even late, a multi-click never counts.
+        sheet.press(insert: sheet.insertButton, event: clickEvent(sheet, clickCount: 2, timestamp: t.clock + 0.05))
+        t.clock += 5
+        sheet.press(insert: sheet.insertButton, event: clickEvent(sheet, clickCount: 2, timestamp: t.clock))
+        assertNothingTyped(s, before: before)
+        XCTAssertTrue(s.window.attachedSheet === sheet.window, "the sheet stays up")
+    }
+
+    func testAClickTenthsOfASecondAfterTheSheetAppearedIsRefusedAndALaterOneWorks() throws {
+        let t = Timed()
+        let (s, sheet) = try openOnAClock(t)
+        let before = s.rig.inputFrames.count
+        t.clock += 0.1
+        sheet.press(insert: sheet.insertButton, event: clickEvent(sheet, timestamp: t.clock))
+        assertNothingTyped(s, before: before, "0.1 s is too soon")
+
+        t.clock += 0.6
+        sheet.press(insert: sheet.insertButton, event: clickEvent(sheet, timestamp: t.clock))
+        XCTAssertEqual(s.rig.target.sent, [Array(s.command.utf8)])
+        XCTAssertEqual(s.rig.insertedFrames.count, 1)
+    }
+
+    func testForgedEventTimestampsWithNoHandlerClockGapAreRefused() throws {
+        let t = Timed()
+        let (s, sheet) = try openOnAClock(t)
+        let before = s.rig.inputFrames.count
+        // The handler clock has not moved, however late the event says it is.
+        sheet.press(insert: sheet.insertButton, event: clickEvent(sheet, timestamp: t.clock + 30))
+        assertNothingTyped(s, before: before)
+
+        // And the other way: the handler clock moved but the event is stamped like the opening one.
+        t.clock += 30
+        sheet.press(insert: sheet.insertButton, event: clickEvent(sheet, timestamp: t.clock - 30))
+        assertNothingTyped(s, before: before)
+    }
+
+    func testAHeldKeyIsRefusedAndASingleSpaceOnTheFocusedInsertWorks() throws {
+        let t = Timed()
+        let (s, sheet) = try openOnAClock(t)
+        let before = s.rig.inputFrames.count
+        t.clock += 1
+        XCTAssertTrue(sheet.window!.makeFirstResponder(sheet.insertButton))
+        sheet.press(insert: sheet.insertButton, event: spaceEvent(sheet, repeating: true, timestamp: t.clock))
+        assertNothingTyped(s, before: before, "a repeat is a held key")
+
+        XCTAssertTrue(sheet.window!.makeFirstResponder(sheet.cancelButton))
+        sheet.press(insert: sheet.insertButton, event: spaceEvent(sheet, timestamp: t.clock))
+        assertNothingTyped(s, before: before, "Insert is not the first responder")
+
+        XCTAssertTrue(sheet.window!.makeFirstResponder(sheet.insertButton))
+        sheet.press(insert: sheet.insertButton, event: spaceEvent(sheet, timestamp: t.clock))
+        XCTAssertEqual(s.rig.target.sent.count, 1)
+    }
+
+    func testAKeyOtherThanSpaceNeverInserts() throws {
+        let t = Timed()
+        let (s, sheet) = try openOnAClock(t)
+        let before = s.rig.inputFrames.count
+        t.clock += 1
+        XCTAssertTrue(sheet.window!.makeFirstResponder(sheet.insertButton))
+        let ret = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: t.clock,
+                                   windowNumber: sheet.window!.windowNumber, context: nil, characters: "\r",
+                                   charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+        sheet.press(insert: sheet.insertButton, event: ret)
+        assertNothingTyped(s, before: before)
+    }
+
+    func testTheEventThatOpenedTheSheetIsNotAnInsert() throws {
+        let t = Timed()
+        let s = setup()
+        s.rig.box.sheetClock = { t.clock }
+        let down = StagingEvents.mouse(.leftMouseDown, in: s.window, at: StagingRig.point(in: s.row), timestamp: t.clock)
+        let up = StagingEvents.mouse(.leftMouseUp, in: s.window, at: StagingRig.point(in: s.row), timestamp: t.clock)
+        s.row.mouseDown(with: down)
+        s.row.mouseUp(with: up)
+        let sheet = try sheet(s)
+        let before = s.rig.inputFrames.count
+        t.clock += 5
+        // Same type, number and stamp as the opening event, now aimed at Insert.
+        sheet.press(insert: sheet.insertButton, event: clickEvent(sheet, timestamp: up.timestamp))
+        assertNothingTyped(s, before: before)
+    }
+
+    func testAClickOutsideInsertIsRefused() throws {
+        let t = Timed()
+        let (s, sheet) = try openOnAClock(t)
+        let before = s.rig.inputFrames.count
+        t.clock += 1
+        sheet.press(insert: sheet.insertButton, event: clickEvent(sheet, at: NSPoint(x: 2, y: 2), timestamp: t.clock))
+        assertNothingTyped(s, before: before)
+    }
+
+    func testTheSheetOpensWithCancelFocusedNeverInsert() throws {
+        let (_, sheet) = try openOnAClock(Timed())
+        XCTAssertTrue(sheet.window?.initialFirstResponder === sheet.cancelButton)
+        XCTAssertFalse(sheet.window?.firstResponder === sheet.insertButton)
     }
 
     // MARK: It closes by itself, sending nothing

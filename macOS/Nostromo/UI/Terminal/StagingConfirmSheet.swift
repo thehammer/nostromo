@@ -13,12 +13,56 @@ import AppKit
 ///
 /// - **Cancel** is the one button that answers Return, and Escape cancels too.
 /// - **Insert** answers to no key at all (Tab reaches it, Space activates it, or a click) and asks
-///   `TerminalInputGuard.allowsControl` first: a synthetic click does nothing and is reported.
+///   `TerminalInputGuard.allowsControl` first: a synthetic click does nothing and is reported. On top of
+///   that, `InsertGestureGuard` refuses anything that could be an accident: within 0.5 s of the sheet
+///   appearing (on the event clock AND the handler clock, the smaller gap wins), the event that opened the
+///   sheet, the second click of a double-click, a held key, a click outside Insert's bounds and a key
+///   while Insert is not first responder. The sheet opens with Cancel focused, never Insert.
 final class StagingConfirmSheet: NSWindowController {
 
     static let fixedLine = "Insert places the text at the prompt. Nothing runs until you press Enter. No label does not mean safe."
     static let contentWidth: CGFloat = 480
     static let maxCommandHeight: CGFloat = 180
+
+    /// Whether an Insert press is a deliberate one rather than the tail of the gesture that opened the sheet
+    /// (a double-click's second click, a held key) or a click that landed there as the sheet settled.
+    /// Lessons of the Stop button (`TaskStopButton`): event timestamps can be forged and the handler clock
+    /// can bunch, so the smaller of the two gaps must clear the delay.
+    struct InsertGestureGuard {
+        static let minDelay: TimeInterval = 0.5
+        static let spaceKeyCode: UInt16 = 49
+
+        private let openedAt: TimeInterval
+        private let openedBy: (timestamp: TimeInterval, type: NSEvent.EventType, number: Int?, keyCode: UInt16?)?
+        private let now: () -> TimeInterval
+
+        init(openedBy event: NSEvent?, now: @escaping () -> TimeInterval) {
+            self.now = now
+            openedAt = now()
+            openedBy = event.map { ($0.timestamp, $0.type, $0.isMouseEvent ? $0.eventNumber : nil,
+                                    $0.type == .keyDown ? $0.keyCode : nil) }
+        }
+
+        func permits(_ event: NSEvent?, button: NSView) -> Bool {
+            let handlerGap = now() - openedAt
+            guard let event else { return handlerGap >= Self.minDelay }   // a VoiceOver press: the gate decided who
+            if event.type == .keyDown {
+                guard !event.isARepeat, event.keyCode == Self.spaceKeyCode,
+                      button.window?.firstResponder === button else { return false }
+            } else if event.isMouseEvent {
+                guard event.clickCount <= 1 else { return false }
+                guard button.bounds.contains(button.convert(event.locationInWindow, from: nil)) else { return false }
+            } else {
+                return false
+            }
+            if let openedBy, event.timestamp == openedBy.timestamp, event.type == openedBy.type,
+               event.isMouseEvent ? event.eventNumber == openedBy.number : event.keyCode == openedBy.keyCode {
+                return false
+            }
+            let eventGap = event.timestamp - (openedBy?.timestamp ?? openedAt)
+            return min(eventGap, handlerGap) >= Self.minDelay
+        }
+    }
 
     private final class InsertButton: NSButton {
         override var canBecomeKeyView: Bool { true }
@@ -45,13 +89,16 @@ final class StagingConfirmSheet: NSWindowController {
     private let onRefused: () -> Void
     /// Whether an Insert press is a person's (the real guard unless a test says otherwise).
     private let gate: (NSEvent?, NSView) -> Bool
+    private let gesture: InsertGestureGuard
 
     /// `onInsert` runs (with the Insert button) after the sheet closes, only for a person's Insert; `onCancel` after Cancel, Return
     /// or Escape; `onRefused` when an Insert was not a person's (the sheet stays up).
     init(title: String, targetLine: String, command: String, matches: [String], hazardLabels: [String],
          gate: @escaping (NSEvent?, NSView) -> Bool = { TerminalInputGuard.allowsControl(event: $0, control: $1) },
+         openedBy: NSEvent? = nil, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          onInsert: @escaping (NSButton) -> Void, onCancel: @escaping () -> Void, onRefused: @escaping () -> Void) {
         self.gate = gate
+        self.gesture = InsertGestureGuard(openedBy: openedBy, now: now)
         self.onInsert = onInsert
         self.onCancel = onCancel
         self.onRefused = onRefused
@@ -60,8 +107,8 @@ final class StagingConfirmSheet: NSWindowController {
         win.title = "Insert"
         win.isReleasedWhenClosed = false
         win.appearance = NSAppearance(named: .darkAqua)
-        win.initialFirstResponder = nil
         super.init(window: win)
+        win.contentView = StagingConfirmContentView(frame: NSRect(x: 0, y: 0, width: Self.contentWidth, height: 200))
         win.onCancel = { [weak self] in self?.cancelTapped(nil) }
         build(title: title, targetLine: targetLine, command: command, matches: matches, hazardLabels: hazardLabels)
     }
@@ -145,6 +192,8 @@ final class StagingConfirmSheet: NSWindowController {
             escapeButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
         ])
         window?.setContentSize(NSSize(width: Self.contentWidth, height: contentView.fittingSize.height))
+        // Never Insert: a stray Space or Return at the moment the sheet opens must not reach it.
+        window?.initialFirstResponder = cancelButton
     }
 
     private func wrapping(_ text: String, font: NSFont, color: NSColor, width: CGFloat) -> NSTextField {
@@ -208,8 +257,13 @@ final class StagingConfirmSheet: NSWindowController {
     }
 
     @objc private func insertTapped(_ sender: NSButton) {
+        press(insert: sender, event: NSApp.currentEvent)
+    }
+
+    /// Insert pressed by `event` (what the action sees as current). Internal so tests can hand it crafted events.
+    func press(insert sender: NSButton, event: NSEvent?) {
         guard !isFinished else { return }
-        guard gate(NSApp.currentEvent, sender) else {
+        guard gate(event, sender), gesture.permits(event, button: sender) else {
             onRefused()
             return
         }
@@ -218,3 +272,21 @@ final class StagingConfirmSheet: NSWindowController {
         onInsert(sender)
     }
 }
+
+private extension NSEvent {
+    var isMouseEvent: Bool {
+        switch type {
+        case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+             .otherMouseDown, .otherMouseUp, .otherMouseDragged:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+/// The sheet's content view. The sheet is a window of its own that app-control can target (`"sheet": true`),
+/// so, like the staging drawer, everything in it is withheld from `tree`, `find`, `ax`, `text` and
+/// `screenshot` in the real app (`AppControlAX.isWithheld`), and it is painted over in a screenshot
+/// (`TerminalPixelSource`): the command, the target line and the matched patterns are for the person to read.
+final class StagingConfirmContentView: NSView, TerminalPixelSource {}

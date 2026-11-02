@@ -106,21 +106,116 @@ pub fn validate_command_in(text: &str, no_history_expansion: bool) -> Result<(),
     Ok(())
 }
 
-/// tmux input verbs, or GNU screen's `-X stuff`.
+/// The text as a shell would see its words, for the hazard rules (the Mac app's `StagingHazards.normalised`
+/// does the same, and the shared fixture `tests/fixtures/terminal_staging/hazards.json` pins both): `/* ... */`
+/// comments become a space (SQL treats one as whitespace), quotes and backslashes are dropped (`r''m`,
+/// `\rm`, `"rm"` become `rm`), backticks, parentheses and braces become `;` (a subshell, a command
+/// substitution and a group each start a new command), and runs of whitespace collapse. Quotes are not
+/// otherwise parsed: asking or refusing is the cheap side, so a hazard inside a quoted string matches too.
+pub fn normalise_for_hazards(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+                out.push(' ');
+            }
+            '\'' | '"' | '\\' => {}
+            '`' | '(' | ')' | '{' | '}' => out.push(';'),
+            c if c.is_whitespace() => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Words of the normalised text, split at whitespace and at command separators.
+fn hazard_words(normalised: &str) -> Vec<&str> {
+    normalised
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&'))
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// tmux verbs that type, paste or pipe into a pane.
+const TMUX_INPUT_VERBS: [&str; 6] = [
+    "send-keys",
+    "paste-buffer",
+    "pipe-pane",
+    "send-prefix",
+    "respawn-pane",
+    "respawn-window",
+];
+
+/// Other terminal multiplexers' and terminals' verbs that type into a pane: `(program word, verb word)`.
+const OTHER_INPUT_VERBS: [(&str, &str); 5] = [
+    ("kitty", "send-text"),
+    ("kitten", "send-text"),
+    ("wezterm", "send-text"),
+    ("zellij", "write-chars"),
+    ("zellij", "write"),
+];
+
+/// tmux accepts any unique prefix of a command name, so a word of at least three letters that begins a tmux
+/// input verb counts (`send-k`, `paste-b`), after any `tmux` word. Also GNU screen's `-X stuff`, the other
+/// terminals' send-text verbs, and `osascript` with `do script` / `write text`. Everything on the normalised
+/// text and on the text as written; a hit on either refuses.
 fn types_into_another_terminal(text: &str) -> bool {
     if crate::approvals::guard::tmux_input_marker(text) {
         return true;
     }
     static SCREEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    SCREEN
-        .get_or_init(|| regex::Regex::new(r"(?is)screen.*-X.*stuff").unwrap())
-        .is_match(text)
+    let screen = SCREEN.get_or_init(|| regex::Regex::new(r"(?is)screen.*-X.*stuff").unwrap());
+    let normalised = normalise_for_hazards(text);
+    if screen.is_match(text) || screen.is_match(&normalised) {
+        return true;
+    }
+    let lower = normalised.to_lowercase();
+    if crate::approvals::guard::tmux_input_marker(&lower) {
+        return true;
+    }
+    let words = hazard_words(&lower);
+    if let Some(first_tmux) = words.iter().position(|w| w.rsplit('/').next() == Some("tmux")) {
+        if words[first_tmux + 1..].iter().any(|w| {
+            w.len() >= 3 && TMUX_INPUT_VERBS.iter().any(|verb| verb.starts_with(w))
+        }) {
+            return true;
+        }
+    }
+    if OTHER_INPUT_VERBS.iter().any(|(program, verb)| {
+        words
+            .iter()
+            .position(|w| w.rsplit('/').next() == Some(*program))
+            .is_some_and(|at| words[at + 1..].iter().any(|w| w == verb))
+    }) {
+        return true;
+    }
+    lower.contains("osascript") && (lower.contains("do script") || lower.contains("write text"))
 }
+
+/// Words before a command that still leave the next word in command position.
+const COMMAND_PREFIX_WORDS: [&str; 9] =
+    ["then", "do", "else", "command", "builtin", "eval", "exec", "time", "sudo"];
 
 /// Would a shell expand history in `text`? Quotes are not parsed: asking or
 /// refusing is the cheap side. A `!` followed by anything but a space, `=` or
-/// `(`; text starting with `^`; or a command segment (split on `;`, `&&`,
-/// `||`, `|`) whose first word is exactly `r`, `fc` or `history`.
+/// `(`; text starting with `^`; `fc` or `history` as a word anywhere (after
+/// [`normalise_for_hazards`]: `\fc`, `'fc'`, `$(fc -s)` all count); or `r` in
+/// command position: first in a segment (split on `;`, `&`, `&&`, `|`, `||`,
+/// a subshell, a substitution, a group or a backtick), or after `then`,
+/// `do`, `else`, `command`, `builtin`, `eval`, `exec`, `time` or `sudo`.
 pub fn uses_history_expansion(text: &str) -> bool {
     let chars: Vec<char> = text.chars().collect();
     if chars.iter().enumerate().any(|(i, c)| {
@@ -134,9 +229,19 @@ pub fn uses_history_expansion(text: &str) -> bool {
     if text.starts_with('^') {
         return true;
     }
-    text.split([';', '|', '&'])
-        .filter_map(|seg| seg.split_whitespace().next())
-        .any(|w| matches!(w, "r" | "fc" | "history"))
+    let normalised = normalise_for_hazards(text);
+    if hazard_words(&normalised)
+        .iter()
+        .any(|w| matches!(*w, "fc" | "history"))
+    {
+        return true;
+    }
+    normalised.split([';', '|', '&']).any(|segment| {
+        segment
+            .split_whitespace()
+            .find(|w| !COMMAND_PREFIX_WORDS.contains(w))
+            == Some("r")
+    })
 }
 
 /// The note as it is kept: `Ok(None)` when nothing is left of it (so a note of

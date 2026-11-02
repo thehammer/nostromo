@@ -774,13 +774,23 @@ impl StagingStore {
 
     // ── reads and the outbox ──────────────────────────────────────────────────
 
-    /// Every list's frame as it stands (without changing anything): what a
-    /// connection that just declared `terminal_staging_ui` is sent.
-    pub(crate) fn frames_of_all(&self) -> Vec<ServerMsg> {
+    /// Every list's frame as it stands (without changing anything), then a `none` frame with
+    /// `enabled: false` for each terminal the user turned staging off for (`pane_of` names the pane of a
+    /// terminal that still exists): what a connection that just declared `terminal_staging_ui` is sent, so
+    /// an app that relaunched shows "off" where the daemon refuses.
+    pub(crate) fn frames_of_all(&self, pane_of: &dyn Fn(&str) -> Option<String>) -> Vec<ServerMsg> {
         let state = self.lock();
         let mut lists: Vec<&StagingList> = state.lists.values().collect();
         lists.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
-        lists.into_iter().map(frame_of).collect()
+        let mut frames: Vec<ServerMsg> = lists.into_iter().map(frame_of).collect();
+        let mut off: Vec<&String> = state.disabled.iter().collect();
+        off.sort();
+        for id in off {
+            if let Some(pane_id) = pane_of(id) {
+                frames.push(none_frame(id, &pane_id, state.next_revision, false));
+            }
+        }
+        frames
     }
 
     /// Take what the changes so far left to send and audit.

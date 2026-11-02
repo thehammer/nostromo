@@ -73,6 +73,55 @@ final class StagingHazardsTests: XCTestCase {
         }
     }
 
+    // MARK: Wrapped, split and abbreviated forms (M2, S4, P4)
+
+    func testRmRfIsSeenThroughWrapping() {
+        let wrapped = [
+            "bash -c 'rm -rf /srv/app/cache'", "sh -c \"rm -rf x\"", "echo $(rm -rf x)", "echo `rm -rf x`", "(rm -rf x)",
+            "{ rm -rf x; }", "\\rm -rf x", "\"rm\" -rf x", "r''m -rf x", "command rm -rf x", "/bin/rm -rf x", "env rm -rf x",
+            "rm -r --forc x", "rm --recurs -f x", "rm -rf x", "ls & rm -rf x", "xargs rm -rf",
+        ]
+        for command in wrapped {
+            XCTAssertTrue(StagingDestructivePatterns.matches(command).contains("rm -rf"), command)
+        }
+        XCTAssertFalse(StagingDestructivePatterns.matches("bash -c 'rm x'").contains("rm -rf"))
+        XCTAssertFalse(StagingDestructivePatterns.matches("echo \"rm\" -r x").contains("rm -rf"))
+    }
+
+    func testLaravelAbbreviationsAndSplitWordsMatch() {
+        let cases: [(String, String)] = [
+            ("php artisan ca:cl", "cache:clear"), ("php artisan q:fl", "queue:flush"), ("php artisan mi:fr", "migrate:fresh"),
+            ("php artisan db:w", "db:wipe"), ("php artisan migrate:fre''sh", "migrate:fresh"),
+            ("php artisan cache:cle\\ar", "cache:clear"), ("php artisan \"queue\":flush", "queue:flush"),
+        ]
+        for (command, name) in cases {
+            XCTAssertTrue(StagingDestructivePatterns.matches(command).contains(name), command)
+        }
+        XCTAssertEqual(StagingDestructivePatterns.matches("php artisan cache:forget x"), [])
+        XCTAssertEqual(StagingDestructivePatterns.matches("php artisan route:list"), [])
+    }
+
+    func testSqlCommentsAndShortKillAndForceForms() {
+        XCTAssertTrue(StagingDestructivePatterns.matches("mysql -e 'DROP/**/TABLE users'").contains("DROP"))
+        XCTAssertTrue(StagingDestructivePatterns.matches("DELETE/**/FROM users").contains("DELETE FROM without WHERE"))
+        XCTAssertTrue(StagingDestructivePatterns.matches("kill -n 9 123").contains("kill -9"))
+        XCTAssertTrue(StagingDestructivePatterns.matches("git push --forc").contains("--force"))
+        XCTAssertEqual(StagingDestructivePatterns.matches("git log --format=x"), [])
+    }
+
+    func testEachDeleteStatementIsCheckedOnItsOwn() {
+        for command in ["DELETE FROM a WHERE id=1; DELETE FROM b", "DELETE FROM a; SELECT * FROM b WHERE x = 1",
+                        "delete from a where id=1; delete from b; select 1"] {
+            XCTAssertTrue(StagingDestructivePatterns.matches(command).contains("DELETE FROM without WHERE"), command)
+        }
+        XCTAssertEqual(StagingDestructivePatterns.matches("DELETE FROM a WHERE id=1; DELETE FROM b WHERE id=2"), [])
+    }
+
+    func testEveryNonASCIIScalarIsIsolatedFromTheTextBesideIt() {
+        let label = StagingHazards.nonASCIILabel("\u{05D0}") ?? ""
+        XCTAssertTrue(label.contains("\u{2068}\u{05D0}\u{2069} U+05D0"), label)
+    }
+
     // MARK: History expansion (the cases of tests/fixtures/terminal_staging/hazards.json)
 
     func testHistoryExpansionRule() {
@@ -84,11 +133,22 @@ final class StagingHazardsTests: XCTestCase {
         for command in negatives { XCTAssertFalse(StagingHazards.usesHistoryExpansion(command), command) }
     }
 
+    /// Every case in the file the daemon's tests read too: both sides must say the same.
+    func testTheSharedFixtureGivesTheSameAnswerAsTheDaemon() throws {
+        let cases = try StagingFixtures.hazards()
+        XCTAssertGreaterThan(cases.count, 60, "hazards.json should be found")
+        for entry in cases {
+            let text = try XCTUnwrap(entry["text"] as? String)
+            let expected = try XCTUnwrap(entry["history"] as? Bool)
+            XCTAssertEqual(StagingHazards.usesHistoryExpansion(text), expected, "\(entry["name"] ?? "?"): \(text)")
+        }
+    }
+
     // MARK: Non-ASCII
 
     func testALookAlikeLetterIsNamedWithItsCodePoint() {
         XCTAssertEqual(StagingHazards.nonASCIILabel("echo \u{0430}"),
-                       "\u{26A0} Contains non-ASCII: \u{0430} U+0430 CYRILLIC SMALL LETTER A")
+                       "\u{26A0} Contains non-ASCII: \u{2068}\u{0430}\u{2069} U+0430 CYRILLIC SMALL LETTER A")
         XCTAssertNil(StagingHazards.nonASCIILabel("echo hello"))
     }
 

@@ -199,6 +199,46 @@ fn closing_a_terminal_forgets_its_off_switch() {
     assert!(!w.terminals.lock().unwrap().staging().is_disabled(&t.id));
 }
 
+#[test]
+fn a_per_terminal_off_is_replayed_to_an_app_that_subscribes_later() {
+    let mut w = World::new();
+    let t = w.local(A);
+    w.follow(&t, A);
+    w.staged_id(A, &t, "ls");
+    set_enabled(&w, &t, false);
+    w.frames();
+
+    let mut relaunched = w.connect_app("relaunched", &[TERMINAL_STAGING_UI]);
+    match relaunched.try_recv().expect("the off switch is replayed") {
+        ServerMsg::TerminalStagingList {
+            terminal_id,
+            state,
+            enabled,
+            entries,
+            ..
+        } => {
+            assert_eq!(terminal_id, t.id);
+            assert_eq!(state, TerminalStagingState::NoList);
+            assert!(!enabled, "the app must show staging as off here");
+            assert!(entries.is_empty());
+        }
+        unexpected => panic!("{unexpected:?}"),
+    }
+    assert!(relaunched.try_recv().is_err(), "nothing else is sent");
+
+    // Turned back on: nothing is replayed for it any more.
+    set_enabled(&w, &t, true);
+    let mut third = w.connect_app("third", &[TERMINAL_STAGING_UI]);
+    let frames: Vec<_> = std::iter::from_fn(|| third.try_recv().ok()).collect();
+    assert!(
+        frames.iter().all(|f| matches!(
+            f,
+            ServerMsg::TerminalStagingList { enabled: true, .. }
+        )),
+        "{frames:?}"
+    );
+}
+
 // ── D3: the global switch ─────────────────────────────────────────────────────
 
 #[test]
@@ -637,7 +677,13 @@ fn a_real_pty_reports_sleep_as_the_foreground_and_returns_to_the_shell_after_ctr
 #[test]
 fn a_shell_that_exec_replaced_itself_reports_the_new_program() {
     let mut w = World::new();
-    let t = w.local_with(A, ": > \"$READY\"; exec sleep 30");
+    // The shell waits for a go file before it execs: the session has recorded the shell's own name by then
+    // (spawn reads it once), so the test never depends on the race between that read and the exec.
+    let t = w.local_with(
+        A,
+        ": > \"$READY\"; while [ ! -e \"$READY.go\" ]; do sleep 0.02; done; exec sleep 30",
+    );
+    std::fs::File::create(w.dir.path().join(format!("ready-{}.go", w.spawned))).unwrap();
     wait_for(
         "the program to be named",
         || matches!(t.session.foreground(), Foreground::Program(n) if n.contains("sleep")),

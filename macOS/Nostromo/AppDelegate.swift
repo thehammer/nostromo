@@ -406,10 +406,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
 
     /// Debug > Copy Terminal Staging Stats: counts from the terminal audit trail (read-only), never text.
     @objc func copyTerminalStagingStats() {
-        let text = TerminalStagingStats.summary(auditDirectory: terminalAuditLogURL.deletingLastPathComponent())
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        // The audit files are read off the main thread; only the pasteboard is touched on it.
+        let directory = terminalAuditLogURL.deletingLastPathComponent()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let text = TerminalStagingStats.summary(auditDirectory: directory)
+            DispatchQueue.main.async {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
+            }
+        }
     }
 
     /// Terminal > Focus Staged Commands (⇧⌘J): the keyboard moves into the drawer of the terminal pane that

@@ -1407,6 +1407,38 @@ extension TerminalSessionStoreTests {
         XCTAssertFalse(line(Array("abc".utf8) + [0x15]), "typed then Ctrl-U")
     }
 
+    func testAnEntryThatContinuesOnTheNextLineLeavesTheLineMayHaveTextUntilCtrlC() {
+        let continuing = [
+            "php artisan queue:fl\\", "ls |", "ls &&", "ls ||", "mysql prod -e \"drop", "echo 'a", "cat <<EOF", "echo $(ls",
+            "if true; then", "echo hi \\  ",
+        ]
+        _ = attachedTerminal()
+        for entry in continuing {
+            store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
+            XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"), "reset: \(entry)")
+            store.sendInput(terminalId: "t1", bytes: Array(entry.utf8), fromWindow: "w1", autoReply: false, via: "stage_insert")
+            store.sendInput(terminalId: "t1", bytes: [0x0D], fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "Enter after \(entry) leaves the shell waiting for more")
+            store.sendInput(terminalId: "t1", bytes: Array("ush".utf8) + [0x0D], fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "a second Enter does not make it known empty: \(entry)")
+            store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
+            XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"), "Ctrl-C does: \(entry)")
+        }
+    }
+
+    func testACompleteEntryAndABracketedPasteOfOneAreKnownEmptyAfterEnter() {
+        _ = attachedTerminal()
+        for entry in ["ls -la", "echo 'a b'", "echo \"x\" | wc", "git commit -m \"done\""] {
+            store.sendInput(terminalId: "t1", bytes: [0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E] + Array(entry.utf8) + [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E],
+                            fromWindow: "w1", autoReply: false, via: "stage_insert")
+            store.sendInput(terminalId: "t1", bytes: [0x0D], fromWindow: "w1")
+            XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"), entry)
+        }
+        store.sendInput(terminalId: "t1", bytes: [0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E] + Array("ls |".utf8) + [0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E, 0x0D],
+                        fromWindow: "w1", autoReply: false, via: "stage_insert")
+        XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "a bracketed paste of a continuing line is followed too")
+    }
+
     func testAnAutoReplyNeverChangesTheLineState() {
         _ = attachedTerminal()
         store.sendInput(terminalId: "t1", bytes: [0x0D], fromWindow: "w1")

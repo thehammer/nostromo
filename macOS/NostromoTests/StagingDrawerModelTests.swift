@@ -48,7 +48,7 @@ final class StagingDrawerModelTests: XCTestCase {
         XCTAssertEqual(StagingDisabledReason.connecting.text, "The shell is still connecting")
         XCTAssertEqual(StagingDisabledReason.ended.text, "The shell has ended")
         XCTAssertEqual(StagingDisabledReason.lineMayHaveText.text,
-                       "Something may already be on the line: press Ctrl-U or Enter in the shell first")
+                       "Something may already be on the line: press Ctrl-C in the shell first (Enter works only if nothing is half-typed or continued)")
         XCTAssertEqual(StagingDisabledReason.historyExpansion.text,
                        "Uses shell history (! ^ r fc): Nostromo will not place it here")
         XCTAssertEqual(StagingDisabledReason.alternateScreen.text, "A full-screen program is running")
@@ -483,7 +483,7 @@ extension StagingDrawerModelTests {
         for e in [env(), ecs()] {
             XCTAssertTrue(row(entry("echo <name>"), env: e).labels.contains(StagingDrawerModel.placeholderLabel))
             let label = row(entry("echo \u{0430}"), env: e).labels.first { $0.contains("non-ASCII") }
-            XCTAssertEqual(label, "\u{26A0} Contains non-ASCII: \u{0430} U+0430 CYRILLIC SMALL LETTER A")
+            XCTAssertEqual(label, "\u{26A0} Contains non-ASCII: \u{2068}\u{0430}\u{2069} U+0430 CYRILLIC SMALL LETTER A")
         }
     }
 

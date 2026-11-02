@@ -1649,7 +1649,8 @@ impl TerminalManager {
         }) else {
             return;
         };
-        for frame in self.staging.frames_of_all() {
+        let pane_of = |id: &str| self.terminals.get(id).map(|t| t.info.pane_id.clone());
+        for frame in self.staging.frames_of_all(&pane_of) {
             let _ = conn.targeted.send(frame);
         }
     }

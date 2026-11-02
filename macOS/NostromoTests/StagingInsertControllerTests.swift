@@ -48,6 +48,12 @@ enum StagingFixtures {
         return try XCTUnwrap(object as? [String], "commands.json should be an array of strings")
     }
 
+    /// `hazards.json`: the text rules shared with the daemon (`text`, `history`: does it use history expansion).
+    static func hazards(file: StaticString = #filePath) throws -> [[String: Any]] {
+        let object = try JSONSerialization.jsonObject(with: try fixtureData("hazards.json", file: file))
+        return try XCTUnwrap(object as? [[String: Any]], "hazards.json should be an array of objects")
+    }
+
     static func entry(_ id: String, _ number: Int, _ command: String, note: String? = nil,
                       changedAt: Date = baseDate, insertedCount: Int = 0, lastInsertedAt: Date? = nil) -> StagingEntry {
         StagingEntry(id: id, number: number, command: command, note: note, stagedAt: baseDate, changedAt: changedAt,
@@ -179,6 +185,10 @@ final class StagingRigState {
     var scheduled: [() -> Void] = []
     var rowResults: [StagingInsertResult] = []
     let log = StagingCallLog()
+    /// The clock the confirm sheet measures its 0.5 s on. Nil: every read is 10 s after the last, so a
+    /// press that carries no event always clears the delay (tests of the delay set their own).
+    var sheetClock: (() -> TimeInterval)?
+    var sheetTicks = 0
 }
 
 /// A staging store and a terminal session store on injected clocks and recording transports, a private
@@ -253,7 +263,12 @@ final class StagingRig {
         side.context = StagingContext(terminalId: StagingFixtures.terminalId, kind: kind, status: status, isMirror: isMirror)
         side.controller = StagingInsertController(staging: staging, sessions: sessions, target: side.target,
                                                   pasteboard: pasteboard,
-                                                  context: { [weak side] in side?.context }, gate: gate)
+                                                  context: { [weak side] in side?.context },
+                                                  sheetClock: { [box] in
+                                                      if let clock = box.sheetClock { return clock() }
+                                                      box.sheetTicks += 1
+                                                      return TimeInterval(box.sheetTicks) * 10
+                                                  }, gate: gate)
         sides.append(side)
     }
 

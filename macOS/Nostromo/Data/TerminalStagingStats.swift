@@ -95,9 +95,8 @@ enum TerminalStagingStats {
             default: break
             }
         case "staging_ui_event":
-            // The line's own `event` is its tag (`staging_ui_event`), so the UI event's name is another key.
-            let name = ["ui_event", "name", "kind", "what"].lazy.compactMap { object[$0] as? String }.first
-            switch name {
+            // The line's own `event` is its tag (`staging_ui_event`), so the UI event's name is `ui_event`.
+            switch object["ui_event"] as? String {
             case "confirm_cancelled": counts.confirmsCancelled += 1
             case "just_changed": counts.justChanged += 1
             default: break
@@ -119,7 +118,7 @@ enum TerminalStagingStats {
             "Staged entries inserted at least once: \(c.firstInserts) of \(c.entriesStaged) (\(percent(c.firstInserts, of: c.entriesStaged)))",
             "Removed or cleared unused: \(c.unused)",
             "Archived: \(c.archivedManual) manual, \(c.archivedAuto) auto",
-            "Refused: list_full \(c.listFull), rate_limited \(c.rateLimited)",
+            "Refused: list_full \(c.listFull), rate_limited \(c.rateLimited) (undercounts: refusals are audited on a budget)",
             "Destructive confirms: \(c.confirmsInserted) inserted, \(c.confirmsCancelled) cancelled",
             "Just changed (refused within the reading delay): \(c.justChanged)",
             "Audit files read: \(c.filesRead); malformed lines skipped: \(c.malformedLines)",

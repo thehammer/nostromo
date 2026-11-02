@@ -20,7 +20,7 @@ enum StagingDisabledReason: Equatable, CaseIterable {
         case .ended:              return "The shell has ended"
         case .alternateScreen:    return "A full-screen program is running"
         case .sendingPaste:       return "A paste is still being sent"
-        case .lineMayHaveText:    return "Something may already be on the line: press Ctrl-U or Enter in the shell first"
+        case .lineMayHaveText:    return "Something may already be on the line: press Ctrl-C in the shell first (Enter works only if nothing is half-typed or continued)"
         case .historyExpansion:   return StagingHazards.historyReasonText
         case .justChanged:        return "Just changed: read it again"
         case .notInsertable:      return "Nostromo will not insert this text"

@@ -64,6 +64,8 @@ final class StagingInsertController {
     private let context: () -> StagingContext?
     private let gate: Gate
     private let pasteboard: NSPasteboard
+    /// The clock the confirm sheet measures its 0.5 s with (seconds since boot, like `NSEvent.timestamp`).
+    private let sheetClock: () -> TimeInterval
 
     /// The confirmation on screen, if any (one per controller; one per window).
     private(set) var confirmSheet: StagingConfirmSheet?
@@ -77,7 +79,9 @@ final class StagingInsertController {
     init(staging: TerminalStagingStore = .shared, sessions: TerminalSessionStore = .shared,
          target: StagingInsertTarget?, pasteboard: NSPasteboard = .general,
          context: @escaping () -> StagingContext?,
+         sheetClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          gate: @escaping Gate = { TerminalInputGuard.allowsControl(event: $0, control: $1, fromMenu: $2) }) {
+        self.sheetClock = sheetClock
         self.staging = staging
         self.sessions = sessions
         self.target = target
@@ -157,7 +161,7 @@ final class StagingInsertController {
               let target else { return .refused(.notInsertable) }
         let matches = StagingDestructivePatterns.matches(snapshot.command)
         if production && !matches.isEmpty && !confirmed {
-            return presentConfirmation(snapshot, env: env, matches: matches, control: control)
+            return presentConfirmation(snapshot, env: env, matches: matches, control: control, openedBy: event)
         }
         let bytes = StagingDrawerModel.bytes(for: snapshot.command, bracketedPaste: target.bracketedPasteMode)
         guard target.sendStagedBytes(bytes) else { return .refused(.notSent) }
@@ -171,7 +175,7 @@ final class StagingInsertController {
     // MARK: - The confirm sheet
 
     private func presentConfirmation(_ snapshot: StagingSnapshot, env: StagingEnvironment, matches: [String],
-                                     control: NSView) -> StagingInsertResult {
+                                     control: NSView, openedBy: NSEvent?) -> StagingInsertResult {
         // Without a window to hang the question on: refuse. Nothing falls through to an unconfirmed insert.
         guard let window = control.window else { return .refused(.notSent) }
         // One sheet per window: activating rows while one is up does nothing.
@@ -185,6 +189,7 @@ final class StagingInsertController {
             command: snapshot.command, matches: matches,
             hazardLabels: StagingDrawerModel.hazardLabels(for: snapshot.command, production: production),
             gate: { [weak self] event, button in self?.gate(event, button, false) ?? false },
+            openedBy: openedBy, now: sheetClock,
             onInsert: { [weak self] button in
                 guard let self else { return }
                 self.clearConfirmation()
@@ -199,7 +204,7 @@ final class StagingInsertController {
         guard let sheetWindow = sheet.window else { return .refused(.notSent) }
         confirmSheet = sheet
         confirmTerminalId = terminalId
-        watchConfirmation(terminalId: terminalId, window: window)
+        watchConfirmation(terminalId: terminalId, entryId: snapshot.entryId, command: snapshot.command, window: window)
         // The completion keeps the sheet's controller alive while it is up: its buttons' targets are weak.
         window.beginSheet(sheetWindow) { [weak self, sheet] _ in
             withExtendedLifetime(sheet) { if self?.confirmSheet === sheet { self?.clearConfirmation() } }
@@ -208,11 +213,14 @@ final class StagingInsertController {
     }
 
     /// The sheet closes, sending nothing, when the terminal ends or closes, the list goes, staging is turned
-    /// off or the parent window closes.
-    private func watchConfirmation(terminalId: String, window: NSWindow) {
+    /// off, its entry is removed or its text replaced, or the parent window closes.
+    private func watchConfirmation(terminalId: String, entryId: String, command: String, window: NSWindow) {
         confirmObservation = staging.observe(terminalId: terminalId) { [weak self] in
             guard let self else { return }
             if self.staging.list(for: terminalId) == nil || !self.staging.isStagingOn(terminalId: terminalId) {
+                self.dismissConfirmation()
+            } else if self.staging.entry(terminalId: terminalId, entryId: entryId)?.command != command {
+                // Removed or replaced: the sheet asked about other text, and the agent is told what was placed.
                 self.dismissConfirmation()
             }
         }

@@ -2889,6 +2889,10 @@ pub enum ServerMsg {
     },
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7965,8 +7969,4 @@ mod huey_document_wire_tests {
             other => panic!("expected PaneActionResult, got {other:?}"),
         }
     }
-}
-
-fn default_true() -> bool {
-    true
 }
