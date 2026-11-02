@@ -280,7 +280,7 @@ fn uname_with_a_flag_other_than_a_gets_no_rule() {
 fn search_and_sort_commands_with_allowed_flags_still_get_an_exact_rule() {
     assert_offered_exact(&[
         "grep -inr foo /tmp/a",
-        "rg -i foo",
+        "rg -i foo /tmp/a",
         "sort -n /tmp/a",
         "diff -u /tmp/a /tmp/b",
     ]);
