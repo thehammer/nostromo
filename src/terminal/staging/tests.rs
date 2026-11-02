@@ -910,6 +910,30 @@ fn a_replaced_command_resets_the_insert_count_and_a_replaced_note_does_not() {
     );
 }
 
+/// The race check compares BYTE lengths: `echo é` is 7 bytes (6 chars). A same-byte-length replacement is not
+/// told apart (documented), a different-length one is refused.
+#[test]
+fn the_replace_race_check_compares_byte_lengths_of_multibyte_text() {
+    let mut w = World::new();
+    let t = w.local(A);
+    w.follow(&t, A);
+    let id = w.staged_id(A, &t, "echo é");
+    w.call(A, &t, replace(&id, Some("echo ab"), None)).unwrap(); // 7 bytes too
+    w.report_inserted(&t, &id, 7);
+    assert_eq!(
+        w.list(A, &t).unwrap().entries[0].inserted_count,
+        1,
+        "same byte length: not detected"
+    );
+    w.call(A, &t, replace(&id, Some("echo abc"), None)).unwrap(); // 8 bytes
+    w.report_inserted(&t, &id, 7);
+    assert_eq!(
+        w.list(A, &t).unwrap().entries[0].inserted_count,
+        0,
+        "a different length is refused"
+    );
+}
+
 #[test]
 fn entry_ids_are_never_reused() {
     let mut w = World::new();

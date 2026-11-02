@@ -110,11 +110,34 @@ pub fn validate_command_in(text: &str, no_history_expansion: bool) -> Result<(),
 /// (IFS is whitespace), `r$()m` and `r$@m` are `rm`. Longest first.
 const EMPTY_EXPANSIONS: [&str; 5] = ["${IFS}", "$IFS", "$()", "$@", "$*"];
 
+/// Length in chars of the empty expansion starting at `chars[0]` (a `$`), if there is one: the fixed forms above,
+/// a positional parameter (`$0`-`$9`, `${0}`-`${9}`: the common `rm$IFS$9-rf`) and `${IFS` with a modifier
+/// (`${IFS%?}`, `${IFS:0:1}`, `${IFS#?}`), which run to the closing brace.
+fn empty_expansion_len(chars: &[char]) -> Option<usize> {
+    if let Some(e) = EMPTY_EXPANSIONS
+        .iter()
+        .find(|e| chars.iter().copied().take(e.len()).eq(e.chars()))
+    {
+        return Some(e.chars().count());
+    }
+    if chars.get(1).is_some_and(|c| c.is_ascii_digit()) {
+        return Some(2);
+    }
+    if chars.get(1) == Some(&'{') && chars.get(2).is_some_and(|c| c.is_ascii_digit()) && chars.get(3) == Some(&'}') {
+        return Some(4);
+    }
+    if chars.len() > 5 && chars[1..5] == ['{', 'I', 'F', 'S'] && !(chars[5].is_alphanumeric() || chars[5] == '_') {
+        return chars[5..].iter().position(|&c| c == '}').map(|p| 6 + p);
+    }
+    None
+}
+
 /// The text as a shell would see its words, for the hazard rules (the Mac app's `StagingHazards.normalised`
-/// does the same, and the shared fixture `tests/fixtures/terminal_staging/hazards.json` pins both): `/* ... */`
+/// does the same, and the shared fixture `tests/fixtures/terminal_staging/hazards.json` pins both for the normalised text and the
+/// rule verdicts, except `destructive` and `escape_quoted`, which only the Swift test exercises): `/* ... */`
 /// comments become a space (SQL treats one as whitespace), quotes and backslashes are dropped (`r''m`,
 /// `\rm`, `"rm"` become `rm`; the `$` of an ANSI-C `$'...'` quote goes too), an empty expansion (`$IFS`,
-/// `${IFS}`, `$@`, `$*`, `$()`) becomes a space, backticks, parentheses and braces become `;` (a subshell, a
+/// `${IFS}`, `$@`, `$*`, `$()`, `$0`-`$9`, `${IFS%?}`) becomes a space, backticks, parentheses and braces become `;` (a subshell, a
 /// command substitution and a group each start a new command), and runs of whitespace collapse. Quotes are
 /// not otherwise parsed: asking or refusing is the cheap side, so a hazard inside a quoted string matches too.
 pub fn normalise_for_hazards(text: &str) -> String {
@@ -143,15 +166,8 @@ fn normalise_with(text: &str, empty: &str) -> String {
     while i < chars.len() {
         let c = chars[i];
         i += 1;
-        if let Some(expansion) = (c == '$')
-            .then(|| {
-                EMPTY_EXPANSIONS
-                    .iter()
-                    .find(|e| chars[i - 1..].iter().copied().take(e.len()).eq(e.chars()))
-            })
-            .flatten()
-        {
-            i += expansion.chars().count() - 1;
+        if let Some(len) = (c == '$').then(|| empty_expansion_len(&chars[i - 1..])).flatten() {
+            i += len - 1;
             if !(empty == " " && out.ends_with(' ')) {
                 out.push_str(empty);
             }

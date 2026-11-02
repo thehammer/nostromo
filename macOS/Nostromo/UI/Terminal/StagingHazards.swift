@@ -149,6 +149,20 @@ enum StagingHazards {
     /// Expansions that are empty at run time (`rm${IFS}-rf` is `rm -rf`; `r$@m` is `rm`). Longest first.
     private static let emptyExpansions = ["${IFS}", "$IFS", "$()", "$@", "$*"]
 
+    /// Length of the empty expansion starting at `chars[index]` (a `$`), if any: the fixed forms, a positional
+    /// parameter (`$0`-`$9`, `${0}`-`${9}`) and `${IFS` with a modifier (`${IFS%?}`), which runs to the `}`.
+    private static func emptyExpansionLength(_ chars: [Character], at index: Int) -> Int? {
+        if let fixed = emptyExpansions.first(where: { chars[index...].starts(with: Array($0)) }) { return fixed.count }
+        func at(_ offset: Int) -> Character? { index + offset < chars.count ? chars[index + offset] : nil }
+        func isDigit(_ c: Character?) -> Bool { c.map { $0.isASCII && $0.isNumber } ?? false }
+        if isDigit(at(1)) { return 2 }
+        if at(1) == "{", isDigit(at(2)), at(3) == "}" { return 4 }
+        if chars[index...].starts(with: Array("${IFS")), let next = at(5), !(next.isLetter || next.isNumber || next == "_") {
+            return chars[(index + 5)...].firstIndex(of: "}").map { $0 - index + 1 }
+        }
+        return nil
+    }
+
     /// Both forms of the normalised text: empty expansions as a space, and removed (inside a word the shell glues
     /// the halves together). Rules match either.
     static func normalisedViews(_ text: String) -> [String] {
@@ -157,7 +171,7 @@ enum StagingHazards {
 
     /// The text as a shell would see its words, for the hazard rules (the daemon's `normalise_for_hazards`
     /// does the same): `/* */` comments become a space, quotes and backslashes are dropped (and the `$` of a
-    /// `$'...'` quote), empty expansions (`$IFS`, `${IFS}`, `$@`, `$*`, `$()`) become `empty`, backticks,
+    /// `$'...'` quote), empty expansions (`$IFS`, `${IFS}`, `$@`, `$*`, `$()`, `$0`-`$9`, `${IFS%?}`) become `empty`, backticks,
     /// parentheses and braces become `;`, and runs of whitespace collapse.
     static func normalised(_ text: String, empty: String = " ") -> String {
         var out = ""
@@ -165,8 +179,8 @@ enum StagingHazards {
         var index = 0
         while index < chars.count {
             let c = chars[index]
-            if c == "$", let expansion = emptyExpansions.first(where: { chars[index...].starts(with: Array($0)) }) {
-                index += expansion.count
+            if c == "$", let length = emptyExpansionLength(chars, at: index) {
+                index += length
                 if !(empty == " " && out.last == " ") { out.append(empty) }
                 continue
             }

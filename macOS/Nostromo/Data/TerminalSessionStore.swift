@@ -150,7 +150,7 @@ final class TerminalSessionStore {
     /// waiting for the rest of the command, and Enter alone never makes the line "known empty" again.
     private var awaitingContinuation: Set<String> = []
     /// Terminals that received input this app cannot follow (an escape sequence or other control byte: Up/Down
-    /// recall, Ctrl-R, Ctrl-A/E/W, cursor movement) since the last Ctrl-C or Ctrl-U. What is on the line is
+    /// recall, Ctrl-R, Ctrl-A/E/W, cursor movement) since the last Ctrl-C (Ctrl-U does not release it: it kills only left of the cursor). What is on the line is
     /// unknown, so an Enter after it may have run a recalled command that waits for more: that Enter puts the
     /// terminal in `awaitingContinuation`. Fails closed.
     private var unfollowedInput: Set<String> = []
@@ -624,8 +624,9 @@ final class TerminalSessionStore {
     /// After a person's bytes: the line is known empty only when the last of Enter (CR), Ctrl-C and Ctrl-U is the
     /// final byte AND the Enter did not leave the shell waiting for a continuation line (the entry ended in `\`,
     /// `|`, `&&`, an open quote or `<<`: then only Ctrl-C or Ctrl-U makes it known empty). Any byte after the
-    /// ender, or none of them at all, may have put text on the line. Ctrl-U never ends a continuation, and an Enter
-    /// after input the app cannot follow (`unfollowedInput`) is treated as one: only Ctrl-C releases those.
+    /// ender, or none of them at all, may have put text on the line. Ctrl-U never ends a continuation, never releases input the app
+    /// cannot follow (`unfollowedInput`: the cursor may have moved), and an Enter after such input is treated as a
+    /// continuation: only Ctrl-C releases those.
     private func noteLine(terminalId: String, bytes: [UInt8]) {
         let enders: Set<UInt8> = [0x0D, 0x03, 0x15]
         let base = bytes.lastIndex(where: { enders.contains($0) }).map { $0 != bytes.count - 1 } ?? true
@@ -637,8 +638,10 @@ final class TerminalSessionStore {
                 unfollowedInput.remove(terminalId)
                 pending = []
             case 0x15:
-                // Clears the text on the current line only: a continuation the shell is waiting for stays.
-                unfollowedInput.remove(terminalId)
+                // bash's Ctrl-U kills only LEFT of the cursor, and a continuation the shell waits for stays. It
+                // therefore never clears `unfollowedInput` (Left or Ctrl-A, then Ctrl-U, leaves text to the right).
+                // When the app followed every byte since the last reset, no escape or control byte moved the
+                // cursor, so Ctrl-U wipes exactly the text the app saw: that case stays allowed.
                 pending = []
             case 0x0D:
                 if unfollowedInput.remove(terminalId) != nil || Self.continuesOnTheNextLine(pending) {

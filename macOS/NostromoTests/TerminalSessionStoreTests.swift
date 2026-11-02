@@ -1463,13 +1463,22 @@ extension TerminalSessionStoreTests {
         }
     }
 
-    func testCtrlUAfterInputTheAppCannotFollowKnowsTheLineEmptyWhenNothingWaits() {
+    /// bash's Ctrl-U kills only LEFT of the cursor: after Left or Ctrl-A the text to the right stays, so only
+    /// Ctrl-C releases input the app cannot follow.
+    func testCtrlUNeverReleasesInputTheAppCannotFollowOnlyCtrlCDoes() {
         _ = attachedTerminal()
-        store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
-        store.sendInput(terminalId: "t1", bytes: [0x1B, 0x5B, 0x41], fromWindow: "w1")
-        XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"))
-        store.sendInput(terminalId: "t1", bytes: [0x15], fromWindow: "w1")
-        XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"), "the recalled text is wiped and nothing was submitted")
+        let moves: [(String, [UInt8])] = [("Left", [0x1B, 0x5B, 0x44]), ("Ctrl-A", [0x01]), ("Up", [0x1B, 0x5B, 0x41])]
+        for (name, move) in moves {
+            store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
+            store.sendInput(terminalId: "t1", bytes: Array("rm x".utf8) + move, fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), name)
+            store.sendInput(terminalId: "t1", bytes: [0x15], fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "Ctrl-U after \(name) leaves text to the right: still refused")
+            store.sendInput(terminalId: "t1", bytes: Array("a".utf8) + [0x15], fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "typed then Ctrl-U after \(name): still refused")
+            store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
+            XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"), "Ctrl-C releases: \(name)")
+        }
     }
 
     func testACompleteEntryAndABracketedPasteOfOneAreKnownEmptyAfterEnter() {

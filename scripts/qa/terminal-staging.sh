@@ -27,6 +27,12 @@
 # timed drag) the step says INCONCLUSIVE and the PR's manual list covers it. Exits 0 PASS, 1 FAIL, 3 INCONCLUSIVE.
 # shellcheck disable=SC2329  # functions handed to poll / ok_if / the EXIT trap are not "called" by name
 set -euo pipefail
+# This script promises no tokens: qa-instance.sh would hand a real CLI to the QA daemon when this is set.
+if [ -n "${NOSTROMO_QA_CLAUDE_BIN:-}" ]; then
+  echo "REFUSING TO RUN: NOSTROMO_QA_CLAUDE_BIN is set, so the QA session would run a real model and spend tokens." >&2
+  echo "This script uses the fake CLI only. Unset NOSTROMO_QA_CLAUDE_BIN (it is for tracker-discoverability.sh)." >&2
+  exit 2
+fi
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 instance="$here/qa-instance.sh"
