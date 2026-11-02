@@ -16,7 +16,9 @@
 use std::path::PathBuf;
 
 use chrono::{TimeZone, Timelike, Utc};
-use nostromo::ipc::protocol::{ClientMsg, ServerMsg, StagedEntryWire, TerminalStagingState};
+use nostromo::ipc::protocol::{
+    ClientMsg, ServerMsg, StagedEntryWire, StagingArchive, TerminalStagingState,
+};
 use serde::Serialize;
 
 const TERMINAL: &str = "5f0a8f7e-2d4c-4a4e-9a55-0f1f3a9d7c11";
@@ -67,6 +69,8 @@ fn list_frame(
         agent_name: "Cody".into(),
         revision,
         entries,
+        enabled: true,
+        foreground: None,
     }
 }
 
@@ -79,6 +83,8 @@ fn none_frame() -> ServerMsg {
         agent_name: String::new(),
         revision: 9,
         entries: Vec::new(),
+        enabled: true,
+        foreground: None,
     }
 }
 
@@ -181,11 +187,57 @@ fn the_client_frames_match_their_golden_files_and_decode() {
     let remove = ClientMsg::TerminalStagingRemove {
         terminal_id: TERMINAL.into(),
         entry_id: "s-00000001".into(),
+        archive: None,
     };
     let clear = ClientMsg::TerminalStagingClear {
         terminal_id: TERMINAL.into(),
     };
+    let archive = ClientMsg::TerminalStagingRemove {
+        terminal_id: TERMINAL.into(),
+        entry_id: "s-00000002".into(),
+        archive: Some(StagingArchive::Manual),
+    };
+    let set_enabled = ClientMsg::TerminalStagingSetEnabled {
+        terminal_id: TERMINAL.into(),
+        enabled: false,
+    };
+    let set_global = ClientMsg::TerminalStagingSetGlobal { enabled: true };
+    let ui_event = ClientMsg::TerminalStagingUiEvent {
+        terminal_id: TERMINAL.into(),
+        event: "confirm_cancelled".into(),
+    };
+    let stage_insert = ClientMsg::TerminalInput {
+        terminal_id: TERMINAL.into(),
+        bytes: "Z2l0IHN0YXR1cyAtLXNob3J0".into(),
+        auto_reply: false,
+        via: Some("stage_insert".into()),
+    };
     for (name, msg, verb) in [
+        (
+            "client-terminal-staging-remove-archive.json",
+            &archive,
+            "terminal_staging_remove",
+        ),
+        (
+            "client-terminal-staging-set-enabled.json",
+            &set_enabled,
+            "terminal_staging_set_enabled",
+        ),
+        (
+            "client-terminal-staging-set-global.json",
+            &set_global,
+            "terminal_staging_set_global",
+        ),
+        (
+            "client-terminal-staging-ui-event.json",
+            &ui_event,
+            "terminal_staging_ui_event",
+        ),
+        (
+            "client-terminal-input-stage-insert.json",
+            &stage_insert,
+            "terminal_input",
+        ),
         (
             "client-terminal-staging-inserted.json",
             &inserted,
@@ -225,4 +277,65 @@ fn an_older_app_that_omits_confirmed_decodes_it_as_false() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_frame_with_a_foreground_program_matches_its_golden_file() {
+    let msg = match list_frame(TerminalStagingState::Active, 10, entries()) {
+        ServerMsg::TerminalStagingList {
+            terminal_id,
+            pane_id,
+            state,
+            owner_tag,
+            agent_name,
+            revision,
+            entries,
+            enabled,
+            ..
+        } => ServerMsg::TerminalStagingList {
+            terminal_id,
+            pane_id,
+            state,
+            owner_tag,
+            agent_name,
+            revision,
+            entries,
+            enabled,
+            foreground: Some("ssh".into()),
+        },
+        other => panic!("{other:?}"),
+    };
+    let text = check_golden("frame-terminal-staging-list-foreground.json", &msg);
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["foreground"], "ssh");
+}
+
+#[test]
+fn enabled_is_always_sent_and_defaults_to_true_for_an_older_daemon() {
+    let text = rendered(&none_frame());
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["enabled"], true);
+    assert!(value.get("foreground").is_none());
+    let older = r#"{"type":"terminal_staging_list","terminal_id":"t","pane_id":"p","state":"none","owner_tag":"","agent_name":"","revision":1,"entries":[]}"#;
+    match serde_json::from_str::<ServerMsg>(older).unwrap() {
+        ServerMsg::TerminalStagingList { enabled, .. } => assert!(enabled),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_plain_terminal_input_has_no_via_and_a_plain_remove_has_no_archive() {
+    let text = rendered(&ClientMsg::TerminalInput {
+        terminal_id: TERMINAL.into(),
+        bytes: "bHMK".into(),
+        auto_reply: false,
+        via: None,
+    });
+    assert!(!text.contains("via"));
+    let text = rendered(&ClientMsg::TerminalStagingRemove {
+        terminal_id: TERMINAL.into(),
+        entry_id: "s-00000001".into(),
+        archive: None,
+    });
+    assert!(!text.contains("archive"));
 }

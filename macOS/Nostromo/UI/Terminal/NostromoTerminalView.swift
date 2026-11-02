@@ -35,6 +35,9 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate, TerminalPi
 
     /// The terminal this view shows (the host sets it as the daemon describes the pane).
     var terminalId: String?
+    /// The staging items of the context menu (Let Agents Stage Commands Here, Show Staged Commands): the host
+    /// builds them (it knows the drawer and its controller); this view only lists them.
+    var stagingMenuItems: (() -> [NSMenuItem])?
     let windowId: String
     private let store: TerminalSessionStore
     /// > 0 while SwiftTerm is sending something the emulator generated (see the type's comment).
@@ -159,7 +162,14 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate, TerminalPi
     /// Right-click: "Send selection to <focus>", and a submenu of the other focuses. Both are off while
     /// nothing is selected. Never anything for a pane the daemon has not described yet.
     override func menu(for event: NSEvent) -> NSMenu? {
-        sendSelectionMenu()
+        let menu = sendSelectionMenu()
+        let staging = stagingMenuItems?() ?? []
+        guard !staging.isEmpty else { return menu }
+        let result = menu ?? NSMenu(title: "Terminal")
+        result.autoenablesItems = false
+        if !result.items.isEmpty { result.addItem(.separator()) }
+        staging.forEach { result.addItem($0) }
+        return result
     }
 
     /// Pops the Send selection list up at the view's top-left (Terminal > Send Selection to…).
@@ -335,7 +345,7 @@ extension NostromoTerminalView: StagingInsertTarget {
             refuse(.stageInsert)
             return false
         }
-        return store.sendInput(terminalId: terminalId, bytes: bytes, fromWindow: windowId, autoReply: false)
+        return store.sendInput(terminalId: terminalId, bytes: bytes, fromWindow: windowId, autoReply: false, via: "stage_insert")
     }
 
     func focusTerminal() {

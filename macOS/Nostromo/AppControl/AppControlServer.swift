@@ -244,9 +244,10 @@ final class AppControlServer {
     private func node(_ v: NSView, in w: NSWindow, depth: Int, maxDepth: Int, visibleOnly: Bool) -> [String: Any]? {
         if visibleOnly && v.isHidden { return nil }
         let frameInWindow = v.convert(v.bounds, to: nil)
-        if v is StagingDrawerView, AppControlAX.isWithheld(v) {
-            // Staged commands are the user's to read on screen, not app-control's: one fixed entry, no children.
-            return ["class": "StagingDrawerView", "text": AppControlAX.stagedHiddenText,
+        if v is StagingDrawerView || v is StagingConfirmContentView, AppControlAX.isWithheld(v) {
+            // Staged commands (and the confirm sheet asking about one) are the user's to read on screen, not
+            // app-control's: one fixed entry, no children.
+            return ["class": String(describing: type(of: v)), "text": AppControlAX.stagedHiddenText,
                     "frame": AppControlGeometry.topLeftRect(viewFrameInWindow: frameInWindow, contentHeight: contentHeight(w))]
         }
         var n: [String: Any] = [
@@ -296,8 +297,8 @@ final class AppControlServer {
         var out: [Hit] = []
         func walk(_ v: NSView) {
             if v.isHidden { return }
-            if v is StagingDrawerView, AppControlAX.isWithheld(v) {
-                if v.window != nil, AppControlAX.stagedHiddenText.contains(needle) { out.append(Hit(cls: "StagingDrawerView", text: AppControlAX.stagedHiddenText, rectInWindow: v.convert(v.bounds, to: nil))) }
+            if v is StagingDrawerView || v is StagingConfirmContentView, AppControlAX.isWithheld(v) {
+                if v.window != nil, AppControlAX.stagedHiddenText.contains(needle) { out.append(Hit(cls: String(describing: type(of: v)), text: AppControlAX.stagedHiddenText, rectInWindow: v.convert(v.bounds, to: nil))) }
                 return
             }
             let hay = [text(of: v), v.toolTip, v.accessibilityLabel(), String(describing: type(of: v))]

@@ -222,6 +222,7 @@ async fn main() -> Result<()> {
         terminals.set_idle_policy(nostromo::terminal::idle::IdlePolicy::from_env());
     }
     nostromo::terminal::TerminalManager::start_idle_monitor(&terminals);
+    nostromo::terminal::TerminalManager::start_foreground_monitor(&terminals);
     // The real remote-shell launcher: the AWS CLI, run by argv, never through
     // a shell. It is called only after the verified app says Connect.
     {

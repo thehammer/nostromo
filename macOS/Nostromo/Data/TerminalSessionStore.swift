@@ -93,6 +93,10 @@ final class TerminalSessionStore {
     /// Sends one frame to the daemon (`AppStore` points it at the client; dropped when not connected).
     var transport: (TerminalClientMessage) -> Void
 
+    /// Told, with the bytes, of every input a person's own (keys, paste, a staged insert) that went to a
+    /// terminal; never of a terminal's auto-reply. `AppStore` points it at the staging store (auto-archive).
+    var onPersonInput: ((_ terminalId: String, _ bytes: [UInt8]) -> Void)?
+
     private(set) var terminals: [String: TerminalInfo] = [:]
     /// The window a person last typed or clicked in, per terminal. A terminal nobody has used yet is
     /// driven by its first view (`isDriver`).
@@ -133,6 +137,23 @@ final class TerminalSessionStore {
     /// terminal id -> (window id, when the claim was made), once the daemon said the terminal exists.
     private var focusClaims: [String: (windowId: String, at: Date)] = [:]
     private var lastRefusalReport: [String: Date] = [:]
+    /// Whether something may be on the shell's current line (false: known empty). A terminal not in here is
+    /// UNKNOWN, which counts as true: a terminal this app did not open or first see connecting (re-attached
+    /// after a launch or a reconnect) may have anything typed on its line.
+    private var lineHasText: [String: Bool] = [:]
+    /// What was sent since the last Enter, Ctrl-C or Ctrl-U (printable bytes; Backspace removes one). Read at the
+    /// next Enter to tell whether the shell is now waiting for a continuation line.
+    private var pendingLine: [String: [UInt8]] = [:]
+    /// Terminals whose last Enter ended a line the shell may not have finished (`\` at the end, `|`, `&&`, an
+    /// open quote, `<<`): the prompt is a `> ` and the next Enter may complete a command assembled from two
+    /// rows. Cleared only by Ctrl-C: Ctrl-U clears the text on the current `> ` line but the shell is still
+    /// waiting for the rest of the command, and Enter alone never makes the line "known empty" again.
+    private var awaitingContinuation: Set<String> = []
+    /// Terminals that received input this app cannot follow (an escape sequence or other control byte: Up/Down
+    /// recall, Ctrl-R, Ctrl-A/E/W, cursor movement) since the last Ctrl-C (Ctrl-U does not release it: it kills only left of the cursor). What is on the line is
+    /// unknown, so an Enter after it may have run a recalled command that waits for more: that Enter puts the
+    /// terminal in `awaitingContinuation`. Fails closed.
+    private var unfollowedInput: Set<String> = []
 
     /// Where Reconnect on a closed remote shell sends its request.
     private let remoteShells: RemoteShellStore
@@ -169,6 +190,12 @@ final class TerminalSessionStore {
     /// The daemon is unreachable (or has not yet described this terminal since it came back).
     func isDaemonUnavailable(terminalId: String) -> Bool {
         daemonUnavailable.contains(terminalId)
+    }
+
+    /// Something typed or placed since the last Enter, Ctrl-C or Ctrl-U may still be on the line. True when
+    /// that is unknown. Only a production-treated staging pane reads it (a command is not placed next to it).
+    func lineMayHaveText(terminalId: String) -> Bool {
+        lineHasText[terminalId] ?? true
     }
 
     /// A large paste is still going out in frames: anything else for this terminal queues behind it.
@@ -234,6 +261,10 @@ final class TerminalSessionStore {
     func connectionChanged(_ isConnected: Bool) {
         connected = isConnected
         if !isConnected {
+            lineHasText.removeAll()
+            pendingLine.removeAll()
+            awaitingContinuation.removeAll()
+            unfollowedInput.removeAll()
             attached.removeAll()
             inputBacklog.removeAll()
             if !terminals.isEmpty, daemonUnavailable.isEmpty {
@@ -257,8 +288,11 @@ final class TerminalSessionStore {
     /// they are going out, anything else for that terminal (a key, a reply) queues behind them, so a
     /// paste is never split by what the person types next.
     /// Returns whether the bytes were sent or queued (false: dropped, nothing will go out).
+    ///
+    /// `via` says where a person's input came from (`"stage_insert"`: a staged command placed at the prompt).
     @discardableResult
-    func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String, autoReply: Bool = false) -> Bool {
+    func sendInput(terminalId: String, bytes: [UInt8], fromWindow windowId: String, autoReply: Bool = false,
+                   via: String? = nil) -> Bool {
         guard !bytes.isEmpty, terminals[terminalId]?.status == .running,
               !daemonUnavailable.contains(terminalId) else { return false }
         // Every window's emulator answers the same output; only the driver's reply reaches the process.
@@ -272,8 +306,12 @@ final class TerminalSessionStore {
         while start < bytes.count {
             let end = min(start + Self.inputChunkBytes, bytes.count)
             let chunk = (start == 0 && end == bytes.count) ? bytes : Array(bytes[start..<end])
-            frames.append(.input(terminalId: terminalId, bytes: chunk, autoReply: autoReply))
+            frames.append(.input(terminalId: terminalId, bytes: chunk, autoReply: autoReply, via: via))
             start = end
+        }
+        if !autoReply {
+            noteLine(terminalId: terminalId, bytes: bytes)
+            onPersonInput?(terminalId, bytes)
         }
         if inputBacklog[terminalId] == nil && frames.count == 1 {
             transport(frames[0])
@@ -389,6 +427,9 @@ final class TerminalSessionStore {
     private func apply(_ info: TerminalInfo) {
         let id = info.terminalId
         let sizeChanged = terminals[id].map { ($0.cols, $0.rows) != (info.cols, info.rows) } ?? false
+        // A terminal this app opened, or first seen still connecting, starts with an empty line.
+        let appOpened = info.openedByRequest.map { pendingFocus[$0] != nil } ?? false
+        if terminals[id] == nil, lineHasText[id] == nil, appOpened || info.status == .connecting { lineHasText[id] = false }
         terminals[id] = info
         knownSize[id] = [info.cols, info.rows]
         // A restart replaces the terminal in the same pane under a new id; the old record is gone.
@@ -580,7 +621,89 @@ final class TerminalSessionStore {
         }
     }
 
+    /// After a person's bytes: the line is known empty only when the last of Enter (CR), Ctrl-C and Ctrl-U is the
+    /// final byte AND the Enter did not leave the shell waiting for a continuation line (the entry ended in `\`,
+    /// `|`, `&&`, an open quote or `<<`: then only Ctrl-C or Ctrl-U makes it known empty). Any byte after the
+    /// ender, or none of them at all, may have put text on the line. Ctrl-U never ends a continuation, never releases input the app
+    /// cannot follow (`unfollowedInput`: the cursor may have moved), and an Enter after such input is treated as a
+    /// continuation: only Ctrl-C releases those.
+    private func noteLine(terminalId: String, bytes: [UInt8]) {
+        let enders: Set<UInt8> = [0x0D, 0x03, 0x15]
+        let base = bytes.lastIndex(where: { enders.contains($0) }).map { $0 != bytes.count - 1 } ?? true
+        var pending = pendingLine[terminalId] ?? []
+        for byte in Self.withoutPasteMarkers(bytes) {
+            switch byte {
+            case 0x03:
+                awaitingContinuation.remove(terminalId)
+                unfollowedInput.remove(terminalId)
+                pending = []
+            case 0x15:
+                // bash's Ctrl-U kills only LEFT of the cursor, and a continuation the shell waits for stays. It
+                // therefore never clears `unfollowedInput` (Left or Ctrl-A, then Ctrl-U, leaves text to the right).
+                // When the app followed every byte since the last reset, no escape or control byte moved the
+                // cursor, so Ctrl-U wipes exactly the text the app saw: that case stays allowed.
+                pending = []
+            case 0x0D:
+                if unfollowedInput.remove(terminalId) != nil || Self.continuesOnTheNextLine(pending) {
+                    awaitingContinuation.insert(terminalId)
+                }
+                pending = []
+            case 0x7F, 0x08:
+                if !pending.isEmpty { pending.removeLast() }
+            case 0x09, 0x20...0xFF:
+                if pending.count < 4096 { pending.append(byte) }
+            default:
+                pending = []    // an escape sequence or other control: what is on the line can no longer be followed
+                unfollowedInput.insert(terminalId)
+            }
+        }
+        pendingLine[terminalId] = pending
+        lineHasText[terminalId] = base || awaitingContinuation.contains(terminalId) || unfollowedInput.contains(terminalId)
+    }
+
+    private static func withoutPasteMarkers(_ bytes: [UInt8]) -> [UInt8] {
+        guard bytes.contains(0x1B) else { return bytes }
+        let markers = [Array("\u{1b}[200~".utf8), Array("\u{1b}[201~".utf8)]
+        var out: [UInt8] = []
+        var index = 0
+        while index < bytes.count {
+            if let marker = markers.first(where: { bytes[index...].starts(with: $0) }) {
+                index += marker.count
+            } else {
+                out.append(bytes[index])
+                index += 1
+            }
+        }
+        return out
+    }
+
+    /// Would a shell wait for more after this line? A trailing `\`, `|` or `&&`; an open quote, parenthesis or
+    /// brace; a here-document (`<<`); or a trailing `then`, `do`, `else` or `elif`. Over-approximates:
+    /// asking for Ctrl-C is the cheap side.
+    static func continuesOnTheNextLine(_ bytes: [UInt8]) -> Bool {
+        let text = String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return false }
+        if text.hasSuffix("\\") || text.hasSuffix("|") || text.hasSuffix("&&") || text.contains("<<") { return true }
+        if let last = text.split(separator: " ").last, ["then", "do", "else", "elif"].contains(String(last)) { return true }
+        var single = false, double = false, escaped = false
+        var depth = 0
+        for character in text {
+            if escaped { escaped = false; continue }
+            if character == "\\" && !single { escaped = true; continue }
+            if character == "'" && !double { single.toggle(); continue }
+            if character == "\"" && !single { double.toggle(); continue }
+            guard !single && !double else { continue }
+            if character == "(" || character == "{" { depth += 1 }
+            if character == ")" || character == "}" { depth -= 1 }
+        }
+        return single || double || depth > 0
+    }
+
     private func forget(_ id: String) {
+        lineHasText.removeValue(forKey: id)
+        pendingLine.removeValue(forKey: id)
+        awaitingContinuation.remove(id)
+        unfollowedInput.remove(id)
         terminals.removeValue(forKey: id)
         replayCopy.removeValue(forKey: id)
         inputBacklog.removeValue(forKey: id)

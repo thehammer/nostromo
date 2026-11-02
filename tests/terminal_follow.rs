@@ -425,6 +425,7 @@ impl Unix {
             terminal_id: terminal_id.into(),
             bytes: B64.encode(bytes),
             auto_reply: false,
+            via: None,
         })
         .await;
     }

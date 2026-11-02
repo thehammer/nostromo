@@ -310,6 +310,31 @@ final class TerminalScreenAccessTests: XCTestCase {
         XCTAssertFalse(AppControlAX.isWithheld(NSView(), allowsSynthetic: false))
     }
 
+    func testTheConfirmSheetIsWithheldLikeTheDrawerAndPaintedOverInAScreenshot() throws {
+        let sheet = StagingConfirmSheet(title: "Insert into PRODUCTION?", targetLine: "target \(stagedCanary)",
+                                        command: "echo \(stagedCanary)", matches: ["queue:flush"], hazardLabels: [],
+                                        onInsert: { _ in }, onCancel: {}, onRefused: {})
+        let window = try XCTUnwrap(sheet.window)
+        let content = try XCTUnwrap(window.contentView)
+        XCTAssertTrue(content is StagingConfirmContentView)
+        var everything: [NSView] = [content]
+        var index = 0
+        while index < everything.count { everything.append(contentsOf: everything[index].subviews); index += 1 }
+        XCTAssertGreaterThan(everything.count, 8)
+        for view in everything {
+            XCTAssertTrue(AppControlAX.isWithheld(view, allowsSynthetic: false), "\(type(of: view))")
+            XCTAssertFalse(AppControlAX.isWithheld(view, allowsSynthetic: true), "\(type(of: view)) in the QA build")
+            XCTAssertNil(AppControlAX.text(of: view, allowsSynthetic: false), "\(type(of: view))")
+        }
+        let hits = AppControlAX.hits(under: content, in: window, allowsSynthetic: false)
+        XCTAssertFalse(hits.contains { $0.text?.contains(stagedCanary) == true }, "\(hits)")
+        let dump = try json(AppControlAX.dump(content, 0, allowsSynthetic: false))
+        XCTAssertFalse(dump.contains(stagedCanary), dump)
+        XCTAssertTrue(dump.contains(AppControlAX.stagedHiddenText), dump)
+        XCTAssertTrue(content is TerminalPixelSource, "a screenshot paints the sheet's content over")
+        XCTAssertEqual(try ScreenshotRedaction.terminalAreas(in: window).count, 1)
+    }
+
     // MARK: - `AppControlAX.text(of:)`: what `layout-issues`, `tree` and `find` read out of a view
 
     private let secretCommand = "echo SECRET-STAGED"
