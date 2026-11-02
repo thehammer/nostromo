@@ -62,7 +62,8 @@ enum HumanGesture {
     ///     still is). Every other check applies, so a synthetic, stale or missing event is refused.
     ///   - contextMenuPick: with `menuSelection`, the item is in a context menu, which can also be chosen by
     ///     the keyboard (a key event with no window, or the menu's own) or by releasing the right button.
-    ///     Off for every other caller.
+    ///     Off for every other caller: never for a control whose single permitted action changes state;
+    ///     only for a step that cannot itself confirm.
     static func permit(_ event: NSEvent?, control: NSView, menuSelection: Bool = false,
                        contextMenuPick: Bool = false,
                        voiceOverEnabled: () -> Bool = { NSWorkspace.shared.isVoiceOverEnabled },

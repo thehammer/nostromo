@@ -439,6 +439,68 @@ final class HumanGestureTests: XCTestCase {
         XCTAssertEqual(verdict(nil, control, at: clock, voiceOver: false), .refused(reason: .accessibilityPress))
         XCTAssertEqual(verdict(nil, control, at: clock, voiceOver: true), .human(sourcePid: nil, sourceState: nil))
     }
+
+    // MARK: A menu selection does not widen the default
+
+    /// A window whose class name contains "Menu", as a context menu's own window.
+    private final class MenuLikeWindow: NSWindow {}
+
+    private func menuLikeWindow() -> NSWindow {
+        _ = NSApplication.shared
+        let w = MenuLikeWindow(contentRect: NSRect(x: 0, y: 0, width: 80, height: 40),
+                               styleMask: .borderless, backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+        w.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        addTeardownBlock { w.close() }
+        return w
+    }
+
+    /// `menuSelection: true` with the DEFAULT `contextMenuPick` (false): the strict shape every control
+    /// whose action changes state would use. The three context-menu routes stay refused.
+    private func menuVerdict(_ event: NSEvent?, _ control: NSView) -> HumanGestureVerdict {
+        HumanGesture.permit(event, control: control, menuSelection: true,
+                            voiceOverEnabled: { false }, allowsSynthetic: { false })
+    }
+
+    func testAMenuSelectionWithoutTheContextMenuFlagRefusesAWindowlessKeyEvent() {
+        let (_, control) = makeWindowAndControl()
+        let windowless = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                          timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: 0, context: nil, characters: "\r",
+                                          charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36)!
+        XCTAssertNil(windowless.window, "precondition: no window")
+        XCTAssertEqual(menuVerdict(windowless, control), .refused(reason: .notAUserEvent))
+    }
+
+    func testAMenuSelectionWithoutTheContextMenuFlagRefusesAKeyEventFromAMenuWindow() {
+        let (_, control) = makeWindowAndControl()
+        let menuWindow = menuLikeWindow()
+        let key = GestureFixtures.key(in: menuWindow, characters: "\r", keyCode: 36)
+        XCTAssertTrue(key.window === menuWindow, "precondition: the event belongs to the menu-like window")
+        XCTAssertEqual(menuVerdict(key, control), .refused(reason: .notAUserEvent))
+    }
+
+    func testAMenuSelectionWithoutTheContextMenuFlagRefusesARightMouseUp() {
+        let (window, control) = makeWindowAndControl()
+        XCTAssertEqual(menuVerdict(GestureFixtures.mouse(.rightMouseUp, in: window), control),
+                       .refused(reason: .notAUserEvent))
+        XCTAssertEqual(menuVerdict(GestureFixtures.mouse(.rightMouseUp, in: menuLikeWindow()), control),
+                       .refused(reason: .notAUserEvent))
+    }
+
+    func testTheContextMenuFlagIsWhatAdmitsThoseThreeRoutes() {
+        let (window, control) = makeWindowAndControl()
+        let menuWindow = menuLikeWindow()
+        func permitted(_ event: NSEvent) -> Bool {
+            if case .human = HumanGesture.permit(event, control: control, menuSelection: true, contextMenuPick: true,
+                                                 voiceOverEnabled: { false }, allowsSynthetic: { false }) { return true }
+            return false
+        }
+        XCTAssertTrue(permitted(GestureFixtures.key(in: menuWindow, characters: "\r", keyCode: 36)))
+        XCTAssertTrue(permitted(GestureFixtures.mouse(.rightMouseUp, in: window)))
+    }
 }
 
 private extension HumanGestureVerdict {
