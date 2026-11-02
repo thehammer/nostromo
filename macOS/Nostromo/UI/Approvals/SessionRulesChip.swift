@@ -187,7 +187,7 @@ final class SessionRulesChip: NSButton {
     /// The most rules a session may hold; the slot fits its text.
     static let countCap = 32
 
-    /// The width the input bar reserves when there is room: the widest `N session rules` for any N up to the cap
+    /// The width the input bar reserves when there is room: the widest `N rules` for any N up to the cap
     /// (proportional digits make `20` wider than `32`), plus padding.
     static let slotWidth: CGFloat = widest(.full)
 
@@ -204,7 +204,7 @@ final class SessionRulesChip: NSButton {
     /// What the chip says for `count` rules at `fit`.
     static func text(count: Int, fit: Fit) -> String {
         switch fit {
-        case .full: return count == 1 ? "1 session rule" : "\(count) session rules"
+        case .full: return count == 1 ? "1 rule" : "\(count) rules"
         case .countOnly: return "\(count)"
         case .hidden: return ""
         }

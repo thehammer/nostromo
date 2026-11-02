@@ -1312,7 +1312,10 @@ final class TrackerPaneViewTests: MouseQueueTestCase {
         XCTAssertEqual(saved[0], 0.5, accuracy: 0.06, "the saved ratio is where the divider was dropped (was 0.66): \(saved)")
 
         // A new view for the same tag comes up with the dragged ratio, not the agent's.
-        let size2 = NSSize(width: 1000, height: 600)
+        // The REPL pane has a minimum width (the input bar reserves the fixed session-rules slot, BA3), so the
+        // drag to 0.5 and the restore are both at the 1200 pt the divider was dragged in: a narrower window
+        // would clamp the restored ratio to that minimum and say nothing about persistence.
+        let size2 = NSSize(width: 1200, height: 640)
         let (window2, focusView2) = makeDynamicFocusWindow(focus, size: size2)
         let split2 = try XCTUnwrap(rigAllSubviews(of: focusView2).compactMap { $0 as? RatioSplitView }.first)
         layOut(focusView2) { split2.ratiosApplied }
