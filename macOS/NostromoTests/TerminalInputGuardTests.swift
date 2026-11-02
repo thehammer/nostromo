@@ -13,7 +13,7 @@ import AppKit
 // Events come from `GestureFixtures` (HumanGestureTests.swift): real-typed events resolve to their
 // window and carry no marker; a "marked" event is stamped the way app-control stamps what it posts.
 
-final class TerminalInputGuardTests: XCTestCase {
+final class TerminalInputGuardTests: MouseQueueTestCase {
 
     private func windowAndControl() -> (NSWindow, NSButton) {
         let window = GestureFixtures.offscreenWindow()
@@ -404,7 +404,7 @@ final class TerminalInputGuardTests: XCTestCase {
 // the control's window; every other check (synthetic, stale, future, missing, wrong event type, a
 // key equivalent in another window) still applies.
 
-final class HumanGestureMenuSelectionTests: XCTestCase {
+final class HumanGestureMenuSelectionTests: MouseQueueTestCase {
 
     private func windowAndControl() -> (NSWindow, NSButton) {
         let window = GestureFixtures.offscreenWindow()

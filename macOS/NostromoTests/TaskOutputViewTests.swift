@@ -248,7 +248,7 @@ private final class OutputRig {
 
 // MARK: - Tests
 
-final class TaskOutputViewTests: XCTestCase {
+final class TaskOutputViewTests: MouseQueueTestCase {
 
     /// The pane keeps the end of the text in view with the text container's bottom inset (8 pt) and a little
     /// rounding below it.
@@ -681,7 +681,7 @@ final class TaskOutputViewTests: XCTestCase {
 
 // MARK: - Display soft breaks (one huge line)
 
-final class TaskOutputDisplayTests: XCTestCase {
+final class TaskOutputDisplayTests: MouseQueueTestCase {
 
     private let limit = TaskOutputDisplay.lineLimit
 

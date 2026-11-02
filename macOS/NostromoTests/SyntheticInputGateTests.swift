@@ -10,7 +10,7 @@ import AppKit
 // a control that the synthesised click reaches: that last hop is pinned here
 // against the real `AppControlMouse`.
 
-final class SyntheticInputGateTests: XCTestCase {
+final class SyntheticInputGateTests: MouseQueueTestCase {
 
     private let userApp = "com.hammer.nostromo"
     private let qaApp = "com.hammer.nostromo.qa"
