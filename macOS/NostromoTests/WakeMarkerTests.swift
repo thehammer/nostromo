@@ -584,7 +584,7 @@ enum TaskWakeFixtures {
 }
 
 /// A background wake turn draws MF2c's marker, routes by target, and never forges one.
-final class TaskWakeMarkerViewTests: XCTestCase {
+final class TaskWakeMarkerViewTests: MouseQueueTestCase {
 
     private var routed: [WakeMarkerTarget] = []
 

@@ -612,7 +612,7 @@ final class MotherNoticeReattachTests: XCTestCase {
 
 /// BA6b: a wake turn is a fixed 22 pt marker, so one arriving, merging or being clicked moves nothing
 /// (the gate is `SafetyRig`).
-final class TaskWakeScrollSafetyTests: XCTestCase {
+final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
 
     private func wake(seq: Int, items: Int = 1) -> ChatTurn {
         TaskWakeFixtures.turn(items, userInput: TaskWakeFixtures.fallback + "\n\(seq)", blocks: [.text("Both reported back.")], seq: seq)
