@@ -67,6 +67,9 @@ enum TurnHeightEstimator {
     /// `AskQuestionView`: header chip, question, divider, and 36 pt per option.
     static let questionChrome: CGFloat      = 46
     static let questionOptionHeight: CGFloat = 36
+    /// `AskQuestionRecordView`: the muted question lines plus one status line, 4+4 padding and a 2 pt gap.
+    static let questionRecordChrome: CGFloat = 2 * AskQuestionRecordView.verticalInset
+        + AskQuestionRecordView.lineGap + AskQuestionRecordView.statusLineHeight
     /// `TerminalDeliveryBlockView` collapsed: laid out like a collapsed `ToolResultView`. Also
     /// used for a block restored expanded (a saved result fold, `TranscriptFoldStore`): harmless, the
     /// measured height replaces the estimate once the row is laid out.
@@ -235,6 +238,16 @@ enum TurnHeightEstimator {
                                               glyphWidth: systemGlyphWidth,
                                               lineHeight: noteLineHeight)
         case .askQuestion(let d):
+            // A question with a `toolUseId` is, in an approval-capable session, drawn as the quiet
+            // record. A restricted session draws the card instead: the estimate is then short by its
+            // option rows until the measured height replaces it.
+            if d.toolUseId != nil {
+                return questionRecordChrome
+                    + wrappedHeight(characters: AskQuestionRecordView.questionText(for: d).count,
+                                    width: width - 2 * AskQuestionRecordView.horizontalInset,
+                                    glyphWidth: systemGlyphWidth,
+                                    lineHeight: noteLineHeight)
+            }
             return questionChrome
                 + CGFloat(d.options.count) * questionOptionHeight
                 + wrappedHeight(characters: d.question.count,

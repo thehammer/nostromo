@@ -112,6 +112,11 @@ final class ApprovalStore {
     private var announced = Set<String>()
     /// What each tool call's row says about its request, for the session's lifetime (bounded per focus).
     private var statusBook = ApprovalStatusBook()
+    /// The option labels the person chose for an `AskUserQuestion` call, by `tool_use_id`, so the quiet
+    /// transcript record can say what was answered. In memory only, never persisted, never logged; labels
+    /// only (no free text); at most `answerCapacity` calls, the oldest going first.
+    private var chosenLabels: [String: [String]] = [:]
+    private var chosenOrder: [String] = []
     /// Which request last made each tool call await: only it may end that wait. A reused
     /// `tool_use_id` must not let a late frame for the old request overwrite the new request's wait.
     private var waitOwner: [String: String] = [:]
@@ -276,6 +281,34 @@ final class ApprovalStore {
     /// How many calls' statuses are kept for a focus.
     func statusCount(tag: String) -> Int { statusBook.count(tag: tag) }
 
+    // MARK: AskUserQuestion record
+
+    /// How many calls' chosen labels are kept.
+    static let answerCapacity = 200
+
+    /// True when a permission request exists, or existed in this process, for the call `toolUseId`: the
+    /// approval form handles an `AskUserQuestion` call then, so the transcript only keeps a record of it.
+    func handlesQuestion(toolUseId: String) -> Bool {
+        statusBook.status(toolUseId: toolUseId) != nil || chosenLabels[toolUseId] != nil
+    }
+
+    /// True while the request for `toolUseId` waits for the person.
+    func isAwaitingAnswer(toolUseId: String) -> Bool {
+        statusBook.status(toolUseId: toolUseId) == .awaiting
+    }
+
+    /// The labels the person chose for `toolUseId`, if this process saw them answer.
+    func chosenLabels(toolUseId: String) -> [String]? { chosenLabels[toolUseId] }
+
+    private func recordChoice(_ decision: ApprovalDecisionWire, for request: ApprovalRequestWire) {
+        guard decision.kind == .answerQuestions,
+              let selected = decision.answers?.first?.selected, !selected.isEmpty else { return }
+        let id = request.toolUseId
+        if chosenLabels.updateValue(selected, forKey: id) == nil { chosenOrder.append(id) }
+        while chosenOrder.count > Self.answerCapacity { chosenLabels.removeValue(forKey: chosenOrder.removeFirst()) }
+        statusChanges.send(id)
+    }
+
     // MARK: Guard bar (AP2b)
 
     /// The guard block the bar shows for a focus, if any.
@@ -311,6 +344,7 @@ final class ApprovalStore {
         entry.state = .inFlight(decision.kind)
         entries[id] = entry
         send(id, decision, windowID)
+        recordChoice(decision, for: entry.request)
         changes.send(entry.request.tag)
         return true
     }

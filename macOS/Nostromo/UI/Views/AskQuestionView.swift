@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 // MARK: - AskQuestionView
 
@@ -366,5 +367,97 @@ final class AskQuestionView: NSView {
             guard !chosen else { return }
             layer?.backgroundColor = nil
         }
+    }
+}
+
+// MARK: - AskQuestionRecordView
+
+/// The quiet transcript record of an `AskUserQuestion` the approval form already handles.
+///
+/// The approval form is the one place to answer; this block is only a muted note of what was asked
+/// and, once answered, what was chosen. It has no option rows, no `onAnswer`, nothing that sends a
+/// message, and it is not a button for assistive technology.
+///
+/// The status line (waiting / answered / nothing) updates in place from the approval store; its
+/// height is reserved either way, so the block never changes height (the estimator relies on that).
+final class AskQuestionRecordView: NSView {
+
+    static let horizontalInset: CGFloat = 8
+    static let verticalInset: CGFloat = 4
+    static let lineGap: CGFloat = 2
+    static let statusLineHeight: CGFloat = 14
+
+    /// The muted text of the question line: the header, then the question.
+    static func questionText(for data: AskQuestionData) -> String {
+        data.header.isEmpty ? data.question : "\(data.header) — \(data.question)"
+    }
+
+    /// What the status line says. Nil answer and not waiting: nothing (never an invented answer).
+    static func statusText(awaiting: Bool, chosen: [String]?) -> String {
+        if let chosen, !chosen.isEmpty { return "Answered: " + chosen.joined(separator: ", ") }
+        return awaiting ? "Waiting for your answer above" : ""
+    }
+
+    private let data: AskQuestionData
+    private let toolUseId: String
+    private weak var store: ApprovalStore?
+    private let questionLabel: NSTextField
+    private let statusLabel: NSTextField
+    private var subscription: AnyCancellable?
+
+    init(data: AskQuestionData, toolUseId: String, approvals: ApprovalStore?) {
+        self.data = data
+        self.toolUseId = toolUseId
+        self.store = approvals
+        questionLabel = NSTextField(labelWithString: Self.questionText(for: data))
+        statusLabel = NSTextField(labelWithString: "")
+        super.init(frame: .zero)
+
+        questionLabel.isSelectable = true
+        questionLabel.font = .systemFont(ofSize: 11)
+        questionLabel.textColor = Theme.fgMuted
+        questionLabel.lineBreakMode = .byWordWrapping
+        questionLabel.maximumNumberOfLines = 0
+        questionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        statusLabel.font = .systemFont(ofSize: 10)
+        statusLabel.textColor = Theme.fgMuted
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.maximumNumberOfLines = 1
+        for label in [questionLabel, statusLabel] {
+            label.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(label)
+        }
+        NSLayoutConstraint.activate([
+            questionLabel.topAnchor.constraint(equalTo: topAnchor, constant: Self.verticalInset),
+            questionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalInset),
+            questionLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset),
+            statusLabel.topAnchor.constraint(equalTo: questionLabel.bottomAnchor, constant: Self.lineGap),
+            statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalInset),
+            statusLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset),
+            statusLabel.heightAnchor.constraint(equalToConstant: Self.statusLineHeight),
+            statusLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.verticalInset),
+        ])
+        // One static-text element; not a button, not focusable.
+        setAccessibilityElement(true)
+        setAccessibilityChildren([])
+        setAccessibilityRole(.staticText)
+        refresh()
+        subscription = approvals?.statusChanges.sink { [weak self] id in
+            guard let self, id == self.toolUseId else { return }
+            self.refresh()
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// The status line as it reads now.
+    var statusLine: String { statusLabel.stringValue }
+
+    private func refresh() {
+        statusLabel.stringValue = Self.statusText(
+            awaiting: store?.isAwaitingAnswer(toolUseId: toolUseId) ?? false,
+            chosen: store?.chosenLabels(toolUseId: toolUseId))
+        let spoken = [Self.questionText(for: data), statusLabel.stringValue].filter { !$0.isEmpty }
+        setAccessibilityLabel(spoken.joined(separator: ". "))
     }
 }

@@ -742,12 +742,12 @@ class ChatSession: ObservableObject {
             return .resultSummary(ResultSummaryData(durationMs: d, costUSD: c, isError: e, interrupted: i))
         case .errorMessage(let m):
             return .errorMessage(m)
-        case .askQuestion(let q, let h, let opts, let multi):
+        case .askQuestion(let q, let h, let opts, let multi, let toolUseId):
             return .askQuestion(AskQuestionData(
                 question: q,
                 header:   h,
                 options:  opts.map { AskQuestionData.Option(label: $0.label, description: $0.description, recommended: $0.recommended) },
-                multiSelect: multi))
+                multiSelect: multi, toolUseId: toolUseId))
         case .note(_, let text, _):
             return .note(text)
         }

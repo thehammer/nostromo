@@ -966,10 +966,18 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         case .errorMessage(let m):   return ErrorBlockView(message: m)
         case .note(let text):        return NoteBlockView(text: text)
         case .askQuestion(let d):
+            // The approval form already handles this call: only a quiet record here, nothing to click.
+            // (`toolUseId` is nil for a CONFIRM: card and from an older daemon: those stay interactive.)
+            if let id = d.toolUseId, approvals?.handlesQuestion(toolUseId: id) == true {
+                return AskQuestionRecordView(data: d, toolUseId: id, approvals: approvals)
+            }
             let v = AskQuestionView(data: d,
                                     answeredOptionIndex: interaction.answeredOptions[index])
             v.onAnswer = { [weak self] answer, optionIndex in
                 guard let self else { return }
+                // A card built before the approval request arrived: the form handles the call now, and
+                // a click must not become a second, user-typed answer.
+                if let id = d.toolUseId, self.approvals?.handlesQuestion(toolUseId: id) == true { return }
                 // Record before sending. If the send path ever tears this view
                 // down, the answer is already outside it.
                 self.interaction.answeredOptions[index] = optionIndex

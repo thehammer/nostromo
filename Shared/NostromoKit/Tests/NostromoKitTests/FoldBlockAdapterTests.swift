@@ -161,3 +161,39 @@ final class FoldBlockAdapterTests: XCTestCase {
         XCTAssertEqual(FoldOutcome.of(try decodeTurn([text("hi")])), .completedOk)
     }
 }
+
+/// `ask_question` blocks: the `tool_use_id` that lets the app tell the approval form already handles the call.
+final class AskQuestionWireTests: XCTestCase {
+
+    private func decode(_ extra: [String: Any]) throws -> DaemonTurnBlock {
+        var block: [String: Any] = ["kind": "ask_question", "question": "Which?", "header": "Pick",
+                                    "options": [["label": "A", "description": "a"]], "multi_select": false]
+        for (k, v) in extra { block[k] = v }
+        return try JSONDecoder().decode(DaemonTurnBlock.self, from: JSONSerialization.data(withJSONObject: block))
+    }
+
+    func testAnAskQuestionBlockCarriesItsToolUseId() throws {
+        guard case .askQuestion(let q, let h, let options, let multi, let id) = try decode(["tool_use_id": "toolu_9"]) else {
+            return XCTFail("not an ask_question block")
+        }
+        XCTAssertEqual([q, h, id], ["Which?", "Pick", "toolu_9"])
+        XCTAssertEqual(options.count, 1)
+        XCTAssertFalse(multi)
+    }
+
+    func testAnAskQuestionBlockFromAnOlderDaemonDecodesWithNoToolUseId() throws {
+        guard case .askQuestion(let q, _, let options, _, let id) = try decode([:]) else {
+            return XCTFail("not an ask_question block")
+        }
+        XCTAssertEqual(q, "Which?")
+        XCTAssertEqual(options.count, 1)
+        XCTAssertNil(id)
+    }
+
+    func testANullToolUseIdDecodesAsNone() throws {
+        guard case .askQuestion(_, _, _, _, let id) = try decode(["tool_use_id": NSNull()]) else {
+            return XCTFail("not an ask_question block")
+        }
+        XCTAssertNil(id)
+    }
+}

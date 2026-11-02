@@ -291,7 +291,7 @@ private struct BlockView: View {
                 .foregroundStyle(.red)
                 .lineLimit(2)
 
-        case .askQuestion(let question, let header, let options, _):
+        case .askQuestion(let question, let header, let options, _, _):
             AskQuestionPrompt(
                 question: question,
                 header:   header,
