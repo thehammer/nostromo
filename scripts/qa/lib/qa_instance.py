@@ -163,7 +163,11 @@ def audit_files(approvals_path):
 
 def qa_markers(qa_root=None):
     """Byte strings that no line of the user's own audit log may carry: only a QA run writes them."""
-    markers = {"`FIXTURE:`": b"FIXTURE:", "the QA bundle id": QA_BUNDLE_ID.encode()}
+    markers = {
+        "`FIXTURE:`": b"FIXTURE:",
+        "`WAKE:`": b"WAKE:",
+        "the QA bundle id": QA_BUNDLE_ID.encode(),
+    }
     if qa_root:
         markers["the QA root path"] = qa_root.encode()
     return markers

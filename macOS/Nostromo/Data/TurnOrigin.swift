@@ -19,7 +19,7 @@ extension ChatTurn {
     var hasTerminalOrigin: Bool {
         switch origin {
         case .terminalDelivery?, .terminalFollowNotice?: return true
-        case .motherJobNotice?, nil: return false
+        case .motherJobNotice?, .taskWake?, nil: return false
         }
     }
 
@@ -29,11 +29,36 @@ extension ChatTurn {
         return false
     }
 
+    /// Whether this turn is a background task wake (shown as one muted marker, not a bubble).
+    var hasTaskWakeOrigin: Bool {
+        if case .taskWake? = origin { return true }
+        return false
+    }
+
+    /// Whether the user slot draws a muted marker for this turn: a Mother notice or a task wake.
+    var hasMarkerOrigin: Bool { hasMotherNoticeOrigin || hasTaskWakeOrigin }
+
+    /// The marker this turn shows in the user slot; nil for a turn that has none. Only a turn whose
+    /// daemon-sent origin says so draws one, never one whose text merely looks like it.
+    var markerContent: WakeMarkerContent? {
+        switch origin {
+        case .motherJobNotice(let items)?: return WakeMarkerText.motherNotice(items)
+        case .taskWake(let items, let omitted)?: return WakeMarkerText.taskWake(items, omitted: omitted)
+        case .terminalDelivery?, .terminalFollowNotice?, nil: return nil
+        }
+    }
+
+    /// What the marker's Copy menu puts on the pasteboard: a Mother notice's raw text (what the agent
+    /// received); a task wake's own line and tooltip lines (the daemon never sends the raw event).
+    var markerCopyText: String {
+        guard hasTaskWakeOrigin, let content = markerContent else { return userInput }
+        return ([content.line] + content.tooltipLines).joined(separator: "\n")
+    }
+
     /// The marker a Mother job notice turn shows in the user slot; nil for any other turn. The raw
     /// element stays in `userInput`, which the marker's Copy Notice Text menu puts on the pasteboard.
     var motherNoticeMarker: WakeMarkerContent? {
-        guard case .motherJobNotice(let items)? = origin else { return nil }
-        return WakeMarkerText.motherNotice(items)
+        hasMotherNoticeOrigin ? markerContent : nil
     }
 
     /// The exact text of each item's element in `userInput` (nil for a notice, and for an element

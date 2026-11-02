@@ -28,6 +28,10 @@ public enum WakeMarkerTarget: Equatable {
     case motherJob(id: String)
     /// Several jobs: the first one opens, with the Mother focus's list in view.
     case motherJobs(ids: [String])
+    /// A background task: its window opens.
+    case backgroundTask(id: String)
+    /// Several background events: the pane's background list opens.
+    case backgroundTasks(ids: [String])
     case none
 }
 
@@ -76,7 +80,85 @@ public enum WakeMarkerText {
             target: .motherJobs(ids: items.map(\.jobId)))
     }
 
+    /// The marker for a background task wake. State-first, like the Mother marker. `omitted` counts
+    /// events the daemon dropped past its cap; they only count toward the total.
+    public static func taskWake(_ items: [TaskWakeItemWire], omitted: Int) -> WakeMarkerContent {
+        let total = items.count + max(0, omitted)
+        guard let first = items.first else {
+            return WakeMarkerContent(line: "\(mark) Background event", tooltipLines: [],
+                                     accessibilityLabel: "Background event.", target: .none)
+        }
+        if total == 1 {
+            let words = wakeWords(first)
+            let desc = wakeDescription(first, limit: lineTitleLimit)
+            let tipDesc = wakeDescription(first, limit: tooltipTitleLimit)
+            let line = desc.isEmpty ? "\(mark) \(words)" : "\(mark) \(words) \"\(desc)\""
+            return WakeMarkerContent(
+                line: line,
+                tooltipLines: [wakeDetail(first, limit: tooltipTitleLimit)],
+                accessibilityLabel: tipDesc.isEmpty ? "\(wakeAXPrefix(first))." : "\(wakeAXPrefix(first)), \(tipDesc).",
+                target: first.taskId.map { .backgroundTask(id: $0) } ?? .none)
+        }
+        var lines = items.prefix(tooltipJobLimit).map { wakeDetail($0, limit: tooltipTitleLimit) }
+        if total > tooltipJobLimit { lines.append("…and \(total - tooltipJobLimit) more") }
+        return WakeMarkerContent(
+            line: "\(mark) \(total) background events",
+            tooltipLines: lines,
+            accessibilityLabel: "\(total) background events. " + lines.joined(separator: "; "),
+            target: .backgroundTasks(ids: items.compactMap(\.taskId)))
+    }
+
     // MARK: Pieces
+
+    /// `<Kind>: <outcome words>`, or `Background event` for an item with nothing to name.
+    private static func wakeWords(_ item: TaskWakeItemWire) -> String {
+        if item.kind == "other", item.outcome == "event", item.description.isEmpty { return "Background event" }
+        return "\(kindWords(item.kind)): \(outcomeWords(item))"
+    }
+
+    private static func wakeAXPrefix(_ item: TaskWakeItemWire) -> String {
+        "Background \(kindWords(item.kind)): \(outcomeWords(item))"
+    }
+
+    private static func wakeDetail(_ item: TaskWakeItemWire, limit: Int) -> String {
+        let desc = wakeDescription(item, limit: limit)
+        let words = "\(kindWords(item.kind)): \(outcomeWords(item))"
+        return desc.isEmpty ? words : "\(words) \"\(desc)\""
+    }
+
+    private static func kindWords(_ kind: String) -> String {
+        switch kind {
+        case "shell": return "Shell"
+        case "monitor": return "Monitor"
+        case "agent": return "Agent"
+        default: return "Background task"
+        }
+    }
+
+    private static func outcomeWords(_ item: TaskWakeItemWire) -> String {
+        switch item.outcome {
+        case "new_output": return "new output"
+        case "completed": return item.kind == "agent" ? "finished" : "completed"
+        case "failed": return "failed"
+        case "stopped": return "stopped"
+        case "ended": return "ended"
+        case "event": return "event"
+        default: return plainWords(item.outcome)
+        }
+    }
+
+    /// The sanitised, quote-neutralised, capped description; empty when there is none.
+    private static func wakeDescription(_ item: TaskWakeItemWire, limit: Int) -> String {
+        let clean = neutralised(item.description)
+        return clean.isEmpty ? "" : capped(clean, to: limit)
+    }
+
+    /// Double quotes become `'` so text cannot close the quoted region and forge what follows.
+    /// Scalar level: a quote with a combining mark after it is one Character, but still a quote.
+    private static func neutralised(_ text: String) -> String {
+        let scalars = FoldTextSanitizer.sanitize(text).unicodeScalars.map { doubleQuotes.contains($0) ? "'" : $0 }
+        return String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: .whitespaces)
+    }
 
     /// `<state words> "<title>"` (· PR #n). The state comes first so tail truncation never hides it.
     private static func detail(_ item: MotherNoticeItemWire, titleLimit: Int) -> String {
