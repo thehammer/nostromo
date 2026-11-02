@@ -311,9 +311,8 @@ const RELATIVE_PATH_SENSITIVE: &[&str] = &[
     "sort", "uniq", "tree", "xxd", // can write an output file
 ];
 
-/// Flags (by prefix, lower-case) that run another program or write a file; an
-/// allowlisted command carrying one gets no rule (`rg --pre CMD`, `sort -o FILE`).
-const NEVER_FLAG_PREFIXES: &[&str] = &["--pre", "--compress-program", "--output", "-o", "--exec"];
+/// Long options that run another program or write a file (`rg --pre CMD`, `sort --output`).
+const NEVER_LONG_FLAGS: &[&str] = &["pre", "compress-program", "output", "exec"];
 
 // ── candidates ────────────────────────────────────────────────────────────────
 
@@ -526,16 +525,13 @@ fn eligible(
     {
         return None;
     }
-    // `uniq IN OUT` and `xxd IN OUT` write their second operand.
-    if matches!(basename.as_str(), "uniq" | "xxd")
-        && words[1..].iter().filter(|w| !w.starts_with('-')).count() > 1
-    {
+    // `uniq IN OUT` and `xxd IN OUT` write their second operand. A lone `-` and everything
+    // after `--` is an operand too.
+    if matches!(basename.as_str(), "uniq" | "xxd") && operand_count(&words[1..]) > 1 {
         return None;
     }
-    if words[1..].iter().any(|w| {
-        let w = w.to_ascii_lowercase();
-        NEVER_FLAG_PREFIXES.iter().any(|f| w.starts_with(f))
-    }) {
+    if !PREFIX_COMMANDS.contains(&basename.as_str()) && words[1..].iter().any(|w| runs_or_writes(w))
+    {
         return None;
     }
     // `=cmd` expands to a path in zsh; a leading `%` is a job spec or a format.
@@ -563,6 +559,36 @@ fn eligible(
         command: command.to_owned(),
         words,
     })
+}
+
+/// Words that are operands rather than flags: not starting with `-`, a lone `-`, and
+/// everything after `--`.
+fn operand_count(args: &[String]) -> usize {
+    let mut after_dashes = false;
+    let mut n = 0;
+    for w in args {
+        if after_dashes || !w.starts_with('-') || w == "-" {
+            n += 1;
+        } else if w == "--" {
+            after_dashes = true;
+        }
+    }
+    n
+}
+
+/// Is `word` a flag that can run another program or write a file? Any short group
+/// containing `o` (`-o`, `-ro`), and any long option that is, abbreviates (getopt accepts
+/// abbreviations) or extends one of [`NEVER_LONG_FLAGS`].
+fn runs_or_writes(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    if let Some(long) = lower.strip_prefix("--") {
+        let name = long.split('=').next().unwrap_or("");
+        return !name.is_empty()
+            && NEVER_LONG_FLAGS
+                .iter()
+                .any(|f| f.starts_with(name) || name.starts_with(f));
+    }
+    lower.starts_with('-') && lower.len() > 1 && lower.contains('o')
 }
 
 /// The words of `command` when it is plain, else `None`: at most
@@ -1329,6 +1355,13 @@ mod tests {
             "sort --compress-program=/work/x /work/b",
             "tree -o /work/a",
             "uniq /work/a /work/b",
+            "uniq /work/a -",
+            "uniq -- /work/a /work/b",
+            "sort -ro /work/a",
+            "sort --outp=/work/a /work/b",
+            "sort --out /work/a",
+            "rg --pr x /work/a",
+            "rg --exec x /work/a",
             "xxd /work/a /work/b",
             "sort a",
         ] {
