@@ -128,9 +128,11 @@ enum AppControlMouse {
             guard let down = event(.leftMouseDown, window, point, flags, number, clickCount, t),
                   let up = event(.leftMouseUp, window, point, flags, number, clickCount, t + 0.001)
             else { throw AppControlError.failed("could not synthesise mouse events") }
+            let foreign = takeForeignMouseEvents()
             NSApp.postEvent(up, atStart: false)
             window.sendEvent(down)
             deliverQueuedMouseEvents(to: window, eventNumber: number)
+            giveBack(foreign)
         }
     }
 
@@ -156,9 +158,31 @@ enum AppControlMouse {
             throw AppControlError.failed("could not synthesise mouse events")
         }
         queued.append(up)
+        let foreign = takeForeignMouseEvents()
         for e in queued { NSApp.postEvent(e, atStart: false) }
         window.sendEvent(down)
         deliverQueuedMouseEvents(to: window, eventNumber: number)
+        giveBack(foreign)
+    }
+
+    /// Mouse events already queued when a gesture starts are not this gesture's.
+    /// AppKit's tracking loop (text selection, controls) reads the queue front to
+    /// back, so a stale drag or mouse-up ahead of the gesture's own events would end
+    /// or distort it. They are set aside for the duration and put back, in order,
+    /// at the front afterwards.
+    private static func takeForeignMouseEvents() -> [NSEvent] {
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseUp, .leftMouseDragged]
+        var out: [NSEvent] = []
+        // Bounded: the queue is app-wide and something could be refilling it.
+        while out.count < 10_000,
+              let e = NSApp.nextEvent(matching: mask, until: .distantPast, inMode: .default, dequeue: true) {
+            out.append(e)
+        }
+        return out
+    }
+
+    private static func giveBack(_ events: [NSEvent]) {
+        for e in events.reversed() { NSApp.postEvent(e, atStart: true) }
     }
 
     /// Whatever the down did not consume (it did not track) still goes to the

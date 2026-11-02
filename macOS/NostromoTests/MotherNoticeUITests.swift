@@ -89,7 +89,7 @@ private func feed(_ enabled: Bool, focuses: [MotherFocusNoticeState] = []) {
 
 // MARK: - The row's mark
 
-final class MotherNoticeRowTests: XCTestCase {
+final class MotherNoticeRowTests: MouseQueueTestCase {
 
     // MARK: Helpers
 
@@ -259,7 +259,7 @@ final class MotherNoticeRowTests: XCTestCase {
 
 // MARK: - Closed focus and relative times on the list's view model
 
-final class MotherNoticeListViewModelTests: XCTestCase {
+final class MotherNoticeListViewModelTests: MouseQueueTestCase {
 
     private var tempDirs: [URL] = []
     private var cancellables = Set<AnyCancellable>()
@@ -365,7 +365,7 @@ final class MotherNoticeListViewModelTests: XCTestCase {
 
 // MARK: - The daemon connection and the notice state
 
-final class MotherNoticeConnectionTests: XCTestCase {
+final class MotherNoticeConnectionTests: MouseQueueTestCase {
 
     private var window: NSWindow!
 
@@ -452,7 +452,7 @@ final class MotherNoticeConnectionTests: XCTestCase {
 
 // MARK: - The detail's Notices section
 
-final class MotherNoticeSectionTests: XCTestCase {
+final class MotherNoticeSectionTests: MouseQueueTestCase {
 
     // MARK: Helpers
 
@@ -645,7 +645,7 @@ final class MotherNoticeSectionTests: XCTestCase {
 
 // MARK: - The switches
 
-final class MotherNoticeSwitchesTests: XCTestCase {
+final class MotherNoticeSwitchesTests: MouseQueueTestCase {
 
     private var window: NSWindow!
     private var control: NSButton!
@@ -730,7 +730,7 @@ final class MotherNoticeSwitchesTests: XCTestCase {
 
 // MARK: - The sidebar menu
 
-final class MotherNoticeMenuTests: XCTestCase {
+final class MotherNoticeMenuTests: MouseQueueTestCase {
 
     private var window: NSWindow!
     private let rec = SettingRecorder()
@@ -843,7 +843,7 @@ final class MotherNoticeMenuTests: XCTestCase {
 
 // MARK: - Bell and off strip
 
-final class MotherNoticeBellTests: XCTestCase {
+final class MotherNoticeBellTests: MouseQueueTestCase {
 
     private var window: NSWindow!
     private let rec = SettingRecorder()

@@ -87,7 +87,7 @@ enum MotherNoticeFixtures {
 // MARK: - Content to view
 
 /// What the view draws, says and announces comes from the marker content, nothing else.
-final class WakeMarkerViewContentTests: XCTestCase {
+final class WakeMarkerViewContentTests: MouseQueueTestCase {
 
     private func view(_ content: WakeMarkerContent, noticeText: String = MotherNoticeFixtures.rawText,
                       router: @escaping (String) -> Void = { _ in }) -> WakeMarkerView {
@@ -159,7 +159,7 @@ final class WakeMarkerViewContentTests: XCTestCase {
 
 /// A click, Return or Space on a marker with a target sends the job to the router; with no target
 /// nothing is sent.
-final class WakeMarkerClickRoutingTests: XCTestCase {
+final class WakeMarkerClickRoutingTests: MouseQueueTestCase {
 
     private var routed: [String] = []
 
@@ -232,7 +232,7 @@ final class WakeMarkerClickRoutingTests: XCTestCase {
 // MARK: - Copy Notice Text
 
 /// The context menu gives the raw text the agent received, not the marker line.
-final class WakeMarkerContextMenuTests: XCTestCase {
+final class WakeMarkerContextMenuTests: MouseQueueTestCase {
 
     private func copy(_ marker: WakeMarkerView, file: StaticString = #filePath, line: UInt = #line) throws {
         let menu = try XCTUnwrap(marker.menu(for: MotherNoticeFixtures.rightClick()), "a marker has a context menu", file: file, line: line)
@@ -290,7 +290,7 @@ final class WakeMarkerContextMenuTests: XCTestCase {
 
 /// `MotherJobRouting.open(jobId:)` is the one "open this Mother job" navigation: the notification
 /// click (`NeedsYouRouting`) and the marker click both go through it.
-final class MotherJobRoutingTests: XCTestCase {
+final class MotherJobRoutingTests: MouseQueueTestCase {
 
     private var opened = 0
     private var requestedWhenPosted: [String?] = []
@@ -370,7 +370,7 @@ final class MotherJobRoutingTests: XCTestCase {
 // MARK: - The turn
 
 /// A notice turn in `ChatTurnView`: the marker, no bubble, no raw element anywhere.
-final class MotherNoticeTurnViewTests: XCTestCase {
+final class MotherNoticeTurnViewTests: MouseQueueTestCase {
 
     func testANoticeTurnShowsTheMarkerAndNoBubbleOrDeliveryBlocks() {
         let view = MotherNoticeFixtures.turnView(MotherNoticeFixtures.turn())
@@ -495,7 +495,7 @@ final class MotherNoticeTurnViewTests: XCTestCase {
 
 /// A notice turn's user slot is a fixed 22 pt marker and the same 8 pt gap a bubble leaves: the
 /// element's length is never measured, and the estimate is what is drawn.
-final class MotherNoticeHeightTests: XCTestCase {
+final class MotherNoticeHeightTests: MouseQueueTestCase {
 
     private let fiftyKB = MotherNoticeFixtures.rawText + String(repeating: "padding of the element text. ", count: 1_800)
 

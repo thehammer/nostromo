@@ -57,7 +57,7 @@ private final class BA3UIFocusView: NSView {
     override var acceptsFirstResponder: Bool { true }
 }
 
-final class BackgroundPopoverTests: XCTestCase {
+final class BackgroundPopoverTests: MouseQueueTestCase {
 
     private let tag = "claudia"
     private var world: BA3UIWorld!
