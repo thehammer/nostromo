@@ -54,9 +54,9 @@ pub struct ApprovalRequestWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub options: Vec<ApprovalOption>,
-    /// Session-rule candidates (a later slice; empty until then).
+    /// The rules the human may choose "for this session" (AP4); empty when none is offered.
     #[serde(default)]
-    pub session_rule_candidates: Vec<Value>,
+    pub session_rule_candidates: Vec<SessionRuleCandidateWire>,
     pub created_at_ms: u64,
     pub deadline_at_ms: u64,
 }
@@ -96,6 +96,9 @@ pub enum ApprovalOption {
     /// Only on an `AskUserQuestion` request whose input can be answered
     /// (`questions::parse_questions`); never part of [`ApprovalOption::ALL`].
     AnswerQuestions,
+    /// Only on a request with session-rule candidates (`rules::candidates`); never
+    /// part of [`ApprovalOption::ALL`].
+    AllowSession,
 }
 
 impl ApprovalOption {
@@ -118,6 +121,37 @@ pub struct ApprovalDecision {
     /// The answers to an `AskUserQuestion` request (`answer_questions` only; ignored by every other kind).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers: Option<Vec<QuestionAnswer>>,
+    /// `allow_session` only: the id of one of the held request's own candidates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    /// `allow_session` only: that candidate's rule text, exactly as shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_text: Option<String>,
+}
+
+/// A rule the human may choose for a held request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRuleCandidateWire {
+    pub id: String,
+    pub rule_text: String,
+    pub summary: String,
+    pub kind: super::rules::CandidateKind,
+    /// The user's ask rule this overrides, for an ask-rule request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<String>,
+}
+
+/// An active session rule, as the chip lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRuleWire {
+    pub id: String,
+    pub rule_text: String,
+    pub summary: String,
+    pub kind: super::rules::CandidateKind,
+    pub created_at_ms: u64,
+    pub uses: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 /// The human's answer to one question of an `AskUserQuestion` request.
@@ -141,6 +175,8 @@ pub enum DecisionKind {
     DenyAndStop,
     /// The human answered an `AskUserQuestion` request.
     AnswerQuestions,
+    /// Allow this call and create the session rule `candidate_id` names.
+    AllowSession,
 }
 
 /// The verdict `approval_resolved` carries is the audit log's outcome name
@@ -158,6 +194,8 @@ pub enum AnswerRefusal {
     UnknownRequest,
     /// An `answer_questions` decision that does not fit the request's questions.
     InvalidAnswer,
+    /// An `allow_session` decision that names no candidate of the request, or text that differs.
+    InvalidRule,
 }
 
 impl AnswerRefusal {
@@ -169,6 +207,7 @@ impl AnswerRefusal {
             Self::AlreadyResolved => "already_resolved",
             Self::UnknownRequest => "unknown_request",
             Self::InvalidAnswer => "invalid_answer",
+            Self::InvalidRule => "invalid_rule",
         }
     }
 }

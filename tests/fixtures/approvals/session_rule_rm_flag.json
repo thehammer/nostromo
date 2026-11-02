@@ -1,0 +1,34 @@
+{
+  "description": "AP4: the exact command with one more flag after the path.",
+  "tool_uses": [
+    {
+      "id": "toolu_session_rule_rm_flag_0",
+      "name": "Bash",
+      "input": {
+        "command": "rm -rf ~/Library/Caches/a -v",
+        "description": "d"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "rm -rf ~/Library/Caches/a -v",
+          "description": "d"
+        },
+        "description": "d",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_session_rule_rm_flag_0",
+        "matched_ask_rule": {
+          "source": "userSettings",
+          "tool_name": "Bash",
+          "rule_content": "rm:*"
+        }
+      }
+    }
+  ]
+}

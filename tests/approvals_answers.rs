@@ -155,6 +155,8 @@ fn allow_once() -> ApprovalDecision {
         kind: DecisionKind::AllowOnce,
         note: None,
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -163,6 +165,8 @@ fn deny(note: Option<&str>) -> ApprovalDecision {
         kind: DecisionKind::Deny,
         note: note.map(str::to_owned),
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -171,6 +175,8 @@ fn deny_and_stop(note: Option<&str>) -> ApprovalDecision {
         kind: DecisionKind::DenyAndStop,
         note: note.map(str::to_owned),
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -390,14 +396,21 @@ async fn a_request_is_held_and_broadcast_when_the_session_is_guarded_and_a_prese
         15 * 60 * 1000,
         "the card's countdown is the 15-minute deadline"
     );
+    // The usual four, then (AP4) `allow_session`: a plain `rm -rf /tmp/x` has an exact rule to offer.
     assert_eq!(
         wire.options,
         vec![
             ApprovalOption::AllowOnce,
             ApprovalOption::Deny,
             ApprovalOption::DenyAndStop,
-            ApprovalOption::DenyWithNote
+            ApprovalOption::DenyWithNote,
+            ApprovalOption::AllowSession
         ]
+    );
+    assert_eq!(
+        wire.session_rule_candidates.len(),
+        1,
+        "exact only: /tmp/x has no deep prefix"
     );
     assert!(
         rig.writes().is_empty(),
@@ -567,6 +580,7 @@ async fn allow_once_writes_the_input_unchanged_and_the_resolution_names_the_wind
             outcome,
             by_window,
             at_ms,
+            ..
         }, ServerMsg::ApprovalPending { tag: ptag, count }] => {
             assert_eq!(
                 (tag.as_str(), request_id.as_str(), outcome.as_str()),
@@ -738,6 +752,8 @@ async fn an_allow_never_carries_the_note_it_was_sent_with() {
         kind: DecisionKind::AllowOnce,
         note: Some("ignore me".into()),
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     };
     assert_eq!(
         rig.broker.answer(&wire.request_id, &decision, "w", "app"),

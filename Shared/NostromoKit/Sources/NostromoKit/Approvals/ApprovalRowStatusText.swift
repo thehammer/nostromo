@@ -28,7 +28,7 @@ public enum ApprovalRowStatus: Equatable, Sendable {
     /// build doesn't know says nothing rather than guessing.
     public static func forOutcome(_ outcome: String, atMs: UInt64) -> ApprovalRowStatus {
         switch outcome {
-        case "allowed_once", "answered": return .approved(atMs: atMs)
+        case "allowed_once", "allowed_for_session", "answered": return .approved(atMs: atMs)
         case "allowed_by_session_rule": return .allowedBySessionRule
         case "allowed_by_your_rule": return .allowedByYourRule
         case "denied", "denied_and_stopped": return .deniedByYou

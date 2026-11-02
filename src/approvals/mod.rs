@@ -22,6 +22,7 @@ pub mod display;
 pub mod guard;
 pub mod questions;
 pub mod request;
+pub mod rules;
 pub mod shell;
 pub mod wire;
 

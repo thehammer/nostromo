@@ -164,7 +164,8 @@ enum ApprovalTestRequests {
         flags: [String: Bool] = [:],
         options: [String] = ApprovalTestRequests.allOptions,
         description: String? = nil,
-        deadlineAtMs: UInt64? = nil
+        deadlineAtMs: UInt64? = nil,
+        sessionRuleCandidates: [Obj] = []
     ) throws -> ApprovalRequestWire {
         var flagValues: [String: Bool] = [
             "default_to_no": false,
@@ -190,7 +191,7 @@ enum ApprovalTestRequests {
             "reason": ["kind": reasonKind, "text": reasonText] as Obj,
             "flags": flagValues,
             "options": options,
-            "session_rule_candidates": [Any](),
+            "session_rule_candidates": sessionRuleCandidates,
             "created_at_ms": 1_760_000_000_000,
             "deadline_at_ms": NSNumber(value: deadlineAtMs ?? freshDeadlineMs()),
         ]
@@ -216,13 +217,15 @@ enum ApprovalTestRequests {
         flags: [String: Bool] = [:],
         options: [String] = ApprovalTestRequests.allOptions,
         description: String? = nil,
-        deadlineAtMs: UInt64? = nil
+        deadlineAtMs: UInt64? = nil,
+        sessionRuleCandidates: [Obj] = []
     ) throws -> ApprovalRequestWire {
         try request(id: id, tag: tag, agentName: agentName, subagentType: subagentType,
                     input: ["command": command],
                     display: display(lines: lines ?? plainBashLines(command), commandCount: commandCount),
                     cwd: cwd, reasonKind: reasonKind, reasonText: reasonText, flags: flags,
-                    options: options, description: description, deadlineAtMs: deadlineAtMs)
+                    options: options, description: description, deadlineAtMs: deadlineAtMs,
+                    sessionRuleCandidates: sessionRuleCandidates)
     }
 
     // MARK: Bash fixtures
@@ -461,8 +464,14 @@ final class ApprovalRecorder {
         let channel: ApprovalRefusalChannel
     }
 
+    struct Revoke: Equatable {
+        let tag: String
+        let ruleID: String
+    }
+
     private(set) var sent: [Sent] = []
     private(set) var reports: [Report] = []
+    private(set) var revoked: [Revoke] = []
     /// The store's outcome-drop timer: `(delay, work)`, run by hand.
     var scheduled: [(delay: TimeInterval, work: () -> Void)] = []
 
@@ -477,7 +486,8 @@ final class ApprovalRecorder {
             schedule: { delay, work in
                 self.scheduled.append((delay: delay, work: work))
             },
-            canSend: canSend)
+            canSend: canSend,
+            revoke: { tag, ruleID in self.revoked.append(Revoke(tag: tag, ruleID: ruleID)) })
     }
 
     /// Run every scheduled drop, as if the 2 s had passed.
@@ -598,6 +608,8 @@ final class ApprovalCardHarness {
          armDelay: TimeInterval = 0,
          canSend: @escaping () -> Bool = { true },
          isOnScreen: (() -> Bool)? = { true },
+         gesture: SessionRuleGesture = SessionRuleGesture(),
+         currentEvent: @escaping () -> NSEvent? = { NSApp.currentEvent },
          prepare: ((NSWindow) -> Void)? = nil) {
         let window: NSWindow = provided ?? makeRigWindow(testCase, size: NSSize(width: width + 80, height: maxHeight + 80))
         let recorder = ApprovalRecorder()
@@ -606,7 +618,7 @@ final class ApprovalCardHarness {
         prepare?(window)
         let entry = store.entry(id: request.id)!
         let card = ApprovalCardView(entry: entry, store: store, windowID: { windowID }, permit: permit, armDelay: armDelay,
-                                    isOnScreen: isOnScreen)
+                                    isOnScreen: isOnScreen, gesture: gesture, currentEvent: currentEvent)
         let height = card.preferredHeight(forWidth: width, maxHeight: maxHeight)
         card.frame = NSRect(x: 20, y: 20, width: width, height: height)
         window.contentView!.addSubview(card)

@@ -167,6 +167,16 @@ enum ApprovalFixtures {
     // MARK: - Requests
 
     static let allOptions = ["allow_once", "deny", "deny_and_stop", "deny_with_note"]
+    static let sessionOptions = allOptions + ["allow_session"]
+
+    /// The two candidates the daemon derives for `rm -rf ~/Library/Caches/a`.
+    static let cacheCandidates: [Obj] = [
+        ["id": "c-exact", "rule_text": "Bash(rm -rf ~/Library/Caches/a)",
+         "summary": "Allows exactly this command again", "kind": "exact", "overrides": "Bash(rm:*)"],
+        ["id": "c-prefix", "rule_text": "Bash(rm -rf ~/Library/Caches/:*)",
+         "summary": "Allows `rm -rf` on one or more paths inside `~/Library/Caches/`, with no other flags",
+         "kind": "path_prefix", "overrides": "Bash(rm:*)"],
+    ]
 
     static func request(
         toolKind: String = "bash",
@@ -182,7 +192,8 @@ enum ApprovalFixtures {
         reasonText: String = "your rule Bash(rm:*) in ~/.claude/settings.json",
         flags: [String: Bool] = [:],
         options: [String] = ApprovalFixtures.allOptions,
-        description: String? = nil
+        description: String? = nil,
+        sessionRuleCandidates: [Obj] = []
     ) throws -> ApprovalRequestWire {
         var flagValues: [String: Bool] = [
             "default_to_no": false,
@@ -207,7 +218,7 @@ enum ApprovalFixtures {
             "reason": reason,
             "flags": flagValues,
             "options": options,
-            "session_rule_candidates": [Any](),
+            "session_rule_candidates": sessionRuleCandidates,
             "created_at_ms": 1_760_000_000_000,
             "deadline_at_ms": 1_760_000_900_000,
         ]

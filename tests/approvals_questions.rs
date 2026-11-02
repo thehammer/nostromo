@@ -103,6 +103,8 @@ fn answer_questions(answers: Vec<QuestionAnswer>) -> ApprovalDecision {
         kind: DecisionKind::AnswerQuestions,
         note: None,
         answers: Some(answers),
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -1129,16 +1131,22 @@ fn the_existing_decisions_still_serialise_without_an_answers_key() {
         kind: DecisionKind::AllowOnce,
         note: None,
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     };
     let deny = ApprovalDecision {
         kind: DecisionKind::Deny,
         note: Some("use /tmp/y".into()),
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     };
     let stop = ApprovalDecision {
         kind: DecisionKind::DenyAndStop,
         note: None,
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     };
 
     assert_eq!(json_of(&allow), r#"{"kind":"allow_once"}"#);
@@ -1237,6 +1245,8 @@ fn approval_answer_with_the_existing_decisions_has_no_answers_key_on_the_wire() 
                 kind: DecisionKind::AllowOnce,
                 note: None,
                 answers: None,
+                candidate_id: None,
+                rule_text: None,
             },
             window_id: "win-1".into(),
             operator_nonce: Some("ab12".into()),
@@ -1250,6 +1260,8 @@ fn approval_answer_with_the_existing_decisions_has_no_answers_key_on_the_wire() 
                 kind: DecisionKind::Deny,
                 note: Some("use /tmp/y".into()),
                 answers: None,
+                candidate_id: None,
+                rule_text: None,
             },
             window_id: "win-1".into(),
             operator_nonce: Some("ab12".into()),
@@ -1263,6 +1275,8 @@ fn approval_answer_with_the_existing_decisions_has_no_answers_key_on_the_wire() 
                 kind: DecisionKind::DenyAndStop,
                 note: None,
                 answers: None,
+                candidate_id: None,
+                rule_text: None,
             },
             window_id: "win-2".into(),
             operator_nonce: None,
@@ -1407,6 +1421,8 @@ fn allow_once() -> ApprovalDecision {
         kind: DecisionKind::AllowOnce,
         note: None,
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -1415,6 +1431,8 @@ fn deny(note: Option<&str>) -> ApprovalDecision {
         kind: DecisionKind::Deny,
         note: note.map(str::to_owned),
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -1423,6 +1441,8 @@ fn deny_and_stop(note: Option<&str>) -> ApprovalDecision {
         kind: DecisionKind::DenyAndStop,
         note: note.map(str::to_owned),
         answers: None,
+        candidate_id: None,
+        rule_text: None,
     }
 }
 
@@ -1841,13 +1861,17 @@ async fn the_snapshot_a_late_window_receives_offers_answer_questions_too() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_bash_request_is_offered_exactly_the_usual_options() {
+async fn a_bash_request_is_offered_the_usual_options_and_never_answer_questions() {
     let rig = Rig::new();
     rig.broker.presenter_connected("app");
 
     let wire = rig.hold_bash("toolu_b").await;
 
-    assert_eq!(wire.options, ApprovalOption::ALL.to_vec());
+    // The usual four, then (AP4) `allow_session` for a plain command: nothing else.
+    let mut expected = ApprovalOption::ALL.to_vec();
+    expected.push(ApprovalOption::AllowSession);
+    assert_eq!(wire.options, expected);
+    assert!(!wire.options.contains(&ApprovalOption::AnswerQuestions));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1930,6 +1954,8 @@ async fn assert_refused_and_still_held(answers: Option<Vec<QuestionAnswer>>) {
         kind: DecisionKind::AnswerQuestions,
         note: None,
         answers,
+        candidate_id: None,
+        rule_text: None,
     };
 
     let result = rig.broker.answer(&wire.request_id, &decision, "w", "app");
@@ -2309,6 +2335,8 @@ async fn an_invalid_answer_after_the_request_ended_is_told_already_resolved_not_
             kind: DecisionKind::AnswerQuestions,
             note: None,
             answers,
+            candidate_id: None,
+            rule_text: None,
         };
         assert_eq!(
             rig.broker.answer(&wire.request_id, &decision, "w", "app"),
@@ -2341,6 +2369,8 @@ async fn an_answer_for_an_id_no_request_ever_had_is_unknown_and_writes_nothing()
             kind: DecisionKind::AnswerQuestions,
             note: None,
             answers,
+            candidate_id: None,
+            rule_text: None,
         };
         assert_eq!(
             rig.broker.answer("no-such-request", &decision, "w", "app"),
@@ -2505,6 +2535,8 @@ async fn deny_on_a_question_request_sends_the_usual_deny_words_and_ignores_any_a
         kind: DecisionKind::Deny,
         note: Some("not now".into()),
         answers: Some(valid_answers()),
+        candidate_id: None,
+        rule_text: None,
     };
 
     assert_eq!(
@@ -2544,6 +2576,8 @@ async fn deny_and_stop_on_a_question_request_sends_the_usual_words_with_interrup
         kind: DecisionKind::DenyAndStop,
         note: None,
         answers: Some(valid_answers()),
+        candidate_id: None,
+        rule_text: None,
     };
 
     assert_eq!(
@@ -2757,6 +2791,8 @@ async fn the_only_allow_written_for_a_question_is_a_valid_answer_from_the_operat
                 kind: DecisionKind::AnswerQuestions,
                 note: None,
                 answers: None,
+                candidate_id: None,
+                rule_text: None,
             },
         ),
         ("app", "empty answers", answer_questions(vec![])),
@@ -2793,6 +2829,29 @@ async fn the_only_allow_written_for_a_question_is_a_valid_answer_from_the_operat
             "valid, but never connected",
             answer_questions(valid_answers()),
         ),
+        // AP4: a question is never allowed "for this session" either; it lists no candidates.
+        (
+            "app",
+            "allow_session with a made-up candidate",
+            ApprovalDecision {
+                kind: DecisionKind::AllowSession,
+                note: None,
+                answers: Some(valid_answers()),
+                candidate_id: Some("made-up".into()),
+                rule_text: Some("Bash(ls)".into()),
+            },
+        ),
+        (
+            "app",
+            "allow_session with nothing",
+            ApprovalDecision {
+                kind: DecisionKind::AllowSession,
+                note: None,
+                answers: None,
+                candidate_id: None,
+                rule_text: None,
+            },
+        ),
     ];
     for (conn, what, decision) in &wrong {
         let result = rig.broker.answer(&bad.request_id, decision, "w", conn);
@@ -2803,7 +2862,9 @@ async fn the_only_allow_written_for_a_question_is_a_valid_answer_from_the_operat
         assert!(
             matches!(
                 result,
-                AnswerResult::InvalidAnswer | AnswerResult::NotPresenter
+                AnswerResult::InvalidAnswer
+                    | AnswerResult::NotPresenter
+                    | AnswerResult::InvalidRule
             ),
             "{what}: {result:?}"
         );

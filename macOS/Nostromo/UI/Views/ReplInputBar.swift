@@ -77,10 +77,23 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private var modeChipWidth: NSLayoutConstraint!
     private var modeChipGap: NSLayoutConstraint!
 
+    /// The session-rules chip (AP4: `2 session rules`), right-aligned in `sessionRulesSlot`, between the
+    /// composer and the background slot. Its slot is `SessionRulesChip.slotWidth` wide once the bar is bound
+    /// to a session, whatever the chip shows, so the chip appearing, changing or going moves nothing.
+    let sessionRulesChip     = SessionRulesChip()
+    let sessionRulesSlot     = NSView()
+    private(set) var sessionRulesPopover: SessionRulesPopover?
+    private var sessionRulesStore: ApprovalStore?
+    private var sessionRulesTag: String?
+    private var sessionRulesBinding: AnyCancellable?
+    private var sessionRulesSlotWidth: NSLayoutConstraint!
+    private var sessionRulesSlotGap: NSLayoutConstraint!
+
     /// The composer never gets narrower than this, or than `composerMinimumFraction` of the bar,
     /// whichever is more, while the bar is wide enough for it at all. What gives way for it, in
     /// this order: the background slot first (its chip shows the icon alone, then nothing), then
-    /// the transcript view chip (its label truncates, then it is gone), then the model chip.
+    /// the transcript view chip (its label truncates, then it is gone), then the model chip, then the
+    /// session-rules slot (`N session rules`, then `N`, then nothing).
     static let composerMinimumWidth: CGFloat = 120
     static let composerMinimumFraction: CGFloat = 0.35
     /// Priorities of what gives way, weakest first. All stay under `NSLayoutConstraint.Priority.windowSizeStayPut`
@@ -88,6 +101,7 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private static let slotPriority = NSLayoutConstraint.Priority(600)
     private static let modeChipPriority = NSLayoutConstraint.Priority(650)
     private static let modelChipPriority = NSLayoutConstraint.Priority(700)
+    private static let sessionRulesPriority = NSLayoutConstraint.Priority(720)
     private static let composerPriority = NSLayoutConstraint.Priority(740)
     private let spinner      = NSProgressIndicator()
     /// Horizontal strip of image thumbnails shown above the text field when images are attached.
@@ -225,6 +239,15 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         backgroundChip.target = self
         backgroundChip.action = #selector(backgroundChipClicked(_:))
         backgroundSlot.addSubview(backgroundChip)
+        // The session-rules slot: zero-width until bound, then fixed; the chip is right-aligned inside it.
+        sessionRulesSlot.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(sessionRulesSlot)
+        sessionRulesChip.target = self
+        sessionRulesChip.action = #selector(sessionRulesChipClicked(_:))
+        sessionRulesSlot.addSubview(sessionRulesChip)
+        sessionRulesSlotWidth = sessionRulesSlot.widthAnchor.constraint(equalToConstant: 0)
+        sessionRulesSlotWidth.priority = Self.sessionRulesPriority
+        sessionRulesSlotGap = sessionRulesSlot.trailingAnchor.constraint(equalTo: backgroundSlot.leadingAnchor, constant: 0)
         backgroundSlotWidth = backgroundSlot.widthAnchor.constraint(equalToConstant: 0)
         backgroundSlotWidth.priority = Self.slotPriority
         let composerMinimum = textScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.composerMinimumWidth)
@@ -263,7 +286,16 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
 
             // The text view stops short of the background slot, which sits left of the mode chip, which
             // sits left of the model chip. Its trailing edge never depends on a chip's visibility.
-            textScroll.trailingAnchor.constraint(equalTo: backgroundSlot.leadingAnchor, constant: -8),
+            textScroll.trailingAnchor.constraint(equalTo: sessionRulesSlot.leadingAnchor, constant: -8),
+            sessionRulesSlotGap,
+            sessionRulesSlotWidth,
+            sessionRulesSlot.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
+            sessionRulesSlot.heightAnchor.constraint(equalToConstant: SessionRulesChip.height),
+            sessionRulesSlot.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            sessionRulesChip.trailingAnchor.constraint(equalTo: sessionRulesSlot.trailingAnchor),
+            sessionRulesChip.leadingAnchor.constraint(greaterThanOrEqualTo: sessionRulesSlot.leadingAnchor),
+            sessionRulesChip.topAnchor.constraint(equalTo: sessionRulesSlot.topAnchor),
+            sessionRulesChip.bottomAnchor.constraint(equalTo: sessionRulesSlot.bottomAnchor),
             backgroundSlotGap,
             modeChipGap,
             modeChipWidth,
@@ -439,6 +471,50 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     override func layout() {
         super.layout()
         fitBackgroundChipToSlot()
+        fitSessionRulesChipToSlot()
+    }
+
+    // MARK: Session rules chip (AP4)
+
+    /// Show `tag`'s session rules in the chip, live from `store`. Reserves the chip's slot.
+    func bindSessionRules(tag: String, store: ApprovalStore) {
+        sessionRulesTag = tag
+        sessionRulesStore = store
+        sessionRulesSlotWidth.constant = SessionRulesChip.slotWidth
+        sessionRulesSlotGap.constant = -6
+        sessionRulesBinding = store.sessionRulesChanges
+            .filter { $0 == tag }
+            .sink { [weak self] _ in self?.refreshSessionRulesChip() }
+        refreshSessionRulesChip()
+    }
+
+    /// The chip shows what its slot has room for: the text, the count alone, or nothing.
+    private func fitSessionRulesChipToSlot() {
+        guard sessionRulesTag != nil else { return }
+        let room = sessionRulesSlot.frame.width + 0.5
+        sessionRulesChip.setFit(room >= SessionRulesChip.slotWidth ? .full
+                                : room >= SessionRulesChip.countWidth ? .countOnly : .hidden)
+    }
+
+    /// Only the chip's text and visibility change, inside the fixed slot: no layout outside it, no
+    /// first-responder change.
+    private func refreshSessionRulesChip() {
+        guard let store = sessionRulesStore, let tag = sessionRulesTag else { return }
+        sessionRulesChip.apply(count: store.sessionRules(tag: tag).count)
+    }
+
+    @objc private func sessionRulesChipClicked(_ sender: Any?) {
+        if let open = sessionRulesPopover, open.isShown {
+            open.close()
+            return
+        }
+        guard let store = sessionRulesStore, let tag = sessionRulesTag, !store.sessionRules(tag: tag).isEmpty else { return }
+        let popover = SessionRulesPopover(tag: tag, store: store)
+        popover.onDidClose = { [weak self, weak popover] in
+            if self?.sessionRulesPopover === popover { self?.sessionRulesPopover = nil }
+        }
+        sessionRulesPopover = popover
+        popover.show(relativeTo: sessionRulesChip)
     }
 
     /// The chip shows what its slot has room for: the text, the icon alone, or nothing. Reads the

@@ -758,6 +758,7 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::ApprovalRequest { .. }
         | ServerMsg::ApprovalsSnapshot { .. }
         | ServerMsg::ApprovalResolved { .. }
+        | ServerMsg::ApprovalSessionRules { .. }
         | ServerMsg::ApprovalGuardBlocked { .. }
         | ServerMsg::ApprovalAnswerRefused { .. } => ServerClass::LocalOnly,
         // Which sessions wait for a Claude sign-in: names tags and the claude
@@ -1018,6 +1019,7 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::PerriAction { .. }
         | ClientMsg::DecisionAnswer { .. }
         | ClientMsg::ApprovalAnswer { .. }
+        | ClientMsg::ApprovalRevokeSessionRule { .. }
         | ClientMsg::ApprovalRefusalReport { .. }
         // Resends or drops a session's held message: it writes to a session.
         | ClientMsg::ClaudeLoginAction { .. }
@@ -1103,6 +1105,7 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::RenderedShape { tag, .. }
         | ClientMsg::SessionModelGet { tag }
         | ClientMsg::SessionModelSet { tag, .. }
+        | ClientMsg::ApprovalRevokeSessionRule { tag, .. }
         | ClientMsg::SessionTaskStop { tag, .. }
         | ClientMsg::SessionTaskOutput { tag, .. }
         | ClientMsg::ClaudeLoginAction { tag, .. }
@@ -2008,8 +2011,15 @@ mod tests {
                     kind: crate::approvals::wire::DecisionKind::AllowOnce,
                     note: None,
                     answers: None,
+                    candidate_id: None,
+                    rule_text: None,
                 },
                 window_id: "w".into(),
+                operator_nonce: None,
+            },
+            ClientMsg::ApprovalRevokeSessionRule {
+                tag: "x1".into(),
+                rule_id: "r".into(),
                 operator_nonce: None,
             },
             ClientMsg::ApprovalRefusalReport {
@@ -2176,7 +2186,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 69;
+    const CLIENT_MSG_VARIANTS: usize = 70;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2250,6 +2260,7 @@ mod tests {
             ClientMsg::TerminalStagingSetEnabled { .. } => 66,
             ClientMsg::TerminalStagingSetGlobal { .. } => 67,
             ClientMsg::TerminalStagingUiEvent { .. } => 68,
+            ClientMsg::ApprovalRevokeSessionRule { .. } => 69,
         }
     }
 
@@ -2288,9 +2299,9 @@ mod tests {
         assert_eq!(by_name("PtyList"), 9);
         // 62 since `PaneAction` (H6) was added after the retired verbs, so no ordinal moved;
         // 65 with the three command-staging verbs; 66 with `MotherNoticeSettingsSet`;
-        // 69 with the S2 staging frames (set_enabled, set_global, ui_event).
-        assert_eq!(CLIENT_MSG_VARIANTS, 69);
-        assert_eq!(every_client_msg().len(), 69);
+        // 69 with the S2 staging frames (set_enabled, set_global, ui_event); 70 with `ApprovalRevokeSessionRule`.
+        assert_eq!(CLIENT_MSG_VARIANTS, 70);
+        assert_eq!(every_client_msg().len(), 70);
     }
 
     #[test]
@@ -3690,6 +3701,14 @@ mod tests {
                     outcome: "denied".into(),
                     by_window: None,
                     at_ms: 3,
+                    tool_use_id: None,
+                },
+            ),
+            (
+                "approval_session_rules",
+                ServerMsg::ApprovalSessionRules {
+                    tag: "cody-plain".into(),
+                    rules: vec![],
                 },
             ),
             (
@@ -3921,6 +3940,8 @@ mod tests {
                     kind: crate::approvals::wire::DecisionKind::AllowOnce,
                     note: None,
                     answers: None,
+                    candidate_id: None,
+                    rule_text: None,
                 },
                 window_id: "w".into(),
                 operator_nonce: Some("n".into()),

@@ -10,7 +10,7 @@ import NostromoKit
 //   - a click on it asks the pane for the OTHER mode (the pane performs it);
 //   - it is reachable with Tab, never takes the keyboard by itself, and never changes the composer's
 //     width, whichever mode it shows;
-//   - left to right the bar reads [composer ... background slot, mode chip, model chip, Send], and in a
+//   - left to right the bar reads [composer ... (session-rules slot, AP4: unbound here, so zero-wide) background slot, mode chip, model chip, Send], and in a
 //     narrow pane the parts give way in the order background slot, then mode chip, then model chip,
 //     with the composer keeping its 120 pt minimum and no part ever overlapping another.
 //

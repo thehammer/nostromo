@@ -1,0 +1,186 @@
+# Allow for this session (AP4)
+
+The approval card can offer "This session ▾" next to Allow once. It creates a **session rule**: later calls
+that match it are allowed by the daemon itself, with no card, until the session ends. It is the second place
+Nostromo ever writes `"behavior":"allow"` without a click on that very request, so it is narrow on purpose.
+
+Why Nostromo matches the rule itself: the Claude CLI does not stop asking for a call an `ask` rule matched, even
+if it is sent an allow rule (`updatedPermissions`), and it sends no suggestion for an ask-rule prompt. So the daemon
+keeps the rules in memory and answers matching requests. It never sends `updatedPermissions` (a test scans `src/`).
+
+## What is offered
+
+A candidate exists only for a **plain Bash command**:
+
+- `tool_name` is `Bash` and the input has only `command`, `description` and `timeout` (so no `run_in_background`,
+  no `dangerouslyDisableSandbox`); the CLI did not set `suppress_always_allow_rule` or `requires_user_interaction`;
+  the reason is not a safety check or a settings write; and the guard let it through.
+- The command is at most 300 bytes of ASCII words joined by **single spaces**, each byte in
+  `[A-Za-z0-9_./~+=,:@%-]`. No quote, `$`, backtick, `; & | < > ( ) { } [ ] * ? ! # \`, tab, newline or non-ASCII
+  byte, so compound commands, substitutions, redirections, globs and here-docs never get a rule.
+- The command word is a bare name, **exactly lowercase** (`CP`, `Rm` run the same programs on the Mac's case-insensitive file system; any such word, and any word containing `/`, gets nothing) **on the allowlist**. Everything else gets
+  **Allow once only**, with no session candidate: test and task runners, package managers, interpreters, exec wrappers
+  and anything that loads project files (`pytest jest make npm cargo git docker just xcodebuild sed awk find tar curl
+  ln …`), shells, `sudo env xargs exec`, `ssh aws kubectl`, `tmux`, Nostromo's own binaries, and so on. The allowlist is
+  `rm rmdir mkdir touch ls du stat file cat head tail wc` (also prefix-capable) plus `cp mv diff cmp grep rg sort uniq
+  cut tr basename dirname realpath readlink pwd which whoami id date uname sw_vers echo printf sleep shasum md5 xxd
+  od strings tree ps pgrep df`. (`jq` and `lsof` were dropped: a jq filter file or a rewritten `~/.jq` cannot be pinned,
+  and `lsof` has no safe flag set. `chmod` is not allowlisted.) Not `ln` (it makes the symlinks the prefix check depends on). The old denylists
+  (`NEVER_COMMANDS`, interpreters, `NEVER_SUBSTRINGS`, `remote_shell_marker`) still apply on top, as defence in depth.
+- **Flags are a strict allowlist per command** (table below). Every word starting `--` is refused for every command
+  (this includes a bare `--`, abbreviations and `=` forms: `rg --hostname-bin=./hn` runs a program on every run,
+  `sort --files0-from=f` reads a list the agent can rewrite). A short group is allowed only if **every letter** is in
+  the command's set, so `-ion` is refused; a flag that takes a number (`head -n 5`) must be followed by an all-digit word.
+  `uniq`/`xxd` take one operand at most (the second is an output file).
+- `rm rmdir mv cp touch mkdir` with any **relative** (and `sort uniq tree xxd`, which can write a file) path argument get nothing: the rule ignores the directory it
+  was granted in. No word may start with `=` (zsh `=cmd`) or `%`, or contain a `.vol` component (APFS volume paths name any file by
+  number and bypass the path checks).
+- No word contains `ecs`, `ssm`, `execute-command`, `start-session`, `run-task`, `session-manager`, `send-keys`,
+  `send-prefix`, `paste-buffer`, `pipe-pane`, `respawn-pane` or `tmux`, and `remote_shell_marker` finds nothing. Production-shell
+  and ECS commands never get a rule, even ones the guard allows.
+- No word is, or points inside, a protected place: `/`, `~`, `~/`, `~user`, `/etc`, `/private/etc`, `/System`, `/usr`,
+  `/bin`, `/sbin`, `/Library`, `/Applications`, `/var`, `/dev`, `~/.ssh`, `~/.aws`, `~/.kube`, `~/.gnupg`, `~/.config` (all of it),
+  `~/.docker`, `~/.npmrc`, `~/.netrc`, `~/.pypirc`, `~/.git-credentials`, `~/.cargo`, `~/.local/bin`, the shell startup files
+  (`~/.zshrc .zshenv .zlogin .zlogout .zprofile .bash_profile .bash_login .bash_logout .bashrc .profile .cshrc .tcshrc .login .inputrc`), `~/.gitconfig`, `~/bin`, `~/.vimrc`, `~/.vim`, `~/.tmux.conf`, the shell history files (`.zsh_history .bash_history .history`), `~/.claude`, `~/.nostromo`, `~/Library/Application Support`, `~/Library/Cookies`, `~/Library/Preferences`, `/opt/homebrew/bin`, `/opt/homebrew/sbin`, `/usr/local/bin`, `/usr/local/sbin`,
+  `~/Library/Keychains`, `~/Library/LaunchAgents`, or any `.git` component. A bare relative `.ssh` counts like `.ssh/x`, checked against the session's directory. Also protected: `/opt/homebrew/Cellar`, `~/.npm/bin`, `~/.nvm`. (Allow once still works for all of them.)
+
+### Allowed flags
+
+| Command | Short flags allowed | Why / what is left out |
+|---|---|---|
+| `rm` | `-r -R -f -v -d` | no `-P`; nothing runs a program |
+| `rmdir`, `mkdir` | `-p -v` | no `mkdir -m` (takes an argument) |
+| `touch` | `-c` | no `-r/-t/-d` (take arguments) |
+| `cp` | `-R -p -v -n -f -i` | no `-r` (on macOS it behaves like `-RL` and copies the contents of every symlink inside the directory; `-R` keeps links), no `-L/-H/-P/-a` |
+| `mv` | `-f -n -v -i` | |
+| `ls` | `-l -a -h -1 -t -r` | no `-R`, no `-G` |
+| `du` | `-s -h`, `-d <digits>` | |
+| `stat` | none | `-f` formats take arguments |
+| `file` | `-b -i` | no `-C` (writes a `.mgc` file), `-f`, `-m`, `-z` (runs a decompressor) |
+| `cat` | `-n -b -s` | |
+| `head`, `tail` | `-n <digits>`, `-<digits>` | no `-f` (follows forever) |
+| `wc` | `-l -w -c` | |
+| `diff`, `cmp` | `-u -q -s` | no `-r` (`diff -r` reads through symlinks inside the directory), no directory operand at all, no `--` forms (`--to-file`, `--exclude-from`) |
+| `grep` | `-i -n -l -c -w -v -r -F -H -h -s` | agents run the bundled ugrep (Claude Code's shell snapshot aliases `grep` to ugrep with `--hidden --ignore-files`, `rg` to the bundled ripgrep), where `-r` does not follow symlinks inside the directory but `-R` does, so `-R` stays refused (BSD `-R` behaves like `-r`); no `-e/-f` (take arguments), no long option at all |
+| `rg` | `-i -n -l -c -w -v -F -H -h -s` | no `-r` (that is `--replace` and takes an argument; `rg` is recursive already and does not follow inner links), no long option at all (`--pre`, `--hostname-bin`, `--config`) |
+| `sort` | `-n -r -u -f -b` | no `-o`, no `--files0-from`, `--output`, `--compress-program` |
+| `uniq` | `-c -d -u -i` | one operand at most |
+| `cut` | `-d -f -c -b -s` | |
+| `tr` | `-d -s -c` | |
+| `basename dirname realpath readlink pwd whoami id sw_vers printf sleep shasum md5 xxd` | none | `xxd -r` writes a file; `shasum -c` reads a list |
+| `which` | `-a` | |
+| `date` | `-u`; operands only `+FORMAT` | `-s` and the positional `mmddHHMM` form set the clock |
+| `uname` | `-a` | |
+| `echo` | `-n` | |
+| `od` | `-c -x -b` | |
+| `strings` | `-a` | |
+| `tree` | `-a`, `-L <digits>` | no `-R` (writes `00Tree.html` into every directory), `-o`, `-H` |
+| `ps` | exactly `ps aux` or `ps -ef` | nothing else |
+| `pgrep` | `-f -l -x -i` | no `-o` (and nothing that signals) |
+| `df` | `-h` | |
+
+### Exact rules are pinned to the file system
+
+An exact rule stores where every **absolute or `~/` operand** resolved when it was offered, and re-resolves each at
+match time, requiring equality. Offering is refused if any such operand (a) passes through a symlink anywhere,
+**including its last component** (a symlinked home and the `/tmp` to `/private/tmp` alias are the only indirections
+accepted), (b) resolves into a protected place or under `/Volumes` or `/Network`, (c) contains a `.` or `..`
+component or `//`, (d) for `cp`/`mv`, is a destination that exists with **more than one hard link** (checked when offered and again at match time, so a hard link made to `~/.zshrc` later ends the rule), or (e) hangs the file system (time-bounded, below). So `rm -rf ~/proj/fixtures/.ssh` stops matching
+the moment `fixtures` becomes a symlink to home, and `cp /abs/src /abs/dst` stops matching when `dst` becomes a
+symlink. A not-yet-existing leaf is fine (its nearest existing ancestor is pinned, and a later symlink changes it).
+Exact rules on `/tmp/...` are offered: the resolved `/private/tmp` is stored (`/private` is a broad root only for
+**prefix** rules). Relative operands are never ruled, for file-changing and for reading commands alike (`cat grep rg diff ls du head …` take absolute or `~/` operands only; `grep` and `rg` skip their first operand: the pattern; a flag's numeric argument such as `head -n 20` is not an operand). The registered directory is where the session *started*; the Bash tool's directory persists after a `cd`, so `cat notes` could read `sub/notes` (maybe a symlink) while only the start-directory copy was pinned. A recursive search with **no path** (`grep -r PAT`, `rg PAT`, `du`, `tree`) searches the shell's directory and is refused for the same reason. An absolute operand of a recursive search, `du` or `tree` that is an **ancestor of a protected place** (`~/Library`, `/opt/homebrew`, `/Users`, `/`) is refused (exact and prefix rules). `diff` and `cmp` refuse any **directory** operand, at offer time and at match time: `diff DIR DIR` (no `-r`) opens the files the directories have in common through symlinks among them, and those files are not pinned. Two regular files get a rule. `cp`/`mv` are offered only as `SRC DST` with
+a destination that is not an existing directory and does not end in `/` (`cp a dir` writes `dir/a`, which is not pinned).
+
+The candidates, in order:
+
+1. **Exact**: `Bash(<command>)`, matched byte for byte. The card says "Allows exactly this command text again, in whatever directory the session is in".
+2. **Path prefix**, only for `rm rmdir mkdir touch ls du stat file cat head tail wc` with `<command> <flags…> <path…>`
+   (flags are `-[A-Za-z]+`, at least one path, every path absolute or `~/`, no `.` or `..` component, no `//`): the
+   deepest common parent of the paths. Paths under your home are first rewritten to `~/…` (so `/Users/you/Code/x` is
+   exactly as shallow as `~/Code/x`, whatever the case or a symlinked home), and then the parent needs at least two
+   components below `~/`; elsewhere at least three below `/`, and never inside `/Volumes /Users /opt /usr /etc /var
+   /private /Library /System /Applications` (and similar roots). It must not be protected (`Bash(rm -rf
+   ~/Library/Caches/:*)` yes; `~/Code/`, `/tmp/x/`, `/Volumes/Backup/` no). Relative paths never get a prefix.
+   **The prefix must resolve to itself:** it is resolved when offered and refused if any component is a symlink (a
+   symlinked home is the one exception, and the rule is then tied to where it pointed). Depth, broad roots and
+   protected places are checked again on the resolved form, which is stored in the rule.
+- A request with `default_to_no`, `classifier_approvable: false` or `decision_reason_type: safetyCheck` (read from the
+  raw field, not from the displayed reason) gets no candidate and never matches a rule.
+
+For a request raised by the user's own ask rule the card says `Overrides your rule <rule> for matching commands, this
+session only`.
+
+## How a rule is created: two human gestures
+
+1. Choosing an item of the `This session ▾` menu **only selects** it. Nothing is sent. The card then shows the exact
+   rule text, what it covers, who it is for and the overrides line, with an `Allow for this session` button.
+2. Pressing that button sends `approval_answer` with `allow_session`, the candidate's `id` and its `rule_text`.
+
+Both steps go through `HumanGesture.permit` (the pick as a menu selection, which is allowed only because it cannot
+confirm; the confirm with the strict defaults). The confirm also refuses, changing nothing: the same event as the pick;
+less than 0.3 s after it on **either clock** (the smaller of the events' own timestamp gap and the handlers' clock gap); a key repeat; a double click; a mouse event outside the button; a key
+while the button is not first responder or is not Space/Return. The pick reverts after 15 s, when the request changes
+and when the card leaves its window. No app-control command and no Accessibility press (VoiceOver off) completes
+either step. The button has no key equivalent and is never the default.
+
+The daemon accepts `allow_session` only from the verified app with its nonce, only for a held request that listed it,
+only with one of **that request's own** candidates and the identical text; anything else is `invalid_rule`, logged, the
+request stays held and no rule exists. It never parses the text: the rule is built from the stored candidate. At most
+32 rules per session.
+
+## How a rule is used
+
+In `process`, **after the guard and before a card**: only if the session carries the guard hook **and** a verified app
+that renders approvals is connected (nothing is allowed host-side while nobody can show and revoke rules); only a rule
+of exactly this session process (`tag` + generation) and the same requester (the session's agent, or the same
+sub-agent); and the request passes every eligibility check again. A prefix match first requires the prefix directory to
+still resolve to the value stored when the rule was created (a directory that later became a symlink ends the rule's
+reach), then resolves each path: one that leaves the prefix, lands in a protected place, or is a dangling or looping
+symlink does not match. All of a request's rules are checked on one helper thread with a 500 ms limit in total, and deriving candidates for a
+held request gets its own 500 ms limit (no candidates on a timeout). A file system that does not answer is no match.
+At most 4 timed-out helper threads may still be stuck in a hung mount at once (a blocked syscall cannot be cancelled;
+the thread ends when it returns; the limit is shared by all sessions, so one hung mount turns rule matching off everywhere, which is safe: cards are shown as usual); past that, new work is refused instead of piling up threads. A rule also belongs to the session id it was granted under:
+grant and match use the same value (the request's `session_id` when present, else the registered one), so a request
+carrying a different session id, or a rule from another one, never matches. A match is logged `allowed_by_session_rule` and the row reads `allowed by session rule`.
+
+## How it ends
+
+Rules are memory only. They go, each with a `session_rule_revoked` entry (`reason: session_ended`), when the session
+process goes for any reason (stop, restart, Clear Context, exit, crash, model switch), when a new process registers for
+the focus, and at daemon shutdown. A daemon restart starts with none. Revoke (the chip's popover) removes one at once
+(`reason: user`).
+
+## Seeing and revoking
+
+The input bar's `N session rules` chip (its own fixed-width slot, so it never moves the composer or the transcript;
+narrow bars show `N`, then nothing) opens a popover: each rule's exact text, summary, `granted 2:47 pm`, `used N
+times`, the sub-agent if bound, and Revoke (one human gesture). A new daemon connection clears every rule before the
+daemon replays its own. `nostromo-app approvals session-rules [--focus TAG]` is read-only; nothing in app-control
+presses, selects or revokes.
+
+## Audit
+
+`session_rule_granted` (with the request, window, session and generation), a `request` and `outcome:
+allowed_by_session_rule` per use (the outcome's `rule` names the rule and its grant), `session_rule_revoked`, and
+`refusal` entries for every refused create or revoke.
+
+## Limits (decision D-1)
+
+- Bash only, plain commands only; widening (quoted commands, MCP, Edit/Write, relative prefixes) is a follow-up.
+- **A rule ignores the working directory.** The working directory is not part of a rule, and the broker's `cwd` is the
+  directory the session started in, not the Bash tool's current directory: after a `cd`, the same text acts somewhere
+  else and still matches. The file-changing commands (`rm rmdir mv cp chmod touch mkdir`) get no exact rule with a
+  relative path for that reason, and neither do read-only ones (`ls build`, `grep x out`): relative operands are never ruled. The card says so.
+- Exact rules cover the same **text**, not the same **effect**; that is why exact candidates come only from the
+  allowlist above, not from a denylist.
+- The grant audit does not yet record gesture provenance: `approval_answer` has no field for it and widening the wire
+  is a follow-up. The Mac logs the source pid and state of the pick and of the confirm (as Allow once does).
+- Prefix rules are never offered under `/Volumes` or `/Network`.
+- Residual risks that cannot be closed from the text: a background job (or anything else) that swaps a symlink
+  **between the match and the command running**; a **hard link** to a protected file used for a **read** (`cat ~/x/y/link`, a source of `cp`; hard-link *destinations* of `cp`/`mv` are refused); symlinks planted inside a directory that `grep -r`, `rg`, `du` or `cp -R` walk are not followed by those tools, but a hard link inside it is read.
+- Not accepted for lack of a safe gain: `readlink`/`realpath` of a symlink (pinning refuses a symlink operand, which is their purpose), paths under `$TMPDIR` (`/var/folders`, a symlinked path), `cut -d:`.
+- The CLI's permission request carries no session id of its own, so the broker compares the id it registered the
+  session with (and the request's `session_id`, when one is present). A typed `/clear` that keeps the same process does
+  not change the registered id: the rules still end when the process does, as documented.
+- Persisted rules ("Always allow…") are AP6.
