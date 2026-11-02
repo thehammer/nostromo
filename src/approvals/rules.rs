@@ -140,7 +140,7 @@ impl SessionRule {
     #[cfg(any(test, feature = "test-support"))]
     pub fn exact_for_test(command: &str, home: &Path, agent_id: Option<String>) -> Self {
         let words: Vec<String> = command.split(' ').map(str::to_owned).collect();
-        let pinned = pin_operands(&words, home, None).unwrap_or_default();
+        let pinned = pin_operands(&words, home).unwrap_or_default();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             rule_text: format!("Bash({command})"),
@@ -279,6 +279,7 @@ const PROTECTED_ABSOLUTE: &[&str] = &[
     "dev",
     "opt/homebrew/bin",
     "opt/homebrew/sbin",
+    "opt/homebrew/cellar",
     "usr/local/bin",
     "usr/local/sbin",
 ];
@@ -312,6 +313,8 @@ const PROTECTED_HOME: &[&str] = &[
     ".pypirc",
     ".cargo",
     ".local/bin",
+    ".npm/bin",
+    ".nvm",
     ".claude",
     ".nostromo",
     "library/keychains",
@@ -421,7 +424,7 @@ pub fn candidates(
         return Vec::new();
     };
     // Every absolute operand must be where it says it is, now and (re-checked) at match time.
-    let Some(pinned) = pin_operands(&plain.words, home, cwd) else {
+    let Some(pinned) = pin_operands(&plain.words, home) else {
         return Vec::new();
     };
     let overrides = (reason.kind == ReasonKind::AskRule)
@@ -509,9 +512,7 @@ pub fn matches(
     }
     match &rule.spec {
         // The operands must still resolve to where they did when the rule was offered.
-        Spec::Exact { pinned, .. } => {
-            pin_operands(&plain.words, home, cwd).as_ref() == Some(pinned)
-        }
+        Spec::Exact { pinned, .. } => pin_operands(&plain.words, home).as_ref() == Some(pinned),
         Spec::PathPrefix {
             head,
             prefix,
@@ -737,6 +738,18 @@ fn eligible(
     if words.iter().any(|w| word_is_protected(w, home, cwd)) {
         return None;
     }
+    // A recursive search walks everything below its operand: an operand that contains a
+    // protected place (`~/Library`, `/opt/homebrew`) reaches it.
+    if searches_recursively(&basename, &words[1..])
+        && words[1..].iter().any(|w| {
+            (w.starts_with('/') || w.starts_with("~/")) && {
+                let path = expand(w.trim_end_matches('/'), home);
+                path_contains_protected(&path, home)
+            }
+        })
+    {
+        return None;
+    }
     Some(Plain {
         command: command.to_owned(),
         words,
@@ -809,17 +822,6 @@ const READS_FILES: &[&str] = &[
     "uniq", "cut", "realpath", "readlink", "shasum", "md5", "xxd", "od", "strings", "tree",
 ];
 
-/// A relative operand a rule may pin: `.` itself, or plain components (no `.`, `..`, `//`).
-fn plain_relative(word: &str) -> bool {
-    word == "."
-        || (!word.starts_with('/')
-            && !word.contains("//")
-            && !word
-                .trim_end_matches('/')
-                .split('/')
-                .any(|c| c.is_empty() || c == "." || c == ".."))
-}
-
 /// Does this command search a directory tree (so that, with no path, it searches the session's
 /// directory)? `grep` only with `-r`; `rg`, `du` and `tree` always.
 fn searches_recursively(command: &str, args: &[String]) -> bool {
@@ -832,17 +834,20 @@ fn searches_recursively(command: &str, args: &[String]) -> bool {
     }
 }
 
-/// Where each absolute or `~/` operand of `words[1..]` resolves (and, for commands that read
-/// files, each relative operand, against `cwd`, the session's directory), in order; `None` if
-/// one cannot be pinned. An operand is pinned only if the file system resolves it to itself (no
+/// Where each absolute or `~/` operand of `words[1..]` resolves, in order; `None` if one
+/// cannot be pinned. An operand is pinned only if the file system resolves it to itself (no
 /// symlink in it or its parents, anywhere, including its last component), allowing the
 /// symlinked home and the `/tmp` alias of `/private/tmp`; the resolved form must not be a
 /// protected place nor under `/Volumes` or `/Network` (mounts that may hang). The exact rule
 /// stores these and re-resolves them at match time, so a directory that later becomes a
 /// symlink ends the rule's reach (`rm -rf fixtures/.ssh` after `fixtures` pointed at home).
-/// A relative operand with an unknown `cwd` is refused, and so is a recursive search with no
-/// path (it searches `cwd`, which is then pinned and checked like an operand).
-fn pin_operands(words: &[String], home: &Path, cwd: Option<&Path>) -> Option<Vec<PathBuf>> {
+///
+/// Relative operands are never pinned (so never ruled): the session's registered directory
+/// is where it started, not where the shell is now. For the same reason a recursive search
+/// with no path operand (it would search the shell's directory) is refused. `diff` and `cmp`
+/// refuse a directory operand: `diff DIR DIR` opens the files the two have in common through
+/// any symlink among them, and those files are not pinned.
+fn pin_operands(words: &[String], home: &Path) -> Option<Vec<PathBuf>> {
     let name = words[0].to_ascii_lowercase();
     let name = name.as_str();
     // `cp a dir` and `mv a b c` write `dir/a`, a path the rule never pinned (and `dir/a` may be
@@ -867,6 +872,11 @@ fn pin_operands(words: &[String], home: &Path, cwd: Option<&Path>) -> Option<Vec
         }
     }
     let reads_files = READS_FILES.contains(&name);
+    let recursive = searches_recursively(name, &words[1..]);
+    let numeric_flags = FLAG_TABLE
+        .iter()
+        .find(|(c, _, _)| *c == name)
+        .map_or("", |(_, _, n)| *n);
     let real_home = canonical_lenient(home).unwrap_or_else(|| home.to_path_buf());
     let pin = |path: PathBuf| -> Option<PathBuf> {
         let real = canonical_lenient(&path)?;
@@ -880,17 +890,32 @@ fn pin_operands(words: &[String], home: &Path, cwd: Option<&Path>) -> Option<Vec
         if !expected.contains(&real)
             || path_is_protected(&real, home)
             || path_is_protected(&real, &real_home)
+            || (recursive
+                && (path_contains_protected(&real, home)
+                    || path_contains_protected(&real, &real_home)))
             || first_component_is(&real, &["volumes", "network"])
             || first_component_is(&path, &["volumes", "network"])
+            || (matches!(name, "diff" | "cmp") && real.is_dir())
         {
             return None;
         }
         Some(real)
     };
-    let session_dir = || cwd.filter(|c| c.is_absolute());
     let mut pattern_pending = matches!(name, "grep" | "rg");
     let mut pinned = Vec::new();
+    let mut prev: Option<&String> = None;
     for word in &words[1..] {
+        // `head -n 20`: the number is the flag's argument, not a path.
+        let is_flag_argument = prev.is_some_and(|p| {
+            p.len() == 2
+                && p.starts_with('-')
+                && numeric_flags.contains(&p[1..])
+                && word.bytes().all(|b| b.is_ascii_digit())
+        });
+        prev = Some(word);
+        if is_flag_argument {
+            continue;
+        }
         if word.starts_with('/') || word.starts_with("~/") {
             if !plain_path(word) {
                 return None;
@@ -903,16 +928,7 @@ fn pin_operands(words: &[String], home: &Path, cwd: Option<&Path>) -> Option<Vec
                 pattern_pending = false;
                 continue;
             }
-            if !plain_relative(word) {
-                return None;
-            }
-            let dir = session_dir()?;
-            let path = if word == "." {
-                dir.to_path_buf()
-            } else {
-                dir.join(word.trim_end_matches('/'))
-            };
-            pinned.push(pin(path)?);
+            return None;
         }
     }
     // `grep -r PATTERN` and `rg PATTERN` name no path: the first operand is the pattern.
@@ -921,8 +937,8 @@ fn pin_operands(words: &[String], home: &Path, cwd: Option<&Path>) -> Option<Vec
         .iter()
         .filter(|w| !w.starts_with('-') && !w.bytes().all(|b| b.is_ascii_digit()))
         .count();
-    if searches_recursively(name, &words[1..]) && operands <= pattern_words {
-        pinned.push(pin(session_dir()?.to_path_buf())?);
+    if recursive && operands <= pattern_words {
+        return None;
     }
     Some(pinned)
 }
@@ -1081,6 +1097,30 @@ fn path_is_protected(path: &Path, home: &Path) -> bool {
     })
 }
 
+/// Does the absolute `path` contain a protected location (is it an ancestor of one)? The
+/// home directory and everything above it are protected places themselves
+/// ([`path_is_protected`]); this covers `~/Library`, `/opt/homebrew` and the like.
+fn path_contains_protected(path: &Path, home: &Path) -> bool {
+    let Some(parts) = normalize(path) else {
+        return true;
+    };
+    let lower: Vec<String> = parts.iter().map(|p| p.to_ascii_lowercase()).collect();
+    let home_parts: Vec<String> = normalize(home)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+    let contains = |base: &[String]| lower.len() <= base.len() && base[..lower.len()] == lower[..];
+    PROTECTED_HOME.iter().any(|p| {
+        let mut base = home_parts.clone();
+        base.extend(p.split('/').map(str::to_owned));
+        contains(&base)
+    }) || PROTECTED_ABSOLUTE.iter().any(|p| {
+        let base: Vec<String> = p.split('/').map(str::to_owned).collect();
+        contains(&base)
+    })
+}
+
 /// Is `word` (or a piece of it split at `=`, `,` or `:`) a protected location, or
 /// does it point inside one? Relative words are resolved against `cwd`.
 fn word_is_protected(word: &str, home: &Path, cwd: Option<&Path>) -> bool {
@@ -1118,17 +1158,14 @@ fn piece_is_protected(piece: &str, home: &Path, cwd: Option<&Path>) -> bool {
             None => piece.split('/').any(|c| c == ".."),
         };
     }
-    // A bare relative name (`.ssh`) is checked like `.ssh/x`: against the session's
-    // directory, or, when that is unknown, by its name.
-    match cwd {
-        Some(cwd) => path_is_protected(&cwd.join(piece), home),
-        None => {
-            let lower = piece.to_ascii_lowercase();
-            PROTECTED_HOME
-                .iter()
-                .any(|p| !p.contains('/') && *p == lower)
-        }
-    }
+    // A bare relative name (`.ssh`, `ls`, `aux`) is checked by its name only: every command that
+    // reads or changes files refuses relative operands ([`pin_operands`], [`eligible`]), so such
+    // a word is never a path to resolve against the session's directory (which would make every
+    // word protected for a session started in `~/.claude`).
+    let lower = piece.to_ascii_lowercase();
+    PROTECTED_HOME
+        .iter()
+        .any(|p| !p.contains('/') && *p == lower)
 }
 
 // ── prefix derivation ─────────────────────────────────────────────────────────
@@ -1532,7 +1569,7 @@ mod tests {
 
     #[test]
     fn request_flags_and_a_raw_safety_check_block_every_candidate() {
-        let base = || json!({ "command": "ls build" });
+        let base = || json!({ "command": "ls /work/build" });
         let flagged = [
             ("default_to_no", json!({ "default_to_no": true })),
             (
@@ -1560,7 +1597,7 @@ mod tests {
             let req = request(base(), extra);
             assert!(texts(&req).is_empty(), "{name}");
             // and a rule never matches it either
-            let rule = rule_for("ls build", 0);
+            let rule = rule_for("ls /work/build", 0);
             let kind = req.reason(None, &NoSettings).kind;
             assert!(
                 !matches(&rule, &req, kind, &home(), Some(Path::new("/work/proj"))),
@@ -1568,19 +1605,21 @@ mod tests {
             );
         }
         // The same command without the flags is offered.
-        assert_eq!(texts(&request(base(), json!({}))), ["Bash(ls build)"]);
+        assert_eq!(texts(&request(base(), json!({}))), ["Bash(ls /work/build)"]);
         assert_eq!(
             texts(&request(
                 base(),
                 json!({ "default_to_no": false, "classifier_approvable": true })
             )),
-            ["Bash(ls build)"]
+            ["Bash(ls /work/build)"]
         );
     }
 
     #[test]
     fn a_relative_path_never_gets_a_prefix() {
-        assert_eq!(texts_of("ls build"), ["Bash(ls build)"]);
+        // S1: a relative operand is never ruled (the shell may have left the session directory).
+        assert!(texts_of("ls build").is_empty());
+        assert_eq!(texts_of("ls /work/build"), ["Bash(ls /work/build)"]);
         assert_eq!(texts_of("git push"), Vec::<String>::new());
     }
 
@@ -1604,10 +1643,10 @@ mod tests {
         ] {
             assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
         }
-        // Absolute arguments are still fine, and so are relative ones to read-only commands.
+        // Absolute arguments are still fine; relative ones to read-only commands are not (S1).
         assert_eq!(texts_of("cp /work/a /work/b"), ["Bash(cp /work/a /work/b)"]);
         assert_eq!(texts_of("mv /work/a /work/b"), ["Bash(mv /work/a /work/b)"]);
-        assert_eq!(texts_of("ls build"), ["Bash(ls build)"]);
+        assert!(texts_of("ls build").is_empty());
     }
 
     // M2: exact candidates come from an allowlist of command words. Every one of these
@@ -1675,7 +1714,7 @@ mod tests {
     fn an_allowlisted_command_still_gets_an_exact_rule() {
         for c in [
             "grep foo /work/a",
-            "rg foo build",
+            "rg foo /work/build",
             "diff /work/a /work/b",
             "echo hi",
             "date",
@@ -1770,13 +1809,15 @@ mod tests {
                 "{command} in {cwd:?}"
             );
         }
-        // Not under a protected place: still offered.
+        // Relative operands are never ruled (S1), protected or not.
         let req = cmd("ls src");
         let reason = req.reason(None, &NoSettings);
-        assert_eq!(
-            candidates(&req, &reason, &h, Some(&h.join("Code/p"))).len(),
-            1
-        );
+        assert!(candidates(&req, &reason, &h, Some(&h.join("Code/p"))).is_empty());
+        // Not under a protected place: an absolute operand is still offered.
+        let req = cmd("ls /Users/tester/Code/p/src");
+        let reason = req.reason(None, &NoSettings);
+        let c = candidates(&req, &reason, &h, Some(&h.join("Code/p")));
+        assert_eq!(c[0].rule_text, "Bash(ls /Users/tester/Code/p/src)");
     }
 
     #[test]
@@ -1887,12 +1928,12 @@ mod tests {
 
     #[test]
     fn an_exact_rule_matches_only_the_same_command() {
-        let r = rule_for("ls build", 0);
-        assert!(hit(&r, "ls build"));
-        assert!(hit(&r, " ls build "));
-        assert!(!hit(&r, "ls build -f"));
-        assert!(!hit(&r, "ls  build"));
-        assert!(!hit(&r, "ls build && curl x"));
+        let r = rule_for("ls /work/build", 0);
+        assert!(hit(&r, "ls /work/build"));
+        assert!(hit(&r, " ls /work/build "));
+        assert!(!hit(&r, "ls /work/build -f"));
+        assert!(!hit(&r, "ls  /work/build"));
+        assert!(!hit(&r, "ls /work/build && curl x"));
     }
 
     #[test]
@@ -2092,8 +2133,8 @@ mod tests {
             true
         });
         assert_eq!(slow, None);
-        let rule = rule_for("ls build", 0);
-        let req = cmd("ls build");
+        let rule = rule_for("ls /work/build", 0);
+        let req = cmd("ls /work/build");
         assert!(matches_within(
             Duration::from_secs(5),
             &rule,
@@ -2108,7 +2149,7 @@ mod tests {
     #[test]
     fn candidates_within_and_first_match_within_agree_with_the_plain_functions() {
         use std::time::Duration;
-        let req = cmd("ls build");
+        let req = cmd("ls /work/build");
         let reason = req.reason(None, &NoSettings);
         let got: Vec<String> = candidates_within(
             Duration::from_secs(5),
@@ -2120,8 +2161,8 @@ mod tests {
         .into_iter()
         .map(|c| c.rule_text)
         .collect();
-        assert_eq!(got, ["Bash(ls build)"]);
-        let rules = [rule_for("ls other", 0), rule_for("ls build", 0)];
+        assert_eq!(got, ["Bash(ls /work/build)"]);
+        let rules = [rule_for("ls /work/other", 0), rule_for("ls /work/build", 0)];
         let hit = first_match_within(
             Duration::from_secs(5),
             &rules,
@@ -2130,7 +2171,10 @@ mod tests {
             &home(),
             Some(Path::new("/work/proj")),
         );
-        assert_eq!(hit.map(|r| r.rule_text), Some("Bash(ls build)".to_owned()));
+        assert_eq!(
+            hit.map(|r| r.rule_text),
+            Some("Bash(ls /work/build)".to_owned())
+        );
         assert!(first_match_within(
             Duration::from_secs(5),
             &[],
@@ -2270,37 +2314,88 @@ mod tests {
         assert!(texts_in(&mv, &home(), None).is_empty());
     }
 
-    // S2: relative operands of read commands are pinned against the session's directory.
+    // S1: the session's registered directory is where it started, not where the shell is now,
+    // so a relative operand is never ruled, whatever directory is known.
     #[test]
-    fn relative_operands_of_read_commands_are_pinned_against_the_session_directory() {
+    fn relative_operands_of_read_commands_get_no_rule_whatever_the_session_directory() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path().canonicalize().unwrap();
         std::fs::write(d.join("notes"), "n").unwrap();
-        // No directory known: no rule. Known: a rule.
-        assert!(texts_in("cat notes", &home(), None).is_empty());
-        assert!(texts_in("diff a b", &home(), None).is_empty());
-        assert_eq!(texts_in("cat notes", &home(), Some(&d)).len(), 1);
-        assert!(texts_in("cat ../notes", &home(), Some(&d)).is_empty());
-        assert!(texts_in("cat a//b", &home(), Some(&d)).is_empty());
-        // The rule stops matching once `notes` is a symlink (or the directory differs).
+        for cwd in [None, Some(d.as_path())] {
+            for c in [
+                "cat notes",
+                "cat ./notes",
+                "cat ../notes",
+                "cat a//b",
+                "head notes",
+                "tail notes",
+                "wc -l notes",
+                "ls .",
+                "ls build",
+                "stat notes",
+                "file notes",
+                "grep x notes",
+                "rg x notes",
+                "diff a b",
+                "cmp a b",
+                "sort notes",
+                "uniq notes",
+                "strings notes",
+                "od notes",
+                "xxd notes",
+                "shasum notes",
+                "md5 notes",
+                "realpath notes",
+                "readlink notes",
+                "tree build",
+                "du build",
+                "cut -f1 notes",
+                "cat /work/a notes",
+            ] {
+                assert!(texts_in(c, &home(), cwd).is_empty(), "{c} in {cwd:?}");
+            }
+        }
+        // An absolute operand is fine with the directory known or not.
+        let abs = format!("cat {}/notes", d.display());
+        for cwd in [None, Some(d.as_path())] {
+            assert_eq!(texts_in(&abs, &home(), cwd), [format!("Bash({abs})")]);
+        }
+    }
+
+    // S1, the `cd` drift: a rule is about files, not about the directory the shell is in, so
+    // no rule (not even a hand-built one) covers a relative operand in any directory.
+    #[test]
+    fn a_rule_never_matches_a_relative_operand_after_the_shell_changes_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        std::fs::write(d.join("notes"), "n").unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let e = elsewhere.path().canonicalize().unwrap();
+        let hand_built = SessionRule::exact_for_test("cat notes", &home(), None);
         let req = cmd("cat notes");
+        for cwd in [None, Some(d.as_path()), Some(e.as_path())] {
+            assert!(
+                !matches(&hand_built, &req, ReasonKind::AskRule, &home(), cwd),
+                "{cwd:?}"
+            );
+        }
+        // A rule for the absolute path covers it from every directory, until the file is a symlink.
+        let abs = format!("cat {}/notes", d.display());
+        let req = cmd(&abs);
         let reason = req.reason(None, &NoSettings);
         let c = candidates(&req, &reason, &home(), Some(&d));
         let rule = rule_from(&c[0]);
         let m = |cwd: Option<&Path>| matches(&rule, &req, ReasonKind::AskRule, &home(), cwd);
-        assert!(m(Some(&d)));
-        assert!(!m(None));
-        let elsewhere = tempfile::tempdir().unwrap();
-        assert!(!m(Some(&elsewhere.path().canonicalize().unwrap())));
+        assert!(m(Some(&d)) && m(Some(&e)) && m(None));
         std::fs::remove_file(d.join("notes")).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", d.join("notes")).unwrap();
         assert!(!m(Some(&d)));
-        assert!(texts_in("cat notes", &home(), Some(&d)).is_empty());
+        assert!(texts_in(&abs, &home(), Some(&d)).is_empty());
     }
 
-    // S2: a recursive search with no path searches the session's directory.
+    // S1: a recursive search with no path operand would search the shell's directory.
     #[test]
-    fn a_recursive_search_with_no_path_needs_a_safe_session_directory() {
+    fn a_recursive_search_with_no_path_gets_no_rule_whatever_the_session_directory() {
         let dir = tempfile::tempdir().unwrap();
         let d = dir.path().canonicalize().unwrap();
         let fake_home = d.join("home");
@@ -2312,27 +2407,192 @@ mod tests {
             "rg -i x",
             "du",
             "du -sh",
+            "du -d 1",
             "tree",
             "tree -L 2",
         ] {
-            assert!(texts_in(c, &fake_home, None).is_empty(), "{c}: unknown dir");
-            assert!(
-                texts_in(c, &fake_home, Some(&fake_home)).is_empty(),
-                "{c}: home"
-            );
-            assert!(
-                texts_in(c, &fake_home, Some(&fake_home.join(".ssh"))).is_empty(),
-                "{c}: protected"
-            );
-            assert!(
-                !texts_in(c, &fake_home, Some(&proj)).is_empty(),
-                "{c}: a project directory is fine"
-            );
+            for cwd in [None, Some(fake_home.as_path()), Some(proj.as_path())] {
+                assert!(texts_in(c, &fake_home, cwd).is_empty(), "{c} in {cwd:?}");
+            }
         }
         // With a path operand the directory does not matter.
         assert!(!texts_in("rg x /work/a/b/c", &home(), None).is_empty());
-        // `.` is the session directory.
-        assert!(texts_in("grep -r AKIA .", &fake_home, Some(&fake_home)).is_empty());
+        // `.` is relative.
+        assert!(texts_in("grep -r AKIA .", &fake_home, Some(&proj)).is_empty());
+    }
+
+    // N1: `diff DIR DIR` opens the files the two directories have in common, through any
+    // symlink among them, and those files are not pinned.
+    #[test]
+    fn diff_and_cmp_get_no_rule_when_any_operand_is_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        let (a, b) = (d.join("dirA"), d.join("dirB"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("secret"), "x").unwrap();
+        // The motivating case: a link planted inside one directory, a plain file in the other.
+        std::os::unix::fs::symlink("/etc/hosts", a.join("planted")).unwrap();
+        std::fs::write(b.join("planted"), "y").unwrap();
+        let (f1, f2) = (d.join("f1"), d.join("f2"));
+        std::fs::write(&f1, "1").unwrap();
+        std::fs::write(&f2, "2").unwrap();
+        let (a, b, f1, f2) = (a.display(), b.display(), f1.display(), f2.display());
+        for tool in ["diff", "cmp"] {
+            for c in [
+                format!("{tool} {a} {b}"),
+                format!("{tool} -u {a} {b}"),
+                format!("{tool} -q {a} {b}"),
+                format!("{tool} {f1} {a}"),
+                format!("{tool} {a} {f1}"),
+            ] {
+                assert!(texts_in(&c, &home(), None).is_empty(), "{c}");
+            }
+            let files = format!("{tool} {f1} {f2}");
+            assert_eq!(texts_in(&files, &home(), None), [format!("Bash({files})")]);
+        }
+    }
+
+    #[test]
+    fn a_diff_or_cmp_rule_stops_matching_once_an_operand_becomes_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        let (f1, f2) = (d.join("f1"), d.join("f2"));
+        std::fs::write(&f1, "1").unwrap();
+        std::fs::write(&f2, "2").unwrap();
+        for tool in ["diff", "cmp"] {
+            let command = format!("{tool} {} {}", f1.display(), f2.display());
+            let req = cmd(&command);
+            let reason = req.reason(None, &NoSettings);
+            let c = candidates(&req, &reason, &home(), None);
+            assert_eq!(c.len(), 1, "{command}");
+            let rule = rule_from(&c[0]);
+            assert!(matches_in(&rule, &command, &home()), "{command}");
+            std::fs::remove_file(&f2).unwrap();
+            std::fs::create_dir(&f2).unwrap();
+            std::os::unix::fs::symlink("/etc/hosts", f2.join("f1")).unwrap();
+            assert!(!matches_in(&rule, &command, &home()), "{command}");
+            assert!(texts_in(&command, &home(), None).is_empty(), "{command}");
+            std::fs::remove_dir_all(&f2).unwrap();
+            std::fs::write(&f2, "2").unwrap();
+        }
+    }
+
+    // S2: a recursive search walks everything below its operand, so an operand that contains
+    // a protected place reaches it.
+    #[test]
+    fn a_recursive_search_of_an_ancestor_of_a_protected_place_gets_no_rule() {
+        for operand in [
+            "~/Library",
+            "~/Library/",
+            "/Users/tester/Library",
+            "~/.config",
+            "/Users",
+            "/Users/",
+            "/",
+            "~",
+            "/opt/homebrew",
+        ] {
+            for c in [
+                format!("grep -r pat {operand}"),
+                format!("rg pat {operand}"),
+                format!("du {operand}"),
+                format!("du -sh {operand}"),
+                format!("tree {operand}"),
+            ] {
+                assert!(texts_of(&c).is_empty(), "{c}: {:?}", texts_of(&c));
+            }
+        }
+        // A sibling that is not an ancestor of anything protected is still offered.
+        for c in [
+            "grep -r pat ~/Code/x",
+            "rg pat ~/Code/x",
+            "du ~/Code/x",
+            "tree ~/Code/x",
+        ] {
+            assert_eq!(texts_of(c), [format!("Bash({c})")], "{c}");
+        }
+    }
+
+    #[test]
+    fn a_prefix_rule_for_du_never_matches_an_ancestor_of_a_protected_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(home.join("Library")).unwrap();
+        std::fs::create_dir_all(home.join("Code/x")).unwrap();
+        let rule = SessionRule {
+            spec: Spec::PathPrefix {
+                head: vec!["du".into()],
+                prefix: format!("{}/", home.display()),
+                resolved: home.clone(),
+            },
+            ..SessionRule::exact_for_test("x", Path::new("/Users/tester"), None)
+        };
+        let check = |c: &str| matches(&rule, &cmd(c), ReasonKind::AskRule, &home, None);
+        assert!(check("du ~/Code/x"));
+        assert!(!check("du ~/Library"));
+        assert!(!check("du ~/Library/"));
+        assert!(!check("du ~/.config"));
+        assert!(!check("du ~/Code/x ~/Library"));
+    }
+
+    // Nits.
+    #[test]
+    fn a_numeric_flag_argument_is_not_a_path() {
+        for c in [
+            "head -n 20 /work/a/b/f",
+            "tail -n 5 /work/a/b/f",
+            "du -d 1 /work/a/b/dir",
+            "tree -L 2 /work/a/b/dir",
+        ] {
+            assert_eq!(texts_in(c, &home(), None), [format!("Bash({c})")], "{c}");
+        }
+    }
+
+    #[test]
+    fn package_manager_trees_are_protected() {
+        for c in [
+            "cat /opt/homebrew/Cellar/x",
+            "ls /opt/homebrew/Cellar/x",
+            "cat ~/.npm/bin/x",
+            "cat ~/.nvm/x",
+            "ls ~/.nvm/x",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c}: {:?}", texts_of(c));
+        }
+    }
+
+    #[test]
+    fn an_absolute_command_still_gets_a_rule_when_the_session_directory_is_protected() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        let claude = home().join(".claude");
+        for c in [
+            format!("ls {}", d.display()),
+            format!("cat {}/f", d.display()),
+        ] {
+            for cwd in [None, Some(claude.as_path())] {
+                assert_eq!(
+                    texts_in(&c, &home(), cwd),
+                    [format!("Bash({c})")],
+                    "{c} in {cwd:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pathless_commands_still_get_a_rule() {
+        for c in [
+            "ps aux",
+            "pgrep node",
+            "df -h",
+            "date",
+            "which ls",
+            "echo hi",
+        ] {
+            assert_eq!(texts_in(c, &home(), None), [format!("Bash({c})")], "{c}");
+        }
     }
 
     // S3
