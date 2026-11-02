@@ -42,7 +42,7 @@ A candidate exists only for a **plain Bash command**:
   `/bin`, `/sbin`, `/Library`, `/Applications`, `/var`, `/dev`, `~/.ssh`, `~/.aws`, `~/.kube`, `~/.gnupg`, `~/.config` (all of it),
   `~/.docker`, `~/.npmrc`, `~/.netrc`, `~/.pypirc`, `~/.git-credentials`, `~/.cargo`, `~/.local/bin`, the shell startup files
   (`~/.zshrc .zshenv .zlogin .zlogout .zprofile .bash_profile .bash_login .bash_logout .bashrc .profile .cshrc .tcshrc .login .inputrc`), `~/.gitconfig`, `~/bin`, `~/.vimrc`, `~/.vim`, `~/.tmux.conf`, the shell history files (`.zsh_history .bash_history .history`), `~/.claude`, `~/.nostromo`, `~/Library/Application Support`, `~/Library/Cookies`, `~/Library/Preferences`, `/opt/homebrew/bin`, `/opt/homebrew/sbin`, `/usr/local/bin`, `/usr/local/sbin`,
-  `~/Library/Keychains`, `~/Library/LaunchAgents`, or any `.git` component. A bare relative `.ssh` counts like `.ssh/x`, checked against the session's directory. Also protected: `/opt/homebrew/Cellar`, `~/.npm/bin`, `~/.nvm`. (Allow once still works for all of them.)
+  `~/Library/Keychains`, `~/Library/LaunchAgents`, or any `.git` component. A bare relative `.ssh` counts like `.ssh/x`, checked by name only. Also protected: `/opt/homebrew/Cellar`, `~/.npm/bin`, `~/.nvm`. (Allow once still works for all of them.)
 
 ### Allowed flags
 
@@ -178,7 +178,7 @@ allowed_by_session_rule` per use (the outcome's `rule` names the rule and its gr
   is a follow-up. The Mac logs the source pid and state of the pick and of the confirm (as Allow once does).
 - Prefix rules are never offered under `/Volumes` or `/Network`.
 - Residual risks that cannot be closed from the text: a background job (or anything else) that swaps a symlink
-  **between the match and the command running**; a **hard link** to a protected file used for a **read** (`cat ~/x/y/link`, a source of `cp`; hard-link *destinations* of `cp`/`mv` are refused); symlinks planted inside a directory that `grep -r`, `rg`, `du` or `cp -R` walk are not followed by those tools, but a hard link inside it is read.
+  **between the match and the command running**; a **hard link** to a protected file used for a **read** (`cat ~/x/y/link`, a source of `cp`; hard-link *destinations* of `cp`/`mv` are refused); symlinks planted inside a directory that `grep -r`, `rg`, `du` or `cp -R` walk are not followed by those tools, but a hard link inside it is read; the ugrep and rg wrappers skip `.git`, but `/usr/bin/grep -r` and `rg --hidden` read `.git/config` (a token in a remote URL is a real exposure), which only matters if the grep/rg wrappers are not loaded and is not new.
 - Not accepted for lack of a safe gain: `readlink`/`realpath` of a symlink (pinning refuses a symlink operand, which is their purpose), paths under `$TMPDIR` (`/var/folders`, a symlinked path), `cut -d:`.
 - The CLI's permission request carries no session id of its own, so the broker compares the id it registered the
   session with (and the request's `session_id`, when one is present). A typed `/clear` that keeps the same process does
