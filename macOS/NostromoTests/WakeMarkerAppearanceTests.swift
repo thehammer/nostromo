@@ -181,11 +181,6 @@ final class WakeMarkerAppearanceTests: XCTestCase {
 
 // MARK: - Background task wakes (BA6b)
 
-private final class WakeNotKeyWindow: NSWindow {
-    override var canBecomeKey: Bool { false }
-    override var isKeyWindow: Bool { false }
-}
-
 final class TaskWakeMarkerAppearanceTests: XCTestCase {
 
     private static let hostileDescription = "\u{1B}[31mred\u{1B}[0m safe\u{202E}evil\u{2066}iso\u{2069} a\u{034F}b\u{115F}c\u{3164}d\u{2028}e "
@@ -232,26 +227,23 @@ final class TaskWakeMarkerAppearanceTests: XCTestCase {
         XCTAssertLessThan((leading as NSString).size(withAttributes: [.font: font]).width, 220 - 16)
     }
 
-    func testMutedTextMeasuresAtLeastFourPointFiveToOneInKeyAndNonKeyWindows() throws {
+    func testMutedTextMeasuresAtLeastFourPointFiveToOne() throws {
         func luminance(_ color: NSColor) -> Double {
             let c = color.usingColorSpace(.sRGB) ?? color
             func lin(_ v: CGFloat) -> Double { let s = Double(v); return s <= 0.04045 ? s / 12.92 : pow((s + 0.055) / 1.055, 2.4) }
             return 0.2126 * lin(c.redComponent) + 0.7152 * lin(c.greenComponent) + 0.0722 * lin(c.blueComponent)
         }
-        for keyWindow in [true, false] {
-            let window: NSWindow = keyWindow
-                ? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 60), styleMask: [.titled], backing: .buffered, defer: true)
-                : WakeNotKeyWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 60), styleMask: [.titled], backing: .buffered, defer: true)
-            let view = laidOut(content("CI"), width: 300)
-            window.contentView?.addSubview(view)
-            let label = try XCTUnwrap(MotherNoticeFixtures.descendants(of: view).compactMap { $0 as? NSTextField }.first)
-            let text = try XCTUnwrap(label.textColor)
-            let (a, b) = (luminance(text), luminance(Theme.bg))
-            let ratio = (max(a, b) + 0.05) / (min(a, b) + 0.05)
-            print("[TaskWakeMarkerAppearance key=\(keyWindow)] fgMuted on transcript background \(String(format: "%.2f", ratio)):1")
+        // The label draws an explicit colour (never a semantic one that dims in an inactive window), so
+        // the ratio is the same in key and non-key windows. No window is created here: a stray key
+        // window would steal key status from the mouse-injection tests that run after this one.
+        let view = laidOut(content("CI"), width: 300)
+        let label = try XCTUnwrap(MotherNoticeFixtures.descendants(of: view).compactMap { $0 as? NSTextField }.first)
+        let text = try XCTUnwrap(label.textColor)
+        let (a, b) = (luminance(text), luminance(Theme.bg))
+        let ratio = (max(a, b) + 0.05) / (min(a, b) + 0.05)
+        print("[TaskWakeMarkerAppearance] fgMuted on transcript background \(String(format: "%.2f", ratio)):1")
 
-            XCTAssertGreaterThanOrEqual(ratio, 4.5, "key window: \(keyWindow)")
-            XCTAssertEqual(text, Theme.fgMuted)
-        }
+        XCTAssertGreaterThanOrEqual(ratio, 4.5)
+        XCTAssertEqual(text, Theme.fgMuted)
     }
 }
