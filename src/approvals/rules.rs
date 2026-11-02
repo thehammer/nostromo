@@ -738,9 +738,10 @@ fn eligible(
     if words.iter().any(|w| word_is_protected(w, home, cwd)) {
         return None;
     }
-    // A recursive search walks everything below its operand: an operand that contains a
-    // protected place (`~/Library`, `/opt/homebrew`) reaches it.
-    if searches_recursively(&basename, &words[1..])
+    // A recursive search, or a command that removes, copies or moves a directory tree, reaches
+    // everything below its operand: an operand that contains a protected place (`~/Library`,
+    // `/opt/homebrew`) reaches it.
+    if reaches_below_operands(&basename, &words[1..])
         && words[1..].iter().any(|w| {
             (w.starts_with('/') || w.starts_with("~/")) && {
                 let path = expand(w.trim_end_matches('/'), home);
@@ -814,16 +815,16 @@ fn flags_allowed(command: &str, args: &[String]) -> bool {
     true
 }
 
-/// Commands whose non-flag words are file operands they read, so a relative one is pinned
-/// against the session's directory too (the others, `echo hi`, `which ls`, take words that are
+/// Commands whose non-flag words are file operands they read, so a relative one is refused
+/// (a bare `.ssh` is judged by name only; nothing pins it to a directory) (the others, `echo hi`, `which ls`, take words that are
 /// not paths).
 const READS_FILES: &[&str] = &[
     "ls", "du", "stat", "file", "cat", "head", "tail", "wc", "diff", "cmp", "grep", "rg", "sort",
     "uniq", "cut", "realpath", "readlink", "shasum", "md5", "xxd", "od", "strings", "tree",
 ];
 
-/// Does this command search a directory tree (so that, with no path, it searches the session's
-/// directory)? `grep` only with `-r`; `rg`, `du` and `tree` always.
+/// Does this command search a directory tree (so that, with no path, it would search the
+/// shell's directory, which is unknown)? `grep` only with `-r`; `rg`, `du` and `tree` always.
 fn searches_recursively(command: &str, args: &[String]) -> bool {
     match command {
         "rg" | "du" | "tree" => true,
@@ -831,6 +832,22 @@ fn searches_recursively(command: &str, args: &[String]) -> bool {
             .iter()
             .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('r')),
         _ => false,
+    }
+}
+
+/// Does this command act on everything below an operand: a recursive search, `rm -r`/`-R`,
+/// `rmdir`, `cp -R`, or `mv` (which may move a directory)?
+fn reaches_below_operands(command: &str, args: &[String]) -> bool {
+    let has_flag = |letters: &[char]| {
+        args.iter().any(|a| {
+            a.starts_with('-') && !a.starts_with("--") && a.chars().any(|c| letters.contains(&c))
+        })
+    };
+    match command {
+        "rm" => has_flag(&['r', 'R']),
+        "cp" => has_flag(&['R']),
+        "rmdir" | "mv" => true,
+        _ => searches_recursively(command, args),
     }
 }
 
@@ -873,6 +890,7 @@ fn pin_operands(words: &[String], home: &Path) -> Option<Vec<PathBuf>> {
     }
     let reads_files = READS_FILES.contains(&name);
     let recursive = searches_recursively(name, &words[1..]);
+    let reaches_below = reaches_below_operands(name, &words[1..]);
     let numeric_flags = FLAG_TABLE
         .iter()
         .find(|(c, _, _)| *c == name)
@@ -890,7 +908,7 @@ fn pin_operands(words: &[String], home: &Path) -> Option<Vec<PathBuf>> {
         if !expected.contains(&real)
             || path_is_protected(&real, home)
             || path_is_protected(&real, &real_home)
-            || (recursive
+            || (reaches_below
                 && (path_contains_protected(&real, home)
                     || path_contains_protected(&real, &real_home)))
             || first_component_is(&real, &["volumes", "network"])
@@ -2511,6 +2529,26 @@ mod tests {
             "tree ~/Code/x",
         ] {
             assert_eq!(texts_of(c), [format!("Bash({c})")], "{c}");
+        }
+    }
+
+    #[test]
+    fn rm_cp_and_mv_of_an_ancestor_of_a_protected_place_get_no_rule() {
+        for c in [
+            "rm -rf ~/Library",
+            "rm -rf ~/.config",
+            "rm -rf /opt/homebrew",
+            "rm -rf ~",
+            "rm -rf /Users",
+            "rm -R ~/Library",
+            "rmdir ~/Library",
+            "cp -R ~/Library /tmp/x/new",
+            "mv ~/Library /tmp/x/new",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c}: {:?}", texts_of(c));
+        }
+        for c in ["rm -rf ~/Library/Caches/foo/bar", "rm -rf /tmp/x/build"] {
+            assert!(texts_of(c).contains(&format!("Bash({c})")), "{c}");
         }
     }
 
