@@ -146,8 +146,14 @@ final class TerminalSessionStore {
     private var pendingLine: [String: [UInt8]] = [:]
     /// Terminals whose last Enter ended a line the shell may not have finished (`\` at the end, `|`, `&&`, an
     /// open quote, `<<`): the prompt is a `> ` and the next Enter may complete a command assembled from two
-    /// rows. Cleared only by Ctrl-C or Ctrl-U, so Enter alone never makes the line "known empty" again.
+    /// rows. Cleared only by Ctrl-C: Ctrl-U clears the text on the current `> ` line but the shell is still
+    /// waiting for the rest of the command, and Enter alone never makes the line "known empty" again.
     private var awaitingContinuation: Set<String> = []
+    /// Terminals that received input this app cannot follow (an escape sequence or other control byte: Up/Down
+    /// recall, Ctrl-R, Ctrl-A/E/W, cursor movement) since the last Ctrl-C or Ctrl-U. What is on the line is
+    /// unknown, so an Enter after it may have run a recalled command that waits for more: that Enter puts the
+    /// terminal in `awaitingContinuation`. Fails closed.
+    private var unfollowedInput: Set<String> = []
 
     /// Where Reconnect on a closed remote shell sends its request.
     private let remoteShells: RemoteShellStore
@@ -258,6 +264,7 @@ final class TerminalSessionStore {
             lineHasText.removeAll()
             pendingLine.removeAll()
             awaitingContinuation.removeAll()
+            unfollowedInput.removeAll()
             attached.removeAll()
             inputBacklog.removeAll()
             if !terminals.isEmpty, daemonUnavailable.isEmpty {
@@ -617,18 +624,26 @@ final class TerminalSessionStore {
     /// After a person's bytes: the line is known empty only when the last of Enter (CR), Ctrl-C and Ctrl-U is the
     /// final byte AND the Enter did not leave the shell waiting for a continuation line (the entry ended in `\`,
     /// `|`, `&&`, an open quote or `<<`: then only Ctrl-C or Ctrl-U makes it known empty). Any byte after the
-    /// ender, or none of them at all, may have put text on the line.
+    /// ender, or none of them at all, may have put text on the line. Ctrl-U never ends a continuation, and an Enter
+    /// after input the app cannot follow (`unfollowedInput`) is treated as one: only Ctrl-C releases those.
     private func noteLine(terminalId: String, bytes: [UInt8]) {
         let enders: Set<UInt8> = [0x0D, 0x03, 0x15]
         let base = bytes.lastIndex(where: { enders.contains($0) }).map { $0 != bytes.count - 1 } ?? true
         var pending = pendingLine[terminalId] ?? []
         for byte in Self.withoutPasteMarkers(bytes) {
             switch byte {
-            case 0x03, 0x15:
+            case 0x03:
                 awaitingContinuation.remove(terminalId)
+                unfollowedInput.remove(terminalId)
+                pending = []
+            case 0x15:
+                // Clears the text on the current line only: a continuation the shell is waiting for stays.
+                unfollowedInput.remove(terminalId)
                 pending = []
             case 0x0D:
-                if Self.continuesOnTheNextLine(pending) { awaitingContinuation.insert(terminalId) }
+                if unfollowedInput.remove(terminalId) != nil || Self.continuesOnTheNextLine(pending) {
+                    awaitingContinuation.insert(terminalId)
+                }
                 pending = []
             case 0x7F, 0x08:
                 if !pending.isEmpty { pending.removeLast() }
@@ -636,10 +651,11 @@ final class TerminalSessionStore {
                 if pending.count < 4096 { pending.append(byte) }
             default:
                 pending = []    // an escape sequence or other control: what is on the line can no longer be followed
+                unfollowedInput.insert(terminalId)
             }
         }
         pendingLine[terminalId] = pending
-        lineHasText[terminalId] = base || awaitingContinuation.contains(terminalId)
+        lineHasText[terminalId] = base || awaitingContinuation.contains(terminalId) || unfollowedInput.contains(terminalId)
     }
 
     private static func withoutPasteMarkers(_ bytes: [UInt8]) -> [UInt8] {
@@ -684,6 +700,7 @@ final class TerminalSessionStore {
         lineHasText.removeValue(forKey: id)
         pendingLine.removeValue(forKey: id)
         awaitingContinuation.remove(id)
+        unfollowedInput.remove(id)
         terminals.removeValue(forKey: id)
         replayCopy.removeValue(forKey: id)
         inputBacklog.removeValue(forKey: id)

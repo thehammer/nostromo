@@ -1426,6 +1426,52 @@ extension TerminalSessionStoreTests {
         }
     }
 
+    /// S1a: Ctrl-U clears the text on the current `> ` line only; the shell still waits for the rest of the command.
+    func testCtrlUNeverEndsAContinuationOnlyCtrlCDoes() {
+        _ = attachedTerminal()
+        for entry in ["mysql -e \"drop", "php artisan queue:fl\\", "ls |"] {
+            store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
+            store.sendInput(terminalId: "t1", bytes: Array(entry.utf8) + [0x0D], fromWindow: "w1", autoReply: false, via: "stage_insert")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), entry)
+            store.sendInput(terminalId: "t1", bytes: [0x15], fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "Ctrl-U does not release: \(entry)")
+            store.sendInput(terminalId: "t1", bytes: Array("ush".utf8) + [0x15], fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "typed then Ctrl-U still does not: \(entry)")
+            store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
+            XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"), "Ctrl-C does: \(entry)")
+        }
+    }
+
+    /// S1b: input the app cannot follow (Up recall, Ctrl-R, Ctrl-A, cursor keys) fails closed: an Enter after it may
+    /// have run a recalled `mysql -e "drop` that leaves the shell at `dquote>`.
+    func testInputTheAppCannotFollowLeavesTheLineMayHaveTextAfterTheEnterUntilCtrlC() {
+        _ = attachedTerminal()
+        let unfollowable: [(String, [UInt8])] = [("Up", [0x1B, 0x5B, 0x41]), ("Down", [0x1B, 0x5B, 0x42]), ("Ctrl-R", [0x12]),
+                                                 ("Ctrl-A", [0x01]), ("Ctrl-E", [0x05]), ("Ctrl-W", [0x17]), ("Left", [0x1B, 0x5B, 0x44])]
+        for (name, bytes) in unfollowable {
+            store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
+            XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"))
+            store.sendInput(terminalId: "t1", bytes: bytes, fromWindow: "w1")
+            store.sendInput(terminalId: "t1", bytes: [0x0D], fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "Enter after \(name) may continue")
+            store.sendInput(terminalId: "t1", bytes: [0x0D], fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "a second Enter does not release: \(name)")
+            store.sendInput(terminalId: "t1", bytes: [0x15], fromWindow: "w1")
+            XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"), "nor Ctrl-U: \(name)")
+            store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
+            XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"), "Ctrl-C does: \(name)")
+        }
+    }
+
+    func testCtrlUAfterInputTheAppCannotFollowKnowsTheLineEmptyWhenNothingWaits() {
+        _ = attachedTerminal()
+        store.sendInput(terminalId: "t1", bytes: [0x03], fromWindow: "w1")
+        store.sendInput(terminalId: "t1", bytes: [0x1B, 0x5B, 0x41], fromWindow: "w1")
+        XCTAssertTrue(store.lineMayHaveText(terminalId: "t1"))
+        store.sendInput(terminalId: "t1", bytes: [0x15], fromWindow: "w1")
+        XCTAssertFalse(store.lineMayHaveText(terminalId: "t1"), "the recalled text is wiped and nothing was submitted")
+    }
+
     func testACompleteEntryAndABracketedPasteOfOneAreKnownEmptyAfterEnter() {
         _ = attachedTerminal()
         for entry in ["ls -la", "echo 'a b'", "echo \"x\" | wc", "git commit -m \"done\""] {

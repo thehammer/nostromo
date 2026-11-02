@@ -15,7 +15,7 @@ enum StagingDestructivePatterns {
 
     /// The names of the patterns `command` matches, in list order.
     static func matches(_ command: String) -> [String] {
-        let views = [command, StagingHazards.normalised(command)]
+        let views = [command] + StagingHazards.normalisedViews(command)
         func any(_ test: (String) -> Bool) -> Bool { views.contains(where: test) }
         var found: [String] = []
         if any(hasRecursiveForcedRemove) { found.append("rm -rf") }
@@ -74,6 +74,12 @@ enum StagingDestructivePatterns {
         return false
     }
 
+    /// `text` up to a SQL comment start (`-- `, a trailing `--`, `#`): a `WHERE` after one is not part of the statement.
+    private static func withoutSqlComment(_ text: String) -> String {
+        guard let comment = text.range(of: #"--(?:\s|$)|#"#, options: .regularExpression) else { return text }
+        return String(text[..<comment.lowerBound])
+    }
+
     /// A `delete from` with no `where` after it in the same statement (statements split at `;`).
     private static func hasDeleteWithoutWhere(_ command: String) -> Bool {
         guard let regex = try? NSRegularExpression(pattern: #"\bdelete\s+from\b"#, options: [.caseInsensitive]) else { return false }
@@ -83,7 +89,7 @@ enum StagingDestructivePatterns {
             for (index, match) in found.enumerated() {
                 let start = match.range.location + match.range.length
                 let end = index + 1 < found.count ? found[index + 1].range.location : ns.length
-                let rest = ns.substring(with: NSRange(location: start, length: end - start))
+                let rest = withoutSqlComment(ns.substring(with: NSRange(location: start, length: end - start)))
                 if !StagingHazards.regex(#"\bwhere\b"#, in: rest) { return true }
             }
         }
@@ -112,27 +118,62 @@ enum StagingHazards {
             let next = scalars[index + 1]
             if next != " " && next != "=" && next != "(" { return true }
         }
-        let normalisedText = normalised(command)
-        if words(of: normalisedText).contains(where: { $0 == "fc" || $0 == "history" }) { return true }
-        let prefixWords: Set<String> = ["then", "do", "else", "elif", "if", "while", "until", "!", "command", "builtin", "eval", "exec",
-                                        "time", "sudo", "noglob", "nocorrect", "nohup", "nice", "env", "coproc"]
-        for segment in segments(of: normalisedText) {
-            let first = segment.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-                .first(where: { !prefixWords.contains($0) })
-            if first == "r" { return true }
+        return normalisedViews(command).contains { view in
+            words(of: view).contains(where: { $0 == "fc" || $0 == "history" })
+                || segments(of: view).contains { segment in
+                    segment.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+                        .first(where: { !leavesCommandPosition($0) }) == "r"
+                }
         }
-        return false
+    }
+
+    private static let prefixWords: Set<String> = ["then", "do", "else", "elif", "if", "while", "until", "!", "-", "command", "builtin",
+                                                   "eval", "exec", "time", "sudo", "noglob", "nocorrect", "nohup", "nice", "env", "coproc"]
+
+    /// Does `word` leave the next word in command position? A prefix word, a prefix assignment (`X=1 r` runs the
+    /// builtin), an option or a number (`nice -n 5 r`). Only read before a segment's command, so `ls -r` stops at `ls`.
+    private static func leavesCommandPosition(_ word: String) -> Bool {
+        if prefixWords.contains(word) || word.hasPrefix("-") || word.allSatisfy({ $0.isASCII && $0.isNumber }) { return true }
+        guard let equals = word.firstIndex(of: "="), equals != word.startIndex else { return false }
+        let name = word[..<equals]
+        return !(name.first?.isNumber ?? true) && name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }
+    }
+
+    /// `$'...'` (ANSI-C quoting) with a backslash inside: the shell turns `\x72` into `r`, which no text rule can follow.
+    static let escapeQuotedLabel = "\u{26A0} Contains an escape-quoted word ($'...' with a backslash): what runs may differ from what you see."
+
+    static func escapeQuotedWordLabel(_ command: String) -> String? {
+        regex(#"\$'[^']*\\"#, in: command, caseInsensitive: false) ? escapeQuotedLabel : nil
+    }
+
+    /// Expansions that are empty at run time (`rm${IFS}-rf` is `rm -rf`; `r$@m` is `rm`). Longest first.
+    private static let emptyExpansions = ["${IFS}", "$IFS", "$()", "$@", "$*"]
+
+    /// Both forms of the normalised text: empty expansions as a space, and removed (inside a word the shell glues
+    /// the halves together). Rules match either.
+    static func normalisedViews(_ text: String) -> [String] {
+        [normalised(text), normalised(text, empty: "")]
     }
 
     /// The text as a shell would see its words, for the hazard rules (the daemon's `normalise_for_hazards`
-    /// does the same): `/* */` comments become a space, quotes and backslashes are dropped, backticks,
+    /// does the same): `/* */` comments become a space, quotes and backslashes are dropped (and the `$` of a
+    /// `$'...'` quote), empty expansions (`$IFS`, `${IFS}`, `$@`, `$*`, `$()`) become `empty`, backticks,
     /// parentheses and braces become `;`, and runs of whitespace collapse.
-    static func normalised(_ text: String) -> String {
+    static func normalised(_ text: String, empty: String = " ") -> String {
         var out = ""
         let chars = Array(text)
         var index = 0
         while index < chars.count {
             let c = chars[index]
+            if c == "$", let expansion = emptyExpansions.first(where: { chars[index...].starts(with: Array($0)) }) {
+                index += expansion.count
+                if !(empty == " " && out.last == " ") { out.append(empty) }
+                continue
+            }
+            if c == "$", index + 1 < chars.count, chars[index + 1] == "'" {
+                index += 1
+                continue
+            }
             if c == "/", index + 1 < chars.count, chars[index + 1] == "*" {
                 index += 2
                 var previous: Character = "\0"

@@ -777,3 +777,49 @@ fn a_users_insert_report_archive_switch_and_ui_event_touch_no_idle_state() {
     );
     assert!(w.audit_named("idle_kept_open").is_empty());
 }
+
+// ── round 3: a click that raced a replace, pruned off-switches ────────────────
+
+#[test]
+fn an_insert_report_for_text_the_entry_no_longer_holds_counts_nothing_and_tells_no_one() {
+    let mut w = World::new();
+    let t = w.local(A);
+    w.follow(&t, A);
+    let id = w.staged_id(A, &t, "ls");
+    w.advance(Duration::from_secs(13));
+    // The agent replaces the entry; the app's click had already placed the 2 bytes of `ls`.
+    w.call(A, &t, replace(&id, Some("git status --short"), None))
+        .unwrap();
+    w.frames();
+    w.report_inserted(&t, &id, 2);
+    let list = w.peek(&t).unwrap();
+    assert_eq!(
+        list.entries[0].inserted_count, 0,
+        "the old text was placed, not this one"
+    );
+    assert!(
+        w.frames().is_empty(),
+        "no frame says the entry was inserted"
+    );
+    let audits = w.audit_named("staging_inserted");
+    assert_eq!(audits.len(), 1, "still audited");
+    assert!(audits[0]["entry_number"].is_null(), "{:?}", audits[0]);
+    assert_eq!(audits[0]["first"], false);
+
+    // A report for what it holds now counts.
+    w.report_inserted(&t, &id, "git status --short".len() as u32);
+    assert_eq!(w.peek(&t).unwrap().entries[0].inserted_count, 1);
+}
+
+#[test]
+fn an_off_switch_for_a_terminal_that_is_gone_is_pruned_when_the_app_subscribes() {
+    let w = World::new();
+    let store = w.store();
+    store.set_enabled("gone-1", "pane-1", false, None);
+    store.set_enabled("here-1", "pane-2", false, None);
+    assert!(store.is_disabled("gone-1"));
+    let frames = store.frames_of_all(&|id| (id == "here-1").then(|| "pane-2".to_string()));
+    assert_eq!(frames.len(), 1, "only the live terminal's off is replayed");
+    assert!(!store.is_disabled("gone-1"), "the dead id was forgotten");
+    assert!(store.is_disabled("here-1"));
+}

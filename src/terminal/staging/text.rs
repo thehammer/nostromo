@@ -106,21 +106,64 @@ pub fn validate_command_in(text: &str, no_history_expansion: bool) -> Result<(),
     Ok(())
 }
 
+/// Expansions that are empty at run time, so a shell sees right through them: `rm${IFS}-rf` is `rm -rf`
+/// (IFS is whitespace), `r$()m` and `r$@m` are `rm`. Longest first.
+const EMPTY_EXPANSIONS: [&str; 5] = ["${IFS}", "$IFS", "$()", "$@", "$*"];
+
 /// The text as a shell would see its words, for the hazard rules (the Mac app's `StagingHazards.normalised`
 /// does the same, and the shared fixture `tests/fixtures/terminal_staging/hazards.json` pins both): `/* ... */`
 /// comments become a space (SQL treats one as whitespace), quotes and backslashes are dropped (`r''m`,
-/// `\rm`, `"rm"` become `rm`), backticks, parentheses and braces become `;` (a subshell, a command
-/// substitution and a group each start a new command), and runs of whitespace collapse. Quotes are not
-/// otherwise parsed: asking or refusing is the cheap side, so a hazard inside a quoted string matches too.
+/// `\rm`, `"rm"` become `rm`; the `$` of an ANSI-C `$'...'` quote goes too), an empty expansion (`$IFS`,
+/// `${IFS}`, `$@`, `$*`, `$()`) becomes a space, backticks, parentheses and braces become `;` (a subshell, a
+/// command substitution and a group each start a new command), and runs of whitespace collapse. Quotes are
+/// not otherwise parsed: asking or refusing is the cheap side, so a hazard inside a quoted string matches too.
 pub fn normalise_for_hazards(text: &str) -> String {
+    normalise_with(text, " ")
+}
+
+/// [`normalise_for_hazards`] with the empty expansions removed instead of turned into a space: inside a word
+/// (`r$@m`) the shell glues the two halves together, between words (`rm${IFS}-rf`) they are separate.
+/// Hazard rules look at both forms.
+pub fn normalise_for_hazards_joined(text: &str) -> String {
+    normalise_with(text, "")
+}
+
+/// Both forms, the one with empty expansions as a space first.
+fn hazard_views(text: &str) -> [String; 2] {
+    [
+        normalise_for_hazards(text),
+        normalise_for_hazards_joined(text),
+    ]
+}
+
+fn normalise_with(text: &str, empty: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        if let Some(expansion) = (c == '$')
+            .then(|| {
+                EMPTY_EXPANSIONS
+                    .iter()
+                    .find(|e| chars[i - 1..].iter().copied().take(e.len()).eq(e.chars()))
+            })
+            .flatten()
+        {
+            i += expansion.chars().count() - 1;
+            if !(empty == " " && out.ends_with(' ')) {
+                out.push_str(empty);
+            }
+            continue;
+        }
         match c {
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
+            '/' if chars.get(i) == Some(&'*') => {
+                i += 1;
                 let mut prev = '\0';
-                for n in chars.by_ref() {
+                while i < chars.len() {
+                    let n = chars[i];
+                    i += 1;
                     if prev == '*' && n == '/' {
                         break;
                     }
@@ -128,6 +171,7 @@ pub fn normalise_for_hazards(text: &str) -> String {
                 }
                 out.push(' ');
             }
+            '$' if chars.get(i) == Some(&'\'') => {}
             '\'' | '"' | '\\' => {}
             '`' | '(' | ')' | '{' | '}' => out.push(';'),
             c if c.is_whitespace() => {
@@ -178,39 +222,43 @@ fn types_into_another_terminal(text: &str) -> bool {
     }
     static SCREEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let screen = SCREEN.get_or_init(|| regex::Regex::new(r"(?is)screen.*-X.*stuff").unwrap());
-    let normalised = normalise_for_hazards(text);
-    if screen.is_match(text) || screen.is_match(&normalised) {
+    if screen.is_match(text) {
         return true;
     }
-    let lower = normalised.to_lowercase();
-    if crate::approvals::guard::tmux_input_marker(&lower) {
-        return true;
-    }
-    let words = hazard_words(&lower);
-    if let Some(first_tmux) = words
-        .iter()
-        .position(|w| w.rsplit('/').next() == Some("tmux"))
-    {
-        if words[first_tmux + 1..]
-            .iter()
-            .any(|w| w.len() >= 3 && TMUX_INPUT_VERBS.iter().any(|verb| verb.starts_with(w)))
-        {
+    hazard_views(text).iter().any(|normalised| {
+        if screen.is_match(normalised) {
             return true;
         }
-    }
-    if OTHER_INPUT_VERBS.iter().any(|(program, verb)| {
-        words
+        let lower = normalised.to_lowercase();
+        if crate::approvals::guard::tmux_input_marker(&lower) {
+            return true;
+        }
+        let words = hazard_words(&lower);
+        if let Some(first_tmux) = words
             .iter()
-            .position(|w| w.rsplit('/').next() == Some(*program))
-            .is_some_and(|at| words[at + 1..].iter().any(|w| w == verb))
-    }) {
-        return true;
-    }
-    lower.contains("osascript") && (lower.contains("do script") || lower.contains("write text"))
+            .position(|w| w.rsplit('/').next() == Some("tmux"))
+        {
+            if words[first_tmux + 1..]
+                .iter()
+                .any(|w| w.len() >= 3 && TMUX_INPUT_VERBS.iter().any(|verb| verb.starts_with(w)))
+            {
+                return true;
+            }
+        }
+        if OTHER_INPUT_VERBS.iter().any(|(program, verb)| {
+            words
+                .iter()
+                .position(|w| w.rsplit('/').next() == Some(*program))
+                .is_some_and(|at| words[at + 1..].iter().any(|w| w == verb))
+        }) {
+            return true;
+        }
+        lower.contains("osascript") && (lower.contains("do script") || lower.contains("write text"))
+    })
 }
 
 /// Words before a command that still leave the next word in command position.
-const COMMAND_PREFIX_WORDS: [&str; 20] = [
+const COMMAND_PREFIX_WORDS: [&str; 21] = [
     "then",
     "do",
     "else",
@@ -219,6 +267,7 @@ const COMMAND_PREFIX_WORDS: [&str; 20] = [
     "while",
     "until",
     "!",
+    "-",
     "command",
     "builtin",
     "eval",
@@ -233,6 +282,20 @@ const COMMAND_PREFIX_WORDS: [&str; 20] = [
     "coproc",
 ];
 
+/// Does `word` leave the next word in command position? A [`COMMAND_PREFIX_WORDS`] entry, a prefix
+/// assignment (`X=1 r` runs the builtin), an option or a number (`nice -n 5 r`, `sudo -E r`). Only read for
+/// words before the segment's command, so `ls -r` still stops at `ls`.
+fn is_command_prefix(word: &str) -> bool {
+    COMMAND_PREFIX_WORDS.contains(&word)
+        || word.starts_with('-')
+        || word.bytes().all(|b| b.is_ascii_digit())
+        || word.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
 /// Would a shell expand history in `text`? Quotes are not parsed: asking or
 /// refusing is the cheap side. A `!` followed by anything but a space, `=` or
 /// `(`; text starting with `^`; `fc` or `history` as a word anywhere (after
@@ -240,7 +303,8 @@ const COMMAND_PREFIX_WORDS: [&str; 20] = [
 /// command position: first in a segment (split on `;`, `&`, `&&`, `|`, `||`,
 /// a subshell, a substitution, a group or a backtick), or after `then`,
 /// `do`, `else`, `elif`, `if`, `while`, `until`, `!`, `command`, `builtin`, `eval`, `exec`, `time`, `sudo`,
-/// `noglob`, `nocorrect`, `nohup`, `nice`, `env` or `coproc`.
+/// `noglob`, `nocorrect`, `nohup`, `nice`, `env` or `coproc`, a `-` (zsh's modifier), an option, a number or a
+/// prefix assignment (`X=1 r`, `nice -n 5 r`); empty expansions (`$IFS`, `$@`, `$()`) are seen through.
 pub fn uses_history_expansion(text: &str) -> bool {
     let chars: Vec<char> = text.chars().collect();
     if chars.iter().enumerate().any(|(i, c)| {
@@ -254,18 +318,13 @@ pub fn uses_history_expansion(text: &str) -> bool {
     if text.starts_with('^') {
         return true;
     }
-    let normalised = normalise_for_hazards(text);
-    if hazard_words(&normalised)
-        .iter()
-        .any(|w| matches!(*w, "fc" | "history"))
-    {
-        return true;
-    }
-    normalised.split([';', '|', '&']).any(|segment| {
-        segment
-            .split_whitespace()
-            .find(|w| !COMMAND_PREFIX_WORDS.contains(w))
-            == Some("r")
+    hazard_views(text).iter().any(|normalised| {
+        hazard_words(normalised)
+            .iter()
+            .any(|w| matches!(*w, "fc" | "history"))
+            || normalised.split([';', '|', '&']).any(|segment| {
+                segment.split_whitespace().find(|w| !is_command_prefix(w)) == Some("r")
+            })
     })
 }
 

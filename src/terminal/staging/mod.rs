@@ -520,7 +520,10 @@ impl StagingStore {
     // ── the user's operations (from the app) ──────────────────────────────────
 
     /// The app inserted an entry and says so. Counts it when the entry still
-    /// exists; always audited (counts only).
+    /// exists AND its current command is as long as what the app placed (`bytes`): a click that raced a
+    /// replace placed the old text, and the agent is not told the new entry was inserted. Always audited
+    /// (counts only). The report carries no text, so a replacement of the same length is not told apart; the
+    /// app's own confirm sheet closes on any change and the click is a person's.
     pub(crate) fn inserted(
         &self,
         terminal_id: &str,
@@ -532,6 +535,9 @@ impl StagingStore {
         let mut first = false;
         let found = state.lists.get_mut(terminal_id).and_then(|list| {
             let at = list.entries.iter().position(|e| e.id == entry_id)?;
+            if list.entries[at].command.len() != bytes as usize {
+                return None;
+            }
             let now = now_utc();
             let entry = &mut list.entries[at];
             first = entry.inserted_count == 0;
@@ -779,7 +785,9 @@ impl StagingStore {
     /// terminal that still exists): what a connection that just declared `terminal_staging_ui` is sent, so
     /// an app that relaunched shows "off" where the daemon refuses.
     pub(crate) fn frames_of_all(&self, pane_of: &dyn Fn(&str) -> Option<String>) -> Vec<ServerMsg> {
-        let state = self.lock();
+        let mut state = self.lock();
+        // A terminal that is gone no longer needs its "off".
+        state.disabled.retain(|id| pane_of(id).is_some());
         let mut lists: Vec<&StagingList> = state.lists.values().collect();
         lists.sort_by(|a, b| a.terminal_id.cmp(&b.terminal_id));
         let mut frames: Vec<ServerMsg> = lists.into_iter().map(frame_of).collect();

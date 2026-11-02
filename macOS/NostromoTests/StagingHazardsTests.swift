@@ -146,6 +146,34 @@ final class StagingHazardsTests: XCTestCase {
         }
     }
 
+    /// The fixture's optional `destructive` (pattern names) and `escape_quoted` (the `$'..\x..'` label) fields.
+    func testTheSharedFixtureGivesTheExpectedDestructiveNamesAndEscapeQuoteLabel() throws {
+        var checked = 0
+        for entry in try StagingFixtures.hazards() {
+            let text = try XCTUnwrap(entry["text"] as? String)
+            let name = entry["name"] as? String ?? "?"
+            if let names = entry["destructive"] as? [String] {
+                XCTAssertEqual(StagingDestructivePatterns.matches(text), names, "\(name): \(text)")
+                checked += 1
+            }
+            if let escaped = entry["escape_quoted"] as? Bool {
+                XCTAssertEqual(StagingHazards.escapeQuotedWordLabel(text) != nil, escaped, "\(name): \(text)")
+            }
+        }
+        XCTAssertGreaterThanOrEqual(checked, 8)
+    }
+
+    func testEmptyExpansionsAreSeenThroughInBothForms() {
+        XCTAssertEqual(StagingHazards.normalised("rm${IFS}-rf /"), "rm -rf /")
+        XCTAssertEqual(StagingHazards.normalised("r$@m"), "r m")
+        XCTAssertEqual(StagingHazards.normalised("r$@m", empty: ""), "rm")
+        XCTAssertTrue(StagingDestructivePatterns.matches("rm${IFS}-rf /").contains("rm -rf"))
+        XCTAssertTrue(StagingDestructivePatterns.matches("r$()m -rf /").contains("rm -rf"))
+        XCTAssertTrue(StagingHazards.usesHistoryExpansion("X=1 r"))
+        XCTAssertTrue(StagingHazards.usesHistoryExpansion("nice -n 5 r"))
+        XCTAssertTrue(StagingHazards.usesHistoryExpansion("- r"))
+    }
+
     // MARK: Non-ASCII
 
     func testALookAlikeLetterIsNamedWithItsCodePoint() {

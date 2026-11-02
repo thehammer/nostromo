@@ -20,7 +20,7 @@ enum StagingDisabledReason: Equatable, CaseIterable {
         case .ended:              return "The shell has ended"
         case .alternateScreen:    return "A full-screen program is running"
         case .sendingPaste:       return "A paste is still being sent"
-        case .lineMayHaveText:    return "Something may already be on the line: press Ctrl-C in the shell first"
+        case .lineMayHaveText:    return "Text may be on the line, or the shell awaits more: press Ctrl-C first"
         case .historyExpansion:   return StagingHazards.historyReasonText
         case .justChanged:        return "Just changed: read it again"
         case .notInsertable:      return "Nostromo will not insert this text"
@@ -360,6 +360,7 @@ enum StagingDrawerModel {
         var labels: [String] = []
         if isPlaceholderCommand(command) { labels.append(placeholderLabel) }
         if let label = StagingHazards.nonASCIILabel(command) { labels.append(label) }
+        if let label = StagingHazards.escapeQuotedWordLabel(command) { labels.append(label) }
         if !production && StagingHazards.usesHistoryExpansion(command) { labels.append(StagingHazards.localHistoryLabel) }
         return labels
     }
