@@ -143,3 +143,33 @@ Kind words: Shell, Monitor, Agent, else `Background task`; outcome words: new ou
 - **Scroll.** The marker is the same fixed 22 pt (`TurnHeightEstimator.wakeMarkerHeight`) as MF2c's, so
   a wake arriving, merging or being clicked moves nothing.
 - **Focus.** The marker is drawn outside the Focus planner, so Focus never folds it.
+
+## Live check
+
+`scripts/qa/background-wake.sh` (BA6d) runs the wake path end to end in the isolated QA instance only (see
+`scripts/qa/README.md`): the fake CLI's `WAKE:basic:<dir>` cue (`tests/support/fake_claude_perm.py`) starts a
+background shell and a Monitor, then sends five wake groups, one per `<dir>/wake-<k>` file (group 3 is a single hostile failed shell, so the marker line itself must show the sanitised title `⟲ Shell: failed "qa-fail"`: a positive control for the absence checks), and the script
+checks the marker texts, the transcript anchor before and after each wake, that no raw notification text or
+sentinel is drawn, the marker's accessibility label and the marker click. It needs a logged-in awake display and
+spends no tokens.
+
+It refuses (exit 2) when `NOSTROMO_QA_CLAUDE_BIN` is set, because the QA daemon would then run a real model and
+spend tokens. A small QA window can scroll old rows out of view (no scroll verb): the marker-1 label, row label
+and marker-click FAIL lines say "may be scrolled out of view: enlarge the QA window".
+
+A passing run (fixed strings only; other lines elided):
+
+```
+PASS chip-running: the Background activity chip reads running
+...
+PASS wake-3-marker: marker text shown: ⟲ Shell: failed "qa-fail"
+...
+PASS absent-bidi-override: not drawn anywhere in the window
+PASS marker-click-opens-window: tasks list shows window_open true for the Monitor
+INCONCLUSIVE escape-closes-window: window_open stayed true after Escape (Escape may not reach the panel)
+NOTE: one line was inconclusive; the rest passed
+RESULT: PASS (0 failed)
+```
+
+`RESULT: PASS (0 failed)` and exit 0 is a pass. The `INCONCLUSIVE escape-closes-window` line (and the NOTE) may
+appear on a passing run: Escape cannot always reach the panel, which is never a FAIL.

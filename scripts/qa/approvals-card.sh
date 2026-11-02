@@ -90,6 +90,13 @@ done
 start_args=()
 [ "$synthetic" = 1 ] || start_args+=(--no-synthetic)
 
+# This script promises no tokens: qa-instance.sh would hand a real CLI to the QA daemon when this is set.
+if [ -n "${NOSTROMO_QA_CLAUDE_BIN:-}" ]; then
+  echo "REFUSING TO RUN: NOSTROMO_QA_CLAUDE_BIN is set, so the QA session would run a real model and spend tokens." >&2
+  echo "This script uses the fake CLI only. Unset NOSTROMO_QA_CLAUDE_BIN (it is for tracker-discoverability.sh)." >&2
+  exit 2
+fi
+
 # A real focuses.json that already carries a QA marker is the leftover of an earlier breach (the QA app
 # once wrote into the user's own ~/.nostromo). Starting on top of it would compound it: refuse, by file
 # name only (never the content).

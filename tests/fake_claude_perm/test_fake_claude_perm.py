@@ -7,6 +7,8 @@ here: shapes copied from the real CLI 2.1.296 spike captures.
 Run with:  python3 -m unittest discover -s tests/fake_claude_perm
 """
 import glob
+import importlib.util
+import io
 import json
 import os
 import queue
@@ -16,7 +18,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+import xml.etree.ElementTree as ET
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAKE = os.path.join(HERE, "..", "support", "fake_claude_perm.py")
@@ -1059,6 +1063,426 @@ class HoldCueTest(unittest.TestCase):
         fake.cue("HOLD:%s" % path)
         self.assertTrue(fake.no_more_frames(grace=0.3))
         self.assertFalse(os.path.exists(path))
+
+
+class WakeCueTest(unittest.TestCase):
+    """WAKE:basic:<abs dir> scripts a background-wake scenario: turn 1 starts a
+    background Bash and a Monitor, then wake-1..wake-5 files in <dir> each release
+    one group of task-notification wake events, in order."""
+
+    EVENT_SENTINEL = "SECRET-OUTPUT-EVENT"
+    RESULT_SENTINEL = "SECRET-OUTPUT-RESULT"
+
+    def wake_dir(self):
+        d = tempfile.mkdtemp(prefix="fcpwake")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return d
+
+    def touch(self, d, k):
+        with open(os.path.join(d, "wake-%d" % k), "w", encoding="utf-8") as f:
+            f.write("go")
+
+    def release_all_quietly(self, d):
+        for k in range(1, 6):
+            if not os.path.exists(os.path.join(d, "wake-%d" % k)):
+                self.touch(d, k)
+
+    def started(self):
+        """A fake that has finished turn 1 of the scenario; returns (fake, dir, turn1 frames)."""
+        d = self.wake_dir()
+        fake = Fake(self)
+        fake.start()
+        # Runs before the fake's own cleanup, so a waiting fake exits promptly.
+        self.addCleanup(self.release_all_quietly, d)
+        fake.cue("WAKE:basic:%s" % d)
+        return fake, d, fake.until_result()
+
+    def group(self, fake, d, k):
+        self.touch(d, k)
+        return fake.until_result()
+
+    @staticmethod
+    def notifications(content):
+        """The <task-notification> elements of a wake event body (also proves well-formed XML)."""
+        root = ET.fromstring("<r>%s</r>" % content)
+        return list(root)
+
+    def assert_wake_event(self, frame):
+        self.assertEqual(frame["type"], "user")
+        self.assertEqual(frame["origin"], {"kind": "task-notification"})
+        content = frame["message"]["content"]
+        self.assertIsInstance(content, str)
+        self.assertTrue(content.startswith("<task-notification>"), content)
+        return content
+
+    def assert_ends_with_ack(self, frames, k):
+        self.assertEqual(frames[-2]["type"], "assistant")
+        self.assertEqual(frames[-2]["message"]["content"], [{"type": "text", "text": "ack %d" % k}])
+        self.assertEqual(frames[-1]["type"], "result")
+        self.assertIs(frames[-1]["is_error"], False)
+        self.assertEqual(frames[-1]["result"], "done")
+
+    # ---- turn 1 ----
+
+    def test_turn_one_starts_a_background_bash_and_a_monitor_then_ends(self):
+        fake, d, frames = self.started()
+        self.assertEqual(
+            [(f["type"], f.get("subtype")) for f in frames],
+            [("assistant", None), ("user", None), ("system", "task_started"),
+             ("assistant", None), ("user", None), ("system", "task_started"),
+             ("system", "background_tasks_changed"), ("assistant", None), ("result", "success")])
+        bash_use = frames[0]["message"]["content"][0]
+        self.assertEqual(bash_use["type"], "tool_use")
+        self.assertEqual(bash_use["name"], "Bash")
+        self.assertIs(bash_use["input"]["run_in_background"], True)
+        self.assertEqual(bash_use["input"]["command"], "qa-sleep 60")
+        self.assertEqual(frames[1]["message"]["content"][0]["type"], "tool_result")
+        self.assertEqual(frames[1]["message"]["content"][0]["tool_use_id"], bash_use["id"])
+        sh = frames[2]
+        self.assertEqual(sh["task_id"], "qa-sh1")
+        self.assertEqual(sh["tool_use_id"], bash_use["id"])
+        mon_use = frames[3]["message"]["content"][0]
+        self.assertEqual(mon_use["type"], "tool_use")
+        self.assertEqual(mon_use["name"], "Monitor")
+        self.assertEqual(frames[4]["message"]["content"][0]["tool_use_id"], mon_use["id"])
+        mon = frames[5]
+        self.assertEqual(mon["task_id"], "qa-mon1")
+        self.assertEqual(mon["tool_use_id"], mon_use["id"])
+        self.assertEqual(mon["description"], "qa-ticker")
+        self.assertEqual({t["task_id"] for t in frames[6]["tasks"]}, {"qa-sh1", "qa-mon1"})
+        self.assertEqual(frames[7]["message"]["content"], [{"type": "text", "text": "started"}])
+
+    def test_nothing_more_is_emitted_until_wake_1_exists(self):
+        fake, d, _ = self.started()
+        self.assertTrue(fake.no_more_frames(grace=0.5))
+        self.assertIsNone(fake.proc.poll(), "alive while waiting")
+        self.assertEqual(fake.jsonl("wakes.jsonl"), [])
+
+    def test_the_fake_never_creates_the_wake_files(self):
+        fake, d, _ = self.started()
+        self.assertTrue(fake.no_more_frames(grace=0.3))
+        self.assertEqual(os.listdir(d), [])
+
+    # ---- groups ----
+
+    def test_group_1_is_one_monitor_event_notification(self):
+        fake, d, _ = self.started()
+        frames = self.group(fake, d, 1)
+        self.assertEqual([f["type"] for f in frames], ["user", "assistant", "result"])
+        content = self.assert_wake_event(frames[0])
+        (n,) = self.notifications(content)
+        self.assertEqual(n.tag, "task-notification")
+        self.assertEqual(n.findtext("task-id"), "qa-mon1")
+        self.assertEqual(n.findtext("summary"), 'Monitor event: "qa-ticker"')
+        self.assertIn(self.EVENT_SENTINEL, n.findtext("event"))
+        self.assert_ends_with_ack(frames, 1)
+
+    def test_group_2_reports_the_shell_completed_after_a_task_notification_system_event(self):
+        fake, d, _ = self.started()
+        self.group(fake, d, 1)
+        frames = self.group(fake, d, 2)
+        self.assertEqual([f["type"] for f in frames], ["system", "user", "assistant", "result"])
+        self.assertEqual(frames[0]["subtype"], "task_notification")
+        self.assertEqual(frames[0]["task_id"], "qa-sh1")
+        content = self.assert_wake_event(frames[1])
+        (n,) = self.notifications(content)
+        self.assertEqual(n.findtext("task-id"), "qa-sh1")
+        self.assertEqual(n.findtext("status"), "completed")
+        self.assert_ends_with_ack(frames, 2)
+
+    def test_group_3_is_one_hostile_item_with_a_clean_visible_title(self):
+        fake, d, _ = self.started()
+        for k in (1, 2):
+            self.group(fake, d, k)
+        frames = self.group(fake, d, 3)
+        self.assertEqual([f["type"] for f in frames], ["user", "assistant", "result"])
+        (n,) = self.notifications(self.assert_wake_event(frames[0]))
+        self.assertEqual(n.findtext("status"), "failed")
+        summary = n.findtext("summary")
+        self.assertIn("\u202e", summary)
+        self.assertIn("\u3164", summary)
+        clean = summary.replace("\u202e", "").replace("\u3164", "")
+        self.assertEqual(clean, 'Background command "qa-fail" failed with exit code 1')
+        self.assert_ends_with_ack(frames, 3)
+
+    def test_group_4_has_two_back_to_back_events_then_one_reply(self):
+        fake, d, _ = self.started()
+        for k in (1, 2, 3):
+            self.group(fake, d, k)
+        frames = self.group(fake, d, 4)
+        self.assertEqual([f["type"] for f in frames], ["user", "user", "assistant", "result"])
+        first, second = (self.notifications(self.assert_wake_event(f)) for f in frames[:2])
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(first[0].findtext("status"), "completed")
+        self.assertIn(self.RESULT_SENTINEL, first[0].findtext("result"))
+        self.assertEqual(second[0].findtext("status"), "failed")
+        self.assert_ends_with_ack(frames, 4)
+
+    def test_wake_bodies_are_xml_escaped_with_no_raw_angle_brackets(self):
+        fake, d, _ = self.started()
+        for k in (1, 2, 3):
+            self.group(fake, d, k)
+        frames = self.group(fake, d, 4)
+        for f in frames[:2]:
+            for n in self.notifications(f["message"]["content"]):
+                for child in n:
+                    text = child.text or ""
+                    self.assertNotIn("<", text, child.tag)
+                    self.assertNotIn(">", text, child.tag)
+
+    def test_group_5_is_one_event_holding_three_notifications(self):
+        fake, d, _ = self.started()
+        for k in (1, 2, 3, 4):
+            self.group(fake, d, k)
+        frames = self.group(fake, d, 5)
+        self.assertEqual([f["type"] for f in frames], ["user", "assistant", "result"])
+        content = self.assert_wake_event(frames[0])
+        notes = self.notifications(content)
+        self.assertEqual(len(notes), 3)
+        self.assertEqual({n.tag for n in notes}, {"task-notification"})
+        self.assertEqual(content.count("<task-notification>"), 3)
+        self.assert_ends_with_ack(frames, 5)
+
+    # ---- drift guard: the fake's notifications against the golden fixtures the parser is tested with ----
+
+    GOLDEN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fixtures", "background-activity")
+    KIND_BY_PREFIX = (('Monitor event: "', "monitor"), ('Background command "', "shell"),
+                      ('Agent "', "agent"))
+
+    def golden_items(self):
+        with open(os.path.join(self.GOLDEN_DIR, "turn-task-wake.json"), encoding="utf-8") as f:
+            return json.load(f)["origin"]["items"]
+
+    def test_the_fakes_notifications_match_the_shape_and_vocabulary_of_the_golden_fixtures(self):
+        golden = self.golden_items()
+        self.assertEqual({k for item in golden for k in item},
+                         {"task_id", "tool_use_id", "kind", "outcome", "description"})
+        golden_pairs = {(i["kind"], i["outcome"]) for i in golden}
+        fake, d, turn1 = self.started()
+        frames = []
+        for k in (1, 2, 3, 4, 5):
+            frames += self.group(fake, d, k)
+        seen = set()
+        for f in frames:
+            if f["type"] != "user" or not f.get("origin"):
+                continue
+            for n in self.notifications(f["message"]["content"]):
+                # The elements the parser reads, in the golden's own field names.
+                self.assertTrue(n.findtext("task-id"))
+                summary = n.findtext("summary")
+                kind = next((k for p, k in self.KIND_BY_PREFIX if summary.startswith(p)), None)
+                self.assertIsNotNone(kind, "a summary the parser would not classify: " + summary)
+                status = n.findtext("status")
+                outcome = "new_output" if kind == "monitor" and summary.startswith("Monitor event") else status
+                seen.add((kind, outcome))
+        # Every (kind, outcome) the golden documents for a monitor event or failed shell is one the fake emits.
+        self.assertLessEqual(golden_pairs, seen)
+
+    def test_wakes_log_records_group_numbers_only_in_order(self):
+        fake, d, _ = self.started()
+        for k in (1, 2, 3, 4, 5):
+            self.group(fake, d, k)
+        self.assertEqual(fake.jsonl("wakes.jsonl"), [{"group": k} for k in (1, 2, 3, 4, 5)])
+        raw = fake.read_log("wakes.jsonl")
+        self.assertNotIn("SECRET", raw)
+
+    def test_sentinels_appear_only_inside_event_and_result_bodies(self):
+        fake, d, turn1 = self.started()
+        frames = list(turn1)
+        for k in (1, 2, 3, 4, 5):
+            frames += self.group(fake, d, k)
+        allowed = 0
+        for f in frames:
+            if f["type"] == "user" and f.get("origin"):
+                for n in self.notifications(f["message"]["content"]):
+                    for child in n:
+                        if child.tag in ("event", "result"):
+                            allowed += (child.text or "").count("SECRET-OUTPUT")
+                        else:
+                            self.assertNotIn("SECRET", child.text or "", child.tag)
+        raw_total = sum(json.dumps(f).count("SECRET-OUTPUT") for f in frames)
+        self.assertGreater(allowed, 0)
+        self.assertEqual(raw_total, allowed, "a sentinel leaked outside <event>/<result>")
+        for f in frames:
+            if f["type"] == "assistant":
+                self.assertNotIn("SECRET", json.dumps(f))
+
+    def test_groups_are_emitted_in_order_even_if_a_later_file_exists_early(self):
+        fake, d, _ = self.started()
+        self.touch(d, 2)
+        self.touch(d, 3)
+        self.assertTrue(fake.no_more_frames(grace=0.5), "wake-2/3 alone release nothing")
+        frames = self.group(fake, d, 1)
+        self.assertEqual([f["type"] for f in frames], ["user", "assistant", "result"])
+        self.assert_ends_with_ack(frames, 1)
+        # Groups 2 and 3 are already released, so they follow without further prompting.
+        g2 = fake.until_result()
+        self.assertEqual(g2[0]["subtype"], "task_notification")
+        self.assert_ends_with_ack(g2, 2)
+        g3 = fake.until_result()
+        self.assertEqual([f["type"] for f in g3], ["user", "assistant", "result"])
+        self.assert_ends_with_ack(g3, 3)
+        self.assertTrue(fake.no_more_frames(grace=0.3), "group 4 still waits for wake-4")
+
+    # ---- refusals ----
+
+    def refused(self, cue):
+        fake = Fake(self)
+        fake.start()
+        echo = fake.cue(cue)
+        self.assertEqual(echo["message"]["content"], cue)
+        frames = fake.until_result()
+        self.assertEqual([f["type"] for f in frames], ["assistant", "result"])
+        self.assertEqual(frames[0]["message"]["content"], [{"type": "text", "text": "wake cue refused"}])
+        self.assertIs(frames[1]["is_error"], False)
+        self.assertTrue(fake.no_more_frames(grace=0.3), "no hold after a refusal")
+        self.assertEqual(fake.jsonl("wakes.jsonl"), [])
+        return fake
+
+    def test_a_dir_with_a_space_is_accepted(self):
+        d = os.path.join(self.wake_dir(), "with space")
+        os.mkdir(d)
+        fake = Fake(self)
+        fake.start()
+        self.addCleanup(self.release_all_quietly, d)
+        fake.cue("WAKE:basic:%s" % d)
+        frames = fake.until_result()
+        self.assertEqual(frames[-2]["message"]["content"], [{"type": "text", "text": "started"}])
+        self.touch(d, 1)
+        self.assert_ends_with_ack(fake.until_result(), 1)
+
+    def test_a_relative_dir_is_refused(self):
+        self.refused("WAKE:basic:relative/dir")
+
+    def test_a_missing_dir_is_refused(self):
+        missing = os.path.join(self.wake_dir(), "does-not-exist")
+        self.refused("WAKE:basic:%s" % missing)
+
+    def test_an_unknown_scenario_is_refused(self):
+        self.refused("WAKE:other:%s" % self.wake_dir())
+
+    def test_a_refused_fake_still_serves_the_next_message(self):
+        fake = self.refused("WAKE:basic:%s" % os.path.join(self.wake_dir(), "nope"))
+        fake.send(user("hello"))
+        self.assertEqual([f["type"] for f in fake.until_result()], ["user", "assistant", "result"])
+
+    # ---- safety nets ----
+
+    @staticmethod
+    def load_module():
+        spec = importlib.util.spec_from_file_location("fake_claude_perm_under_test", os.path.abspath(FAKE))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_the_wait_gives_up_after_the_give_up_window_and_scripts_no_groups(self):
+        # Exercised in-process with the 120 s window shrunk, since a patch cannot cross processes.
+        module = self.load_module()
+        module.HOLD_GIVE_UP_SECONDS = 0.2
+        log_dir = tempfile.mkdtemp(prefix="fcpwakelog")
+        self.addCleanup(shutil.rmtree, log_dir, ignore_errors=True)
+        d = self.wake_dir()
+        fake = module.FakeClaude(list(PERM_ARGV), log_dir)
+        self.addCleanup(fake.stdin_log.close)
+        self.addCleanup(fake.responses_log.close)
+        fake.out = io.BytesIO()
+        fake.run_wake("basic", d)  # returns (rather than blocking) once it gives up
+        frames = [json.loads(l) for l in fake.out.getvalue().splitlines()]
+        self.assertEqual(frames[-1]["type"], "result", "turn 1 ended")
+        self.assertFalse(any(f["type"] == "user" and f.get("origin") for f in frames))
+        self.assertFalse(os.path.exists(os.path.join(log_dir, "wakes.jsonl")))
+
+    def test_the_parent_baseline_is_taken_at_start_not_when_the_wait_begins(self):
+        # Deterministic form of the race: the parent changes while turn 1 is still being emitted.
+        module = self.load_module()
+        module.HOLD_GIVE_UP_SECONDS = 0.5
+        log_dir = tempfile.mkdtemp(prefix="fcpwakebase")
+        self.addCleanup(shutil.rmtree, log_dir, ignore_errors=True)
+        d = self.wake_dir()
+        real_getppid, real_exit = os.getppid, os._exit
+        self.addCleanup(setattr, os, "getppid", real_getppid)
+        self.addCleanup(setattr, os, "_exit", real_exit)
+        started = []  # holds the fake once built; before that the parent is "still there"
+
+        def turn_one_done():
+            return bool(started) and b'"type":"result"' in started[0].out.getvalue()
+        # 4242 until turn 1 has ended, then 1: the wrapper went away while turn 1 was being emitted.
+        module.os.getppid = lambda: 1 if turn_one_done() else 4242
+        exits = []
+
+        class Left(Exception):
+            pass
+
+        def fake_exit(code):
+            exits.append(code)
+            raise Left()
+        module.os._exit = fake_exit
+        fake = module.FakeClaude(list(PERM_ARGV), log_dir)
+        self.addCleanup(fake.stdin_log.close)
+        self.addCleanup(fake.responses_log.close)
+        fake.out = io.BytesIO()
+        started.append(fake)
+        with self.assertRaises(Left):
+            fake.run_wake("basic", d)
+        self.assertEqual(exits, [0])
+
+    def test_the_wait_ends_the_fake_when_its_parent_is_gone(self):
+        # A wrapper starts the fake, sends the cue and exits as soon as the fake has logged it (turn 1 may not have ended): the fake's baseline
+        # parent is the one it started with, so it must still notice and leave.
+        d = self.wake_dir()
+        log_dir = tempfile.mkdtemp(prefix="fcpwakepp")
+        self.addCleanup(shutil.rmtree, log_dir, ignore_errors=True)
+        wrapper = (
+            "import json, os, subprocess, sys, time\n"
+            "fake, log_dir, wake_dir = sys.argv[1:4]\n"
+            "env = {'PATH': os.environ.get('PATH', ''), 'FAKE_CLAUDE_LOG_DIR': log_dir}\n"
+            "p = subprocess.Popen([sys.executable, '-I', fake], stdin=subprocess.PIPE,\n"
+            "                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)\n"
+            "msg = {'type': 'user', 'message': {'role': 'user', 'content': 'WAKE:basic:' + wake_dir}}\n"
+            "p.stdin.write((json.dumps(msg) + '\\n').encode()); p.stdin.flush()\n"
+            "log = os.path.join(log_dir, 'stdin.jsonl')\n"
+            "while not (os.path.exists(log) and os.path.getsize(log) > 0):\n"
+            "    time.sleep(0.005)\n"
+            "sys.stdout.write(str(p.pid) + '\\n'); sys.stdout.flush()\n"
+            "os._exit(0)\n"
+        )
+        out = subprocess.run([sys.executable, "-I", "-c", wrapper, os.path.abspath(FAKE), log_dir, d],
+                             capture_output=True, timeout=TIMEOUT)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        pid = int(out.stdout.split()[0])
+
+        def alive():
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            return True
+
+        def cleanup():
+            if alive():
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        self.addCleanup(cleanup)
+        # Condition-based wait, bounded: the fake polls every ~20 ms, so this is generous.
+        deadline = time.monotonic() + TIMEOUT
+        while alive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(alive(), "the fake outlived its parent")
+
+    # ---- hygiene ----
+
+    def test_a_wake_run_writes_only_the_usual_logs_plus_wakes_jsonl(self):
+        fake, d, _ = self.started()
+        self.group(fake, d, 1)
+        self.release_all_quietly(d)
+        fake.close_stdin_and_wait()
+        self.assertEqual(sorted(os.listdir(fake.log_dir)),
+                         ["argv.json", "responses.jsonl", "stdin.jsonl", "wakes.jsonl"])
 
 
 class HygieneTest(unittest.TestCase):
