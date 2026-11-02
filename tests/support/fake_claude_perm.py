@@ -36,6 +36,26 @@ real CLI 2.1.296 spike captures) and models the permission-prompt flow:
                          Safety nets so a forgotten hold cannot leak a process:
                          it gives up after 120 s (and then ends the turn), and
                          it exits at once when its parent process is gone;
+        WAKE:basic:<abs dir>
+                         a scripted background-wake scenario for the QA scripts
+                         (scripts/qa/background-wake.sh). Turn 1 runs a background
+                         `Bash` (`qa-sleep 60`, task `qa-sh1`) and a `Monitor`
+                         (`qa-ticker`, task `qa-mon1`) with their `task_started` and
+                         `background_tasks_changed` events, says `started`, and ends.
+                         The fake then waits (same polling, 120 s give-up and
+                         exit-when-parent-gone nets as HOLD, no stdin read) for the
+                         files `<dir>/wake-1` .. `wake-4` in turn. Each file emits one
+                         wake group (`type:user`, `origin.kind: task-notification`,
+                         XML-escaped bodies), then `ack <k>` and a `result`:
+                           1 a Monitor event notification,
+                           2 `qa-sh1` completed (a `task_notification` system event
+                             first),
+                           3 two back-to-back notifications (an agent finished, a
+                             shell failed), then one reply,
+                           4 one event holding three notifications.
+                         Each group is logged (number only) to `<logdir>/wakes.jsonl`.
+                         The dir must be absolute and exist, else an "ok" turn that
+                         says `wake cue refused`. Only scenario `basic` exists;
         (no cue)         a short "ok" turn;
   * `control_response` answers are logged to `<logdir>/responses.jsonl`;
   * a daemon `control_request` with subtype `interrupt` is answered the way
@@ -123,6 +143,8 @@ AUTH_MIDTURN_CUE = "AUTH_MIDTURN"
 DIE_MIDTURN_CUE = "DIE_MIDTURN"
 HANG_MIDTURN_CUE = "HANG_MIDTURN"
 HOLD_RE = re.compile(r"\bHOLD:(/\S+)")
+WAKE_RE = re.compile(r"\bWAKE:([a-z]+):(\S+)")
+WAKE_GROUPS = 4
 HOLD_POLL_SECONDS = 0.02
 HOLD_GIVE_UP_SECONDS = 120
 
@@ -455,6 +477,10 @@ class FakeClaude:
             self.emit_text("ok")
             self.emit_result()
             return
+        wake = WAKE_RE.search(text)
+        if wake:
+            self.run_wake(wake.group(1), wake.group(2))
+            return
         cue = CUE_RE.search(text)
         raw = RAW_RE.search(text)
         if raw and not cue:
@@ -468,14 +494,111 @@ class FakeClaude:
             self.emit_result()
 
     def hold_until_file_exists(self, path):
+        """Wait for `path`; True when it exists, False when the 120 s net gave up."""
         parent = os.getppid()
         deadline = time.monotonic() + HOLD_GIVE_UP_SECONDS
         while not os.path.exists(path):
             if os.getppid() != parent:
                 os._exit(0)  # the daemon is gone: do not leak
             if time.monotonic() >= deadline:
-                return
+                return False
             time.sleep(HOLD_POLL_SECONDS)
+        return True
+
+    # ---- background wake scenario (WAKE cue) ---------------------------------
+
+    def task_event(self, subtype, **fields):
+        self.emit(self.envelope(type="system", subtype=subtype, **fields))
+
+    def run_wake(self, scenario, directory):
+        if scenario != "basic" or not os.path.isabs(directory) or not os.path.isdir(directory):
+            self.emit_text("wake cue refused")
+            self.emit_result()
+            return
+        self.wake_turn_one()
+        for k in range(1, WAKE_GROUPS + 1):
+            if not self.hold_until_file_exists(os.path.join(directory, "wake-%d" % k)):
+                return  # gave up: stop scripting, stay a quiet idle session
+            self.wake_group(k)
+
+    def wake_turn_one(self):
+        self.emit_assistant(
+            [{"type": "tool_use", "id": "toolu_qa_bash", "name": "Bash",
+              "input": {"command": "qa-sleep 60", "description": "qa sleep",
+                        "run_in_background": True}}]
+        )
+        self.emit_tool_result_ok(
+            "toolu_qa_bash", "Command running in background with ID: qa-sh1", source="config"
+        )
+        self.task_event("task_started", task_id="qa-sh1", tool_use_id="toolu_qa_bash",
+                        description="qa-sleep 60", task_type="local_bash", is_backgrounded=True)
+        self.emit_assistant(
+            [{"type": "tool_use", "id": "toolu_qa_monitor", "name": "Monitor",
+              "input": {"description": "qa-ticker", "command": "qa-ticker", "persistent": True}}]
+        )
+        self.emit_tool_result_ok(
+            "toolu_qa_monitor", "Monitor started (task qa-mon1)", source="config"
+        )
+        self.task_event("task_started", task_id="qa-mon1", tool_use_id="toolu_qa_monitor",
+                        description="qa-ticker", task_type="local_bash", is_backgrounded=True)
+        self.task_event("background_tasks_changed", tasks=[
+            {"task_id": "qa-sh1", "task_type": "local_bash", "description": "qa-sleep 60"},
+            {"task_id": "qa-mon1", "task_type": "local_bash", "description": "qa-ticker"},
+        ])
+        self.emit_text("started")
+        self.emit_result()
+
+    @staticmethod
+    def xml_escape(text):
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    @classmethod
+    def notification(cls, task_id, status, summary, body_tag=None, body=None, tool_use_id=None):
+        parts = ["<task-notification>", "<task-id>%s</task-id>" % task_id]
+        if tool_use_id:
+            parts.append("<tool-use-id>%s</tool-use-id>" % tool_use_id)
+        parts.append("<status>%s</status>" % status)
+        parts.append("<summary>%s</summary>" % cls.xml_escape(summary))
+        if body_tag:
+            parts.append("<%s>%s</%s>" % (body_tag, cls.xml_escape(body), body_tag))
+        parts.append("</task-notification>")
+        return "".join(parts)
+
+    def emit_wake_event(self, content):
+        self.emit(self.envelope(
+            type="user",
+            message={"role": "user", "content": content},
+            origin={"kind": "task-notification"},
+        ))
+
+    def wake_group(self, k):
+        monitor = self.notification(
+            "qa-mon1", "running", 'Monitor event: "qa-ticker"', "event", "SECRET-OUTPUT-EVENT tick 1",
+            tool_use_id="toolu_qa_monitor")
+        if k == 1:
+            self.emit_wake_event(monitor)
+        elif k == 2:
+            self.task_event("task_notification", task_id="qa-sh1", tool_use_id="toolu_qa_bash",
+                            status="completed", summary='Background command "qa-sleep 60" completed')
+            self.emit_wake_event(self.notification(
+                "qa-sh1", "completed", 'Background command "qa-sleep 60" completed (exit code 0)',
+                tool_use_id="toolu_qa_bash"))
+        elif k == 3:
+            self.emit_wake_event(self.notification(
+                "qa-ag1", "completed", 'Agent "qa-survey" finished', "result", "SECRET-OUTPUT-RESULT"))
+            self.emit_wake_event(self.notification(
+                "qa-sh2", "failed",
+                'Background command "qa-fail \u202e\u3164" failed with exit code 1'))
+        else:
+            self.emit_wake_event(
+                monitor
+                + self.notification("qa-sh3", "completed", 'Background command "qa-one" completed')
+                + self.notification("qa-sh4", "completed", 'Background command "qa-two" completed')
+            )
+        self.emit_text("ack %d" % k)
+        self.emit_result()
+        with open(os.path.join(self.log_dir, "wakes.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"group": k}) + "\n")
 
     def load_fixture(self, name):
         path = os.path.join(FIXTURE_DIR, name + ".json")

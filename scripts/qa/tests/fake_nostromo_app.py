@@ -14,6 +14,7 @@ Every invocation is its own process, so all state lives in files under $FAKE_APP
   actions.log     one JSON object per UI action a click actually triggered ({"action": "tab:Jira",
                   "window": 0, "tab": <tab at that moment>, "focus": <focus at that moment>}); the
                   semantic record of "what was done to the app", independent of coordinates
+  wake-state.json state of the `wake` scenario (see wake_main): anchor reads so far, task windows open
   hanging         written (with the pid) when the `hang` scenario option makes a call block
 
 The JSON shapes mirror macOS/Nostromo/AppControl/AppControlServer.swift (ping, windows, tree,
@@ -24,6 +25,12 @@ result is printed with json.dumps(indent=2), errors go to stderr with exit 1.
 Click resolution is geometric: the tree is laid out in window-content points (top-left origin)
 and a click at X,Y lands on the deepest node whose frame contains it, so the scripts' real
 coordinate clicks are exercised. Standard library only.
+
+WAKE scenario (scenario.json key `wake`, for background-wake.sh's tests): the app is the QA clone showing a
+session with the fake CLI's wake markers. `wake_main` answers ping, windows, hittest, find, expect, wait,
+`click --text`, key, type, `tasks list|chip` and transcript-anchor from the scenario and from wake-state.json
+(anchor reads so far, task windows open), and logs anything else (a coordinate click, an unknown verb, a `type`
+that is not the WAKE cue, a key other than Return or Escape) to forbidden.log.
 """
 import json
 import os
@@ -656,9 +663,105 @@ def cmd_find(S, st, wi, opts, rest):
     return out
 
 
+# ------------------------------------------------------------------------------ the WAKE scenario
+
+WAKE_MARKER_1 = "\u27f2 Monitor: new output \"qa-ticker\""
+WAKE_DEFAULTS = {
+    "label": "QA approvals",
+    "texts": [
+        "QA approvals", "Message\u2026", WAKE_MARKER_1, "\u27f2 Shell: completed \"qa-sleep 60\"",
+        "\u27f2 2 background events", "\u27f2 3 background events", "ack 1", "ack 2", "ack 3", "ack 4",
+        "Background Monitor: new output, qa-ticker.", "Background task running",
+    ],
+    "chip_state": "running",
+    "tasks": [
+        {"id": "qa-sh1", "kind": "Shell", "description": "qa-sleep 60", "status": "running"},
+        {"id": "qa-mon1", "kind": "Monitor", "description": "qa-ticker", "status": "running"},
+    ],
+    # transcript-anchor replies in call order; the last one repeats.
+    "anchors": [{"turnKey": "t1", "itemKey": "i1", "offsetPt": 0, "bottomOffsetPt": 0, "following": True}],
+    "extra_texts": [],             # more text on screen (a sentinel, a raw notification, ...)
+    "drop_texts": [],              # substrings: any default text containing one is not on screen
+    "windows_hidden": False,       # alpha 0, as with a locked display
+    "escape_ignored": False,
+    "first_responder": "ChatTextView",
+}
+
+
+def wake_main(S, argv):
+    W = {**WAKE_DEFAULTS, **S["wake"]}
+    st = read_json("wake-state.json") or {"anchor_reads": 0, "window_open": {}}
+    args = []
+    i = 0
+    while i < len(argv):
+        if argv[i] in ("--socket", "-w", "--window"):
+            i += 2
+            continue
+        args.append(argv[i])
+        i += 1
+    cmd, rest = (args[0] if args else ""), args[1:]
+
+    def present(text):
+        shown = [t for t in W["texts"] if not any(d in t for d in W["drop_texts"])] + W["extra_texts"]
+        return [t for t in shown if text.lower() in t.lower()]
+
+    def flag(name, default=None):
+        return rest[rest.index(name) + 1] if name in rest and rest.index(name) + 1 < len(rest) else default
+
+    result = None
+    if cmd == "ping":
+        result = {"pid": S["pid"]}
+    elif cmd == "windows":
+        result = [{"index": 0, "alpha": 0 if W["windows_hidden"] else 1,
+                    "visible": not W["windows_hidden"], "key": True, "firstResponder": W["first_responder"]}]
+    elif cmd == "hittest":
+        result = {"window": {"firstResponder": W["first_responder"]}, "chain": []}
+    elif cmd == "find":
+        result = [{"text": t, "x": 10, "y": 10} for t in present(rest[0])]
+    elif cmd == "expect":
+        ok = bool(present(rest[0])) != ("--absent" in rest)
+        print(("ok: " if ok else "FAIL: ") + repr(rest[0]))
+        sys.exit(0 if ok else 1)
+    elif cmd == "wait":
+        ok = bool(present(rest[0])) != ("--gone" in rest)
+        print(("ok: " if ok else "TIMEOUT: ") + repr(rest[0]))
+        sys.exit(0 if ok else 1)
+    elif cmd == "click" and len(rest) == 2 and rest[0] == "--text" and (
+            rest[1] in (W["label"], "Message\u2026", WAKE_MARKER_1)):
+        if rest[1] == WAKE_MARKER_1:
+            st["window_open"]["qa-mon1"] = True
+        result = {"hit": "NSView"}
+    elif cmd == "key" and rest[:1] == ["\r"] and flag("--key-code") == "36":
+        result = {"sent": "return"}
+    elif cmd == "key" and rest[:1] == ["\x1b"] and flag("--key-code") == "53":
+        if not W["escape_ignored"]:
+            st["window_open"]["qa-mon1"] = False
+        result = {"sent": "escape"}
+    elif cmd == "type" and rest and rest[0].startswith("WAKE:basic:/") and len(rest) == 1:
+        result = {"typed": True}
+    elif cmd == "tasks" and rest[:1] == ["chip"]:
+        result = {"text": None, "state": W["chip_state"]}
+    elif cmd == "tasks" and rest[:1] == ["list"]:
+        tasks = [{**t, "window_open": st["window_open"].get(t["id"], False)} for t in W["tasks"]]
+        result = {"tag": flag("--focus"), "running": len(tasks), "chip": {"state": W["chip_state"]}, "tasks": tasks}
+    elif cmd == "transcript-anchor":
+        anchors = W["anchors"]
+        result = anchors[min(st["anchor_reads"], len(anchors) - 1)]
+        st["anchor_reads"] += 1
+    else:
+        forbid("wake scenario: verb or arguments outside the allow-list", argv)
+        write_json("wake-state.json", st)
+        die("error: refused by the fake", 1)
+    write_json("wake-state.json", st)
+    print(json.dumps(result, indent=2))
+
+
 def main():
     argv = sys.argv[1:]
     S = deep_merge(DEFAULTS, read_json("scenario.json", {}))
+    if "wake" in S:
+        append("calls.log", json.dumps(argv))
+        return wake_main(S, argv)
     st = read_json("state.json") or fresh_state(S)
     st["calls"] += 1
     append("calls.log", json.dumps(argv))
