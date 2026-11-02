@@ -932,6 +932,11 @@ class ReplView: NSView {
         view.onAnsweredOption = { [weak self] blockIndex, optionIndex in
             self?.interactions.recordAnswer(turn: turn.id, block: blockIndex, option: optionIndex)
         }
+        // A question the approval form handles stays a record after the approval store forgets it.
+        view.onApprovalHandled = { [weak self] blockIndex in
+            self?.interactions.recordApprovalHandled(turn: turn.id, block: blockIndex)
+        }
+        view.replayApprovalHandled()
         // Expansion restore also keeps geometry and view agreeing: the height
         // cache keys measured heights by content, which is invariant across
         // expansion, so a re-collapsed tool result would leave the virtualizer

@@ -117,6 +117,10 @@ final class ApprovalStore {
     /// only (no free text); at most `answerCapacity` calls, the oldest going first.
     private var chosenLabels: [String: [String]] = [:]
     private var chosenOrder: [String] = []
+    /// The `AskUserQuestion` calls a request with an answerable form was seen for (the form was offered).
+    /// Unlike the status book it survives withdrawal and status eviction; bounded by `answerCapacity`.
+    private var formOffered = Set<String>()
+    private var formOfferedOrder: [String] = []
     /// Which request last made each tool call await: only it may end that wait. A reused
     /// `tool_use_id` must not let a late frame for the old request overwrite the new request's wait.
     private var waitOwner: [String: String] = [:]
@@ -283,13 +287,24 @@ final class ApprovalStore {
 
     // MARK: AskUserQuestion record
 
-    /// How many calls' chosen labels are kept.
-    static let answerCapacity = 200
+    /// How many calls' chosen labels (and offered forms) are kept: as many as the status book keeps per focus.
+    static let answerCapacity = ApprovalStatusBook.capacityPerTag
 
-    /// True when a permission request exists, or existed in this process, for the call `toolUseId`: the
-    /// approval form handles an `AskUserQuestion` call then, so the transcript only keeps a record of it.
-    func handlesQuestion(toolUseId: String) -> Bool {
-        statusBook.status(toolUseId: toolUseId) != nil || chosenLabels[toolUseId] != nil
+    /// True when the approval form was offered for the call `toolUseId`: a request that lists
+    /// `answer_questions` and whose questions this build can parse was seen for it. The form is then the
+    /// one place to answer and the transcript only keeps a record. A question the form cannot take (one
+    /// option, five, duplicate labels, a non-choice kind, `answer_questions` not listed) is not handled:
+    /// its transcript card is the person's only way to answer. Stays true after the request is withdrawn,
+    /// answered or resolved, and after its status is evicted.
+    func handlesQuestion(toolUseId: String) -> Bool { formOffered.contains(toolUseId) }
+
+    private func noteFormOffered(for request: ApprovalRequestWire) {
+        guard request.toolName == ApprovalKinds.askUserQuestionTool,
+              ApprovalCardOptions(request: request).questions != nil else { return }
+        let id = request.toolUseId
+        guard formOffered.insert(id).inserted else { return }
+        formOfferedOrder.append(id)
+        while formOfferedOrder.count > Self.answerCapacity { formOffered.remove(formOfferedOrder.removeFirst()) }
     }
 
     /// True while the request for `toolUseId` waits for the person.
@@ -440,6 +455,7 @@ final class ApprovalStore {
         entries[request.id] = ApprovalEntry(request: request, state: state)
         order[request.tag, default: []].append(request.id)
         waitOwner[request.toolUseId] = request.id
+        noteFormOffered(for: request)   // before the status goes out: a listening card reads it
         setStatus(.awaiting, for: request)
     }
 

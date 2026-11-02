@@ -20,6 +20,11 @@ struct TurnInteractionState: Equatable {
     /// and `OptionButton` is already constructed with `tag: idx`.
     var answeredOptions: [Int: Int] = [:]
 
+    /// Block indexes of `AskUserQuestion` blocks that were surfaced to the approval path (the store
+    /// offered its form for the call). Such a block stays a quiet, inert record whatever the approval
+    /// store later forgets (withdrawal, eviction). See `AskQuestionSurface`.
+    var approvalHandledBlocks: Set<Int> = []
+
     /// Ordinals of messages whose roll-in this pane is holding back (FV3's reader-protected
     /// roll-in): they stay on screen as conversation, at their place, until `RollInPolicy` lets
     /// them go. `FocusPlanner.leadingGroups` stands for the groups before the turn's first message.
@@ -27,7 +32,7 @@ struct TurnInteractionState: Equatable {
     var heldOrdinals: Set<Int> = []
 
     var isEmpty: Bool {
-        answeredOptions.isEmpty && heldOrdinals.isEmpty
+        answeredOptions.isEmpty && approvalHandledBlocks.isEmpty && heldOrdinals.isEmpty
     }
 }
 
@@ -62,6 +67,10 @@ final class TurnInteractionStore {
 
     func recordAnswer(turn: UUID, block: Int, option: Int) {
         states[turn, default: TurnInteractionState()].answeredOptions[block] = option
+    }
+
+    func recordApprovalHandled(turn: UUID, block: Int) {
+        states[turn, default: TurnInteractionState()].approvalHandledBlocks.insert(block)
     }
 
     /// Hold back the roll-in of message `ordinal` of `turn`.

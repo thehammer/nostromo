@@ -67,6 +67,8 @@ enum TurnHeightEstimator {
     /// `AskQuestionView`: header chip, question, divider, and 36 pt per option.
     static let questionChrome: CGFloat      = 46
     static let questionOptionHeight: CGFloat = 36
+    /// Whether the approval store offered its form for a call: what decides record or card. Tests replace it.
+    static var questionHandled: (String) -> Bool = { ApprovalStore.shared.handlesQuestion(toolUseId: $0) }
     /// `AskQuestionRecordView`: the muted question lines plus one status line, 4+4 padding and a 2 pt gap.
     static let questionRecordChrome: CGFloat = 2 * AskQuestionRecordView.verticalInset
         + AskQuestionRecordView.lineGap + AskQuestionRecordView.statusLineHeight
@@ -238,10 +240,12 @@ enum TurnHeightEstimator {
                                               glyphWidth: systemGlyphWidth,
                                               lineHeight: noteLineHeight)
         case .askQuestion(let d):
-            // A question with a `toolUseId` is, in an approval-capable session, drawn as the quiet
-            // record. A restricted session draws the card instead: the estimate is then short by its
-            // option rows until the measured height replaces it.
-            if d.toolUseId != nil {
+            // The same predicate as the view (`AskQuestionSurface`), with what the estimator can see: whether
+            // the approval store offered its form. A card answered on the card, or a block marked surfaced
+            // after the store forgot it, is corrected by the measured height.
+            let offered = d.toolUseId.map(questionHandled) ?? false
+            if AskQuestionSurface.resolve(toolUseId: d.toolUseId, answeredOnCard: false,
+                                          formOffered: offered, markedSurfaced: false) == .record {
                 return questionRecordChrome
                     + wrappedHeight(characters: AskQuestionRecordView.questionText(for: d).count,
                                     width: width - 2 * AskQuestionRecordView.horizontalInset,

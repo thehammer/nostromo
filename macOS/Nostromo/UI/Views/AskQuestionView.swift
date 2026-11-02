@@ -33,9 +33,14 @@ final class AskQuestionView: NSView {
     /// same label, and `OptionButton` is already tagged with its index.
     var onAnswer: ((_ reply: String, _ optionIndex: Int) -> Void)?
 
+    /// Asked before a click is taken as an answer: false swallows the click, leaving no chosen state.
+    /// `ChatTurnView` points it at the approval store (a card whose call the form now handles).
+    var acceptsAnswer: () -> Bool = { true }
+
     private let data: AskQuestionData
     private var answered = false
     private var headerChip: NSTextField?
+    private var approvalSubscription: AnyCancellable?
 
     /// - Parameter answeredOptionIndex: the option the operator already chose,
     ///   restored from `TurnInteractionState`. Non-nil means this card is
@@ -155,8 +160,32 @@ final class AskQuestionView: NSView {
 
     // MARK: - Answering
 
-    @objc private func optionTapped(_ sender: OptionButton) {
+    /// Follow the approval store for the call `toolUseId`: once its form handles the call, this card
+    /// is muted and inert (the request usually arrives after the `tool_use` block built the card), and
+    /// `onHandled` fires. A click is never accepted while the form handles the call.
+    func followApproval(_ store: ApprovalStore?, toolUseId: String, onHandled: @escaping () -> Void) {
+        guard let store else { return }
+        acceptsAnswer = { [weak store] in store?.handlesQuestion(toolUseId: toolUseId) != true }
+        approvalSubscription = store.statusChanges.sink { [weak self, weak store] id in
+            guard let self, id == toolUseId, store?.handlesQuestion(toolUseId: id) == true else { return }
+            self.yieldToApproval()
+            onHandled()
+        }
+    }
+
+    /// Disable and mute every option, unless the card is already answered (its chosen look stays).
+    private func yieldToApproval() {
         guard !answered else { return }
+        subviews.compactMap { $0 as? OptionButton }.forEach { btn in
+            btn.isEnabled = false
+            btn.alphaValue = 0.35
+        }
+        alphaValue = 0.6
+    }
+
+    @objc private func optionTapped(_ sender: OptionButton) {
+        // Answered only once the answer is accepted: a swallowed click leaves nothing behind.
+        guard !answered, acceptsAnswer() else { return }
         answered = true
         applyChosen(sender, animated: true)
         // Claude's AskUserQuestion call always errors in -p mode ("Answer questions?").
@@ -404,6 +433,7 @@ final class AskQuestionRecordView: NSView {
     private let questionLabel: NSTextField
     private let statusLabel: NSTextField
     private var subscription: AnyCancellable?
+    private var published = false
 
     init(data: AskQuestionData, toolUseId: String, approvals: ApprovalStore?) {
         self.data = data
@@ -454,10 +484,42 @@ final class AskQuestionRecordView: NSView {
     var statusLine: String { statusLabel.stringValue }
 
     private func refresh() {
+        let before = statusLabel.stringValue
         statusLabel.stringValue = Self.statusText(
             awaiting: store?.isAwaitingAnswer(toolUseId: toolUseId) ?? false,
             chosen: store?.chosenLabels(toolUseId: toolUseId))
         let spoken = [Self.questionText(for: data), statusLabel.stringValue].filter { !$0.isEmpty }
         setAccessibilityLabel(spoken.joined(separator: ". "))
+        setAccessibilityValue(statusLabel.stringValue)
+        if published, before != statusLabel.stringValue {
+            NSAccessibility.post(element: self, notification: .valueChanged)
+        }
+        published = true
+    }
+}
+
+// MARK: - AskQuestionSurface
+
+/// Which surface draws an `AskUserQuestion` block: the interactive card or the quiet record. The one
+/// predicate the view (`ChatTurnView`) and the height estimator share.
+///
+/// Decision table (first matching row):
+///
+/// | `toolUseId` | answered on the card | the store offered its form | block marked surfaced | surface |
+/// |---|---|---|---|---|
+/// | nil (`CONFIRM:` card, older daemon) | any | any | any | card |
+/// | set | yes | any | any | card (restored answered, inert) |
+/// | set | no | yes | any | record (and the block is marked) |
+/// | set | no | no | yes | record, question only: the store forgot it (withdrawn, evicted) |
+/// | set | no | no | no | card: nothing known. Includes a form that was never offered (the card is the
+///   person's only way to answer) and a reload or relaunch with an empty store, the one case that cannot be
+///   told apart from "no request yet", where the legacy card stays |
+enum AskQuestionSurface: Equatable {
+    case card
+    case record
+
+    static func resolve(toolUseId: String?, answeredOnCard: Bool, formOffered: Bool, markedSurfaced: Bool) -> AskQuestionSurface {
+        guard toolUseId != nil, !answeredOnCard else { return .card }
+        return formOffered || markedSurfaced ? .record : .card
     }
 }
