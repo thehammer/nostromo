@@ -71,6 +71,9 @@ use super::guard::{self, GuardVerdict, HookPayload, PaneProbe, SystemPaneProbe};
 use super::questions;
 use super::request::{FileSettings, PermissionRequest, Reason, SettingsSource};
 use super::rules::{self, Candidate, SessionRule};
+
+/// The longest one rule match may take (it may touch a slow file system).
+const RULE_MATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 use super::wire::{
     clean_note, AgentWire, AnswerRefusal, ApprovalDecision, ApprovalFlags, ApprovalOption,
     ApprovalRequestWire, DecisionKind, RefusalChannel, SessionRuleCandidateWire, SessionRuleWire,
@@ -1431,14 +1434,14 @@ impl ApprovalBroker {
     }
 
     /// Use `home` as the directory `~/` in session rules means. For tests.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_home_for_test(&self, home: PathBuf) {
         *lock(&self.inner.home) = home;
     }
 
     /// Put a hand-built rule on `tag`'s process `generation`, as if the human had created it.
     /// For tests of the matcher's guard ordering and scope; nothing in production calls it.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn inject_session_rule_for_test(&self, tag: &str, generation: u64, rule: SessionRule) {
         lock(&self.inner.state)
             .session_rules
@@ -1864,6 +1867,7 @@ impl Inner {
         req: &PermissionRequest,
         reason: &Reason,
         cwd: Option<&Path>,
+        session_id: Option<&str>,
     ) -> Option<SessionRule> {
         let candidates: Vec<SessionRule> = {
             let st = lock(&self.state);
@@ -1872,14 +1876,18 @@ impl Inner {
                 .get(&(tag.to_owned(), generation))?
                 .iter()
                 .filter(|r| r.agent_id == req.agent_id)
+                // A rule belongs to the conversation it was granted in: a different
+                // session id (a `/clear` or a resumed conversation) is a different one.
+                .filter(|r| r.session_id.as_deref() == session_id)
                 .cloned()
                 .collect()
         };
         let home = lock(&self.home).clone();
-        // Outside the lock: a prefix match looks at the file system.
+        // Outside the lock: a prefix match looks at the file system, and a hung mount must
+        // not stall this worker, so each match is bounded and a timeout is no match.
         candidates
             .into_iter()
-            .find(|r| rules::matches(r, req, reason.kind, &home, cwd))
+            .find(|r| rules::matches_within(RULE_MATCH_TIMEOUT, r, req, reason.kind, &home, cwd))
     }
 
     /// One more use of rule `rule_id` was allowed: count it and tell the app.
@@ -2057,9 +2065,19 @@ impl Inner {
             // After the guard, before a card: a rule the human created for this very
             // session process and requester. Only while an app that can show and revoke
             // rules is connected (the check above).
-            if let Some(rule) =
-                self.matching_session_rule(&ident.tag, generation, &req, &reason, cwd.as_deref())
-            {
+            // The id the request itself names, when it names one, must be the rule's too.
+            let live_session_id = value
+                .get("session_id")
+                .and_then(Value::as_str)
+                .or(ident.session_id.as_deref());
+            if let Some(rule) = self.matching_session_rule(
+                &ident.tag,
+                generation,
+                &req,
+                &reason,
+                cwd.as_deref(),
+                live_session_id,
+            ) {
                 let ending =
                     Ending::allowed_by_session_rule(req.input.clone(), rules::rule_identity(&rule));
                 if let Some(done) = self.finish(request_id, ending) {

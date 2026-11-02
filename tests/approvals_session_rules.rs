@@ -1444,15 +1444,17 @@ async fn without_an_app_that_renders_approvals_a_matching_request_is_denied_as_b
     rig.assert_allowed_by_rule("toolu_3", CACHES_A).await;
 }
 
-// A hand-built rule whose text equals a guarded command must not turn a guard block into an
-// allow. Note: `rules::eligible` also refuses every one of these commands (tmux, ecs_, aws ecs),
-// so this pins the end result (`guard_blocked`), not the guard-before-rule order by itself; the
-// order is `process` running `guard_block` before `matching_session_rule`.
+// A hand-built rule whose text equals a guarded command must still end in a guard block.
+// Honest limit: `rules::eligible` is an allowlist of command words and refuses every one of
+// these as well (tmux, ecs_, aws, `noglob` wrapping tmux; kill-pane is not input, so the guard lets it through to a card), so no command exists that the guard
+// blocks and the matcher accepts. This pins the end result (`guard_blocked`); the guard-first
+// order itself is `process` running `guard_block` before `matching_session_rule`.
 #[tokio::test(start_paused = true)]
 async fn a_rule_never_overrides_the_guard() {
     let mut rig = Rig::with_app();
     for (i, command) in [
         "tmux send-keys -t %9 ls",
+        "noglob tmux send-keys -t %9 ls Enter",
         "ecs_connect ap production portal",
         "aws ecs execute-command --cluster c --task t --interactive --command sh",
     ]
@@ -1484,6 +1486,39 @@ async fn a_rule_never_overrides_the_guard() {
         })
         .await;
     }
+}
+
+// S-f: a rule belongs to the conversation it was granted in. Fails if the matcher ignores
+// the session id (a `/clear` or a resumed conversation would inherit the rules).
+#[tokio::test(start_paused = true)]
+async fn a_rule_of_another_session_id_does_not_match() {
+    let rig = Rig::with_app();
+    // Control: the registered session's own id matches.
+    let mut own = SessionRule::exact_for_test(CACHES_A, None);
+    own.session_id = Some(format!("sid-{T}"));
+    rig.broker
+        .inject_session_rule_for_test(T, rig.generation, own);
+    rig.assert_allowed_by_rule("toolu_own", CACHES_A).await;
+
+    // A request that names another session id is not covered.
+    let mut moved = ask_request("toolu_moved", CACHES_A);
+    moved["session_id"] = json!("sid-after-clear");
+    let wire = rig.hold_value("toolu_moved", moved).await;
+    assert_eq!(
+        rig.broker
+            .answer(&wire.request_id, &deny(), "w-clean", "app"),
+        applied("denied")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rule_granted_under_another_session_id_does_not_match() {
+    let rig = Rig::with_app();
+    let mut old = SessionRule::exact_for_test(CACHES_A, None);
+    old.session_id = Some("sid-before-clear".into());
+    rig.broker
+        .inject_session_rule_for_test(T, rig.generation, old);
+    rig.assert_card("toolu_1", CACHES_A).await;
 }
 
 // Fails if the matcher trusts a rule's text instead of re-checking the request: a hand-built

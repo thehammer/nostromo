@@ -13,8 +13,11 @@
 //!   command or a substitution cannot be mistaken for a plain one.
 //! - A candidate is either **exact** (the command, byte for byte) or, for a
 //!   short list of file utilities on absolute or `~/` paths, a **path prefix**.
-//! - Shells, interpreters, remote and production-shell commands, tmux, AWS and
-//!   anything that points at a protected location never get a candidate.
+//! - Only a short **allowlist** of command words ([`PREFIX_COMMANDS`], [`EXACT_COMMANDS`])
+//!   ever gets a candidate; everything else (test and task runners, interpreters, exec
+//!   wrappers, remote and production-shell commands, tmux, AWS) gets "Allow once" only. The
+//!   denylists stay as defence in depth. Anything that points at a protected location never
+//!   gets one either.
 //!
 //! The module is pure apart from [`matches`]' symlink check on a prefix match.
 //! It never parses rule text: a [`SessionRule`] is built only from a
@@ -34,7 +37,8 @@ pub const MAX_RULES_PER_SESSION: usize = 32;
 /// The longest plain command, in bytes.
 const MAX_COMMAND_BYTES: usize = 300;
 /// The summary of an exact rule.
-pub const EXACT_SUMMARY: &str = "Allows exactly this command again";
+pub const EXACT_SUMMARY: &str =
+    "Allows exactly this command text again, in whatever directory the session is in";
 
 /// What a candidate or rule covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,8 +63,14 @@ pub enum Spec {
     /// The trimmed command, byte for byte.
     Exact(String),
     /// `head` (command word and flags) followed by one or more paths under `prefix`
-    /// (`~/Library/Caches/`, always ending in `/`).
-    PathPrefix { head: Vec<String>, prefix: String },
+    /// (`~/Library/Caches/`, always ending in `/`). `resolved` is the prefix directory as the
+    /// file system resolved it when the rule was offered; it must have resolved to itself
+    /// (a symlinked home aside), and a match requires it to resolve to exactly that again.
+    PathPrefix {
+        head: Vec<String>,
+        prefix: String,
+        resolved: PathBuf,
+    },
 }
 
 /// A rule the human may choose for one held request.
@@ -119,7 +129,7 @@ impl SessionRule {
     }
 
     /// An exact rule for `command` (tests: a hand-built rule the broker never derived).
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn exact_for_test(command: &str, agent_id: Option<String>) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -133,6 +143,17 @@ impl SessionRule {
             uses: 0,
             granted_by_request_id: "test".into(),
             granted_by_window: "test".into(),
+        }
+    }
+}
+
+impl Candidate {
+    /// The resolved prefix directory of a path-prefix candidate (tests).
+    #[cfg(test)]
+    fn spec_resolved(&self) -> Option<PathBuf> {
+        match &self.spec {
+            Spec::PathPrefix { resolved, .. } => Some(resolved.clone()),
+            Spec::Exact(_) => None,
         }
     }
 }
@@ -216,6 +237,7 @@ const INTERPRETER_PREFIXES: &[&str] = &["python", "perl", "ruby", "node", "php"]
 
 /// Words (lower-cased) that must not appear inside any word of the command.
 const NEVER_SUBSTRINGS: &[&str] = &[
+    "tmux",
     "ecs",
     "ssm",
     "execute-command",
@@ -269,6 +291,23 @@ const PREFIX_COMMANDS: &[&str] = &[
     "rm", "rmdir", "mkdir", "touch", "ls", "du", "stat", "file", "cat", "head", "tail", "wc",
 ];
 
+/// The only other command words an exact rule may be offered for: file and text
+/// utilities and read-only inspection commands whose effect is the same wherever and
+/// whenever they run. Everything else (task runners, test runners, interpreters, exec
+/// wrappers, anything that loads project files) gets "Allow once" only. Not `ln` (it
+/// creates the symlinks the prefix check depends on), `sed`, `awk`, `find`, `tar`, `zip`,
+/// `curl` or `wget`.
+const EXACT_COMMANDS: &[&str] = &[
+    "cp", "mv", "diff", "cmp", "grep", "rg", "sort", "uniq", "cut", "tr", "basename", "dirname",
+    "realpath", "readlink", "pwd", "which", "whoami", "id", "date", "uname", "sw_vers", "echo",
+    "printf", "sleep", "jq", "shasum", "md5", "xxd", "od", "strings", "tree", "lsof", "ps",
+    "pgrep", "df",
+];
+
+/// Commands that change files: an exact rule for one is not offered when a path
+/// argument is relative, because the rule ignores the directory it was granted in.
+const RELATIVE_PATH_SENSITIVE: &[&str] = &["rm", "rmdir", "mv", "cp", "chmod", "touch", "mkdir"];
+
 // ── candidates ────────────────────────────────────────────────────────────────
 
 /// The rules the human may choose for `req`: empty unless the request is an
@@ -293,7 +332,7 @@ pub fn candidates(
         overrides: overrides.clone(),
         spec: Spec::Exact(plain.command.clone()),
     }];
-    if let Some((head, prefix)) = prefix_of(&plain, home) {
+    if let Some((head, prefix, resolved)) = prefix_of(&plain, home) {
         let head_text = head.join(" ");
         let flags = head[1..].join(" ");
         let summary = if flags.is_empty() {
@@ -312,7 +351,11 @@ pub fn candidates(
             summary,
             kind: CandidateKind::PathPrefix,
             overrides,
-            spec: Spec::PathPrefix { head, prefix },
+            spec: Spec::PathPrefix {
+                head,
+                prefix,
+                resolved,
+            },
         });
     }
     // Belt and braces: a candidate must cover the request it came from.
@@ -338,10 +381,59 @@ pub fn matches(
     }
     match &rule.spec {
         Spec::Exact(_) => true,
-        Spec::PathPrefix { head, prefix } => plain.words[head.len()..]
-            .iter()
-            .all(|p| resolved_inside(p, prefix, home)),
+        Spec::PathPrefix {
+            head,
+            prefix,
+            resolved,
+        } => {
+            // The prefix directory must still be what it was when the human chose the
+            // rule: a directory that has since become a symlink is a different place.
+            let dir = expand(prefix.trim_end_matches('/'), home);
+            if canonical_lenient(&dir).as_ref() != Some(resolved) {
+                return false;
+            }
+            plain.words[head.len()..]
+                .iter()
+                .all(|p| resolved_inside(p, resolved, home))
+        }
     }
+}
+
+/// [`matches`], but a file system that does not answer within `timeout` (a hung network
+/// mount under `/Volumes`) counts as no match, so the broker's single worker cannot stall.
+pub fn matches_within(
+    timeout: std::time::Duration,
+    rule: &SessionRule,
+    req: &PermissionRequest,
+    reason_kind: ReasonKind,
+    home: &Path,
+    cwd: Option<&Path>,
+) -> bool {
+    let (rule, req, home, cwd) = (
+        rule.clone(),
+        req.clone(),
+        home.to_path_buf(),
+        cwd.map(Path::to_path_buf),
+    );
+    bounded(timeout, move || {
+        matches(&rule, &req, reason_kind, &home, cwd.as_deref())
+    })
+    .unwrap_or(false)
+}
+
+/// Run `f` on a helper thread; `None` if it has not finished within `timeout`.
+fn bounded<T: Send + 'static>(
+    timeout: std::time::Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("rule-match".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .ok()?;
+    rx.recv_timeout(timeout).ok()
 }
 
 /// A request that passed every eligibility check: its trimmed command and words.
@@ -416,6 +508,24 @@ fn eligible(
     {
         return None;
     }
+    if !PREFIX_COMMANDS.contains(&basename.as_str()) && !EXACT_COMMANDS.contains(&basename.as_str())
+    {
+        return None;
+    }
+    if RELATIVE_PATH_SENSITIVE.contains(&basename.as_str())
+        && words[1..]
+            .iter()
+            .any(|w| !w.starts_with('-') && !w.starts_with('/') && !w.starts_with("~/"))
+    {
+        return None;
+    }
+    // `=cmd` expands to a path in zsh; a leading `%` is a job spec or a format.
+    if words
+        .iter()
+        .any(|w| w.starts_with('=') || w.starts_with('%'))
+    {
+        return None;
+    }
     let command_word = parsed.commands[0].words.first()?;
     if looks_like_tmux(command_word, cwd.unwrap_or_else(|| Path::new("/")), true) {
         return None;
@@ -455,7 +565,7 @@ fn plain_words(command: &str) -> Option<Vec<String>> {
 fn spec_matches(spec: &Spec, plain: &Plain, home: &Path) -> bool {
     match spec {
         Spec::Exact(command) => plain.command == *command,
-        Spec::PathPrefix { head, prefix } => {
+        Spec::PathPrefix { head, prefix, .. } => {
             let Some(paths) = plain.words.strip_prefix(head.as_slice()) else {
                 return false;
             };
@@ -509,6 +619,11 @@ fn canonical_lenient(path: &Path) -> Option<PathBuf> {
                 return Some(out);
             }
             Err(_) => {
+                // Something is there but cannot be resolved (a dangling or looping
+                // symlink): where it would lead is unknown, so do not guess.
+                if std::fs::symlink_metadata(&cur).is_ok() {
+                    return None;
+                }
                 tail.push(cur.file_name()?.to_owned());
                 if !cur.pop() {
                     return None;
@@ -518,17 +633,16 @@ fn canonical_lenient(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// R5: after resolving symlinks, `word` is still inside `prefix` and not in a protected place.
-fn resolved_inside(word: &str, prefix: &str, home: &Path) -> bool {
+/// R5: after resolving symlinks, `word` is still strictly inside `resolved` (the prefix
+/// directory as resolved) and not in a protected place.
+fn resolved_inside(word: &str, resolved: &Path, home: &Path) -> bool {
     let path = expand(word.trim_end_matches('/'), home);
-    let dir = expand(prefix.trim_end_matches('/'), home);
-    let (Some(real_path), Some(real_dir)) = (canonical_lenient(&path), canonical_lenient(&dir))
-    else {
+    let Some(real_path) = canonical_lenient(&path) else {
         return false;
     };
     let real_home = canonical_lenient(home).unwrap_or_else(|| home.to_path_buf());
-    real_path != real_dir
-        && real_path.starts_with(&real_dir)
+    real_path != resolved
+        && real_path.starts_with(resolved)
         && !path_is_protected(&real_path, &real_home)
         && !path_is_protected(&real_path, home)
 }
@@ -602,6 +716,11 @@ fn piece_is_protected(piece: &str, home: &Path, cwd: Option<&Path>) -> bool {
     if piece.split('/').any(|c| c.eq_ignore_ascii_case(".git")) {
         return true;
     }
+    // APFS volume paths (`/.vol/<fsid>/<inode>`) name any file by number and bypass
+    // every path check here.
+    if piece.to_ascii_lowercase().starts_with("/.vol") {
+        return true;
+    }
     if piece.starts_with('/') || piece.starts_with("~/") {
         return path_is_protected(&expand(piece, home), home);
     }
@@ -612,13 +731,24 @@ fn piece_is_protected(piece: &str, home: &Path, cwd: Option<&Path>) -> bool {
             None => piece.split('/').any(|c| c == ".."),
         };
     }
-    false
+    // A bare relative name (`.ssh`) is checked like `.ssh/x`: against the session's
+    // directory, or, when that is unknown, by its name.
+    match cwd {
+        Some(cwd) => path_is_protected(&cwd.join(piece), home),
+        None => {
+            let lower = piece.to_ascii_lowercase();
+            PROTECTED_HOME
+                .iter()
+                .any(|p| !p.contains('/') && *p == lower)
+        }
+    }
 }
 
 // ── prefix derivation ─────────────────────────────────────────────────────────
 
-/// `(head, prefix)` for a command a path-prefix rule can cover, else `None`.
-fn prefix_of(plain: &Plain, home: &Path) -> Option<(Vec<String>, String)> {
+/// `(head, prefix, resolved)` for a command a path-prefix rule can cover, else `None`.
+/// `resolved` is the prefix directory as the file system resolves it now.
+fn prefix_of(plain: &Plain, home: &Path) -> Option<(Vec<String>, String, PathBuf)> {
     let words = &plain.words;
     if !PREFIX_COMMANDS.contains(&words[0].as_str()) {
         return None;
@@ -649,25 +779,56 @@ fn prefix_of(plain: &Plain, home: &Path) -> Option<(Vec<String>, String)> {
         });
     }
     let common = common?;
-    // `common[0]` is the root marker (`/` or `~`). Under home: at least two components
-    // below `~` (R1). Elsewhere: at least three below `/`, and never inside a broad root
-    // such as `/Volumes`, `/Users` (another user), `/opt` or `/private`.
+    // `common[0]` is the root marker (`/` or `~`).
     let prefix = if common[0] == "~" {
-        if common.len() < 3 {
-            return None;
-        }
         format!("~/{}/", common[1..].join("/"))
     } else {
-        if common.len() < 4 || BROAD_ROOTS.contains(&common[1].to_ascii_lowercase().as_str()) {
-            return None;
-        }
         format!("/{}/", common[1..].join("/"))
     };
+    if !prefix_depth_ok(&prefix, &home_forms) {
+        return None;
+    }
     let dir = expand(prefix.trim_end_matches('/'), home);
     if path_is_protected(&dir, home) {
         return None;
     }
-    Some((head, prefix))
+    // The prefix must be where it says it is: a symlink anywhere in it (or at it) would
+    // let the rule cover a different place later, or already now. A symlinked home is
+    // the one allowed indirection. Depth, broad roots and protected places are then
+    // judged again on the resolved form.
+    let resolved = resolve_prefix(&dir, home)?;
+    let resolved_text = resolved.to_str()?;
+    let real_home = canonical_lenient(home).unwrap_or_else(|| home.to_path_buf());
+    if !prefix_depth_ok(resolved_text, &home_forms)
+        || path_is_protected(&resolved, home)
+        || path_is_protected(&resolved, &real_home)
+    {
+        return None;
+    }
+    Some((head, prefix, resolved))
+}
+
+/// Depth rule (R1) for a prefix as text (`~/a/b/` or `/a/b/c/`): at least two components
+/// below the home directory; elsewhere at least three below `/`, and never inside a broad
+/// root such as `/Volumes`, `/Users` (another user), `/opt` or `/private`.
+fn prefix_depth_ok(prefix: &str, home_forms: &[Vec<String>]) -> bool {
+    let (root, parts) = split_root(prefix, home_forms);
+    if root == "~" {
+        parts.len() >= 2
+    } else {
+        parts.len() >= 3 && !BROAD_ROOTS.contains(&parts[0].to_ascii_lowercase().as_str())
+    }
+}
+
+/// `dir` as the file system resolves it, provided that is `dir` itself (or `dir` with a
+/// symlinked home replaced by its real path); `None` for any other symlink.
+fn resolve_prefix(dir: &Path, home: &Path) -> Option<PathBuf> {
+    let real = canonical_lenient(dir)?;
+    let expected = match dir.strip_prefix(home) {
+        Ok(rest) => canonical_lenient(home)?.join(rest),
+        Err(_) => dir.to_path_buf(),
+    };
+    (real == expected).then_some(real)
 }
 
 /// First components under which an absolute (non-home) prefix rule is never offered.
@@ -892,8 +1053,8 @@ mod tests {
         ]);
         // Three components below `/` outside a broad root is still fine.
         assert_eq!(
-            texts_of("rm -rf /tmp/a/b/x"),
-            ["Bash(rm -rf /tmp/a/b/x)", "Bash(rm -rf /tmp/a/b/:*)"]
+            texts_of("rm -rf /work/a/b/x"),
+            ["Bash(rm -rf /work/a/b/x)", "Bash(rm -rf /work/a/b/:*)"]
         );
     }
 
@@ -1028,8 +1189,173 @@ mod tests {
 
     #[test]
     fn a_relative_path_never_gets_a_prefix() {
-        assert_eq!(texts_of("rm build"), ["Bash(rm build)"]);
+        assert_eq!(texts_of("ls build"), ["Bash(ls build)"]);
         assert_eq!(texts_of("git push"), Vec::<String>::new());
+    }
+
+    // S-a: the rule ignores the directory it was granted in, so a file-changing command
+    // with a relative path argument gets no rule at all.
+    #[test]
+    fn a_file_changing_command_with_a_relative_path_gets_no_rule() {
+        for c in [
+            "rm build",
+            "rm -rf build",
+            "rm -rf /work/a/b/x build",
+            "rmdir out",
+            "mv a /work/b",
+            "mv /work/a b",
+            "cp a /work/b",
+            "cp /work/a b",
+            "touch x",
+            "mkdir -p out",
+            "mkdir out/sub",
+            "chmod 755 /work/a",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
+        }
+        // Absolute arguments are still fine, and so are relative ones to read-only commands.
+        assert_eq!(texts_of("cp /work/a /work/b"), ["Bash(cp /work/a /work/b)"]);
+        assert_eq!(texts_of("mv /work/a /work/b"), ["Bash(mv /work/a /work/b)"]);
+        assert_eq!(texts_of("ls build"), ["Bash(ls build)"]);
+    }
+
+    // M2: exact candidates come from an allowlist of command words. Every one of these
+    // used to be offered (the same text runs project code, or wraps another command).
+    #[test]
+    fn a_command_that_is_not_on_the_allowlist_gets_no_rule() {
+        for c in [
+            "pytest",
+            "pytest tests",
+            "jest",
+            "vitest run",
+            "eslint src",
+            "prettier --check src",
+            "tox",
+            "swift test",
+            "xcodebuild test",
+            "docker compose up",
+            "just build",
+            "rake test",
+            "bundle exec rspec",
+            "composer install",
+            "pre-commit run",
+            "terraform plan",
+            "brew bundle",
+            "pod install",
+            "deno run x",
+            "bun run x",
+            "tsx x",
+            "lua x",
+            "Rscript x",
+            "java x",
+            "awk -f x",
+            "sed -n 1p x",
+            "sqlite3 -init x",
+            "psql -f x",
+            "gh extension exec x",
+            "xcrun ls",
+            "taskpolicy ls",
+            "flock x ls",
+            "parallel ls",
+            "gtimeout 5 ls",
+            "genv ls",
+            "rsync a b",
+            "op run ls",
+            "aws-vault exec x",
+            "noglob tmux kill-server",
+            "noglob ssh host",
+            "nocorrect ssh host",
+            "ln -s /work/a /work/b",
+            "tar xf x",
+            "zip x y",
+            "curl x",
+            "wget x",
+            "chmod 755 /work/a",
+            "git status",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
+        }
+    }
+
+    #[test]
+    fn an_allowlisted_command_still_gets_an_exact_rule() {
+        for c in [
+            "grep foo /work/a",
+            "rg foo build",
+            "diff /work/a /work/b",
+            "echo hi",
+            "date",
+            "uname -a",
+            "sleep 1",
+            "jq . /work/a",
+            "ps aux",
+            "pgrep foo",
+            "df -h",
+            "tree build",
+            "lsof -i",
+        ] {
+            assert_eq!(texts_of(c), [format!("Bash({c})")], "{c:?}");
+        }
+    }
+
+    #[test]
+    fn tmux_anywhere_in_a_command_gets_no_rule() {
+        for c in ["echo tmux", "ls /work/tmux/a", "grep foo /work/TMUX"] {
+            assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
+        }
+    }
+
+    #[test]
+    fn apfs_volume_paths_never_get_a_rule() {
+        for c in [
+            "cat /.vol/1/2",
+            "ls /.vol/16777220/2",
+            "rm -rf /.vol/1/2/Users/x/y/z",
+            "ls /.VOL/1/2",
+            "echo x=/.vol/1/2",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
+        }
+    }
+
+    #[test]
+    fn words_starting_with_equals_or_percent_get_no_rule() {
+        for c in [
+            "ls =ls",
+            "echo =tmux",
+            "echo %1",
+            "printf %s x",
+            "ls /work/a =x",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
+        }
+    }
+
+    #[test]
+    fn a_bare_relative_protected_name_is_checked_like_a_path_under_it() {
+        let h = home();
+        for (command, cwd) in [
+            ("ls .ssh", Some(h.as_path())),
+            ("ls .ssh/x", Some(h.as_path())),
+            ("ls .aws", Some(h.as_path())),
+            ("cat .zshrc", Some(h.as_path())),
+            ("ls .ssh", None),
+            ("ls .git", Some(Path::new("/work/proj"))),
+        ] {
+            let req = cmd(command);
+            let reason = req.reason(None, &NoSettings);
+            assert!(
+                candidates(&req, &reason, &h, cwd).is_empty(),
+                "{command} in {cwd:?}"
+            );
+        }
+        // Not under a protected place: still offered.
+        let req = cmd("ls src");
+        let reason = req.reason(None, &NoSettings);
+        assert_eq!(
+            candidates(&req, &reason, &h, Some(&h.join("Code/p"))).len(),
+            1
+        );
     }
 
     #[test]
@@ -1140,12 +1466,12 @@ mod tests {
 
     #[test]
     fn an_exact_rule_matches_only_the_same_command() {
-        let r = rule_for("rm build", 0);
-        assert!(hit(&r, "rm build"));
-        assert!(hit(&r, " rm build "));
-        assert!(!hit(&r, "rm build -f"));
-        assert!(!hit(&r, "rm  build"));
-        assert!(!hit(&r, "rm build && curl x"));
+        let r = rule_for("ls build", 0);
+        assert!(hit(&r, "ls build"));
+        assert!(hit(&r, " ls build "));
+        assert!(!hit(&r, "ls build -f"));
+        assert!(!hit(&r, "ls  build"));
+        assert!(!hit(&r, "ls build && curl x"));
     }
 
     #[test]
@@ -1193,6 +1519,7 @@ mod tests {
             spec: Spec::PathPrefix {
                 head: vec!["rm".into(), "-rf".into()],
                 prefix: "~/Library/Caches/".into(),
+                resolved: caches.clone(),
             },
             ..SessionRule::exact_for_test("x", None)
         };
@@ -1204,6 +1531,156 @@ mod tests {
         assert!(!check("rm -rf ~/Library/Caches/escape/x"));
         assert!(!check("rm -rf ~/Library/Caches/escape"));
         assert!(!check("rm -rf ~/Library/Caches/docs/x"));
+    }
+
+    /// `prefix` candidate (index 1) for `command`, with `home`, if one is offered.
+    fn prefix_candidate(command: &str, home: &Path) -> Option<Candidate> {
+        let req = cmd(command);
+        let reason = req.reason(None, &NoSettings);
+        candidates(&req, &reason, home, None)
+            .into_iter()
+            .find(|c| c.kind == CandidateKind::PathPrefix)
+    }
+
+    fn rule_from(c: &Candidate) -> SessionRule {
+        SessionRule::from_candidate(c, None, 0, "r", "w")
+    }
+
+    fn matches_in(rule: &SessionRule, command: &str, home: &Path) -> bool {
+        matches(rule, &cmd(command), ReasonKind::AskRule, home, None)
+    }
+
+    // M1, the model repro: the prefix directory itself becomes a symlink to home after the
+    // rule was granted. The old matcher re-resolved the prefix and only checked the path
+    // was inside wherever it now pointed, so `<prefix>/Documents` matched.
+    #[test]
+    fn a_prefix_directory_that_becomes_a_symlink_ends_the_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let home = root.join("Users/me");
+        std::fs::create_dir_all(home.join("Code/proj/build/out")).unwrap();
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        let candidate = prefix_candidate("rm -rf ~/Code/proj/build/out", &home).expect("offered");
+        let rule = rule_from(&candidate);
+        assert!(matches_in(&rule, "rm -rf ~/Code/proj/build/out", &home));
+        assert!(matches_in(
+            &rule,
+            "rm -rf ~/Code/proj/build/Documents",
+            &home
+        ));
+
+        std::fs::rename(home.join("Code/proj/build"), root.join("old-build")).unwrap();
+        std::os::unix::fs::symlink("../..", home.join("Code/proj/build")).unwrap();
+
+        assert!(!matches_in(
+            &rule,
+            "rm -rf ~/Code/proj/build/Documents",
+            &home
+        ));
+        assert!(!matches_in(&rule, "rm -rf ~/Code/proj/build/out", &home));
+        // Swapped for a symlink to a harmless sibling: still not the same place.
+        std::fs::remove_file(home.join("Code/proj/build")).unwrap();
+        std::fs::create_dir_all(home.join("Code/proj/other/out")).unwrap();
+        std::os::unix::fs::symlink(home.join("Code/proj/other"), home.join("Code/proj/build"))
+            .unwrap();
+        assert!(!matches_in(&rule, "rm -rf ~/Code/proj/build/out", &home));
+    }
+
+    // M1 at grant time: a symlink already inside the prefix path is refused outright.
+    #[test]
+    fn a_prefix_with_a_symlink_in_it_is_not_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let home = root.join("Users/me");
+        std::fs::create_dir_all(home.join("Documents/x")).unwrap();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere/c")).unwrap();
+        // /…/a/b -> home, at the prefix directory.
+        std::os::unix::fs::symlink(&home, root.join("a/b")).unwrap();
+        let command = format!("rm -rf {}/a/b/Documents/x", root.display());
+        assert!(prefix_candidate(&command, &home).is_none(), "{command}");
+        let command = format!("rm -rf {}/a/b/c", root.display());
+        assert!(prefix_candidate(&command, &home).is_none(), "{command}");
+        // A symlink at an intermediate component.
+        std::os::unix::fs::symlink(root.join("elsewhere"), root.join("l")).unwrap();
+        let command = format!("rm -rf {}/l/c/d", root.display());
+        assert!(prefix_candidate(&command, &home).is_none(), "{command}");
+        // A plain directory in the same place is fine.
+        std::fs::create_dir_all(root.join("a/plain/q")).unwrap();
+        let command = format!("rm -rf {}/a/plain/q/z", root.display());
+        let c = prefix_candidate(&command, &home).expect("a real directory is offered");
+        assert_eq!(c.spec_resolved(), Some(root.join("a/plain/q")));
+    }
+
+    // A symlinked home is the one allowed indirection, and the rule stays tied to it.
+    #[test]
+    fn a_symlinked_home_may_carry_a_prefix_but_only_while_it_points_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let real = root.join("real");
+        let other = root.join("other");
+        std::fs::create_dir_all(real.join("Library/Caches/foo")).unwrap();
+        std::fs::create_dir_all(other.join("Library/Caches/foo")).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let c = prefix_candidate("rm -rf ~/Library/Caches/foo/x", &link).expect("offered");
+        assert_eq!(c.spec_resolved(), Some(real.join("Library/Caches/foo")));
+        let rule = rule_from(&c);
+        assert!(matches_in(&rule, "rm -rf ~/Library/Caches/foo/y", &link));
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert!(!matches_in(&rule, "rm -rf ~/Library/Caches/foo/y", &link));
+    }
+
+    // S-e: a dangling final symlink used to fall back to its parent and so match.
+    #[test]
+    fn a_dangling_symlink_does_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let caches = home.join("Library/Caches/foo");
+        std::fs::create_dir_all(&caches).unwrap();
+        let candidate = prefix_candidate("rm -rf ~/Library/Caches/foo/a", &home).expect("offered");
+        let rule = rule_from(&candidate);
+        std::os::unix::fs::symlink(home.join(".ssh/authorized_keys"), caches.join("dangling"))
+            .unwrap();
+        std::os::unix::fs::symlink("loop", caches.join("loop")).unwrap();
+        assert!(matches_in(
+            &rule,
+            "rm -rf ~/Library/Caches/foo/fresh",
+            &home
+        ));
+        assert!(!matches_in(
+            &rule,
+            "rm -rf ~/Library/Caches/foo/dangling",
+            &home
+        ));
+        assert!(!matches_in(
+            &rule,
+            "rm -rf ~/Library/Caches/foo/loop",
+            &home
+        ));
+    }
+
+    // S-d: a file system that does not answer is no match, not a stall.
+    #[test]
+    fn a_match_that_takes_too_long_is_no_match() {
+        use std::time::Duration;
+        assert_eq!(bounded(Duration::from_millis(2000), || 7), Some(7));
+        let slow = bounded(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(1500));
+            true
+        });
+        assert_eq!(slow, None);
+        let rule = rule_for("ls build", 0);
+        let req = cmd("ls build");
+        assert!(matches_within(
+            Duration::from_secs(5),
+            &rule,
+            &req,
+            ReasonKind::AskRule,
+            &home(),
+            None
+        ));
     }
 
     #[test]

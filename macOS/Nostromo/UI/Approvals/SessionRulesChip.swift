@@ -87,9 +87,23 @@ final class SessionRuleGesture {
 
     var hasSelection: Bool { selection != nil }
 
+    /// What `HumanGesture.permit` recorded for the last gesture it let through (source pid and state,
+    /// as `pid 123, state 1`), for the log. The wire has no field for it (follow-up).
+    private(set) var lastProvenance: String = "none"
+
+    private func note(_ verdict: HumanGestureVerdict) -> HumanGestureRefusal? {
+        switch verdict {
+        case .human(let pid, let src):
+            lastProvenance = "event source pid \(pid.map(String.init) ?? "none"), state \(src.map(String.init) ?? "none")"
+            return nil
+        case .refused(let reason):
+            return reason
+        }
+    }
+
     /// Step 1: the human chose a rule from the menu of `control`. Records the event it was chosen with.
     func select(event: NSEvent?, control: NSView) -> Verdict {
-        if case .refused(let reason) = permit(event, control, true) {
+        if let reason = note(permit(event, control, true)) {
             selection = nil
             return .refused(.notHuman(reason))
         }
@@ -99,7 +113,7 @@ final class SessionRuleGesture {
 
     /// Step 2: the human pressed the confirm button. On a refusal nothing changes (the selection stays).
     func confirm(event: NSEvent?, button: NSView) -> Verdict {
-        if case .refused(let reason) = permit(event, button, false) { return .refused(.notHuman(reason)) }
+        if let reason = note(permit(event, button, false)) { return .refused(.notHuman(reason)) }
         guard let pick = selection else { return .refused(.noSelection) }
         let now = uptime()
         if now - pick.handlerTime > Self.selectionLifetime {

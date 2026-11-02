@@ -624,6 +624,7 @@ final class ApprovalCardView: NSView {
     func selectSessionRule(_ candidate: ApprovalSessionRuleCandidate, control: NSView) -> Bool {
         switch gesture.select(event: currentEvent(), control: control) {
         case .allowed:
+            cardLog.notice("approval \(self.request.id, privacy: .public) allow_session rule picked by a user gesture (\(self.gesture.lastProvenance, privacy: .public))")
             selectedCandidate = candidate
             selectionGeneration += 1
             let generation = selectionGeneration
@@ -645,6 +646,7 @@ final class ApprovalCardView: NSView {
         guard canAllowSession, let candidate = selectedCandidate else { return }
         switch gesture.confirm(event: currentEvent(), button: sender) {
         case .allowed:
+            cardLog.notice("approval \(self.request.id, privacy: .public) allow_session confirmed by a user gesture (\(self.gesture.lastProvenance, privacy: .public))")
             submit(ApprovalDecisionWire(kind: .allowSession, candidateId: candidate.id, ruleText: candidate.ruleText))
             clearSessionSelection()
         case .refused(let refusal):
