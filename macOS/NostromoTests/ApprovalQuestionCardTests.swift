@@ -138,7 +138,7 @@ enum QuestionTestViews {
 
 // MARK: - The form on its own
 
-final class ApprovalQuestionFormViewTests: XCTestCase {
+final class ApprovalQuestionFormViewTests: MouseQueueTestCase {
 
     typealias Q = QuestionTestRequests
 
@@ -496,7 +496,7 @@ final class ApprovalQuestionFormViewTests: XCTestCase {
 
 // MARK: - The card around it
 
-final class ApprovalQuestionCardTests: XCTestCase {
+final class ApprovalQuestionCardTests: MouseQueueTestCase {
 
     typealias Q = QuestionTestRequests
 
@@ -1868,7 +1868,7 @@ final class ApprovalQuestionCardTests: XCTestCase {
 /// can be thousands of characters, with or without a place to wrap. None of it may widen the card, push a row out of
 /// it, make the card taller than the pane lets it be, or (in a window that cannot grow) make the window's content
 /// wider than the window.
-final class ApprovalQuestionLayoutTests: XCTestCase {
+final class ApprovalQuestionLayoutTests: MouseQueueTestCase {
 
     typealias Q = QuestionTestRequests
 
@@ -2214,7 +2214,7 @@ final class ApprovalQuestionLayoutTests: XCTestCase {
 
 // MARK: - The store
 
-final class ApprovalQuestionStoreTests: XCTestCase {
+final class ApprovalQuestionStoreTests: MouseQueueTestCase {
 
     private func make() -> (ApprovalStore, ApprovalRecorder) {
         let recorder = ApprovalRecorder()

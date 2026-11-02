@@ -150,7 +150,7 @@ private let ba6cHostileDescriptions: [String] = {
 
 // MARK: - Tests
 
-final class BackgroundRowMarkTests: XCTestCase {
+final class BackgroundRowMarkTests: MouseQueueTestCase {
 
     private var w: BA6cWorld!
 
@@ -967,7 +967,7 @@ func ba6cFirstActivityKey(_ turn: ChatTurn) -> String? {
 /// one with three calls after its message (a group row; `vis_*`, turn 10), one more of the same shape (`grp_*`,
 /// turn 20), one whose two calls fold into an activity row (`act_*`, turn 30) and a last one with a trailing group
 /// (`end_*`, turn 39).
-final class BackgroundRowMarkRevealTests: XCTestCase {
+final class BackgroundRowMarkRevealTests: MouseQueueTestCase {
 
     private final class FixedWindow: NSWindow {
         override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }

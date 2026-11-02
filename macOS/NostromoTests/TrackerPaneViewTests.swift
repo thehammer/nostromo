@@ -432,7 +432,7 @@ enum TrackerPaneFx {
 
 // MARK: - Tests
 
-final class TrackerPaneViewTests: XCTestCase {
+final class TrackerPaneViewTests: MouseQueueTestCase {
 
     private typealias Fx = TrackerPaneFx
 
@@ -1353,7 +1353,7 @@ final class TrackerPaneViewTests: XCTestCase {
 // move to a line of their own below it, inside the row, so the text always has room and the window
 // never has to grow. Everything is read from the frames the pane gives the row's views.
 
-final class TrackerRowLayoutTests: XCTestCase {
+final class TrackerRowLayoutTests: MouseQueueTestCase {
 
     private typealias Fx = TrackerPaneFx
 
@@ -1585,7 +1585,7 @@ final class TrackerRowLayoutTests: XCTestCase {
 // layout that went quadratic, not to benchmark. The measured seconds are printed so the CI log shows
 // how close it is.
 
-final class TrackerLargeBoardTests: XCTestCase {
+final class TrackerLargeBoardTests: MouseQueueTestCase {
 
     private typealias Fx = TrackerPaneFx
 
@@ -1700,7 +1700,7 @@ final class TrackerLargeBoardTests: XCTestCase {
 // tests document both. They read `tests/fixtures/tracker/hostile-text.txt` (NAME<TAB>PAYLOAD per line,
 // '#' comments, escapes \e \a \r \\ \u{HEX}), the same file the Rust tests read.
 
-final class TrackerHostileTextTests: XCTestCase {
+final class TrackerHostileTextTests: MouseQueueTestCase {
 
     private typealias Fx = TrackerPaneFx
 
@@ -1882,7 +1882,7 @@ final class TrackerHostileTextTests: XCTestCase {
 
 // MARK: - The clock only runs while the pane can be seen (N5)
 
-final class TrackerPaneClockTests: XCTestCase {
+final class TrackerPaneClockTests: MouseQueueTestCase {
 
     private typealias Fx = TrackerPaneFx
 

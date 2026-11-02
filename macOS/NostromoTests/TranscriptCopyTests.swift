@@ -67,7 +67,7 @@ private func makeWindow(_ size: NSSize = NSSize(width: 700, height: 600)) -> NSW
 
 // MARK: - ToolCallData.fullCommand
 
-final class ToolCallFullCommandTests: XCTestCase {
+final class ToolCallFullCommandTests: MouseQueueTestCase {
 
     func testBashReturnsCommandVerbatimNotJSONEscaped() {
         XCTAssertGreaterThan(trickyCommand.count, 80)
@@ -99,7 +99,7 @@ final class ToolCallFullCommandTests: XCTestCase {
 
 // MARK: - Selectability
 
-final class TranscriptSelectabilityTests: XCTestCase {
+final class TranscriptSelectabilityTests: MouseQueueTestCase {
 
     func testToolCallSummaryLabelIsSelectable() {
         let data = bashData()
@@ -127,7 +127,7 @@ final class TranscriptSelectabilityTests: XCTestCase {
 
 // MARK: - Copy menu & tooltip
 
-final class ToolCallCopyMenuTests: XCTestCase {
+final class ToolCallCopyMenuTests: MouseQueueTestCase {
 
     private func makeView(_ data: ToolCallData) -> (ToolCallView, NSPasteboard) {
         let view = ToolCallView(data: data)
@@ -212,7 +212,7 @@ final class ToolCallCopyMenuTests: XCTestCase {
 /// A selectable label that owns the field editor answers the click itself, so
 /// these tests hit-test like AppKit does instead of calling `menu(for:)` on the
 /// row directly.
-final class ToolCallContextMenuReachabilityTests: XCTestCase {
+final class ToolCallContextMenuReachabilityTests: MouseQueueTestCase {
 
     private struct Row {
         let window: NSWindow
@@ -294,7 +294,7 @@ final class ToolCallContextMenuReachabilityTests: XCTestCase {
 
 // MARK: - Layout unchanged
 
-final class ToolCallLayoutUnchangedTests: XCTestCase {
+final class ToolCallLayoutUnchangedTests: MouseQueueTestCase {
 
     func testInputFullDoesNotAffectRowSize() {
         let short = "ls -la"
@@ -359,7 +359,7 @@ private func makeTranscript(containing views: [NSView], width: CGFloat = 400) ->
     return scroll
 }
 
-final class TranscriptFocusPolicyTests: XCTestCase {
+final class TranscriptFocusPolicyTests: MouseQueueTestCase {
 
     private struct Pane {
         let window: NSWindow
@@ -531,7 +531,7 @@ final class TranscriptFocusPolicyTests: XCTestCase {
 
 // MARK: - Selection survival
 
-final class TranscriptSelectionSurvivalTests: XCTestCase {
+final class TranscriptSelectionSurvivalTests: MouseQueueTestCase {
 
     private let paragraph = "A paragraph of assistant text that the operator wants to copy."
 
@@ -718,7 +718,7 @@ private final class FlippedTestView: NSView {
 /// The group row's copy surface. A collapsed group hides every command it ran, so Copy
 /// Commands has to hand the operator all of them, complete, without expanding. Nothing here
 /// touches the general pasteboard: the row's pasteboard is injected.
-final class ToolGroupCopyTests: XCTestCase {
+final class ToolGroupCopyTests: MouseQueueTestCase {
 
     private typealias F = FoldFixtures
 

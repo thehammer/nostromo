@@ -31,7 +31,7 @@ final class TrackerTestMouseButton {
     var isDown = false
 }
 
-final class TrackerRowHoldMouseDownTests: XCTestCase {
+final class TrackerRowHoldMouseDownTests: MouseQueueTestCase {
 
     private typealias Hold = TrackerHoldBoard
     private typealias Fx = TrackerHoldFx
