@@ -157,7 +157,6 @@ enum AppControlMouse {
         }
         queued.append(up)
         for e in queued { NSApp.postEvent(e, atStart: false) }
-        NSLog("DIAGMOUSE drag win=%ld num=%ld", window.windowNumber, number)
         window.sendEvent(down)
         deliverQueuedMouseEvents(to: window, eventNumber: number)
     }
@@ -177,7 +176,6 @@ enum AppControlMouse {
             if e.windowNumber == window.windowNumber && e.eventNumber == eventNumber {
                 window.sendEvent(e)
             } else {
-                NSLog("DIAGMOUSE foreign win=%ld/%ld num=%ld/%ld type=%ld", e.windowNumber, window.windowNumber, e.eventNumber, eventNumber, e.type.rawValue)
                 foreign.append(e)
             }
         }

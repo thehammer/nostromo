@@ -205,7 +205,7 @@ mac-test:
 	  -test-timeouts-enabled YES -default-test-execution-time-allowance $(MAC_TEST_ALLOWANCE) \
 	  -maximum-test-execution-time-allowance $(MAC_TEST_MAX_ALLOWANCE) test \
 	  2>&1 | tee build/mac-test-full.log \
-	  | grep --line-buffered -E "error:|Executed [0-9]+ tests|Test Case .* failed|\*\* TEST|MEMORY-CAPTURE-COST|exceeded its execution time|DIAGMOUSE"
+	  | grep --line-buffered -E "error:|Executed [0-9]+ tests|Test Case .* failed|\*\* TEST|MEMORY-CAPTURE-COST|exceeded its execution time"
 
 ## Measure the bounded-transcript acceptance criteria against a Release build.
 ## Takes several minutes; drives synthetic traffic through the real code path.
