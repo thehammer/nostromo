@@ -17,7 +17,7 @@ import AppKit
 //
 // Driven for real: a real sheet window attached to a real (off-screen) parent window, real mouse events.
 
-final class StagingConfirmSheetTests: XCTestCase {
+final class StagingConfirmSheetTests: MouseQueueTestCase {
 
     private var rigs: [StagingRig] = []
 

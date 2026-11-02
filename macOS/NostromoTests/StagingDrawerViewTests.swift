@@ -196,7 +196,7 @@ fileprivate enum StagingAX {
 
 // MARK: - Tests
 
-final class StagingDrawerViewTests: XCTestCase {
+final class StagingDrawerViewTests: MouseQueueTestCase {
 
     private var rigs: [StagingRig] = []
     private var hosts: [StagingDrawerHost] = []
