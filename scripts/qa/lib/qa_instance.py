@@ -165,7 +165,7 @@ def qa_markers(qa_root=None):
     """Byte strings that no line of the user's own audit log may carry: only a QA run writes them."""
     markers = {
         "`FIXTURE:`": b"FIXTURE:",
-        "`WAKE:`": b"WAKE:",
+        "`WAKE:basic:`": b"WAKE:basic:",
         "the QA bundle id": QA_BUNDLE_ID.encode(),
     }
     if qa_root:

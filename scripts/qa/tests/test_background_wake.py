@@ -56,7 +56,7 @@ class WakeScriptTest(QATestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         verdicts = self.verdicts(run)
         self.assertNotIn("FAIL", verdicts.values())
-        for k in (1, 2, 3, 4):
+        for k in (1, 2, 3, 4, 5):
             for part in ("anchor-before", "marker", "reply", "anchor-after"):
                 self.assertEqual(verdicts["wake-%d-%s" % (k, part)], "PASS")
         for name in ("raw-notification", "event-sentinel", "result-sentinel", "bidi-override", "hangul-filler"):
@@ -117,11 +117,37 @@ class WakeScriptTest(QATestCase):
         self.assertEqual(v["absent-bidi-override"], "FAIL")
         self.assertNotIn("‮", run.stdout)
 
+    def test_the_hostile_title_is_proven_drawn_sanitised_before_the_absence_checks_count(self):
+        run = self.go()
+        self.assertEqual(self.verdicts(run)["wake-3-marker"], "PASS")
+        self.assertIn('marker text shown: ⟲ Shell: failed "qa-fail"', run.stdout)
+        # Without the sanitised title in the window the absence checks prove nothing: the run must FAIL.
+        run = self.go(wake={"drop_texts": ["qa-fail"]})
+        self.assertEqual(run.returncode, 1)
+        self.assertEqual(self.verdicts(run)["wake-3-marker"], "FAIL")
+        self.assertEqual(self.verdicts(run)["absent-bidi-override"], "PASS")
+
+    def test_the_label_checks_run_right_after_wake_1_not_after_the_last_wake(self):
+        run = self.go()
+        order = [ln.split(":")[0].split(" ", 1)[1] for ln in run.stdout.splitlines()
+                 if ln.startswith(("PASS ", "FAIL "))]
+        self.assertLess(order.index("ax-row-label"), order.index("wake-2-anchor-before"))
+        self.assertLess(order.index("ax-marker-label"), order.index("wake-2-anchor-before"))
+        self.assertGreater(order.index("ax-marker-label"), order.index("wake-1-anchor-after"))
+
+    def test_checks_on_old_content_say_the_window_may_be_too_small(self):
+        run = self.go(wake={"drop_texts": ["Background task", "Background Monitor"]})
+        self.assertEqual(run.returncode, 1)
+        fails = [ln for ln in run.stdout.splitlines() if ln.startswith(("FAIL ax-", "FAIL marker-"))]
+        self.assertEqual(len(fails), 2, run.stdout)
+        for ln in fails:
+            self.assertIn("scrolled out of view: enlarge the QA window", ln)
+
     def test_a_missing_marker_fails(self):
         run = self.go(wake={"drop_texts": ["3 background"]})
         self.assertEqual(run.returncode, 1)
-        self.assertEqual(self.verdicts(run)["wake-4-marker"], "FAIL")
-        self.assertEqual(self.verdicts(run)["wake-3-marker"], "PASS")
+        self.assertEqual(self.verdicts(run)["wake-5-marker"], "FAIL")
+        self.assertEqual(self.verdicts(run)["wake-4-marker"], "PASS")
 
     def test_escape_that_does_not_close_the_window_is_inconclusive_not_fail(self):
         run = self.go(wake={"escape_ignored": True})
@@ -160,6 +186,18 @@ class WakeScriptTest(QATestCase):
         self.assertEqual(run.calls, [])
         self.assertFalse(os.path.exists(os.path.join(run.root, "qa-root", "instance.log")))
 
+    def test_refuses_when_a_real_model_binary_is_configured(self):
+        run = self.go(env={"NOSTROMO_QA_CLAUDE_BIN": "/usr/local/bin/claude"})
+        self.assertEqual(run.returncode, 2)
+        self.assertIn("NOSTROMO_QA_CLAUDE_BIN", run.stderr)
+        self.assertIn("spend tokens", run.stderr)
+        self.assertEqual(run.calls, [])
+        self.assertFalse(os.path.exists(os.path.join(run.root, "qa-root", "instance.log")))
+
+    def test_an_empty_real_model_variable_is_not_a_refusal(self):
+        run = self.go(env={"NOSTROMO_QA_CLAUDE_BIN": ""})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
     def test_a_socket_inside_a_qa_root_is_accepted_but_never_used(self):
         run = self.go(env={"NOSTROMO_APP_CONTROL_SOCKET": "@ROOT@/qa-root/app-control.sock"})
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
@@ -178,8 +216,9 @@ class HelperTest(unittest.TestCase):
     def test_markers(self):
         self.assertEqual(bw.MARKERS[1], '⟲ Monitor: new output "qa-ticker"')
         self.assertEqual(bw.MARKERS[2], '⟲ Shell: completed "qa-sleep 60"')
-        self.assertEqual(bw.MARKERS[3], "⟲ 2 background events")
-        self.assertEqual(bw.MARKERS[4], "⟲ 3 background events")
+        self.assertEqual(bw.MARKERS[3], '⟲ Shell: failed "qa-fail"')
+        self.assertEqual(bw.MARKERS[4], "⟲ 2 background events")
+        self.assertEqual(bw.MARKERS[5], "⟲ 3 background events")
 
     def test_anchor_checks(self):
         self.assertTrue(bw.anchor_following({"following": True, "bottomOffsetPt": 12}))
