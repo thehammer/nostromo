@@ -34,7 +34,19 @@ trap cleanup EXIT
 sock="$root/app-control.sock"
 
 verdict=PASS
+# A fresh window is briefly invisible (alpha 0): re-read for up to 45 s before calling it a locked display.
+# A fresh window is briefly invisible (alpha 0): re-read for up to 45 s before calling it a locked display.
 windows="$("$app" --socket "$sock" windows)"
+for _ in $(seq 1 90); do
+  grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$windows" || break
+  sleep 0.5
+  windows="$("$app" --socket "$sock" windows)"
+done
+for _ in $(seq 1 90); do
+  grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$windows" || break
+  sleep 0.5
+  windows="$("$app" --socket "$sock" windows)"
+done
 echo "$windows"
 if grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$windows"; then
   verdict=INCONCLUSIVE

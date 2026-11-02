@@ -149,6 +149,21 @@ class WakeScriptTest(QATestCase):
         self.assertEqual(self.verdicts(run)["wake-5-marker"], "FAIL")
         self.assertEqual(self.verdicts(run)["wake-4-marker"], "PASS")
 
+    def test_marker_1_is_clicked_and_closed_right_after_wake_1_before_wake_2(self):
+        run = self.go()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        with open(os.path.join(run.app_dir, "wake-state.json")) as f:
+            # transcript-anchor reads so far at the time of each click: 2 = wake 1 done, wake 2 not begun.
+            self.assertEqual(json.load(f)["marker_clicks"], [2])
+        order = [ln.split(":")[0].split(" ", 1)[1] for ln in run.stdout.splitlines()
+                 if ln.startswith(("PASS ", "FAIL ", "INCONCLUSIVE "))]
+        self.assertGreater(order.index("marker-click-opens-window"), order.index("wake-1-anchor-after"))
+        self.assertLess(order.index("escape-closes-window"), order.index("wake-2-anchor-before"))
+
+    def test_a_window_that_is_hidden_at_first_and_then_visible_passes(self):
+        run = self.go(wake={"hidden_reads": 1})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
     def test_escape_that_does_not_close_the_window_is_inconclusive_not_fail(self):
         run = self.go(wake={"escape_ignored": True})
         self.assertEqual(run.returncode, 0, run.stdout)

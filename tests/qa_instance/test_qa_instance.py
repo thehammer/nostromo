@@ -208,8 +208,33 @@ class SnapshotTests(unittest.TestCase):
         before = dict(self.before, control_socket_inode=qa.socket_inode(p) + 12345)
         self.assertTrue(any("app-control.sock" in x for x in qa.compare_snapshots(before, self.snap())))
 
-    def test_changed_defaults_are_reported(self):
-        self.assertTrue(qa.compare_snapshots(self.before, self.snap(defaults="{ key = other; }")))
+    def test_changed_defaults_without_a_qa_marker_pass_with_a_note(self):
+        notes = []
+        probs = qa.compare_snapshots(self.before, self.snap(defaults="{ key = other; }"), notes=notes)
+        self.assertEqual(probs, [])
+        self.assertEqual(notes, ["real app wrote its preferences during the run; no QA marker found"])
+
+    def test_unchanged_defaults_pass_without_a_note(self):
+        notes = []
+        self.assertEqual(qa.compare_snapshots(self.before, self.snap(), notes=notes), [])
+        self.assertEqual(notes, [])
+
+    def test_changed_defaults_with_a_qa_marker_are_reported_by_kind_not_content(self):
+        qa_root = "/tmp/nostromo-qa.AbC123"
+        secret = "SECRET-VALUE"
+        for text, kind in (
+            ("{ path = \"%s/home\"; x = %s; }" % (qa_root, secret), "the QA root path"),
+            ("{ id = \"com.hammer.nostromo.qa\"; x = %s; }" % secret, "the QA bundle id"),
+            ("{ tag = \"cody-qa-1234\"; x = %s; }" % secret, "QA focus tag"),
+            ("{ dir = \"nostromo-qa.AbC123\"; x = %s; }" % secret, "temp directory name"),
+            ("{ f = \".nostromo-qa-root\"; x = %s; }" % secret, "root marker file name"),
+        ):
+            with self.subTest(kind=kind):
+                notes = []
+                probs = qa.compare_snapshots(self.before, self.snap(defaults=text, qa_root=qa_root), notes=notes)
+                self.assertTrue(any("defaults export" in p and kind in p for p in probs), probs)
+                self.assertNotIn(secret, " ".join(probs))
+                self.assertEqual(notes, [])
 
     def test_users_daemon_vanishing_is_reported(self):
         after = self.snap(ps="  2 /A/Nostromo.app/Contents/MacOS/Nostromo\n")

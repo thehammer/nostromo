@@ -36,6 +36,8 @@ if [ -n "${NOSTROMO_QA_CLAUDE_BIN:-}" ]; then
   exit 2
 fi
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/qa-visible.sh
+. "$here/lib/qa-visible.sh"
 repo="$(cd "$here/../.." && pwd)"
 instance="$here/qa-instance.sh"
 app="$repo/bin/nostromo-app"
@@ -92,9 +94,7 @@ stop_instance() {
   fi
 }
 require_visible() {
-  local windows
-  windows="$(ctl windows)"
-  if grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$windows" || [ -z "$windows" ] || [ "$windows" = "[]" ]; then
+  if ! qa_wait_visible; then
     echo "INCONCLUSIVE: the QA window is not visible (display locked or asleep)"
     stop_instance
     echo "RESULT: INCONCLUSIVE"

@@ -21,6 +21,8 @@
 # shellcheck disable=SC2329  # functions handed to poll / ok_if / the EXIT trap are not "called" by name
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/qa-visible.sh
+. "$here/lib/qa-visible.sh"
 repo="$(cd "$here/../.." && pwd)"
 instance="$here/qa-instance.sh"
 app="$repo/bin/nostromo-app"
@@ -88,8 +90,7 @@ root="$(sed -n 's/^QA_ROOT=//p' <<<"$out")"
 sock="$root/app-control.sock"
 audit="$root/home/.nostromo/audit/terminal.jsonl"
 
-windows="$(ctl windows)"
-if [ -z "$windows" ] || [ "$windows" = "[]" ] || grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$windows"; then
+if ! qa_wait_visible; then
   echo "INCONCLUSIVE: the QA window is not visible (display locked or asleep)"
   echo "RESULT: INCONCLUSIVE"
   exit 3

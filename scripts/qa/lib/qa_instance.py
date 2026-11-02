@@ -242,16 +242,29 @@ def state_file_problems(rel, old, nostromo_dir, qa_root=None):
             for kind, marker in markers.items() if marker in new_bytes]
 
 
-def compare_snapshots(before, after, approvals_dir=None, qa_root=None, nostromo_dir=None):
+def defaults_markers(defaults_text, qa_root=None):
+    """The kinds of QA marker an exported `defaults` text carries (names only, never content): the QA root path,
+    the QA bundle id, the QA focus tags and session title, the run's temp directory name, the root marker file."""
+    data = defaults_text.encode()
+    markers = dict(qa_markers(qa_root), **QA_NAME_MARKERS)
+    markers["the QA root marker file name"] = ROOT_MARKER.encode()
+    if qa_root:
+        markers["the run's temp directory name"] = os.path.basename(qa_root.rstrip("/")).encode()
+    return sorted(kind for kind, marker in markers.items() if marker and marker in data)
+
+
+def compare_snapshots(before, after, approvals_dir=None, qa_root=None, nostromo_dir=None, notes=None):
     """Problems between two guard snapshots (see `take_snapshot`); empty means isolated.
 
-    Files, the control-socket inode and `defaults` must be identical, and so must the approvals
+    Files and the control-socket inode must be identical, and so must the approvals
     listing apart from the daemon's audit logs: the user's real daemon appends to its dated
     `audit-*.jsonl` during a run, which is allowed when it is append-only and carries no QA marker
     (needs `approvals_dir`, the user's real approvals directory, to inspect; without it any audit
     growth is reported). Other top-level `*.json` files and `logs/*.log` of the user's `~/.nostromo` may change
     (their real app writes them) unless the new bytes carry a QA marker; that needs `nostromo_dir`, the user's
-    real ~/.nostromo (without it any change is reported). `focuses.json` stays strict. The user's own nostromd/Nostromo pids must survive; no new `claude` (or
+    real ~/.nostromo (without it any change is reported). `focuses.json` stays strict. The user's real app also
+    rewrites its `defaults` domain during a run: a changed hash is only a problem when the new export carries a QA
+    marker (`defaults_markers` in the snapshot); otherwise a NOTE line is appended to `notes` (a list, if given). The user's own nostromd/Nostromo pids must survive; no new `claude` (or
     other monitored) process may appear."""
     problems = []
     for name, b in before["files"].items():
@@ -280,7 +293,12 @@ def compare_snapshots(before, after, approvals_dir=None, qa_root=None, nostromo_
     if before["control_socket_inode"] != after["control_socket_inode"]:
         problems.append("~/.nostromo/app-control.sock inode changed (the user's socket was replaced)")
     if before["defaults"] != after["defaults"]:
-        problems.append(f"`defaults export {USER_BUNDLE_ID}` changed")
+        found = after.get("defaults_markers")
+        if found:
+            problems.append(f"`defaults export {USER_BUNDLE_ID}` changed and mentions {', '.join(found)} "
+                            "(the QA run wrote into the user's real preferences)")
+        elif notes is not None:
+            notes.append("real app wrote its preferences during the run; no QA marker found")
     bp, ap = before["processes"], after["processes"]
     for name in ("nostromd", "Nostromo"):
         for pid in bp.get(name, []):
@@ -306,6 +324,7 @@ def take_snapshot(user_home, ps_text, defaults_text, qa_root=None):
         "state_files": state_files(nostromo),
         "control_socket_inode": socket_inode(os.path.join(nostromo, CONTROL_SOCKET)),
         "defaults": hashlib.sha256(defaults_text.encode()).hexdigest() if defaults_text else None,
+        "defaults_markers": defaults_markers(defaults_text or "", qa_root),
         "processes": process_view(parse_processes(ps_text, qa_root)),
     }
 
@@ -641,7 +660,11 @@ def cmd_start(args):
                  60, "the QA app's control socket")
     except BaseException as e:
         teardown(qa_root, state)
-        problems = compare_snapshots(before, user_snapshot(qa_root), user_approvals_dir(), qa_root, user_nostromo_dir())
+        notes = []
+        problems = compare_snapshots(before, user_snapshot(qa_root), user_approvals_dir(), qa_root, user_nostromo_dir(),
+                                     notes=notes)
+        for n in notes:
+            print(f"NOTE: {n}", file=sys.stderr)
         print(f"start failed: {e}", file=sys.stderr)
         for p in problems:
             print(f"ISOLATION FAILURE: {p}", file=sys.stderr)
@@ -691,7 +714,11 @@ def cmd_stop(args):
     state = load_state(qa_root)
     teardown(qa_root, state)
     problems = report_qa_mother(qa_root)
-    problems += compare_snapshots(state["before"], user_snapshot(qa_root), user_approvals_dir(), qa_root, user_nostromo_dir())
+    notes = []
+    problems += compare_snapshots(state["before"], user_snapshot(qa_root), user_approvals_dir(), qa_root, user_nostromo_dir(),
+                                  notes=notes)
+    for n in notes:
+        print(f"NOTE: {n}")
     # An isolation failure keeps the root: its logs are the evidence (the caller prints them).
     keep = os.environ.get("KEEP") == "1" or bool(problems)
     if not keep:
@@ -701,7 +728,7 @@ def cmd_stop(args):
             print(f"ISOLATION FAILURE: {p}", file=sys.stderr)
         print(f"QA root kept for debugging: {qa_root} (delete it when done)", file=sys.stderr)
         sys.exit(1)
-    print("isolation guard: PASS (user's files, approvals dir, control socket, defaults and processes unchanged)")
+    print("isolation guard: PASS (user's files, approvals dir, control socket and processes unchanged; no QA marker in defaults)")
 
 
 def main(argv):

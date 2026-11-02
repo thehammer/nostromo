@@ -24,6 +24,8 @@
 # shellcheck disable=SC2329  # the predicates below are called through wait_for
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/qa-visible.sh
+. "$here/lib/qa-visible.sh"
 instance="$here/qa-instance.sh"
 restart="$here/lib/terminal_restart.py"
 app="$here/../../bin/nostromo-app"
@@ -56,9 +58,7 @@ root="$(sed -n 's/^QA_ROOT=//p' <<<"$out")"
 sock="$root/app-control.sock"
 
 require_visible() {
-  local windows
-  windows="$(ctl windows)"
-  if grep -Eq '"(alpha)": *0([^.0-9]|$)|"visible": *false' <<<"$windows" || [ -z "$windows" ] || [ "$windows" = "[]" ]; then
+  if ! qa_wait_visible; then
     echo "INCONCLUSIVE: the QA window is not visible (display locked or asleep)"
     echo "RESULT: INCONCLUSIVE"
     echo "Manual checklist: see the PR body (two windows mirror, relaunch with top running, daemon stopped overlay)."
