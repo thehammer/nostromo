@@ -18,7 +18,7 @@ A candidate exists only for a **plain Bash command**:
 - The command is at most 300 bytes of ASCII words joined by **single spaces**, each byte in
   `[A-Za-z0-9_./~+=,:@%-]`. No quote, `$`, backtick, `; & | < > ( ) { } [ ] * ? ! # \`, tab, newline or non-ASCII
   byte, so compound commands, substitutions, redirections, globs and here-docs never get a rule.
-- The command word is a bare name (any word containing `/` gets nothing) **on the allowlist**. Everything else gets
+- The command word is a bare name, **exactly lowercase** (`CP`, `Rm` run the same programs on the Mac's case-insensitive file system; any such word, and any word containing `/`, gets nothing) **on the allowlist**. Everything else gets
   **Allow once only**, with no session candidate: test and task runners, package managers, interpreters, exec wrappers
   and anything that loads project files (`pytest jest make npm cargo git docker just xcodebuild sed awk find tar curl
   ln …`), shells, `sudo env xargs exec`, `ssh aws kubectl`, `tmux`, Nostromo's own binaries, and so on. The allowlist is
@@ -41,7 +41,7 @@ A candidate exists only for a **plain Bash command**:
 - No word is, or points inside, a protected place: `/`, `~`, `~/`, `~user`, `/etc`, `/private/etc`, `/System`, `/usr`,
   `/bin`, `/sbin`, `/Library`, `/Applications`, `/var`, `/dev`, `~/.ssh`, `~/.aws`, `~/.kube`, `~/.gnupg`, `~/.config` (all of it),
   `~/.docker`, `~/.npmrc`, `~/.netrc`, `~/.pypirc`, `~/.git-credentials`, `~/.cargo`, `~/.local/bin`, the shell startup files
-  (`~/.zshrc .zshenv .zlogin .zlogout .zprofile .bash_profile .bash_login .bash_logout .bashrc .profile .cshrc .tcshrc .login .inputrc`), `~/.gitconfig`, `~/.claude`, `~/.nostromo`,
+  (`~/.zshrc .zshenv .zlogin .zlogout .zprofile .bash_profile .bash_login .bash_logout .bashrc .profile .cshrc .tcshrc .login .inputrc`), `~/.gitconfig`, `~/bin`, `~/.vimrc`, `~/.vim`, `~/.tmux.conf`, the shell history files (`.zsh_history .bash_history .history`), `~/.claude`, `~/.nostromo`, `~/Library/Application Support`, `~/Library/Cookies`, `~/Library/Preferences`, `/opt/homebrew/bin`, `/opt/homebrew/sbin`, `/usr/local/bin`, `/usr/local/sbin`,
   `~/Library/Keychains`, `~/Library/LaunchAgents`, or any `.git` component. A bare relative `.ssh` counts like `.ssh/x`, checked against the session's directory. (Allow once still works for all of them.)
 
 ### Allowed flags
@@ -51,24 +51,25 @@ A candidate exists only for a **plain Bash command**:
 | `rm` | `-r -R -f -v -d` | no `-P`; nothing runs a program |
 | `rmdir`, `mkdir` | `-p -v` | no `mkdir -m` (takes an argument) |
 | `touch` | `-c` | no `-r/-t/-d` (take arguments) |
-| `cp` | `-r -R -p -v -n -f -i` | no `-L/-H/-P/-a` (symlink-following variants) |
+| `cp` | `-R -p -v -n -f -i` | no `-r` (on macOS it behaves like `-RL` and copies the contents of every symlink inside the directory; `-R` keeps links), no `-L/-H/-P/-a` |
 | `mv` | `-f -n -v -i` | |
 | `ls` | `-l -a -h -1 -t -r` | no `-R`, no `-G` |
 | `du` | `-s -h`, `-d <digits>` | |
 | `stat` | none | `-f` formats take arguments |
 | `file` | `-b -i` | no `-C` (writes a `.mgc` file), `-f`, `-m`, `-z` (runs a decompressor) |
 | `cat` | `-n -b -s` | |
-| `head`, `tail` | `-n <digits>` | no `-f` (follows forever) |
+| `head`, `tail` | `-n <digits>`, `-<digits>` | no `-f` (follows forever) |
 | `wc` | `-l -w -c` | |
-| `diff`, `cmp` | `-u -q -r -s` | no `--` forms (`--to-file`, `--exclude-from`) |
-| `grep`, `rg` | `-i -n -l -c -w -v -r -F -H -h -s` | no `-R`, `-e/-f` (take arguments), and **no long option at all** (`rg --pre`, `--hostname-bin`, `--config`) |
+| `diff`, `cmp` | `-u -q -s` | no `-r` (`diff -r` reads through symlinks inside the directory), no `--` forms (`--to-file`, `--exclude-from`) |
+| `grep` | `-i -n -l -c -w -v -r -F -H -h -s` | `-r` does not follow symlinks inside the directory on macOS; no `-R` (it does), no `-e/-f` (take arguments), no long option at all |
+| `rg` | `-i -n -l -c -w -v -F -H -h -s` | no `-r` (that is `--replace` and takes an argument; `rg` is recursive already and does not follow inner links), no long option at all (`--pre`, `--hostname-bin`, `--config`) |
 | `sort` | `-n -r -u -f -b` | no `-o`, no `--files0-from`, `--output`, `--compress-program` |
 | `uniq` | `-c -d -u -i` | one operand at most |
 | `cut` | `-d -f -c -b -s` | |
 | `tr` | `-d -s -c` | |
 | `basename dirname realpath readlink pwd whoami id sw_vers printf sleep shasum md5 xxd` | none | `xxd -r` writes a file; `shasum -c` reads a list |
 | `which` | `-a` | |
-| `date` | none; operands only `+FORMAT` | `-s` and the positional `mmddHHMM` form set the clock |
+| `date` | `-u`; operands only `+FORMAT` | `-s` and the positional `mmddHHMM` form set the clock |
 | `uname` | `-a` | |
 | `echo` | `-n` | |
 | `od` | `-c -x -b` | |
@@ -84,12 +85,11 @@ An exact rule stores where every **absolute or `~/` operand** resolved when it w
 match time, requiring equality. Offering is refused if any such operand (a) passes through a symlink anywhere,
 **including its last component** (a symlinked home and the `/tmp` to `/private/tmp` alias are the only indirections
 accepted), (b) resolves into a protected place or under `/Volumes` or `/Network`, (c) contains a `.` or `..`
-component or `//`, or (d) hangs the file system (time-bounded, below). So `rm -rf ~/proj/fixtures/.ssh` stops matching
+component or `//`, (d) for `cp`/`mv`, is a destination that exists with **more than one hard link** (checked when offered and again at match time, so a hard link made to `~/.zshrc` later ends the rule), or (e) hangs the file system (time-bounded, below). So `rm -rf ~/proj/fixtures/.ssh` stops matching
 the moment `fixtures` becomes a symlink to home, and `cp /abs/src /abs/dst` stops matching when `dst` becomes a
 symlink. A not-yet-existing leaf is fine (its nearest existing ancestor is pinned, and a later symlink changes it).
 Exact rules on `/tmp/...` are offered: the resolved `/private/tmp` is stored (`/private` is a broad root only for
-**prefix** rules). Relative operands cannot be pinned: they are refused for the commands that change files, and for
-read-only ones the rule still ignores the working directory (see Limits). `cp`/`mv` are offered only as `SRC DST` with
+**prefix** rules). Relative operands are refused for the commands that change files. For the commands that **read** files (`cat grep rg diff ls du head …`) a relative operand is resolved against the session's registered directory and pinned like an absolute one (no symlink in it, not protected, same result at match time, same directory); with the directory unknown the candidate is refused, and the rule only matches while the session is in that directory. (`grep` and `rg` skip their first operand: the pattern.) A recursive search with **no path** (`grep -r PAT`, `rg PAT`, `du`, `tree`) searches the session's directory, so that directory is pinned and checked the same way: home, a protected place or an unknown directory means no rule. `cp`/`mv` are offered only as `SRC DST` with
 a destination that is not an existing directory and does not end in `/` (`cp a dir` writes `dir/a`, which is not pinned).
 
 The candidates, in order:
@@ -140,7 +140,7 @@ reach), then resolves each path: one that leaves the prefix, lands in a protecte
 symlink does not match. All of a request's rules are checked on one helper thread with a 500 ms limit in total, and deriving candidates for a
 held request gets its own 500 ms limit (no candidates on a timeout). A file system that does not answer is no match.
 At most 4 timed-out helper threads may still be stuck in a hung mount at once (a blocked syscall cannot be cancelled;
-the thread ends when it returns); past that, new work is refused instead of piling up threads. A rule also belongs to the session id it was granted under:
+the thread ends when it returns; the limit is shared by all sessions, so one hung mount turns rule matching off everywhere, which is safe: cards are shown as usual); past that, new work is refused instead of piling up threads. A rule also belongs to the session id it was granted under:
 grant and match use the same value (the request's `session_id` when present, else the registered one), so a request
 carrying a different session id, or a rule from another one, never matches. A match is logged `allowed_by_session_rule` and the row reads `allowed by session rule`.
 
@@ -178,8 +178,8 @@ allowed_by_session_rule` per use (the outcome's `rule` names the rule and its gr
   is a follow-up. The Mac logs the source pid and state of the pick and of the confirm (as Allow once does).
 - Prefix rules are never offered under `/Volumes` or `/Network`.
 - Residual risks that cannot be closed from the text: a background job (or anything else) that swaps a symlink
-  **between the match and the command running**; a **hard link** to a protected file made inside an allowed prefix
-  (`cat ~/x/y/link`); a relative operand of a read-only command after the Bash tool `cd`'d elsewhere.
+  **between the match and the command running**; a **hard link** to a protected file used for a **read** (`cat ~/x/y/link`, a source of `cp`; hard-link *destinations* of `cp`/`mv` are refused); symlinks planted inside a directory that `grep -r`, `rg`, `du` or `cp -R` walk are not followed by those tools, but a hard link inside it is read; a relative operand of a read-only command after the Bash tool `cd`'d elsewhere (the registered directory is the session's start directory).
+- Not accepted for lack of a safe gain: `readlink`/`realpath` of a symlink (pinning refuses a symlink operand, which is their purpose), paths under `$TMPDIR` (`/var/folders`, a symlinked path), `cut -d:`.
 - The CLI's permission request carries no session id of its own, so the broker compares the id it registered the
   session with (and the request's `session_id`, when one is present). A typed `/clear` that keeps the same process does
   not change the registered id: the rules still end when the process does, as documented.

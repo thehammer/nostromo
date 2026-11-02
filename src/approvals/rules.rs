@@ -140,7 +140,7 @@ impl SessionRule {
     #[cfg(any(test, feature = "test-support"))]
     pub fn exact_for_test(command: &str, home: &Path, agent_id: Option<String>) -> Self {
         let words: Vec<String> = command.split(' ').map(str::to_owned).collect();
-        let pinned = pin_operands(&words, home).unwrap_or_default();
+        let pinned = pin_operands(&words, home, None).unwrap_or_default();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             rule_text: format!("Bash({command})"),
@@ -277,6 +277,10 @@ const PROTECTED_ABSOLUTE: &[&str] = &[
     "var",
     "private/var",
     "dev",
+    "opt/homebrew/bin",
+    "opt/homebrew/sbin",
+    "usr/local/bin",
+    "usr/local/sbin",
 ];
 
 /// Locations under the home directory, likewise.
@@ -312,6 +316,16 @@ const PROTECTED_HOME: &[&str] = &[
     ".nostromo",
     "library/keychains",
     "library/launchagents",
+    "bin",
+    ".vimrc",
+    ".vim",
+    ".tmux.conf",
+    ".zsh_history",
+    ".bash_history",
+    ".history",
+    "library/application support",
+    "library/cookies",
+    "library/preferences",
 ];
 
 /// The file utilities a path-prefix rule may be offered for.
@@ -350,7 +364,7 @@ const FLAG_TABLE: &[(&str, &str, &str)] = &[
     ("rmdir", "pv", ""),
     ("mkdir", "pv", ""),
     ("touch", "c", ""),
-    ("cp", "rRpvnfi", ""),
+    ("cp", "Rpvnfi", ""),
     ("mv", "fnvi", ""),
     ("ls", "lah1tr", ""),
     ("du", "sh", "d"),
@@ -360,10 +374,10 @@ const FLAG_TABLE: &[(&str, &str, &str)] = &[
     ("head", "", "n"),
     ("tail", "", "n"),
     ("wc", "lwc", ""),
-    ("diff", "uqrs", ""),
-    ("cmp", "uqrs", ""),
+    ("diff", "uqs", ""),
+    ("cmp", "uqs", ""),
     ("grep", "inlcwvrFHhs", ""),
-    ("rg", "inlcwvrFHhs", ""),
+    ("rg", "inlcwvFHhs", ""),
     ("sort", "nrufb", ""),
     ("uniq", "cdui", ""),
     ("cut", "dfcbs", ""),
@@ -407,7 +421,7 @@ pub fn candidates(
         return Vec::new();
     };
     // Every absolute operand must be where it says it is, now and (re-checked) at match time.
-    let Some(pinned) = pin_operands(&plain.words, home) else {
+    let Some(pinned) = pin_operands(&plain.words, home, cwd) else {
         return Vec::new();
     };
     let overrides = (reason.kind == ReasonKind::AskRule)
@@ -495,7 +509,9 @@ pub fn matches(
     }
     match &rule.spec {
         // The operands must still resolve to where they did when the rule was offered.
-        Spec::Exact { pinned, .. } => pin_operands(&plain.words, home).as_ref() == Some(pinned),
+        Spec::Exact { pinned, .. } => {
+            pin_operands(&plain.words, home, cwd).as_ref() == Some(pinned)
+        }
         Spec::PathPrefix {
             head,
             prefix,
@@ -666,11 +682,12 @@ fn eligible(
     if first.contains('/') {
         return None;
     }
-    let basename = first
-        .rsplit('/')
-        .next()
-        .unwrap_or(first)
-        .to_ascii_lowercase();
+    // The Mac's file system ignores case, so `CP` runs `/bin/cp`: any command word that is not
+    // exactly its lowercase allowlisted name is refused, and every later decision uses it.
+    let basename = first.to_ascii_lowercase();
+    if *first != basename {
+        return None;
+    }
     if basename.is_empty()
         || NEVER_COMMANDS.contains(&basename.as_str())
         || basename.starts_with("ecs_")
@@ -750,7 +767,9 @@ fn flags_allowed(command: &str, args: &[String]) -> bool {
     }
     // Any other operand is the positional form that sets the clock.
     if command == "date" {
-        return args.iter().all(|a| a.starts_with('+') && a.len() > 1);
+        return args
+            .iter()
+            .all(|a| a == "-u" || (a.starts_with('+') && a.len() > 1));
     }
     let Some((_, short, numeric)) = FLAG_TABLE.iter().find(|(c, _, _)| *c == command) else {
         return false;
@@ -763,6 +782,10 @@ fn flags_allowed(command: &str, args: &[String]) -> bool {
         let Some(body) = word.strip_prefix('-').filter(|b| !b.is_empty()) else {
             continue;
         };
+        if numeric.contains('n') && body.bytes().all(|b| b.is_ascii_digit()) {
+            // `head -20`: the glued numeric form.
+            continue;
+        }
         if body.len() == 1 && numeric.contains(body) {
             // `head -n 5`: the number is the flag's argument, not a path.
             if !rest
@@ -778,18 +801,57 @@ fn flags_allowed(command: &str, args: &[String]) -> bool {
     true
 }
 
-/// Where each absolute or `~/` operand of `words[1..]` resolves, in order; `None` if one
-/// cannot be pinned. An operand is pinned only if the file system resolves it to itself (no
+/// Commands whose non-flag words are file operands they read, so a relative one is pinned
+/// against the session's directory too (the others, `echo hi`, `which ls`, take words that are
+/// not paths).
+const READS_FILES: &[&str] = &[
+    "ls", "du", "stat", "file", "cat", "head", "tail", "wc", "diff", "cmp", "grep", "rg", "sort",
+    "uniq", "cut", "realpath", "readlink", "shasum", "md5", "xxd", "od", "strings", "tree",
+];
+
+/// A relative operand a rule may pin: `.` itself, or plain components (no `.`, `..`, `//`).
+fn plain_relative(word: &str) -> bool {
+    word == "."
+        || (!word.starts_with('/')
+            && !word.contains("//")
+            && !word
+                .trim_end_matches('/')
+                .split('/')
+                .any(|c| c.is_empty() || c == "." || c == ".."))
+}
+
+/// Does this command search a directory tree (so that, with no path, it searches the session's
+/// directory)? `grep` only with `-r`; `rg`, `du` and `tree` always.
+fn searches_recursively(command: &str, args: &[String]) -> bool {
+    match command {
+        "rg" | "du" | "tree" => true,
+        "grep" => args
+            .iter()
+            .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('r')),
+        _ => false,
+    }
+}
+
+/// Where each absolute or `~/` operand of `words[1..]` resolves (and, for commands that read
+/// files, each relative operand, against `cwd`, the session's directory), in order; `None` if
+/// one cannot be pinned. An operand is pinned only if the file system resolves it to itself (no
 /// symlink in it or its parents, anywhere, including its last component), allowing the
 /// symlinked home and the `/tmp` alias of `/private/tmp`; the resolved form must not be a
 /// protected place nor under `/Volumes` or `/Network` (mounts that may hang). The exact rule
 /// stores these and re-resolves them at match time, so a directory that later becomes a
 /// symlink ends the rule's reach (`rm -rf fixtures/.ssh` after `fixtures` pointed at home).
-fn pin_operands(words: &[String], home: &Path) -> Option<Vec<PathBuf>> {
+/// A relative operand with an unknown `cwd` is refused, and so is a recursive search with no
+/// path (it searches `cwd`, which is then pinned and checked like an operand).
+fn pin_operands(words: &[String], home: &Path, cwd: Option<&Path>) -> Option<Vec<PathBuf>> {
+    let name = words[0].to_ascii_lowercase();
+    let name = name.as_str();
     // `cp a dir` and `mv a b c` write `dir/a`, a path the rule never pinned (and `dir/a` may be
     // a symlink by then): only a plain `cp SRC DST` / `mv SRC DST` whose destination is not
-    // (and does not read as) an existing directory is pinned.
-    if matches!(words[0].as_str(), "cp" | "mv") {
+    // (and does not read as) an existing directory is pinned. A destination that exists with
+    // several hard links is refused too: writing it would write the other names as well
+    // (`~/.zshrc`), and the inode behind a path cannot be pinned by its name. (Hard links
+    // for reads are not checked.)
+    if matches!(name, "cp" | "mv") {
         let operands: Vec<&String> = words[1..].iter().filter(|w| !w.starts_with('-')).collect();
         let dest_is_dir = operands.last().is_some_and(|d| {
             d.ends_with('/') || expand(d, home).is_dir() || expand(d, home) == Path::new("/")
@@ -797,17 +859,16 @@ fn pin_operands(words: &[String], home: &Path) -> Option<Vec<PathBuf>> {
         if operands.len() != 2 || dest_is_dir {
             return None;
         }
-    }
-    let real_home = canonical_lenient(home).unwrap_or_else(|| home.to_path_buf());
-    let mut pinned = Vec::new();
-    for word in &words[1..] {
-        if !(word.starts_with('/') || word.starts_with("~/")) {
-            continue;
-        }
-        if !plain_path(word) {
+        let dest = expand(operands[1], home);
+        if std::fs::symlink_metadata(&dest)
+            .is_ok_and(|m| !m.file_type().is_dir() && std::os::unix::fs::MetadataExt::nlink(&m) > 1)
+        {
             return None;
         }
-        let path = expand(word.trim_end_matches('/'), home);
+    }
+    let reads_files = READS_FILES.contains(&name);
+    let real_home = canonical_lenient(home).unwrap_or_else(|| home.to_path_buf());
+    let pin = |path: PathBuf| -> Option<PathBuf> {
         let real = canonical_lenient(&path)?;
         let mut expected = vec![path.clone()];
         if let Ok(rest) = path.strip_prefix(home) {
@@ -824,7 +885,44 @@ fn pin_operands(words: &[String], home: &Path) -> Option<Vec<PathBuf>> {
         {
             return None;
         }
-        pinned.push(real);
+        Some(real)
+    };
+    let session_dir = || cwd.filter(|c| c.is_absolute());
+    let mut pattern_pending = matches!(name, "grep" | "rg");
+    let mut pinned = Vec::new();
+    for word in &words[1..] {
+        if word.starts_with('/') || word.starts_with("~/") {
+            if !plain_path(word) {
+                return None;
+            }
+            pinned.push(pin(expand(word.trim_end_matches('/'), home))?);
+            pattern_pending = false;
+        } else if reads_files && !word.starts_with('-') {
+            // `grep`/`rg`: the first operand is the pattern, not a path.
+            if pattern_pending {
+                pattern_pending = false;
+                continue;
+            }
+            if !plain_relative(word) {
+                return None;
+            }
+            let dir = session_dir()?;
+            let path = if word == "." {
+                dir.to_path_buf()
+            } else {
+                dir.join(word.trim_end_matches('/'))
+            };
+            pinned.push(pin(path)?);
+        }
+    }
+    // `grep -r PATTERN` and `rg PATTERN` name no path: the first operand is the pattern.
+    let pattern_words = usize::from(matches!(name, "grep" | "rg"));
+    let operands = words[1..]
+        .iter()
+        .filter(|w| !w.starts_with('-') && !w.bytes().all(|b| b.is_ascii_digit()))
+        .count();
+    if searches_recursively(name, &words[1..]) && operands <= pattern_words {
+        pinned.push(pin(session_dir()?.to_path_buf())?);
     }
     Some(pinned)
 }
@@ -1464,7 +1562,10 @@ mod tests {
             // and a rule never matches it either
             let rule = rule_for("ls build", 0);
             let kind = req.reason(None, &NoSettings).kind;
-            assert!(!matches(&rule, &req, kind, &home(), None), "{name}");
+            assert!(
+                !matches(&rule, &req, kind, &home(), Some(Path::new("/work/proj"))),
+                "{name}"
+            );
         }
         // The same command without the flags is offered.
         assert_eq!(texts(&request(base(), json!({}))), ["Bash(ls build)"]);
@@ -1774,14 +1875,14 @@ mod tests {
     fn rule_for(command: &str, idx: usize) -> SessionRule {
         let req = cmd(command);
         let reason = req.reason(None, &NoSettings);
-        let c = candidates(&req, &reason, &home(), None);
+        let c = candidates(&req, &reason, &home(), Some(Path::new("/work/proj")));
         SessionRule::from_candidate(&c[idx], None, 0, "r", "w")
     }
 
     fn hit(rule: &SessionRule, command: &str) -> bool {
         let req = cmd(command);
         let kind = req.reason(None, &NoSettings).kind;
-        matches(rule, &req, kind, &home(), None)
+        matches(rule, &req, kind, &home(), Some(Path::new("/work/proj")))
     }
 
     #[test]
@@ -1999,7 +2100,7 @@ mod tests {
             &req,
             ReasonKind::AskRule,
             &home(),
-            None
+            Some(Path::new("/work/proj"))
         ));
     }
 
@@ -2027,7 +2128,7 @@ mod tests {
             &req,
             ReasonKind::AskRule,
             &home(),
-            None,
+            Some(Path::new("/work/proj")),
         );
         assert_eq!(hit.map(|r| r.rule_text), Some("Bash(ls build)".to_owned()));
         assert!(first_match_within(
@@ -2084,6 +2185,210 @@ mod tests {
         ] {
             assert!(texts_of(c).is_empty(), "{c}: {:?}", texts_of(c));
         }
+    }
+
+    fn texts_in(command: &str, home: &Path, cwd: Option<&Path>) -> Vec<String> {
+        let req = cmd(command);
+        let reason = req.reason(None, &NoSettings);
+        candidates(&req, &reason, home, cwd)
+            .into_iter()
+            .map(|c| c.rule_text)
+            .collect()
+    }
+
+    // M1: the file system ignores case, so `CP` runs cp; only the exact lowercase word counts.
+    #[test]
+    fn a_command_word_that_is_not_exactly_lowercase_gets_no_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        let d = d.to_str().unwrap();
+        for c in [
+            format!("CP /work/src {d}"),
+            format!("Cp /work/src {d}"),
+            format!("CP -p /work/src {d}"),
+            "CP /work/a /work/b /work/c".to_owned(),
+            "MV /work/a /work/b /work/c".to_owned(),
+            "Rm /work/proj/x".to_owned(),
+            "Rm -rf /work/proj/x".to_owned(),
+            "LS /work/proj/x".to_owned(),
+            "LS -l /work/proj/x".to_owned(),
+            "CAT /work/proj/x".to_owned(),
+            "Cat /work/proj/x".to_owned(),
+            "ECHO hi".to_owned(),
+        ] {
+            assert!(texts_of(&c).is_empty(), "{c}: {:?}", texts_of(&c));
+        }
+        assert_eq!(texts_of("cp /work/a /work/b").len(), 1);
+    }
+
+    // M2: `cp -r` follows every symlink inside the directory on macOS; `diff -r` and `cmp -r`
+    // read through them; `rg -r` is `--replace` and takes an argument.
+    #[test]
+    fn flags_that_follow_symlinks_inside_a_directory_get_no_rule() {
+        for c in [
+            "cp -r /work/a /work/b",
+            "cp -pr /work/a /work/b",
+            "diff -r /work/a /work/b",
+            "diff -ur /work/a /work/b",
+            "cmp -r /work/a /work/b",
+            "rg -r x pat /work/a/b/c",
+            "rg -rn x /work/a/b/c",
+            "grep -R x /work/a/b/c",
+            "grep -rR x /work/a/b/c",
+            "ls -R /work/a/b/c",
+            "tree -l /work/a/b/c",
+            "du -L /work/a/b/c",
+        ] {
+            assert!(texts_of(c).is_empty(), "{c}: {:?}", texts_of(c));
+        }
+        // `cp -R` copies symlinks as links; `grep -r` does not follow inner links.
+        assert_eq!(texts_of("cp -R /work/a /work/b").len(), 1);
+        assert_eq!(texts_of("grep -r x /work/a/b/c").len(), 1);
+    }
+
+    // S1: a destination with several hard links writes into the other names too.
+    #[test]
+    fn a_cp_destination_with_several_hard_links_gets_no_rule_and_stops_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        let (src, dst, other) = (d.join("src"), d.join("dst"), d.join("other"));
+        std::fs::write(&src, "x").unwrap();
+        std::fs::write(&other, "y").unwrap();
+        let command = format!("cp {} {}", src.display(), dst.display());
+        // A destination that does not exist, or has one link, is fine.
+        assert_eq!(texts_in(&command, &home(), None).len(), 1);
+        let req = cmd(&command);
+        let reason = req.reason(None, &NoSettings);
+        let c = candidates(&req, &reason, &home(), None);
+        let rule = rule_from(&c[0]);
+        assert!(matches_in(&rule, &command, &home()));
+        // Now it is a hard link to another file.
+        std::fs::hard_link(&other, &dst).unwrap();
+        assert!(!matches_in(&rule, &command, &home()));
+        assert!(texts_in(&command, &home(), None).is_empty());
+        let mv = format!("mv {} {}", src.display(), dst.display());
+        assert!(texts_in(&mv, &home(), None).is_empty());
+    }
+
+    // S2: relative operands of read commands are pinned against the session's directory.
+    #[test]
+    fn relative_operands_of_read_commands_are_pinned_against_the_session_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        std::fs::write(d.join("notes"), "n").unwrap();
+        // No directory known: no rule. Known: a rule.
+        assert!(texts_in("cat notes", &home(), None).is_empty());
+        assert!(texts_in("diff a b", &home(), None).is_empty());
+        assert_eq!(texts_in("cat notes", &home(), Some(&d)).len(), 1);
+        assert!(texts_in("cat ../notes", &home(), Some(&d)).is_empty());
+        assert!(texts_in("cat a//b", &home(), Some(&d)).is_empty());
+        // The rule stops matching once `notes` is a symlink (or the directory differs).
+        let req = cmd("cat notes");
+        let reason = req.reason(None, &NoSettings);
+        let c = candidates(&req, &reason, &home(), Some(&d));
+        let rule = rule_from(&c[0]);
+        let m = |cwd: Option<&Path>| matches(&rule, &req, ReasonKind::AskRule, &home(), cwd);
+        assert!(m(Some(&d)));
+        assert!(!m(None));
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(!m(Some(&elsewhere.path().canonicalize().unwrap())));
+        std::fs::remove_file(d.join("notes")).unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", d.join("notes")).unwrap();
+        assert!(!m(Some(&d)));
+        assert!(texts_in("cat notes", &home(), Some(&d)).is_empty());
+    }
+
+    // S2: a recursive search with no path searches the session's directory.
+    #[test]
+    fn a_recursive_search_with_no_path_needs_a_safe_session_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        let fake_home = d.join("home");
+        let proj = fake_home.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        for c in [
+            "grep -r AKIA",
+            "rg x",
+            "rg -i x",
+            "du",
+            "du -sh",
+            "tree",
+            "tree -L 2",
+        ] {
+            assert!(texts_in(c, &fake_home, None).is_empty(), "{c}: unknown dir");
+            assert!(
+                texts_in(c, &fake_home, Some(&fake_home)).is_empty(),
+                "{c}: home"
+            );
+            assert!(
+                texts_in(c, &fake_home, Some(&fake_home.join(".ssh"))).is_empty(),
+                "{c}: protected"
+            );
+            assert!(
+                !texts_in(c, &fake_home, Some(&proj)).is_empty(),
+                "{c}: a project directory is fine"
+            );
+        }
+        // With a path operand the directory does not matter.
+        assert!(!texts_in("rg x /work/a/b/c", &home(), None).is_empty());
+        // `.` is the session directory.
+        assert!(texts_in("grep -r AKIA .", &fake_home, Some(&fake_home)).is_empty());
+    }
+
+    // S3
+    #[test]
+    fn more_places_the_user_can_write_that_run_code_are_protected() {
+        for f in [
+            ".vimrc",
+            ".vim/plugin/x.vim",
+            ".tmux.conf",
+            ".zsh_history",
+            ".bash_history",
+            ".history",
+            "bin/tool",
+            "bin",
+            "Library/Application Support",
+            "Library/Application Support/x/y",
+            "Library/Cookies/Cookies.binarycookies",
+            "Library/Preferences/x.plist",
+        ] {
+            let p = home().join(f);
+            assert!(path_is_protected(&p, &home()), "{f}");
+            let c = format!(
+                "cp /Users/tester/proj/x /Users/tester/{}",
+                f.replace(' ', "")
+            );
+            if !f.contains(' ') {
+                assert!(texts_of(&c).is_empty(), "{c}");
+            }
+        }
+        for f in [
+            "opt/homebrew/bin",
+            "opt/homebrew/bin/brew",
+            "opt/homebrew/sbin/x",
+            "usr/local/bin/x",
+            "usr/local/sbin",
+        ] {
+            assert!(path_is_protected(&Path::new("/").join(f), &home()), "{f}");
+            let c = format!("cp /Users/tester/proj/x /{f}");
+            assert!(texts_of(&c).is_empty(), "{c}");
+        }
+        assert!(!path_is_protected(
+            Path::new("/Users/tester/proj/bin2"),
+            &home()
+        ));
+    }
+
+    // Nits: a glued numeric `head -20` and `date -u` are fine; `date -s` and positional are not.
+    #[test]
+    fn head_dash_number_and_date_u_are_accepted() {
+        assert_eq!(texts_of("head -20 /work/a/b/c").len(), 1);
+        assert_eq!(texts_of("tail -5 /work/a/b/c").len(), 1);
+        assert!(texts_of("head -2x /work/a/b/c").is_empty());
+        assert!(texts_of("wc -20 /work/a/b/c").is_empty());
+        assert_eq!(texts_of("date -u").len(), 1);
+        assert_eq!(texts_of("date -u +%s").len(), 1);
+        assert!(texts_of("date -s 2020").is_empty());
     }
 
     #[test]
