@@ -143,3 +143,12 @@ Kind words: Shell, Monitor, Agent, else `Background task`; outcome words: new ou
 - **Scroll.** The marker is the same fixed 22 pt (`TurnHeightEstimator.wakeMarkerHeight`) as MF2c's, so
   a wake arriving, merging or being clicked moves nothing.
 - **Focus.** The marker is drawn outside the Focus planner, so Focus never folds it.
+
+## Live check
+
+`scripts/qa/background-wake.sh` (BA6d) runs the wake path end to end in the isolated QA instance only (see
+`scripts/qa/README.md`): the fake CLI's `WAKE:basic:<dir>` cue (`tests/support/fake_claude_perm.py`) starts a
+background shell and a Monitor, then sends four wake groups, one per `<dir>/wake-<k>` file, and the script
+checks the marker texts, the transcript anchor before and after each wake, that no raw notification text or
+sentinel is drawn, the marker's accessibility label and the marker click. It needs a logged-in awake display and
+spends no tokens.
