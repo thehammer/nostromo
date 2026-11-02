@@ -72,7 +72,8 @@ use super::questions;
 use super::request::{FileSettings, PermissionRequest, Reason, SettingsSource};
 use super::rules::{self, Candidate, SessionRule};
 
-/// The longest one rule match may take (it may touch a slow file system).
+/// The most one request may spend on all of its session-rule file system work, matching
+/// (every rule together) and, separately, deriving candidates.
 const RULE_MATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 use super::wire::{
     clean_note, AgentWire, AnswerRefusal, ApprovalDecision, ApprovalFlags, ApprovalOption,
@@ -705,6 +706,33 @@ struct Pending {
     wire: Option<ApprovalRequestWire>,
     /// The session rules this held request offered: the only ones an `allow_session` may name.
     candidates: Vec<Candidate>,
+}
+
+/// Tool-use ids the guard is forced to block (tests: a request the matcher would accept,
+/// to show the guard really runs first).
+#[cfg(any(test, feature = "test-support"))]
+fn forced_guard_blocks() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Make the guard block the request with this `tool_use_id` (tests only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn force_guard_block_for_test(tool_use_id: &str) {
+    forced_guard_blocks().insert(tool_use_id.to_owned());
+}
+
+/// The session id a rule is granted under and compared by: the id the request itself
+/// carries (a future CLI may add one; today's `can_use_tool` has none), else the id the
+/// session was registered with. Grant and match both go through here, so they cannot drift.
+fn live_session_id(raw: &Value, registered: Option<&str>) -> Option<String> {
+    raw.get("session_id")
+        .and_then(Value::as_str)
+        .or(registered)
+        .map(str::to_owned)
 }
 
 /// Who a request belongs to, for the audit entries.
@@ -1825,7 +1853,9 @@ impl Inner {
             request_id,
             window,
         );
-        rule.session_id = p.ident.session_id.clone();
+        // The id `process` compares on the way back in: the request's own, when the CLI
+        // names one, else the one the session was registered with.
+        rule.session_id = live_session_id(&p.raw, p.ident.session_id.as_deref());
         Some(SessionRuleChoice {
             rule,
             generation: p.generation,
@@ -1883,11 +1913,9 @@ impl Inner {
                 .collect()
         };
         let home = lock(&self.home).clone();
-        // Outside the lock: a prefix match looks at the file system, and a hung mount must
-        // not stall this worker, so each match is bounded and a timeout is no match.
-        candidates
-            .into_iter()
-            .find(|r| rules::matches_within(RULE_MATCH_TIMEOUT, r, req, reason.kind, &home, cwd))
+        // Outside the lock: a match looks at the file system, and a hung mount must not
+        // stall this worker, so all rules together get one bounded helper; a timeout is no match.
+        rules::first_match_within(RULE_MATCH_TIMEOUT, &candidates, req, reason.kind, &home, cwd)
     }
 
     /// One more use of rule `rule_id` was allowed: count it and tell the app.
@@ -2066,17 +2094,14 @@ impl Inner {
             // session process and requester. Only while an app that can show and revoke
             // rules is connected (the check above).
             // The id the request itself names, when it names one, must be the rule's too.
-            let live_session_id = value
-                .get("session_id")
-                .and_then(Value::as_str)
-                .or(ident.session_id.as_deref());
+            let live_session_id = live_session_id(value, ident.session_id.as_deref());
             if let Some(rule) = self.matching_session_rule(
                 &ident.tag,
                 generation,
                 &req,
                 &reason,
                 cwd.as_deref(),
-                live_session_id,
+                live_session_id.as_deref(),
             ) {
                 let ending =
                     Ending::allowed_by_session_rule(req.input.clone(), rules::rule_identity(&rule));
@@ -2088,7 +2113,9 @@ impl Inner {
                 return;
             }
             let home = lock(&self.home).clone();
-            let candidates = rules::candidates(&req, &reason, &home, cwd.as_deref());
+            // Bounded like the match: the paths in the command are the agent's choice.
+            let candidates =
+                rules::candidates_within(RULE_MATCH_TIMEOUT, &req, &reason, &home, cwd.as_deref());
             let wire = approval_wire(
                 request_id,
                 &ident.tag,
@@ -2121,6 +2148,10 @@ impl Inner {
         ident: &Ident,
         cwd: Option<&Path>,
     ) -> Option<Ending> {
+        #[cfg(any(test, feature = "test-support"))]
+        if forced_guard_blocks().contains(&req.tool_use_id) {
+            return Some(Ending::guard(guard::GUARD_MESSAGE, "forced_for_test", ""));
+        }
         let payload = HookPayload {
             tool_name: req.tool_name.clone(),
             tool_input: req.input.clone(),

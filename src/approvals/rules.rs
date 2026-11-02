@@ -60,8 +60,11 @@ impl CandidateKind {
 /// What a rule matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spec {
-    /// The trimmed command, byte for byte.
-    Exact(String),
+    /// The trimmed command, byte for byte. `pinned` is where every absolute or `~/` operand
+    /// resolved when the rule was offered (none of them may pass through a symlink, a
+    /// symlinked home and the `/tmp` alias aside); a match requires each to resolve to
+    /// exactly that again.
+    Exact { command: String, pinned: Vec<PathBuf> },
     /// `head` (command word and flags) followed by one or more paths under `prefix`
     /// (`~/Library/Caches/`, always ending in `/`). `resolved` is the prefix directory as the
     /// file system resolved it when the rule was offered; it must have resolved to itself
@@ -128,15 +131,22 @@ impl SessionRule {
         }
     }
 
-    /// An exact rule for `command` (tests: a hand-built rule the broker never derived).
+    /// An exact rule for `command` (tests: a hand-built rule the broker never derived), its
+    /// operands pinned as the file system under `home` resolves them now (none when they
+    /// cannot be pinned, which can then never match).
     #[cfg(any(test, feature = "test-support"))]
-    pub fn exact_for_test(command: &str, agent_id: Option<String>) -> Self {
+    pub fn exact_for_test(command: &str, home: &Path, agent_id: Option<String>) -> Self {
+        let words: Vec<String> = command.split(' ').map(str::to_owned).collect();
+        let pinned = pin_operands(&words, home).unwrap_or_default();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             rule_text: format!("Bash({command})"),
             summary: EXACT_SUMMARY.to_owned(),
             kind: CandidateKind::Exact,
-            spec: Spec::Exact(command.to_owned()),
+            spec: Spec::Exact {
+                command: command.to_owned(),
+                pinned,
+            },
             agent_id,
             session_id: None,
             created_at_ms: 0,
@@ -153,7 +163,7 @@ impl Candidate {
     fn spec_resolved(&self) -> Option<PathBuf> {
         match &self.spec {
             Spec::PathPrefix { resolved, .. } => Some(resolved.clone()),
-            Spec::Exact(_) => None,
+            Spec::Exact { .. } => None,
         }
     }
 }
@@ -277,9 +287,17 @@ const PROTECTED_HOME: &[&str] = &[
     ".npmrc",
     ".netrc",
     ".zshrc",
+    ".zshenv",
+    ".zlogin",
     ".zprofile",
+    ".bash_profile",
     ".bashrc",
+    ".profile",
     ".gitconfig",
+    ".git-credentials",
+    ".pypirc",
+    ".cargo",
+    ".local/bin",
     ".claude",
     ".nostromo",
     "library/keychains",
@@ -300,19 +318,70 @@ const PREFIX_COMMANDS: &[&str] = &[
 const EXACT_COMMANDS: &[&str] = &[
     "cp", "mv", "diff", "cmp", "grep", "rg", "sort", "uniq", "cut", "tr", "basename", "dirname",
     "realpath", "readlink", "pwd", "which", "whoami", "id", "date", "uname", "sw_vers", "echo",
-    "printf", "sleep", "jq", "shasum", "md5", "xxd", "od", "strings", "tree", "lsof", "ps",
-    "pgrep", "df",
+    "printf", "sleep", "shasum", "md5", "xxd", "od", "strings", "tree", "ps", "pgrep", "df",
 ];
 
 /// Commands that change files: an exact rule for one is not offered when a path
 /// argument is relative, because the rule ignores the directory it was granted in.
 const RELATIVE_PATH_SENSITIVE: &[&str] = &[
-    "rm", "rmdir", "mv", "cp", "chmod", "touch", "mkdir", // change files
+    "rm", "rmdir", "mv", "cp", "touch", "mkdir", // change files
     "sort", "uniq", "tree", "xxd", // can write an output file
 ];
 
-/// Long options that run another program or write a file (`rg --pre CMD`, `sort --output`).
-const NEVER_LONG_FLAGS: &[&str] = &["pre", "compress-program", "output", "exec"];
+/// The flags each allowlisted command may carry in an exact or prefix rule: `(command,
+/// short flag letters, letters that take a separate all-digits word)`. A command word not
+/// listed here is never offered. Every `--` word (including a bare `--`) is refused for all
+/// of them: long options run programs (`rg --hostname-bin`, `rg --pre`), read operand lists an
+/// agent can rewrite (`sort --files0-from`) or write files, and getopt accepts abbreviations.
+/// A short group is allowed only if every letter is in the set, so `-ion` is refused for `o`.
+/// `ps` and `date` are special-cased in [`flags_allowed`].
+const FLAG_TABLE: &[(&str, &str, &str)] = &[
+    ("rm", "rRfvd", ""),
+    ("rmdir", "pv", ""),
+    ("mkdir", "pv", ""),
+    ("touch", "c", ""),
+    ("cp", "rRpvnfi", ""),
+    ("mv", "fnvi", ""),
+    ("ls", "lah1tr", ""),
+    ("du", "sh", "d"),
+    ("stat", "", ""),
+    ("file", "bi", ""),
+    ("cat", "nbs", ""),
+    ("head", "", "n"),
+    ("tail", "", "n"),
+    ("wc", "lwc", ""),
+    ("diff", "uqrs", ""),
+    ("cmp", "uqrs", ""),
+    ("grep", "inlcwvrFHhs", ""),
+    ("rg", "inlcwvrFHhs", ""),
+    ("sort", "nrufb", ""),
+    ("uniq", "cdui", ""),
+    ("cut", "dfcbs", ""),
+    ("tr", "dsc", ""),
+    ("basename", "", ""),
+    ("dirname", "", ""),
+    ("realpath", "", ""),
+    ("readlink", "", ""),
+    ("pwd", "", ""),
+    ("which", "a", ""),
+    ("whoami", "", ""),
+    ("id", "", ""),
+    ("date", "", ""),
+    ("uname", "a", ""),
+    ("sw_vers", "", ""),
+    ("echo", "n", ""),
+    ("printf", "", ""),
+    ("sleep", "", ""),
+    ("shasum", "", ""),
+    ("md5", "", ""),
+    ("xxd", "", ""),
+    ("od", "cxb", ""),
+    ("strings", "a", ""),
+    ("tree", "a", "L"),
+    ("ps", "", ""),
+    ("pgrep", "flxi", ""),
+    ("df", "h", ""),
+];
 
 // ── candidates ────────────────────────────────────────────────────────────────
 
@@ -327,6 +396,10 @@ pub fn candidates(
     let Some(plain) = eligible(req, reason.kind, home, cwd) else {
         return Vec::new();
     };
+    // Every absolute operand must be where it says it is, now and (re-checked) at match time.
+    let Some(pinned) = pin_operands(&plain.words, home) else {
+        return Vec::new();
+    };
     let overrides = (reason.kind == ReasonKind::AskRule)
         .then(|| reason.rule.as_ref().map(|r| r.rule.clone()))
         .flatten();
@@ -336,7 +409,10 @@ pub fn candidates(
         summary: EXACT_SUMMARY.to_owned(),
         kind: CandidateKind::Exact,
         overrides: overrides.clone(),
-        spec: Spec::Exact(plain.command.clone()),
+        spec: Spec::Exact {
+            command: plain.command.clone(),
+            pinned,
+        },
     }];
     if let Some((head, prefix, resolved)) = prefix_of(&plain, home) {
         let head_text = head.join(" ");
@@ -369,6 +445,25 @@ pub fn candidates(
     out
 }
 
+/// [`candidates`] on a helper thread: a file system that does not answer within `timeout`
+/// (a hung mount under the home directory, `/Network`, `/Volumes`) means no candidates, so
+/// the broker's single worker cannot stall on an agent-chosen path.
+pub fn candidates_within(
+    timeout: std::time::Duration,
+    req: &PermissionRequest,
+    reason: &Reason,
+    home: &Path,
+    cwd: Option<&Path>,
+) -> Vec<Candidate> {
+    let (req, reason, home, cwd) = (
+        req.clone(),
+        reason.clone(),
+        home.to_path_buf(),
+        cwd.map(Path::to_path_buf),
+    );
+    bounded(timeout, move || candidates(&req, &reason, &home, cwd.as_deref())).unwrap_or_default()
+}
+
 /// Does `rule` cover `req`? Besides the rule's own shape, the request must pass
 /// every eligibility check again, and a prefix match must still land inside the
 /// prefix once symlinks are resolved.
@@ -386,7 +481,8 @@ pub fn matches(
         return false;
     }
     match &rule.spec {
-        Spec::Exact(_) => true,
+        // The operands must still resolve to where they did when the rule was offered.
+        Spec::Exact { pinned, .. } => pin_operands(&plain.words, home).as_ref() == Some(pinned),
         Spec::PathPrefix {
             head,
             prefix,
@@ -415,27 +511,74 @@ pub fn matches_within(
     home: &Path,
     cwd: Option<&Path>,
 ) -> bool {
-    let (rule, req, home, cwd) = (
-        rule.clone(),
+    first_match_within(timeout, std::slice::from_ref(rule), req, reason_kind, home, cwd).is_some()
+}
+
+/// The first of `rules` that [`matches`], all checked on one helper thread under one overall
+/// `timeout` (so 32 rules on a slow mount stall the worker once, not 32 times); `None` on
+/// no match or on a timeout.
+pub fn first_match_within(
+    timeout: std::time::Duration,
+    rules: &[SessionRule],
+    req: &PermissionRequest,
+    reason_kind: ReasonKind,
+    home: &Path,
+    cwd: Option<&Path>,
+) -> Option<SessionRule> {
+    let (rules, req, home, cwd) = (
+        rules.to_vec(),
         req.clone(),
         home.to_path_buf(),
         cwd.map(Path::to_path_buf),
     );
     bounded(timeout, move || {
-        matches(&rule, &req, reason_kind, &home, cwd.as_deref())
+        rules
+            .into_iter()
+            .find(|r| matches(r, &req, reason_kind, &home, cwd.as_deref()))
     })
-    .unwrap_or(false)
+    .flatten()
 }
 
-/// Run `f` on a helper thread; `None` if it has not finished within `timeout`.
+/// How many timed-out helper threads may still be stuck in the file system at once. A thread
+/// blocked in a syscall on a dead mount cannot be cancelled; it ends when the call returns.
+/// Past this many, new work is refused (no match, no candidate) instead of piling up more.
+const MAX_HELPERS: usize = 4;
+
+static HELPERS_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts one helper thread; dropping it (the thread ending, even by a panic) gives the slot back.
+struct HelperSlot;
+
+impl HelperSlot {
+    fn take() -> Option<Self> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let taken = HELPERS_IN_FLIGHT.fetch_add(1, SeqCst);
+        if taken >= MAX_HELPERS {
+            HELPERS_IN_FLIGHT.fetch_sub(1, SeqCst);
+            return None;
+        }
+        Some(Self)
+    }
+}
+
+impl Drop for HelperSlot {
+    fn drop(&mut self) {
+        HELPERS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Run `f` on a helper thread; `None` if it has not finished within `timeout` or too many
+/// earlier helpers are still stuck.
 fn bounded<T: Send + 'static>(
     timeout: std::time::Duration,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
+    let slot = HelperSlot::take()?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("rule-match".into())
         .spawn(move || {
+            let _slot = slot;
             let _ = tx.send(f());
         })
         .ok()?;
@@ -518,10 +661,12 @@ fn eligible(
     {
         return None;
     }
+    // (`tree -L 2`: the depth is the flag's argument, not a path; [`flags_allowed`] checks it.)
     if RELATIVE_PATH_SENSITIVE.contains(&basename.as_str())
-        && words[1..]
-            .iter()
-            .any(|w| !w.starts_with('-') && !w.starts_with('/') && !w.starts_with("~/"))
+        && words[1..].iter().enumerate().any(|(i, w)| {
+            let is_depth = basename == "tree" && i > 0 && words[i] == "-L";
+            !w.starts_with('-') && !w.starts_with('/') && !w.starts_with("~/") && !is_depth
+        })
     {
         return None;
     }
@@ -530,8 +675,7 @@ fn eligible(
     if matches!(basename.as_str(), "uniq" | "xxd") && operand_count(&words[1..]) > 1 {
         return None;
     }
-    if !PREFIX_COMMANDS.contains(&basename.as_str()) && words[1..].iter().any(|w| runs_or_writes(w))
-    {
+    if !flags_allowed(&basename, &words[1..]) {
         return None;
     }
     // `=cmd` expands to a path in zsh; a leading `%` is a job spec or a format.
@@ -576,19 +720,86 @@ fn operand_count(args: &[String]) -> usize {
     n
 }
 
-/// Is `word` a flag that can run another program or write a file? Any short group
-/// containing `o` (`-o`, `-ro`), and any long option that is, abbreviates (getopt accepts
-/// abbreviations) or extends one of [`NEVER_LONG_FLAGS`].
-fn runs_or_writes(word: &str) -> bool {
-    let lower = word.to_ascii_lowercase();
-    if let Some(long) = lower.strip_prefix("--") {
-        let name = long.split('=').next().unwrap_or("");
-        return !name.is_empty()
-            && NEVER_LONG_FLAGS
-                .iter()
-                .any(|f| f.starts_with(name) || name.starts_with(f));
+/// Do the arguments of `command` stay inside [`FLAG_TABLE`]? Operands (words not starting
+/// with `-`, and a lone `-`) are not judged here; the path checks do that.
+fn flags_allowed(command: &str, args: &[String]) -> bool {
+    // Only the two forms nobody can aim at a program or a file; `ps -o` and friends are out.
+    if command == "ps" {
+        return args == ["aux"] || args == ["-ef"];
     }
-    lower.starts_with('-') && lower.len() > 1 && lower.contains('o')
+    // Any other operand is the positional form that sets the clock.
+    if command == "date" {
+        return args.iter().all(|a| a.starts_with('+') && a.len() > 1);
+    }
+    let Some((_, short, numeric)) = FLAG_TABLE.iter().find(|(c, _, _)| *c == command) else {
+        return false;
+    };
+    let mut rest = args.iter();
+    while let Some(word) = rest.next() {
+        if word.starts_with("--") {
+            return false;
+        }
+        let Some(body) = word.strip_prefix('-').filter(|b| !b.is_empty()) else {
+            continue;
+        };
+        if body.len() == 1 && numeric.contains(body) {
+            // `head -n 5`: the number is the flag's argument, not a path.
+            if !rest
+                .next()
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return false;
+            }
+        } else if !body.chars().all(|c| short.contains(c)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Where each absolute or `~/` operand of `words[1..]` resolves, in order; `None` if one
+/// cannot be pinned. An operand is pinned only if the file system resolves it to itself (no
+/// symlink in it or its parents, anywhere, including its last component), allowing the
+/// symlinked home and the `/tmp` alias of `/private/tmp`; the resolved form must not be a
+/// protected place nor under `/Volumes` or `/Network` (mounts that may hang). The exact rule
+/// stores these and re-resolves them at match time, so a directory that later becomes a
+/// symlink ends the rule's reach (`rm -rf fixtures/.ssh` after `fixtures` pointed at home).
+fn pin_operands(words: &[String], home: &Path) -> Option<Vec<PathBuf>> {
+    let real_home = canonical_lenient(home).unwrap_or_else(|| home.to_path_buf());
+    let mut pinned = Vec::new();
+    for word in &words[1..] {
+        if !(word.starts_with('/') || word.starts_with("~/")) {
+            continue;
+        }
+        if !plain_path(word) {
+            return None;
+        }
+        let path = expand(word.trim_end_matches('/'), home);
+        let real = canonical_lenient(&path)?;
+        let mut expected = vec![path.clone()];
+        if let Ok(rest) = path.strip_prefix(home) {
+            expected.push(real_home.join(rest));
+        }
+        if let Ok(rest) = path.strip_prefix("/tmp") {
+            expected.push(Path::new("/private/tmp").join(rest));
+        }
+        if !expected.contains(&real)
+            || path_is_protected(&real, home)
+            || path_is_protected(&real, &real_home)
+            || first_component_is(&real, &["volumes", "network"])
+            || first_component_is(&path, &["volumes", "network"])
+        {
+            return None;
+        }
+        pinned.push(real);
+    }
+    Some(pinned)
+}
+
+fn first_component_is(path: &Path, names: &[&str]) -> bool {
+    normalize(path)
+        .and_then(|parts| parts.first().map(|p| p.to_ascii_lowercase()))
+        .is_some_and(|first| names.contains(&first.as_str()))
 }
 
 /// The words of `command` when it is plain, else `None`: at most
@@ -609,7 +820,7 @@ fn plain_words(command: &str) -> Option<Vec<String>> {
 
 fn spec_matches(spec: &Spec, plain: &Plain, home: &Path) -> bool {
     match spec {
-        Spec::Exact(command) => plain.command == *command,
+        Spec::Exact { command, .. } => plain.command == *command,
         Spec::PathPrefix { head, prefix, .. } => {
             let Some(paths) = plain.words.strip_prefix(head.as_slice()) else {
                 return false;
@@ -879,6 +1090,7 @@ fn resolve_prefix(dir: &Path, home: &Path) -> Option<PathBuf> {
 /// First components under which an absolute (non-home) prefix rule is never offered.
 const BROAD_ROOTS: &[&str] = &[
     "volumes",
+    "network",
     "users",
     "opt",
     "usr",
@@ -1317,6 +1529,9 @@ mod tests {
             "wget x",
             "chmod 755 /work/a",
             "git status",
+            // Dropped in round 3: no flag/filter set that cannot run or read a rewritable file.
+            "jq . /work/a",
+            "lsof -i",
         ] {
             assert!(texts_of(c).is_empty(), "{c:?}: {:?}", texts_of(c));
         }
@@ -1332,14 +1547,12 @@ mod tests {
             "date",
             "uname -a",
             "sleep 1",
-            "jq . /work/a",
             "ps aux",
             "pgrep foo",
             "df -h",
             "tree /work/build",
             "uniq /work/a",
             "xxd /work/a",
-            "lsof -i",
         ] {
             assert_eq!(texts_of(c), [format!("Bash({c})")], "{c:?}");
         }
@@ -1595,7 +1808,7 @@ mod tests {
                 prefix: "~/Library/Caches/".into(),
                 resolved: caches.clone(),
             },
-            ..SessionRule::exact_for_test("x", None)
+            ..SessionRule::exact_for_test("x", Path::new("/Users/tester"), None)
         };
         let check = |c: &str| {
             let req = cmd(c);
@@ -1755,6 +1968,51 @@ mod tests {
             &home(),
             None
         ));
+    }
+
+    // Round 3: candidate derivation and the all-rules match share one bounded helper.
+    #[test]
+    fn candidates_within_and_first_match_within_agree_with_the_plain_functions() {
+        use std::time::Duration;
+        let req = cmd("ls build");
+        let reason = req.reason(None, &NoSettings);
+        let got: Vec<String> = candidates_within(
+            Duration::from_secs(5),
+            &req,
+            &reason,
+            &home(),
+            Some(Path::new("/work/proj")),
+        )
+        .into_iter()
+        .map(|c| c.rule_text)
+        .collect();
+        assert_eq!(got, ["Bash(ls build)"]);
+        let rules = [rule_for("ls other", 0), rule_for("ls build", 0)];
+        let hit = first_match_within(
+            Duration::from_secs(5),
+            &rules,
+            &req,
+            ReasonKind::AskRule,
+            &home(),
+            None,
+        );
+        assert_eq!(hit.map(|r| r.rule_text), Some("Bash(ls build)".to_owned()));
+        assert!(first_match_within(
+            Duration::from_secs(5),
+            &[],
+            &req,
+            ReasonKind::AskRule,
+            &home(),
+            None
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn network_and_volumes_operands_get_no_rule() {
+        for c in ["ls /Network/x/y", "cat /Volumes/Backup/f", "rm -rf /Network/a/b/c"] {
+            assert!(texts_of(c).is_empty(), "{c}: {:?}", texts_of(c));
+        }
     }
 
     #[test]

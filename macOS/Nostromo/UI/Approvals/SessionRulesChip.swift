@@ -4,8 +4,8 @@ import NostromoKit
 // AP4: the session-rules chip in the input bar, and the two-step human gate every session-rule
 // control goes through.
 //
-// The chip says how many "Allow for this session" rules the focus has (`1 session rule`,
-// `3 session rules`), and nothing when it has none. It sits in its own fixed-width slot
+// The chip says how many "Allow for this session" rules the focus has (`1 rule`,
+// `3 rules`; narrow bars show just the count), and nothing when it has none. It sits in its own fixed-width slot
 // (`SessionRulesChip.slotWidth`) so it appearing, changing or going never moves the composer or the
 // transcript. A click opens `SessionRulesPopover`, where every rule is listed and can be revoked.
 

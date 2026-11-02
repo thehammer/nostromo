@@ -1464,7 +1464,7 @@ async fn a_rule_never_overrides_the_guard() {
         rig.broker.inject_session_rule_for_test(
             T,
             rig.generation,
-            SessionRule::exact_for_test(command, None),
+            SessionRule::exact_for_test(command, &rig.home, None),
         );
         let tool_use_id = format!("toolu_guard{i}");
         rig.frames();
@@ -1488,13 +1488,38 @@ async fn a_rule_never_overrides_the_guard() {
     }
 }
 
+// The guard-first order, really tested: the rule matches this command (control), and the same
+// request with the guard forced to block ends `guard_blocked` instead of `allowed_by_session_rule`.
+#[tokio::test(start_paused = true)]
+async fn a_forced_guard_block_beats_a_rule_that_matches() {
+    let rig = Rig::with_app();
+    let mut rule = SessionRule::exact_for_test(CACHES_A, &rig.home, None);
+    rule.session_id = Some(format!("sid-{T}"));
+    rig.broker
+        .inject_session_rule_for_test(T, rig.generation, rule);
+    rig.assert_allowed_by_rule("toolu_control", CACHES_A).await;
+
+    nostromo::approvals::broker::force_guard_block_for_test("toolu_forced");
+    rig.submit_value(
+        T,
+        rig.generation,
+        "toolu_forced",
+        ask_request("toolu_forced", CACHES_A),
+    );
+    let outcome = rig.wait_outcome("toolu_forced").await;
+    assert_eq!(outcome_name(&outcome), "guard_blocked");
+    let writes = rig.writes_for("toolu_forced");
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0]["behavior"], "deny");
+}
+
 // S-f: a rule belongs to the conversation it was granted in. Fails if the matcher ignores
 // the session id (a `/clear` or a resumed conversation would inherit the rules).
 #[tokio::test(start_paused = true)]
 async fn a_rule_of_another_session_id_does_not_match() {
     let rig = Rig::with_app();
     // Control: the registered session's own id matches.
-    let mut own = SessionRule::exact_for_test(CACHES_A, None);
+    let mut own = SessionRule::exact_for_test(CACHES_A, &rig.home, None);
     own.session_id = Some(format!("sid-{T}"));
     rig.broker
         .inject_session_rule_for_test(T, rig.generation, own);
@@ -1511,10 +1536,36 @@ async fn a_rule_of_another_session_id_does_not_match() {
     );
 }
 
+// Round 3 (S-f): grant and match use the same id. A request that names its own session id
+// is granted under it, so the same id matches again, and a request without one (the registered
+// id) does not inherit the rule.
+#[tokio::test(start_paused = true)]
+async fn a_rule_granted_on_a_request_that_names_a_session_id_matches_that_id() {
+    let rig = Rig::with_app();
+    let mut first = ask_request("toolu_named", "ls /tmp/cap/named");
+    first["session_id"] = json!("sid-named");
+    rig.grant_value(T, rig.generation, first, CandidateKind::Exact)
+        .await;
+
+    let mut again = ask_request("toolu_named_again", "ls /tmp/cap/named");
+    again["session_id"] = json!("sid-named");
+    rig.submit_value(T, rig.generation, "toolu_named_again", again);
+    let outcome = rig.wait_outcome("toolu_named_again").await;
+    assert_eq!(outcome_name(&outcome), "allowed_by_session_rule");
+
+    let other = ask_request("toolu_unnamed", "ls /tmp/cap/named");
+    let wire = rig.hold_value("toolu_unnamed", other).await;
+    assert_eq!(
+        rig.broker
+            .answer(&wire.request_id, &deny(), "w-clean", "app"),
+        applied("denied")
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_rule_granted_under_another_session_id_does_not_match() {
     let rig = Rig::with_app();
-    let mut old = SessionRule::exact_for_test(CACHES_A, None);
+    let mut old = SessionRule::exact_for_test(CACHES_A, &rig.home, None);
     old.session_id = Some("sid-before-clear".into());
     rig.broker
         .inject_session_rule_for_test(T, rig.generation, old);
@@ -1530,7 +1581,7 @@ async fn a_hand_built_rule_for_a_compound_command_does_not_allow_it() {
     rig.broker.inject_session_rule_for_test(
         T,
         rig.generation,
-        SessionRule::exact_for_test(command, None),
+        SessionRule::exact_for_test(command, &rig.home, None),
     );
 
     rig.assert_card("toolu_1", command).await;
@@ -1628,7 +1679,7 @@ async fn a_rule_of_one_generation_never_matches_the_next_even_if_the_old_process
     let sink = FakeSink::new();
     let next = rig.broker.register_session(session(T, true), sink.clone());
     rig.broker
-        .inject_session_rule_for_test(T, old, SessionRule::exact_for_test(CACHES_A, None));
+        .inject_session_rule_for_test(T, old, SessionRule::exact_for_test(CACHES_A, &rig.home, None));
     assert!(rig.rules(T).is_empty(), "the new process lists no rules");
     rig.assert_card_on(T, next, "toolu_2", CACHES_A).await;
     assert!(sink.writes().iter().all(|(_, b)| b["behavior"] == "deny"));
@@ -1763,7 +1814,7 @@ async fn the_only_allows_written_are_allowed_once_allowed_for_session_and_allowe
     rig.broker.inject_session_rule_for_test(
         T,
         rig.generation,
-        SessionRule::exact_for_test("ecs_connect ap production portal", None),
+        SessionRule::exact_for_test("ecs_connect ap production portal", &rig.home, None),
     );
     rig.submit_value(
         T,
