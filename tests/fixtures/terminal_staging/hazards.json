@@ -78,5 +78,12 @@
  {"name": "tmux_select_pane", "text": "tmux select-pane -t 1", "remote": "ok", "local": "ok", "history": false},
  {"name": "kitty_ls", "text": "kitty @ ls", "remote": "ok", "local": "ok", "history": false},
  {"name": "zellij_list", "text": "zellij list-sessions", "remote": "ok", "local": "ok", "history": false},
- {"name": "osascript_other", "text": "osascript -e 'display dialog \"hi\"'", "remote": "ok", "local": "ok", "history": false}
+ {"name": "osascript_other", "text": "osascript -e 'display dialog \"hi\"'", "remote": "ok", "local": "ok", "history": false},
+ {"name": "r_after_if", "text": "if r; then :; fi", "remote": "history_expansion", "local": "ok", "history": true},
+ {"name": "r_after_while", "text": "while r", "remote": "history_expansion", "local": "ok", "history": true},
+ {"name": "r_after_bang", "text": "! r", "remote": "history_expansion", "local": "ok", "history": true},
+ {"name": "r_after_noglob", "text": "noglob r", "remote": "history_expansion", "local": "ok", "history": true},
+ {"name": "r_after_env", "text": "env r", "remote": "history_expansion", "local": "ok", "history": true},
+ {"name": "r_after_nohup", "text": "nohup r", "remote": "history_expansion", "local": "ok", "history": true},
+ {"name": "r_after_elif", "text": "if false; then :; elif r; then :; fi", "remote": "history_expansion", "local": "ok", "history": true}
 ]

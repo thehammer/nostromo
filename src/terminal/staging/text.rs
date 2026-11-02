@@ -187,10 +187,14 @@ fn types_into_another_terminal(text: &str) -> bool {
         return true;
     }
     let words = hazard_words(&lower);
-    if let Some(first_tmux) = words.iter().position(|w| w.rsplit('/').next() == Some("tmux")) {
-        if words[first_tmux + 1..].iter().any(|w| {
-            w.len() >= 3 && TMUX_INPUT_VERBS.iter().any(|verb| verb.starts_with(w))
-        }) {
+    if let Some(first_tmux) = words
+        .iter()
+        .position(|w| w.rsplit('/').next() == Some("tmux"))
+    {
+        if words[first_tmux + 1..]
+            .iter()
+            .any(|w| w.len() >= 3 && TMUX_INPUT_VERBS.iter().any(|verb| verb.starts_with(w)))
+        {
             return true;
         }
     }
@@ -206,8 +210,28 @@ fn types_into_another_terminal(text: &str) -> bool {
 }
 
 /// Words before a command that still leave the next word in command position.
-const COMMAND_PREFIX_WORDS: [&str; 9] =
-    ["then", "do", "else", "command", "builtin", "eval", "exec", "time", "sudo"];
+const COMMAND_PREFIX_WORDS: [&str; 20] = [
+    "then",
+    "do",
+    "else",
+    "elif",
+    "if",
+    "while",
+    "until",
+    "!",
+    "command",
+    "builtin",
+    "eval",
+    "exec",
+    "time",
+    "sudo",
+    "noglob",
+    "nocorrect",
+    "nohup",
+    "nice",
+    "env",
+    "coproc",
+];
 
 /// Would a shell expand history in `text`? Quotes are not parsed: asking or
 /// refusing is the cheap side. A `!` followed by anything but a space, `=` or
@@ -215,7 +239,8 @@ const COMMAND_PREFIX_WORDS: [&str; 9] =
 /// [`normalise_for_hazards`]: `\fc`, `'fc'`, `$(fc -s)` all count); or `r` in
 /// command position: first in a segment (split on `;`, `&`, `&&`, `|`, `||`,
 /// a subshell, a substitution, a group or a backtick), or after `then`,
-/// `do`, `else`, `command`, `builtin`, `eval`, `exec`, `time` or `sudo`.
+/// `do`, `else`, `elif`, `if`, `while`, `until`, `!`, `command`, `builtin`, `eval`, `exec`, `time`, `sudo`,
+/// `noglob`, `nocorrect`, `nohup`, `nice`, `env` or `coproc`.
 pub fn uses_history_expansion(text: &str) -> bool {
     let chars: Vec<char> = text.chars().collect();
     if chars.iter().enumerate().any(|(i, c)| {

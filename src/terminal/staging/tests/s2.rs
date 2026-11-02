@@ -231,10 +231,9 @@ fn a_per_terminal_off_is_replayed_to_an_app_that_subscribes_later() {
     let mut third = w.connect_app("third", &[TERMINAL_STAGING_UI]);
     let frames: Vec<_> = std::iter::from_fn(|| third.try_recv().ok()).collect();
     assert!(
-        frames.iter().all(|f| matches!(
-            f,
-            ServerMsg::TerminalStagingList { enabled: true, .. }
-        )),
+        frames
+            .iter()
+            .all(|f| matches!(f, ServerMsg::TerminalStagingList { enabled: true, .. })),
         "{frames:?}"
     );
 }

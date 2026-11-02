@@ -101,8 +101,9 @@ enum StagingHazards {
     /// Shell history expansion: `!` followed by anything but a space, `=` or `(` (a trailing `!` does not
     /// count); text that starts with `^`; `fc` or `history` as a word anywhere (on the normalised text:
     /// `\fc`, `'fc'`, `$(fc -s)` count); or `r` in command position: first in a segment (split on `;`, `&`,
-    /// `&&`, `|`, `||`, a subshell, a substitution, a group or a backtick) or after `then`, `do`, `else`,
-    /// `command`, `builtin`, `eval`, `exec`, `time` or `sudo`. The same rule the daemon applies
+    /// `&&`, `|`, `||`, a subshell, a substitution, a group or a backtick) or after `then`, `do`, `else`, `elif`, `if`,
+    /// `while`, `until`, `!`, `command`, `builtin`, `eval`, `exec`, `time`, `sudo`, `noglob`, `nocorrect`, `nohup`, `nice`,
+    /// `env` or `coproc`. The same rule the daemon applies
     /// (`tests/fixtures/terminal_staging/hazards.json`).
     static func usesHistoryExpansion(_ command: String) -> Bool {
         if command.hasPrefix("^") { return true }
@@ -113,7 +114,8 @@ enum StagingHazards {
         }
         let normalisedText = normalised(command)
         if words(of: normalisedText).contains(where: { $0 == "fc" || $0 == "history" }) { return true }
-        let prefixWords: Set<String> = ["then", "do", "else", "command", "builtin", "eval", "exec", "time", "sudo"]
+        let prefixWords: Set<String> = ["then", "do", "else", "elif", "if", "while", "until", "!", "command", "builtin", "eval", "exec",
+                                        "time", "sudo", "noglob", "nocorrect", "nohup", "nice", "env", "coproc"]
         for segment in segments(of: normalisedText) {
             let first = segment.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
                 .first(where: { !prefixWords.contains($0) })
