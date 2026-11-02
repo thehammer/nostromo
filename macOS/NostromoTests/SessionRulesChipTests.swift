@@ -96,7 +96,7 @@ private func uptime(_ clock: @escaping () -> TimeInterval) -> () -> TimeInterval
 
 // MARK: - The gate
 
-final class SessionRuleGestureTests: XCTestCase {
+final class SessionRuleGestureTests: MouseQueueTestCase {
 
     private var rig: EventRig!
 
@@ -282,7 +282,7 @@ final class SessionRuleGestureTests: XCTestCase {
 
 // MARK: - The chip, the store and the popover
 
-final class SessionRulesStoreAndChipTests: XCTestCase {
+final class SessionRulesStoreAndChipTests: MouseQueueTestCase {
 
     private var keepAlive: [AnyObject] = []
 
@@ -471,7 +471,7 @@ final class SessionRulesStoreAndChipTests: XCTestCase {
 
 // MARK: - The card
 
-final class SessionRuleCardTests: XCTestCase {
+final class SessionRuleCardTests: MouseQueueTestCase {
 
     private var rig: EventRig!
     private var current: NSEvent?
@@ -719,7 +719,7 @@ final class SessionRuleCardTests: XCTestCase {
 
 // MARK: - The input bar's slot
 
-final class SessionRulesSlotTests: XCTestCase {
+final class SessionRulesSlotTests: MouseQueueTestCase {
 
     private var keepAlive: [AnyObject] = []
 
