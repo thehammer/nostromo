@@ -88,7 +88,7 @@ private func matches(_ text: String, _ pattern: String) -> Bool {
 
 // MARK: - The store
 
-final class ApprovalStatusStoreTests: XCTestCase {
+final class ApprovalStatusStoreTests: MouseQueueTestCase {
 
     private func make() -> (ApprovalStore, ApprovalRecorder) {
         let recorder = ApprovalRecorder()
@@ -507,7 +507,7 @@ final class ApprovalStatusStoreTests: XCTestCase {
 // MARK: - The tool row
 
 /// Shared helpers: a window, a row, a store, a clock-free way to feed it.
-class ApprovalRowTestCase: XCTestCase {
+class ApprovalRowTestCase: MouseQueueTestCase {
 
     let reading = ApprovalAP2bFixtures.atMs
 
@@ -1190,7 +1190,7 @@ final class ApprovalPane {
 
 // MARK: - Paging (criterion 35)
 
-final class ApprovalPagingHostTests: XCTestCase {
+final class ApprovalPagingHostTests: MouseQueueTestCase {
 
     private func deny() -> ApprovalDecisionWire { ApprovalDecisionWire(kind: .deny) }
 
@@ -1517,7 +1517,7 @@ final class ApprovalPagingHostTests: XCTestCase {
 
 // MARK: - Two windows (criterion 34)
 
-final class ApprovalTwoWindowTests: XCTestCase {
+final class ApprovalTwoWindowTests: MouseQueueTestCase {
 
     private func twoWindows(tag: String = "cody-1") -> (ApprovalPane, ApprovalPane) {
         let recorder = ApprovalRecorder()
@@ -1644,7 +1644,7 @@ final class ApprovalTwoWindowTests: XCTestCase {
 
 // MARK: - The guard bar
 
-final class ApprovalGuardBarTests: XCTestCase {
+final class ApprovalGuardBarTests: MouseQueueTestCase {
 
     private func block(_ p: ApprovalPane, tag: String = "cody-1", toolUseId: String = "toolu_g", entryId: String = "e1",
                        summary: String = "Bash tmux") throws {
@@ -1894,7 +1894,7 @@ final class ApprovalGuardBarTests: XCTestCase {
 
 // MARK: - Source scans (T-AP2b-3)
 
-final class ApprovalAP2bSourceScanTests: XCTestCase {
+final class ApprovalAP2bSourceScanTests: MouseQueueTestCase {
 
     private func code(_ path: String) throws -> [String] {
         try DecisionCoordinatorTests.codeLines(ofSourceAt: path)
@@ -1964,7 +1964,7 @@ final class ApprovalAP2bSourceScanTests: XCTestCase {
 
 // MARK: - Paging keeps what the person was doing (AF2-4, nits)
 
-final class ApprovalPagingStateTests: XCTestCase {
+final class ApprovalPagingStateTests: MouseQueueTestCase {
 
     private func askThenSimple(_ p: ApprovalPane) throws {
         p.store.handle(.request(try QuestionTestRequests.ask(id: "q", options: QuestionTestRequests.offered)))

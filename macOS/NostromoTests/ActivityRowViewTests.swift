@@ -63,7 +63,7 @@ private func makeRig(_ testCase: XCTestCase, blocks: [TurnBlock] = standardBlock
     return rig
 }
 
-final class ActivityRowViewTests: XCTestCase {
+final class ActivityRowViewTests: MouseQueueTestCase {
 
     // MARK: The row
 

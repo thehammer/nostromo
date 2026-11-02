@@ -24,6 +24,36 @@ import AppKit
 // - Windows are borderless, parked far off every screen, and ordered front so
 //   they have a window number.
 
+// MARK: - Event-queue hygiene
+
+/// The application's event queue is process-wide and one XCTest process runs every
+/// class, so a mouse event a test posts and never consumes sits in front of a later
+/// test's gesture, where AppKit's tracking loops read it first. Tests that
+/// synthesise or post mouse events derive from this class: the queue is drained
+/// around every test. (`invokeTest` rather than setUp/tearDown, so a subclass that
+/// forgets `super` is still covered.)
+class MouseQueueTestCase: XCTestCase {
+
+    /// Dequeues everything pending. Bounded, so a producer that keeps posting
+    /// cannot hang the run. Returns how many events it removed.
+    @discardableResult
+    static func drainEventQueue(limit: Int = 10_000) -> Int {
+        var n = 0
+        while n < limit,
+              NSApp.nextEvent(matching: .any, until: .distantPast, inMode: .default, dequeue: true) != nil {
+            n += 1
+        }
+        return n
+    }
+
+    override func invokeTest() {
+        _ = NSApplication.shared
+        Self.drainEventQueue()
+        super.invokeTest()
+        Self.drainEventQueue()
+    }
+}
+
 // MARK: - Shared fixtures (internal: SyntheticInputGateTests uses them too)
 
 enum GestureFixtures {
@@ -97,7 +127,7 @@ enum GestureFixtures {
 
 // MARK: - HumanGesture.permit
 
-final class HumanGestureTests: XCTestCase {
+final class HumanGestureTests: MouseQueueTestCase {
 
     private func makeWindowAndControl() -> (NSWindow, NSButton) {
         let window = GestureFixtures.offscreenWindow()
@@ -522,7 +552,7 @@ private extension HumanGestureVerdict {
 // parent, never shown on screen). `currentEvent` stands in for
 // `NSApp.currentEvent`, the event behind the button's action.
 
-final class DecisionSheetHumanGestureTests: XCTestCase {
+final class DecisionSheetHumanGestureTests: MouseQueueTestCase {
 
     private let requestId = "req-ap1"
     private var store: DecisionStore!

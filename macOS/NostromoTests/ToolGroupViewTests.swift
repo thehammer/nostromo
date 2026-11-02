@@ -79,7 +79,7 @@ private enum Key {
 
 // MARK: - A turn with tool calls
 
-final class ToolGroupViewTests: XCTestCase {
+final class ToolGroupViewTests: MouseQueueTestCase {
 
     // MARK: collapsed
 
@@ -411,7 +411,7 @@ final class ToolGroupViewTests: XCTestCase {
 
 // MARK: - The row
 
-final class ToolGroupRowTests: XCTestCase {
+final class ToolGroupRowTests: MouseQueueTestCase {
 
     private func makeRow(_ group: ToolGroup, expanded: Bool = false, payloadAvailable: Bool = true,
                          reduceMotion: @escaping () -> Bool = { false }) -> (RigWindow, ToolGroupRowView) {
@@ -665,6 +665,61 @@ final class ToolGroupRowTests: XCTestCase {
         XCTAssertGreaterThan(editor?.selectedRange.length ?? 0, 0, "the drag selected part of the summary")
     }
 
+    // MARK: leftovers from earlier tests in the same process
+
+    /// What an earlier test (or the operator) leaves in the app-wide queue: a drag and a
+    /// mouse-up from some other gesture, with event numbers this gesture never handed out.
+    private func queueForeignDragAndUp(in window: NSWindow) {
+        let t = ProcessInfo.processInfo.systemUptime - 5
+        for (i, type) in [NSEvent.EventType.leftMouseDragged, .leftMouseDragged, .leftMouseUp].enumerated() {
+            let e = NSEvent.mouseEvent(with: type, location: NSPoint(x: 5, y: 5), modifierFlags: [],
+                                       timestamp: t + 0.001 * Double(i), windowNumber: window.windowNumber,
+                                       context: nil, eventNumber: 0x2BAD, clickCount: 1,
+                                       pressure: type == .leftMouseUp ? 0 : 1)!
+            NSApp.postEvent(e, atStart: false)
+        }
+    }
+
+    func testADragStillSelectsTheTextWithAForeignDragAndMouseUpAlreadyQueued() throws {
+        let (window, row) = makeRow(F.plainGroup(calls: 10))
+        var toggles: [Bool] = []
+        row.onToggle = { toggles.append($0) }
+        queueForeignDragAndUp(in: window)
+        let summary = row.summaryField.convert(row.summaryField.bounds, to: nil)
+        let from = NSPoint(x: summary.minX + 6, y: summary.midY)
+        try AppControlMouse.drag(in: window, from: from, to: NSPoint(x: from.x + 40, y: from.y))
+
+        XCTAssertEqual(toggles, [], "a 40 pt drag is a selection, not a click")
+        XCTAssertGreaterThan(rigEditor(of: row.summaryField)?.selectedRange.length ?? 0, 0,
+                             "the drag selected part of the summary")
+    }
+
+    func testAFourPointDragIsStillAClickWithAForeignDragAndMouseUpAlreadyQueued() throws {
+        let (window, row) = makeRow(F.plainGroup(calls: 10))
+        var toggles: [Bool] = []
+        row.onToggle = { toggles.append($0) }
+        queueForeignDragAndUp(in: window)
+        let summary = row.summaryField.convert(row.summaryField.bounds, to: nil)
+        let from = NSPoint(x: summary.minX + 20, y: summary.midY)
+        try AppControlMouse.drag(in: window, from: from, to: NSPoint(x: from.x + 2, y: from.y))
+        XCTAssertEqual(toggles, [true])
+    }
+
+    func testTheForeignEventsAreStillQueuedAfterTheGesture() throws {
+        let (window, row) = makeRow(F.plainGroup(calls: 10))
+        queueForeignDragAndUp(in: window)
+        let summary = row.summaryField.convert(row.summaryField.bounds, to: nil)
+        try AppControlMouse.click(in: window, at: NSPoint(x: summary.minX + 8, y: summary.midY))
+
+        var left: [NSEvent] = []
+        while let e = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged],
+                                      until: .distantPast, inMode: .default, dequeue: true), left.count < 100 {
+            left.append(e)
+        }
+        XCTAssertEqual(left.map(\.type), [.leftMouseDragged, .leftMouseDragged, .leftMouseUp])
+        XCTAssertTrue(left.allSatisfy { $0.eventNumber == 0x2BAD })
+    }
+
     func testTheSummaryIsSelectableText() {
         let (_, row) = makeRow(F.plainGroup(calls: 3))
         XCTAssertTrue(row.summaryField.isSelectable)
@@ -674,7 +729,7 @@ final class ToolGroupRowTests: XCTestCase {
 
 // MARK: - The island
 
-final class ToolGroupIslandTests: XCTestCase {
+final class ToolGroupIslandTests: MouseQueueTestCase {
 
     private func makeGroupView(_ blocks: [TurnBlock], expanded: Bool = false,
                                folds: FoldResolver = FoldResolver(),
@@ -862,7 +917,7 @@ final class ToolGroupIslandTests: XCTestCase {
 
 // MARK: - What a collapsed group hides, and what selection can reach
 
-final class ToolGroupSelectionTests: XCTestCase {
+final class ToolGroupSelectionTests: MouseQueueTestCase {
 
     private static let sentinel = "HIDDEN-OUTPUT-SENTINEL"
 
@@ -945,7 +1000,7 @@ final class ToolGroupSelectionTests: XCTestCase {
 
 // MARK: - Cold and dropped turns
 
-final class ToolGroupColdTurnTests: XCTestCase {
+final class ToolGroupColdTurnTests: MouseQueueTestCase {
 
     private func fullTurn() -> ChatTurn {
         let blocks: [TurnBlock] = [.text(F.prose),
@@ -1023,7 +1078,7 @@ final class ToolGroupColdTurnTests: XCTestCase {
 
 // MARK: - Layout cost and hostile content
 
-final class ToolGroupCostTests: XCTestCase {
+final class ToolGroupCostTests: MouseQueueTestCase {
 
     private func turnWithGroup(of n: Int) -> ChatTurn {
         F.turn([.text("before")] + F.run(n))
@@ -1101,7 +1156,7 @@ final class ToolGroupCostTests: XCTestCase {
 
 // MARK: - Review follow-ups (Perri, TF2)
 
-final class ToolGroupReviewFollowUpTests: XCTestCase {
+final class ToolGroupReviewFollowUpTests: MouseQueueTestCase {
 
     private typealias F = FoldFixtures
 

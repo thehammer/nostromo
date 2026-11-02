@@ -12,7 +12,7 @@ import AppKit
 //
 // The width store is a throwaway UserDefaults suite; `.standard` is never written.
 
-final class MotherListResizeTests: XCTestCase {
+final class MotherListResizeTests: MouseQueueTestCase {
 
     private var suiteName = ""
     private var suite: UserDefaults!
