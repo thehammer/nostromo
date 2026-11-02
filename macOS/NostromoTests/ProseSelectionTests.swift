@@ -345,7 +345,7 @@ private struct Target {
 
 // MARK: - Tests
 
-final class ProseSelectionTests: XCTestCase {
+final class ProseSelectionTests: MouseQueueTestCase {
 
     private func rig(for element: ProseElement, width: CGFloat = 900, overlay: Bool = false)
         -> (TranscriptRig, Target)? {
@@ -555,7 +555,7 @@ final class ProseSelectionTests: XCTestCase {
 /// `NSTextView`, not a field editor, so a selection in it has to survive the
 /// same trip: a width change, a streamed block, or a tool result expanding
 /// must not silently clear what the operator is copying.
-final class TranscriptTextViewSelectionSurvivalTests: XCTestCase {
+final class TranscriptTextViewSelectionSurvivalTests: MouseQueueTestCase {
 
     private let selected = NSRange(location: 7, length: 12)
 
@@ -924,7 +924,7 @@ final class ReplRig {
 
 /// A mouse-down over the paragraph must reach the card's text view, at any pane width,
 /// whatever phase of layout the pane is in, with the pane's overlays over it.
-final class ReplPaneHitTestFidelityTests: XCTestCase {
+final class ReplPaneHitTestFidelityTests: MouseQueueTestCase {
 
     private let widths: [CGFloat] = [520, 640, 780, 900, 1415]
     private let blocks: [TurnBlock] = [.text(ProseElement.markdown)]
@@ -1016,7 +1016,7 @@ final class ReplPaneHitTestFidelityTests: XCTestCase {
 /// that loop (event-tracking run-loop mode, as a main-queue pass would), after the first
 /// dragged events have been consumed; the timer then queues the rest of the drag and the
 /// mouse-up.
-final class ProseSelectionRemeasureMidDragTests: XCTestCase {
+final class ProseSelectionRemeasureMidDragTests: MouseQueueTestCase {
 
     private struct Gesture {
         let expected: NSRange
@@ -1146,7 +1146,7 @@ final class ProseSelectionRemeasureMidDragTests: XCTestCase {
 
 // MARK: - Follow-tail while a selection is held
 
-final class PinnedPaneSelectionTests: XCTestCase {
+final class PinnedPaneSelectionTests: MouseQueueTestCase {
 
     private let card = TurnBlock.text(ProseElement.markdown)
 
@@ -1210,7 +1210,7 @@ final class PinnedPaneSelectionTests: XCTestCase {
 /// vertically resizable nor constraint-driven). So a resize of the card has to reach
 /// `layout()`, and the text view must always be tall enough for its laid-out text:
 /// with `isVerticallyResizable` off, anything below the frame is hard-clipped.
-final class MarkdownCardLayoutTests: XCTestCase {
+final class MarkdownCardLayoutTests: MouseQueueTestCase {
 
     private let md = "Filed `bugs/open/prose-selection.md` for this one.\n\n"
         + "Second paragraph with some words to select across lines when the pane is narrow enough to wrap; "

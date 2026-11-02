@@ -159,7 +159,7 @@ private func select(_ labelCase: LabelCase, appearance: (name: String, appearanc
 
 // MARK: - Tests
 
-final class TranscriptSelectionColorTests: XCTestCase {
+final class TranscriptSelectionColorTests: MouseQueueTestCase {
 
     /// Black text on the selection colour is the bug. The editor must draw the text in
     /// the colour the label renders it in, and that colour must not be (near) black.
@@ -261,7 +261,7 @@ final class TranscriptSelectionColorTests: XCTestCase {
 
 /// The expanded tool output is raw text the operator wants to copy, so a right-click
 /// on it must offer Copy -- whether or not it already holds a selection.
-final class ToolResultCopyMenuTests: XCTestCase {
+final class ToolResultCopyMenuTests: MouseQueueTestCase {
 
     private func setUpLabel() -> (RigWindow, NSTextField)? {
         let window = makeRigWindow(self)
@@ -316,7 +316,7 @@ final class ToolResultCopyMenuTests: XCTestCase {
 /// clicks away, the label has to look and measure exactly as it did before it was
 /// ever selected (a flattened attributed string loses per-run colour, ligature
 /// and paragraph settings, and changes the wrapped height).
-final class TranscriptLabelAttributeStabilityTests: XCTestCase {
+final class TranscriptLabelAttributeStabilityTests: MouseQueueTestCase {
 
     private func describeValue(_ value: Any) -> String {
         if let c = value as? NSColor {
@@ -494,7 +494,7 @@ private func paint(_ view: NSView) -> Painted? {
     return Painted(highlight: top.c, text: text, highlightShare: Double(top.n) / Double(rep.pixelsWide * rep.pixelsHigh))
 }
 
-final class TranscriptInactiveSelectionTests: XCTestCase {
+final class TranscriptInactiveSelectionTests: MouseQueueTestCase {
 
     private enum Subject: String, CaseIterable {
         case markdownCard = "MarkdownCardView text view"

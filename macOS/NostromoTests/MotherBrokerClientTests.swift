@@ -55,7 +55,7 @@ import UserNotifications
 /// without checking anything, which is the precise defect this class already
 /// learned about the hard way. A broker socket we cannot open is a broken
 /// test, not an excused one.
-final class MotherBrokerClientTests: XCTestCase {
+final class MotherBrokerClientTests: MouseQueueTestCase {
 
     var client:    MotherBrokerClient!
     var serverFd:  Int32 = -1
@@ -788,7 +788,7 @@ private func mc3PermittedGesture() -> MotherGestureInputs {
 // A1: the Mac's job decoder keeps crew data, and never loses a job over it.
 // ══════════════════════════════════════════════════════════════════════════════
 
-final class MC2JobSlimCrewDecodingTests: XCTestCase {
+final class MC2JobSlimCrewDecodingTests: MouseQueueTestCase {
 
     /// A trimmed j-hold1 fixture job carrying every crew key; `gates` is substituted so a test can break it.
     private func jobJSON(gates: String) -> String {
@@ -1136,7 +1136,7 @@ extension MotherBrokerClientTests {
 // A3 (cont.): the progress overlay's ordering rules.
 // ══════════════════════════════════════════════════════════════════════════════
 
-final class MC2ProgressOverlayTests: XCTestCase {
+final class MC2ProgressOverlayTests: MouseQueueTestCase {
 
     private let noon = "2026-10-17T12:00:00.000Z"
     private let earlier = "2026-10-17T11:59:00.000Z"
@@ -1218,7 +1218,7 @@ final class MC2ProgressOverlayTests: XCTestCase {
 // A6: MotherJobRefresher — a burst of crew events is one query.get.
 // ══════════════════════════════════════════════════════════════════════════════
 
-final class MC2JobRefresherTests: XCTestCase {
+final class MC2JobRefresherTests: MouseQueueTestCase {
 
     private final class Probe {
         var fetched: [String] = []
@@ -1353,7 +1353,7 @@ final class MC2JobRefresherTests: XCTestCase {
 // A7: the counts strip's numbers.
 // ══════════════════════════════════════════════════════════════════════════════
 
-final class MC2StatusCountsTests: XCTestCase {
+final class MC2StatusCountsTests: MouseQueueTestCase {
 
     private func attention(_ reason: MotherAttentionReason, acked: Bool = false) -> MotherAttention {
         MotherAttention(reason: reason, since: "2026-10-17T12:00:02.000Z", acked: acked)
@@ -1468,7 +1468,7 @@ final class MC2StatusCountsTests: XCTestCase {
 // B, C: MotherJobDetail inside a window — what must keep still, and what must change.
 // ══════════════════════════════════════════════════════════════════════════════
 
-final class MC2JobDetailNoChurnTests: XCTestCase {
+final class MC2JobDetailNoChurnTests: MouseQueueTestCase {
 
     private var host: MC2StubHost!
     private var detail: MotherJobDetail!
@@ -1947,7 +1947,7 @@ final class MC2JobDetailNoChurnTests: XCTestCase {
 // D: the counts strip does not move when a count changes.
 // ══════════════════════════════════════════════════════════════════════════════
 
-final class MC2CountsChipsTests: XCTestCase {
+final class MC2CountsChipsTests: MouseQueueTestCase {
 
     private var chips: MotherCountsChips!
     private var window: NSWindow!
@@ -2026,7 +2026,7 @@ final class MC2CountsChipsTests: XCTestCase {
 // E: the panel's colours are legible on the Mother panel's background.
 // ══════════════════════════════════════════════════════════════════════════════
 
-final class MC2LegibilityTests: XCTestCase {
+final class MC2LegibilityTests: MouseQueueTestCase {
 
     private func luminance(_ color: NSColor, file: StaticString = #filePath, line: UInt = #line) throws -> Double {
         let rgb = try XCTUnwrap(color.usingColorSpace(.sRGB), "colour has no sRGB form", file: file, line: line)
@@ -2074,7 +2074,7 @@ final class MC2LegibilityTests: XCTestCase {
 // F: the Details sheet (`mother status <id>` on this Mac, never for a PHI repo).
 // ══════════════════════════════════════════════════════════════════════════════
 
-final class MC2DetailsSheetTests: XCTestCase {
+final class MC2DetailsSheetTests: MouseQueueTestCase {
 
     private var host: MC2StubHost!
     private var detail: MotherJobDetail!
@@ -2432,7 +2432,7 @@ extension MotherBrokerClientTests {
 
 // MARK: - MC3: BrokerError.kind
 
-final class MC3BrokerErrorKindTests: XCTestCase {
+final class MC3BrokerErrorKindTests: MouseQueueTestCase {
 
     func testTransportFailuresMapToTheirOwnKinds() {
         XCTAssertEqual(BrokerError.timeout.kind, .timeout)
@@ -2460,7 +2460,7 @@ final class MC3BrokerErrorKindTests: XCTestCase {
 
 // MARK: - MC3: the job detail pane
 
-final class MC3JobDetailDecisionTests: XCTestCase {
+final class MC3JobDetailDecisionTests: MouseQueueTestCase {
 
     private var host: MC2StubHost!
     private var detail: MotherJobDetail!
@@ -3221,7 +3221,7 @@ private func mc4Coordinator(center: MC4FakeCenter = MC4FakeCenter(), badges: @es
 
 // MARK: - MC4: the app-wide count and the badge
 
-final class MC4NeedsYouCoordinatorTests: XCTestCase {
+final class MC4NeedsYouCoordinatorTests: MouseQueueTestCase {
 
     func testTheDockBadgeShowsTheTotalThenClearsAtZero() {
         var badges: [String?] = []
@@ -3465,7 +3465,7 @@ extension MotherBrokerClientTests {
 
 // MARK: - MC4: the quiet-broker note
 
-final class MC4MotherNotifyNoteTests: XCTestCase {
+final class MC4MotherNotifyNoteTests: MouseQueueTestCase {
 
     func testTheNoteTextIsTheFixedExplanation() {
         XCTAssertEqual(MotherNotifyNote.text,
@@ -3517,7 +3517,7 @@ final class MC4MotherNotifyNoteTests: XCTestCase {
 
 // MARK: - MC4: clicking a notification
 
-final class MC4NeedsYouRoutingTests: XCTestCase {
+final class MC4NeedsYouRoutingTests: MouseQueueTestCase {
 
     private var opened = 0
     private var observer: NSObjectProtocol?
@@ -3571,7 +3571,7 @@ final class MC4NeedsYouRoutingTests: XCTestCase {
 
 // MARK: - MC4: relaunch baseline and the reconnect guard
 
-final class MC4ResnapshotGuardTests: XCTestCase {
+final class MC4ResnapshotGuardTests: MouseQueueTestCase {
     private let t0 = Date(timeIntervalSince1970: 1_000)
 
     func testHoldingStartsAtDisconnectAndASnapshotClearsIt() {
@@ -3612,7 +3612,7 @@ final class MC4ResnapshotGuardTests: XCTestCase {
     }
 }
 
-final class MC4RelaunchBaselineTests: XCTestCase {
+final class MC4RelaunchBaselineTests: MouseQueueTestCase {
 
     func testLaunchWithThreeWaitingAlertsNothingAndTheBadgeStillShowsThree() {
         let center = MC4FakeCenter()
@@ -3705,7 +3705,7 @@ final class MC4RelaunchBaselineTests: XCTestCase {
 ///   j-focus, j-unverified, j-you, j-unknown   one origin kind each
 ///   j-robot                                   a kind this build has never heard of
 ///   j-bad-string, j-bad-origin                a malformed annotation: skipped, nothing else lost
-final class MF3MotherAnnotationsTests: XCTestCase {
+final class MF3MotherAnnotationsTests: MouseQueueTestCase {
 
     // MARK: Helpers
 

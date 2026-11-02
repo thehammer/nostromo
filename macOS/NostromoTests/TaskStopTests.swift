@@ -379,7 +379,7 @@ fileprivate final class TSButtonRig {
     var title: String { tsTitle(button) }
 }
 
-final class TaskStopButtonTests: XCTestCase {
+final class TaskStopButtonTests: MouseQueueTestCase {
 
     override func setUp() {
         super.setUp()
@@ -685,7 +685,7 @@ fileprivate final class TSGestureRig {
     }
 }
 
-final class TaskStopRealGestureTests: XCTestCase {
+final class TaskStopRealGestureTests: MouseQueueTestCase {
 
     private var clock: TSGestureClock!
 
@@ -855,7 +855,7 @@ fileprivate func tsKey(in window: NSWindow?, characters: String = ".", keyCode: 
 
 /// The arm and the confirm must be two gestures. Real `HumanGesture.permit` and real events; the gate's
 /// clock is set by hand (`step = 0`), so "0.1 s after the arm" is exactly that.
-final class TaskStopOneGestureTests: XCTestCase {
+final class TaskStopOneGestureTests: MouseQueueTestCase {
 
     private var clock: TSGestureClock!
 
@@ -1207,7 +1207,7 @@ fileprivate final class TSFlippedView: NSView {
 
 // MARK: - The store
 
-final class TaskStopStoreTests: XCTestCase {
+final class TaskStopStoreTests: MouseQueueTestCase {
 
     private var rig: TSRig!
     private var bag = Set<AnyCancellable>()
@@ -1627,7 +1627,7 @@ final class TaskStopStoreTests: XCTestCase {
 
 // MARK: - The popover
 
-final class TaskStopPopoverTests: XCTestCase {
+final class TaskStopPopoverTests: MouseQueueTestCase {
 
     private var rig: TSRig!
     private var bag = Set<AnyCancellable>()
@@ -1982,7 +1982,7 @@ final class TaskStopPopoverTests: XCTestCase {
 
 // MARK: - The task window
 
-final class TaskStopWindowTests: XCTestCase {
+final class TaskStopWindowTests: MouseQueueTestCase {
 
     private var rig: TSRig!
 
@@ -2203,7 +2203,7 @@ final class TaskStopWindowTests: XCTestCase {
 
 // MARK: - Nothing is logged
 
-final class TaskStopLoggingTests: XCTestCase {
+final class TaskStopLoggingTests: MouseQueueTestCase {
 
     private static let sources = [
         "Nostromo/UI/Background/TaskStopButton.swift",
@@ -2257,7 +2257,7 @@ final class TaskStopLoggingTests: XCTestCase {
 /// line: nothing but the two button closures (the popover's row button and the task window's header button)
 /// may call `requestStop`, and nothing outside `TaskRequests` may reach the daemon's stop verb by another
 /// road. A third route would be a Stop that skipped the gate.
-final class TaskStopGateFitnessTests: XCTestCase {
+final class TaskStopGateFitnessTests: MouseQueueTestCase {
 
     private static let nostromo = URL(fileURLWithPath: #filePath)   // .../macOS/NostromoTests/TaskStopTests.swift
         .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Nostromo")

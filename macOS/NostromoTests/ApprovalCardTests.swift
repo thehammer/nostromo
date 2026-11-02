@@ -649,7 +649,7 @@ final class ApprovalCardHarness {
 
 // MARK: - The store
 
-final class ApprovalStoreTests: XCTestCase {
+final class ApprovalStoreTests: MouseQueueTestCase {
 
     private var cancellables: [AnyCancellable] = []
 
@@ -1160,7 +1160,7 @@ final class ApprovalStoreTests: XCTestCase {
 
 // MARK: - The card
 
-final class ApprovalCardTests: XCTestCase {
+final class ApprovalCardTests: MouseQueueTestCase {
 
     // MARK: Helpers
 
@@ -3306,7 +3306,7 @@ final class ApprovalCardTests: XCTestCase {
 
 // MARK: - The overlay host
 
-final class ApprovalOverlayHostTests: XCTestCase {
+final class ApprovalOverlayHostTests: MouseQueueTestCase {
 
     fileprivate static func hostHarness(_ testCase: XCTestCase, size: NSSize) -> HostHarness {
         HostHarness(testCase, size: size)
@@ -3666,7 +3666,7 @@ final class ApprovalOverlayHostTests: XCTestCase {
 
 // MARK: - Contrast (T-AP2a-3)
 
-final class ApprovalPaletteContrastTests: XCTestCase {
+final class ApprovalPaletteContrastTests: MouseQueueTestCase {
 
     private func ratio(_ fg: NSColor, _ bg: NSColor) -> Double {
         ApprovalTestColors.contrast(ApprovalTestColors.rgb(fg), ApprovalTestColors.rgb(bg))
@@ -3741,7 +3741,7 @@ final class ApprovalPaletteContrastTests: XCTestCase {
 
 // MARK: - Source scan (33)
 
-final class ApprovalSourceScanTests: XCTestCase {
+final class ApprovalSourceScanTests: MouseQueueTestCase {
 
     private func approvalSources() throws -> [String] {
         let dir = URL(fileURLWithPath: #filePath)        // …/macOS/NostromoTests/ApprovalCardTests.swift
@@ -3823,7 +3823,7 @@ final class ApprovalSourceScanTests: XCTestCase {
 
 // MARK: - AP3: collapse, Esc and ⌥⌘A
 
-final class ApprovalCollapseAndFocusTests: XCTestCase {
+final class ApprovalCollapseAndFocusTests: MouseQueueTestCase {
 
     private typealias Harness = ApprovalOverlayHostTests.HostHarness
 

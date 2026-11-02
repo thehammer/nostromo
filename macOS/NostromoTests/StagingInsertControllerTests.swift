@@ -341,7 +341,7 @@ final class StagingRig {
 
 // MARK: - Tests
 
-final class StagingInsertControllerTests: XCTestCase {
+final class StagingInsertControllerTests: MouseQueueTestCase {
 
     private var rigs: [StagingRig] = []
 

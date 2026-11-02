@@ -151,7 +151,7 @@ private func windowCentre(of view: NSView) -> NSPoint {
 
 // MARK: - Tests
 
-final class AppControlMouseTests: XCTestCase {
+final class AppControlMouseTests: MouseQueueTestCase {
 
     /// A hang is caught by the watchdog (3 s); this only has to be "not parked", and
     /// leaves room for a loaded machine.
@@ -410,7 +410,7 @@ private let foreignNumberC = 0x2BAF
 /// The synthetic gesture is app-wide-queue based, so it must take only its own events
 /// out of the queue. Anything else -- the operator's own mouse-up, a drag for a sheet
 /// or another window -- has to come back out of the call exactly as it went in.
-final class AppControlMouseForeignEventTests: XCTestCase {
+final class AppControlMouseForeignEventTests: MouseQueueTestCase {
 
     private func makeRecorder() -> (NSWindow, RecordingView) {
         let window = makeOffscreenWindow()
@@ -599,7 +599,7 @@ private final class BlockingOverlay: NSView {}
 /// and can it select text?" for the socket's `hittest` verb. It exists so a "this
 /// text cannot be selected" report can be diagnosed in the running app without
 /// clicking in it, so it must be accurate and strictly read-only.
-final class AppControlHitTestTests: XCTestCase {
+final class AppControlHitTestTests: MouseQueueTestCase {
 
     private let markdown = "A first paragraph with enough words in it that it wraps onto a second line at this width, "
         + "and keeps going a little longer for good measure.\n\nSecond paragraph."
