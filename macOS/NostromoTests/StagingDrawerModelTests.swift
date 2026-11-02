@@ -48,7 +48,7 @@ final class StagingDrawerModelTests: XCTestCase {
         XCTAssertEqual(StagingDisabledReason.connecting.text, "The shell is still connecting")
         XCTAssertEqual(StagingDisabledReason.ended.text, "The shell has ended")
         XCTAssertEqual(StagingDisabledReason.lineMayHaveText.text,
-                       "Something may already be on the line: press Ctrl-C in the shell first (Enter works only if nothing is half-typed or continued)")
+                       "Something may already be on the line: press Ctrl-C in the shell first")
         XCTAssertEqual(StagingDisabledReason.historyExpansion.text,
                        "Uses shell history (! ^ r fc): Nostromo will not place it here")
         XCTAssertEqual(StagingDisabledReason.alternateScreen.text, "A full-screen program is running")
