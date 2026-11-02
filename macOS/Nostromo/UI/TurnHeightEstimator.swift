@@ -64,9 +64,9 @@ enum TurnHeightEstimator {
     /// `NoteBlockView`: 4+4 padding around 11 pt text.
     static let noteChrome: CGFloat          = 8
     static let noteLineHeight: CGFloat      = 14
-    /// `AskQuestionView`: header chip, question, divider, and 36 pt per option.
-    static let questionChrome: CGFloat      = 46
-    static let questionOptionHeight: CGFloat = 36
+    /// `AskQuestionView`: header chip, question, divider, and 37 pt per option (measured, CI).
+    static let questionChrome: CGFloat      = 39
+    static let questionOptionHeight: CGFloat = 37
     /// Whether the approval store offered its form for a call: what decides record or card. Tests replace it.
     static var questionHandled: (String) -> Bool = { ApprovalStore.shared.handlesQuestion(toolUseId: $0) }
     /// `AskQuestionRecordView`: the muted question lines plus one status line, 4+4 padding and a 2 pt gap.
