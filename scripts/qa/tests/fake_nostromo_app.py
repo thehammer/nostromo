@@ -670,7 +670,8 @@ WAKE_DEFAULTS = {
     "label": "QA approvals",
     "texts": [
         "QA approvals", "Message\u2026", WAKE_MARKER_1, "\u27f2 Shell: completed \"qa-sleep 60\"",
-        "\u27f2 2 background events", "\u27f2 3 background events", "ack 1", "ack 2", "ack 3", "ack 4",
+        "\u27f2 Shell: failed \"qa-fail\"", "\u27f2 2 background events", "\u27f2 3 background events",
+        "ack 1", "ack 2", "ack 3", "ack 4", "ack 5",
         "Background Monitor: new output, qa-ticker.", "Background task running",
     ],
     "chip_state": "running",

@@ -44,15 +44,17 @@ real CLI 2.1.296 spike captures) and models the permission-prompt flow:
                          `background_tasks_changed` events, says `started`, and ends.
                          The fake then waits (same polling, 120 s give-up and
                          exit-when-parent-gone nets as HOLD, no stdin read) for the
-                         files `<dir>/wake-1` .. `wake-4` in turn. Each file emits one
+                         files `<dir>/wake-1` .. `wake-5` in turn. Each file emits one
                          wake group (`type:user`, `origin.kind: task-notification`,
                          XML-escaped bodies), then `ack <k>` and a `result`:
                            1 a Monitor event notification,
                            2 `qa-sh1` completed (a `task_notification` system event
                              first),
-                           3 two back-to-back notifications (an agent finished, a
+                           3 ONE hostile item: a failed shell whose title carries
+                             U+202E and U+3164 (the marker line shows it sanitised),
+                           4 two back-to-back notifications (an agent finished, a
                              shell failed), then one reply,
-                           4 one event holding three notifications.
+                           5 one event holding three notifications.
                          Each group is logged (number only) to `<logdir>/wakes.jsonl`.
                          The dir must be absolute and exist, else an "ok" turn that
                          says `wake cue refused`. Only scenario `basic` exists;
@@ -143,8 +145,8 @@ AUTH_MIDTURN_CUE = "AUTH_MIDTURN"
 DIE_MIDTURN_CUE = "DIE_MIDTURN"
 HANG_MIDTURN_CUE = "HANG_MIDTURN"
 HOLD_RE = re.compile(r"\bHOLD:(/\S+)")
-WAKE_RE = re.compile(r"\bWAKE:([a-z]+):(\S+)")
-WAKE_GROUPS = 4
+WAKE_RE = re.compile(r"\bWAKE:([a-z]+):(.+?)\s*$")
+WAKE_GROUPS = 5
 HOLD_POLL_SECONDS = 0.02
 HOLD_GIVE_UP_SECONDS = 120
 
@@ -166,6 +168,8 @@ class FakeClaude:
     def __init__(self, argv, log_dir):
         self.argv = argv
         self.log_dir = log_dir
+        # The baseline for "my parent is gone", taken at start so a wrapper that exits early is still noticed.
+        self.parent_pid = os.getppid()
         self.session_id = (
             arg_value(argv, "--session-id") or arg_value(argv, "--resume") or str(uuid.uuid4())
         )
@@ -495,7 +499,7 @@ class FakeClaude:
 
     def hold_until_file_exists(self, path):
         """Wait for `path`; True when it exists, False when the 120 s net gave up."""
-        parent = os.getppid()
+        parent = self.parent_pid
         deadline = time.monotonic() + HOLD_GIVE_UP_SECONDS
         while not os.path.exists(path):
             if os.getppid() != parent:
@@ -585,10 +589,13 @@ class FakeClaude:
                 tool_use_id="toolu_qa_bash"))
         elif k == 3:
             self.emit_wake_event(self.notification(
+                "qa-sh2", "failed",
+                'Background command "qa-fail\u202e\u3164" failed with exit code 1'))
+        elif k == 4:
+            self.emit_wake_event(self.notification(
                 "qa-ag1", "completed", 'Agent "qa-survey" finished', "result", "SECRET-OUTPUT-RESULT"))
             self.emit_wake_event(self.notification(
-                "qa-sh2", "failed",
-                'Background command "qa-fail \u202e\u3164" failed with exit code 1'))
+                "qa-sh5", "failed", 'Background command "qa-late" failed with exit code 1'))
         else:
             self.emit_wake_event(
                 monitor
