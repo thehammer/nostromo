@@ -110,3 +110,36 @@ never an event, result, note, usage, output path or summary tail. `SessionTurnOr
 ## Logging
 
 Nothing in the parse, merge or authorship path logs a description, summary or any part of a notification.
+
+## The Mac and Kit: the wake marker (BA6b)
+
+A `task_wake` turn is drawn as MF2c's muted marker in the user slot, never a bubble. Kit decodes the
+origin (`TurnOriginWire.taskWake(items:omitted:)`, `TaskWakeItemWire`) and the `session_turn_origin` frame
+(`ServerMsg.sessionTurnOrigin`); a `task_wake` with no readable item, or an unknown origin type, decodes to
+a nil origin and the turn stays a plain bubble holding the fallback line. iOS ignores the frame.
+
+`WakeMarkerText.taskWake` builds the line, state first, like the Mother marker. Only the quoted description
+is untrusted: it goes through `FoldTextSanitizer`, double-quote scalars become `'`, and it is capped at 80
+characters in the line and 120 in the tooltip and accessibility label.
+
+| Events | Line | Click opens |
+|---|---|---|
+| one | `⟲ Monitor: new output "CI for PR #251"`, `⟲ Shell: failed "npm run build"`, `⟲ Agent: finished "…"` | that task's window (`TaskWindowManager.open(tag:taskId:)` on the pane's tag) |
+| several (omitted ones count) | `⟲ 3 background events`, one tooltip line each (20, then `…and K more`) | the pane's background popover |
+
+A task the store does not know (after a daemon restart) or a missing task id opens the popover instead.
+Kind words: Shell, Monitor, Agent, else `Background task`; outcome words: new output, completed
+(`finished` for an agent), failed, stopped, ended, event. The accessibility label is state first
+(`Background Monitor: new output, CI for PR #251.`), and role and help follow the target.
+
+- **Click, Return and Space** are navigation, so they are view actions and not gesture-gated (as for MF2c).
+- **Copy** reads "Copy Event Text" and puts the line followed by the tooltip lines on the pasteboard; the
+  daemon never sends the raw event. A Mother notice keeps "Copy Notice Text" and its raw text.
+- **A `session_turn_origin` frame** applies only when the turn already has a `task_wake` origin and the
+  new one is a `task_wake` too. It never turns a bubble into a marker, and never changes a terminal or
+  Mother origin. The turn's text, timestamp and blocks are untouched (identity is unchanged); the turn
+  view is rebuilt (`.spliced`) with the marker at the same fixed height. A merge missed while detached
+  arrives with the attach snapshot, whose turn replaces the local copy of a matched turn.
+- **Scroll.** The marker is the same fixed 22 pt (`TurnHeightEstimator.wakeMarkerHeight`) as MF2c's, so
+  a wake arriving, merging or being clicked moves nothing.
+- **Focus.** The marker is drawn outside the Focus planner, so Focus never folds it.

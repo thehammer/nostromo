@@ -44,6 +44,15 @@ class ReplView: NSView {
     private let documentView = TranscriptDocumentView()
     private let inputBar   = ReplInputBar()
 
+    /// What a click on a wake marker opens: the task's window on this pane's tag, or the pane's
+    /// background list when the store does not know the task (or several events woke the agent).
+    private lazy var wakeMarkerRouter: WakeMarkerView.Router = WakeMarkerView.paneRouter(
+        openTask: { [weak self] id in
+            guard let self else { return true }
+            return TaskWindowManager.shared.open(tag: self.session.tag, taskId: id) != nil
+        },
+        showList: { [weak self] in self?.inputBar.showBackgroundPopover(nil) })
+
     private var inputBarHeightConstraint: NSLayoutConstraint!
 
     /// Whether a click that ended on `hit` should hand the keyboard to the composer. Not when the
@@ -909,7 +918,8 @@ class ReplView: NSView {
         let view = ChatTurnView(turn: hydrated, contentAvailable: contentAvailable, interaction: state,
                                 folds: foldSync.resolver(turnKey: turnKey),
                                 heldOrdinals: state.heldOrdinals, approvals: ApprovalStore.shared,
-                                backgroundTasks: BackgroundRowBinding(store: BackgroundTaskStore.shared, tag: session.tag))
+                                backgroundTasks: BackgroundRowBinding(store: BackgroundTaskStore.shared, tag: session.tag),
+                                markerRouter: wakeMarkerRouter)
         view.onSend = { [weak self] text in
             guard let self else { return }
             self.followTail.setPinned(true, cause: .send)

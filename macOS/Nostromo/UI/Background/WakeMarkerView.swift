@@ -15,13 +15,38 @@ import NostromoKit
 /// turn's raw `userInput`) on the pasteboard, so nothing the agent was told is ever hidden.
 final class WakeMarkerView: NSView, ArithmeticIsland {
 
-    /// Opens the job with this id. The transcript passes `MotherJobRouting.open(jobId:)`.
-    typealias Router = (String) -> Void
+    /// Opens what the marker's target names. The default handles the Mother targets (the first job);
+    /// a pane that knows its session passes one that also opens background tasks.
+    typealias Router = (WakeMarkerTarget) -> Void
+
+    /// The router for the Mother targets; background targets go nowhere.
+    static let defaultRouter: Router = { target in
+        switch target {
+        case .motherJob(let id): MotherJobRouting.open(jobId: id)
+        case .motherJobs(let ids): if let id = ids.first { MotherJobRouting.open(jobId: id) }
+        case .backgroundTask, .backgroundTasks, .none: break
+        }
+    }
+
+    /// The router a pane installs: a background task opens its window (`openTask` says whether the
+    /// store knew it; if not, the pane's list opens instead), several events open the list, and the
+    /// Mother targets go where `defaultRouter` sends them.
+    static func paneRouter(openTask: @escaping (String) -> Bool, showList: @escaping () -> Void) -> Router {
+        { target in
+            switch target {
+            case .backgroundTask(let id): if !openTask(id) { showList() }
+            case .backgroundTasks: showList()
+            case .motherJob, .motherJobs, .none: defaultRouter(target)
+            }
+        }
+    }
 
     static let copyMenuTitle = "Copy Notice Text"
+    static let copyEventMenuTitle = "Copy Event Text"
 
     private let content: WakeMarkerContent
     private let noticeText: String
+    private let copyMenuTitle: String
     private let router: Router
     private let pasteboard: NSPasteboard
     private let label = NSTextField(labelWithString: "")
@@ -32,8 +57,10 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
     var shownText: String { label.stringValue }
 
     init(content: WakeMarkerContent, noticeText: String,
-         router: @escaping Router = { MotherJobRouting.open(jobId: $0) },
+         router: @escaping Router = WakeMarkerView.defaultRouter,
+         copyMenuTitle: String = WakeMarkerView.copyMenuTitle,
          pasteboard: NSPasteboard = .general) {
+        self.copyMenuTitle = copyMenuTitle
         self.content = content
         self.noticeText = noticeText
         self.router = router
@@ -69,10 +96,10 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
 
     // MARK: Action
 
-    /// What a click, Return or Space does: open the first job. Nothing when there is no target.
+    /// What a click, Return or Space does: hand the target to the router. Nothing when there is none.
     func activate() {
-        guard let id = firstJobId else { return }
-        router(id)
+        guard hasTarget else { return }
+        router(content.target)
     }
 
     // MARK: Layout
@@ -108,7 +135,7 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
-        let item = NSMenuItem(title: Self.copyMenuTitle, action: #selector(copyNoticeText(_:)), keyEquivalent: "")
+        let item = NSMenuItem(title: copyMenuTitle, action: #selector(copyNoticeText(_:)), keyEquivalent: "")
         item.target = self
         menu.addItem(item)
         return menu
@@ -160,7 +187,14 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { hasTarget ? .button : .staticText }
     override func accessibilityLabel() -> String? { content.accessibilityLabel }
-    override func accessibilityHelp() -> String? { hasTarget ? "Opens the job in Mother" : nil }
+    override func accessibilityHelp() -> String? {
+        switch content.target {
+        case .motherJob, .motherJobs: return "Opens the job in Mother"
+        case .backgroundTask: return "Opens the task's window"
+        case .backgroundTasks: return "Opens the background activity list"
+        case .none: return nil
+        }
+    }
     override func accessibilityChildren() -> [Any]? { [] }
     override func accessibilityPerformPress() -> Bool {
         guard hasTarget else { return false }
@@ -170,15 +204,7 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
 
     // MARK: Private
 
-    private var hasTarget: Bool { firstJobId != nil }
-
-    private var firstJobId: String? {
-        switch content.target {
-        case .motherJob(let id): return id
-        case .motherJobs(let ids): return ids.first
-        case .none: return nil
-        }
-    }
+    private var hasTarget: Bool { content.target != .none }
 
     /// The text's own rectangle: right-aligned, as wide as the line (at most the row).
     private var textRect: NSRect {

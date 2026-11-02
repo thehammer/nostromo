@@ -1559,7 +1559,7 @@ class AppStore: ObservableObject {
         case .sessionSpawned(let tag, _):
             toolsOfflinePolicy.sessionStarted(tag: tag)
 
-        case .sessionTurns, .sessionTurnDelta, .sessionPermissionRequest:
+        case .sessionTurns, .sessionTurnDelta, .sessionTurnOrigin, .sessionPermissionRequest:
             break
 
         // ── agent-authored pane layout (Phase 1) ─────────────────────────────
