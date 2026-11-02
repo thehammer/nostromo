@@ -4,7 +4,7 @@
 Everything printed is a fixed string or a number; no transcript text, task output or id from a reply is ever
 echoed (the script must not print content it did not put there itself).
 
-  background_wake.py marker K                      -> the marker text group K (1..4) must show
+  background_wake.py marker K                      -> the marker text group K (1..5) must show
   background_wake.py absent-names                   -> the names of the texts that must never be drawn
   background_wake.py absent NAME                   -> that text (a name from `absent-names`)
   background_wake.py anchor-before < anchor.json   -> exit 0 if the transcript follows the tail
@@ -20,13 +20,16 @@ import sys
 MARKERS = {
     1: '⟲ Monitor: new output "qa-ticker"',
     2: '⟲ Shell: completed "qa-sleep 60"',
-    3: "⟲ 2 background events",
-    4: "⟲ 3 background events",
+    3: '⟲ Shell: failed "qa-fail"',
+    4: "⟲ 2 background events",
+    5: "⟲ 3 background events",
 }
+# Group 3 is ONE hostile item, so its marker line carries the sanitised title (a positive control for the
+# absence checks: the title was drawn, with U+202E and U+3164 removed).
 MARKER_AX_LABEL = "Background Monitor: new output, qa-ticker."
 ROW_LABEL = "background task running"
 # Raw notification text and the sentinels the fake CLI puts only inside <event>/<result>; none may be drawn.
-# U+202E and U+3164 are in the shell-failed command of group 3 and must be stripped.
+# U+202E and U+3164 are in the shell-failed command of group 3 and must be stripped (marker 3 is the control).
 ABSENT_TEXTS = {
     "raw-notification": "<task-notification",
     "event-sentinel": "SECRET-OUTPUT-EVENT",

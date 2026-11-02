@@ -6,17 +6,20 @@
 #   scripts/qa/background-wake.sh
 #
 # A QA agent session runs the fake CLI's `WAKE:basic:<dir>` cue: turn 1 starts a background shell (`qa-sleep 60`)
-# and a Monitor (`qa-ticker`); then, one file at a time (`<dir>/wake-1` .. `wake-4`, created by this script), the
-# fake CLI wakes the session with a Monitor event, a shell completion, two back-to-back notifications and a
+# and a Monitor (`qa-ticker`); then, one file at a time (`<dir>/wake-1` .. `wake-5`, created by this script), the
+# fake CLI wakes the session with a Monitor event, a shell completion, ONE hostile failed shell (U+202E and
+# U+3164 in its title: its marker line must show the sanitised title), two back-to-back notifications and a
 # three-element notification. For each wake the script checks:
 #   * `transcript-anchor` before and after: following the tail, bottomOffsetPt == 0 after;
 #   * the muted marker text (see lib/background_wake.py MARKERS) and the reply `ack <k>`.
-# At the end: no raw notification text, no sentinels, no U+202E or U+3164 anywhere in the window; the marker's
-# accessibility label; the row's "background task running" label; a click on marker 1 opens the Monitor's task
+# Right after wake 1 (marker 1 and turn 1's rows are still near the bottom): the marker's accessibility label and
+# the row's "background task running" label. At the end: no raw notification text, no sentinels, no U+202E or
+# U+3164 anywhere in the window; a click on marker 1 (old content: may be scrolled out of a small QA window) opens the Monitor's task
 # window (`tasks list` window_open true), and Escape closes it (INCONCLUSIVE for that line if Escape cannot
 # reach the panel, never a FAIL).
 #
 # Output is PASS/FAIL lines with fixed strings: the script never prints transcript text it did not put there.
+# Refuses (exit 2) when NOSTROMO_QA_CLAUDE_BIN is set: a real model would spend tokens.
 # Exits 0 PASS, 1 FAIL, 2 usage or refused, 3 INCONCLUSIVE (display locked or asleep: the window is not visible).
 # KEEP=1 keeps the QA root. QA_INSTANCE / QA_APP override the instance script and the app-control CLI (the
 # self-tests point them at fakes).
@@ -31,11 +34,18 @@ qa_root_marker=".nostromo-qa-root"
 
 [ "$#" -eq 0 ] || { echo "usage: background-wake.sh (no arguments)" >&2; exit 2; }
 
+# This script promises no tokens: qa-instance.sh would hand a real CLI to the QA daemon when this is set.
+if [ -n "${NOSTROMO_QA_CLAUDE_BIN:-}" ]; then
+  echo "REFUSING TO RUN: NOSTROMO_QA_CLAUDE_BIN is set, so the QA session would run a real model and spend tokens." >&2
+  echo "This script uses the fake CLI only. Unset NOSTROMO_QA_CLAUDE_BIN (it is for tracker-discoverability.sh)." >&2
+  exit 2
+fi
+
 # A real focuses.json that already carries a QA marker is the leftover of an earlier breach: refuse, by file
 # name only (never the content).
 real_focuses="$HOME/.nostromo/focuses.json"
-if [ -f "$real_focuses" ] && grep -qE 'FIXTURE:|WAKE:|com\.hammer\.nostromo\.qa|nostromo-qa-|cody-qa-|qa-approvals' "$real_focuses"; then
-  echo "REFUSING TO RUN: $real_focuses already carries a QA marker (FIXTURE:, WAKE:, the QA bundle id, a QA root path, cody-qa-, qa-approvals)." >&2
+if [ -f "$real_focuses" ] && grep -qE 'FIXTURE:|WAKE:basic:|com\.hammer\.nostromo\.qa|nostromo-qa-|cody-qa-|qa-approvals' "$real_focuses"; then
+  echo "REFUSING TO RUN: $real_focuses already carries a QA marker (FIXTURE:, WAKE:basic:, the QA bundle id, a QA root path, cody-qa-, qa-approvals)." >&2
   echo "A QA run once wrote into your real ~/.nostromo. Remove the QA entries from that file, then run again." >&2
   exit 2
 fi
@@ -73,6 +83,14 @@ check() {
   local id="$1" detail="$2"
   shift 2
   if "$@" >/dev/null 2>&1; then pass "$id" "$detail"; else fail "$id" "$detail"; fi
+}
+
+# As check, for a look at content that may have scrolled out of a small QA window (estimated row heights, no
+# scroll verb): a FAIL says so instead of blaming the app.
+check_old() {
+  local id="$1" detail="$2"
+  shift 2
+  if "$@" >/dev/null 2>&1; then pass "$id" "$detail"; else fail "$id" "$detail (may be scrolled out of view: enlarge the QA window)"; fi
 }
 
 adopt_root() {
@@ -183,16 +201,23 @@ listing="$(ctl tasks list "${focus_args[@]+"${focus_args[@]}"}")" || abort_fail 
 check "task-monitor" 'running Monitor "qa-ticker" is listed' python3 "$helper" has-task Monitor qa-ticker <<<"$listing"
 check "task-shell" 'running Shell "qa-sleep 60" is listed' python3 "$helper" has-task Shell "qa-sleep 60" <<<"$listing"
 
-# --- the four wake groups -----------------------------------------------------------------------------
-for k in 1 2 3 4; do
+# --- the five wake groups -----------------------------------------------------------------------------
+for k in 1 2 3 4 5; do
   marker="$(python3 "$helper" marker "$k")"
   anchor="$(ctl transcript-anchor "${focus_args[@]+"${focus_args[@]}"}")" || anchor="{}"
   check "wake-$k-anchor-before" "the transcript follows the tail before the wake" python3 "$helper" anchor-before <<<"$anchor"
   : >"$scratch/wake-$k"
-  if ctl wait "$marker" --timeout 20 >/dev/null 2>&1; then pass "wake-$k-marker" "marker text shown: $marker"; else fail "wake-$k-marker" "marker text not shown within 20 s: $marker"; fi
+  if ctl wait "$marker" --timeout 20 >/dev/null 2>&1; then pass "wake-$k-marker" "marker text shown: $marker"; else fail "wake-$k-marker" "marker text not shown within 20 s: $marker (the new row sits at the bottom; if the window is tiny, enlarge the QA window)"; fi
   if ctl wait "ack $k" --timeout 20 >/dev/null 2>&1; then pass "wake-$k-reply" "reply 'ack $k' shown"; else fail "wake-$k-reply" "reply 'ack $k' not shown within 20 s"; fi
   anchor="$(ctl transcript-anchor "${focus_args[@]+"${focus_args[@]}"}")" || anchor="{}"
   check "wake-$k-anchor-after" "following the tail, bottomOffsetPt == 0 after the wake" python3 "$helper" anchor-after <<<"$anchor"
+  if [ "$k" = 1 ]; then
+    # Marker 1 and turn 1's tool rows are still near the bottom: check them now, before later wakes scroll them away.
+    check_old "ax-marker-label" "marker label 'Background Monitor: new output, qa-ticker.' found" \
+      python3 "$helper" found < <(ctl find "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import background_wake as b; print(b.MARKER_AX_LABEL)' "$here/lib")")
+    check_old "ax-row-label" "a row labelled 'background task running' found (the Monitor is still running)" \
+      python3 "$helper" found < <(ctl find "background task running")
+  fi
 done
 
 # --- nothing raw is drawn ------------------------------------------------------------------------------
@@ -200,12 +225,6 @@ while IFS= read -r name; do
   text="$(python3 "$helper" absent "$name")"
   check "absent-$name" "not drawn anywhere in the window" ctl expect "$text" --absent
 done < <(python3 "$helper" absent-names)
-
-# --- accessibility ------------------------------------------------------------------------------------
-check "ax-marker-label" "marker label 'Background Monitor: new output, qa-ticker.' found" \
-  python3 "$helper" found < <(ctl find "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import background_wake as b; print(b.MARKER_AX_LABEL)' "$here/lib")")
-check "ax-row-label" "a row labelled 'background task running' found (the Monitor is still running)" \
-  python3 "$helper" found < <(ctl find "background task running")
 
 # --- click marker 1 opens the Monitor's task window; Escape closes it -------------------------------------
 marker1="$(python3 "$helper" marker 1)"
@@ -229,7 +248,7 @@ if ctl click --text "$marker1" >/dev/null 2>&1 && wait_window true; then
     echo "INCONCLUSIVE escape-closes-window: window_open stayed true after Escape (Escape may not reach the panel)"
   fi
 else
-  fail "marker-click-opens-window" "clicking marker 1 did not make window_open true within 10 s"
+  fail "marker-click-opens-window" "clicking marker 1 did not make window_open true within 10 s (may be scrolled out of view: enlarge the QA window)"
 fi
 
 if [ "$verdict" = PASS ] && [ "$inconclusive" = 1 ]; then echo "NOTE: one line was inconclusive; the rest passed"; fi

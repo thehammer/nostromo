@@ -457,8 +457,11 @@ class ApprovalsAuditIsolationTests(unittest.TestCase):
         self.assertTrue(self.problems())
 
     def test_wake_cue_is_a_qa_marker(self):
-        self.assertIn(b"WAKE:", qa.qa_markers().values())
-        self.assertIn(b"WAKE:", qa.qa_markers("/tmp/nostromo-qa-x").values())
+        self.assertIn(b"WAKE:basic:", qa.qa_markers().values())
+        self.assertIn(b"WAKE:basic:", qa.qa_markers("/tmp/nostromo-qa-x").values())
+
+    def test_the_short_wake_string_alone_is_not_a_qa_marker(self):
+        self.assertNotIn(b"WAKE:", qa.qa_markers().values())
 
     def test_appended_line_carrying_a_qa_marker_is_a_problem_that_does_not_echo_the_line(self):
         markers = [self.qa_root + "/home/x", "FIXTURE:simple_rm", "com.hammer.nostromo.qa"]

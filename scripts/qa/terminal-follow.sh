@@ -29,6 +29,12 @@
 # Screenshots go to a private temp directory (printed; removed at the end unless KEEP=1).
 # shellcheck disable=SC2329  # functions handed to poll / ok_if / the EXIT trap are not "called" by name
 set -euo pipefail
+# This script promises no tokens: qa-instance.sh would hand a real CLI to the QA daemon when this is set.
+if [ -n "${NOSTROMO_QA_CLAUDE_BIN:-}" ]; then
+  echo "REFUSING TO RUN: NOSTROMO_QA_CLAUDE_BIN is set, so the QA session would run a real model and spend tokens." >&2
+  echo "This script uses the fake CLI only. Unset NOSTROMO_QA_CLAUDE_BIN (it is for tracker-discoverability.sh)." >&2
+  exit 2
+fi
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 instance="$here/qa-instance.sh"
