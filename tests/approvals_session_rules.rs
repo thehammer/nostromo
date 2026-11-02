@@ -2019,6 +2019,12 @@ async fn one_grant_two_uses_and_a_revoke_read_back_in_order_with_the_same_rule()
     let (granting, rule) = rig.grant("toolu_1", CACHES_A, CandidateKind::Exact).await;
     rig.assert_allowed_by_rule("toolu_2", CACHES_A).await;
     rig.assert_allowed_by_rule("toolu_3", CACHES_A).await;
+    // The use is counted just after the outcome is written: wait for it, or the revoke
+    // can overtake it on the broker's worker.
+    wait_until("both uses counted", || {
+        rig.rules(T).iter().all(|r| r.uses == 2).then_some(())
+    })
+    .await;
     assert_eq!(
         rig.broker.revoke_session_rule(T, &rule.id, "app", "win-5"),
         RevokeResult::Revoked
