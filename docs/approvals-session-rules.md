@@ -41,7 +41,7 @@ A candidate exists only for a **plain Bash command**:
 - No word is, or points inside, a protected place: `/`, `~`, `~/`, `~user`, `/etc`, `/private/etc`, `/System`, `/usr`,
   `/bin`, `/sbin`, `/Library`, `/Applications`, `/var`, `/dev`, `~/.ssh`, `~/.aws`, `~/.kube`, `~/.gnupg`, `~/.config` (all of it),
   `~/.docker`, `~/.npmrc`, `~/.netrc`, `~/.pypirc`, `~/.git-credentials`, `~/.cargo`, `~/.local/bin`, the shell startup files
-  (`~/.zshrc .zshenv .zlogin .zprofile .bash_profile .bashrc .profile`), `~/.gitconfig`, `~/.claude`, `~/.nostromo`,
+  (`~/.zshrc .zshenv .zlogin .zlogout .zprofile .bash_profile .bash_login .bash_logout .bashrc .profile .cshrc .tcshrc .login .inputrc`), `~/.gitconfig`, `~/.claude`, `~/.nostromo`,
   `~/Library/Keychains`, `~/Library/LaunchAgents`, or any `.git` component. A bare relative `.ssh` counts like `.ssh/x`, checked against the session's directory. (Allow once still works for all of them.)
 
 ### Allowed flags
@@ -89,7 +89,8 @@ the moment `fixtures` becomes a symlink to home, and `cp /abs/src /abs/dst` stop
 symlink. A not-yet-existing leaf is fine (its nearest existing ancestor is pinned, and a later symlink changes it).
 Exact rules on `/tmp/...` are offered: the resolved `/private/tmp` is stored (`/private` is a broad root only for
 **prefix** rules). Relative operands cannot be pinned: they are refused for the commands that change files, and for
-read-only ones the rule still ignores the working directory (see Limits).
+read-only ones the rule still ignores the working directory (see Limits). `cp`/`mv` are offered only as `SRC DST` with
+a destination that is not an existing directory and does not end in `/` (`cp a dir` writes `dir/a`, which is not pinned).
 
 The candidates, in order:
 

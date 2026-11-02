@@ -64,7 +64,10 @@ pub enum Spec {
     /// resolved when the rule was offered (none of them may pass through a symlink, a
     /// symlinked home and the `/tmp` alias aside); a match requires each to resolve to
     /// exactly that again.
-    Exact { command: String, pinned: Vec<PathBuf> },
+    Exact {
+        command: String,
+        pinned: Vec<PathBuf>,
+    },
     /// `head` (command word and flags) followed by one or more paths under `prefix`
     /// (`~/Library/Caches/`, always ending in `/`). `resolved` is the prefix directory as the
     /// file system resolved it when the rule was offered; it must have resolved to itself
@@ -288,6 +291,13 @@ const PROTECTED_HOME: &[&str] = &[
     ".netrc",
     ".zshrc",
     ".zshenv",
+    ".zlogout",
+    ".bash_login",
+    ".bash_logout",
+    ".cshrc",
+    ".tcshrc",
+    ".login",
+    ".inputrc",
     ".zlogin",
     ".zprofile",
     ".bash_profile",
@@ -461,7 +471,10 @@ pub fn candidates_within(
         home.to_path_buf(),
         cwd.map(Path::to_path_buf),
     );
-    bounded(timeout, move || candidates(&req, &reason, &home, cwd.as_deref())).unwrap_or_default()
+    bounded(timeout, move || {
+        candidates(&req, &reason, &home, cwd.as_deref())
+    })
+    .unwrap_or_default()
 }
 
 /// Does `rule` cover `req`? Besides the rule's own shape, the request must pass
@@ -511,7 +524,15 @@ pub fn matches_within(
     home: &Path,
     cwd: Option<&Path>,
 ) -> bool {
-    first_match_within(timeout, std::slice::from_ref(rule), req, reason_kind, home, cwd).is_some()
+    first_match_within(
+        timeout,
+        std::slice::from_ref(rule),
+        req,
+        reason_kind,
+        home,
+        cwd,
+    )
+    .is_some()
 }
 
 /// The first of `rules` that [`matches`], all checked on one helper thread under one overall
@@ -765,6 +786,18 @@ fn flags_allowed(command: &str, args: &[String]) -> bool {
 /// stores these and re-resolves them at match time, so a directory that later becomes a
 /// symlink ends the rule's reach (`rm -rf fixtures/.ssh` after `fixtures` pointed at home).
 fn pin_operands(words: &[String], home: &Path) -> Option<Vec<PathBuf>> {
+    // `cp a dir` and `mv a b c` write `dir/a`, a path the rule never pinned (and `dir/a` may be
+    // a symlink by then): only a plain `cp SRC DST` / `mv SRC DST` whose destination is not
+    // (and does not read as) an existing directory is pinned.
+    if matches!(words[0].as_str(), "cp" | "mv") {
+        let operands: Vec<&String> = words[1..].iter().filter(|w| !w.starts_with('-')).collect();
+        let dest_is_dir = operands.last().is_some_and(|d| {
+            d.ends_with('/') || expand(d, home).is_dir() || expand(d, home) == Path::new("/")
+        });
+        if operands.len() != 2 || dest_is_dir {
+            return None;
+        }
+    }
     let real_home = canonical_lenient(home).unwrap_or_else(|| home.to_path_buf());
     let mut pinned = Vec::new();
     for word in &words[1..] {
@@ -2009,8 +2042,46 @@ mod tests {
     }
 
     #[test]
+    fn cp_and_mv_into_a_directory_or_with_many_sources_get_no_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().canonicalize().unwrap();
+        let d = d.to_str().unwrap();
+        for c in [
+            format!("cp /work/a {d}"),
+            format!("cp /work/a {d}/"),
+            format!("mv /work/a {d}"),
+            "cp /work/a /work/b /work/c".to_owned(),
+            "mv /work/a /work/b /work/c".to_owned(),
+            "cp /work/a /work/b/".to_owned(),
+        ] {
+            assert!(texts_of(&c).is_empty(), "{c}: {:?}", texts_of(&c));
+        }
+        assert_eq!(texts_of(&format!("cp /work/a {d}/new")).len(), 1);
+    }
+
+    #[test]
+    fn more_shell_startup_files_are_protected() {
+        for f in [
+            ".zlogout",
+            ".bash_login",
+            ".bash_logout",
+            ".cshrc",
+            ".tcshrc",
+            ".login",
+            ".inputrc",
+        ] {
+            let c = format!("cp /Users/tester/proj/x /Users/tester/{f}");
+            assert!(texts_of(&c).is_empty(), "{c}");
+        }
+    }
+
+    #[test]
     fn network_and_volumes_operands_get_no_rule() {
-        for c in ["ls /Network/x/y", "cat /Volumes/Backup/f", "rm -rf /Network/a/b/c"] {
+        for c in [
+            "ls /Network/x/y",
+            "cat /Volumes/Backup/f",
+            "rm -rf /Network/a/b/c",
+        ] {
             assert!(texts_of(c).is_empty(), "{c}: {:?}", texts_of(c));
         }
     }

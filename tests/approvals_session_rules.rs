@@ -1678,8 +1678,11 @@ async fn a_rule_of_one_generation_never_matches_the_next_even_if_the_old_process
     let old = rig.generation;
     let sink = FakeSink::new();
     let next = rig.broker.register_session(session(T, true), sink.clone());
-    rig.broker
-        .inject_session_rule_for_test(T, old, SessionRule::exact_for_test(CACHES_A, &rig.home, None));
+    rig.broker.inject_session_rule_for_test(
+        T,
+        old,
+        SessionRule::exact_for_test(CACHES_A, &rig.home, None),
+    );
     assert!(rig.rules(T).is_empty(), "the new process lists no rules");
     rig.assert_card_on(T, next, "toolu_2", CACHES_A).await;
     assert!(sink.writes().iter().all(|(_, b)| b["behavior"] == "deny"));

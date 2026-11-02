@@ -138,9 +138,9 @@ fn wrongly_decided(world: &World, commands: &[&str], want_offered: bool) -> Vec<
             let offered = world.offered(c);
             if want_offered {
                 // An exact rule for exactly this text.
-                !offered.iter().any(|o| {
-                    o.kind == CandidateKind::Exact && o.rule_text == format!("Bash({c})")
-                })
+                !offered
+                    .iter()
+                    .any(|o| o.kind == CandidateKind::Exact && o.rule_text == format!("Bash({c})"))
             } else {
                 !offered.is_empty()
             }
@@ -446,7 +446,11 @@ fn cp_source_through_an_existing_symlinked_directory_gets_no_exact_rule() {
     w.mkdir("proj/dst");
     w.swap_for_symlink("proj/link", &w.elsewhere);
 
-    let offered = w.offered(&format!("cp {} {}", w.p("proj/link/s"), w.p("proj/dst/out")));
+    let offered = w.offered(&format!(
+        "cp {} {}",
+        w.p("proj/link/s"),
+        w.p("proj/dst/out")
+    ));
 
     assert!(offered.is_empty(), "{offered:?}");
 }

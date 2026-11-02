@@ -1915,7 +1915,14 @@ impl Inner {
         let home = lock(&self.home).clone();
         // Outside the lock: a match looks at the file system, and a hung mount must not
         // stall this worker, so all rules together get one bounded helper; a timeout is no match.
-        rules::first_match_within(RULE_MATCH_TIMEOUT, &candidates, req, reason.kind, &home, cwd)
+        rules::first_match_within(
+            RULE_MATCH_TIMEOUT,
+            &candidates,
+            req,
+            reason.kind,
+            &home,
+            cwd,
+        )
     }
 
     /// One more use of rule `rule_id` was allowed: count it and tell the app.
