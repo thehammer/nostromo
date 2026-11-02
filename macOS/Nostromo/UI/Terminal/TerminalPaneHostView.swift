@@ -132,6 +132,7 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
         addSubview(idleBanner)
         addSubview(overlay)
         buildDrawer()
+        terminalView.stagingMenuItems = { [weak self] in self?.stagingContextMenuItems() ?? [] }
         info = store.info(forPane: paneId, tag: focusTag)
         terminalView.terminalId = info?.terminalId
         drawer?.bind()
@@ -212,9 +213,50 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
     /// Whether the drawer has a staged list to show (Terminal > Focus Staged Commands is on only then).
     var hasStagedCommands: Bool { drawer?.hasList ?? false }
 
-    /// Terminal > Focus Staged Commands (⇧⌘J): the keyboard goes to the drawer. Focus only.
+    /// Terminal > Focus Staged Commands (⇧⌘J): the keyboard goes to the drawer (a closed drawer reopens first).
+    /// Focus only.
     func focusStagedCommands() -> Bool {
         drawer?.focusRows() ?? false
+    }
+
+    /// Whether agents may stage into this terminal (the last `enabled` the daemon sent; true until it says).
+    var stagingEnabledHere: Bool {
+        info.map { TerminalStagingStore.shared.isEnabled(terminalId: $0.terminalId) } ?? true
+    }
+
+    /// Terminal > Let Agents Stage Commands Here (also the context menu's item): a gated, checkable switch.
+    func toggleStagingFromMenu() {
+        guard let controller = stagingController else { return }
+        controller.setStagingEnabledHere(!stagingEnabledHere, event: NSApp.currentEvent, control: self, fromMenu: true)
+    }
+
+    /// The staging items of the terminal's context menu: the per-terminal switch, and Show Staged Commands
+    /// while the drawer is closed.
+    private func stagingContextMenuItems() -> [NSMenuItem] {
+        guard info != nil else { return [] }
+        let toggle = NSMenuItem(title: "Let Agents Stage Commands Here", action: #selector(stagingSwitchChosen(_:)), keyEquivalent: "")
+        toggle.target = self
+        toggle.state = stagingEnabledHere ? .on : .off
+        var items = [toggle]
+        if drawer?.isUserHidden == true, drawer?.hasList == true {
+            let show = NSMenuItem(title: "Show Staged Commands", action: #selector(showStagedCommandsChosen(_:)), keyEquivalent: "")
+            show.target = self
+            items.append(show)
+        }
+        return items
+    }
+
+    @objc private func stagingSwitchChosen(_ sender: NSMenuItem) {
+        toggleStagingFromMenu()
+    }
+
+    @objc private func showStagedCommandsChosen(_ sender: NSMenuItem) {
+        drawer?.setUserHidden(false, event: NSApp.currentEvent, control: self, fromMenu: true)
+    }
+
+    /// The header chip (`3 staged`): reopens the closed drawer. A person's click only.
+    @objc private func stagedChipTapped(_ sender: NSButton) {
+        drawer?.setUserHidden(false, event: NSApp.currentEvent, control: sender, fromMenu: false)
     }
 
     // MARK: - TerminalByteSink
@@ -460,6 +502,9 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
         let drawer = StagingDrawerView(controller: controller, paneKey: paneId)
         drawer.onLayoutChange = { [weak self] in self?.needsLayout = true }
         drawer.onReturnToTerminal = { [weak self] in self?.focusTerminal() }
+        drawer.onChipChange = { [weak self] count, pulse in self?.header.setStagedChip(count: count, pulse: pulse) }
+        header.stagedChip.target = self
+        header.stagedChip.action = #selector(stagedChipTapped(_:))
         stagingController = controller
         self.drawer = drawer
         addSubview(drawer)
@@ -468,7 +513,8 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
     /// What the staging flow needs to know about this pane and window, read fresh at every decision.
     private func stagingContext() -> StagingContext? {
         guard let info else { return nil }
-        return StagingContext(terminalId: info.terminalId, kind: info.kind, status: info.status, isMirror: isMirror)
+        return StagingContext(terminalId: info.terminalId, kind: info.kind, status: info.status, isMirror: isMirror,
+                              target: info.target)
     }
 
     private func buildIdleBanner() {

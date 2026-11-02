@@ -948,6 +948,14 @@ pub(crate) fn remote_shell_marker(text: &str) -> Option<String> {
     }
 }
 
+/// Does `text` mention tmux together with a verb that types or pipes into a
+/// pane (`send-keys`, `paste-buffer`, `pipe-pane`, …)? Staging refuses such
+/// text everywhere: it never types into another pane. Reuses the hook's own
+/// tmux matchers, over the text as written.
+pub(crate) fn tmux_input_marker(text: &str) -> bool {
+    tmux_mention_re().is_match(text) && tmux_verb_re().is_match(text)
+}
+
 /// Rules 2 to 4 for one command string.
 fn evaluate_command(
     raw: &str,

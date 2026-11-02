@@ -87,13 +87,16 @@ final class StagingRowView: NSView {
     private let stateLabel = NSTextField(labelWithString: "")
     private let noteLabel = NSTextField(labelWithString: "")
     private let showAll = StagingClickableLabel()
+    /// `inserted 2m ago · Archive`: only on a row that was placed, in the driver window.
+    let archiveLabel = StagingClickableLabel()
+    private let separatorLabel = NSTextField(labelWithString: "\u{00B7}")
     /// A left click went down on this row (nil: none, or one that can never insert).
     private var pending: StagingSnapshot?
     private var cache: (width: CGFloat, layout: Layout)?
 
     private struct Layout {
         var height: CGFloat
-        var number, glyph, command, age, labels, state, note, showAll: NSRect
+        var number, glyph, command, age, labels, state, note, showAll, archive, separator: NSRect
         var truncatedCommand: Bool
     }
 
@@ -127,6 +130,14 @@ final class StagingRowView: NSView {
             self.onNeedsLayout?()
         }
         addSubview(showAll)
+        archiveLabel.title = "Archive"
+        archiveLabel.onClick = { [weak self] in self?.archiveFromLabel() }
+        separatorLabel.font = Theme.statusFont
+        separatorLabel.textColor = Theme.fgMuted
+        separatorLabel.isSelectable = false
+        separatorLabel.setAccessibilityElement(false)
+        addSubview(separatorLabel)
+        addSubview(archiveLabel)
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityIdentifier("staging-row")
@@ -181,7 +192,7 @@ final class StagingRowView: NSView {
         case .disabled: glyphLabel.textColor = Theme.fgMuted
         }
         commandLabel.attributedStringValue = Self.commandText(model.command, dimmed: model.disabledReason != nil)
-        commandLabel.maximumNumberOfLines = isExpanded ? 0 : Self.collapsedLines
+        commandLabel.maximumNumberOfLines = (isExpanded || !model.collapses) ? 0 : Self.collapsedLines
         ageLabel.stringValue = model.age
         ageLabel.textColor = model.ageIsStale ? Theme.amber : Theme.fgMuted
         ageLabel.alignment = .right
@@ -211,6 +222,12 @@ final class StagingRowView: NSView {
         case .disabled(let reason):
             return showsReason || !reason.appliesToEveryRow ? reason.text : model.lineAfterDelay
         }
+    }
+
+    /// The Archive label sits after `inserted 2m ago ·` on the state line (a placed row you may modify).
+    private var showsArchiveInline: Bool {
+        guard model.placed, canModify, let line = stateLine else { return false }
+        return line.hasPrefix("inserted ")
     }
 
     /// The command exactly as staged: monospaced, forced left to right (Hebrew or Arabic letters must not
@@ -250,6 +267,10 @@ final class StagingRowView: NSView {
         noteLabel.frame = info.note
         showAll.frame = info.showAll
         showAll.isHidden = !info.truncatedCommand
+        archiveLabel.frame = info.archive
+        archiveLabel.isHidden = info.archive.isEmpty
+        separatorLabel.frame = info.separator
+        separatorLabel.isHidden = info.archive.isEmpty
     }
 
     private func layoutInfo(width: CGFloat) -> Layout {
@@ -264,12 +285,13 @@ final class StagingRowView: NSView {
         let chrome = max(0, Self.cellHeight(of: Self.commandText("X", dimmed: false), width: textWidth, wrapping: .byCharWrapping) - lineHeight)
         let fullHeight = Self.cellHeight(of: commandLabel.attributedStringValue, width: textWidth, wrapping: .byCharWrapping)
         let fullLines = max(1, Int(((fullHeight - chrome) / lineHeight).rounded()))
-        let shownLines = isExpanded ? fullLines : min(fullLines, Self.collapsedLines)
+        let collapses = model.collapses
+        let shownLines = (isExpanded || !collapses) ? fullLines : min(fullLines, Self.collapsedLines)
         var y = Self.verticalPadding
         let commandRect = NSRect(x: textX, y: y, width: textWidth, height: CGFloat(shownLines) * lineHeight + chrome)
         y = commandRect.maxY
         var showAllRect = NSRect.zero
-        if fullLines > Self.collapsedLines {
+        if collapses && fullLines > Self.collapsedLines {
             showAllRect = NSRect(x: textX, y: y + 1, width: min(80, textWidth), height: 14)
             y = showAllRect.maxY
         }
@@ -287,6 +309,15 @@ final class StagingRowView: NSView {
         let labelsRect = secondary(labelsLabel, lines: 0)
         let stateRect = secondary(stateLabel, lines: 2)
         let noteRect = secondary(noteLabel, lines: Self.noteLines)
+        var archiveRect = NSRect.zero
+        var separatorRect = NSRect.zero
+        if showsArchiveInline, !stateRect.isEmpty {
+            let used = ceil(stateLabel.attributedStringValue.size().width) + 14
+            if used + 48 <= textWidth {
+                archiveRect = NSRect(x: textX + used, y: stateRect.minY, width: 48, height: stateRect.height)
+                separatorRect = NSRect(x: textX + used - 10, y: stateRect.minY, width: 10, height: stateRect.height)
+            }
+        }
         let height = y + Self.verticalPadding
         let info = Layout(
             height: ceil(height),
@@ -294,7 +325,8 @@ final class StagingRowView: NSView {
             glyph: NSRect(x: pad + Self.numberWidth, y: Self.verticalPadding, width: Self.glyphWidth, height: lineHeight),
             command: commandRect,
             age: NSRect(x: width - pad - Self.ageWidth, y: Self.verticalPadding, width: Self.ageWidth, height: lineHeight),
-            labels: labelsRect, state: stateRect, note: noteRect, showAll: showAllRect, truncatedCommand: fullLines > Self.collapsedLines)
+            labels: labelsRect, state: stateRect, note: noteRect, showAll: showAllRect, archive: archiveRect, separator: separatorRect,
+            truncatedCommand: collapses && fullLines > Self.collapsedLines)
         cache = (width, info)
         return info
     }
@@ -345,7 +377,9 @@ final class StagingRowView: NSView {
     /// Everything inside the row is the row's: its labels never take a click or start a text selection.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard bounds.contains(convert(point, from: superview)) else { return nil }
-        if !showAll.isHidden, showAll.frame.contains(convert(point, from: superview)) { return showAll }
+        let local = convert(point, from: superview)
+        if !showAll.isHidden, showAll.frame.contains(local) { return showAll }
+        if !archiveLabel.isHidden, archiveLabel.frame.contains(local) { return archiveLabel }
         return self
     }
 
@@ -388,7 +422,17 @@ final class StagingRowView: NSView {
     /// One VoiceOver button per row, spoken from the model's label: the command, note and state fields are
     /// not elements of their own. Show all (when the row shows it) is the only child.
     override func accessibilityChildren() -> [Any]? {
-        layoutInfo(width: bounds.width).truncatedCommand ? [showAll] : []
+        let info = layoutInfo(width: bounds.width)
+        return (info.truncatedCommand ? [showAll] : []) + (info.archive.isEmpty ? [] : [archiveLabel])
+    }
+
+    /// VoiceOver's custom action for a placed row (the Archive label is also a button of its own).
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        guard model.placed, canModify else { return nil }
+        return [NSAccessibilityCustomAction(name: "Archive") { [weak self] in
+            self?.archiveFromAction()
+            return true
+        }]
     }
 
     // MARK: - Context menu: Copy and Remove (each is gated inside `StagingInsertController`)
@@ -403,9 +447,29 @@ final class StagingRowView: NSView {
         let remove = NSMenuItem(title: "Remove", action: #selector(removeStagedCommand(_:)), keyEquivalent: "")
         remove.target = self
         remove.isEnabled = canModify
+        let archive = NSMenuItem(title: "Archive", action: #selector(archiveStagedCommand(_:)), keyEquivalent: "")
+        archive.target = self
+        archive.isEnabled = canModify && model.placed
         menu.addItem(copy)
+        menu.addItem(archive)
         menu.addItem(remove)
         return menu
+    }
+
+    @objc private func archiveStagedCommand(_ sender: NSMenuItem) {
+        guard let controller else { return }
+        onResult?(controller.archive(entryIds: [model.entryId], event: NSApp.currentEvent, control: self, fromMenu: true))
+    }
+
+    private func archiveFromLabel() {
+        guard let controller else { return }
+        onResult?(controller.archive(entryIds: [model.entryId], event: NSApp.currentEvent, control: self, fromMenu: false))
+    }
+
+    /// VoiceOver's action: no event (the guard allows that only while VoiceOver is on).
+    private func archiveFromAction() {
+        guard let controller else { return }
+        onResult?(controller.archive(entryIds: [model.entryId], event: NSApp.currentEvent, control: self, fromMenu: false))
     }
 
     @objc private func copyStagedCommand(_ sender: NSMenuItem) {
@@ -414,5 +478,82 @@ final class StagingRowView: NSView {
 
     @objc private func removeStagedCommand(_ sender: NSMenuItem) {
         controller?.remove(entryId: model.entryId, event: NSApp.currentEvent, control: self)
+    }
+}
+
+/// An archived entry in the drawer's footer: read-only. Dimmed text and `placed 4m ago`; it takes no click,
+/// no Space, has no context menu, no Copy and nothing that can insert it.
+final class StagingArchivedRowView: NSView {
+
+    static let verticalPadding: CGFloat = 4
+
+    private(set) var entry: ArchivedStagedEntry
+    private let commandLabel = NSTextField(labelWithString: "")
+    private let stateLabel = NSTextField(labelWithString: "")
+    private var placedText = ""
+
+    init(entry: ArchivedStagedEntry, now: Date) {
+        self.entry = entry
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        for label in [commandLabel, stateLabel] {
+            label.isSelectable = false
+            label.isEditable = false
+            addSubview(label)
+        }
+        commandLabel.lineBreakMode = .byCharWrapping
+        commandLabel.maximumNumberOfLines = 2
+        commandLabel.cell?.truncatesLastVisibleLine = true
+        commandLabel.clipsToBounds = true
+        stateLabel.font = Theme.statusFont
+        stateLabel.textColor = Theme.fgMuted
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityIdentifier("staging-archived-row")
+        update(now: now)
+    }
+
+    required init?(coder: NSCoder) { fatalError("StagingArchivedRowView is created in code") }
+
+    /// The text of the state line (`placed 4m ago`).
+    var stateText: String { stateLabel.stringValue }
+
+    func update(now: Date) {
+        placedText = "placed \(StagingDrawerModel.ageText(since: entry.placedAt, now: now)) ago"
+        stateLabel.stringValue = placedText
+        commandLabel.attributedStringValue = StagingRowView.commandText(entry.command, dimmed: true)
+        commandLabel.maximumNumberOfLines = 2
+        setAccessibilityLabel("Archived staged command, \(entry.command), \(placedText)")
+        needsLayout = true
+    }
+
+    /// Never a click target, never in a menu.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func menu(for event: NSEvent) -> NSMenu? { nil }
+
+    override var isFlipped: Bool { true }
+
+    private var textX: CGFloat { StagingRowView.horizontalPadding + StagingRowView.numberWidth + StagingRowView.glyphWidth + 4 }
+
+    func height(forWidth width: CGFloat) -> CGFloat {
+        let textWidth = max(20, width - textX - StagingRowView.horizontalPadding)
+        let full = StagingRowView.cellHeight(of: commandLabel.attributedStringValue, width: textWidth, wrapping: .byCharWrapping)
+        let lineHeight = ceil(NSLayoutManager().defaultLineHeight(for: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)))
+        let capped = min(full, lineHeight * 2 + 6)
+        let state = StagingRowView.cellHeight(of: placedText, font: Theme.statusFont, width: textWidth)
+        return ceil(capped + state + 2 * Self.verticalPadding + 1)
+    }
+
+    override func layout() {
+        super.layout()
+        let textWidth = max(20, bounds.width - textX - StagingRowView.horizontalPadding)
+        let lineHeight = ceil(NSLayoutManager().defaultLineHeight(for: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)))
+        let full = StagingRowView.cellHeight(of: commandLabel.attributedStringValue, width: textWidth, wrapping: .byCharWrapping)
+        let commandH = min(full, lineHeight * 2 + 6)
+        commandLabel.frame = NSRect(x: textX, y: Self.verticalPadding, width: textWidth, height: commandH)
+        let stateH = StagingRowView.cellHeight(of: placedText, font: Theme.statusFont, width: textWidth)
+        stateLabel.frame = NSRect(x: textX, y: commandLabel.frame.maxY + 1, width: textWidth, height: stateH)
     }
 }

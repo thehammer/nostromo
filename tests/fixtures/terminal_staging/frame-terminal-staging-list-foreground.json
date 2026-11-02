@@ -1,0 +1,31 @@
+{
+  "type": "terminal_staging_list",
+  "terminal_id": "5f0a8f7e-2d4c-4a4e-9a55-0f1f3a9d7c11",
+  "pane_id": "terminal-00000001",
+  "state": "active",
+  "owner_tag": "cody-fixture",
+  "agent_name": "Cody",
+  "revision": 10,
+  "entries": [
+    {
+      "id": "s-00000001",
+      "number": 1,
+      "command": "git status --short",
+      "note": "see what changed",
+      "staged_at": "2026-10-30T15:04:05Z",
+      "changed_at": "2026-10-30T15:04:05Z",
+      "inserted_count": 0
+    },
+    {
+      "id": "s-00000002",
+      "number": 2,
+      "command": "ls -la src/terminal",
+      "staged_at": "2026-10-30T15:04:05Z",
+      "changed_at": "2026-10-30T15:06:01Z",
+      "inserted_count": 2,
+      "last_inserted_at": "2026-10-30T15:07:30Z"
+    }
+  ],
+  "enabled": true,
+  "foreground": "ssh"
+}

@@ -6,5 +6,6 @@
   "owner_tag": "",
   "agent_name": "",
   "revision": 9,
-  "entries": []
+  "entries": [],
+  "enabled": true
 }

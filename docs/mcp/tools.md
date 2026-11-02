@@ -1561,12 +1561,14 @@ Errors are `{ error, detail?, retry_after? }`, checked in this order; a refused 
 | `not_following` | You do not follow that terminal, or the follow ended (the user stopped it, or it moved to another focus: the list is the user's now). The same answer for another focus's terminal and for one that does not exist. Ask with `nostromo.request_follow` and start a fresh list. |
 | `terminal_not_running` | The terminal's shell has ended. |
 | `no_operator` | The Nostromo app is not open, or cannot show the staging drawer. Ask the user to open or update it; tell them the command in your reply instead. |
-| `staging_disabled` | Staging into remote shells is not available yet. Suggest the command in your reply. |
+| `staging_disabled` | The user turned staging off, for every terminal (detail `the user turned staging off`) or for this one (detail `the user turned staging off for this terminal`). Suggest the command in your reply; the user can turn it back on in the app. Remote (ECS) terminals you follow can be staged into like local ones. |
 | `rate_limited` | More than 30 changes in a minute or 300 in an hour. Wait `retry_after` seconds. |
 | `invalid_text` | A command is one non-empty line of printable text: no line break, tab, control or invisible character, no leading or trailing space, no space but U+0020, no more than 4 spaces in a row. Stage one command per entry. |
 | `entry_too_long` / `note_too_long` | At most 1,000 / 120 characters. Shorten it. |
 | `looks_like_secret` | The command (or the note: detail `note`) contains something that looks like a secret or personal data. Never stage it; use a placeholder or an environment variable the user already has. |
 | `remote_shell_command` | It starts a remote shell (an ECS exec session, an SSM session, the session-manager plugin). Ask with `nostromo.request_remote_shell` instead. |
+| `history_expansion` | In a remote shell, or a local one with a program running, history expansion (`!!`, `!ssh`, `^a^b`, a command that starts with `r`, `fc` or `history`) runs something other than what the user reads. Spell the command out. |
+| `types_into_another_terminal` | In any terminal: the command would type into another pane (`tmux send-keys`, `paste-buffer`, `pipe-pane`, screen `-X stuff`). Staging never types into another pane. |
 | `invalid_position` | `position` is outside 1 to the entry count plus one. |
 | `unknown_entry` | No entry has that `entry_id`; call `list`. |
 | `list_full` | 12 entries; remove one first. |

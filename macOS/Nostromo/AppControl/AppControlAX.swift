@@ -23,13 +23,14 @@ enum AppControlAX {
     /// read views: the same rule as a terminal's screen (SR7).
     static let stagedHiddenText = "staged commands hidden from app-control"
 
-    /// Whether `view` is a staging drawer, or inside one, and app-control must not read it: the real app
+    /// Whether `view` is a staging drawer or a confirm sheet's content (the sheet is its own window), or inside
+    /// one, and app-control must not read it: the real app
     /// (`allowsSynthetic` false). A QA build keeps the rows readable for the live QA script.
     static func isWithheld(_ view: NSView, allowsSynthetic: Bool = SyntheticInputGate.allowsSynthetic) -> Bool {
         guard !allowsSynthetic else { return false }
         var current: NSView? = view
         while let candidate = current {
-            if candidate is StagingDrawerView { return true }
+            if candidate is StagingDrawerView || candidate is StagingConfirmContentView { return true }
             current = candidate.superview
         }
         return false
@@ -93,7 +94,8 @@ enum AppControlAX {
     /// The raw accessibility tree under `element` (type, role, label, value, children), as `ax` prints it.
     static func dump(_ e: Any, _ d: Int, allowsSynthetic: Bool = SyntheticInputGate.allowsSynthetic) -> [String: Any] {
         if let view = e as? NSView, isWithheld(view, allowsSynthetic: allowsSynthetic) {
-            return ["type": "StagingDrawerView", "role": NSAccessibility.Role.group.rawValue, "label": stagedHiddenText]
+            return ["type": view is StagingDrawerView ? "StagingDrawerView" : "StagingConfirmContentView",
+                    "role": NSAccessibility.Role.group.rawValue, "label": stagedHiddenText]
         }
         guard let ax = e as? NSAccessibilityProtocol else { return ["raw": "\(e)"] }
         var n: [String: Any] = ["type": "\(Swift.type(of: ax))", "role": ax.accessibilityRole()?.rawValue ?? ""]

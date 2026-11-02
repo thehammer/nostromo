@@ -302,3 +302,54 @@ final class TerminalStagingWireTests: XCTestCase {
         }
     }
 }
+
+
+// MARK: - S2 frames
+
+extension TerminalStagingWireTests {
+
+    private func body(_ message: TerminalClientMessage) throws -> [String: Any] {
+        let data = try XCTUnwrap(message.encoded())
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    func testTheSwitchArchiveAndUIEventFramesEncodeAsTheDaemonReadsThem() throws {
+        let id = StagingFixtures.terminalId
+        XCTAssertEqual(NSDictionary(dictionary: try body(.stagingSetEnabled(terminalId: id, enabled: false))),
+                       ["type": "terminal_staging_set_enabled", "terminal_id": id, "enabled": false] as NSDictionary)
+        XCTAssertEqual(NSDictionary(dictionary: try body(.stagingSetGlobal(enabled: true))),
+                       ["type": "terminal_staging_set_global", "enabled": true] as NSDictionary)
+        XCTAssertEqual(NSDictionary(dictionary: try body(.stagingUIEvent(terminalId: id, event: "confirm_cancelled"))),
+                       ["type": "terminal_staging_ui_event", "terminal_id": id, "event": "confirm_cancelled"] as NSDictionary)
+        XCTAssertEqual(NSDictionary(dictionary: try body(.stagingRemove(terminalId: id, entryId: "s-1", archive: "manual"))),
+                       ["type": "terminal_staging_remove", "terminal_id": id, "entry_id": "s-1", "archive": "manual"] as NSDictionary)
+        XCTAssertNil(try body(.stagingRemove(terminalId: id, entryId: "s-1"))["archive"], "a plain Remove has no archive field")
+    }
+
+    func testAStagedInsertInputCarriesViaAndOtherInputDoesNot() throws {
+        let staged = try body(.input(terminalId: "t1", bytes: [0x61], autoReply: false, via: "stage_insert"))
+        XCTAssertEqual(staged["via"] as? String, "stage_insert")
+        XCTAssertNil(staged["auto_reply"])
+        XCTAssertNil(try body(.input(terminalId: "t1", bytes: [0x61]))["via"], "omitted when nil")
+    }
+
+    func testTheNewRefusalOpsHaveTheirWireNames() {
+        XCTAssertEqual(TerminalRefusedOp.stagingArchive.rawValue, "staging_archive")
+        XCTAssertEqual(TerminalRefusedOp.stagingHide.rawValue, "staging_hide")
+        XCTAssertEqual(TerminalRefusedOp.stagingSwitch.rawValue, "staging_switch")
+        XCTAssertEqual(TerminalRefusedOp.stagingConfirm.rawValue, "staging_confirm")
+    }
+
+    func testAListFrameCarriesEnabledAndForegroundAndAnOlderDaemonsDefaultsToEnabled() throws {
+        let withFields = Data("""
+            {"type":"terminal_staging_list","terminal_id":"t","pane_id":"p","state":"none","revision":4,"enabled":false,"foreground":"ssh"}
+            """.utf8)
+        let decoded = try JSONDecoder().decode(TerminalStagingList.self, from: withFields)
+        XCTAssertFalse(decoded.enabled)
+        XCTAssertEqual(decoded.foreground, "ssh")
+        let older = Data(#"{"type":"terminal_staging_list","terminal_id":"t","state":"active","revision":1,"entries":[]}"#.utf8)
+        let defaulted = try JSONDecoder().decode(TerminalStagingList.self, from: older)
+        XCTAssertTrue(defaulted.enabled, "an S1 daemon sends no `enabled`")
+        XCTAssertNil(defaulted.foreground)
+    }
+}

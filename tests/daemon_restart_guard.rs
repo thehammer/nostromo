@@ -338,6 +338,7 @@ async fn any_local_process_is_told_the_open_shells_as_metadata_only() {
             terminal_id: terminal_id.clone(),
             bytes: b64(&format!("{CANARY}\r")),
             auto_reply: false,
+            via: None,
         })
         .await;
     s.app

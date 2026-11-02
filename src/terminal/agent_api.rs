@@ -26,7 +26,7 @@ use super::remote_request::{
 };
 use super::staging::text::sanitize_agent_name;
 use super::staging::{StagingError, StagingList, StagingTextCode, MAX_ENTRIES};
-use super::{TerminalError, TerminalManager};
+use super::{StagingGlobal, TerminalError, TerminalManager};
 use crate::ipc::decisions::{DecisionOutcome, DecisionRegistry};
 use crate::ipc::protocol::{
     DecisionChoice, RemoteRequester, RemoteShellProject, ServerMsg, TerminalInfo, TerminalKind,
@@ -456,7 +456,7 @@ impl TerminalAgentApi {
     /// followed by the caller, a former follower of a frozen list; another
     /// focus's terminal is never revealed), `terminal_not_running`,
     /// `no_operator` (no app that can show the drawer is connected),
-    /// `staging_disabled` (anything but a local terminal in S1), `rate_limited`
+    /// `staging_disabled` (the user turned staging off, here or everywhere), `rate_limited`
     /// (changes only), then the content's own codes (text, position, entry,
     /// `list_full`). A refusal is audited as `staging_refused` (code only).
     pub fn staging(
@@ -497,9 +497,9 @@ impl TerminalAgentApi {
         {
             return Err(StagingRefusal::new("not_following"));
         }
-        let (info, ui_connected) = {
+        let (info, global) = {
             let m = self.lock();
-            (m.info(terminal_id), m.staging_ui_connected())
+            (m.info(terminal_id), m.staging_global())
         };
         let Some(info) = info else {
             return Err(StagingRefusal::new("not_following"));
@@ -507,14 +507,21 @@ impl TerminalAgentApi {
         if info.status != TerminalStatus::Running {
             return Err(StagingRefusal::new("terminal_not_running"));
         }
-        if !ui_connected {
+        if global == StagingGlobal::NoOperator {
             return Err(StagingRefusal::new("no_operator")
                 .detail("the Nostromo app is not open to show the staging drawer"));
         }
-        if info.kind != TerminalKind::Local {
-            return Err(StagingRefusal::new("staging_disabled")
-                .detail("staging into remote shells is not available yet"));
+        if global == StagingGlobal::Off {
+            return Err(
+                StagingRefusal::new("staging_disabled").detail("the user turned staging off")
+            );
         }
+        if store.is_disabled(terminal_id) {
+            return Err(StagingRefusal::new("staging_disabled")
+                .detail("the user turned staging off for this terminal"));
+        }
+        // Anything not known to be a local shell is treated as remote.
+        let remote = info.kind != TerminalKind::Local;
         if request.op.is_change() {
             store
                 .take_change(focus_tag, (self.clock)())
@@ -530,13 +537,14 @@ impl TerminalAgentApi {
                 note,
                 position,
             } => store
-                .stage(
+                .stage_in(
                     focus_tag,
                     terminal_id,
                     &name,
                     command,
                     note.as_deref(),
                     *position,
+                    remote,
                 )
                 .map(|(entry_id, number, entries)| StagingOutcome::Staged {
                     entry_id,
@@ -548,13 +556,14 @@ impl TerminalAgentApi {
                 command,
                 note,
             } => store
-                .replace(
+                .replace_in(
                     focus_tag,
                     terminal_id,
                     &name,
                     entry_id,
                     command.as_deref(),
                     note.as_deref(),
+                    remote,
                 )
                 .map(|number| StagingOutcome::Replaced {
                     entry_id: entry_id.clone(),
