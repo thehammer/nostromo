@@ -668,7 +668,11 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         guard let id = controller.terminalId else { return }
         // At once (a click that began before the move must not insert), without telling observers from inside layout.
         staging.restartReadingDelay(terminalId: id, notify: false)
-        DispatchQueue.main.async { [weak self] in self?.refresh() }
+        DispatchQueue.main.async { [weak self] in
+            // The drawer may have left its window before this runs: nothing to redraw then.
+            guard let self, self.window != nil else { return }
+            self.refresh()
+        }
     }
 
     // MARK: - Timer (only while visible, in a window, with entries)

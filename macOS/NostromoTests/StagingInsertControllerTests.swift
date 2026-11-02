@@ -253,7 +253,7 @@ final class StagingRig {
         side.context = StagingContext(terminalId: StagingFixtures.terminalId, kind: kind, status: status, isMirror: isMirror)
         side.controller = StagingInsertController(staging: staging, sessions: sessions, target: side.target,
                                                   pasteboard: pasteboard,
-                                                  context: { [unowned side] in side.context }, gate: gate)
+                                                  context: { [weak side] in side?.context }, gate: gate)
         sides.append(side)
     }
 
