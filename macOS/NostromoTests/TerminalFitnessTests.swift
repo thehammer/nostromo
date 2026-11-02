@@ -1106,8 +1106,12 @@ final class TerminalFitnessTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(hide.first).body.contains("controller.allowsHideControl("), "closing and reopening ask the gate")
         // The confirm sheet's Insert asks the gate it was given, and that gate defaults to the real guard.
         let sheet = try terminalViewSource("StagingConfirmSheet.swift")
-        let insert = declarations(in: sheet.name, lines: sheet.lines) { sheet.lines[$0].contains("func insertTapped(") }
-        XCTAssertTrue(try XCTUnwrap(insert.first).body.contains("gate(NSApp.currentEvent, sender)"))
+        let insert = declarations(in: sheet.name, lines: sheet.lines) { sheet.lines[$0].contains("func press(insert") }
+        let pressBody = try XCTUnwrap(insert.first).body
+        XCTAssertTrue(pressBody.contains("gate(event, sender)"), "Insert asks the gate with the event it was pressed by")
+        XCTAssertTrue(pressBody.contains("gesture.permits(event, button: sender)"), "and the accidental-input checks")
+        let tapped = declarations(in: sheet.name, lines: sheet.lines) { sheet.lines[$0].contains("func insertTapped(") }
+        XCTAssertTrue(try XCTUnwrap(tapped.first).body.contains("press(insert: sender, event: NSApp.currentEvent)"))
         XCTAssertTrue(sheet.lines.joined(separator: "\n").contains("TerminalInputGuard.allowsControl(event: $0, control: $1)"))
         // The global switch menu action asks the guard through the controller's static entry point.
         let delegate = try Repo.read(Repo.app.appendingPathComponent("AppDelegate.swift"))

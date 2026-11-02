@@ -188,6 +188,9 @@ final class StagingRigState {
     /// The clock the confirm sheet measures its 0.5 s on. Nil: every read is 10 s after the last, so a
     /// press that carries no event always clears the delay (tests of the delay set their own).
     var sheetClock: (() -> TimeInterval)?
+    /// Whether the sheet's Insert applies its accidental-input checks. Off by default: most tests press Insert with
+    /// `performClick`, whose current event is whatever AppKit last dispatched. The tests of the checks turn it on.
+    var sheetChecksGesture = false
     var sheetTicks = 0
 }
 
@@ -268,7 +271,8 @@ final class StagingRig {
                                                       if let clock = box.sheetClock { return clock() }
                                                       box.sheetTicks += 1
                                                       return TimeInterval(box.sheetTicks) * 10
-                                                  }, gate: gate)
+                                                  },
+                                                  sheetChecksGesture: { [box] in box.sheetChecksGesture }, gate: gate)
         sides.append(side)
     }
 

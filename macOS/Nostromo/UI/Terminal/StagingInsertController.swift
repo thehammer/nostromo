@@ -66,6 +66,8 @@ final class StagingInsertController {
     private let pasteboard: NSPasteboard
     /// The clock the confirm sheet measures its 0.5 s with (seconds since boot, like `NSEvent.timestamp`).
     private let sheetClock: () -> TimeInterval
+    /// Whether the sheet's Insert applies its accidental-input checks (always, in the app).
+    private let sheetChecksGesture: () -> Bool
 
     /// The confirmation on screen, if any (one per controller; one per window).
     private(set) var confirmSheet: StagingConfirmSheet?
@@ -80,8 +82,10 @@ final class StagingInsertController {
          target: StagingInsertTarget?, pasteboard: NSPasteboard = .general,
          context: @escaping () -> StagingContext?,
          sheetClock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         sheetChecksGesture: @escaping () -> Bool = { true },
          gate: @escaping Gate = { TerminalInputGuard.allowsControl(event: $0, control: $1, fromMenu: $2) }) {
         self.sheetClock = sheetClock
+        self.sheetChecksGesture = sheetChecksGesture
         self.staging = staging
         self.sessions = sessions
         self.target = target
@@ -189,7 +193,7 @@ final class StagingInsertController {
             command: snapshot.command, matches: matches,
             hazardLabels: StagingDrawerModel.hazardLabels(for: snapshot.command, production: production),
             gate: { [weak self] event, button in self?.gate(event, button, false) ?? false },
-            openedBy: openedBy, now: sheetClock,
+            openedBy: openedBy, now: sheetClock, checksGesture: sheetChecksGesture,
             onInsert: { [weak self] button in
                 guard let self else { return }
                 self.clearConfirmation()

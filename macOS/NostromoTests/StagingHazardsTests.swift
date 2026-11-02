@@ -126,10 +126,12 @@ final class StagingHazardsTests: XCTestCase {
 
     func testHistoryExpansionRule() {
         let positives = ["!!", "!ssh", "!$", "!-2", "!#", "!ls -la", "echo hi !!", "^a^b", "^foo", "r", "fc -l", "history",
-                         "history | grep x", "ls; r", "ls && fc", "ls || history", "ls | r 2"]
+                         "history | grep x", "ls; r", "ls && fc", "ls || history", "ls | r 2",
+                         // `fc` and `history` count as a word anywhere (S2 review): asking is the cheap side.
+                         "grep history x", "rg fc"]
         for command in positives { XCTAssertTrue(StagingHazards.usesHistoryExpansion(command), command) }
-        let negatives = ["[ a != b ]", "echo hi!", "echo ! x", "git status", "ls -r", "echo r", "grep history x", "echo !(x)",
-                         "echo ^caret", "rg fc", "ls -la", "echo a!=b"]
+        let negatives = ["[ a != b ]", "echo hi!", "echo ! x", "git status", "ls -r", "echo r", "echo !(x)",
+                         "echo ^caret", "ls -la", "echo a!=b", "ls r"]
         for command in negatives { XCTAssertFalse(StagingHazards.usesHistoryExpansion(command), command) }
     }
 

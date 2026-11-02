@@ -90,15 +90,20 @@ final class StagingConfirmSheet: NSWindowController {
     /// Whether an Insert press is a person's (the real guard unless a test says otherwise).
     private let gate: (NSEvent?, NSView) -> Bool
     private let gesture: InsertGestureGuard
+    /// Always true in the app. A test rig that drives Insert with `performClick` (whose current event is
+    /// whatever AppKit last dispatched) turns the 0.5 s / bounds / repeat checks off; the tests of those checks leave them on.
+    private let checksGesture: () -> Bool
 
     /// `onInsert` runs (with the Insert button) after the sheet closes, only for a person's Insert; `onCancel` after Cancel, Return
     /// or Escape; `onRefused` when an Insert was not a person's (the sheet stays up).
     init(title: String, targetLine: String, command: String, matches: [String], hazardLabels: [String],
          gate: @escaping (NSEvent?, NSView) -> Bool = { TerminalInputGuard.allowsControl(event: $0, control: $1) },
          openedBy: NSEvent? = nil, now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         checksGesture: @escaping () -> Bool = { true },
          onInsert: @escaping (NSButton) -> Void, onCancel: @escaping () -> Void, onRefused: @escaping () -> Void) {
         self.gate = gate
         self.gesture = InsertGestureGuard(openedBy: openedBy, now: now)
+        self.checksGesture = checksGesture
         self.onInsert = onInsert
         self.onCancel = onCancel
         self.onRefused = onRefused
@@ -263,7 +268,7 @@ final class StagingConfirmSheet: NSWindowController {
     /// Insert pressed by `event` (what the action sees as current). Internal so tests can hand it crafted events.
     func press(insert sender: NSButton, event: NSEvent?) {
         guard !isFinished else { return }
-        guard gate(event, sender), gesture.permits(event, button: sender) else {
+        guard gate(event, sender), !checksGesture() || gesture.permits(event, button: sender) else {
             onRefused()
             return
         }

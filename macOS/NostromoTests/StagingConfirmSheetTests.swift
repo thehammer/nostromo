@@ -301,6 +301,7 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
     private func openOnAClock(_ t: Timed) throws -> (Setup, StagingConfirmSheet) {
         let s = setup()
         s.rig.box.sheetClock = { t.clock }
+        s.rig.box.sheetChecksGesture = true
         s.rig.click(s.row, in: s.window)
         return (s, try sheet(s))
     }
@@ -396,6 +397,7 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
         let t = Timed()
         let s = setup()
         s.rig.box.sheetClock = { t.clock }
+        s.rig.box.sheetChecksGesture = true
         let down = StagingEvents.mouse(.leftMouseDown, in: s.window, at: StagingRig.point(in: s.row), timestamp: t.clock)
         let up = StagingEvents.mouse(.leftMouseUp, in: s.window, at: StagingRig.point(in: s.row), timestamp: t.clock)
         s.row.mouseDown(with: down)
