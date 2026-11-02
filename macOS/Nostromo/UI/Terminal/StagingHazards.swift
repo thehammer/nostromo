@@ -150,15 +150,21 @@ enum StagingHazards {
     private static let emptyExpansions = ["${IFS}", "$IFS", "$()", "$@", "$*"]
 
     /// Length of the empty expansion starting at `chars[index]` (a `$`), if any: the fixed forms, a positional
-    /// parameter (`$0`-`$9`, `${0}`-`${9}`) and `${IFS` with a modifier (`${IFS%?}`), which runs to the `}`.
+    /// parameter (`$0`-`$9`, `${0}`-`${9}`) and `${IFS` with a plain `%` / `#` / `:N:M` modifier, which runs to the `}`.
     private static func emptyExpansionLength(_ chars: [Character], at index: Int) -> Int? {
         if let fixed = emptyExpansions.first(where: { chars[index...].starts(with: Array($0)) }) { return fixed.count }
         func at(_ offset: Int) -> Character? { index + offset < chars.count ? chars[index + offset] : nil }
         func isDigit(_ c: Character?) -> Bool { c.map { $0.isASCII && $0.isNumber } ?? false }
         if isDigit(at(1)) { return 2 }
         if at(1) == "{", isDigit(at(2)), at(3) == "}" { return 4 }
-        if chars[index...].starts(with: Array("${IFS")), let next = at(5), !(next.isLetter || next.isNumber || next == "_") {
-            return chars[(index + 5)...].firstIndex(of: "}").map { $0 - index + 1 }
+        if chars[index...].starts(with: Array("${IFS")), let close = chars[(index + 5)...].firstIndex(of: "}") {
+            // Only modifiers that keep whitespace or nothing: `%` / `#` with a literal pattern, and `:N` / `:N:M`.
+            // `:+`, `:-`, `=`, `/` and anything with `$`, a backtick or `(` are not swallowed: the operand can run
+            // a command, so it stays visible to the rules.
+            let body = Array(chars[(index + 5)..<close])
+            let offset = body.count > 1 && body[0] == ":" && body.dropFirst().allSatisfy { $0 == ":" || ($0.isASCII && $0.isNumber) }
+            let literal = !body.dropFirst().contains(where: { "$`(){\\'\"".contains($0) })
+            if offset || ((body.first == "%" || body.first == "#") && literal) { return close - index + 1 }
         }
         return nil
     }

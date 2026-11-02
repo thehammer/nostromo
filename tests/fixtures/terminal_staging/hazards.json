@@ -107,6 +107,8 @@
  {"name": "rm_ifs_modifier", "text": "rm${IFS%?}-rf /", "remote": "remote_shell_command", "local": "remote_shell_command", "history": false, "destructive": ["rm -rf"]},
  {"name": "rm_positional_in_word", "text": "r$9m -rf /", "remote": "remote_shell_command", "local": "remote_shell_command", "history": true, "destructive": ["rm -rf"]},
  {"name": "tmux_positional_in_word", "text": "t$1mux send-keys -t 1 x", "remote": "remote_shell_command", "local": "remote_shell_command", "history": false},
+ {"name": "tmux_in_ifs_default_operand", "text": "${IFS:+$(tmux send-keys -t 1 x)}", "remote": "types_into_another_terminal", "local": "types_into_another_terminal", "history": false},
+ {"name": "rm_ifs_offset", "text": "rm${IFS:0:1}-rf /", "remote": "remote_shell_command", "local": "remote_shell_command", "history": false, "destructive": ["rm -rf"]},
  {"name": "rm_empty_substitution", "text": "r$()m -rf /", "remote": "remote_shell_command", "local": "remote_shell_command", "history": true, "destructive": ["rm -rf"]},
  {"name": "rm_at_in_word", "text": "r$@m -rf x", "remote": "remote_shell_command", "local": "remote_shell_command", "history": true, "destructive": ["rm -rf"]},
  {"name": "rm_star_in_word", "text": "r$*m -fr x", "remote": "remote_shell_command", "local": "remote_shell_command", "history": true, "destructive": ["rm -rf"]},

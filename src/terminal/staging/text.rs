@@ -123,11 +123,27 @@ fn empty_expansion_len(chars: &[char]) -> Option<usize> {
     if chars.get(1).is_some_and(|c| c.is_ascii_digit()) {
         return Some(2);
     }
-    if chars.get(1) == Some(&'{') && chars.get(2).is_some_and(|c| c.is_ascii_digit()) && chars.get(3) == Some(&'}') {
+    if chars.get(1) == Some(&'{')
+        && chars.get(2).is_some_and(|c| c.is_ascii_digit())
+        && chars.get(3) == Some(&'}')
+    {
         return Some(4);
     }
-    if chars.len() > 5 && chars[1..5] == ['{', 'I', 'F', 'S'] && !(chars[5].is_alphanumeric() || chars[5] == '_') {
-        return chars[5..].iter().position(|&c| c == '}').map(|p| 6 + p);
+    if chars.len() > 5 && chars[1..5] == ['{', 'I', 'F', 'S'] {
+        // Only modifiers that keep a (whitespace) character or nothing: `%` and `#` with a literal pattern, and
+        // `:N` / `:N:M`. `:+`, `:-`, `=`, `/` and anything holding `$`, a backtick or `(` are NOT swallowed: their
+        // operand can run a command, so it stays visible to the rules.
+        let close = chars[5..].iter().position(|&c| c == '}')?;
+        let body = &chars[5..5 + close];
+        let literal = |b: &[char]| {
+            !b.iter()
+                .any(|c| matches!(c, '$' | '`' | '(' | ')' | '{' | '\\' | '\'' | '"'))
+        };
+        let offset = body.first() == Some(&':')
+            && body[1..].iter().all(|c| c.is_ascii_digit() || *c == ':')
+            && body.len() > 1;
+        let strip = matches!(body.first(), Some('%' | '#')) && literal(&body[1..]);
+        return (offset || strip).then_some(6 + close);
     }
     None
 }
@@ -166,7 +182,10 @@ fn normalise_with(text: &str, empty: &str) -> String {
     while i < chars.len() {
         let c = chars[i];
         i += 1;
-        if let Some(len) = (c == '$').then(|| empty_expansion_len(&chars[i - 1..])).flatten() {
+        if let Some(len) = (c == '$')
+            .then(|| empty_expansion_len(&chars[i - 1..]))
+            .flatten()
+        {
             i += len - 1;
             if !(empty == " " && out.ends_with(' ')) {
                 out.push_str(empty);
