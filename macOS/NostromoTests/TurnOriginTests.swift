@@ -743,7 +743,7 @@ final class TaskWakeSessionTests: XCTestCase {
         XCTAssertEqual(session.turns[0].origin, TaskWakeFixtures.origin(1))
     }
 
-    func testAMergeMissedWhileDisconnectedShowsAfterReattachWithoutGapOrDuplicate() {
+    func testAMergeMissedWhileDisconnectedShowsAfterReattach() {
         let (session, client) = makeSession()
         load([daemonTurn(0), daemonTurn(1, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(1))], into: client, session: session)
         let ids = session.turns.map(\.id)
@@ -755,6 +755,20 @@ final class TaskWakeSessionTests: XCTestCase {
         XCTAssertEqual(session.turns.count, 2)
         XCTAssertEqual(session.turns.filter { $0.isGapMarker }.count, 0)
         XCTAssertEqual(session.turns.map(\.id), ids)
+        XCTAssertEqual(session.turns[1].markerContent?.line, "⟲ 2 background events")
+    }
+
+    func testAReattachWithTheSameWakeOriginKeepsTheMarkerAndTheTurnView() {
+        let (session, client) = makeSession()
+        load([daemonTurn(0), daemonTurn(1, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(2))], into: client, session: session)
+        let ids = session.turns.map(\.id)
+
+        client.messages.send(.sessionTurns(tag: "test", turns: [daemonTurn(0),
+            daemonTurn(1, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(2))]))
+        modelFlushMain()
+
+        XCTAssertEqual(session.turns.map(\.id), ids)
+        XCTAssertEqual(session.turns[1].origin, TaskWakeFixtures.origin(2))
         XCTAssertEqual(session.turns[1].markerContent?.line, "⟲ 2 background events")
     }
 
