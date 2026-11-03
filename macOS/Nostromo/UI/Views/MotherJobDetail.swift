@@ -998,6 +998,33 @@ final class MotherJobDetail: NSView {
         originLine.show(origin, repo: currentJob?.repo ?? "")
     }
 
+    /// Whether this detail is the one on screen. A hidden detail keeps its state (draft, segment, scroll, log
+    /// position) but runs nothing: no log timer, no plan or checklist watcher.
+    private(set) var isShown = true
+
+    /// The live-log timer is scheduled (tests: a hidden detail must not have one).
+    var isLogTimerRunning: Bool { logTimer != nil }
+
+    /// The reply box holds text the reader typed and has not sent.
+    var hasDraft: Bool { !replyTextView.string.isEmpty }
+
+    /// The owner swaps this detail out of the view hierarchy (false) or back in (true).
+    func setShown(_ shown: Bool) {
+        guard shown != isShown else { return }
+        isShown = shown
+        if shown {
+            showSelectedSegment()
+            if let job = currentJob {
+                syncLogTimer(for: job)
+                loadLog(job)   // catch up on what was written while hidden
+            }
+        } else {
+            logTimer?.invalidate(); logTimer = nil
+            planView?.setActive(false)
+            planChecklistView.setActive(false)
+        }
+    }
+
     /// Show `job` as the pane's subject: a different job than the one shown, or none (nil).
     /// Starts from a clean slate: the reply draft is cleared and everything is rebuilt.
     func select(_ job: MotherJob?) {
@@ -1164,8 +1191,8 @@ final class MotherJobDetail: NSView {
         contentScrollView.isHidden = selectedSegment != .overview
         logScrollView.isHidden = selectedSegment != .log
         if selectedSegment == .plan { ensurePlanView().isHidden = false } else { planView?.isHidden = true }
-        planView?.setActive(selectedSegment == .plan)
-        planChecklistView.setActive(selectedSegment == .overview)
+        planView?.setActive(isShown && selectedSegment == .plan)
+        planChecklistView.setActive(isShown && selectedSegment == .overview)
     }
 
     private func ensurePlanView() -> PlanDocumentView {
@@ -1329,7 +1356,7 @@ final class MotherJobDetail: NSView {
     private static func isActive(_ state: String) -> Bool { state == "running" || state == "awaiting" }
 
     private func syncLogTimer(for job: MotherJob) {
-        if Self.isActive(job.state) {
+        if Self.isActive(job.state), isShown {
             guard logTimer == nil else { return }
             logTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
                 guard let self, let j = self.currentJob else { return }

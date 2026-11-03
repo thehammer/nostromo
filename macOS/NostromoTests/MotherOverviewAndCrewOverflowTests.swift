@@ -39,7 +39,7 @@ final class MotherOverviewAndCrewOverflowTests: XCTestCase {
     func testTheOverviewFitsTheWindowWithHundredsOfJobsWithLongTitles() throws {
         let w = try MD.makeWindow(self, index: 980)
         resetStoreWhenDone()
-        XCTAssertEqual(w.pane.activePaneId, MotherView.overviewPaneId, "precondition: the Overview tab is showing")
+        XCTAssertEqual(w.pane.activePaneId, MDPane.emptyId, "precondition: the empty state is showing")
         MD.assertFits(w, "control: Overview with no jobs")
 
         AppStore.shared.applyBrokerEventForTesting(.snapshot(
@@ -47,7 +47,7 @@ final class MotherOverviewAndCrewOverflowTests: XCTestCase {
         MD.pump(w.window, seconds: 1)
 
         XCTAssertEqual(AppStore.shared.motherJobs.count, 600, "precondition: the app holds the 600 jobs")
-        XCTAssertEqual(w.pane.activePaneId, MotherView.overviewPaneId, "precondition: still on the Overview tab")
+        XCTAssertEqual(w.pane.activePaneId, MDPane.emptyId, "precondition: still the empty state")
         MD.assertFits(w, "Overview, 600 jobs with 600-character titles")
     }
 

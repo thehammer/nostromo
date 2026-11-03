@@ -57,7 +57,7 @@ final class MotherListResizeTests: MouseQueueTestCase {
     }
 
     private func tabRegion(in view: MotherView) -> NSView? {
-        view.subviews.first { $0 is TabRegionView }
+        view.detailContainer
     }
 
     private func mouse(_ type: NSEvent.EventType, x: CGFloat, in window: NSWindow) -> NSEvent {
