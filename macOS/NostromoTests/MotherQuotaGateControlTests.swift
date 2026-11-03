@@ -725,7 +725,9 @@ final class MotherQuotaGateControlTests: MouseQueueTestCase {
         XCTAssertNil(h.armed)
         XCTAssertTrue(h.sent.isEmpty)
         XCTAssertEqual(h.schedule.count, 0)
-        XCTAssertFalse(h.window.makeFirstResponder(h.button(.off)), "a disabled option cannot take keyboard focus")
+        XCTAssertFalse(h.button(.off).acceptsFirstResponder, "a disabled option cannot take keyboard focus")
+        _ = h.window.makeFirstResponder(h.button(.off))
+        XCTAssertTrue(h.window.firstResponder !== h.button(.off), "a disabled option cannot take keyboard focus")
     }
 
     func testClickingTheOptionAlreadyInForceDoesNothing() {
