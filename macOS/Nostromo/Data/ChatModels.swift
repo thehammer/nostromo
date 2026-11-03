@@ -428,6 +428,9 @@ struct AskQuestionData {
     let header:      String
     let options:     [Option]
     let multiSelect: Bool
+    /// The `AskUserQuestion` call's id (from the daemon). Nil for a `CONFIRM:` card, and from a
+    /// daemon that does not send it: those stay interactive.
+    var toolUseId: String? = nil
 }
 
 // MARK: - NDJSON parsing

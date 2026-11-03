@@ -112,6 +112,15 @@ final class ApprovalStore {
     private var announced = Set<String>()
     /// What each tool call's row says about its request, for the session's lifetime (bounded per focus).
     private var statusBook = ApprovalStatusBook()
+    /// The option labels the person chose for an `AskUserQuestion` call, by `tool_use_id`, so the quiet
+    /// transcript record can say what was answered. In memory only, never persisted, never logged; labels
+    /// only (no free text); at most `answerCapacity` calls, the oldest going first.
+    private var chosenLabels: [String: [String]] = [:]
+    private var chosenOrder: [String] = []
+    /// The `AskUserQuestion` calls a request with an answerable form was seen for (the form was offered).
+    /// Unlike the status book it survives withdrawal and status eviction; bounded by `answerCapacity`.
+    private var formOffered = Set<String>()
+    private var formOfferedOrder: [String] = []
     /// Which request last made each tool call await: only it may end that wait. A reused
     /// `tool_use_id` must not let a late frame for the old request overwrite the new request's wait.
     private var waitOwner: [String: String] = [:]
@@ -276,6 +285,45 @@ final class ApprovalStore {
     /// How many calls' statuses are kept for a focus.
     func statusCount(tag: String) -> Int { statusBook.count(tag: tag) }
 
+    // MARK: AskUserQuestion record
+
+    /// How many calls' chosen labels (and offered forms) are kept: as many as the status book keeps per focus.
+    static let answerCapacity = ApprovalStatusBook.capacityPerTag
+
+    /// True when the approval form was offered for the call `toolUseId`: a request that lists
+    /// `answer_questions` and whose questions this build can parse was seen for it. The form is then the
+    /// one place to answer and the transcript only keeps a record. A question the form cannot take (one
+    /// option, five, duplicate labels, a non-choice kind, `answer_questions` not listed) is not handled:
+    /// its transcript card is the person's only way to answer. Stays true after the request is withdrawn,
+    /// answered or resolved, and after its status is evicted.
+    func handlesQuestion(toolUseId: String) -> Bool { formOffered.contains(toolUseId) }
+
+    private func noteFormOffered(for request: ApprovalRequestWire) {
+        guard request.toolName == ApprovalKinds.askUserQuestionTool,
+              ApprovalCardOptions(request: request).questions != nil else { return }
+        let id = request.toolUseId
+        guard formOffered.insert(id).inserted else { return }
+        formOfferedOrder.append(id)
+        while formOfferedOrder.count > Self.answerCapacity { formOffered.remove(formOfferedOrder.removeFirst()) }
+    }
+
+    /// True while the request for `toolUseId` waits for the person.
+    func isAwaitingAnswer(toolUseId: String) -> Bool {
+        statusBook.status(toolUseId: toolUseId) == .awaiting
+    }
+
+    /// The labels the person chose for `toolUseId`, if this process saw them answer.
+    func chosenLabels(toolUseId: String) -> [String]? { chosenLabels[toolUseId] }
+
+    private func recordChoice(_ decision: ApprovalDecisionWire, for request: ApprovalRequestWire) {
+        guard decision.kind == .answerQuestions,
+              let selected = decision.answers?.first?.selected, !selected.isEmpty else { return }
+        let id = request.toolUseId
+        if chosenLabels.updateValue(selected, forKey: id) == nil { chosenOrder.append(id) }
+        while chosenOrder.count > Self.answerCapacity { chosenLabels.removeValue(forKey: chosenOrder.removeFirst()) }
+        statusChanges.send(id)
+    }
+
     // MARK: Guard bar (AP2b)
 
     /// The guard block the bar shows for a focus, if any.
@@ -311,6 +359,7 @@ final class ApprovalStore {
         entry.state = .inFlight(decision.kind)
         entries[id] = entry
         send(id, decision, windowID)
+        recordChoice(decision, for: entry.request)
         changes.send(entry.request.tag)
         return true
     }
@@ -406,6 +455,7 @@ final class ApprovalStore {
         entries[request.id] = ApprovalEntry(request: request, state: state)
         order[request.tag, default: []].append(request.id)
         waitOwner[request.toolUseId] = request.id
+        noteFormOffered(for: request)   // before the status goes out: a listening card reads it
         setStatus(.awaiting, for: request)
     }
 

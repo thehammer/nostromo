@@ -465,7 +465,8 @@ enum DaemonTurnBlock: Decodable {
     case toolResult(content: String, isError: Bool, meta: DaemonToolMeta = .none)
     case resultSummary(durationMs: Int, costUsd: Double, isError: Bool, interrupted: Bool = false)
     case errorMessage(String)
-    case askQuestion(question: String, header: String, options: [DaemonAskOption], multiSelect: Bool)
+    /// `toolUseId`: the `AskUserQuestion` call's id; nil for a `CONFIRM:` card and from a daemon that predates the field (the card stays interactive).
+    case askQuestion(question: String, header: String, options: [DaemonAskOption], multiSelect: Bool, toolUseId: String? = nil)
     /// A daemon-authored marker ("Model changed to Opus (from Sonnet) by you."): not a
     /// message, never sent to the agent. `kind` is the raw `note_kind` (`model_changed`,
     /// `model_pending`, `model_failed`, ...), kept as a string so a kind a newer daemon
@@ -507,7 +508,8 @@ enum DaemonTurnBlock: Decodable {
             self = .askQuestion(question: try c.decode(String.self, forKey: .question),
                                 header: try c.decode(String.self, forKey: .header),
                                 options: try c.decode([DaemonAskOption].self, forKey: .options),
-                                multiSelect: try c.decode(Bool.self, forKey: .multiSelect))
+                                multiSelect: try c.decode(Bool.self, forKey: .multiSelect),
+                                toolUseId: try c.decodeIfPresent(String.self, forKey: .toolUseId))
         case "note":
             // `note_kind`, not `kind`: `kind` is this enum's own tag.
             self = .note(kind: try c.decodeIfPresent(String.self, forKey: .noteKind) ?? "",

@@ -147,6 +147,12 @@ pub enum TurnBlock {
         header: String,
         options: Vec<AskOption>,
         multi_select: bool,
+        /// The `AskUserQuestion` call's own `tool_use_id`, so a client can tell
+        /// the approval form already handles this question. Absent (and left
+        /// out of the JSON) for a `CONFIRM:` expansion, which has no tool call
+        /// and stays an interactive card.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
     },
     /// A daemon-authored transcript marker ("Model changed to Opus (from
     /// Sonnet) by you."). Not a message: it is never sent to the agent and
@@ -1305,7 +1311,7 @@ fn parse_content_block(b: &Value) -> Option<TurnBlock> {
 
             // AskUserQuestion → a structured card instead of a generic tool row.
             if name == "AskUserQuestion" {
-                if let Some(card) = parse_ask_question(&input) {
+                if let Some(card) = parse_ask_question(&input, str_field(b, "id")) {
                     return Some(card);
                 }
             }
@@ -1379,7 +1385,7 @@ fn extract_tool_result_text(b: &Value) -> String {
 // ── AskUserQuestion / CONFIRM: parsing ──────────────────────────────────────
 
 /// Extract an `AskQuestion` block from an `AskUserQuestion` tool input.
-fn parse_ask_question(input: &Value) -> Option<TurnBlock> {
+fn parse_ask_question(input: &Value, tool_use_id: Option<String>) -> Option<TurnBlock> {
     let questions = input.get("questions")?.as_array()?;
     let first = questions.first()?;
     let question = first.get("question")?.as_str()?.to_string();
@@ -1424,6 +1430,7 @@ fn parse_ask_question(input: &Value) -> Option<TurnBlock> {
         header,
         options,
         multi_select,
+        tool_use_id,
     })
 }
 
@@ -1528,6 +1535,7 @@ fn parse_confirm_json(json: &Value) -> Option<TurnBlock> {
         header,
         options,
         multi_select: false,
+        tool_use_id: None,
     })
 }
 
@@ -2707,6 +2715,41 @@ mod tests {
     }
 
     #[test]
+    fn ask_user_question_carries_tool_use_id_on_the_wire() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_Q1","name":"AskUserQuestion","input":{"questions":[{"question":"Pick one","header":"H","multiSelect":false,"options":[{"label":"A","description":"first"}]}]}}]}}"#;
+        let Some(ParsedLine::Blocks { blocks: b, .. }) = parse_line(line) else {
+            panic!("expected Blocks");
+        };
+        let json = serde_json::to_value(&b[0]).unwrap();
+        assert_eq!(json["kind"], "ask_question");
+        assert_eq!(json["tool_use_id"], "toolu_Q1");
+    }
+
+    #[test]
+    fn ask_question_without_id_omits_the_field_on_the_wire() {
+        // A CONFIRM: expansion has no tool call, so no id, and the key is absent
+        // (an older client sees exactly the shape it always did).
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"CONFIRM:{\"q\":\"OK?\",\"h\":\"Review\",\"opts\":[{\"l\":\"Yes\",\"d\":\"do it\"}]}"}]}}"#;
+        let Some(ParsedLine::Blocks { blocks: b, .. }) = parse_line(line) else {
+            panic!("expected Blocks");
+        };
+        let card = b
+            .iter()
+            .find(|x| matches!(x, TurnBlock::AskQuestion { .. }))
+            .expect("a card");
+        let json = serde_json::to_value(card).unwrap();
+        assert_eq!(json["kind"], "ask_question");
+        assert!(json.get("tool_use_id").is_none());
+
+        // An old daemon's JSON (no key) still deserializes, as None.
+        let old = r#"{"kind":"ask_question","question":"q","header":"h","options":[],"multi_select":false}"#;
+        match serde_json::from_str::<TurnBlock>(old).unwrap() {
+            TurnBlock::AskQuestion { tool_use_id, .. } => assert_eq!(tool_use_id, None),
+            other => panic!("expected AskQuestion, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn confirm_line_splits_text_into_card() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"before\nCONFIRM:{\"q\":\"OK?\",\"h\":\"Review\",\"opts\":[{\"l\":\"Yes\",\"d\":\"do it\"}]}\nafter"}]}}"#;
         match parse_line(line) {
@@ -2957,6 +3000,7 @@ mod tests {
                     recommended: true,
                 }],
                 multi_select: true,
+                tool_use_id: None,
             },
         ];
         for b in blocks {

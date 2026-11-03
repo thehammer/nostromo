@@ -324,6 +324,10 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// every width change. See `TurnInteractionStore`.
     var onAnsweredOption: ((_ blockIndex: Int, _ optionIndex: Int) -> Void)?
 
+    /// Fired once when the approval store is seen to handle an `AskUserQuestion` block, so the pane
+    /// remembers it (`TurnInteractionStore`) after the store forgets the call.
+    var onApprovalHandled: ((_ blockIndex: Int) -> Void)?
+
     /// Fired when the operator expands or collapses a tool result. Distinct from
     /// `onIntrinsicHeightChange`, which is about geometry: this one is about
     /// persistence, so the state survives the view.
@@ -966,8 +970,19 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         case .errorMessage(let m):   return ErrorBlockView(message: m)
         case .note(let text):        return NoteBlockView(text: text)
         case .askQuestion(let d):
+            let offered = d.toolUseId.map { approvals?.handlesQuestion(toolUseId: $0) == true } ?? false
+            let surface = AskQuestionSurface.resolve(
+                toolUseId: d.toolUseId, answeredOnCard: interaction.answeredOptions[index] != nil,
+                formOffered: offered, markedSurfaced: interaction.approvalHandledBlocks.contains(index))
+            if surface == .record, let id = d.toolUseId {
+                if offered { noteApprovalHandled(index) }
+                return AskQuestionRecordView(data: d, toolUseId: id, approvals: approvals)
+            }
             let v = AskQuestionView(data: d,
                                     answeredOptionIndex: interaction.answeredOptions[index])
+            if let id = d.toolUseId {
+                v.followApproval(approvals, toolUseId: id) { [weak self] in self?.noteApprovalHandled(index) }
+            }
             v.onAnswer = { [weak self] answer, optionIndex in
                 guard let self else { return }
                 // Record before sending. If the send path ever tears this view
@@ -978,6 +993,18 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             }
             return v
         }
+    }
+
+    /// Fire `onApprovalHandled` for every block already known to be handled (the callback is set after
+    /// `init`, which is where a record built from the store first learned it).
+    func replayApprovalHandled() {
+        interaction.approvalHandledBlocks.forEach { onApprovalHandled?($0) }
+    }
+
+    /// The approval store handles the question at block `index`: remember it outside this view.
+    private func noteApprovalHandled(_ index: Int) {
+        guard interaction.approvalHandledBlocks.insert(index).inserted else { return }
+        onApprovalHandled?(index)
     }
 
     // MARK: - Islands

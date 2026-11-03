@@ -2102,3 +2102,985 @@ final class ApprovalPagingStateTests: MouseQueueTestCase {
         XCTAssertLessThanOrEqual(label.frame.maxX, card.bounds.maxX)
     }
 }
+
+// MARK: - AskUserQuestion: one surface (the form answers; the transcript only keeps a record)
+
+private enum QuestionRecordFixtures {
+
+    static let question = "Which database should we use?"
+    static let twoLabels = ["SQLite", "Postgres"]
+
+    static func data(toolUseId: String?, question: String = QuestionRecordFixtures.question,
+                     header: String = "Database", labels: [String] = QuestionRecordFixtures.twoLabels) -> AskQuestionData {
+        AskQuestionData(question: question, header: header,
+                        options: labels.map { AskQuestionData.Option(label: $0, description: "d") },
+                        multiSelect: false, toolUseId: toolUseId)
+    }
+
+    /// The request the daemon sends for `data(toolUseId: "toolu_<id>", labels:)`. `kind` is the question's
+    /// `kind` key (the CLI's text and number questions); `options` is what the request offers the person.
+    static func request(id: String = "a", labels: [String] = QuestionRecordFixtures.twoLabels, kind: String? = nil,
+                        question: String = QuestionRecordFixtures.question,
+                        options: [String] = QuestionTestRequests.offered) throws -> ApprovalRequestWire {
+        var q = QuestionTestRequests.question(question, header: "Database",
+                                              options: labels.map { QuestionTestRequests.option($0, "d") })
+        if let kind { q["kind"] = kind }
+        return try QuestionTestRequests.ask([q], id: id, options: options)
+    }
+
+    /// Questions the approval form cannot take, though the request lists `answer_questions`.
+    static let notAFormCases: [(name: String, labels: [String], kind: String?)] = [
+        ("one option", ["SQLite"], nil),
+        ("five options", ["A", "B", "C", "D", "E"], nil),
+        ("duplicate labels", ["SQLite", "SQLite"], nil),
+        ("a question of another kind", ["SQLite", "Postgres"], "text"),
+    ]
+
+    static func turn(_ d: AskQuestionData) -> ChatTurn {
+        ChatTurn(userInput: "pick", timestamp: Date(), blocks: [.askQuestion(d)], isComplete: true)
+    }
+
+    static func answer(_ labels: [String], question: String = QuestionRecordFixtures.question) -> ApprovalDecisionWire {
+        ApprovalDecisionWire(kind: .answerQuestions,
+                             answers: [ApprovalQuestionAnswer(question: question, selected: labels)])
+    }
+
+    /// Plain prose of exactly `chars` characters, for a question that wraps to a known number of lines.
+    static func text(chars: Int) -> String {
+        let words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"]
+        var s = ""
+        var i = 0
+        while s.count < chars {
+            s += (s.isEmpty ? "" : " ") + words[i % words.count]
+            i += 1
+        }
+        return String(s.prefix(chars)).trimmingCharacters(in: .whitespaces)
+    }
+}
+
+final class AskQuestionHandledStoreTests: MouseQueueTestCase {
+
+    private func make() -> (ApprovalStore, ApprovalRecorder) {
+        let recorder = ApprovalRecorder()
+        return (recorder.makeStore(), recorder)
+    }
+
+    private func ask(_ store: ApprovalStore, _ id: String) throws {
+        store.handle(.request(try QuestionTestRequests.ask(id: id)))
+    }
+
+    func testACallNoRequestWasEverMadeForIsNotHandled() throws {
+        let (store, _) = make()
+        try ask(store, "a")
+        XCTAssertFalse(store.handlesQuestion(toolUseId: "toolu_other"))
+        XCTAssertFalse(store.isAwaitingAnswer(toolUseId: "toolu_other"))
+        XCTAssertNil(store.chosenLabels(toolUseId: "toolu_other"))
+    }
+
+    func testARequestMakesItsCallHandledAndAwaitingWithNoChoiceYet() throws {
+        let (store, _) = make()
+        try ask(store, "a")
+        XCTAssertTrue(store.handlesQuestion(toolUseId: "toolu_a"))
+        XCTAssertTrue(store.isAwaitingAnswer(toolUseId: "toolu_a"))
+        XCTAssertNil(store.chosenLabels(toolUseId: "toolu_a"))
+    }
+
+    func testAnAnswerRecordsTheChosenLabelsAndTheCallStaysHandled() throws {
+        let (store, _) = make()
+        try ask(store, "a")
+        XCTAssertTrue(store.answer("a", QuestionRecordFixtures.answer(["SQLite", "Postgres"]), windowID: "w"))
+        XCTAssertEqual(store.chosenLabels(toolUseId: "toolu_a"), ["SQLite", "Postgres"])
+        XCTAssertTrue(store.handlesQuestion(toolUseId: "toolu_a"))
+    }
+
+    func testOnlyTheFirstAnswersSelectedLabelsAreKeptAndNeverFreeText() throws {
+        let (store, _) = make()
+        try ask(store, "a")
+        let decision = ApprovalDecisionWire(kind: .answerQuestions, answers: [
+            ApprovalQuestionAnswer(question: "one", selected: ["First"], other: "secret typed text"),
+            ApprovalQuestionAnswer(question: "two", selected: ["Second"]),
+        ])
+        XCTAssertTrue(store.answer("a", decision, windowID: "w"))
+        XCTAssertEqual(store.chosenLabels(toolUseId: "toolu_a"), ["First"])
+    }
+
+    func testADenyRecordsNoChoiceButTheCallStaysHandled() throws {
+        let (store, _) = make()
+        try ask(store, "a")
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+        XCTAssertNil(store.chosenLabels(toolUseId: "toolu_a"))
+        XCTAssertTrue(store.handlesQuestion(toolUseId: "toolu_a"))
+    }
+
+    func testAnAnswerTheStoreRefusesRecordsNothing() throws {
+        let recorder = ApprovalRecorder()
+        let store = recorder.makeStore(canSend: { false })
+        try ask(store, "a")
+        XCTAssertFalse(store.answer("a", QuestionRecordFixtures.answer(["SQLite"]), windowID: "w"))
+        XCTAssertNil(store.chosenLabels(toolUseId: "toolu_a"))
+    }
+
+    func testChosenLabelsAreBoundedAndTheOldestGoFirst() throws {
+        let (store, _) = make()
+        let cap = ApprovalStore.answerCapacity
+        XCTAssertEqual(cap, 500)
+        XCTAssertEqual(cap, ApprovalStatusBook.capacityPerTag, "as many answers as statuses are kept")
+        for i in 0 ... cap {   // cap + 1 answers
+            try ask(store, "r\(i)")
+            XCTAssertTrue(store.answer("r\(i)", QuestionRecordFixtures.answer(["L\(i)"]), windowID: "w"))
+        }
+        XCTAssertNil(store.chosenLabels(toolUseId: "toolu_r0"), "the oldest was evicted")
+        XCTAssertEqual(store.chosenLabels(toolUseId: "toolu_r1"), ["L1"])
+        XCTAssertEqual(store.chosenLabels(toolUseId: "toolu_r\(cap)"), ["L\(cap)"])
+    }
+
+    // MARK: Which calls the form handles
+
+    private func offer(_ store: ApprovalStore, id: String = "a", labels: [String] = QuestionRecordFixtures.twoLabels,
+                       kind: String? = nil, options: [String] = QuestionTestRequests.offered) throws {
+        store.handle(.request(try QuestionRecordFixtures.request(id: id, labels: labels, kind: kind, options: options)))
+    }
+
+    func testAQuestionTheFormCannotTakeIsNotHandledEvenWhenAnswerQuestionsIsListed() throws {
+        for c in QuestionRecordFixtures.notAFormCases {
+            let (store, _) = make()
+            try offer(store, labels: c.labels, kind: c.kind)
+            XCTAssertTrue(store.isAwaitingAnswer(toolUseId: "toolu_a"), "\(c.name): a request does wait")
+            XCTAssertFalse(store.handlesQuestion(toolUseId: "toolu_a"), c.name)
+        }
+    }
+
+    func testAnAnswerableQuestionTheRequestDoesNotOfferToAnswerIsNotHandled() throws {
+        let (store, _) = make()
+        try offer(store, options: ApprovalTestRequests.allOptions)
+        XCTAssertTrue(store.isAwaitingAnswer(toolUseId: "toolu_a"))
+        XCTAssertFalse(store.handlesQuestion(toolUseId: "toolu_a"))
+    }
+
+    func testARequestForSomeOtherToolIsNeverAHandledQuestion() throws {
+        let (store, _) = make()
+        store.handle(.request(try ApprovalAP2bFixtures.request(id: "b", toolUseId: "toolu_b")))
+        XCTAssertFalse(store.handlesQuestion(toolUseId: "toolu_b"))
+    }
+
+    func testAnAnswerableQuestionTheRequestOffersTheFormForIsHandled() throws {
+        let (store, _) = make()
+        try offer(store)
+        XCTAssertTrue(store.handlesQuestion(toolUseId: "toolu_a"))
+    }
+
+    func testAHandledQuestionStaysHandledAfterItsRequestIsWithdrawn() throws {
+        let (store, _) = make()
+        try offer(store)
+        store.handle(.snapshot([]))
+        XCTAssertFalse(store.isAwaitingAnswer(toolUseId: "toolu_a"), "the wait is over")
+        XCTAssertTrue(store.handlesQuestion(toolUseId: "toolu_a"))
+    }
+
+    func testAHandledQuestionStaysHandledAfterItIsResolvedElsewhere() throws {
+        let (store, _) = make()
+        try offer(store)
+        store.handle(.resolved(try ApprovalAP2bFixtures.resolved(id: "a", outcome: "denied")))
+        XCTAssertFalse(store.isAwaitingAnswer(toolUseId: "toolu_a"))
+        XCTAssertTrue(store.handlesQuestion(toolUseId: "toolu_a"))
+    }
+
+    func testAHandledQuestionStaysHandledAfterItsStatusIsEvictedFromTheBook() throws {
+        let (store, _) = make()
+        try offer(store)
+        for i in 0 ... ApprovalStatusBook.capacityPerTag {   // one more than the book keeps
+            store.handle(.request(try ApprovalAP2bFixtures.request(id: "b\(i)", toolUseId: "toolu_b\(i)")))
+        }
+        XCTAssertFalse(store.isAwaitingAnswer(toolUseId: "toolu_a"), "its status was evicted")
+        XCTAssertTrue(store.handlesQuestion(toolUseId: "toolu_a"))
+    }
+
+    func testAnAnswerTellsTheCallsViewsByToolUseId() throws {
+        let (store, _) = make()
+        let tap = ApprovalTap(store.statusChanges)
+        try ask(store, "a")
+        let before = tap.values.count
+        XCTAssertTrue(store.answer("a", QuestionRecordFixtures.answer(["SQLite"]), windowID: "w"))
+        XCTAssertTrue(tap.values.dropFirst(before).contains("toolu_a"))
+    }
+}
+
+final class AskQuestionRecordViewTests: MouseQueueTestCase {
+
+    private typealias Fx = QuestionRecordFixtures
+
+    private func make() -> (ApprovalStore, ApprovalRecorder) {
+        let recorder = ApprovalRecorder()
+        return (recorder.makeStore(), recorder)
+    }
+
+    private func record(_ store: ApprovalStore?, id: String = "toolu_a") -> AskQuestionRecordView {
+        AskQuestionRecordView(data: Fx.data(toolUseId: id), toolUseId: id, approvals: store)
+    }
+
+    func testItWaitsWhileTheRequestAwaitsTheAnswer() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertEqual(record(store).statusLine, "Waiting for your answer above")
+    }
+
+    func testItSaysWhatWasAnsweredOnceTheAnswerIsSent() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite", "Postgres"]), windowID: "w"))
+        XCTAssertEqual(record(store).statusLine, "Answered: SQLite, Postgres")
+    }
+
+    func testItUpdatesInPlaceWhenTheAnswerArrivesAfterItWasBuilt() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        let view = record(store)
+        XCTAssertEqual(view.statusLine, "Waiting for your answer above")
+        XCTAssertTrue(store.answer("a", Fx.answer(["Postgres"]), windowID: "w"))
+        XCTAssertEqual(view.statusLine, "Answered: Postgres")
+    }
+
+    func testItNeverInventsAnAnswerAfterADenyOrWithoutAStore() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+        XCTAssertFalse(record(store).statusLine.hasPrefix("Answered"))
+        XCTAssertEqual(record(nil).statusLine, "")
+    }
+
+    func testItIsOneStaticTextElementNotAButtonAndHasNoOptionControls() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        let view = record(store)
+        view.frame = NSRect(x: 0, y: 0, width: 600, height: 60)
+        view.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(view.isAccessibilityElement())
+        XCTAssertEqual(view.accessibilityRole(), .staticText)
+        XCTAssertNotEqual(view.accessibilityRole(), .button)
+        let label = view.accessibilityLabel() ?? ""
+        XCTAssertFalse(label.isEmpty)
+        XCTAssertTrue(label.contains(Fx.question))
+        XCTAssertTrue(rigAllSubviews(of: view).compactMap { $0 as? NSButton }.isEmpty)
+        for option in ["SQLite", "Postgres"] {
+            XCTAssertFalse(ApprovalTestViews.labelTexts(in: view).contains(option), "options are not drawn")
+        }
+    }
+
+    func testItsAccessibilityLabelFollowsTheStatus() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        let view = record(store)
+        XCTAssertTrue((view.accessibilityLabel() ?? "").contains("Waiting for your answer above"))
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+        XCTAssertTrue((view.accessibilityLabel() ?? "").contains("Answered: SQLite"))
+    }
+
+    func testItsAccessibilityValueIsTheStatusLineAndFollowsIt() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        let view = record(store)
+        XCTAssertEqual(view.accessibilityValue() as? String, "Waiting for your answer above")
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+        XCTAssertEqual(view.accessibilityValue() as? String, "Answered: SQLite")
+        XCTAssertEqual(view.accessibilityValue() as? String, view.statusLine)
+    }
+
+    func testItsAccessibilityValueIsEmptyWhenItHasNothingToSay() {
+        let view = record(nil)
+        XCTAssertEqual(view.statusLine, "")
+        XCTAssertTrue(((view.accessibilityValue() as? String) ?? "").isEmpty)
+    }
+}
+
+final class AskQuestionSingleSurfaceTurnTests: MouseQueueTestCase {
+
+    private typealias Fx = QuestionRecordFixtures
+
+    private func make() -> (ApprovalStore, ApprovalRecorder) {
+        let recorder = ApprovalRecorder()
+        return (recorder.makeStore(), recorder)
+    }
+
+    private func turnView(_ d: AskQuestionData, store: ApprovalStore?, turn: ChatTurn? = nil,
+                          interaction: TurnInteractionState = TurnInteractionState()) -> ChatTurnView {
+        let view = ChatTurnView(turn: turn ?? Fx.turn(d), contentAvailable: true, interaction: interaction,
+                                approvals: store)
+        view.setIslandWidth(900)
+        view.frame = NSRect(x: 0, y: 0, width: 900, height: view.islandHeight())
+        view.layoutSubtreeIfNeeded()
+        return view
+    }
+
+    private func optionButtons(_ view: NSView) -> [NSButton] {
+        rigAllSubviews(of: view).compactMap { $0 as? NSButton }
+    }
+
+    private func records(_ view: NSView) -> [AskQuestionRecordView] {
+        rigAllSubviews(of: view).compactMap { $0 as? AskQuestionRecordView }
+    }
+
+    private func texts(_ view: NSView) -> [String] {
+        rigAllSubviews(of: view).compactMap { ($0 as? NSTextField)?.stringValue }
+    }
+
+    /// Clicks every button a click anywhere on the view could reach, found by hit-testing a grid of points.
+    private func clickEverywhere(_ view: NSView) {
+        let step: CGFloat = 6
+        var y: CGFloat = 1
+        while y < view.bounds.height {
+            var x: CGFloat = 1
+            while x < view.bounds.width {
+                if let hit = view.hitTest(view.convert(NSPoint(x: x, y: y), to: view.superview)) as? NSButton {
+                    hit.performClick(nil)
+                }
+                x += step
+            }
+            y += step
+        }
+    }
+
+    /// The card does not look answered: its header chip never says APPROVED, and no option row stands out
+    /// from the others (a muted card dims every row alike; an answered one keeps the chosen row bright).
+    private func assertNoAnsweredLook(_ view: NSView, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(texts(view).contains("APPROVED"), "no APPROVED chip", file: file, line: line)
+        let alphas = Set(optionButtons(view).map { $0.alphaValue })
+        XCTAssertLessThanOrEqual(alphas.count, 1, "no option row is picked out as chosen", file: file, line: line)
+    }
+
+    /// The answered look of a card restored as answered with option `chosen`.
+    private func assertAnsweredLook(_ view: NSView, chosen: Int, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(texts(view).contains("APPROVED"), file: file, line: line)
+        let buttons = optionButtons(view)
+        XCTAssertEqual(buttons.first { $0.tag == chosen }?.alphaValue, 1.0, file: file, line: line)
+        for other in buttons where other.tag != chosen {
+            XCTAssertLessThan(other.alphaValue, 1.0, file: file, line: line)
+        }
+        for button in buttons { XCTAssertFalse(button.isEnabled, file: file, line: line) }
+    }
+
+    private func assertARecordNobodyCanAnswerThrough(_ view: ChatTurnView, file: StaticString = #filePath,
+                                                     line: UInt = #line) {
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+        XCTAssertEqual(records(view).count, 1, "a record", file: file, line: line)
+        XCTAssertNil(rigAllSubviews(of: view).first { $0 is AskQuestionView }, "no card", file: file, line: line)
+        XCTAssertTrue(optionButtons(view).isEmpty, "no option buttons", file: file, line: line)
+        clickEverywhere(view)
+        XCTAssertTrue(sent.isEmpty, "nothing was sent", file: file, line: line)
+    }
+
+    private func assertAnInteractiveCard(_ view: ChatTurnView, file: StaticString = #filePath, line: UInt = #line) {
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+        XCTAssertTrue(records(view).isEmpty, "not a record", file: file, line: line)
+        let buttons = optionButtons(view)
+        XCTAssertGreaterThanOrEqual(buttons.count, 1, "option buttons", file: file, line: line)
+        XCTAssertTrue(buttons.allSatisfy { $0.isEnabled }, "enabled", file: file, line: line)
+        buttons.first?.performClick(nil)
+        XCTAssertEqual(sent.count, 1, "one click sends exactly one message", file: file, line: line)
+    }
+
+    // MARK: A question the form handles is a record
+
+    func testAQuestionTheFormHandlesIsAQuietRecordWithNoOptionButtons() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+
+        XCTAssertNotNil(rigAllSubviews(of: view).first { $0 is AskQuestionRecordView })
+        XCTAssertNil(rigAllSubviews(of: view).first { $0 is AskQuestionView })
+        XCTAssertTrue(optionButtons(view).isEmpty)
+    }
+
+    func testClickingWhereTheOptionsWereNeverSendsAMessage() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+
+        clickEverywhere(view)
+        XCTAssertTrue(sent.isEmpty)
+    }
+
+    func testARecordBuiltFromTheStoreSaysWaitingThenAnswered() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+        let record = try XCTUnwrap(records(view).first)
+        XCTAssertEqual(record.statusLine, "Waiting for your answer above")
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+        XCTAssertEqual(record.statusLine, "Answered: SQLite")
+    }
+
+    func testAnAnsweredQuestionStaysARecordAfterItsRequestIsGone() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+        store.handle(.resolved(try ApprovalAP2bFixtures.resolved(id: "a", outcome: "allowed_once")))
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+        XCTAssertNotNil(rigAllSubviews(of: view).first { $0 is AskQuestionRecordView })
+        XCTAssertTrue(optionButtons(view).isEmpty)
+    }
+
+    // MARK: Stays a card (the form does not take the question, or nothing says it did)
+
+    // B3 (e): reload or history, nothing known anywhere. The documented legacy case: a card.
+    func testAQuestionNoRequestExistsForStaysAnInteractiveCard() throws {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_unknown"), store: store)
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+
+        XCTAssertNil(rigAllSubviews(of: view).first { $0 is AskQuestionRecordView })
+        let buttons = optionButtons(view)
+        XCTAssertEqual(buttons.count, 2)
+        XCTAssertTrue(buttons.allSatisfy { $0.isEnabled })
+        buttons[0].performClick(nil)
+        XCTAssertEqual(sent.count, 1)
+    }
+
+    // B3 (f)
+    func testAConfirmCardWithoutAToolUseIdStaysInteractiveEvenWithRequestsPending() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        let view = turnView(Fx.data(toolUseId: nil), store: store)
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+
+        XCTAssertNil(rigAllSubviews(of: view).first { $0 is AskQuestionRecordView })
+        let buttons = optionButtons(view)
+        XCTAssertEqual(buttons.count, 2)
+        buttons[1].performClick(nil)
+        XCTAssertEqual(sent.count, 1)
+    }
+
+    func testAConfirmCardWithoutAToolUseIdIgnoresARequestArrivingLater() throws {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: nil), store: store)
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        assertAnInteractiveCard(view)
+    }
+
+    func testAnInteractiveCardWithoutAnyStoreStaysInteractive() {
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: nil)
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+        let buttons = optionButtons(view)
+        XCTAssertEqual(buttons.count, 2)
+        buttons[0].performClick(nil)
+        XCTAssertEqual(sent.count, 1)
+    }
+
+    // B2: the form cannot take these questions, so the transcript card is the only way to answer.
+    func testAQuestionTheFormCannotTakeStaysAnInteractiveCardWhenTheRequestIsSeenFirst() throws {
+        for c in Fx.notAFormCases {
+            let (store, _) = make()
+            store.handle(.request(try Fx.request(labels: c.labels, kind: c.kind)))
+            let view = turnView(Fx.data(toolUseId: "toolu_a", labels: c.labels), store: store)
+            XCTAssertFalse(store.handlesQuestion(toolUseId: "toolu_a"), c.name)
+            assertAnInteractiveCard(view)
+        }
+    }
+
+    func testAQuestionTheFormCannotTakeStaysAnInteractiveCardWhenTheRequestArrivesAfterTheCard() throws {
+        for c in Fx.notAFormCases {
+            let (store, _) = make()
+            let view = turnView(Fx.data(toolUseId: "toolu_a", labels: c.labels), store: store)
+            var handled: [Int] = []
+            view.onApprovalHandled = { handled.append($0) }
+            store.handle(.request(try Fx.request(labels: c.labels, kind: c.kind)))
+
+            XCTAssertTrue(handled.isEmpty, "\(c.name): the form did not take it")
+            assertAnInteractiveCard(view)
+        }
+    }
+
+    func testAValidQuestionTheRequestDoesNotOfferToAnswerStaysAnInteractiveCard() throws {
+        for order in ["request first", "card first"] {
+            let (store, _) = make()
+            let request = try Fx.request(options: ApprovalTestRequests.allOptions)
+            let view: ChatTurnView
+            if order == "request first" {
+                store.handle(.request(request))
+                view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+            } else {
+                view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+                store.handle(.request(request))
+            }
+            XCTAssertFalse(store.handlesQuestion(toolUseId: "toolu_a"), order)
+            assertAnInteractiveCard(view)
+        }
+    }
+
+    func testAValidQuestionTheRequestOffersToAnswerIsARecordWhicheverCameFirst() throws {
+        let (store, _) = make()
+        store.handle(.request(try Fx.request()))
+        assertARecordNobodyCanAnswerThrough(turnView(Fx.data(toolUseId: "toolu_a"), store: store))
+
+        let (other, _) = make()
+        let card = turnView(Fx.data(toolUseId: "toolu_a"), store: other)
+        other.handle(.request(try Fx.request()))
+        assertAnInteractiveCardIsInert(card)
+    }
+
+    /// The card built first yielded: nothing it shows can answer.
+    private func assertAnInteractiveCardIsInert(_ view: ChatTurnView, file: StaticString = #filePath,
+                                                line: UInt = #line) {
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+        for button in optionButtons(view) { XCTAssertFalse(button.isEnabled, file: file, line: line) }
+        clickEverywhere(view)
+        for button in optionButtons(view) { button.performClick(nil) }
+        XCTAssertTrue(sent.isEmpty, file: file, line: line)
+    }
+
+    // MARK: B1: a card built before the request arrived yields to the form
+
+    func testAStaleCardBuiltBeforeTheRequestArrivedSendsNothingOnceTheFormHandlesTheCall() throws {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+        let buttons = optionButtons(view)
+        XCTAssertEqual(buttons.count, 2, "no request yet: a card")
+
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        for button in buttons { button.performClick(nil) }
+
+        XCTAssertTrue(sent.isEmpty, "the click must not become a second, typed answer")
+    }
+
+    func testACardBuiltBeforeTheRequestArrivedHasItsOptionsDisabledOnceTheFormHandlesTheCall() throws {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+        let buttons = optionButtons(view)
+        XCTAssertEqual(buttons.count, 2)
+        XCTAssertTrue(buttons.allSatisfy { $0.isEnabled }, "no request yet: live")
+        XCTAssertTrue(texts(view).contains("DATABASE"), "the card's own header chip")
+
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+
+        for button in buttons { XCTAssertFalse(button.isEnabled) }
+    }
+
+    func testClickingWhereTheOptionsWereOnAStaleCardSendsNothingAndLeavesNoAnsweredLook() throws {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+        var answered: [Int] = []
+        view.onAnsweredOption = { block, _ in answered.append(block) }
+        let buttons = optionButtons(view)
+
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        clickEverywhere(view)
+        for button in buttons { button.performClick(nil) }
+
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertTrue(answered.isEmpty, "no answer is recorded for the block")
+        assertNoAnsweredLook(view)
+    }
+
+    func testAClickDeliveredAnywayToAYieldedCardIsSwallowedWithoutAnAnsweredLook() throws {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+        var answered: [Int] = []
+        view.onAnsweredOption = { block, _ in answered.append(block) }
+        let buttons = optionButtons(view)
+
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        for button in buttons { QuestionTestViews.forcePress(button) }   // an action sent past the disabled state
+
+        XCTAssertTrue(sent.isEmpty)
+        XCTAssertTrue(answered.isEmpty)
+        assertNoAnsweredLook(view)
+    }
+
+    func testTheTurnViewTellsItsOwnerWhichBlockTheFormTookOver() throws {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+        var handled: [Int] = []
+        view.onApprovalHandled = { handled.append($0) }
+        XCTAssertTrue(handled.isEmpty)
+
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+
+        XCTAssertFalse(handled.isEmpty)
+        XCTAssertEqual(Set(handled), [0])
+    }
+
+    func testARequestForSomeOtherCallDoesNotMuteTheCard() throws {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+        var handled: [Int] = []
+        view.onApprovalHandled = { handled.append($0) }
+
+        store.handle(.request(try QuestionTestRequests.ask(id: "other")))
+
+        XCTAssertTrue(handled.isEmpty)
+        assertAnInteractiveCard(view)
+    }
+
+    // MARK: B3: a record stays a record whatever the approval store later forgets
+
+    // (a) the request was seen, then withdrawn
+    func testAWithdrawnRequestsQuestionIsARecordWhenMaterializedLater() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        store.handle(.snapshot([]))
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+
+        assertARecordNobodyCanAnswerThrough(view)
+        XCTAssertEqual(records(view).first?.statusLine, "")
+    }
+
+    // (b) the status was evicted from the book
+    func testAQuestionWhoseStatusWasEvictedIsARecordWithOnlyTheQuestion() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        for i in 0 ... ApprovalStatusBook.capacityPerTag {
+            store.handle(.request(try ApprovalAP2bFixtures.request(id: "b\(i)", toolUseId: "toolu_b\(i)")))
+        }
+        XCTAssertFalse(store.isAwaitingAnswer(toolUseId: "toolu_a"), "evicted")
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store)
+
+        assertARecordNobodyCanAnswerThrough(view)
+        XCTAssertEqual(records(view).first?.statusLine, "")
+    }
+
+    // (c) the chosen labels were evicted
+    func testAnAnswerWhoseLabelsWereEvictedIsARecordWithOnlyTheQuestionNeverAnotherCallsAnswer() throws {
+        let (store, _) = make()
+        let interactions = TurnInteractionStore()
+        let firstTurn = Fx.turn(Fx.data(toolUseId: "toolu_r0"))
+
+        let live = turnView(Fx.data(toolUseId: "toolu_r0"), store: store, turn: firstTurn)
+        live.onApprovalHandled = { interactions.recordApprovalHandled(turn: firstTurn.id, block: $0) }
+        store.handle(.request(try Fx.request(id: "r0")))
+        XCTAssertEqual(interactions.state(for: firstTurn.id).approvalHandledBlocks, [0])
+        XCTAssertTrue(store.answer("r0", Fx.answer(["SQLite"]), windowID: "w"))
+
+        for i in 1 ... ApprovalStore.answerCapacity {   // one more answer than the store keeps
+            store.handle(.request(try Fx.request(id: "r\(i)")))
+            XCTAssertTrue(store.answer("r\(i)", Fx.answer(["Postgres"]), windowID: "w"))
+        }
+        XCTAssertNil(store.chosenLabels(toolUseId: "toolu_r0"), "the first answer's labels were evicted")
+
+        let view = turnView(Fx.data(toolUseId: "toolu_r0"), store: store, turn: firstTurn,
+                            interaction: interactions.state(for: firstTurn.id))
+        assertARecordNobodyCanAnswerThrough(view)
+        XCTAssertEqual(records(view).first?.statusLine, "", "the question only")
+
+        let last = turnView(Fx.data(toolUseId: "toolu_r\(ApprovalStore.answerCapacity)"), store: store)
+        XCTAssertEqual(records(last).first?.statusLine, "Answered: Postgres", "a call keeps its own answer")
+    }
+
+    // (d) the block was surfaced to the approval path; the app relaunched with an empty store
+    func testABlockMarkedAsSurfacedToTheApprovalPathIsARecordEvenWithAnEmptyStore() {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store,
+                            interaction: TurnInteractionState(approvalHandledBlocks: [0]))
+        assertARecordNobodyCanAnswerThrough(view)
+        XCTAssertEqual(records(view).first?.statusLine, "")
+    }
+
+    func testABlockMarkedAsSurfacedIsARecordEvenWithoutAnyStore() {
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: nil,
+                            interaction: TurnInteractionState(approvalHandledBlocks: [0]))
+        assertARecordNobodyCanAnswerThrough(view)
+    }
+
+    func testAnotherBlocksMarkDoesNotTurnThisBlocksCardIntoARecord() {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store,
+                            interaction: TurnInteractionState(approvalHandledBlocks: [3]))
+        assertAnInteractiveCard(view)
+    }
+
+    // (g) answered on the card before the form handled the call: the restored card stays as it was
+    func testACardRestoredAsAnsweredStaysTheAnsweredCardWhenTheFormLaterHandlesTheCall() throws {
+        let (store, _) = make()
+        let view = turnView(Fx.data(toolUseId: "toolu_a"), store: store,
+                            interaction: TurnInteractionState(answeredOptions: [0: 1]))
+        var sent: [String] = []
+        view.onSend = { sent.append($0) }
+        assertAnsweredLook(view, chosen: 1)
+
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        clickEverywhere(view)
+        for button in optionButtons(view) { button.performClick(nil) }
+
+        XCTAssertTrue(records(view).isEmpty)
+        XCTAssertTrue(sent.isEmpty)
+        assertAnsweredLook(view, chosen: 1)
+    }
+
+    // Re-materializing after the live card yielded
+    func testBuildingTheTurnAgainAfterTheLiveCardYieldedGivesARecord() throws {
+        let (store, _) = make()
+        let turn = Fx.turn(Fx.data(toolUseId: "toolu_a"))
+        let interactions = TurnInteractionStore()
+        let live = turnView(Fx.data(toolUseId: "toolu_a"), store: store, turn: turn)
+        live.onApprovalHandled = { interactions.recordApprovalHandled(turn: turn.id, block: $0) }
+        XCTAssertEqual(optionButtons(live).count, 2, "a live card")
+
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        let again = turnView(Fx.data(toolUseId: "toolu_a"), store: store, turn: turn,
+                             interaction: interactions.state(for: turn.id))
+
+        assertARecordNobodyCanAnswerThrough(again)
+    }
+
+    func testWhatTheLiveCardToldItsOwnerKeepsTheRebuiltTurnARecordAfterTheStoreForgotEverything() throws {
+        let (store, _) = make()
+        let turn = Fx.turn(Fx.data(toolUseId: "toolu_a"))
+        let interactions = TurnInteractionStore()
+        let live = turnView(Fx.data(toolUseId: "toolu_a"), store: store, turn: turn)
+        live.onApprovalHandled = { interactions.recordApprovalHandled(turn: turn.id, block: $0) }
+
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertEqual(interactions.state(for: turn.id).approvalHandledBlocks, [0])
+
+        let (relaunched, _) = make()   // the approval store knows nothing of the call any more
+        let again = turnView(Fx.data(toolUseId: "toolu_a"), store: relaunched, turn: turn,
+                             interaction: interactions.state(for: turn.id))
+        assertARecordNobodyCanAnswerThrough(again)
+    }
+}
+
+// MARK: - What the pane remembers about a surfaced question
+
+final class AskQuestionApprovalHandledInteractionTests: XCTestCase {
+
+    func testASurfacedBlockIsRememberedForItsTurn() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.recordApprovalHandled(turn: turn, block: 2)
+        store.recordApprovalHandled(turn: turn, block: 0)
+        XCTAssertEqual(store.state(for: turn).approvalHandledBlocks, [0, 2])
+        XCTAssertTrue(store.state(for: UUID()).approvalHandledBlocks.isEmpty, "another turn knows nothing")
+    }
+
+    func testRecordingTheSameBlockTwiceChangesNothing() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.recordApprovalHandled(turn: turn, block: 1)
+        store.recordApprovalHandled(turn: turn, block: 1)
+        XCTAssertEqual(store.state(for: turn).approvalHandledBlocks, [1])
+    }
+
+    func testAStateWithOnlyASurfacedBlockIsNotEmptyAndIsKept() {
+        XCTAssertFalse(TurnInteractionState(approvalHandledBlocks: [0]).isEmpty)
+        XCTAssertTrue(TurnInteractionState().isEmpty)
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.recordApprovalHandled(turn: turn, block: 0)
+        XCTAssertEqual(store.trackedTurnCount, 1)
+    }
+
+    func testASurfacedBlockIsNotAnAnswer() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.recordApprovalHandled(turn: turn, block: 0)
+        XCTAssertTrue(store.state(for: turn).answeredOptions.isEmpty)
+    }
+
+    func testReleasingTheLastHoldKeepsASurfacedBlock() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.recordApprovalHandled(turn: turn, block: 0)
+        store.hold(turn: turn, ordinal: 4)
+        store.release(turn: turn, ordinals: [4])
+        XCTAssertEqual(store.state(for: turn).approvalHandledBlocks, [0])
+        XCTAssertEqual(store.trackedTurnCount, 1)
+    }
+
+    func testPruningDropsTheSurfacedBlocksOfTurnsThatAreGone() {
+        let store = TurnInteractionStore()
+        let kept = UUID(), gone = UUID()
+        store.recordApprovalHandled(turn: kept, block: 0)
+        store.recordApprovalHandled(turn: gone, block: 1)
+        store.prune(keeping: [kept])
+        XCTAssertEqual(store.state(for: kept).approvalHandledBlocks, [0])
+        XCTAssertTrue(store.state(for: gone).approvalHandledBlocks.isEmpty)
+        XCTAssertEqual(store.trackedTurnCount, 1)
+    }
+
+    func testClearingTheTranscriptDropsEverySurfacedBlock() {
+        let store = TurnInteractionStore()
+        let turn = UUID()
+        store.recordApprovalHandled(turn: turn, block: 0)
+        store.removeAll()
+        XCTAssertTrue(store.state(for: turn).approvalHandledBlocks.isEmpty)
+        XCTAssertEqual(store.trackedTurnCount, 0)
+    }
+}
+
+final class AskQuestionRecordHeightTests: MouseQueueTestCase {
+
+    private typealias Fx = QuestionRecordFixtures
+
+    private var savedHook: ((String) -> Bool)!
+
+    override func setUp() {
+        super.setUp()
+        savedHook = TurnHeightEstimator.questionHandled
+    }
+
+    override func tearDown() {
+        TurnHeightEstimator.questionHandled = savedHook
+        super.tearDown()
+    }
+
+    /// The estimator decides record or card the way the view does: by asking `store`.
+    private func estimatorFollows(_ store: ApprovalStore) {
+        TurnHeightEstimator.questionHandled = { [weak store] id in store?.handlesQuestion(toolUseId: id) ?? false }
+    }
+
+    private func measured(_ d: AskQuestionData, store: ApprovalStore, width: CGFloat) -> CGFloat {
+        let view = ChatTurnView(turn: Fx.turn(d), contentAvailable: true, interaction: TurnInteractionState(),
+                                approvals: store)
+        view.setIslandWidth(width)
+        return view.islandHeight()
+    }
+
+    private func estimated(_ d: AskQuestionData, width: CGFloat) -> CGFloat {
+        TurnHeightEstimator.estimate(Fx.turn(d), width: width)
+    }
+
+    /// A store whose form handles the call `toolu_a` (a valid two-option question).
+    private func handlingStore() throws -> ApprovalStore {
+        let s = ApprovalRecorder().makeStore()
+        s.handle(.request(try Fx.request(id: "a")))
+        return s
+    }
+
+    /// Question text that wraps to two lines at each width: (width, record question, card question).
+    /// The record's line also carries the header (`Database — `, 11 characters).
+    private static let twoLineCases: [(width: CGFloat, record: Int, card: Int)] = [(900, 159, 150), (420, 59, 70)]
+
+    func testARecordIsEstimatedShorterThanTheCardForTheSameQuestion() {
+        TurnHeightEstimator.questionHandled = { $0 == "toolu_a" }
+        let card = estimated(Fx.data(toolUseId: nil), width: 900)
+        let record = estimated(Fx.data(toolUseId: "toolu_a"), width: 900)
+        XCTAssertLessThan(record, card)
+    }
+
+    func testTheEstimateFollowsWhetherTheFormHandlesTheCallNotTheCallsHavingAnId() {
+        let withId = Fx.data(toolUseId: "toolu_a")
+        let card = estimated(Fx.data(toolUseId: nil), width: 900)
+
+        TurnHeightEstimator.questionHandled = { _ in false }
+        XCTAssertEqual(estimated(withId, width: 900), card, accuracy: 0.001, "not handled: the card's height")
+
+        var asked: [String] = []
+        TurnHeightEstimator.questionHandled = { asked.append($0); return true }
+        XCTAssertLessThan(estimated(withId, width: 900), card, "handled: the record's height")
+        XCTAssertEqual(Set(asked), ["toolu_a"], "asked about this call")
+
+        XCTAssertEqual(estimated(Fx.data(toolUseId: nil), width: 900), card, accuracy: 0.001,
+                       "no id: always the card, and nobody is asked about another call")
+        XCTAssertEqual(Set(asked), ["toolu_a"])
+    }
+
+    func testTheEstimateTracksTheMeasuredRecordAsTheQuestionWraps() throws {
+        let s = try handlingStore()
+        estimatorFollows(s)
+        for c in Self.twoLineCases {
+            let short = Fx.data(toolUseId: "toolu_a", question: "Which one?")
+            let wrapped = Fx.data(toolUseId: "toolu_a", question: Fx.text(chars: c.record))
+            let measuredGrowth = measured(wrapped, store: s, width: c.width) - measured(short, store: s, width: c.width)
+            let estimatedGrowth = estimated(wrapped, width: c.width) - estimated(short, width: c.width)
+            XCTAssertGreaterThan(measuredGrowth, 0)
+            XCTAssertEqual(estimatedGrowth, measuredGrowth, accuracy: 1, "width \(c.width)")
+        }
+    }
+
+    func testTheEstimateTracksTheMeasuredCardAsTheQuestionWraps() throws {
+        let s = ApprovalRecorder().makeStore()
+        estimatorFollows(s)
+        for c in Self.twoLineCases {
+            let short = Fx.data(toolUseId: nil, question: "Which one?")
+            let wrapped = Fx.data(toolUseId: nil, question: Fx.text(chars: c.card))
+            let measuredGrowth = measured(wrapped, store: s, width: c.width) - measured(short, store: s, width: c.width)
+            let estimatedGrowth = estimated(wrapped, width: c.width) - estimated(short, width: c.width)
+            XCTAssertGreaterThan(measuredGrowth, 0)
+            XCTAssertEqual(estimatedGrowth, measuredGrowth, accuracy: 1, "width \(c.width)")
+        }
+    }
+
+    func testTheEstimatedSavingOverTheCardMatchesTheMeasuredSaving() throws {
+        let s = try handlingStore()
+        estimatorFollows(s)
+        let text = "Which database should we use for the new service?"
+        // The card is measured through a store that does not handle the id, so it stays a card.
+        let emptyStore = ApprovalRecorder().makeStore()
+        let measuredSaving = measured(Fx.data(toolUseId: "toolu_x", question: text), store: emptyStore, width: 900)
+            - measured(Fx.data(toolUseId: "toolu_a", question: text), store: s, width: 900)
+        let estimatedSaving = estimated(Fx.data(toolUseId: nil, question: text), width: 900)
+            - estimated(Fx.data(toolUseId: "toolu_a", question: text), width: 900)
+        XCTAssertGreaterThan(measuredSaving, 0)
+        XCTAssertEqual(estimatedSaving, measuredSaving, accuracy: 1)
+    }
+
+    func testTheEstimateMatchesTheMeasuredHeightOfARecord() throws {
+        let s = try handlingStore()
+        estimatorFollows(s)
+        for width: CGFloat in [900, 420] {
+            let d = Fx.data(toolUseId: "toolu_a")
+            XCTAssertEqual(estimated(d, width: width), measured(d, store: s, width: width), accuracy: 1, "width \(width)")
+        }
+        for c in Self.twoLineCases {
+            let d = Fx.data(toolUseId: "toolu_a", question: Fx.text(chars: c.record))
+            XCTAssertEqual(estimated(d, width: c.width), measured(d, store: s, width: c.width), accuracy: 1,
+                           "wrapped, width \(c.width)")
+        }
+    }
+
+    func testTheEstimateMatchesTheMeasuredHeightOfAStaleCardTheFormDoesNotTake() throws {
+        // A single-option question the request lists `answer_questions` for: the form cannot take it,
+        // the transcript shows (and measures, and estimates) the card.
+        let s = ApprovalRecorder().makeStore()
+        s.handle(.request(try Fx.request(id: "a", labels: ["SQLite"])))
+        XCTAssertFalse(s.handlesQuestion(toolUseId: "toolu_a"))
+        estimatorFollows(s)
+        for width: CGFloat in [900, 420] {
+            let d = Fx.data(toolUseId: "toolu_a", labels: ["SQLite"])
+            XCTAssertEqual(estimated(d, width: width), measured(d, store: s, width: width), accuracy: 1, "width \(width)")
+        }
+        for c in Self.twoLineCases {
+            let d = Fx.data(toolUseId: "toolu_a", question: Fx.text(chars: c.card), labels: ["SQLite"])
+            XCTAssertEqual(estimated(d, width: c.width), measured(d, store: s, width: c.width), accuracy: 1,
+                           "wrapped, width \(c.width)")
+        }
+    }
+
+    func testTheEstimateMatchesTheMeasuredHeightOfThePlainCard() throws {
+        let s = try handlingStore()
+        estimatorFollows(s)
+        for width: CGFloat in [900, 420] {
+            let d = Fx.data(toolUseId: nil)
+            XCTAssertEqual(estimated(d, width: width), measured(d, store: s, width: width), accuracy: 1, "width \(width)")
+        }
+        for c in Self.twoLineCases {
+            let d = Fx.data(toolUseId: nil, question: Fx.text(chars: c.card))
+            XCTAssertEqual(estimated(d, width: c.width), measured(d, store: s, width: c.width), accuracy: 1,
+                           "wrapped, width \(c.width)")
+        }
+    }
+
+    func testTheRecordKeepsItsHeightWhenTheAnswerArrives() throws {
+        let s = try handlingStore()
+        let view = ChatTurnView(turn: Fx.turn(Fx.data(toolUseId: "toolu_a")), contentAvailable: true,
+                                interaction: TurnInteractionState(), approvals: s)
+        view.setIslandWidth(900)
+        let before = view.islandHeight()
+        XCTAssertTrue(s.answer("a", Fx.answer(["SQLite", "Postgres"]), windowID: "w"))
+        view.setIslandWidth(900)
+        XCTAssertEqual(view.islandHeight(), before, accuracy: 0.5)
+    }
+}
