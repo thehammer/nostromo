@@ -146,6 +146,9 @@ enum BrokerEvent {
     /// Mother reported what it did with an awaiting push (`awaiting_notified`). Only
     /// `transport == "suppressed_client"` matters: Mother stood down because of a client.
     case awaitingNotified(transport: String, ok: Bool)
+    /// Mother's quota gate block: from every snapshot (nil when the broker sent none, an older Mother), from each
+    /// `quota` event and from a `quota-gate` ack. The gate shown is only ever what the broker last said.
+    case quota(MotherQuota?)
     /// Liveness ping — ignore.
     case ping
     /// Client reconnected after disconnect — AppStore must clear jobMap and await next snapshot.
@@ -238,6 +241,9 @@ class MotherBrokerClient {
     var supportsAnswerOption: Bool { advertisedCaps.contains("answer.option") }
     /// The `ack` command (MC3).
     var supportsAck: Bool { advertisedCaps.contains("ack") }
+
+    /// The broker accepts `quota-gate` (Mother's three-state quota switch).
+    var supportsQuotaGate: Bool { advertisedCaps.contains("quota-gate") }
     /// Explicit client registration in `subscribe` (MC4). Proposed to Mother in
     /// `.claude/wip/mother-crew-client-feedback-for-mother.md`; Mother has not published it
     /// yet, so nothing new is sent until the broker's hello advertises it.
@@ -318,6 +324,20 @@ class MotherBrokerClient {
             return
         }
         sendCommand(type: "ack", jobId: job, extra: ["reason": reason], completion: completion)
+    }
+
+    /// Ask Mother to set the quota gate. Completes with the `quota` block of the ack (the broker's read-back
+    /// of the stored state, not an echo of `request`), or the broker's error. Only a gesture-gated control
+    /// calls this (see `QuotaGateConfirmation`); no agent-facing surface reaches it.
+    func setQuotaGate(_ request: MotherQuotaGateRequest,
+                      completion: @escaping (Result<MotherQuota?, BrokerError>) -> Void) {
+        guard supportsQuotaGate else {
+            completion(.failure(.code(.invalidState, message: "this Mother has no quota gate switch")))
+            return
+        }
+        sendRaw(type: "quota-gate", jobId: "", extra: request.commandData) { result in
+            completion(result.map { MotherQuota.decode($0["quota"]) })
+        }
     }
 
     func cancel(job: String,
@@ -780,8 +800,18 @@ class MotherBrokerClient {
             let jobsRaw = dataDict["jobs"] as? [[String: Any]] ?? []
             let jobs = decodeJobList(jobsRaw)
             log.debug("broker snapshot: \(jobs.count, privacy: .public) jobs")
+            let quota = MotherQuota.decode(dataDict["quota"])
             DispatchQueue.main.async { [weak self] in
                 self?.events.send(.snapshot(jobs))
+                self?.events.send(.quota(quota))
+            }
+
+        case "quota":
+            // The top-level quota block (no job). Handled before the job-keyed default below, which
+            // would drop it for want of a job id. An unreadable block changes nothing.
+            guard let quota = MotherQuota.decode(dataDict["quota"]) else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.events.send(.quota(quota))
             }
 
         case "awaiting_notified":

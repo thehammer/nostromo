@@ -35,6 +35,8 @@ MANIFEST = os.path.join(VENDOR_DIR, "MANIFEST.json")
 MOTHER_REPO = "thehammer/mother"
 MOTHER_PATH = "plugins/mother/tests/fixtures/contract"
 FILES = ["gates_fix_pass.ndjson", "lens_wave.ndjson", "gate_hold_answered.ndjson"]
+# Fixtures that live elsewhere in the Mother repo (name -> path). Vendored when the ref has them.
+EXTRA_FILES = {"quota_block.json": "plugins/mother/tests/fixtures/quota_block.json"}
 DEFAULT_REF = "origin/main"
 ONLINE_BASE = "https://raw.githubusercontent.com/thehammer/mother/main"
 
@@ -65,11 +67,11 @@ def git(repo: str, *args: str) -> bytes:
 
 
 def local_show(repo: str, ref: str, name: str) -> bytes:
-    return git(repo, "show", f"{ref}:{MOTHER_PATH}/{name}")
+    return git(repo, "show", f"{ref}:{EXTRA_FILES.get(name, f'{MOTHER_PATH}/{name}')}")
 
 
 def online_fetch(name: str) -> bytes:
-    url = f"{ONLINE_BASE}/{MOTHER_PATH}/{name}"
+    url = f"{ONLINE_BASE}/{EXTRA_FILES.get(name, f'{MOTHER_PATH}/{name}')}"
     try:
         with urllib.request.urlopen(url, timeout=20) as r:
             return r.read()
@@ -85,6 +87,11 @@ def cmd_vendor(ref: str) -> int:
     try:
         commit = git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").decode().strip()
         blobs = {name: local_show(repo, ref, name) for name in FILES}
+        for name in EXTRA_FILES:
+            try:
+                blobs[name] = local_show(repo, ref, name)
+            except Unavailable:
+                pass  # an older Mother ref without the file: nothing to vendor
     except Unavailable as e:
         print(f"skipped: {e}", file=sys.stderr)
         return EXIT_UNAVAILABLE

@@ -71,6 +71,8 @@ private let mockJobs: [MotherJob] = [
 class MotherView: NSView {
 
     private let countsStrip = MotherCountsStrip()
+    /// The quota windows, the gate badge and the gate control; zero height unless Mother sends a quota block.
+    private let quotaStrip  = MotherQuotaStrip()
     /// One line under the strip; zero height unless the "staying quiet" note is raised.
     private let notifyNote  = MotherNotifyNoteRow()
     /// "Session notices off": zero height unless the global switch is off.
@@ -154,7 +156,7 @@ class MotherView: NSView {
         handle.onResize = { [weak self] in self?.setListWidth($0) }
         handle.onCommit = { [weak self] in self?.rememberListWidth() }
 
-        for v in [countsStrip, notifyNote, offStrip, jobList, divider, tabRegion, handle] as [NSView] {
+        for v in [countsStrip, quotaStrip, notifyNote, offStrip, jobList, divider, tabRegion, handle] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -166,8 +168,13 @@ class MotherView: NSView {
             countsStrip.trailingAnchor.constraint(equalTo: trailingAnchor),
             countsStrip.heightAnchor.constraint(equalToConstant: 36),
 
+            // Quota strip — under the counts, zero height while Mother sends no quota block
+            quotaStrip.topAnchor.constraint(equalTo: countsStrip.bottomAnchor),
+            quotaStrip.leadingAnchor.constraint(equalTo: leadingAnchor),
+            quotaStrip.trailingAnchor.constraint(equalTo: trailingAnchor),
+
             // Note row — full width, zero height unless raised
-            notifyNote.topAnchor.constraint(equalTo: countsStrip.bottomAnchor),
+            notifyNote.topAnchor.constraint(equalTo: quotaStrip.bottomAnchor),
             notifyNote.leadingAnchor.constraint(equalTo: leadingAnchor),
             notifyNote.trailingAnchor.constraint(equalTo: trailingAnchor),
 

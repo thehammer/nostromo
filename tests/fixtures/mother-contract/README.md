@@ -32,6 +32,10 @@ additive job-record key `base_sha` (string or null; placeholder `000000000000000
 | `lens_wave.ndjson` | the lens review wave, including a skipped lens |
 | `gate_hold_answered.ndjson` | an exhausted-gates hold with an open decision, then its answer |
 
+`quota_block.json` is Mother's golden quota-gate fixture (`plugins/mother/tests/fixtures/quota_block.json`, from
+Mother #106, `9943542`): the `quota` block of a subscribe snapshot, of the `quota` event and of the `quota-gate` ack,
+and the `quota-gate` command envelopes. `MotherQuotaWireTests` (Kit) decodes it. It is a plain JSON file, not NDJSON.
+
 `ipc_mother_jobs.golden.json` and `ipc_mother_jobs_plain.golden.json` are not Mother's: they are the
 daemon's own `ServerMsg::MotherJobs` bytes for the fixture jobs (and for jobs with no crew data),
 written by the Rust tests (`UPDATE_GOLDEN=1`) and read by the Kit tests.

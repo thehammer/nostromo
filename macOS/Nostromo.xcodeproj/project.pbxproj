@@ -160,6 +160,7 @@
 		RD00000000000000000000A2 /* ToastBannerView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000040 /* ToastBannerView.swift */; };
 		AA0000020000000000000110 /* ToastBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000040 /* ToastBannerView.swift */; };
 		AA0000020000000000000111 /* SessionHealthStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000041 /* SessionHealthStatusView.swift */; };
+		QG0000000000000000000A01 /* MotherQuotaStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = QG0000000000000000000A00 /* MotherQuotaStrip.swift */; };
 		AA0000020000000000000120 /* MotherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000020 /* MotherView.swift */; };
 		MC0000000000000000000002 /* MotherJobDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = MC0000000000000000000001 /* MotherJobDetail.swift */; };
 		MC0000000000000000000003 /* MotherJobDetail.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MC0000000000000000000001 /* MotherJobDetail.swift */; };
@@ -415,6 +416,9 @@
 		MF000000000000000000B109 /* MotherRowLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B009 /* MotherRowLayoutTests.swift */; };
 		MF000000000000000000C103 /* MotherNoticeHeldBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000C003 /* MotherNoticeHeldBarTests.swift */; };
 		MF000000000000000000C102 /* MotherNoticeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000C002 /* MotherNoticeUITests.swift */; };
+		QG0000000000000000000B01 /* MotherQuotaGateControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QG0000000000000000000B00 /* MotherQuotaGateControlTests.swift */; };
+		QG0000000000000000000B11 /* MotherQuotaStripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QG0000000000000000000B10 /* MotherQuotaStripTests.swift */; };
+		QG0000000000000000000B21 /* MotherQuotaBrokerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QG0000000000000000000B20 /* MotherQuotaBrokerTests.swift */; };
 		MF000000000000000000B110 /* MotherListResizeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B010 /* MotherListResizeTests.swift */; };
 		MF000000000000000000B104 /* MotherFocusFitnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B004 /* MotherFocusFitnessTests.swift */; };
 		MF000000000000000000B105 /* PlanFixupRedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B005 /* PlanFixupRedTests.swift */; };
@@ -549,6 +553,7 @@
 		PBC000000000000000000002 /* PaneBlankCapture.swift in TestSources */ = {isa = PBXBuildFile; fileRef = PBC000000000000000000003 /* PaneBlankCapture.swift */; };
 		PRW000000000000000000002 /* PaneRenderWatch.swift in TestSources */ = {isa = PBXBuildFile; fileRef = PRW000000000000000000003 /* PaneRenderWatch.swift */; };
 		OVC000000000000000000002 /* OverflowCapture.swift in TestSources */ = {isa = PBXBuildFile; fileRef = OVC000000000000000000003 /* OverflowCapture.swift */; };
+		QG0000000000000000000A02 /* MotherQuotaStrip.swift in TestSources */ = {isa = PBXBuildFile; fileRef = QG0000000000000000000A00 /* MotherQuotaStrip.swift */; };
 		WCO000000000000000000009 /* MotherView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000020 /* MotherView.swift */; };
 		WCO000000000000000000010 /* PaceBarsView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AA0000020000000000000008 /* PaceBarsView.swift */; };
 		WCO000000000000000000011 /* PaneContentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = EE00000000000000000000E0 /* PaneContentView.swift */; };
@@ -825,6 +830,7 @@
 		OVC000000000000000000003 /* OverflowCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverflowCapture.swift; sourceTree = "<group>"; };
 		AA0000020000000000000040 /* ToastBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastBannerView.swift; sourceTree = "<group>"; };
 		AA0000020000000000000041 /* SessionHealthStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionHealthStatusView.swift; sourceTree = "<group>"; };
+		QG0000000000000000000A00 /* MotherQuotaStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherQuotaStrip.swift; sourceTree = "<group>"; };
 		AA0000020000000000000020 /* MotherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherView.swift; sourceTree = "<group>"; };
 		MC0000000000000000000001 /* MotherJobDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobDetail.swift; sourceTree = "<group>"; };
 		AA0000020000000000000022 /* PerriView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriView.swift; sourceTree = "<group>"; };
@@ -1006,6 +1012,9 @@
 		MF000000000000000000B009 /* MotherRowLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherRowLayoutTests.swift; sourceTree = "<group>"; };
 		MF000000000000000000C003 /* MotherNoticeHeldBarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherNoticeHeldBarTests.swift; sourceTree = "<group>"; };
 		MF000000000000000000C002 /* MotherNoticeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherNoticeUITests.swift; sourceTree = "<group>"; };
+		QG0000000000000000000B00 /* MotherQuotaGateControlTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherQuotaGateControlTests.swift; sourceTree = "<group>"; };
+		QG0000000000000000000B10 /* MotherQuotaStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherQuotaStripTests.swift; sourceTree = "<group>"; };
+		QG0000000000000000000B20 /* MotherQuotaBrokerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherQuotaBrokerTests.swift; sourceTree = "<group>"; };
 		MF000000000000000000B010 /* MotherListResizeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherListResizeTests.swift; sourceTree = "<group>"; };
 		MF000000000000000000B004 /* MotherFocusFitnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherFocusFitnessTests.swift; sourceTree = "<group>"; };
 		MF000000000000000000B005 /* PlanFixupRedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanFixupRedTests.swift; sourceTree = "<group>"; };
@@ -1474,6 +1483,7 @@
 				WK0000000000000000000055 /* TeriBindings.swift */,
 				WK0000000000000000000057 /* FredBindings.swift */,
 				AA0000020000000000000020 /* MotherView.swift */,
+				QG0000000000000000000A00 /* MotherQuotaStrip.swift */,
 				MC0000000000000000000001 /* MotherJobDetail.swift */,
 				AA0000020000000000000022 /* PerriView.swift */,
 				EE00000000000000000000A0 /* QuickActionStripView.swift */,
@@ -1670,6 +1680,9 @@
 				MF000000000000000000B009 /* MotherRowLayoutTests.swift */,
 				MF000000000000000000C003 /* MotherNoticeHeldBarTests.swift */,
 				MF000000000000000000C002 /* MotherNoticeUITests.swift */,
+				QG0000000000000000000B00 /* MotherQuotaGateControlTests.swift */,
+				QG0000000000000000000B10 /* MotherQuotaStripTests.swift */,
+				QG0000000000000000000B20 /* MotherQuotaBrokerTests.swift */,
 				MF000000000000000000B010 /* MotherListResizeTests.swift */,
 				MF000000000000000000B005 /* PlanFixupRedTests.swift */,
 				MF000000000000000000B006 /* PlanFixupTests.swift */,
@@ -2071,6 +2084,7 @@
 				AA0000020000000000000110 /* ToastBannerView.swift in Sources */,
 				AA0000020000000000000111 /* SessionHealthStatusView.swift in Sources */,
 			AA0000020000000000000120 /* MotherView.swift in Sources */,
+			QG0000000000000000000A01 /* MotherQuotaStrip.swift in Sources */,
 			MC0000000000000000000002 /* MotherJobDetail.swift in Sources */,
 				AA0000020000000000000122 /* PerriView.swift in Sources */,
 				EE00000000000000000000A1 /* QuickActionStripView.swift in Sources */,
@@ -2522,6 +2536,9 @@
 				MF000000000000000000B109 /* MotherRowLayoutTests.swift in Sources */,
 				MF000000000000000000C103 /* MotherNoticeHeldBarTests.swift in Sources */,
 				MF000000000000000000C102 /* MotherNoticeUITests.swift in Sources */,
+				QG0000000000000000000B01 /* MotherQuotaGateControlTests.swift in Sources */,
+				QG0000000000000000000B11 /* MotherQuotaStripTests.swift in Sources */,
+				QG0000000000000000000B21 /* MotherQuotaBrokerTests.swift in Sources */,
 				MF000000000000000000B110 /* MotherListResizeTests.swift in Sources */,
 				MF000000000000000000B105 /* PlanFixupRedTests.swift in Sources */,
 				MF000000000000000000B106 /* PlanFixupTests.swift in Sources */,
@@ -2589,6 +2606,7 @@
 				PBC000000000000000000002 /* PaneBlankCapture.swift in TestSources */,
 				PRW000000000000000000002 /* PaneRenderWatch.swift in TestSources */,
 				WCO000000000000000000009 /* MotherView.swift in TestSources */,
+				QG0000000000000000000A02 /* MotherQuotaStrip.swift in TestSources */,
 				WCO000000000000000000010 /* PaceBarsView.swift in TestSources */,
 				WCO000000000000000000011 /* PaneContentView.swift in TestSources */,
 				WCO000000000000000000012 /* PerriView.swift in TestSources */,
