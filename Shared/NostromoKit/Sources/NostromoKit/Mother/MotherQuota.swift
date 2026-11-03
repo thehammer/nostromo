@@ -108,7 +108,7 @@ public struct MotherQuota: Equatable, Sendable {
             changedAt: obj["changed_at"] as? String,
             changedBy: obj["changed_by"] as? String,
             source: source(obj["source"] as? String),
-            feedAgeSeconds: (number(obj["feed_age_s"])).map { Int($0) },
+            feedAgeSeconds: count(obj["feed_age_s"]),
             stale: obj["stale"] as? Bool ?? false,
             capInvalid: obj["cap_invalid"] as? Bool ?? false,
             fiveHour: window(windows?["five_hour"]),
@@ -131,7 +131,7 @@ public struct MotherQuota: Equatable, Sendable {
 
     private static func window(_ value: Any?) -> MotherQuotaWindow? {
         guard let obj = value as? [String: Any],
-              let used = number(obj["used_pct"]), let cap = number(obj["cap_pct"]) else { return nil }
+              let used = percentValue(obj["used_pct"]), let cap = percentValue(obj["cap_pct"]) else { return nil }
         return MotherQuotaWindow(usedPct: used, capPct: cap, resetsAt: epoch(obj["resets_at"]))
     }
 
@@ -141,8 +141,23 @@ public struct MotherQuota: Equatable, Sendable {
         return number.doubleValue
     }
 
+    /// A finite number the display can hold: hostile wire values (infinite, absurdly large) are dropped, never trapped on.
+    private static let sane = 1e12
+
+    private static func percentValue(_ value: Any?) -> Double? {
+        guard let v = number(value), v.isFinite, v >= 0, v <= sane else { return nil }
+        return v
+    }
+
+    /// A whole number of seconds (the feed's age), or nil when the wire value is not a sane one.
+    private static func count(_ value: Any?) -> Int? {
+        guard let v = number(value), v.isFinite, abs(v) <= sane else { return nil }
+        return Int(exactly: v.rounded(.towardZero))
+    }
+
     private static func epoch(_ value: Any?) -> Date? {
-        number(value).map { Date(timeIntervalSince1970: $0) }
+        guard let v = number(value), v.isFinite, v >= 0, v <= sane else { return nil }
+        return Date(timeIntervalSince1970: v)
     }
 }
 
@@ -150,11 +165,15 @@ public struct MotherQuota: Equatable, Sendable {
 public enum MotherQuotaPresentation {
     public static let unavailableNote = "Quota status unavailable"
 
-    /// `5h 15% / 90 · resets 8:40 pm`; over the cap: `5h 100% / 90 · paused · resets Thu 8 pm`.
+    /// Central time, the operator's own; reset times are shown in it with an explicit zone label.
+    public static let displayTimeZone = TimeZone(identifier: "America/Chicago") ?? .current
+
+    /// `5h 15% / 90 · resets 8:40 pm CT`; over the cap: `5h 100% / 90 · paused · resets Thu 8 pm CT`, or
+    /// `· over cap, gate off` when the gate is off (Mother is then not holding anything).
     public static func windowText(label: String, _ window: MotherQuotaWindow, now: Date = Date(),
-                                  timeZone: TimeZone = .current) -> String {
+                                  timeZone: TimeZone = displayTimeZone, gate: MotherQuotaGate = .on) -> String {
         var parts = ["\(label) \(percent(window.usedPct)) / \(plain(window.capPct))"]
-        if window.isOverCap { parts.append("paused") }
+        if window.isOverCap { parts.append(gate.isOff ? "over cap, gate off" : "paused") }
         if let resets = window.resetsAt {
             parts.append("resets \(resetTime(resets, now: now, timeZone: timeZone))")
         }
@@ -162,9 +181,9 @@ public enum MotherQuotaPresentation {
     }
 
     /// The text of the quiet or loud gate badge.
-    public static func badgeText(_ quota: MotherQuota, now: Date = Date(), timeZone: TimeZone = .current) -> String {
+    public static func badgeText(_ quota: MotherQuota, now: Date = Date(), timeZone: TimeZone = displayTimeZone) -> String {
         switch quota.gate {
-        case .on: return "Gate on"
+        case .on: return quota.stale ? staleGateOnText : "Gate on"
         case .off: return "Gate OFF"
         case .offUntilReset:
             guard let until = quota.until else { return "Gate off until reset" }
@@ -180,12 +199,16 @@ public enum MotherQuotaPresentation {
         return "Quota feed stale (\(max(0, age) / 60)m)"
     }
 
+    /// A stale feed makes the gate pass jobs, so "Mother holds work" would be false.
+    public static let staleGateOnText = "Gate on, feed stale: Mother is not limiting work"
+
     public static let capInvalidText = "cap invalid, using 90"
 
     /// One spoken sentence for the badge (the OFF states are announced as warnings).
-    public static func badgeSpokenText(_ quota: MotherQuota, now: Date = Date(), timeZone: TimeZone = .current) -> String {
+    public static func badgeSpokenText(_ quota: MotherQuota, now: Date = Date(), timeZone: TimeZone = displayTimeZone) -> String {
         switch quota.gate {
         case .on:
+            if quota.stale { return "Quota gate on, but the feed is stale. Mother is not limiting work." }
             return "Quota gate on. Mother holds work when a window is over its cap."
         case .off:
             return "Warning: quota gate off. Mother starts work whatever the quota."
@@ -224,7 +247,7 @@ public enum MotherQuotaPresentation {
         "Confirm: \(optionSpokenLabel(request).lowercased()). Activate again to confirm."
     }
 
-    /// `8:40 pm` for a reset today, `Thu 8 pm` for a later day. On the hour the minutes are dropped.
+    /// `8:40 pm CT` for a reset today, `Thu 8 pm CT` for a later day. On the hour the minutes are dropped.
     public static func resetTime(_ date: Date, now: Date, timeZone: TimeZone) -> String {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = timeZone
@@ -234,14 +257,21 @@ public enum MotherQuotaPresentation {
         let minute = parts.minute ?? 0
         let clock = (minute == 0 ? "\(hour12)" : "\(hour12):\(String(format: "%02d", minute))")
             + (hour24 < 12 ? " am" : " pm")
-        if cal.isDate(date, inSameDayAs: now) { return clock }
+        let zone = zoneLabel(timeZone, at: date)
+        if cal.isDate(date, inSameDayAs: now) { return "\(clock) \(zone)" }
         let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        return "\(days[((parts.weekday ?? 1) - 1) % 7]) \(clock)"
+        return "\(days[((parts.weekday ?? 1) - 1) % 7]) \(clock) \(zone)"
+    }
+
+    private static func zoneLabel(_ zone: TimeZone, at date: Date) -> String {
+        if zone.identifier == "America/Chicago" { return "CT" }
+        return zone.abbreviation(for: date) ?? zone.identifier
     }
 
     private static func percent(_ value: Double) -> String { "\(plain(value.rounded()))%" }
 
     private static func plain(_ value: Double) -> String {
-        value == value.rounded() ? String(Int(value)) : String(format: "%g", value)
+        if let whole = Int(exactly: value), abs(value) < 1e15 { return String(whole) }
+        return String(format: "%g", value)
     }
 }

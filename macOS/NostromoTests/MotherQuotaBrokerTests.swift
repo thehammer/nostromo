@@ -17,6 +17,9 @@ import NostromoKit
 //   - `setQuotaGate` sends exactly `{t: "quota-gate", data: {state, origin: "nostromo"}}` (no `job`), reports
 //     the ack's own `quota` block (the broker's read-back, not an echo of the request) and the broker's error.
 //   - It refuses locally, writing nothing, when the hello does not advertise `quota-gate`.
+//   - A refusal's code is kept: `no_reset_known` is its own error, a code this build does not know is carried
+//     as that code (never guessed to be an internal failure).
+//   - `stop()` ends a client for good: no reconnect follows, and commands still waiting fail as disconnected.
 
 /// What the client published, in order.
 private final class QBRecorder {
@@ -44,6 +47,9 @@ private final class QBRecorder {
     func record(_ event: BrokerEvent) { events.append(event) }
 }
 
+/// Why the last `qbReadLine` returned nil (the test's failure message).
+private var qbLastReadFailure = ""
+
 extension MotherBrokerClientTests {
 
     // MARK: Helpers
@@ -64,14 +70,19 @@ extension MotherBrokerClientTests {
     }
 
     /// One line from the client, byte by byte like `serverReadLine`, but a signal-interrupted read (EINTR) is
-    /// retried instead of reading as "the client wrote nothing". The 5 s receive timeout still ends it.
+    /// retried instead of reading as "the client wrote nothing". The 5 s receive timeout still ends it. On
+    /// failure `qbLastReadFailure` says what the read returned and its errno.
     fileprivate func qbReadLine() -> String? {
         var buf = Data()
         var byte: UInt8 = 0
         while true {
             let n = Darwin.read(serverFd, &byte, 1)
-            if n < 0 && errno == EINTR { continue }
-            if n <= 0 { return nil }
+            let err = errno
+            if n < 0 && err == EINTR { continue }
+            if n <= 0 {
+                qbLastReadFailure = "read returned n=\(n) errno=\(err) (\(String(cString: strerror(err)))) fd=\(serverFd) after \(buf.count) bytes"
+                return nil
+            }
             if byte == 0x0A { break }
             buf.append(byte)
         }
@@ -80,7 +91,7 @@ extension MotherBrokerClientTests {
 
     /// The next command the client wrote, as a JSON object (nil-read after 5 s fails instead of hanging).
     fileprivate func qbReadCommand() throws -> [String: Any] {
-        let line = try XCTUnwrap(qbReadLine(), "the client wrote nothing")
+        let line = try XCTUnwrap(qbReadLine(), "the client wrote nothing: \(qbLastReadFailure)")
         let object = try JSONSerialization.jsonObject(with: Data(line.utf8))
         return try XCTUnwrap(object as? [String: Any], "not a JSON object: \(line)")
     }
@@ -288,6 +299,56 @@ extension MotherBrokerClientTests {
         XCTAssertEqual(message, "quota-gate: state must be one of on, off, off_until_reset")
     }
 
+    func testANoResetKnownAckCompletesWithTheNoResetKnownError() throws {
+        try qbHandshake(capabilities: Self.qbWithGate)
+        let (command, result) = try qbAskGate(.offUntilReset)
+        let id = try XCTUnwrap(command["id"] as? String)
+
+        serverWrite(try qbLine(dir: "ack", t: "quota-gate", id: id,
+                               data: ["ok": false, "error": ["code": "no_reset_known",
+                                                              "message": "quota-gate: no reset time is known"]]))
+
+        qbWait("the completion") { result() != nil }
+        guard case .failure(let error)? = result() else { return XCTFail("expected failure, got \(String(describing: result()))") }
+        guard case .code(let code, let message) = error else { return XCTFail("expected a coded error, got \(error)") }
+        XCTAssertEqual(code, .noResetKnown)
+        XCTAssertEqual(message, "quota-gate: no reset time is known")
+    }
+
+    func testAnAckWithACodeThisBuildDoesNotKnowCompletesWithThatCode() throws {
+        try qbHandshake(capabilities: Self.qbWithGate)
+        let (command, result) = try qbAskGate(.off)
+        let id = try XCTUnwrap(command["id"] as? String)
+
+        serverWrite(try qbLine(dir: "ack", t: "quota-gate", id: id,
+                               data: ["ok": false, "error": ["code": "weird_code", "message": "something new"]]))
+
+        qbWait("the completion") { result() != nil }
+        guard case .failure(let error)? = result() else { return XCTFail("expected failure, got \(String(describing: result()))") }
+        guard case .unknownCode(let code) = error else { return XCTFail("expected an unknown code, got \(error)") }
+        XCTAssertEqual(code, "weird_code")
+        XCTAssertTrue(error.userFacingMessage.contains("weird_code"), error.userFacingMessage)
+    }
+
+    func testAnAckWithNoErrorCodeAndAnExplicitInternalCodeAreBothInternalErrors() throws {
+        try qbHandshake(capabilities: Self.qbWithGate)
+        let bodies: [[String: Any]] = [
+            ["ok": false],
+            ["ok": false, "error": ["message": "no code here"]],
+            ["ok": false, "error": ["code": "internal", "message": "boom"]],
+        ]
+        for body in bodies {
+            let (command, result) = try qbAskGate(.off)
+            let id = try XCTUnwrap(command["id"] as? String)
+            serverWrite(try qbLine(dir: "ack", t: "quota-gate", id: id, data: body))
+
+            qbWait("the completion") { result() != nil }
+            guard case .failure(let error)? = result() else { return XCTFail("expected failure for \(body)") }
+            guard case .code(let code, _) = error else { return XCTFail("\(body): expected a coded error, got \(error)") }
+            XCTAssertEqual(code, .internal, "\(body)")
+        }
+    }
+
     func testTwoCommandsInARowAreAnsweredEachByItsOwnAck() throws {
         try qbHandshake(capabilities: Self.qbWithGate)
         let (firstCommand, first) = try qbAskGate(.off)
@@ -308,6 +369,100 @@ extension MotherBrokerClientTests {
         }
         XCTAssertEqual(firstQuota?.gate, .off)
         XCTAssertEqual(secondQuota?.gate, .on)
+    }
+
+    // MARK: stop()
+
+    /// A listener at `path` (replacing whatever file is there), or nil if one cannot be made.
+    fileprivate func qbListen(at path: String) -> Int32? {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let bytes = path.utf8CString
+        let cap = MemoryLayout.size(ofValue: addr.sun_path)
+        guard bytes.count <= cap else { Darwin.close(fd); return nil }
+        withUnsafeMutablePointer(to: &addr.sun_path) { pointer in
+            pointer.withMemoryRebound(to: CChar.self, capacity: cap) { destination in
+                bytes.withUnsafeBufferPointer { destination.update(from: $0.baseAddress!, count: $0.count) }
+            }
+        }
+        unlink(path)
+        let bound = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard bound == 0, Darwin.listen(fd, 5) == 0 else { Darwin.close(fd); return nil }
+        return fd
+    }
+
+    /// Whether a client connects to `listener` within `seconds`.
+    fileprivate func qbConnectionArrives(on listener: Int32, within seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 { return false }
+            var watched = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
+            let ready = Darwin.poll(&watched, 1, Int32(remaining * 1000))
+            if ready > 0 { return watched.revents & Int16(POLLIN) != 0 }
+            if ready < 0 && errno != EINTR { return false }
+        }
+    }
+
+    /// The control for the next test: the client reconnects when its broker goes away. Without this, "a stopped
+    /// client does not reconnect" would also pass if the harness could never observe a reconnect at all.
+    func testAClientWhoseBrokerHangsUpReconnectsToTheListenerAtItsPath() throws {
+        try qbHandshake(capabilities: Self.qbClassic)
+        listenFd = -1   // the accept thread closed the first listener; keep tearDown off a stale fd number
+        let listener = try XCTUnwrap(qbListen(at: sockPath), "a second listener at the broker's path")
+        defer { Darwin.close(listener) }
+
+        Darwin.close(serverFd)   // the broker hangs up
+        serverFd = -1
+
+        XCTAssertTrue(qbConnectionArrives(on: listener, within: 6), "the client should have come back to the path")
+    }
+
+    func testAStoppedClientDoesNotReconnect() throws {
+        try qbHandshake(capabilities: Self.qbClassic)
+        listenFd = -1   // the accept thread closed the first listener; keep tearDown off a stale fd number
+        let listener = try XCTUnwrap(qbListen(at: sockPath), "a second listener at the broker's path")
+        defer { Darwin.close(listener) }
+
+        client.stop()
+
+        XCTAssertFalse(qbConnectionArrives(on: listener, within: 2.5), "a stopped client must not dial the broker again")
+    }
+
+    func testAStoppedClientDoesNotReconnectAfterTheBrokerHangsUpEither() throws {
+        try qbHandshake(capabilities: Self.qbClassic)
+        listenFd = -1   // the accept thread closed the first listener; keep tearDown off a stale fd number
+        let listener = try XCTUnwrap(qbListen(at: sockPath), "a second listener at the broker's path")
+        defer { Darwin.close(listener) }
+
+        client.stop()
+        Darwin.close(serverFd)
+        serverFd = -1
+
+        XCTAssertFalse(qbConnectionArrives(on: listener, within: 2.5))
+    }
+
+    func testStopFailsACommandStillWaitingForItsAckAsDisconnected() throws {
+        try qbHandshake(capabilities: Self.qbWithGate)
+        let (_, result) = try qbAskGate(.off)
+
+        client.stop()
+
+        qbWait("the completion") { result() != nil }
+        guard case .failure(let error)? = result() else { return XCTFail("expected failure, got \(String(describing: result()))") }
+        guard case .disconnected = error else { return XCTFail("expected .disconnected, got \(error)") }
+    }
+
+    func testStopIsIdempotent() throws {
+        try qbHandshake(capabilities: Self.qbClassic)
+        client.stop()
+        client.stop()   // and tearDown stops it once more
     }
 
     // MARK: Without the capability

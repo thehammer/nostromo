@@ -1116,6 +1116,8 @@ class AppStore: ObservableObject {
         case .code(.malformed, _): return "Mother rejected the request."
         case .code(.unauthorized, _): return "Mother refused it (unauthorized)."
         case .code(.internal, _): return "Mother failed to apply it."
+        case .code(.noResetKnown, _): return "No reset time is known yet; use Off, or try again when the feed is live."
+        case .unknownCode(let code): return "Mother refused it (\(code))."
         default: return error.userFacingMessage
         }
     }

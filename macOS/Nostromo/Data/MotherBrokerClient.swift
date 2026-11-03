@@ -21,12 +21,16 @@ enum BrokerErrorCode: String {
     case versionMismatch = "version_mismatch"
     case unauthorized    = "unauthorized"
     case `internal`      = "internal"
+    /// `quota-gate off_until_reset` while Mother knows no reset time.
+    case noResetKnown    = "no_reset_known"
 }
 
 enum BrokerError: Error {
     case code(BrokerErrorCode, message: String)
     case timeout
     case disconnected
+    /// An error code this build does not know: shown as the code, never guessed at.
+    case unknownCode(String)
     /// A `query.list` reply whose decode finished after a newer reply had already been delivered:
     /// applying it would put an older queue over a newer one. Nothing to tell the operator.
     case superseded
@@ -40,6 +44,8 @@ enum BrokerError: Error {
             return "Mother broker is offline."
         case .superseded:
             return "Superseded by a newer reading."
+        case .unknownCode(let code):
+            return "Mother returned an error this version does not know (\(code))."
         case .code(let code, let message):
             switch code {
             case .noSuchJob:
@@ -56,6 +62,8 @@ enum BrokerError: Error {
                 return "Unauthorized."
             case .internal:
                 return "Mother failed to apply the action: \(message)."
+            case .noResetKnown:
+                return "No reset time is known yet; use Off, or try again when the feed is live."
             }
         }
     }
@@ -67,7 +75,7 @@ extension BrokerError {
         switch self {
         case .timeout: return .timeout
         case .disconnected: return .disconnected
-        case .superseded: return .other
+        case .superseded, .unknownCode: return .other
         case .code(let code, _):
             switch code {
             case .noSuchJob: return .noSuchJob
@@ -194,6 +202,8 @@ class MotherBrokerClient {
     // MARK: - Private state
 
     private var fd:           Int32 = -1
+    /// Set by `stop()`; read on `q` and under `sendLock`.
+    private var stopped = false
     private let sendLock    = NSLock()
     private let pendingLock = NSLock()
     private var pending:     [String: PendingCommand] = [:]
@@ -266,6 +276,22 @@ class MotherBrokerClient {
     func start() {
         log.info("Broker client starting — \(self.socketPath, privacy: .public)")
         connect()
+    }
+
+    /// End the connection for good: no reconnect follows, a connected socket is shut down (its read loop
+    /// ends and closes it), and pending commands fail as `.disconnected`. Any thread; idempotent.
+    func stop() {
+        sendLock.lock()
+        stopped = true
+        let live = fd
+        sendLock.unlock()
+        if live >= 0 { Darwin.shutdown(live, SHUT_RDWR) }
+        failAllPending(with: .disconnected)
+    }
+
+    private var isStopped: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return stopped
     }
 
     // MARK: - Client registration (MC4)
@@ -465,6 +491,7 @@ class MotherBrokerClient {
     }
 
     private func doConnect() {
+        guard !isStopped else { return }
         let sock = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard sock >= 0 else {
             log.warning("socket() errno=\(errno, privacy: .public)")
@@ -500,6 +527,7 @@ class MotherBrokerClient {
         log.info("Connected to broker at \(self.socketPath, privacy: .public)")
         fd = sock
         reconnectDelay = 1.0
+        if isStopped { Darwin.shutdown(sock, SHUT_RDWR) }   // `stop()` raced the connect
 
         // Step 1: Read the hello event (first line the broker pushes)
         guard let helloLine = readOneLine(sock) else {
@@ -544,6 +572,7 @@ class MotherBrokerClient {
     }
 
     private func scheduleReconnect() {
+        guard !isStopped else { return }
         let delay = reconnectDelay
         reconnectDelay = min(reconnectDelay * 2, 30.0)
         q.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -777,12 +806,15 @@ class MotherBrokerClient {
             let errDict = dataDict["error"]   as? [String: Any] ?? [:]
             let codeStr = errDict["code"]     as? String        ?? "internal"
             let message = errDict["message"]  as? String        ?? "unknown error"
-            let code    = BrokerErrorCode(rawValue: codeStr)    ?? .internal
+            let known   = BrokerErrorCode(rawValue: codeStr)
+            let code    = known ?? .internal
             // version_mismatch is terminal for this connection — log loudly
             if code == .versionMismatch {
                 log.error("broker version_mismatch — mutations disabled until reconnect+update")
             }
-            DispatchQueue.main.async { cmd.completion(.failure(.code(code, message: message))) }
+            let failure: BrokerError = known == nil && codeStr != "internal"
+                ? .unknownCode(codeStr) : .code(code, message: message)
+            DispatchQueue.main.async { cmd.completion(.failure(failure)) }
         }
     }
 

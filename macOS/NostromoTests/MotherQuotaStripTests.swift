@@ -7,11 +7,14 @@ import NostromoKit
 //
 // The Mother pane's quota strip, from outside:
 //
-//   - One compact row: the live windows (`5h 15% / 90 · resets 8:40 pm`, `7d 100% / 90 · paused · resets Thu 8 pm`),
+//   - One compact row: the live windows (`5h 15% / 90 · resets 8:40 pm CT`, `7d 100% / 90 · paused · resets Thu 8 pm CT`;
+//     over its cap with the gate off a window says `over cap, gate off`, as Mother is then holding nothing),
 //     a gate badge and the three-option gate control. Zero height and hidden while the broker sends no quota
 //     block (an older Mother) or the link is down.
 //   - The badge is quiet when the gate is on and loud for BOTH off states ("Gate OFF", "Gate off until reset
-//     (resets <time>)"). A stale feed, an over-cap window and an invalid cap are said in words.
+//     (resets <time>)"). A stale feed, an over-cap window and an invalid cap are said in words; the notes
+//     (refusal, stale feed, invalid cap) are in the warning colour. A stale feed with the gate on says Mother
+//     is not limiting work.
 //   - The strip shows what the broker reported and nothing else: a refused command shows its error and does not
 //     change the gate; an ack changes the gate only to what the ack's own block says.
 //   - A block that says nothing new moves nothing (no re-render, so no layout churn).
@@ -173,7 +176,7 @@ final class MotherQuotaStripTests: MouseQueueTestCase {
         XCTAssertGreaterThan(rig.strip.badge.layer?.backgroundColor?.alpha ?? 0, 0, "the loud badge is filled")
 
         rig.apply(qsQuota(gate: .offUntilReset, until: 1_793_658_600))
-        XCTAssertEqual(rig.strip.badgeText, "Gate off until reset (resets 4:30 pm)")
+        XCTAssertEqual(rig.strip.badgeText, "Gate off until reset (resets 4:30 pm CT)")
         XCTAssertTrue(rig.strip.isOffBadge)
         XCTAssertGreaterThan(rig.strip.badge.layer?.backgroundColor?.alpha ?? 0, 0)
 
@@ -226,11 +229,37 @@ final class MotherQuotaStripTests: MouseQueueTestCase {
         rig.apply(qsQuota(gate: .offUntilReset, until: 1_793_658_600))
 
         let text = rig.strip.labelText
-        let five = text.range(of: "5h 23% / 90 · resets 4:30 pm")
-        let seven = text.range(of: "7d 100% / 90 · paused · resets Thu 8 pm")
+        let five = text.range(of: "5h 23% / 90 · resets 4:30 pm CT")
+        let seven = text.range(of: "7d 100% / 90 · over cap, gate off · resets Thu 8 pm CT")
         XCTAssertNotNil(five, text)
         XCTAssertNotNil(seven, text)
         if let five, let seven { XCTAssertLessThan(five.lowerBound, seven.lowerBound, "5h first, then 7d") }
+    }
+
+    func testAnOverCapWindowSaysPausedWhileTheGateIsOnAndOverCapGateOffWhenItIsOff() {
+        let rig = QSRig(self)
+
+        rig.apply(qsQuota(gate: .on))
+        XCTAssertTrue(rig.strip.labelText.contains("7d 100% / 90 · paused · resets Thu 8 pm CT"), rig.strip.labelText)
+        XCTAssertFalse(rig.strip.labelText.contains("gate off"), "Mother is holding the work: say so")
+
+        for gate in [MotherQuotaGate.off, .offUntilReset] {
+            rig.apply(qsQuota(gate: gate, until: gate == .offUntilReset ? 1_793_658_600 : nil))
+            XCTAssertTrue(rig.strip.labelText.contains("7d 100% / 90 · over cap, gate off · resets Thu 8 pm CT"),
+                          "\(gate): \(rig.strip.labelText)")
+            XCTAssertFalse(rig.strip.labelText.contains("paused"), "\(gate): nothing is paused with the gate off")
+        }
+    }
+
+    func testResetTimesCarryTheirZoneInCentralTimeWhateverTheMachinesZone() {
+        let rig = QSRig(self)
+        rig.apply(qsQuota())
+        XCTAssertTrue(rig.strip.labelText.contains("resets 4:30 pm CT"), rig.strip.labelText)
+        XCTAssertTrue(rig.strip.labelText.contains("resets Thu 8 pm CT"), rig.strip.labelText)
+
+        // A strip nobody configured shows Central time, not the machine's.
+        let plain = MotherQuotaStrip(control: nil, observeStore: false)
+        XCTAssertEqual(plain.timeZone.identifier, "America/Chicago")
     }
 
     func testOnlyAnOverCapWindowSaysPaused() {
@@ -265,6 +294,101 @@ final class MotherQuotaStripTests: MouseQueueTestCase {
 
         rig.apply(qsQuota(capInvalid: false))
         XCTAssertFalse(rig.strip.labelText.contains("cap invalid"))
+    }
+
+    /// The foreground colour of the first run of the label's attributed text that contains `needle`.
+    private func colour(of needle: String, in label: NSTextField, file: StaticString = #filePath,
+                        line: UInt = #line) -> NSColor? {
+        let text = label.attributedStringValue
+        let range = (text.string as NSString).range(of: needle)
+        guard range.location != NSNotFound else {
+            XCTFail("\"\(needle)\" is not in the label: \(text.string)", file: file, line: line)
+            return nil
+        }
+        return text.attribute(.foregroundColor, at: range.location, effectiveRange: nil) as? NSColor
+    }
+
+    private func sameColour(_ a: NSColor?, _ b: NSColor) -> Bool {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else { return false }
+        return abs(a.redComponent - b.redComponent) < 0.005 && abs(a.greenComponent - b.greenComponent) < 0.005
+            && abs(a.blueComponent - b.blueComponent) < 0.005
+    }
+
+    func testAnInvalidCapNoteIsInTheWarningColour() {
+        let rig = QSRig(self)
+        rig.apply(qsQuota(capInvalid: true))
+
+        XCTAssertTrue(sameColour(colour(of: "cap invalid, using 90", in: rig.strip.label), Theme.amber),
+                      "an invalid cap changes what the gate holds: it is a warning, not a footnote")
+        XCTAssertFalse(sameColour(colour(of: "5h 23%", in: rig.strip.label), Theme.amber),
+                       "an ordinary window is not in the warning colour (so the check above means something)")
+    }
+
+    func testTheStaleAndRefusalNotesAreInTheWarningColourToo() {
+        let rig = QSRig(self)
+        rig.apply(qsQuota(stale: true, feedAge: 725), error: "Couldn't change the gate: Mother failed to apply it.")
+
+        XCTAssertTrue(sameColour(colour(of: "Quota feed stale", in: rig.strip.label), Theme.amber))
+        XCTAssertTrue(sameColour(colour(of: "Couldn't change the gate", in: rig.strip.label), Theme.amber))
+    }
+
+    func testAStaleFeedWithTheGateOnSaysMotherIsNotLimitingWork() {
+        let rig = QSRig(self)
+
+        rig.apply(qsQuota(gate: .on, stale: true, feedAge: 725))
+        XCTAssertEqual(rig.strip.badgeText, "Gate on, feed stale: Mother is not limiting work")
+        XCTAssertFalse(rig.strip.isOffBadge, "the gate is on; only its feed is not to be trusted")
+        XCTAssertTrue(rig.strip.spokenSummary.contains("not limiting work"), rig.strip.spokenSummary)
+        XCTAssertFalse(rig.strip.spokenSummary.contains("holds work"), rig.strip.spokenSummary)
+
+        rig.apply(qsQuota(gate: .on, stale: false))
+        XCTAssertEqual(rig.strip.badgeText, "Gate on")
+        XCTAssertTrue(rig.strip.spokenSummary.contains("holds work"), rig.strip.spokenSummary)
+
+        rig.apply(qsQuota(gate: .off, stale: true, feedAge: 725))
+        XCTAssertEqual(rig.strip.badgeText, "Gate OFF", "an off gate says what it is, stale or not")
+    }
+
+    func testAHostileQuotaBlockStillRendersAndTheControlStillWorks() throws {
+        // Wire numbers a broker should never send: huge, an integer past Int64, negative, a string.
+        let json = """
+        {"gate":"on","stale":true,"feed_age_s":100000000000000000000000,
+         "windows":{"five_hour":{"used_pct":1e30,"cap_pct":90,"resets_at":1e30},
+                    "seven_day":{"used_pct":-5,"cap_pct":"Infinity","resets_at":-1}}}
+        """
+        let quota = try XCTUnwrap(MotherQuota.decode(json: Data(json.utf8)), "the block still decodes")
+        XCTAssertNil(quota.fiveHour)
+        XCTAssertNil(quota.sevenDay)
+
+        let rig = QSRig(self)
+        rig.apply(quota)
+
+        XCTAssertTrue(rig.strip.isShown)
+        XCTAssertEqual(rig.shownHeight, MotherQuotaStrip.visibleHeight)
+        XCTAssertFalse(rig.strip.labelText.contains("5h"))
+        XCTAssertFalse(rig.strip.labelText.contains("7d"))
+        XCTAssertTrue(rig.strip.labelText.contains("Quota feed stale"), "with no usable age, just stale")
+        XCTAssertEqual(rig.strip.badgeText, "Gate on, feed stale: Mother is not limiting work")
+        for request in [MotherQuotaGateRequest.on, .off, .offUntilReset] {
+            XCTAssertEqual(rig.control.button(for: request).isEnabled, true, "\(request)")
+        }
+        rig.h.click(.off, at: 0)
+        XCTAssertEqual(rig.control.armed, .off, "the control works")
+        rig.h.click(.off, at: 0.6)
+        XCTAssertEqual(rig.h.sent, [.off])
+    }
+
+    func testAnEnormousButValidPercentageRendersWithoutTrapping() {
+        let rig = QSRig(self)
+        let quota = MotherQuota(gate: .on, stale: false,
+                                fiveHour: MotherQuotaWindow(usedPct: 1e14, capPct: 90, resetsAt: nil),
+                                sevenDay: MotherQuotaWindow(usedPct: 1e300, capPct: 90, resetsAt: epoch(1e12)))
+        rig.apply(quota)
+
+        XCTAssertTrue(rig.strip.isShown)
+        XCTAssertTrue(rig.strip.labelText.contains("5h"), rig.strip.labelText)
+        XCTAssertTrue(rig.strip.labelText.contains("7d"), rig.strip.labelText)
+        XCTAssertTrue(rig.strip.labelText.contains("paused"), rig.strip.labelText)
     }
 
     func testABlockWithNoWindowsStillShowsTheGate() {
@@ -402,6 +526,53 @@ final class MotherQuotaStripTests: MouseQueueTestCase {
 
         XCTAssertEqual(rig.control.armed, .off)
         XCTAssertTrue(rig.strip.labelText.contains("Click again to confirm"))
+    }
+
+    func testABlockWithADifferentUntilEndsAnArmAndTheNextClickOnlyArmsAgain() {
+        let rig = QSRig(self)
+        rig.apply(qsQuota(gate: .on))
+        rig.h.click(.offUntilReset, at: 0)
+        XCTAssertEqual(rig.control.armed, .offUntilReset)
+
+        // The reset the arm was for moved: "off until reset" now means a different time.
+        rig.apply(qsQuota(gate: .on, until: 1_793_700_000))
+
+        XCTAssertNil(rig.control.armed)
+        XCTAssertFalse(rig.strip.labelText.contains("Click again"), rig.strip.labelText)
+        rig.h.click(.offUntilReset, at: 0.6)
+        XCTAssertTrue(rig.h.sent.isEmpty, "the click after the change does not confirm the old arm")
+        XCTAssertEqual(rig.control.armed, .offUntilReset)
+    }
+
+    func testABlockWhoseWindowResetTimeDiffersEndsAnArm() {
+        for window in ["fiveHour", "sevenDay"] {
+            let rig = QSRig(self)
+            rig.apply(qsQuota(gate: .on))
+            rig.h.click(.off, at: 0)
+            XCTAssertEqual(rig.control.armed, .off, window)
+
+            var moved = qsQuota(gate: .on)
+            if window == "fiveHour" { moved.fiveHour?.resetsAt = epoch(1_793_700_000) }
+            else { moved.sevenDay?.resetsAt = epoch(1_793_900_000) }
+            rig.apply(moved)
+
+            XCTAssertNil(rig.control.armed, "\(window): its reset time changed")
+            rig.h.click(.off, at: 0.6)
+            XCTAssertTrue(rig.h.sent.isEmpty, window)
+            XCTAssertEqual(rig.control.armed, .off, window)
+        }
+    }
+
+    func testABlockWhoseGateChangedEndsAnArmThroughTheStrip() {
+        let rig = QSRig(self)
+        rig.apply(qsQuota(gate: .on))
+        rig.h.click(.off, at: 0)
+
+        rig.apply(qsQuota(gate: .offUntilReset, until: 1_793_658_600))
+
+        XCTAssertNil(rig.control.armed)
+        rig.h.click(.off, at: 0.6)
+        XCTAssertTrue(rig.h.sent.isEmpty)
     }
 
     // MARK: Narrow width
@@ -604,6 +775,35 @@ final class MotherQuotaStoreTests: MouseQueueTestCase {
             XCTAssertEqual(store.motherQuota, quota, "\(failure)")
             XCTAssertNotNil(store.motherQuotaGateError, "\(failure)")
         }
+    }
+
+    func testNoResetKnownTellsTheOperatorWhatToDoInstead() {
+        let quota = qsQuota(gate: .on)
+        store.applyBrokerEventForTesting(.quota(quota))
+
+        store.applyQuotaGateResult(.failure(.code(.noResetKnown, message: "no reset known")))
+
+        let error = store.motherQuotaGateError ?? ""
+        XCTAssertTrue(error.hasPrefix("Couldn't change the gate"), error)
+        XCTAssertTrue(error.contains("No reset time is known yet; use Off, or try again when the feed is live"), error)
+        XCTAssertEqual(store.motherQuota, quota, "a refusal never changes the gate")
+        XCTAssertFalse(store.motherQuotaGateInFlight)
+    }
+
+    func testAnErrorCodeThisBuildDoesNotKnowIsShownAsItsCodeNotAsAnInternalFailure() {
+        store.applyBrokerEventForTesting(.quota(qsQuota(gate: .on)))
+
+        store.applyQuotaGateResult(.failure(.unknownCode("weird_code")))
+
+        let error = store.motherQuotaGateError ?? ""
+        XCTAssertTrue(error.hasPrefix("Couldn't change the gate"), error)
+        XCTAssertTrue(error.contains("weird_code"), error)
+        XCTAssertFalse(error.contains("failed to apply"), "an unknown code is not an internal error: \(error)")
+        XCTAssertEqual(store.motherQuota?.gate, .on)
+
+        // And a genuine internal error still says so.
+        store.applyQuotaGateResult(.failure(.code(.internal, message: "boom")))
+        XCTAssertTrue((store.motherQuotaGateError ?? "").contains("failed to apply"), store.motherQuotaGateError ?? "")
     }
 
     func testASuccessClearsEarlierErrorsAndAReconnectClearsThem() {

@@ -60,6 +60,13 @@ The context-menu Stop only arms; a menu item chosen by keyboard or by releasing 
 accepted (`menuSelection: true`, `contextMenuPick: true`: never for a control whose single permitted
 action changes state).
 
+### Other controls that use the same rules
+
+The Mother quota-gate control (`MotherQuotaStrip.swift`, `MotherQuotaGateControl`) reuses `BackgroundGesture`
+and `HumanGesture.permit`: On is one permitted gesture, either Off is two distinct ones, and it is a
+human-only control (see `app-control.md`). It is stricter on the keyboard: Space only, and any other key on a
+focused option disarms and blocks keyboard arming for 1.5 s.
+
 ### The store only accepts a confirmed Stop
 
 `BackgroundTaskStore.requestStop` takes a `StopConfirmation`, whose initializer is `fileprivate` to

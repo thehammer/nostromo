@@ -42,6 +42,7 @@ final class MotherQuotaGateControl: NSView {
     private var timerToken = 0
     private var armedAt: TimeInterval = 0
     private var armedBy: GestureStamp?
+    private var keyboardBlockedUntil: TimeInterval = 0
     private let permit: BackgroundGesture.Permit
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     private let send: (MotherQuotaGateRequest, QuotaGateConfirmation) -> Void
@@ -96,13 +97,28 @@ final class MotherQuotaGateControl: NSView {
     /// The control works only while the gate's state is known and no command is waiting for its ack.
     var isActive: Bool { !inFlight && !gate.isUnknown }
 
-    /// Show what the broker says. A gate that changed under an armed OFF, to that very state, ends the arm.
+    /// Show what the broker says. A gate that changed under an armed OFF, to any state, ends the arm.
     func update(gate: MotherQuotaGate, inFlight: Bool) {
+        let changed = self.gate != gate
         self.gate = gate
         self.inFlight = inFlight
-        if let armed, armed.resultingGate == gate || !isActive { disarm() }
+        // Any change of the gate's state ends an arm: the second click must not apply to a state the operator
+        // never saw armed.
+        if armed != nil, changed || !isActive { disarm() }
         refreshAppearance()
     }
+
+    /// How long after any key other than Space the keyboard cannot arm or confirm.
+    static let strayKeyBlock: TimeInterval = 1.5
+
+    /// A key that is not a deliberate Space press reached a focused option (ordinary typing): drop any arm and
+    /// refuse keyboard arming and confirming for `strayKeyBlock` seconds, so typing can never finish the two steps.
+    fileprivate func strayKey() {
+        keyboardBlockedUntil = BackgroundGesture.now() + Self.strayKeyBlock
+        disarm()
+    }
+
+    fileprivate var keyboardIsBlocked: Bool { BackgroundGesture.now() < keyboardBlockedUntil }
 
     /// Drop the arm (focus loss, expiry, window close). Sends nothing.
     func disarm() {
@@ -172,7 +188,7 @@ final class MotherQuotaGateControl: NSView {
     }
 
     /// A mouse event must land inside the button; a key event must reach it as the first responder and be
-    /// Space or Return. No event (an Accessibility press with VoiceOver on) has nothing to aim, so the
+    /// Space (never Return or Enter, which ordinary typing ends with), outside a stray-key block. No event (an Accessibility press with VoiceOver on) has nothing to aim, so the
     /// gate's own rule for it stands.
     private func isAimed(_ event: NSEvent?, at button: NSButton) -> Bool {
         guard let event else { return true }
@@ -180,7 +196,7 @@ final class MotherQuotaGateControl: NSView {
             return button.bounds.contains(button.convert(event.locationInWindow, from: nil))
         }
         guard event.type == .keyDown, button.window?.firstResponder === button else { return false }
-        return [49, 36, 76].contains(event.keyCode)   // Space, Return, keypad Enter
+        return event.keyCode == 49 && !keyboardIsBlocked   // Space
     }
 
     /// Seconds from the arm to this confirm; the smaller of the event clock's and the handler clock's gap,
@@ -245,7 +261,19 @@ private final class GateOptionButton: NSButton {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override var acceptsFirstResponder: Bool { isEnabled }
+    /// Focusable only as a standard button is (full keyboard access), never always: an agent must not be able
+    /// to park focus here for the person's next keystrokes to land on.
+    override var acceptsFirstResponder: Bool { isEnabled && super.acceptsFirstResponder }
+
+    /// Space presses the button; any other key is ordinary typing and disarms (see `strayKey`).
+    override func keyDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        if event.keyCode == 49 {
+            performClick(nil)
+        } else {
+            control?.strayKey()
+        }
+    }
 
     override func resignFirstResponder() -> Bool {
         control?.disarm()
@@ -295,7 +323,7 @@ final class MotherQuotaStrip: NSView {
     var isShown: Bool { !isHidden }
 
     var now: () -> Date = { Date() }
-    var timeZone: TimeZone = .current
+    var timeZone: TimeZone = MotherQuotaPresentation.displayTimeZone
 
     /// - Parameter observeStore: tests pass false and drive `apply` themselves.
     init(control: MotherQuotaGateControl? = nil, observeStore: Bool = true) {
@@ -360,6 +388,11 @@ final class MotherQuotaStrip: NSView {
     /// command is in flight, and the broker's last refusal.
     func apply(quota: MotherQuota?, inFlight: Bool, error: String?) {
         let previousGate = self.quota?.gate
+        // An arm is for the block it was made against: a changed reset time alters what "Off until reset" means.
+        if control.armed != nil, let old = self.quota, let new = quota, old.until != new.until
+            || old.fiveHour?.resetsAt != new.fiveHour?.resetsAt || old.sevenDay?.resetsAt != new.sevenDay?.resetsAt {
+            control.disarm()
+        }
         self.quota = quota
         gateError = error
         control.update(gate: quota?.gate ?? .unknown(""), inFlight: inFlight)
@@ -421,11 +454,12 @@ final class MotherQuotaStrip: NSView {
         if armed != nil { add(MotherQuotaPresentation.armedPrompt, warning: true) }
         if let gateError { add(gateError, warning: true) }
         if let stale = MotherQuotaPresentation.staleText(quota) { add(stale, warning: true) }
-        if quota.capInvalid { add(MotherQuotaPresentation.capInvalidText, warning: false) }
+        if quota.capInvalid { add(MotherQuotaPresentation.capInvalidText, warning: true) }
         if armed == nil {
             for (label, window) in [("5h", quota.fiveHour), ("7d", quota.sevenDay)] {
                 guard let window else { continue }
-                add(MotherQuotaPresentation.windowText(label: label, window, now: now, timeZone: timeZone),
+                add(MotherQuotaPresentation.windowText(label: label, window, now: now, timeZone: timeZone,
+                                                       gate: quota.gate),
                     warning: window.isOverCap)
             }
         }

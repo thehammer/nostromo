@@ -16,7 +16,11 @@ import NostromoKit
 //     double-click, at least 0.3 s after the arm on the event clock AND on the handler clock, and aimed at
 //     the button. A refused confirm changes nothing: the arm and its timer carry on.
 //   - Arming ends by itself (the injected schedule), when the window loses key, when the armed button loses
-//     focus, and when the broker's gate becomes the armed one. It never sends.
+//     focus, and when the broker's gate changes to any state (the second click must not apply to a state the
+//     operator never saw armed). It never sends.
+//   - From the keyboard only Space counts, never Return or Enter (which ordinary typing ends with), and any
+//     other key typed at a focused option is a stray key: it drops an arm and blocks keyboard arming and
+//     confirming for `strayKeyBlock` seconds. A key reaches an option through its own `keyDown(with:)`.
 //   - Every click and key press runs the human-gesture check first; a refusal does nothing.
 //   - The control only shows what `update` gives it: disabled while a command is in flight and while the
 //     gate's state is unknown; the already-current option does nothing.
@@ -56,12 +60,51 @@ final class QGSchedule {
 
 private var qgEventNumber = 70_000
 
+/// The harness's offscreen window (as `GestureFixtures.offscreenWindow`), whose first responder a test can force.
+///
+/// AppKit gives a plain button keyboard focus only with full keyboard access on, which a CI machine does not
+/// have, and the gate's options are focusable exactly as a plain button is. A test needing "this option has
+/// keyboard focus" asks AppKit first (`makeFirstResponder`) and forces the focus only when AppKit refuses.
+final class QGWindow: NSWindow {
+    private weak var forced: NSResponder?
+
+    static func offscreen(size: NSSize = NSSize(width: 400, height: 240)) -> QGWindow {
+        _ = NSApplication.shared
+        let w = QGWindow(contentRect: NSRect(origin: .zero, size: size),
+                         styleMask: .borderless, backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+        w.orderFrontRegardless()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        return w
+    }
+
+    override var firstResponder: NSResponder? { forced ?? super.firstResponder }
+
+    func force(_ responder: NSResponder) { forced = responder }
+
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        if let current = forced, responder !== current {
+            forced = nil
+            _ = current.resignFirstResponder()   // focus leaves it, as it would for real
+        }
+        return super.makeFirstResponder(responder)
+    }
+}
+
+private let qgKeyA: UInt16 = 0
+private let qgKeyB: UInt16 = 11
+private let qgKeySpace: UInt16 = 49
+private let qgKeyReturn: UInt16 = 36
+private let qgKeyKeypadEnter: UInt16 = 76
+
 /// One gate control in a real (offscreen) window, wired to a scripted (or the real) human-gesture check.
 ///
 /// Times are set by hand. A press `at: t` is stamped `t` seconds into the test on the event clock and, unless
 /// `handlerAt:` says otherwise, `t` seconds into the test on the handler clock (`BackgroundGesture.now`).
 final class QGHarness {
     let window: NSWindow
+    private let qgWindow: QGWindow
     let clock: TSGestureClock
     let schedule = QGSchedule()
     /// What the scripted permit says.
@@ -84,9 +127,10 @@ final class QGHarness {
     ///     the scripted verdict.
     ///   - hostControl: put the control in the window; false when a strip will adopt it.
     init(_ testCase: XCTestCase, real: Bool = false, hostControl: Bool = true) {
-        let window = GestureFixtures.offscreenWindow()
+        let window = QGWindow.offscreen()
         let clock = TSGestureSeams.install(on: testCase)
         self.window = window
+        self.qgWindow = window
         self.clock = clock
         self.eventBase = real ? ProcessInfo.processInfo.systemUptime - 0.7 : 50_000
         clock.step = 0   // the handler clock moves only when a test says so
@@ -143,10 +187,18 @@ final class QGHarness {
     /// A point in the window that is on none of the options.
     var offButton: NSPoint { NSPoint(x: window.contentView!.bounds.maxX - 4, y: 3) }
 
-    /// Make an option the window's first responder (Space and Return reach it only then).
+    /// Make an option the window's first responder (a key reaches it only then). AppKit decides first; if it
+    /// refuses (an option takes focus only as a plain button does, which needs full keyboard access) the focus
+    /// is forced, so the same test runs on any machine.
     func focus(_ request: MotherQuotaGateRequest, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(window.makeFirstResponder(button(request)), "the option must be able to take focus",
-                      file: file, line: line)
+        if window.makeFirstResponder(button(request)) { return }
+        forceFocus(request)
+        XCTAssertTrue(window.firstResponder === button(request), "the option should hold focus", file: file, line: line)
+    }
+
+    /// Give an option focus whatever AppKit says (even a disabled one).
+    func forceFocus(_ request: MotherQuotaGateRequest) {
+        qgWindow.force(button(request))
     }
 
     // MARK: Events
@@ -158,8 +210,8 @@ final class QGHarness {
                                   eventNumber: qgEventNumber, clickCount: clickCount, pressure: 1)!
     }
 
-    func key(at t: TimeInterval, code: UInt16 = 49, isARepeat: Bool = false) -> NSEvent {
-        let characters = code == 49 ? " " : (code == 36 || code == 76 ? "\r" : "a")
+    func key(at t: TimeInterval, code: UInt16 = 49, isARepeat: Bool = false, characters: String? = nil) -> NSEvent {
+        let characters = characters ?? (code == 49 ? " " : (code == 36 || code == 76 ? "\r" : "a"))
         return NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: eventBase + t,
                                 windowNumber: window.windowNumber, context: nil, characters: characters,
                                 charactersIgnoringModifiers: characters, isARepeat: isARepeat, keyCode: code)!
@@ -186,6 +238,16 @@ final class QGHarness {
     func press(_ request: MotherQuotaGateRequest, at t: TimeInterval, handlerAt: TimeInterval? = nil,
                code: UInt16 = 49, isARepeat: Bool = false) {
         fire(request, with: key(at: t, code: code, isARepeat: isARepeat), handlerAt: handlerAt ?? t)
+    }
+
+    /// A key typed while `request`'s option has focus, delivered the way AppKit delivers a key: to the option's own
+    /// `keyDown(with:)`, which presses on Space and treats any other key as typing. Space by default.
+    func keyDown(_ request: MotherQuotaGateRequest, at t: TimeInterval, code: UInt16 = 49, characters: String? = nil,
+                 isARepeat: Bool = false) {
+        let event = key(at: t, code: code, isARepeat: isARepeat, characters: characters)
+        clock.now = Self.handlerBase + t
+        self.event = event
+        button(request).keyDown(with: event)
     }
 
     /// An action with no event at all (an Accessibility press).
@@ -550,6 +612,45 @@ final class MotherQuotaGateControlTests: MouseQueueTestCase {
         XCTAssertEqual(h.sent, [.off])
     }
 
+    func testAnArmEndsWhenTheGateChangesToAnyOtherStateAndTheNextClickOnlyArmsAgain() {
+        let cases: [(request: MotherQuotaGateRequest, from: MotherQuotaGate, to: MotherQuotaGate)] = [
+            (.off, .on, .offUntilReset),
+            (.offUntilReset, .on, .off),
+            (.off, .offUntilReset, .on),
+            (.offUntilReset, .off, .on),
+        ]
+        for (request, from, to) in cases {
+            let h = harness()
+            h.setGate(from)
+            h.click(request, at: 0)
+            XCTAssertEqual(h.armed, request)
+
+            h.setGate(to)   // the broker moved the gate under the arm, to a state that is not the armed one
+
+            XCTAssertNil(h.armed, "\(request) armed on \(from), gate now \(to): the arm is void")
+            XCTAssertEqual(h.armedChanges, [request, nil])
+            XCTAssertTrue(h.sent.isEmpty)
+
+            // A deliberate click well after the arm must not confirm what was armed on another state.
+            h.click(request, at: 0.6)
+            XCTAssertTrue(h.sent.isEmpty, "\(request): the click after the change sends nothing")
+            XCTAssertEqual(h.armed, request, "\(request): it arms afresh, if the option still changes the gate")
+        }
+    }
+
+    func testAnArmedOffIsNotConfirmedByTheClickThatFollowsAGateChange() {
+        let h = harness()
+        h.click(.off, at: 0)
+        h.setGate(.offUntilReset)
+
+        h.click(.off, at: 0.5)   // 0.5 s after the arm: long enough to have confirmed, were the arm still alive
+        XCTAssertTrue(h.sent.isEmpty)
+        XCTAssertEqual(h.armed, .off)
+
+        h.click(.off, at: 1.2)   // the fresh arm's own second click
+        XCTAssertEqual(h.sent, [.off])
+    }
+
     func testTheArmEndsWhenTheControlBecomesUnavailable() {
         let a = harness()
         a.click(.off, at: 0)
@@ -805,20 +906,197 @@ final class MotherQuotaGateControlTests: MouseQueueTestCase {
 
     // MARK: Keyboard
 
-    func testSpaceReturnAndEnterOnTheFocusedButtonFollowTheSameTwoSteps() {
-        for code: UInt16 in [49, 36, 76] {
+    func testSpaceOnTheFocusedButtonFollowsTheSameTwoSteps() {
+        for request in qgOffOptions {
+            let h = harness()
+            h.focus(request)
+
+            h.press(request, at: 0)
+            XCTAssertEqual(h.armed, request, "the first Space arms")
+            h.press(request, at: 0.1)
+            XCTAssertTrue(h.sent.isEmpty, "0.1 s later is the same press")
+            h.press(request, at: 0.6)
+            XCTAssertEqual(h.sent, [request], "a second, deliberate Space confirms")
+        }
+    }
+
+    func testSpaceTypedAtTheFocusedButtonFollowsTheSameTwoSteps() {
+        for request in qgOffOptions {
+            let h = harness()
+            h.focus(request)
+
+            h.keyDown(request, at: 0)
+            XCTAssertEqual(h.armed, request, "\(request): the first Space arms")
+            XCTAssertTrue(h.sent.isEmpty)
+            h.keyDown(request, at: 0.1)
+            XCTAssertTrue(h.sent.isEmpty, "\(request): 0.1 s later is the same press")
+            h.keyDown(request, at: 0.6)
+            XCTAssertEqual(h.sent, [request], "\(request): a second Space after a pause confirms, once")
+            XCTAssertNil(h.armed)
+        }
+    }
+
+    func testReturnAndKeypadEnterNeverArmOrConfirm() {
+        for code in [qgKeyReturn, qgKeyKeypadEnter] {
             for request in qgOffOptions {
                 let h = harness()
                 h.focus(request)
 
+                // As an action (the press reaches the option's action with a Return event).
                 h.press(request, at: 0, code: code)
-                XCTAssertEqual(h.armed, request, "key \(code): the first press arms")
-                h.press(request, at: 0.1, code: code)
-                XCTAssertTrue(h.sent.isEmpty, "key \(code): 0.1 s later is the same press")
-                h.press(request, at: 0.6, code: code)
-                XCTAssertEqual(h.sent, [request], "key \(code): a second, deliberate press confirms")
+                XCTAssertNil(h.armed, "key \(code) \(request): an action with Return does not arm")
+                // As typed (the key reaches the option's keyDown).
+                h.keyDown(request, at: 1, code: code)
+                XCTAssertNil(h.armed, "key \(code) \(request): typed Return does not arm")
+                XCTAssertEqual(h.schedule.count, 0, "nothing was armed, so no timer")
+                XCTAssertTrue(h.armedChanges.isEmpty, "the strip is never told of an arm")
+
+                // Nor does it finish an arm that a Space started.
+                h.keyDown(request, at: 5)   // Space, after the stray-key block from the Return above
+                XCTAssertEqual(h.armed, request)
+                h.press(request, at: 6, code: code)
+                XCTAssertTrue(h.sent.isEmpty, "key \(code) \(request): Return does not confirm")
+                h.keyDown(request, at: 7, code: code)
+                XCTAssertTrue(h.sent.isEmpty, "key \(code) \(request): typed Return does not confirm")
+                XCTAssertNil(h.armed, "typing ended the arm")
             }
         }
+    }
+
+    // MARK: Typing at a focused option
+
+    /// The reported hazard: an option has keyboard focus while the person types a sentence at it. Typing ends
+    /// with a space and a Return; neither may turn the gate off, whatever the pace.
+    func testTypingAtAFocusedOffOptionNeverArmsOrSends() {
+        for request in qgOffOptions {
+            let h = harness()
+            h.focus(request)
+
+            h.keyDown(request, at: 0.0, code: qgKeyA, characters: "a")
+            h.keyDown(request, at: 0.4)   // a space between words
+            h.keyDown(request, at: 0.8, code: qgKeyB, characters: "b")
+            h.keyDown(request, at: 1.2, code: qgKeyReturn)
+
+            XCTAssertNil(h.armed, "\(request)")
+            XCTAssertTrue(h.sent.isEmpty, "\(request)")
+            XCTAssertTrue(h.armedChanges.isEmpty, "\(request): never armed at any point after the first letter")
+            XCTAssertEqual(h.schedule.count, 0, "\(request): and no arm timer was started")
+        }
+    }
+
+    func testSeveralSpacesTypedAfterALetterNeverArmOrSend() {
+        let h = harness()
+        h.focus(.off)
+        h.keyDown(.off, at: 0, code: qgKeyA, characters: "a")
+        // Spaces 0.3 s or more apart, every one inside the block that the letter started.
+        for t in stride(from: 0.3, through: 1.4, by: 0.35) { h.keyDown(.off, at: t) }
+        h.keyDown(.off, at: 1.45, code: qgKeyReturn)
+
+        XCTAssertNil(h.armed)
+        XCTAssertTrue(h.sent.isEmpty)
+        XCTAssertTrue(h.armedChanges.isEmpty)
+    }
+
+    func testAStrayKeyEndsAnArmAndSendsNothing() {
+        let h = harness()
+        h.focus(.off)
+        h.keyDown(.off, at: 0)
+        XCTAssertEqual(h.armed, .off)
+
+        h.keyDown(.off, at: 0.4, code: qgKeyA, characters: "a")
+
+        XCTAssertNil(h.armed, "typing is not a confirmation, and it drops the arm")
+        XCTAssertTrue(h.sent.isEmpty)
+        XCTAssertEqual(h.armedChanges, [.off, nil])
+
+        h.keyDown(.off, at: 0.8)   // a Space, still inside the block
+        XCTAssertNil(h.armed, "the Space after the stray key does not arm")
+        XCTAssertTrue(h.sent.isEmpty)
+    }
+
+    func testATabFocusedOffNeedsSpaceAPauseAndSpaceToSendExactlyOff() {
+        let h = harness()
+        h.focus(.off)
+
+        h.keyDown(.off, at: 0)
+        XCTAssertEqual(h.armed, .off)
+        XCTAssertTrue(h.sent.isEmpty, "one Space only arms")
+
+        h.keyDown(.off, at: 0.1)
+        XCTAssertTrue(h.sent.isEmpty, "a Space that is part of the same press does not confirm")
+
+        h.keyDown(.off, at: 0.5)
+        XCTAssertEqual(h.sent, [.off], "Space, a pause, Space: exactly one Off")
+        XCTAssertNil(h.armed)
+    }
+
+    func testASecondSpaceAfterAStrayKeyOnlyArmsAgain() {
+        let h = harness()
+        h.focus(.off)
+        let block = MotherQuotaGateControl.strayKeyBlock
+
+        h.keyDown(.off, at: 0)                                          // arm
+        h.keyDown(.off, at: 0.4, code: qgKeyA, characters: "a")         // a stray key between the two Spaces
+        h.keyDown(.off, at: 0.4 + block + 0.5)                          // the second Space, once the block is over
+
+        XCTAssertEqual(h.armed, .off, "it arms again")
+        XCTAssertTrue(h.sent.isEmpty, "and sends nothing: the first arm was dropped")
+        h.keyDown(.off, at: 0.4 + block + 1.2)
+        XCTAssertEqual(h.sent, [.off], "a third, deliberate Space then confirms the fresh arm")
+    }
+
+    func testAfterAStrayKeyASpaceWithinTheBlockDoesNotArmAndOneAfterItDoes() {
+        let block = MotherQuotaGateControl.strayKeyBlock
+        XCTAssertGreaterThanOrEqual(block, 1.0, "long enough to cover the pace of ordinary typing")
+        XCTAssertLessThanOrEqual(block, 3.0, "short enough not to lock the keyboard out for long")
+
+        let h = harness()
+        h.focus(.off)
+        h.keyDown(.off, at: 0, code: qgKeyA, characters: "a")
+
+        h.keyDown(.off, at: block - 0.1)
+        XCTAssertNil(h.armed, "a Space within \(block) s of a stray key does not arm")
+        XCTAssertEqual(h.schedule.count, 0)
+
+        h.keyDown(.off, at: block + 0.1)
+        XCTAssertEqual(h.armed, .off, "a Space after \(block) s does")
+        XCTAssertTrue(h.sent.isEmpty)
+    }
+
+    func testSpacePressesWorkAgainOnceTheStrayKeyBlockHasEnded() {
+        let h = harness()
+        h.focus(.off)
+        let block = MotherQuotaGateControl.strayKeyBlock
+
+        h.keyDown(.off, at: 0, code: qgKeyA, characters: "a")
+        h.keyDown(.off, at: block + 0.2)           // arms
+        XCTAssertEqual(h.armed, .off)
+        h.keyDown(.off, at: block + 0.7)           // confirms
+        XCTAssertEqual(h.sent, [.off])
+    }
+
+    func testTheMouseIsNotBlockedByAStrayKey() {
+        let h = harness()
+        h.focus(.off)
+        h.keyDown(.off, at: 0, code: qgKeyA, characters: "a")
+
+        h.click(.off, at: 0.2)
+        XCTAssertEqual(h.armed, .off, "a click is deliberate whatever was just typed")
+        h.click(.off, at: 0.7)
+        XCTAssertEqual(h.sent, [.off])
+    }
+
+    func testAKeyTypedAtADisabledOptionDoesNothing() {
+        let h = harness()
+        h.setGate(.on, inFlight: true)   // every option disabled while a command is in flight
+        h.forceFocus(.off)
+
+        h.keyDown(.off, at: 0)
+        h.keyDown(.off, at: 0.6)
+
+        XCTAssertNil(h.armed)
+        XCTAssertTrue(h.sent.isEmpty)
+        XCTAssertEqual(h.schedule.count, 0)
     }
 
     func testAKeyPressCountsOnlyWhileThatButtonHasKeyboardFocus() {
@@ -837,14 +1115,36 @@ final class MotherQuotaGateControlTests: MouseQueueTestCase {
         h.focus(.off)
         h.press(.off, at: 0, code: 0)    // "a"
         h.press(.off, at: 1, code: 53)   // Escape
+        h.keyDown(.off, at: 2, code: 0)
+        h.keyDown(.off, at: 3, code: 53)
         XCTAssertNil(h.armed)
         XCTAssertTrue(h.sent.isEmpty)
     }
 
-    func testAnEnabledOptionTakesKeyboardFocus() {
+    func testADisabledOptionDoesNotTakeKeyboardFocus() {
         let h = harness()
+        h.setGate(.on, inFlight: true)
         for request in qgAllOptions {
-            XCTAssertTrue(h.window.makeFirstResponder(h.button(request)), "\(request) is keyboard operable")
+            XCTAssertFalse(h.button(request).acceptsFirstResponder, "\(request) is disabled")
+            XCTAssertFalse(h.window.makeFirstResponder(h.button(request)), "\(request)")
+        }
+        h.setGate(.unknown("future"))
+        for request in qgAllOptions {
+            XCTAssertFalse(h.button(request).acceptsFirstResponder, "\(request): the state is unknown")
+        }
+    }
+
+    /// Focus is never easier to get than a standard button's (an agent must not be able to park it on an option
+    /// for the person's next keystrokes to land on). What a standard button does depends on the machine's keyboard
+    /// access setting, so the option is compared with a plain button in the same window, not with a fixed answer.
+    func testAnEnabledOptionIsFocusableExactlyAsAStandardButtonIs() {
+        let h = harness()
+        let plain = NSButton(title: "Plain", target: nil, action: nil)
+        plain.frame = NSRect(x: 200, y: 20, width: 80, height: 24)
+        h.window.contentView!.addSubview(plain)
+
+        for request in qgAllOptions {
+            XCTAssertEqual(h.button(request).acceptsFirstResponder, plain.acceptsFirstResponder, "\(request)")
         }
     }
 
