@@ -1,6 +1,5 @@
 import AppKit
 import XCTest
-@testable import Nostromo
 
 final class ActivationAuditTests: XCTestCase {
 
