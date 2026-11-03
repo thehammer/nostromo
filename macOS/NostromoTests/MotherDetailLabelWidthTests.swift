@@ -67,7 +67,7 @@ final class MotherDetailLabelWidthTests: XCTestCase {
     private struct Rig {
         let window: NSWindow
         let layout: MainLayout
-        let pane: TabRegionView
+        let pane: MotherDetailContainer
         let detail: MotherJobDetail
         let host: StubHost
     }
@@ -108,7 +108,7 @@ final class MotherDetailLabelWidthTests: XCTestCase {
     }
 
     /// The real Mother focus in a fixed window, with a real `MotherJobDetail` (stub host,
-    /// private log directory) as a tab of the Mother pane, showing `fields` filled with `text`.
+    /// private log directory) in the Mother pane's detail region, showing `fields` filled with `text`.
     private func makeRig(fields: Set<Field>, text: String, index: Int) throws -> Rig {
         let displayUUID = "mdlw-\(UUID().uuidString)"
         let focus = Focus.builtIns.first { $0.id == "mother" }!
@@ -137,8 +137,7 @@ final class MotherDetailLabelWidthTests: XCTestCase {
 
         let motherView = try XCTUnwrap(allSubviews(layout).compactMap { $0 as? MotherView }.first,
                                        "the Mother focus shows no MotherView")
-        let pane = try XCTUnwrap(allSubviews(motherView).compactMap { $0 as? TabRegionView }.first,
-                                 "the Mother view has no tab region")
+        let pane = motherView.detailContainer
 
         let dir = try makeTemp()
         let host = StubHost()
@@ -165,8 +164,7 @@ final class MotherDetailLabelWidthTests: XCTestCase {
 
         let detail = MotherJobDetail(host: host, logDirectory: dir)
         detail.translatesAutoresizingMaskIntoConstraints = false
-        pane.addTab(TabRegionView.Tab(paneId: "mother_job:\(jobId)", label: "job", view: detail))
-        pane.selectTab("mother_job:\(jobId)")
+        pane.install(detail)
         addTeardownBlock { detail.select(nil) }
 
         detail.select(job(id: jobId, title: pick(.title, "A job"), planPath: planPath, gateName: pick(.gateName, "unit")))
