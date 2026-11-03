@@ -152,6 +152,17 @@ more than **1 s** (`HumanGesture.maxEventAge`) after that event is refused
 stamped when it happened, and the age check alone would let any future
 timestamp pass.
 
+**The Mother quota-gate control** (On · Off until next reset · Off, in the Mother view's quota strip) is
+one of these human-only controls: it lowers a safety check, so a `click`, `key` or `type` aimed at it does
+nothing, and nothing the agent can reach (no MCP tool, URL scheme or AppleScript hook) ends in
+`AppStore.requestQuotaGate`, which needs a `QuotaGateConfirmation` only the control can mint. On is one
+gesture; either Off needs two distinct ones. From the keyboard only **Space** counts (never Return or
+Enter, which ordinary typing ends with), the options take keyboard focus only as a standard button does
+(full keyboard access), and any other key pressed on a focused option disarms and blocks keyboard
+arming for 1.5 s, so typing cannot arm and confirm. See [`background-stop.md`](background-stop.md) for
+the shared gesture rules. A CLI or broker caller outside the app can still set the gate; that is not
+covered here.
+
 What the daemon checks on its side (only the pinned, installed app may answer
 at all) is in [`operator-app-trust.md`](operator-app-trust.md).
 

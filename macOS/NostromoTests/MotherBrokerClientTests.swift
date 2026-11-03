@@ -9,6 +9,9 @@ import UserNotifications
 
 // MARK: - MotherBrokerClientTests
 
+/// Every broker-test socket path handed out in this run (see `MotherBrokerClientTests.setUpWithError`).
+private var brokerTestSocketPaths = Set<String>()
+
 /// Integration tests for MotherBrokerClient using an in-process Unix-socket fake broker.
 ///
 /// Each test:
@@ -65,10 +68,24 @@ final class MotherBrokerClientTests: MouseQueueTestCase {
 
     // Semaphore signals when the server-side has accepted the client connection.
     let accepted = DispatchSemaphore(value: 0)
+    /// Signalled when the accepting thread has closed the listening fd and is finished.
+    private let acceptorDone = DispatchSemaphore(value: 0)
+    private let acceptorLock = NSLock()
+    private var acceptorStop = false
+    private var acceptorStarted = false
+
+    private func acceptorShouldStop() -> Bool {
+        acceptorLock.lock(); defer { acceptorLock.unlock() }
+        return acceptorStop
+    }
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        sockPath = NSTemporaryDirectory() + "nostromo-broker-test-\(ProcessInfo.processInfo.processIdentifier).sock"
+        // Unique per test (and short, under the sun_path limit): a client leaked from an earlier test must never
+        // find this test's listener at the same path.
+        sockPath = NSTemporaryDirectory() + "nostromo-bt-\(String(UInt32.random(in: 0...UInt32.max), radix: 16)).sock"
+        XCTAssertTrue(brokerTestSocketPaths.insert(sockPath).inserted,
+                      "\(sockPath!) was already used by an earlier test in this run")
         unlink(sockPath)
 
         // Create a listening AF_UNIX socket. Every errno below is read on the
@@ -117,23 +134,55 @@ final class MotherBrokerClientTests: MouseQueueTestCase {
         }
 
         // Accept client connection asynchronously so the test can proceed
+        //
+        // The accepting thread owns the listening fd and closes it itself, when it has accepted or when
+        // `tearDown` says to stop. `tearDown` used to close the fd under a thread still blocked in accept(2) on
+        // it; the number was then reused by the next test's sockets, and the stale thread closed THAT: the next
+        // test's server side read EBADF ("the client wrote nothing") 14 ms in.
         let listenFdCopy = listenFd
+        acceptorStarted = true
         DispatchQueue.global(qos: .background).async { [weak self] in
-            guard let self else { return }
-            self.serverFd = Darwin.accept(listenFdCopy, nil, nil)
+            var poller = pollfd(fd: listenFdCopy, events: Int16(POLLIN), revents: 0)
+            while true {
+                guard let self, !self.acceptorShouldStop() else { break }
+                let ready = Darwin.poll(&poller, 1, 50)
+                if ready > 0 {
+                    self.serverFd = Darwin.accept(listenFdCopy, nil, nil)
+                    self.accepted.signal()
+                    break
+                }
+                if ready < 0 && errno != EINTR { break }
+            }
             Darwin.close(listenFdCopy)
-            self.accepted.signal()
+            self?.acceptorDone.signal()
         }
 
         client = MotherBrokerClient(socketPath: sockPath)
     }
 
     override func tearDown() {
+        client?.stop()
+        if acceptorStarted {
+            acceptorLock.lock(); acceptorStop = true; acceptorLock.unlock()
+            _ = acceptorDone.wait(timeout: .now() + 5)   // the thread closes the listening fd
+            listenFd = -1
+        }
         if serverFd  >= 0 { Darwin.close(serverFd);  serverFd  = -1 }
         if listenFd  >= 0 { Darwin.close(listenFd);  listenFd  = -1 }
         if let sp = sockPath { unlink(sp) }
         cancellables.removeAll()
         super.tearDown()
+    }
+
+    /// A leaked client from an earlier test must never find a later test's listener at the same path, and a path
+    /// that is too long cannot be bound at all: so the path is unique per test (`setUpWithError` checks that
+    /// no two tests got the same one), short, and named so a leftover file is recognisable.
+    func testTheBrokerSocketPathIsUniqueShortAndNamedForTheBrokerTests() throws {
+        let path = try XCTUnwrap(sockPath)
+        XCTAssertLessThan(path.utf8CString.count, 104, "a unix socket path must fit sun_path (104 bytes with its NUL)")
+        XCTAssertNotNil(path.range(of: #"/nostromo-bt-[0-9a-f]{1,8}\.sock$"#, options: .regularExpression),
+                        "unexpected socket file name: \(path)")
+        XCTAssertTrue(brokerTestSocketPaths.contains(path))
     }
 
     // MARK: - Server helpers

@@ -45,6 +45,13 @@ class AppStore: ObservableObject {
     @Published private(set) var motherNoticeState: MotherNoticeStateWire?
     /// The daemon's last refusal of a notice switch, as one line; cleared by the next state frame or a disconnect.
     @Published private(set) var motherNoticeRefusal: String?
+    /// Mother's quota block as the broker last reported it; nil when it sent none (an older Mother) or the
+    /// link is down. Published only when it changes. The gate shown is this, never what was just requested.
+    @Published private(set) var motherQuota: MotherQuota?
+    /// A `quota-gate` command is waiting for its ack.
+    @Published private(set) var motherQuotaGateInFlight = false
+    /// The broker's refusal of the last `quota-gate` command, plainly; cleared by the next attempt or a success.
+    @Published private(set) var motherQuotaGateError: String?
     /// Live peek snapshots keyed by job id. Cleared on disconnect and on terminal transition.
     @Published private(set) var motherPeeks:        [String: MotherPeekPayload] = [:]
     /// True while the broker socket is connected (hello received + subscribe sent).
@@ -753,6 +760,9 @@ class AppStore: ObservableObject {
             publishJobsAndStatus()
             resyncScheduler.snapshotReceived()
 
+        case .quota(let quota):
+            setMotherQuota(quota)
+
         case .newJob(let job):
             // A job that was queued after the initial snapshot arrived.
             // The broker embeds the full payload in the "queued" event so
@@ -803,6 +813,8 @@ class AppStore: ObservableObject {
             stateMismatch.removeAll()
             jobMap.removeAll()
             motherPeeks.removeAll()
+            setMotherQuota(nil)
+            motherQuotaGateError = nil
             resnapshotGuard.disconnected(now: Date())
             publishJobsAndStatus()
         }
@@ -1069,6 +1081,49 @@ class AppStore: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Ask Mother to set the quota gate. Needs a `QuotaGateConfirmation`, which only the gate control can make,
+    /// after its own human-gesture steps (two for either OFF). Not exposed to the agent: no MCP tool, URL
+    /// scheme or AppleScript reaches it.
+    func requestQuotaGate(_ request: MotherQuotaGateRequest, confirmation: QuotaGateConfirmation) {
+        guard !motherQuotaGateInFlight else { return }
+        motherQuotaGateInFlight = true
+        motherQuotaGateError = nil
+        broker.setQuotaGate(request) { [weak self] result in
+            self?.applyQuotaGateResult(result)
+        }
+    }
+
+    /// The ack of a `quota-gate` command. The displayed state changes only to what the broker's ack (or a
+    /// later event) reports; a refusal shows its message and leaves the state as it was.
+    func applyQuotaGateResult(_ result: Result<MotherQuota?, BrokerError>) {
+        motherQuotaGateInFlight = false
+        switch result {
+        case .success(let quota):
+            motherQuotaGateError = nil
+            if let quota { setMotherQuota(quota) }
+        case .failure(let err):
+            log.warning("broker quota-gate failed: \(err.kind.logName, privacy: .public)")
+            motherQuotaGateError = "Couldn't change the gate: \(Self.quotaGateFailure(err))"
+        }
+    }
+
+    /// The failure in the gate's terms (the job-worded `userFacingMessage` does not fit); never Mother's own text.
+    private static func quotaGateFailure(_ error: BrokerError) -> String {
+        switch error {
+        case .code(.invalidState, _): return "this Mother has no gate switch."
+        case .code(.malformed, _): return "Mother rejected the request."
+        case .code(.unauthorized, _): return "Mother refused it (unauthorized)."
+        case .code(.internal, _): return "Mother failed to apply it."
+        case .code(.noResetKnown, _): return "No reset time is known yet; use Off, or try again when the feed is live."
+        case .unknownCode(let code): return "Mother refused it (\(code))."
+        default: return error.userFacingMessage
+        }
+    }
+
+    private func setMotherQuota(_ quota: MotherQuota?) {
+        if motherQuota != quota { motherQuota = quota }
     }
 
     func forceStartJob(_ id: String) {

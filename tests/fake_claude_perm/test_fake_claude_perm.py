@@ -1283,7 +1283,13 @@ class WakeCueTest(unittest.TestCase):
         fake, d, _ = self.started()
         for k in (1, 2, 3, 4, 5):
             self.group(fake, d, k)
-        self.assertEqual(fake.jsonl("wakes.jsonl"), [{"group": k} for k in (1, 2, 3, 4, 5)])
+        # The fake appends a group's line around the time it emits that group's frames, so the last line can
+        # land just after the test has read the last frame: wait (bounded) for the expected count, then compare.
+        expected = [{"group": k} for k in (1, 2, 3, 4, 5)]
+        deadline = time.monotonic() + 60
+        while len(fake.jsonl("wakes.jsonl")) < len(expected) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(fake.jsonl("wakes.jsonl"), expected)
         raw = fake.read_log("wakes.jsonl")
         self.assertNotIn("SECRET", raw)
 

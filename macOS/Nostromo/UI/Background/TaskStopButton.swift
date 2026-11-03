@@ -49,8 +49,9 @@ struct StopConfirmation {
     fileprivate init() {}
 }
 
-/// What identifies the event that armed Stop, so the confirming one can be told apart from it.
-private struct GestureStamp {
+/// What identifies the event that armed a two-step control (Stop, the quota gate's OFF), so the confirming one
+/// can be told apart from it.
+struct GestureStamp {
     let timestamp: TimeInterval
     let type: NSEvent.EventType
     /// Mouse events only (`eventNumber` is not valid on a key event).
@@ -75,7 +76,7 @@ private struct GestureStamp {
     }
 }
 
-private extension NSEvent {
+extension NSEvent {
     var isMouse: Bool {
         switch type {
         case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .rightMouseDragged,

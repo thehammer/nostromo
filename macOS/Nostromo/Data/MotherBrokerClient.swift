@@ -21,12 +21,16 @@ enum BrokerErrorCode: String {
     case versionMismatch = "version_mismatch"
     case unauthorized    = "unauthorized"
     case `internal`      = "internal"
+    /// `quota-gate off_until_reset` while Mother knows no reset time.
+    case noResetKnown    = "no_reset_known"
 }
 
 enum BrokerError: Error {
     case code(BrokerErrorCode, message: String)
     case timeout
     case disconnected
+    /// An error code this build does not know: shown as the code, never guessed at.
+    case unknownCode(String)
     /// A `query.list` reply whose decode finished after a newer reply had already been delivered:
     /// applying it would put an older queue over a newer one. Nothing to tell the operator.
     case superseded
@@ -40,6 +44,8 @@ enum BrokerError: Error {
             return "Mother broker is offline."
         case .superseded:
             return "Superseded by a newer reading."
+        case .unknownCode(let code):
+            return "Mother returned an error this version does not know (\(code))."
         case .code(let code, let message):
             switch code {
             case .noSuchJob:
@@ -56,6 +62,8 @@ enum BrokerError: Error {
                 return "Unauthorized."
             case .internal:
                 return "Mother failed to apply the action: \(message)."
+            case .noResetKnown:
+                return "No reset time is known yet; use Off, or try again when the feed is live."
             }
         }
     }
@@ -67,7 +75,7 @@ extension BrokerError {
         switch self {
         case .timeout: return .timeout
         case .disconnected: return .disconnected
-        case .superseded: return .other
+        case .superseded, .unknownCode: return .other
         case .code(let code, _):
             switch code {
             case .noSuchJob: return .noSuchJob
@@ -146,6 +154,9 @@ enum BrokerEvent {
     /// Mother reported what it did with an awaiting push (`awaiting_notified`). Only
     /// `transport == "suppressed_client"` matters: Mother stood down because of a client.
     case awaitingNotified(transport: String, ok: Bool)
+    /// Mother's quota gate block: from every snapshot (nil when the broker sent none, an older Mother), from each
+    /// `quota` event and from a `quota-gate` ack. The gate shown is only ever what the broker last said.
+    case quota(MotherQuota?)
     /// Liveness ping — ignore.
     case ping
     /// Client reconnected after disconnect — AppStore must clear jobMap and await next snapshot.
@@ -191,6 +202,8 @@ class MotherBrokerClient {
     // MARK: - Private state
 
     private var fd:           Int32 = -1
+    /// Set by `stop()`; read on `q` and under `sendLock`.
+    private var stopped = false
     private let sendLock    = NSLock()
     private let pendingLock = NSLock()
     private var pending:     [String: PendingCommand] = [:]
@@ -238,6 +251,9 @@ class MotherBrokerClient {
     var supportsAnswerOption: Bool { advertisedCaps.contains("answer.option") }
     /// The `ack` command (MC3).
     var supportsAck: Bool { advertisedCaps.contains("ack") }
+
+    /// The broker accepts `quota-gate` (Mother's three-state quota switch).
+    var supportsQuotaGate: Bool { advertisedCaps.contains("quota-gate") }
     /// Explicit client registration in `subscribe` (MC4). Proposed to Mother in
     /// `.claude/wip/mother-crew-client-feedback-for-mother.md`; Mother has not published it
     /// yet, so nothing new is sent until the broker's hello advertises it.
@@ -260,6 +276,22 @@ class MotherBrokerClient {
     func start() {
         log.info("Broker client starting — \(self.socketPath, privacy: .public)")
         connect()
+    }
+
+    /// End the connection for good: no reconnect follows, a connected socket is shut down (its read loop
+    /// ends and closes it), and pending commands fail as `.disconnected`. Any thread; idempotent.
+    func stop() {
+        sendLock.lock()
+        stopped = true
+        let live = fd
+        sendLock.unlock()
+        if live >= 0 { Darwin.shutdown(live, SHUT_RDWR) }
+        failAllPending(with: .disconnected)
+    }
+
+    private var isStopped: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return stopped
     }
 
     // MARK: - Client registration (MC4)
@@ -318,6 +350,20 @@ class MotherBrokerClient {
             return
         }
         sendCommand(type: "ack", jobId: job, extra: ["reason": reason], completion: completion)
+    }
+
+    /// Ask Mother to set the quota gate. Completes with the `quota` block of the ack (the broker's read-back
+    /// of the stored state, not an echo of `request`), or the broker's error. Only a gesture-gated control
+    /// calls this (see `QuotaGateConfirmation`); no agent-facing surface reaches it.
+    func setQuotaGate(_ request: MotherQuotaGateRequest,
+                      completion: @escaping (Result<MotherQuota?, BrokerError>) -> Void) {
+        guard supportsQuotaGate else {
+            completion(.failure(.code(.invalidState, message: "this Mother has no quota gate switch")))
+            return
+        }
+        sendRaw(type: "quota-gate", jobId: "", extra: request.commandData) { result in
+            completion(result.map { MotherQuota.decode($0["quota"]) })
+        }
     }
 
     func cancel(job: String,
@@ -445,6 +491,7 @@ class MotherBrokerClient {
     }
 
     private func doConnect() {
+        guard !isStopped else { return }
         let sock = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard sock >= 0 else {
             log.warning("socket() errno=\(errno, privacy: .public)")
@@ -480,6 +527,7 @@ class MotherBrokerClient {
         log.info("Connected to broker at \(self.socketPath, privacy: .public)")
         fd = sock
         reconnectDelay = 1.0
+        if isStopped { Darwin.shutdown(sock, SHUT_RDWR) }   // `stop()` raced the connect
 
         // Step 1: Read the hello event (first line the broker pushes)
         guard let helloLine = readOneLine(sock) else {
@@ -524,6 +572,7 @@ class MotherBrokerClient {
     }
 
     private func scheduleReconnect() {
+        guard !isStopped else { return }
         let delay = reconnectDelay
         reconnectDelay = min(reconnectDelay * 2, 30.0)
         q.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -757,12 +806,15 @@ class MotherBrokerClient {
             let errDict = dataDict["error"]   as? [String: Any] ?? [:]
             let codeStr = errDict["code"]     as? String        ?? "internal"
             let message = errDict["message"]  as? String        ?? "unknown error"
-            let code    = BrokerErrorCode(rawValue: codeStr)    ?? .internal
+            let known   = BrokerErrorCode(rawValue: codeStr)
+            let code    = known ?? .internal
             // version_mismatch is terminal for this connection — log loudly
             if code == .versionMismatch {
                 log.error("broker version_mismatch — mutations disabled until reconnect+update")
             }
-            DispatchQueue.main.async { cmd.completion(.failure(.code(code, message: message))) }
+            let failure: BrokerError = known == nil && codeStr != "internal"
+                ? .unknownCode(codeStr) : .code(code, message: message)
+            DispatchQueue.main.async { cmd.completion(.failure(failure)) }
         }
     }
 
@@ -780,8 +832,18 @@ class MotherBrokerClient {
             let jobsRaw = dataDict["jobs"] as? [[String: Any]] ?? []
             let jobs = decodeJobList(jobsRaw)
             log.debug("broker snapshot: \(jobs.count, privacy: .public) jobs")
+            let quota = MotherQuota.decode(dataDict["quota"])
             DispatchQueue.main.async { [weak self] in
                 self?.events.send(.snapshot(jobs))
+                self?.events.send(.quota(quota))
+            }
+
+        case "quota":
+            // The top-level quota block (no job). Handled before the job-keyed default below, which
+            // would drop it for want of a job id. An unreadable block changes nothing.
+            guard let quota = MotherQuota.decode(dataDict["quota"]) else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.events.send(.quota(quota))
             }
 
         case "awaiting_notified":
