@@ -352,7 +352,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     @objc func showTerminalAuditLog(_ sender: Any?) {
         let url = terminalAuditLogURL
         guard auditLogExists(url) else { return }
+        ActivationAudit.note("open-external:audit-log")
         if NSWorkspace.shared.urlForApplication(toOpen: url) != nil, NSWorkspace.shared.open(url) { return }
+        ActivationAudit.note("reveal-in-finder:audit-log")
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
@@ -360,6 +362,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     @objc func revealTerminalAuditLog(_ sender: Any?) {
         let url = terminalAuditLogURL
         guard auditLogExists(url) else { return }
+        ActivationAudit.note("reveal-in-finder:audit-log")
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 

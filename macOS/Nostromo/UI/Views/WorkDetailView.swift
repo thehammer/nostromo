@@ -179,15 +179,19 @@ final class WorkDetailView: NSView, NSTextViewDelegate {
         switch target {
         case .url(_, let url):
             guard isWebURL(url) else { return }
+            ActivationAudit.note("open-external-url:work-detail")
             NSWorkspace.shared.open(url)
         case .path(_, let path):
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else { return }
             if isDirectory.boolValue {
+                ActivationAudit.note("reveal-in-finder:work-detail-directory")
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
             } else if executableExtensions.contains((path as NSString).pathExtension.lowercased()) {
+                ActivationAudit.note("reveal-in-finder:work-detail-executable")
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
             } else {
+                ActivationAudit.note("open-external-url:work-detail-file")
                 NSWorkspace.shared.open(URL(fileURLWithPath: path))
             }
         }

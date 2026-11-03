@@ -146,6 +146,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
         Self.whenIdle(budget: 5) { [weak self] in
             guard let self, !self.styleMask.contains(.fullScreen), !self.isInTransition else { return }
             guard !self.isPendingScreenRemoval else { self.fullScreenDeferredByPendingRemoval = true; return }
+            ActivationAudit.note("full-screen:retry-after-give-up")
             self.toggleFullScreen(nil)
         }
     }
@@ -215,6 +216,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
                       !window.styleMask.contains(.fullScreen), !self.isInTransition else { return }
                 guard !self.isPendingScreenRemoval else { self.fullScreenDeferredByPendingRemoval = true; return }
                 winLog.warning("windowDidFailToEnterFullScreen — retrying toggleFullScreen for \(window.title, privacy: .private)")
+                ActivationAudit.note("full-screen:retry-after-failed-enter")
                 window.toggleFullScreen(nil)
             }
         }
@@ -295,12 +297,14 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
                     winLog.warning("windowDidExitFullScreen — follow-up re-entry after display settle (\(self.title, privacy: .private))")
                     self.displayChangePending = false
                     self.lifecycleHandler?(.willReenterFullScreen)
+                    ActivationAudit.note("full-screen:re-enter-after-display-settle")
                     self.toggleFullScreen(nil)
                 }
                 return
             }
             winLog.warning("windowDidExitFullScreen — calling toggleFullScreen to re-enter (\(self.title, privacy: .private))")
             self.lifecycleHandler?(.willReenterFullScreen)
+            ActivationAudit.note("full-screen:re-enter-after-exit")
             self.toggleFullScreen(nil)
         }
     }
@@ -413,6 +417,7 @@ class NostromoWindow: NSWindow, NSWindowDelegate {
             }
             winLog.warning("resuming full-screen entry after a display removal was called off (\(self.title, privacy: .private))")
             self.lifecycleHandler?(.willReenterFullScreen)
+            ActivationAudit.note("full-screen:resume-after-removal-called-off")
             self.toggleFullScreen(nil)
         }
     }
@@ -453,6 +458,7 @@ extension NostromoWindow: PlacementWindowing {
     }
 
     func toggleFullScreenNow() {
+        ActivationAudit.note("full-screen:toggleFullScreenNow")
         toggleFullScreen(nil)
     }
 }

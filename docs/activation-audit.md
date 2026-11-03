@@ -30,10 +30,30 @@ app-control arguments (only the command name).
   not a person using the UI.
 
 Reading it: find the Space switch time in `space-watch.log`; a `reason=` line within a few hundred ms
-before it means Nostromo asked for it. An `activeSpaceDidChange`/`didBecomeActive` with no preceding
-`reason=` means something outside Nostromo (or AppKit itself) did.
+before it means Nostromo asked for it. A `didResignActive` / `activeSpaceDidChange` / `didBecomeActive`
+with no preceding `reason=` line means something outside Nostromo (or AppKit itself) did ONLY if the
+triggering call is not in the covered list below; otherwise suspect a call that is missing a note.
+
+## Coverage (every one has a `reason=` line BEFORE the call)
+
+- App activation: `NSApp.activate`, `NSApplication.shared.activate`, `NSRunningApplication.activate`.
+- Window ordering: `makeKeyAndOrderFront`, `orderFront`, `orderFrontRegardless`, `makeKey`, `makeMain`,
+  `deminiaturize` (task window).
+- Full-screen: every `toggleFullScreen` / `toggleFullScreenNow` (`NostromoWindow`, `WindowPlacementController`;
+  reasons `full-screen:*` and `placement:*`, which line up with the placement log's own lines).
+- Bringing another app forward, which makes Nostromo resign active: `NSWorkspace.shared.open`,
+  `activateFileViewerSelecting`, `selectFile(_:inFileViewerRootedAtPath:)` (reasons `open-external-url*`,
+  `reveal-in-finder*`, `open-login-terminal`, `open-external:audit-log`).
+
+## Size of the log
+
+The placement log is capped at 256 KiB (`WindowPlacementLog.defaultMaxBytes`); when exceeded the oldest half
+is dropped. Occlusion and screen-change events share it with the activation lines, so a long session can
+roll the interesting window out. Copy the log soon after a surprise switch.
 
 ## Keeping it complete
 
-`ActivationAuditTests` scans the app sources and fails if an `activate` / `orderFront` / `makeKey*` call has
-no `ActivationAudit.note` before it.
+`ActivationAuditTests` scans the app sources and fails if any call in the coverage list has no
+`ActivationAudit.note` before it (same line, or the nearest previous code line). Only the listed lines in the
+test's `exemptLines` are skipped. `note`'s `reason` and `detail` are `StaticString`, so window titles or other
+content cannot be logged.

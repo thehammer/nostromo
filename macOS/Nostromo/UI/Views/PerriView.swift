@@ -990,6 +990,7 @@ private class PerriPRDetail: NSView {
 
     @objc private func openInGitHub() {
         guard let urlString = currentURL, let url = URL(string: urlString) else { return }
+        ActivationAudit.note("open-external-url:perri-github")
         NSWorkspace.shared.open(url)
     }
 

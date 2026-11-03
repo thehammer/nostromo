@@ -33,6 +33,6 @@ enum FredBindings {
         FredDetailBridge.actions(
             workStore: .shared,
             send: { store.client.send($0) },
-            open: { NSWorkspace.shared.open($0) })
+            open: { ActivationAudit.note("open-external-url"); NSWorkspace.shared.open($0) })
     }
 }

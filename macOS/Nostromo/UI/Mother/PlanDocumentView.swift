@@ -19,9 +19,9 @@ struct PlanViewActions {
     /// Open the plan in the default app (the host's `openPlan`).
     var openPlan: (String) -> Void = { _ in }
     /// Open an `http`/`https` link in the default browser.
-    var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+    var openURL: (URL) -> Void = { ActivationAudit.note("open-external-url"); NSWorkspace.shared.open($0) }
     /// Show a file in Finder. Never opens it.
-    var reveal: (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }
+    var reveal: (URL) -> Void = { ActivationAudit.note("reveal-in-finder"); NSWorkspace.shared.activateFileViewerSelecting([$0]) }
     /// Copy plain text to the pasteboard.
     var copy: (String) -> Void = {
         NSPasteboard.general.clearContents()

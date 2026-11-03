@@ -24,10 +24,11 @@ enum ActivationAudit {
     }
 
     /// Log one line just before an activation / order-front. `reason` names the call site (and
-    /// trigger); `detail` is a short static note such as a request command name, never content.
-    static func note(_ reason: StaticString, detail: String = "",
+    /// trigger); `detail` is a compile-time constant such as a request command name, so content
+    /// (titles, text, ids) cannot reach the log.
+    static func note(_ reason: StaticString, detail: StaticString = "",
                      file: StaticString = #fileID, line: UInt = #line) {
-        emit("\(reason)", detail: detail, site: "\(file):\(line)")
+        emit("\(reason)", detail: "\(detail)", site: "\(file):\(line)")
     }
 
     /// Log a system event (observer callbacks) with the same fields.
@@ -73,6 +74,12 @@ enum ActivationAudit {
         return parts.joined(separator: " ")
     }
 
+    /// Where lines go. A test seam so tests don't write the real placement log.
+    static var sink: WindowPlacementLog = .shared
+
+    /// One window as the audit would log it; nil for windows the audit ignores.
+    static func windowInfo(of window: NSWindow) -> WindowInfo? { info(of: window) }
+
     // MARK: - Private
 
     private static var observersInstalled = false
@@ -82,7 +89,7 @@ enum ActivationAudit {
                           caller: SyntheticInputGate.depth > 0 ? "agent-or-cli(app-control)" : "in-app",
                           keyDisplay: NSApp?.keyWindow.map(displayUUID(of:)),
                           windows: (NSApp?.windows ?? []).compactMap(info(of:)))
-        WindowPlacementLog.shared.log("activation", body)
+        sink.log("activation", body)
     }
 
     private static func info(of window: NSWindow) -> WindowInfo? {

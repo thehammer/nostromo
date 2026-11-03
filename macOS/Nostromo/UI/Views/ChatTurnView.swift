@@ -1528,6 +1528,7 @@ class UserBubbleView: NSView {
         guard let iv = g.view,
               let i = stack.arrangedSubviews.firstIndex(of: iv), i < imageURLs.count
         else { return }
+        ActivationAudit.note("open-external-url:chat-image")
         NSWorkspace.shared.open(imageURLs[i])
     }
 
