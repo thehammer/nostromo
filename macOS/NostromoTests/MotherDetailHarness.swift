@@ -185,15 +185,40 @@ final class MDFixedWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
+/// Stand-in for the old tab region: puts a view in the Mother view's detail region in place of what shows
+/// there, and switches between such views. The Mother view itself has no tabs.
+final class MDPane {
+    static let emptyId = "mother_empty"
+    let container: MotherDetailContainer
+    private var views: [String: NSView] = [:]
+    private(set) var activePaneId = MDPane.emptyId
+    var bounds: NSRect { container.bounds }
+
+    init(container: MotherDetailContainer) { self.container = container }
+
+    func hasTab(_ id: String) -> Bool { views[id] != nil }
+
+    func addTab(_ tab: TabRegionView.Tab, activate: Bool = true) {
+        views[tab.paneId] = tab.view
+        if activate { selectTab(tab.paneId) }
+    }
+
+    func selectTab(_ id: String) {
+        if let current = views[activePaneId], activePaneId != id { current.removeFromSuperview() }
+        activePaneId = id
+        if let view = views[id], view.superview == nil { container.install(view) }
+    }
+}
+
 /// The real Mother focus in a fixed window.
 final class MDWindow {
     let window: NSWindow
     let layout: MainLayout
     let motherView: MotherView
-    /// The Mother pane's tab region (Overview, plus a tab per opened job).
-    let pane: TabRegionView
+    /// The Mother view's detail region, with tab-like helpers for putting arbitrary views in it.
+    let pane: MDPane
 
-    init(window: NSWindow, layout: MainLayout, motherView: MotherView, pane: TabRegionView) {
+    init(window: NSWindow, layout: MainLayout, motherView: MotherView, pane: MDPane) {
         self.window = window; self.layout = layout; self.motherView = motherView; self.pane = pane
     }
 
@@ -438,9 +463,7 @@ enum MD {
 
         let motherView = try XCTUnwrap(allSubviews(layout).compactMap { $0 as? MotherView }.first,
                                        "the Mother focus shows no MotherView")
-        let pane = try XCTUnwrap(allSubviews(motherView).compactMap { $0 as? TabRegionView }.first,
-                                 "the Mother view has no tab region")
-        return MDWindow(window: window, layout: layout, motherView: motherView, pane: pane)
+        return MDWindow(window: window, layout: layout, motherView: motherView, pane: MDPane(container: motherView.detailContainer))
     }
 
     /// A job detail as a tab of the Mother pane, showing a job whose `long` fields are long.
@@ -465,7 +488,6 @@ enum MD {
         let detail = MotherJobDetail(host: host, logDirectory: dir)
         detail.translatesAutoresizingMaskIntoConstraints = false
         w.pane.addTab(TabRegionView.Tab(paneId: "mother_job:\(jobId)", label: "job", view: detail))
-        w.pane.selectTab("mother_job:\(jobId)")
 
         let rig = MDRig(w: w, detail: detail, host: host, dir: dir, jobId: jobId, long: long, planPath: plan.path)
         tc.addTeardownBlock { rig.close() }
@@ -501,7 +523,7 @@ enum MD {
         }
         var lines = ["window.frame=\(fmt(w.window.frame.size)) content=\(fmt(w.contentSize)) contentOverflow=\(w.layout.contentOverflow)"]
         var chain: [NSView] = []
-        var cursor: NSView? = detail ?? w.pane
+        var cursor: NSView? = detail ?? w.pane.container
         while let v = cursor {
             chain.append(v)
             if v === w.layout { break }
@@ -511,7 +533,7 @@ enum MD {
             let name: String
             if v === w.layout { name = "MainLayout" }
             else if v === w.motherView { name = "MotherView" }
-            else if v === w.pane { name = "TabRegionView" }
+            else if v === w.pane.container { name = "MotherDetailContainer" }
             else if let detail, v === detail { name = "detail" }
             else { name = "level" }
             lines.append("  " + describe(name, v))

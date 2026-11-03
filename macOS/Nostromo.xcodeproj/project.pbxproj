@@ -419,6 +419,7 @@
 		QG0000000000000000000B01 /* MotherQuotaGateControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QG0000000000000000000B00 /* MotherQuotaGateControlTests.swift */; };
 		QG0000000000000000000B11 /* MotherQuotaStripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QG0000000000000000000B10 /* MotherQuotaStripTests.swift */; };
 		QG0000000000000000000B21 /* MotherQuotaBrokerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = QG0000000000000000000B20 /* MotherQuotaBrokerTests.swift */; };
+		MF00000000000000000099A1 /* MotherViewSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF00000000000000000099A2 /* MotherViewSelectionTests.swift */; };
 		MF000000000000000000B110 /* MotherListResizeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B010 /* MotherListResizeTests.swift */; };
 		MF000000000000000000B104 /* MotherFocusFitnessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B004 /* MotherFocusFitnessTests.swift */; };
 		MF000000000000000000B105 /* PlanFixupRedTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B005 /* PlanFixupRedTests.swift */; };
@@ -1015,6 +1016,7 @@
 		QG0000000000000000000B00 /* MotherQuotaGateControlTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherQuotaGateControlTests.swift; sourceTree = "<group>"; };
 		QG0000000000000000000B10 /* MotherQuotaStripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherQuotaStripTests.swift; sourceTree = "<group>"; };
 		QG0000000000000000000B20 /* MotherQuotaBrokerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherQuotaBrokerTests.swift; sourceTree = "<group>"; };
+		MF00000000000000000099A2 /* MotherViewSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherViewSelectionTests.swift; sourceTree = "<group>"; };
 		MF000000000000000000B010 /* MotherListResizeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherListResizeTests.swift; sourceTree = "<group>"; };
 		MF000000000000000000B004 /* MotherFocusFitnessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherFocusFitnessTests.swift; sourceTree = "<group>"; };
 		MF000000000000000000B005 /* PlanFixupRedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanFixupRedTests.swift; sourceTree = "<group>"; };
@@ -1684,6 +1686,7 @@
 				QG0000000000000000000B10 /* MotherQuotaStripTests.swift */,
 				QG0000000000000000000B20 /* MotherQuotaBrokerTests.swift */,
 				MF000000000000000000B010 /* MotherListResizeTests.swift */,
+				MF00000000000000000099A2 /* MotherViewSelectionTests.swift */,
 				MF000000000000000000B005 /* PlanFixupRedTests.swift */,
 				MF000000000000000000B006 /* PlanFixupTests.swift */,
 				PP000000000000000000006 /* ActivityEventDecodeTests.swift */,
@@ -2540,6 +2543,7 @@
 				QG0000000000000000000B11 /* MotherQuotaStripTests.swift in Sources */,
 				QG0000000000000000000B21 /* MotherQuotaBrokerTests.swift in Sources */,
 				MF000000000000000000B110 /* MotherListResizeTests.swift in Sources */,
+				MF00000000000000000099A1 /* MotherViewSelectionTests.swift in Sources */,
 				MF000000000000000000B105 /* PlanFixupRedTests.swift in Sources */,
 				MF000000000000000000B106 /* PlanFixupTests.swift in Sources */,
 				PP000000000000000000003 /* ActivityStreamModel.swift in TestSources */,

@@ -78,17 +78,36 @@ class MotherView: NSView {
     /// "Session notices off": zero height unless the global switch is off.
     private let offStrip    = MotherNoticesOffStrip()
     private let jobList     = MotherJobList()
-    /// Right-hand side: one closable tab per opened job, plus a fixed
-    /// "Overview" tab holding the empty state. See docs/plans/mother-pane.md (P2).
-    private var tabRegion: TabRegionView!
+    /// Right-hand side: exactly one thing, the selected job's detail or the "Select a job" empty state.
+    /// The job list is the navigation; there are no tabs.
+    let detailContainer = MotherDetailContainer()
+    private let emptyDetail = MotherEmptyDetailView()
+    /// A detail per job the reader has viewed, so each keeps its draft, segment, scroll and log position
+    /// while another job is on show. Only the selected one is in the view hierarchy and running.
     private var jobDetails: [String: MotherJobDetail] = [:]
-    static let overviewPaneId = "mother_overview"
-    static func tabPaneId(for jobId: String) -> String { "mother_job:\(jobId)" }
+    /// Job ids in the order they were last viewed, most recent last. Drives eviction.
+    private var viewOrder: [String] = []
+    private var latestJobs: [MotherJob] = []
+    private var pendingSelection: DispatchWorkItem?
 
-    /// Posted after `requestedJobId` is set, to open that job's tab in a Mother view that exists.
+    /// The job whose detail is on show. A selected job that leaves the queue (archived, pruned) stays
+    /// selected: its detail shows the ended state until the reader picks another job.
+    private(set) var selectedJobId: String?
+    /// The detail on show, nil while the empty state is.
+    var shownDetail: MotherJobDetail? { selectedJobId.flatMap { jobDetails[$0] } }
+    func cachedDetail(for jobId: String) -> MotherJobDetail? { jobDetails[jobId] }
+    var cachedDetailCount: Int { jobDetails.count }
+
+    /// How many viewed details are kept. Details with an unsent draft are kept regardless.
+    static var maxCachedDetails = 8
+    /// Arrow keys move the list selection one row per press; a detail is built only once the presses
+    /// stop for this long. 0 applies every selection at once.
+    static var selectionCoalescing: TimeInterval = 0.05
+
+    /// Posted after `requestedJobId` is set, to select that job in a Mother view that exists.
     static let openJobNotification = Notification.Name("nostromo.mother.openJob")
-    /// A job to open as soon as a Mother view has it in its list (a "queued as Mother job"
-    /// marker was clicked). Cleared once opened.
+    /// A job to select as soon as a Mother view has it in its list (a "queued as Mother job"
+    /// marker was clicked). Cleared once selected.
     static var requestedJobId: String?
 
     /// Posted after `requestedFilterTag` is set ("Show My Jobs"), for the Mother view in the key window.
@@ -136,27 +155,12 @@ class MotherView: NSView {
         divider.wantsLayer = true
         divider.layer?.backgroundColor = Theme.borderInactive.cgColor
 
-        let overview = MotherOverviewView()
-        tabRegion = TabRegionView(
-            tabs: [TabRegionView.Tab(paneId: Self.overviewPaneId, label: "Overview", view: overview)],
-            activePaneId: Self.overviewPaneId, compactTabs: true)
-        tabRegion.onCloseTab = { [weak self] paneId in self?.closeJobTab(paneId) }
-        // Mirror the active tab in the list highlight (Overview clears it).
-        tabRegion.onSelectTab = { [weak self] paneId in
-            guard let self else { return }
-            if paneId.hasPrefix("mother_job:") {
-                self.jobList.select(jobId: String(paneId.dropFirst("mother_job:".count)))
-            } else {
-                self.jobList.clearSelection()
-            }
-        }
-
         let handle = listDivider
         handle.currentWidth = { [weak self] in self?.listColumnWidth ?? MotherListWidth.defaultWidth }
         handle.onResize = { [weak self] in self?.setListWidth($0) }
         handle.onCommit = { [weak self] in self?.rememberListWidth() }
 
-        for v in [countsStrip, quotaStrip, notifyNote, offStrip, jobList, divider, tabRegion, handle] as [NSView] {
+        for v in [countsStrip, quotaStrip, notifyNote, offStrip, jobList, divider, detailContainer, handle] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -201,17 +205,19 @@ class MotherView: NSView {
             divider.widthAnchor.constraint(equalToConstant: 1),
             divider.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            // Job tabs — fill remaining width
-            tabRegion.topAnchor.constraint(equalTo: offStrip.bottomAnchor),
-            tabRegion.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
-            tabRegion.trailingAnchor.constraint(equalTo: trailingAnchor),
-            tabRegion.bottomAnchor.constraint(equalTo: bottomAnchor),
+            // Job detail — fills the remaining width
+            detailContainer.topAnchor.constraint(equalTo: offStrip.bottomAnchor),
+            detailContainer.leadingAnchor.constraint(equalTo: divider.trailingAnchor),
+            detailContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
+            detailContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
+        detailContainer.install(emptyDetail)
+        detailContainer.setAccessibilityLabel(Self.emptyAccessibilityLabel)
 
-        // Wire selection
+        // Wire selection. A nil (the selected row left the list) changes nothing: the detail stays.
         jobList.onSelect = { [weak self] job in
             guard let job else { return }
-            self?.openJobTab(job)
+            self?.listDidSelect(job)
         }
 
         NotificationCenter.default.publisher(for: Self.openJobNotification)
@@ -316,51 +322,132 @@ class MotherView: NSView {
 
     private func jobsDidChange(_ jobs: [MotherJob]) {
         log.debug("live jobs: \(jobs.count, privacy: .public)")
+        latestJobs = jobs
         jobList.update(jobs)
         openRequestedJob(in: jobs)
-        // Keep every open tab current. A job that left the queue (archived,
-        // pruned) keeps its tab, showing the empty state, rather than the tab
-        // vanishing under the reader.
+        // Keep every viewed detail current, shown or not. A job that left the queue (archived,
+        // pruned) keeps showing its ended state rather than vanishing under the reader.
         // `update` applies only what changed: it never clears the reader's draft or moves their log.
         for (id, detail) in jobDetails {
             detail.update(jobs.first { $0.id == id })
         }
+        if let id = selectedJobId { refreshAccessibilityLabel(for: jobs.first { $0.id == id }) }
     }
 
     /// `jobs` is passed in: a `@Published` sink runs before the property holds the new value.
-    private func openRequestedJob(in jobs: [MotherJob]) {
+    func openRequestedJob(in jobs: [MotherJob]) {
         guard let id = Self.requestedJobId, let job = jobs.first(where: { $0.id == id }) else { return }
         Self.requestedJobId = nil
-        openJobTab(job)
+        jobList.select(jobId: job.id)
+        showJob(job)
     }
 
-    private func openJobTab(_ job: MotherJob) {
-        let paneId = Self.tabPaneId(for: job.id)
-        if tabRegion.hasTab(paneId) {
-            tabRegion.selectTab(paneId)
+    /// The list's selection changed (a click or an arrow key). Rapid changes are coalesced so only the
+    /// last row's detail is built.
+    func listDidSelect(_ job: MotherJob) {
+        pendingSelection?.cancel()
+        pendingSelection = nil
+        guard job.id != selectedJobId else { return }
+        guard Self.selectionCoalescing > 0 else { showJob(job); return }
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingSelection = nil
+            self.showJob(self.latestJobs.first { $0.id == job.id } ?? job)
+        }
+        pendingSelection = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.selectionCoalescing, execute: item)
+    }
+
+    /// Replace what the right-hand side shows with `job`'s detail. Selecting the job already shown does nothing.
+    private func showJob(_ job: MotherJob) {
+        pendingSelection?.cancel()
+        pendingSelection = nil
+        guard job.id != selectedJobId else { return }
+
+        if let old = shownDetail {
+            old.setShown(false)
+            old.removeFromSuperview()
+        }
+        selectedJobId = job.id
+
+        let detail: MotherJobDetail
+        if let cached = jobDetails[job.id] {
+            detail = cached
+            detail.update(job)
+        } else {
+            detail = MotherJobDetail(host: AppStore.shared)
+            detail.select(job)
+            applyOrigin(to: detail, jobId: job.id)
+            jobDetails[job.id] = detail
+        }
+        detailContainer.install(detail)
+        emptyDetail.isHidden = true
+        detail.setShown(true)
+
+        viewOrder.removeAll { $0 == job.id }
+        viewOrder.append(job.id)
+        evictOldDetails()
+        refreshAccessibilityLabel(for: job)
+    }
+
+    /// Keep the most recently viewed details; one with an unsent draft is never dropped.
+    private func evictOldDetails() {
+        while jobDetails.count > Self.maxCachedDetails,
+              let victim = viewOrder.first(where: { $0 != selectedJobId && jobDetails[$0]?.hasDraft != true }) {
+            viewOrder.removeAll { $0 == victim }
+            if let detail = jobDetails.removeValue(forKey: victim) {
+                detail.setShown(false)
+                detail.select(nil)   // stop its log timer and watchers
+            }
+        }
+    }
+
+    static let emptyAccessibilityLabel = "No job selected"
+
+    private func refreshAccessibilityLabel(for job: MotherJob?) {
+        guard let job else {
+            // The job left the queue: the detail still names it.
+            detailContainer.setAccessibilityLabel("Job detail: \(selectedJobId ?? "")")
             return
         }
-        let detail = MotherJobDetail(host: AppStore.shared)
-        detail.select(job)
-        applyOrigin(to: detail, jobId: job.id)
-        jobDetails[job.id] = detail
-        let label = job.title.isEmpty ? job.id : job.title
-        tabRegion.addTab(TabRegionView.Tab(paneId: paneId, label: label, view: detail))
-    }
-
-    private func closeJobTab(_ paneId: String) {
-        guard paneId.hasPrefix("mother_job:") else { return }
-        let jobId = String(paneId.dropFirst("mother_job:".count))
-        jobDetails.removeValue(forKey: jobId)?.select(nil)   // stop its log timer
-        tabRegion.removeTab(paneId)
-        jobList.clearSelection()   // so the same row can be clicked to reopen it
+        detailContainer.setAccessibilityLabel("Job detail: \(job.title.isEmpty ? job.id : job.title)")
     }
 }
 
-// MARK: - MotherOverviewView
+// MARK: - MotherDetailContainer
 
-/// The Mother pane's fixed first tab: shown when no job tab is open.
-private class MotherOverviewView: NSView {
+/// The Mother view's right-hand side: holds the one view that is showing, clipped to its bounds.
+final class MotherDetailContainer: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        setAccessibilityRole(.group)
+        setAccessibilityElement(true)
+        setContentHuggingPriority(.init(1), for: .horizontal)
+        setContentHuggingPriority(.init(1), for: .vertical)
+        setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        setContentCompressionResistancePriority(.init(1), for: .vertical)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Pin `view` to all four edges.
+    func install(_ view: NSView) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: topAnchor),
+            view.leadingAnchor.constraint(equalTo: leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: trailingAnchor),
+            view.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+}
+
+// MARK: - MotherEmptyDetailView
+
+/// The right-hand placeholder while no job is selected.
+private class MotherEmptyDetailView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         let label = NSTextField(labelWithString: "Select a job")
