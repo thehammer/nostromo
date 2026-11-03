@@ -68,6 +68,16 @@ final class MotherBrokerClientTests: MouseQueueTestCase {
 
     // Semaphore signals when the server-side has accepted the client connection.
     let accepted = DispatchSemaphore(value: 0)
+    /// Signalled when the accepting thread has closed the listening fd and is finished.
+    private let acceptorDone = DispatchSemaphore(value: 0)
+    private let acceptorLock = NSLock()
+    private var acceptorStop = false
+    private var acceptorStarted = false
+
+    private func acceptorShouldStop() -> Bool {
+        acceptorLock.lock(); defer { acceptorLock.unlock() }
+        return acceptorStop
+    }
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -124,12 +134,27 @@ final class MotherBrokerClientTests: MouseQueueTestCase {
         }
 
         // Accept client connection asynchronously so the test can proceed
+        //
+        // The accepting thread owns the listening fd and closes it itself, when it has accepted or when
+        // `tearDown` says to stop. `tearDown` used to close the fd under a thread still blocked in accept(2) on
+        // it; the number was then reused by the next test's sockets, and the stale thread closed THAT: the next
+        // test's server side read EBADF ("the client wrote nothing") 14 ms in.
         let listenFdCopy = listenFd
+        acceptorStarted = true
         DispatchQueue.global(qos: .background).async { [weak self] in
-            guard let self else { return }
-            self.serverFd = Darwin.accept(listenFdCopy, nil, nil)
+            var poller = pollfd(fd: listenFdCopy, events: Int16(POLLIN), revents: 0)
+            while true {
+                guard let self, !self.acceptorShouldStop() else { break }
+                let ready = Darwin.poll(&poller, 1, 50)
+                if ready > 0 {
+                    self.serverFd = Darwin.accept(listenFdCopy, nil, nil)
+                    self.accepted.signal()
+                    break
+                }
+                if ready < 0 && errno != EINTR { break }
+            }
             Darwin.close(listenFdCopy)
-            self.accepted.signal()
+            self?.acceptorDone.signal()
         }
 
         client = MotherBrokerClient(socketPath: sockPath)
@@ -137,6 +162,11 @@ final class MotherBrokerClientTests: MouseQueueTestCase {
 
     override func tearDown() {
         client?.stop()
+        if acceptorStarted {
+            acceptorLock.lock(); acceptorStop = true; acceptorLock.unlock()
+            _ = acceptorDone.wait(timeout: .now() + 5)   // the thread closes the listening fd
+            listenFd = -1
+        }
         if serverFd  >= 0 { Darwin.close(serverFd);  serverFd  = -1 }
         if listenFd  >= 0 { Darwin.close(listenFd);  listenFd  = -1 }
         if let sp = sockPath { unlink(sp) }
