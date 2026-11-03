@@ -265,13 +265,20 @@ private final class GateOptionButton: NSButton {
     /// to park focus here for the person's next keystrokes to land on.
     override var acceptsFirstResponder: Bool { isEnabled && super.acceptsFirstResponder }
 
-    /// Space presses the button; any other key is ordinary typing and disarms (see `strayKey`).
+    /// Space presses the button; any other key is ordinary typing and disarms (see `strayKey`). Keys other than
+    /// Space and Return/Enter then continue up the responder chain (`super`), so Tab, Shift-Tab, Escape and the
+    /// arrows still move focus: no keyboard trap. `super` is never reached for Space or Return/Enter, the two keys
+    /// NSButton would turn into a click.
     override func keyDown(with event: NSEvent) {
-        guard isEnabled else { return }
-        if event.keyCode == 49 {
+        guard isEnabled else { return super.keyDown(with: event) }
+        switch event.keyCode {
+        case 49:
             performClick(nil)
-        } else {
+        case 36, 76:
             control?.strayKey()
+        default:
+            control?.strayKey()
+            super.keyDown(with: event)
         }
     }
 
@@ -459,7 +466,7 @@ final class MotherQuotaStrip: NSView {
             for (label, window) in [("5h", quota.fiveHour), ("7d", quota.sevenDay)] {
                 guard let window else { continue }
                 add(MotherQuotaPresentation.windowText(label: label, window, now: now, timeZone: timeZone,
-                                                       gate: quota.gate),
+                                                       gate: quota.gate, stale: quota.stale),
                     warning: window.isOverCap)
             }
         }

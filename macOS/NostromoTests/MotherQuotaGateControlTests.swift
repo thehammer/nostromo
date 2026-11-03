@@ -210,9 +210,10 @@ final class QGHarness {
                                   eventNumber: qgEventNumber, clickCount: clickCount, pressure: 1)!
     }
 
-    func key(at t: TimeInterval, code: UInt16 = 49, isARepeat: Bool = false, characters: String? = nil) -> NSEvent {
+    func key(at t: TimeInterval, code: UInt16 = 49, isARepeat: Bool = false, characters: String? = nil,
+             modifiers: NSEvent.ModifierFlags = []) -> NSEvent {
         let characters = characters ?? (code == 49 ? " " : (code == 36 || code == 76 ? "\r" : "a"))
-        return NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: eventBase + t,
+        return NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: eventBase + t,
                                 windowNumber: window.windowNumber, context: nil, characters: characters,
                                 charactersIgnoringModifiers: characters, isARepeat: isARepeat, keyCode: code)!
     }
@@ -243,8 +244,8 @@ final class QGHarness {
     /// A key typed while `request`'s option has focus, delivered the way AppKit delivers a key: to the option's own
     /// `keyDown(with:)`, which presses on Space and treats any other key as typing. Space by default.
     func keyDown(_ request: MotherQuotaGateRequest, at t: TimeInterval, code: UInt16 = 49, characters: String? = nil,
-                 isARepeat: Bool = false) {
-        let event = key(at: t, code: code, isARepeat: isARepeat, characters: characters)
+                 isARepeat: Bool = false, modifiers: NSEvent.ModifierFlags = []) {
+        let event = key(at: t, code: code, isARepeat: isARepeat, characters: characters, modifiers: modifiers)
         clock.now = Self.handlerBase + t
         self.event = event
         button(request).keyDown(with: event)
@@ -259,6 +260,13 @@ final class QGHarness {
     func drain() {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.03))
     }
+}
+
+/// The next responder after an option: records the keys the option let continue up the responder chain
+/// (what `super.keyDown` does), so "Tab still moves focus" is observable without a key window.
+final class QGKeyProbe: NSResponder {
+    private(set) var received: [UInt16] = []
+    override func keyDown(with event: NSEvent) { received.append(event.keyCode) }
 }
 
 private let qgOffOptions: [MotherQuotaGateRequest] = [.off, .offUntilReset]
@@ -959,6 +967,95 @@ final class MotherQuotaGateControlTests: MouseQueueTestCase {
                 h.keyDown(request, at: 7, code: code)
                 XCTAssertTrue(h.sent.isEmpty, "key \(code) \(request): typed Return does not confirm")
                 XCTAssertNil(h.armed, "typing ended the arm")
+            }
+        }
+    }
+
+    // MARK: Keys that must keep working up the responder chain (no keyboard trap)
+
+    /// Tab, Shift-Tab, Escape and the arrows are how a person leaves the control or dismisses a sheet. The option
+    /// treats them as typing (it disarms) but still hands them on. A probe stands in for the next responder.
+    func testTabShiftTabEscapeAndArrowsStillContinueUpTheResponderChain() {
+        let keys: [(name: String, code: UInt16, chars: String, mods: NSEvent.ModifierFlags)] = [
+            ("Tab", 48, "\t", []),
+            ("Shift-Tab", 48, "\u{19}", .shift),
+            ("Escape", 53, "\u{1b}", []),
+            ("Left arrow", 123, "\u{F702}", []),
+            ("Right arrow", 124, "\u{F703}", []),
+            ("Down arrow", 125, "\u{F701}", []),
+            ("Up arrow", 126, "\u{F700}", []),
+        ]
+        for request in qgAllOptions {
+            for key in keys {
+                let h = harness()
+                let probe = QGKeyProbe()
+                h.button(request).nextResponder = probe
+                h.focus(request)
+
+                h.keyDown(request, at: 0, code: key.code, characters: key.chars, modifiers: key.mods)
+
+                XCTAssertEqual(probe.received, [key.code], "\(request) \(key.name): the key continues up the responder chain")
+            }
+        }
+    }
+
+    func testTabDisarmsAndBlocksTheKeyboardForTheStrayKeyBlock() {
+        for request in qgOffOptions {
+            let h = harness()
+            h.focus(request)
+            let block = MotherQuotaGateControl.strayKeyBlock
+
+            h.keyDown(request, at: 0)   // Space arms
+            XCTAssertEqual(h.armed, request)
+
+            h.keyDown(request, at: 0.4, code: 48, characters: "\t")
+            XCTAssertNil(h.armed, "\(request): Tab drops the arm")
+            XCTAssertTrue(h.sent.isEmpty)
+
+            h.keyDown(request, at: 0.4 + block - 0.1)   // Space inside the block
+            XCTAssertNil(h.armed, "\(request): a Space within the block does not arm")
+            XCTAssertTrue(h.sent.isEmpty)
+
+            h.keyDown(request, at: 0.4 + block + 0.1)   // Space after it
+            XCTAssertEqual(h.armed, request, "\(request): and one after it does")
+        }
+    }
+
+    func testSpaceReturnAndKeypadEnterDoNotContinueUpTheResponderChain() {
+        for code in [qgKeySpace, qgKeyReturn, qgKeyKeypadEnter] {
+            for request in qgAllOptions {
+                let h = harness()
+                let probe = QGKeyProbe()
+                h.button(request).nextResponder = probe
+                h.focus(request)
+
+                h.keyDown(request, at: 0, code: code)
+
+                XCTAssertTrue(probe.received.isEmpty, "key \(code) \(request): the option consumes it, the next responder never sees it")
+            }
+        }
+    }
+
+    func testSpaceStillArmsAndConfirmsWhileReturnAndEnterNeverDo() {
+        for request in qgOffOptions {
+            let h = harness()
+            let probe = QGKeyProbe()
+            h.button(request).nextResponder = probe
+            h.focus(request)
+
+            h.keyDown(request, at: 0)
+            XCTAssertEqual(h.armed, request, "\(request): Space arms")
+            h.keyDown(request, at: 0.6)
+            XCTAssertEqual(h.sent, [request], "\(request): a second Space confirms, once")
+            XCTAssertTrue(probe.received.isEmpty)
+
+            for code in [qgKeyReturn, qgKeyKeypadEnter] {
+                let r = harness()
+                r.focus(request)
+                r.keyDown(request, at: 0, code: code)
+                r.keyDown(request, at: 0.6, code: code)
+                XCTAssertNil(r.armed, "\(request) key \(code): never arms")
+                XCTAssertTrue(r.sent.isEmpty, "\(request) key \(code): never confirms")
             }
         }
     }

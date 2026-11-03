@@ -171,9 +171,13 @@ public enum MotherQuotaPresentation {
     /// `5h 15% / 90 · resets 8:40 pm CT`; over the cap: `5h 100% / 90 · paused · resets Thu 8 pm CT`, or
     /// `· over cap, gate off` when the gate is off (Mother is then not holding anything).
     public static func windowText(label: String, _ window: MotherQuotaWindow, now: Date = Date(),
-                                  timeZone: TimeZone = displayTimeZone, gate: MotherQuotaGate = .on) -> String {
+                                  timeZone: TimeZone = displayTimeZone, gate: MotherQuotaGate = .on,
+                                  stale: Bool = false) -> String {
         var parts = ["\(label) \(percent(window.usedPct)) / \(plain(window.capPct))"]
-        if window.isOverCap { parts.append(gate.isOff ? "over cap, gate off" : "paused") }
+        if window.isOverCap {
+            // A stale feed makes the gate pass jobs, so "paused" would be false next to "not limiting work".
+            parts.append(gate.isOff ? "over cap, gate off" : stale ? "over cap (feed stale)" : "paused")
+        }
         if let resets = window.resetsAt {
             parts.append("resets \(resetTime(resets, now: now, timeZone: timeZone))")
         }

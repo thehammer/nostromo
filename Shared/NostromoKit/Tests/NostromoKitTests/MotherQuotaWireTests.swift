@@ -434,6 +434,19 @@ final class MotherQuotaWireTests: XCTestCase {
         XCTAssertFalse(text(.offUntilReset).contains("paused"))
     }
 
+    func testAnOverCapWindowWithAStaleFeedAndTheGateOnSaysSoInsteadOfPaused() {
+        let window = MotherQuotaWindow(usedPct: 90, capPct: 90, resetsAt: nil)
+        let text = { (gate: MotherQuotaGate, stale: Bool) in
+            MotherQuotaPresentation.windowText(label: "5h", window, now: self.now, timeZone: self.chicago,
+                                               gate: gate, stale: stale)
+        }
+
+        XCTAssertEqual(text(.on, true), "5h 90% / 90 · over cap (feed stale)")
+        XCTAssertEqual(text(.on, false), "5h 90% / 90 · paused")
+        XCTAssertEqual(text(.off, true), "5h 90% / 90 · over cap, gate off", "gate off wins over stale")
+        XCTAssertEqual(text(.offUntilReset, true), "5h 90% / 90 · over cap, gate off")
+    }
+
     func testAWindowUnderItsCapReadsTheSameWhateverTheGate() {
         let window = MotherQuotaWindow(usedPct: 15, capPct: 90, resetsAt: date(1_793_673_600))
         for gate in [MotherQuotaGate.on, .off, .offUntilReset] {
