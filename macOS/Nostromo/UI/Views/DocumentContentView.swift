@@ -19,7 +19,7 @@ final class DocumentContentView: NSView, NSTextViewDelegate {
     /// Called with an action id when a button, or a `nostromo-action:` link, is clicked.
     var onAction: (String) -> Void = { _ in }
     /// Called with an `https:` URL the reader clicked. Defaults to the system browser.
-    var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+    var openURL: (URL) -> Void = { ActivationAudit.note("open-external-url"); NSWorkspace.shared.open($0) }
 
     // MARK: - Subviews
 

@@ -162,7 +162,10 @@ final class TaskWindowController: NSObject, NSWindowDelegate {
 
     /// Show it and bring it to the front (a person opened it).
     func bringForward() {
-        if panel.isMiniaturized { panel.deminiaturize(nil) }
+        if panel.isMiniaturized {
+            ActivationAudit.note("task-window:deminiaturize")
+            panel.deminiaturize(nil)
+        }
         ActivationAudit.note("task-window:makeKeyAndOrderFront")
         panel.makeKeyAndOrderFront(nil)
     }

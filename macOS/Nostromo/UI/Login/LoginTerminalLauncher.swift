@@ -79,6 +79,7 @@ struct SystemProcessLauncher: ProcessLaunching {
         // AppKit's workspace is main-thread territory; the launcher calls this from a background queue.
         let request = {
             guard let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else { return false }
+            ActivationAudit.note("open-login-terminal")
             NSWorkspace.shared.open([file], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration())
             return true
         }

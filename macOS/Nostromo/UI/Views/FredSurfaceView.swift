@@ -691,7 +691,7 @@ final class FredSignInView: NSView {
     /// `permit` and `opener` are seams for tests; the app uses the human-gesture check and `NSWorkspace`.
     init(permit: GesturePermit? = nil, opener: ((URL) -> Void)? = nil) {
         self.permit = permit ?? { HumanGesture.permit(NSApp.currentEvent, control: $0) }
-        self.opener = opener ?? { NSWorkspace.shared.open($0) }
+        self.opener = opener ?? { ActivationAudit.note("open-external-url"); NSWorkspace.shared.open($0) }
         codeRow = NSStackView(views: [codeLabel, copyButton])
         super.init(frame: .zero)
         wantsLayer = true

@@ -1230,6 +1230,7 @@ class AppStore: ObservableObject {
     }
 
     func openPlan(path: String) {
+        ActivationAudit.note("open-external-url:open-plan")
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
@@ -1845,7 +1846,7 @@ class AppStore: ObservableObject {
     }
 
     /// Where a `pane_action_result`'s `open_url` goes once it passes `DocumentLinkPolicy`. A test seam.
-    var openExternalURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
+    var openExternalURL: (URL) -> Void = { ActivationAudit.note("open-external-url"); NSWorkspace.shared.open($0) }
 
     /// Show a `pane_action_result`'s message as a toast, and open its `open_url` only if it is an
     /// `https:` URL or a `file:` URL inside `~/.nostromo/huey/`. Anything else is dropped silently.

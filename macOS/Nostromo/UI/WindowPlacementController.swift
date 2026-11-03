@@ -179,6 +179,7 @@ final class WindowPlacementController {
             emit("WARNING: transition still in flight after bounded wait — toggling anyway", true)
         }
         emit("before toggleFullScreen: \(window.placementSnapshot)", false)
+        ActivationAudit.note("placement:toggle-full-screen")
         window.toggleFullScreenNow()
     }
 
@@ -241,6 +242,7 @@ final class WindowPlacementController {
             return
         }
         emit("exiting full-screen to re-home: \(window.placementSnapshot)", true)
+        ActivationAudit.note("placement:exit-full-screen-rehome")
         window.toggleFullScreenNow()
     }
 
