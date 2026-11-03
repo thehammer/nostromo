@@ -94,19 +94,21 @@ final class QGHarness {
         BackgroundGesture.currentEvent = { [weak self] in self?.event }
         testCase.addTeardownBlock { window.close() }
 
+        // Weak: the window's teardown can end an arm after the harness is gone.
         control = MotherQuotaGateControl(
-            permit: { [unowned self] view in
+            permit: { [weak self] view in
+                guard let self else { return .refused(reason: .notAUserEvent) }
                 self.permitCalls += 1
                 guard real else { return self.verdict }
                 return HumanGesture.permit(self.event, control: view, voiceOverEnabled: { self.voiceOver },
                                            allowsSynthetic: { false })
             },
-            schedule: { [unowned self] delay, work in self.schedule.schedule(delay, work) },
-            send: { [unowned self] request, confirmation in
-                self.sent.append(request)
-                self.confirmations.append(confirmation)
+            schedule: { [weak self] delay, work in self?.schedule.schedule(delay, work) },
+            send: { [weak self] request, confirmation in
+                self?.sent.append(request)
+                self?.confirmations.append(confirmation)
             })
-        control.onArmedChange = { [unowned self] armed in self.armedChanges.append(armed) }
+        control.onArmedChange = { [weak self] armed in self?.armedChanges.append(armed) }
         control.update(gate: .on, inFlight: false)
         if hostControl { host(control, at: 20) }
     }
