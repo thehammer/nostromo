@@ -265,6 +265,7 @@ public enum MotherQuotaPresentation {
 
     private static func zoneLabel(_ zone: TimeZone, at date: Date) -> String {
         if zone.identifier == "America/Chicago" { return "CT" }
+        if ["UTC", "GMT", "Etc/UTC", "Etc/GMT"].contains(zone.identifier) { return "UTC" }
         return zone.abbreviation(for: date) ?? zone.identifier
     }
 
