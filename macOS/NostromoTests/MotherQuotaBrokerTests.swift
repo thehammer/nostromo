@@ -63,9 +63,24 @@ extension MotherBrokerClientTests {
         return String(decoding: bytes, as: UTF8.self)
     }
 
+    /// One line from the client, byte by byte like `serverReadLine`, but a signal-interrupted read (EINTR) is
+    /// retried instead of reading as "the client wrote nothing". The 5 s receive timeout still ends it.
+    fileprivate func qbReadLine() -> String? {
+        var buf = Data()
+        var byte: UInt8 = 0
+        while true {
+            let n = Darwin.read(serverFd, &byte, 1)
+            if n < 0 && errno == EINTR { continue }
+            if n <= 0 { return nil }
+            if byte == 0x0A { break }
+            buf.append(byte)
+        }
+        return String(data: buf, encoding: .utf8)
+    }
+
     /// The next command the client wrote, as a JSON object (nil-read after 5 s fails instead of hanging).
     fileprivate func qbReadCommand() throws -> [String: Any] {
-        let line = try XCTUnwrap(serverReadLine(), "the client wrote nothing")
+        let line = try XCTUnwrap(qbReadLine(), "the client wrote nothing")
         let object = try JSONSerialization.jsonObject(with: Data(line.utf8))
         return try XCTUnwrap(object as? [String: Any], "not a JSON object: \(line)")
     }
