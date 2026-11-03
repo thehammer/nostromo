@@ -463,8 +463,12 @@ final class MotherQuotaStrip: NSView {
         if let stale = MotherQuotaPresentation.staleText(quota) { add(stale, warning: true) }
         if quota.capInvalid { add(MotherQuotaPresentation.capInvalidText, warning: true) }
         if armed == nil {
-            for (label, window) in [("5h", quota.fiveHour), ("7d", quota.sevenDay)] {
-                guard let window else { continue }
+            for (label, window, dropped) in [("5h", quota.fiveHour, quota.fiveHourDropped),
+                                             ("7d", quota.sevenDay, quota.sevenDayDropped)] {
+                guard let window else {
+                    if dropped { add(MotherQuotaPresentation.windowUnavailableText(label: label), warning: true) }
+                    continue
+                }
                 add(MotherQuotaPresentation.windowText(label: label, window, now: now, timeZone: timeZone,
                                                        gate: quota.gate, stale: quota.stale),
                     warning: window.isOverCap)

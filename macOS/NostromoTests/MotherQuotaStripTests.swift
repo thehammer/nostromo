@@ -365,8 +365,8 @@ final class MotherQuotaStripTests: MouseQueueTestCase {
 
         XCTAssertTrue(rig.strip.isShown)
         XCTAssertEqual(rig.shownHeight, MotherQuotaStrip.visibleHeight)
-        XCTAssertFalse(rig.strip.labelText.contains("5h"))
-        XCTAssertFalse(rig.strip.labelText.contains("7d"))
+        XCTAssertTrue(rig.strip.labelText.contains("5h unavailable"), rig.strip.labelText)
+        XCTAssertTrue(rig.strip.labelText.contains("7d unavailable"), rig.strip.labelText)
         XCTAssertTrue(rig.strip.labelText.contains("Quota feed stale"), "with no usable age, just stale")
         XCTAssertEqual(rig.strip.badgeText, "Gate on, feed stale: Mother is not limiting work")
         for request in [MotherQuotaGateRequest.on, .off, .offUntilReset] {

@@ -81,10 +81,14 @@ public struct MotherQuota: Equatable, Sendable {
     public var capInvalid: Bool
     public var fiveHour: MotherQuotaWindow?
     public var sevenDay: MotherQuotaWindow?
+    /// The wire sent this window but its numbers were unusable, so it was dropped (not the same as never sent).
+    public var fiveHourDropped: Bool
+    public var sevenDayDropped: Bool
 
     public init(gate: MotherQuotaGate, until: Date? = nil, changedAt: String? = nil, changedBy: String? = nil,
                 source: Source = .none, feedAgeSeconds: Int? = nil, stale: Bool = false, capInvalid: Bool = false,
-                fiveHour: MotherQuotaWindow? = nil, sevenDay: MotherQuotaWindow? = nil) {
+                fiveHour: MotherQuotaWindow? = nil, sevenDay: MotherQuotaWindow? = nil,
+                fiveHourDropped: Bool = false, sevenDayDropped: Bool = false) {
         self.gate = gate
         self.until = until
         self.changedAt = changedAt
@@ -95,6 +99,8 @@ public struct MotherQuota: Equatable, Sendable {
         self.capInvalid = capInvalid
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
+        self.fiveHourDropped = fiveHourDropped
+        self.sevenDayDropped = sevenDayDropped
     }
 
     /// Decode the `quota` value of an envelope's `data` (a JSON object as `JSONSerialization` gives it).
@@ -102,6 +108,7 @@ public struct MotherQuota: Equatable, Sendable {
     public static func decode(_ value: Any?) -> MotherQuota? {
         guard let obj = value as? [String: Any] else { return nil }
         let windows = obj["windows"] as? [String: Any]
+        let five = window(windows?["five_hour"]), seven = window(windows?["seven_day"])
         return MotherQuota(
             gate: MotherQuotaGate(wire: obj["gate"] as? String),
             until: epoch(obj["until"]),
@@ -111,8 +118,9 @@ public struct MotherQuota: Equatable, Sendable {
             feedAgeSeconds: count(obj["feed_age_s"]),
             stale: obj["stale"] as? Bool ?? false,
             capInvalid: obj["cap_invalid"] as? Bool ?? false,
-            fiveHour: window(windows?["five_hour"]),
-            sevenDay: window(windows?["seven_day"]))
+            fiveHour: five, sevenDay: seven,
+            fiveHourDropped: five == nil && windows?["five_hour"] != nil,
+            sevenDayDropped: seven == nil && windows?["seven_day"] != nil)
     }
 
     /// `decode` from raw JSON bytes of the block itself.
@@ -164,6 +172,9 @@ public struct MotherQuota: Equatable, Sendable {
 /// The words the strip, the badge and the control show. Pure, so each wording is tested without a window.
 public enum MotherQuotaPresentation {
     public static let unavailableNote = "Quota status unavailable"
+
+    /// A window the broker sent with unusable numbers: `7d unavailable`.
+    public static func windowUnavailableText(label: String) -> String { "\(label) unavailable" }
 
     /// Central time, the operator's own; reset times are shown in it with an explicit zone label.
     public static let displayTimeZone = TimeZone(identifier: "America/Chicago") ?? .current
