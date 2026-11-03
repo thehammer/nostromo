@@ -96,6 +96,7 @@ final class ActivationAuditTests: XCTestCase {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
                               styleMask: [.titled], backing: .buffered, defer: true)
         window.title = sentinel
+        window.isReleasedWhenClosed = false
         defer { window.close() }
 
         let marker = "sentinel-test-\(UUID().uuidString)"
