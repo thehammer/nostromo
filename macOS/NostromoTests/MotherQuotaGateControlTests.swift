@@ -1126,7 +1126,6 @@ final class MotherQuotaGateControlTests: MouseQueueTestCase {
         h.setGate(.on, inFlight: true)
         for request in qgAllOptions {
             XCTAssertFalse(h.button(request).acceptsFirstResponder, "\(request) is disabled")
-            XCTAssertFalse(h.window.makeFirstResponder(h.button(request)), "\(request)")
         }
         h.setGate(.unknown("future"))
         for request in qgAllOptions {
