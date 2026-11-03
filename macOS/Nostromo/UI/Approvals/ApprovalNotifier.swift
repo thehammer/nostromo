@@ -76,6 +76,7 @@ enum NeedsYouPresentation {
 final class LiveApprovalRouter: ApprovalWindowRouting {
 
     func bringAppForward() {
+        ActivationAudit.note("approval-notification-click:activate")
         NSApp.activate(ignoringOtherApps: true)
     }
 

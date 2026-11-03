@@ -80,6 +80,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
 
         if !others.isEmpty {
             appLog.warning("Another Nostromo already running (pid=\(others.first?.processIdentifier ?? -1, privacy: .public)) — activating it and quitting self")
+            ActivationAudit.note("single-instance:activate-other")
             others.first?.activate()
             NSApp.terminate(nil)
             return
@@ -89,6 +90,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         // is shown by the system and its click goes nowhere (see `NeedsYouRouting`).
         UNUserNotificationCenter.current().delegate = self
 
+        ActivationAudit.installObservers()
         setupMenu()
         // The approval store listens from before the daemon connects: a permission request
         // is an event, and one that arrives with no listener is gone until the next snapshot.
@@ -194,6 +196,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         appLog.info("applicationShouldHandleReopen — hasVisibleWindows=\(flag, privacy: .public) windowCount=\(self.windows.count, privacy: .public)")
+        ActivationAudit.note("reopen:makeKeyAndOrderFront")
         windows.forEach { $0.makeKeyAndOrderFront(nil) }
         return false
     }
@@ -280,6 +283,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         win.collectionBehavior = [.fullScreenAuxiliary]
         win.contentView = MainLayout(windowIndex: index, displayUUID: display.uuid)
         win.delegate = win
+        ActivationAudit.note("qa-second-window:orderFront")
         win.orderFront(nil)
         qaExtraWindows.append(win)
         appLog.info("QA second window opened (index \(index, privacy: .public))")
@@ -526,9 +530,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         for (slot, display) in displays.enumerated() {
             openWindow(for: display, staggerDelay: Self.staggerInterval * Double(slot))
         }
+        ActivationAudit.note("launch:activate")
         NSApp.activate(ignoringOtherApps: true)
         // Key window: the menu-bar display's (`NSScreen.screens.first`, which `isMain` now means).
         if let keyUUID = (displays.first { $0.isMain } ?? displays.first)?.uuid {
+            ActivationAudit.note("launch:makeKeyAndOrderFront")
             windowsByDisplayUUID[keyUUID]?.makeKeyAndOrderFront(nil)
         }
         for (uuid, win) in windowsByDisplayUUID {
@@ -649,10 +655,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
             // operator. See docs/diagnostics.md for the residual this
             // accepts (no full-screen transition is exercised) and the
             // empirical check the plan required before landing this.
+            ActivationAudit.note("open-window:orderFront(smoke)")
             win.orderFront(nil)
         } else {
             // Ordered front WITHOUT activating: activation is done once, after
             // every window is placed, so it can't pull a window toward the key screen.
+            ActivationAudit.note("open-window:orderFront")
             win.orderFront(nil)
             placementLog.log(scope, "after orderFront: \(win.placementSnapshot)")
 
@@ -787,6 +795,7 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         // An approval notification brings the app forward itself (`ApprovalNotifier`), selects its focus and
         // puts the card in view. It has no action: the person reads the card and answers there.
         if ApprovalNotifier.live.handleClick(userInfo: response.notification.request.content.userInfo) { return }
+        ActivationAudit.note("notification-click:activate")
         NSApp.activate(ignoringOtherApps: true)
         // Another producer's items route to their focus once a router exists (AP3); for now the
         // app just comes forward.

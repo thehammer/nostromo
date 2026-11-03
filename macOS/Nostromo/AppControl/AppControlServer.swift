@@ -386,7 +386,9 @@ final class AppControlServer {
     private func activate(_ req: AppControlRequest) throws -> Any {
         let w = try window(req)
         if !NSApp.isActive { previousFrontmost = NSWorkspace.shared.frontmostApplication }
+        ActivationAudit.note("app-control:activate", detail: "cmd=activate")
         NSApp.activate(ignoringOtherApps: true)
+        ActivationAudit.note("app-control:activate", detail: "cmd=activate")
         w.makeKeyAndOrderFront(nil)
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         return ["active": NSApp.isActive, "key": w.isKeyWindow,
@@ -398,6 +400,7 @@ final class AppControlServer {
         let prev = previousFrontmost
         previousFrontmost = nil
         if let prev, prev.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            ActivationAudit.note("app-control:restore", detail: "cmd=restore")
             prev.activate(options: [])
             return ["restored": prev.bundleIdentifier as Any]
         }
@@ -735,6 +738,7 @@ final class AppControlServer {
         } else if let t = req.string("text") {
             pb.setString(t, forType: .string)
         } else { throw AppControlError.badRequest("paste needs \"image\" (path) or \"text\"") }
+        ActivationAudit.note("app-control:paste", detail: "cmd=paste")
         w.makeKeyAndOrderFront(nil)
         guard NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) else {
             throw AppControlError.failed("nothing in the responder chain handled paste")

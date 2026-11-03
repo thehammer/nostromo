@@ -630,7 +630,7 @@ final class BackgroundPopover: NSObject, NSPopoverDelegate {
             self.takeKeyboard(selectFirst: true)
         } else {
             // A click never moves the keyboard: undo whatever showing did.
-            if let keyBefore, NSApp?.keyWindow !== keyBefore { keyBefore.makeKey() }
+            if let keyBefore, NSApp?.keyWindow !== keyBefore { ActivationAudit.note("popover:restore-key"); keyBefore.makeKey() }
             restoreResponder()
         }
     }
@@ -645,6 +645,7 @@ final class BackgroundPopover: NSObject, NSPopoverDelegate {
         tookKeyboard = true
         let content = viewController.contentView
         content.acceptsKeyboard = true
+        ActivationAudit.note("popover:take-keyboard")
         content.window?.makeKey()
         content.window?.makeFirstResponder(content)
         if selectFirst { viewController.selectFirst() }
@@ -674,7 +675,7 @@ final class BackgroundPopover: NSObject, NSPopoverDelegate {
         tookKeyboard = false
         viewController.contentView.acceptsKeyboard = false
         if hadKeyboard || NSApp?.keyWindow == nil || NSApp?.keyWindow === viewController.view.window {
-            if let window = saved.window, window.isVisible, NSApp?.keyWindow !== window { window.makeKey() }
+            if let window = saved.window, window.isVisible, NSApp?.keyWindow !== window { ActivationAudit.note("popover:restore-saved-key"); window.makeKey() }
         }
         if hadKeyboard || firstResponderIsFree() { restoreResponder() }
         saved = (nil, nil, nil)
