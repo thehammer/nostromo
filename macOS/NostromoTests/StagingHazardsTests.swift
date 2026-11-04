@@ -474,10 +474,11 @@ final class StagingHazardsTests: XCTestCase {
             #"bash -c "cat a > b""#,
             #"echo $(echo x > f)"#,
             #"ls && echo x > f"#,
-            #"echo "a > b""#,
         ])
         // appends dups closes and redirections to the bit buckets are not truncations
         assertNone([
+            // A `>` inside quotes is a character, not a redirection (round 2: SQL, awk and jq programs).
+            #"echo "a > b""#,
             #"echo a >> log"#,
             #"cmd 2>&1"#,
             #"cmd >&2"#,
@@ -802,6 +803,7 @@ final class StagingHazardsTests: XCTestCase {
     func testTheSharedFixtureGivesTheExpectedDestructiveNamesAndEscapeQuoteLabel() throws {
         var checked = 0
         var asked = 0
+        var gluedChecked = 0
         for entry in try StagingFixtures.hazards() {
             let text = try XCTUnwrap(entry["text"] as? String)
             let name = entry["name"] as? String ?? "?"
@@ -812,14 +814,20 @@ final class StagingHazardsTests: XCTestCase {
             if let escaped = entry["escape_quoted"] as? Bool {
                 XCTAssertEqual(StagingHazards.escapeQuotedWordLabel(text) != nil, escaped, "\(name): \(text)")
             }
-            // Whether a production pane asks first: a destructive match, or an escape-quoted word.
+            // A brace expansion glued to a word (`r{m..m}`): its own label.
+            if let glued = entry["brace_glued"] as? Bool {
+                XCTAssertEqual(StagingHazards.braceGluedWordLabel(text) != nil, glued, "\(name): \(text)")
+                gluedChecked += 1
+            }
+            // Whether a production pane asks first: a destructive match, an escape-quoted word or a brace-glued word.
             if let asks = entry["asks_in_production"] as? Bool {
                 XCTAssertEqual(StagingHazards.asksFirstInProduction(text), asks, "\(name): \(text)")
                 asked += 1
             }
         }
         XCTAssertGreaterThanOrEqual(checked, 100, "the fixture pins the destructive names of at least 100 rows")
-        XCTAssertGreaterThanOrEqual(asked, 5, "the fixture pins whether a production pane asks for the escape-quoted rows")
+        XCTAssertGreaterThanOrEqual(asked, 25, "the fixture pins whether a production pane asks for the escape-quoted and brace-glued rows")
+        XCTAssertGreaterThanOrEqual(gluedChecked, 25, "the fixture pins brace_glued for at least 25 rows")
     }
 
     func testAnEscapeQuotedWordWithNoDestructiveMatchStillAsksInProduction() {
@@ -879,6 +887,313 @@ final class StagingHazardsTests: XCTestCase {
             let text = try XCTUnwrap(entry["text"] as? String, name)
             let expected = try XCTUnwrap(entry["history"] as? Bool, name)
             XCTAssertEqual(StagingHazards.usesHistoryExpansion(text), expected, "\(name): \(text)")
+        }
+    }
+}
+
+// MARK: - Round 2: quoted openers, brace groups glued to a word, `>` in quotes, command position, the read-only corpus
+
+extension StagingHazardsTests {
+
+    private static let escapeQuotedText = "\u{26A0} Contains an escape-quoted word ($'...' with a backslash): what runs may differ from what you see."
+    private static let braceGluedText = "\u{26A0} Contains a brace expansion glued to a word ({a,b} or {1..3}): what runs may differ from what you see."
+    private static let asksFirstSuffix = " Insert asks first."
+
+    private func wordSet(_ view: String) -> Set<String> {
+        Set(view.split(whereSeparator: { $0.isWhitespace }).map(String.init))
+    }
+
+    /// The first `;`, `|`, `&` separated segment of `view` that has `word` as one of its words.
+    private func segment(of view: String, withWord word: String) -> String? {
+        StagingHazards.segments(of: view).first { wordSet($0).contains(word) }
+    }
+
+    // MARK: Quoted and escaped substitution openers, and a quote-aware closer
+    //
+    // The words view puts the inner words of `$(...)`, a backtick pair and `<(...)` in the segment after a `_`
+    // placeholder, with `;`, `|` and `&` inside turned into spaces, and its closer search skips a quoted or
+    // backslash-escaped `)`, `}` or backtick. The daemon's `destructive.rs` tests hold the same cases.
+
+    func testAQuotedOrEscapedOpenerDoesNotHideTheWordsAShellRunsAfterIt() {
+        let cases: [(command: String, names: [String])] = [
+            (#"rm '$(' '-rf' /x ')'"#, ["rm -rf"]),
+            (#"rm '`' '-rf' /x '`'"#, ["rm -rf"]),
+            (#"rm '<(' '-rf' /x ')'"#, ["rm -rf"]),
+            (#"rm a\` '-rf' /x b\`"#, ["rm -rf"]),
+            (#"kubectl -n '$(' 'delete' ns prod ')'"#, ["kubectl delete"]),
+            (#"kubectl '`' 'delete' ns prod '`'"#, ["kubectl delete"]),
+            (#"kubectl $(echo "(") 'delete' ns prod "x)""#, ["kubectl delete"]),
+            (#"terraform '$(' 'destroy' -auto-approve ')'"#, ["terraform destroy"]),
+            (#"helm '$(' 'uninstall' rel ')'"#, ["helm uninstall"]),
+            (#"aws '$(' ec2 'terminate-instances' --instance-ids i-1 ')'"#, ["aws delete/terminate"]),
+            (#"aws '`' ec2 'terminate-instances' --instance-ids i-1 '`'"#, ["aws delete/terminate"]),
+            (#"pkill '$(' '-9' x ')'"#, ["kill -9"]),
+            (#"kill '$(' '-9' 1 ')'"#, ["kill -9"]),
+        ]
+        for (command, names) in cases {
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), names, command)
+        }
+    }
+
+    func testACloserThatSkipsAQuotedOrEscapedParenOrBacktickKeepsTheVerbAfterItsProgram() {
+        // The segment must not be split at the `;` inside the substitution: only a quote-aware closer sees that the
+        // `)` in the string does not end it.
+        let cases: [(command: String, names: [String])] = [
+            (#"kubectl $(echo ")"; echo x) delete ns prod"#, ["kubectl delete"]),
+            (#"kubectl $(echo ')'; echo x) delete ns prod"#, ["kubectl delete"]),
+            (#"kubectl `echo \`;echo x` delete ns prod"#, ["kubectl delete"]),
+            (#"terraform $(echo ")"; echo x) destroy"#, ["terraform destroy"]),
+            (#"kubectl ${X:-"}"; echo y} delete ns prod"#, ["kubectl delete"]),
+        ]
+        for (command, names) in cases {
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), names, command)
+        }
+    }
+
+    func testSubstitutionsThatHideNothingStayUnlabelled() {
+        for command in [#"echo '$(' hello ')'"#, "kubectl get pods -l app=$(cat app.txt)", "ls $(echo a; echo b)",
+                        "echo $(date) && ls ${HOME}/x"] {
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), [], command)
+        }
+    }
+
+    func testTheWordsViewEmitsTheInnerWordsOfSubstitutionsAfterThePlaceholder() {
+        let cases: [(text: String, words: [String])] = [
+            ("echo $(rm -rf /x)", ["echo", "_", "rm", "-rf", "/x"]),
+            ("echo `kubectl delete ns x`", ["echo", "_", "kubectl", "delete", "ns"]),
+            ("diff <(sort a.txt) <(cat b.txt)", ["diff", "_", "sort", "a.txt", "cat", "b.txt"]),
+            ("kubectl ${X:-delete} ns prod", ["kubectl", "_", "delete", "ns", "prod"]),
+        ]
+        for (text, words) in cases {
+            let view = StagingHazards.normalisedWords(text)
+            for word in words {
+                XCTAssertTrue(wordSet(view).contains(word), "\(word) should be a word of \(view) (from \(text))")
+            }
+        }
+    }
+
+    func testSeparatorsInsideASubstitutionDoNotSplitTheOuterSegment() {
+        for text in ["ls $(echo a; echo b | wc -l && echo c) ; ls",
+                     "ls `echo a; echo b | wc -l && echo c` ; ls",
+                     "ls <(echo a; echo b | wc -l && echo c) ; ls"] {
+            let view = StagingHazards.normalisedWords(text)
+            XCTAssertEqual(view.filter { $0 == ";" }.count, 1, "only the outer `;` is left in \(view) (from \(text))")
+            XCTAssertFalse(view.contains("|") || view.contains("&"), "no `|` or `&` is left in \(view) (from \(text))")
+            for word in ["echo", "wc", "a", "b"] {
+                XCTAssertTrue(wordSet(view).contains(word), "\(word) should be a word of \(view)")
+            }
+        }
+    }
+
+    func testTheWordsViewCloserSkipsAQuotedOrEscapedParenAndAnEscapedBacktick() {
+        for text in [#"kubectl $(echo ")"; echo x) delete ns prod"#,
+                     #"kubectl $(echo ')'; echo x) delete ns prod"#,
+                     #"kubectl $(echo \); echo x) delete ns prod"#,
+                     #"kubectl `echo \`;echo x` delete ns prod"#] {
+            let view = StagingHazards.normalisedWords(text)
+            XCTAssertFalse(view.contains(";"), "the `;` inside the substitution must not survive in \(view) (from \(text))")
+            let kubectl = segment(of: view, withWord: "kubectl")
+            XCTAssertNotNil(kubectl, "a segment with kubectl in \(view)")
+            XCTAssertTrue(wordSet(kubectl ?? "").contains("delete"), "`delete` must stay in kubectl's segment: \(view) (from \(text))")
+        }
+    }
+
+    func testTheWordsViewCloserSkipsAQuotedBrace() {
+        let view = StagingHazards.normalisedWords(#"kubectl ${X:-"}"; echo y} delete ns prod"#)
+        let kubectl = segment(of: view, withWord: "kubectl")
+        XCTAssertNotNil(kubectl, "a segment with kubectl in \(view)")
+        XCTAssertTrue(wordSet(kubectl ?? "").contains("delete"), "`delete` must stay in kubectl's segment: \(view)")
+    }
+
+    func testAnUnbalancedOpenerIsDroppedAndWhatFollowsStaysVisible() {
+        let view = StagingHazards.normalisedWords("kubectl --context $(echo x delete ns y")
+        XCTAssertTrue(wordSet(segment(of: view, withWord: "kubectl") ?? "").contains("delete"), view)
+    }
+
+    // MARK: Brace groups glued to a word
+    //
+    // `r{m..m}` is `rm` to a shell and nothing a text rule can follow: it fails toward the sheet (a production pane
+    // asks first) instead of expanding. A group alone as a word (`ls {a,b}`), a quoted or escaped one and `${...}`
+    // are not it. `file{1,2}.txt` and `cp f{,.bak}` ARE glued, so they ask in production too: the documented cost
+    // of failing toward confirmation.
+
+    private static let bracesGlued: [String] = [
+        "r{m..m} -rf /x", "{r..r}m -rf /x", "{r,}m -rf /x", "r{m,} -rf /x", "kubectl d{e..e}lete ns prod",
+        "terraform d{e..e}stroy -auto-approve", "aws s3 r{m..m} s3://b --recursive", "kill -{9..9} 1",
+        "{s,}hred -u old.log", "redis-cli flush{a..a}ll", "rm -{r,f} /x", "cp file{,.bak}", "ls file{1,2}.txt",
+        "echo a{b,c}d", "echo x{1..3}",
+        // glued after the closing brace by something that is not a separator or a redirection
+        "ls {a,b}/c",
+        // a quote counts as glue
+        #"echo "x"{a,b}"#, "echo 'x'{a,b}",
+        // the quoted argument of a command wrapper is analysed as live code
+        "bash -c 'ls file{1,2}.txt'", "ssh prod-host 'ls file{1,2}.txt'", #"sh -c "cp f{,.bak}""#,
+    ]
+
+    private static let bracesNotGlued: [String] = [
+        // a group alone as a word
+        "ls {a,b}", "echo {a,b} x", "ls {1..3}", "{rm,-rf,/x}", "kubectl {delete,} ns prod",
+        // glued only to a separator, a redirection or a parenthesis
+        "ls {a,b};ls", "ls {a,b}|wc -l", "cat <{a,b}", "echo ({a,b})",
+        // a parameter expansion
+        "echo ${HOME}", "echo ${X:-a,b}", "echo ${X:-1..3}",
+        // not a brace expansion: no comma and no `..` in the body
+        "xargs -I{} rm {}", #"find . -exec rm {} \;"#, "echo a{b}c", "echo x{}y",
+        // quoted (not a command wrapper's argument) or escaped
+        "jq '{a,b}' f.json", "kubectl get pods -o jsonpath='{.items[*].metadata.name}'",
+        "aws ec2 describe-instances --query 'Reservations[].Instances[].{Id:InstanceId,State:State.Name}'",
+        #"echo \{a,b\}x"#, "echo 'r{m,}'", #"echo "{a,b}x""#, "echo hello",
+    ]
+
+    func testABraceExpansionGluedToAWordHasItsLabelAndAsksFirstInProduction() {
+        for command in Self.bracesGlued {
+            XCTAssertEqual(StagingHazards.braceGluedWordLabel(command), Self.braceGluedText, command)
+            XCTAssertEqual(StagingHazards.braceGluedWordLabel(command, production: false), Self.braceGluedText, command)
+            XCTAssertEqual(StagingHazards.braceGluedWordLabel(command, production: true), Self.braceGluedText + Self.asksFirstSuffix, command)
+            XCTAssertTrue(StagingHazards.asksFirstInProduction(command), command)
+        }
+    }
+
+    func testABraceGroupThatIsNotGluedNotAnExpansionOrNotLiveHasNoLabel() {
+        for command in Self.bracesNotGlued {
+            XCTAssertNil(StagingHazards.braceGluedWordLabel(command), command)
+            XCTAssertNil(StagingHazards.braceGluedWordLabel(command, production: true), command)
+        }
+    }
+
+    func testTheEscapeQuotedLabelSaysInsertAsksFirstOnlyInProduction() {
+        let command = #"echo $'\x72m' -rf /"#
+        XCTAssertEqual(StagingHazards.escapeQuotedWordLabel(command), Self.escapeQuotedText)
+        XCTAssertEqual(StagingHazards.escapeQuotedWordLabel(command, production: false), Self.escapeQuotedText)
+        XCTAssertEqual(StagingHazards.escapeQuotedWordLabel(command, production: true), Self.escapeQuotedText + Self.asksFirstSuffix)
+        XCTAssertNil(StagingHazards.escapeQuotedWordLabel("echo $'abc'", production: true))
+        XCTAssertNil(StagingHazards.escapeQuotedWordLabel("echo hello", production: false))
+    }
+
+    func testAProductionPaneAsksForADestructiveMatchAnEscapeQuotedWordOrABraceGluedWord() {
+        // Each of the three on its own, with no destructive match for the last two.
+        XCTAssertTrue(StagingHazards.asksFirstInProduction("rm -rf x"))
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"echo $'\x72m' -rf /"#), [])
+        XCTAssertTrue(StagingHazards.asksFirstInProduction(#"echo $'\x72m' -rf /"#))
+        XCTAssertEqual(StagingDestructivePatterns.matches("r{m..m} -rf /x"), [])
+        XCTAssertTrue(StagingHazards.asksFirstInProduction("r{m..m} -rf /x"))
+        XCTAssertEqual(StagingDestructivePatterns.matches("ls file{1,2}.txt"), [])
+        XCTAssertTrue(StagingHazards.asksFirstInProduction("ls file{1,2}.txt"))
+        // and none of them
+        for command in ["ls -la", "echo hello", "echo ${HOME}", "ls {a,b}", "echo 'r{m,}'", "jq '{a,b}' f.json",
+                        "kubectl get pods -o jsonpath='{.items[*].metadata.name}'",
+                        "mysql -e 'SELECT id FROM jobs WHERE created_at > NOW() - INTERVAL 1 DAY'", "last reboot | head"] {
+            XCTAssertFalse(StagingHazards.asksFirstInProduction(command), command)
+        }
+    }
+
+    // MARK: pulumi and an aws ecs service scaled to a signed zero
+
+    func testPulumiDownStackRmAndStateDeleteAreTerraformDestroysAndTheReadOnlyVerbsAreNot() {
+        for command in ["pulumi down", "pulumi down --yes", "pulumi stack rm", "pulumi stack rm --yes", "pulumi state delete",
+                        "pulumi destroy --yes"] {
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), ["terraform destroy"], command)
+        }
+        for command in ["pulumi up", "pulumi stack ls", "pulumi preview", "pulumi stack output"] {
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), [], command)
+        }
+    }
+
+    func testAnEcsServiceScaledToASignedZeroIsLabelledAndAPositiveCountIsNot() {
+        for count in ["--desired-count +0", "--desired-count -0", "--desired-count=+0", "--desired-count=-0"] {
+            let command = "aws ecs update-service --cluster c --service s \(count)"
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), ["aws delete/terminate"], command)
+        }
+        for count in ["--desired-count 2", "--desired-count +2", "--desired-count=+2", "--desired-count 10"] {
+            let command = "aws ecs update-service --cluster c --service s \(count)"
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), [], command)
+        }
+    }
+
+    // MARK: A `>` inside quotes is not a redirection
+    //
+    // Except in the quoted argument of a command wrapper (a shell, `eval`, `ssh`, `mosh`, `parallel`, `watch`, `su`,
+    // `script`, `flock`, `runuser`): that string runs as code, with its own quotes tracked again. A `>` in a `$(...)`
+    // or backticks inside a double-quoted string is live too, and an unterminated quote counts as unquoted.
+
+    func testAGreaterThanInsideQuotesIsNotATruncatingRedirection() {
+        for command in ["mysql -e 'SELECT id FROM jobs WHERE created_at > NOW() - INTERVAL 1 DAY'",
+                        #"mysql -e "SELECT id FROM jobs WHERE attempts >= 3""#,
+                        #"php artisan tinker --execute='App\Models\Job::where("created_at", ">", now()->subDay())->count()'"#,
+                        "jq '.[] | select(.requests > 100)' stats.json",
+                        "awk '$9 >= 500 {print $7}' access.log",
+                        "echo x '>' y",
+                        // a quote nested inside a wrapper's argument is a quote again
+                        #"bash -c "mysql -e 'select 1 > 0'""#,
+                        #"ssh h 'mysql -e "select 1 > 0"'"#] {
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), [], command)
+        }
+    }
+
+    func testAGreaterThanInACommandWrappersQuotedArgumentOrOutsideQuotesIsStillATruncation() {
+        for command in ["bash -c 'echo x > f'", #"sh -c "cat y > f""#, "ssh h 'echo x > f'", "eval 'echo x > f'",
+                        "awk $3 > 80 f", "parallel 'echo {} > f' ::: a b", "xargs -I{} sh -c 'echo {} > out.txt'",
+                        "watch -n 5 'date > f'", "su deploy -c 'echo x > f'", "echo x > 'f'",
+                        // `$(...)` and backticks inside a double-quoted string run
+                        #"echo "$(date > f)""#, #"echo "`date > f`""#,
+                        // an unterminated quote counts as unquoted
+                        "echo 'a > b"] {
+            XCTAssertTrue(StagingDestructivePatterns.matches(command).contains("> file"), command)
+        }
+        XCTAssertEqual(StagingDestructivePatterns.matches("xargs -I{} sh -c 'echo {} > out.txt'"), ["> file"])
+    }
+
+    // MARK: Stop and shutdown only where a command can start
+    //
+    // `shutdown`, `reboot`, `halt`, `poweroff`, `systemctl ... stop|disable|mask` and `service ... stop` count in
+    // COMMAND POSITION of a segment: first, after prefix words (an assignment, `sudo`, `env`, `nice` and its number,
+    // `timeout` and its duration, `nohup`, `exec`, `command`, `time`, an option and the argument of one that takes
+    // one), or after a wrapper word earlier in the segment (a shell, `eval`, `ssh`, `xargs`, `parallel`, `watch`,
+    // `su`, `find -exec`, `kubectl|docker exec|run`, ...). Merely naming one (`last reboot`, `grep shutdown`) does not.
+
+    func testAShutdownWordThatIsOnlyAnArgumentDoesNotStopAnything() {
+        for command in ["last reboot | head", "grep -i shutdown /var/log/syslog", "journalctl -b | grep -i poweroff",
+                        "echo reboot", "echo systemctl stop nginx", "man shutdown",
+                        "grep -rn 'service nginx stop' /etc/init.d", "systemctl status nginx", "service nginx status",
+                        "systemctl restart nginx", "systemctl is-active nginx"] {
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), [], command)
+        }
+    }
+
+    func testAShutdownProgramInCommandPositionIsLabelledWhereverThePrefixWordsPutIt() {
+        for command in ["shutdown -h now", "sudo reboot", "/sbin/shutdown -h now", "FOO=1 reboot", "timeout 5 halt",
+                        "timeout 5s halt", "sudo -u root systemctl stop nginx", "nice -n 5 poweroff", "ssh prod-host reboot",
+                        "bash -c 'sudo reboot'", "xargs -n1 systemctl disable", "service nginx stop", "sudo service nginx stop",
+                        "systemctl --user mask foo", "sudo systemctl disable --now nginx", "ls; reboot",
+                        "kubectl exec p -- reboot", "halt", "poweroff"] {
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), ["stop/shutdown"], command)
+        }
+    }
+
+    // MARK: The read-only corpus
+    //
+    // Sixty realistic read-only production commands. None of them may ask in a production pane and none may carry a
+    // destructive label. A new rule that trips one of them is a false positive: fix the rule, not the row. A row
+    // marked `"expect": "sheet"` (with a `reason`) is the one allowed exception.
+
+    func testTheReadOnlyCorpusNeverAsksInProductionAndNeverCarriesALabel() throws {
+        let data = try StagingFixtures.fixtureData("read_only_corpus.json")
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]], "read_only_corpus.json should be an array of objects")
+        XCTAssertEqual(rows.count, 60, "the corpus is exactly 60 commands")
+        let texts = rows.compactMap { $0["text"] as? String }
+        XCTAssertEqual(texts.count, 60)
+        XCTAssertEqual(Set(texts).count, 60, "the commands are unique")
+        XCTAssertEqual(Set(rows.compactMap { $0["name"] as? String }).count, 60, "the names are unique")
+        for row in rows {
+            XCTAssertTrue(["ok", "sheet"].contains(row["expect"] as? String ?? ""), "\(row["name"] ?? "?"): expect is ok or sheet")
+        }
+        let sheet = rows.filter { ($0["expect"] as? String) == "sheet" }.compactMap { $0["text"] as? String }
+        XCTAssertLessThanOrEqual(sheet.count, 1, "at most one exception, got \(sheet)")
+        let asking = texts.filter { StagingHazards.asksFirstInProduction($0) }
+        XCTAssertEqual(asking, sheet, "exactly the rows marked sheet ask in production; any other command here is a false positive")
+        for row in rows where (row["expect"] as? String) == "ok" {
+            let text = try XCTUnwrap(row["text"] as? String)
+            XCTAssertEqual(StagingDestructivePatterns.matches(text), [], "\(row["name"] ?? "?"): \(text) must carry no label")
         }
     }
 }

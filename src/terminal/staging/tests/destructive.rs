@@ -7,9 +7,15 @@
 //! The list is conservative on purpose: when a command is ambiguous it MATCHES (the user is asked to
 //! confirm); a missing label never means a command is safe.
 
-use crate::terminal::staging::destructive::{destructive_patterns, DESTRUCTIVE_NAMES};
+use crate::terminal::staging::destructive::{
+    asks_in_production, brace_glued_word, destructive_patterns, escape_quoted_word,
+    DESTRUCTIVE_NAMES,
+};
+use crate::terminal::staging::text::{normalise_for_hazard_words, validate_command_in};
 
 const HAZARDS: &str = include_str!("../../../../tests/fixtures/terminal_staging/hazards.json");
+const READ_ONLY_CORPUS: &str =
+    include_str!("../../../../tests/fixtures/terminal_staging/read_only_corpus.json");
 
 const THE_LIST: [&str; 30] = [
     "rm -rf",
@@ -158,28 +164,37 @@ fn the_shared_fixture_has_a_positive_row_for_every_name_and_negatives_for_the_ne
 }
 
 #[test]
-fn the_fixtures_asks_in_production_field_is_a_destructive_match_or_an_escape_quoted_word() {
-    // The Mac app opens the confirm sheet in a production pane for a destructive match AND for an escape-quoted
-    // word (`$'\x72m'`: no text rule can follow it, so the sheet is the only thing that stops it). The daemon
-    // only pins the destructive half; the fixture row says what the app must do, and the Swift tests hold it to it.
+fn the_fixtures_asks_in_production_field_is_a_destructive_match_an_escape_quoted_word_or_a_brace_glued_word(
+) {
+    // The Mac app opens the confirm sheet in a production pane for a destructive match, for an escape-quoted
+    // word (`$'\x72m'`: no text rule can follow it) and for a brace expansion glued to a word (`r{m..m}`: no
+    // text rule can follow what the shell makes of it): the sheet is the only thing that stops them. The
+    // fixture row says what the app must do; the daemon's three predicates are held to the same rows.
     let rows: Vec<serde_json::Value> = serde_json::from_str(HAZARDS).expect("hazards.json");
     let asking: Vec<&serde_json::Value> = rows
         .iter()
         .filter(|r| r.get("asks_in_production").is_some())
         .collect();
     assert!(
-        asking.len() >= 5,
-        "the fixture pins the sheet for the escape-quoted rows, has {}",
+        asking.len() >= 25,
+        "the fixture pins the sheet for the escape-quoted and brace-glued rows, has {}",
         asking.len()
     );
     for row in asking {
         let text = row["text"].as_str().unwrap();
         let destructive = !destructive_patterns(text).is_empty();
         let escape_quoted = row["escape_quoted"].as_bool().unwrap_or(false);
+        let brace_glued = row["brace_glued"].as_bool().unwrap_or(false);
         assert_eq!(
             row["asks_in_production"].as_bool().unwrap(),
-            destructive || escape_quoted,
+            destructive || escape_quoted || brace_glued,
             "{}: {text:?}",
+            row["name"]
+        );
+        assert_eq!(
+            asks_in_production(text),
+            row["asks_in_production"].as_bool().unwrap(),
+            "{} (asks_in_production): {text:?}",
             row["name"]
         );
     }
@@ -188,6 +203,42 @@ fn the_fixtures_asks_in_production_field_is_a_destructive_match_or_an_escape_quo
             && r["asks_in_production"] == true
             && r["destructive"].as_array().is_some_and(|d| d.is_empty())),
         "an escape-quoted row with no destructive match must still ask in production"
+    );
+    assert!(
+        rows.iter().any(|r| r["brace_glued"] == true
+            && r["asks_in_production"] == true
+            && r["destructive"].as_array().is_some_and(|d| d.is_empty())),
+        "a brace-glued row with no destructive match must still ask in production"
+    );
+}
+
+#[test]
+fn the_fixtures_escape_quoted_and_brace_glued_fields_are_what_the_daemon_computes() {
+    let rows: Vec<serde_json::Value> = serde_json::from_str(HAZARDS).expect("hazards.json");
+    let mut glued = 0;
+    for row in &rows {
+        let text = row["text"].as_str().unwrap();
+        if let Some(want) = row["escape_quoted"].as_bool() {
+            assert_eq!(
+                escape_quoted_word(text),
+                want,
+                "{} (escape_quoted): {text:?}",
+                row["name"]
+            );
+        }
+        if let Some(want) = row["brace_glued"].as_bool() {
+            glued += 1;
+            assert_eq!(
+                brace_glued_word(text),
+                want,
+                "{} (brace_glued): {text:?}",
+                row["name"]
+            );
+        }
+    }
+    assert!(
+        glued >= 25,
+        "the fixture pins brace_glued for at least 25 rows, has {glued}"
     );
 }
 
@@ -817,7 +868,6 @@ fn a_truncating_redirection_is_caught_in_all_its_spellings() {
             "bash -c \"cat a > b\"",
             "echo $(echo x > f)",
             "ls && echo x > f",
-            "echo \"a > b\"",
         ],
     );
 }
@@ -825,6 +875,8 @@ fn a_truncating_redirection_is_caught_in_all_its_spellings() {
 #[test]
 fn appends_dups_closes_and_redirections_to_the_bit_buckets_are_not_truncations() {
     assert_none_match(&[
+        // A `>` inside quotes is a character, not a redirection (round 2: SQL, awk and jq programs).
+        "echo \"a > b\"",
         "echo a >> log",
         "cmd 2>&1",
         "cmd >&2",
@@ -1198,4 +1250,581 @@ fn several_families_in_one_command_are_all_listed_in_list_order() {
         destructive_patterns("kubectl delete pod x --force; php artisan migrate:rollback"),
         ["--force", "migrate:rollback", "kubectl delete"]
     );
+}
+
+// ── quoted and escaped substitution openers, and a quote-aware closer ─────────
+//
+// The words view (`normalise_for_hazard_words`) puts the inner words of `$(…)`, a backtick pair and `<(…)` in
+// the segment after a `_` placeholder, with `;`, `|` and `&` inside turned into spaces, and its closer search
+// skips a quoted or backslash-escaped `)`, `}` or backtick. So a verb a shell runs after a quoted opener, or
+// after a `)` inside a string, is still seen after the program it follows.
+
+#[test]
+fn a_quoted_or_escaped_opener_does_not_hide_the_words_a_shell_runs_after_it() {
+    let cases: &[(&str, &[&str])] = &[
+        (r#"rm '$(' '-rf' /x ')'"#, &["rm -rf"]),
+        (r#"rm '`' '-rf' /x '`'"#, &["rm -rf"]),
+        (r#"rm '<(' '-rf' /x ')'"#, &["rm -rf"]),
+        (r#"rm a\` '-rf' /x b\`"#, &["rm -rf"]),
+        (
+            r#"kubectl -n '$(' 'delete' ns prod ')'"#,
+            &["kubectl delete"],
+        ),
+        (r#"kubectl '`' 'delete' ns prod '`'"#, &["kubectl delete"]),
+        (
+            r#"kubectl $(echo "(") 'delete' ns prod "x)""#,
+            &["kubectl delete"],
+        ),
+        (
+            r#"terraform '$(' 'destroy' -auto-approve ')'"#,
+            &["terraform destroy"],
+        ),
+        (r#"helm '$(' 'uninstall' rel ')'"#, &["helm uninstall"]),
+        (
+            r#"aws '$(' ec2 'terminate-instances' --instance-ids i-1 ')'"#,
+            &["aws delete/terminate"],
+        ),
+        (
+            r#"aws '`' ec2 'terminate-instances' --instance-ids i-1 '`'"#,
+            &["aws delete/terminate"],
+        ),
+        (r#"pkill '$(' '-9' x ')'"#, &["kill -9"]),
+        (r#"kill '$(' '-9' 1 ')'"#, &["kill -9"]),
+    ];
+    for (command, want) in cases {
+        assert_eq!(destructive_patterns(command), *want, "{command}");
+    }
+}
+
+#[test]
+fn a_closer_that_skips_a_quoted_or_escaped_paren_or_backtick_keeps_the_verb_after_its_program() {
+    // The segment must not be split at the `;` inside the substitution: only a quote-aware closer sees that
+    // the `)` in the string does not end it.
+    let cases: &[(&str, &[&str])] = &[
+        (
+            r#"kubectl $(echo ")"; echo x) delete ns prod"#,
+            &["kubectl delete"],
+        ),
+        (
+            r#"kubectl $(echo ')'; echo x) delete ns prod"#,
+            &["kubectl delete"],
+        ),
+        (
+            r#"kubectl `echo \`;echo x` delete ns prod"#,
+            &["kubectl delete"],
+        ),
+        (
+            r#"terraform $(echo ")"; echo x) destroy"#,
+            &["terraform destroy"],
+        ),
+    ];
+    for (command, want) in cases {
+        assert_eq!(destructive_patterns(command), *want, "{command}");
+    }
+}
+
+#[test]
+fn substitutions_that_hide_nothing_stay_unlabelled() {
+    assert_none_match(&[
+        r#"echo '$(' hello ')'"#,
+        "kubectl get pods -l app=$(cat app.txt)",
+        "ls $(echo a; echo b)",
+        "echo $(date) && ls ${HOME}/x",
+    ]);
+}
+
+fn words_of(view: &str) -> Vec<&str> {
+    view.split_whitespace().collect()
+}
+
+/// The first `;`, `|`, `&` separated segment of `view` that has `program` as one of its words.
+fn segment_with<'a>(view: &'a str, program: &str) -> Option<&'a str> {
+    view.split([';', '|', '&'])
+        .find(|segment| segment.split_whitespace().any(|w| w == program))
+}
+
+#[test]
+fn the_words_view_emits_the_inner_words_of_a_command_substitution_after_the_placeholder() {
+    let view = normalise_for_hazard_words("echo $(rm -rf /x)");
+    let words = words_of(&view);
+    for want in ["echo", "_", "rm", "-rf", "/x"] {
+        assert!(
+            words.contains(&want),
+            "{want:?} should be a word of {view:?}"
+        );
+    }
+}
+
+#[test]
+fn the_words_view_emits_the_inner_words_of_a_backtick_pair() {
+    let view = normalise_for_hazard_words("echo `kubectl delete ns x`");
+    let words = words_of(&view);
+    for want in ["echo", "_", "kubectl", "delete", "ns"] {
+        assert!(
+            words.contains(&want),
+            "{want:?} should be a word of {view:?}"
+        );
+    }
+}
+
+#[test]
+fn the_words_view_emits_the_inner_words_of_a_process_substitution() {
+    let view = normalise_for_hazard_words("diff <(sort a.txt) <(cat b.txt)");
+    let words = words_of(&view);
+    for want in ["diff", "_", "sort", "a.txt", "cat", "b.txt"] {
+        assert!(
+            words.contains(&want),
+            "{want:?} should be a word of {view:?}"
+        );
+    }
+}
+
+#[test]
+fn the_words_view_still_shows_the_operand_of_a_parameter_expansion() {
+    let view = normalise_for_hazard_words("kubectl ${X:-delete} ns prod");
+    let words = words_of(&view);
+    for want in ["kubectl", "_", "delete", "ns", "prod"] {
+        assert!(
+            words.contains(&want),
+            "{want:?} should be a word of {view:?}"
+        );
+    }
+}
+
+#[test]
+fn separators_inside_a_substitution_do_not_split_the_outer_segment() {
+    for text in [
+        "ls $(echo a; echo b | wc -l && echo c) ; ls",
+        "ls `echo a; echo b | wc -l && echo c` ; ls",
+        "ls <(echo a; echo b | wc -l && echo c) ; ls",
+    ] {
+        let view = normalise_for_hazard_words(text);
+        assert_eq!(
+            view.matches(';').count(),
+            1,
+            "only the outer `;` is left in {view:?} (from {text:?})"
+        );
+        assert!(
+            !view.contains('|') && !view.contains('&'),
+            "no `|` or `&` is left in {view:?} (from {text:?})"
+        );
+        let words = words_of(&view);
+        for want in ["echo", "wc", "a", "b"] {
+            assert!(
+                words.contains(&want),
+                "{want:?} should be a word of {view:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_words_view_closer_skips_a_quoted_paren() {
+    for text in [
+        r#"kubectl $(echo ")"; echo x) delete ns prod"#,
+        r#"kubectl $(echo ')'; echo x) delete ns prod"#,
+        r#"kubectl $(echo \); echo x) delete ns prod"#,
+    ] {
+        let view = normalise_for_hazard_words(text);
+        assert!(
+            !view.contains(';'),
+            "the `;` inside the substitution must not survive in {view:?} (from {text:?})"
+        );
+        let segment = segment_with(&view, "kubectl")
+            .unwrap_or_else(|| panic!("a segment with kubectl in {view:?}"));
+        assert!(
+            words_of(segment).contains(&"delete"),
+            "`delete` must stay in kubectl's segment: {view:?} (from {text:?})"
+        );
+    }
+}
+
+#[test]
+fn the_words_view_closer_skips_a_quoted_brace() {
+    let text = r#"kubectl ${X:-"}"; echo y} delete ns prod"#;
+    let view = normalise_for_hazard_words(text);
+    let segment = segment_with(&view, "kubectl")
+        .unwrap_or_else(|| panic!("a segment with kubectl in {view:?}"));
+    assert!(
+        words_of(segment).contains(&"delete"),
+        "`delete` must stay in kubectl's segment: {view:?}"
+    );
+    assert_eq!(destructive_patterns(text), ["kubectl delete"]);
+}
+
+#[test]
+fn an_escaped_backtick_does_not_close_a_backtick_pair() {
+    let text = r#"kubectl `echo \`;echo x` delete ns prod"#;
+    let view = normalise_for_hazard_words(text);
+    assert!(
+        !view.contains(';'),
+        "the `;` between the escaped and the real backtick is inside the pair: {view:?}"
+    );
+    let segment = segment_with(&view, "kubectl")
+        .unwrap_or_else(|| panic!("a segment with kubectl in {view:?}"));
+    assert!(
+        words_of(segment).contains(&"delete"),
+        "`delete` must stay in kubectl's segment: {view:?}"
+    );
+}
+
+#[test]
+fn an_unbalanced_opener_is_dropped_and_what_follows_stays_visible() {
+    let view = normalise_for_hazard_words("kubectl --context $(echo x delete ns y");
+    let segment = segment_with(&view, "kubectl")
+        .unwrap_or_else(|| panic!("a segment with kubectl in {view:?}"));
+    assert!(words_of(segment).contains(&"delete"), "{view:?}");
+}
+
+// ── brace groups glued to a word ──────────────────────────────────────────────
+//
+// `r{m..m}` is `rm` to a shell and nothing a text rule can follow: it fails toward the sheet (a production
+// pane asks first) instead of expanding. A group alone as a word (`ls {a,b}`), a quoted or escaped one and
+// `${…}` are not it. `file{1,2}.txt` and `cp f{,.bak}` ARE glued, so they ask in production too: the documented
+// cost of failing toward confirmation.
+
+#[test]
+fn a_brace_expansion_glued_to_a_word_is_a_brace_glued_word() {
+    for command in [
+        "r{m..m} -rf /x",
+        "{r..r}m -rf /x",
+        "{r,}m -rf /x",
+        "r{m,} -rf /x",
+        "kubectl d{e..e}lete ns prod",
+        "terraform d{e..e}stroy -auto-approve",
+        "aws s3 r{m..m} s3://b --recursive",
+        "kill -{9..9} 1",
+        "{s,}hred -u old.log",
+        "redis-cli flush{a..a}ll",
+        "rm -{r,f} /x",
+        "cp file{,.bak}",
+        "ls file{1,2}.txt",
+        "echo a{b,c}d",
+        "echo x{1..3}",
+        // glued after the closing brace by something that is not a separator or a redirection
+        "ls {a,b}/c",
+        // a quote counts as glue
+        r#"echo "x"{a,b}"#,
+        "echo 'x'{a,b}",
+        // the quoted argument of a command wrapper is analysed as live code
+        "bash -c 'ls file{1,2}.txt'",
+        "ssh prod-host 'ls file{1,2}.txt'",
+        r#"sh -c "cp f{,.bak}""#,
+    ] {
+        assert!(
+            brace_glued_word(command),
+            "{command:?} is a brace-glued word"
+        );
+    }
+}
+
+#[test]
+fn a_brace_group_that_is_not_glued_or_not_an_expansion_or_not_live_is_not_a_brace_glued_word() {
+    for command in [
+        // a group alone as a word
+        "ls {a,b}",
+        "echo {a,b} x",
+        "ls {1..3}",
+        "{rm,-rf,/x}",
+        "kubectl {delete,} ns prod",
+        // glued only to a separator, a redirection or a parenthesis
+        "ls {a,b};ls",
+        "ls {a,b}|wc -l",
+        "cat <{a,b}",
+        "echo ({a,b})",
+        // a parameter expansion
+        "echo ${HOME}",
+        "echo ${X:-a,b}",
+        "echo ${X:-1..3}",
+        // not a brace expansion: no comma and no `..` in the body
+        "xargs -I{} rm {}",
+        r"find . -exec rm {} \;",
+        "echo a{b}c",
+        "echo x{}y",
+        // quoted (a quote that is not a command wrapper's argument) or escaped
+        "jq '{a,b}' f.json",
+        "kubectl get pods -o jsonpath='{.items[*].metadata.name}'",
+        "aws ec2 describe-instances --query 'Reservations[].Instances[].{Id:InstanceId,State:State.Name}'",
+        r"echo \{a,b\}x",
+        "echo 'r{m,}'",
+        r#"echo "{a,b}x""#,
+        "echo hello",
+    ] {
+        assert!(
+            !brace_glued_word(command),
+            "{command:?} is not a brace-glued word"
+        );
+    }
+}
+
+#[test]
+fn an_escape_quoted_word_is_an_ansi_c_quote_with_a_backslash() {
+    for command in [
+        r"echo $'\x72m' -rf /",
+        r"$'\x72\x6d' -rf /var/lib/mysql",
+        r"kubectl $'\x64elete' ns prod",
+        r"echo $'a\tb'",
+    ] {
+        assert!(escape_quoted_word(command), "{command:?}");
+    }
+    for command in ["echo $'abc'", "ls -la", "echo hello", r"echo '$\x72'"] {
+        assert!(!escape_quoted_word(command), "{command:?}");
+    }
+}
+
+#[test]
+fn a_production_pane_asks_for_a_destructive_match_an_escape_quoted_word_or_a_brace_glued_word() {
+    // Each of the three on its own, with no destructive match for the last two.
+    assert!(asks_in_production("rm -rf x"));
+    assert!(destructive_patterns(r"echo $'\x72m' -rf /").is_empty());
+    assert!(asks_in_production(r"echo $'\x72m' -rf /"));
+    assert!(destructive_patterns("r{m..m} -rf /x").is_empty());
+    assert!(asks_in_production("r{m..m} -rf /x"));
+    assert!(destructive_patterns("ls file{1,2}.txt").is_empty());
+    assert!(asks_in_production("ls file{1,2}.txt"));
+    // and none of them
+    for command in [
+        "ls -la",
+        "echo hello",
+        "echo ${HOME}",
+        "ls {a,b}",
+        "echo 'r{m,}'",
+        "jq '{a,b}' f.json",
+        "kubectl get pods -o jsonpath='{.items[*].metadata.name}'",
+        "mysql -e 'SELECT id FROM jobs WHERE created_at > NOW() - INTERVAL 1 DAY'",
+        "last reboot | head",
+    ] {
+        assert!(!asks_in_production(command), "{command:?} does not ask");
+    }
+}
+
+// ── pulumi and an aws ecs service scaled to a signed zero ─────────────────────
+
+#[test]
+fn pulumi_down_stack_rm_and_state_delete_are_terraform_destroys_and_the_read_only_verbs_are_not() {
+    for command in [
+        "pulumi down",
+        "pulumi down --yes",
+        "pulumi stack rm",
+        "pulumi stack rm --yes",
+        "pulumi state delete",
+        "pulumi destroy --yes",
+    ] {
+        assert_eq!(
+            destructive_patterns(command),
+            ["terraform destroy"],
+            "{command}"
+        );
+    }
+    assert_none_match(&[
+        "pulumi up",
+        "pulumi stack ls",
+        "pulumi preview",
+        "pulumi stack output",
+    ]);
+}
+
+#[test]
+fn an_ecs_service_scaled_to_a_signed_zero_is_labelled_and_a_positive_count_is_not() {
+    for count in [
+        "--desired-count +0",
+        "--desired-count -0",
+        "--desired-count=+0",
+        "--desired-count=-0",
+    ] {
+        let command = format!("aws ecs update-service --cluster c --service s {count}");
+        assert_eq!(
+            destructive_patterns(&command),
+            ["aws delete/terminate"],
+            "{command}"
+        );
+    }
+    for count in [
+        "--desired-count 2",
+        "--desired-count +2",
+        "--desired-count=+2",
+        "--desired-count 10",
+    ] {
+        let command = format!("aws ecs update-service --cluster c --service s {count}");
+        assert_none_match(&[command.as_str()]);
+    }
+}
+
+// ── a `>` inside quotes is not a redirection ──────────────────────────────────
+//
+// Except in the quoted argument of a command wrapper (a shell, `eval`, `ssh`, `mosh`, `parallel`, `watch`, `su`,
+// `script`, `flock`, `runuser`): that string runs as code, with its own quotes tracked again. A `>` in a `$(…)`
+// or backticks inside a double-quoted string is live too, and an unterminated quote counts as unquoted.
+
+#[test]
+fn a_greater_than_inside_quotes_is_not_a_truncating_redirection() {
+    assert_none_match(&[
+        "mysql -e 'SELECT id FROM jobs WHERE created_at > NOW() - INTERVAL 1 DAY'",
+        r#"mysql -e "SELECT id FROM jobs WHERE attempts >= 3""#,
+        r#"php artisan tinker --execute='App\Models\Job::where("created_at", ">", now()->subDay())->count()'"#,
+        "jq '.[] | select(.requests > 100)' stats.json",
+        "awk '$9 >= 500 {print $7}' access.log",
+        "echo x '>' y",
+        // a quote nested inside a wrapper's argument is a quote again
+        r#"bash -c "mysql -e 'select 1 > 0'""#,
+        r#"ssh h 'mysql -e "select 1 > 0"'"#,
+    ]);
+}
+
+#[test]
+fn a_greater_than_in_a_command_wrappers_quoted_argument_or_outside_quotes_is_still_a_truncation() {
+    assert_all_match(
+        "> file",
+        &[
+            "bash -c 'echo x > f'",
+            r#"sh -c "cat y > f""#,
+            "ssh h 'echo x > f'",
+            "eval 'echo x > f'",
+            "awk $3 > 80 f",
+            "parallel 'echo {} > f' ::: a b",
+            "xargs -I{} sh -c 'echo {} > out.txt'",
+            "watch -n 5 'date > f'",
+            "su deploy -c 'echo x > f'",
+            "echo x > 'f'",
+            // `$(…)` and backticks inside a double-quoted string run
+            r#"echo "$(date > f)""#,
+            r#"echo "`date > f`""#,
+            // an unterminated quote counts as unquoted
+            "echo 'a > b",
+        ],
+    );
+    assert_eq!(
+        destructive_patterns("xargs -I{} sh -c 'echo {} > out.txt'"),
+        ["> file"]
+    );
+}
+
+// ── stop and shutdown only where a command can start ──────────────────────────
+//
+// `shutdown`, `reboot`, `halt`, `poweroff`, `systemctl … stop|disable|mask` and `service … stop` count in COMMAND
+// POSITION of a segment: first, after prefix words (an assignment, `sudo`, `env`, `nice` and its number,
+// `timeout` and its duration, `nohup`, `exec`, `command`, `time`, an option and the argument of one that takes
+// one), or after a wrapper word earlier in the segment (a shell, `eval`, `ssh`, `xargs`, `parallel`, `watch`,
+// `su`, `find -exec`, `kubectl|docker exec|run`, …). Merely naming one (`last reboot`, `grep shutdown`) does not.
+
+#[test]
+fn a_shutdown_word_that_is_only_an_argument_does_not_stop_anything() {
+    assert_none_match(&[
+        "last reboot | head",
+        "grep -i shutdown /var/log/syslog",
+        "journalctl -b | grep -i poweroff",
+        "echo reboot",
+        "echo systemctl stop nginx",
+        "man shutdown",
+        "grep -rn 'service nginx stop' /etc/init.d",
+        "systemctl status nginx",
+        "service nginx status",
+        "systemctl restart nginx",
+        "systemctl is-active nginx",
+    ]);
+}
+
+#[test]
+fn a_shutdown_program_in_command_position_is_labelled_wherever_the_prefix_words_put_it() {
+    for command in [
+        "shutdown -h now",
+        "sudo reboot",
+        "/sbin/shutdown -h now",
+        "FOO=1 reboot",
+        "timeout 5 halt",
+        "timeout 5s halt",
+        "sudo -u root systemctl stop nginx",
+        "nice -n 5 poweroff",
+        "ssh prod-host reboot",
+        "bash -c 'sudo reboot'",
+        "xargs -n1 systemctl disable",
+        "service nginx stop",
+        "sudo service nginx stop",
+        "systemctl --user mask foo",
+        "sudo systemctl disable --now nginx",
+        "ls; reboot",
+        "kubectl exec p -- reboot",
+        "halt",
+        "poweroff",
+    ] {
+        assert_eq!(
+            destructive_patterns(command),
+            ["stop/shutdown"],
+            "{command}"
+        );
+    }
+}
+
+// ── the read-only corpus ──────────────────────────────────────────────────────
+//
+// Sixty realistic read-only production commands. None of them may ask in a production pane, none may carry a
+// destructive label, and every one must be stageable in a remote pane. A new rule that trips one of them is
+// a false positive: fix the rule, not the row. A row marked `"expect": "sheet"` (with a `reason`) is the one
+// allowed exception.
+
+#[test]
+fn the_read_only_corpus_never_asks_in_production_and_never_carries_a_label() {
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(READ_ONLY_CORPUS).expect("read_only_corpus.json");
+    assert_eq!(rows.len(), 60, "the corpus is exactly 60 commands");
+
+    let mut names = std::collections::BTreeSet::new();
+    let mut texts = std::collections::BTreeSet::new();
+    for row in &rows {
+        assert!(
+            names.insert(row["name"].as_str().unwrap()),
+            "duplicate name {}",
+            row["name"]
+        );
+        assert!(
+            texts.insert(row["text"].as_str().unwrap()),
+            "duplicate text {}",
+            row["text"]
+        );
+        assert!(
+            matches!(row["expect"].as_str(), Some("ok" | "sheet")),
+            "{}: expect is \"ok\" or \"sheet\"",
+            row["name"]
+        );
+        if row["expect"] == "sheet" {
+            assert!(
+                row["reason"].as_str().is_some_and(|r| !r.is_empty()),
+                "{}: a sheet row says why",
+                row["name"]
+            );
+        }
+    }
+
+    let sheet: Vec<&str> = rows
+        .iter()
+        .filter(|r| r["expect"] == "sheet")
+        .map(|r| r["text"].as_str().unwrap())
+        .collect();
+    assert!(sheet.len() <= 1, "at most one exception, got {sheet:?}");
+
+    let asking: Vec<&str> = rows
+        .iter()
+        .map(|r| r["text"].as_str().unwrap())
+        .filter(|text| asks_in_production(text))
+        .collect();
+    assert_eq!(
+        asking, sheet,
+        "exactly the rows marked `sheet` ask in production; any other command here is a false positive"
+    );
+
+    for row in rows.iter().filter(|r| r["expect"] == "ok") {
+        let text = row["text"].as_str().unwrap();
+        assert_eq!(
+            destructive_patterns(text),
+            Vec::<&str>::new(),
+            "{}: {text:?} must carry no label",
+            row["name"]
+        );
+        assert_eq!(
+            validate_command_in(text, true),
+            Ok(()),
+            "{}: {text:?} must be stageable in a remote pane",
+            row["name"]
+        );
+    }
 }

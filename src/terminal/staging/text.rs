@@ -172,8 +172,10 @@ const SUBSTITUTION_WORD: &str = "_";
 
 /// The view of the text for the destructive rules in which what a shell expands cannot sit between a program
 /// and its verb: each balanced `$(...)`, backtick pair, `<(...)` or `${...}` becomes ONE placeholder word
-/// ([`SUBSTITUTION_WORD`]; for `${...}` the words of its operand follow it, so `${X:-delete}` still shows
-/// `delete`), `(`, `)`, `{`, `}` become spaces, and a comma inside a brace group does too (brace expansion:
+/// ([`SUBSTITUTION_WORD`]) followed by its words (for `${...}` its operand's, so `${X:-delete}` still shows
+/// `delete`; for the others the whole body with `;`, `|` and `&` as spaces, so a quoted opener such as
+/// `rm '$(' -rf x ')'`, which a shell passes through as literal text, still leaves `-rf` visible). A closer
+/// inside quotes or after a backslash does not close ([`closing_index`]). `(`, `)`, `{`, `}` become spaces, and a comma inside a brace group does too (brace expansion:
 /// `{rm,-rf,/x}` is the words `rm -rf /x`). Quotes and backslashes are dropped, and so is the `$` of `$'...'`
 /// and `$"..."`; empty expansions are as in [`normalise_for_hazards`]. `;`, `|` and `&` stay, and `/* */` is
 /// NOT a comment here: a shell has none, so `echo /*; 'kubectl' delete ns x; echo */` runs the middle command.
@@ -188,19 +190,67 @@ pub fn normalise_for_hazard_words_joined(text: &str) -> String {
 }
 
 /// Index of the char that closes the `open` at `chars[start]`, counting nested pairs; `None` when unbalanced.
-fn closing_index(chars: &[char], start: usize, open: char, close: char) -> Option<usize> {
-    let mut depth = 0usize;
+/// Quote- and escape-aware: a closer (or an opener) inside `'...'` or `"..."`, or after a backslash, neither
+/// closes nor opens, so `$(echo ")"; x)` closes at its last parenthesis. A quote that never closes makes the
+/// whole group unbalanced (the caller then drops the opener and what follows stays visible).
+pub(super) fn closing_index(
+    chars: &[char],
+    start: usize,
+    open: char,
+    close: char,
+) -> Option<usize> {
+    let (mut depth, mut quote, mut escaped) = (0usize, None::<char>, false);
     for (offset, &c) in chars[start..].iter().enumerate() {
-        if c == open {
+        if escaped {
+            escaped = false;
+        } else if quote == Some('\'') {
+            if c == '\'' {
+                quote = None;
+            }
+        } else if c == '\\' {
+            escaped = true;
+        } else if quote.is_some() {
+            if quote == Some(c) {
+                quote = None;
+            }
+        } else if matches!(c, '\'' | '"') {
+            quote = Some(c);
+        } else if c == open {
             depth += 1;
         } else if c == close {
-            depth -= 1;
+            depth = depth.saturating_sub(1);
             if depth == 0 {
                 return Some(start + offset);
             }
         }
     }
     None
+}
+
+/// Index of the backtick that closes the one at `chars[start]`: the next one not escaped by a backslash.
+pub(super) fn closing_backtick(chars: &[char], start: usize) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, &c) in chars[start + 1..].iter().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '`' {
+            return Some(start + 1 + offset);
+        }
+    }
+    None
+}
+
+/// The words inside a `$(...)`, backtick pair or `<(...)`, for [`normalise_for_hazard_words`]: the body as that
+/// view reads any text, with `;`, `|` and `&` turned into spaces so it cannot split the outer segment.
+fn substitution_words(body: &[char], empty: &str) -> String {
+    let body: String = body.iter().collect();
+    let words: String = normalise_words_with(&body, empty)
+        .chars()
+        .map(|c| if matches!(c, ';' | '|' | '&') { ' ' } else { c })
+        .collect();
+    format!(" {words} ")
 }
 
 /// The words of a `${...}` body, for the hazard rules: its name, then its operand with the operator
@@ -243,10 +293,14 @@ fn normalise_words_with(text: &str, empty: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut braces = 0usize;
+    let mut escaped = false;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if c == '$' {
+        // A backslash-escaped character never opens a substitution. A quoted opener is NOT told apart here: it
+        // opens like any other, and its body is emitted below, so what it hides is still seen (`rm '$(' -rf x ')'`).
+        let literal = std::mem::take(&mut escaped);
+        if c == '$' && !literal {
             if let Some(len) = empty_expansion_len(&chars[i..]) {
                 i += len;
                 if !(empty == " " && out.ends_with(' ')) {
@@ -262,6 +316,7 @@ fn normalise_words_with(text: &str, empty: &str) -> String {
                 Some('(') => {
                     if let Some(close) = closing_index(&chars, i + 1, '(', ')') {
                         out.push_str(&format!(" {SUBSTITUTION_WORD} "));
+                        out.push_str(&substitution_words(&chars[i + 2..close], empty));
                         i = close + 1;
                         continue;
                     }
@@ -277,23 +332,26 @@ fn normalise_words_with(text: &str, empty: &str) -> String {
                 _ => {}
             }
         }
-        if c == '<' && chars.get(i + 1) == Some(&'(') {
+        if c == '<' && chars.get(i + 1) == Some(&'(') && !literal {
             if let Some(close) = closing_index(&chars, i + 1, '(', ')') {
                 out.push_str(&format!(" {SUBSTITUTION_WORD} "));
+                out.push_str(&substitution_words(&chars[i + 2..close], empty));
                 i = close + 1;
                 continue;
             }
         }
-        if c == '`' {
-            if let Some(len) = chars[i + 1..].iter().position(|&n| n == '`') {
+        if c == '`' && !literal {
+            if let Some(close) = closing_backtick(&chars, i) {
                 out.push_str(&format!(" {SUBSTITUTION_WORD} "));
-                i += len + 2;
+                out.push_str(&substitution_words(&chars[i + 1..close], empty));
+                i = close + 1;
                 continue;
             }
         }
         i += 1;
         match c {
-            '\'' | '"' | '\\' => {}
+            '\\' => escaped = !literal,
+            '\'' | '"' => {}
             '{' => {
                 braces += 1;
                 out.push(' ');

@@ -11,20 +11,27 @@
 //! removed); a hit on any view counts, so a wrapped (`bash -c 'rm -rf x'`), quoted (`r''m`), split (`r$()m`),
 //! substituted (`kubectl --context $(...) delete ns x`) or brace-expanded (`{rm,-rf,/x}`) form is still seen.
 //! Quotes are not parsed, so a pattern inside a quoted string matches too: asking is the cheap side, and an
-//! ambiguous case asks.
+//! ambiguous case asks. Two rules do read quotes, both to stop asking about ordinary read-only commands:
+//! `> file` ignores a `>` inside a quoted string (SQL, `awk` and `jq` programs are full of them) unless the
+//! string is the argument of a command wrapper (`bash -c '...'`, `eval`, `ssh host '...'`, `parallel`, ...),
+//! which is analysed as live code; and `stop/shutdown` only counts in command position.
 //!
 //! Vocabulary used below: a *segment* is a view split at `;`, `|` and `&`; its *words* are split at spaces and
 //! tabs; a word's *program* is its last path component, lowercased (`/usr/bin/kubectl` is `kubectl`). A
 //! program counts anywhere in a segment, so a leading `sudo`, `env`, `command`, `time`, `nohup`, `exec`, a
 //! prefix assignment or option never hides it, and global options between it and its verb do not either.
+//!
+//! Besides the 30 names, a production pane also asks first for two *warnings* that are not names (nothing
+//! in them says what the command does): an escape-quoted word (`$'\x72m'`) and a brace group glued to a word
+//! (`r{m,} -rf x`, `kill -{9..9} 1`), see [`asks_in_production`].
 
 use std::sync::OnceLock;
 
 use regex::Regex;
 
 use super::text::{
-    normalise_for_hazard_words, normalise_for_hazard_words_joined, normalise_for_hazards,
-    normalise_for_hazards_joined,
+    closing_backtick, closing_index, normalise_for_hazard_words, normalise_for_hazard_words_joined,
+    normalise_for_hazards, normalise_for_hazards_joined,
 };
 
 /// The names, in list order. The first ten are the original list; the rest were added with the
@@ -64,13 +71,7 @@ pub const DESTRUCTIVE_NAMES: [&str; 30] = [
 
 /// The names of the patterns `text` matches, in list order.
 pub fn destructive_patterns(text: &str) -> Vec<&'static str> {
-    let views = [
-        text.to_string(),
-        normalise_for_hazards(text),
-        normalise_for_hazards_joined(text),
-        normalise_for_hazard_words(text),
-        normalise_for_hazard_words_joined(text),
-    ];
+    let views = views_of(text);
     let any = |test: &dyn Fn(&str) -> bool| views.iter().any(|v| test(v));
     let matches = |name: &str| -> bool {
         match name {
@@ -105,7 +106,15 @@ pub fn destructive_patterns(text: &str) -> Vec<&'static str> {
             }),
             "mkfs" => any(&|v| all_words(v).iter().any(|w| program(w).starts_with("mkfs"))),
             "shred" => any(&|v| all_words(v).iter().any(|w| program(w) == "shred")),
-            "> file" => any(&truncates_a_file),
+            "> file" => {
+                // A `>` inside a quoted string is not a redirection: read the views of the text with those masked.
+                let masked = mask_quoted_operators(text);
+                if masked == text {
+                    any(&truncates_a_file)
+                } else {
+                    views_of(&masked).iter().any(|v| truncates_a_file(v))
+                }
+            }
             "find -delete" => any(&has_find_delete),
             "xargs/piped rm" => any(&has_xargs_or_piped_rm),
             "FLUSHALL/FLUSHDB" => any(&|v| regex(&FLUSH, r"(?i)\bflush(?:all|db)\b").is_match(v)),
@@ -120,7 +129,26 @@ pub fn destructive_patterns(text: &str) -> Vec<&'static str> {
         .collect()
 }
 
+/// The text as written and its four normalised copies.
+fn views_of(text: &str) -> [String; 5] {
+    [
+        text.to_string(),
+        normalise_for_hazards(text),
+        normalise_for_hazards_joined(text),
+        normalise_for_hazard_words(text),
+        normalise_for_hazard_words_joined(text),
+    ]
+}
+
+/// Does a production pane ask before inserting `text`? On a destructive match, on an escape-quoted word
+/// ([`escape_quoted_word`]) and on a brace group glued to a word ([`brace_glued_word`]). The Mac app's
+/// `StagingHazards.asksFirstInProduction` is the same rule.
+pub fn asks_in_production(text: &str) -> bool {
+    !destructive_patterns(text).is_empty() || escape_quoted_word(text) || brace_glued_word(text)
+}
+
 static DROP: OnceLock<Regex> = OnceLock::new();
+static ESCAPE_QUOTED: OnceLock<Regex> = OnceLock::new();
 static TRUNCATE: OnceLock<Regex> = OnceLock::new();
 static KILL: OnceLock<Regex> = OnceLock::new();
 static DELETE_FROM: OnceLock<Regex> = OnceLock::new();
@@ -347,36 +375,45 @@ fn has_force_kill(view: &str) -> bool {
 // ── infrastructure ──────────────────────────────────────────────────────────────────────────────────
 
 /// `terraform`, `tofu`, `terragrunt` or `pulumi` followed later in the segment by `destroy`, `destroy-all`,
-/// `-destroy`, `--destroy`, `-replace` or `--replace` (optionally `=value`). `plan -destroy` is read-only but
-/// its plan file can be applied unseen, so it asks too. Also (same label) `taint`, `force-unlock`,
-/// `workspace … delete` and `state … rm`/`remove`/`push`: each makes the next apply destroy something, or
-/// forgets, overwrites or deletes state, or breaks a lock.
+/// `-destroy`, `--destroy`, `-replace` or `--replace` (optionally `=value`), or, for `pulumi`, `down` (its alias
+/// of `destroy`). `plan -destroy` is read-only but its plan file can be applied unseen, so it asks too. Also
+/// (same label) `taint`, `force-unlock`, `workspace … delete`, `state … rm`/`remove`/`push`/`delete` and
+/// `stack … rm`/`remove` (pulumi: deletes the stack and its history): each makes the next apply destroy
+/// something, or forgets, overwrites or deletes state, or breaks a lock.
 fn has_terraform_destroy(view: &str) -> bool {
+    const PROGRAMS: [&str; 4] = ["terraform", "tofu", "terragrunt", "pulumi"];
     segment_words(view).iter().any(|words| {
-        after_program(words, &["terraform", "tofu", "terragrunt", "pulumi"]).is_some_and(|rest| {
-            let rest: Vec<String> = rest.iter().map(|w| w.to_lowercase()).collect();
-            let then = |first: &str, verbs: &[&str]| {
-                rest.iter()
-                    .position(|w| w == first)
-                    .is_some_and(|at| rest[at + 1..].iter().any(|w| verbs.contains(&w.as_str())))
-            };
-            then("workspace", &["delete"])
-                || then("state", &["rm", "remove", "push"])
-                || rest.iter().any(|w| {
-                    let flag = w.trim_start_matches('-');
-                    let name = flag.split('=').next().unwrap_or(flag);
-                    matches!(
-                        w.as_str(),
-                        "destroy" | "destroy-all" | "taint" | "force-unlock"
-                    ) || (w.starts_with('-') && (name == "destroy" || name == "replace"))
-                })
-        })
+        let Some(at) = words
+            .iter()
+            .position(|w| PROGRAMS.contains(&program(w).as_str()))
+        else {
+            return false;
+        };
+        let pulumi = program(&words[at]) == "pulumi";
+        let rest: Vec<String> = words[at + 1..].iter().map(|w| w.to_lowercase()).collect();
+        let then = |first: &str, verbs: &[&str]| {
+            rest.iter()
+                .position(|w| w == first)
+                .is_some_and(|at| rest[at + 1..].iter().any(|w| verbs.contains(&w.as_str())))
+        };
+        then("workspace", &["delete"])
+            || then("state", &["rm", "remove", "push", "delete"])
+            || then("stack", &["rm", "remove"])
+            || rest.iter().any(|w| {
+                let flag = w.trim_start_matches('-');
+                let name = flag.split('=').next().unwrap_or(flag);
+                matches!(
+                    w.as_str(),
+                    "destroy" | "destroy-all" | "taint" | "force-unlock"
+                ) || (pulumi && w == "down")
+                    || (w.starts_with('-') && (name == "destroy" || name == "replace"))
+            })
     })
 }
 
 /// `aws` followed later in the segment by a word that is exactly `delete-…`, `batch-delete-…`, `terminate-…`,
 /// `remove-…`, `deregister-…` or `purge-…`, or exactly `schedule-key-deletion` (kms: the key is gone in 7 to 30
-/// days) or `stop-instances`, or `update-service` with `--desired-count` 0 (an ECS service scaled to nothing).
+/// days) or `stop-instances`, or `update-service` with `--desired-count` 0, `+0` or `-0` (an ECS service scaled to nothing).
 fn has_aws_delete(view: &str) -> bool {
     const VERBS: [&str; 6] = [
         "delete-",
@@ -391,7 +428,11 @@ fn has_aws_delete(view: &str) -> bool {
             let rest: Vec<String> = rest.iter().map(|w| w.to_lowercase()).collect();
             let scales_to_zero = rest.contains(&"update-service".to_string())
                 && rest.iter().enumerate().any(|(index, w)| {
-                    let zero = |n: &str| !n.is_empty() && n.chars().all(|c| c == '0');
+                    // A shell tool parses `+0` and `-0` as 0 too.
+                    let zero = |n: &str| {
+                        let n = n.strip_prefix(['+', '-']).unwrap_or(n);
+                        !n.is_empty() && n.chars().all(|c| c == '0')
+                    };
                     w.strip_prefix("--desired-count=").is_some_and(zero)
                         || (w == "--desired-count" && rest.get(index + 1).is_some_and(|n| zero(n)))
                 });
@@ -537,14 +578,346 @@ fn has_xargs_or_piped_rm(view: &str) -> bool {
 
 // ── shutdown ────────────────────────────────────────────────────────────────────────────────────────
 
-/// A `shutdown`, `reboot`, `halt` or `poweroff` program anywhere, `systemctl` followed later in the segment by
-/// `stop`, `disable` or `mask`, or `service` followed later by `stop`.
+/// Programs whose quoted argument is itself a command (`bash -c '...'`, `eval '...'`, `ssh host '...'`,
+/// `parallel '...'`): that argument is analysed as live code, not as a string.
+const QUOTE_WRAPPERS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh", "fish", "eval", "ssh", "mosh",
+    "parallel", "watch", "su", "script", "flock", "runuser",
+];
+
+/// Programs that run what follows them as a command, so a later word in the same segment may be the command
+/// (`bash -c 'reboot'`, `ssh host reboot`, `xargs systemctl stop`, `find -exec shutdown`): the wrappers above
+/// and these.
+const MORE_COMMAND_WRAPPERS: &[&str] = &["xargs", "nsenter", "chroot", "find"];
+
+/// Programs that run another program after their own words, so what follows them is still in command position.
+const PREFIX_PROGRAMS: &[&str] = &[
+    "then",
+    "do",
+    "else",
+    "elif",
+    "if",
+    "while",
+    "until",
+    "!",
+    "-",
+    "command",
+    "builtin",
+    "eval",
+    "exec",
+    "time",
+    "sudo",
+    "doas",
+    "noglob",
+    "nocorrect",
+    "nohup",
+    "nice",
+    "ionice",
+    "setsid",
+    "env",
+    "timeout",
+];
+
+/// Options of the prefix programs that take a value (`sudo -u deploy`, `timeout -s KILL 5`, `ionice -c 2`).
+const OPTIONS_WITH_VALUE: &[&str] = &["-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n"];
+
+/// A `name=value` prefix assignment.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// A number or duration (`5`, `0.5`, `5s`, `10m`): the operand of `nice`, `timeout`.
+fn is_duration(word: &str) -> bool {
+    let number = word.strip_suffix(['s', 'm', 'h', 'd']).unwrap_or(word);
+    !number.is_empty()
+        && number.chars().any(|c| c.is_ascii_digit())
+        && number.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// The indexes of the words of one segment that are in command position: the first word, then each word
+/// after only prefix words (an assignment, a prefix program, an option, an option's value, a duration), and,
+/// once a command wrapper or a substitution placeholder (`_`: its output may be the command) has been seen,
+/// every later word.
+fn command_positions(words: &[String]) -> Vec<usize> {
+    let (mut positions, mut leading, mut wrapped, mut after_option) = (vec![], true, false, false);
+    for (index, word) in words.iter().enumerate() {
+        if leading || wrapped {
+            positions.push(index);
+        }
+        let name = program(word);
+        if QUOTE_WRAPPERS.contains(&name.as_str())
+            || MORE_COMMAND_WRAPPERS.contains(&name.as_str())
+            || word == "_"
+            || (matches!(name.as_str(), "kubectl" | "docker" | "podman")
+                && words[index + 1..]
+                    .iter()
+                    .any(|w| matches!(w.to_lowercase().as_str(), "exec" | "run")))
+        {
+            wrapped = true;
+        }
+        if leading {
+            let lower = word.to_lowercase();
+            let prefix = after_option
+                || is_assignment(word)
+                || PREFIX_PROGRAMS.contains(&name.as_str())
+                || word.starts_with('-')
+                || is_duration(word);
+            after_option = word.starts_with('-') && OPTIONS_WITH_VALUE.contains(&lower.as_str());
+            leading = prefix;
+        }
+    }
+    positions
+}
+
+/// A `shutdown`, `reboot`, `halt` or `poweroff` program, `systemctl` followed later in the segment by `stop`,
+/// `disable` or `mask`, or `service` followed later by `stop`, each only in command position
+/// ([`command_positions`]): `last reboot | head` and `grep -i shutdown /var/log/syslog` merely mention one.
 fn has_stop_or_shutdown(view: &str) -> bool {
-    all_words(view).iter().any(|w| {
-        matches!(
-            program(w).as_str(),
-            "shutdown" | "reboot" | "halt" | "poweroff"
-        )
-    }) || program_then(view, &["systemctl"], &["stop", "disable", "mask"])
-        || program_then(view, &["service"], &["stop"])
+    segment_words(view).iter().any(|words| {
+        command_positions(words).iter().any(|&at| {
+            let later = |verbs: &[&str]| {
+                words[at + 1..]
+                    .iter()
+                    .any(|w| verbs.contains(&w.to_lowercase().as_str()))
+            };
+            match program(&words[at]).as_str() {
+                "shutdown" | "reboot" | "halt" | "poweroff" => true,
+                "systemctl" => later(&["stop", "disable", "mask"]),
+                "service" => later(&["stop"]),
+                _ => false,
+            }
+        })
+    })
+}
+
+// ── quoted `>`, escape-quoted words, glued brace groups ─────────────────────────────────────────────
+
+/// `text` with the operators that a quoted string cannot use replaced by `_`: a `>` (not a redirection),
+/// `{` and `}` (not a brace group) inside `'...'`, `"..."` or `$'...'`. Three things stay live: the quoted
+/// argument of a command wrapper (a quoted string after a [`QUOTE_WRAPPERS`] word in the same segment:
+/// `bash -c 'echo x > f'`), analysed recursively with its own quotes; a `$(...)` or
+/// backtick substitution inside double quotes; and everything in a string whose closing quote is missing.
+/// The Mac app's `StagingHazards.maskingQuotedOperators` is the same scan.
+fn mask_quoted_operators(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    mask_into(&chars, &mut out);
+    out
+}
+
+fn mask_into(chars: &[char], out: &mut String) {
+    let masked = |c: char| if matches!(c, '>' | '{' | '}') { '_' } else { c };
+    let (mut word, mut wrapper_seen, mut i) = (String::new(), false, 0);
+    fn end_word(word: &mut String, wrapper_seen: &mut bool) {
+        if QUOTE_WRAPPERS.contains(&program(word).as_str()) {
+            *wrapper_seen = true;
+        }
+        word.clear();
+    }
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                out.push(c);
+                word.push(c);
+                if let Some(&next) = chars.get(i + 1) {
+                    out.push(next);
+                    word.push(next);
+                }
+                i += 2;
+            }
+            '\'' | '"' => {
+                let ansi = c == '\'' && i > 0 && chars[i - 1] == '$';
+                let Some(end) = quote_end(chars, i, ansi) else {
+                    out.extend(&chars[i..]);
+                    return;
+                };
+                let content = &chars[i + 1..end];
+                out.push(c);
+                if wrapper_seen {
+                    mask_into(content, out);
+                } else if c == '"' {
+                    mask_double_quoted(content, out);
+                } else {
+                    out.extend(content.iter().map(|&n| masked(n)));
+                }
+                out.push(c);
+                word.push('\'');
+                i = end + 1;
+            }
+            ';' | '|' | '&' | '\n' => {
+                end_word(&mut word, &mut wrapper_seen);
+                wrapper_seen = false;
+                out.push(c);
+                i += 1;
+            }
+            c if c.is_whitespace() || matches!(c, '(' | ')') => {
+                end_word(&mut word, &mut wrapper_seen);
+                out.push(c);
+                i += 1;
+            }
+            c => {
+                word.push(c);
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    end_word(&mut word, &mut wrapper_seen);
+}
+
+/// The inside of a double-quoted string: masked, except for a `$(...)` or backtick substitution, which runs.
+fn mask_double_quoted(content: &[char], out: &mut String) {
+    let mut i = 0;
+    while i < content.len() {
+        let c = content[i];
+        if c == '\\' {
+            out.push(c);
+            if let Some(&next) = content.get(i + 1) {
+                out.push(if matches!(next, '>' | '{' | '}') {
+                    '_'
+                } else {
+                    next
+                });
+            }
+            i += 2;
+            continue;
+        }
+        let substitution = match (c, content.get(i + 1)) {
+            ('$', Some('(')) => {
+                closing_index(content, i + 1, '(', ')').map(|close| (i + 2, close, "$(", ")"))
+            }
+            ('`', _) => closing_backtick(content, i).map(|close| (i + 1, close, "`", "`")),
+            _ => None,
+        };
+        if let Some((from, close, open, closer)) = substitution {
+            out.push_str(open);
+            mask_into(&content[from..close], out);
+            out.push_str(closer);
+            i = close + 1;
+            continue;
+        }
+        out.push(if matches!(c, '>' | '{' | '}') { '_' } else { c });
+        i += 1;
+    }
+}
+
+/// Index of the quote that closes the one at `chars[start]`: a single quote has no escapes (but `$'...'` does),
+/// a double quote honours backslashes and skips over `$(...)` and backtick substitutions. `None` if unterminated.
+fn quote_end(chars: &[char], start: usize, ansi: bool) -> Option<usize> {
+    let quote = chars[start];
+    let mut i = start + 1;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == quote {
+            return Some(i);
+        }
+        if c == '\\' && (quote == '"' || ansi) {
+            i += 2;
+            continue;
+        }
+        if quote == '"' {
+            let skip = match (c, chars.get(i + 1)) {
+                ('$', Some('(')) => closing_index(chars, i + 1, '(', ')'),
+                ('`', _) => closing_backtick(chars, i),
+                _ => None,
+            };
+            if let Some(close) = skip {
+                i = close + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `$'...'` with a backslash inside: the shell turns `\x72` into `r`, which no text rule can follow.
+pub fn escape_quoted_word(text: &str) -> bool {
+    regex(&ESCAPE_QUOTED, r"\$'[^']*\\").is_match(text)
+}
+
+/// An unquoted, unescaped brace expansion (`{a,b}` or `{1..3}`, `{x..z}`: a body with no whitespace and a
+/// comma or a sequence) glued to other text: the char before the `{` or after the `}` is not whitespace and not
+/// `;`, `|`, `&`, `<`, `>`, `(` or `)`. A shell expands it into words no rule can follow (`r{m,} -rf /x` is
+/// `rm -rf /x`), so a production pane asks. A group alone (`{rm,-rf,/x}`, `ls {a,b}`) is read by the
+/// normalised views instead, and `${...}` is a parameter expansion. **Cost, taken on purpose:** an ordinary
+/// glued group such as `cp file{,.bak}` or `ls file{1,2}.txt` asks too. Quoted braces (`jq '{a,b}'`,
+/// `--query 'Items[].{Id:Id}'`) do not count, except in the quoted argument of a command wrapper
+/// ([`mask_quoted_operators`]).
+pub fn brace_glued_word(text: &str) -> bool {
+    if !text.contains('{') {
+        return false;
+    }
+    let chars: Vec<char> = mask_quoted_operators(text).chars().collect();
+    let glue = |c: Option<&char>| {
+        c.is_some_and(|c| {
+            !c.is_whitespace() && !matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')')
+        })
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '{' if i == 0 || chars[i - 1] != '$' => {
+                if let Some(close) = matching_brace(&chars, i) {
+                    let body = &chars[i + 1..close];
+                    let before = i.checked_sub(1).and_then(|b| chars.get(b));
+                    if is_brace_expansion(body) && (glue(before) || glue(chars.get(close + 1))) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The index of the `}` that closes the `{` at `chars[start]` (nested pairs counted, backslashes skipped).
+fn matching_brace(chars: &[char], start: usize) -> Option<usize> {
+    let (mut depth, mut i) = (0usize, start);
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Would a shell expand a group with this body: no whitespace, and a comma or a sequence (`1..3`, `-2..2`,
+/// `a..z`, with an optional `..step`)?
+fn is_brace_expansion(body: &[char]) -> bool {
+    if body.iter().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    if body.contains(&',') {
+        return true;
+    }
+    let text: String = body.iter().collect();
+    let parts: Vec<&str> = text.split("..").collect();
+    let integer = |p: &str| {
+        let digits = p.strip_prefix(['+', '-']).unwrap_or(p);
+        !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+    };
+    let letter = |p: &str| p.len() == 1 && p.chars().all(|c| c.is_ascii_alphabetic());
+    match parts.as_slice() {
+        [a, b] => (integer(a) && integer(b)) || (letter(a) && letter(b)),
+        [a, b, step] => ((integer(a) && integer(b)) || (letter(a) && letter(b))) && integer(step),
+        _ => false,
+    }
 }

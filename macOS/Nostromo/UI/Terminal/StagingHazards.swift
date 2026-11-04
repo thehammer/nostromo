@@ -9,7 +9,12 @@ import Foundation
 /// placeholder word, brace groups split at commas; each with empty expansions as a space and removed), and a
 /// hit on any counts, so a pattern inside a quoted string matches too and a wrapped (`bash -c 'rm -rf x'`),
 /// split (`r''m`), substituted (`kubectl --context $(...) delete ns x`), brace-expanded (`{rm,-rf,/x}`) or
-/// abbreviated (`q:fl`) form is still seen.
+/// abbreviated (`q:fl`) form is still seen. Two rules do read quotes, to stop asking about ordinary read-only
+/// commands: `> file` ignores a `>` inside a quoted string (SQL, `awk` and `jq` programs are full of them) unless
+/// the string is the argument of a command wrapper (`bash -c '...'`, `eval`, `ssh host '...'`, `parallel`, ...),
+/// which is analysed as live code; and `stop/shutdown` only counts in command position.
+/// Besides the names, a production pane also asks first for two warnings that are not names: an escape-quoted word
+/// and a brace group glued to a word (`StagingHazards.asksFirstInProduction`).
 enum StagingDestructivePatterns {
 
     /// The names, in list order.
@@ -52,7 +57,7 @@ enum StagingDestructivePatterns {
         if any(hasDdOutput) { found.append("dd of=") }
         if any({ StagingHazards.redirectionSplitWords(of: $0).contains { program($0).hasPrefix("mkfs") } }) { found.append("mkfs") }
         if any({ StagingHazards.redirectionSplitWords(of: $0).contains { program($0) == "shred" } }) { found.append("shred") }
-        if any(truncatesAFile) { found.append("> file") }
+        if hasUnquotedTruncation(command, views: views) { found.append("> file") }
         if any(hasFindDelete) { found.append("find -delete") }
         if any(hasXargsOrPipedRemove) { found.append("xargs/piped rm") }
         for name in ["queue:clear", "horizon:clear", "optimize:clear"]
@@ -166,21 +171,25 @@ enum StagingDestructivePatterns {
     }
 
     /// `terraform`, `tofu`, `terragrunt` or `pulumi` followed later in the segment by `destroy`, `destroy-all`,
-    /// `-destroy`, `--destroy`, `-replace` or `--replace` (optionally `=value`). `plan -destroy` is read-only but its
-    /// plan file can be applied unseen, so it asks too. Also (same label) `taint`, `force-unlock`,
-    /// `workspace ... delete` and `state ... rm`/`remove`/`push`: each makes the next apply destroy something, or
-    /// forgets, overwrites or deletes state, or breaks a lock.
+    /// `-destroy`, `--destroy`, `-replace` or `--replace` (optionally `=value`), or, for `pulumi`, `down` (its alias
+    /// of `destroy`). `plan -destroy` is read-only but its plan file can be applied unseen, so it asks too. Also
+    /// (same label) `taint`, `force-unlock`, `workspace ... delete`, `state ... rm`/`remove`/`push`/`delete` and
+    /// `stack ... rm`/`remove` (pulumi: deletes the stack and its history): each makes the next apply destroy
+    /// something, or forgets, overwrites or deletes state, or breaks a lock.
     private static func hasTerraformDestroy(_ view: String) -> Bool {
+        let programs = ["terraform", "tofu", "terragrunt", "pulumi"]
         for words in segmentWords(view) {
-            guard let rest = afterProgram(words, ["terraform", "tofu", "terragrunt", "pulumi"]) else { continue }
-            let lowered = rest.map { $0.lowercased() }
+            guard let at = words.firstIndex(where: { programs.contains(program($0)) }) else { continue }
+            let pulumi = program(words[at]) == "pulumi"
+            let lowered = words[(at + 1)...].map { $0.lowercased() }
             func then(_ first: String, _ verbs: [String]) -> Bool {
-                guard let at = lowered.firstIndex(of: first) else { return false }
-                return lowered[(at + 1)...].contains { verbs.contains($0) }
+                guard let found = lowered.firstIndex(of: first) else { return false }
+                return lowered[(found + 1)...].contains { verbs.contains($0) }
             }
-            if then("workspace", ["delete"]) || then("state", ["rm", "remove", "push"]) { return true }
+            if then("workspace", ["delete"]) || then("state", ["rm", "remove", "push", "delete"])
+                || then("stack", ["rm", "remove"]) { return true }
             for word in lowered {
-                if ["destroy", "destroy-all", "taint", "force-unlock"].contains(word) { return true }
+                if ["destroy", "destroy-all", "taint", "force-unlock"].contains(word) || (pulumi && word == "down") { return true }
                 if word.hasPrefix("-") {
                     let flag = word.drop(while: { $0 == "-" })
                     let name = flag.split(separator: "=", omittingEmptySubsequences: false).first.map(String.init) ?? ""
@@ -193,10 +202,16 @@ enum StagingDestructivePatterns {
 
     /// `aws` followed later in the segment by a word that is exactly `delete-...`, `batch-delete-...`, `terminate-...`,
     /// `remove-...`, `deregister-...` or `purge-...`, or exactly `schedule-key-deletion` (kms: the key is gone in 7 to
-    /// 30 days) or `stop-instances`, or `update-service` with `--desired-count` 0 (an ECS service scaled to nothing).
+    /// 30 days) or `stop-instances`, or `update-service` with `--desired-count` 0, `+0` or `-0` (an ECS service scaled to
+    /// nothing).
     private static func hasAwsDelete(_ view: String) -> Bool {
         let verbs = ["delete-", "batch-delete-", "terminate-", "remove-", "deregister-", "purge-"]
-        func isZero(_ text: String) -> Bool { !text.isEmpty && text.allSatisfy { $0 == "0" } }
+        // A shell tool parses `+0` and `-0` as 0 too.
+        func isZero(_ text: String) -> Bool {
+            var digits = Substring(text)
+            if let first = digits.first, first == "+" || first == "-" { digits = digits.dropFirst() }
+            return !digits.isEmpty && digits.allSatisfy { $0 == "0" }
+        }
         for words in segmentWords(view) {
             guard let after = afterProgram(words, ["aws"]) else { continue }
             let rest = after.map { $0.lowercased() }
@@ -363,12 +378,89 @@ enum StagingDestructivePatterns {
         return false
     }
 
-    /// A `shutdown`, `reboot`, `halt` or `poweroff` program anywhere, `systemctl` followed later in the segment by
-    /// `stop`, `disable` or `mask`, or `service` followed later by `stop`.
+    // MARK: Shutdown, in command position
+
+    /// Programs that run what follows them as a command, so a later word in the same segment may be the command
+    /// (`bash -c 'reboot'`, `ssh host reboot`, `xargs systemctl stop`, `find -exec shutdown`): the quote wrappers
+    /// (`StagingHazards.quoteWrappers`) and these.
+    private static let moreCommandWrappers: Set<String> = ["xargs", "nsenter", "chroot", "find"]
+
+    /// Programs that run another program after their own words, so what follows them is still in command position.
+    private static let prefixPrograms: Set<String> = [
+        "then", "do", "else", "elif", "if", "while", "until", "!", "-", "command", "builtin", "eval", "exec",
+        "time", "sudo", "doas", "noglob", "nocorrect", "nohup", "nice", "ionice", "setsid", "env", "timeout"]
+
+    /// Options of the prefix programs that take a value (`sudo -u deploy`, `timeout -s KILL 5`, `ionice -c 2`).
+    private static let optionsWithValue: Set<String> = ["-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n"]
+
+    /// A `name=value` prefix assignment.
+    private static func isAssignment(_ word: String) -> Bool {
+        guard let equals = word.firstIndex(of: "=") else { return false }
+        let name = word[..<equals]
+        guard let first = name.first, !(first.isASCII && first.isNumber) else { return false }
+        return name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }
+    }
+
+    /// A number or duration (`5`, `0.5`, `5s`, `10m`): the operand of `nice`, `timeout`.
+    private static func isDuration(_ word: String) -> Bool {
+        var number = Substring(word)
+        if let last = number.last, "smhd".contains(last) { number = number.dropLast() }
+        return !number.isEmpty && number.contains(where: { $0.isASCII && $0.isNumber })
+            && number.allSatisfy { ($0.isASCII && $0.isNumber) || $0 == "." }
+    }
+
+    /// The indexes of the words of one segment that are in command position: the first word, then each word after
+    /// only prefix words (an assignment, a prefix program, an option, an option's value, a duration), and, once a
+    /// command wrapper or a substitution placeholder (`_`: its output may be the command) has been seen, every
+    /// later word.
+    private static func commandPositions(_ words: [String]) -> [Int] {
+        var positions: [Int] = []
+        var leading = true
+        var wrapped = false
+        var afterOption = false
+        for (index, word) in words.enumerated() {
+            if leading || wrapped { positions.append(index) }
+            let name = program(word)
+            let runsOthers = ["kubectl", "docker", "podman"].contains(name)
+                && words[(index + 1)...].contains { ["exec", "run"].contains($0.lowercased()) }
+            if StagingHazards.quoteWrappers.contains(name) || moreCommandWrappers.contains(name) || word == "_" || runsOthers {
+                wrapped = true
+            }
+            if leading {
+                let prefix = afterOption || isAssignment(word) || prefixPrograms.contains(name)
+                    || word.hasPrefix("-") || isDuration(word)
+                afterOption = word.hasPrefix("-") && optionsWithValue.contains(word.lowercased())
+                leading = prefix
+            }
+        }
+        return positions
+    }
+
+    /// A `shutdown`, `reboot`, `halt` or `poweroff` program, `systemctl` followed later in the segment by `stop`,
+    /// `disable` or `mask`, or `service` followed later by `stop`, each only in command position
+    /// (`commandPositions`): `last reboot | head` and `grep -i shutdown /var/log/syslog` merely mention one.
     private static func hasStopOrShutdown(_ view: String) -> Bool {
-        hasProgram(view, ["shutdown", "reboot", "halt", "poweroff"])
-            || programThen(view, ["systemctl"], ["stop", "disable", "mask"])
-            || programThen(view, ["service"], ["stop"])
+        for words in segmentWords(view) {
+            for at in commandPositions(words) {
+                func later(_ verbs: [String]) -> Bool { words[(at + 1)...].contains { verbs.contains($0.lowercased()) } }
+                switch program(words[at]) {
+                case "shutdown", "reboot", "halt", "poweroff": return true
+                case "systemctl": if later(["stop", "disable", "mask"]) { return true }
+                case "service": if later(["stop"]) { return true }
+                default: break
+                }
+            }
+        }
+        return false
+    }
+
+    /// `> file` on the views of the text with the operators of its quoted strings masked: a `>` inside a quoted
+    /// string is a character, not a redirection (`StagingHazards.maskingQuotedOperators`).
+    private static func hasUnquotedTruncation(_ command: String, views: [String]) -> Bool {
+        let masked = StagingHazards.maskingQuotedOperators(command)
+        if masked == command { return views.contains(where: truncatesAFile) }
+        let maskedViews = [masked] + StagingHazards.normalisedViews(masked) + StagingHazards.normalisedWordViews(masked)
+        return maskedViews.contains(where: truncatesAFile)
     }
 }
 
@@ -417,14 +509,26 @@ enum StagingHazards {
     /// `$'...'` (ANSI-C quoting) with a backslash inside: the shell turns `\x72` into `r`, which no text rule can follow.
     static let escapeQuotedLabel = "\u{26A0} Contains an escape-quoted word ($'...' with a backslash): what runs may differ from what you see."
 
-    static func escapeQuotedWordLabel(_ command: String) -> String? {
-        regex(#"\$'[^']*\\"#, in: command, caseInsensitive: false) ? escapeQuotedLabel : nil
+    /// What a production pane's row adds to a warning that makes Insert ask first.
+    static let asksFirstSuffix = " Insert asks first."
+
+    /// A brace group glued to a word (`r{m,} -rf x`, `kill -{9..9} 1`): the shell expands it into words no text rule can follow.
+    static let braceGluedLabel = "\u{26A0} Contains a brace expansion glued to a word ({a,b} or {1..3}): what runs may differ from what you see."
+
+    static func escapeQuotedWordLabel(_ command: String, production: Bool = false) -> String? {
+        regex(#"\$'[^']*\\"#, in: command, caseInsensitive: false) ? escapeQuotedLabel + (production ? asksFirstSuffix : "") : nil
     }
 
-    /// Does a production pane ask before inserting `command`? On a destructive match, and on an escape-quoted word
-    /// (`$'\x72\x6d' -rf x`): no text rule can follow what the shell makes of it, so it fails toward the sheet.
+    static func braceGluedWordLabel(_ command: String, production: Bool = false) -> String? {
+        hasBraceGluedWord(command) ? braceGluedLabel + (production ? asksFirstSuffix : "") : nil
+    }
+
+    /// Does a production pane ask before inserting `command`? On a destructive match, on an escape-quoted word
+    /// (`$'\x72\x6d' -rf x`) and on a brace group glued to a word (`r{m,} -rf x`): no text rule can follow what the
+    /// shell makes of those, so they fail toward the sheet. The daemon's `asks_in_production` is the same rule.
     static func asksFirstInProduction(_ command: String) -> Bool {
         !StagingDestructivePatterns.matches(command).isEmpty || escapeQuotedWordLabel(command) != nil
+            || braceGluedWordLabel(command) != nil
     }
 
     /// Expansions that are empty at run time (`rm${IFS}-rf` is `rm -rf`; `r$@m` is `rm`). Longest first.
@@ -519,10 +623,15 @@ enum StagingHazards {
         var out = ""
         let chars = Array(text)
         var braces = 0
+        var escaped = false
         var index = 0
         while index < chars.count {
             let c = chars[index]
-            if c == "$" {
+            // A backslash-escaped character never opens a substitution. A quoted opener is NOT told apart here: it
+            // opens like any other, and its body is emitted below, so what it hides is still seen (`rm '$(' -rf x ')'`).
+            let literal = escaped
+            escaped = false
+            if c == "$", !literal {
                 if let length = emptyExpansionLength(chars, at: index) {
                     index += length
                     if !(empty == " " && out.last == " ") { out.append(empty) }
@@ -535,6 +644,7 @@ enum StagingHazards {
                 }
                 if next == "(", let close = closingIndex(chars, from: index + 1, open: "(", close: ")") {
                     out.append(" _ ")
+                    out.append(substitutionWords(Array(chars[(index + 2)..<close]), empty: empty))
                     index = close + 1
                     continue
                 }
@@ -545,20 +655,23 @@ enum StagingHazards {
                     continue
                 }
             }
-            if c == "<", index + 1 < chars.count, chars[index + 1] == "(",
+            if c == "<", !literal, index + 1 < chars.count, chars[index + 1] == "(",
                let close = closingIndex(chars, from: index + 1, open: "(", close: ")") {
                 out.append(" _ ")
+                out.append(substitutionWords(Array(chars[(index + 2)..<close]), empty: empty))
                 index = close + 1
                 continue
             }
-            if c == "`", let close = chars[(index + 1)...].firstIndex(of: "`") {
+            if c == "`", !literal, let close = closingBacktick(chars, from: index) {
                 out.append(" _ ")
+                out.append(substitutionWords(Array(chars[(index + 1)..<close]), empty: empty))
                 index = close + 1
                 continue
             }
             index += 1
             switch c {
-            case "'", "\"", "\\": break
+            case "\\": escaped = !literal
+            case "'", "\"": break
             case "{":
                 braces += 1
                 out.append(" ")
@@ -573,18 +686,261 @@ enum StagingHazards {
         return out
     }
 
+    /// The words inside a `$(...)`, backtick pair or `<(...)` for `normalisedWords`: the body as that view reads any
+    /// text, with `;`, `|` and `&` turned into spaces so it cannot split the outer segment.
+    private static func substitutionWords(_ body: [Character], empty: String) -> String {
+        let words = normalisedWords(String(body), empty: empty).map { (c: Character) -> Character in ";|&".contains(c) ? " " : c }
+        return " " + String(words) + " "
+    }
+
     /// The index of the character that closes the `open` at `chars[start]`, counting nested pairs; nil when unbalanced.
+    /// Quote- and escape-aware: a closer (or an opener) inside `'...'` or `"..."`, or after a backslash, neither closes
+    /// nor opens, so `$(echo ")"; x)` closes at its last parenthesis. A quote that never closes makes the whole group
+    /// unbalanced (the caller then drops the opener and what follows stays visible).
     private static func closingIndex(_ chars: [Character], from start: Int, open: Character, close: Character) -> Int? {
         var depth = 0
+        var quote: Character?
+        var escaped = false
         for index in start..<chars.count {
-            if chars[index] == open {
+            let c = chars[index]
+            if escaped {
+                escaped = false
+            } else if quote == "'" {
+                if c == "'" { quote = nil }
+            } else if c == "\\" {
+                escaped = true
+            } else if quote != nil {
+                if quote == c { quote = nil }
+            } else if c == "'" || c == "\"" {
+                quote = c
+            } else if c == open {
                 depth += 1
-            } else if chars[index] == close {
-                depth -= 1
+            } else if c == close {
+                depth = max(0, depth - 1)
                 if depth == 0 { return index }
             }
         }
         return nil
+    }
+
+    /// The index of the backtick that closes the one at `chars[start]`: the next one not escaped by a backslash.
+    private static func closingBacktick(_ chars: [Character], from start: Int) -> Int? {
+        var escaped = false
+        var index = start + 1
+        while index < chars.count {
+            let c = chars[index]
+            if escaped {
+                escaped = false
+            } else if c == "\\" {
+                escaped = true
+            } else if c == "`" {
+                return index
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    // MARK: Quoted operators, glued brace groups
+
+    /// Programs whose quoted argument is itself a command (`bash -c '...'`, `eval '...'`, `ssh host '...'`,
+    /// `parallel '...'`): that argument is analysed as live code, not as a string.
+    static let quoteWrappers: Set<String> = [
+        "sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh", "fish", "eval", "ssh", "mosh", "parallel",
+        "watch", "su", "script", "flock", "runuser"]
+
+    private static func programName(_ word: String) -> String {
+        (word.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? word).lowercased()
+    }
+
+    private static func maskedOperator(_ c: Character) -> Character { c == ">" || c == "{" || c == "}" ? "_" : c }
+
+    /// `text` with the operators that a quoted string cannot use replaced by `_`: a `>` (not a redirection), `{` and `}`
+    /// (not a brace group) inside `'...'`, `"..."` or `$'...'`. Three things stay live: the quoted argument of a command
+    /// wrapper (a quoted string after a `quoteWrappers` word in the same segment: `bash -c 'echo x > f'`), analysed
+    /// recursively with its own quotes; a `$(...)` or backtick substitution inside double quotes; and everything in a
+    /// string whose closing quote is missing. The daemon's `mask_quoted_operators` is the same scan.
+    static func maskingQuotedOperators(_ text: String) -> String {
+        var out = ""
+        maskInto(Array(text), &out)
+        return out
+    }
+
+    private static func maskInto(_ chars: [Character], _ out: inout String) {
+        var word = ""
+        var wrapperSeen = false
+        var index = 0
+        func endWord() {
+            if quoteWrappers.contains(programName(word)) { wrapperSeen = true }
+            word = ""
+        }
+        while index < chars.count {
+            let c = chars[index]
+            switch c {
+            case "\\":
+                out.append(c)
+                word.append(c)
+                if index + 1 < chars.count {
+                    out.append(chars[index + 1])
+                    word.append(chars[index + 1])
+                }
+                index += 2
+            case "'", "\"":
+                let ansi = c == "'" && index > 0 && chars[index - 1] == "$"
+                guard let end = quoteEnd(chars, from: index, ansi: ansi) else {
+                    for rest in chars[index...] { out.append(rest) }
+                    return
+                }
+                let content = Array(chars[(index + 1)..<end])
+                out.append(c)
+                if wrapperSeen {
+                    maskInto(content, &out)
+                } else if c == "\"" {
+                    maskDoubleQuoted(content, &out)
+                } else {
+                    for inner in content { out.append(maskedOperator(inner)) }
+                }
+                out.append(c)
+                word.append("'")
+                index = end + 1
+            case ";", "|", "&", "\n":
+                endWord()
+                wrapperSeen = false
+                out.append(c)
+                index += 1
+            default:
+                if c.isWhitespace || c == "(" || c == ")" {
+                    endWord()
+                } else {
+                    word.append(c)
+                }
+                out.append(c)
+                index += 1
+            }
+        }
+        endWord()
+    }
+
+    /// The inside of a double-quoted string: masked, except for a `$(...)` or backtick substitution, which runs.
+    private static func maskDoubleQuoted(_ content: [Character], _ out: inout String) {
+        var index = 0
+        while index < content.count {
+            let c = content[index]
+            if c == "\\" {
+                out.append(c)
+                if index + 1 < content.count { out.append(maskedOperator(content[index + 1])) }
+                index += 2
+                continue
+            }
+            var substitution: (from: Int, close: Int, open: String, closer: String)?
+            if c == "$", index + 1 < content.count, content[index + 1] == "(",
+               let close = closingIndex(content, from: index + 1, open: "(", close: ")") {
+                substitution = (index + 2, close, "$(", ")")
+            } else if c == "`", let close = closingBacktick(content, from: index) {
+                substitution = (index + 1, close, "`", "`")
+            }
+            if let found = substitution {
+                out.append(found.open)
+                maskInto(Array(content[found.from..<found.close]), &out)
+                out.append(found.closer)
+                index = found.close + 1
+                continue
+            }
+            out.append(maskedOperator(c))
+            index += 1
+        }
+    }
+
+    /// The index of the quote that closes the one at `chars[start]`: a single quote has no escapes (but `$'...'` does), a
+    /// double quote honours backslashes and skips over `$(...)` and backtick substitutions. Nil if unterminated.
+    private static func quoteEnd(_ chars: [Character], from start: Int, ansi: Bool) -> Int? {
+        let quote = chars[start]
+        var index = start + 1
+        while index < chars.count {
+            let c = chars[index]
+            if c == quote { return index }
+            if c == "\\" && (quote == "\"" || ansi) {
+                index += 2
+                continue
+            }
+            if quote == "\"" {
+                var skip: Int?
+                if c == "$", index + 1 < chars.count, chars[index + 1] == "(" {
+                    skip = closingIndex(chars, from: index + 1, open: "(", close: ")")
+                } else if c == "`" {
+                    skip = closingBacktick(chars, from: index)
+                }
+                if let close = skip {
+                    index = close + 1
+                    continue
+                }
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    /// An unquoted, unescaped brace expansion (`{a,b}` or `{1..3}`, `{x..z}`: a body with no whitespace and a comma or a
+    /// sequence) glued to other text: the character before the `{` or after the `}` is not whitespace and not `;`, `|`,
+    /// `&`, `<`, `>`, `(` or `)`. A shell expands it into words no rule can follow (`r{m,} -rf /x` is `rm -rf /x`), so a
+    /// production pane asks. A group alone (`{rm,-rf,/x}`, `ls {a,b}`) is read by the normalised views instead, and
+    /// `${...}` is a parameter expansion. **Cost, taken on purpose:** an ordinary glued group such as `cp file{,.bak}` or
+    /// `ls file{1,2}.txt` asks too. Quoted braces (`jq '{a,b}'`, `--query 'Items[].{Id:Id}'`) do not count, except in the
+    /// quoted argument of a command wrapper (`maskingQuotedOperators`). The daemon's `brace_glued_word` is the same rule.
+    static func hasBraceGluedWord(_ command: String) -> Bool {
+        guard command.contains("{") else { return false }
+        let chars = Array(maskingQuotedOperators(command))
+        func glue(_ index: Int) -> Bool {
+            guard index >= 0, index < chars.count else { return false }
+            return !chars[index].isWhitespace && !";|&<>()".contains(chars[index])
+        }
+        var index = 0
+        while index < chars.count {
+            if chars[index] == "\\" {
+                index += 1
+            } else if chars[index] == "{", index == 0 || chars[index - 1] != "$", let close = matchingBrace(chars, from: index) {
+                if isBraceExpansion(Array(chars[(index + 1)..<close])) && (glue(index - 1) || glue(close + 1)) { return true }
+            }
+            index += 1
+        }
+        return false
+    }
+
+    /// The index of the `}` that closes the `{` at `chars[start]` (nested pairs counted, backslashes skipped).
+    private static func matchingBrace(_ chars: [Character], from start: Int) -> Int? {
+        var depth = 0
+        var index = start
+        while index < chars.count {
+            if chars[index] == "\\" {
+                index += 1
+            } else if chars[index] == "{" {
+                depth += 1
+            } else if chars[index] == "}" {
+                depth -= 1
+                if depth == 0 { return index }
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    /// Would a shell expand a group with this body: no whitespace, and a comma or a sequence (`1..3`, `-2..2`, `a..z`,
+    /// with an optional `..step`)?
+    private static func isBraceExpansion(_ body: [Character]) -> Bool {
+        if body.contains(where: { $0.isWhitespace }) { return false }
+        if body.contains(",") { return true }
+        let parts = String(body).components(separatedBy: "..")
+        func integer(_ part: String) -> Bool {
+            var digits = Substring(part)
+            if let first = digits.first, first == "+" || first == "-" { digits = digits.dropFirst() }
+            return !digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber }
+        }
+        func letter(_ part: String) -> Bool { part.count == 1 && part.allSatisfy { $0.isASCII && $0.isLetter } }
+        switch parts.count {
+        case 2: return (integer(parts[0]) && integer(parts[1])) || (letter(parts[0]) && letter(parts[1]))
+        case 3: return ((integer(parts[0]) && integer(parts[1])) || (letter(parts[0]) && letter(parts[1]))) && integer(parts[2])
+        default: return false
+        }
     }
 
     /// The words of a `${...}` body: its name, then its operand with the operator (`:-`, `:=`, `:+`, `:?`, `%`, `#`, `/`,

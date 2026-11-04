@@ -18,6 +18,10 @@ import unittest
 from qa_harness import QA_DIR
 
 SCRIPTS = ("terminal-remote.sh", "terminal-local.sh", "terminal-hazard.sh")
+# terminal-follow.sh and terminal-staging.sh do not call the shared start guards (SCRIPTS is the all-three set the
+# refusal tests above run on), but they stop their instance the same way and share the not-visible early exit, so
+# the isolation-guard reporting is held for all five.
+VISIBILITY_SCRIPTS = SCRIPTS + ("terminal-follow.sh", "terminal-staging.sh")
 MARKERS = ("FIXTURE:x", "WAKE:basic:/tmp/x", "com.hammer.nostromo.qa", "/tmp/nostromo-qa-1234", "cody-qa-x", "qa-approvals")
 
 STUB = """#!/bin/sh
@@ -36,7 +40,7 @@ class Tree:
         os.makedirs(qa)
         shutil.copytree(os.path.join(QA_DIR, "lib"), os.path.join(qa, "lib"),
                         ignore=shutil.ignore_patterns("__pycache__"))
-        for name in SCRIPTS:
+        for name in VISIBILITY_SCRIPTS:
             shutil.copy(os.path.join(QA_DIR, name), os.path.join(qa, name))
         os.makedirs(os.path.join(self.root, "bin"))
         for stub in (os.path.join(qa, "qa-instance.sh"), os.path.join(self.root, "bin", "nostromo-app")):
@@ -198,7 +202,7 @@ class IsolationGuardIsReportedTest(unittest.TestCase):
     guard is a FAIL of the run, not something the EXIT trap swallows."""
 
     def test_each_script_reports_a_failing_isolation_guard(self):
-        for script in SCRIPTS:
+        for script in VISIBILITY_SCRIPTS:
             with self.subTest(script):
                 with open(os.path.join(QA_DIR, script)) as f:
                     text = f.read()
@@ -208,8 +212,10 @@ class IsolationGuardIsReportedTest(unittest.TestCase):
     def test_a_failing_guard_on_the_not_visible_path_ends_fail_with_exit_1_not_inconclusive(self):
         """The early exit for a window that is not visible stops the instance too; if that guard fails the run is
         a FAIL (exit 1), never `RESULT: INCONCLUSIVE` (exit 3). Run for real with a stub instance whose `stop`
-        fails and whose `start` prints a root; the visibility helper is overridden to say "not visible"."""
-        for script in SCRIPTS:
+        fails and whose `start` prints a root; the visibility helper is overridden to say "not visible". Held for
+        terminal-follow.sh and terminal-staging.sh too: `stop_instance` there fails the run (`fails` > 0), and the
+        INCONCLUSIVE result must not hide that."""
+        for script in VISIBILITY_SCRIPTS:
             with self.subTest(script):
                 tree = Tree(self)
                 with open(os.path.join(tree.qa, "qa-instance.sh"), "w") as f:
