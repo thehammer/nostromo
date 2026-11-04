@@ -7,11 +7,13 @@ model `nostromo-app tasks output` reads). See the type's doc comment for the loa
 
 - A file that is ahead of what the model holds is read chunk by chunk, back to back, not one chunk per
   poll. While that goes on the model reports itself busy (`isRefreshing`), so `tasks output` says
-  `loading`, not `ready`.
+  `loading`, not `ready`. A file more than the window ahead is reloaded from its tail instead; the model
+  stays busy from the read that found it until that tail (and the head fetched behind it) has landed.
 - When the task ends mid catch-up the final read keeps following the file until it reaches its end, up
-  to 64 MiB or 10 s (`finalReadCapBytes`, `finalReadCapSeconds`). A file more than the 10 MB window ahead
-  is reloaded from its tail instead. If the cap is hit the notice line says `Output truncated: ...`;
-  it is never silent.
+  to 64 MiB or 10 s (`finalReadCapBytes`, `finalReadCapSeconds`; the byte cap is an `init` argument so tests
+  can reach it). A file more than the 10 MB window ahead is reloaded from its tail instead. If the cap is
+  hit the notice line says `Output truncated: ...` and `tasks output` reports `truncated: true` with
+  `end_truncated: true`; it is never silent.
 
 ## Copying
 

@@ -96,7 +96,8 @@ final class TaskOutputModel {
     /// The most of a file the viewer holds from the end.
     static let windowBytes: UInt64 = 10 * 1_048_576
     /// The most a task's final read follows the file's growth (a task that exits while the window is far
-    /// behind): past either limit the model stops and says the end of the output was not loaded.
+    /// behind): past either limit the model stops and says the end of the output was not loaded. The byte
+    /// cap is injectable (`finalReadCapBytes:` on `init`) so a test can reach it with kilobytes.
     static let finalReadCapBytes: UInt64 = 64 * 1_048_576
     static let finalReadCapSeconds: TimeInterval = 10
     /// Past this many held bytes a growing file drops its oldest lines back to `windowBytes`.
@@ -118,8 +119,9 @@ final class TaskOutputModel {
     /// The head of the file is still being fetched in front of the tail.
     private(set) var isFillingHead = false
     /// What `text` holds may be older than the file, so `tasks output` says `loading`: a reload of the tail
-    /// is in flight because a holder arrived on a ready model (a repeat ask), or chained reads are still
-    /// catching up with a file that is ahead of them. Clear once the last of them has landed.
+    /// is in flight because a holder arrived on a ready model (a repeat ask) or because the file is more
+    /// than the window ahead, or chained reads are still catching up with a file that is ahead of them.
+    /// Clear once the last of them has landed.
     private(set) var isRefreshing = false
     /// The task ended while the window was so far behind that the final read hit its cap: the end of
     /// the output was not loaded.
@@ -166,13 +168,16 @@ final class TaskOutputModel {
     /// How much of a file is held from its end, and the most one read asks for. Tests shrink both.
     private let window: UInt64
     private let readSize: UInt32
+    /// The byte cap of the final read's chain (`finalReadCapBytes`; tests shrink it).
+    private let finalCapBytes: UInt64
 
     init(tag: String, taskId: String, isTaskEnded: Bool = false,
          requests: TaskRequests = .shared,
          schedule: @escaping TaskPollScheduler = MainRunLoopPollTimer.scheduler,
          now: @escaping () -> Date = Date.init,
          windowBytes: UInt64 = TaskOutputModel.windowBytes,
-         readBytes: UInt32 = TaskOutputModel.readBytes) {
+         readBytes: UInt32 = TaskOutputModel.readBytes,
+         finalReadCapBytes: UInt64 = TaskOutputModel.finalReadCapBytes) {
         self.tag = tag
         self.taskId = taskId
         self.isTaskEnded = isTaskEnded
@@ -181,6 +186,7 @@ final class TaskOutputModel {
         self.now = now
         self.window = windowBytes
         self.readSize = readBytes
+        self.finalCapBytes = finalReadCapBytes
     }
 
     deinit {
@@ -307,6 +313,9 @@ final class TaskOutputModel {
     }
 
     private func tailArrived(_ reply: TaskReply<SessionTaskOutputResultWire>) {
+        // Whatever asked for this reload (a file far ahead of the window) is answered now: the head
+        // fetch, if one follows, keeps the model busy through `isFillingHead`.
+        isRefreshing = false
         switch reply {
         case .answered(let wire):
             switch wire.outcome {
@@ -450,7 +459,9 @@ final class TaskOutputModel {
             // there will be.
             let chain = more && self.holderCount > 0 && !self.readInFlight && self.phase == .ready
                 && (final || !self.isTaskEnded)
-            self.isRefreshing = chain
+            // A read that found the file further ahead than the window started a tail reload: that reload
+            // is the catch-up now, and the model stays busy until its answer lands (`tailArrived`).
+            self.isRefreshing = chain || self.phase == .loadingTail
             if chain {
                 if !final || self.finalChainMayContinue() {
                     self.read(final: final)
@@ -470,7 +481,7 @@ final class TaskOutputModel {
     /// The final read has not yet followed the file past its caps.
     private func finalChainMayContinue() -> Bool {
         guard let start = finalChainStart else { return false }
-        return cursor - start.cursor < Self.finalReadCapBytes
+        return cursor - start.cursor < finalCapBytes
             && now().timeIntervalSince(start.at) < Self.finalReadCapSeconds
     }
 

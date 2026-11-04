@@ -312,6 +312,13 @@ final class ApprovalStore {
         statusBook.status(toolUseId: toolUseId) == .awaiting
     }
 
+    /// True while the daemon has refused the answer for `toolUseId` and the request still waits: the card
+    /// accepts only a Deny then (`answer`), so a record must not say it waits for an answer.
+    func isAnswerNotAccepted(toolUseId: String) -> Bool {
+        guard let id = waitOwner[toolUseId], case .notSent? = entries[id]?.state else { return false }
+        return true
+    }
+
     /// The labels the person chose for `toolUseId`, if this process saw them answer.
     func chosenLabels(toolUseId: String) -> [String]? { chosenLabels[toolUseId] }
 
@@ -355,11 +362,13 @@ final class ApprovalStore {
     @discardableResult
     func answer(_ id: String, _ decision: ApprovalDecisionWire, windowID: String) -> Bool {
         guard var entry = entries[id], canSend() else { return false }
+        var wasNotSent = false
         switch entry.state {
         case .pending:
             guard !answered.contains(id) else { return false }
         case .notSent:
             guard decision.kind == .deny else { return false }
+            wasNotSent = true
         case .inFlight, .ended:
             return false
         }
@@ -369,6 +378,7 @@ final class ApprovalStore {
         entries[id] = entry
         send(id, decision, windowID)
         recordChoice(decision, for: entry.request)
+        if wasNotSent { statusChanges.send(entry.request.toolUseId) }   // "not accepted" no longer holds
         changes.send(entry.request.tag)
         return true
     }
@@ -511,6 +521,7 @@ final class ApprovalStore {
             end(frame.requestId, text: Self.alreadyResolvedText(outcome: frame.outcome))
         case .unknownRequest:
             forgetAwaiting(entry.request)
+            forgetChoice(for: entry.request)   // it ended unanswered as far as we know: no "Answered"
             end(frame.requestId, text: "Already resolved")
         case .notOperatorApp:
             hold(frame.requestId, text: "Not sent: Nostromo isn't verified as the operator (run make mac-install)")
@@ -531,6 +542,7 @@ final class ApprovalStore {
         forgetChoice(for: entry.request)   // the answer was not taken: the record must not say it was
         entry.state = .notSent(text)
         entries[id] = entry
+        statusChanges.send(entry.request.toolUseId)   // a record reads "not accepted" now
         changes.send(entry.request.tag)
     }
 

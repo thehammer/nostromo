@@ -480,7 +480,7 @@ final class AppControlTasksTests: XCTestCase {
 
     // MARK: - tasks output
 
-    private let outputKeys: Set<String> = ["tag", "task_id", "state", "truncated", "total_bytes", "source", "text"]
+    private let outputKeys: Set<String> = ["tag", "task_id", "state", "truncated", "end_truncated", "total_bytes", "source", "text"]
 
     private func visible(_ range: Range<Int>) -> String {
         TaskOutputFakeDaemon.visibleText(range)
@@ -514,6 +514,7 @@ final class AppControlTasksTests: XCTestCase {
         XCTAssertEqual(payload["task_id"] as? String, "b1")
         XCTAssertEqual(payload["state"] as? String, "ready")
         XCTAssertEqual(payload["truncated"] as? Bool, false)
+        XCTAssertEqual(payload["end_truncated"] as? Bool, false)
         XCTAssertEqual(number(payload["total_bytes"]), 640)
         XCTAssertEqual(payload["source"] as? String, "file")
         XCTAssertEqual(payload["text"] as? String, visible(0..<10))
@@ -925,5 +926,97 @@ extension AppControlTasksTests {
         XCTAssertEqual(after["state"] as? String, "ready")
         XCTAssertEqual(after["text"] as? String, visible(0..<210))
         XCTAssertEqual(number(after["total_bytes"]), 210 * 64)
+    }
+    // MARK: - The end of the output
+
+    func testATaskWhoseFinalReadHitItsCapIsReadyButTruncatedAndSaysItIsTheEndThatIsMissing() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(10)
+        let model = rig.makeModel(tag: tag, taskId: "b1", readBytes: 4_096, finalReadCapBytes: 8 * 1_024)
+        model.acquire()
+        rig.drainAnswers()
+        rig.flushDeliveries()
+        addTeardownBlock { model.release() }
+        rig.daemon.appendLines(200)                  // 12.5 KiB ahead: past the 8 KiB cap
+
+        model.taskEnded()
+        rig.flushDeliveries()
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertTrue(model.endCutShort, "premise: the cap stopped the final read")
+        XCTAssertEqual(payload["state"] as? String, "ready")
+        XCTAssertEqual(payload["truncated"] as? Bool, true, "the end of the output is not in the text")
+        XCTAssertEqual(payload["end_truncated"] as? Bool, true, "and this says it is the end, not the start")
+        XCTAssertEqual(payload["text"] as? String, visible(0..<138), "what was read")
+        assertValidJSON(payload, "tasks output")
+    }
+
+    func testAnEndCutShortOutputWithTheTextWithheldStillSaysItIsTruncated() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(10)
+        let model = rig.makeModel(tag: tag, taskId: "b1", readBytes: 4_096, finalReadCapBytes: 8 * 1_024)
+        model.acquire()
+        rig.drainAnswers()
+        addTeardownBlock { model.release() }
+        rig.daemon.appendLines(200)
+        model.taskEnded()
+
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: false)
+
+        XCTAssertTrue(isNull(payload["text"]))
+        XCTAssertEqual(payload["truncated"] as? Bool, true)
+        XCTAssertEqual(payload["end_truncated"] as? Bool, true)
+    }
+
+    func testATaskWhoseFinalReadReachedTheEndIsNotTruncatedAtTheEnd() throws {
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(10)
+        let model = rig.makeModel(tag: tag, taskId: "b1", readBytes: 4_096)
+        model.acquire()
+        rig.drainAnswers()
+        addTeardownBlock { model.release() }
+        rig.daemon.appendLines(200)
+
+        model.taskEnded()
+        let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(payload["truncated"] as? Bool, false)
+        XCTAssertEqual(payload["end_truncated"] as? Bool, false)
+        XCTAssertEqual(payload["text"] as? String, visible(0..<210))
+    }
+
+    // MARK: - A file far ahead of the window
+
+    func testAFileMoreThanTheWindowAheadIsLoadingUntilTheReloadedTailAndItsHeadHaveLanded() throws {
+        // A 48 KiB window and 16 KiB reads stand for 10 MiB and 1 MiB.
+        let rig = TaskOutputRig()
+        rig.daemon.setLines(16 * 1_024 / 64)
+        let model = rig.makeModel(tag: tag, taskId: "b1", windowBytes: 48 * 1_024, readBytes: 16 * 1_024)
+        model.acquire()
+        rig.drainAnswers()
+        rig.flushDeliveries()
+        addTeardownBlock { model.release() }
+        rig.daemon.appendLines(80 * 1_024 / 64)      // 96 KiB in all: more than the window past the cursor
+        rig.daemon.defersAnswers = true
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+
+        rig.daemon.answerNext()                      // the poll's read finds the file far ahead: the tail reload starts
+        let reloading = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+        XCTAssertEqual(reloading["state"] as? String, "loading", "the held text is the old one while the tail is out")
+        XCTAssertTrue(isNull(reloading["total_bytes"]))
+
+        rig.daemon.answerNext()                      // the tail lands; its head is still to come
+        let fillingHead = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+        XCTAssertEqual(fillingHead["state"] as? String, "loading", "the head is still being read")
+
+        rig.drainAnswers()
+        rig.flushDeliveries()
+        let after = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+        XCTAssertEqual(after["state"] as? String, "ready")
+        XCTAssertEqual(after["text"] as? String, visible((48 * 1_024 / 64)..<(96 * 1_024 / 64)), "the last 48 KiB")
+        XCTAssertEqual(number(after["total_bytes"]), 96 * 1_024)
+        XCTAssertEqual(after["truncated"] as? Bool, true, "the start is cut")
+        XCTAssertEqual(after["end_truncated"] as? Bool, false)
     }
 }

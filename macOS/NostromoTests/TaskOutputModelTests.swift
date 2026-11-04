@@ -307,14 +307,16 @@ final class TaskOutputRig {
         scheduler.clock = clock
     }
 
-    /// `windowBytes` and `readBytes` shrink the model's 10 MiB window and 1 MiB read so a test crosses their
-    /// edges with a file of kilobytes (the fake daemon honours the request's `maxBytes`).
+    /// `windowBytes` and `readBytes` shrink the model's 10 MiB window and 1 MiB read, and `finalReadCapBytes` its
+    /// 64 MiB final-read cap, so a test crosses their edges with a file of kilobytes (the fake daemon honours the
+    /// request's `maxBytes`).
     func makeModel(tag: String = "kate", taskId: String = "t1", ended: Bool = false,
                    windowBytes: UInt64 = TaskOutputModel.windowBytes,
-                   readBytes: UInt32 = TaskOutputModel.readBytes) -> TaskOutputModel {
+                   readBytes: UInt32 = TaskOutputModel.readBytes,
+                   finalReadCapBytes: UInt64 = TaskOutputModel.finalReadCapBytes) -> TaskOutputModel {
         TaskOutputModel(tag: tag, taskId: taskId, isTaskEnded: ended, requests: requests,
                         schedule: scheduler.schedule, now: { [clock] in clock.date },
-                        windowBytes: windowBytes, readBytes: readBytes)
+                        windowBytes: windowBytes, readBytes: readBytes, finalReadCapBytes: finalReadCapBytes)
     }
 
     func makeRegistry(store: BackgroundTaskStore, capBytes: Int = TaskOutputRegistry.capBytes) -> TaskOutputRegistry {
@@ -412,9 +414,11 @@ final class TaskOutputModelTests: XCTestCase {
     /// A model over `count` fixture lines, loaded, and released when the test ends.
     private func open(_ rig: TaskOutputRig, lines count: Int, escaped: Bool = false, ended: Bool = false,
                       windowBytes: UInt64 = TaskOutputModel.windowBytes,
-                      readBytes: UInt32 = TaskOutputModel.readBytes) -> TaskOutputModel {
+                      readBytes: UInt32 = TaskOutputModel.readBytes,
+                      finalReadCapBytes: UInt64 = TaskOutputModel.finalReadCapBytes) -> TaskOutputModel {
         rig.daemon.setLines(count, escaped: escaped)
-        let model = rig.makeModel(ended: ended, windowBytes: windowBytes, readBytes: readBytes)
+        let model = rig.makeModel(ended: ended, windowBytes: windowBytes, readBytes: readBytes,
+                                  finalReadCapBytes: finalReadCapBytes)
         model.acquire()
         rig.drainAnswers()
         addTeardownBlock { model.release() }
@@ -1987,28 +1991,6 @@ extension TaskOutputModelTests {
 
     // MARK: Exact tail
 
-    func testATaskThatEndsWhileTheModelIsSeveralMegabytesBehindEndsWithTheExactFullTail() throws {
-        let rig = TaskOutputRig()
-        let model = open(rig, lines: 100)                       // loaded when the file was small
-        let lineCount = 3 * mib / 64
-        rig.daemon.appendLines(lineCount - 100)                 // it grew by 3 MiB
-        rig.daemon.defersAnswers = true
-        rig.clock.advance(0.5)
-        try rig.firePoll()                                      // a poll's read is out: not a final one
-        XCTAssertEqual(rig.daemon.queuedCount, 1, "premise: a read is in flight")
-
-        model.taskEnded()                                       // the task ends before it is answered
-        rig.drainAnswers(advancing: 0.01)
-
-        assertSameLargeText(model.text, visible(0..<lineCount), "every line, in order, to the last one")
-        XCTAssertEqual(model.totalBytes, UInt64(3 * mib))
-        XCTAssertFalse(model.endCutShort)
-        XCTAssertNil(model.truncationNotice)
-        XCTAssertFalse(model.isRefreshing)
-        XCTAssertEqual(rig.daemon.queuedCount, 0, "nothing more is asked for")
-        XCTAssertTrue(rig.scheduler.pollSlots.isEmpty, "and an ended task is not polled")
-    }
-
     func testATaskThatEndsBetweenPollsWhileTheModelIsSeveralChunksBehindEndsWithTheExactFullTail() {
         let rig = TaskOutputRig()
         let model = openBehind(rig)
@@ -2187,6 +2169,121 @@ extension TaskOutputModelTests {
         rig.daemon.answerNext()
 
         XCTAssertFalse(model.isRefreshing)
+    }
+
+    // MARK: Busy across a tail reload
+
+    // A 48 KiB window and 16 KiB reads stand for 10 MiB and 1 MiB: a file 80 KiB past the cursor is more
+    // than the window ahead, so the model reloads its tail instead of chaining reads.
+
+    private static let window: UInt64 = 48 * 1_024
+    private static let farRead: UInt32 = 16 * 1_024
+    private var farBehindLines: Int { 16 * 1_024 / 64 }
+    private var farBehindTotalLines: Int { 96 * 1_024 / 64 }
+
+    func testAFileFarAheadOfTheWindowIsRefreshingFromTheReadThatFoundItUntilItsTailAndHeadHaveLanded() throws {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: farBehindLines, windowBytes: Self.window, readBytes: Self.farRead)
+        rig.daemon.appendLines(80 * 1_024 / 64)
+        rig.daemon.defersAnswers = true
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+
+        rig.daemon.answerNext()                                 // the poll's read: the file is far ahead
+        XCTAssertEqual(rig.daemon.queuedCount, 1, "premise: the tail reload is the one request out")
+        XCTAssertNil(rig.daemon.reads.last?.offset, "premise: it asks for the tail")
+        XCTAssertTrue(model.isRefreshing, "the text is stale until the tail lands")
+
+        rig.daemon.answerNext()                                 // the tail lands; the head is fetched behind it
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertTrue(model.isFillingHead, "the head fetch keeps the model busy")
+        XCTAssertEqual(rig.daemon.queuedCount, 1)
+
+        rig.drainAnswers()
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertFalse(model.isFillingHead)
+        XCTAssertEqual(model.text, visible((Int(Self.window) / 64)..<farBehindTotalLines), "the last 48 KiB")
+    }
+
+    func testAnUnansweredTailReloadStopsBeingBusyWhenItsRequestTimesOut() throws {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: farBehindLines, windowBytes: Self.window, readBytes: Self.farRead)
+        rig.daemon.appendLines(80 * 1_024 / 64)
+        rig.daemon.defersAnswers = true
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+        rig.daemon.answerNext()
+        XCTAssertTrue(model.isRefreshing, "premise")
+
+        rig.timeouts.fireAll()                                  // the daemon never answers the reload
+
+        XCTAssertFalse(model.isRefreshing, "a reload nobody answers must not leave the output loading for ever")
+    }
+
+    func testATaskThatEndsWhileTheWindowIsFarBehindReloadsItsTailForTheFinalReadAndIsNotCutShort() {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: farBehindLines, windowBytes: Self.window, readBytes: Self.farRead)
+        rig.daemon.appendLines(80 * 1_024 / 64)
+        rig.daemon.defersAnswers = true
+
+        model.taskEnded()                                       // between polls: the final read is out
+        rig.daemon.answerNext()                                 // it finds the file more than the window ahead
+        XCTAssertEqual(rig.daemon.queuedCount, 1, "premise: the tail reload")
+        XCTAssertNil(rig.daemon.reads.last?.offset, "premise: it asks for the tail")
+        XCTAssertTrue(model.isRefreshing, "busy while the reload is in flight")
+        XCTAssertEqual(model.stateName, "ready", "premise: the state alone cannot say the text is stale")
+
+        rig.drainAnswers()
+
+        XCTAssertEqual(model.text, visible((Int(Self.window) / 64)..<farBehindTotalLines), "the last 48 KiB, to the last line")
+        XCTAssertEqual(model.truncationNotice, "Showing the last 48 KB of 96 KB", "the start is cut; the end is not")
+        XCTAssertFalse(model.endCutShort, "the reload reached the end of the file")
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertFalse(model.isFillingHead)
+        XCTAssertEqual(rig.daemon.queuedCount, 0, "nothing more is asked for")
+        XCTAssertTrue(rig.scheduler.pollSlots.isEmpty, "an ended task is not polled")
+    }
+
+    // MARK: The byte cap
+
+    func testAFinalReadStopsAtTheByteCapAndSaysTheEndOfTheOutputIsMissing() {
+        // Reads of 4 KiB over 64-byte lines; a cap of 8 KiB lets the chain take two reads. The clock never moves,
+        // so only the byte cap can stop it.
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 10, readBytes: Self.chunk, finalReadCapBytes: 8 * 1_024)
+        let log = TaskOutputChangeLog(model)
+        rig.daemon.appendLines(200)                             // 4 chunks ahead, well past the cap
+        let readsBefore = rig.daemon.reads.count
+
+        model.taskEnded()
+        rig.flushDeliveries()
+
+        XCTAssertEqual(rig.daemon.reads.count - readsBefore, 2, "two reads of 4 KiB are the cap, the third is not asked")
+        XCTAssertEqual(model.text, visible(0..<138), "what was read is kept: ten lines and two 64-line chunks")
+        XCTAssertTrue(model.endCutShort)
+        let notice = model.truncationNotice ?? ""
+        XCTAssertTrue(notice.contains(TaskOutputModel.endCutNotice), "the explicit line, never silent: \(notice)")
+        XCTAssertTrue(notice.hasPrefix("Output truncated"), notice)
+        XCTAssertTrue(log.events.contains(.status), "the window is told, so the line shows: \(log.kinds)")
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertEqual(model.stateName, "ready")
+        XCTAssertTrue(rig.scheduler.pollSlots.isEmpty)
+    }
+
+    func testAFinalReadWithAByteCapLargerThanTheGapReachesTheEndAndIsNotCutShort() {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 10, readBytes: Self.chunk, finalReadCapBytes: 16 * 1_024)
+        rig.daemon.appendLines(200)                             // 12.5 KiB ahead: inside the cap
+
+        model.taskEnded()
+
+        XCTAssertEqual(model.text, visible(0..<210))
+        XCTAssertFalse(model.endCutShort)
+        XCTAssertNil(model.truncationNotice)
+    }
+
+    func testTheDefaultByteCapIsSixtyFourMegabytes() {
+        XCTAssertEqual(TaskOutputModel.finalReadCapBytes, 64 * UInt64(mib))
     }
 }
 

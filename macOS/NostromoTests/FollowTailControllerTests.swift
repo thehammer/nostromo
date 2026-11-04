@@ -594,6 +594,43 @@ final class TranscriptRevealFollowTests: XCTestCase {
         XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1)
     }
 
+    func testRevealingAnItemInTheLastViewportWhileFollowingFlipsNothingAtAll() {
+        // Pinned and staying pinned is no flip: `onFlip` (the log of every change) must not hear a
+        // pinned-false followed by a pinned-true for a reveal that changes nothing.
+        let rig = SafetyRig.followingTail(self)
+        XCTAssertTrue(rig.followTail.isPinned, "precondition")
+        rig.flips = []
+
+        rig.coordinator.reveal(documentY: rig.virtualizer.documentHeight - 100)
+        rig.settle()
+
+        XCTAssertEqual(rig.flips.count, 0, "no flip: \(rig.flips)")
+        XCTAssertTrue(rig.followTail.isPinned)
+    }
+
+    func testRevealingAnItemFarAboveTheEndWhileFollowingFlipsOnceAndNotBack() {
+        let rig = SafetyRig.followingTail(self)
+        rig.flips = []
+
+        rig.coordinator.reveal(documentY: rig.virtualizer.offset(of: 3))
+        rig.settle()
+
+        XCTAssertEqual(rig.flips.map(\.pinned), [false], "one flip, to not following: \(rig.flips)")
+        XCTAssertFalse(rig.followTail.isPinned)
+    }
+
+    func testRevealingAnItemInTheLastViewportAfterScrollingUpFlipsOnceToFollowing() {
+        let rig = SafetyRig.scrolledUp(self)
+        XCTAssertFalse(rig.followTail.isPinned, "precondition")
+        rig.flips = []
+
+        rig.coordinator.reveal(documentY: rig.virtualizer.documentHeight - 100)
+        rig.settle()
+
+        XCTAssertEqual(rig.flips.map(\.pinned), [true], "one flip, to following: \(rig.flips)")
+        XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1)
+    }
+
     func testRevealingAnItemFarAboveTheEndStopsFollowingAndOffersTheJumpPill() {
         let rig = SafetyRig.followingTail(self)
         XCTAssertTrue(rig.followTail.isPinned, "precondition")

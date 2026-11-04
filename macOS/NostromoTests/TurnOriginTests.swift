@@ -700,11 +700,19 @@ final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
         func showList() { listsShown += 1 }
     }
 
-    /// Click the marker of `turn` through the router `ReplView` builds for pane "pane-tag", without the
+    /// The tag of the pane the router tests build: it is only the session's, never named to the router
+    /// by the test.
+    private let paneTag = "wake-route-\(UUID().uuidString)"
+
+    /// Click the marker of `turn` through the router a real `ReplView` for `paneTag` builds (its own lazy
+    /// `wakeMarkerRouter`, the one its turn views get), with the window and list actions recorded, without the
     /// transcript moving.
     private func click(_ turn: ChatTurn, recorder: RouteRecorder) {
-        let router = ReplView.wakeMarkerRouter(tag: "pane-tag", openTask: { recorder.open($0, $1) }, showList: { recorder.showList() })
-        let (rig, found) = rigWithWakeMarkerOnScreen(turn, markerRouter: router)
+        let world = FV4StoreWorld(self)
+        let repl = ReplView(tag: paneTag, foldStore: world.store)
+        repl.wakeMarkerOpensTask = { recorder.open($0, $1) }
+        repl.wakeMarkerShowsList = { recorder.showList() }
+        let (rig, found) = rigWithWakeMarkerOnScreen(turn, markerRouter: repl.wakeMarkerRouter)
         guard let marker = found else { return XCTFail("the wake marker is not on screen") }
         rig.assertNoMove("wake marker clicked", following: false) {
             marker.activate()
@@ -717,7 +725,7 @@ final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
 
         click(wake(seq: 34), recorder: recorder)
 
-        XCTAssertEqual(recorder.opened, [.init(tag: "pane-tag", taskId: "bmon01")], "the task the wake names, under the pane's own tag")
+        XCTAssertEqual(recorder.opened, [.init(tag: paneTag, taskId: "bmon01")], "the task the wake names, under the session's own tag")
         XCTAssertEqual(recorder.listsShown, 0, "the window opened: no list")
     }
 
@@ -727,7 +735,7 @@ final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
 
         click(wake(seq: 35), recorder: recorder)
 
-        XCTAssertEqual(recorder.opened, [.init(tag: "pane-tag", taskId: "bmon01")], "it tried the task first")
+        XCTAssertEqual(recorder.opened, [.init(tag: paneTag, taskId: "bmon01")], "it tried the task first")
         XCTAssertEqual(recorder.listsShown, 1, "and fell back to the list, once")
     }
 
