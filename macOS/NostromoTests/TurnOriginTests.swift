@@ -655,11 +655,12 @@ final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
         }
     }
 
-    func testClickingAWakeMarkerDoesNotMoveTheTranscript() {
+    /// A rig with `turn` among the standard transcript, scrolled up with the composer focused, and the turn's
+    /// wake marker on screen. `markerRouter` is what a click goes through (nil: the turn views' default).
+    private func rigWithWakeMarkerOnScreen(_ turn: ChatTurn, markerRouter: WakeMarkerView.Router? = nil) -> (SafetyRig, WakeMarkerView?) {
         var turns = SafetyFixtures.transcript()
-        let turn = wake(seq: 33)
         turns.insert(turn, at: 3)
-        let rig = SafetyRig(self, turns: turns)
+        let rig = SafetyRig(self, turns: turns, markerRouter: markerRouter)
         rig.start()
         rig.focusComposer()
         rig.userScroll(to: rig.virtualizer.offset(of: 3))
@@ -667,12 +668,95 @@ final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
         rig.settle()
         rig.userScroll(to: max(rig.clip.bounds.minY - 60, 0))
         rig.settle()
+        return (rig, rig.materialized[turn.id]?.wakeMarkerView)
+    }
 
-        guard let marker = rig.materialized[turn.id]?.wakeMarkerView else { return XCTFail("the wake marker is not on screen") }
+    func testClickingAWakeMarkerDoesNotMoveTheTranscript() {
+        let turn = wake(seq: 33)
+        let (rig, found) = rigWithWakeMarkerOnScreen(turn)
+
+        guard let marker = found else { return XCTFail("the wake marker is not on screen") }
         rig.assertNoMove("wake marker clicked", following: false) {
             marker.activate()
             rig.runPass()
         }
+    }
+
+    // MARK: Where a click goes (the router a pane installs on its markers)
+
+    /// What the pane's `openTask` and `showList` would have done.
+    private final class RouteRecorder {
+        struct Opened: Equatable { let tag: String; let taskId: String }
+        private(set) var opened: [Opened] = []
+        private(set) var listsShown = 0
+        /// Whether the store knows the task (what `TaskWindowManager.open` answers).
+        var knowsTask = true
+
+        func open(_ tag: String, _ taskId: String) -> Bool {
+            opened.append(Opened(tag: tag, taskId: taskId))
+            return knowsTask
+        }
+
+        func showList() { listsShown += 1 }
+    }
+
+    /// The tag of the pane the router tests build: it is only the session's, never named to the router
+    /// by the test.
+    private let paneTag = "wake-route-\(UUID().uuidString)"
+
+    /// Click the marker of `turn` through the router a real `ReplView` for `paneTag` builds (its own lazy
+    /// `wakeMarkerRouter`, the one its turn views get), with the window and list actions recorded, without the
+    /// transcript moving.
+    private func click(_ turn: ChatTurn, recorder: RouteRecorder) {
+        let world = FV4StoreWorld(self)
+        let repl = ReplView(tag: paneTag, foldStore: world.store)
+        repl.wakeMarkerOpensTask = { recorder.open($0, $1) }
+        repl.wakeMarkerShowsList = { recorder.showList() }
+        let (rig, found) = rigWithWakeMarkerOnScreen(turn, markerRouter: repl.wakeMarkerRouter)
+        guard let marker = found else { return XCTFail("the wake marker is not on screen") }
+        rig.assertNoMove("wake marker clicked", following: false) {
+            marker.activate()
+            rig.runPass()
+        }
+    }
+
+    func testClickingAOneEventWakeMarkerOpensThatTasksWindowOnThePanesTagAndNotTheList() {
+        let recorder = RouteRecorder()
+
+        click(wake(seq: 34), recorder: recorder)
+
+        XCTAssertEqual(recorder.opened, [.init(tag: paneTag, taskId: "bmon01")], "the task the wake names, under the session's own tag")
+        XCTAssertEqual(recorder.listsShown, 0, "the window opened: no list")
+    }
+
+    func testClickingAOneEventWakeMarkerForATaskTheStoreDoesNotKnowShowsThePanesListInstead() {
+        let recorder = RouteRecorder()
+        recorder.knowsTask = false
+
+        click(wake(seq: 35), recorder: recorder)
+
+        XCTAssertEqual(recorder.opened, [.init(tag: paneTag, taskId: "bmon01")], "it tried the task first")
+        XCTAssertEqual(recorder.listsShown, 1, "and fell back to the list, once")
+    }
+
+    func testClickingASeveralEventWakeMarkerShowsThePanesListAndOpensNoWindow() {
+        let recorder = RouteRecorder()
+
+        click(wake(seq: 36, items: 3), recorder: recorder)
+
+        XCTAssertEqual(recorder.opened, [])
+        XCTAssertEqual(recorder.listsShown, 1)
+    }
+
+    func testClickingAWakeMarkerWhoseEventNamesNoTaskDoesNothing() {
+        let recorder = RouteRecorder()
+        let noTask = TurnOriginWire.taskWake(
+            items: [TaskWakeItemWire(taskId: nil, toolUseId: nil, kind: "other", outcome: "event", description: "")], omitted: 0)
+
+        click(TaskWakeFixtures.turn(seq: 37, origin: noTask), recorder: recorder)
+
+        XCTAssertEqual(recorder.opened, [])
+        XCTAssertEqual(recorder.listsShown, 0)
     }
 }
 
@@ -717,6 +801,53 @@ final class TaskWakeSessionTests: XCTestCase {
         XCTAssertEqual(session.turns[1].markerContent?.line, "⟲ 3 background events")
         XCTAssertTrue(changes.contains { if case .spliced(let from) = $0 { return from == 1 } else { return false } })
         sub.cancel()
+    }
+
+    private func isSplice(_ change: TurnChange) -> Bool {
+        if case .spliced = change { return true }
+        return false
+    }
+
+    func testAFrameThatSaysWhatTheTurnAlreadyHoldsChangesNothingAndTellsNoOne() {
+        let (session, client) = makeSession()
+        load([daemonTurn(0), daemonTurn(1, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(3))], into: client, session: session)
+        var changes: [TurnChange] = []
+        let sub = session.changes.sink { changes.append($0) }
+
+        frame(client, id: "d1", TaskWakeFixtures.origin(3))
+
+        XCTAssertEqual(session.turns[1].origin, TaskWakeFixtures.origin(3))
+        XCTAssertFalse(changes.contains(where: isSplice), "a repeat frame does not rebuild the turn view: \(changes)")
+        sub.cancel()
+    }
+
+    func testAFrameWithFewerEventsThanTheMarkerShowsDoesNotShrinkTheMarker() {
+        let (session, client) = makeSession()
+        load([daemonTurn(0), daemonTurn(1, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(3))], into: client, session: session)
+        var changes: [TurnChange] = []
+        let sub = session.changes.sink { changes.append($0) }
+
+        frame(client, id: "d1", TaskWakeFixtures.origin(2))                   // a late frame from before the third merge
+        frame(client, id: "d1", TaskWakeFixtures.origin(1))
+
+        XCTAssertEqual(session.turns[1].origin, TaskWakeFixtures.origin(3), "the marker never goes back to a smaller count")
+        XCTAssertEqual(session.turns[1].markerContent?.line, "⟲ 3 background events")
+        XCTAssertFalse(changes.contains(where: isSplice), "and the turn view is not rebuilt for it: \(changes)")
+        sub.cancel()
+    }
+
+    func testEventsTheDaemonDroppedCountTowardTheEventsAFrameHasWhenComparingItWithTheMarker() {
+        let (session, client) = makeSession()
+        // Three listed and four dropped: seven events.
+        load([daemonTurn(0), daemonTurn(1, input: TaskWakeFixtures.fallback, origin: TaskWakeFixtures.origin(3, omitted: 4))],
+             into: client, session: session)
+
+        frame(client, id: "d1", TaskWakeFixtures.origin(3, omitted: 1))       // four events: older than what is shown
+        XCTAssertEqual(session.turns[1].origin, TaskWakeFixtures.origin(3, omitted: 4))
+
+        frame(client, id: "d1", TaskWakeFixtures.origin(3, omitted: 6))       // nine events: newer
+        XCTAssertEqual(session.turns[1].origin, TaskWakeFixtures.origin(3, omitted: 6))
+        XCTAssertEqual(session.turns[1].markerContent?.line, "⟲ 9 background events")
     }
 
     func testAFrameNeverTurnsABubbleOrAnotherOriginIntoAWakeMarker() {

@@ -122,7 +122,9 @@ scroll-safety rig) passes no binding and gets none of them.
 - **Show in Transcript** in the popover's row menu, offered by `PaneBackgroundActions` only when the task's
   call is in that pane's retained transcript. It closes the popover and calls `ReplView.revealToolCall`,
   which scrolls to the item that shows the call (the call's row, its collapsed group's row, or its collapsed
-  activity row), a third of the way down the viewport, and stops following the tail. It expands nothing.
+  activity row), a third of the way down the viewport, and stops following the tail, unless the item lies in the
+  last two thirds of a viewport (within `2/3 × viewport height` of the document's end): the scroll then
+  ends at the bottom and the pane keeps following. It expands nothing.
 
 Which are gated: none of these. Opening a window and scrolling are view actions that change nothing in the
 world, so there is no human-gesture check (unlike Stop, which is untouched: `PaneBackgroundActions` forwards

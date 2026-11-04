@@ -669,6 +669,36 @@ final class TaskWakeMarkerViewTests: MouseQueueTestCase {
                        (["⟲ 3 background events"] + turn.markerContent!.tooltipLines).joined(separator: "\n"))
     }
 
+    func testASingleEventCopiesExactlyItsLineNotItsTooltipRepeated() throws {
+        let board = MotherNoticeFixtures.pasteboard(self)
+        let turn = TaskWakeFixtures.turn(1)
+
+        XCTAssertEqual(turn.markerCopyText, TaskWakeFixtures.line, "one event: its tooltip says the same, so it is not pasted twice")
+        let copyView = WakeMarkerView(content: turn.markerContent!, noticeText: turn.markerCopyText,
+                                      copyMenuTitle: WakeMarkerView.copyEventMenuTitle, pasteboard: board)
+        let item = try XCTUnwrap(copyView.menu(for: MotherNoticeFixtures.rightClick())?.items.first)
+        _ = (item.target as? NSObject)?.perform(try XCTUnwrap(item.action), with: item)
+
+        XCTAssertEqual(board.string(forType: .string), TaskWakeFixtures.line)
+    }
+
+    func testSeveralEventsCopyTheLineThenOneLinePerEvent() {
+        for count in [2, 3] {
+            let turn = TaskWakeFixtures.turn(count)
+
+            XCTAssertEqual(turn.markerCopyText,
+                           (["⟲ \(count) background events"] + turn.markerContent!.tooltipLines).joined(separator: "\n"), "\(count) events")
+            XCTAssertEqual(turn.markerCopyText.components(separatedBy: "\n").count, count + 1, "\(count) events")
+        }
+    }
+
+    func testOneListedEventWithOthersDroppedStillCopiesTheCountedLineAndItsTooltip() {
+        let turn = TaskWakeFixtures.turn(seq: 0, origin: TaskWakeFixtures.origin(1, omitted: 2))
+
+        XCTAssertEqual(turn.markerCopyText, "⟲ 3 background events\nMonitor: new output \"CI for PR #251\"\n…and 2 more",
+                       "the tooltip adds the event and the count of the rest: more than the line says")
+    }
+
     func testAMotherNoticeStillCopiesItsRawTextAndKeepsItsMenuTitle() {
         let turn = MotherNoticeFixtures.turn()
 

@@ -95,6 +95,11 @@ final class TaskOutputModel {
     static let readBytes = TaskRequests.maxReadBytes
     /// The most of a file the viewer holds from the end.
     static let windowBytes: UInt64 = 10 * 1_048_576
+    /// The most a task's final read follows the file's growth (a task that exits while the window is far
+    /// behind): past either limit the model stops and says the end of the output was not loaded. The byte
+    /// cap is injectable (`finalReadCapBytes:` on `init`) so a test can reach it with kilobytes.
+    static let finalReadCapBytes: UInt64 = 64 * 1_048_576
+    static let finalReadCapSeconds: TimeInterval = 10
     /// Past this many held bytes a growing file drops its oldest lines back to `windowBytes`.
     static let ceilingBytes = 20 * 1_048_576
     static let filePollInterval: TimeInterval = 0.5
@@ -113,9 +118,14 @@ final class TaskOutputModel {
     private(set) var state: State = .loading
     /// The head of the file is still being fetched in front of the tail.
     private(set) var isFillingHead = false
-    /// A reload of the tail is in flight because a holder arrived on a ready model (a repeat ask): what
-    /// `text` holds may be older than the file, so `tasks output` says `loading` until it lands.
+    /// What `text` holds may be older than the file, so `tasks output` says `loading`: a reload of the tail
+    /// is in flight because a holder arrived on a ready model (a repeat ask) or because the file is more
+    /// than the window ahead, or chained reads are still catching up with a file that is ahead of them.
+    /// Clear once the last of them has landed.
     private(set) var isRefreshing = false
+    /// The task ended while the window was so far behind that the final read hit its cap: the end of
+    /// the output was not loaded.
+    private(set) var endCutShort = false
     private var headFetchFailed = false
     /// UTF-8 bytes of `text` (what the registry's cap counts).
     private(set) var heldBytes = 0
@@ -141,6 +151,8 @@ final class TaskOutputModel {
     private var failedPolls = 0
     private static let failedPollLimit = 3
     private var needsFinalRead = false
+    /// Where the final read chain started (its cursor and the clock), for the cap.
+    private var finalChainStart: (cursor: UInt64, at: Date)?
     private var pollTimer: TaskPollTimer?
     private var coalesceTimer: TaskPollTimer?
     private var deliveryScheduled = false
@@ -153,17 +165,28 @@ final class TaskOutputModel {
     private let requests: TaskRequests
     private let schedule: TaskPollScheduler
     private let now: () -> Date
+    /// How much of a file is held from its end, and the most one read asks for. Tests shrink both.
+    private let window: UInt64
+    private let readSize: UInt32
+    /// The byte cap of the final read's chain (`finalReadCapBytes`; tests shrink it).
+    private let finalCapBytes: UInt64
 
     init(tag: String, taskId: String, isTaskEnded: Bool = false,
          requests: TaskRequests = .shared,
          schedule: @escaping TaskPollScheduler = MainRunLoopPollTimer.scheduler,
-         now: @escaping () -> Date = Date.init) {
+         now: @escaping () -> Date = Date.init,
+         windowBytes: UInt64 = TaskOutputModel.windowBytes,
+         readBytes: UInt32 = TaskOutputModel.readBytes,
+         finalReadCapBytes: UInt64 = TaskOutputModel.finalReadCapBytes) {
         self.tag = tag
         self.taskId = taskId
         self.isTaskEnded = isTaskEnded
         self.requests = requests
         self.schedule = schedule
         self.now = now
+        self.window = windowBytes
+        self.readSize = readBytes
+        self.finalCapBytes = finalReadCapBytes
     }
 
     deinit {
@@ -173,12 +196,20 @@ final class TaskOutputModel {
 
     // MARK: Reading
 
-    /// `Showing the last 10 MB of 12 MB` or `Showing the last 8 KB of 40 KB`; nil when nothing is cut.
+    /// `Showing the last 10 MB of 12 MB` or `Showing the last 8 KB of 40 KB`, and `Output truncated: ...` when the
+    /// end of the output was not loaded; nil when nothing is cut.
     var truncationNotice: String? {
+        let notices = [headNotice, endCutShort ? Self.endCutNotice : nil].compactMap { $0 }
+        return notices.isEmpty ? nil : notices.joined(separator: ". ")
+    }
+
+    static let endCutNotice = "Output truncated: the task ended with more output than could be loaded, so the end is missing"
+
+    private var headNotice: String? {
         guard truncatedHead else { return nil }
         switch source {
         case .file? where !headFetchFailed:
-            return "Showing the last \(TaskOutputSize.text(min(Self.windowBytes, totalBytes))) of \(TaskOutputSize.text(totalBytes))"
+            return "Showing the last \(TaskOutputSize.text(min(window, totalBytes))) of \(TaskOutputSize.text(totalBytes))"
         case .file?:
             // The head did not come: say what is actually held.
             return "Showing the last \(TaskOutputSize.text(UInt64(heldBytes))) of \(TaskOutputSize.text(totalBytes))"
@@ -274,7 +305,7 @@ final class TaskOutputModel {
         failedPolls = 0
         headFetchFailed = false
         readInFlight = true
-        requests.requestOutput(tag: tag, taskId: taskId, offset: nil) { [weak self] reply in
+        requests.requestOutput(tag: tag, taskId: taskId, offset: nil, maxBytes: readSize) { [weak self] reply in
             guard let self else { return }
             self.readInFlight = false
             self.tailArrived(reply)
@@ -282,6 +313,9 @@ final class TaskOutputModel {
     }
 
     private func tailArrived(_ reply: TaskReply<SessionTaskOutputResultWire>) {
+        // Whatever asked for this reload (a file far ahead of the window) is answered now: the head
+        // fetch, if one follows, keeps the model busy through `isFillingHead`.
+        isRefreshing = false
         switch reply {
         case .answered(let wire):
             switch wire.outcome {
@@ -321,7 +355,7 @@ final class TaskOutputModel {
         state = .ready
         let generation = loadGeneration
         if kind == .file {
-            let windowStart = totalBytes > Self.windowBytes ? totalBytes - Self.windowBytes : 0
+            let windowStart = totalBytes > window ? totalBytes - window : 0
             truncatedHead = windowStart > 0
             if wire.startOffset > windowStart { headStart = windowStart }
         } else {
@@ -337,7 +371,7 @@ final class TaskOutputModel {
     /// Only a head that is contiguous from `offset` through `limit`, answered for the load still current,
     /// goes in; anything else would leave a gap or a stale piece in front of the tail.
     private func fetchHeadChunk(at offset: UInt64, limit: UInt64, generation: Int, parts: [String]) {
-        let want = UInt32(min(UInt64(Self.readBytes), limit - offset))
+        let want = UInt32(min(UInt64(readSize), limit - offset))
         requests.requestOutput(tag: tag, taskId: taskId, offset: offset, maxBytes: want) { [weak self] reply in
             guard let self, self.loadGeneration == generation else { return }
             var parts = parts
@@ -405,6 +439,7 @@ final class TaskOutputModel {
     private func finalRead() {
         guard phase == .ready, !readInFlight else { return }
         needsFinalRead = false
+        finalChainStart = (cursor, now())
         read(final: true)
     }
 
@@ -413,20 +448,41 @@ final class TaskOutputModel {
         readInFlight = true
         let viaFile = source == .file
         let offset: UInt64? = viaFile ? cursor : nil
-        requests.requestOutput(tag: tag, taskId: taskId, offset: offset) { [weak self] reply in
+        requests.requestOutput(tag: tag, taskId: taskId, offset: offset, maxBytes: readSize) { [weak self] reply in
             guard let self else { return }
             self.readInFlight = false
-            self.isRefreshing = false
             var more = false
             if viaFile { more = self.fileReadArrived(reply) } else { self.tailReadArrived(reply) }
             if self.needsFinalRead { self.finalRead() }
-            // A file that is ahead of what was read is caught up now, not one chunk per poll.
-            if more, !final, self.holderCount > 0, !self.isTaskEnded, !self.readInFlight, self.phase == .ready {
-                self.read(final: false)
-                return
+            // A file that is ahead of what was read is caught up now, not one chunk per poll. The final
+            // read follows it to the end too (up to its cap): the task is over, so what is left is all
+            // there will be.
+            let chain = more && self.holderCount > 0 && !self.readInFlight && self.phase == .ready
+                && (final || !self.isTaskEnded)
+            // A read that found the file further ahead than the window started a tail reload: that reload
+            // is the catch-up now, and the model stays busy until its answer lands (`tailArrived`).
+            self.isRefreshing = chain || self.phase == .loadingTail
+            if chain {
+                if !final || self.finalChainMayContinue() {
+                    self.read(final: final)
+                    return
+                }
+                self.isRefreshing = false
+                self.endCutShort = true
+                self.queue(.status)
+                self.flush()
+            } else if more, final, self.holderCount == 0 {
+                self.needsFinalRead = true   // the last holder left mid-catch-up: the next one finishes it
             }
             if !final { self.scheduleNextPollIfNeeded() }
         }
+    }
+
+    /// The final read has not yet followed the file past its caps.
+    private func finalChainMayContinue() -> Bool {
+        guard let start = finalChainStart else { return false }
+        return cursor - start.cursor < finalCapBytes
+            && now().timeIntervalSince(start.at) < Self.finalReadCapSeconds
     }
 
     /// True when the file holds more past what this read returned, and the next read should follow at once.
@@ -434,7 +490,7 @@ final class TaskOutputModel {
         guard case .answered(let wire) = reply else { return false }   // no answer: try again at the next poll
         switch wire.outcome {
         case .ok:
-            if wire.totalBytes < cursor || (wire.totalBytes > wire.endOffset && wire.totalBytes - wire.endOffset > Self.windowBytes) {
+            if wire.totalBytes < cursor || (wire.totalBytes > wire.endOffset && wire.totalBytes - wire.endOffset > window) {
                 // The file got shorter (rewritten), or is further ahead than the window: reading it
                 // chunk by chunk would only be trimmed away; start again from its end.
                 phase = .idle
@@ -513,7 +569,7 @@ final class TaskOutputModel {
 
     /// A file that keeps growing: drop the oldest lines so the model stays near the window.
     private func trimOldest() {
-        text = Self.lastBytes(of: text, Int(Self.windowBytes))
+        text = Self.lastBytes(of: text, Int(window))
         heldBytes = text.utf8.count
         truncatedHead = true
         queue(.replaced)

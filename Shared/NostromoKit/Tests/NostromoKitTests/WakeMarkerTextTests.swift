@@ -349,6 +349,33 @@ final class WakeMarkerTextTests: XCTestCase {
         XCTAssertEqual(WakeMarkerText.taskWake([wake()], omitted: 2).line, "⟲ 3 background events")
     }
 
+    func testTheTooltipCountsWhatItDoesNotListEvenWhenTheDaemonDroppedEventsBeforeTheLimit() {
+        // Five events are listed and thirty more were dropped: the rest is 30, not "35 minus the limit".
+        let five = (0 ..< 5).map { wake("shell", "completed", "c\($0)", id: "t\($0)") }
+        let content = WakeMarkerText.taskWake(five, omitted: 30)
+
+        XCTAssertEqual(content.line, "⟲ 35 background events")
+        XCTAssertEqual(content.tooltipLines.count, 6, "five events and the count of the rest")
+        XCTAssertEqual(Array(content.tooltipLines.prefix(5)), five.map { "Shell: completed \"\($0.description)\"" })
+        XCTAssertEqual(content.tooltipLines.last, "…and 30 more")
+        XCTAssertTrue(content.accessibilityLabel.hasSuffix("…and 30 more"), "the spoken label says it too")
+    }
+
+    func testOneListedEventWithTwoDroppedSaysAndTwoMore() {
+        let content = WakeMarkerText.taskWake([wake()], omitted: 2)
+
+        XCTAssertEqual(content.tooltipLines, ["Monitor: new output \"CI for PR #251\"", "…and 2 more"])
+        XCTAssertEqual(content.line, "⟲ 3 background events")
+    }
+
+    func testTwentyListedWithOthersDroppedCountsOnlyTheDropped() {
+        let twenty = (0 ..< 20).map { wake("shell", "completed", "c\($0)", id: "t\($0)") }
+
+        XCTAssertEqual(WakeMarkerText.taskWake(twenty, omitted: 3).tooltipLines.last, "…and 3 more")
+        XCTAssertEqual(WakeMarkerText.taskWake(twenty, omitted: 3).tooltipLines.count, 21)
+        XCTAssertEqual(WakeMarkerText.taskWake(twenty, omitted: 0).tooltipLines.count, 20, "nothing left out: no count line")
+    }
+
     func testWakeDescriptionCapsAtEightyInTheLineAndOneHundredTwentyInTheTooltip() {
         let content = WakeMarkerText.taskWake([wake("monitor", "new_output", String(repeating: "x", count: 500))], omitted: 0)
 

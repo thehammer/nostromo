@@ -39,8 +39,9 @@ enum AppControlTasks {
         + "the isolated QA instance returns it"
 
     /// `tasks output TASK_ID`: what the task window shows, from the same `TaskOutputModel`. `text` is the
-    /// end of what the model holds, at most `outputTextLimit` bytes; `truncated` is true when the start of
-    /// the output is not in it (the model cut it, or this cap did). With `allowsText` false (the real
+    /// end of what the model holds, at most `outputTextLimit` bytes; `truncated` is true when any of the
+    /// output is not in it: the start (the model cut it, or this cap did) or the end (the task ended with
+    /// more output than the final read would follow: `end_truncated`, also true then). With `allowsText` false (the real
     /// app: `SyntheticInputGate.allowsSynthetic`) the text is `null` and `refusal` says why; the rest
     /// still answers. `state` is `loading` while the model is still reading (ask again), then `ready`,
     /// `unavailable` or `error`.
@@ -53,7 +54,8 @@ enum AppControlTasks {
             "tag": tag,
             "task_id": taskId,
             "state": loading ? "loading" : model.stateName,
-            "truncated": model.truncatedHead || text.wasCut,
+            "truncated": model.truncatedHead || text.wasCut || model.endCutShort,
+            "end_truncated": model.endCutShort,
             "total_bytes": total,
             "source": sourceName(model.source),
             "text": shownText,

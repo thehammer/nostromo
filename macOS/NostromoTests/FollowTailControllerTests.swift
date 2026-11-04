@@ -541,3 +541,105 @@ extension FollowTailControllerTests {
         XCTAssertTrue(rig.flips.isEmpty)
     }
 }
+
+// MARK: - Revealing an item (Show in Transcript) near the end of the transcript
+
+/// `TranscriptViewportCoordinator.reveal(documentY:)` puts an item a third of the way down the viewport and
+/// stops following the tail, except that an item in the last viewport leaves the bottom in view: the pane
+/// then still follows. The scroll to such an item moves nothing (the viewport already is at the bottom), so
+/// no bounds change says "following" again; the reveal has to. Runs over the gate's rig (real coordinator,
+/// follow-tail controller, overlay and virtualizer).
+final class TranscriptRevealFollowTests: XCTestCase {
+
+    func testRevealingAnItemInTheLastViewportWhileFollowingTheTailKeepsFollowingAndShowsNoJumpPill() {
+        let rig = SafetyRig.followingTail(self)
+        XCTAssertTrue(rig.followTail.isPinned, "precondition")
+        XCTAssertTrue(rig.overlay.button.isHidden, "precondition")
+        let item = rig.virtualizer.documentHeight - 100              // inside the last viewport
+
+        rig.coordinator.reveal(documentY: item)
+        rig.settle()
+
+        XCTAssertTrue(rig.followTail.isPinned, "the bottom is in view: the pane follows the tail")
+        XCTAssertTrue(rig.overlay.button.isHidden, "so no Jump to latest is offered")
+        XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1, "and the viewport is at the bottom")
+    }
+
+    func testANewTurnAfterRevealingAnItemInTheLastViewportIsFollowed() {
+        let rig = SafetyRig.followingTail(self)
+        rig.coordinator.reveal(documentY: rig.virtualizer.documentHeight - 100)
+        rig.settle()
+        let heightBefore = rig.virtualizer.documentHeight
+
+        rig.appendTurn(SafetyFixtures.tallTurn(90))
+        rig.settle()
+
+        XCTAssertGreaterThan(rig.virtualizer.documentHeight, heightBefore, "premise: the document grew")
+        XCTAssertTrue(rig.followTail.isPinned, "still following")
+        XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1, "the viewport went down with the new content")
+        XCTAssertTrue(rig.overlay.button.isHidden)
+    }
+
+    func testNewBlocksOnTheLastTurnAfterRevealingAnItemInTheLastViewportAreFollowed() {
+        let rig = SafetyRig.followingTail(self)
+        rig.coordinator.reveal(documentY: rig.virtualizer.documentHeight - 100)
+        rig.settle()
+        let heightBefore = rig.virtualizer.documentHeight
+
+        rig.append([.text("More output. \(FoldFixtures.prose) \(FoldFixtures.prose) \(FoldFixtures.prose)")])
+        rig.settle()
+
+        XCTAssertGreaterThan(rig.virtualizer.documentHeight, heightBefore, "premise: the document grew")
+        XCTAssertTrue(rig.followTail.isPinned)
+        XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1)
+    }
+
+    func testRevealingAnItemInTheLastViewportWhileFollowingFlipsNothingAtAll() {
+        // Pinned and staying pinned is no flip: `onFlip` (the log of every change) must not hear a
+        // pinned-false followed by a pinned-true for a reveal that changes nothing.
+        let rig = SafetyRig.followingTail(self)
+        XCTAssertTrue(rig.followTail.isPinned, "precondition")
+        rig.flips = []
+
+        rig.coordinator.reveal(documentY: rig.virtualizer.documentHeight - 100)
+        rig.settle()
+
+        XCTAssertEqual(rig.flips.count, 0, "no flip: \(rig.flips)")
+        XCTAssertTrue(rig.followTail.isPinned)
+    }
+
+    func testRevealingAnItemFarAboveTheEndWhileFollowingFlipsOnceAndNotBack() {
+        let rig = SafetyRig.followingTail(self)
+        rig.flips = []
+
+        rig.coordinator.reveal(documentY: rig.virtualizer.offset(of: 3))
+        rig.settle()
+
+        XCTAssertEqual(rig.flips.map(\.pinned), [false], "one flip, to not following: \(rig.flips)")
+        XCTAssertFalse(rig.followTail.isPinned)
+    }
+
+    func testRevealingAnItemInTheLastViewportAfterScrollingUpFlipsOnceToFollowing() {
+        let rig = SafetyRig.scrolledUp(self)
+        XCTAssertFalse(rig.followTail.isPinned, "precondition")
+        rig.flips = []
+
+        rig.coordinator.reveal(documentY: rig.virtualizer.documentHeight - 100)
+        rig.settle()
+
+        XCTAssertEqual(rig.flips.map(\.pinned), [true], "one flip, to following: \(rig.flips)")
+        XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1)
+    }
+
+    func testRevealingAnItemFarAboveTheEndStopsFollowingAndOffersTheJumpPill() {
+        let rig = SafetyRig.followingTail(self)
+        XCTAssertTrue(rig.followTail.isPinned, "precondition")
+
+        rig.coordinator.reveal(documentY: rig.virtualizer.offset(of: 3))
+        rig.settle()
+
+        XCTAssertFalse(rig.followTail.isPinned, "the operator asked to see something else")
+        XCTAssertGreaterThan(rig.gapBelowViewport, rig.viewportHeight, "the viewport is well above the end")
+        XCTAssertFalse(rig.overlay.button.isHidden, "and the pane offers the way back")
+    }
+}

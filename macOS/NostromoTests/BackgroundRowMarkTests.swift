@@ -579,7 +579,7 @@ final class BackgroundRowMarkTests: MouseQueueTestCase {
 
         XCTAssertTrue(row.accessibilityLabel()?.contains("background task running") ?? false, "the row's label says so")
         XCTAssertTrue(row.accessibilityLabel()?.hasPrefix(plain ?? "") ?? false, "after what it said before")
-        XCTAssertEqual(row.backgroundField.accessibilityLabel(), "background task running", "VoiceOver reads words, not the glyph")
+        XCTAssertFalse(row.backgroundField.isAccessibilityElement(), "the row's label says it once: the glyph is not read again")
         XCTAssertNotNil(action())
         XCTAssertEqual(action()?.handler?(), true)
         XCTAssertEqual(w.opened, ["job"], "the action opens the task")
@@ -1218,6 +1218,38 @@ final class BackgroundRowMarkRevealTests: MouseQueueTestCase {
         let top = screenTop(of: try XCTUnwrap(groupView(key, in: pane)).row, in: pane)
         XCTAssertGreaterThanOrEqual(top, 0, "the row is in the viewport")
         XCTAssertLessThan(top, viewportHeight(pane))
+    }
+
+    func testRevealingACallAtTheEndOfTheTranscriptKeepsFollowingTheTailAndShowsNoJumpPill() throws {
+        let pane = makePane()
+        deliverTurns(to: pane)
+        XCTAssertTrue(following(pane), "precondition: the pane follows the tail")
+
+        XCTAssertTrue(pane.repl.revealToolCall(toolUseId: "end_0"))
+        settle(pane)
+
+        XCTAssertTrue(following(pane), "the call is in the last viewport: the bottom is in view, so the pane follows")
+        XCTAssertEqual(pane.repl.renderGeometry["followingTail"], 1)
+        let pills = rigAllSubviews(of: pane.repl).compactMap { $0 as? JumpToLatestOverlay }
+        XCTAssertFalse(pills.isEmpty, "premise: the pane has its jump-to-latest overlay")
+        XCTAssertTrue(pills.allSatisfy { $0.button.isHidden }, "no Jump to latest is offered")
+    }
+
+    func testANewTurnAfterRevealingACallAtTheEndOfTheTranscriptIsFollowed() throws {
+        let pane = makePane()
+        deliverTurns(to: pane)
+        XCTAssertTrue(pane.repl.revealToolCall(toolUseId: "end_0"))
+        settle(pane)
+
+        client.messages.send(.sessionTurnDelta(tag: pane.tag, delta: .turnStarted(turn(40))))
+        modelWaitUntil {
+            self.pump(pane)
+            return AppStore.shared.session(for: pane.tag).turns.count >= 41
+        }
+        settle(pane)
+
+        XCTAssertTrue(following(pane), "still following")
+        XCTAssertEqual(pane.repl.anchorSnapshot(windowIndex: 0).bottomOffsetPt, 0, accuracy: 1, "at the new end")
     }
 
     // MARK: - The pane's popover actions

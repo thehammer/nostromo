@@ -46,12 +46,29 @@ class ReplView: NSView {
 
     /// What a click on a wake marker opens: the task's window on this pane's tag, or the pane's
     /// background list when the store does not know the task (or several events woke the agent).
-    private lazy var wakeMarkerRouter: WakeMarkerView.Router = WakeMarkerView.paneRouter(
-        openTask: { [weak self] id in
-            guard let self else { return true }
-            return TaskWindowManager.shared.open(tag: self.session.tag, taskId: id) != nil
+    lazy var wakeMarkerRouter: WakeMarkerView.Router = Self.wakeMarkerRouter(
+        tag: session.tag,
+        openTask: { [weak self] tag, id in self?.wakeMarkerOpensTask(tag, id) ?? true },
+        showList: { [weak self] in self?.wakeMarkerShowsList() })
+
+    /// What a wake marker's click does once routed: open the task's window (true if it opened), or show
+    /// the pane's background list. Tests replace them to see what the router chose, and with which tag.
+    var wakeMarkerOpensTask: (_ tag: String, _ taskId: String) -> Bool = { tag, id in
+        TaskWindowManager.shared.open(tag: tag, taskId: id) != nil
+    }
+    lazy var wakeMarkerShowsList: () -> Void = { [weak self] in self?.inputBar.showBackgroundPopover(nil) }
+
+    /// The router a pane with `tag` installs on its wake markers. `openTask` says whether the task's
+    /// window opened (`TaskWindowManager` by default); if not, `showList` runs. Tests pass recorders.
+    static func wakeMarkerRouter(
+        tag: String,
+        openTask: @escaping (_ tag: String, _ taskId: String) -> Bool = { tag, id in
+            TaskWindowManager.shared.open(tag: tag, taskId: id) != nil
         },
-        showList: { [weak self] in self?.inputBar.showBackgroundPopover(nil) })
+        showList: @escaping () -> Void
+    ) -> WakeMarkerView.Router {
+        WakeMarkerView.paneRouter(openTask: { openTask(tag, $0) }, showList: showList)
+    }
 
     private var inputBarHeightConstraint: NSLayoutConstraint!
 
