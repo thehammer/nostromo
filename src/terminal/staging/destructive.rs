@@ -115,12 +115,13 @@ fn regex<'a>(cell: &'a OnceLock<Regex>, pattern: &str) -> &'a Regex {
 
 // ── shared text helpers ─────────────────────────────────────────────────────────────────────────────
 
-/// The view split at `;`, `|` and `&`, each segment as its words (split at spaces and tabs).
+/// The view split at `;`, `|` and `&`, each segment as its words (split at spaces, tabs, `<` and `>`, so a
+/// redirection glued to a word, `kubectl delete>/dev/null ns x`, still leaves the verb a word of its own).
 fn segment_words(view: &str) -> Vec<Vec<String>> {
     view.split([';', '|', '&'])
         .map(|segment| {
             segment
-                .split([' ', '\t'])
+                .split([' ', '\t', '<', '>'])
                 .filter(|w| !w.is_empty())
                 .map(str::to_string)
                 .collect::<Vec<_>>()
@@ -129,9 +130,9 @@ fn segment_words(view: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// Every word of the view, split at whitespace and at `;`, `|` and `&`.
+/// Every word of the view, split at whitespace and at `;`, `|`, `&`, `<` and `>`.
 fn all_words(view: &str) -> Vec<String> {
-    view.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&'))
+    view.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>'))
         .filter(|w| !w.is_empty())
         .map(str::to_string)
         .collect()
@@ -280,37 +281,48 @@ fn has_force_kill(view: &str) -> bool {
 
 /// `terraform`, `tofu` or `terragrunt` followed later in the segment by `destroy`, `-destroy`, `--destroy`,
 /// `-replace` or `--replace` (optionally `=value`). `plan -destroy` is read-only but its plan file can be
-/// applied unseen, so it asks too.
+/// applied unseen, so it asks too. Also (same label) `taint`, `workspace … delete` and `state … rm`/`remove`:
+/// each makes the next apply destroy something, or forgets or deletes state.
 fn has_terraform_destroy(view: &str) -> bool {
     segment_words(view).iter().any(|words| {
         after_program(words, &["terraform", "tofu", "terragrunt"]).is_some_and(|rest| {
-            rest.iter().any(|w| {
-                let w = w.to_lowercase();
-                let flag = w.trim_start_matches('-');
-                let name = flag.split('=').next().unwrap_or(flag);
-                w == "destroy" || (w.starts_with('-') && (name == "destroy" || name == "replace"))
-            })
+            let rest: Vec<String> = rest.iter().map(|w| w.to_lowercase()).collect();
+            let then = |first: &str, verbs: &[&str]| {
+                rest.iter()
+                    .position(|w| w == first)
+                    .is_some_and(|at| rest[at + 1..].iter().any(|w| verbs.contains(&w.as_str())))
+            };
+            then("workspace", &["delete"])
+                || then("state", &["rm", "remove"])
+                || rest.iter().any(|w| {
+                    let flag = w.trim_start_matches('-');
+                    let name = flag.split('=').next().unwrap_or(flag);
+                    w == "destroy"
+                        || w == "taint"
+                        || (w.starts_with('-') && (name == "destroy" || name == "replace"))
+                })
         })
     })
 }
 
 /// `aws` followed later in the segment by a word that is exactly `delete-…`, `terminate-…`, `remove-…`,
-/// `deregister-…` or `purge-…`.
+/// `deregister-…` or `purge-…`, or exactly `schedule-key-deletion` (kms: the key is gone in 7 to 30 days).
 fn has_aws_delete(view: &str) -> bool {
     segment_words(view).iter().any(|words| {
         after_program(words, &["aws"]).is_some_and(|rest| {
             rest.iter().any(|w| {
                 let w = w.to_lowercase();
-                ["delete-", "terminate-", "remove-", "deregister-", "purge-"]
-                    .iter()
-                    .any(|verb| {
-                        w.strip_prefix(verb).is_some_and(|x| {
-                            !x.is_empty()
-                                && x.chars().all(|c| {
-                                    c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
-                                })
+                w == "schedule-key-deletion"
+                    || ["delete-", "terminate-", "remove-", "deregister-", "purge-"]
+                        .iter()
+                        .any(|verb| {
+                            w.strip_prefix(verb).is_some_and(|x| {
+                                !x.is_empty()
+                                    && x.chars().all(|c| {
+                                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+                                    })
+                            })
                         })
-                    })
             })
         })
     })
@@ -417,11 +429,12 @@ fn has_find_delete(view: &str) -> bool {
             .is_some_and(|exec| rest[exec + 1..].iter().any(|w| program(w) == "rm"))
 }
 
-/// An `xargs` program followed later anywhere in the text by an `rm` program, or an `rm` program after a single
-/// `|` (a pipe, not `||`) anywhere in the text.
+/// An `xargs` or `parallel` program followed later anywhere in the text by an `rm` program (`parallel rm ::: a b`,
+/// `parallel 'rm -rf {}' ::: x`), or an `rm` program after a single `|` (a pipe, not `||`) anywhere in the text.
 fn has_xargs_or_piped_rm(view: &str) -> bool {
     let words = all_words(view);
-    if after_program(&words, &["xargs"]).is_some_and(|rest| rest.iter().any(|w| program(w) == "rm"))
+    if after_program(&words, &["xargs", "parallel"])
+        .is_some_and(|rest| rest.iter().any(|w| program(w) == "rm"))
     {
         return true;
     }

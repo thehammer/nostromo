@@ -45,8 +45,8 @@ enum StagingDestructivePatterns {
         if any(hasAwsDelete) { found.append("aws delete/terminate") }
         if any(hasAwsS3Remove) { found.append("aws s3 rm/rb") }
         if any(hasDdOutput) { found.append("dd of=") }
-        if any({ StagingHazards.words(of: $0).contains { program($0).hasPrefix("mkfs") } }) { found.append("mkfs") }
-        if any({ StagingHazards.words(of: $0).contains { program($0) == "shred" } }) { found.append("shred") }
+        if any({ StagingHazards.redirectionSplitWords(of: $0).contains { program($0).hasPrefix("mkfs") } }) { found.append("mkfs") }
+        if any({ StagingHazards.redirectionSplitWords(of: $0).contains { program($0) == "shred" } }) { found.append("shred") }
         if any(truncatesAFile) { found.append("> file") }
         if any(hasFindDelete) { found.append("find -delete") }
         if any(hasXargsOrPipedRemove) { found.append("xargs/piped rm") }
@@ -101,7 +101,7 @@ enum StagingDestructivePatterns {
 
     private static func segmentWords(_ view: String) -> [[String]] {
         view.split(whereSeparator: { $0 == ";" || $0 == "|" || $0 == "&" })
-            .map { $0.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init) }
+            .map { $0.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "<" || $0 == ">" }).map(String.init) }
             .filter { !$0.isEmpty }
     }
 
@@ -141,13 +141,19 @@ enum StagingDestructivePatterns {
 
     /// `terraform`, `tofu` or `terragrunt` followed later in the segment by `destroy`, `-destroy`, `--destroy`,
     /// `-replace` or `--replace` (optionally `=value`). `plan -destroy` is read-only but its plan file can be applied
-    /// unseen, so it asks too.
+    /// unseen, so it asks too. Also (same label) `taint`, `workspace ... delete` and `state ... rm`/`remove`: each
+    /// makes the next apply destroy something, or forgets or deletes state.
     private static func hasTerraformDestroy(_ view: String) -> Bool {
         for words in segmentWords(view) {
             guard let rest = afterProgram(words, ["terraform", "tofu", "terragrunt"]) else { continue }
-            for raw in rest {
-                let word = raw.lowercased()
-                if word == "destroy" { return true }
+            let lowered = rest.map { $0.lowercased() }
+            func then(_ first: String, _ verbs: [String]) -> Bool {
+                guard let at = lowered.firstIndex(of: first) else { return false }
+                return lowered[(at + 1)...].contains { verbs.contains($0) }
+            }
+            if then("workspace", ["delete"]) || then("state", ["rm", "remove"]) { return true }
+            for word in lowered {
+                if word == "destroy" || word == "taint" { return true }
                 if word.hasPrefix("-") {
                     let flag = word.drop(while: { $0 == "-" })
                     let name = flag.split(separator: "=", omittingEmptySubsequences: false).first.map(String.init) ?? ""
@@ -159,12 +165,13 @@ enum StagingDestructivePatterns {
     }
 
     /// `aws` followed later in the segment by a word that is exactly `delete-…`, `terminate-…`, `remove-…`,
-    /// `deregister-…` or `purge-…`.
+    /// `deregister-…` or `purge-…`, or exactly `schedule-key-deletion` (kms: the key is gone in 7 to 30 days).
     private static func hasAwsDelete(_ view: String) -> Bool {
         let verbs = ["delete-", "terminate-", "remove-", "deregister-", "purge-"]
         return segmentWords(view).contains { words in
             afterProgram(words, ["aws"])?.contains { raw in
                 let word = raw.lowercased()
+                if word == "schedule-key-deletion" { return true }
                 return verbs.contains { verb in
                     guard word.hasPrefix(verb) else { return false }
                     let tail = word.dropFirst(verb.count)
@@ -235,25 +242,25 @@ enum StagingDestructivePatterns {
     /// A `find` program followed later anywhere in the text (the `{}` of `-exec rm {} \;` splits segments once
     /// normalised) by `-delete`, or by `-exec`/`-execdir`/`-ok`/`-okdir` and later an `rm` program.
     private static func hasFindDelete(_ view: String) -> Bool {
-        let words = StagingHazards.words(of: view).map { $0.lowercased() }
+        let words = StagingHazards.redirectionSplitWords(of: view).map { $0.lowercased() }
         guard let rest = afterProgram(words, ["find"]) else { return false }
         if rest.contains("-delete") { return true }
         guard let exec = rest.firstIndex(where: { ["-exec", "-execdir", "-ok", "-okdir"].contains($0) }) else { return false }
         return rest[(exec + 1)...].contains { program($0) == "rm" }
     }
 
-    /// An `xargs` program followed later anywhere in the text by an `rm` program, or an `rm` program after a single
-    /// `|` (a pipe, not `||`) anywhere in the text.
+    /// An `xargs` or `parallel` program followed later anywhere in the text by an `rm` program (`parallel rm ::: a b`),
+    /// or an `rm` program after a single `|` (a pipe, not `||`) anywhere in the text.
     private static func hasXargsOrPipedRemove(_ view: String) -> Bool {
-        let words = StagingHazards.words(of: view)
-        if afterProgram(words, ["xargs"])?.contains(where: { program($0) == "rm" }) ?? false { return true }
+        let words = StagingHazards.redirectionSplitWords(of: view)
+        if afterProgram(words, ["xargs", "parallel"])?.contains(where: { program($0) == "rm" }) ?? false { return true }
         let chars = Array(view.unicodeScalars)
         guard let pipe = chars.indices.first(where: { index in
             chars[index] == "|" && (index == 0 || chars[index - 1] != "|") && (index + 1 >= chars.count || chars[index + 1] != "|")
         }) else { return false }
         var rest = String.UnicodeScalarView()
         rest.append(contentsOf: chars[(pipe + 1)...])
-        return StagingHazards.words(of: String(rest)).contains { program($0) == "rm" }
+        return StagingHazards.redirectionSplitWords(of: String(rest)).contains { program($0) == "rm" }
     }
 
     /// `text` up to a SQL comment start (`-- `, a trailing `--`, `#`): a `WHERE` after one is not part of the statement.
@@ -406,6 +413,13 @@ enum StagingHazards {
     /// Words, split at whitespace and at `;`, `|` and `&`.
     static func words(of text: String) -> [String] {
         text.split(whereSeparator: { $0.isWhitespace || $0 == ";" || $0 == "|" || $0 == "&" }).map(String.init)
+    }
+
+    /// Words for the destructive rules: split at whitespace and at `;`, `|`, `&`, `<` and `>`, so a redirection glued
+    /// to a word (`kubectl delete>/dev/null ns x`) still leaves the verb a word of its own. The history check keeps
+    /// [`words(of:)`].
+    static func redirectionSplitWords(of text: String) -> [String] {
+        text.split(whereSeparator: { $0.isWhitespace || ";|&<>".contains($0) }).map(String.init)
     }
 
     /// `⚠ Matches a destructive pattern (queue:flush). Insert asks first. No label does not mean safe.`

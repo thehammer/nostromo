@@ -121,6 +121,39 @@ class TerminalScriptGuardsTest(unittest.TestCase):
                     self.assertIn("evidence directory", run.stdout)
 
 
+    def test_each_script_refuses_a_control_socket_that_is_not_inside_a_qa_root(self):
+        for script in SCRIPTS:
+            with self.subTest(script):
+                tree = Tree(self)
+                sock_dir = os.path.join(tree.root, "someones-app")
+                os.makedirs(sock_dir)
+                run = tree.run(script, {"NOSTROMO_APP_CONTROL_SOCKET": os.path.join(sock_dir, "app-control.sock")})
+                self.refused(run, tree, "NOSTROMO_APP_CONTROL_SOCKET")
+
+    def test_each_script_accepts_a_control_socket_inside_a_qa_root(self):
+        for script in SCRIPTS:
+            with self.subTest(script):
+                tree = Tree(self)
+                sock_dir = os.path.join(tree.root, "qa-root")
+                os.makedirs(sock_dir)
+                open(os.path.join(sock_dir, ".nostromo-qa-root"), "w").close()
+                run = tree.run(script, {"NOSTROMO_APP_CONTROL_SOCKET": os.path.join(sock_dir, "app-control.sock")})
+                self.assertNotIn("REFUSING TO RUN", run.stderr, run.stdout + run.stderr)
+
+    def test_each_script_refuses_when_the_real_focuses_file_cannot_be_read(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can read a mode 000 file")
+        for script in SCRIPTS:
+            with self.subTest(script):
+                tree = Tree(self)
+                tree.write_focuses('{"focuses":[]}')
+                path = os.path.join(tree.home, ".nostromo", "focuses.json")
+                os.chmod(path, 0)
+                self.addCleanup(os.chmod, path, 0o600)
+                run = tree.run(script)
+                self.refused(run, tree, "could not be read")
+
+
 class TerminalScriptSourceTest(unittest.TestCase):
     """The scripts call the shared guards right after sourcing lib/qa-visible.sh, before they start anything."""
 
@@ -157,6 +190,19 @@ class TerminalScriptSourceTest(unittest.TestCase):
                 for started in ('"$instance" start', "mktemp -d", "evidence directory"):
                     if started in code:
                         self.assertLess(guard_at, code.index(started), "guard must come before " + started)
+
+
+class IsolationGuardIsReportedTest(unittest.TestCase):
+    """Each script stops its QA instance through `stop "$root" || fail "isolation guard"`: a failing isolation
+    guard is a FAIL of the run, not something the EXIT trap swallows."""
+
+    def test_each_script_reports_a_failing_isolation_guard(self):
+        for script in SCRIPTS:
+            with self.subTest(script):
+                with open(os.path.join(QA_DIR, script)) as f:
+                    text = f.read()
+                self.assertIn('"$instance" stop "$root" || fail "isolation guard"', text)
+                self.assertIn("\nstop_instance\n", text, "the normal end of a run must call stop_instance")
 
 
 if __name__ == "__main__":

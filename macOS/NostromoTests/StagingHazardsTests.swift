@@ -635,6 +635,123 @@ final class StagingHazardsTests: XCTestCase {
         ])
     }
 
+    func testRedirectionGluedToAWordDoesNotHideTheVerb() {
+        assertAll("kubectl delete", [
+            #"kubectl delete>/dev/null ns x"#,
+            #"kubectl delete</dev/null ns x"#,
+            #"kubectl>/dev/null delete ns x"#,
+            #"bash -c 'kubectl delete>/dev/null ns x'"#,
+            #"sudo kubectl delete>/dev/null ns x"#,
+        ])
+        assertAll("terraform destroy", [
+            #"terraform destroy>/dev/null"#,
+            #"tofu destroy</dev/null"#,
+        ])
+        assertAll("helm uninstall", [
+            #"helm uninstall</dev/null x"#,
+            #"helm uninstall>/dev/null x"#,
+        ])
+        assertAll("aws delete/terminate", [
+            #"aws s3api delete-bucket>/dev/null"#,
+            #"aws s3api delete-bucket>/dev/null --bucket b"#,
+        ])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"kubectl delete>out.log ns x"#), ["kubectl delete", "> file"])
+        // plain redirections to the bit buckets and descriptor duplications stay unlabelled
+        assertNone([
+            #"echo hi 2>&1"#,
+            #"echo hi >&2"#,
+            #"echo hi > /dev/null"#,
+            #"ls>/dev/null"#,
+            #"ls >/dev/null 2>&1"#,
+            #"cat</dev/null"#,
+            #"kubectl get pods>/dev/null"#,
+            #"terraform plan>/dev/null"#,
+            #"helm list</dev/null"#,
+            #"aws s3api list-buckets>/dev/null"#,
+        ])
+    }
+
+    func testAwsKmsScheduleKeyDeletionIsCaughtAndTheOtherKmsVerbsAreNot() {
+        assertAll("aws delete/terminate", [
+            #"aws kms schedule-key-deletion --key-id k"#,
+            #"aws --profile prod kms schedule-key-deletion --key-id k"#,
+            #"/usr/local/bin/aws kms schedule-key-deletion --key-id k"#,
+            #"sudo aws kms schedule-key-deletion --key-id k"#,
+            #"bash -c 'aws kms schedule-key-deletion --key-id k'"#,
+            #"aws kms schedule-key-d''eletion --key-id k"#,
+            #"AWS KMS SCHEDULE-KEY-DELETION --key-id k"#,
+            #"aws kms schedule-key-deletion>/dev/null --key-id k"#,
+        ])
+        assertNone([
+            #"aws kms list-keys"#,
+            #"aws kms describe-key --key-id k"#,
+            #"aws kms cancel-key-deletion --key-id k"#,
+            #"aws kms encrypt --key-id k --plaintext x"#,
+        ])
+    }
+
+    func testParallelRmIsCaughtLikeXargsRmAndOtherParallelCommandsAreNot() {
+        assertAll("xargs/piped rm", [
+            #"parallel rm ::: a b"#,
+            #"parallel -j4 rm {} ::: a b"#,
+            #"parallel 'rm -rf {}' ::: a b"#,
+            #"ls | parallel rm"#,
+            #"sudo parallel rm ::: a b"#,
+            #"/usr/bin/parallel rm ::: a b"#,
+            #"parallel /bin/rm ::: a b"#,
+            #"bash -c 'parallel rm ::: a b'"#,
+            #"p''arallel rm ::: a b"#,
+            #"PARALLEL RM ::: a b"#,
+            #"parallel rm>/dev/null ::: a b"#,
+        ])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"parallel 'rm -rf {}' ::: a b"#), ["rm -rf", "xargs/piped rm"])
+        assertNone([
+            #"parallel echo ::: a b"#,
+            #"parallel gzip ::: a b"#,
+            #"parallel --dry-run echo {} ::: a b"#,
+            #"parallel rmdir ::: a b"#,
+        ])
+    }
+
+    func testTerraformWorkspaceDeleteStateRmAndTaintAreCaughtAndReadOnlyFormsAreNot() {
+        assertAll("terraform destroy", [
+            #"terraform workspace delete staging"#,
+            #"terraform workspace delete -force staging"#,
+            #"tofu workspace delete staging"#,
+            #"terraform -chdir=infra workspace delete staging"#,
+            #"sudo terraform workspace delete staging"#,
+            #"bash -c 'terraform workspace delete staging'"#,
+            #"terraform work''space de\lete staging"#,
+            #"terraform state rm aws_instance.web"#,
+            #"terraform -chdir=infra state rm aws_instance.web"#,
+            #"tofu state rm aws_instance.web"#,
+            #"terraform state remove aws_instance.web"#,
+            #"/usr/local/bin/terraform state rm aws_instance.web"#,
+            #"env TF_LOG=debug terraform state rm aws_instance.web"#,
+            #"TERRAFORM STATE RM aws_instance.web"#,
+            #"bash -c 'terraform state rm aws_instance.web'"#,
+            #"terraform state list; terraform state rm aws_instance.web"#,
+            #"terraform taint aws_instance.web"#,
+            #"sudo terraform taint aws_instance.web"#,
+            #"tofu taint aws_instance.web"#,
+            #"/usr/bin/terraform taint aws_instance.web"#,
+            #"bash -c 'terraform taint aws_instance.web'"#,
+            #"terraform ta''int aws_instance.web"#,
+            #"terraform -chdir=infra taint aws_instance.web"#,
+            #"TERRAFORM TAINT aws_instance.web"#,
+        ])
+        assertNone([
+            #"terraform workspace list"#,
+            #"terraform workspace select prod"#,
+            #"terraform workspace show"#,
+            #"terraform state show aws_instance.web"#,
+            #"terraform state pull"#,
+            #"terraform untaint aws_instance.web"#,
+            #"terraform output"#,
+            #"terraform state list; terraform workspace list"#,
+        ])
+    }
+
     func testSeveralNewFamiliesInOneCommandAreListedInListOrder() {
         // several families in one command are all listed in list order
         XCTAssertEqual(StagingDestructivePatterns.matches(#"kubectl delete pod web-1 && terraform destroy"#), ["kubectl delete", "terraform destroy"])
