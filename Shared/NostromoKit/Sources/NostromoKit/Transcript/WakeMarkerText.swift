@@ -100,7 +100,8 @@ public enum WakeMarkerText {
                 target: first.taskId.map { .backgroundTask(id: $0) } ?? .none)
         }
         var lines = items.prefix(tooltipJobLimit).map { wakeDetail($0, limit: tooltipTitleLimit) }
-        if total > tooltipJobLimit { lines.append("…and \(total - tooltipJobLimit) more") }
+        // The rest is what is not listed: past the limit, and the events the daemon dropped.
+        if total > lines.count { lines.append("…and \(total - lines.count) more") }
         return WakeMarkerContent(
             line: "\(mark) \(total) background events",
             tooltipLines: lines,

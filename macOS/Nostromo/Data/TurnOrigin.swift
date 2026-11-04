@@ -49,9 +49,11 @@ extension ChatTurn {
     }
 
     /// What the marker's Copy menu puts on the pasteboard: a Mother notice's raw text (what the agent
-    /// received); a task wake's own line and tooltip lines (the daemon never sends the raw event).
+    /// received); a task wake's own line, and for several events the tooltip's lines after it (the daemon
+    /// never sends the raw event). One event is only its line: its tooltip says the same.
     var markerCopyText: String {
         guard hasTaskWakeOrigin, let content = markerContent else { return userInput }
+        guard content.tooltipLines.count > 1 else { return content.line }
         return ([content.line] + content.tooltipLines).joined(separator: "\n")
     }
 

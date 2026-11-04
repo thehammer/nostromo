@@ -721,3 +721,162 @@ final class BackgroundTaskStoreTests: XCTestCase {
         XCTAssertNotNil(relaunched.seenMark(tag: "tag-201"))
     }
 }
+
+// MARK: - Looking a task up by the call that started it
+
+// A transcript with many tool rows asks for the task of each call on every tick (`task(tag:toolUseId:)`,
+// `runningTask(tag:toolUseIds:)`). The store answers from an index of the focus's tasks by call id that
+// it builds once per state, not once per row: 60 rows over 240 tasks must not be 60 scans.
+
+extension BackgroundTaskStoreTests {
+
+    /// A task started by the call `toolUseId`.
+    private func call(_ id: String, _ toolUseId: String?, _ status: TaskStatusWire = .running, started: UInt64?) -> TaskMetaWire {
+        TaskMetaWire(id: id, kind: .shell, description: "", toolUseId: toolUseId, isBackgrounded: true, status: status,
+                     startedAtMs: started, endedAtMs: status.isTerminal ? (started ?? 0) + 1_000 : nil)
+    }
+
+    private func manyTasks(_ count: Int = 240) -> [TaskMetaWire] {
+        (0 ..< count).map { call("t\($0)", "call-\($0)", $0 % 3 == 0 ? .completed : .running, started: startMs + UInt64($0)) }
+    }
+
+    // MARK: The index is built once per state
+
+    func testSixtyLookupsInOneTickOverTwoHundredFortyTasksBuildTheIndexOnce() throws {
+        let rig = try makeRig()
+        rig.send(snapshot(manyTasks()))
+        let builtBefore = rig.store.toolUseIndexBuilds
+
+        for row in 0 ..< 60 {
+            let n = row * 3 + 1                                                // t1, t4, t7, ...: all running
+            XCTAssertEqual(rig.store.task(tag: "kate", toolUseId: "call-\(n)")?.id, "t\(n)")
+            XCTAssertEqual(rig.store.runningTask(tag: "kate", toolUseIds: ["call-\(n)"])?.id, "t\(n)")
+        }
+
+        XCTAssertEqual(rig.store.toolUseIndexBuilds - builtBefore, 1, "120 lookups, one index")
+    }
+
+    func testANewSnapshotMakesTheNextLookupRebuildTheIndexExactlyOnce() throws {
+        let rig = try makeRig()
+        rig.send(snapshot(manyTasks()))
+        _ = rig.store.task(tag: "kate", toolUseId: "call-1")
+        let afterFirst = rig.store.toolUseIndexBuilds
+
+        _ = rig.store.task(tag: "kate", toolUseId: "call-2")
+        XCTAssertEqual(rig.store.toolUseIndexBuilds, afterFirst, "no change in between: the same index")
+
+        rig.send(snapshot(manyTasks(241)))                                     // the state changed
+        XCTAssertEqual(rig.store.toolUseIndexBuilds, afterFirst, "nothing is built until someone asks")
+        for row in 0 ..< 60 { _ = rig.store.task(tag: "kate", toolUseId: "call-\(row)") }
+
+        XCTAssertEqual(rig.store.toolUseIndexBuilds, afterFirst + 1, "one more build serves the next 60 lookups")
+        XCTAssertEqual(rig.store.task(tag: "kate", toolUseId: "call-240")?.id, "t240", "and it sees the new task")
+    }
+
+    func testAFocusWithNoStateBuildsNoIndexAndFindsNothing() throws {
+        let rig = try makeRig()
+        rig.send(snapshot(manyTasks(3)))
+        let builtBefore = rig.store.toolUseIndexBuilds
+
+        XCTAssertNil(rig.store.task(tag: "nobody", toolUseId: "call-1"))
+        XCTAssertNil(rig.store.runningTask(tag: "nobody", toolUseIds: ["call-1", "call-2"]))
+
+        XCTAssertEqual(rig.store.toolUseIndexBuilds, builtBefore)
+    }
+
+    func testAnIndexIsNeverServedForTasksThatHaveChangedSince() throws {
+        let rig = try makeRig()
+        rig.send(snapshot([call("job", "call-x", .running, started: startMs)]))
+        XCTAssertEqual(rig.store.runningTask(tag: "kate", toolUseIds: ["call-x"])?.id, "job", "premise: it is running")
+
+        rig.send(snapshot([call("job", "call-x", .completed, started: startMs)]))
+
+        XCTAssertNil(rig.store.runningTask(tag: "kate", toolUseIds: ["call-x"]), "the next snapshot says it is over")
+        XCTAssertEqual(rig.store.task(tag: "kate", toolUseId: "call-x")?.status, .completed)
+
+        rig.send(snapshot([]))
+        XCTAssertNil(rig.store.task(tag: "kate", toolUseId: "call-x"), "and a snapshot without it forgets it")
+    }
+
+    // MARK: Which task of a call
+
+    func testTheTaskOfACallIsTheNewestOfSeveralThatShareItsId() throws {
+        let rig = try makeRig()
+        rig.send(snapshot([call("old", "call-x", .completed, started: startMs + 100),
+                           call("newest", "call-x", .failed, started: startMs + 300),
+                           call("middle", "call-x", .running, started: startMs + 200),
+                           call("other", "call-y", .running, started: startMs + 900)]))
+
+        XCTAssertEqual(rig.store.task(tag: "kate", toolUseId: "call-x")?.id, "newest", "even though it is over")
+        XCTAssertEqual(rig.store.task(tag: "kate", toolUseId: "call-y")?.id, "other")
+        XCTAssertNil(rig.store.task(tag: "kate", toolUseId: "call-z"))
+    }
+
+    func testAtTheSameStartTheLaterEntryOfTheListWins() throws {
+        let rig = try makeRig()
+        rig.send(snapshot([call("first", "call-x", .running, started: startMs),
+                           call("second", "call-x", .running, started: startMs)]))
+
+        XCTAssertEqual(rig.store.task(tag: "kate", toolUseId: "call-x")?.id, "second")
+    }
+
+    func testATaskWithNoStartTimeCountsAsTheOldest() throws {
+        let rig = try makeRig()
+        rig.send(snapshot([call("started", "call-x", .running, started: 5), call("unstamped", "call-x", .running, started: nil)]))
+
+        XCTAssertEqual(rig.store.task(tag: "kate", toolUseId: "call-x")?.id, "started")
+    }
+
+    func testTheDaemonsTaskBeatsALocalEntryOfTheSameCallThatStartedAtTheSameTime() throws {
+        let rig = try makeRig()
+        rig.send(snapshot(epoch: "e1", [call("before-restart", "call-x", .running, started: startMs)]))
+        // The daemon restarted: the old task is kept locally as stopped, and the new daemon lists its own.
+        rig.send(snapshot(epoch: "e2", [call("after-restart", "call-x", .running, started: startMs)]))
+
+        XCTAssertEqual(rig.store.task(tag: "kate", toolUseId: "call-x")?.id, "after-restart")
+        XCTAssertEqual(rig.store.runningTask(tag: "kate", toolUseIds: ["call-x"])?.id, "after-restart")
+    }
+
+    // MARK: Which running task of a call
+
+    func testAnOlderTaskStillRunningIsNotHiddenByANewerOneOfTheSameCallThatEnded() throws {
+        let rig = try makeRig()
+        rig.send(snapshot([call("older-running", "call-x", .running, started: startMs + 100),
+                           call("newer-ended", "call-x", .completed, started: startMs + 200)]))
+
+        XCTAssertEqual(rig.store.runningTask(tag: "kate", toolUseIds: ["call-x"])?.id, "older-running",
+                       "the call still has a task that runs")
+        XCTAssertEqual(rig.store.task(tag: "kate", toolUseId: "call-x")?.id, "newer-ended", "the task of the call is still its newest")
+    }
+
+    func testACallWhoseTasksAreAllOverHasNoRunningTask() throws {
+        let rig = try makeRig()
+        rig.send(snapshot([call("a", "call-x", .completed, started: startMs + 100),
+                           call("b", "call-x", .failed, started: startMs + 200),
+                           call("c", "call-x", .stopped, started: startMs + 300)]))
+
+        XCTAssertNil(rig.store.runningTask(tag: "kate", toolUseIds: ["call-x"]))
+    }
+
+    func testOfSeveralRunningTasksOfACallTheNewestRunningOneWins() throws {
+        let rig = try makeRig()
+        rig.send(snapshot([call("r1", "call-x", .running, started: startMs + 100),
+                           call("r2", "call-x", .paused, started: startMs + 300),
+                           call("r3", "call-x", .running, started: startMs + 200),
+                           call("done", "call-x", .completed, started: startMs + 400)]))
+
+        XCTAssertEqual(rig.store.runningTask(tag: "kate", toolUseIds: ["call-x"])?.id, "r2", "paused is not over, and r2 is the newest of them")
+    }
+
+    func testTheCallsOrderDecidesWhichCallsRunningTaskIsReturned() throws {
+        let rig = try makeRig()
+        rig.send(snapshot([call("a-over", "call-a", .completed, started: startMs),
+                           call("b-run", "call-b", .running, started: startMs + 10),
+                           call("c-run", "call-c", .running, started: startMs + 20)]))
+
+        XCTAssertEqual(rig.store.runningTask(tag: "kate", toolUseIds: ["call-a", "call-b", "call-c"])?.id, "b-run",
+                       "call-a has nothing running: the first call that has is call-b")
+        XCTAssertEqual(rig.store.runningTask(tag: "kate", toolUseIds: ["call-c", "call-b"])?.id, "c-run")
+        XCTAssertNil(rig.store.runningTask(tag: "kate", toolUseIds: ["call-a", "call-unknown"]))
+    }
+}

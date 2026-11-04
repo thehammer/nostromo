@@ -863,4 +863,67 @@ extension AppControlTasksTests {
         XCTAssertEqual(payload["text"] as? String, visible(0..<10))
         XCTAssertEqual(number(payload["total_bytes"]), 640)
     }
+
+    // A file several reads ahead of the model is caught up by chained reads. Reads of 4 KiB over 64-byte
+    // lines make a 10-line file that grew by 200 lines four reads behind.
+
+    /// A model over a 10-line file, read in 4 KiB reads, loaded and polling.
+    private func readyModelWithSmallReads(_ rig: TaskOutputRig) -> TaskOutputModel {
+        rig.daemon.setLines(10)
+        let model = rig.makeModel(tag: tag, taskId: "b1", readBytes: 4_096)
+        model.acquire()
+        rig.drainAnswers()
+        rig.flushDeliveries()
+        addTeardownBlock { model.release() }
+        return model
+    }
+
+    func testWhileChainedReadsCatchUpOnAPollTheOutputIsLoadingUntilTheLastOneLands() throws {
+        let rig = TaskOutputRig()
+        let model = readyModelWithSmallReads(rig)
+        rig.daemon.appendLines(200)
+        rig.daemon.defersAnswers = true
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+
+        for read in 1...3 {
+            rig.daemon.answerNext()
+            let during = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+            XCTAssertEqual(during["state"] as? String, "loading", "read \(read) of 4: the file is still ahead of the text")
+            XCTAssertTrue(isNull(during["total_bytes"]), "an unknown size is null, never a size that is about to change")
+        }
+        rig.daemon.answerNext()
+        rig.flushDeliveries()
+        let after = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(after["state"] as? String, "ready")
+        XCTAssertEqual(after["text"] as? String, visible(0..<210), "all of what the file holds")
+        XCTAssertEqual(number(after["total_bytes"]), 210 * 64)
+    }
+
+    func testAskingAgainOfAModelFarBehindTheFileIsLoadingUntilItHasCaughtUpWithAllOfIt() throws {
+        let rig = TaskOutputRig()
+        let model = readyModelWithSmallReads(rig)
+        model.release()                          // the first ask's hold ran out
+        rig.daemon.appendLines(200)
+        rig.daemon.defersAnswers = true
+
+        model.acquire()                          // the second ask
+        addTeardownBlock { model.release() }
+
+        for read in 1...3 {
+            let during = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+            XCTAssertEqual(during["state"] as? String, "loading", "before read \(read) of 4 is answered")
+            rig.daemon.answerNext()
+        }
+        XCTAssertEqual(AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)["state"] as? String,
+                       "loading", "the third answer was not the last")
+        rig.daemon.answerNext()
+        rig.flushDeliveries()
+        let after = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
+
+        XCTAssertEqual(after["state"] as? String, "ready")
+        XCTAssertEqual(after["text"] as? String, visible(0..<210))
+        XCTAssertEqual(number(after["total_bytes"]), 210 * 64)
+    }
 }

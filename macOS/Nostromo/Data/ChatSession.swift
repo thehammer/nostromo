@@ -427,13 +427,21 @@ class ChatSession: ObservableObject {
     /// A background wake merged another event into an open wake turn. Only a turn that already has a
     /// `task_wake` origin takes it, and only a `task_wake` one: a frame can never turn a bubble into a
     /// marker or change a terminal or Mother origin. Identity (text, timestamp) and blocks stay as
-    /// they are; the turn view is rebuilt so the marker reads the new count at the same fixed height.
+    /// they are; the turn view is rebuilt so the marker reads the new count at the same fixed height. A frame that changes nothing, or that
+    /// holds fewer events than the marker already counts (a merge only adds), is dropped.
     private func applyOrigin(_ origin: TurnOriginWire, toDaemonTurn turnId: String) {
         guard case .taskWake = origin,
               let i = index(ofDaemonId: turnId),
-              turns[i].hasTaskWakeOrigin else { return }
+              turns[i].hasTaskWakeOrigin,
+              let current = turns[i].origin,
+              current != origin,
+              Self.wakeEventCount(origin) >= Self.wakeEventCount(current) else { return }
         turns[i].origin = origin
         changes.send(.spliced(replacedFrom: i))
+    }
+
+    private static func wakeEventCount(_ origin: TurnOriginWire) -> Int {
+        origin.taskWakeItems.count + origin.taskWakeOmitted
     }
 
     private func apply(_ delta: DaemonTurnDelta) {

@@ -97,7 +97,16 @@ final class BackgroundTaskStore {
         var allTasks: [TaskMetaWire] { restartStopped + awaitingReconnect + tasks }
     }
 
-    private(set) var states: [String: TagState] = [:]
+    private(set) var states: [String: TagState] = [:] {
+        // Any change to a tag's tasks may change what its index says: it is rebuilt on the next lookup.
+        didSet { tasksByToolUseId.removeAll(keepingCapacity: true) }
+    }
+
+    /// Per tag, its tasks by the call that started them (in list order). Built on the first lookup after
+    /// `states` changed, so the rows of one `changes` tick share one build.
+    private var tasksByToolUseId: [String: [String: [TaskMetaWire]]] = [:]
+    /// How many times a tag's index was built (tests watch this).
+    private(set) var toolUseIndexBuilds = 0
 
     private let now: () -> Date
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
@@ -132,21 +141,36 @@ final class BackgroundTaskStore {
 
     /// The task the call `toolUseId` started, in any status; the newest when several share the id.
     func task(tag: String, toolUseId: String) -> TaskMetaWire? {
+        tasksByToolUseId(tag)?[toolUseId].flatMap(Self.newest)
+    }
+
+    /// The first of `toolUseIds` with a task that is not over (pending, running, paused): the newest such
+    /// task of the call, so a newer task that ended does not hide an older one still running.
+    func runningTask(tag: String, toolUseIds: [String]) -> TaskMetaWire? {
+        guard let index = tasksByToolUseId(tag) else { return nil }
+        for id in toolUseIds {
+            if let running = index[id].flatMap({ Self.newest($0.filter { !$0.status.isTerminal }) }) { return running }
+        }
+        return nil
+    }
+
+    private func tasksByToolUseId(_ tag: String) -> [String: [TaskMetaWire]]? {
+        if let index = tasksByToolUseId[tag] { return index }
         guard let all = states[tag]?.allTasks else { return nil }
+        toolUseIndexBuilds += 1
+        var index: [String: [TaskMetaWire]] = [:]
+        for task in all { if let id = task.toolUseId { index[id, default: []].append(task) } }
+        tasksByToolUseId[tag] = index
+        return index
+    }
+
+    private static func newest(_ tasks: [TaskMetaWire]) -> TaskMetaWire? {
         var best: TaskMetaWire?
-        for task in all where task.toolUseId == toolUseId {
+        for task in tasks {
             // `>=`: on a tie the later entry (the daemon's, over a local one) wins.
             if best == nil || (task.startedAtMs ?? 0) >= (best?.startedAtMs ?? 0) { best = task }
         }
         return best
-    }
-
-    /// The first of `toolUseIds` whose task is not over (pending, running, paused).
-    func runningTask(tag: String, toolUseIds: [String]) -> TaskMetaWire? {
-        for id in toolUseIds {
-            if let task = task(tag: tag, toolUseId: id), !task.status.isTerminal { return task }
-        }
-        return nil
     }
 
     /// The daemon has sent at least one snapshot for `tag` on some connection.

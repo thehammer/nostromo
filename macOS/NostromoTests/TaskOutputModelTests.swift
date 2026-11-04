@@ -194,6 +194,16 @@ final class TaskOutputFakeDaemon: TaskRequestSending {
         return skip
     }
 
+    /// How many leading bytes of a tail window starting at `from` (mid-file) to drop: like
+    /// `leading_skip(.., tail: true)` in `src/ipc/task_output.rs`, everything up to and including the first
+    /// newline (the tail starts at a line start, not in the middle of one), unless that newline is the
+    /// window's last byte (the last line is longer than the window: keep it, skip only a split scalar).
+    private static func tailLeadingSkip(_ data: Data, from: Int) -> Int {
+        let length = data.count - from
+        if let newline = data[from...].firstIndex(of: 0x0A), newline - from + 1 < length { return newline - from + 1 }
+        return leadingContinuationBytes(data, from: from, limit: data.count)
+    }
+
     /// Where a chunk that stopped short of the end of the file ends (`safe_end`): after the last newline in
     /// `[from, to)` when it holds one, else not inside a UTF-8 scalar.
     private static func safeEnd(_ data: Data, from: Int, to: Int) -> Int {
@@ -226,6 +236,7 @@ final class TaskOutputFakeDaemon: TaskRequestSending {
             case .file:
                 // Like the real daemon: a read starts at an arbitrary byte, skips the rest of a scalar it
                 // began inside, and (short of the end of the file) stops after the last newline it holds.
+                // A tail that starts mid-file also drops the rest of its first line (`tailLeadingSkip`).
                 let wanted = Int(min(UInt64(read.maxBytes), UInt64(Self.chunkLimit)))
                 let size = served.count
                 if let offset = read.offset {
@@ -238,7 +249,7 @@ final class TaskOutputFakeDaemon: TaskRequestSending {
                     end = UInt64(to)
                 } else {
                     var from = size - min(size, wanted)
-                    if from > 0 { from += Self.leadingContinuationBytes(served, from: from, limit: size) }
+                    if from > 0 { from += Self.tailLeadingSkip(served, from: from) }
                     start = UInt64(from)
                     end = total
                 }
@@ -296,9 +307,14 @@ final class TaskOutputRig {
         scheduler.clock = clock
     }
 
-    func makeModel(tag: String = "kate", taskId: String = "t1", ended: Bool = false) -> TaskOutputModel {
+    /// `windowBytes` and `readBytes` shrink the model's 10 MiB window and 1 MiB read so a test crosses their
+    /// edges with a file of kilobytes (the fake daemon honours the request's `maxBytes`).
+    func makeModel(tag: String = "kate", taskId: String = "t1", ended: Bool = false,
+                   windowBytes: UInt64 = TaskOutputModel.windowBytes,
+                   readBytes: UInt32 = TaskOutputModel.readBytes) -> TaskOutputModel {
         TaskOutputModel(tag: tag, taskId: taskId, isTaskEnded: ended, requests: requests,
-                        schedule: scheduler.schedule, now: { [clock] in clock.date })
+                        schedule: scheduler.schedule, now: { [clock] in clock.date },
+                        windowBytes: windowBytes, readBytes: readBytes)
     }
 
     func makeRegistry(store: BackgroundTaskStore, capBytes: Int = TaskOutputRegistry.capBytes) -> TaskOutputRegistry {
@@ -394,9 +410,11 @@ final class TaskOutputModelTests: XCTestCase {
     // MARK: Fixtures
 
     /// A model over `count` fixture lines, loaded, and released when the test ends.
-    private func open(_ rig: TaskOutputRig, lines count: Int, escaped: Bool = false, ended: Bool = false) -> TaskOutputModel {
+    private func open(_ rig: TaskOutputRig, lines count: Int, escaped: Bool = false, ended: Bool = false,
+                      windowBytes: UInt64 = TaskOutputModel.windowBytes,
+                      readBytes: UInt32 = TaskOutputModel.readBytes) -> TaskOutputModel {
         rig.daemon.setLines(count, escaped: escaped)
-        let model = rig.makeModel(ended: ended)
+        let model = rig.makeModel(ended: ended, windowBytes: windowBytes, readBytes: readBytes)
         model.acquire()
         rig.drainAnswers()
         addTeardownBlock { model.release() }
@@ -454,8 +472,11 @@ final class TaskOutputModelTests: XCTestCase {
         XCTAssertEqual(model.state, .loading)
         XCTAssertTrue(model.text.isEmpty)
 
-        rig.daemon.answerNext()      // the tail: the last 1 MiB, from 2 MiB
-        XCTAssertEqual(model.text.utf8.count, mib)
+        // The tail: the last 1 MiB from 2 MiB, less the line that 2 MiB falls in (a tail starts at a line
+        // start, as the daemon's does), so it begins one 64-byte line later.
+        rig.daemon.answerNext()
+        let tailStart = 2 * mib + 64
+        XCTAssertEqual(model.text.utf8.count, 3 * mib - tailStart)
         XCTAssertTrue(model.isFillingHead, "the head is still being read")
         XCTAssertEqual(rig.daemon.reads.count, 2)
         XCTAssertEqual(rig.daemon.reads[1].offset, 0, "forward from the start of the window")
@@ -466,9 +487,14 @@ final class TaskOutputModelTests: XCTestCase {
         XCTAssertEqual(rig.daemon.reads[2].offset, UInt64(mib))
         XCTAssertLessThanOrEqual(rig.daemon.reads[2].maxBytes, UInt32(mib))
 
-        rig.daemon.answerNext()      // [1 MiB, 2 MiB): the head is complete
+        rig.daemon.answerNext()      // [1 MiB, 2 MiB)
+        XCTAssertTrue(model.isFillingHead, "the line in front of the tail is still to come")
+        XCTAssertEqual(rig.daemon.reads[3].offset, UInt64(2 * mib))
+        XCTAssertEqual(rig.daemon.reads[3].maxBytes, 64, "just up to where the tail began")
+
+        rig.daemon.answerNext()      // [2 MiB, tail): the head is complete
         XCTAssertFalse(model.isFillingHead)
-        XCTAssertEqual(rig.daemon.reads.count, 3, "nothing more is asked for")
+        XCTAssertEqual(rig.daemon.reads.count, 4, "nothing more is asked for")
         assertSameLargeText(model.text, visible(0..<(3 * mib / 64)), "the whole output, in order, from its first line")
         XCTAssertEqual(model.state, .ready)
     }
@@ -484,10 +510,11 @@ final class TaskOutputModelTests: XCTestCase {
 
         rig.drainAnswers()
 
-        XCTAssertEqual(log.kinds, ["replaced", "prepended(\(2 * mib))"],
+        // The head runs up to where the tail began: 2 MiB, and the line the tail left out.
+        XCTAssertEqual(log.kinds, ["replaced", "prepended(\(2 * mib + 64))"],
                        "the tail first, then the head in front of it once, however many chunks it took")
         if case .prepended(let head)? = log.events.last {
-            assertSameLargeText(head, visible(0..<(2 * mib / 64)), "the prepended head")
+            assertSameLargeText(head, visible(0..<(2 * mib / 64 + 1)), "the prepended head")
         }
     }
 
@@ -519,16 +546,19 @@ final class TaskOutputModelTests: XCTestCase {
         XCTAssertFalse(model.isFillingHead)
     }
 
-    func testALongOutputIsReadForwardFromTheStartOfTheLastTenMegabytes() {
+    func testALongOutputIsReadForwardFromTheStartOfTheWindowUpToWhereTheTailBegan() {
+        // A 48 KiB window and 16 KiB reads over an 80 KiB file stand for 10 MiB and 1 MiB over 12 MiB
+        // (the 12 MB tests above keep the real sizes).
         let rig = TaskOutputRig()
-        _ = open(rig, lines: 12 * mib / 64)
+        _ = open(rig, lines: 80 * 1_024 / 64, windowBytes: 48 * 1_024, readBytes: 16 * 1_024)
 
         let reads = rig.daemon.reads
         XCTAssertNil(reads[0].offset)
+        XCTAssertEqual(reads[0].maxBytes, 16 * 1_024, "the tail asks for one read's worth")
         let head = Array(reads.dropFirst())
-        XCTAssertEqual(head.compactMap(\.offset), (2...10).map { UInt64($0 * mib) },
-                       "9 forward chunks from 2 MiB (12 minus 10) up to where the tail began at 11 MiB")
-        for read in head { XCTAssertLessThanOrEqual(read.maxBytes, UInt32(mib)) }
+        XCTAssertEqual(head.compactMap(\.offset), [32 * 1_024, 48 * 1_024, 64 * 1_024].map { UInt64($0) },
+                       "3 forward chunks from 32 KiB (80 minus 48) up to where the tail began, one line past 64 KiB")
+        for read in head { XCTAssertLessThanOrEqual(read.maxBytes, 16 * 1_024) }
     }
 
     func testAnOutputOfExactlyTenMegabytesIsShownWholeWithNoTruncationLine() {
@@ -1568,15 +1598,20 @@ extension TaskOutputModelTests {
         return run
     }
 
+    /// The window and the read size the M1 tests shrink the model's 10 MiB and 1 MiB to: a 48 KiB window
+    /// over a 55 KiB file, in 16 KiB reads (so the head takes three chunks and has two chunk edges).
+    private static let smallWindow = 48 * 1_024
+    private static let smallRead: UInt32 = 16 * 1_024
+
     /// A file of multi-byte lines and a short ASCII closing line, with the closing line's length picked so
-    /// that `total - 10 MiB` (the start of the viewer's window) falls inside a character, `skip` continuation
-    /// bytes before the next one starts. Nil when no closing line does it.
-    private func multibyteFile(skip: Int, lines: Int = 300_000) -> (data: Data, windowStart: Int)? {
+    /// that `total - smallWindow` (the start of the viewer's window) falls inside a character, `skip`
+    /// continuation bytes before the next one starts. Nil when no closing line does it.
+    private func multibyteFile(skip: Int, lines: Int = 1_500) -> (data: Data, windowStart: Int)? {
         let unit = Array(Self.multibyteLine.utf8)
         guard unit.count == 38 else { return nil }
         for closing in 0..<unit.count {
             let total = unit.count * lines + closing
-            let windowStart = total - 10 * mib
+            let windowStart = total - Self.smallWindow
             let inLine = windowStart % unit.count
             guard unit[inLine] & 0xC0 == 0x80, continuationRun(in: unit, at: inLine) == skip else { continue }
             var data = Data()
@@ -1597,51 +1632,85 @@ extension TaskOutputModelTests {
 
     // MARK: - M1: a window that starts inside a character
 
-    func testAWindowThatStartsInsideACharacterStillHoldsTheWholeTenMegabytesFromTheNextCharacter() throws {
-        // The window start (total - 10 MiB) is an arbitrary byte. In the box-drawing, CJK and emoji lines
-        // below it lands 1, 2 and 3 continuation bytes before a character begins.
+    func testAWindowThatStartsInsideACharacterStillHoldsTheWholeWindowFromTheNextCharacter() throws {
+        // The window start (total - window) is an arbitrary byte. In the box-drawing, CJK and emoji lines
+        // below it lands 1, 2 and 3 continuation bytes before a character begins. The window is 48 KiB and
+        // a read 16 KiB (not the 10 MiB and 1 MiB: the arithmetic is the same, the fixture 200 times smaller),
+        // so the head takes three chunks whose edges fall next to multi-byte text.
         for skip in 1...3 {
             let (data, windowStart) = try XCTUnwrap(multibyteFile(skip: skip), "a fixture with a skip of \(skip)")
             XCTAssertEqual(data[windowStart] & 0xC0, 0x80, "premise (skip \(skip)): the window starts inside a character")
             XCTAssertNotEqual(data[windowStart + skip] & 0xC0, 0x80, "premise: the character after it starts \(skip) bytes on")
-            XCTAssertGreaterThan(data.count, 10 * mib)
+            XCTAssertGreaterThan(data.count, Self.smallWindow)
 
             let rig = TaskOutputRig()
             rig.daemon.content = data
-            let model = rig.makeModel()
+            let model = rig.makeModel(windowBytes: UInt64(Self.smallWindow), readBytes: Self.smallRead)
             model.acquire()
             rig.drainAnswers()
 
             let first = windowStart + skip
             XCTAssertEqual(model.state, .ready, "skip \(skip)")
             XCTAssertFalse(model.isFillingHead, "skip \(skip)")
+            XCTAssertGreaterThan(rig.daemon.reads.count, 3, "premise (skip \(skip)): the head took several chunks")
             XCTAssertEqual(model.text.utf8.count, data.count - first, "skip \(skip): the whole window, from its first whole character")
             XCTAssertTrue(model.text.utf8.elementsEqual(data[first...]), "skip \(skip): the held text is the file from there to its end")
             XCTAssertFalse(model.text.unicodeScalars.contains("\u{FFFD}"), "skip \(skip): no split character")
             XCTAssertTrue(model.truncatedHead, "skip \(skip)")
-            XCTAssertEqual(model.truncationNotice, "Showing the last 10 MB of 11 MB", "skip \(skip)")
+            XCTAssertEqual(model.truncationNotice, "Showing the last 48 KB of 55 KB", "skip \(skip)")
+            model.release()
+        }
+    }
+
+    func testAWindowInsideACharacterOfOneLineWithNoNewlineStillHoldsTheWholeWindowAndNoChunkSplitsACharacter() throws {
+        // Three-byte characters and no newline anywhere: a 16 KiB read is not a multiple of three, so each
+        // chunk edge falls inside a character and the daemon must stop short of it. Trailing ASCII bytes
+        // move the window start (total - 48 KiB) 1 or 2 bytes into a character.
+        for trailing in 1...2 {
+            var data = Data(String(repeating: "\u{65E5}", count: 19_000).utf8)
+            data.append(contentsOf: [UInt8](repeating: 0x78, count: trailing))
+            let windowStart = data.count - Self.smallWindow
+            let skip = 3 - trailing
+            XCTAssertEqual(data[windowStart] & 0xC0, 0x80, "premise (trailing \(trailing)): the window starts inside a character")
+            XCTAssertNotEqual(data[windowStart + skip] & 0xC0, 0x80, "premise: the next character starts \(skip) bytes on")
+
+            let rig = TaskOutputRig()
+            rig.daemon.content = data
+            let model = rig.makeModel(windowBytes: UInt64(Self.smallWindow), readBytes: Self.smallRead)
+            model.acquire()
+            rig.drainAnswers()
+
+            let first = windowStart + skip
+            XCTAssertEqual(model.state, .ready, "trailing \(trailing)")
+            XCTAssertFalse(model.isFillingHead, "trailing \(trailing)")
+            XCTAssertGreaterThan(rig.daemon.reads.count, 3, "premise (trailing \(trailing)): the head took several chunks")
+            XCTAssertTrue(model.text.utf8.elementsEqual(data[first...]),
+                          "trailing \(trailing): the file from the first whole character of the window to its end")
+            XCTAssertFalse(model.text.unicodeScalars.contains("\u{FFFD}"), "trailing \(trailing): no split character")
+            XCTAssertEqual(model.truncationNotice, "Showing the last 48 KB of 55 KB", "trailing \(trailing)")
             model.release()
         }
     }
 
     func testAHeadThatStartsFurtherFromTheRequestThanASplitCharacterCanExplainIsRefusedAndTheNoticeSaysWhatIsHeld() {
         // The daemon skips at most three continuation bytes; any other start is a head that does not line up.
+        // An 80 KiB file, a 48 KiB window and 16 KiB reads: the tail is the last 16 KiB less its first line.
         for shift in [4, 5] {
             let rig = TaskOutputRig()
-            let lineCount = 12 * mib / 64
+            let lineCount = 80 * 1_024 / 64
             rig.daemon.setLines(lineCount)
             rig.daemon.rangedStartShift = shift
-            let model = rig.makeModel()
+            let model = rig.makeModel(windowBytes: 48 * 1_024, readBytes: 16 * 1_024)
             model.acquire()
             rig.drainAnswers()
 
             XCTAssertEqual(model.state, .ready, "shift \(shift)")
             XCTAssertFalse(model.isFillingHead, "shift \(shift)")
-            XCTAssertEqual(model.text.utf8.count, mib, "shift \(shift): only the tail is held")
-            assertSameLargeText(model.text, visible((11 * mib / 64)..<lineCount), "shift \(shift): the tail, whole, to the last line")
+            XCTAssertEqual(model.text.utf8.count, 16 * 1_024 - 64, "shift \(shift): only the tail is held")
+            assertSameLargeText(model.text, visible((lineCount - 255)..<lineCount), "shift \(shift): the tail, whole, to the last line")
             XCTAssertTrue(model.truncatedHead, "shift \(shift)")
-            XCTAssertEqual(model.truncationNotice, "Showing the last 1 MB of 12 MB",
-                           "shift \(shift): the notice reports what is held, not the 10 MB it could not fetch")
+            XCTAssertEqual(model.truncationNotice, "Showing the last 15 KB of 80 KB",
+                           "shift \(shift): the notice reports what is held, not the 48 KB it could not fetch")
             model.release()
         }
     }
@@ -1852,21 +1921,21 @@ extension TaskOutputModelTests {
     }
 
     func testAFileMoreThanTheWindowAheadReloadsTheTailInsteadOfAppendingChunkByChunk() throws {
+        // A 48 KiB window and 16 KiB reads stand for 10 MiB and 1 MiB.
         let rig = TaskOutputRig()
-        let perMiB = mib / 64
-        let model = open(rig, lines: perMiB)
+        let model = open(rig, lines: 16 * 1_024 / 64, windowBytes: 48 * 1_024, readBytes: 16 * 1_024)
         let log = TaskOutputChangeLog(model)
-        rig.daemon.appendLines(13 * perMiB)      // 14 MiB in all: 13 MiB past the cursor, more than the window
+        rig.daemon.appendLines(80 * 1_024 / 64)  // 96 KiB in all: 80 KiB past the cursor, more than the window
         rig.clock.advance(0.5)
 
         try rig.firePoll()
         rig.flushDeliveries()
 
-        assertSameLargeText(model.text, visible((4 * perMiB)..<(14 * perMiB)), "the last 10 MB of the file")
-        XCTAssertEqual(model.truncationNotice, "Showing the last 10 MB of 14 MB")
+        assertSameLargeText(model.text, visible((48 * 1_024 / 64)..<(96 * 1_024 / 64)), "the last 48 KiB of the file")
+        XCTAssertEqual(model.truncationNotice, "Showing the last 48 KB of 96 KB")
         XCTAssertTrue(model.truncatedHead)
         XCTAssertTrue(log.contentEvents.contains(.replaced), "the tail was loaded again: \(log.kinds)")
-        XCTAssertEqual(appendedText(log), "", "no 1 MiB chunk of the old stretch was appended and then thrown away")
+        XCTAssertEqual(appendedText(log), "", "no chunk of the old stretch was appended and then thrown away")
         XCTAssertEqual(rig.scheduler.pollSlots.count, 1)
     }
 
@@ -1898,5 +1967,315 @@ extension TaskOutputModelTests {
         try rig.firePoll()
         XCTAssertEqual(model.text, visible(0..<627))
         XCTAssertEqual(log.contentEvents.last, .appended(visible(625..<627)), "new lines are appended, as for any file")
+    }
+}
+
+// MARK: - A task that ends while the window is behind
+
+// The final read follows the file to its end, however many chunks that takes, up to `finalReadCapSeconds`
+// of the test clock; past the cap it says the end is missing (never silently). Reads of 4 KiB over a file
+// of 64-byte lines make a chunk 64 lines, so a few kilobytes stand for megabytes of catching up.
+
+extension TaskOutputModelTests {
+
+    private static let chunk: UInt32 = 4_096
+
+    /// A model over `lines` fixture lines in `chunk`-byte reads, loaded and idle, and released at the end.
+    private func openBehind(_ rig: TaskOutputRig, lines: Int = 10) -> TaskOutputModel {
+        open(rig, lines: lines, readBytes: Self.chunk)
+    }
+
+    // MARK: Exact tail
+
+    func testATaskThatEndsWhileTheModelIsSeveralMegabytesBehindEndsWithTheExactFullTail() throws {
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 100)                       // loaded when the file was small
+        let lineCount = 3 * mib / 64
+        rig.daemon.appendLines(lineCount - 100)                 // it grew by 3 MiB
+        rig.daemon.defersAnswers = true
+        rig.clock.advance(0.5)
+        try rig.firePoll()                                      // a poll's read is out: not a final one
+        XCTAssertEqual(rig.daemon.queuedCount, 1, "premise: a read is in flight")
+
+        model.taskEnded()                                       // the task ends before it is answered
+        rig.drainAnswers(advancing: 0.01)
+
+        assertSameLargeText(model.text, visible(0..<lineCount), "every line, in order, to the last one")
+        XCTAssertEqual(model.totalBytes, UInt64(3 * mib))
+        XCTAssertFalse(model.endCutShort)
+        XCTAssertNil(model.truncationNotice)
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertEqual(rig.daemon.queuedCount, 0, "nothing more is asked for")
+        XCTAssertTrue(rig.scheduler.pollSlots.isEmpty, "and an ended task is not polled")
+    }
+
+    func testATaskThatEndsBetweenPollsWhileTheModelIsSeveralChunksBehindEndsWithTheExactFullTail() {
+        let rig = TaskOutputRig()
+        let model = openBehind(rig)
+        rig.daemon.appendLines(200)                             // 4 chunks ahead of what was read
+        XCTAssertEqual(rig.scheduler.pollSlots.count, 1, "premise: the model is idle between polls")
+
+        model.taskEnded()
+
+        XCTAssertEqual(model.text, visible(0..<210), "the final read followed the file to its end")
+        XCTAssertGreaterThan(rig.daemon.reads.count, 4, "premise: it took several reads")
+        XCTAssertFalse(model.endCutShort)
+        XCTAssertNil(model.truncationNotice)
+        XCTAssertTrue(rig.scheduler.pollSlots.isEmpty)
+    }
+
+    func testATaskThatEndsWhileAPollIsOutAndTheModelIsSeveralChunksBehindEndsWithTheExactFullTail() throws {
+        let rig = TaskOutputRig()
+        let model = openBehind(rig)
+        rig.daemon.appendLines(200)
+        rig.daemon.defersAnswers = true
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+
+        model.taskEnded()
+        rig.drainAnswers(advancing: 0.01)
+
+        XCTAssertEqual(model.text, visible(0..<210))
+        XCTAssertFalse(model.endCutShort)
+        XCTAssertNil(model.truncationNotice)
+    }
+
+    // MARK: The cap
+
+    func testAFinalReadThatRunsPastTheTimeCapStopsAndSaysTheEndOfTheOutputIsMissing() throws {
+        let rig = TaskOutputRig()
+        let model = openBehind(rig)
+        let log = TaskOutputChangeLog(model)
+        rig.daemon.appendLines(200)                             // 4 chunks ahead
+        rig.daemon.defersAnswers = true
+        model.taskEnded()                                       // between polls: the final read is out
+        XCTAssertEqual(rig.daemon.queuedCount, 1)
+        let slow = TaskOutputModel.finalReadCapSeconds / 2 + 1  // two answers this far apart are past the cap
+
+        rig.clock.advance(slow)
+        rig.daemon.answerNext()
+        XCTAssertFalse(model.endCutShort, "inside the cap: the chain goes on")
+        XCTAssertEqual(rig.daemon.queuedCount, 1)
+        _ = log.drain()
+
+        rig.clock.advance(slow)
+        rig.daemon.answerNext()                                 // past the cap, the file still has more
+        rig.flushDeliveries()
+
+        XCTAssertEqual(rig.daemon.queuedCount, 0, "the chain stopped")
+        XCTAssertTrue(model.endCutShort)
+        XCTAssertTrue(try XCTUnwrap(model.truncationNotice).contains("Output truncated"), "never silent")
+        XCTAssertTrue(log.events.contains(.status), "the window is told, so the notice shows: \(log.kinds)")
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertEqual(model.text, visible(0..<138), "what was read is kept: two 64-line chunks past the first ten lines")
+        XCTAssertLessThan(model.text.utf8.count, 210 * 64)
+        XCTAssertTrue(rig.scheduler.pollSlots.isEmpty, "an ended task is not polled")
+    }
+
+    func testAFinalReadThatIsSlowButReachesTheEndOfTheFileIsNotReportedAsCutShort() {
+        let rig = TaskOutputRig()
+        let model = openBehind(rig)
+        rig.daemon.appendLines(128)                             // exactly two chunks ahead
+        rig.daemon.defersAnswers = true
+        model.taskEnded()
+        let slow = TaskOutputModel.finalReadCapSeconds / 2 + 1
+
+        rig.clock.advance(slow)
+        rig.daemon.answerNext()
+        rig.clock.advance(slow)
+        rig.daemon.answerNext()                                 // past the cap, but the last chunk reached the end
+
+        XCTAssertEqual(model.text, visible(0..<138))
+        XCTAssertFalse(model.endCutShort, "nothing is missing")
+        XCTAssertNil(model.truncationNotice)
+    }
+
+    func testTheEndMissingNoticeComposesWithTheNoticeThatTheStartIsCut() {
+        // A 48 KiB window over a 100 KiB file: the start is cut. Then the task ends 44 KiB ahead of the model
+        // and the final read runs out of time after two 16 KiB reads.
+        let rig = TaskOutputRig()
+        let model = open(rig, lines: 100 * 1_024 / 64, windowBytes: 48 * 1_024, readBytes: 16 * 1_024)
+        XCTAssertEqual(model.truncationNotice, "Showing the last 48 KB of 100 KB", "premise")
+        rig.daemon.appendLines(44 * 1_024 / 64)
+        rig.daemon.defersAnswers = true
+        model.taskEnded()
+        let slow = TaskOutputModel.finalReadCapSeconds / 2 + 1
+
+        rig.clock.advance(slow)
+        rig.daemon.answerNext()
+        rig.clock.advance(slow)
+        rig.daemon.answerNext()
+
+        XCTAssertTrue(model.endCutShort)
+        let notice = model.truncationNotice ?? ""
+        XCTAssertTrue(notice.contains("Showing the last 48 KB of 144 KB"), "the start notice is still there: \(notice)")
+        XCTAssertTrue(notice.contains("Output truncated"), "and so is the end notice: \(notice)")
+    }
+
+    func testARunningTaskThatIsFarBehindStillCatchesUpWithoutAnyCapOrNotice() throws {
+        // The cap is for the final read only: while the task runs, a slow chain is just a chain.
+        let rig = TaskOutputRig()
+        let model = openBehind(rig)
+        rig.daemon.appendLines(200)
+        rig.daemon.defersAnswers = true
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+
+        while rig.daemon.queuedCount > 0 {
+            rig.clock.advance(TaskOutputModel.finalReadCapSeconds)
+            rig.daemon.answerNext()
+        }
+
+        XCTAssertEqual(model.text, visible(0..<210))
+        XCTAssertFalse(model.endCutShort)
+        XCTAssertNil(model.truncationNotice)
+        XCTAssertEqual(rig.scheduler.pollSlots.count, 1, "and polling goes on")
+    }
+
+    // MARK: Busy while catching up
+
+    func testWhileChainedReadsCatchUpOnAPollTheModelIsRefreshingAndIsNotOnceItIsCaughtUp() throws {
+        let rig = TaskOutputRig()
+        let model = openBehind(rig)
+        rig.daemon.appendLines(200)                             // 4 chunks ahead
+        rig.daemon.defersAnswers = true
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+
+        for chunk in 1...3 {
+            rig.daemon.answerNext()
+            XCTAssertEqual(rig.daemon.queuedCount, 1, "chunk \(chunk): the next read follows at once")
+            XCTAssertTrue(model.isRefreshing, "chunk \(chunk): the file is still ahead of the text")
+        }
+        rig.daemon.answerNext()
+
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertEqual(model.text, visible(0..<210))
+        XCTAssertEqual(rig.scheduler.pollSlots.count, 1, "polling resumes")
+    }
+
+    func testWhileChainedReadsCatchUpAfterAHolderArrivesOnAReadyModelItIsRefreshingUntilCaughtUp() {
+        let rig = TaskOutputRig()
+        let model = openBehind(rig)
+        model.release()                                         // the last holder left
+        rig.daemon.appendLines(200)
+        rig.daemon.defersAnswers = true
+
+        model.acquire()                                         // a repeat reader arrives
+        addTeardownBlock { model.release() }
+        XCTAssertTrue(model.isRefreshing, "premise: the refresh is out")
+
+        for chunk in 1...3 {
+            rig.daemon.answerNext()
+            XCTAssertTrue(model.isRefreshing, "chunk \(chunk): the file is still ahead of the text")
+        }
+        rig.daemon.answerNext()
+
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertEqual(model.text, visible(0..<210))
+    }
+
+    func testARefreshThatIsAnsweredWithNothingNewIsNotRefreshingAnyMore() {
+        let rig = TaskOutputRig()
+        let model = openBehind(rig)
+        model.release()
+        rig.daemon.defersAnswers = true
+
+        model.acquire()
+        XCTAssertTrue(model.isRefreshing, "premise")
+        rig.daemon.answerNext()
+
+        XCTAssertFalse(model.isRefreshing)
+    }
+}
+
+// MARK: - The fake daemon's tail
+
+/// The fake daemon is the stand-in for `src/ipc/task_output.rs`, so these pin that it cuts a tail the way
+/// `leading_skip` does: a tail that starts mid-file starts at a line start. (The model fetches the part
+/// the daemon left out, so its text does not show this; the daemon's answer does.)
+final class TaskOutputFakeDaemonTailTests: XCTestCase {
+
+    private func tail(of file: Data, maxBytes: UInt32, offset: UInt64? = nil) throws -> SessionTaskOutputResultWire {
+        let rig = TaskOutputRig()
+        rig.daemon.content = file
+        var answer: SessionTaskOutputResultWire?
+        rig.requests.requestOutput(tag: "kate", taskId: "t1", offset: offset, maxBytes: maxBytes) { reply in
+            if case .answered(let wire) = reply { answer = wire }
+        }
+        return try XCTUnwrap(answer, "the fake daemon answered")
+    }
+
+    private func lines(_ count: Int) -> Data { TaskOutputFakeDaemon.data(0..<count) }
+
+    func testATailThatStartsMidLineStartsAfterTheFirstNewlineInItsWindow() throws {
+        let file = lines(10)                                     // 640 bytes; the last 250 start 6 bytes into line 6
+
+        let wire = try tail(of: file, maxBytes: 250)
+
+        XCTAssertEqual(wire.startOffset, 448, "line 7 is the first whole line in the window")
+        XCTAssertEqual(wire.endOffset, 640)
+        XCTAssertEqual(wire.text, TaskOutputFakeDaemon.visibleText(7..<10))
+    }
+
+    func testATailThatStartsExactlyOnALineStartStillSkipsThatFirstLine() throws {
+        // As the daemon does: it cannot know the window began on a line start, so it drops through the newline.
+        let wire = try tail(of: lines(10), maxBytes: 256)        // from 384, the start of line 6
+
+        XCTAssertEqual(wire.startOffset, 448)
+        XCTAssertEqual(wire.text, TaskOutputFakeDaemon.visibleText(7..<10))
+    }
+
+    func testATailOfAFileSmallerThanTheWindowStartsAtZeroWithNoSkip() throws {
+        let wire = try tail(of: lines(10), maxBytes: UInt32(mib))
+
+        XCTAssertEqual(wire.startOffset, 0)
+        XCTAssertEqual(wire.text, TaskOutputFakeDaemon.visibleText(0..<10), "the first line is kept")
+    }
+
+    func testATailWindowOfExactlyTheWholeFileStartsAtZeroWithNoSkip() throws {
+        let wire = try tail(of: lines(10), maxBytes: 640)
+
+        XCTAssertEqual(wire.startOffset, 0)
+        XCTAssertEqual(wire.text, TaskOutputFakeDaemon.visibleText(0..<10))
+    }
+
+    func testATailWindowThatIsOneHugeLineWithNoNewlineOnlyGetsTheScalarSkip() throws {
+        // 700 three-byte characters, no newline; a 500-byte window starts at 1600, one byte into a character.
+        let file = Data(String(repeating: "\u{65E5}", count: 700).utf8)
+
+        let wire = try tail(of: file, maxBytes: 500)
+
+        XCTAssertEqual(wire.startOffset, 1602, "only the rest of the split character is skipped")
+        XCTAssertEqual(wire.endOffset, 2100)
+        XCTAssertFalse(wire.text.unicodeScalars.contains("\u{FFFD}"))
+        XCTAssertEqual(wire.text, String(repeating: "\u{65E5}", count: 166))
+    }
+
+    func testATailWindowWhoseOnlyNewlineIsItsLastByteKeepsItsWholeLine() throws {
+        // The last line is longer than the window: skipping to after its newline would leave nothing.
+        let file = Data(String(repeating: "x", count: 2_000).utf8) + Data([0x0A])
+
+        let wire = try tail(of: file, maxBytes: 500)
+
+        XCTAssertEqual(wire.startOffset, 1_501)
+        XCTAssertEqual(wire.text.utf8.count, 500)
+    }
+
+    func testATailWindowWithAFinalLineOfOneByteAfterTheNewlineSkipsToIt() throws {
+        let file = Data(String(repeating: "x", count: 2_000).utf8) + Data([0x0A, 0x79])   // "…x\ny"
+
+        let wire = try tail(of: file, maxBytes: 500)
+
+        XCTAssertEqual(wire.startOffset, 2_001, "a newline that is not the last byte ends the skip")
+        XCTAssertEqual(wire.text, "y")
+    }
+
+    func testARangedReadAtAnArbitraryOffsetIsNotAlignedToALine() throws {
+        // Only a tail drops its first line: a read forward from an offset starts exactly there.
+        let wire = try tail(of: lines(10), maxBytes: 128, offset: 390)
+
+        XCTAssertEqual(wire.startOffset, 390)
     }
 }

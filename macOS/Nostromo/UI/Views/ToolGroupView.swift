@@ -711,7 +711,6 @@ class FoldRowView: NSView {
         runningTaskId = task?.id
         background.isHidden = task == nil
         setText(task == nil ? "" : "· \u{25F7}", on: background, color: Theme.fgMuted)
-        background.setAccessibilityLabel(task == nil ? nil : "background task running")
         if task != nil { background.toolTip = "Open background task" } else { background.toolTip = nil }
         updateBackgroundAccessibility()
     }
@@ -818,6 +817,9 @@ class FoldRowView: NSView {
         approval.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(rawValue: 260), for: .horizontal)
 
         // The `◷` is a few points wide; it gives way after the summary, just below the approval status.
+        // The row's own label says "background task running" (`accessibilityLabel(adding:)`): the glyph
+        // must not make VoiceOver read it a second time.
+        background.setAccessibilityElement(false)
         background.font = Self.font
         background.textColor = Theme.fgMuted
         background.lineBreakMode = .byClipping

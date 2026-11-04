@@ -324,6 +324,15 @@ final class ApprovalStore {
         statusChanges.send(id)
     }
 
+    /// The daemon refused the answer sent for `request`: drop the labels `recordChoice` kept for it, so the
+    /// transcript record does not read "Answered" while the form still waits.
+    private func forgetChoice(for request: ApprovalRequestWire) {
+        let id = request.toolUseId
+        guard chosenLabels.removeValue(forKey: id) != nil else { return }
+        chosenOrder.removeAll { $0 == id }
+        statusChanges.send(id)
+    }
+
     // MARK: Guard bar (AP2b)
 
     /// The guard block the bar shows for a focus, if any.
@@ -519,6 +528,7 @@ final class ApprovalStore {
     private func hold(_ id: String, text: String) {
         guard var entry = entries[id] else { return }
         if answered.contains(id) { refusalTexts[id] = text }
+        forgetChoice(for: entry.request)   // the answer was not taken: the record must not say it was
         entry.state = .notSent(text)
         entries[id] = entry
         changes.send(entry.request.tag)
