@@ -1,12 +1,18 @@
-# TEMPORARY (fix/mac-scroll-test-flake): loops MotherDetailScrollTests to prove the scroll/render
-# tests are deterministic. Plain and CPU-loaded, same runner type as the Mac job. Removed before the PR ends. (attempt 2)
-name: tmp-mac-scroll-loop
+# Manual only. Loops a Mac test class to prove it is deterministic, on the same runner type as the Mac
+# job: once plain, once with a CPU spinner per core (a loaded hosted runner). Run it with
+#   gh workflow run mac-scroll-loop.yml --ref <branch> [-f iterations=50] [-f tests=NostromoTests/MotherDetailScrollTests]
+# and read the "Summary" step (iterations started, failed test cases). See docs/ci.md.
+name: mac-scroll-loop
 
 on:
-  push:
-    branches: [fix/mac-scroll-test-flake]
-    paths: [.github/workflows/tmp-mac-scroll-loop.yml]
   workflow_dispatch:
+    inputs:
+      iterations:
+        description: Iterations of the test class
+        default: "50"
+      tests:
+        description: -only-testing target
+        default: NostromoTests/MotherDetailScrollTests
 
 permissions:
   contents: read
@@ -30,12 +36,15 @@ jobs:
           n=$(sysctl -n hw.ncpu); echo "spinners: $n"
           for i in $(seq "$n"); do nohup yes > /dev/null 2>&1 & done
           sleep 1; uptime
-      - name: Loop MotherDetailScrollTests x50
+      - name: Loop the test class
+        env:
+          TESTS: ${{ inputs.tests }}
+          ITERATIONS: ${{ inputs.iterations }}
         run: |
           set -o pipefail; mkdir -p macOS/build; cd macOS
           xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
             -destination 'platform=macOS' -derivedDataPath build \
-            -only-testing:NostromoTests/MotherDetailScrollTests -test-iterations 50 \
+            -only-testing:"$TESTS" -test-iterations "$ITERATIONS" \
             -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
             -maximum-test-execution-time-allowance 300 test \
             2>&1 | tee build/loop.log | grep --line-buffered -E "error:|Executed [0-9]+ tests|Test Case .* failed|\*\* TEST"
