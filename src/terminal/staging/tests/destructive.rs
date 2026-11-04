@@ -1,4 +1,4 @@
-//! The destructive-pattern list, daemon side: the same 25 names, in the same order, as the Mac app's
+//! The destructive-pattern list, daemon side: the same 30 names, in the same order, as the Mac app's
 //! `StagingDestructivePatterns`, and the same verdicts. The shared fixture `hazards.json` pins the two
 //! together row by row (see `s2.rs`); this file pins the Rust port to the Swift tests' cases and each
 //! family's contract: wrapped, quoted, sudo'd, piped and absolute-path variants are still seen, and the
@@ -11,7 +11,7 @@ use crate::terminal::staging::destructive::{destructive_patterns, DESTRUCTIVE_NA
 
 const HAZARDS: &str = include_str!("../../../../tests/fixtures/terminal_staging/hazards.json");
 
-const THE_LIST: [&str; 25] = [
+const THE_LIST: [&str; 30] = [
     "rm -rf",
     "DROP",
     "TRUNCATE",
@@ -37,6 +37,11 @@ const THE_LIST: [&str; 25] = [
     "> file",
     "find -delete",
     "xargs/piped rm",
+    "queue:clear",
+    "horizon:clear",
+    "optimize:clear",
+    "FLUSHALL/FLUSHDB",
+    "stop/shutdown",
 ];
 
 /// Every command in `commands` is labelled with `name` (and possibly more).
@@ -149,6 +154,40 @@ fn the_shared_fixture_has_a_positive_row_for_every_name_and_negatives_for_the_ne
     assert!(
         negatives >= 40,
         "the fixture needs read-only look-alikes too, has {negatives}"
+    );
+}
+
+#[test]
+fn the_fixtures_asks_in_production_field_is_a_destructive_match_or_an_escape_quoted_word() {
+    // The Mac app opens the confirm sheet in a production pane for a destructive match AND for an escape-quoted
+    // word (`$'\x72m'`: no text rule can follow it, so the sheet is the only thing that stops it). The daemon
+    // only pins the destructive half; the fixture row says what the app must do, and the Swift tests hold it to it.
+    let rows: Vec<serde_json::Value> = serde_json::from_str(HAZARDS).expect("hazards.json");
+    let asking: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| r.get("asks_in_production").is_some())
+        .collect();
+    assert!(
+        asking.len() >= 5,
+        "the fixture pins the sheet for the escape-quoted rows, has {}",
+        asking.len()
+    );
+    for row in asking {
+        let text = row["text"].as_str().unwrap();
+        let destructive = !destructive_patterns(text).is_empty();
+        let escape_quoted = row["escape_quoted"].as_bool().unwrap_or(false);
+        assert_eq!(
+            row["asks_in_production"].as_bool().unwrap(),
+            destructive || escape_quoted,
+            "{}: {text:?}",
+            row["name"]
+        );
+    }
+    assert!(
+        rows.iter().any(|r| r["escape_quoted"] == true
+            && r["asks_in_production"] == true
+            && r["destructive"].as_array().is_some_and(|d| d.is_empty())),
+        "an escape-quoted row with no destructive match must still ask in production"
     );
 }
 
@@ -769,6 +808,8 @@ fn a_truncating_redirection_is_caught_in_all_its_spellings() {
             "> /var/log/app.log",
             "echo x >$out",
             "ls > /dev/nullx",
+            "ls > /DEV/NULL",
+            "ls > /Dev/Null",
             "cmd > /dev/null > out.txt",
             "echo a >(cat)",
             "echo a >",
@@ -794,7 +835,6 @@ fn appends_dups_closes_and_redirections_to_the_bit_buckets_are_not_truncations()
         "ls &>/dev/null",
         "ls > /dev/stderr",
         "ls 2>/dev/stdout",
-        "ls > /DEV/NULL",
         "ls >& /dev/null",
         "ls &>> log",
         "ls 2>> err.log",

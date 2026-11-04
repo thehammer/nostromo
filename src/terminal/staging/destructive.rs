@@ -6,10 +6,12 @@
 //! is the daemon's port of the same rules, and the shared fixture `tests/fixtures/terminal_staging/hazards.json`
 //! pins both to the same answers (its `destructive` field). The daemon itself does not refuse on a match.
 //!
-//! Every rule runs on the text as written AND on both normalised copies ([`super::text::normalise_for_hazards`]
-//! with empty expansions as a space, and with them removed); a hit on any view counts, so a wrapped
-//! (`bash -c 'rm -rf x'`), quoted (`r''m`) or split (`r$()m`) form is still seen. Quotes are not parsed, so a
-//! pattern inside a quoted string matches too: asking is the cheap side, and an ambiguous case asks.
+//! Every rule runs on the text as written AND on four normalised copies ([`super::text::normalise_for_hazards`]
+//! and [`super::text::normalise_for_hazard_words`], each with empty expansions as a space and with them
+//! removed); a hit on any view counts, so a wrapped (`bash -c 'rm -rf x'`), quoted (`r''m`), split (`r$()m`),
+//! substituted (`kubectl --context $(...) delete ns x`) or brace-expanded (`{rm,-rf,/x}`) form is still seen.
+//! Quotes are not parsed, so a pattern inside a quoted string matches too: asking is the cheap side, and an
+//! ambiguous case asks.
 //!
 //! Vocabulary used below: a *segment* is a view split at `;`, `|` and `&`; its *words* are split at spaces and
 //! tabs; a word's *program* is its last path component, lowercased (`/usr/bin/kubectl` is `kubectl`). A
@@ -20,11 +22,14 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use super::text::{normalise_for_hazards, normalise_for_hazards_joined};
+use super::text::{
+    normalise_for_hazard_words, normalise_for_hazard_words_joined, normalise_for_hazards,
+    normalise_for_hazards_joined,
+};
 
 /// The names, in list order. The first ten are the original list; the rest were added with the
-/// staging-leftovers families.
-pub const DESTRUCTIVE_NAMES: [&str; 25] = [
+/// staging-leftovers families (the last five with the review fix-ups).
+pub const DESTRUCTIVE_NAMES: [&str; 30] = [
     "rm -rf",
     "DROP",
     "TRUNCATE",
@@ -50,6 +55,11 @@ pub const DESTRUCTIVE_NAMES: [&str; 25] = [
     "> file",
     "find -delete",
     "xargs/piped rm",
+    "queue:clear",
+    "horizon:clear",
+    "optimize:clear",
+    "FLUSHALL/FLUSHDB",
+    "stop/shutdown",
 ];
 
 /// The names of the patterns `text` matches, in list order.
@@ -58,16 +68,22 @@ pub fn destructive_patterns(text: &str) -> Vec<&'static str> {
         text.to_string(),
         normalise_for_hazards(text),
         normalise_for_hazards_joined(text),
+        normalise_for_hazard_words(text),
+        normalise_for_hazard_words_joined(text),
     ];
     let any = |test: &dyn Fn(&str) -> bool| views.iter().any(|v| test(v));
     let matches = |name: &str| -> bool {
         match name {
             "rm -rf" => any(&has_recursive_forced_remove),
-            "DROP" => any(&|v| regex(&DROP, r"(?i)\bdrop\s").is_match(v)),
+            "DROP" => any(&|v| {
+                regex(&DROP, r"(?i)\bdrop\s").is_match(v)
+                    || all_words(v).iter().any(|w| program(w) == "dropdb")
+            }),
             "TRUNCATE" => any(&|v| regex(&TRUNCATE, r"(?i)\btruncate\b").is_match(v)),
             "DELETE FROM without WHERE" => any(&has_delete_without_where),
             "migrate:fresh" | "db:wipe" | "queue:flush" | "cache:clear" | "migrate:refresh"
-            | "migrate:reset" | "migrate:rollback" => {
+            | "migrate:reset" | "migrate:rollback" | "queue:clear" | "horizon:clear"
+            | "optimize:clear" => {
                 any(&|v| v.to_lowercase().contains(name) || uses_artisan_abbreviation(name, v))
             }
             "--force" => any(&has_force_flag),
@@ -92,6 +108,8 @@ pub fn destructive_patterns(text: &str) -> Vec<&'static str> {
             "> file" => any(&truncates_a_file),
             "find -delete" => any(&has_find_delete),
             "xargs/piped rm" => any(&has_xargs_or_piped_rm),
+            "FLUSHALL/FLUSHDB" => any(&|v| regex(&FLUSH, r"(?i)\bflush(?:all|db)\b").is_match(v)),
+            "stop/shutdown" => any(&has_stop_or_shutdown),
             _ => false,
         }
     };
@@ -106,6 +124,7 @@ static DROP: OnceLock<Regex> = OnceLock::new();
 static TRUNCATE: OnceLock<Regex> = OnceLock::new();
 static KILL: OnceLock<Regex> = OnceLock::new();
 static DELETE_FROM: OnceLock<Regex> = OnceLock::new();
+static FLUSH: OnceLock<Regex> = OnceLock::new();
 static WHERE: OnceLock<Regex> = OnceLock::new();
 static SQL_COMMENT: OnceLock<Regex> = OnceLock::new();
 
@@ -163,14 +182,15 @@ fn program_then(view: &str, programs: &[&str], verbs: &[&str]) -> bool {
 
 // ── the original ten ────────────────────────────────────────────────────────────────────────────────
 
-/// An `rm` word anywhere whose arguments (up to the next `;`, `&` or `|`) include a recursive flag and a force
-/// flag, in any combination or order (`-rf`, `-fr`, `-Rf`, `-r -f`, `--recursive --force`, `--recurs`, `--forc`).
+/// An `rm` program (any case: macOS volumes are case-insensitive) anywhere whose arguments (up to the next `;`,
+/// `&` or `|`) include a recursive flag and a force flag, in any combination or order (`-rf`, `-fr`, `-Rf`,
+/// `-r -f`, `--recursive --force`, `--recurs`, `--forc`).
 fn has_recursive_forced_remove(view: &str) -> bool {
     segment_words(view).iter().any(|words| {
         words
             .iter()
             .enumerate()
-            .filter(|(_, w)| *w == "rm" || w.ends_with("/rm"))
+            .filter(|(_, w)| program(w) == "rm")
             .any(|(index, _)| {
                 let (mut recursive, mut force) = (false, false);
                 for argument in words[index + 1..].iter().filter(|a| a.starts_with('-')) {
@@ -217,7 +237,10 @@ fn has_force_flag(view: &str) -> bool {
         if chars[start..].iter().take(4).collect::<String>() != "--fo" {
             return false;
         }
-        if start > 0 && (is_word(chars[start - 1]) || chars[start - 1] == '-') {
+        // Before it only ASCII counts (the Mac app's lookbehind is `(?<![A-Za-z0-9_-])`): `é--force` matches.
+        if start > 0
+            && (chars[start - 1].is_ascii_alphanumeric() || matches!(chars[start - 1], '_' | '-'))
+        {
             return false;
         }
         let mut end = start + 4;
@@ -232,26 +255,69 @@ fn has_force_flag(view: &str) -> bool {
     })
 }
 
-/// A `delete from` with no `where` after it in the same statement (statements split at `;`).
+/// A `delete from` (also `delete t from`, `delete ignore|low_priority|quick from`) with no `where` after it in
+/// the same statement. A statement ends at `;`, `&`, `|`, the next `delete from`, and, when the `delete` sits
+/// inside a quoted string (`psql -c 'DELETE FROM users' -c '... WHERE ...'`), at that string's closing quote.
 fn has_delete_without_where(view: &str) -> bool {
-    let delete = regex(&DELETE_FROM, r"(?i)\bdelete\s+from\b");
+    let delete = regex(
+        &DELETE_FROM,
+        r"(?i)\bdelete\s+(?:(?:ignore|low_priority|quick)\s+)*(?:[\w$.`\x22]+(?:\s*,\s*[\w$.`\x22]+)*\s+)?from\b",
+    );
     let where_ = regex(&WHERE, r"(?i)\bwhere\b");
     let comment = regex(&SQL_COMMENT, r"--(?:\s|$)|#");
-    view.split(';').any(|statement| {
-        let found: Vec<_> = delete.find_iter(statement).collect();
-        found.iter().enumerate().any(|(index, m)| {
-            let end = found.get(index + 1).map_or(statement.len(), |n| n.start());
-            let rest = &statement[m.end()..end];
-            let rest = comment.find(rest).map_or(rest, |c| &rest[..c.start()]);
-            !where_.is_match(rest)
-        })
+    let found: Vec<_> = delete.find_iter(view).collect();
+    found.iter().enumerate().any(|(index, m)| {
+        let quote = open_quote_at(view, m.start());
+        let next = found.get(index + 1).map_or(view.len(), |n| n.start());
+        let mut escaped = false;
+        let stop = view[m.end()..next]
+            .char_indices()
+            .find(|&(_, c)| {
+                let ends = !escaped && (matches!(c, ';' | '&' | '|') || Some(c) == quote);
+                escaped = !escaped && c == '\\' && quote != Some('\'');
+                ends
+            })
+            .map_or(next, |(at, _)| m.end() + at);
+        let rest = &view[m.end()..stop];
+        let rest = comment.find(rest).map_or(rest, |c| &rest[..c.start()]);
+        !where_.is_match(rest)
     })
+}
+
+/// The quote (`'` or `"`) still open at byte `at` of `view` (a single quote has no escapes, a backslash escapes
+/// the next character anywhere else).
+fn open_quote_at(view: &str, at: usize) -> Option<char> {
+    let (mut quote, mut escaped) = (None, false);
+    for (index, c) in view.char_indices() {
+        if index >= at {
+            break;
+        }
+        if escaped {
+            escaped = false;
+        } else if c == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if quote == Some(c) {
+            quote = None;
+        } else if quote.is_none() && matches!(c, '\'' | '"') {
+            quote = Some(c);
+        }
+    }
+    quote
 }
 
 // ── kill -9 ─────────────────────────────────────────────────────────────────────────────────────────
 
+/// Is `word` (lowercase) signal 9? Numerically, so `09` and `0009` count as they do in a shell.
+fn is_kill_signal(word: &str) -> bool {
+    matches!(word, "kill" | "sigkill")
+        || (!word.is_empty()
+            && word.chars().all(|c| c.is_ascii_digit())
+            && word.trim_start_matches('0') == "9")
+}
+
 /// The original `kill`/`pkill`/`killall` followed by a force signal, and a `kill` program followed anywhere
-/// later in the same segment by one (`pkill -f x -9`, `kill -s9 1`, `kill -n9 1`, `kill --signal=KILL 1`).
+/// later in the same segment by one (`pkill -f x -9`, `kill -s9 1`, `kill -n9 1`, `kill -09 1`,
+/// `kill --signal=KILL 1`). Signal 9 is compared as a number: `-09`, `-s 0009`.
 fn has_force_kill(view: &str) -> bool {
     let original = regex(
         &KILL,
@@ -260,32 +326,36 @@ fn has_force_kill(view: &str) -> bool {
     if original.is_match(view) {
         return true;
     }
-    let is_signal = |w: &str| matches!(w, "9" | "kill" | "sigkill");
     segment_words(view).iter().any(|words| {
         let Some(rest) = after_program(words, &["kill", "pkill", "killall"]) else {
             return false;
         };
         let rest: Vec<String> = rest.iter().map(|w| w.to_lowercase()).collect();
         rest.iter().enumerate().any(|(index, w)| {
-            matches!(
-                w.as_str(),
-                "-9" | "-kill" | "-sigkill" | "-s9" | "-skill" | "-ssigkill" | "-n9"
-            ) || w.strip_prefix("--signal=").is_some_and(is_signal)
+            w.strip_prefix("--signal=").is_some_and(is_kill_signal)
+                || (!w.starts_with("--")
+                    && w.strip_prefix('-').is_some_and(|flag| {
+                        is_kill_signal(flag)
+                            || flag
+                                .strip_prefix(['s', 'n'])
+                                .is_some_and(|signal| is_kill_signal(signal))
+                    }))
                 || (matches!(w.as_str(), "-s" | "-n" | "--signal")
-                    && rest.get(index + 1).is_some_and(|n| is_signal(n)))
+                    && rest.get(index + 1).is_some_and(|n| is_kill_signal(n)))
         })
     })
 }
 
 // ── infrastructure ──────────────────────────────────────────────────────────────────────────────────
 
-/// `terraform`, `tofu` or `terragrunt` followed later in the segment by `destroy`, `-destroy`, `--destroy`,
-/// `-replace` or `--replace` (optionally `=value`). `plan -destroy` is read-only but its plan file can be
-/// applied unseen, so it asks too. Also (same label) `taint`, `workspace … delete` and `state … rm`/`remove`:
-/// each makes the next apply destroy something, or forgets or deletes state.
+/// `terraform`, `tofu`, `terragrunt` or `pulumi` followed later in the segment by `destroy`, `destroy-all`,
+/// `-destroy`, `--destroy`, `-replace` or `--replace` (optionally `=value`). `plan -destroy` is read-only but
+/// its plan file can be applied unseen, so it asks too. Also (same label) `taint`, `force-unlock`,
+/// `workspace … delete` and `state … rm`/`remove`/`push`: each makes the next apply destroy something, or
+/// forgets, overwrites or deletes state, or breaks a lock.
 fn has_terraform_destroy(view: &str) -> bool {
     segment_words(view).iter().any(|words| {
-        after_program(words, &["terraform", "tofu", "terragrunt"]).is_some_and(|rest| {
+        after_program(words, &["terraform", "tofu", "terragrunt", "pulumi"]).is_some_and(|rest| {
             let rest: Vec<String> = rest.iter().map(|w| w.to_lowercase()).collect();
             let then = |first: &str, verbs: &[&str]| {
                 rest.iter()
@@ -293,29 +363,46 @@ fn has_terraform_destroy(view: &str) -> bool {
                     .is_some_and(|at| rest[at + 1..].iter().any(|w| verbs.contains(&w.as_str())))
             };
             then("workspace", &["delete"])
-                || then("state", &["rm", "remove"])
+                || then("state", &["rm", "remove", "push"])
                 || rest.iter().any(|w| {
                     let flag = w.trim_start_matches('-');
                     let name = flag.split('=').next().unwrap_or(flag);
-                    w == "destroy"
-                        || w == "taint"
+                    matches!(
+                        w.as_str(),
+                        "destroy" | "destroy-all" | "taint" | "force-unlock"
+                    )
                         || (w.starts_with('-') && (name == "destroy" || name == "replace"))
                 })
         })
     })
 }
 
-/// `aws` followed later in the segment by a word that is exactly `delete-…`, `terminate-…`, `remove-…`,
-/// `deregister-…` or `purge-…`, or exactly `schedule-key-deletion` (kms: the key is gone in 7 to 30 days).
+/// `aws` followed later in the segment by a word that is exactly `delete-…`, `batch-delete-…`, `terminate-…`,
+/// `remove-…`, `deregister-…` or `purge-…`, or exactly `schedule-key-deletion` (kms: the key is gone in 7 to 30
+/// days) or `stop-instances`, or `update-service` with `--desired-count` 0 (an ECS service scaled to nothing).
 fn has_aws_delete(view: &str) -> bool {
+    const VERBS: [&str; 6] = [
+        "delete-",
+        "batch-delete-",
+        "terminate-",
+        "remove-",
+        "deregister-",
+        "purge-",
+    ];
     segment_words(view).iter().any(|words| {
         after_program(words, &["aws"]).is_some_and(|rest| {
-            rest.iter().any(|w| {
-                let w = w.to_lowercase();
-                w == "schedule-key-deletion"
-                    || ["delete-", "terminate-", "remove-", "deregister-", "purge-"]
-                        .iter()
-                        .any(|verb| {
+            let rest: Vec<String> = rest.iter().map(|w| w.to_lowercase()).collect();
+            let scales_to_zero = rest.contains(&"update-service".to_string())
+                && rest.iter().enumerate().any(|(index, w)| {
+                    let zero = |n: &str| !n.is_empty() && n.chars().all(|c| c == '0');
+                    w.strip_prefix("--desired-count=").is_some_and(zero)
+                        || (w == "--desired-count" && rest.get(index + 1).is_some_and(|n| zero(n)))
+                });
+            scales_to_zero
+                || rest.iter().any(|w| {
+                    w == "schedule-key-deletion"
+                        || w == "stop-instances"
+                        || VERBS.iter().any(|verb| {
                             w.strip_prefix(verb).is_some_and(|x| {
                                 !x.is_empty()
                                     && x.chars().all(|c| {
@@ -323,12 +410,13 @@ fn has_aws_delete(view: &str) -> bool {
                                     })
                             })
                         })
-            })
+                })
         })
     })
 }
 
-/// `aws` then `s3` then `rm` or `rb`; also `aws s3 sync … --delete`.
+/// `aws` then `s3` then `rm` or `rb`; also `aws s3 sync … --delete` and `aws s3 cp /dev/null s3://…` (which
+/// replaces the object with an empty one).
 fn has_aws_s3_remove(view: &str) -> bool {
     segment_words(view).iter().any(|words| {
         let Some(rest) = after_program(words, &["aws"]) else {
@@ -342,6 +430,10 @@ fn has_aws_s3_remove(view: &str) -> bool {
         after.iter().any(|w| w == "rm" || w == "rb")
             || after
                 .iter()
+                .position(|w| w == "cp")
+                .is_some_and(|cp| after[cp + 1..].iter().any(|w| w == "/dev/null"))
+            || after
+                .iter()
                 .position(|w| w == "sync")
                 .is_some_and(|sync| after[sync + 1..].iter().any(|w| w == "--delete"))
     })
@@ -350,7 +442,8 @@ fn has_aws_s3_remove(view: &str) -> bool {
 // ── redirection, find, xargs ────────────────────────────────────────────────────────────────────────
 
 /// A `>` that truncates a file. `>>` (append) and `<>` are not truncation; `>&` followed by a descriptor or `-`
-/// is a duplication (`2>&1`, `>&2`); a target of exactly `/dev/null`, `/dev/stderr` or `/dev/stdout` is exempt.
+/// is a duplication (`2>&1`, `>&2`); a target of exactly `/dev/null`, `/dev/stderr` or `/dev/stdout` (case
+/// matters: `/DEV/NULL` is a file on a case-sensitive volume) is exempt.
 /// Anything else, an empty target and `>(…)` included, matches. Quotes and backslashes inside a target are
 /// ignored (`> '/dev/null'` is `/dev/null`).
 fn truncates_a_file(view: &str) -> bool {
@@ -404,10 +497,7 @@ fn truncates_a_file(view: &str) -> bool {
         if duplication && descriptor {
             continue;
         }
-        if matches!(
-            target.to_lowercase().as_str(),
-            "/dev/null" | "/dev/stderr" | "/dev/stdout"
-        ) {
+        if matches!(target.as_str(), "/dev/null" | "/dev/stderr" | "/dev/stdout") {
             continue;
         }
         return true;
@@ -446,4 +536,16 @@ fn has_xargs_or_piped_rm(view: &str) -> bool {
         let rest: String = chars[at + 1..].iter().collect();
         all_words(&rest).iter().any(|w| program(w) == "rm")
     })
+}
+
+// ── shutdown ────────────────────────────────────────────────────────────────────────────────────────
+
+/// A `shutdown`, `reboot`, `halt` or `poweroff` program anywhere, `systemctl` followed later in the segment by
+/// `stop`, `disable` or `mask`, or `service` followed later by `stop`.
+fn has_stop_or_shutdown(view: &str) -> bool {
+    all_words(view)
+        .iter()
+        .any(|w| matches!(program(w).as_str(), "shutdown" | "reboot" | "halt" | "poweroff"))
+        || program_then(view, &["systemctl"], &["stop", "disable", "mask"])
+        || program_then(view, &["service"], &["stop"])
 }

@@ -167,6 +167,150 @@ pub fn normalise_for_hazards_joined(text: &str) -> String {
     normalise_with(text, "")
 }
 
+/// The word standing for a `$(...)`, `${...}`, backtick pair or `<(...)` in [`normalise_for_hazard_words`].
+const SUBSTITUTION_WORD: &str = "_";
+
+/// The view of the text for the destructive rules in which what a shell expands cannot sit between a program
+/// and its verb: each balanced `$(...)`, backtick pair, `<(...)` or `${...}` becomes ONE placeholder word
+/// ([`SUBSTITUTION_WORD`]; for `${...}` the words of its operand follow it, so `${X:-delete}` still shows
+/// `delete`), `(`, `)`, `{`, `}` become spaces, and a comma inside a brace group does too (brace expansion:
+/// `{rm,-rf,/x}` is the words `rm -rf /x`). Quotes and backslashes are dropped, and so is the `$` of `$'...'`
+/// and `$"..."`; empty expansions are as in [`normalise_for_hazards`]. `;`, `|` and `&` stay, and `/* */` is
+/// NOT a comment here: a shell has none, so `echo /*; 'kubectl' delete ns x; echo */` runs the middle command.
+/// An unbalanced opener is dropped and what follows stays visible.
+pub fn normalise_for_hazard_words(text: &str) -> String {
+    normalise_words_with(text, " ")
+}
+
+/// [`normalise_for_hazard_words`] with the empty expansions removed instead of turned into a space.
+pub fn normalise_for_hazard_words_joined(text: &str) -> String {
+    normalise_words_with(text, "")
+}
+
+/// Index of the char that closes the `open` at `chars[start]`, counting nested pairs; `None` when unbalanced.
+fn closing_index(chars: &[char], start: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, &c) in chars[start..].iter().enumerate() {
+        if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(start + offset);
+            }
+        }
+    }
+    None
+}
+
+/// The words of a `${...}` body, for the hazard rules: its name, then its operand with the operator
+/// (`:-`, `:=`, `:+`, `:?`, `%`, `#`, `/`, `^`, `,`) skipped and anything but word characters, `-`, `.`, `/`
+/// and `=` turned into a space, so `${X:-delete}` gives `X delete` and `${X:-$(rm -rf /)}` shows `rm -rf /`.
+fn parameter_words(body: &[char]) -> String {
+    let name_len = body
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric() || **c == '_')
+        .count();
+    let mut at = name_len;
+    if body.get(at) == Some(&':') {
+        at += 1;
+    }
+    match body.get(at) {
+        Some('-' | '=' | '+' | '?') => at += 1,
+        Some(&op @ ('%' | '#' | '/' | '^' | ',')) => {
+            at += 1;
+            if body.get(at) == Some(&op) {
+                at += 1;
+            }
+        }
+        _ => {}
+    }
+    let name: String = body[..name_len].iter().collect();
+    let operand: String = body[at..]
+        .iter()
+        .map(|&c| {
+            if c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '=') {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    format!(" {name} {operand} ")
+}
+
+fn normalise_words_with(text: &str, empty: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut braces = 0usize;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '$' {
+            if let Some(len) = empty_expansion_len(&chars[i..]) {
+                i += len;
+                if !(empty == " " && out.ends_with(' ')) {
+                    out.push_str(empty);
+                }
+                continue;
+            }
+            match chars.get(i + 1) {
+                Some('\'' | '"') => {
+                    i += 1;
+                    continue;
+                }
+                Some('(') => {
+                    if let Some(close) = closing_index(&chars, i + 1, '(', ')') {
+                        out.push_str(&format!(" {SUBSTITUTION_WORD} "));
+                        i = close + 1;
+                        continue;
+                    }
+                }
+                Some('{') => {
+                    if let Some(close) = closing_index(&chars, i + 1, '{', '}') {
+                        out.push_str(&format!(" {SUBSTITUTION_WORD} "));
+                        out.push_str(&parameter_words(&chars[i + 2..close]));
+                        i = close + 1;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if c == '<' && chars.get(i + 1) == Some(&'(') {
+            if let Some(close) = closing_index(&chars, i + 1, '(', ')') {
+                out.push_str(&format!(" {SUBSTITUTION_WORD} "));
+                i = close + 1;
+                continue;
+            }
+        }
+        if c == '`' {
+            if let Some(len) = chars[i + 1..].iter().position(|&n| n == '`') {
+                out.push_str(&format!(" {SUBSTITUTION_WORD} "));
+                i += len + 2;
+                continue;
+            }
+        }
+        i += 1;
+        match c {
+            '\'' | '"' | '\\' => {}
+            '{' => {
+                braces += 1;
+                out.push(' ');
+            }
+            '}' => {
+                braces = braces.saturating_sub(1);
+                out.push(' ');
+            }
+            ',' if braces > 0 => out.push(' '),
+            '`' | '(' | ')' => out.push(' '),
+            c if c.is_whitespace() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Both forms, the one with empty expansions as a space first.
 fn hazard_views(text: &str) -> [String; 2] {
     [
@@ -206,7 +350,7 @@ fn normalise_with(text: &str, empty: &str) -> String {
                 }
                 out.push(' ');
             }
-            '$' if chars.get(i) == Some(&'\'') => {}
+            '$' if matches!(chars.get(i), Some('\'' | '"')) => {}
             '\'' | '"' | '\\' => {}
             '`' | '(' | ')' | '{' | '}' => out.push(';'),
             c if c.is_whitespace() => {
