@@ -103,6 +103,11 @@ require_visible() {
   if [ "$wv" != 0 ]; then
     echo "INCONCLUSIVE: the QA window is not visible (display locked or asleep)"
     stop_instance
+    # A failing isolation guard (reported by stop_instance) is a FAIL, not an inconclusive run.
+    if [ "$fails" -gt 0 ]; then
+      echo "RESULT: FAIL"
+      exit 1
+    fi
     echo "RESULT: INCONCLUSIVE"
     echo "Manual checklist: see the PR body (staging first)."
     exit 3

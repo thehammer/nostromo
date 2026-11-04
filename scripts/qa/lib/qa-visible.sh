@@ -32,7 +32,7 @@ qa_wait_visible() {
 # sourcing this file. Each fails CLOSED: anything it cannot check is a refusal.
 
 # The marker kinds a QA run leaves behind (the same list the isolation guard and approvals-card.sh use).
-QA_MARKER_PATTERN='FIXTURE:|com\.hammer\.nostromo\.qa|nostromo-qa-|cody-qa-|qa-approvals'
+QA_MARKER_PATTERN='FIXTURE:|WAKE:basic:|com\.hammer\.nostromo\.qa|nostromo-qa-|cody-qa-|qa-approvals'
 QA_ROOT_MARKER=".nostromo-qa-root"
 
 # NOSTROMO_QA_CLAUDE_BIN makes qa-instance.sh hand a real CLI to the QA daemon: tokens would be spent.
@@ -57,7 +57,7 @@ qa_refuse_dirty_real_home() {
   grep -qE "$QA_MARKER_PATTERN" "$real_focuses" 2>/dev/null && rc=0 || rc=$?
   [ "$rc" = 1 ] && return 0
   if [ "$rc" = 0 ]; then
-    echo "REFUSING TO RUN: $real_focuses already carries a QA marker (FIXTURE:, the QA bundle id, a QA root path, cody-qa-, qa-approvals)." >&2
+    echo "REFUSING TO RUN: $real_focuses already carries a QA marker (FIXTURE:, WAKE:basic:, the QA bundle id, a QA root path, cody-qa-, qa-approvals)." >&2
     echo "A QA run once wrote into your real ~/.nostromo. Remove the QA entries from that file, then run again." >&2
   else
     echo "REFUSING TO RUN: $real_focuses could not be read, so it cannot be checked for QA leftovers." >&2

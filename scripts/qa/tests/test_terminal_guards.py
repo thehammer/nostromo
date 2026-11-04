@@ -18,7 +18,7 @@ import unittest
 from qa_harness import QA_DIR
 
 SCRIPTS = ("terminal-remote.sh", "terminal-local.sh", "terminal-hazard.sh")
-MARKERS = ("FIXTURE:x", "com.hammer.nostromo.qa", "/tmp/nostromo-qa-1234", "cody-qa-x", "qa-approvals")
+MARKERS = ("FIXTURE:x", "WAKE:basic:/tmp/x", "com.hammer.nostromo.qa", "/tmp/nostromo-qa-1234", "cody-qa-x", "qa-approvals")
 
 STUB = """#!/bin/sh
 echo "$0 $*" >> "$STUB_LOG"
@@ -96,13 +96,14 @@ class TerminalScriptGuardsTest(unittest.TestCase):
                     run = tree.run(script)
                     self.refused(run, tree, "focuses.json")
 
-    def test_the_marker_refusal_comes_before_anything_else_when_both_conditions_hold(self):
+    def test_the_model_refusal_comes_before_the_marker_refusal_when_both_conditions_hold(self):
         for script in SCRIPTS:
             with self.subTest(script):
                 tree = Tree(self)
                 tree.write_focuses('{"focuses":[{"tag":"cody-qa-x"}]}')
                 run = tree.run(script, {"NOSTROMO_QA_CLAUDE_BIN": "/usr/local/bin/claude"})
-                self.refused(run, tree, "REFUSING TO RUN")
+                self.refused(run, tree, "NOSTROMO_QA_CLAUDE_BIN")
+                self.assertNotIn("focuses.json", run.stderr)
 
     def test_each_script_gets_past_the_guards_in_a_clean_environment(self):
         """Control: without either condition the guard stays out of the way (the stub then ends the run)."""
@@ -165,7 +166,7 @@ class TerminalScriptSourceTest(unittest.TestCase):
         lib = self.read("lib", "qa-visible.sh")
         self.assertRegex(lib, r"(?m)^qa_refuse_real_model\(\)")
         self.assertRegex(lib, r"(?m)^qa_refuse_dirty_real_home\(\)")
-        for marker in (r"FIXTURE:", r"com\.hammer\.nostromo\.qa", r"nostromo-qa-", r"cody-qa-", r"qa-approvals"):
+        for marker in (r"FIXTURE:", r"WAKE:basic:", r"com\.hammer\.nostromo\.qa", r"nostromo-qa-", r"cody-qa-", r"qa-approvals"):
             self.assertIn(marker, lib)
 
     def test_each_script_calls_both_guards_before_it_starts_anything(self):
@@ -203,6 +204,25 @@ class IsolationGuardIsReportedTest(unittest.TestCase):
                     text = f.read()
                 self.assertIn('"$instance" stop "$root" || fail "isolation guard"', text)
                 self.assertIn("\nstop_instance\n", text, "the normal end of a run must call stop_instance")
+
+    def test_a_failing_guard_on_the_not_visible_path_ends_fail_with_exit_1_not_inconclusive(self):
+        """The early exit for a window that is not visible stops the instance too; if that guard fails the run is
+        a FAIL (exit 1), never `RESULT: INCONCLUSIVE` (exit 3). Run for real with a stub instance whose `stop`
+        fails and whose `start` prints a root; the visibility helper is overridden to say "not visible"."""
+        for script in SCRIPTS:
+            with self.subTest(script):
+                tree = Tree(self)
+                with open(os.path.join(tree.qa, "qa-instance.sh"), "w") as f:
+                    f.write('#!/bin/sh\necho "$0 $*" >> "$STUB_LOG"\n'
+                            'case "$1" in start) echo "QA_ROOT=$STUB_ROOT";; stop) exit 1;; esac\nexit 0\n')
+                os.chmod(os.path.join(tree.qa, "qa-instance.sh"), 0o755)
+                with open(os.path.join(tree.qa, "lib", "qa-visible.sh"), "a") as f:
+                    f.write("\nqa_wait_visible() { return 1; }\n")
+                run = tree.run(script, {"STUB_ROOT": os.path.join(tree.root, "qa-root")})
+                self.assertIn("FAIL: isolation guard", run.stdout, run.stdout + run.stderr)
+                self.assertIn("RESULT: FAIL", run.stdout, run.stdout + run.stderr)
+                self.assertNotIn("RESULT: INCONCLUSIVE", run.stdout)
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
 
 
 if __name__ == "__main__":
