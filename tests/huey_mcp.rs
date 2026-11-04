@@ -2633,7 +2633,7 @@ async fn h6_5_start_refuses_while_a_run_is_going_and_inside_the_cooldown_and_ret
     m.clock.set(ts(AFTER_START));
     let h = &src.handle;
 
-    h.start(Trigger::RunNow).expect("a run starts");
+    start_run_now(h);
     // It returned while the model is still waiting: the run is in the background.
     tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
         .await
@@ -2701,6 +2701,19 @@ fn state_for(src: &HueySources) -> McpSharedState {
     state.huey = Some(src.handle.clone());
     state.huey_rx = src.view_rx.clone();
     state
+}
+
+/// Get a run going once the test has moved the clock past the start time.
+/// The engine's scheduler takes its first look at the clock on its own task,
+/// and `boot`'s settle delay cannot guarantee it already has: under load that
+/// look lands after the clock moved, finds the run due and starts it. Either
+/// way exactly one run is going, which is all the caller needs, so that one
+/// refusal is accepted; anything else still fails.
+fn start_run_now(h: &HueyHandle) {
+    match h.start(Trigger::RunNow) {
+        Ok(()) | Err(StartError::Refused(TriggerRefused::AlreadyRunning)) => {}
+        Err(e) => panic!("a run starts: {e:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4164,7 +4177,7 @@ async fn h6_9_a_run_finishing_repaints_the_report_pane_with_the_new_report() {
     .await;
 
     m.clock.set(ts(AFTER_START));
-    src.handle.start(Trigger::RunNow).expect("starts");
+    start_run_now(&src.handle);
 
     next_document(&mut d.bcast, "huey/report", |title, blocks, _| {
         title.contains("Oct 26, 2026") && plain(blocks).contains("Gizmo 2 ships batch mode")

@@ -392,7 +392,12 @@ impl GraphClient {
             if let Some(parent) = delta_link_file.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            let _ = tokio::fs::write(delta_link_file, &delta_link).await;
+            // Write-then-rename so a reader (or a crash) never sees the
+            // truncated, half-written file a plain overwrite leaves.
+            let tmp = delta_link_file.with_extension("delta.tmp");
+            if tokio::fs::write(&tmp, &delta_link).await.is_ok() {
+                let _ = tokio::fs::rename(&tmp, delta_link_file).await;
+            }
         }
 
         Ok((items, delta_link))
