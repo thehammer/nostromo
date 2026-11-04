@@ -1,5 +1,5 @@
 # TEMPORARY (fix/mac-scroll-test-flake): loops MotherDetailScrollTests to prove the scroll/render
-# tests are deterministic. Plain and CPU-loaded, same runner type as the Mac job. Removed before the PR ends.
+# tests are deterministic. Plain and CPU-loaded, same runner type as the Mac job. Removed before the PR ends. (attempt 2)
 name: tmp-mac-scroll-loop
 
 on:
