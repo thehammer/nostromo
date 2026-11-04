@@ -7,7 +7,7 @@ broker read. The contract itself is Mother's `docs/design.md`, "Headless crew co
 
 **Recordings.** Since Mother's HC-16 (#76) these are recordings of real runs
 (recorded by Mother's `record-contract-fixtures.sh`: timestamps monotonic, `updated_at` increasing, real `crew` shape),
-not hand-written. Pinned to Mother `9943542a0b9e` (#106) (see `MANIFEST.json`; the fixture bytes last changed at `6712f38ecb28`). Since `15513946b0e5` the only change is Mother #98's
+not hand-written. Pinned to Mother `5c76ffbf5932` (see `MANIFEST.json`; re-vendored after #106's quota-gate change to the `hello` capabilities and the snapshot `quota` object; the fixture bytes last changed at `6712f38ecb28`). Since `15513946b0e5` the only change is Mother #98's
 additive job-record key `base_sha` (string or null; placeholder `0000000000000000000000000000000000000001` in
 `queued` event data and snapshot jobs). Clients must ignore it if unknown; Nostromo has no use for it. What changed from `0ca8b700`:
 
@@ -41,6 +41,10 @@ daemon's own `ServerMsg::MotherJobs` bytes for the fixture jobs (and for jobs wi
 written by the Rust tests (`UPDATE_GOLDEN=1`) and read by the Kit tests.
 
 ## Re-vendor
+
+**Redo this whenever Mother's contract fixtures change** (any change under `plugins/mother/tests/fixtures/`). Bumping
+`MANIFEST.json` by hand without re-vendoring the files is what let #419 drift. CI has no Mother checkout, so it only runs
+the manifest sha256 tests (they fail if a vendored file differs from its manifest hash); the upstream comparison runs locally.
 
 ```bash
 git -C ~/Code/mother fetch                 # the script never fetches
