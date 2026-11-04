@@ -84,13 +84,11 @@ final class MotherDetailScrollTests: XCTestCase {
                 ("first visible plan row", try XCTUnwrap(rows.first, file: file, line: line))]
     }
 
-    /// `makeRig` ends by showing a short action error that clears itself 5 s later; wait for that, so a
-    /// shrink that is not part of the event under test cannot land in the middle of one.
-    private func waitForTheStartupErrorToClear(_ rig: MDRig, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertTrue(MD.pumpUntil(rig.window) { rig.renderedCount(prefix: "ERR") == 0 },
-                      "the startup action error never cleared", file: file, line: line)
-        // A reader acts on a settled screen, not in the same breath as the update that cleared the error.
-        MD.pump(rig.window)
+    /// A rig that starts with no action error showing. `makeRig`'s usual one clears itself 5 s after it
+    /// arrives, and a test that measures where the reader is would then depend on how fast the runner is:
+    /// the clearing shrinks what is above the reader mid-test. The tests that want an error send their own.
+    private func makeScrollRig(long: Set<MDField>, index: Int, bare: Bool = false) throws -> MDRig {
+        try MD.makeRig(self, long: long, index: index, bare: bare, startupError: false)
     }
 
     private enum Change { case grows, shrinks, either }
@@ -212,8 +210,7 @@ final class MotherDetailScrollTests: XCTestCase {
     // MARK: - The reader's place survives updates to the same job
 
     func testTheRowsInViewStayPutWhileTheSectionsAboveThePlanGrowAndShrink() throws {
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 940)
-        waitForTheStartupErrorToClear(rig)
+        let rig = try makeScrollRig(long: [.planChecklist], index: 940)
         // Everything the reader sees, kept across all the events: no re-scrolling in between.
         let anchors = try scrollIntoPlan(rig)
         for (name, change, event) in liveEvents(rig) {
@@ -224,8 +221,7 @@ final class MotherDetailScrollTests: XCTestCase {
     func testTheEndOfTheOverviewInViewStaysPutWhileTheSectionsAboveItGrowAndShrink() throws {
         // At the very end of the document, and a little above it (where a shrink cannot hide in the clamp).
         for (index, slack) in [(941, CGFloat(0)), (947, 150)] {
-            let rig = try MD.makeRig(self, long: [.planChecklist], index: index)
-            waitForTheStartupErrorToClear(rig)
+            let rig = try makeScrollRig(long: [.planChecklist], index: index)
             let anchors = try scrollToOverviewEnd(rig, slack: slack)
             for (name, change, event) in liveEvents(rig) {
                 try assertAnchorsHold(rig, "\(name) (\(slack) pt above the end)", change, anchors: anchors, event: event)
@@ -236,8 +232,7 @@ final class MotherDetailScrollTests: XCTestCase {
 
     func testCrewDataArrivingForAJobThatHadNoneKeepsTheRowsInViewPut() throws {
         // The crew section goes from zero height to its full height above the reader.
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 945, bare: true)
-        waitForTheStartupErrorToClear(rig)
+        let rig = try makeScrollRig(long: [.planChecklist], index: 945, bare: true)
         let anchors = try scrollIntoPlan(rig)
         rig.bare = false
         try assertAnchorsHold(rig, "the first crew data arrives", .grows, anchors: anchors) { rig.setProgress(40) }
@@ -246,7 +241,7 @@ final class MotherDetailScrollTests: XCTestCase {
     func testALiveUpdateNeverCarriesTheReaderToTheNextJob() throws {
         // An update takes an anchor in the plan; a different job then opens: top, and still the top
         // after everything has settled (a held anchor must not pull the new job back down).
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 946)
+        let rig = try makeScrollRig(long: [.planChecklist], index: 946)
         _ = try scrollIntoPlan(rig)
         rig.sendPeek(todos: 60)
         MD.pump(rig.window, seconds: 0.05)
@@ -257,8 +252,7 @@ final class MotherDetailScrollTests: XCTestCase {
     }
 
     func testLiveUpdatesLeaveFocusAndTheDraftAloneAndWriteNothing() throws {
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 949)
-        waitForTheStartupErrorToClear(rig)
+        let rig = try makeScrollRig(long: [.planChecklist], index: 949)
         let reply = rig.detail.replyTextView
         XCTAssertTrue(rig.window.makeFirstResponder(reply), "precondition: the guidance box can take focus")
         reply.string = "half-written guidance"
@@ -281,7 +275,7 @@ final class MotherDetailScrollTests: XCTestCase {
 
     func testAReaderInThePlanWhoScrollsOnIsAnchoredWhereTheyStopped() throws {
         // The anchor follows the reader: after scrolling to a new place, the next update holds THAT place.
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 943)
+        let rig = try makeScrollRig(long: [.planChecklist], index: 943)
         for (k, below) in [CGFloat(2_400), 5_000].enumerated() {
             let anchors = try scrollIntoPlan(rig, below: below)
             try assertAnchorsHold(rig, "the todo list grows (stop \(k))", .grows, anchors: anchors) {
@@ -295,7 +289,7 @@ final class MotherDetailScrollTests: XCTestCase {
 
     func testDataBelowTheReaderOrInsideTheLogLeavesTheScrollPositionAlone() throws {
         // Nothing above the reader changes height, so the clip itself must not move either.
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 944)
+        let rig = try makeScrollRig(long: [.planChecklist], index: 944)
         let anchors = try scrollIntoPlan(rig)
         let origin = originY(rig)
         let logEvents: [(String, () throws -> Void)] = [
@@ -313,7 +307,7 @@ final class MotherDetailScrollTests: XCTestCase {
     }
 
     func testTheScrollPositionStaysWhenTheDocumentGrowsBelowTheViewport() throws {
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 934)
+        let rig = try makeScrollRig(long: [.planChecklist], index: 934)
         scrollAndConfirm(rig, toY: 300)
         let before = try XCTUnwrap(scrollView(rig).documentView).frame.height
 
@@ -328,7 +322,7 @@ final class MotherDetailScrollTests: XCTestCase {
 
     func testTheScrollPositionStaysWhenTheDocumentGrowsFromEmpty() throws {
         // Short plan first (nothing to scroll), then a long one arrives: still at the top, no jump to the end.
-        let rig = try MD.makeRig(self, long: [], index: 935)
+        let rig = try makeScrollRig(long: [], index: 935)
         XCTAssertEqual(originY(rig), 0, accuracy: tolerance)
         try rig.setPlan(items: 300)
         rig.awaitRendered()
@@ -340,7 +334,7 @@ final class MotherDetailScrollTests: XCTestCase {
 
     func testWhenTheDocumentShrinksThePositionClampsToTheNewEnd() throws {
         for (target, index) in [(200, 936), (3, 937)] {
-            let rig = try MD.makeRig(self, long: [.planChecklist], index: index)
+            let rig = try makeScrollRig(long: [.planChecklist], index: index)
             try rig.setPlan(items: 400)
             rig.awaitRendered()
 
@@ -365,7 +359,7 @@ final class MotherDetailScrollTests: XCTestCase {
     // MARK: - A different job starts at the top
 
     func testSelectingADifferentJobStartsAtTheTop() throws {
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 938)
+        let rig = try makeScrollRig(long: [.planChecklist], index: 938)
         scrollAndConfirm(rig, toY: 300)
 
         try rig.selectOtherJob(planItems: 200)
@@ -376,7 +370,7 @@ final class MotherDetailScrollTests: XCTestCase {
     }
 
     func testUpdatingToADifferentJobStartsAtTheTop() throws {
-        let rig = try MD.makeRig(self, long: [.planChecklist], index: 939)
+        let rig = try makeScrollRig(long: [.planChecklist], index: 939)
         scrollAndConfirm(rig, toY: 300)
 
         try rig.updateToOtherJob(planItems: 200)
@@ -388,7 +382,7 @@ final class MotherDetailScrollTests: XCTestCase {
     // MARK: - The actions scroll with the content and stay reachable
 
     func testEveryDecisionButtonCanBeScrolledIntoViewWithLongConsequences() throws {
-        let rig = try MD.makeRig(self, long: [.consequences], index: 942)
+        let rig = try makeScrollRig(long: [.consequences], index: 942)
         let sv = scrollView(rig)
         let doc = try XCTUnwrap(sv.documentView)
         XCTAssertGreaterThan(doc.frame.height, sv.contentView.bounds.height, "precondition: three long consequences make the detail scroll")
@@ -407,5 +401,45 @@ final class MotherDetailScrollTests: XCTestCase {
             XCTAssertTrue(content.bounds.contains(content.convert(button.bounds, from: button)),
                           "\(button.title) is inside the window once scrolled to")
         }
+    }
+
+    // MARK: - The harness waits on real conditions
+
+    func testDrainMainQueueRunsABlockQueuedBeforeTheCall() {
+        var ran = false
+        DispatchQueue.main.async { ran = true }
+        XCTAssertTrue(MD.drainMainQueue())
+        XCTAssertTrue(ran, "a block queued on the main queue before the drain has run when it returns")
+    }
+
+    func testTodosDeliveredJustBeforeSwitchingJobsStillShowForTheNewJob() throws {
+        let rig = try makeScrollRig(long: [], index: 950)
+        rig.sendPeek(todos: 60)
+        try rig.selectOtherJob()
+
+        XCTAssertEqual(rig.renderedCount(prefix: "TODO-"), 60, "the todos delivered before the switch are shown for the new job")
+        MD.pump(rig.window, seconds: 0.5)
+        XCTAssertEqual(rig.renderedCount(prefix: "TODO-"), 60, "a late delivery for the old job does not clear them")
+    }
+
+    func testAwaitRenderedSeesAnUpdateThatWasOnlyQueued() throws {
+        let rig = try makeScrollRig(long: [], index: 951)
+        rig.sendPeek(todos: 60)
+        rig.awaitRendered()
+        XCTAssertEqual(rig.renderedCount(prefix: "TODO-"), 60, "precondition: the todos are shown")
+
+        rig.sendPeek(todos: 0)
+        rig.awaitRendered()
+        XCTAssertEqual(rig.renderedCount(prefix: "TODO-"), 0, "an empty list is not mistaken for 'not yet applied'")
+    }
+
+    func testARigWithoutTheStartupErrorShowsNoErrorRow() throws {
+        let quiet = try makeScrollRig(long: [], index: 952)
+        XCTAssertEqual(quiet.renderedCount(prefix: "ERR"), 0, "startupError: false leaves out the action error")
+
+        let usual = try MD.makeRig(self, long: [], index: 953)
+        MD.drainMainQueue()
+        MD.pump(usual.window)
+        XCTAssertEqual(usual.renderedCount(prefix: "ERR"), 1, "the default rig starts with one action error showing")
     }
 }

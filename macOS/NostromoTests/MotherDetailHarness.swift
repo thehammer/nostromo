@@ -143,14 +143,23 @@ enum MDFixtures {
 final class MDStubHost: MotherJobDetailHost {
     let connectedSubject = CurrentValueSubject<Bool, Never>(true)
     let errorSubject     = CurrentValueSubject<String?, Never>(nil)
+    /// Every job's peek, as the app's host publishes them: one dictionary keyed by job id.
     let peeksSubject     = CurrentValueSubject<[String: MotherPeekPayload], Never>([:])
-    var payload: MotherPeekPayload?
 
     var brokerConnected: Bool { connectedSubject.value }
     var brokerConnectedPublisher: AnyPublisher<Bool, Never> { connectedSubject.eraseToAnyPublisher() }
     var motherActionErrorPublisher: AnyPublisher<String?, Never> { errorSubject.eraseToAnyPublisher() }
     var motherPeeksPublisher: AnyPublisher<[String: MotherPeekPayload], Never> { peeksSubject.eraseToAnyPublisher() }
-    func peek(for jobId: String) -> MotherPeekPayload? { payload }
+    /// Read from the same dictionary the publisher carries, so what `select` reads and what a delivery
+    /// (which `receive(on: main)` queues, and which can land after a later `select`) says can never disagree.
+    func peek(for jobId: String) -> MotherPeekPayload? { peeksSubject.value[jobId] }
+
+    /// Publish `payload` as `jobId`'s peek, keeping every other job's (as the app's host does).
+    func publishPeek(_ payload: MotherPeekPayload, for jobId: String) {
+        var all = peeksSubject.value
+        all[jobId] = payload
+        peeksSubject.send(all)
+    }
 
     /// Every call that would change something outside the view (answer, cancel, retry, ...): a
     /// reader's updates must never produce one.
@@ -295,9 +304,7 @@ final class MDRig {
         todoCount = todos
         todoLong = long
         todoVersion += 1
-        let payload = MDFixtures.peek(jobId: jobId, todos: todos, long: long, version: todoVersion)
-        host.payload = payload
-        host.peeksSubject.send([jobId: payload])
+        host.publishPeek(MDFixtures.peek(jobId: jobId, todos: todos, long: long, version: todoVersion), for: jobId)
     }
 
     func setGates(_ count: Int) {
@@ -337,18 +344,26 @@ final class MDRig {
 
     /// Select a different job than the one shown (a new id, its own plan file).
     func selectOtherJob(planItems items: Int = 200) throws {
-        jobId = jobId + "-b"
-        try setPlanFileOnly(items: items)
+        try switchJob(to: jobId + "-b", planItems: items)
         detail.select(currentJob())
         awaitRendered()
     }
 
     /// `update` with a job of a different id (which the detail must treat as a selection).
     func updateToOtherJob(planItems items: Int = 200) throws {
-        jobId = jobId + "-c"
-        try setPlanFileOnly(items: items)
+        try switchJob(to: jobId + "-c", planItems: items)
         detail.update(currentJob())
         awaitRendered()
+    }
+
+    /// Everything a job switch needs ready before the detail is told: the peeks already on their way are
+    /// delivered first (one keyed by the old id, arriving after the switch, would clear the new job's
+    /// todos), and the new job has the todo list the old one had.
+    private func switchJob(to newId: String, planItems items: Int) throws {
+        MD.drainMainQueue()
+        if let peek = host.peek(for: jobId) { host.publishPeek(peek, for: newId) }
+        jobId = newId
+        try setPlanFileOnly(items: items)
     }
 
     private func setPlanFileOnly(items: Int) throws {
@@ -376,8 +391,13 @@ final class MDRig {
     /// Waits (pumping the run loop, up to a generous bound, never a fixed sleep) until the plan items,
     /// the todo rows and the log text the rig has delivered are on screen, then lets layout settle.
     /// Fails if they never arrive, so a test cannot pass by looking at an empty detail.
+    ///
+    /// Everything the host and the error publisher delivered before this call is delivered first: a
+    /// condition that already holds (an empty todo list, rows that were there anyway) says nothing about
+    /// whether the update has been applied yet.
     @discardableResult
     func awaitRendered(file: StaticString = #filePath, line: UInt = #line) -> Bool {
+        MD.drainMainQueue(file: file, line: line)
         let wantsTodos = state == "awaiting" || state == "running"
         let ok = MD.pumpUntil(window) {
             self.planRows == self.planItems && (!wantsTodos || self.todoRows == self.todoCount)
@@ -412,6 +432,25 @@ enum MD {
             window.contentView?.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
         } while Date() < end
+    }
+
+    private final class Marker: @unchecked Sendable { var ran = false }
+
+    /// Runs the run loop until every block already queued on the main queue has run (what a
+    /// `receive(on: DispatchQueue.main)` delivery is): the queue is first in, first out, so a block queued
+    /// now runs after them. Updates the app applied asynchronously are then applied, however slow the
+    /// runner. Fails, naming what was missing, if the main queue does not get there within `timeout`.
+    @discardableResult
+    static func drainMainQueue(timeout: TimeInterval = 10, file: StaticString = #filePath, line: UInt = #line) -> Bool {
+        let marker = Marker()
+        DispatchQueue.main.async { marker.ran = true }
+        let end = Date().addingTimeInterval(timeout)
+        while !marker.ran && Date() < end {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertTrue(marker.ran, "the main queue did not drain within \(timeout) s: a block queued before this call never ran",
+                      file: file, line: line)
+        return marker.ran
     }
 
     /// Pumps until `condition` holds (true) or `timeout` passes (false). A bound, not a duration.
@@ -468,7 +507,13 @@ enum MD {
 
     /// A job detail as a tab of the Mother pane, showing a job whose `long` fields are long.
     /// The rig is closed when the test ends (call `close()` earlier to free a window mid-test).
-    static func makeRig(_ tc: XCTestCase, long: Set<MDField>, index: Int, bare: Bool = false) throws -> MDRig {
+    ///
+    /// `startupError: false` leaves out the short action error that is otherwise showing when this
+    /// returns. It clears itself 5 s after it arrives, which resizes what is above a reader: a test that
+    /// measures where the reader is must not have that landing mid-test (it would depend on how fast the
+    /// runner is), so it starts without one and sends its own (`host.errorSubject`) when it needs one.
+    static func makeRig(_ tc: XCTestCase, long: Set<MDField>, index: Int, bare: Bool = false,
+                        startupError: Bool = true) throws -> MDRig {
         let w = try makeWindow(tc, index: index)
         let dir = try makeTemp(tc)
         let host = MDStubHost()
@@ -483,7 +528,9 @@ enum MD {
         try MDFixtures.logText(lines: logLines, long: long.contains(.log))
             .write(to: dir.appendingPathComponent("\(jobId).log"), atomically: true, encoding: .utf8)
 
-        host.payload = MDFixtures.peek(jobId: jobId, todos: long.contains(.todos) ? 60 : 2, long: long.contains(.todos), version: 0)
+        // Published before the detail exists, so the value its subscription is first handed is this one.
+        host.publishPeek(MDFixtures.peek(jobId: jobId, todos: long.contains(.todos) ? 60 : 2, long: long.contains(.todos), version: 0),
+                         for: jobId)
 
         let detail = MotherJobDetail(host: host, logDirectory: dir)
         detail.translatesAutoresizingMaskIntoConstraints = false
@@ -495,16 +542,15 @@ enum MD {
         if bare { rig.state = "running" }
 
         detail.select(rig.currentJob())
-        // The detail also listens to the host's peeks publisher, whose first (empty) value is delivered
-        // on the main queue after `select`; it would clear the todos the stub's `peek(for:)` returned.
-        host.peeksSubject.send([jobId: host.payload!])
         rig.awaitRendered()
         // The log is read on a background queue too.
         let wantedLog = long.contains(.log) ? "LOG-\(logLines - 1) " : "LOG-0 "
         let logged = pumpUntil(w.window) { detail.logTextView.string.contains(wantedLog) }
         XCTAssertTrue(logged, "the log tail never rendered")
         // The error auto-clears after 5 s, so it is sent last, right before the measurement.
-        host.errorSubject.send(MDFixtures.actionError(long: long.contains(.actionError)))
+        if startupError {
+            host.errorSubject.send(MDFixtures.actionError(long: long.contains(.actionError)))
+        }
         pump(w.window)
         return rig
     }

@@ -1,0 +1,54 @@
+# TEMPORARY (fix/mac-scroll-test-flake): loops MotherDetailScrollTests to prove the scroll/render
+# tests are deterministic. Plain and CPU-loaded, same runner type as the Mac job. Removed before the PR ends.
+name: tmp-mac-scroll-loop
+
+on:
+  push:
+    branches: [fix/mac-scroll-test-flake]
+    paths: [.github/workflows/tmp-mac-scroll-loop.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  loop:
+    name: loop (${{ matrix.mode }})
+    runs-on: macos-26
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [plain, loaded]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+      - name: CPU load (loaded mode only)
+        if: matrix.mode == 'loaded'
+        run: |
+          n=$(sysctl -n hw.ncpu); echo "spinners: $n"
+          for i in $(seq "$n"); do nohup yes > /dev/null 2>&1 & done
+          sleep 1; uptime
+      - name: Loop MotherDetailScrollTests x50
+        run: |
+          set -o pipefail; mkdir -p macOS/build; cd macOS
+          xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
+            -destination 'platform=macOS' -derivedDataPath build \
+            -only-testing:NostromoTests/MotherDetailScrollTests -test-iterations 50 \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 120 \
+            -maximum-test-execution-time-allowance 300 test \
+            2>&1 | tee build/loop.log | grep --line-buffered -E "error:|Executed [0-9]+ tests|Test Case .* failed|\*\* TEST"
+      - name: Summary
+        if: always()
+        run: |
+          cd macOS/build
+          echo "iterations started: $(grep -c "Test Suite 'MotherDetailScrollTests' started" loop.log)"
+          echo "failed test cases:  $(grep -c "Test Case .* failed" loop.log)"
+          grep "Test Case .* failed" loop.log | sort | uniq -c || true
+          grep -E "Executed [0-9]+ tests" loop.log | tail -3
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loop-log-${{ matrix.mode }}
+          path: macOS/build/loop.log
