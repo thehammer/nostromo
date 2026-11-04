@@ -150,7 +150,7 @@ fn empty_expansion_len(chars: &[char]) -> Option<usize> {
 
 /// The text as a shell would see its words, for the hazard rules (the Mac app's `StagingHazards.normalised`
 /// does the same, and the shared fixture `tests/fixtures/terminal_staging/hazards.json` pins both for the normalised text and the
-/// rule verdicts, except `destructive` and `escape_quoted`, which only the Swift test exercises): `/* ... */`
+/// rule verdicts, and its `destructive` names for [`super::destructive`]; only `escape_quoted` is exercised by the Swift test alone): `/* ... */`
 /// comments become a space (SQL treats one as whitespace), quotes and backslashes are dropped (`r''m`,
 /// `\rm`, `"rm"` become `rm`; the `$` of an ANSI-C `$'...'` quote goes too), an empty expansion (`$IFS`,
 /// `${IFS}`, `$@`, `$*`, `$()`, `$0`-`$9`, `${IFS%?}`) becomes a space, backticks, parentheses and braces become `;` (a subshell, a

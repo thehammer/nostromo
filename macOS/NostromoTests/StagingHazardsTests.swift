@@ -52,7 +52,13 @@ final class StagingHazardsTests: XCTestCase {
 
     func testTheListIsExactlyTheFixedOneInOrder() {
         XCTAssertEqual(StagingDestructivePatterns.names, ["rm -rf", "DROP", "TRUNCATE", "DELETE FROM without WHERE", "migrate:fresh",
-                                                          "db:wipe", "queue:flush", "cache:clear", "--force", "kill -9"])
+                                                          "db:wipe", "queue:flush", "cache:clear", "--force", "kill -9",
+                                                          "migrate:refresh", "migrate:reset", "migrate:rollback", "kubectl delete",
+                                                          "kubectl drain", "helm uninstall", "terraform destroy", "aws delete/terminate",
+                                                          "aws s3 rm/rb", "dd of=", "mkfs", "shred", "> file", "find -delete",
+                                                          "xargs/piped rm"])
+        XCTAssertEqual(StagingDestructivePatterns.names.count, 25)
+        XCTAssertEqual(Set(StagingDestructivePatterns.names).count, 25, "the names are unique")
     }
 
     func testEveryPatternLabelSaysNoLabelDoesNotMeanSafeAndNothingSaysSafe() {
@@ -117,6 +123,533 @@ final class StagingHazardsTests: XCTestCase {
         XCTAssertEqual(StagingDestructivePatterns.matches("DELETE FROM a WHERE id=1; DELETE FROM b WHERE id=2"), [])
     }
 
+    // MARK: The fifteen families added after the first ten (kubectl, helm, terraform, aws, dd, mkfs, shred, `> file`, find, xargs, ...)
+    //
+    // Each family: wrapped, quoted, sudo'd, piped and absolute-path variants are still seen, and the read-only
+    // look-alikes are not. The list is conservative: an ambiguous command MATCHES (the user is asked to confirm).
+    // The daemon's `destructive.rs` is held to the same cases (`src/terminal/staging/tests/destructive.rs`).
+
+    /// Every command carries `name` (and possibly other names).
+    private func assertAll(_ name: String, _ commands: [String], file: StaticString = #filePath, line: UInt = #line) {
+        for command in commands {
+            let found = StagingDestructivePatterns.matches(command)
+            XCTAssertTrue(found.contains(name), "\(command) should be labelled \(name), got \(found)", file: file, line: line)
+        }
+    }
+
+    /// No command matches anything.
+    private func assertNone(_ commands: [String], file: StaticString = #filePath, line: UInt = #line) {
+        for command in commands {
+            XCTAssertEqual(StagingDestructivePatterns.matches(command), [], command, file: file, line: line)
+        }
+    }
+
+    /// No command carries `name` (other names are not this family's business).
+    private func assertNotLabelled(_ name: String, _ commands: [String], file: StaticString = #filePath, line: UInt = #line) {
+        for command in commands {
+            let found = StagingDestructivePatterns.matches(command)
+            XCTAssertFalse(found.contains(name), "\(command) must not be labelled \(name), got \(found)", file: file, line: line)
+        }
+    }
+
+    func testNewMigrateRefreshResetRollbackFamilyIsSeenThroughWrapping() {
+        // Like migrate:fresh: the literal name, any case, and the Laravel abbreviation.
+        assertAll("migrate:refresh", [#"php artisan migrate:refresh --seed"#, #"PHP ARTISAN MIGRATE:REFRESH"#, #"php artisan mi:ref"#])
+        assertAll("migrate:reset", [#"php artisan migrate:reset"#, #"PHP ARTISAN MIGRATE:RESET"#, #"php artisan mi:rese"#])
+        assertAll("migrate:rollback", [#"php artisan migrate:rollback --step=1"#, #"PHP ARTISAN MIGRATE:ROLLBACK"#,
+                                       #"php artisan migrate:rol"#, #"php artisan mi:ro"#])
+        // migrate resets are seen through wrapping quoting and sudo
+        assertAll(#"migrate:refresh"#, [
+            #"bash -c 'php artisan migrate:refresh'"#,
+            #"php artisan migrate:refre''sh"#,
+            #"echo $(php artisan migrate:refresh)"#,
+            #"sudo -u www-data php artisan migrate:refresh"#,
+        ])
+        assertAll(#"migrate:rollback"#, [
+            #"php artisan "migrate":rollback"#,
+            #"php artisan down && php artisan migrate:rollback; php artisan up"#,
+            #"sudo -u www-data php artisan migrate:rollback --force"#,
+        ])
+        assertAll(#"migrate:reset"#, [
+            #"php artisan migrate:res\et"#,
+        ])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"sudo -u www-data php artisan migrate:rollback --force"#), ["--force", "migrate:rollback"])
+        // migrate abbreviations that fit several commands label all of them
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"php artisan mi:re"#), ["migrate:refresh", "migrate:reset"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"php artisan mi:r"#), ["migrate:refresh", "migrate:reset", "migrate:rollback"])
+        // migrate look alikes are not resets
+        assertNone([
+            #"php artisan migrate:status"#,
+            #"php artisan migrate"#,
+            #"php artisan migrate --pretend"#,
+            #"php artisan migrate:install"#,
+            #"php artisan make:request StoreUser"#,
+            #"php artisan make:migration add_x_to_users"#,
+            #"php artisan route:list"#,
+        ])
+    }
+
+    func testNewKubectlFamilyIsSeenThroughWrapping() {
+        // kubectl delete is caught wherever the program sits
+        assertAll(#"kubectl delete"#, [
+            #"kubectl delete pod web-1"#,
+            #"kubectl delete -f deploy.yaml"#,
+            #"kubectl -n prod delete pod web-1"#,
+            #"kubectl --namespace=prod delete deployment web"#,
+            #"KUBECTL delete ns prod"#,
+            #"/usr/local/bin/kubectl delete pod web-1"#,
+            #"sudo kubectl delete pod web-1"#,
+            #"env KUBECONFIG=/x kubectl delete pod web-1"#,
+            #"KUBECONFIG=/x kubectl delete pod web-1"#,
+            #"command kubectl delete pod web-1"#,
+            #"time kubectl delete pod web-1"#,
+            #"nohup kubectl delete pod web-1"#,
+            #"exec kubectl delete pod web-1"#,
+            #"kubectl get pods && kubectl delete pod web-1"#,
+            #"echo go; kubectl delete pod web-1"#,
+            #"false || kubectl delete pod web-1"#,
+            #"echo web-1 | kubectl delete pod web-1"#,
+            #"k''ubectl delete pod web-1"#,
+            #""kubectl" delete pod web-1"#,
+            #"\kubectl delete pod web-1"#,
+            #"kubectl del\ete pod web-1"#,
+            #"kubectl${IFS}delete${IFS}pod${IFS}web-1"#,
+            #"bash -c 'kubectl delete pod web-1'"#,
+            #"echo $(kubectl delete pod web-1)"#,
+            #"echo `kubectl delete pod web-1`"#,
+            #"(kubectl delete pod web-1)"#,
+            #"{ kubectl delete pod web-1; }"#,
+        ])
+        // kubectl drain is caught wherever the program sits
+        assertAll(#"kubectl drain"#, [
+            #"kubectl drain node-1 --ignore-daemonsets"#,
+            #"kubectl --context prod drain node-1"#,
+            #"sudo kubectl drain node-1"#,
+            #"/usr/bin/kubectl drain node-1"#,
+            #"bash -c "kubectl drain node-1""#,
+            #"kubectl dr''ain node-1"#,
+        ])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"kubectl drain node-1; kubectl delete node node-1"#), ["kubectl delete", "kubectl drain"])
+        // kubectl read only look alikes match nothing
+        assertNone([
+            #"kubectl get pods"#,
+            #"kubectl describe pod web-1"#,
+            #"kubectl logs web-1"#,
+            #"kubectl apply -f x.yaml"#,
+            #"kubectl get pod delete-me"#,
+            #"kubectl get node drain-me"#,
+            #"kubectl get pods; echo delete"#,
+        ])
+    }
+
+    func testNewHelmFamilyIsSeenThroughWrapping() {
+        // helm uninstall and its aliases are caught
+        assertAll(#"helm uninstall"#, [
+            #"helm uninstall web"#,
+            #"helm delete web"#,
+            #"helm del web"#,
+            #"helm un web"#,
+            #"helm -n prod uninstall web"#,
+            #"sudo helm uninstall web"#,
+            #"/usr/local/bin/helm uninstall web"#,
+            #"HELM uninstall web"#,
+            #"bash -c 'helm uninstall web'"#,
+            #"helm list && helm uninstall web"#,
+            #"he''lm uninstall web"#,
+            #"helm${IFS}uninstall${IFS}web"#,
+            #"echo $(helm uninstall web)"#,
+        ])
+        // helm read only look alikes match nothing
+        assertNone([
+            #"helm list"#,
+            #"helm install web ./chart"#,
+            #"helm upgrade web ./chart"#,
+            #"helm status web"#,
+            #"helm list --uninstalling"#,
+            #"helm list; echo uninstall"#,
+        ])
+    }
+
+    func testNewTerraformFamilyIsSeenThroughWrapping() {
+        // terraform destroy and the ambiguous destroying flags are caught
+        assertAll(#"terraform destroy"#, [
+            #"terraform destroy"#,
+            #"terraform destroy -auto-approve"#,
+            #"tofu destroy"#,
+            #"terragrunt destroy"#,
+            #"terragrunt run-all destroy"#,
+            #"terraform apply -destroy"#,
+            #"terraform apply --destroy"#,
+            #"terraform plan -destroy"#,
+            #"terraform apply -replace=aws_instance.web"#,
+            #"terraform apply -replace aws_instance.web"#,
+            #"tofu apply -replace=aws_instance.web"#,
+            #"terraform -chdir=infra destroy"#,
+            #"terraform -chdir=infra apply -destroy"#,
+            #"sudo terraform destroy"#,
+            #"/usr/local/bin/terraform destroy"#,
+            #"TF_LOG=debug terraform destroy"#,
+            #"env TF_LOG=debug terraform destroy"#,
+            #"TERRAFORM destroy"#,
+            #"terraform apply -auto-approve && terraform destroy"#,
+            #"bash -c 'terraform destroy'"#,
+            #"terra''form destroy"#,
+            #"terraform "destroy""#,
+            #"\terraform destroy"#,
+            #"terraform${IFS}destroy"#,
+        ])
+        // terraform read only and plain apply look alikes match nothing
+        assertNone([
+            #"terraform apply"#,
+            #"terraform plan"#,
+            #"terraform init"#,
+            #"terraform apply -auto-approve"#,
+            #"tofu validate"#,
+            #"terraform fmt"#,
+            #"terraform state list"#,
+            #"terraform plan -out=tfplan"#,
+            #"terraform plan; echo destroy"#,
+        ])
+    }
+
+    func testNewAwsFamilyIsSeenThroughWrapping() {
+        assertNotLabelled("aws s3 rm/rb", [#"aws s3 cp a.txt s3://b/a.txt"#, #"aws s3 cp s3://b/k ./out --recursive"#,
+                                           #"aws s3 sync ./out s3://b"#, #"aws s3 sync ./out s3://b --dryrun"#,
+                                           #"aws s3 mb s3://x"#, #"aws s3 ls s3://rm"#, #"aws s3 ls"#])
+        // aws delete terminate remove deregister and purge verbs are caught
+        assertAll(#"aws delete/terminate"#, [
+            #"aws ec2 terminate-instances --instance-ids i-0abc"#,
+            #"aws s3api delete-object --bucket b --key k"#,
+            #"aws s3api delete-bucket --bucket b"#,
+            #"aws iam remove-user-from-group --user-name u --group-name g"#,
+            #"aws ecs deregister-task-definition --task-definition web:1"#,
+            #"aws sqs purge-queue --queue-url q"#,
+            #"aws rds delete-db-instance --db-instance-identifier x --skip-final-snapshot"#,
+            #"aws --profile prod ec2 terminate-instances --instance-ids i-0abc"#,
+            #"aws --region us-east-1 --profile prod ec2 terminate-instances --instance-ids i-0abc"#,
+            #"AWS EC2 TERMINATE-INSTANCES --instance-ids i-0abc"#,
+            #"sudo aws ec2 terminate-instances --instance-ids i-0abc"#,
+            #"/usr/local/bin/aws ec2 terminate-instances --instance-ids i-0abc"#,
+            #"AWS_PROFILE=prod aws ec2 terminate-instances --instance-ids i-0abc"#,
+            #"env AWS_PROFILE=prod aws ec2 terminate-instances --instance-ids i-0abc"#,
+            #"time aws ec2 terminate-instances --instance-ids i-0abc"#,
+            #"aws ec2 describe-instances && aws ec2 terminate-instances --instance-ids i-0abc"#,
+            #"a''ws ec2 terminate-instances --instance-ids i-0abc"#,
+            #"aws ec2 "terminate-instances" --instance-ids i-0abc"#,
+            #"\aws ec2 delete-volume --volume-id vol-0abc"#,
+            #"aws ec2 termi\nate-instances --instance-ids i-0abc"#,
+            #"bash -c 'aws ec2 terminate-instances --instance-ids i-0abc'"#,
+            #"echo $(aws sqs purge-queue --queue-url q)"#,
+            #"(aws iam delete-user --user-name u)"#,
+            #"aws${IFS}ec2${IFS}terminate-instances${IFS}--instance-ids${IFS}i-0abc"#,
+        ])
+        // aws read only look alikes match nothing
+        assertNone([
+            #"aws ec2 describe-instances"#,
+            #"aws s3 ls"#,
+            #"aws s3api get-object --bucket b --key k out.bin"#,
+            #"aws iam list-users"#,
+            #"aws sts get-caller-identity"#,
+            #"aws s3 ls s3://delete-me"#,
+            #"aws logs filter-log-events --log-group-name g"#,
+            #"aws ec2 describe-instances --filters Name=tag:x,Values=delete-me"#,
+            #"aws ec2 describe-instances; echo terminate-instances"#,
+        ])
+        // aws s3 rm rb and sync with delete are caught
+        assertAll(#"aws s3 rm/rb"#, [
+            #"aws s3 rm s3://b/k"#,
+            #"aws s3 rm s3://b/k --recursive"#,
+            #"aws s3 rb s3://b --force"#,
+            #"aws s3 rb s3://b"#,
+            #"aws --profile prod s3 rm s3://b/k"#,
+            #"aws s3 sync ./out s3://b --delete"#,
+            #"aws s3 sync s3://a s3://b --delete --exact-timestamps"#,
+            #"sudo aws s3 rm s3://b/k"#,
+            #"/usr/local/bin/aws s3 rm s3://b/k"#,
+            #"AWS_PROFILE=prod aws s3 rb s3://b"#,
+            #"bash -c 'aws s3 rm s3://b/k'"#,
+            #""aws" s3 "rm" s3://b/k"#,
+            #"aws s3 r''m s3://b/k"#,
+            #"aws${IFS}s3${IFS}rm${IFS}s3://b/k"#,
+            #"aws s3 ls && aws s3 rm s3://b/k"#,
+        ])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"aws s3 rb s3://b --force"#), ["--force", "aws s3 rm/rb"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"aws s3 rm s3://b/k --recursive --force"#), ["rm -rf", "--force", "aws s3 rm/rb"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"aws s3 rm s3://b/k && aws ec2 terminate-instances --instance-ids i-0abc"#), ["aws delete/terminate", "aws s3 rm/rb"])
+    }
+
+    func testNewDdMkfsShredAndTruncateFamiliesAreSeenThroughWrapping() {
+        // dd with an output file is caught and a read only dd is not
+        assertAll(#"dd of="#, [
+            #"dd if=/dev/zero of=/dev/sda bs=1M"#,
+            #"dd of=/dev/sdb if=disk.img"#,
+            #"DD IF=disk.img OF=/dev/sdb"#,
+            #"sudo dd if=disk.img of=/dev/sdb"#,
+            #"/bin/dd if=disk.img of=/dev/sdb"#,
+            #"env LC_ALL=C dd if=disk.img of=/dev/sdb"#,
+            #"time dd if=disk.img of=/dev/sdb"#,
+            #"nohup dd if=disk.img of=/dev/sdb"#,
+            #"cat disk.img | dd of=/dev/sdb"#,
+            #"sync && dd if=disk.img of=/dev/sdb"#,
+            #"bash -c 'dd if=/dev/zero of=/dev/sda'"#,
+            #"echo $(dd if=a of=b)"#,
+            #"d''d if=disk.img of=/dev/sdb"#,
+            #"dd if=disk.img o''f=/dev/sdb"#,
+            #"\dd if=disk.img of=/dev/sdb"#,
+            #"dd${IFS}if=disk.img${IFS}of=/dev/sdb"#,
+        ])
+        assertNone([
+            #"dd if=/dev/zero bs=1M count=1"#,
+            #"echo odd of=x"#,
+            #"ls of=x"#,
+            #"dd if=disk.img bs=1 count=1; echo of=x"#,
+        ])
+        // mkfs and its variants are caught and look alikes are not
+        assertAll(#"mkfs"#, [
+            #"mkfs /dev/sdb1"#,
+            #"mkfs.ext4 /dev/sdb1"#,
+            #"/sbin/mkfs -t xfs /dev/sdb1"#,
+            #"sudo mkfs.xfs /dev/sdb1"#,
+            #"MKFS.EXT4 /dev/sdb1"#,
+            #"mkfs.vfat -F 32 /dev/sdb1"#,
+            #"X=1 mkfs.ext4 /dev/sdb1"#,
+            #"echo go; mkfs.ext4 /dev/sdb1"#,
+            #"bash -c 'mkfs.ext4 /dev/sdb1'"#,
+            #"mk''fs.ext4 /dev/sdb1"#,
+            #"/usr/sbin/mkfs.btrfs -f /dev/sdb1"#,
+            #"mkfsx /dev/sdb1"#,
+            #"mkfs.ext4${IFS}/dev/sdb1"#,
+        ])
+        assertNone([
+            #"mkdir -p /tmp/x"#,
+            #"mk"#,
+            #"mktemp -d"#,
+            #"echo mkf"#,
+        ])
+        // shred is caught and look alikes are not
+        assertAll(#"shred"#, [
+            #"shred -u secret.txt"#,
+            #"shred -vzn 3 /dev/sdb"#,
+            #"SHRED -u secret.txt"#,
+            #"sudo shred -u secret.txt"#,
+            #"/usr/bin/shred -u secret.txt"#,
+            #"ls | xargs shred -u"#,
+            #"bash -c 'shred -u secret.txt'"#,
+            #"sh''red -u secret.txt"#,
+            #"\shred secret.txt"#,
+            #"echo go; shred secret.txt"#,
+        ])
+        assertNone([
+            #"shredder --help"#,
+            #"echo shreds"#,
+            #"ls shred-notes.txt"#,
+        ])
+        // truncate the command is the truncate pattern
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"truncate -s 0 f"#), ["TRUNCATE"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"sudo truncate -s0 /var/log/app.log"#), ["TRUNCATE"])
+    }
+
+    func testNewTruncatingRedirectFamilyIsSeenThroughWrapping() {
+        // a truncating redirection is caught in all its spellings
+        assertAll(#"> file"#, [
+            #": > file"#,
+            #":> file"#,
+            #"echo hi > out.txt"#,
+            #"cat a >b"#,
+            #"ls 2>err.log"#,
+            #"cmd >| f"#,
+            #"cmd >! f"#,
+            #"echo x >& log"#,
+            #"a &>log"#,
+            #"> /var/log/app.log"#,
+            #"echo x >$out"#,
+            #"ls > /dev/nullx"#,
+            #"cmd > /dev/null > out.txt"#,
+            #"echo a >(cat)"#,
+            #"echo a >"#,
+            #"sudo sh -c 'echo x > /etc/conf'"#,
+            #"bash -c "cat a > b""#,
+            #"echo $(echo x > f)"#,
+            #"ls && echo x > f"#,
+            #"echo "a > b""#,
+        ])
+        // appends dups closes and redirections to the bit buckets are not truncations
+        assertNone([
+            #"echo a >> log"#,
+            #"cmd 2>&1"#,
+            #"cmd >&2"#,
+            #"cmd 1>&2"#,
+            #"cmd >&-"#,
+            #"ls > /dev/null"#,
+            #"ls 2>/dev/null"#,
+            #"ls &>/dev/null"#,
+            #"ls > /dev/stderr"#,
+            #"ls 2>/dev/stdout"#,
+            #"ls > /DEV/NULL"#,
+            #"ls >& /dev/null"#,
+            #"ls &>> log"#,
+            #"ls 2>> err.log"#,
+            #"cmd 2>&1 | grep x"#,
+            #"echo > /dev/null; ls"#,
+            #"ls > /dev/null 2>&1"#,
+            #"ls 2>&1 >/dev/null"#,
+            #"exec 3<>/tmp/sock"#,
+            #"echo hello"#,
+        ])
+        // a redirection is listed after the older names
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"echo x > a; kill -9 1"#), ["kill -9", "> file"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"rm -rf x > log"#), ["rm -rf", "> file"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"rm -rf /tmp/x 2>/dev/null"#), ["rm -rf"])
+    }
+
+    func testNewFindXargsAndPipedRmFamilyIsSeenThroughWrapping() {
+        // find with delete or an exec of rm is caught
+        assertAll(#"find -delete"#, [
+            #"find . -name x -delete"#,
+            #"find . -exec rm {} \;"#,
+            #"find . -type f -execdir rm -- {} +"#,
+            #"find /tmp -exec sh -c 'rm {}' \;"#,
+            #"find . -ok rm {} \;"#,
+            #"find . -okdir rm {} \;"#,
+            #"find . -exec /bin/rm {} \;"#,
+            #"find . -exec RM {} \;"#,
+            #"find . -name '*.log' -mtime +7 -delete"#,
+            #"/usr/bin/find . -delete"#,
+            #"sudo find . -DELETE"#,
+            #"FIND . -delete"#,
+            #"bash -c 'find . -name x -delete'"#,
+            #"echo $(find . -delete)"#,
+            #"f''ind . -delete"#,
+            #"\find . -delete"#,
+            #"ls && find . -delete"#,
+            #"find . -delete | cat"#,
+            #"find${IFS}.${IFS}-delete"#,
+            #"find . -name x -exec grep rm {} \;"#,
+        ])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"find . -exec rm -rf {} \;"#), ["rm -rf", "find -delete"])
+        // find without delete or rm is not caught
+        assertNone([
+            #"find . -name x"#,
+            #"find . -exec ls {} \;"#,
+            #"find . -name delete"#,
+            #"find . -print"#,
+            #"find . -type f -print0 | sort -z"#,
+            #"find . -name '*.log' -exec grep -l error {} +"#,
+            #"echo -delete"#,
+        ])
+        // xargs rm and rm after a pipe are caught
+        assertAll(#"xargs/piped rm"#, [
+            #"xargs rm"#,
+            #"xargs -0 rm -f"#,
+            #"xargs -I{} rm {}"#,
+            #"xargs 'rm'"#,
+            #"ls | xargs rm"#,
+            #"ls | sudo rm x"#,
+            #"find . | while read f; do rm "$f"; done"#,
+            #"echo x | sh -c 'rm y'"#,
+            #"cat list | xargs -n1 rm"#,
+            #"ls | /bin/rm x"#,
+            #"ls | RM x"#,
+            #"ls|xargs rm"#,
+            #"echo x | env rm y"#,
+            #"ls | \rm x"#,
+            #"ls | x''args rm"#,
+            #"ls | xargs${IFS}rm"#,
+            #"bash -c 'ls | xargs rm'"#,
+            #"(ls | xargs rm)"#,
+            #"echo $(ls | xargs rm)"#,
+            #"ls && ls | xargs rm"#,
+            #"ls | xargs -P4 -I {} rm {}"#,
+            #"ls | rm"#,
+            #"find . -name x | xargs rm"#,
+        ])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"xargs rm -rf"#), ["rm -rf", "xargs/piped rm"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"ls | xargs rm -rf"#), ["rm -rf", "xargs/piped rm"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"ls | xargs rm -f"#), ["xargs/piped rm"])
+        // rm before the pipe or after or or is not piped rm
+        assertNone([
+            #"rm x | grep y"#,
+            #"ls || rm x"#,
+            #"rm x"#,
+            #"ls | grep rm-me"#,
+            #"xargs echo"#,
+            #"ls | xargs ls"#,
+            #"rm x || ls | cat"#,
+            #"echo x | tee y"#,
+        ])
+    }
+
+    func testNewForceKillFamilyIsSeenThroughWrapping() {
+        // every spelling of a force kill is caught
+        assertAll(#"kill -9"#, [
+            #"kill -s9 1"#,
+            #"kill -s KILL 1"#,
+            #"kill -SIGKILL 1"#,
+            #"kill -KILL 1"#,
+            #"kill -n9 1"#,
+            #"kill -n 9 1"#,
+            #"kill -sKILL 1"#,
+            #"kill -ssigkill 1"#,
+            #"kill --signal=KILL 1"#,
+            #"kill --signal=sigkill 1"#,
+            #"kill --signal=9 1"#,
+            #"kill --signal 9 1"#,
+            #"kill --signal KILL 1"#,
+            #"kill 1 -9"#,
+            #"pkill -9 x"#,
+            #"pkill -f x -9"#,
+            #"pkill -f x -KILL"#,
+            #"killall -9 x"#,
+            #"killall -s KILL x"#,
+            #"/bin/kill -9 1"#,
+            #"sudo kill -9 1"#,
+            #"env kill -9 1"#,
+            #"nohup kill -9 1"#,
+            #"time kill -9 1"#,
+            #"exec kill -9 1"#,
+            #"command kill -9 1"#,
+            #"KILL -9 1"#,
+            #"bash -c 'kill -9 1'"#,
+            #"echo $(kill -9 1)"#,
+            #"ls && kill -9 1"#,
+            #"ls; kill -9 1"#,
+            #"pgrep x | xargs kill -9"#,
+            #"k''ill -9 1"#,
+            #"\kill -9 1"#,
+            #"kill${IFS}-9${IFS}1"#,
+        ])
+        // gentle signals and listing signals are not force kills
+        assertNone([
+            #"kill 123"#,
+            #"kill -15 1"#,
+            #"kill -s 15 1"#,
+            #"kill -s TERM 1"#,
+            #"kill -HUP 1"#,
+            #"kill -n 15 1"#,
+            #"kill --signal=15 1"#,
+            #"pkill -f x"#,
+            #"pkill -TERM x"#,
+            #"kill -l"#,
+            #"killall x"#,
+            #"kill 1; echo -9"#,
+        ])
+    }
+
+    func testSeveralNewFamiliesInOneCommandAreListedInListOrder() {
+        // several families in one command are all listed in list order
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"kubectl delete pod web-1 && terraform destroy"#), ["kubectl delete", "terraform destroy"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"dd if=a of=b; mkfs.ext4 /dev/sdb; shred x"#), ["dd of=", "mkfs", "shred"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"ls | xargs rm -rf; find . -delete"#), ["rm -rf", "find -delete", "xargs/piped rm"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"helm uninstall web; kubectl delete ns web"#), ["kubectl delete", "helm uninstall"])
+        XCTAssertEqual(StagingDestructivePatterns.matches(#"kubectl delete pod x --force; php artisan migrate:rollback"#), ["--force", "migrate:rollback", "kubectl delete"])
+        // every label comes in list order, once
+        let found = StagingDestructivePatterns.matches(
+            #"ls | xargs rm -rf; find . -delete; echo x > a; kill -9 1; kubectl delete pod x --force; DROP TABLE y"#)
+        XCTAssertEqual(found, ["rm -rf", "DROP", "--force", "kill -9", "kubectl delete", "> file", "find -delete", "xargs/piped rm"])
+        XCTAssertEqual(found, found.sorted { StagingDestructivePatterns.names.firstIndex(of: $0)! < StagingDestructivePatterns.names.firstIndex(of: $1)! })
+
+    }
+
     func testEveryNonASCIIScalarIsIsolatedFromTheTextBesideIt() {
         let label = StagingHazards.nonASCIILabel("\u{05D0}") ?? ""
         XCTAssertTrue(label.contains("\u{2068}\u{05D0}\u{2069} U+05D0"), label)
@@ -138,7 +671,7 @@ final class StagingHazardsTests: XCTestCase {
     /// Every case in the file the daemon's tests read too: both sides must say the same.
     func testTheSharedFixtureGivesTheSameAnswerAsTheDaemon() throws {
         let cases = try StagingFixtures.hazards()
-        XCTAssertGreaterThan(cases.count, 60, "hazards.json should be found")
+        XCTAssertGreaterThan(cases.count, 500, "hazards.json should be found")
         for entry in cases {
             let text = try XCTUnwrap(entry["text"] as? String)
             let expected = try XCTUnwrap(entry["history"] as? Bool)
@@ -160,7 +693,7 @@ final class StagingHazardsTests: XCTestCase {
                 XCTAssertEqual(StagingHazards.escapeQuotedWordLabel(text) != nil, escaped, "\(name): \(text)")
             }
         }
-        XCTAssertGreaterThanOrEqual(checked, 8)
+        XCTAssertGreaterThanOrEqual(checked, 100, "the fixture pins the destructive names of at least 100 rows")
     }
 
     func testEmptyExpansionsAreSeenThroughInBothForms() {
@@ -196,7 +729,7 @@ final class StagingHazardsTests: XCTestCase {
     func testTheSharedHazardsFixtureAgreesWithTheAppsHistoryRule() throws {
         let data = try StagingFixtures.fixtureData("hazards.json")
         let cases = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
-        XCTAssertGreaterThan(cases.count, 25, "hazards.json should be found")
+        XCTAssertGreaterThan(cases.count, 500, "hazards.json should be found")
         for entry in cases {
             let name = entry["name"] as? String ?? "?"
             let text = try XCTUnwrap(entry["text"] as? String, name)

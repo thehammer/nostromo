@@ -276,7 +276,25 @@ It stays **place-only** everywhere: no click-to-run, no auto-Enter, no Run butto
 - `DELETE FROM without WHERE`: case-insensitive `\bdelete\s+from\b` with no case-insensitive `\bwhere\b` after it **in the same statement** (statements split at `;`: `DELETE FROM a WHERE id=1; DELETE FROM b` matches; a `WHERE` after a `-- ` or `#` comment start does not count: `DELETE FROM users -- WHERE id=1` matches). A `$'...'` ANSI-C quote that contains a backslash (`$'\x72m'`) adds the label "Contains an escape-quoted word" instead: no text rule can follow what the shell makes of it.
 - `migrate:fresh`, `db:wipe`, `queue:flush`, `cache:clear`: case-insensitive substrings, and Laravel's abbreviations: a word of two letters-only parts, each a non-empty prefix of the matching part (`ca:cl`, `q:fl`, `mi:fr`, `db:w`). It over-matches (`c:c`): asking is the cheap side.
 - `--force`: the token `--force` at a word boundary (so `--force-with-lease` also matches), and a shortened `--fo`, `--for`, `--forc`.
-- `kill -9`: `\b(kill|pkill|killall)\s+` followed by `-9`, `-KILL`, `-SIGKILL`, or `-s`/`-n` `9|KILL|SIGKILL`.
+- `kill -9`: `\b(kill|pkill|killall)\s+` followed by `-9`, `-KILL`, `-SIGKILL`, or `-s`/`-n` `9|KILL|SIGKILL`; and, added with the families below, a `kill`, `pkill` or `killall` word (path allowed) followed **anywhere later in the same segment** by a force signal: `-9`, `-KILL`, `-SIGKILL`, `-s9`, `-sKILL`, `-n9`, `--signal=9|KILL|SIGKILL`, or `-s`/`-n`/`--signal` then `9|KILL|SIGKILL` (so `pkill -f x -9` and `kill -s9 1` match; `kill -15`, `kill -s 15` and `pkill -f x` do not).
+
+Families added after S2 (the leftovers PR; same normalised views, same "asking is the cheap side"). A **segment** is the text split at `;`, `|` and `&`; a **program** is a word's last path component, lowercased (`/usr/bin/kubectl`). A program counts **anywhere** in a segment, so a leading `sudo`, `env`, `command`, `time`, `nohup`, `exec`, `X=1`, `bash -c '…'`, a subshell or a `$( )` never hides it, and global options between the program and its verb (`kubectl -n prod delete`, `aws --profile p ec2 terminate-instances`) do not either:
+
+- `migrate:refresh`, `migrate:reset`, `migrate:rollback`: exactly as `migrate:fresh` (substring or Laravel abbreviation; `mi:re` matches both refresh and reset).
+- `kubectl delete` (any resource) and `kubectl drain`: a `kubectl` program followed later in the segment by the word `delete` / `drain`.
+- `helm uninstall`: a `helm` program followed later by `uninstall`, `delete`, `del` or `un` (helm's aliases).
+- `terraform destroy`: a `terraform`, `tofu` or `terragrunt` program followed later in the segment by the word `destroy`, or by `-destroy`, `--destroy`, `-replace` or `--replace` (optionally `=value`). Plain `apply`, `plan`, `init` and `fmt` do not match; `plan -destroy` and `apply -replace=…` do (ambiguous, so they ask).
+- `aws delete/terminate`: an `aws` program followed later in the segment by a word that is exactly `delete-…`, `terminate-…`, `remove-…`, `deregister-…` or `purge-…` (`s3api delete-object`, `ec2 terminate-instances`, `iam remove-user-from-group`). `describe-*`, `list-*`, `get-*` and `s3 ls` stay unlabelled.
+- `aws s3 rm/rb`: an `aws` program followed by `s3` and later `rm` or `rb`; also `aws s3 sync … --delete`.
+- `dd of=`: a `dd` program followed later in the segment by a word starting `of=`.
+- `mkfs`: any word whose program starts with `mkfs` (`mkfs.ext4`, `/sbin/mkfs`).
+- `shred`: any word whose program is `shred`.
+- `truncate -s 0` is already caught by `TRUNCATE` (the word `truncate` anywhere).
+- `> file`: a truncating redirection. Every `>` that is not part of `>>` (nor `<>`) counts unless it is a descriptor duplication (`2>&1`, `>&2`, `>&-`) or its target is exactly `/dev/null`, `/dev/stderr` or `/dev/stdout` (`2>/dev/null`, `&>/dev/null`). `>|`, zsh `>!`, `>&file`, `&>file`, `: > file`, `2>err.log`, an empty target and `>(…)` all match. Quotes are not parsed, so `echo "a > b"` matches too.
+- `find -delete`: a `find` program followed later **anywhere in the text** (the `{}` of `-exec rm {} \;` splits segments once normalised) by `-delete`, or by `-exec`, `-execdir`, `-ok` or `-okdir` and later a word whose program is `rm`.
+- `xargs/piped rm`: an `xargs` program followed later anywhere in the text by a word whose program is `rm`; or an `rm` program word appearing after a single `|` (a pipe; not `||`) anywhere in the text. `rm x | grep y` (the `rm` comes first) does not match.
+
+Not covered, by design (the list is fixed and small; no label does not mean safe): `tee file`, `cp`/`mv` over an existing file, `sed -i`, `aws s3 mv`, `aws iam detach-*`/`revoke-*`, `kubectl scale --replicas=0`/`replace --force`, `terraform state rm`/`taint`, `docker rm`/`system prune`, `git reset --hard`/`clean -fd`.
 
 **No label does not mean safe**, on every label and on the sheet: nothing here judges a command.
 

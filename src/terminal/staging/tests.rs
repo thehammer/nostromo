@@ -2003,3 +2003,8 @@ fn staging_insert_reports_and_follow_changes_from_threads_do_not_deadlock() {
 }
 
 mod s2;
+
+// Named `destructive_cases`, not `destructive`: `use super::*` in sibling test modules would otherwise find this
+// test module where they expect `crate::terminal::staging::destructive`.
+#[path = "tests/destructive.rs"]
+mod destructive_cases;

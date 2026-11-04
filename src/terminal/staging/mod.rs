@@ -32,6 +32,7 @@
 //! calls the store from under its `state` lock (the store never calls back) and
 //! flushes after letting go.
 
+pub mod destructive;
 pub mod limits;
 pub mod text;
 

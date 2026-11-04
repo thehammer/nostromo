@@ -11,7 +11,11 @@ enum StagingDestructivePatterns {
 
     /// The names, in list order.
     static let names = ["rm -rf", "DROP", "TRUNCATE", "DELETE FROM without WHERE", "migrate:fresh", "db:wipe",
-                        "queue:flush", "cache:clear", "--force", "kill -9"]
+                        "queue:flush", "cache:clear", "--force", "kill -9",
+                        // Added with the staging-leftovers families, in this order.
+                        "migrate:refresh", "migrate:reset", "migrate:rollback", "kubectl delete", "kubectl drain",
+                        "helm uninstall", "terraform destroy", "aws delete/terminate", "aws s3 rm/rb", "dd of=", "mkfs",
+                        "shred", "> file", "find -delete", "xargs/piped rm"]
 
     /// The names of the patterns `command` matches, in list order.
     static func matches(_ command: String) -> [String] {
@@ -29,9 +33,23 @@ enum StagingDestructivePatterns {
         if any({ StagingHazards.regex(#"(?<![A-Za-z0-9_-])--fo(?:r(?:c(?:e)?)?)?\b"#, in: $0, caseInsensitive: false) }) {
             found.append("--force")
         }
-        if any({ StagingHazards.regex(#"\b(?:kill|pkill|killall)\s+(?:-9\b|-KILL\b|-SIGKILL\b|-[sn]\s+(?:9|KILL|SIGKILL)\b)"#, in: $0) }) {
-            found.append("kill -9")
+        if any(hasForceKill) { found.append("kill -9") }
+        for name in ["migrate:refresh", "migrate:reset", "migrate:rollback"]
+        where any({ $0.lowercased().contains(name) || usesArtisanAbbreviation(of: name, in: $0) }) {
+            found.append(name)
         }
+        if any({ programThen($0, ["kubectl"], ["delete"]) }) { found.append("kubectl delete") }
+        if any({ programThen($0, ["kubectl"], ["drain"]) }) { found.append("kubectl drain") }
+        if any({ programThen($0, ["helm"], ["uninstall", "delete", "del", "un"]) }) { found.append("helm uninstall") }
+        if any(hasTerraformDestroy) { found.append("terraform destroy") }
+        if any(hasAwsDelete) { found.append("aws delete/terminate") }
+        if any(hasAwsS3Remove) { found.append("aws s3 rm/rb") }
+        if any(hasDdOutput) { found.append("dd of=") }
+        if any({ StagingHazards.words(of: $0).contains { program($0).hasPrefix("mkfs") } }) { found.append("mkfs") }
+        if any({ StagingHazards.words(of: $0).contains { program($0) == "shred" } }) { found.append("shred") }
+        if any(truncatesAFile) { found.append("> file") }
+        if any(hasFindDelete) { found.append("find -delete") }
+        if any(hasXargsOrPipedRemove) { found.append("xargs/piped rm") }
         return found
     }
 
@@ -72,6 +90,170 @@ enum StagingDestructivePatterns {
             if lettersOnly && target[0].hasPrefix(parts[0]) && target[1].hasPrefix(parts[1]) { return true }
         }
         return false
+    }
+
+    // MARK: Families added with the staging-leftovers PR
+    //
+    // A *segment* is a view split at `;`, `|` and `&`; its *words* are split at spaces and tabs; a word's
+    // *program* is its last path component, lowercased. A program counts anywhere in a segment, so a leading
+    // `sudo`, `env`, `command`, `time`, `nohup`, `exec`, a prefix assignment or an option never hides it, and
+    // global options between it and its verb do not either. The daemon's `destructive.rs` is the same rules.
+
+    private static func segmentWords(_ view: String) -> [[String]] {
+        view.split(whereSeparator: { $0 == ";" || $0 == "|" || $0 == "&" })
+            .map { $0.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func program(_ word: String) -> String {
+        (word.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? word).lowercased()
+    }
+
+    /// The words after the first word whose program is one of `programs`.
+    private static func afterProgram(_ words: [String], _ programs: [String]) -> [String]? {
+        guard let at = words.firstIndex(where: { programs.contains(program($0)) }) else { return nil }
+        return Array(words[(at + 1)...])
+    }
+
+    /// Is there a segment with one of `programs` followed later by one of `verbs` (lowercased compare)?
+    private static func programThen(_ view: String, _ programs: [String], _ verbs: [String]) -> Bool {
+        segmentWords(view).contains { words in
+            afterProgram(words, programs)?.contains { verbs.contains($0.lowercased()) } ?? false
+        }
+    }
+
+    /// The original `kill`/`pkill`/`killall` + force signal, and a kill program followed anywhere later in the same
+    /// segment by one (`pkill -f x -9`, `kill -s9 1`, `kill -n9 1`, `kill --signal=KILL 1`).
+    private static func hasForceKill(_ view: String) -> Bool {
+        if StagingHazards.regex(#"\b(?:kill|pkill|killall)\s+(?:-9\b|-KILL\b|-SIGKILL\b|-[sn]\s+(?:9|KILL|SIGKILL)\b)"#, in: view) { return true }
+        func isSignal(_ word: String) -> Bool { ["9", "kill", "sigkill"].contains(word) }
+        for words in segmentWords(view) {
+            guard let after = afterProgram(words, ["kill", "pkill", "killall"]) else { continue }
+            let rest = after.map { $0.lowercased() }
+            for (index, word) in rest.enumerated() {
+                if ["-9", "-kill", "-sigkill", "-s9", "-skill", "-ssigkill", "-n9"].contains(word) { return true }
+                if word.hasPrefix("--signal="), isSignal(String(word.dropFirst("--signal=".count))) { return true }
+                if ["-s", "-n", "--signal"].contains(word), index + 1 < rest.count, isSignal(rest[index + 1]) { return true }
+            }
+        }
+        return false
+    }
+
+    /// `terraform`, `tofu` or `terragrunt` followed later in the segment by `destroy`, `-destroy`, `--destroy`,
+    /// `-replace` or `--replace` (optionally `=value`). `plan -destroy` is read-only but its plan file can be applied
+    /// unseen, so it asks too.
+    private static func hasTerraformDestroy(_ view: String) -> Bool {
+        for words in segmentWords(view) {
+            guard let rest = afterProgram(words, ["terraform", "tofu", "terragrunt"]) else { continue }
+            for raw in rest {
+                let word = raw.lowercased()
+                if word == "destroy" { return true }
+                if word.hasPrefix("-") {
+                    let flag = word.drop(while: { $0 == "-" })
+                    let name = flag.split(separator: "=", omittingEmptySubsequences: false).first.map(String.init) ?? ""
+                    if name == "destroy" || name == "replace" { return true }
+                }
+            }
+        }
+        return false
+    }
+
+    /// `aws` followed later in the segment by a word that is exactly `delete-…`, `terminate-…`, `remove-…`,
+    /// `deregister-…` or `purge-…`.
+    private static func hasAwsDelete(_ view: String) -> Bool {
+        let verbs = ["delete-", "terminate-", "remove-", "deregister-", "purge-"]
+        return segmentWords(view).contains { words in
+            afterProgram(words, ["aws"])?.contains { raw in
+                let word = raw.lowercased()
+                return verbs.contains { verb in
+                    guard word.hasPrefix(verb) else { return false }
+                    let tail = word.dropFirst(verb.count)
+                    return !tail.isEmpty && tail.allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "-") }
+                }
+            } ?? false
+        }
+    }
+
+    /// `aws` then `s3` then `rm` or `rb`; also `aws s3 sync ... --delete`.
+    private static func hasAwsS3Remove(_ view: String) -> Bool {
+        for words in segmentWords(view) {
+            guard let after = afterProgram(words, ["aws"]) else { continue }
+            let rest = after.map { $0.lowercased() }
+            guard let s3 = rest.firstIndex(of: "s3") else { continue }
+            let tail = Array(rest[(s3 + 1)...])
+            if tail.contains("rm") || tail.contains("rb") { return true }
+            if let sync = tail.firstIndex(of: "sync"), tail[(sync + 1)...].contains("--delete") { return true }
+        }
+        return false
+    }
+
+    /// `dd` followed later in the segment by a word starting `of=`.
+    private static func hasDdOutput(_ view: String) -> Bool {
+        segmentWords(view).contains { words in
+            afterProgram(words, ["dd"])?.contains { $0.lowercased().hasPrefix("of=") } ?? false
+        }
+    }
+
+    /// A `>` that truncates a file. `>>` (append) and `<>` are not truncation; `>&` followed by a descriptor or `-`
+    /// is a duplication (`2>&1`, `>&2`); a target of exactly `/dev/null`, `/dev/stderr` or `/dev/stdout` is exempt.
+    /// Anything else, an empty target and `>(...)` included, matches. Quotes and backslashes inside a target are
+    /// ignored (`> '/dev/null'` is `/dev/null`).
+    private static func truncatesAFile(_ view: String) -> Bool {
+        let c = Array(view.unicodeScalars)
+        let terminators = Set(";|&<>(){}`".unicodeScalars)
+        var i = 0
+        while i < c.count {
+            if c[i] != ">" { i += 1; continue }
+            if i + 1 < c.count, c[i + 1] == ">" {
+                while i < c.count, c[i] == ">" { i += 1 }
+                continue
+            }
+            let afterLess = i > 0 && c[i - 1] == "<"
+            i += 1
+            if afterLess { continue }
+            if i < c.count, c[i] == "|" || c[i] == "!" { i += 1 }
+            let duplication = i < c.count && c[i] == "&"
+            if duplication { i += 1 }
+            while i < c.count, c[i] == " " || c[i] == "\t" { i += 1 }
+            var target = ""
+            while i < c.count {
+                let scalar = c[i]
+                if scalar.properties.isWhitespace || terminators.contains(scalar) { break }
+                if scalar != "'" && scalar != "\"" && scalar != "\\" { target.unicodeScalars.append(scalar) }
+                i += 1
+            }
+            var digits = Substring(target)
+            while digits.last == "-" { digits = digits.dropLast() }
+            let descriptor = target == "-" || (!digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber })
+            if duplication && descriptor { continue }
+            if ["/dev/null", "/dev/stderr", "/dev/stdout"].contains(target.lowercased()) { continue }
+            return true
+        }
+        return false
+    }
+
+    /// A `find` program followed later anywhere in the text (the `{}` of `-exec rm {} \;` splits segments once
+    /// normalised) by `-delete`, or by `-exec`/`-execdir`/`-ok`/`-okdir` and later an `rm` program.
+    private static func hasFindDelete(_ view: String) -> Bool {
+        let words = StagingHazards.words(of: view).map { $0.lowercased() }
+        guard let rest = afterProgram(words, ["find"]) else { return false }
+        if rest.contains("-delete") { return true }
+        guard let exec = rest.firstIndex(where: { ["-exec", "-execdir", "-ok", "-okdir"].contains($0) }) else { return false }
+        return rest[(exec + 1)...].contains { program($0) == "rm" }
+    }
+
+    /// An `xargs` program followed later anywhere in the text by an `rm` program, or an `rm` program after a single
+    /// `|` (a pipe, not `||`) anywhere in the text.
+    private static func hasXargsOrPipedRemove(_ view: String) -> Bool {
+        let words = StagingHazards.words(of: view)
+        if afterProgram(words, ["xargs"])?.contains(where: { program($0) == "rm" }) ?? false { return true }
+        let chars = Array(view.unicodeScalars)
+        guard let pipe = chars.indices.first(where: { index in
+            chars[index] == "|" && (index == 0 || chars[index - 1] != "|") && (index + 1 >= chars.count || chars[index + 1] != "|")
+        }) else { return false }
+        var rest = String.UnicodeScalarView()
+        rest.append(contentsOf: chars[(pipe + 1)...])
+        return StagingHazards.words(of: String(rest)).contains { program($0) == "rm" }
     }
 
     /// `text` up to a SQL comment start (`-- `, a trailing `--`, `#`): a `WHERE` after one is not part of the statement.

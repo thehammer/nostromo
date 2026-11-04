@@ -23,6 +23,9 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/qa-visible.sh
 . "$here/lib/qa-visible.sh"
+# No tokens and no foreign state: refuse (exit 2, before anything starts) when NOSTROMO_QA_CLAUDE_BIN is set, when
+# the real ~/.nostromo/focuses.json carries QA leftovers, or when an inherited control socket is not a QA one.
+qa_refuse_unsafe_start
 repo="$(cd "$here/../.." && pwd)"
 instance="$here/qa-instance.sh"
 app="$repo/bin/nostromo-app"
