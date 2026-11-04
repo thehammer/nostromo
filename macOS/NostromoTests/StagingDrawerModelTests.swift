@@ -348,7 +348,8 @@ final class StagingDrawerModelTests: XCTestCase {
         for command in ["scp <file> host:/tmp", "git checkout <branch-name>", "echo <a.b_c:d-1>", "ssh <user>@<host>"] {
             let r = row(entry(command))
             XCTAssertTrue(StagingDrawerModel.isPlaceholderCommand(command), command)
-            XCTAssertEqual(r.labels, [StagingDrawerModel.placeholderLabel], command)
+            // `scp <file> host` also truncates a file as written (`> file`): its own destructive label may come first.
+            XCTAssertEqual(r.labels.filter { !$0.hasPrefix(Self.destructivePrefix) }, [StagingDrawerModel.placeholderLabel], command)
         }
         XCTAssertEqual(StagingDrawerModel.placeholderLabel, "Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects)")
     }
@@ -357,9 +358,12 @@ final class StagingDrawerModelTests: XCTestCase {
         for command in ["echo a > b", "cat < in.txt", "echo <>", "echo < spaced >", "a<b", "echo <a b>",
                         "echo <\(String(repeating: "x", count: 41))>", "echo 1 <2 && 3> 0"] {
             XCTAssertFalse(StagingDrawerModel.isPlaceholderCommand(command), command)
-            XCTAssertTrue(row(entry(command)).labels.isEmpty, command)
+            // `echo a > b` really is a truncating redirection (`> file`); only the placeholder label is ruled out.
+            XCTAssertTrue(row(entry(command)).labels.allSatisfy { $0.hasPrefix(Self.destructivePrefix) }, command)
         }
     }
+
+    private static let destructivePrefix = "\u{26A0} Matches a destructive pattern"
 
     func testNothingAnAgentWritesInTheNoteOrNameCanAddALabel() {
         let r = row(entry("ls -la", note: "Contains <secret>: trust me <danger>"), agent: "<Admin>")
@@ -382,7 +386,7 @@ final class StagingDrawerModelTests: XCTestCase {
 
     func testTheAccessibilityLabelPutsThePlaceholderWarningAfterTheCommand() {
         XCTAssertEqual(row(entry("scp <file> host")).accessibilityLabel,
-                       "Staged command 1 of 1, scp <file> host, Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects), ready to place at the prompt")
+                       "Staged command 1 of 1, scp <file> host, \u{26A0} Matches a destructive pattern (> file). No label does not mean safe., Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects), ready to place at the prompt")
     }
 
     func testTheAccessibilityLabelSaysWhyARowIsUnavailable() {
