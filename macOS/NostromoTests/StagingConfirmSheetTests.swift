@@ -128,7 +128,7 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
         _ = try sheet(production)
         assertNothingTyped(production, before: before)
 
-        let local = setup(kind: .local, command: command)
+        let local = setup(command: command, kind: .local)
         local.rig.click(local.row, in: local.window)
         XCTAssertEqual(local.rig.rowResults, [.inserted(bytes: command.utf8.count)])
         XCTAssertNil(local.rig.controller.confirmSheet)
