@@ -926,5 +926,9 @@
  {"name": "shutdown_after_strace", "text": "strace -f reboot", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
  {"name": "shutdown_after_taskset", "text": "taskset 1 poweroff", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
  {"name": "shutdown_word_is_an_argument_of_grep_under_sudo", "text": "sudo -E grep reboot /var/log/syslog", "remote": "ok", "local": "ok", "history": false, "destructive": []},
- {"name": "shutdown_word_is_an_argument_of_last_with_option", "text": "last -x reboot | head", "remote": "ok", "local": "ok", "history": false, "destructive": []}
+ {"name": "shutdown_word_is_an_argument_of_last_with_option", "text": "last -x reboot | head", "remote": "ok", "local": "ok", "history": false, "destructive": []},
+ {"name": "quoted_gt_text_piped_with_stderr_into_a_shell", "text": "echo 'echo x > f' |& sh", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]},
+ {"name": "quoted_gt_text_piped_into_ssh", "text": "echo 'echo x > f' | ssh h", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]},
+ {"name": "quoted_gt_text_piped_into_a_variable_command", "text": "echo 'echo x > f' | $SH", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]},
+ {"name": "quoted_gt_after_xargs_variable_command", "text": "xargs $RUNNER 'echo x > f'", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]}
 ]

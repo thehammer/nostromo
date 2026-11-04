@@ -726,9 +726,6 @@ enum StagingHazards {
 
     private static func maskedOperator(_ c: Character) -> Character { c == ">" || c == "{" || c == "}" ? "_" : c }
 
-    /// Shells: what is piped into one runs as a script, whatever it quotes.
-    static let shells: Set<String> = ["sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh", "fish"]
-
     /// Programs that run another program after their own words, so what follows them is still in command position.
     private static let prefixPrograms: Set<String> = [
         "then", "do", "else", "elif", "if", "while", "until", "!", "-", "command", "builtin", "eval", "exec",
@@ -771,8 +768,8 @@ enum StagingHazards {
     /// (a quoted string after a `quoteWrappers` word in the same segment, the word read as a shell reads it:
     /// `b'a'sh -c 'echo x > f'`, `\bash`, and any command word holding a `$` expansion, which may be a shell:
     /// `$SHELL -c '...'`), analysed recursively with its own quotes; a `$(...)` or backtick substitution inside double
-    /// quotes; everything in a string whose closing quote is missing; and, when a shell is fed by a pipe
-    /// (`echo 'echo x > f' | sh`), everything. The daemon's `mask_quoted_operators` is the same scan.
+    /// quotes; everything in a string whose closing quote is missing; and, when a command wrapper or a `$` command word is
+    /// fed by a pipe (`echo 'echo x > f' | sh`, `| ssh h`), everything. The daemon's `mask_quoted_operators` is the same scan.
     static func maskingQuotedOperators(_ text: String) -> String {
         var out = ""
         var fedShell = false
@@ -787,18 +784,20 @@ enum StagingHazards {
         var wrapperSeen = false
         var leading = true
         var afterOption = false
+        /// A `xargs`-like word has been seen: a `$` word after it may be the command it runs.
+        var runsOthers = false
         var piped: Bool
 
         mutating func endWord(_ fedShell: inout Bool) {
             if word.isEmpty { return }
             let name = StagingHazards.programName(word)
             if StagingHazards.quoteWrappers.contains(name) { wrapperSeen = true }
-            if piped && StagingHazards.shells.contains(name) { fedShell = true }
-            if leading {
-                // A variable or substitution where the command goes (`$SHELL -c '...'`) may be a shell.
-                if word.contains("$") { wrapperSeen = true }
-                (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption)
-            }
+            // A variable or substitution where the command goes (`$SHELL -c '...'`) may be a shell.
+            let dynamicCommand = (leading || runsOthers) && word.contains("$")
+            if dynamicCommand { wrapperSeen = true }
+            if piped && (StagingHazards.quoteWrappers.contains(name) || dynamicCommand) { fedShell = true }
+            if ["xargs", "nsenter", "chroot", "find", "kubectl", "docker", "podman"].contains(name) { runsOthers = true }
+            if leading { (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption) }
             word = ""
         }
     }
@@ -834,6 +833,11 @@ enum StagingHazards {
                 out.append(c)
                 for inner in content { segment.word.append(inner) }
                 index = end + 1
+            case "&" where index > 0 && chars[index - 1] == "|":
+                // The `&` of `|&` belongs to the pipe: the segment it ends is still fed by it.
+                segment.endWord(&fedShell)
+                out.append(c)
+                index += 1
             case ";", "|", "&", "\n":
                 segment.endWord(&fedShell)
                 let singlePipe = c == "|" && !(index + 1 < chars.count && chars[index + 1] == "|")

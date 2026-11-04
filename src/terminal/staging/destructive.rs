@@ -631,11 +631,6 @@ const PREFIX_PROGRAMS: &[&str] = &[
     "setpriv",
 ];
 
-/// Shells: what is piped into one runs as a script, whatever it quotes.
-const SHELLS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh", "fish",
-];
-
 /// Options of the prefix programs that take a value (`sudo -u deploy`, `timeout -s KILL 5`, `ionice -c 2`). A long
 /// option without `=` is taken to have one too (`sudo --user deploy reboot`): that only ever asks more.
 const OPTIONS_WITH_VALUE: &[&str] = &["-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n"];
@@ -728,7 +723,7 @@ fn has_stop_or_shutdown(view: &str) -> bool {
 /// read as a shell reads it: `b'a'sh -c 'echo x > f'`, `\bash`, and any command word holding a `$` expansion,
 /// which may be a shell: `$SHELL -c '...'`), analysed recursively with its own quotes; a `$(...)` or
 /// backtick substitution inside double quotes; everything in a string whose closing quote is missing; and, when
-/// a shell is fed by a pipe (`echo 'echo x > f' | sh`), everything.
+/// a command wrapper or a `$` command word is fed by a pipe (`echo 'echo x > f' | sh`, `| ssh h`), everything.
 /// The Mac app's `StagingHazards.maskingQuotedOperators` is the same scan.
 fn mask_quoted_operators(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
@@ -750,6 +745,8 @@ struct MaskSegment {
     wrapper_seen: bool,
     leading: bool,
     after_option: bool,
+    /// A `xargs`-like word has been seen: a `$` word after it may be the command it runs.
+    runs_others: bool,
     piped: bool,
 }
 
@@ -770,14 +767,20 @@ impl MaskSegment {
         if QUOTE_WRAPPERS.contains(&name.as_str()) {
             self.wrapper_seen = true;
         }
-        if self.piped && SHELLS.contains(&name.as_str()) {
+        // A variable or substitution where the command goes (`$SHELL -c '...'`) may be a shell.
+        let dynamic_command = (self.leading || self.runs_others) && self.word.contains('$');
+        if dynamic_command {
+            self.wrapper_seen = true;
+        }
+        if self.piped && (QUOTE_WRAPPERS.contains(&name.as_str()) || dynamic_command) {
             *fed_shell = true;
         }
+        if MORE_COMMAND_WRAPPERS.contains(&name.as_str())
+            || matches!(name.as_str(), "kubectl" | "docker" | "podman")
+        {
+            self.runs_others = true;
+        }
         if self.leading {
-            // A variable or substitution where the command goes (`$SHELL -c '...'`) may be a shell.
-            if self.word.contains('$') {
-                self.wrapper_seen = true;
-            }
             (self.leading, self.after_option) = leading_step(&self.word, self.after_option);
         }
         self.word.clear();
@@ -816,6 +819,12 @@ fn mask_into(chars: &[char], out: &mut String, fed_shell: &mut bool) {
                 out.push(c);
                 segment.word.extend(content);
                 i = end + 1;
+            }
+            // The `&` of `|&` belongs to the pipe: the segment it ends is still fed by it.
+            '&' if i > 0 && chars[i - 1] == '|' => {
+                segment.end_word(fed_shell);
+                out.push(c);
+                i += 1;
             }
             ';' | '|' | '&' | '\n' => {
                 segment.end_word(fed_shell);
