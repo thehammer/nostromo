@@ -616,9 +616,28 @@ const PREFIX_PROGRAMS: &[&str] = &[
     "setsid",
     "env",
     "timeout",
+    "pkexec",
+    "busybox",
+    "stdbuf",
+    "systemd-run",
+    "strace",
+    "ltrace",
+    "taskset",
+    "chrt",
+    "numactl",
+    "unbuffer",
+    "caffeinate",
+    "unshare",
+    "setpriv",
 ];
 
-/// Options of the prefix programs that take a value (`sudo -u deploy`, `timeout -s KILL 5`, `ionice -c 2`).
+/// Shells: what is piped into one runs as a script, whatever it quotes.
+const SHELLS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh", "fish",
+];
+
+/// Options of the prefix programs that take a value (`sudo -u deploy`, `timeout -s KILL 5`, `ionice -c 2`). A long
+/// option without `=` is taken to have one too (`sudo --user deploy reboot`): that only ever asks more.
 const OPTIONS_WITH_VALUE: &[&str] = &["-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n"];
 
 /// A `name=value` prefix assignment.
@@ -636,6 +655,20 @@ fn is_duration(word: &str) -> bool {
     !number.is_empty()
         && number.chars().any(|c| c.is_ascii_digit())
         && number.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+/// While reading the words before a segment's command: does `word` leave the next word in command position
+/// (a prefix word), and does it take a value of its own (so the word after it is one too)?
+fn leading_step(word: &str, after_option: bool) -> (bool, bool) {
+    let prefix = after_option
+        || is_assignment(word)
+        || PREFIX_PROGRAMS.contains(&program(word).as_str())
+        || word.starts_with('-')
+        || is_duration(word);
+    let takes_value = word.starts_with('-')
+        && (OPTIONS_WITH_VALUE.contains(&word.to_lowercase().as_str())
+            || (word.starts_with("--") && !word.contains('=')));
+    (prefix, takes_value)
 }
 
 /// The indexes of the words of one segment that are in command position: the first word, then each word
@@ -660,14 +693,7 @@ fn command_positions(words: &[String]) -> Vec<usize> {
             wrapped = true;
         }
         if leading {
-            let lower = word.to_lowercase();
-            let prefix = after_option
-                || is_assignment(word)
-                || PREFIX_PROGRAMS.contains(&name.as_str())
-                || word.starts_with('-')
-                || is_duration(word);
-            after_option = word.starts_with('-') && OPTIONS_WITH_VALUE.contains(&lower.as_str());
-            leading = prefix;
+            (leading, after_option) = leading_step(word, after_option);
         }
     }
     positions
@@ -697,36 +723,78 @@ fn has_stop_or_shutdown(view: &str) -> bool {
 // ── quoted `>`, escape-quoted words, glued brace groups ─────────────────────────────────────────────
 
 /// `text` with the operators that a quoted string cannot use replaced by `_`: a `>` (not a redirection),
-/// `{` and `}` (not a brace group) inside `'...'`, `"..."` or `$'...'`. Three things stay live: the quoted
-/// argument of a command wrapper (a quoted string after a [`QUOTE_WRAPPERS`] word in the same segment:
-/// `bash -c 'echo x > f'`), analysed recursively with its own quotes; a `$(...)` or
-/// backtick substitution inside double quotes; and everything in a string whose closing quote is missing.
+/// `{` and `}` (not a brace group) inside `'...'`, `"..."` or `$'...'`. Things stay live: the quoted
+/// argument of a command wrapper (a quoted string after a [`QUOTE_WRAPPERS`] word in the same segment, the word
+/// read as a shell reads it: `b'a'sh -c 'echo x > f'`, `\bash`, and any command word holding a `$` expansion,
+/// which may be a shell: `$SHELL -c '...'`), analysed recursively with its own quotes; a `$(...)` or
+/// backtick substitution inside double quotes; everything in a string whose closing quote is missing; and, when
+/// a shell is fed by a pipe (`echo 'echo x > f' | sh`), everything.
 /// The Mac app's `StagingHazards.maskingQuotedOperators` is the same scan.
 fn mask_quoted_operators(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
-    mask_into(&chars, &mut out);
-    out
+    let mut fed_shell = false;
+    mask_into(&chars, &mut out, &mut fed_shell);
+    if fed_shell {
+        text.to_string()
+    } else {
+        out
+    }
 }
 
-fn mask_into(chars: &[char], out: &mut String) {
-    let masked = |c: char| if matches!(c, '>' | '{' | '}') { '_' } else { c };
-    let (mut word, mut wrapper_seen, mut i) = (String::new(), false, 0);
-    fn end_word(word: &mut String, wrapper_seen: &mut bool) {
-        if QUOTE_WRAPPERS.contains(&program(word).as_str()) {
-            *wrapper_seen = true;
+/// What the mask scan knows about the segment it is in.
+#[derive(Default)]
+struct MaskSegment {
+    /// The current word as a shell reads it: quotes and backslashes dropped, quoted text kept.
+    word: String,
+    wrapper_seen: bool,
+    leading: bool,
+    after_option: bool,
+    piped: bool,
+}
+
+impl MaskSegment {
+    fn new(piped: bool) -> Self {
+        MaskSegment {
+            leading: true,
+            piped,
+            ..Default::default()
         }
-        word.clear();
     }
+
+    fn end_word(&mut self, fed_shell: &mut bool) {
+        if self.word.is_empty() {
+            return;
+        }
+        let name = program(&self.word);
+        if QUOTE_WRAPPERS.contains(&name.as_str()) {
+            self.wrapper_seen = true;
+        }
+        if self.piped && SHELLS.contains(&name.as_str()) {
+            *fed_shell = true;
+        }
+        if self.leading {
+            // A variable or substitution where the command goes (`$SHELL -c '...'`) may be a shell.
+            if self.word.contains('$') {
+                self.wrapper_seen = true;
+            }
+            (self.leading, self.after_option) = leading_step(&self.word, self.after_option);
+        }
+        self.word.clear();
+    }
+}
+
+fn mask_into(chars: &[char], out: &mut String, fed_shell: &mut bool) {
+    let masked = |c: char| if matches!(c, '>' | '{' | '}') { '_' } else { c };
+    let (mut segment, mut i) = (MaskSegment::new(false), 0);
     while i < chars.len() {
         let c = chars[i];
         match c {
             '\\' => {
                 out.push(c);
-                word.push(c);
                 if let Some(&next) = chars.get(i + 1) {
                     out.push(next);
-                    word.push(next);
+                    segment.word.push(next);
                 }
                 i += 2;
             }
@@ -738,40 +806,42 @@ fn mask_into(chars: &[char], out: &mut String) {
                 };
                 let content = &chars[i + 1..end];
                 out.push(c);
-                if wrapper_seen {
-                    mask_into(content, out);
+                if segment.wrapper_seen {
+                    mask_into(content, out, fed_shell);
                 } else if c == '"' {
-                    mask_double_quoted(content, out);
+                    mask_double_quoted(content, out, fed_shell);
                 } else {
                     out.extend(content.iter().map(|&n| masked(n)));
                 }
                 out.push(c);
-                word.push('\'');
+                segment.word.extend(content);
                 i = end + 1;
             }
             ';' | '|' | '&' | '\n' => {
-                end_word(&mut word, &mut wrapper_seen);
-                wrapper_seen = false;
+                segment.end_word(fed_shell);
+                let single_pipe =
+                    c == '|' && chars.get(i + 1) != Some(&'|') && (i == 0 || chars[i - 1] != '|');
+                segment = MaskSegment::new(single_pipe);
                 out.push(c);
                 i += 1;
             }
             c if c.is_whitespace() || matches!(c, '(' | ')') => {
-                end_word(&mut word, &mut wrapper_seen);
+                segment.end_word(fed_shell);
                 out.push(c);
                 i += 1;
             }
             c => {
-                word.push(c);
+                segment.word.push(c);
                 out.push(c);
                 i += 1;
             }
         }
     }
-    end_word(&mut word, &mut wrapper_seen);
+    segment.end_word(fed_shell);
 }
 
 /// The inside of a double-quoted string: masked, except for a `$(...)` or backtick substitution, which runs.
-fn mask_double_quoted(content: &[char], out: &mut String) {
+fn mask_double_quoted(content: &[char], out: &mut String, fed_shell: &mut bool) {
     let mut i = 0;
     while i < content.len() {
         let c = content[i];
@@ -796,7 +866,7 @@ fn mask_double_quoted(content: &[char], out: &mut String) {
         };
         if let Some((from, close, open, closer)) = substitution {
             out.push_str(open);
-            mask_into(&content[from..close], out);
+            mask_into(&content[from..close], out, fed_shell);
             out.push_str(closer);
             i = close + 1;
             continue;

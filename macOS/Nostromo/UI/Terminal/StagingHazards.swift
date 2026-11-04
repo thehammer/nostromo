@@ -385,30 +385,6 @@ enum StagingDestructivePatterns {
     /// (`StagingHazards.quoteWrappers`) and these.
     private static let moreCommandWrappers: Set<String> = ["xargs", "nsenter", "chroot", "find"]
 
-    /// Programs that run another program after their own words, so what follows them is still in command position.
-    private static let prefixPrograms: Set<String> = [
-        "then", "do", "else", "elif", "if", "while", "until", "!", "-", "command", "builtin", "eval", "exec",
-        "time", "sudo", "doas", "noglob", "nocorrect", "nohup", "nice", "ionice", "setsid", "env", "timeout"]
-
-    /// Options of the prefix programs that take a value (`sudo -u deploy`, `timeout -s KILL 5`, `ionice -c 2`).
-    private static let optionsWithValue: Set<String> = ["-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n"]
-
-    /// A `name=value` prefix assignment.
-    private static func isAssignment(_ word: String) -> Bool {
-        guard let equals = word.firstIndex(of: "=") else { return false }
-        let name = word[..<equals]
-        guard let first = name.first, !(first.isASCII && first.isNumber) else { return false }
-        return name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }
-    }
-
-    /// A number or duration (`5`, `0.5`, `5s`, `10m`): the operand of `nice`, `timeout`.
-    private static func isDuration(_ word: String) -> Bool {
-        var number = Substring(word)
-        if let last = number.last, "smhd".contains(last) { number = number.dropLast() }
-        return !number.isEmpty && number.contains(where: { $0.isASCII && $0.isNumber })
-            && number.allSatisfy { ($0.isASCII && $0.isNumber) || $0 == "." }
-    }
-
     /// The indexes of the words of one segment that are in command position: the first word, then each word after
     /// only prefix words (an assignment, a prefix program, an option, an option's value, a duration), and, once a
     /// command wrapper or a substitution placeholder (`_`: its output may be the command) has been seen, every
@@ -426,12 +402,7 @@ enum StagingDestructivePatterns {
             if StagingHazards.quoteWrappers.contains(name) || moreCommandWrappers.contains(name) || word == "_" || runsOthers {
                 wrapped = true
             }
-            if leading {
-                let prefix = afterOption || isAssignment(word) || prefixPrograms.contains(name)
-                    || word.hasPrefix("-") || isDuration(word)
-                afterOption = word.hasPrefix("-") && optionsWithValue.contains(word.lowercased())
-                leading = prefix
-            }
+            if leading { (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption) }
         }
         return positions
     }
@@ -755,34 +726,94 @@ enum StagingHazards {
 
     private static func maskedOperator(_ c: Character) -> Character { c == ">" || c == "{" || c == "}" ? "_" : c }
 
-    /// `text` with the operators that a quoted string cannot use replaced by `_`: a `>` (not a redirection), `{` and `}`
-    /// (not a brace group) inside `'...'`, `"..."` or `$'...'`. Three things stay live: the quoted argument of a command
-    /// wrapper (a quoted string after a `quoteWrappers` word in the same segment: `bash -c 'echo x > f'`), analysed
-    /// recursively with its own quotes; a `$(...)` or backtick substitution inside double quotes; and everything in a
-    /// string whose closing quote is missing. The daemon's `mask_quoted_operators` is the same scan.
-    static func maskingQuotedOperators(_ text: String) -> String {
-        var out = ""
-        maskInto(Array(text), &out)
-        return out
+    /// Shells: what is piped into one runs as a script, whatever it quotes.
+    static let shells: Set<String> = ["sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh", "fish"]
+
+    /// Programs that run another program after their own words, so what follows them is still in command position.
+    private static let prefixPrograms: Set<String> = [
+        "then", "do", "else", "elif", "if", "while", "until", "!", "-", "command", "builtin", "eval", "exec",
+        "time", "sudo", "doas", "noglob", "nocorrect", "nohup", "nice", "ionice", "setsid", "env", "timeout",
+        "pkexec", "busybox", "stdbuf", "systemd-run", "strace", "ltrace", "taskset", "chrt", "numactl", "unbuffer",
+        "caffeinate", "unshare", "setpriv"]
+
+    /// Options of the prefix programs that take a value (`sudo -u deploy`, `timeout -s KILL 5`, `ionice -c 2`). A long
+    /// option without `=` is taken to have one too (`sudo --user deploy reboot`): that only ever asks more.
+    private static let optionsWithValue: Set<String> = ["-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n"]
+
+    /// A `name=value` prefix assignment.
+    private static func isAssignment(_ word: String) -> Bool {
+        guard let equals = word.firstIndex(of: "=") else { return false }
+        let name = word[..<equals]
+        guard let first = name.first, !(first.isASCII && first.isNumber) else { return false }
+        return name.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }
     }
 
-    private static func maskInto(_ chars: [Character], _ out: inout String) {
+    /// A number or duration (`5`, `0.5`, `5s`, `10m`): the operand of `nice`, `timeout`.
+    private static func isDuration(_ word: String) -> Bool {
+        var number = Substring(word)
+        if let last = number.last, "smhd".contains(last) { number = number.dropLast() }
+        return !number.isEmpty && number.contains(where: { $0.isASCII && $0.isNumber })
+            && number.allSatisfy { ($0.isASCII && $0.isNumber) || $0 == "." }
+    }
+
+    /// While reading the words before a segment's command: does `word` leave the next word in command position (a prefix
+    /// word), and does it take a value of its own (so the word after it is one too)?
+    static func leadingStep(_ word: String, afterOption: Bool) -> (prefix: Bool, takesValue: Bool) {
+        let prefix = afterOption || isAssignment(word) || prefixPrograms.contains(programName(word))
+            || word.hasPrefix("-") || isDuration(word)
+        let takesValue = word.hasPrefix("-")
+            && (optionsWithValue.contains(word.lowercased()) || (word.hasPrefix("--") && !word.contains("=")))
+        return (prefix, takesValue)
+    }
+
+    /// `text` with the operators that a quoted string cannot use replaced by `_`: a `>` (not a redirection), `{` and `}`
+    /// (not a brace group) inside `'...'`, `"..."` or `$'...'`. Things stay live: the quoted argument of a command wrapper
+    /// (a quoted string after a `quoteWrappers` word in the same segment, the word read as a shell reads it:
+    /// `b'a'sh -c 'echo x > f'`, `\bash`, and any command word holding a `$` expansion, which may be a shell:
+    /// `$SHELL -c '...'`), analysed recursively with its own quotes; a `$(...)` or backtick substitution inside double
+    /// quotes; everything in a string whose closing quote is missing; and, when a shell is fed by a pipe
+    /// (`echo 'echo x > f' | sh`), everything. The daemon's `mask_quoted_operators` is the same scan.
+    static func maskingQuotedOperators(_ text: String) -> String {
+        var out = ""
+        var fedShell = false
+        maskInto(Array(text), &out, &fedShell)
+        return fedShell ? text : out
+    }
+
+    /// What the mask scan knows about the segment it is in.
+    private struct MaskSegment {
+        /// The current word as a shell reads it: quotes and backslashes dropped, quoted text kept.
         var word = ""
         var wrapperSeen = false
-        var index = 0
-        func endWord() {
-            if quoteWrappers.contains(programName(word)) { wrapperSeen = true }
+        var leading = true
+        var afterOption = false
+        var piped: Bool
+
+        mutating func endWord(_ fedShell: inout Bool) {
+            if word.isEmpty { return }
+            let name = StagingHazards.programName(word)
+            if StagingHazards.quoteWrappers.contains(name) { wrapperSeen = true }
+            if piped && StagingHazards.shells.contains(name) { fedShell = true }
+            if leading {
+                // A variable or substitution where the command goes (`$SHELL -c '...'`) may be a shell.
+                if word.contains("$") { wrapperSeen = true }
+                (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption)
+            }
             word = ""
         }
+    }
+
+    private static func maskInto(_ chars: [Character], _ out: inout String, _ fedShell: inout Bool) {
+        var segment = MaskSegment(piped: false)
+        var index = 0
         while index < chars.count {
             let c = chars[index]
             switch c {
             case "\\":
                 out.append(c)
-                word.append(c)
                 if index + 1 < chars.count {
                     out.append(chars[index + 1])
-                    word.append(chars[index + 1])
+                    segment.word.append(chars[index + 1])
                 }
                 index += 2
             case "'", "\"":
@@ -793,36 +824,38 @@ enum StagingHazards {
                 }
                 let content = Array(chars[(index + 1)..<end])
                 out.append(c)
-                if wrapperSeen {
-                    maskInto(content, &out)
+                if segment.wrapperSeen {
+                    maskInto(content, &out, &fedShell)
                 } else if c == "\"" {
-                    maskDoubleQuoted(content, &out)
+                    maskDoubleQuoted(content, &out, &fedShell)
                 } else {
                     for inner in content { out.append(maskedOperator(inner)) }
                 }
                 out.append(c)
-                word.append("'")
+                for inner in content { segment.word.append(inner) }
                 index = end + 1
             case ";", "|", "&", "\n":
-                endWord()
-                wrapperSeen = false
+                segment.endWord(&fedShell)
+                let singlePipe = c == "|" && !(index + 1 < chars.count && chars[index + 1] == "|")
+                    && !(index > 0 && chars[index - 1] == "|")
+                segment = MaskSegment(piped: singlePipe)
                 out.append(c)
                 index += 1
             default:
                 if c.isWhitespace || c == "(" || c == ")" {
-                    endWord()
+                    segment.endWord(&fedShell)
                 } else {
-                    word.append(c)
+                    segment.word.append(c)
                 }
                 out.append(c)
                 index += 1
             }
         }
-        endWord()
+        segment.endWord(&fedShell)
     }
 
     /// The inside of a double-quoted string: masked, except for a `$(...)` or backtick substitution, which runs.
-    private static func maskDoubleQuoted(_ content: [Character], _ out: inout String) {
+    private static func maskDoubleQuoted(_ content: [Character], _ out: inout String, _ fedShell: inout Bool) {
         var index = 0
         while index < content.count {
             let c = content[index]
@@ -841,7 +874,7 @@ enum StagingHazards {
             }
             if let found = substitution {
                 out.append(found.open)
-                maskInto(Array(content[found.from..<found.close]), &out)
+                maskInto(Array(content[found.from..<found.close]), &out, &fedShell)
                 out.append(found.closer)
                 index = found.close + 1
                 continue

@@ -912,5 +912,19 @@
  {"name": "command_position_after_xargs", "text": "xargs -n1 systemctl disable", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
  {"name": "command_position_systemctl_mask_after_an_option", "text": "systemctl --user mask foo", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
  {"name": "command_position_after_a_semicolon", "text": "ls; reboot", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
- {"name": "command_position_after_kubectl_exec", "text": "kubectl exec p -- reboot", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]}
+ {"name": "command_position_after_kubectl_exec", "text": "kubectl exec p -- reboot", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
+ {"name": "quoted_gt_wrapper_word_quoted_in_part", "text": "b'a'sh -c 'echo x > f'", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]},
+ {"name": "quoted_gt_wrapper_word_backslashed", "text": "\\bash -c 'echo x > f'", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]},
+ {"name": "quoted_gt_wrapper_word_double_quoted", "text": "\"bash\" -c 'echo x > f'", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]},
+ {"name": "quoted_gt_wrapper_word_is_a_variable", "text": "$SHELL -c 'echo x > f'", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]},
+ {"name": "quoted_gt_text_piped_into_a_shell", "text": "echo 'echo x > f' | sh", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]},
+ {"name": "quoted_gt_text_piped_into_sudo_bash", "text": "echo 'echo x > f' | sudo bash -s", "remote": "ok", "local": "ok", "history": false, "destructive": ["> file"]},
+ {"name": "quoted_gt_text_piped_into_grep_is_data", "text": "echo 'a > b' | grep a", "remote": "ok", "local": "ok", "history": false, "destructive": []},
+ {"name": "shutdown_after_sudo_long_option_with_value", "text": "sudo --user deploy reboot", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
+ {"name": "shutdown_after_pkexec", "text": "pkexec reboot", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
+ {"name": "shutdown_after_busybox", "text": "busybox halt", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
+ {"name": "shutdown_after_strace", "text": "strace -f reboot", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
+ {"name": "shutdown_after_taskset", "text": "taskset 1 poweroff", "remote": "ok", "local": "ok", "history": false, "destructive": ["stop/shutdown"]},
+ {"name": "shutdown_word_is_an_argument_of_grep_under_sudo", "text": "sudo -E grep reboot /var/log/syslog", "remote": "ok", "local": "ok", "history": false, "destructive": []},
+ {"name": "shutdown_word_is_an_argument_of_last_with_option", "text": "last -x reboot | head", "remote": "ok", "local": "ok", "history": false, "destructive": []}
 ]
