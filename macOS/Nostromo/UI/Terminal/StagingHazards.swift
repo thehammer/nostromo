@@ -3,10 +3,13 @@ import Foundation
 /// The fixed list of destructive patterns (PRD SR6). A match only adds a label, and in a pane treated as
 /// production an "Insert asks first" sheet. **No label does not mean safe**: nothing here judges a command.
 /// The list is documented verbatim in `docs/terminal.md`; changing it needs a PRD change. Quotes are not
-/// parsed: every rule runs on the text as written AND on a normalised copy (`StagingHazards.normalised`:
+/// parsed: every rule runs on the text as written AND on four normalised copies (`StagingHazards.normalised`:
 /// quotes and backslashes dropped, `/* */` comments removed, command substitutions, groups and backticks
-/// made separators), and a hit on either counts, so a pattern inside a quoted string matches too and a
-/// wrapped (`bash -c 'rm -rf x'`), split (`r''m`) or abbreviated (`q:fl`) form is still seen.
+/// made separators; and `StagingHazards.normalisedWords`: each `$(...)`, backtick pair or `${...}` one
+/// placeholder word, brace groups split at commas; each with empty expansions as a space and removed), and a
+/// hit on any counts, so a pattern inside a quoted string matches too and a wrapped (`bash -c 'rm -rf x'`),
+/// split (`r''m`), substituted (`kubectl --context $(...) delete ns x`), brace-expanded (`{rm,-rf,/x}`) or
+/// abbreviated (`q:fl`) form is still seen.
 enum StagingDestructivePatterns {
 
     /// The names, in list order.
@@ -15,15 +18,17 @@ enum StagingDestructivePatterns {
                         // Added with the staging-leftovers families, in this order.
                         "migrate:refresh", "migrate:reset", "migrate:rollback", "kubectl delete", "kubectl drain",
                         "helm uninstall", "terraform destroy", "aws delete/terminate", "aws s3 rm/rb", "dd of=", "mkfs",
-                        "shred", "> file", "find -delete", "xargs/piped rm"]
+                        "shred", "> file", "find -delete", "xargs/piped rm",
+                        // Added with the review fix-ups, in this order.
+                        "queue:clear", "horizon:clear", "optimize:clear", "FLUSHALL/FLUSHDB", "stop/shutdown"]
 
     /// The names of the patterns `command` matches, in list order.
     static func matches(_ command: String) -> [String] {
-        let views = [command] + StagingHazards.normalisedViews(command)
+        let views = [command] + StagingHazards.normalisedViews(command) + StagingHazards.normalisedWordViews(command)
         func any(_ test: (String) -> Bool) -> Bool { views.contains(where: test) }
         var found: [String] = []
         if any(hasRecursiveForcedRemove) { found.append("rm -rf") }
-        if any({ StagingHazards.regex(#"\bdrop\s"#, in: $0) }) { found.append("DROP") }
+        if any({ StagingHazards.regex(#"\bdrop\s"#, in: $0) || hasProgram($0, ["dropdb"]) }) { found.append("DROP") }
         if any({ StagingHazards.regex(#"\btruncate\b"#, in: $0) }) { found.append("TRUNCATE") }
         if any(hasDeleteWithoutWhere) { found.append("DELETE FROM without WHERE") }
         for name in ["migrate:fresh", "db:wipe", "queue:flush", "cache:clear"]
@@ -50,16 +55,22 @@ enum StagingDestructivePatterns {
         if any(truncatesAFile) { found.append("> file") }
         if any(hasFindDelete) { found.append("find -delete") }
         if any(hasXargsOrPipedRemove) { found.append("xargs/piped rm") }
+        for name in ["queue:clear", "horizon:clear", "optimize:clear"]
+        where any({ $0.lowercased().contains(name) || usesArtisanAbbreviation(of: name, in: $0) }) {
+            found.append(name)
+        }
+        if any({ StagingHazards.regex(#"\bflush(?:all|db)\b"#, in: $0) }) { found.append("FLUSHALL/FLUSHDB") }
+        if any(hasStopOrShutdown) { found.append("stop/shutdown") }
         return found
     }
 
-    /// An `rm` word anywhere whose arguments (up to the next `;`, `&`, `&&`, `||` or `|`) include a recursive
-    /// flag and a force flag, in any combination or order (`-rf`, `-fr`, `-Rf`, `-r -f`, `--recursive --force`,
-    /// the shortened `--recurs`, `--forc`).
+    /// An `rm` program (any case: macOS volumes are case-insensitive) anywhere whose arguments (up to the next
+    /// `;`, `&`, `&&`, `||` or `|`) include a recursive flag and a force flag, in any combination or order
+    /// (`-rf`, `-fr`, `-Rf`, `-r -f`, `--recursive --force`, the shortened `--recurs`, `--forc`). Words are split
+    /// as everywhere else (`segmentWords`: also at `<` and `>`, so `rm>/dev/null -rf x` is seen).
     private static func hasRecursiveForcedRemove(_ command: String) -> Bool {
-        for segment in StagingHazards.segments(of: command) {
-            let words = segment.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-            for (index, word) in words.enumerated() where word == "rm" || word.hasSuffix("/rm") {
+        for words in segmentWords(command) {
+            for (index, word) in words.enumerated() where program(word) == "rm" {
                 var recursive = false
                 var force = false
                 for argument in words[(index + 1)...] where argument.hasPrefix("-") {
@@ -109,6 +120,11 @@ enum StagingDestructivePatterns {
         (word.split(separator: "/", omittingEmptySubsequences: false).last.map(String.init) ?? word).lowercased()
     }
 
+    /// Is any word of the view (split at whitespace, `;`, `|`, `&`, `<`, `>`) one of `programs`?
+    private static func hasProgram(_ view: String, _ programs: [String]) -> Bool {
+        StagingHazards.redirectionSplitWords(of: view).contains { programs.contains(program($0)) }
+    }
+
     /// The words after the first word whose program is one of `programs`.
     private static func afterProgram(_ words: [String], _ programs: [String]) -> [String]? {
         guard let at = words.firstIndex(where: { programs.contains(program($0)) }) else { return nil }
@@ -122,38 +138,49 @@ enum StagingDestructivePatterns {
         }
     }
 
+    /// Is `word` (lowercase) signal 9? Numerically, so `09` and `0009` count as they do in a shell.
+    private static func isKillSignal(_ word: String) -> Bool {
+        if word == "kill" || word == "sigkill" { return true }
+        return !word.isEmpty && word.allSatisfy { $0.isASCII && $0.isNumber } && word.drop(while: { $0 == "0" }) == "9"
+    }
+
     /// The original `kill`/`pkill`/`killall` + force signal, and a kill program followed anywhere later in the same
-    /// segment by one (`pkill -f x -9`, `kill -s9 1`, `kill -n9 1`, `kill --signal=KILL 1`).
+    /// segment by one (`pkill -f x -9`, `kill -s9 1`, `kill -n9 1`, `kill -09 1`, `kill --signal=KILL 1`). Signal 9
+    /// is compared as a number: `-09`, `-s 0009`.
     private static func hasForceKill(_ view: String) -> Bool {
         if StagingHazards.regex(#"\b(?:kill|pkill|killall)\s+(?:-9\b|-KILL\b|-SIGKILL\b|-[sn]\s+(?:9|KILL|SIGKILL)\b)"#, in: view) { return true }
-        func isSignal(_ word: String) -> Bool { ["9", "kill", "sigkill"].contains(word) }
         for words in segmentWords(view) {
             guard let after = afterProgram(words, ["kill", "pkill", "killall"]) else { continue }
             let rest = after.map { $0.lowercased() }
             for (index, word) in rest.enumerated() {
-                if ["-9", "-kill", "-sigkill", "-s9", "-skill", "-ssigkill", "-n9"].contains(word) { return true }
-                if word.hasPrefix("--signal="), isSignal(String(word.dropFirst("--signal=".count))) { return true }
-                if ["-s", "-n", "--signal"].contains(word), index + 1 < rest.count, isSignal(rest[index + 1]) { return true }
+                if word.hasPrefix("--signal="), isKillSignal(String(word.dropFirst("--signal=".count))) { return true }
+                if word.hasPrefix("-"), !word.hasPrefix("--") {
+                    let flag = String(word.dropFirst())
+                    if isKillSignal(flag) { return true }
+                    if flag.hasPrefix("s") || flag.hasPrefix("n"), isKillSignal(String(flag.dropFirst())) { return true }
+                }
+                if ["-s", "-n", "--signal"].contains(word), index + 1 < rest.count, isKillSignal(rest[index + 1]) { return true }
             }
         }
         return false
     }
 
-    /// `terraform`, `tofu` or `terragrunt` followed later in the segment by `destroy`, `-destroy`, `--destroy`,
-    /// `-replace` or `--replace` (optionally `=value`). `plan -destroy` is read-only but its plan file can be applied
-    /// unseen, so it asks too. Also (same label) `taint`, `workspace ... delete` and `state ... rm`/`remove`: each
-    /// makes the next apply destroy something, or forgets or deletes state.
+    /// `terraform`, `tofu`, `terragrunt` or `pulumi` followed later in the segment by `destroy`, `destroy-all`,
+    /// `-destroy`, `--destroy`, `-replace` or `--replace` (optionally `=value`). `plan -destroy` is read-only but its
+    /// plan file can be applied unseen, so it asks too. Also (same label) `taint`, `force-unlock`,
+    /// `workspace ... delete` and `state ... rm`/`remove`/`push`: each makes the next apply destroy something, or
+    /// forgets, overwrites or deletes state, or breaks a lock.
     private static func hasTerraformDestroy(_ view: String) -> Bool {
         for words in segmentWords(view) {
-            guard let rest = afterProgram(words, ["terraform", "tofu", "terragrunt"]) else { continue }
+            guard let rest = afterProgram(words, ["terraform", "tofu", "terragrunt", "pulumi"]) else { continue }
             let lowered = rest.map { $0.lowercased() }
             func then(_ first: String, _ verbs: [String]) -> Bool {
                 guard let at = lowered.firstIndex(of: first) else { return false }
                 return lowered[(at + 1)...].contains { verbs.contains($0) }
             }
-            if then("workspace", ["delete"]) || then("state", ["rm", "remove"]) { return true }
+            if then("workspace", ["delete"]) || then("state", ["rm", "remove", "push"]) { return true }
             for word in lowered {
-                if word == "destroy" || word == "taint" { return true }
+                if ["destroy", "destroy-all", "taint", "force-unlock"].contains(word) { return true }
                 if word.hasPrefix("-") {
                     let flag = word.drop(while: { $0 == "-" })
                     let name = flag.split(separator: "=", omittingEmptySubsequences: false).first.map(String.init) ?? ""
@@ -164,24 +191,34 @@ enum StagingDestructivePatterns {
         return false
     }
 
-    /// `aws` followed later in the segment by a word that is exactly `delete-…`, `terminate-…`, `remove-…`,
-    /// `deregister-…` or `purge-…`, or exactly `schedule-key-deletion` (kms: the key is gone in 7 to 30 days).
+    /// `aws` followed later in the segment by a word that is exactly `delete-...`, `batch-delete-...`, `terminate-...`,
+    /// `remove-...`, `deregister-...` or `purge-...`, or exactly `schedule-key-deletion` (kms: the key is gone in 7 to
+    /// 30 days) or `stop-instances`, or `update-service` with `--desired-count` 0 (an ECS service scaled to nothing).
     private static func hasAwsDelete(_ view: String) -> Bool {
-        let verbs = ["delete-", "terminate-", "remove-", "deregister-", "purge-"]
-        return segmentWords(view).contains { words in
-            afterProgram(words, ["aws"])?.contains { raw in
-                let word = raw.lowercased()
-                if word == "schedule-key-deletion" { return true }
-                return verbs.contains { verb in
-                    guard word.hasPrefix(verb) else { return false }
-                    let tail = word.dropFirst(verb.count)
-                    return !tail.isEmpty && tail.allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "-") }
+        let verbs = ["delete-", "batch-delete-", "terminate-", "remove-", "deregister-", "purge-"]
+        func isZero(_ text: String) -> Bool { !text.isEmpty && text.allSatisfy { $0 == "0" } }
+        for words in segmentWords(view) {
+            guard let after = afterProgram(words, ["aws"]) else { continue }
+            let rest = after.map { $0.lowercased() }
+            if rest.contains("update-service") {
+                for (index, word) in rest.enumerated() {
+                    if word.hasPrefix("--desired-count="), isZero(String(word.dropFirst("--desired-count=".count))) { return true }
+                    if word == "--desired-count", index + 1 < rest.count, isZero(rest[index + 1]) { return true }
                 }
-            } ?? false
+            }
+            for word in rest {
+                if word == "schedule-key-deletion" || word == "stop-instances" { return true }
+                for verb in verbs where word.hasPrefix(verb) {
+                    let tail = word.dropFirst(verb.count)
+                    if !tail.isEmpty && tail.allSatisfy({ $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "-") }) { return true }
+                }
+            }
         }
+        return false
     }
 
-    /// `aws` then `s3` then `rm` or `rb`; also `aws s3 sync ... --delete`.
+    /// `aws` then `s3` then `rm` or `rb`; also `aws s3 sync ... --delete` and `aws s3 cp /dev/null s3://...` (which
+    /// replaces the object with an empty one).
     private static func hasAwsS3Remove(_ view: String) -> Bool {
         for words in segmentWords(view) {
             guard let after = afterProgram(words, ["aws"]) else { continue }
@@ -189,6 +226,7 @@ enum StagingDestructivePatterns {
             guard let s3 = rest.firstIndex(of: "s3") else { continue }
             let tail = Array(rest[(s3 + 1)...])
             if tail.contains("rm") || tail.contains("rb") { return true }
+            if let cp = tail.firstIndex(of: "cp"), tail[(cp + 1)...].contains("/dev/null") { return true }
             if let sync = tail.firstIndex(of: "sync"), tail[(sync + 1)...].contains("--delete") { return true }
         }
         return false
@@ -202,7 +240,8 @@ enum StagingDestructivePatterns {
     }
 
     /// A `>` that truncates a file. `>>` (append) and `<>` are not truncation; `>&` followed by a descriptor or `-`
-    /// is a duplication (`2>&1`, `>&2`); a target of exactly `/dev/null`, `/dev/stderr` or `/dev/stdout` is exempt.
+    /// is a duplication (`2>&1`, `>&2`); a target of exactly `/dev/null`, `/dev/stderr` or `/dev/stdout` (case matters:
+    /// `/DEV/NULL` is a file on a case-sensitive volume) is exempt.
     /// Anything else, an empty target and `>(...)` included, matches. Quotes and backslashes inside a target are
     /// ignored (`> '/dev/null'` is `/dev/null`).
     private static func truncatesAFile(_ view: String) -> Bool {
@@ -233,7 +272,7 @@ enum StagingDestructivePatterns {
             while digits.last == "-" { digits = digits.dropLast() }
             let descriptor = target == "-" || (!digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber })
             if duplication && descriptor { continue }
-            if ["/dev/null", "/dev/stderr", "/dev/stdout"].contains(target.lowercased()) { continue }
+            if ["/dev/null", "/dev/stderr", "/dev/stdout"].contains(target) { continue }
             return true
         }
         return false
@@ -269,20 +308,67 @@ enum StagingDestructivePatterns {
         return String(text[..<comment.lowerBound])
     }
 
-    /// A `delete from` with no `where` after it in the same statement (statements split at `;`).
-    private static func hasDeleteWithoutWhere(_ command: String) -> Bool {
-        guard let regex = try? NSRegularExpression(pattern: #"\bdelete\s+from\b"#, options: [.caseInsensitive]) else { return false }
-        for statement in command.split(separator: ";", omittingEmptySubsequences: false).map(String.init) {
-            let ns = statement as NSString
-            let found = regex.matches(in: statement, range: NSRange(location: 0, length: ns.length))
-            for (index, match) in found.enumerated() {
-                let start = match.range.location + match.range.length
-                let end = index + 1 < found.count ? found[index + 1].range.location : ns.length
-                let rest = withoutSqlComment(ns.substring(with: NSRange(location: start, length: end - start)))
-                if !StagingHazards.regex(#"\bwhere\b"#, in: rest) { return true }
+    /// `delete from`, `delete t from`, `delete t1, t2 from`, `delete ignore|low_priority|quick from`.
+    private static let deletePattern = #"\bdelete\s+(?:(?:ignore|low_priority|quick)\s+)*(?:[\w$.`\x22]+(?:\s*,\s*[\w$.`\x22]+)*\s+)?from\b"#
+
+    /// The quote (`'` or `"`, as a UTF-16 unit) still open before offset `limit`: a single quote has no escapes, a
+    /// backslash escapes the next character anywhere else.
+    private static func openQuote(in units: [UInt16], before limit: Int) -> UInt16? {
+        let backslash: UInt16 = 0x5C, single: UInt16 = 0x27, double: UInt16 = 0x22
+        var quote: UInt16?
+        var escaped = false
+        for index in 0..<limit {
+            let unit = units[index]
+            if escaped {
+                escaped = false
+            } else if unit == backslash && quote != single {
+                escaped = true
+            } else if quote == unit {
+                quote = nil
+            } else if quote == nil && (unit == single || unit == double) {
+                quote = unit
             }
         }
+        return quote
+    }
+
+    /// A `delete from` with no `where` after it in the same statement. A statement ends at `;`, `&`, `|`, the next
+    /// `delete from`, and, when the `delete` sits inside a quoted string (`psql -c 'DELETE FROM users' -c '... WHERE ...'`),
+    /// at that string's closing quote.
+    private static func hasDeleteWithoutWhere(_ command: String) -> Bool {
+        guard let regex = try? NSRegularExpression(pattern: deletePattern, options: [.caseInsensitive]) else { return false }
+        let ns = command as NSString
+        let units = Array(command.utf16)
+        let semicolon: UInt16 = 0x3B, ampersand: UInt16 = 0x26, pipe: UInt16 = 0x7C, backslash: UInt16 = 0x5C, single: UInt16 = 0x27
+        let found = regex.matches(in: command, range: NSRange(location: 0, length: ns.length))
+        for (index, match) in found.enumerated() {
+            let quote = openQuote(in: units, before: match.range.location)
+            let start = match.range.location + match.range.length
+            let limit = index + 1 < found.count ? found[index + 1].range.location : ns.length
+            var stop = limit
+            var escaped = false
+            var position = start
+            while position < limit {
+                let unit = units[position]
+                if !escaped && (unit == semicolon || unit == ampersand || unit == pipe || unit == quote) {
+                    stop = position
+                    break
+                }
+                escaped = !escaped && unit == backslash && quote != single
+                position += 1
+            }
+            let rest = withoutSqlComment(ns.substring(with: NSRange(location: start, length: stop - start)))
+            if !StagingHazards.regex(#"\bwhere\b"#, in: rest) { return true }
+        }
         return false
+    }
+
+    /// A `shutdown`, `reboot`, `halt` or `poweroff` program anywhere, `systemctl` followed later in the segment by
+    /// `stop`, `disable` or `mask`, or `service` followed later by `stop`.
+    private static func hasStopOrShutdown(_ view: String) -> Bool {
+        hasProgram(view, ["shutdown", "reboot", "halt", "poweroff"])
+            || programThen(view, ["systemctl"], ["stop", "disable", "mask"])
+            || programThen(view, ["service"], ["stop"])
     }
 }
 
@@ -335,6 +421,12 @@ enum StagingHazards {
         regex(#"\$'[^']*\\"#, in: command, caseInsensitive: false) ? escapeQuotedLabel : nil
     }
 
+    /// Does a production pane ask before inserting `command`? On a destructive match, and on an escape-quoted word
+    /// (`$'\x72\x6d' -rf x`): no text rule can follow what the shell makes of it, so it fails toward the sheet.
+    static func asksFirstInProduction(_ command: String) -> Bool {
+        !StagingDestructivePatterns.matches(command).isEmpty || escapeQuotedWordLabel(command) != nil
+    }
+
     /// Expansions that are empty at run time (`rm${IFS}-rf` is `rm -rf`; `r$@m` is `rm`). Longest first.
     private static let emptyExpansions = ["${IFS}", "$IFS", "$()", "$@", "$*"]
 
@@ -379,7 +471,7 @@ enum StagingHazards {
                 if !(empty == " " && out.last == " ") { out.append(empty) }
                 continue
             }
-            if c == "$", index + 1 < chars.count, chars[index + 1] == "'" {
+            if c == "$", index + 1 < chars.count, chars[index + 1] == "'" || chars[index + 1] == "\"" {
                 index += 1
                 continue
             }
@@ -408,6 +500,113 @@ enum StagingHazards {
             }
         }
         return out
+    }
+
+    /// Both forms of [`normalisedWords`]: empty expansions as a space, and removed.
+    static func normalisedWordViews(_ text: String) -> [String] {
+        [normalisedWords(text), normalisedWords(text, empty: "")]
+    }
+
+    /// The view of the text for the destructive rules in which what a shell expands cannot sit between a program and
+    /// its verb (the daemon's `normalise_for_hazard_words` does the same): each balanced `$(...)`, backtick pair,
+    /// `<(...)` or `${...}` becomes ONE placeholder word (`_`; for `${...}` the words of its operand follow it, so
+    /// `${X:-delete}` still shows `delete`), `(`, `)`, `{`, `}` become spaces, and a comma inside a brace group does
+    /// too (`{rm,-rf,/x}` is the words `rm -rf /x`). Quotes and backslashes are dropped, and so is the `$` of `$'...'`
+    /// and `$"..."`; empty expansions as in [`normalised`]. `;`, `|` and `&` stay, and `/* */` is NOT a comment here:
+    /// a shell has none, so `echo /*; 'kubectl' delete ns x; echo */` runs the middle command. An unbalanced opener
+    /// is dropped and what follows stays visible.
+    static func normalisedWords(_ text: String, empty: String = " ") -> String {
+        var out = ""
+        let chars = Array(text)
+        var braces = 0
+        var index = 0
+        while index < chars.count {
+            let c = chars[index]
+            if c == "$" {
+                if let length = emptyExpansionLength(chars, at: index) {
+                    index += length
+                    if !(empty == " " && out.last == " ") { out.append(empty) }
+                    continue
+                }
+                let next: Character? = index + 1 < chars.count ? chars[index + 1] : nil
+                if next == "'" || next == "\"" {
+                    index += 1
+                    continue
+                }
+                if next == "(", let close = closingIndex(chars, from: index + 1, open: "(", close: ")") {
+                    out.append(" _ ")
+                    index = close + 1
+                    continue
+                }
+                if next == "{", let close = closingIndex(chars, from: index + 1, open: "{", close: "}") {
+                    out.append(" _ ")
+                    out.append(parameterWords(Array(chars[(index + 2)..<close])))
+                    index = close + 1
+                    continue
+                }
+            }
+            if c == "<", index + 1 < chars.count, chars[index + 1] == "(",
+               let close = closingIndex(chars, from: index + 1, open: "(", close: ")") {
+                out.append(" _ ")
+                index = close + 1
+                continue
+            }
+            if c == "`", let close = chars[(index + 1)...].firstIndex(of: "`") {
+                out.append(" _ ")
+                index = close + 1
+                continue
+            }
+            index += 1
+            switch c {
+            case "'", "\"", "\\": break
+            case "{":
+                braces += 1
+                out.append(" ")
+            case "}":
+                braces = max(0, braces - 1)
+                out.append(" ")
+            case "," where braces > 0: out.append(" ")
+            case "`", "(", ")": out.append(" ")
+            default: out.append(c.isWhitespace ? " " : c)
+            }
+        }
+        return out
+    }
+
+    /// The index of the character that closes the `open` at `chars[start]`, counting nested pairs; nil when unbalanced.
+    private static func closingIndex(_ chars: [Character], from start: Int, open: Character, close: Character) -> Int? {
+        var depth = 0
+        for index in start..<chars.count {
+            if chars[index] == open {
+                depth += 1
+            } else if chars[index] == close {
+                depth -= 1
+                if depth == 0 { return index }
+            }
+        }
+        return nil
+    }
+
+    /// The words of a `${...}` body: its name, then its operand with the operator (`:-`, `:=`, `:+`, `:?`, `%`, `#`, `/`,
+    /// `^`, `,`) skipped and anything but letters, digits, `_`, `-`, `.`, `/` and `=` turned into a space, so
+    /// `${X:-delete}` gives `X delete` and `${X:-$(rm -rf /)}` shows `rm -rf /`.
+    private static func parameterWords(_ body: [Character]) -> String {
+        var at = body.prefix(while: { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }).count
+        let name = String(body[..<at])
+        if at < body.count, body[at] == ":" { at += 1 }
+        if at < body.count {
+            let op = body[at]
+            if "-=+?".contains(op) {
+                at += 1
+            } else if "%#/^,".contains(op) {
+                at += 1
+                if at < body.count, body[at] == op { at += 1 }
+            }
+        }
+        let operand = String(body[at...].map { (c: Character) -> Character in
+            (c.isLetter || c.isNumber || "_-./=".contains(c)) ? c : " "
+        })
+        return " \(name) \(operand) "
     }
 
     /// Words, split at whitespace and at `;`, `|` and `&`.

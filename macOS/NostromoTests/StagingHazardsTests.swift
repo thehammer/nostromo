@@ -56,9 +56,10 @@ final class StagingHazardsTests: XCTestCase {
                                                           "migrate:refresh", "migrate:reset", "migrate:rollback", "kubectl delete",
                                                           "kubectl drain", "helm uninstall", "terraform destroy", "aws delete/terminate",
                                                           "aws s3 rm/rb", "dd of=", "mkfs", "shred", "> file", "find -delete",
-                                                          "xargs/piped rm"])
-        XCTAssertEqual(StagingDestructivePatterns.names.count, 25)
-        XCTAssertEqual(Set(StagingDestructivePatterns.names).count, 25, "the names are unique")
+                                                          "xargs/piped rm", "queue:clear", "horizon:clear", "optimize:clear",
+                                                          "FLUSHALL/FLUSHDB", "stop/shutdown"])
+        XCTAssertEqual(StagingDestructivePatterns.names.count, 30)
+        XCTAssertEqual(Set(StagingDestructivePatterns.names).count, 30, "the names are unique")
     }
 
     func testEveryPatternLabelSaysNoLabelDoesNotMeanSafeAndNothingSaysSafe() {
@@ -464,6 +465,8 @@ final class StagingHazardsTests: XCTestCase {
             #"> /var/log/app.log"#,
             #"echo x >$out"#,
             #"ls > /dev/nullx"#,
+            #"ls > /DEV/NULL"#,
+            #"ls > /Dev/Null"#,
             #"cmd > /dev/null > out.txt"#,
             #"echo a >(cat)"#,
             #"echo a >"#,
@@ -485,7 +488,6 @@ final class StagingHazardsTests: XCTestCase {
             #"ls &>/dev/null"#,
             #"ls > /dev/stderr"#,
             #"ls 2>/dev/stdout"#,
-            #"ls > /DEV/NULL"#,
             #"ls >& /dev/null"#,
             #"ls &>> log"#,
             #"ls 2>> err.log"#,
@@ -799,6 +801,7 @@ final class StagingHazardsTests: XCTestCase {
     /// The fixture's optional `destructive` (pattern names) and `escape_quoted` (the `$'..\x..'` label) fields.
     func testTheSharedFixtureGivesTheExpectedDestructiveNamesAndEscapeQuoteLabel() throws {
         var checked = 0
+        var asked = 0
         for entry in try StagingFixtures.hazards() {
             let text = try XCTUnwrap(entry["text"] as? String)
             let name = entry["name"] as? String ?? "?"
@@ -809,8 +812,32 @@ final class StagingHazardsTests: XCTestCase {
             if let escaped = entry["escape_quoted"] as? Bool {
                 XCTAssertEqual(StagingHazards.escapeQuotedWordLabel(text) != nil, escaped, "\(name): \(text)")
             }
+            // Whether a production pane asks first: a destructive match, or an escape-quoted word.
+            if let asks = entry["asks_in_production"] as? Bool {
+                XCTAssertEqual(StagingHazards.asksFirstInProduction(text), asks, "\(name): \(text)")
+                asked += 1
+            }
         }
         XCTAssertGreaterThanOrEqual(checked, 100, "the fixture pins the destructive names of at least 100 rows")
+        XCTAssertGreaterThanOrEqual(asked, 5, "the fixture pins whether a production pane asks for the escape-quoted rows")
+    }
+
+    func testAnEscapeQuotedWordWithNoDestructiveMatchStillAsksInProduction() {
+        for command in [#"$'\x72\x6d' -rf /var/lib/mysql"#, #"kubectl $'\x64elete' ns prod"#, #"echo $'\x72m' -rf /"#] {
+            XCTAssertTrue(StagingDestructivePatterns.matches(command).isEmpty, command)
+            XCTAssertTrue(StagingHazards.asksFirstInProduction(command), command)
+        }
+        for command in ["echo $'abc'", "ls -la", "echo hello"] {
+            XCTAssertFalse(StagingHazards.asksFirstInProduction(command), command)
+        }
+        XCTAssertTrue(StagingHazards.asksFirstInProduction("rm -rf x"), "a destructive match still asks")
+    }
+
+    /// The two matchers split words the same way: a redirection glued to `rm` still leaves the flags a word each.
+    func testRmFlagsAfterAGluedRedirectionAreSeen() {
+        XCTAssertEqual(StagingDestructivePatterns.matches("rm>/dev/null -rf /var/lib/mysql"), ["rm -rf"])
+        XCTAssertEqual(StagingDestructivePatterns.matches("rm</dev/null -rf /var/lib/mysql"), ["rm -rf"])
+        XCTAssertEqual(StagingDestructivePatterns.matches("RM -rf /x"), ["rm -rf"])
     }
 
     func testEmptyExpansionsAreSeenThroughInBothForms() {
