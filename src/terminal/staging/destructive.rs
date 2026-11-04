@@ -336,9 +336,7 @@ fn has_force_kill(view: &str) -> bool {
                 || (!w.starts_with("--")
                     && w.strip_prefix('-').is_some_and(|flag| {
                         is_kill_signal(flag)
-                            || flag
-                                .strip_prefix(['s', 'n'])
-                                .is_some_and(|signal| is_kill_signal(signal))
+                            || flag.strip_prefix(['s', 'n']).is_some_and(is_kill_signal)
                     }))
                 || (matches!(w.as_str(), "-s" | "-n" | "--signal")
                     && rest.get(index + 1).is_some_and(|n| is_kill_signal(n)))
@@ -370,8 +368,7 @@ fn has_terraform_destroy(view: &str) -> bool {
                     matches!(
                         w.as_str(),
                         "destroy" | "destroy-all" | "taint" | "force-unlock"
-                    )
-                        || (w.starts_with('-') && (name == "destroy" || name == "replace"))
+                    ) || (w.starts_with('-') && (name == "destroy" || name == "replace"))
                 })
         })
     })
@@ -543,9 +540,11 @@ fn has_xargs_or_piped_rm(view: &str) -> bool {
 /// A `shutdown`, `reboot`, `halt` or `poweroff` program anywhere, `systemctl` followed later in the segment by
 /// `stop`, `disable` or `mask`, or `service` followed later by `stop`.
 fn has_stop_or_shutdown(view: &str) -> bool {
-    all_words(view)
-        .iter()
-        .any(|w| matches!(program(w).as_str(), "shutdown" | "reboot" | "halt" | "poweroff"))
-        || program_then(view, &["systemctl"], &["stop", "disable", "mask"])
+    all_words(view).iter().any(|w| {
+        matches!(
+            program(w).as_str(),
+            "shutdown" | "reboot" | "halt" | "poweroff"
+        )
+    }) || program_then(view, &["systemctl"], &["stop", "disable", "mask"])
         || program_then(view, &["service"], &["stop"])
 }
