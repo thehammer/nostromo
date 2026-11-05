@@ -1,0 +1,26 @@
+# TEMPORARY (PR #425 iteration): runs only the Mother detail test classes on push. Removed before the final commit.
+name: mac-scroll-quick
+on:
+  push:
+    branches: [fix/mac-scroll-test-flake]
+permissions:
+  contents: read
+jobs:
+  quick:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+      - name: Mother detail tests
+        run: |
+          set -o pipefail; mkdir -p macOS/build; cd macOS
+          xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
+            -destination 'platform=macOS' -derivedDataPath build \
+            -only-testing:NostromoTests/MotherDetailScrollTests \
+            -only-testing:NostromoTests/MotherDetailLabelWidthTests \
+            -only-testing:NostromoTests/MotherDetailVerticalOverflowTests \
+            -only-testing:NostromoTests/MotherDetailSwitchTests \
+            -only-testing:NostromoTests/MotherFocusFitnessTests \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 120 test \
+            2>&1 | tee build/q.log | grep --line-buffered -E "error:|Executed [0-9]+ tests|Test Case .* failed|\*\* TEST"
