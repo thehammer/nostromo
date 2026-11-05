@@ -19,19 +19,23 @@ on:
       modes:
         description: 'JSON list of runner modes: ["plain","loaded"], or just ["plain"]'
         default: '["plain","loaded"]'
+      chunks:
+        description: 'JSON list of parallel chunks, each its own runner running `iterations` iterations: [1,2,3,4,5] for 5 x iterations. A 50 iteration single job ran past 4 hours with no log, so use ~10 per chunk.'
+        default: '[1]'
 
 permissions:
   contents: read
 
 jobs:
   loop:
-    name: loop (${{ matrix.mode }})
+    name: loop (${{ matrix.mode }} ${{ matrix.chunk }})
     runs-on: macos-26
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         mode: ${{ fromJSON(inputs.modes) }}
+        chunk: ${{ fromJSON(inputs.chunks) }}
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode
@@ -43,6 +47,7 @@ jobs:
           for i in $(seq "$n"); do nohup yes > /dev/null 2>&1 & done
           sleep 1; uptime
       - name: Loop the test class
+        timeout-minutes: 200
         env:
           TESTS: ${{ inputs.tests }}
           ITERATIONS: ${{ inputs.iterations }}
@@ -66,5 +71,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: loop-log-${{ matrix.mode }}
+          name: loop-log-${{ matrix.mode }}-${{ matrix.chunk }}
           path: macOS/build/loop.log

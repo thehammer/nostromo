@@ -94,6 +94,29 @@ branch protection needs no change.
   test harness (a late peek delivery for the previous job, and the 5 s startup action
   error clearing mid-test; PR #425). `.github/workflows/mac-scroll-loop.yml`
   (`workflow_dispatch`) loops a test class N times, plain and CPU-loaded, to prove it.
+  Two corrections to what #425 shipped, found by the first 50-iteration run (41967116944,
+  plain: 800 test cases started, 799 passed, 0 failed):
+  - **#425's fix for the sideways-scrolling Overview introduced a constraint conflict.**
+    The production bug was real (a legacy scroller took its width out of the clip and the
+    document kept the old width), but the width constraint it added
+    (`DetailDocumentView.width == <clip width>`) was **required priority** and was created
+    before the first layout, with the clip's width of 0. It conflicted with the content's own
+    required constraints (`H:|-16-[section]`, `section.trailing == document.trailing - 16`,
+    the stacks and `WrapLabel.width == NSStackView.width`): 10,800 "Unable to simultaneously
+    satisfy constraints" reports, from the first iteration, and AppKit "recovering by
+    breaking" a required constraint every time a job detail was built. It is now priority
+    999 (above the content's 750 compression resistance, below required), and
+    `syncContentWidth` asks the clip for layout at most 3 times per mismatch. Note that
+    AppKit keeps a constraint it breaks `isActive`: the conflict is visible only in its
+    report, which `MotherDetailWidthConstraintTests` reads from stderr (xcodebuild sets
+    `OS_ACTIVITY_DT_MODE`; the tests skip without it).
+  - **The "hang" at iteration 50 was the job timeout, not a hang.** The job started at
+    04:20:49 UTC and was cancelled at 06:11:31, the 110 minute limit, 10 s after the last
+    test case of iteration 50 had started (that test takes about 9 s). One iteration of the
+    scroll class takes about 2.1-2.5 minutes, so 50 take about 2 hours: the loop's timeout is
+    now 240 minutes. It was never shown to be an infinite layout loop in `syncContentWidth`
+    (an unbounded `clip.needsLayout = true` was possible when the document cannot be as
+    narrow as the clip, and is now bounded), and no test reproduced one.
 - **DerivedData cache and test sharding:** deliberately not done. A restored
   DerivedData can let a stale build product pass a test the current source would
   fail, which is how #345 got through; sharding needs the parallel-safety above.
