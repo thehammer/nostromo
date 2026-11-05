@@ -8,8 +8,8 @@
 //! confirm); a missing label never means a command is safe.
 
 use crate::terminal::staging::destructive::{
-    asks_in_production, brace_glued_word, destructive_patterns, escape_quoted_word,
-    DESTRUCTIVE_NAMES,
+    asks_in_production, brace_glued_word, contains_non_ascii, destructive_patterns,
+    escape_quoted_word, wildcard_command_word, DESTRUCTIVE_NAMES,
 };
 use crate::terminal::staging::text::{normalise_for_hazard_words, validate_command_in};
 
@@ -164,12 +164,13 @@ fn the_shared_fixture_has_a_positive_row_for_every_name_and_negatives_for_the_ne
 }
 
 #[test]
-fn the_fixtures_asks_in_production_field_is_a_destructive_match_an_escape_quoted_word_or_a_brace_glued_word(
+fn the_fixtures_asks_in_production_field_is_a_destructive_match_an_escape_quoted_word_a_brace_glued_word_non_ascii_or_a_wildcard_command(
 ) {
     // The Mac app opens the confirm sheet in a production pane for a destructive match, for an escape-quoted
-    // word (`$'\x72m'`: no text rule can follow it) and for a brace expansion glued to a word (`r{m..m}`: no
-    // text rule can follow what the shell makes of it): the sheet is the only thing that stops them. The
-    // fixture row says what the app must do; the daemon's three predicates are held to the same rows.
+    // word (`$'\x72m'`: no text rule can follow it), for a brace expansion glued to a word (`r{m..m}`), for any
+    // non-ASCII scalar (what the shell runs may differ from what the user sees) and for a command word that is
+    // a glob (`/bin/r?`): the sheet is the only thing that stops them. The fixture row says what the app must
+    // do; the daemon's predicates are held to the same rows.
     let rows: Vec<serde_json::Value> = serde_json::from_str(HAZARDS).expect("hazards.json");
     let asking: Vec<&serde_json::Value> = rows
         .iter()
@@ -185,9 +186,11 @@ fn the_fixtures_asks_in_production_field_is_a_destructive_match_an_escape_quoted
         let destructive = !destructive_patterns(text).is_empty();
         let escape_quoted = row["escape_quoted"].as_bool().unwrap_or(false);
         let brace_glued = row["brace_glued"].as_bool().unwrap_or(false);
+        let non_ascii = row["non_ascii"].as_bool().unwrap_or(false);
+        let wildcard_command = row["wildcard_command"].as_bool().unwrap_or(false);
         assert_eq!(
             row["asks_in_production"].as_bool().unwrap(),
-            destructive || escape_quoted || brace_glued,
+            destructive || escape_quoted || brace_glued || non_ascii || wildcard_command,
             "{}: {text:?}",
             row["name"]
         );
@@ -210,12 +213,27 @@ fn the_fixtures_asks_in_production_field_is_a_destructive_match_an_escape_quoted
             && r["destructive"].as_array().is_some_and(|d| d.is_empty())),
         "a brace-glued row with no destructive match must still ask in production"
     );
+    assert!(
+        rows.iter().any(|r| r["non_ascii"] == true
+            && r["asks_in_production"] == true
+            && r["destructive"].as_array().is_some_and(|d| d.is_empty())),
+        "a non-ASCII row with no destructive match must still ask in production"
+    );
+    assert!(
+        rows.iter().any(|r| r["wildcard_command"] == true
+            && r["asks_in_production"] == true
+            && r["destructive"].as_array().is_some_and(|d| d.is_empty())),
+        "a wildcard-command row with no destructive match must still ask in production"
+    );
 }
 
 #[test]
-fn the_fixtures_escape_quoted_and_brace_glued_fields_are_what_the_daemon_computes() {
+fn the_fixtures_escape_quoted_brace_glued_non_ascii_and_wildcard_command_fields_are_what_the_daemon_computes(
+) {
     let rows: Vec<serde_json::Value> = serde_json::from_str(HAZARDS).expect("hazards.json");
     let mut glued = 0;
+    let mut non_ascii = 0;
+    let mut wildcard = 0;
     for row in &rows {
         let text = row["text"].as_str().unwrap();
         if let Some(want) = row["escape_quoted"].as_bool() {
@@ -235,10 +253,36 @@ fn the_fixtures_escape_quoted_and_brace_glued_fields_are_what_the_daemon_compute
                 row["name"]
             );
         }
+        if let Some(want) = row["non_ascii"].as_bool() {
+            non_ascii += 1;
+            assert_eq!(
+                contains_non_ascii(text),
+                want,
+                "{} (non_ascii): {text:?}",
+                row["name"]
+            );
+        }
+        if let Some(want) = row["wildcard_command"].as_bool() {
+            wildcard += 1;
+            assert_eq!(
+                wildcard_command_word(text),
+                want,
+                "{} (wildcard_command): {text:?}",
+                row["name"]
+            );
+        }
     }
     assert!(
         glued >= 25,
         "the fixture pins brace_glued for at least 25 rows, has {glued}"
+    );
+    assert!(
+        non_ascii >= 10,
+        "the fixture pins non_ascii for at least 10 rows, has {non_ascii}"
+    );
+    assert!(
+        wildcard >= 10,
+        "the fixture pins wildcard_command for at least 10 rows, has {wildcard}"
     );
 }
 
@@ -1757,20 +1801,30 @@ fn a_shutdown_program_in_command_position_is_labelled_wherever_the_prefix_words_
 
 // ── the read-only corpus ──────────────────────────────────────────────────────
 //
-// Sixty realistic read-only production commands. None of them may ask in a production pane, none may carry a
-// destructive label, and every one must be stageable in a remote pane. A new rule that trips one of them is
-// a false positive: fix the rule, not the row. A row marked `"expect": "sheet"` (with a `reason`) is the one
-// allowed exception.
+// `commands`: sixty-one realistic read-only production commands. None of them may ask in a production pane,
+// none may carry a destructive label, and every one must be stageable in a remote pane. A new rule that trips
+// one of them is a false positive: fix the rule, not the row. `known_asks`: read-only commands the sheet
+// asks about anyway (each row says why). They must keep asking, so a fix that makes one quiet is noticed and
+// the row moves to `commands`; the corpus stays an honest account of what the sheet costs.
 
 #[test]
 fn the_read_only_corpus_never_asks_in_production_and_never_carries_a_label() {
-    let rows: Vec<serde_json::Value> =
+    let corpus: serde_json::Value =
         serde_json::from_str(READ_ONLY_CORPUS).expect("read_only_corpus.json");
-    assert_eq!(rows.len(), 60, "the corpus is exactly 60 commands");
+    let rows = corpus["commands"].as_array().expect("commands is an array");
+    let known = corpus["known_asks"]
+        .as_array()
+        .expect("known_asks is an array");
+    assert_eq!(rows.len(), 61, "the corpus is exactly 61 commands");
 
     let mut names = std::collections::BTreeSet::new();
     let mut texts = std::collections::BTreeSet::new();
-    for row in &rows {
+    for row in rows {
+        assert_eq!(
+            row["expect"], "ok",
+            "{}: a commands row expects ok",
+            row["name"]
+        );
         assert!(
             names.insert(row["name"].as_str().unwrap()),
             "duplicate name {}",
@@ -1781,50 +1835,77 @@ fn the_read_only_corpus_never_asks_in_production_and_never_carries_a_label() {
             "duplicate text {}",
             row["text"]
         );
-        assert!(
-            matches!(row["expect"].as_str(), Some("ok" | "sheet")),
-            "{}: expect is \"ok\" or \"sheet\"",
-            row["name"]
-        );
-        if row["expect"] == "sheet" {
-            assert!(
-                row["reason"].as_str().is_some_and(|r| !r.is_empty()),
-                "{}: a sheet row says why",
-                row["name"]
-            );
-        }
     }
 
-    let sheet: Vec<&str> = rows
-        .iter()
-        .filter(|r| r["expect"] == "sheet")
-        .map(|r| r["text"].as_str().unwrap())
-        .collect();
-    assert!(sheet.len() <= 1, "at most one exception, got {sheet:?}");
-
-    let asking: Vec<&str> = rows
-        .iter()
-        .map(|r| r["text"].as_str().unwrap())
-        .filter(|text| asks_in_production(text))
-        .collect();
-    assert_eq!(
-        asking, sheet,
-        "exactly the rows marked `sheet` ask in production; any other command here is a false positive"
-    );
-
-    for row in rows.iter().filter(|r| r["expect"] == "ok") {
+    let mut false_positives = 0;
+    for row in rows {
         let text = row["text"].as_str().unwrap();
+        if asks_in_production(text) || !destructive_patterns(text).is_empty() {
+            false_positives += 1;
+        }
+    }
+    let ok_rows = rows.len();
+    println!(
+        "read-only corpus: {ok_rows} ok rows checked, {false_positives} false positives, {} known asks",
+        known.len()
+    );
+    assert_eq!(
+        false_positives,
+        0,
+        "{ok_rows} ok rows checked, {false_positives} false positives (must be 0), {} known asks",
+        known.len()
+    );
+    for row in rows {
+        let text = row["text"].as_str().unwrap();
+        assert!(
+            !asks_in_production(text),
+            "{}: {text:?} is read-only and must not ask in production ({ok_rows} ok rows checked, {} known asks)",
+            row["name"],
+            known.len()
+        );
         assert_eq!(
             destructive_patterns(text),
             Vec::<&str>::new(),
-            "{}: {text:?} must carry no label",
-            row["name"]
+            "{}: {text:?} must carry no label ({ok_rows} ok rows checked, {} known asks)",
+            row["name"],
+            known.len()
         );
         assert_eq!(
             validate_command_in(text, true),
             Ok(()),
             "{}: {text:?} must be stageable in a remote pane",
             row["name"]
+        );
+    }
+
+    assert!(
+        known.len() >= 4,
+        "the corpus names at least 4 known asks, has {} ({ok_rows} ok rows checked, {false_positives} false positives)",
+        known.len()
+    );
+    for row in known {
+        let text = row["text"].as_str().unwrap();
+        assert_eq!(
+            row["expect"], "sheet",
+            "{}: a known_asks row expects sheet",
+            row["name"]
+        );
+        assert!(
+            row["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            "{}: a known ask says why",
+            row["name"]
+        );
+        assert!(
+            names.insert(row["name"].as_str().unwrap()),
+            "duplicate name {}",
+            row["name"]
+        );
+        assert!(texts.insert(text), "duplicate text {}", row["text"]);
+        assert!(
+            asks_in_production(text),
+            "{}: {text:?} is a known ask and must still ask in production; if it no longer does, move it to commands ({ok_rows} ok rows checked, {} known asks)",
+            row["name"],
+            known.len()
         );
     }
 }

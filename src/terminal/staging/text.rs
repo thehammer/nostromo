@@ -192,7 +192,9 @@ pub fn normalise_for_hazard_words_joined(text: &str) -> String {
 /// Index of the char that closes the `open` at `chars[start]`, counting nested pairs; `None` when unbalanced.
 /// Quote- and escape-aware: a closer (or an opener) inside `'...'` or `"..."`, or after a backslash, neither
 /// closes nor opens, so `$(echo ")"; x)` closes at its last parenthesis. A quote that never closes makes the
-/// whole group unbalanced (the caller then drops the opener and what follows stays visible).
+/// whole group unbalanced (the caller then drops the opener and what follows stays visible). A `case` pattern's
+/// `)` (`$(case a in a) cmd;; esac)`) does not close: while a `case` word in command position is open (until its
+/// `esac`), a `)` at the group's own depth ends a pattern, not the group.
 pub(super) fn closing_index(
     chars: &[char],
     start: usize,
@@ -200,6 +202,17 @@ pub(super) fn closing_index(
     close: char,
 ) -> Option<usize> {
     let (mut depth, mut quote, mut escaped) = (0usize, None::<char>, false);
+    let (mut cases, mut at_command, mut word, mut word_at_command) =
+        (0usize, true, String::new(), false);
+    // A word that ended: `case` in command position opens a case, `esac` in command position closes one.
+    let end_word = |word: &mut String, at_command: bool, cases: &mut usize| {
+        if at_command && word == "case" {
+            *cases += 1;
+        } else if at_command && word == "esac" {
+            *cases = cases.saturating_sub(1);
+        }
+        word.clear();
+    };
     for (offset, &c) in chars[start..].iter().enumerate() {
         if escaped {
             escaped = false;
@@ -208,19 +221,40 @@ pub(super) fn closing_index(
                 quote = None;
             }
         } else if c == '\\' {
+            end_word(&mut word, word_at_command, &mut cases);
+            at_command = false;
             escaped = true;
         } else if quote.is_some() {
             if quote == Some(c) {
                 quote = None;
             }
         } else if matches!(c, '\'' | '"') {
+            end_word(&mut word, word_at_command, &mut cases);
+            at_command = false;
             quote = Some(c);
-        } else if c == open {
-            depth += 1;
-        } else if c == close {
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                return Some(start + offset);
+        } else if c.is_ascii_alphanumeric() || c == '_' {
+            if word.is_empty() {
+                word_at_command = at_command;
+                at_command = false;
+            }
+            word.push(c);
+        } else {
+            end_word(&mut word, word_at_command, &mut cases);
+            if c == open {
+                depth += 1;
+                at_command = true;
+            } else if c == close {
+                at_command = true;
+                if !(depth == 1 && cases > 0 && close == ')') {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(start + offset);
+                    }
+                }
+            } else if matches!(c, ';' | '&' | '|' | '\n' | '{') {
+                at_command = true;
+            } else if !c.is_whitespace() {
+                at_command = false;
             }
         }
     }

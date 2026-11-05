@@ -1,4 +1,5 @@
-[
+{
+"commands": [
  {"name": "kubectl_get_pods", "text": "kubectl get pods -n prod", "expect": "ok"},
  {"name": "kubectl_get_pods_wide", "text": "kubectl get pods -n prod -o wide", "expect": "ok"},
  {"name": "kubectl_get_pod_names_with_jsonpath", "text": "kubectl get pods -n prod -o jsonpath='{.items[*].metadata.name}'", "expect": "ok"},
@@ -58,5 +59,13 @@
  {"name": "mysql_greater_or_equal_in_double_quotes", "text": "mysql -e \"SELECT id FROM jobs WHERE attempts >= 3\"", "expect": "ok"},
  {"name": "mysql_less_than_with_a_quoted_string_in_sql", "text": "mysql -e 'SELECT id, status FROM jobs WHERE attempts < 3 AND status = \"failed\"'", "expect": "ok"},
  {"name": "redis_get_a_key", "text": "redis-cli GET site:banner", "expect": "ok"},
- {"name": "redis_info", "text": "redis-cli INFO", "expect": "ok"}
+ {"name": "redis_info", "text": "redis-cli INFO", "expect": "ok"},
+ {"name": "echo_arithmetic_comparison", "text": "echo $(( 3 > 2 ))", "expect": "ok"}
+],
+"known_asks": [
+ {"name": "cp_with_a_brace_group_for_a_backup_copy", "text": "cp file{,.bak}", "expect": "sheet", "reason": "a glued brace group is read as an expansion no text rule can follow, so the sheet asks first"},
+ {"name": "ls_with_a_brace_group_of_directories", "text": "ls -la /var/log/{nginx,app}", "expect": "sheet", "reason": "a glued brace group is read as an expansion no text rule can follow, so the sheet asks first"},
+ {"name": "tail_follow_with_a_brace_group_of_directories", "text": "tail -f /var/log/{nginx,app}/error.log", "expect": "sheet", "reason": "a glued brace group is read as an expansion no text rule can follow, so the sheet asks first"},
+ {"name": "scp_with_a_literal_angle_bracket_placeholder", "text": "scp <file> host", "expect": "sheet", "reason": "the literal <file> is read as two redirections, so the second truncates host"}
 ]
+}

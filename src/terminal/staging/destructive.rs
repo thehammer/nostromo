@@ -21,9 +21,11 @@
 //! program counts anywhere in a segment, so a leading `sudo`, `env`, `command`, `time`, `nohup`, `exec`, a
 //! prefix assignment or option never hides it, and global options between it and its verb do not either.
 //!
-//! Besides the 30 names, a production pane also asks first for two *warnings* that are not names (nothing
-//! in them says what the command does): an escape-quoted word (`$'\x72m'`) and a brace group glued to a word
-//! (`r{m,} -rf x`, `kill -{9..9} 1`), see [`asks_in_production`].
+//! Besides the 30 names, a production pane also asks first for four *warnings* that are not names (nothing
+//! in them says what the command does): an escape-quoted word (`$'\x72m'`), a brace group glued to a word
+//! (`r{m,} -rf x`, `kill -{9..9} 1`), a wildcard in the command word (`/bin/r? -rf x`) and any non-ASCII text
+//! (the belt to the scalar scanners' braces: a combining mark can glue to a `,` or a quote), see
+//! [`asks_in_production`].
 
 use std::sync::OnceLock;
 
@@ -141,10 +143,23 @@ fn views_of(text: &str) -> [String; 5] {
 }
 
 /// Does a production pane ask before inserting `text`? On a destructive match, on an escape-quoted word
-/// ([`escape_quoted_word`]) and on a brace group glued to a word ([`brace_glued_word`]). The Mac app's
+/// ([`escape_quoted_word`]), on a brace group glued to a word ([`brace_glued_word`]), on a wildcard in a
+/// command word ([`wildcard_command_word`]) and on any non-ASCII text ([`contains_non_ascii`]). The Mac app's
 /// `StagingHazards.asksFirstInProduction` is the same rule.
 pub fn asks_in_production(text: &str) -> bool {
-    !destructive_patterns(text).is_empty() || escape_quoted_word(text) || brace_glued_word(text)
+    !destructive_patterns(text).is_empty()
+        || escape_quoted_word(text)
+        || brace_glued_word(text)
+        || wildcard_command_word(text)
+        || contains_non_ascii(text)
+}
+
+/// Any code point above U+007F. A production pane asks first for text that holds one, whatever it is (an accented
+/// letter, a combining mark, a look-alike letter): the Mac app scans scalars, but a rule that reads a combining
+/// accent glued to a `,`, a quote or a `;` differently from a shell is the one gap a rule cannot close, so the
+/// sheet does. **Cost, taken on purpose:** `echo café` asks too (the drawer already labels non-ASCII text).
+pub fn contains_non_ascii(text: &str) -> bool {
+    !text.is_ascii()
 }
 
 static DROP: OnceLock<Regex> = OnceLock::new();
@@ -579,10 +594,13 @@ fn has_xargs_or_piped_rm(view: &str) -> bool {
 // ── shutdown ────────────────────────────────────────────────────────────────────────────────────────
 
 /// Programs whose quoted argument is itself a command (`bash -c '...'`, `eval '...'`, `ssh host '...'`,
-/// `parallel '...'`): that argument is analysed as live code, not as a string.
+/// `parallel '...'`, `source <(echo '...')`, `echo '...' | at now`): that argument is analysed as live code, not
+/// as a string. A lone `.` (the other name of `source`) counts too, but only in command position (`find . -name`
+/// is not a wrapper): [`is_dot_wrapper`].
 const QUOTE_WRAPPERS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh", "fish", "eval", "ssh", "mosh",
-    "parallel", "watch", "su", "script", "flock", "runuser",
+    "sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh", "fish", "mksh", "rbash", "yash",
+    "pwsh", "eval", "ssh", "mosh", "parallel", "watch", "su", "script", "flock", "runuser", "gosu",
+    "su-exec", "pdsh", "ansible", "source", "at", "batch",
 ];
 
 /// Programs that run what follows them as a command, so a later word in the same segment may be the command
@@ -629,11 +647,15 @@ const PREFIX_PROGRAMS: &[&str] = &[
     "caffeinate",
     "unshare",
     "setpriv",
+    "coproc",
 ];
 
 /// Options of the prefix programs that take a value (`sudo -u deploy`, `timeout -s KILL 5`, `ionice -c 2`). A long
 /// option without `=` is taken to have one too (`sudo --user deploy reboot`): that only ever asks more.
-const OPTIONS_WITH_VALUE: &[&str] = &["-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n"];
+/// (`exec -a name`, `strace -o file`, `sudo -D dir`, `env -S 'cmd'` take one too; compared lowercased.)
+const OPTIONS_WITH_VALUE: &[&str] = &[
+    "-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n", "-a", "-o", "-w", "-d",
+];
 
 /// A `name=value` prefix assignment.
 fn is_assignment(word: &str) -> bool {
@@ -644,8 +666,11 @@ fn is_assignment(word: &str) -> bool {
     })
 }
 
-/// A number or duration (`5`, `0.5`, `5s`, `10m`): the operand of `nice`, `timeout`.
+/// A number, duration or hex mask (`5`, `0.5`, `5s`, `10m`, `0x3`): the operand of `nice`, `timeout`, `taskset`.
 fn is_duration(word: &str) -> bool {
+    if let Some(hex) = word.strip_prefix("0x") {
+        return !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
     let number = word.strip_suffix(['s', 'm', 'h', 'd']).unwrap_or(word);
     !number.is_empty()
         && number.chars().any(|c| c.is_ascii_digit())
@@ -680,6 +705,7 @@ fn command_positions(words: &[String]) -> Vec<usize> {
         if QUOTE_WRAPPERS.contains(&name.as_str())
             || MORE_COMMAND_WRAPPERS.contains(&name.as_str())
             || word == "_"
+            || (leading && is_dot_wrapper(word))
             || (matches!(name.as_str(), "kubectl" | "docker" | "podman")
                 && words[index + 1..]
                     .iter()
@@ -694,8 +720,21 @@ fn command_positions(words: &[String]) -> Vec<usize> {
     positions
 }
 
+/// The verbs of `systemctl`, `loginctl` and `machinectl` that take the machine (or a guest) down or out of service.
+const POWER_VERBS: &[&str] = &[
+    "reboot",
+    "poweroff",
+    "halt",
+    "kexec",
+    "rescue",
+    "emergency",
+    "suspend",
+    "hibernate",
+];
+
 /// A `shutdown`, `reboot`, `halt` or `poweroff` program, `systemctl` followed later in the segment by `stop`,
-/// `disable` or `mask`, or `service` followed later by `stop`, each only in command position
+/// `disable`, `mask` or a power verb ([`POWER_VERBS`]), `loginctl` or `machinectl` followed by a power verb, or
+/// `service` followed later by `stop`, each only in command position
 /// ([`command_positions`]): `last reboot | head` and `grep -i shutdown /var/log/syslog` merely mention one.
 fn has_stop_or_shutdown(view: &str) -> bool {
     segment_words(view).iter().any(|words| {
@@ -707,7 +746,8 @@ fn has_stop_or_shutdown(view: &str) -> bool {
             };
             match program(&words[at]).as_str() {
                 "shutdown" | "reboot" | "halt" | "poweroff" => true,
-                "systemctl" => later(&["stop", "disable", "mask"]),
+                "systemctl" => later(&["stop", "disable", "mask"]) || later(POWER_VERBS),
+                "loginctl" | "machinectl" => later(POWER_VERBS),
                 "service" => later(&["stop"]),
                 _ => false,
             }
@@ -718,23 +758,57 @@ fn has_stop_or_shutdown(view: &str) -> bool {
 // ── quoted `>`, escape-quoted words, glued brace groups ─────────────────────────────────────────────
 
 /// `text` with the operators that a quoted string cannot use replaced by `_`: a `>` (not a redirection),
-/// `{` and `}` (not a brace group) inside `'...'`, `"..."` or `$'...'`. Things stay live: the quoted
+/// `{` and `}` (not a brace group) inside `'...'`, `"..."` or `$'...'`, and a `>` inside an arithmetic expansion
+/// (`$(( 3 > 2 ))`, [`arithmetic_end`]). Things stay live: the quoted
 /// argument of a command wrapper (a quoted string after a [`QUOTE_WRAPPERS`] word in the same segment, the word
-/// read as a shell reads it: `b'a'sh -c 'echo x > f'`, `\bash`, and any command word holding a `$` expansion,
-/// which may be a shell: `$SHELL -c '...'`), analysed recursively with its own quotes; a `$(...)` or
-/// backtick substitution inside double quotes; everything in a string whose closing quote is missing; and, when
+/// read as a shell reads it: `b'a'sh -c 'echo x > f'`, `\bash`, and any command word holding a `$` expansion or
+/// a backtick, which may be a shell: `$SHELL -c '...'`), analysed recursively with its own quotes; a
+/// double-quoted string that holds a `$(...)` or a backtick (its text is scanned as live command text, because a
+/// substitution can hold a `case` pattern or a quote that no cheap scan follows: **cost, taken on purpose:**
+/// `echo "x > y $(date)"` asks); everything in a string whose closing quote is missing; and, when
 /// a command wrapper or a `$` command word is fed by a pipe (`echo 'echo x > f' | sh`, `| ssh h`), everything.
 /// The Mac app's `StagingHazards.maskingQuotedOperators` is the same scan.
+///
+/// **Accepted trade-off of ignoring a quoted `>`:** `awk 'BEGIN{print 1 > "/etc/x"}'`, a `perl -e` or an
+/// `osascript` program that writes a file is not seen (python, ruby and node never were).
 fn mask_quoted_operators(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
-    let mut fed_shell = false;
-    mask_into(&chars, &mut out, &mut fed_shell);
-    if fed_shell {
+    let (masked, scan) = scan_quotes(text);
+    if scan.fed_shell {
         text.to_string()
     } else {
-        out
+        masked
     }
+}
+
+/// Does a command word (the first word of a segment after the prefix words: `sudo`, `env`, options and
+/// assignments) hold a wildcard (`?`, `*`, `[`), except the `[` and `[[` of a test? A shell expands
+/// `/bin/r? -rf /x` into `/bin/rm -rf /x`, which no text rule can follow, so a production pane asks. A wildcard
+/// in an argument or inside a quoted program does not count; the word is read as a shell reads it, so a quoted
+/// wildcard counts (asking is the cheap side).
+pub fn wildcard_command_word(text: &str) -> bool {
+    scan_quotes(text).1.wildcard_command
+}
+
+/// What the quote scan found besides the masked text.
+#[derive(Default)]
+struct Scan {
+    /// A command wrapper or a `$` command word is fed by a pipe: everything is live.
+    fed_shell: bool,
+    /// A command word holds a wildcard ([`wildcard_command_word`]).
+    wildcard_command: bool,
+}
+
+fn scan_quotes(text: &str) -> (String, Scan) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut scan = Scan::default();
+    mask_into(&chars, &mut out, &mut scan);
+    (out, scan)
+}
+
+/// A lone `.` is `source`: it runs its file, which may be `<(echo '...')` or `/dev/stdin`.
+fn is_dot_wrapper(word: &str) -> bool {
+    word == "."
 }
 
 /// What the mask scan knows about the segment it is in.
@@ -759,21 +833,29 @@ impl MaskSegment {
         }
     }
 
-    fn end_word(&mut self, fed_shell: &mut bool) {
+    fn end_word(&mut self, scan: &mut Scan) {
         if self.word.is_empty() {
             return;
         }
         let name = program(&self.word);
-        if QUOTE_WRAPPERS.contains(&name.as_str()) {
+        let wrapper =
+            QUOTE_WRAPPERS.contains(&name.as_str()) || (self.leading && is_dot_wrapper(&self.word));
+        if wrapper {
             self.wrapper_seen = true;
         }
-        // A variable or substitution where the command goes (`$SHELL -c '...'`) may be a shell.
-        let dynamic_command = (self.leading || self.runs_others) && self.word.contains('$');
+        // `env -S 'cmd'` runs its string as a command line.
+        if self.leading && (self.word.starts_with("-S") || self.word.starts_with("--split-string"))
+        {
+            self.wrapper_seen = true;
+        }
+        // A variable or substitution where the command goes (`$SHELL -c '...'`, `` `which bash` -c '...' ``) may
+        // be a shell.
+        let dynamic_command = (self.leading || self.runs_others) && self.word.contains(['$', '`']);
         if dynamic_command {
             self.wrapper_seen = true;
         }
-        if self.piped && (QUOTE_WRAPPERS.contains(&name.as_str()) || dynamic_command) {
-            *fed_shell = true;
+        if self.piped && (wrapper || dynamic_command) {
+            scan.fed_shell = true;
         }
         if MORE_COMMAND_WRAPPERS.contains(&name.as_str())
             || matches!(name.as_str(), "kubectl" | "docker" | "podman")
@@ -782,16 +864,33 @@ impl MaskSegment {
         }
         if self.leading {
             (self.leading, self.after_option) = leading_step(&self.word, self.after_option);
+            // The first word that is not a prefix is the command word.
+            if !self.leading
+                && self.word.contains(['?', '*', '['])
+                && !matches!(self.word.as_str(), "[" | "[[")
+            {
+                scan.wildcard_command = true;
+            }
         }
         self.word.clear();
     }
 }
 
-fn mask_into(chars: &[char], out: &mut String, fed_shell: &mut bool) {
+fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan) {
     let masked = |c: char| if matches!(c, '>' | '{' | '}') { '_' } else { c };
     let (mut segment, mut i) = (MaskSegment::new(false), 0);
     while i < chars.len() {
         let c = chars[i];
+        if c == '$' {
+            if let Some(end) = arithmetic_end(chars, i) {
+                for &n in &chars[i..end] {
+                    out.push(if n == '>' { '_' } else { n });
+                    segment.word.push(n);
+                }
+                i = end;
+                continue;
+            }
+        }
         match c {
             '\\' => {
                 out.push(c);
@@ -809,10 +908,10 @@ fn mask_into(chars: &[char], out: &mut String, fed_shell: &mut bool) {
                 };
                 let content = &chars[i + 1..end];
                 out.push(c);
-                if segment.wrapper_seen {
-                    mask_into(content, out, fed_shell);
+                if segment.wrapper_seen || (c == '"' && holds_substitution(content)) {
+                    mask_into(content, out, scan);
                 } else if c == '"' {
-                    mask_double_quoted(content, out, fed_shell);
+                    mask_double_quoted(content, out);
                 } else {
                     out.extend(content.iter().map(|&n| masked(n)));
                 }
@@ -822,12 +921,12 @@ fn mask_into(chars: &[char], out: &mut String, fed_shell: &mut bool) {
             }
             // The `&` of `|&` belongs to the pipe: the segment it ends is still fed by it.
             '&' if i > 0 && chars[i - 1] == '|' => {
-                segment.end_word(fed_shell);
+                segment.end_word(scan);
                 out.push(c);
                 i += 1;
             }
             ';' | '|' | '&' | '\n' => {
-                segment.end_word(fed_shell);
+                segment.end_word(scan);
                 let single_pipe =
                     c == '|' && chars.get(i + 1) != Some(&'|') && (i == 0 || chars[i - 1] != '|');
                 segment = MaskSegment::new(single_pipe);
@@ -835,7 +934,7 @@ fn mask_into(chars: &[char], out: &mut String, fed_shell: &mut bool) {
                 i += 1;
             }
             c if c.is_whitespace() || matches!(c, '(' | ')') => {
-                segment.end_word(fed_shell);
+                segment.end_word(scan);
                 out.push(c);
                 i += 1;
             }
@@ -846,11 +945,16 @@ fn mask_into(chars: &[char], out: &mut String, fed_shell: &mut bool) {
             }
         }
     }
-    segment.end_word(fed_shell);
+    segment.end_word(scan);
 }
 
-/// The inside of a double-quoted string: masked, except for a `$(...)` or backtick substitution, which runs.
-fn mask_double_quoted(content: &[char], out: &mut String, fed_shell: &mut bool) {
+/// Does the text inside a double-quoted string hold a `$(` or a backtick?
+fn holds_substitution(content: &[char]) -> bool {
+    content.contains(&'`') || content.windows(2).any(|w| w == ['$', '('])
+}
+
+/// The inside of a double-quoted string that holds no substitution: every `>`, `{` and `}` masked.
+fn mask_double_quoted(content: &[char], out: &mut String) {
     let mut i = 0;
     while i < content.len() {
         let c = content[i];
@@ -866,23 +970,28 @@ fn mask_double_quoted(content: &[char], out: &mut String, fed_shell: &mut bool) 
             i += 2;
             continue;
         }
-        let substitution = match (c, content.get(i + 1)) {
-            ('$', Some('(')) => {
-                closing_index(content, i + 1, '(', ')').map(|close| (i + 2, close, "$(", ")"))
-            }
-            ('`', _) => closing_backtick(content, i).map(|close| (i + 1, close, "`", "`")),
-            _ => None,
-        };
-        if let Some((from, close, open, closer)) = substitution {
-            out.push_str(open);
-            mask_into(&content[from..close], out, fed_shell);
-            out.push_str(closer);
-            i = close + 1;
-            continue;
-        }
         out.push(if matches!(c, '>' | '{' | '}') { '_' } else { c });
         i += 1;
     }
+}
+
+/// The index just past the `))` of the arithmetic expansion starting at `chars[start]` (`$((`), when its body is
+/// plain arithmetic: letters, digits, spaces and the operator characters, no parenthesis, quote, backtick,
+/// backslash or `;`. A `>` in it is a comparison, not a redirection (`echo $(( 3 > 2 ))`); a body with anything
+/// else (`$(( $(echo x > f) ))`, `$((echo x > f) )`) is read as the command it may be.
+fn arithmetic_end(chars: &[char], start: usize) -> Option<usize> {
+    if chars.get(start + 1) != Some(&'(') || chars.get(start + 2) != Some(&'(') {
+        return None;
+    }
+    let close = closing_index(chars, start + 1, '(', ')')?;
+    if close < start + 5 || chars[close - 1] != ')' {
+        return None;
+    }
+    let body = &chars[start + 3..close - 1];
+    let plain = body
+        .iter()
+        .all(|&c| c.is_ascii_alphanumeric() || " \t_$+-*/%<>=!^~?:,.#&|".contains(c));
+    plain.then_some(close + 1)
 }
 
 /// Index of the quote that closes the one at `chars[start]`: a single quote has no escapes (but `$'...'` does),

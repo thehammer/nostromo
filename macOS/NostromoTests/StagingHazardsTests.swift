@@ -804,6 +804,8 @@ final class StagingHazardsTests: XCTestCase {
         var checked = 0
         var asked = 0
         var gluedChecked = 0
+        var nonASCIIChecked = 0
+        var wildcardChecked = 0
         for entry in try StagingFixtures.hazards() {
             let text = try XCTUnwrap(entry["text"] as? String)
             let name = entry["name"] as? String ?? "?"
@@ -819,8 +821,25 @@ final class StagingHazardsTests: XCTestCase {
                 XCTAssertEqual(StagingHazards.braceGluedWordLabel(text) != nil, glued, "\(name): \(text)")
                 gluedChecked += 1
             }
-            // Whether a production pane asks first: a destructive match, an escape-quoted word or a brace-glued word.
+            // Any scalar above U+007F.
+            if let nonASCII = entry["non_ascii"] as? Bool {
+                XCTAssertEqual(StagingHazards.containsNonASCII(text), nonASCII, "\(name) (non_ascii): \(text)")
+                nonASCIIChecked += 1
+            }
+            // A command word (the first non-prefix word of a real segment) that is a glob.
+            if let wildcard = entry["wildcard_command"] as? Bool {
+                XCTAssertEqual(StagingHazards.hasWildcardCommandWord(text), wildcard, "\(name) (wildcard_command): \(text)")
+                wildcardChecked += 1
+            }
+            // Whether a production pane asks first: a destructive match, an escape-quoted word, a brace-glued word,
+            // a non-ASCII scalar or a wildcard command word.
             if let asks = entry["asks_in_production"] as? Bool {
+                let formula = !(entry["destructive"] as? [String] ?? []).isEmpty
+                    || (entry["escape_quoted"] as? Bool ?? false)
+                    || (entry["brace_glued"] as? Bool ?? false)
+                    || (entry["non_ascii"] as? Bool ?? false)
+                    || (entry["wildcard_command"] as? Bool ?? false)
+                XCTAssertEqual(asks, formula, "\(name) (asks_in_production is the formula): \(text)")
                 XCTAssertEqual(StagingHazards.asksFirstInProduction(text), asks, "\(name): \(text)")
                 asked += 1
             }
@@ -828,6 +847,8 @@ final class StagingHazardsTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(checked, 100, "the fixture pins the destructive names of at least 100 rows")
         XCTAssertGreaterThanOrEqual(asked, 25, "the fixture pins whether a production pane asks for the escape-quoted and brace-glued rows")
         XCTAssertGreaterThanOrEqual(gluedChecked, 25, "the fixture pins brace_glued for at least 25 rows")
+        XCTAssertGreaterThanOrEqual(nonASCIIChecked, 10, "the fixture pins non_ascii for at least 10 rows, has \(nonASCIIChecked)")
+        XCTAssertGreaterThanOrEqual(wildcardChecked, 10, "the fixture pins wildcard_command for at least 10 rows, has \(wildcardChecked)")
     }
 
     func testAnEscapeQuotedWordWithNoDestructiveMatchStillAsksInProduction() {
@@ -1172,28 +1193,89 @@ extension StagingHazardsTests {
 
     // MARK: The read-only corpus
     //
-    // Sixty realistic read-only production commands. None of them may ask in a production pane and none may carry a
-    // destructive label. A new rule that trips one of them is a false positive: fix the rule, not the row. A row
-    // marked `"expect": "sheet"` (with a `reason`) is the one allowed exception.
+    // `commands`: sixty-one realistic read-only production commands. None of them may ask in a production pane and
+    // none may carry a destructive label. A new rule that trips one of them is a false positive: fix the rule, not
+    // the row. `known_asks`: read-only commands the sheet asks about anyway (each row says why). They must keep
+    // asking, so a fix that makes one quiet is noticed and the row moves to `commands`.
 
     func testTheReadOnlyCorpusNeverAsksInProductionAndNeverCarriesALabel() throws {
         let data = try StagingFixtures.fixtureData("read_only_corpus.json")
-        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]], "read_only_corpus.json should be an array of objects")
-        XCTAssertEqual(rows.count, 60, "the corpus is exactly 60 commands")
+        let corpus = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any], "read_only_corpus.json should be an object with commands and known_asks")
+        let rows = try XCTUnwrap(corpus["commands"] as? [[String: Any]], "commands should be an array of objects")
+        let known = try XCTUnwrap(corpus["known_asks"] as? [[String: Any]], "known_asks should be an array of objects")
+        XCTAssertEqual(rows.count, 61, "the corpus is exactly 61 commands")
         let texts = rows.compactMap { $0["text"] as? String }
-        XCTAssertEqual(texts.count, 60)
-        XCTAssertEqual(Set(texts).count, 60, "the commands are unique")
-        XCTAssertEqual(Set(rows.compactMap { $0["name"] as? String }).count, 60, "the names are unique")
+        let names = rows.compactMap { $0["name"] as? String }
+        XCTAssertEqual(texts.count, 61)
+        XCTAssertEqual(Set(texts).count, 61, "the commands are unique")
+        XCTAssertEqual(Set(names).count, 61, "the names are unique")
         for row in rows {
-            XCTAssertTrue(["ok", "sheet"].contains(row["expect"] as? String ?? ""), "\(row["name"] ?? "?"): expect is ok or sheet")
+            XCTAssertEqual(row["expect"] as? String, "ok", "\(row["name"] ?? "?"): a commands row expects ok")
         }
-        let sheet = rows.filter { ($0["expect"] as? String) == "sheet" }.compactMap { $0["text"] as? String }
-        XCTAssertLessThanOrEqual(sheet.count, 1, "at most one exception, got \(sheet)")
-        let asking = texts.filter { StagingHazards.asksFirstInProduction($0) }
-        XCTAssertEqual(asking, sheet, "exactly the rows marked sheet ask in production; any other command here is a false positive")
-        for row in rows where (row["expect"] as? String) == "ok" {
+
+        var falsePositives = 0
+        for text in texts where StagingHazards.asksFirstInProduction(text) || !StagingDestructivePatterns.matches(text).isEmpty {
+            falsePositives += 1
+        }
+        let summary = "\(rows.count) ok rows checked, \(falsePositives) false positives (must be 0), \(known.count) known asks"
+        XCTAssertEqual(falsePositives, 0, summary)
+        for row in rows {
             let text = try XCTUnwrap(row["text"] as? String)
-            XCTAssertEqual(StagingDestructivePatterns.matches(text), [], "\(row["name"] ?? "?"): \(text) must carry no label")
+            let name = row["name"] as? String ?? "?"
+            XCTAssertFalse(StagingHazards.asksFirstInProduction(text), "\(name): \(text) is read-only and must not ask in production (\(summary))")
+            XCTAssertEqual(StagingDestructivePatterns.matches(text), [], "\(name): \(text) must carry no label (\(summary))")
+        }
+
+        XCTAssertGreaterThanOrEqual(known.count, 4, "the corpus names at least 4 known asks, has \(known.count) (\(summary))")
+        var knownNames = Set(names)
+        var knownTexts = Set(texts)
+        for row in known {
+            let name = row["name"] as? String ?? "?"
+            let text = try XCTUnwrap(row["text"] as? String, name)
+            XCTAssertEqual(row["expect"] as? String, "sheet", "\(name): a known_asks row expects sheet")
+            XCTAssertFalse((row["reason"] as? String ?? "").isEmpty, "\(name): a known ask says why")
+            XCTAssertTrue(knownNames.insert(name).inserted, "duplicate name \(name)")
+            XCTAssertTrue(knownTexts.insert(text).inserted, "duplicate text \(text)")
+            XCTAssertTrue(StagingHazards.asksFirstInProduction(text), "\(name): \(text) is a known ask and must still ask in production; if it no longer does, move it to commands (\(summary))")
+        }
+    }
+
+    // MARK: A combining mark merges with its neighbour into one Character
+
+    /// The strings are built from scalars so the source file (and any editor or git filter that normalises text)
+    /// cannot compose the combining mark away. U+0301 glues to the scalar before it, so the Character count is
+    /// lower than the scalar count: a matcher that walks Characters sees `m,\u{0301}` as one cell and `{m,}` is not
+    /// what it thinks it is. The verdicts must be the ones the scalar-by-scalar daemon gives.
+    func testACombiningMarkMergedIntoACharacterStillLeavesTheHazardsSeen() {
+        func build(_ scalars: [UInt32]) -> String {
+            var s = ""
+            for value in scalars { s.unicodeScalars.append(Unicode.Scalar(value)!) }
+            return s
+        }
+        func scalars(_ text: String) -> [UInt32] { text.unicodeScalars.map { $0.value } }
+        let mark: UInt32 = 0x0301
+        // r{m,U} -rf /x
+        let braceRm = build(scalars("r{m,") + [mark] + scalars("} -rf /x"))
+        // 'U' ; r{m,} -rf /x ; 'y'
+        let quotedMarkThenBraceRm = build(scalars("'") + [mark] + scalars("' ; r{m,} -rf /x ; 'y'"))
+        // echo 'U' > /etc/f 'y'
+        let quotedMarkThenRedirect = build(scalars("echo '") + [mark] + scalars("' > /etc/f 'y'"))
+        // kill -{9,U} 1
+        let braceKill = build(scalars("kill -{9,") + [mark] + scalars("} 1"))
+
+        let cases: [(name: String, text: String, destructive: [String], glued: Bool)] = [
+            ("brace expansion alternative with a combining mark", braceRm, [], true),
+            ("quoted combining mark before a brace-glued rm", quotedMarkThenBraceRm, [], true),
+            ("quoted combining mark before a redirection", quotedMarkThenRedirect, ["> file"], false),
+            ("brace-expanded kill signal with a combining mark", braceKill, [], true),
+        ]
+        for (name, text, destructive, glued) in cases {
+            XCTAssertLessThan(text.count, text.unicodeScalars.count, "\(name): the combining mark must merge into the Character before it")
+            XCTAssertTrue(StagingHazards.containsNonASCII(text), name)
+            XCTAssertEqual(StagingDestructivePatterns.matches(text), destructive, name)
+            XCTAssertEqual(StagingHazards.hasBraceGluedWord(text), glued, name)
+            XCTAssertEqual(StagingHazards.braceGluedWordLabel(text) != nil, glued, name)
+            XCTAssertTrue(StagingHazards.asksFirstInProduction(text), "\(name): a production pane asks first")
         }
     }
 }
