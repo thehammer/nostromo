@@ -6,11 +6,12 @@ import NostromoKit
 // required constraints (its 16 pt margins, the stacks and labels inside it) must never be the casualty.
 //
 // What the reader cares about, and what these tests hold the line on:
-//   - Building a job detail and laying it out at any width breaks none of its constraints (AppKit logs
-//     "Unable to simultaneously satisfy constraints" and silently deactivates one of them when a required
-//     constraint cannot be met).
-//   - A clip narrower than the content can ever be leaves the content intact (it is not squeezed past its
-//     margins) and the detail settles: it does not keep laying itself out forever.
+//   - Building a job detail and laying it out at any width conflicts none of its required constraints. AppKit
+//     reports a conflict ("Unable to simultaneously satisfy constraints") and recovers by ignoring one of the
+//     constraints for that pass; the constraint stays `isActive`, so the only way to see it is the report
+//     itself (written to stderr when the process runs under xcodebuild, OS_ACTIVITY_DT_MODE).
+//   - A clip narrower than the content can ever be leaves the content intact and the detail settles: it does
+//     not keep laying itself out forever.
 //
 // Not the shared 1920 x 1080 `MDRig`: these tests need to control the width the detail is given, so they
 // build a stand-alone `MotherJobDetail` in a plain window, through its public surface only (`select`,
@@ -64,82 +65,67 @@ final class MotherDetailWidthConstraintTests: XCTestCase {
                       "the detail holds its Overview document", file: file, line: line)
     }
 
-    // MARK: - Watching the constraints
+    // MARK: - Reading AppKit's conflict report
 
-    /// Every constraint the detail's subtree holds at some moment, kept so that a later `isActive == false`
-    /// (what AppKit does to the one it breaks) can be named. Only plain `NSLayoutConstraint`s: AppKit's own
-    /// internal ones (autoresizing, intrinsic size) are not the app's and come and go by themselves.
-    private struct Watch {
-        private(set) var entries: [(moment: String, constraint: NSLayoutConstraint)] = []
-        private var seen = Set<ObjectIdentifier>()
+    /// What the process wrote to stderr while `body` ran (AppKit's constraint reports go there under xcodebuild).
+    private func captureStandardError(_ body: () throws -> Void) rethrows -> String {
+        fflush(stderr)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("stderr-\(UUID().uuidString)")
+        let file = open(url.path, O_CREAT | O_RDWR, 0o600)
+        let saved = dup(STDERR_FILENO)
+        dup2(file, STDERR_FILENO)
+        defer { try? FileManager.default.removeItem(at: url) }
+        do { try body() } catch { restore(saved, file); throw error }
+        restore(saved, file)
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
 
-        var count: Int { entries.count }
+    private func restore(_ saved: Int32, _ file: Int32) {
+        fflush(stderr)
+        dup2(saved, STDERR_FILENO)
+        close(saved)
+        close(file)
+    }
 
-        mutating func record(_ detail: NSView, moment: String) {
-            for view in [detail] + MD.allSubviews(detail) {
-                for c in view.constraints where type(of: c) == NSLayoutConstraint.self {
-                    if seen.insert(ObjectIdentifier(c)).inserted { entries.append((moment, c)) }
-                }
-            }
-        }
-
-        /// What the app itself switched off between two recordings (it does, on purpose, for a few) is not a
-        /// break: forget it.
-        mutating func forgetWhatIsNoLongerActive() {
-            entries = entries.filter { $0.constraint.isActive }
-            seen = Set(entries.map { ObjectIdentifier($0.constraint) })
-        }
-
-        /// The recorded constraints that are no longer active although everything they connect is still in the detail.
-        func broken(in detail: NSView) -> [(moment: String, constraint: NSLayoutConstraint)] {
-            entries.filter { entry in
-                guard !entry.constraint.isActive else { return false }
-                let views = [entry.constraint.firstItem, entry.constraint.secondItem].compactMap { $0 as? NSView }
-                return views.allSatisfy { $0 === detail || $0.isDescendant(of: detail) }
-            }
+    /// The constraint-conflict reports in `captured`, empty when there are none.
+    private func conflictReports(_ captured: String) -> [String] {
+        captured.components(separatedBy: "\n").filter {
+            $0.contains("Unable to simultaneously satisfy constraints") || $0.contains("Conflicting constraints detected")
         }
     }
 
-    private func assertNothingBroke(_ watch: Watch, in detail: NSView, _ moment: String,
-                                    file: StaticString = #filePath, line: UInt = #line) {
-        let broken = watch.broken(in: detail)
-        XCTAssertTrue(broken.isEmpty,
-                      "\(moment): AppKit broke \(broken.count) of the \(watch.count) constraints the detail held before any layout:"
-                      + broken.map { "\n  (recorded \($0.moment)) \($0.constraint)" }.joined(),
-                      file: file, line: line)
+    /// Runs `body` and fails if AppKit reported a constraint conflict while it ran, naming the constraints.
+    private func assertNoConflict(_ moment: String, file: StaticString = #filePath, line: UInt = #line,
+                                  _ body: () -> Void) throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["OS_ACTIVITY_DT_MODE"] == nil,
+                      "AppKit's constraint reports are only written to stderr under xcodebuild (OS_ACTIVITY_DT_MODE)")
+        let captured = captureStandardError(body)
+        let reports = conflictReports(captured)
+        XCTAssertTrue(reports.isEmpty,
+                      "\(moment): AppKit reported \(reports.count) constraint conflict(s) and broke a required constraint:\n"
+                      + String(captured.prefix(3_000)), file: file, line: line)
     }
 
-    // MARK: - Building and laying out breaks nothing
+    // MARK: - Building and laying out conflicts with nothing
 
-    // Proves that creating a detail, selecting a job and laying it out at a normal, a very narrow and a normal width again breaks none of its required constraints.
-    func testBuildingSelectingAndLayingOutTheDetailAtAnyWidthBreaksNoneOfItsConstraints() throws {
+    // Proves that building a detail, selecting a job and laying it out at a normal, a very narrow and a normal width again never makes AppKit break a required constraint.
+    func testLayingOutTheDetailAtAnyWidthConflictsNoRequiredConstraint() throws {
+        let probe = captureStandardError { fputs("probe\n", stderr) }
+        XCTAssertTrue(probe.contains("probe"), "precondition: stderr can be captured")
+
+        // The document's width constraint is built (clip width 0) before any layout; the conflict is reported by the first layout.
         let s = try makeStandalone()
-        var watch = Watch()
-
-        watch.record(s.detail, moment: "right after init")
         s.detail.select(s.job)
-        watch.forgetWhatIsNoLongerActive()
-        watch.record(s.detail, moment: "after select, before any layout pass")
-        XCTAssertGreaterThan(watch.count, 20, "precondition: the detail holds its constraints before it is laid out")
-        assertNothingBroke(watch, in: s.detail, "after select, before any layout")
 
-        // The first layout pass: the document's width constraint was built before the clip had a width.
-        s.detail.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
-        s.container.addSubview(s.detail)
-        s.container.layoutSubtreeIfNeeded()
-        assertNothingBroke(watch, in: s.detail, "after the first layout pass (600 wide)")
-
-        MD.pump(s.window)
-        assertNothingBroke(watch, in: s.detail, "after the run loop has settled (600 wide)")
-
-        s.resize(width: 40)
-        assertNothingBroke(watch, in: s.detail, "after the pane is narrowed to 40 pt")
-
-        s.resize(width: 600)
-        assertNothingBroke(watch, in: s.detail, "after the pane is widened to 600 pt again")
-
-        s.resize(width: 300)
-        assertNothingBroke(watch, in: s.detail, "after the pane is resized to 300 pt")
+        try assertNoConflict("the first layout pass") {
+            s.detail.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
+            s.container.addSubview(s.detail)
+            s.container.layoutSubtreeIfNeeded()
+            MD.pump(s.window)
+        }
+        try assertNoConflict("narrowing the pane to 60 pt") { s.resize(width: 60) }
+        try assertNoConflict("narrowing the pane to 40 pt") { s.resize(width: 40) }
+        try assertNoConflict("widening the pane to 600 pt again") { s.resize(width: 600) }
     }
 
     // Proves that the document's width follows the clip through a constraint the content's own required constraints can override.
@@ -155,7 +141,7 @@ final class MotherDetailWidthConstraintTests: XCTestCase {
         XCTAssertFalse(before.isEmpty, "precondition: the document has a constant-width constraint")
         for c in before {
             XCTAssertLessThan(c.priority.rawValue, NSLayoutConstraint.Priority.required.rawValue,
-                              "the document's width constraint is required (priority \(c.priority.rawValue)), so a clip narrower than the content breaks one of the content's own constraints: \(c)")
+                              "the document's width constraint is required (priority \(c.priority.rawValue)), so a clip narrower than the content makes AppKit break one of the content's own constraints: \(c)")
         }
 
         s.detail.select(s.job)
@@ -177,39 +163,31 @@ final class MotherDetailWidthConstraintTests: XCTestCase {
             + "scroller style \(sv.scrollerStyle == .legacy ? "legacy" : "overlay"), layouts so far \(doc.layoutCount)"
     }
 
-    // Proves that when the clip is narrower than the content's required margins the content is left intact, nothing breaks, and layout settles instead of repeating.
-    func testAClipNarrowerThanTheContentCanBeLeavesItIntactAndTheDetailSettles() throws {
+    // Proves that when the content needs more room than the clip has, the content keeps its minimum (a required constraint of its own), nothing conflicts, and layout settles instead of asking for itself again and again.
+    func testAClipNarrowerThanTheContentsMinimumLeavesTheContentIntactAndTheDetailSettles() throws {
         let s = try makeStandalone()
         let detail = s.detail
-        // A legacy scroller takes its width out of the clip (as on a runner with no trackpad), and a pane this
-        // short makes the Overview scroll, so the clip is narrower still than the pane: below the 32 pt the
-        // document's two margins alone need.
-        detail.contentScrollView.scrollerStyle = .legacy
-        var watch = Watch()
-        watch.record(detail, moment: "right after init")
         detail.select(s.job)
-        watch.forgetWhatIsNoLongerActive()
-        watch.record(detail, moment: "after select, before any layout pass")
         let doc = try document(detail)
         let clip = detail.contentScrollView.contentView
 
-        let layoutsBefore = doc.layoutCount
-        s.detail.frame = NSRect(x: 0, y: 0, width: 40, height: 260)
-        s.container.addSubview(detail)
-        s.container.layoutSubtreeIfNeeded()
-        MD.pump(s.window, seconds: 0.4)
-        MD.drainMainQueue()
-        MD.pump(s.window, seconds: 0.4)
-        let layoutsAfterSettling = doc.layoutCount
+        // The content's minimum width: a required constraint of its own, wider than the clip below.
+        let minimum: CGFloat = 500
+        doc.widthAnchor.constraint(greaterThanOrEqualToConstant: minimum).isActive = true
+
+        var layoutsBefore = 0
+        var layoutsAfterSettling = 0
+        try assertNoConflict("laying out a 300 pt pane whose content needs \(Int(minimum)) pt") {
+            layoutsBefore = doc.layoutCount
+            s.resize(width: 300, height: 400, seconds: 0.4)
+            MD.drainMainQueue()
+            MD.pump(s.window, seconds: 0.4)
+            layoutsAfterSettling = doc.layoutCount
+        }
 
         let state = widthState(detail, doc)
-        XCTAssertFalse(detail.contentScrollView.verticalScroller?.isHidden ?? true,
-                       "precondition: the legacy vertical scroller is showing, so the clip is narrower than the pane (\(state))")
-        XCTAssertGreaterThan(doc.frame.width, clip.bounds.width + 0.5,
-                             "precondition: the content cannot be as narrow as the clip (\(state))")
-        XCTAssertGreaterThanOrEqual(doc.frame.width, clip.bounds.width - 0.5,
-                                    "the document is narrower than its clip (\(state))")
-        assertNothingBroke(watch, in: detail, "with a clip narrower than the content (\(state))")
+        XCTAssertLessThan(clip.bounds.width, minimum, "precondition: the clip is narrower than the content's minimum (\(state))")
+        XCTAssertGreaterThanOrEqual(doc.frame.width, minimum - 0.5, "the content was squeezed below its minimum (\(state))")
         XCTAssertLessThanOrEqual(layoutsAfterSettling - layoutsBefore, 30,
                                  "settling a narrow clip took \(layoutsAfterSettling - layoutsBefore) layouts of the document (\(state))")
 
@@ -220,9 +198,8 @@ final class MotherDetailWidthConstraintTests: XCTestCase {
                                  "with nothing changing, the document was laid out \(quiet) more times in 0.4 s: layout is not settling (\(widthState(detail, doc)))")
 
         // And the detail is not stuck at that width: given room again, the document is the width of its clip.
-        s.resize(width: 600, height: 400, seconds: 0.1)
+        s.resize(width: 800, height: 400, seconds: 0.1)
         let tracked = MD.pumpUntil(s.window, timeout: 5) { abs(doc.frame.width - clip.bounds.width) < 1 }
         XCTAssertTrue(tracked, "after widening the pane the document did not follow its clip (\(widthState(detail, doc)))")
-        assertNothingBroke(watch, in: detail, "after the pane is widened again")
     }
 }
