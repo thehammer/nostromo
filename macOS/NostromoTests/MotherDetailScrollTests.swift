@@ -230,31 +230,6 @@ final class MotherDetailScrollTests: XCTestCase {
         }
     }
 
-    // TEMPORARY DIAGNOSTIC (removed before the final commit)
-    func testZZDiagLegacyWidth() throws {
-        let rig = try makeScrollRig(long: [.planChecklist], index: 970)
-        let sv = scrollView(rig)
-        let clip = sv.contentView
-        let doc = try XCTUnwrap(sv.documentView)
-        func snap(_ tag: String) -> String {
-            let widths = doc.constraints.filter { $0.firstAttribute == .width }.map { String(describing: $0.constant) }
-            return "DIAG \(tag): preferred \(NSScroller.preferredScrollerStyle.rawValue) sv.style \(sv.scrollerStyle.rawValue) sv \(sv.frame) clipFrame \(clip.frame) clipBounds \(clip.bounds) doc \(doc.frame) scrollerHidden \(String(describing: sv.verticalScroller?.isHidden)) widthConstraints \(widths)"
-        }
-        XCTFail(snap("built"))
-        MD.pump(rig.window)
-        XCTFail(snap("pumped"))
-        clip.needsLayout = true; rig.window.contentView?.layoutSubtreeIfNeeded()
-        XCTFail(snap("after clip.needsLayout"))
-        doc.needsLayout = true; rig.window.contentView?.layoutSubtreeIfNeeded()
-        XCTFail(snap("after doc.needsLayout"))
-        sv.tile(); rig.window.contentView?.layoutSubtreeIfNeeded()
-        XCTFail(snap("after tile"))
-        sv.scrollerStyle = .overlay; MD.pump(rig.window)
-        XCTFail(snap("overlay"))
-        sv.scrollerStyle = .legacy; MD.pump(rig.window)
-        XCTFail(snap("legacy again"))
-    }
-
     // MARK: - It scrolls
 
     func testTheDetailHoldsAVerticalScrollViewWhoseDocumentIsTallerThanItsClipForALongPlan() throws {

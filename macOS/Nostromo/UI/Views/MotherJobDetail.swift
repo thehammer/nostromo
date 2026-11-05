@@ -1258,9 +1258,13 @@ final class MotherJobDetail: NSView {
     /// Makes the document as wide as the clip is now (the clip's width changes with the pane and with a
     /// legacy scroller coming and going).
     private func syncContentWidth() {
-        let width = contentScrollView.contentView.bounds.width
-        guard abs(contentWidth.constant - width) > 0.01 else { return }
-        contentWidth.constant = width
+        let clip = contentScrollView.contentView
+        let width = clip.bounds.width
+        if abs(contentWidth.constant - width) > 0.01 { contentWidth.constant = width }
+        // The clip's frame is changed by the scroll view's own tiling, in the middle of a layout pass, and
+        // nothing then asks the clip to lay out its document again: the constraint says `width` while the
+        // document keeps its old frame (measured on a runner with legacy scrollers). Ask.
+        if abs(content.frame.width - width) > 0.5 { clip.needsLayout = true }
     }
 
     /// After a layout pass: put what the reader was looking at back where it was, and never let the
