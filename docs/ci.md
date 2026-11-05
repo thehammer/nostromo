@@ -109,7 +109,17 @@ branch protection needs no change.
     `syncContentWidth` asks the clip for layout at most 3 times per mismatch. Note that
     AppKit keeps a constraint it breaks `isActive`: the conflict is visible only in its
     report, which `MotherDetailWidthConstraintTests` reads from stderr (xcodebuild sets
-    `OS_ACTIVITY_DT_MODE`; the tests skip without it).
+    `OS_ACTIVITY_DT_MODE`). Under CI (`CI` or `GITHUB_ACTIONS` set) an unreadable report is
+    a test failure, not a skip; locally the test skips with a reason, after its other
+    assertions have run; and a `ci.yml` step fails the Mac job on any skipped
+    `MotherDetailWidthConstraintTests` case.
+  - **Narrow widths are a known, pre-existing gap.** The "no conflict" assertions run at 320 pt
+    and wider. 320 pt is the divider's clamp (`MotherListWidth.maximum = max(220, viewWidth - 320)`),
+    not a floor on the pane: with a Mother view narrower than 540 pt the detail can be narrower than
+    320 pt, and there the detail's own required constraints (the 16 + 16 insets around the log scroll
+    view, whose legacy scroller is 17 pt) conflict on `main` too (seen at 40 pt). Below 320 pt the
+    tests only check that layout terminates and that the Overview width constraint is not the one
+    AppKit reports. Fixing the narrow case is a follow-up.
   - **The iteration-50 "hang" is not explained.** On main the job was cancelled at its 110
     minute limit with the last test case of iteration 50 running (that test takes about 9 s;
     an iteration takes about 2.9 minutes, so 50 take about 2.4 hours, longer than 110

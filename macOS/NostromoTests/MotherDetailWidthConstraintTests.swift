@@ -13,12 +13,13 @@ import NostromoKit
 //   - A clip narrower than the content can ever be leaves the content intact and the detail settles: it does
 //     not keep laying itself out forever.
 //
-// Which widths are held to "no conflict": the Mother view's real minimum for the detail pane,
-// `MotherListWidth.detailMinimum` (320 pt: the divider never leaves the detail narrower), and wider. Below
-// it, the detail's OWN required insets (16 + 16 around the log scroll view, whose legacy scroller is 17 pt)
-// cannot fit by themselves, with or without the document's width constraint, so AppKit reports a conflict on
-// the log scroll view at 40 pt on the original code too (docs/ci.md, .claude/todos). The tests below 320 pt
-// therefore check termination and that the width constraint of THIS fix is not the one in the report.
+// Which widths are held to "no conflict": `MotherListWidth.detailMinimum` (320 pt) and wider. 320 pt is the
+// divider's clamp, not a floor on the pane: a Mother view narrower than 540 pt can leave the detail
+// narrower. Below 320 pt the detail's OWN required insets (16 + 16 around the log scroll view, whose legacy
+// scroller is 17 pt) cannot fit by themselves, with or without the document's width constraint, so AppKit
+// reports a conflict on the log scroll view at 40 pt on the original code too (a known, pre-existing gap:
+// see docs/ci.md). The tests below 320 pt therefore check termination and that the width constraint of THIS
+// fix is not the one in the report.
 //
 // Not the shared 1920 x 1080 `MDRig`: these tests need to control the width the detail is given, so they
 // build a stand-alone `MotherJobDetail` in a plain window, through its public surface only (`select`,
