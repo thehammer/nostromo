@@ -230,6 +230,35 @@ final class MotherDetailScrollTests: XCTestCase {
         }
     }
 
+    // Proves 200 overlay <-> legacy flips in one open job never hang, never leave the document off its clip, and cost a bounded number of layouts each (a layout that keeps asking for itself would show as a timeout or a count).
+    func testTheOverviewTracksItsClipThroughTwoHundredScrollerStyleFlipsWithoutALayoutStorm() throws {
+        // A broken flip would otherwise report the same failure 200 times.
+        continueAfterFailure = false
+        let rig = try makeScrollRig(long: [.planChecklist], index: 963)
+        let sv = scrollView(rig)
+        let doc = try XCTUnwrap(sv.documentView as? DetailDocumentView, "the Overview's document is a DetailDocumentView")
+        let styles: [NSScroller.Style] = [.legacy, .overlay]
+        let flips = 200
+        let layoutsPerFlipLimit = 20
+
+        var mostLayouts = 0
+        for flip in 0..<flips {
+            let style = styles[flip % 2]
+            let layoutsBefore = doc.layoutCount
+            sv.scrollerStyle = style
+            // Cheap on purpose: the clip's width settles within a few passes, and 200 flips must stay quick.
+            MD.pump(rig.window, seconds: 0.1)
+            let layouts = doc.layoutCount - layoutsBefore
+            mostLayouts = max(mostLayouts, layouts)
+            assertTracksClip(rig, style, "flip \(flip + 1) of \(flips), to \(styleName(style))")
+            XCTAssertLessThanOrEqual(layouts, layoutsPerFlipLimit,
+                                     "flip \(flip + 1) of \(flips), to \(styleName(style)): the document was laid out \(layouts) times (\(scrollerState(rig, style)))")
+        }
+
+        rig.awaitRendered()
+        assertTracksClip(rig, styles[(flips - 1) % 2], "after \(flips) flips (most layouts for one flip: \(mostLayouts))")
+    }
+
     // MARK: - It scrolls
 
     func testTheDetailHoldsAVerticalScrollViewWhoseDocumentIsTallerThanItsClipForALongPlan() throws {

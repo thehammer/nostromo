@@ -486,8 +486,11 @@ final class MotherNoticeSectionView: NSView {
 final class DetailDocumentView: NSView {
     override var isFlipped: Bool { true }
     var onLayout: (() -> Void)?
+    /// How many layout passes this view has had (tests bound it: a layout that keeps asking for itself shows here).
+    private(set) var layoutCount = 0
 
     override func layout() {
+        layoutCount += 1
         super.layout()
         onLayout?()
     }
