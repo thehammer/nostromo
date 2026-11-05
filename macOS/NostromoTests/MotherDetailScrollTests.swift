@@ -237,7 +237,8 @@ final class MotherDetailScrollTests: XCTestCase {
         let clip = sv.contentView
         let doc = try XCTUnwrap(sv.documentView)
         func snap(_ tag: String) -> String {
-            "DIAG \(tag): default style \(NSScroller.preferredScrollerStyle.rawValue) sv.style \(sv.scrollerStyle.rawValue) sv \(sv.frame) clipFrame \(clip.frame) clipBounds \(clip.bounds) doc \(doc.frame) scrollerHidden \(String(describing: sv.verticalScroller?.isHidden)) widthConstraints \(doc.constraints.filter { $0.firstAttribute == .width }.map { \"\($0.constant)@\($0.priority.rawValue)\" })"
+            let widths = doc.constraints.filter { $0.firstAttribute == .width }.map { String(describing: $0.constant) }
+            return "DIAG \(tag): preferred \(NSScroller.preferredScrollerStyle.rawValue) sv.style \(sv.scrollerStyle.rawValue) sv \(sv.frame) clipFrame \(clip.frame) clipBounds \(clip.bounds) doc \(doc.frame) scrollerHidden \(String(describing: sv.verticalScroller?.isHidden)) widthConstraints \(widths)"
         }
         XCTFail(snap("built"))
         MD.pump(rig.window)
