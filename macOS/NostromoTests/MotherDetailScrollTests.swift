@@ -247,7 +247,7 @@ final class MotherDetailScrollTests: XCTestCase {
             let layoutsBefore = doc.layoutCount
             sv.scrollerStyle = style
             // Cheap on purpose: the clip's width settles within a few passes, and 200 flips must stay quick.
-            MD.pump(rig.window, seconds: 0.1)
+            MD.pump(rig.window, seconds: 0.05)
             let layouts = doc.layoutCount - layoutsBefore
             mostLayouts = max(mostLayouts, layouts)
             assertTracksClip(rig, style, "flip \(flip + 1) of \(flips), to \(styleName(style))")
