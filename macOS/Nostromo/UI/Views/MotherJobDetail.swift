@@ -524,6 +524,8 @@ final class MotherJobDetail: NSView {
     private var contentWidth: NSLayoutConstraint!
     /// How many times in a row `syncContentWidth` may ask the clip to lay out again for one and the same mismatch.
     static let maxWidthRelayouts = 3
+    /// Names the document's width constraint, so that AppKit's own conflict reports (and the tests that read them) show it.
+    static let documentWidthConstraintIdentifier = "DetailDocumentView.clipWidth"
     private struct WidthMismatch: Equatable { var target: Int; var actual: Int }
     private var widthMismatch: WidthMismatch?
     private var widthRelayouts = 0
@@ -775,6 +777,7 @@ final class MotherJobDetail: NSView {
         // minimum leaves the content intact.
         contentWidth = content.widthAnchor.constraint(equalToConstant: clip.bounds.width)
         contentWidth.priority = NSLayoutConstraint.Priority(999)
+        contentWidth.identifier = Self.documentWidthConstraintIdentifier
         contentWidth.isActive = true
         clip.postsFrameChangedNotifications = true
         clip.postsBoundsChangedNotifications = true

@@ -314,6 +314,18 @@ jobs:
         timeout-minutes: 35
         run: make mac-test
 
+      # MotherDetailWidthConstraintTests read AppKit's constraint-conflict report from stderr and skip when it
+      # cannot be read. A skip here would silently drop the only check that no required constraint is broken,
+      # so it fails the job (the tests also fail themselves when CI/GITHUB_ACTIONS is set).
+      - name: Constraint-conflict tests must not be skipped
+        if: needs.changes.outputs.swift == 'true'
+        run: |
+          if grep -E "Test Case .*MotherDetailWidthConstraintTests.* skipped" macOS/build/mac-test-full.log; then
+            echo "::error::a MotherDetailWidthConstraintTests case was skipped; its conflict assertions did not run"
+            exit 1
+          fi
+          grep -cE "Test Case .*MotherDetailWidthConstraintTests.* passed" macOS/build/mac-test-full.log
+
       - name: Last tests started (diagnosis)
         if: needs.changes.outputs.swift == 'true' && failure()
         run: grep "Test Case .* started" macOS/build/mac-test-full.log | tail -5 || true

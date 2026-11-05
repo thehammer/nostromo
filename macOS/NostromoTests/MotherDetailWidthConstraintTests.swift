@@ -13,6 +13,13 @@ import NostromoKit
 //   - A clip narrower than the content can ever be leaves the content intact and the detail settles: it does
 //     not keep laying itself out forever.
 //
+// Which widths are held to "no conflict": the Mother view's real minimum for the detail pane,
+// `MotherListWidth.detailMinimum` (320 pt: the divider never leaves the detail narrower), and wider. Below
+// it, the detail's OWN required insets (16 + 16 around the log scroll view, whose legacy scroller is 17 pt)
+// cannot fit by themselves, with or without the document's width constraint, so AppKit reports a conflict on
+// the log scroll view at 40 pt on the original code too (docs/ci.md, .claude/todos). The tests below 320 pt
+// therefore check termination and that the width constraint of THIS fix is not the one in the report.
+//
 // Not the shared 1920 x 1080 `MDRig`: these tests need to control the width the detail is given, so they
 // build a stand-alone `MotherJobDetail` in a plain window, through its public surface only (`select`,
 // the scroll view it exposes, its frame).
@@ -94,21 +101,54 @@ final class MotherDetailWidthConstraintTests: XCTestCase {
         }
     }
 
+    /// AppKit's constraint reports reach stderr only when the process runs under xcodebuild, which sets this.
+    private var canReadConstraintReports: Bool { ProcessInfo.processInfo.environment["OS_ACTIVITY_DT_MODE"] != nil }
+
+    /// CI must never skip the conflict assertions: a skip there is a silent loss of the test.
+    private var runsInCI: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["CI"] != nil || env["GITHUB_ACTIONS"] != nil
+    }
+
+    /// Set when a conflict assertion could not be made; `finishConflictChecks` then skips (outside CI) at the END
+    /// of the test, so that the assertions that do not need the report still ran.
+    private var conflictCheckUnavailable = false
+
+    /// Runs `body` and returns AppKit's conflict reports from while it ran; `nil` when they cannot be read here
+    /// (the body ran regardless). Under CI that is a failure, not a skip.
+    private func conflictReportsDuring(_ moment: String, file: StaticString = #filePath, line: UInt = #line,
+                                       _ body: () -> Void) -> (reports: [String], captured: String)? {
+        guard canReadConstraintReports else {
+            body()
+            conflictCheckUnavailable = true
+            if runsInCI {
+                XCTFail("\(moment): AppKit's constraint reports cannot be read here (OS_ACTIVITY_DT_MODE is not set) under CI, "
+                        + "so the conflict assertions did not run; they must never be skipped in CI", file: file, line: line)
+            }
+            return nil
+        }
+        let captured = captureStandardError(body)
+        return (conflictReports(captured), captured)
+    }
+
     /// Runs `body` and fails if AppKit reported a constraint conflict while it ran, naming the constraints.
     private func assertNoConflict(_ moment: String, file: StaticString = #filePath, line: UInt = #line,
-                                  _ body: () -> Void) throws {
-        try XCTSkipIf(ProcessInfo.processInfo.environment["OS_ACTIVITY_DT_MODE"] == nil,
-                      "AppKit's constraint reports are only written to stderr under xcodebuild (OS_ACTIVITY_DT_MODE)")
-        let captured = captureStandardError(body)
-        let reports = conflictReports(captured)
-        XCTAssertTrue(reports.isEmpty,
-                      "\(moment): AppKit reported \(reports.count) constraint conflict(s) and broke a required constraint:\n"
-                      + String(captured.prefix(3_000)), file: file, line: line)
+                                  _ body: () -> Void) {
+        guard let result = conflictReportsDuring(moment, file: file, line: line, body) else { return }
+        XCTAssertTrue(result.reports.isEmpty,
+                      "\(moment): AppKit reported \(result.reports.count) constraint conflict(s) and broke a required constraint:\n"
+                      + String(result.captured.prefix(3_000)), file: file, line: line)
+    }
+
+    /// Call at the end of a test that used the conflict assertions: outside CI, skips when they could not be made.
+    private func finishConflictChecks() throws {
+        try XCTSkipIf(conflictCheckUnavailable && !runsInCI,
+                      "AppKit's constraint reports are only written to stderr under xcodebuild (OS_ACTIVITY_DT_MODE); the other assertions ran")
     }
 
     // MARK: - Building and laying out conflicts with nothing
 
-    // Proves that building a detail, selecting a job and laying it out at a normal, a very narrow and a normal width again never makes AppKit break a required constraint.
+    // Proves that building a detail, selecting a job and laying it out at the real minimum of the detail pane and wider never makes AppKit break a required constraint.
     func testLayingOutTheDetailAtAnyWidthConflictsNoRequiredConstraint() throws {
         let probe = captureStandardError { fputs("probe\n", stderr) }
         XCTAssertTrue(probe.contains("probe"), "precondition: stderr can be captured")
@@ -117,15 +157,40 @@ final class MotherDetailWidthConstraintTests: XCTestCase {
         let s = try makeStandalone()
         s.detail.select(s.job)
 
-        try assertNoConflict("the first layout pass") {
+        let minimum = MotherListWidth.detailMinimum
+        assertNoConflict("the first layout pass") {
             s.detail.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
             s.container.addSubview(s.detail)
             s.container.layoutSubtreeIfNeeded()
             MD.pump(s.window)
         }
-        try assertNoConflict("narrowing the pane to 60 pt") { s.resize(width: 60) }
-        try assertNoConflict("narrowing the pane to 40 pt") { s.resize(width: 40) }
-        try assertNoConflict("widening the pane to 600 pt again") { s.resize(width: 600) }
+        for width in [minimum, minimum + 1, 400, 1000, 600] {
+            assertNoConflict("setting the pane to \(Int(width)) pt (the real minimum is \(Int(minimum)) pt)") { s.resize(width: width) }
+        }
+        try finishConflictChecks()
+    }
+
+    // Proves that below the real minimum (very narrow and zero-wide panes) layout terminates, the document keeps following its clip's width through a constraint that is not required, and the width constraint of this fix is never the one AppKit reports as conflicting (whatever else in the detail cannot fit such a pane).
+    func testBelowTheRealMinimumLayoutTerminatesAndOurWidthConstraintIsNotTheOneBroken() throws {
+        let s = try makeStandalone()
+        s.detail.select(s.job)
+        let doc = try document(s.detail)
+        s.resize(width: 600)
+
+        var layoutsInThisTest = doc.layoutCount
+        for width: CGFloat in [60, 40, 1, 0, 600] {
+            let result = conflictReportsDuring("laying out a \(Int(width)) pt pane") { s.resize(width: width) }
+            if let reports = result?.reports {
+                let ours = reports.filter { $0.contains(MotherJobDetail.documentWidthConstraintIdentifier) }
+                XCTAssertTrue(ours.isEmpty, "at \(Int(width)) pt AppKit reported the document's width constraint as part of a conflict: \(String((result?.captured ?? "").prefix(3_000)))")
+            }
+            let layouts = doc.layoutCount - layoutsInThisTest
+            layoutsInThisTest = doc.layoutCount
+            XCTAssertLessThanOrEqual(layouts, 30, "a \(Int(width)) pt pane took \(layouts) layouts of the document: layout is not terminating (\(widthState(s.detail, doc)))")
+        }
+        let tracked = MD.pumpUntil(s.window, timeout: 5) { abs(doc.frame.width - s.detail.contentScrollView.contentView.bounds.width) < 1 }
+        XCTAssertTrue(tracked, "after widening the pane again the document did not follow its clip (\(widthState(s.detail, doc)))")
+        try finishConflictChecks()
     }
 
     // Proves that the document's width follows the clip through a constraint the content's own required constraints can override.
@@ -177,7 +242,7 @@ final class MotherDetailWidthConstraintTests: XCTestCase {
 
         var layoutsBefore = 0
         var layoutsAfterSettling = 0
-        try assertNoConflict("laying out a 300 pt pane whose content needs \(Int(minimum)) pt") {
+        assertNoConflict("laying out a 300 pt pane whose content needs \(Int(minimum)) pt") {
             layoutsBefore = doc.layoutCount
             s.resize(width: 300, height: 400, seconds: 0.4)
             MD.drainMainQueue()
@@ -201,5 +266,6 @@ final class MotherDetailWidthConstraintTests: XCTestCase {
         s.resize(width: 800, height: 400, seconds: 0.1)
         let tracked = MD.pumpUntil(s.window, timeout: 5) { abs(doc.frame.width - clip.bounds.width) < 1 }
         XCTAssertTrue(tracked, "after widening the pane the document did not follow its clip (\(widthState(detail, doc)))")
+        try finishConflictChecks()
     }
 }
