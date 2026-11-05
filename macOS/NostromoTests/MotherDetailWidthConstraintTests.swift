@@ -146,18 +146,19 @@ final class MotherDetailWidthConstraintTests: XCTestCase {
                       "AppKit's constraint reports are only written to stderr under xcodebuild (OS_ACTIVITY_DT_MODE); the other assertions ran")
     }
 
-    // Diagnostic on main (scratch, never merged). Reports (as test failures, so they land in the xcresult) which
-    // widths make AppKit report a constraint conflict on the ORIGINAL code, in the full-suite process.
-    func testDiagnosticNarrowWidthsOnMain() throws {
+    // Diagnostic on main (scratch, never merged): same two tests as the scratch of the fixed code.
+    private func diagnose(_ name: String, _ widths: [CGFloat]) throws {
         let s = try makeStandalone()
         s.detail.select(s.job)
         s.detail.frame = NSRect(x: 0, y: 0, width: 600, height: 400)
         s.container.addSubview(s.detail)
-        for w: CGFloat in [600, 320, 60, 40, 0, 600] {
+        for w in widths {
             let captured = captureStandardError { s.resize(width: w) }
-            let broken = captured.components(separatedBy: "\n")
-                .filter { $0.hasPrefix("Will attempt to recover by breaking <") }
-            XCTFail("DIAG width=\(Int(w)) conflicts=\(conflictReports(captured).count) broken=\(broken.map { String($0.prefix(220)) })")
+            let broken = captured.components(separatedBy: "\n").filter { $0.hasPrefix("Will attempt to recover by breaking <") }
+            XCTFail("DIAG \(name) width=\(Int(w)) conflicts=\(conflictReports(captured).count) broken=\(broken.map { String($0.prefix(200)) })")
         }
     }
+
+    func testDiagnosticA() throws { try diagnose("A", [600, 320, 60, 40, 0, 600]) }
+    func testDiagnosticB() throws { try diagnose("B", [600, 60, 40]) }
 }
