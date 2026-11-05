@@ -516,6 +516,8 @@ final class MotherJobDetail: NSView {
     /// pinned to the clip's width.
     let contentScrollView = NSScrollView()
     private let content = DetailDocumentView()
+    /// The document's width, kept equal to the clip's (`syncContentWidth`).
+    private var contentWidth: NSLayoutConstraint!
 
     /// The three views of a job, chosen with the switch under the title.
     enum Segment: Int, CaseIterable {
@@ -752,8 +754,20 @@ final class MotherJobDetail: NSView {
             // The document is as wide as the clip (it never scrolls sideways) and as tall as its content.
             content.topAnchor.constraint(equalTo: clip.topAnchor),
             content.leadingAnchor.constraint(equalTo: clip.leadingAnchor),
-            content.trailingAnchor.constraint(equalTo: clip.trailingAnchor),
         ])
+        // The width is not tied to the clip's trailing edge: a legacy (always visible) vertical scroller
+        // takes its width out of the clip when the content outgrows the pane, which happens in the middle
+        // of a layout pass, and a document pinned to the clip's edge was left at the old, wider width
+        // (the Overview then scrolled sideways). The clip's width is read where it changes instead.
+        contentWidth = content.widthAnchor.constraint(equalToConstant: clip.bounds.width)
+        contentWidth.isActive = true
+        clip.postsFrameChangedNotifications = true
+        clip.postsBoundsChangedNotifications = true
+        for name in [NSView.frameDidChangeNotification, NSView.boundsDidChangeNotification] {
+            NotificationCenter.default.publisher(for: name, object: clip)
+                .sink { [weak self] _ in self?.syncContentWidth() }
+                .store(in: &cancellables)
+        }
 
         // The title, the state and the switch stay put above whichever segment is showing.
         for v in [titleLabel, originLine, stateLabel] as [NSView] {
@@ -1241,9 +1255,22 @@ final class MotherJobDetail: NSView {
         schedulePlaceRecheck()
     }
 
+    /// Makes the document as wide as the clip is now (the clip's width changes with the pane and with a
+    /// legacy scroller coming and going).
+    private func syncContentWidth() {
+        let clip = contentScrollView.contentView
+        let width = clip.bounds.width
+        if abs(contentWidth.constant - width) > 0.01 { contentWidth.constant = width }
+        // The clip's frame is changed by the scroll view's own tiling, in the middle of a layout pass, and
+        // nothing then asks the clip to lay out its document again: the constraint says `width` while the
+        // document keeps its old frame (measured on a runner with legacy scrollers). Ask.
+        if abs(content.frame.width - width) > 0.5 { clip.needsLayout = true }
+    }
+
     /// After a layout pass: put what the reader was looking at back where it was, and never let the
     /// position leave the document or go sideways.
     private func contentDidLayout() {
+        syncContentWidth()
         if placeHeld {
             restoreScrollAnchor()
             placeLaidOut = true

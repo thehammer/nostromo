@@ -90,7 +90,10 @@ branch protection needs no change.
   both reds were `MotherDetailScrollTests.testDataBelowTheReaderOrInsideTheLogLeavesTheScrollPositionAlone`
   (once in the parallel phase, once in the serial phase). Not shipped; the
   implementation is in branch history at `c44722a1` (`macOS/scripts/mac-test-ci.sh`).
-  Revisit after that test is made deterministic.
+  Revisit after that test is made deterministic. The race behind it is fixed in the
+  test harness (a late peek delivery for the previous job, and the 5 s startup action
+  error clearing mid-test; PR #425). `.github/workflows/mac-scroll-loop.yml`
+  (`workflow_dispatch`) loops a test class N times, plain and CPU-loaded, to prove it.
 - **DerivedData cache and test sharding:** deliberately not done. A restored
   DerivedData can let a stale build product pass a test the current source would
   fail, which is how #345 got through; sharding needs the parallel-safety above.
