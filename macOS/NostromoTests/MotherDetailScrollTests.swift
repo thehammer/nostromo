@@ -162,6 +162,74 @@ final class MotherDetailScrollTests: XCTestCase {
         }
     }
 
+    // MARK: - Scroller style
+
+    private func styleName(_ style: NSScroller.Style) -> String { style == .legacy ? "legacy" : "overlay" }
+
+    /// What a failure needs to show: the style, and the widths that decide whether the document tracks the clip.
+    private func scrollerState(_ rig: MDRig, _ style: NSScroller.Style) -> String {
+        let sv = scrollView(rig)
+        let docWidth = sv.documentView?.frame.width ?? -1
+        return "style \(styleName(style)), document \(docWidth) wide, clip \(sv.contentView.bounds.width) wide, "
+            + "scroll view \(sv.frame.width) wide, vertical scroller hidden: \(String(describing: sv.verticalScroller?.isHidden))"
+    }
+
+    /// The document is exactly as wide as the clip (no sideways scrolling), whatever the scroller style.
+    private func assertTracksClip(_ rig: MDRig, _ style: NSScroller.Style, _ moment: String,
+                                  file: StaticString = #filePath, line: UInt = #line) {
+        let state = scrollerState(rig, style)
+        XCTAssertEqual(scrollView(rig).scrollerStyle, style, "\(moment): precondition: the style took (\(state))", file: file, line: line)
+        assertHorizontallyAtRest(rig, "\(moment) (\(state))", file: file, line: line)
+    }
+
+    // Proves the Overview never scrolls sideways, in either scroller style, when the log tail changes: legacy is what a runner without a trackpad has.
+    func testTheOverviewNeverScrollsSidewaysWithEitherScrollerStyleWhenTheLogChanges() throws {
+        for (offset, (name, style)) in [("legacy", NSScroller.Style.legacy), ("overlay", NSScroller.Style.overlay)].enumerated() {
+            let rig = try makeScrollRig(long: [.planChecklist], index: 960 + offset)
+            let sv = scrollView(rig)
+            sv.scrollerStyle = style
+            MD.pump(rig.window)
+            rig.awaitRendered()
+
+            XCTAssertEqual(sv.scrollerStyle, style, "\(name): precondition: the style took")
+            if style == .legacy {
+                let sv = scrollView(rig)
+                let scroller = try XCTUnwrap(sv.verticalScroller, "\(name): the scroll view has a vertical scroller")
+                XCTAssertFalse(scroller.isHidden, "precondition: the legacy vertical scroller is showing (\(scrollerState(rig, style)))")
+                let width = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+                XCTAssertEqual(sv.frame.width - sv.contentView.bounds.width, width, accuracy: tolerance,
+                               "precondition: the legacy scroller takes its width out of the clip (\(scrollerState(rig, style)))")
+            }
+            assertTracksClip(rig, style, "right after the style is set")
+
+            rig.detail.setLogAttributed(MDFixtures.logText(lines: 120, long: true))
+            rig.awaitRendered()
+            assertTracksClip(rig, style, "after a 120-line log of long lines")
+
+            rig.detail.setLogAttributed(MDFixtures.logText(lines: 40, long: false))
+            rig.awaitRendered()
+            assertTracksClip(rig, style, "after a 40-line log of short lines")
+
+            rig.close()
+        }
+    }
+
+    // Proves the document keeps tracking the clip when the scroller style flips while the job is open (overlay -> legacy -> overlay).
+    func testTheOverviewStaysTheWidthOfItsClipWhenTheScrollerStyleFlipsAtRuntime() throws {
+        let rig = try makeScrollRig(long: [.planChecklist], index: 962)
+        let sv = scrollView(rig)
+        for (name, style) in [("overlay", NSScroller.Style.overlay), ("legacy", .legacy), ("overlay again", .overlay)] {
+            sv.scrollerStyle = style
+            MD.pump(rig.window)
+            rig.awaitRendered()
+            assertTracksClip(rig, style, "after flipping to \(name)")
+            if style == .legacy {
+                XCTAssertFalse(sv.verticalScroller?.isHidden ?? true,
+                               "precondition: the legacy vertical scroller is showing (\(scrollerState(rig, style)))")
+            }
+        }
+    }
+
     // MARK: - It scrolls
 
     func testTheDetailHoldsAVerticalScrollViewWhoseDocumentIsTallerThanItsClipForALongPlan() throws {
