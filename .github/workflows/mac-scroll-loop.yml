@@ -2,9 +2,9 @@
 # job: once plain, once with a CPU spinner per core (a loaded hosted runner). Run it with
 #   gh workflow run mac-scroll-loop.yml --ref <branch> [-f iterations=50] [-f tests=NostromoTests/MotherDetailScrollTests] [-f modes='["plain"]']
 # and read the "Summary" step (iterations started, failed test cases, layout conflicts). See docs/ci.md.
-# One iteration of the scroll class takes about 2.5 minutes, so 50 take about 2 hours: the job timeout
-# must be longer than that (the first 50-iteration run was cancelled by the old 110 minute limit while
-# iteration 50 was still running normally). xcodebuild needs more than one iteration for -test-iterations.
+# One iteration of the scroll class takes about 2.9 minutes. Prefer parallel chunks of ~10 iterations
+# (-f iterations=10 -f 'chunks=[1,2,3,4,5]'): a single 50 iteration job ran past a 240 minute limit and
+# left no log. xcodebuild needs more than one iteration for -test-iterations.
 name: mac-scroll-loop
 
 on:
