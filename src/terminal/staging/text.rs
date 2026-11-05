@@ -204,11 +204,12 @@ pub(super) fn closing_index(
     let (mut depth, mut quote, mut escaped) = (0usize, None::<char>, false);
     let (mut cases, mut at_command, mut word, mut word_at_command) =
         (0usize, true, String::new(), false);
-    // A word that ended: `case` in command position opens a case, `esac` in command position closes one.
-    let end_word = |word: &mut String, at_command: bool, cases: &mut usize| {
-        if at_command && word == "case" {
+    // A word that ended at `end`: `case` in command position, followed by whitespace (not `case=1`), opens a case;
+    // `esac` in command position closes one.
+    let end_word = |word: &mut String, at_command: bool, cases: &mut usize, end: char| {
+        if at_command && word == "case" && end.is_whitespace() {
             *cases += 1;
-        } else if at_command && word == "esac" {
+        } else if at_command && word == "esac" && end != '=' {
             *cases = cases.saturating_sub(1);
         }
         word.clear();
@@ -221,7 +222,7 @@ pub(super) fn closing_index(
                 quote = None;
             }
         } else if c == '\\' {
-            end_word(&mut word, word_at_command, &mut cases);
+            end_word(&mut word, word_at_command, &mut cases, c);
             at_command = false;
             escaped = true;
         } else if quote.is_some() {
@@ -229,7 +230,7 @@ pub(super) fn closing_index(
                 quote = None;
             }
         } else if matches!(c, '\'' | '"') {
-            end_word(&mut word, word_at_command, &mut cases);
+            end_word(&mut word, word_at_command, &mut cases, c);
             at_command = false;
             quote = Some(c);
         } else if c.is_ascii_alphanumeric() || c == '_' {
@@ -239,7 +240,7 @@ pub(super) fn closing_index(
             }
             word.push(c);
         } else {
-            end_word(&mut word, word_at_command, &mut cases);
+            end_word(&mut word, word_at_command, &mut cases, c);
             if c == open {
                 depth += 1;
                 at_command = true;

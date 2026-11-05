@@ -763,7 +763,7 @@ fn has_stop_or_shutdown(view: &str) -> bool {
 /// argument of a command wrapper (a quoted string after a [`QUOTE_WRAPPERS`] word in the same segment, the word
 /// read as a shell reads it: `b'a'sh -c 'echo x > f'`, `\bash`, and any command word holding a `$` expansion or
 /// a backtick, which may be a shell: `$SHELL -c '...'`), analysed recursively with its own quotes; a
-/// double-quoted string that holds a `$(...)` or a backtick (its text is scanned as live command text, because a
+/// double-quoted string that holds a `$(...)` or a backtick (its text is scanned as live command text, in which a `'` is a letter, because a
 /// substitution can hold a `case` pattern or a quote that no cheap scan follows: **cost, taken on purpose:**
 /// `echo "x > y $(date)"` asks); everything in a string whose closing quote is missing; and, when
 /// a command wrapper or a `$` command word is fed by a pipe (`echo 'echo x > f' | sh`, `| ssh h`), everything.
@@ -780,8 +780,8 @@ fn mask_quoted_operators(text: &str) -> String {
     }
 }
 
-/// Does a command word (the first word of a segment after the prefix words: `sudo`, `env`, options and
-/// assignments) hold a wildcard (`?`, `*`, `[`), except the `[` and `[[` of a test? A shell expands
+/// Does a command word (the first word of a segment, subshell, `$(...)` or `{ ...; }` after the prefix words: `sudo`,
+/// `env`, options and assignments) hold a wildcard (`?`, `*`, `[`), except the `[` and `[[` of a test? A shell expands
 /// `/bin/r? -rf /x` into `/bin/rm -rf /x`, which no text rule can follow, so a production pane asks. A wildcard
 /// in an argument or inside a quoted program does not count; the word is read as a shell reads it, so a quoted
 /// wildcard counts (asking is the cheap side).
@@ -802,7 +802,7 @@ fn scan_quotes(text: &str) -> (String, Scan) {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut scan = Scan::default();
-    mask_into(&chars, &mut out, &mut scan);
+    mask_into(&chars, &mut out, &mut scan, false);
     (out, scan)
 }
 
@@ -864,6 +864,8 @@ impl MaskSegment {
         }
         if self.leading {
             (self.leading, self.after_option) = leading_step(&self.word, self.after_option);
+            // A group (`{ cmd; }`) starts with a command.
+            self.leading |= self.word == "{";
             // The first word that is not a prefix is the command word.
             if !self.leading
                 && self.word.contains(['?', '*', '['])
@@ -876,9 +878,13 @@ impl MaskSegment {
     }
 }
 
-fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan) {
+/// Scans `chars` as live command text. With `quoted_text` they are the inside of a double-quoted string that holds a
+/// substitution: a `'` in it is a letter (not a quote), and its first word is an argument, not the command (so the
+/// `$` of `"$(...)"` is not a command word that may be a shell); a `$(` starts a command as it does anywhere.
+fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan, quoted_text: bool) {
     let masked = |c: char| if matches!(c, '>' | '{' | '}') { '_' } else { c };
     let (mut segment, mut i) = (MaskSegment::new(false), 0);
+    segment.leading = !quoted_text;
     while i < chars.len() {
         let c = chars[i];
         if c == '$' {
@@ -900,6 +906,11 @@ fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan) {
                 }
                 i += 2;
             }
+            '\'' if quoted_text => {
+                segment.word.push(c);
+                out.push(c);
+                i += 1;
+            }
             '\'' | '"' => {
                 let ansi = c == '\'' && i > 0 && chars[i - 1] == '$';
                 let Some(end) = quote_end(chars, i, ansi) else {
@@ -908,8 +919,11 @@ fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan) {
                 };
                 let content = &chars[i + 1..end];
                 out.push(c);
-                if segment.wrapper_seen || (c == '"' && holds_substitution(content)) {
-                    mask_into(content, out, scan);
+                if segment.wrapper_seen {
+                    mask_into(content, out, scan, false);
+                } else if c == '"' && holds_substitution(content) {
+                    // Live text, in which a `'` is a letter: `"it's $(echo x > f) it's"` runs the substitution.
+                    mask_into(content, out, scan, true);
                 } else if c == '"' {
                     mask_double_quoted(content, out);
                 } else {
@@ -935,6 +949,10 @@ fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan) {
             }
             c if c.is_whitespace() || matches!(c, '(' | ')') => {
                 segment.end_word(scan);
+                // A subshell, `$(`, `<(` or `((` starts a command of its own.
+                if c == '(' {
+                    (segment.leading, segment.after_option) = (true, false);
+                }
                 out.push(c);
                 i += 1;
             }

@@ -773,11 +773,12 @@ enum StagingHazards {
         var atCommand = true
         var word = ""
         var wordAtCommand = false
-        // A word that ended: `case` in command position opens a case, `esac` in command position closes one.
-        func endWord() {
-            if wordAtCommand && word == "case" {
+        // A word that ended at `end`: `case` in command position, followed by whitespace (not `case=1`), opens a case;
+        // `esac` in command position closes one.
+        func endWord(_ end: Unicode.Scalar) {
+            if wordAtCommand && word == "case" && end.properties.isWhitespace {
                 cases += 1
-            } else if wordAtCommand && word == "esac" {
+            } else if wordAtCommand && word == "esac" && end != "=" {
                 cases = max(0, cases - 1)
             }
             word = ""
@@ -789,13 +790,13 @@ enum StagingHazards {
             } else if quote == "'" {
                 if c == "'" { quote = nil }
             } else if c == "\\" {
-                endWord()
+                endWord(c)
                 atCommand = false
                 escaped = true
             } else if quote != nil {
                 if quote == c { quote = nil }
             } else if c == "'" || c == "\"" {
-                endWord()
+                endWord(c)
                 atCommand = false
                 quote = c
             } else if isASCIIAlphanumeric(c) || c == "_" {
@@ -805,7 +806,7 @@ enum StagingHazards {
                 }
                 word.unicodeScalars.append(c)
             } else {
-                endWord()
+                endWord(c)
                 if c == open {
                     depth += 1
                     atCommand = true
@@ -910,7 +911,7 @@ enum StagingHazards {
     /// (a quoted string after a `quoteWrappers` word in the same segment, the word read as a shell reads it:
     /// `b'a'sh -c 'echo x > f'`, `\bash`, and any command word holding a `$` expansion or a backtick, which may be a
     /// shell: `$SHELL -c '...'`), analysed recursively with its own quotes; a double-quoted string that holds a `$(...)`
-    /// or a backtick (its text is scanned as live command text, because a substitution can hold a `case` pattern or a
+    /// or a backtick (its text is scanned as live command text, in which a `'` is a letter, because a substitution can hold a `case` pattern or a
     /// quote that no cheap scan follows: **cost, taken on purpose:** `echo "x > y $(date)"` asks); everything in a
     /// string whose closing quote is missing; and, when a command wrapper or a `$` command word is fed by a pipe
     /// (`echo 'echo x > f' | sh`, `| ssh h`), everything. The daemon's `mask_quoted_operators` is the same scan.
@@ -922,8 +923,8 @@ enum StagingHazards {
         return scan.fedShell ? text : masked
     }
 
-    /// Does a command word (the first word of a segment after the prefix words: `sudo`, `env`, options and
-    /// assignments) hold a wildcard (`?`, `*`, `[`), except the `[` and `[[` of a test? A shell expands
+    /// Does a command word (the first word of a segment, subshell, `$(...)` or `{ ...; }` after the prefix words: `sudo`,
+    /// `env`, options and assignments) hold a wildcard (`?`, `*`, `[`), except the `[` and `[[` of a test? A shell expands
     /// `/bin/r? -rf /x` into `/bin/rm -rf /x`, which no text rule can follow, so a production pane asks. A wildcard
     /// in an argument or inside a quoted program does not count; the word is read as a shell reads it, so a quoted
     /// wildcard counts (asking is the cheap side). The daemon's `wildcard_command_word` is the same rule.
@@ -974,6 +975,8 @@ enum StagingHazards {
             if ["xargs", "nsenter", "chroot", "find", "kubectl", "docker", "podman"].contains(name) { runsOthers = true }
             if leading {
                 (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption)
+                // A group (`{ cmd; }`) starts with a command.
+                if word == "{" { leading = true }
                 // The first word that is not a prefix is the command word.
                 if !leading && word != "[" && word != "[["
                     && word.unicodeScalars.contains(where: { $0 == "?" || $0 == "*" || $0 == "[" }) {
@@ -984,8 +987,12 @@ enum StagingHazards {
         }
     }
 
-    private static func maskInto(_ chars: [Unicode.Scalar], _ out: inout String, _ scan: inout QuoteScan) {
+    /// Scans `chars` as live command text. With `quotedText` they are the inside of a double-quoted string that holds a
+    /// substitution: a `'` in it is a letter (not a quote), and its first word is an argument, not the command (so the
+    /// `$` of `"$(...)"` is not a command word that may be a shell); a `$(` starts a command as it does anywhere.
+    private static func maskInto(_ chars: [Unicode.Scalar], _ out: inout String, _ scan: inout QuoteScan, quotedText: Bool = false) {
         var segment = MaskSegment(piped: false)
+        segment.leading = !quotedText
         var index = 0
         while index < chars.count {
             let c = chars[index]
@@ -1005,6 +1012,10 @@ enum StagingHazards {
                     segment.word.unicodeScalars.append(chars[index + 1])
                 }
                 index += 2
+            case "'" where quotedText:
+                segment.word.unicodeScalars.append(c)
+                out.unicodeScalars.append(c)
+                index += 1
             case "'", "\"":
                 let ansi = c == "'" && index > 0 && chars[index - 1] == "$"
                 guard let end = quoteEnd(chars, from: index, ansi: ansi) else {
@@ -1013,8 +1024,11 @@ enum StagingHazards {
                 }
                 let content = Array(chars[(index + 1)..<end])
                 out.unicodeScalars.append(c)
-                if segment.wrapperSeen || (c == "\"" && holdsSubstitution(content)) {
+                if segment.wrapperSeen {
                     maskInto(content, &out, &scan)
+                } else if c == "\"" && holdsSubstitution(content) {
+                    // Live text, in which a `'` is a letter: `"it's $(echo x > f) it's"` runs the substitution.
+                    maskInto(content, &out, &scan, quotedText: true)
                 } else if c == "\"" {
                     maskDoubleQuoted(content, &out)
                 } else {
@@ -1038,6 +1052,8 @@ enum StagingHazards {
             default:
                 if c.properties.isWhitespace || c == "(" || c == ")" {
                     segment.endWord(&scan)
+                    // A subshell, `$(`, `<(` or `((` starts a command of its own.
+                    if c == "(" { (segment.leading, segment.afterOption) = (true, false) }
                 } else {
                     segment.word.unicodeScalars.append(c)
                 }
