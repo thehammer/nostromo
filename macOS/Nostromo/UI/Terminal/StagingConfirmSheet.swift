@@ -1,6 +1,6 @@
 import AppKit
 
-/// "Insert into PRODUCTION?": the question a production-treated row that matches a destructive pattern
+/// "Insert into PRODUCTION?": the question a production-treated row that matches a destructive pattern (or holds an escape-quoted word)
 /// asks before its text is placed at the prompt (R7). Shown on the driver window by
 /// `StagingInsertController`. Nothing has been sent when it appears; the text goes out from exactly one
 /// place, the Insert button, and then only the snapshot the click began with.
@@ -142,11 +142,14 @@ final class StagingConfirmSheet: NSWindowController {
         let block = commandBlock(command, width: textWidth)
         var lines: [NSView] = [titleField, targetField, block]
         shownLines = [title, targetLine]
-        let matched = "Matches a destructive pattern: " + matches.joined(separator: ", ")
-        let matchField = wrapping(matched, font: .systemFont(ofSize: 13, weight: .semibold), color: .systemOrange, width: textWidth)
-        matchField.setAccessibilityIdentifier("staging-confirm-match")
-        lines.append(matchField)
-        shownLines.append(matched)
+        // Empty when the sheet is up for an escape-quoted word only: its own hazard label is listed below.
+        if !matches.isEmpty {
+            let matched = "Matches a destructive pattern: " + matches.joined(separator: ", ")
+            let matchField = wrapping(matched, font: .systemFont(ofSize: 13, weight: .semibold), color: .systemOrange, width: textWidth)
+            matchField.setAccessibilityIdentifier("staging-confirm-match")
+            lines.append(matchField)
+            shownLines.append(matched)
+        }
         for label in hazardLabels {
             lines.append(wrapping(label, font: .systemFont(ofSize: 12), color: .systemOrange, width: textWidth))
             shownLines.append(label)

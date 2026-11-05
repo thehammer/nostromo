@@ -58,7 +58,60 @@ fn every_hazard_in_the_shared_fixture_gets_its_code_in_remote_and_local_terminal
             "{}",
             case["name"]
         );
+        // The destructive-pattern names are pinned only for rows that carry them (`destructive`: the exact
+        // ordered list); the Mac app's `StagingDestructivePatterns` is held to the same rows.
+        if let Some(want) = case.get("destructive") {
+            let want: Vec<&str> = want
+                .as_array()
+                .expect("destructive is an array of names")
+                .iter()
+                .map(|n| n.as_str().expect("a name"))
+                .collect();
+            assert_eq!(
+                crate::terminal::staging::destructive::destructive_patterns(text),
+                want,
+                "{} (destructive): {text:?}",
+                case["name"]
+            );
+        }
     }
+}
+
+#[test]
+fn the_shared_fixture_gives_the_expected_destructive_names_for_over_a_hundred_rows() {
+    let cases = hazards();
+    let pinned: Vec<&Value> = cases
+        .iter()
+        .filter(|c| c.get("destructive").is_some())
+        .collect();
+    assert!(
+        pinned.len() >= 100,
+        "hazards.json should pin the destructive names of at least 100 rows, has {}",
+        pinned.len()
+    );
+    let mut wrong = Vec::new();
+    for case in pinned {
+        let text = case["text"].as_str().unwrap();
+        let want: Vec<&str> = case["destructive"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap())
+            .collect();
+        let got = crate::terminal::staging::destructive::destructive_patterns(text);
+        if got != want {
+            wrong.push(format!(
+                "{}: {text:?}: want {want:?}, got {got:?}",
+                case["name"]
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} fixture rows disagree:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
 }
 
 #[test]

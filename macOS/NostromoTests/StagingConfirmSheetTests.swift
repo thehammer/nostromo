@@ -116,6 +116,24 @@ final class StagingConfirmSheetTests: MouseQueueTestCase {
         XCTAssertEqual(plain.rig.insertedFrames, [.stagingInserted(terminalId: StagingFixtures.terminalId, entryId: "s-1", bytes: 6, confirmed: false)])
     }
 
+    /// An escape-quoted word has no destructive match (no text rule can follow `$'\x72\x6d'`), but a production pane
+    /// fails toward asking; a local pane inserts as before.
+    func testAnEscapeQuotedWordOpensTheSheetInProductionAndInsertsDirectlyInALocalPane() throws {
+        let command = #"$'\x72\x6d' -rf /var/lib/mysql"#
+        XCTAssertTrue(StagingDestructivePatterns.matches(command).isEmpty)
+        let production = setup(command: command)
+        let before = production.rig.inputFrames.count
+        production.rig.click(production.row, in: production.window)
+        XCTAssertEqual(production.rig.rowResults, [.confirming])
+        _ = try sheet(production)
+        assertNothingTyped(production, before: before)
+
+        let local = setup(command: command, kind: .local)
+        local.rig.click(local.row, in: local.window)
+        XCTAssertEqual(local.rig.rowResults, [.inserted(bytes: command.utf8.count)])
+        XCTAssertNil(local.rig.controller.confirmSheet)
+    }
+
     func testALocalPaneRunningAnotherProgramGetsTheSheetAndTheTitleSaysSo() throws {
         let s = setup(kind: .local, foreground: "ssh")
         s.rig.click(s.row, in: s.window)

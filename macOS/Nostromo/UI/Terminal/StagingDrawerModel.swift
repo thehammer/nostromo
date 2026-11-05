@@ -355,12 +355,17 @@ enum StagingDrawerModel {
     }
 
     /// The labels the app computes about a command's text, in every pane but the destructive-pattern one:
-    /// placeholders, look-alike non-ASCII, and (local panes only; a production pane refuses the row) history.
+    /// placeholders, look-alike non-ASCII (in a production pane a second label says Insert asks first), an escape-quoted
+    /// word, a brace group glued to a word and a wildcard command word (all three add "Insert asks first" in a production pane), and (local panes only; a production pane refuses the row) history.
     static func hazardLabels(for command: String, production: Bool) -> [String] {
         var labels: [String] = []
         if isPlaceholderCommand(command) { labels.append(placeholderLabel) }
         if let label = StagingHazards.nonASCIILabel(command) { labels.append(label) }
-        if let label = StagingHazards.escapeQuotedWordLabel(command) { labels.append(label) }
+        // In a production pane these two also say that Insert asks first (the sheet opens for them).
+        if let label = StagingHazards.escapeQuotedWordLabel(command, production: production) { labels.append(label) }
+        if let label = StagingHazards.braceGluedWordLabel(command, production: production) { labels.append(label) }
+        if let label = StagingHazards.wildcardCommandWordLabel(command, production: production) { labels.append(label) }
+        if production && StagingHazards.containsNonASCII(command) { labels.append(StagingHazards.nonASCIIAsksLabel) }
         if !production && StagingHazards.usesHistoryExpansion(command) { labels.append(StagingHazards.localHistoryLabel) }
         return labels
     }

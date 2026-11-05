@@ -344,20 +344,36 @@ final class StagingDrawerModelTests: XCTestCase {
 
     // MARK: The placeholder label: only from the app
 
-    func testACommandWithAnAnglePlaceholderGetsTheAppsOwnWarning() {
+    func testACommandWithAnAnglePlaceholderGetsTheAppsOwnWarning() throws {
+        // Each of these truncates a file as written (`> file`): the destructive label comes first, the placeholder
+        // label after it. `scp <file> host` and `ssh <user>@<host>` have a target after the `>`; the other two end
+        // in a `>` with an empty target, which counts too.
+        let redirect = try XCTUnwrap(StagingHazards.destructiveLabel(["> file"], production: false))
         for command in ["scp <file> host:/tmp", "git checkout <branch-name>", "echo <a.b_c:d-1>", "ssh <user>@<host>"] {
             let r = row(entry(command))
             XCTAssertTrue(StagingDrawerModel.isPlaceholderCommand(command), command)
-            XCTAssertEqual(r.labels, [StagingDrawerModel.placeholderLabel], command)
+            XCTAssertEqual(r.labels, [redirect, StagingDrawerModel.placeholderLabel], command)
         }
         XCTAssertEqual(StagingDrawerModel.placeholderLabel, "Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects)")
     }
 
-    func testOrdinaryAngleBracketsAreNotPlaceholders() {
-        for command in ["echo a > b", "cat < in.txt", "echo <>", "echo < spaced >", "a<b", "echo <a b>",
-                        "echo <\(String(repeating: "x", count: 41))>", "echo 1 <2 && 3> 0"] {
+    func testOrdinaryAngleBracketsAreNotPlaceholders() throws {
+        let redirect = try XCTUnwrap(StagingHazards.destructiveLabel(["> file"], production: false))
+        // The exact labels of each command: `> file` where a `>` has a target (or an empty one), nothing where there
+        // is no `>` or it follows a `<` (`<>`). Never the placeholder label.
+        let cases: [(command: String, labels: [String])] = [
+            ("echo a > b", [redirect]),
+            ("cat < in.txt", []),
+            ("echo <>", []),
+            ("echo < spaced >", [redirect]),
+            ("a<b", []),
+            ("echo <a b>", [redirect]),
+            ("echo <\(String(repeating: "x", count: 41))>", [redirect]),
+            ("echo 1 <2 && 3> 0", [redirect]),
+        ]
+        for (command, labels) in cases {
             XCTAssertFalse(StagingDrawerModel.isPlaceholderCommand(command), command)
-            XCTAssertTrue(row(entry(command)).labels.isEmpty, command)
+            XCTAssertEqual(row(entry(command)).labels, labels, command)
         }
     }
 
@@ -382,7 +398,7 @@ final class StagingDrawerModelTests: XCTestCase {
 
     func testTheAccessibilityLabelPutsThePlaceholderWarningAfterTheCommand() {
         XCTAssertEqual(row(entry("scp <file> host")).accessibilityLabel,
-                       "Staged command 1 of 1, scp <file> host, Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects), ready to place at the prompt")
+                       "Staged command 1 of 1, scp <file> host, \u{26A0} Matches a destructive pattern (> file). No label does not mean safe., Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects), ready to place at the prompt")
     }
 
     func testTheAccessibilityLabelSaysWhyARowIsUnavailable() {
@@ -475,6 +491,40 @@ extension StagingDrawerModelTests {
                        ["\u{26A0} Matches a destructive pattern (queue:flush). No label does not mean safe."])
         XCTAssertEqual(row(entry(command), env: ecs()).destructive, ["queue:flush"])
         XCTAssertEqual(row(entry("ls -la"), env: ecs()).labels, [], "rows without a match show no pattern label, and no safe label either")
+    }
+
+    func testTheEscapeQuotedAndBraceGluedLabelsSayInsertAsksFirstOnlyInProduction() {
+        let escape = "\u{26A0} Contains an escape-quoted word ($'...' with a backslash): what runs may differ from what you see."
+        let brace = "\u{26A0} Contains a brace expansion glued to a word ({a,b} or {1..3}): what runs may differ from what you see."
+        let asksFirst = " Insert asks first."
+        let escaped = #"echo $'\x72m' -rf /"#
+        XCTAssertEqual(StagingDrawerModel.hazardLabels(for: escaped, production: false), [escape])
+        XCTAssertEqual(StagingDrawerModel.hazardLabels(for: escaped, production: true), [escape + asksFirst])
+        XCTAssertEqual(StagingDrawerModel.hazardLabels(for: "ls file{1,2}.txt", production: false), [brace])
+        XCTAssertEqual(StagingDrawerModel.hazardLabels(for: "ls file{1,2}.txt", production: true), [brace + asksFirst])
+        // Both on one command: the brace label comes right after the escape-quoted one, each with the flag.
+        let both = #"echo $'\x72'{a,b}"#
+        XCTAssertEqual(StagingDrawerModel.hazardLabels(for: both, production: false), [escape, brace])
+        XCTAssertEqual(StagingDrawerModel.hazardLabels(for: both, production: true), [escape + asksFirst, brace + asksFirst])
+        // A brace group that is not glued, quoted or a parameter expansion has no label in either kind of pane.
+        for command in ["ls {a,b}", "jq '{a,b}' f.json", "echo ${HOME}", "echo 'r{m,}'"] {
+            XCTAssertEqual(StagingDrawerModel.hazardLabels(for: command, production: false), [], command)
+            XCTAssertEqual(StagingDrawerModel.hazardLabels(for: command, production: true), [], command)
+        }
+    }
+
+    func testAProductionRowWithABraceGluedWordSaysInsertAsksFirstAndHasNoDestructiveLabel() {
+        let brace = "\u{26A0} Contains a brace expansion glued to a word ({a,b} or {1..3}): what runs may differ from what you see."
+        // `{r,}m` is `rm` to a shell and no pattern matches it (so nothing is disabled either): the sheet stops it.
+        let production = row(entry("{r,}m -rf /x"), env: ecs())
+        XCTAssertEqual(production.labels, [brace + " Insert asks first."])
+        XCTAssertEqual(production.destructive, [], "no pattern matches: the sheet is what stops it")
+        XCTAssertTrue(StagingHazards.asksFirstInProduction("{r,}m -rf /x"))
+        XCTAssertEqual(row(entry("{r,}m -rf /x")).labels, [brace], "a plain local pane shows the label without asking")
+        XCTAssertEqual(row(entry("ls file{1,2}.txt"), env: ecs()).labels, [brace + " Insert asks first."])
+        // The escape-quoted label says it the same way in a production row.
+        let escaped = row(entry(#"echo $'\x72m' -rf /"#), env: ecs())
+        XCTAssertEqual(escaped.labels, ["\u{26A0} Contains an escape-quoted word ($'...' with a backslash): what runs may differ from what you see. Insert asks first."])
     }
 
     func testThePlaceholderAndNonASCIILabelsAppearInEveryPane() {

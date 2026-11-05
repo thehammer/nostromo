@@ -23,6 +23,9 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/qa-visible.sh
 . "$here/lib/qa-visible.sh"
+# No tokens and no foreign state: refuse (exit 2, before anything starts) when NOSTROMO_QA_CLAUDE_BIN is set, when
+# the real ~/.nostromo/focuses.json carries QA leftovers, or when an inherited control socket is not a QA one.
+qa_refuse_unsafe_start
 repo="$(cd "$here/../.." && pwd)"
 instance="$here/qa-instance.sh"
 app="$repo/bin/nostromo-app"
@@ -43,6 +46,15 @@ trap cleanup EXIT
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; fails=$((fails + 1)); }
 inconc() { echo "INCONCLUSIVE: $*"; inconclusive=$((inconclusive + 1)); }
+
+# Stops the QA instance and runs its isolation guard (a changed real ~/.nostromo, real app state or a leftover
+# daemon fails it): a failing guard is a FAIL of this run, never swallowed. The EXIT trap is only the safety net.
+stop_instance() {
+  if [ -n "$root" ]; then
+    "$instance" stop "$root" || fail "isolation guard"
+    root=""
+  fi
+}
 
 aws_log="$work/aws.log"
 : >"$aws_log"
@@ -92,11 +104,18 @@ audit="$root/home/.nostromo/audit/terminal.jsonl"
 
 wv=0; qa_wait_visible || wv=$?
 if [ "$wv" = 2 ]; then
+  stop_instance
   echo "RESULT: FAIL"
   exit 1
 fi
 if [ "$wv" != 0 ]; then
   echo "INCONCLUSIVE: the QA window is not visible (display locked or asleep)"
+  stop_instance
+  # A failing isolation guard (reported by stop_instance) is a FAIL, not an inconclusive run.
+  if [ "$fails" -gt 0 ]; then
+    echo "RESULT: FAIL"
+    exit 1
+  fi
   echo "RESULT: INCONCLUSIVE"
   exit 3
 fi
@@ -195,6 +214,8 @@ if [ -f "$audit" ]; then
 else
   fail "no audit file at $audit"
 fi
+
+stop_instance
 
 if [ "$fails" -gt 0 ]; then
   echo "RESULT: FAIL"

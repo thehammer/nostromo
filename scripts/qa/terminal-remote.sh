@@ -32,6 +32,9 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/qa-visible.sh
 . "$here/lib/qa-visible.sh"
+# No tokens and no foreign state: refuse (exit 2, before anything starts) when NOSTROMO_QA_CLAUDE_BIN is set, when
+# the real ~/.nostromo/focuses.json carries QA leftovers, or when an inherited control socket is not a QA one.
+qa_refuse_unsafe_start
 repo="$(cd "$here/../.." && pwd)"
 instance="$here/qa-instance.sh"
 app="$repo/bin/nostromo-app"
@@ -100,6 +103,11 @@ require_visible() {
   if [ "$wv" != 0 ]; then
     echo "INCONCLUSIVE: the QA window is not visible (display locked or asleep)"
     stop_instance
+    # A failing isolation guard (reported by stop_instance) is a FAIL, not an inconclusive run.
+    if [ "$fails" -gt 0 ]; then
+      echo "RESULT: FAIL"
+      exit 1
+    fi
     echo "RESULT: INCONCLUSIVE"
     echo "Manual checklist: see the PR body (staging first)."
     exit 3

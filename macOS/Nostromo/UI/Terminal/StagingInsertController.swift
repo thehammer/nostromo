@@ -164,7 +164,9 @@ final class StagingInsertController {
               PastePolicy.decide(kind: ctx.kind, text: snapshot.command) == .send,
               let target else { return .refused(.notInsertable) }
         let matches = StagingDestructivePatterns.matches(snapshot.command)
-        if production && !matches.isEmpty && !confirmed {
+        // A destructive match asks, and so does an escape-quoted word (`$'\x72\x6d' -rf x`): no text rule can follow
+        // what the shell makes of it, so a production pane fails toward the sheet. Local panes insert as before.
+        if production && StagingHazards.asksFirstInProduction(snapshot.command) && !confirmed {
             return presentConfirmation(snapshot, env: env, matches: matches, control: control, openedBy: event)
         }
         let bytes = StagingDrawerModel.bytes(for: snapshot.command, bracketedPaste: target.bracketedPasteMode)

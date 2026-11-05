@@ -263,6 +263,16 @@ Teri not active, Fred signed out, SIGINT/SIGTERM/SIGHUP in the middle of a run (
 behaviour (real view structure, timing, the screenshot colours) is checked by running the scripts
 against a real Nostromo.
 
+## Refusals before a terminal script starts (no tokens, no foreign state)
+
+`terminal-local.sh`, `terminal-remote.sh` and `terminal-hazard.sh` promise no tokens and drive only the isolated QA instance, like `terminal-staging.sh`, `background-wake.sh` and `approvals-card.sh`. Right after sourcing `lib/qa-visible.sh` each calls `qa_refuse_unsafe_start`, which exits 2 (stderr says `REFUSING TO RUN: ...`; nothing is started and stdout stays empty) when:
+
+- `NOSTROMO_QA_CLAUDE_BIN` is set: `qa-instance.sh` would hand that real CLI to the QA daemon and the run would spend tokens (`qa_refuse_real_model`);
+- the real `~/.nostromo/focuses.json` already carries a QA marker (`FIXTURE:`, the QA bundle id, a QA root path, `cody-qa-`, `qa-approvals`), the leftover of an earlier breach, or it exists but cannot be read, or `HOME` is not set (`qa_refuse_dirty_real_home`; it names the file, never prints its content);
+- `NOSTROMO_APP_CONTROL_SOCKET` is set and no `.nostromo-qa-root` marker sits beside it, so it would be the user's own app (`qa_refuse_foreign_socket`; an inherited socket that does pass is unset, the script uses the socket of the instance it starts).
+
+Every refusal fails closed: what cannot be checked is refused. `scripts/qa/tests/test_terminal_guards.py` (part of `make qa-selftest`) proves that each of the three refuses a real binary and a dirty real home, and gets past the guard without them.
+
 ## Window visibility and the isolation guard's `defaults` check
 
 A freshly launched QA window is briefly invisible, so every script that needs a visible window waits for it (up to 45 s) before reporting INCONCLUSIVE; the terminal scripts share `lib/qa-visible.sh`. The isolation guard (`qa-instance.sh stop`) treats a changed `defaults export com.hammer.nostromo` like the user's other state files: the real app rewrites its preferences during a run, so a change fails the guard only when the export carries a QA marker (QA root path, QA bundle id, `cody-qa-`, the run's temp directory name, `.nostromo-qa-root`). Otherwise it prints `NOTE: real app wrote its preferences during the run; no QA marker found`. Marker kinds are reported, never the export's content.
