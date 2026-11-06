@@ -482,6 +482,14 @@ impl ManagedSession {
 /// Shared daemon-side registry of running stream-json sessions.
 ///
 /// All public methods take `&mut self` — callers hold the wrapping Mutex.
+/// How long [`SessionManager::reconnect_tools`] waits for the CLI: it starts a
+/// new bridge and replays the MCP handshake before it answers.
+pub const TOOLS_RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The reason [`SessionManager::reconnect_tools`] gives when there is no
+/// running session for the tag (nothing to reconnect, so stop trying).
+pub const TOOLS_RECONNECT_NOT_RUNNING: &str = "the session is not running";
+
 pub struct SessionManager {
     sessions: HashMap<String, ManagedSession>,
     client_senders: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ServerMsg>>>>,
@@ -2118,6 +2126,35 @@ impl SessionManager {
     /// Stop one of `tag`'s background tasks. The returned future owns what it
     /// needs, so it can be awaited without the manager's lock. Nothing is sent
     /// to the CLI for a session or task that is not there or has ended.
+    /// Ask the session's CLI to restart its `nostromo` MCP server (the
+    /// `nostromo-mcp-bridge` child). Claude Code never respawns a stdio server
+    /// that has gone away, and a Nostromo session has no terminal `/mcp` menu,
+    /// so this control request is the only way back short of a restart.
+    /// Resolves to `Err` with a reason when the session is not running or the
+    /// CLI refused or did not answer within [`TOOLS_RECONNECT_TIMEOUT`].
+    pub fn reconnect_tools(
+        &self,
+        tag: &str,
+    ) -> impl std::future::Future<Output = std::result::Result<(), String>> + Send + 'static {
+        let shared = self.sessions.get(tag).map(|s| s.shared.clone());
+        async move {
+            let Some(shared) = shared else {
+                return Err(TOOLS_RECONNECT_NOT_RUNNING.to_owned());
+            };
+            control::control_within(
+                &shared,
+                serde_json::json!({
+                    "subtype": "mcp_reconnect",
+                    "serverName": crate::mcp::socket::MCP_SERVER_NAME,
+                }),
+                TOOLS_RECONNECT_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
+            .map_err(String::from)
+        }
+    }
+
     pub fn task_stop(
         &self,
         tag: &str,

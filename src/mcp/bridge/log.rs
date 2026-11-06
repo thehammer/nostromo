@@ -9,7 +9,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::Path;
 
 /// How many `mcp-bridge-*.log` files are kept (newest by mtime).
-pub const MAX_LOG_FILES: usize = 20;
+pub const MAX_LOG_FILES: usize = 100;
 /// Hard cap on one log file's size.
 pub const MAX_LOG_BYTES: u64 = 256 * 1024;
 
@@ -38,6 +38,11 @@ impl BridgeLog {
         let size = file.metadata()?.len();
         prune(dir, &name);
         Ok(Self { file, size })
+    }
+
+    /// The open log file (the signal handler writes to a duplicate of it).
+    pub fn file(&self) -> &File {
+        &self.file
     }
 
     /// Append one event line: timestamp, pty id, event code, attempt count.

@@ -19,7 +19,10 @@ struct ToolsOfflinePolicy {
 
     static let label = "Tools offline"
     static let accessibilityLabel = "Nostromo tools offline for this session"
-    static let tooltip = "Nostromo tools are offline for this session. Run /mcp and reconnect nostromo, or restart the session."
+    /// `/mcp` cannot reconnect a server in a Nostromo pane (its menu needs Claude Code's own
+    /// terminal UI), so the advice is what does work: the daemon asks the session to reconnect
+    /// (after 15 s, 1 min and 5 min), and a restart with `claude --continue` keeps the conversation.
+    static let tooltip = "Nostromo tools are offline for this session. Nostromo is asking the session to reconnect them; if this stays, restart the session with claude --continue."
 
     private var lostAt: [String: Date] = [:]
     /// Sessions that have stopped running. A bridge usually drops just *after* its session's

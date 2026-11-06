@@ -26,6 +26,7 @@
 
 mod backoff;
 mod log;
+mod signals;
 
 pub use backoff::Backoff;
 pub use log::{BridgeLog, MAX_LOG_BYTES, MAX_LOG_FILES};
@@ -131,11 +132,19 @@ impl BridgeConfig {
 
 /// Run the bridge on the process's stdin/stdout. Returns the exit code.
 pub fn run(config: BridgeConfig) -> i32 {
-    run_with(config, std::io::stdin(), std::io::stdout())
+    run_inner(config, std::io::stdin(), std::io::stdout(), true)
 }
 
-/// [`run`] over arbitrary client streams.
+/// [`run`] over arbitrary client streams (no signal handlers: tests share a process).
 pub fn run_with<R, W>(config: BridgeConfig, input: R, output: W) -> i32
+where
+    R: Read + Send + 'static,
+    W: Write,
+{
+    run_inner(config, input, output, false)
+}
+
+fn run_inner<R, W>(config: BridgeConfig, input: R, output: W, log_signals: bool) -> i32
 where
     R: Read + Send + 'static,
     W: Write,
@@ -146,6 +155,11 @@ where
         .log_dir
         .as_deref()
         .and_then(|dir| BridgeLog::open(dir, std::process::id()).ok());
+    if log_signals {
+        if let Some(log) = log.as_ref() {
+            signals::install(log.file(), &config.pty_id);
+        }
+    }
     let mut proxy = Proxy::new(config, output, log, tx, rx);
     proxy.log("started", None);
     match proxy.run() {
