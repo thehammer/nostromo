@@ -486,8 +486,11 @@ final class MotherNoticeSectionView: NSView {
 final class DetailDocumentView: NSView {
     override var isFlipped: Bool { true }
     var onLayout: (() -> Void)?
+    /// How many layout passes this view has had (tests bound it: a layout that keeps asking for itself shows here).
+    private(set) var layoutCount = 0
 
     override func layout() {
+        layoutCount += 1
         super.layout()
         onLayout?()
     }
@@ -516,8 +519,16 @@ final class MotherJobDetail: NSView {
     /// pinned to the clip's width.
     let contentScrollView = NSScrollView()
     private let content = DetailDocumentView()
-    /// The document's width, kept equal to the clip's (`syncContentWidth`).
+    /// The document's width, kept equal to the clip's (`syncContentWidth`). Never required: the content's own
+    /// required constraints (its margins, its stacks) win when the clip is narrower than they allow.
     private var contentWidth: NSLayoutConstraint!
+    /// How many times in a row `syncContentWidth` may ask the clip to lay out again for one and the same mismatch.
+    static let maxWidthRelayouts = 3
+    /// Names the document's width constraint, so that AppKit's own conflict reports (and the tests that read them) show it.
+    static let documentWidthConstraintIdentifier = "DetailDocumentView.clipWidth"
+    private struct WidthMismatch: Equatable { var target: Int; var actual: Int }
+    private var widthMismatch: WidthMismatch?
+    private var widthRelayouts = 0
 
     /// The three views of a job, chosen with the switch under the title.
     enum Segment: Int, CaseIterable {
@@ -759,7 +770,14 @@ final class MotherJobDetail: NSView {
         // takes its width out of the clip when the content outgrows the pane, which happens in the middle
         // of a layout pass, and a document pinned to the clip's edge was left at the old, wider width
         // (the Overview then scrolled sideways). The clip's width is read where it changes instead.
+        // Not required: it is created with the clip's width before the first layout (0), which the content's
+        // required margins cannot satisfy, and AppKit then breaks one of THEM (a required constraint) every time a
+        // detail is built. Above the content's compression resistance (750), so the content still gives way
+        // before the document grows past the clip, and below required, so a clip narrower than the content's
+        // minimum leaves the content intact.
         contentWidth = content.widthAnchor.constraint(equalToConstant: clip.bounds.width)
+        contentWidth.priority = NSLayoutConstraint.Priority(999)
+        contentWidth.identifier = Self.documentWidthConstraintIdentifier
         contentWidth.isActive = true
         clip.postsFrameChangedNotifications = true
         clip.postsBoundsChangedNotifications = true
@@ -1263,8 +1281,26 @@ final class MotherJobDetail: NSView {
         if abs(contentWidth.constant - width) > 0.01 { contentWidth.constant = width }
         // The clip's frame is changed by the scroll view's own tiling, in the middle of a layout pass, and
         // nothing then asks the clip to lay out its document again: the constraint says `width` while the
-        // document keeps its old frame (measured on a runner with legacy scrollers). Ask.
-        if abs(content.frame.width - width) > 0.5 { clip.needsLayout = true }
+        // document keeps its old frame (measured on a runner with legacy scrollers). Ask: but a bounded number
+        // of times for one mismatch, since the document can legitimately stay at a width other than the
+        // clip's (the clip is narrower than the content's minimum), and asking again would never end.
+        let actual = content.frame.width
+        guard abs(actual - width) > 0.5 else {
+            widthMismatch = nil
+            widthRelayouts = 0
+            return
+        }
+        let mismatch = WidthMismatch(target: Int(width.rounded()), actual: Int(actual.rounded()))
+        if mismatch != widthMismatch {
+            widthMismatch = mismatch
+            widthRelayouts = 0
+        }
+        guard widthRelayouts < Self.maxWidthRelayouts else { return }
+        widthRelayouts += 1
+        clip.needsLayout = true
+        if widthRelayouts == Self.maxWidthRelayouts {
+            log.error("Overview width: document stays \(mismatch.actual) wide in a \(mismatch.target) clip after \(Self.maxWidthRelayouts) layout requests; not asking again")
+        }
     }
 
     /// After a layout pass: put what the reader was looking at back where it was, and never let the
