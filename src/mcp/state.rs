@@ -247,7 +247,24 @@ pub struct McpSharedState {
 
     /// Live `nostromo-mcp-bridge` connections per pty id.
     pub bridges: Arc<crate::mcp::BridgeRegistry>,
+
+    /// Waits before each attempt to bring a lost bridge back (see
+    /// [`McpSharedState::bridge_closed`]). [`BRIDGE_HEAL_DELAYS`] by default;
+    /// tests shorten them.
+    pub bridge_heal_delays: Arc<[std::time::Duration]>,
 }
+
+/// When a session's last bridge goes away, the daemon asks the session's CLI
+/// to reconnect its `nostromo` MCP server after each of these waits, stopping
+/// as soon as a bridge is back, the session is gone, or the list runs out.
+/// The first wait rides out a bridge that is reconnecting by itself (a daemon
+/// restart); the bridge only exits when its CLI closes its stdin, and Claude
+/// Code never respawns it on its own.
+pub const BRIDGE_HEAL_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(15),
+    std::time::Duration::from_secs(60),
+    std::time::Duration::from_secs(300),
+];
 
 impl McpSharedState {
     /// Construct with all required watch receivers.
@@ -285,6 +302,7 @@ impl McpSharedState {
             budget_posture_rx,
             tool_stats: Arc::new(ToolStats::new()),
             bridges: Arc::new(crate::mcp::BridgeRegistry::default()),
+            bridge_heal_delays: Arc::new(BRIDGE_HEAL_DELAYS),
         }
     }
 
@@ -300,11 +318,70 @@ impl McpSharedState {
     }
 
     /// A bridge connection for `pty_id` closed. When it was the last one, the
-    /// app is told the pty's tools are offline.
+    /// app is told the pty's tools are offline, and (in the daemon) a task
+    /// starts that asks the session to reconnect them: see [`Self::heal_bridge`].
     pub fn bridge_closed(&self, pty_id: &str) {
         if self.bridges.close(pty_id) {
             self.announce_bridge(pty_id, false);
+            if self.daemon.is_some() {
+                if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                    let state = self.clone();
+                    let pty_id = pty_id.to_owned();
+                    rt.spawn(async move { state.heal_bridge(pty_id).await });
+                }
+            }
         }
+    }
+
+    /// Bring a lost bridge back: after each of [`Self::bridge_heal_delays`],
+    /// if `pty_id` still has no bridge, ask its session's CLI to reconnect the
+    /// `nostromo` MCP server (`mcp_reconnect`). Stops when a bridge is back,
+    /// when a later loss has started its own attempt (the connect count
+    /// moved), when the session is not running, or when the waits run out.
+    /// Resolves to the number of reconnect requests sent.
+    pub async fn heal_bridge(&self, pty_id: String) -> usize {
+        let Some(daemon) = &self.daemon else {
+            return 0;
+        };
+        let episode = self.bridges.reconnects(&pty_id);
+        let still_lost = |state: &Self| {
+            state.bridges.live(&pty_id) == 0 && state.bridges.reconnects(&pty_id) == episode
+        };
+        let mut sent = 0;
+        for (attempt, delay) in self.bridge_heal_delays.iter().enumerate() {
+            tokio::time::sleep(*delay).await;
+            if !still_lost(self) {
+                return sent;
+            }
+            let reconnect = daemon
+                .session_mgr
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .reconnect_tools(&pty_id);
+            sent += 1;
+            match reconnect.await {
+                Ok(()) => tracing::info!(
+                    pty = %pty_id,
+                    attempt = attempt + 1,
+                    "nostromo tools lost: asked the session to reconnect them"
+                ),
+                Err(reason)
+                    if crate::ipc::session_manager::tools_reconnect_session_gone(&reason) =>
+                {
+                    return sent;
+                }
+                Err(reason) => tracing::warn!(
+                    pty = %pty_id,
+                    attempt = attempt + 1,
+                    %reason,
+                    "nostromo tools lost: the reconnect request failed"
+                ),
+            }
+        }
+        if still_lost(self) {
+            tracing::warn!(pty = %pty_id, "nostromo tools lost: still offline after every reconnect attempt");
+        }
+        sent
     }
 
     fn announce_bridge(&self, pty_id: &str, connected: bool) {

@@ -1363,8 +1363,10 @@ fn backoff_jittered_delay_is_always_within_half_to_full_nominal_and_never_over_m
 // ── BridgeLog (library API) ───────────────────────────────────────────────────
 
 #[test]
-fn log_limits_are_twenty_files_and_256_kib() {
-    assert_eq!(MAX_LOG_FILES, 20);
+fn log_limits_are_a_hundred_files_and_256_kib() {
+    // More than the sessions one operator runs at once (22 were live when
+    // the old limit of 20 pruned a live bridge's log).
+    assert_eq!(MAX_LOG_FILES, 100);
     assert_eq!(MAX_LOG_BYTES, 256 * 1024);
 }
 
@@ -1388,9 +1390,10 @@ fn opening_a_log_creates_the_directory_and_a_private_pid_named_file() {
 }
 
 #[test]
-fn opening_a_log_keeps_only_the_twenty_newest_bridge_logs_including_its_own() {
+fn opening_a_log_keeps_only_the_newest_bridge_logs_including_its_own() {
     let dir = tempfile::tempdir().unwrap();
-    for i in 0..25u64 {
+    let old = MAX_LOG_FILES as u64 + 5;
+    for i in 0..old {
         let p = dir
             .path()
             .join(format!("mcp-bridge-{}.log", DEAD_PID_BASE + i));
@@ -1419,14 +1422,14 @@ fn opening_a_log_keeps_only_the_twenty_newest_bridge_logs_including_its_own() {
         bridge_logs.contains(&"mcp-bridge-99.log".to_string()),
         "own file must survive"
     );
-    // 26 files, keep 20 -> the 6 oldest (pids DEAD_PID_BASE..=DEAD_PID_BASE + 5) are gone.
+    // MAX + 6 files with our own, keep MAX -> the 6 oldest (pids DEAD_PID_BASE..=DEAD_PID_BASE + 5) are gone.
     for pid in DEAD_PID_BASE..=DEAD_PID_BASE + 5 {
         assert!(
             !bridge_logs.contains(&format!("mcp-bridge-{pid}.log")),
             "oldest log {pid} should have been pruned: {bridge_logs:?}"
         );
     }
-    for pid in DEAD_PID_BASE + 6..=DEAD_PID_BASE + 24 {
+    for pid in DEAD_PID_BASE + 6..DEAD_PID_BASE + old {
         assert!(
             bridge_logs.contains(&format!("mcp-bridge-{pid}.log")),
             "newer log {pid} must be kept: {bridge_logs:?}"

@@ -383,8 +383,10 @@ final class ToolsOfflineBadgeViewTests: XCTestCase {
     func testTheTooltipTellsTheOperatorHowToRecover() {
         let badge = ToolsOfflineBadgeView()
         let tip = badge.toolTip ?? ""
-        XCTAssertTrue(tip.contains("/mcp"), "the tooltip names the command that reconnects: \(tip)")
-        XCTAssertTrue(tip.lowercased().contains("restart"), "the tooltip offers restarting the session: \(tip)")
+        // `/mcp` cannot reconnect a server in a Nostromo pane, so it must not be the advice.
+        XCTAssertFalse(tip.contains("/mcp"), "the tooltip must not send the operator to /mcp: \(tip)")
+        XCTAssertTrue(tip.lowercased().contains("reconnect"), "the tooltip says Nostromo is reconnecting: \(tip)")
+        XCTAssertTrue(tip.contains("claude --continue"), "the tooltip names the restart that keeps the conversation: \(tip)")
         XCTAssertEqual(tip, ToolsOfflinePolicy.tooltip)
     }
 

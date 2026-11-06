@@ -39,6 +39,9 @@ impl From<ControlFailure> for String {
     }
 }
 
+/// The reason a control request fails with when the session's CLI has exited.
+pub(super) const SESSION_EXITED: &str = "the session exited";
+
 /// Send a control request and wait (≤ [`CONTROL_TIMEOUT`]) for its answer.
 pub(super) async fn control(
     shared: &Shared,
@@ -68,7 +71,6 @@ pub(super) async fn control_within(
         code: None,
         timed_out: false,
     };
-    const EXITED: &str = "the session exited";
     let id = format!("model-{}", Uuid::new_v4());
     let (tx, rx) = oneshot::channel();
     shared.waiters.lock().unwrap().insert(id.clone(), tx);
@@ -78,7 +80,7 @@ pub(super) async fn control_within(
         || write_control_request(&shared.stdin, &id, request).is_err()
     {
         shared.waiters.lock().unwrap().remove(&id);
-        return Err(failure(EXITED.to_owned(), false));
+        return Err(failure(SESSION_EXITED.to_owned(), false));
     }
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(reply)) if reply.ok => Ok(reply),
@@ -91,7 +93,7 @@ pub(super) async fn control_within(
             code: reply.error_code,
             timed_out: false,
         }),
-        Ok(Err(_)) => Err(failure(EXITED.to_owned(), false)),
+        Ok(Err(_)) => Err(failure(SESSION_EXITED.to_owned(), false)),
         Err(_) => {
             shared.waiters.lock().unwrap().remove(&id);
             Err(ControlFailure {

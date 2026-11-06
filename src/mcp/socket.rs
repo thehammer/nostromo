@@ -36,6 +36,10 @@ pub fn daemon_socket_path() -> PathBuf {
         .join("mcp-daemon.sock")
 }
 
+/// The name sessions know the Nostromo MCP server by (tools are
+/// `mcp__nostromo__*`). `mcp_reconnect` control requests address it by this name.
+pub const MCP_SERVER_NAME: &str = "nostromo";
+
 /// Write the `--mcp-config` file that registers the `nostromo-mcp-bridge` stdio
 /// server, and return its path. The bridge binary is resolved as a sibling of
 /// the running executable (so a dev build's `target/<profile>/` copy is found),
@@ -50,11 +54,12 @@ pub fn write_bridge_mcp_config() -> Option<PathBuf> {
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "nostromo-mcp-bridge".to_string());
 
-    let config = serde_json::json!({
-        "mcpServers": {
-            "nostromo": { "type": "stdio", "command": command }
-        }
-    });
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        MCP_SERVER_NAME.to_owned(),
+        serde_json::json!({ "type": "stdio", "command": command }),
+    );
+    let config = serde_json::json!({ "mcpServers": servers });
 
     let path = dirs_next::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
