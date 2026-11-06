@@ -479,9 +479,6 @@ impl ManagedSession {
 
 // ── SessionManager ────────────────────────────────────────────────────────────
 
-/// Shared daemon-side registry of running stream-json sessions.
-///
-/// All public methods take `&mut self` — callers hold the wrapping Mutex.
 /// How long [`SessionManager::reconnect_tools`] waits for the CLI: it starts a
 /// new bridge and replays the MCP handshake before it answers.
 pub const TOOLS_RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -490,6 +487,15 @@ pub const TOOLS_RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// running session for the tag (nothing to reconnect, so stop trying).
 pub const TOOLS_RECONNECT_NOT_RUNNING: &str = "the session is not running";
 
+/// Whether a [`SessionManager::reconnect_tools`] failure means the session is
+/// gone (not running, or exited while still listed), so retrying is pointless.
+pub fn tools_reconnect_session_gone(reason: &str) -> bool {
+    reason == TOOLS_RECONNECT_NOT_RUNNING || reason == control::SESSION_EXITED
+}
+
+/// Shared daemon-side registry of running stream-json sessions.
+///
+/// All public methods take `&mut self` — callers hold the wrapping Mutex.
 pub struct SessionManager {
     sessions: HashMap<String, ManagedSession>,
     client_senders: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ServerMsg>>>>,
@@ -2123,9 +2129,6 @@ impl SessionManager {
         self.task_io = config;
     }
 
-    /// Stop one of `tag`'s background tasks. The returned future owns what it
-    /// needs, so it can be awaited without the manager's lock. Nothing is sent
-    /// to the CLI for a session or task that is not there or has ended.
     /// Ask the session's CLI to restart its `nostromo` MCP server (the
     /// `nostromo-mcp-bridge` child). Claude Code never respawns a stdio server
     /// that has gone away, and a Nostromo session has no terminal `/mcp` menu,
@@ -2155,6 +2158,9 @@ impl SessionManager {
         }
     }
 
+    /// Stop one of `tag`'s background tasks. The returned future owns what it
+    /// needs, so it can be awaited without the manager's lock. Nothing is sent
+    /// to the CLI for a session or task that is not there or has ended.
     pub fn task_stop(
         &self,
         tag: &str,

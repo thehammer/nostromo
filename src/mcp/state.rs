@@ -366,7 +366,7 @@ impl McpSharedState {
                     "nostromo tools lost: asked the session to reconnect them"
                 ),
                 Err(reason)
-                    if reason == crate::ipc::session_manager::TOOLS_RECONNECT_NOT_RUNNING =>
+                    if crate::ipc::session_manager::tools_reconnect_session_gone(&reason) =>
                 {
                     return sent;
                 }

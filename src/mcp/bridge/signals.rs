@@ -16,25 +16,46 @@ use std::sync::OnceLock;
 const SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
 static LOG_FD: AtomicI32 = AtomicI32::new(-1);
-static PREFIX: OnceLock<Box<[u8]>> = OnceLock::new();
+/// One complete log line per entry of [`SIGNALS`], built before any handler
+/// is installed so the handler only has to `write` it in one call.
+static LINES: OnceLock<[Box<[u8]>; 3]> = OnceLock::new();
+
+/// The line logged when `sig` arrives.
+fn line_for(pty_id: &str, sig: libc::c_int) -> Box<[u8]> {
+    format!("pty={pty_id} event=signal_{sig}\n")
+        .into_bytes()
+        .into_boxed_slice()
+}
+
+/// `true` when `sig` is currently ignored (inherited `SIG_IGN`, e.g. under
+/// `nohup`): such a signal is left alone, so the bridge does not start dying
+/// of something its parent asked it to ignore.
+fn is_ignored(sig: libc::c_int) -> bool {
+    // SAFETY: a null new action only reads the current disposition into `old`.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(sig, std::ptr::null(), &mut old) == 0 && old.sa_sigaction == libc::SIG_IGN
+    }
+}
 
 /// Install the handlers, writing to a duplicate of `log`'s descriptor. Call
-/// once; later calls do nothing.
+/// once; later calls do nothing. Signals that are already ignored are skipped.
 pub fn install(log: &std::fs::File, pty_id: &str) {
-    if PREFIX.get().is_some() {
+    if LINES.get().is_some() {
         return;
     }
     let Ok(dup) = log.try_clone() else {
         return;
     };
-    let prefix = format!("pty={pty_id} event=signal_")
-        .into_bytes()
-        .into_boxed_slice();
-    if PREFIX.set(prefix).is_err() {
+    let lines = SIGNALS.map(|sig| line_for(pty_id, sig));
+    if LINES.set(lines).is_err() {
         return;
     }
     LOG_FD.store(dup.into_raw_fd(), Ordering::SeqCst);
     for sig in SIGNALS {
+        if is_ignored(sig) {
+            continue;
+        }
         // SAFETY: `on_signal` only calls async-signal-safe functions
         // (`write`, `signal`, `raise`) and reads statics set before this point.
         unsafe {
@@ -46,39 +67,16 @@ pub fn install(log: &std::fs::File, pty_id: &str) {
     }
 }
 
-/// `sig` as decimal digits and a newline, without allocating (the handler's tail).
-fn digits(sig: libc::c_int) -> ([u8; 12], usize) {
-    let mut buf = [0u8; 12];
-    let mut n = sig.unsigned_abs();
-    let mut tmp = [0u8; 10];
-    let mut i = 0;
-    loop {
-        tmp[i] = b'0' + (n % 10) as u8;
-        i += 1;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    let mut len = 0;
-    while i > 0 {
-        i -= 1;
-        buf[len] = tmp[i];
-        len += 1;
-    }
-    buf[len] = b'\n';
-    (buf, len + 1)
-}
-
 extern "C" fn on_signal(sig: libc::c_int) {
     let fd = LOG_FD.load(Ordering::SeqCst);
     if fd >= 0 {
-        if let Some(prefix) = PREFIX.get() {
-            let (tail, tail_len) = digits(sig);
-            // SAFETY: plain writes of initialised buffers to an owned fd.
-            unsafe {
-                libc::write(fd, prefix.as_ptr().cast(), prefix.len());
-                libc::write(fd, tail.as_ptr().cast(), tail_len);
+        if let Some(lines) = LINES.get() {
+            if let Some(i) = SIGNALS.iter().position(|&s| s == sig) {
+                let line = &lines[i];
+                // SAFETY: one write of an initialised buffer to an owned fd.
+                unsafe {
+                    libc::write(fd, line.as_ptr().cast(), line.len());
+                }
             }
         }
     }
@@ -95,12 +93,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signal_numbers_are_written_as_decimal_lines() {
-        let (buf, len) = digits(15);
-        assert_eq!(&buf[..len], b"15\n");
-        let (buf, len) = digits(1);
-        assert_eq!(&buf[..len], b"1\n");
-        let (buf, len) = digits(2_147_483_647);
-        assert_eq!(&buf[..len], b"2147483647\n");
+    fn the_logged_line_names_the_pty_and_the_signal_number() {
+        assert_eq!(
+            &*line_for("careport-1", 15),
+            b"pty=careport-1 event=signal_15\n"
+        );
+        assert_eq!(
+            &*line_for("x", libc::SIGHUP),
+            format!("pty=x event=signal_{}\n", libc::SIGHUP).as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_signal_with_the_default_action_is_not_reported_as_ignored() {
+        // SIGTERM's disposition is the default in the test process.
+        assert!(!is_ignored(libc::SIGTERM));
     }
 }

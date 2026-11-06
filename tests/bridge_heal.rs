@@ -107,37 +107,54 @@ impl Fixture {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lost_bridge_is_reconnected_through_the_session() {
+async fn closing_the_last_bridge_is_enough_to_get_a_reconnect() {
+    // Only what the MCP server does when a bridge's socket ends: no manual heal.
     let f = fixture(&[Duration::from_millis(50)]);
     f.spawn_session();
     f.state.bridge_opened(TAG);
     f.state.bridge_closed(TAG);
 
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while f.requests().is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let requests = f.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "bridge_closed alone must lead to one reconnect request"
+    );
+    let r = &requests[0];
+    assert_eq!(r["type"], "control_request");
+    assert_eq!(r["request"]["subtype"], "mcp_reconnect");
+    assert_eq!(r["request"]["serverName"], "nostromo");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lost_bridge_is_reconnected_through_the_session() {
+    let f = fixture(&[Duration::from_millis(50)]);
+    f.spawn_session();
+    f.state.bridge_opened(TAG);
+    // Not via bridge_closed, so this heal is the only one.
+    f.state.bridges.close(TAG);
+
     let sent = f.state.heal_bridge(TAG.to_owned()).await;
 
     assert_eq!(sent, 1, "one reconnect request while the bridge is gone");
-    let requests = f.requests();
-    // Two requests: the one bridge_closed's own task sent and this one; both
-    // are the same request, and neither names anything but our server.
-    assert!(!requests.is_empty());
-    for r in &requests {
-        assert_eq!(r["type"], "control_request");
-        assert_eq!(r["request"]["subtype"], "mcp_reconnect");
-        assert_eq!(r["request"]["serverName"], "nostromo");
-    }
+    assert_eq!(f.requests().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bridge_that_comes_back_by_itself_is_left_alone() {
-    let f = fixture(&[Duration::from_millis(200)]);
+    let f = fixture(&[Duration::from_millis(1_000)]);
     f.spawn_session();
     f.state.bridge_opened(TAG);
     f.state.bridge_closed(TAG);
-    // The bridge reconnects on its own (a daemon restart) inside the wait.
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // The bridge reconnects on its own (a daemon restart) well inside the wait.
     f.state.bridge_opened(TAG);
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
     assert!(
         f.requests().is_empty(),
         "no reconnect for a bridge that came back"
