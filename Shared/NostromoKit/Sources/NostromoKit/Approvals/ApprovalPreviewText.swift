@@ -31,6 +31,7 @@ public enum ApprovalPreviewText {
 
     public struct Line: Equatable {
         public let spans: [Span]
+        public init(spans: [Span]) { self.spans = spans }
         public var text: String { spans.map(\.text).joined() }
         public var hasWarning: Bool { spans.contains { $0.style == .warning } }
     }

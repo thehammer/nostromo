@@ -35,7 +35,8 @@ final class ApprovalPreviewTextTests: XCTestCase {
 
     func testAPartialCountSaysAtLeast() {
         XCTAssertEqual(texts(preview([dir("/tmp/x", atLeast: true)], state: .partial)),
-                       ["/tmp/x — at least 3 directories · 41,208 files · 1.2 GB"])
+                       ["/tmp/x — at least 3 directories · 41,208 files · 1.2 GB",
+                        "and possibly more (stopped counting early)"])
     }
 
     func testAMissingPathDoesNotExist() {
