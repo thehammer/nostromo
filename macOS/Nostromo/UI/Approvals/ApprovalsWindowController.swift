@@ -11,24 +11,11 @@ import NostromoKit
 // responder), and a click in it makes it key like any window. It is not in `AppDelegate.windows`, so app-control's
 // `screenshot`, `tree`, `find` and `click` cannot reach it (its text would otherwise bypass the screenshot policy).
 
-/// The panel. Esc closes it.
+/// The panel. Esc closes it (`cancelOperation`).
 final class ApprovalsPanel: NSPanel {
-    static let escapeKeyCode: UInt16 = 53
-
     override var canBecomeKey: Bool { true }
     /// The main window stays the main window while this one is key.
     override var canBecomeMain: Bool { false }
-
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            .subtracting([.numericPad, .function, .capsLock])
-        if event.keyCode == Self.escapeKeyCode, flags.isEmpty {
-            close()
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
 
     override func cancelOperation(_ sender: Any?) { close() }
 }
@@ -69,6 +56,7 @@ final class ApprovalsWindowManager: NSObject, NSWindowDelegate {
         let (panel, view) = ensureWindow()
         view.apply(link: link)
         if !panel.isVisible { place(panel) }
+        ActivationAudit.note("approvals-window:orderFront")
         panel.orderFront(nil)
     }
 

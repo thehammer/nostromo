@@ -202,9 +202,13 @@ final class ApprovalsLogReader {
     }
 
     private var slots: [String: Slot] = [:]
+    private let clock: () -> Date
+
+    init(clock: @escaping () -> Date = Date.init) { self.clock = clock }
 
     func read(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int,
-              store: ApprovalsLogStore = .shared, now: Date = Date()) -> Result {
+              store: ApprovalsLogStore = .shared) -> Result {
+        let now = clock()
         let key = [tag ?? "", outcome ?? "", sinceMs.map(String.init) ?? "", String(limit)].joined(separator: "|")
         if let slot = slots[key] {
             if case .loading = slot.result { return .loading }
@@ -214,7 +218,7 @@ final class ApprovalsLogReader {
         store.query(tag: tag, outcome: outcome, sinceMs: sinceMs, limit: limit, cursor: nil) { [weak self] reply in
             let result: Result
             if case .answered(let page) = reply { result = .ready(page) } else { result = .failed(reply.problem ?? "failed") }
-            self?.slots[key] = Slot(result: result, at: Date())
+            self?.slots[key] = Slot(result: result, at: self?.clock() ?? now)
         }
         // A request that failed at once (no connection) has already answered.
         return slots[key]?.result ?? .loading

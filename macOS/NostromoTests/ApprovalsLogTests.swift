@@ -343,16 +343,14 @@ final class ApprovalsLogViewTests: XCTestCase {
 
     func testShowInTranscriptRevealsTheCallOnceAndNothingElseInTheWindowDoes() throws {
         let w = ApprovalsLogWorld()
-        w.open(rows: [ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1"), ApprovalsLogFixtures.row("r2", toolUseId: "toolu_2")],
-               next: "c1")
+        w.open(rows: [ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1"), ApprovalsLogFixtures.row("r2", toolUseId: "toolu_2")])
         // Everything else the window can do.
         w.view.setOutcomeFilter(.denied)
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")], next: "c2"))
+        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")]))
         w.view.setFocusFilter("cody-1")
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")], next: "c3"))
+        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")]))
         w.view.toggleExpanded(rowId: "r1")
         w.store.ingest(try ApprovalsLogFixtures.detailFrame(id: "r1", command: "ls"))
-        w.view.loadNextPage()
         w.view.toggleExpanded(rowId: "r1")
         w.view.showAll()
         XCTAssertTrue(w.revealer.revealed.isEmpty, "only Show in transcript moves a transcript")
@@ -600,10 +598,12 @@ final class ApprovalsLogAppControlTests: XCTestCase {
 
     func testTheReaderAnswersLoadingThenTheRowsThenReadsAfresh() {
         let w = ApprovalsLogWorld()
-        let reader = ApprovalsLogReader()
-        let t0 = Date(timeIntervalSince1970: 1_000)
+        var now = Date(timeIntervalSince1970: 1_000)
+        let t0 = now
+        let reader = ApprovalsLogReader(clock: { now })
         func read(at date: Date) -> ApprovalsLogReader.Result {
-            reader.read(tag: "cody-1", outcome: "denied", sinceMs: nil, limit: 20, store: w.store, now: date)
+            now = date
+            return reader.read(tag: "cody-1", outcome: "denied", sinceMs: nil, limit: 20, store: w.store)
         }
         guard case .loading = read(at: t0) else { return XCTFail("the first ask starts the read") }
         XCTAssertEqual(w.recorder.queries, [.init(tag: "cody-1", outcome: "denied", sinceMs: nil, limit: 20, cursor: nil)])
@@ -657,15 +657,15 @@ final class ApprovalsLogScrollSafetyTests: XCTestCase {
             }
             let view = try XCTUnwrap(windows.logView)
             rig.assertNoMove("the first page arrives \(at)", following: following) {
-                world.store.ingest(ApprovalsLogFixtures.page(rows, next: "c1"))
+                world.store.ingest(ApprovalsLogFixtures.page(rows))
             }
             rig.assertNoMove("the outcome filter changes \(at)", following: following) {
                 view.setOutcomeFilter(.denied)
-                world.store.ingest(ApprovalsLogFixtures.page(rows, next: "c1"))
+                world.store.ingest(ApprovalsLogFixtures.page(rows))
             }
             rig.assertNoMove("the focus filter changes \(at)", following: following) {
                 view.setFocusFilter("cody-1")
-                world.store.ingest(ApprovalsLogFixtures.page(rows, next: "c1"))
+                world.store.ingest(ApprovalsLogFixtures.page(rows))
             }
             rig.assertNoMove("a row expands \(at)", following: following) {
                 view.toggleExpanded(rowId: "r1")
