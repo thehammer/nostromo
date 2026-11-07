@@ -492,6 +492,324 @@ final class ApprovalQuestionFormViewTests: MouseQueueTestCase {
         }
         XCTAssertNil(window.defaultButtonCell)
     }
+
+    // MARK: Option rows: each question keeps its own choice
+
+    /// Two single-select questions: the case where a choice in one used to un-mark the choice in the other.
+    private var twoSingleSelect: [Q.Obj] {
+        [Q.database, Q.question("Which cache?", header: "Cache", options: [Q.option("Redis", "In-memory"), Q.option("Memcached", "Simple")])]
+    }
+
+    private func checkShown(_ button: NSButton?) -> Bool {
+        guard let check = (button as? ApprovalChoiceButton)?.checkmark else { return false }
+        return !check.isHiddenOrHasHiddenAncestor
+    }
+
+    private func accessibilityValue(_ button: NSButton?) -> Int? {
+        (button?.accessibilityValue() as? NSNumber)?.intValue
+    }
+
+    /// Every option row and Other row of the form, in question order.
+    private func allRows(_ form: ApprovalQuestionFormView) -> [NSButton] {
+        var rows: [NSButton] = []
+        for q in 0 ..< form.selections.count {
+            var o = 0
+            while let row = form.optionButton(question: q, option: o) { rows.append(row); o += 1 }
+            if let other = form.otherButton(question: q) { rows.append(other) }
+        }
+        return rows
+    }
+
+    /// What a person can see of each row: whether it is marked, whether its check shows, what Accessibility reports.
+    private func look(_ form: ApprovalQuestionFormView) -> [String] {
+        allRows(form).map { "\($0.identifier?.rawValue ?? "?") state=\($0.state.rawValue) check=\(checkShown($0)) value=\(accessibilityValue($0) ?? -1)" }
+    }
+
+    /// Where everything of the form is: its direct views and the texts inside each row.
+    private func geometry(_ form: ApprovalQuestionFormView) -> [CGRect] {
+        form.subviews.map(\.frame) + form.subviews.compactMap { $0 as? ApprovalChoiceButton }.flatMap { $0.subviews.map(\.frame) }
+    }
+
+    private func relayout(_ form: ApprovalQuestionFormView) {
+        form.needsLayout = true
+        form.layoutSubtreeIfNeeded()
+    }
+
+    private func sendKey(_ characters: String, _ code: UInt16, to window: NSWindow) {
+        let down = GestureFixtures.key(.keyDown, in: window, characters: characters, keyCode: code)
+        _ = window.performKeyEquivalent(with: down)
+        window.sendEvent(down)
+        window.sendEvent(GestureFixtures.key(.keyUp, in: window, characters: characters, keyCode: code))
+    }
+
+    func testChoosingInASecondSingleSelectQuestionKeepsTheFirstQuestionsChoiceMarked() throws {
+        let (form, _) = try makeForm(twoSingleSelect)
+        let first = form.optionButton(question: 0, option: 0)
+        QuestionTestViews.press(first)
+        XCTAssertTrue(on(first), "precondition")
+
+        QuestionTestViews.press(form.optionButton(question: 1, option: 1))
+
+        XCTAssertTrue(on(first), "the first answer is still marked")
+        XCTAssertTrue(checkShown(first), "and still shows its check")
+        XCTAssertEqual(accessibilityValue(first), 1)
+        XCTAssertFalse(on(form.optionButton(question: 0, option: 1)))
+        XCTAssertTrue(on(form.optionButton(question: 1, option: 1)))
+        XCTAssertTrue(checkShown(form.optionButton(question: 1, option: 1)))
+        XCTAssertFalse(checkShown(form.optionButton(question: 1, option: 0)))
+        XCTAssertEqual(form.selections[0].selected, [0], "the model kept it too")
+        XCTAssertEqual(form.selections[1].selected, [1])
+        XCTAssertEqual(form.answers, [
+            ApprovalQuestionAnswer(question: "Which database should we use?", selected: ["Postgres"], other: nil),
+            ApprovalQuestionAnswer(question: "Which cache?", selected: ["Memcached"], other: nil),
+        ])
+    }
+
+    func testEachSingleSelectQuestionKeepsItsOwnChoiceHoweverTheAnswersAreOrdered() throws {
+        let (form, _) = try makeForm(twoSingleSelect)
+        QuestionTestViews.press(form.optionButton(question: 1, option: 0))   // the second question first
+        QuestionTestViews.press(form.optionButton(question: 0, option: 1))
+        XCTAssertTrue(on(form.optionButton(question: 1, option: 0)), "answering the first question leaves the second's answer")
+        XCTAssertTrue(on(form.optionButton(question: 0, option: 1)))
+
+        QuestionTestViews.press(form.optionButton(question: 0, option: 0))   // changing one answer
+        XCTAssertTrue(on(form.optionButton(question: 0, option: 0)))
+        XCTAssertFalse(on(form.optionButton(question: 0, option: 1)))
+        XCTAssertTrue(on(form.optionButton(question: 1, option: 0)), "does not touch the other")
+        XCTAssertTrue(checkShown(form.optionButton(question: 1, option: 0)))
+        XCTAssertEqual(form.selections.map(\.selected), [[0], [0]])
+        XCTAssertTrue(form.isComplete)
+    }
+
+    func testTypingOtherInOneQuestionDoesNotUnmarkAnotherQuestionsChoice() throws {
+        let (form, window) = try makeForm(twoSingleSelect)
+        QuestionTestViews.press(form.optionButton(question: 0, option: 1))
+        QuestionTestViews.enter("Valkey", into: try XCTUnwrap(form.otherField(question: 1)), in: window)
+        XCTAssertTrue(on(form.optionButton(question: 0, option: 1)))
+        XCTAssertTrue(checkShown(form.optionButton(question: 0, option: 1)))
+        XCTAssertTrue(on(form.otherButton(question: 1)))
+        XCTAssertEqual(form.selections[0].selected, [1])
+    }
+
+    // MARK: Option rows: multi-select and Other
+
+    func testMultiSelectRowsToggleOnAndOffIndependentlyAndTheirCheckFollows() throws {
+        let (form, _) = try makeForm()
+        func state() -> [Bool] { (0 ..< 3).map { on(form.optionButton(question: 1, option: $0)) } }
+        func checks() -> [Bool] { (0 ..< 3).map { checkShown(form.optionButton(question: 1, option: $0)) } }
+        func values() -> [Int?] { (0 ..< 3).map { accessibilityValue(form.optionButton(question: 1, option: $0)) } }
+
+        QuestionTestViews.press(form.optionButton(question: 1, option: 1))
+        XCTAssertEqual(state(), [false, true, false])
+        XCTAssertEqual(checks(), [false, true, false])
+        XCTAssertEqual(values(), [0, 1, 0])
+
+        QuestionTestViews.press(form.optionButton(question: 1, option: 0))
+        XCTAssertEqual(state(), [true, true, false], "ticking one row leaves the other ticked row alone")
+        XCTAssertEqual(checks(), [true, true, false])
+
+        QuestionTestViews.press(form.optionButton(question: 1, option: 1))
+        XCTAssertEqual(state(), [true, false, false], "a ticked row is un-ticked by pressing it again")
+        XCTAssertEqual(checks(), [true, false, false])
+        XCTAssertEqual(values(), [1, 0, 0])
+        XCTAssertEqual(form.selections[1].selected, [0])
+        XCTAssertEqual(form.selections[0], ApprovalQuestionSelection(), "the other question is untouched")
+    }
+
+    func testTheOtherRowOfAMultiSelectQuestionTogglesOnAndOffAndLeavesTheOptionsAlone() throws {
+        let (form, _) = try makeForm()
+        QuestionTestViews.press(form.optionButton(question: 1, option: 2))
+        let other = form.otherButton(question: 1)
+
+        QuestionTestViews.press(other)
+        XCTAssertTrue(on(other))
+        XCTAssertTrue(checkShown(other))
+        XCTAssertEqual(accessibilityValue(other), 1)
+        XCTAssertTrue(on(form.optionButton(question: 1, option: 2)))
+
+        QuestionTestViews.press(other)
+        XCTAssertFalse(on(other))
+        XCTAssertFalse(checkShown(other))
+        XCTAssertEqual(accessibilityValue(other), 0)
+        XCTAssertTrue(on(form.optionButton(question: 1, option: 2)), "un-ticking Other keeps the ticked option")
+    }
+
+    func testTypingInOtherMarksTheOtherRowAndShowsItsCheck() throws {
+        let (form, window) = try makeForm()
+        QuestionTestViews.press(form.optionButton(question: 0, option: 0))
+        let other = form.otherButton(question: 0)
+        XCTAssertFalse(checkShown(other), "precondition")
+
+        QuestionTestViews.enter("Oracle", into: try XCTUnwrap(form.otherField(question: 0)), in: window)
+
+        XCTAssertTrue(on(other))
+        XCTAssertTrue(checkShown(other))
+        XCTAssertEqual(accessibilityValue(other), 1)
+        XCTAssertFalse(on(form.optionButton(question: 0, option: 0)), "a single-select question has one choice")
+        XCTAssertFalse(checkShown(form.optionButton(question: 0, option: 0)))
+        XCTAssertEqual(accessibilityValue(form.optionButton(question: 0, option: 0)), 0)
+    }
+
+    func testARefusedGestureLeavesEveryRowAndTheModelAsTheyWere() throws {
+        let (form, window) = try makeForm()
+        QuestionTestViews.press(form.optionButton(question: 0, option: 1))
+        QuestionTestViews.press(form.optionButton(question: 1, option: 0))
+        QuestionTestViews.enter("Logging", into: try XCTUnwrap(form.otherField(question: 1)), in: window)
+        let selections = form.selections
+        let before = look(form)
+        var changes = 0
+        form.onChange = { changes += 1 }
+
+        form.permit = { _, _ in false }
+        for row in allRows(form) {
+            QuestionTestViews.press(row)
+            QuestionTestViews.forcePress(row)
+        }
+
+        XCTAssertEqual(form.selections, selections, "nothing was chosen or cleared")
+        XCTAssertEqual(look(form), before, "every row, its check and its Accessibility value, Other included, look as before")
+        XCTAssertEqual(changes, 0, "and nothing was announced")
+    }
+
+    // MARK: Option rows: nothing moves when a choice is made
+
+    func testChoosingAndUnchoosingNeverMovesOrResizesAnythingInTheForm() throws {
+        let long = String(String(repeating: "word ", count: 80).prefix(400))
+        let variants: [(name: String, questions: [Q.Obj])] = [
+            ("fixture", Q.fixture),
+            ("long labels and descriptions", [
+                Q.question("Which one?", header: "H", options: [Q.option(long, long), Q.option("Short", long), Q.option(long, "")]),
+                Q.question("Which others?", header: "M", multi: true, options: [Q.option("Alpha", long), Q.option(long, "Beta")]),
+            ]),
+        ]
+        for variant in variants {
+            let (form, window) = try makeForm(variant.questions)
+            let frames = geometry(form)
+            let height = form.contentHeight(forWidth: 500)
+            XCTAssertFalse(frames.isEmpty)
+
+            func assertUnmoved(_ step: String) {
+                relayout(form)
+                XCTAssertEqual(geometry(form), frames, "\(variant.name): after \(step)")
+                XCTAssertEqual(form.contentHeight(forWidth: 500), height, "\(variant.name): after \(step)")
+                XCTAssertEqual(form.frame.height, height, "\(variant.name): after \(step)")
+            }
+
+            QuestionTestViews.press(form.optionButton(question: 0, option: 0)); assertUnmoved("choosing a row")
+            QuestionTestViews.press(form.optionButton(question: 0, option: 1)); assertUnmoved("choosing another row")
+            QuestionTestViews.press(form.optionButton(question: 1, option: 0)); assertUnmoved("ticking a row")
+            QuestionTestViews.press(form.optionButton(question: 1, option: 1)); assertUnmoved("ticking a second row")
+            QuestionTestViews.press(form.optionButton(question: 1, option: 0)); assertUnmoved("un-ticking a row")
+            QuestionTestViews.press(form.otherButton(question: 0)); assertUnmoved("choosing Other")
+            QuestionTestViews.press(form.otherButton(question: 1)); assertUnmoved("ticking Other")
+            QuestionTestViews.enter("Oracle", into: try XCTUnwrap(form.otherField(question: 0)), in: window); assertUnmoved("typing in Other")
+            QuestionTestViews.press(form.optionButton(question: 0, option: 0)); assertUnmoved("replacing Other with a row")
+            QuestionTestViews.press(form.otherButton(question: 1)); assertUnmoved("un-ticking Other")
+            form.isEnabled = false; assertUnmoved("disabling the form")
+        }
+    }
+
+    // MARK: Option rows: accessibility and keys
+
+    func testEveryRowIsARadioButtonOrACheckBoxByItsQuestionsModeOtherRowsIncluded() throws {
+        let (form, _) = try makeForm()
+        for o in 0 ..< 2 { XCTAssertEqual(form.optionButton(question: 0, option: o)?.accessibilityRole(), .radioButton) }
+        XCTAssertEqual(form.otherButton(question: 0)?.accessibilityRole(), .radioButton)
+        for o in 0 ..< 3 { XCTAssertEqual(form.optionButton(question: 1, option: o)?.accessibilityRole(), .checkBox) }
+        XCTAssertEqual(form.otherButton(question: 1)?.accessibilityRole(), .checkBox)
+    }
+
+    func testARowsAccessibilityValueIsOneWhenChosenAndZeroOtherwise() throws {
+        let (form, _) = try makeForm()
+        for row in allRows(form) { XCTAssertEqual(accessibilityValue(row), 0, "\(row.identifier?.rawValue ?? "?") starts unchosen") }
+
+        QuestionTestViews.press(form.optionButton(question: 0, option: 1))
+        QuestionTestViews.press(form.optionButton(question: 1, option: 0))
+        QuestionTestViews.press(form.optionButton(question: 1, option: 2))
+        XCTAssertEqual(allRows(form).map { accessibilityValue($0) }, [0, 1, 0,  1, 0, 1, 0])
+
+        QuestionTestViews.press(form.optionButton(question: 1, option: 2))
+        QuestionTestViews.press(form.optionButton(question: 0, option: 0))
+        XCTAssertEqual(allRows(form).map { accessibilityValue($0) }, [1, 0, 0,  1, 0, 0, 0])
+    }
+
+    func testARowsAccessibilityLabelNamesTheOptionAndItsHelpIsTheDescription() throws {
+        let (form, _) = try makeForm()
+        let expected: [(q: Int, o: Int, label: String, help: String)] = [
+            (0, 0, "Postgres", "Relational, strong consistency"), (0, 1, "SQLite", "Embedded, zero setup"),
+            (1, 0, "Caching", "In-memory response cache"), (1, 1, "Metrics", "Prometheus endpoint"),
+            (1, 2, "Tracing", "OpenTelemetry spans"),
+        ]
+        for e in expected {
+            let row = form.optionButton(question: e.q, option: e.o)
+            XCTAssertTrue(row?.accessibilityLabel()?.contains(e.label) == true, "\(e.label): \(row?.accessibilityLabel() ?? "nil")")
+            XCTAssertTrue(row?.accessibilityHelp()?.contains(e.help) == true, "\(e.label): \(row?.accessibilityHelp() ?? "nil")")
+        }
+    }
+
+    func testARowHasNoAccessibilityChildrenOfItsOwn() throws {
+        let (form, _) = try makeForm()
+        for row in allRows(form) {
+            XCTAssertTrue((row.accessibilityChildren() ?? []).isEmpty,
+                          "`\(row.identifier?.rawValue ?? "?")`: its label and description are its name and help, not separate elements")
+        }
+    }
+
+    func testRowsTakeKeyboardFocusOnlyWhileTheFormIsEnabled() throws {
+        let (form, _) = try makeForm()
+        for row in allRows(form) { XCTAssertTrue(row.acceptsFirstResponder, row.identifier?.rawValue ?? "?") }
+
+        form.isEnabled = false
+        for row in allRows(form) { XCTAssertFalse(row.acceptsFirstResponder, row.identifier?.rawValue ?? "?") }
+
+        form.isEnabled = true
+        for row in allRows(form) { XCTAssertTrue(row.acceptsFirstResponder, row.identifier?.rawValue ?? "?") }
+    }
+
+    func testNoRowHasAKeyEquivalentAndNoneCanBeGivenOne() throws {
+        let (form, _) = try makeForm()
+        for row in allRows(form) {
+            XCTAssertEqual(row.keyEquivalent, "", row.identifier?.rawValue ?? "?")
+            row.keyEquivalent = "\r"
+            XCTAssertEqual(row.keyEquivalent, "", "\(row.identifier?.rawValue ?? "?") cannot be made a default button")
+        }
+    }
+
+    func testReturnOrAnArrowKeyOnAFocusedRowChoosesNothingAndChangesNothing() throws {
+        let (form, window) = try makeForm()
+        QuestionTestViews.press(form.optionButton(question: 0, option: 0))
+        QuestionTestViews.press(form.optionButton(question: 1, option: 1))
+        let selections = form.selections
+        let before = look(form)
+        var changes = 0
+        form.onChange = { changes += 1 }
+
+        for row in allRows(form) {
+            XCTAssertTrue(window.makeFirstResponder(row), "precondition: \(row.identifier?.rawValue ?? "?") takes focus")
+            sendKey("\r", 36, to: window)
+            XCTAssertEqual(form.selections, selections, "Return on `\(row.identifier?.rawValue ?? "?")`")
+            _ = window.makeFirstResponder(row)
+            let arrows: [(characters: String, code: UInt16)] = [("\u{F701}", 125), ("\u{F700}", 126), ("\u{F702}", 123), ("\u{F703}", 124)]
+            for arrow in arrows {   // down, up, left, right: they only move focus
+                _ = window.makeFirstResponder(row)
+                sendKey(arrow.characters, arrow.code, to: window)
+            }
+            XCTAssertEqual(form.selections, selections, "arrow keys on `\(row.identifier?.rawValue ?? "?")`")
+        }
+
+        XCTAssertEqual(look(form), before)
+        XCTAssertEqual(changes, 0)
+    }
+
+    func testAClickAnywhereInARowIsAClickOnTheRowNotOnItsText() throws {
+        let (form, _) = try makeForm()
+        let row = try XCTUnwrap(form.optionButton(question: 0, option: 0))
+        let superview = try XCTUnwrap(form.superview)
+        for label in [form.optionLabel(question: 0, option: 0), form.descriptionLabel(question: 0, option: 0)] {
+            let point = superview.convert(NSPoint(x: label.bounds.midX, y: label.bounds.midY), from: label)
+            XCTAssertTrue(form.hitTest(point) === row, "a click on `\(label.stringValue)` reaches its row")
+        }
+    }
 }
 
 // MARK: - The card around it
@@ -1860,6 +2178,86 @@ final class ApprovalQuestionCardTests: MouseQueueTestCase {
         }
         XCTAssertTrue(h.card.submitButton?.accessibilityLabel()?.localizedCaseInsensitiveContains("submit") == true)
     }
+
+    // MARK: Option rows: two single-select questions, no click submits, nothing moves
+
+    private var twoSingleSelect: [Q.Obj] {
+        [Q.database, Q.question("Which cache?", header: "Cache", options: [Q.option("Redis", "In-memory"), Q.option("Memcached", "Simple")])]
+    }
+
+    func testAnswersToTwoSingleSelectQuestionsAreBothKeptAndBothSent() throws {
+        let h = try harness(try Q.ask(twoSingleSelect))
+        try choose(h, 0, 0)         // Postgres
+        try choose(h, 1, 1)         // Memcached: must not unmark Postgres
+
+        try assertChoice(h, 0, options: [0], other: false)
+        try assertChoice(h, 1, options: [1], other: false)
+        XCTAssertTrue(try submitButton(h).isEnabled)
+
+        press(try submitButton(h))
+
+        XCTAssertEqual(h.recorder.sent.count, 1)
+        let sent = try XCTUnwrap(h.recorder.sent.first)
+        XCTAssertEqual(try decisionJSON(sent),
+                       #"{"answers":[{"question":"Which database should we use?","selected":["Postgres"]},"#
+                       + #"{"question":"Which cache?","selected":["Memcached"]}],"#
+                       + #""kind":"answer_questions"}"#)
+    }
+
+    func testAnAnswerToASingleSelectQuestionSurvivesAnswersToTheOtherQuestionsInAnyOrder() throws {
+        let h = try harness(try Q.ask(twoSingleSelect))
+        try choose(h, 1, 0)
+        try choose(h, 0, 1)
+        try choose(h, 1, 1)
+        try assertChoice(h, 0, options: [1], other: false)
+        try assertChoice(h, 1, options: [1], other: false)
+        XCTAssertEqual((try form(h).optionButton(question: 0, option: 1)?.accessibilityValue() as? NSNumber)?.intValue, 1)
+    }
+
+    func testClickingARowNeverSubmitsNotEvenWhenItCompletesTheOnlyQuestion() throws {
+        let h = try harness(try Q.ask([Q.database]))
+        let f = try form(h)
+
+        press(f.optionButton(question: 0, option: 1))
+        XCTAssertTrue(try submitButton(h).isEnabled, "the form is complete")
+        XCTAssertTrue(h.recorder.sent.isEmpty, "choosing the answer is not sending it")
+        forcePress(f.optionButton(question: 0, option: 0))
+        press(f.otherButton(question: 0))
+        press(f.optionButton(question: 0, option: 1))
+
+        XCTAssertTrue(h.recorder.sent.isEmpty, "only Submit sends")
+        XCTAssertEqual(h.store.entry(id: "req-1")?.state, ApprovalAnswerState.pending)
+    }
+
+    func testChoosingNeverMovesOrResizesSubmitDenyOrTheForm() throws {
+        let h = try harness()
+        let f = try form(h)
+        let submit = try submitButton(h)
+        func frames() -> [CGRect] {
+            [h.card.convert(submit.bounds, from: submit), h.card.convert(h.card.denyButton.bounds, from: h.card.denyButton),
+             h.card.convert(f.bounds, from: f)]
+        }
+        let before = frames()
+        let preferred = h.card.preferredHeight(forWidth: 560, maxHeight: 520)
+        let rows = h.rowGeometry
+        XCTAssertFalse(submit.isEnabled, "precondition")
+
+        func assertUnmoved(_ step: String) {
+            h.relayout()
+            XCTAssertEqual(frames(), before, step)
+            XCTAssertEqual(h.card.preferredHeight(forWidth: 560, maxHeight: 520), preferred, step)
+            XCTAssertEqual(h.rowGeometry, rows, step)
+        }
+
+        try choose(h, 0, 0); assertUnmoved("choosing a row")
+        try choose(h, 1, 0); assertUnmoved("ticking a row (Submit becomes enabled)")
+        XCTAssertTrue(submit.isEnabled)
+        try choose(h, 1, 2); assertUnmoved("ticking a second row")
+        try choose(h, 1, 0); assertUnmoved("un-ticking a row")
+        try choose(h, 0, 1); assertUnmoved("choosing another row")
+        press(try form(h).otherButton(question: 1)); assertUnmoved("ticking Other")
+        try choose(h, 1, 2); assertUnmoved("un-ticking the last row (Submit becomes disabled)")
+    }
 }
 
 // MARK: - Long text
@@ -2011,6 +2409,49 @@ final class ApprovalQuestionLayoutTests: MouseQueueTestCase {
                 XCTAssertEqual(label.stringValue, text, "\(name): every character is there")
                 XCTAssertGreaterThan(label.frame.height, 4 * (label.font?.pointSize ?? 12), "\(name): the label is as tall as its wrapped text (\(label.frame.height))")
                 XCTAssertLessThanOrEqual(form.convert(label.bounds, from: label).maxX, 500.5, "\(name): wider than the form")
+            }
+        }
+    }
+
+    func testEveryOptionRowSpansTheFormsFullWidthStacksWithoutOverlapAndHoldsItsTexts() throws {
+        var all = cases
+        all.append((name: "short control", fields: [], text: Self.short))
+        for item in all {
+            let parsed = try Q.parsed(questions(item.fields, item.text))
+            let window = makeRigWindow(self, size: NSSize(width: 800, height: 600))
+            let form = ApprovalQuestionFormView(questions: parsed)
+            for width: CGFloat in [520, 320] {
+                form.frame = NSRect(x: 10, y: 10, width: width, height: form.contentHeight(forWidth: width))
+                if form.superview == nil { window.contentView!.addSubview(form) }
+                form.needsLayout = true
+                form.layoutSubtreeIfNeeded()
+
+                for q in 0 ..< parsed.count {
+                    var rows: [NSButton] = []
+                    for o in 0 ..< parsed[q].options.count {
+                        let row = try XCTUnwrap(form.optionButton(question: q, option: o), "\(item.name): q\(q) option \(o)")
+                        rows.append(row)
+                        for label in [form.optionLabel(question: q, option: o), form.descriptionLabel(question: q, option: o)]
+                        where !label.isHidden {
+                            XCTAssertTrue(label.isDescendant(of: row), "\(item.name) at \(width): q\(q) option \(o)'s text belongs to its row")
+                            let r = row.convert(label.frame, from: label.superview)
+                            XCTAssertGreaterThanOrEqual(r.minX, -0.5, "\(item.name) at \(width): text starts left of its row")
+                            XCTAssertLessThanOrEqual(r.maxX, row.bounds.width + 0.5, "\(item.name) at \(width): text is wider than its row")
+                            XCTAssertGreaterThanOrEqual(r.minY, -0.5, "\(item.name) at \(width): text starts above its row")
+                            XCTAssertLessThanOrEqual(r.maxY, row.bounds.height + 0.5, "\(item.name) at \(width): text hangs below its row (\(r.maxY) in \(row.bounds.height))")
+                        }
+                    }
+                    rows.append(try XCTUnwrap(form.otherButton(question: q)))
+                    for (i, row) in rows.enumerated() {
+                        let r = form.convert(row.bounds, from: row)
+                        XCTAssertEqual(r.minX, 0, accuracy: 0.5, "\(item.name) at \(width): q\(q) row \(i) starts at the form's left edge")
+                        XCTAssertEqual(r.width, width, accuracy: 0.5, "\(item.name) at \(width): q\(q) row \(i) is the full form width")
+                        if i > 0 {
+                            let previous = form.convert(rows[i - 1].bounds, from: rows[i - 1])
+                            XCTAssertLessThanOrEqual(previous.maxY, r.minY + 0.5, "\(item.name) at \(width): q\(q) row \(i) overlaps the row above")
+                        }
+                    }
+                }
             }
         }
     }
