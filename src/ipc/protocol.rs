@@ -1480,14 +1480,20 @@ pub enum ClientMsg {
         limit: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cursor: Option<String>,
+        /// Echoed in the page, so the app can drop a page that answers an older query.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_nonce: Option<String>,
     },
 
     /// One log entry in full (`id` is a request id or an entry id). Same rules as
-    /// `ApprovalsLogQuery`; answered with `ApprovalsLogDetail`.
+    /// `ApprovalsLogQuery`; answered with `ApprovalsLogDetail`. `ts_ms` is the row's time:
+    /// when set, only the day files around it are searched.
     ApprovalsLogEntry {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ts_ms: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operator_nonce: Option<String>,
     },
@@ -2571,6 +2577,9 @@ pub enum ServerMsg {
         rows: Vec<crate::approvals::wire::ApprovalsLogRow>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
+        /// The `request_id` of the query this answers, when it had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// One log entry in full (targeted, `LocalOnly`); `detail` is absent when no entry has `id`.
     ApprovalsLogDetail {
@@ -6750,6 +6759,7 @@ mod work_wire_tests {
                 since_ms: Some(5),
                 limit: 50,
                 cursor: Some("abc".into()),
+                request_id: None,
                 operator_nonce: Some("n".into()),
             },
             r#"{"type":"approvals_log_query","tag":"cody-1","outcome":"denied","since_ms":5,"limit":50,"cursor":"abc","operator_nonce":"n"}"#,
@@ -6761,6 +6771,7 @@ mod work_wire_tests {
                 since_ms: None,
                 limit: 10,
                 cursor: None,
+                request_id: None,
                 operator_nonce: None,
             },
             r#"{"type":"approvals_log_query","limit":10}"#,
@@ -6768,6 +6779,7 @@ mod work_wire_tests {
         assert_client_golden(
             ClientMsg::ApprovalsLogEntry {
                 id: "e1".into(),
+                ts_ms: None,
                 operator_nonce: Some("n".into()),
             },
             r#"{"type":"approvals_log_entry","id":"e1","operator_nonce":"n"}"#,
@@ -6798,6 +6810,7 @@ mod work_wire_tests {
                     sensitive: false,
                 }],
                 next_cursor: Some("c".into()),
+                request_id: None,
             },
             r#"{"type":"approvals_log_page","rows":[{"row_id":"r1","kind":"request","ts":"2023-11-14T22:13:20Z","tag":"cody-1","tool_use_id":"toolu_1","request_id":"r1","entry_ids":["e1","e2"],"tool_name":"Bash","summary":"ls","outcome":"denied","latency_ms":7,"sensitive":false}],"next_cursor":"c"}"#,
         );
@@ -6805,6 +6818,7 @@ mod work_wire_tests {
             ServerMsg::ApprovalsLogPage {
                 rows: vec![],
                 next_cursor: None,
+                request_id: None,
             },
             r#"{"type":"approvals_log_page","rows":[]}"#,
         );

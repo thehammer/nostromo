@@ -744,21 +744,26 @@ public struct ApprovalsLogRow: Decodable, Equatable, Identifiable {
 public struct ApprovalsLogPageFrame: Decodable, Equatable {
     public let rows: [ApprovalsLogRow]
     public let nextCursor: String?
+    /// The `request_id` of the query this page answers; nil from a daemon that does not echo it.
+    public let requestId: String?
 
-    public init(rows: [ApprovalsLogRow], nextCursor: String?) {
+    public init(rows: [ApprovalsLogRow], nextCursor: String?, requestId: String? = nil) {
         self.rows = rows
         self.nextCursor = nextCursor
+        self.requestId = requestId
     }
 
     enum CodingKeys: String, CodingKey {
         case rows
         case nextCursor = "next_cursor"
+        case requestId = "request_id"
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         rows = try c.decode(ApprovalLossyArray<ApprovalsLogRow>.self, forKey: .rows).elements
         nextCursor = try c.decodeIfPresent(String.self, forKey: .nextCursor)
+        requestId = try c.decodeIfPresent(String.self, forKey: .requestId)
     }
 }
 
@@ -859,15 +864,19 @@ public struct ClientApprovalsLogQuery: Encodable, Equatable {
     public let sinceMs: Int64?
     public let limit: Int
     public let cursor: String?
+    /// Echoed in the page, so a late page for an older query can be told apart.
+    public let requestId: String?
     public let operatorNonce: String?
 
-    public init(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?, operatorNonce: String?) {
+    public init(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?,
+                requestId: String? = nil, operatorNonce: String?) {
         self.tag = tag; self.outcome = outcome; self.sinceMs = sinceMs; self.limit = limit
-        self.cursor = cursor; self.operatorNonce = operatorNonce
+        self.cursor = cursor; self.requestId = requestId; self.operatorNonce = operatorNonce
     }
 
     enum CodingKeys: String, CodingKey {
-        case type_ = "type", tag, outcome, sinceMs = "since_ms", limit, cursor, operatorNonce = "operator_nonce"
+        case type_ = "type", tag, outcome, sinceMs = "since_ms", limit, cursor
+        case requestId = "request_id", operatorNonce = "operator_nonce"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -878,6 +887,7 @@ public struct ClientApprovalsLogQuery: Encodable, Equatable {
         try c.encodeIfPresent(sinceMs, forKey: .sinceMs)
         try c.encode(limit, forKey: .limit)
         try c.encodeIfPresent(cursor, forKey: .cursor)
+        try c.encodeIfPresent(requestId, forKey: .requestId)
         try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
     }
 }
@@ -886,21 +896,25 @@ public struct ClientApprovalsLogQuery: Encodable, Equatable {
 public struct ClientApprovalsLogEntry: Encodable, Equatable {
     let type_ = "approvals_log_entry"
     public let id: String
+    /// The time of the row the entry belongs to, when known: the daemon reads only the days around it.
+    public let tsMs: Int64?
     public let operatorNonce: String?
 
-    public init(id: String, operatorNonce: String?) {
+    public init(id: String, tsMs: Int64? = nil, operatorNonce: String?) {
         self.id = id
+        self.tsMs = tsMs
         self.operatorNonce = operatorNonce
     }
 
     enum CodingKeys: String, CodingKey {
-        case type_ = "type", id, operatorNonce = "operator_nonce"
+        case type_ = "type", id, tsMs = "ts_ms", operatorNonce = "operator_nonce"
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(type_, forKey: .type_)
         try c.encode(id, forKey: .id)
+        try c.encodeIfPresent(tsMs, forKey: .tsMs)
         try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
     }
 }

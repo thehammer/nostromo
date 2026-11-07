@@ -1699,12 +1699,24 @@ fn handle_client_msg(
             since_ms,
             limit,
             cursor,
+            request_id,
             ..
         } => {
             let broker = session_mgr.lock().unwrap().approvals().cloned();
             if !log_request_allowed(trust, answer_check, targeted_tx) {
                 return;
             }
+            // A time the clock cannot hold is a bad request, not "no filter".
+            let since = match since_ms.map(chrono::DateTime::from_timestamp_millis) {
+                Some(None) => {
+                    let _ = targeted_tx.send(ServerMsg::ApprovalsLogRefused {
+                        code: "bad_request".to_string(),
+                    });
+                    return;
+                }
+                Some(Some(t)) => Some(t),
+                None => None,
+            };
             let Some(broker) = broker else {
                 let _ = targeted_tx.send(ServerMsg::ApprovalsLogRefused {
                     code: "unavailable".to_string(),
@@ -1718,12 +1730,12 @@ fn handle_client_msg(
                     outcome: outcome
                         .as_deref()
                         .and_then(crate::approvals::audit::OutcomeFilter::parse),
-                    since: since_ms.and_then(chrono::DateTime::from_timestamp_millis),
+                    since,
                     limit: limit as usize,
                     cursor,
                 };
                 let reply = match broker.log_query(&query) {
-                    Ok(page) => log_page_frame(page, &sensitive),
+                    Ok(page) => log_page_frame(page, &sensitive, request_id),
                     Err(crate::approvals::audit::LogError::BadCursor) => {
                         ServerMsg::ApprovalsLogRefused { code: "bad_cursor".to_string() }
                     }
@@ -1736,7 +1748,7 @@ fn handle_client_msg(
             });
         }
 
-        ClientMsg::ApprovalsLogEntry { id, .. } => {
+        ClientMsg::ApprovalsLogEntry { id, ts_ms, .. } => {
             let broker = session_mgr.lock().unwrap().approvals().cloned();
             if !log_request_allowed(trust, answer_check, targeted_tx) {
                 return;
@@ -1749,7 +1761,7 @@ fn handle_client_msg(
             };
             let (tx, sensitive) = (targeted_tx.clone(), sensitive.clone());
             tokio::task::spawn_blocking(move || {
-                let reply = match broker.log_entry(&id) {
+                let reply = match broker.log_entry(&id, ts_ms) {
                     Ok(detail) => ServerMsg::ApprovalsLogDetail {
                         id,
                         detail: detail.map(|d| {
@@ -3387,7 +3399,11 @@ fn log_request_allowed(
 
 /// The page frame for `page`: rows stop when the encoded frame would pass
 /// `MAX_FRAME_LEN` less a margin, and `next_cursor` then points after the last row kept.
-fn log_page_frame(page: crate::approvals::audit::LogPage, sensitive: &SensitiveTags) -> ServerMsg {
+fn log_page_frame(
+    page: crate::approvals::audit::LogPage,
+    sensitive: &SensitiveTags,
+    request_id: Option<String>,
+) -> ServerMsg {
     let mut rows = Vec::new();
     let mut size = 0usize;
     let mut cut = false;
@@ -3414,7 +3430,11 @@ fn log_page_frame(page: crate::approvals::audit::LogPage, sensitive: &SensitiveT
     } else {
         page.next_cursor
     };
-    ServerMsg::ApprovalsLogPage { rows, next_cursor }
+    ServerMsg::ApprovalsLogPage {
+        rows,
+        next_cursor,
+        request_id,
+    }
 }
 
 /// Answer a refused request from a network peer with

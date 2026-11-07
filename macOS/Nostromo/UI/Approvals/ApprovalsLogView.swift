@@ -15,8 +15,10 @@ import NostromoKit
 
 /// What the log requests ask of the daemon connection. `NostromodClient` is the real one; tests pass a recorder.
 protocol ApprovalsLogSending: AnyObject {
-    func sendApprovalsLogQuery(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?)
-    func sendApprovalsLogEntry(id: String)
+    func sendApprovalsLogQuery(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?,
+                               requestId: String)
+    /// `tsMs` is the time of the row the entry belongs to, when known: the daemon then reads only the days around it.
+    func sendApprovalsLogEntry(id: String, tsMs: Int64?)
 }
 
 extension NostromodClient: ApprovalsLogSending {}
@@ -40,8 +42,8 @@ enum ApprovalsLogReply<Answer> {
     }
 }
 
-/// Request/response for the two log verbs, one in flight at a time (an `approvals_log_page` names no request,
-/// so replies are matched to the oldest request): each request gets one completion that runs exactly once,
+/// Request/response for the two log verbs, one in flight at a time (an `approvals_log_page` echoes its query's
+/// request id, and a page for any other query is dropped): each request gets one completion that runs exactly once,
 /// and a timeout. A late or duplicate answer is ignored. Main thread only.
 final class ApprovalsLogStore {
     static let shared = ApprovalsLogStore()
@@ -55,7 +57,7 @@ final class ApprovalsLogStore {
     var sender: ApprovalsLogSending?
 
     private enum Kind {
-        case query
+        case query(requestId: String)
         case entry(String)
     }
 
@@ -79,6 +81,7 @@ final class ApprovalsLogStore {
         }
     }
 
+    private var nextQueryNumber = 0
     private var queue: [Job] = []
     private var inflight: Job?
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
@@ -96,8 +99,11 @@ final class ApprovalsLogStore {
     /// One page, newest first. `completion` runs once.
     func query(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?,
                completion: @escaping (ApprovalsLogReply<ApprovalsLogPageFrame>) -> Void) {
-        enqueue(Job(kind: .query, start: { sender in
-            sender.sendApprovalsLogQuery(tag: tag, outcome: outcome, sinceMs: sinceMs, limit: limit, cursor: cursor)
+        nextQueryNumber += 1
+        let requestId = "log-\(nextQueryNumber)"
+        enqueue(Job(kind: .query(requestId: requestId), start: { sender in
+            sender.sendApprovalsLogQuery(tag: tag, outcome: outcome, sinceMs: sinceMs, limit: limit, cursor: cursor,
+                                         requestId: requestId)
         }, finish: { ended in
             switch ended {
             case .page(let page): completion(.answered(page))
@@ -110,9 +116,10 @@ final class ApprovalsLogStore {
     }
 
     /// One entry in full (`id` is a request id or an entry id); nil when no entry has it. `completion` runs once.
-    func entry(id: String, completion: @escaping (ApprovalsLogReply<ApprovalsLogDetail?>) -> Void) {
+    func entry(id: String, ts: Date? = nil, completion: @escaping (ApprovalsLogReply<ApprovalsLogDetail?>) -> Void) {
+        let tsMs = ts.map { Int64($0.timeIntervalSince1970 * 1000) }
         enqueue(Job(kind: .entry(id), start: { sender in
-            sender.sendApprovalsLogEntry(id: id)
+            sender.sendApprovalsLogEntry(id: id, tsMs: tsMs)
         }, finish: { ended in
             switch ended {
             case .detail(let frame): completion(.answered(frame.detail))
@@ -128,7 +135,9 @@ final class ApprovalsLogStore {
     func ingest(_ msg: ServerMsg) {
         guard let job = inflight else { return }
         switch (msg, job.kind) {
-        case (.approvalsLogPage(let page), .query):
+        case (.approvalsLogPage(let page), .query(let requestId)):
+            // A page that answers an older (timed-out) query is not this one's.
+            guard page.requestId == requestId else { return }
             complete(job, .page(page))
         case (.approvalsLogDetail(let detail), .entry(let id)) where detail.id == id:
             complete(job, .detail(detail))
@@ -244,9 +253,10 @@ enum ApprovalsLogJSON {
     /// One row as the window shows it. A row of a sensitive focus carries `withheld: true` instead of its summary
     /// when `redactSensitive` (the real app; the same rule as `tasks output`).
     static func row(for row: ApprovalsLogRow, redactSensitive: Bool) -> [String: Any] {
+        let withheld = row.sensitive && redactSensitive
         var out: [String: Any] = [
             "row_id": row.rowId, "kind": row.kind.rawValue, "ts": row.ts, "entry_ids": row.entryIds,
-            "outcome_text": ApprovalsLogText.outcomePhrase(row), "sensitive": row.sensitive,
+            "outcome_text": ApprovalsLogText.outcomePhrase(row, withholding: withheld), "sensitive": row.sensitive,
         ]
         let optional: [(String, Any?)] = [
             ("tag", row.tag), ("session_id", row.sessionId), ("tool_use_id", row.toolUseId),
@@ -258,7 +268,7 @@ enum ApprovalsLogJSON {
         if let sub = row.subagent {
             out["subagent"] = ["agent_id": sub.agentId, "agent_type": sub.agentType.map { $0 as Any } ?? NSNull()]
         }
-        if row.sensitive && redactSensitive {
+        if withheld {
             out["withheld"] = true
             out["rule_label"] = nil
         } else {
@@ -458,7 +468,8 @@ final class ApprovalsLogView: NSView, NSTableViewDataSource, NSTableViewDelegate
         guard let row = pager.rows.first(where: { $0.rowId == rowId }) else { return }
         if case .loaded? = details[rowId] {} else {
             details[rowId] = .loading
-            store.entry(id: row.requestId ?? row.entryIds.first ?? row.rowId) { [weak self] reply in
+            store.entry(id: row.requestId ?? row.entryIds.first ?? row.rowId,
+                        ts: ApprovalsLogText.timestamp(row.ts)) { [weak self] reply in
                 guard let self else { return }
                 switch reply {
                 case .answered(let detail?): self.details[rowId] = .loaded(detail)

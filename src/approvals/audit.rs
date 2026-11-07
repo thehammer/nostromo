@@ -519,6 +519,13 @@ pub struct LogPage {
     pub next_cursor: Option<String>,
 }
 
+/// What a query scan cost, for tests that hold it to its bound.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanStats {
+    /// The most rows held at once while scanning (before any trim).
+    pub peak_rows_held: usize,
+}
+
 /// One entry in full, as the Approvals window expands it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogDetail {
@@ -845,6 +852,15 @@ impl AuditLog {
     /// the files up to an hour after the request. Every other entry is a row of its
     /// own, including an event kind this build does not know.
     pub fn query(&self, q: &LogQuery, now: DateTime<Utc>) -> Result<LogPage, LogError> {
+        self.query_with_stats(q, now).map(|(page, _)| page)
+    }
+
+    /// [`Self::query`], also reporting what the scan held ([`ScanStats`]).
+    pub fn query_with_stats(
+        &self,
+        q: &LogQuery,
+        now: DateTime<Utc>,
+    ) -> Result<(LogPage, ScanStats), LogError> {
         let limit = q.limit.clamp(1, MAX_PAGE_ROWS);
         let cursor = q.cursor.as_deref().map(decode_cursor).transpose()?;
         let retention_cutoff = now.date_naive() - chrono::Duration::days(RETENTION_DAYS);
@@ -871,6 +887,7 @@ impl AuditLog {
         let mut seen_requests: std::collections::HashSet<String> = Default::default();
         let mut rows: Vec<LogRow> = Vec::new();
         let mut stopped_at: Option<NaiveDate> = None;
+        let mut stats = ScanStats::default();
 
         let accepts = |row: &LogRow| -> bool {
             q.since.is_none_or(|s| row.ts >= s)
@@ -883,8 +900,16 @@ impl AuditLog {
         };
 
         for (date, path) in &files {
-            // Pass 1: this file's outcomes.
+            // This file's request ids: an outcome follows its request in the file, so one
+            // whose request is already in hand is merged and dropped, and only outcomes
+            // still waiting for a request (an older file's) are carried on.
+            let mut seen_here: std::collections::HashSet<String> = Default::default();
+            // Pass 1: this file's outcomes. A line that never says "outcome" is not one,
+            // so most lines are skipped without a parse.
             for_each_line(path, |line| {
+                if !contains_bytes(line, b"outcome") {
+                    return;
+                }
                 let Ok(p) = serde_json::from_slice::<Probe>(line) else {
                     return;
                 };
@@ -908,7 +933,7 @@ impl AuditLog {
                     None => orphans_no_request.push(info),
                 }
             })?;
-            // Pass 2: the rows.
+            // Pass 2: the rows, trimmed to the newest few as they come.
             for_each_line(path, |line| {
                 let Ok(raw) = serde_json::from_slice::<RawEntry>(line) else {
                     return;
@@ -917,21 +942,24 @@ impl AuditLog {
                     "outcome" => {
                         // Kept (light) so an unmatched one can become a row at the end.
                         if let Some(rid) = &raw.request_id {
-                            if outcomes.get(rid).is_some_and(|o| o.entry_id == raw.id) {
+                            if !seen_here.contains(rid)
+                                && outcomes.get(rid).is_some_and(|o| o.entry_id == raw.id)
+                            {
                                 orphan_raws.insert(rid.clone(), raw);
                             }
                         }
                     }
                     "request" => {
-                        if let Some(rid) = &raw.request_id {
-                            seen_requests.insert(rid.clone());
-                        }
                         let mut row = raw.to_row();
-                        if let Some(o) = raw.request_id.as_ref().and_then(|r| outcomes.get(r)) {
-                            row.entry_ids.push(o.entry_id.clone());
-                            row.outcome = Some(o.outcome.clone());
-                            row.by_window = o.by_window.clone();
-                            row.latency_ms = o.latency_ms;
+                        if let Some(rid) = &raw.request_id {
+                            seen_here.insert(rid.clone());
+                            orphan_raws.remove(rid);
+                            if let Some(o) = outcomes.remove(rid) {
+                                row.entry_ids.push(o.entry_id);
+                                row.outcome = Some(o.outcome);
+                                row.by_window = o.by_window;
+                                row.latency_ms = o.latency_ms;
+                            }
                         }
                         if accepts(&row) {
                             rows.push(row);
@@ -944,7 +972,13 @@ impl AuditLog {
                         }
                     }
                 }
+                stats.peak_rows_held = stats.peak_rows_held.max(rows.len());
+                if rows.len() > want * 2 {
+                    trim_rows(&mut rows, want);
+                }
             })?;
+            // What no request claimed is the only outcome still worth carrying.
+            outcomes.retain(|rid, _| orphan_raws.contains_key(rid));
             if rows.len() > want * 2 {
                 trim_rows(&mut rows, want);
             }
@@ -1036,14 +1070,30 @@ impl AuditLog {
         } else {
             None
         };
-        Ok(LogPage { rows, next_cursor })
+        Ok((LogPage { rows, next_cursor }, stats))
     }
 
     /// One entry in full. `id` is a `request_id` (the request's own entry) or an entry
     /// `id`. Searches back at most [`RETENTION_DAYS`].
     pub fn entry_detail(&self, id: &str, now: DateTime<Utc>) -> io::Result<Option<LogDetail>> {
+        self.entry_detail_near(id, None, now)
+    }
+
+    /// [`Self::entry_detail`], searching only the day files within a day of `near` (the time
+    /// of the row the caller holds) when given: a lookup for an id that does not exist then
+    /// reads three files, not up to [`RETENTION_DAYS`].
+    pub fn entry_detail_near(
+        &self,
+        id: &str,
+        near: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> io::Result<Option<LogDetail>> {
         let cutoff = now.date_naive() - chrono::Duration::days(RETENTION_DAYS);
         let mut files = self.daily_files()?;
+        if let Some(near) = near {
+            let day = near.date_naive();
+            files.retain(|(d, _)| (*d - day).num_days().abs() <= 1);
+        }
         files.sort_by_key(|f| std::cmp::Reverse(f.0));
         let mut by_entry: Option<RawEntry> = None;
         let mut by_request: Option<RawEntry> = None;
@@ -1085,6 +1135,10 @@ impl AuditLog {
         }
         Ok(Some(detail))
     }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Sort `rows` newest first and keep the first `keep`.

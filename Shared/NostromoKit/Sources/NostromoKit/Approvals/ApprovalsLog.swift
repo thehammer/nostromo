@@ -89,12 +89,13 @@ public enum ApprovalsLogText {
     }
 
     /// What happened to the row, in words. Reuses the transcript row's words where one exists.
-    public static func outcomePhrase(_ row: ApprovalsLogRow) -> String {
+    /// `withholding`: the row's text is being kept from the reader, so nothing from its summary or rule goes in the phrase.
+    public static func outcomePhrase(_ row: ApprovalsLogRow, withholding: Bool = false) -> String {
         switch row.kind {
         case .refusal: return refusalPhrase(row.refusalCode)
         case .guardBlocked: return "blocked: production-shell guard"
-        case .rule: return rulePhrase(row)
-        case .other: return row.summary
+        case .rule: return rulePhrase(row, withholding: withholding)
+        case .other: return withholding ? "other event" : row.summary
         case .request:
             guard let outcome = row.outcome else { return "awaiting an answer" }
             return outcomePhrase(outcome)
@@ -138,8 +139,8 @@ public enum ApprovalsLogText {
         }
     }
 
-    private static func rulePhrase(_ row: ApprovalsLogRow) -> String {
-        let label = row.ruleLabel.map { ": \($0)" } ?? ""
+    private static func rulePhrase(_ row: ApprovalsLogRow, withholding: Bool) -> String {
+        let label = withholding ? "" : (row.ruleLabel.map { ": \($0)" } ?? "")
         let words = row.summary.split(separator: ":", maxSplits: 1).first.map(String.init) ?? "rule"
         return words + label
     }

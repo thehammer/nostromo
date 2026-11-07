@@ -1163,24 +1163,26 @@ class NostromodClient {
     }
 
     /// Ask for a page of the Approvals log (read-only). Carries the connection's `operator_nonce`.
-    func sendApprovalsLogQuery(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?) {
+    func sendApprovalsLogQuery(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?,
+                               requestId: String) {
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
         guard curFd >= 0 else { log.debug("approvals_log_query dropped — not connected"); return }
         let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
         guard let body = try? encoder.encode(ClientApprovalsLogQuery(tag: tag, outcome: outcome, sinceMs: sinceMs,
-                                                                     limit: limit, cursor: cursor, operatorNonce: nonce))
+                                                                     limit: limit, cursor: cursor, requestId: requestId,
+                                                                     operatorNonce: nonce))
         else { return }
         writeFrameLocked(body, to: curFd, type: "approvals_log_query", tag: nil)
     }
 
     /// Ask for one log entry in full (read-only). Carries the connection's `operator_nonce`.
-    func sendApprovalsLogEntry(id: String) {
+    func sendApprovalsLogEntry(id: String, tsMs: Int64?) {
         sendLock.lock(); defer { sendLock.unlock() }
         let curFd = fd
         guard curFd >= 0 else { log.debug("approvals_log_entry dropped — not connected"); return }
         let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
-        guard let body = try? encoder.encode(ClientApprovalsLogEntry(id: id, operatorNonce: nonce)) else { return }
+        guard let body = try? encoder.encode(ClientApprovalsLogEntry(id: id, tsMs: tsMs, operatorNonce: nonce)) else { return }
         writeFrameLocked(body, to: curFd, type: "approvals_log_entry", tag: nil)
     }
 

@@ -1192,8 +1192,13 @@ impl ApprovalBroker {
     }
 
     /// One audit entry in full (`id` is a request id or an entry id). Read-only.
-    pub fn log_entry(&self, id: &str) -> io::Result<Option<super::audit::LogDetail>> {
-        self.inner.audit.entry_detail(id, Utc::now())
+    pub fn log_entry(
+        &self,
+        id: &str,
+        ts_ms: Option<i64>,
+    ) -> io::Result<Option<super::audit::LogDetail>> {
+        let hint = ts_ms.and_then(DateTime::<Utc>::from_timestamp_millis);
+        self.inner.audit.entry_detail_near(id, hint, Utc::now())
     }
 
     /// Delete audit files past retention ([`AuditLog::sweep`]).

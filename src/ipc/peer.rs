@@ -2037,10 +2037,12 @@ mod tests {
                 since_ms: None,
                 limit: 50,
                 cursor: None,
+                request_id: None,
                 operator_nonce: None,
             },
             ClientMsg::ApprovalsLogEntry {
                 id: "e1".into(),
+                ts_ms: None,
                 operator_nonce: None,
             },
             ClientMsg::ApprovalRefusalReport {
