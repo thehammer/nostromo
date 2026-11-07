@@ -1597,6 +1597,14 @@ impl ApprovalBroker {
         let home = lock(&self.inner.home).clone();
         let (store, report) = RulesStore::open(self.inner.audit.dir(), &home);
         *lock(&self.inner.persisted) = Some(Arc::new(store));
+        self.log_rules_loaded(&report);
+        if let Some((reason, sha)) = &report.quarantined {
+            self.log_quarantined(reason, sha);
+        }
+        Some(report)
+    }
+
+    fn log_rules_loaded(&self, report: &super::persisted::LoadReport) {
         self.inner.append(Entry::new(
             Event::RulesLoaded {
                 active: report.active as u64,
@@ -1605,10 +1613,6 @@ impl ApprovalBroker {
             },
             Utc::now(),
         ));
-        if let Some((reason, sha)) = &report.quarantined {
-            self.log_quarantined(reason, sha);
-        }
-        Some(report)
     }
 
     fn log_quarantined(&self, reason: &str, sha: &str) {
@@ -1689,28 +1693,22 @@ impl ApprovalBroker {
         conn_key: &str,
         window_id: &str,
     ) -> RulesChange {
-        if !self.inner.parts.presenters.is_presenter(conn_key) {
-            return RulesChange::NotPresenter;
-        }
-        let Some(store) = self.inner.rules_store() else {
-            return RulesChange::Unknown;
-        };
-        let change = match store.remove(rule_id) {
-            Ok(Some(rule)) => {
-                self.inner.log_persisted_rule(
-                    false,
-                    &rule,
-                    None,
-                    json!({ "reason": "user", "by_window": sanitize_string(window_id) }),
-                );
-                RulesChange::Applied
+        self.change_rules(conn_key, RulesChange::Unknown, |store| {
+            match store.remove(rule_id) {
+                Ok(Some(rule)) => {
+                    self.inner.log_persisted_rule(
+                        false,
+                        &rule,
+                        None,
+                        json!({ "reason": "user", "by_window": sanitize_string(window_id) }),
+                    );
+                    RulesChange::Applied
+                }
+                Ok(None) => RulesChange::Unknown,
+                Err(ChangeError::Quarantined) => RulesChange::Quarantined,
+                Err(_) => RulesChange::WriteFailed,
             }
-            Ok(None) => RulesChange::Unknown,
-            Err(ChangeError::Quarantined) => RulesChange::Quarantined,
-            Err(_) => RulesChange::WriteFailed,
-        };
-        self.inner.broadcast_persisted_rules();
-        change
+        })
     }
 
     /// The human chose to keep the quarantined rules file they reviewed (`file_sha256`).
@@ -1721,59 +1719,60 @@ impl ApprovalBroker {
         conn_key: &str,
         _window_id: &str,
     ) -> RulesChange {
-        if !self.inner.parts.presenters.is_presenter(conn_key) {
-            return RulesChange::NotPresenter;
-        }
-        let Some(store) = self.inner.rules_store() else {
-            return RulesChange::NotQuarantined;
-        };
-        let home = lock(&self.inner.home).clone();
-        let change = match store.keep(file_sha256, &home) {
-            Ok(report) => {
-                self.inner.append(Entry::new(
-                    Event::RulesKept {
-                        file_sha256: sanitize_string(file_sha256),
-                    },
-                    Utc::now(),
-                ));
-                self.inner.append(Entry::new(
-                    Event::RulesLoaded {
-                        active: report.active as u64,
-                        inactive: report.inactive as u64,
-                        quarantined: false,
-                    },
-                    Utc::now(),
-                ));
-                RulesChange::Applied
+        self.change_rules(conn_key, RulesChange::NotQuarantined, |store| {
+            let home = lock(&self.inner.home).clone();
+            match store.keep(file_sha256, &home) {
+                Ok(report) => {
+                    self.inner.append(Entry::new(
+                        Event::RulesKept {
+                            file_sha256: sanitize_string(file_sha256),
+                        },
+                        Utc::now(),
+                    ));
+                    self.log_rules_loaded(&report);
+                    RulesChange::Applied
+                }
+                Err(ChangeError::NotQuarantined) => RulesChange::NotQuarantined,
+                Err(ChangeError::StaleHash) => RulesChange::Stale,
+                Err(ChangeError::Unreadable(_)) => RulesChange::Unreadable,
+                Err(_) => RulesChange::WriteFailed,
             }
-            Err(ChangeError::NotQuarantined) => RulesChange::NotQuarantined,
-            Err(ChangeError::StaleHash) => RulesChange::Stale,
-            Err(ChangeError::Unreadable(_)) => RulesChange::Unreadable,
-            Err(_) => RulesChange::WriteFailed,
-        };
-        self.inner.broadcast_persisted_rules();
-        change
+        })
     }
 
     /// The human discarded the quarantined rules file: it is replaced with an empty rule set.
     pub fn discard_quarantined(&self, conn_key: &str, _window_id: &str) -> RulesChange {
+        self.change_rules(conn_key, RulesChange::NotQuarantined, |store| {
+            match store.discard() {
+                Ok(()) => {
+                    self.inner
+                        .append(Entry::new(Event::RulesDiscarded {}, Utc::now()));
+                    RulesChange::Applied
+                }
+                Err(ChangeError::NotQuarantined) => RulesChange::NotQuarantined,
+                Err(_) => RulesChange::WriteFailed,
+            }
+        })
+    }
+
+    /// The shared frame of a persisted-rules change: only a presenter may change them; with no
+    /// store open the answer is `without_store`; whatever happened, every window is shown the
+    /// rules as they now are.
+    fn change_rules(
+        &self,
+        conn_key: &str,
+        without_store: RulesChange,
+        change: impl FnOnce(&RulesStore) -> RulesChange,
+    ) -> RulesChange {
         if !self.inner.parts.presenters.is_presenter(conn_key) {
             return RulesChange::NotPresenter;
         }
         let Some(store) = self.inner.rules_store() else {
-            return RulesChange::NotQuarantined;
+            return without_store;
         };
-        let change = match store.discard() {
-            Ok(()) => {
-                self.inner
-                    .append(Entry::new(Event::RulesDiscarded {}, Utc::now()));
-                RulesChange::Applied
-            }
-            Err(ChangeError::NotQuarantined) => RulesChange::NotQuarantined,
-            Err(_) => RulesChange::WriteFailed,
-        };
+        let result = change(&store);
         self.inner.broadcast_persisted_rules();
-        change
+        result
     }
 
     /// `allow_always`: write the persisted rule, then allow this one call. The request stays

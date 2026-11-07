@@ -677,7 +677,7 @@ final class ApprovalCardView: NSView {
         switch gesture.select(event: currentEvent(), control: control) {
         case .allowed:
             cardLog.notice("approval \(self.request.id, privacy: .public) allow_session rule picked by a user gesture (\(self.gesture.lastProvenance, privacy: .public))")
-            closeAlwaysPanel()
+            closeAlwaysPanel(clearingGesture: false)
             selectedCandidate = candidate
             selectionGeneration += 1
             let generation = selectionGeneration
@@ -733,6 +733,15 @@ final class ApprovalCardView: NSView {
         onNeedsLayout?()
     }
 
+    /// Drop a session pick's panel and button without touching the gesture (a newer `select` is recorded in it).
+    private func closeSessionPanelKeepingGesture() {
+        selectionGeneration += 1
+        guard selectedCandidate != nil else { return }
+        selectedCandidate = nil
+        for label in sessionLabels { label.isHidden = true }
+        sessionConfirmButton?.isHidden = true
+    }
+
     private var sessionLabels: [NSTextField] {
         [sessionRuleLabel, sessionSummaryLabel, sessionScopeLabel, sessionOverridesLabel]
     }
@@ -781,7 +790,8 @@ final class ApprovalCardView: NSView {
         switch gesture.select(event: currentEvent(), control: control) {
         case .allowed:
             cardLog.notice("approval \(self.request.id, privacy: .public) allow_always panel opened by a user gesture (\(self.gesture.lastProvenance, privacy: .public))")
-            clearSessionSelection()
+            // The session pick goes away first: clearing it after `select` would also wipe the pick just recorded.
+            closeSessionPanelKeepingGesture()
             let candidates = PersistedRulesText.orderedCandidates(options.alwaysRules)
             guard let first = candidates.first else { return false }
             alwaysCandidate = first
@@ -893,10 +903,10 @@ final class ApprovalCardView: NSView {
     }
 
     /// Close the panel and drop the pick.
-    func closeAlwaysPanel() {
+    func closeAlwaysPanel(clearingGesture: Bool = true) {
         alwaysGeneration += 1
         guard alwaysCandidate != nil else { return }
-        gesture.clear()
+        if clearingGesture { gesture.clear() }
         alwaysCandidate = nil
         alwaysScope = .repo
         alwaysPanel.isHidden = true

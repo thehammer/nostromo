@@ -7055,7 +7055,8 @@ mod work_wire_tests {
             "",
             "ALLOW_ONCE",
             "ALLOW_SESSION",
-            "allow_always",
+            "ALLOW_ALWAYS",
+            "always",
         ] {
             let text = format!(
                 r#"{{"type":"approval_answer","request_id":"r1","decision":{{"kind":"{kind}"}},"window_id":"w"}}"#

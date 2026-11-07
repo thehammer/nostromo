@@ -183,4 +183,4 @@ allowed_by_session_rule` per use (the outcome's `rule` names the rule and its gr
 - The CLI's permission request carries no session id of its own, so the broker compares the id it registered the
   session with (and the request's `session_id`, when one is present). A typed `/clear` that keeps the same process does
   not change the registered id: the rules still end when the process does, as documented.
-- Persisted rules ("Always allow…") are AP6.
+- Persisted rules ("Always allow…") are AP6: see `docs/approvals-persisted-rules.md`.

@@ -131,6 +131,13 @@ pub struct Quarantine {
     pub rules: Vec<(PersistedRule, Option<Inactive>)>,
 }
 
+impl Quarantine {
+    /// `(reason, file hash)`, as reports and log entries carry it.
+    fn summary(&self) -> (String, String) {
+        (self.reason.clone(), self.file_sha256.clone())
+    }
+}
+
 /// What [`RulesStore::open`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadReport {
@@ -315,10 +322,7 @@ impl RulesStore {
         LoadReport {
             active: inner.rules.iter().filter(|r| r.inactive.is_none()).count(),
             inactive: inner.rules.iter().filter(|r| r.inactive.is_some()).count(),
-            quarantined: inner
-                .quarantine
-                .as_ref()
-                .map(|q| (q.reason.clone(), q.file_sha256.clone())),
+            quarantined: inner.quarantine.as_ref().map(Quarantine::summary),
         }
     }
 
@@ -364,23 +368,30 @@ impl RulesStore {
                 if inner.written_sha.as_deref() == Some(sha_hex(&bytes).as_str()) {
                     return External::Unchanged;
                 }
-                self.quarantine(&mut inner, "external_change", Some(&bytes), home);
-                let q = inner.quarantine.as_ref().expect("just set");
-                External::Quarantined(q.reason.clone(), q.file_sha256.clone())
+                self.quarantine_externally(&mut inner, "external_change", Some(&bytes), home)
             }
-            Err(reason) => {
-                self.quarantine(&mut inner, reason, None, home);
-                let q = inner.quarantine.as_ref().expect("just set");
-                External::Quarantined(q.reason.clone(), q.file_sha256.clone())
-            }
+            Err(reason) => self.quarantine_externally(&mut inner, reason, None, home),
         }
+    }
+
+    /// [`Self::quarantine`], reported as what [`Self::check_external`] decided.
+    fn quarantine_externally(
+        &self,
+        inner: &mut Inner,
+        reason: &str,
+        bytes: Option<&[u8]>,
+        home: &Path,
+    ) -> External {
+        self.quarantine(inner, reason, bytes, home);
+        let (reason, sha) = inner.quarantine.as_ref().expect("just set").summary();
+        External::Quarantined(reason, sha)
     }
 
     pub fn quarantined(&self) -> Option<(String, String)> {
         lock(&self.inner)
             .quarantine
             .as_ref()
-            .map(|q| (q.reason.clone(), q.file_sha256.clone()))
+            .map(Quarantine::summary)
     }
 
     pub fn len(&self) -> usize {
@@ -394,7 +405,10 @@ impl RulesStore {
     /// Is another rule allowed (not quarantined, below the cap)? Checked before the human's
     /// allow is written, so a refusal leaves the request held.
     pub fn can_add(&self) -> Result<(), AddError> {
-        let inner = lock(&self.inner);
+        Self::check_room(&lock(&self.inner))
+    }
+
+    fn check_room(inner: &Inner) -> Result<(), AddError> {
         if inner.quarantine.is_some() {
             return Err(AddError::Quarantined);
         }
@@ -408,12 +422,7 @@ impl RulesStore {
     /// write nothing changes in memory.
     pub fn add(&self, rule: PersistedRule) -> Result<(), AddError> {
         let mut inner = lock(&self.inner);
-        if inner.quarantine.is_some() {
-            return Err(AddError::Quarantined);
-        }
-        if inner.rules.len() >= MAX_PERSISTED_RULES {
-            return Err(AddError::Limit);
-        }
+        Self::check_room(&inner)?;
         inner.rules.push(StoredRule {
             rule,
             inactive: None,
@@ -442,8 +451,8 @@ impl RulesStore {
         Ok(Some(removed.rule))
     }
 
-    /// The specs of the active rules whose scope covers `cwd`, checked (scope and spec) on one
-    /// bounded helper against `req`; the matching rule, if any.
+    /// The first active rule whose scope covers `cwd` and whose spec covers `req`, checked on
+    /// one bounded helper.
     pub fn first_match(
         &self,
         timeout: Duration,
@@ -814,7 +823,7 @@ mod tests {
                 "over 1 MiB",
                 Box::new(|w: &World| {
                     let mut bytes = fs::read(w.dir.join(RULES_FILE)).unwrap();
-                    bytes.extend(std::iter::repeat(b' ').take(1024 * 1024 + 1));
+                    bytes.extend(std::iter::repeat_n(b' ', 1024 * 1024 + 1));
                     put(&w.dir.join(RULES_FILE), &bytes);
                     put(&w.dir.join(SIDECAR_FILE), sha_hex(&bytes).as_bytes());
                 }),

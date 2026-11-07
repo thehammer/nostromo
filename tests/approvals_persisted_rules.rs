@@ -1838,7 +1838,7 @@ async fn a_rules_file_that_fails_its_checks_at_start_is_quarantined_and_matches_
             "the file is larger than 1 MiB",
             Box::new(|l: &Layout| {
                 let mut bytes = std::fs::read(l.rules_json()).unwrap();
-                bytes.extend(std::iter::repeat(b' ').take(1024 * 1024 + 1));
+                bytes.extend(std::iter::repeat_n(b' ', 1024 * 1024 + 1));
                 write_private(&l.rules_json(), &bytes);
                 write_private(&l.sidecar(), format!("{}\n", sha_hex(&bytes)).as_bytes());
             }),
