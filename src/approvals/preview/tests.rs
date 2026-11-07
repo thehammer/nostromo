@@ -384,6 +384,7 @@ struct Fake {
     devs: BTreeMap<PathBuf, u64>,
     denied: Vec<PathBuf>,
     network: Vec<PathBuf>,
+    links: Vec<PathBuf>,
     delay: Duration,
     reads: Mutex<Vec<PathBuf>>,
 }
@@ -407,7 +408,13 @@ impl PreviewFs for Fake {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let dev = *self.devs.get(path).unwrap_or(&1);
-        if self.dirs.contains_key(path) {
+        if self.links.iter().any(|l| path == l) {
+            Ok(Meta {
+                kind: EntryKind::Symlink,
+                len: 0,
+                dev,
+            })
+        } else if self.dirs.contains_key(path) {
             Ok(Meta {
                 kind: EntryKind::Dir,
                 len: 0,
@@ -544,9 +551,16 @@ fn a_tcc_folder_under_an_outer_target_is_not_entered_but_one_we_are_in_is() {
     // not a TCC folder under /home/u/proj (those are under home itself): proj walks fully
     let t = &run(&f, "/home/u/proj").targets[0];
     assert_eq!(t.files, Some(2));
-    // a target inside Desktop is walked
-    let t = &run(&f, "/home/u/Desktop/work").targets[0];
+    // a target inside Desktop is walked when the session is there, and not otherwise
+    let in_desktop = Env {
+        cwd: Some(PathBuf::from("/home/u/Desktop")),
+        home: PathBuf::from("/home/u"),
+    };
+    let t = &run_in(&f, "/home/u/Desktop/work", &in_desktop).targets[0];
     assert_eq!(t.files, Some(2));
+    assert!(run(&f, "/home/u/Desktop/work").targets[0]
+        .cant_resolve
+        .is_some());
     // the folder itself is never opened
     let t = &run(&f, "/home/u/Desktop").targets[0];
     assert!(t.flags.contains(&PreviewFlag::NotCounted));
@@ -725,7 +739,11 @@ fn an_outer_glob_never_lists_a_tcc_folder_but_a_glob_inside_one_does() {
         .targets
         .iter()
         .any(|t| t.path.as_deref() == Some("/home/u/proj/a.txt")));
-    let inner = run(&f, "/home/u/Desktop/*.txt");
+    let in_desktop = Env {
+        cwd: Some(PathBuf::from("/home/u/Desktop")),
+        home: PathBuf::from("/home/u"),
+    };
+    let inner = run_in(&f, "/home/u/Desktop/*.txt", &in_desktop);
     assert_eq!(
         inner.targets[0].path.as_deref(),
         Some("/home/u/Desktop/a.txt")
@@ -856,6 +874,111 @@ fn a_glob_into_a_protected_folder_cannot_resolve_and_is_never_read() {
         .targets
         .iter()
         .any(|t| t.path.as_deref() == Some("/home/u/proj/a.txt")));
+}
+
+#[test]
+fn literal_components_after_a_glob_never_reach_into_a_protected_folder() {
+    for pat in ["/home/u/*/a.txt", "/home/u/*/sub/x"] {
+        let f = Fake::default()
+            .dir("/home/u", &["Desktop", "Documents", "proj"])
+            .dir("/home/u/Desktop", &["a.txt", "sub"])
+            .file("/home/u/Desktop/a.txt", 1)
+            .dir("/home/u/Documents", &["a.txt", "sub"])
+            .file("/home/u/Documents/a.txt", 1)
+            .dir("/home/u/proj", &["a.txt", "sub"])
+            .file("/home/u/proj/a.txt", 1)
+            .file("/home/u/proj/sub/x", 1);
+        let p = run(&f, pat);
+        for folder in ["Desktop", "Documents"] {
+            let cant = p
+                .targets
+                .iter()
+                .find(|t| {
+                    t.cant_resolve
+                        .as_deref()
+                        .is_some_and(|c| c.starts_with(&format!("/home/u/{folder}/")))
+                })
+                .unwrap_or_else(|| panic!("{pat}: {folder} is not a can't-resolve line"));
+            assert!(cant.why.as_deref().unwrap().contains("protected folder"));
+            assert_eq!(cant.exists, None);
+        }
+        assert!(
+            !read_under(&f, "/home/u/Desktop") && !read_under(&f, "/home/u/Documents"),
+            "{pat}: a protected folder was read: {:?}",
+            f.reads.lock().unwrap()
+        );
+    }
+}
+
+#[test]
+fn a_symlinked_ancestor_anywhere_cannot_resolve() {
+    let mut f = Fake::default()
+        .dir("/tmp/link/x", &[])
+        .dir("/Users/me/.ssh", &["k"]);
+    f.links.push(PathBuf::from("/tmp/link"));
+    let t = &run_in(&f, "/tmp/link/x", &mac_env()).targets[0];
+    assert_eq!(t.why.as_deref(), Some("path goes through a link"));
+    assert_eq!(t.files, None);
+}
+
+#[test]
+fn a_protected_target_is_walked_only_when_the_session_is_inside_it() {
+    let f = Fake::default()
+        .dir("/Users/me/Documents/proj", &["a"])
+        .file("/Users/me/Documents/proj/a", 5);
+    let t = &run_in(&f, "/Users/me/Documents/proj", &mac_env()).targets[0];
+    assert!(t.cant_resolve.is_some());
+    assert!(t
+        .why
+        .as_deref()
+        .unwrap()
+        .contains("protected folder (not counted)"));
+    assert!(
+        !read_under(&f, "/Users/me/Documents"),
+        "{:?}",
+        f.reads.lock().unwrap()
+    );
+    assert!(!f
+        .reads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|p| p == Path::new("/Users/me/Documents/proj")));
+    // the session is inside the folder: walked as before
+    let env = Env {
+        cwd: Some(PathBuf::from("/Users/me/Documents/proj")),
+        home: PathBuf::from("/Users/me"),
+    };
+    let t = &run_in(&f, "/Users/me/Documents/proj", &env).targets[0];
+    assert_eq!(t.files, Some(1));
+}
+
+#[test]
+fn home_autofs_is_a_network_root() {
+    assert!(is_network_path(Path::new("/home/someone/x")));
+    assert!(is_network_path(Path::new("/System/Volumes/Data/home/x")));
+}
+
+#[test]
+fn a_command_the_preview_does_not_analyse_that_mentions_rm_cannot_resolve() {
+    for (cmd, via) in [
+        ("sudo sh -c \"rm -rf /x\"", "sudo"),
+        ("ssh host rm -rf /x", "ssh"),
+        ("docker exec c rm -rf /x", "docker"),
+        ("su -c \"rm -rf /x\" root", "su"),
+        ("ssh host mv a b", "ssh"),
+    ] {
+        let t = specs(cmd, Some("/w"));
+        assert!(
+            t.iter().any(|s| matches!(&s.operand, Operand::CantResolve { why, .. } if why == &format!("runs via {via}"))),
+            "{cmd}: {t:?}"
+        );
+    }
+    let t = specs("ssh host rm -rf /x; rm foo", Some("/w"));
+    assert_eq!(t.len(), 2);
+    assert_eq!(cant_of(&t[0]).1, "runs via ssh");
+    assert_eq!(path_of(&t[1]).0, "/w/foo");
+    assert!(specs("ssh host ls", None).is_empty());
 }
 
 #[test]

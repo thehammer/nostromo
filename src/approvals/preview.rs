@@ -116,6 +116,13 @@ const WRAPPERS: [&str; 18] = [
     "chroot",
 ];
 
+/// Programs that only read or print their words, or whose `-c` payload the parser already
+/// looks into: a word `rm` after them is not a removal run through them.
+const NOT_RUNNERS: [&str; 14] = [
+    "echo", "printf", "grep", "egrep", "fgrep", "rg", "man", "which", "type", "ls", "cat", "bash",
+    "sh", "zsh",
+];
+
 fn word_base(word: &super::shell::Word) -> Option<String> {
     if word.dynamic {
         return None;
@@ -133,10 +140,15 @@ fn word_base(word: &super::shell::Word) -> Option<String> {
 /// operands are not previewed, so the card says it can't resolve them.
 fn wrapped_removal(name: &str, command: &SimpleCommand) -> Option<TargetSpec> {
     let words = &command.words[1..];
-    let (kind, text, via) = if WRAPPERS.contains(&name) {
-        let (word, kind) = words
-            .iter()
-            .find_map(|w| Some((w, preview_command(&word_base(w)?)?)))?;
+    let (kind, text, via) = if let Some((word, kind)) = WRAPPERS
+        .contains(&name)
+        .then(|| {
+            words
+                .iter()
+                .find_map(|w| Some((w, preview_command(&word_base(w)?)?)))
+        })
+        .flatten()
+    {
         (kind, word.text.clone(), name.to_string())
     } else if name == "find" {
         let exec = words.windows(2).find_map(|pair| {
@@ -158,7 +170,20 @@ fn wrapped_removal(name: &str, command: &SimpleCommand) -> Option<TargetSpec> {
             return None;
         }
     } else {
-        return None;
+        // Any other program the preview does not analyse, with `rm` / `rmdir` / `mv` as a
+        // word (or inside a word, as in `sh -c "rm -rf x"`): it may remove things.
+        if NOT_RUNNERS.contains(&name) {
+            return None;
+        }
+        let (kind, word) = words.iter().find_map(|w| {
+            if w.dynamic {
+                return None;
+            }
+            w.text
+                .split(|c: char| c.is_whitespace() || ";&|()'\"`".contains(c))
+                .find_map(|tok| Some((preview_command(&tok.to_lowercase())?, w)))
+        })?;
+        (kind, word.text.clone(), name.to_string())
     };
     Some(TargetSpec {
         command: kind,
@@ -376,7 +401,13 @@ pub trait PreviewFs: Send + Sync {
 pub struct RealFs;
 
 /// Roots whose contents are network, external or automounted volumes.
-const NETWORK_ROOTS: [&str; 4] = ["/Volumes", "/Network", "/net", "/System/Volumes/Data/mnt"];
+const NETWORK_ROOTS: [&str; 5] = [
+    "/Volumes",
+    "/Network",
+    "/net",
+    "/home",
+    "/System/Volumes/Data/mnt",
+];
 
 /// Is `path` under one of the network / external / automount roots?
 pub fn is_network_path(path: &Path) -> bool {
@@ -584,7 +615,7 @@ pub fn walk(
                         }
                         Expanded::Path(p) => {
                             let (t, hit_budget) =
-                                inspect(&mut w, spec, &p, *relative, *trailing_slash);
+                                inspect(&mut w, spec, &p, path, *relative, *trailing_slash);
                             partial |= hit_budget;
                             targets.push(t);
                         }
@@ -759,7 +790,7 @@ fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<Expanded>, u32) {
             let guarded = w
                 .tcc
                 .iter()
-                .any(|f| within(&base, f) && !within(&literal, f));
+                .any(|f| within(&base, f) && !may_enter(w, f, &literal));
             if guarded {
                 next.push(Expanded::Cant(
                     base.join(comp),
@@ -814,28 +845,33 @@ fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<Expanded>, u32) {
     (frontier, extra)
 }
 
+/// May the walk go inside the protected folder `f` for an operand whose literal prefix is
+/// `literal`? Only when the operand names a path inside it itself and the session's start
+/// folder is inside it too (the session is working there).
+fn may_enter(w: &Walker, f: &Path, literal: &Path) -> bool {
+    within(literal, f) && w.env.cwd.as_deref().is_some_and(|cwd| within(cwd, f))
+}
+
 fn expanded_path(e: &Expanded) -> &Path {
     match e {
         Expanded::Path(p) | Expanded::Cant(p, _) => p,
     }
 }
 
-/// Is any folder between the session's start folder (or home) and `path` a symlink?
-/// Looks at the folders only, each by `symlink_metadata`; never at a protected folder.
+/// Is any folder above `path` a symlink? Looks at the folders only, each by
+/// `symlink_metadata`, never at a protected folder, and at most [`MAX_ANCESTORS`] of them.
 fn through_a_link(w: &Walker, path: &Path) -> bool {
-    let base = [w.env.cwd.as_deref(), Some(w.env.home.as_path())]
-        .into_iter()
-        .flatten()
-        .filter(|b| within(path, b))
-        .max_by_key(|b| b.components().count());
-    let Some(base) = base else { return false };
     let mut ancestor = path.parent();
-    while let Some(dir) = ancestor {
-        if key(dir).components().count() <= key(base).components().count() {
+    for _ in 0..MAX_ANCESTORS {
+        let Some(dir) = ancestor else { break };
+        if dir.parent().is_none() {
             break;
         }
         let protected = w.tcc.iter().any(|f| key(f) == key(dir));
+        // `/var`, `/tmp` and `/etc` are the system's own links into `/private`.
+        let system = ["/var", "/tmp", "/etc"].iter().any(|s| dir == Path::new(s));
         if !protected
+            && !system
             && matches!(
                 w.fs.symlink_metadata(dir),
                 Ok(Meta {
@@ -851,14 +887,35 @@ fn through_a_link(w: &Walker, path: &Path) -> bool {
     false
 }
 
+/// Most folders above one target that are checked for being links.
+const MAX_ANCESTORS: usize = 64;
+
 /// One target's line. The bool is true when the walk ran out of budget on it.
 fn inspect(
     w: &mut Walker,
     spec: &TargetSpec,
     path: &Path,
+    operand: &Path,
     relative: bool,
     trailing_slash: bool,
 ) -> (PreviewTargetWire, bool) {
+    // Inside a protected folder (not the folder itself) the target is never stat'd unless
+    // the operand and the session both are there.
+    let literal: PathBuf = operand
+        .components()
+        .take_while(|c| !has_glob(&c.as_os_str().to_string_lossy()))
+        .collect();
+    if w.tcc
+        .iter()
+        .any(|f| key(path) != key(f) && within(path, f) && !may_enter(w, f, &literal))
+    {
+        let cant = cant_target(
+            spec,
+            &path.to_string_lossy(),
+            "protected folder (not counted)",
+        );
+        return (cant, false);
+    }
     let mut t = base_target(spec, path, relative);
     set_pure_flags(&mut t, path, w.env);
     if w.fs.is_network(path) {
