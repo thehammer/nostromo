@@ -19,7 +19,7 @@ extension ChatTurn {
     var hasTerminalOrigin: Bool {
         switch origin {
         case .terminalDelivery?, .terminalFollowNotice?: return true
-        case .motherJobNotice?, .taskWake?, nil: return false
+        case .motherJobNotice?, .taskWake?, .peerMessage?, .injectedContext?, nil: return false
         }
     }
 
@@ -35,8 +35,18 @@ extension ChatTurn {
         return false
     }
 
-    /// Whether the user slot draws a muted marker for this turn: a Mother notice or a task wake.
-    var hasMarkerOrigin: Bool { hasMotherNoticeOrigin || hasTaskWakeOrigin }
+    /// Whether this turn is text the CLI injected that the user did not type: a message from another
+    /// session, a loaded skill, a summary or other context (shown as one muted marker, not a bubble).
+    var hasInjectedOrigin: Bool {
+        switch origin {
+        case .peerMessage?, .injectedContext?: return true
+        default: return false
+        }
+    }
+
+    /// Whether the user slot draws a muted marker for this turn: a Mother notice, a task wake or
+    /// injected text.
+    var hasMarkerOrigin: Bool { hasMotherNoticeOrigin || hasTaskWakeOrigin || hasInjectedOrigin }
 
     /// The marker this turn shows in the user slot; nil for a turn that has none. Only a turn whose
     /// daemon-sent origin says so draws one, never one whose text merely looks like it.
@@ -44,14 +54,19 @@ extension ChatTurn {
         switch origin {
         case .motherJobNotice(let items)?: return WakeMarkerText.motherNotice(items)
         case .taskWake(let items, let omitted)?: return WakeMarkerText.taskWake(items, omitted: omitted)
+        case .peerMessage(let items, let omitted)?: return WakeMarkerText.peerMessage(items, omitted: omitted)
+        case .injectedContext(let kind, let title, let text, let truncated)?:
+            return WakeMarkerText.injectedContext(kind: kind, title: title, text: text, truncated: truncated)
         case .terminalDelivery?, .terminalFollowNotice?, nil: return nil
         }
     }
 
-    /// What the marker's Copy menu puts on the pasteboard: a Mother notice's raw text (what the agent
+    /// What the marker's Copy menu puts on the pasteboard: an injected message's text (a peer's body, never
+    /// the raw tag); a Mother notice's raw text (what the agent
     /// received); a task wake's own line, and for several events the tooltip's lines after it (the daemon
     /// never sends the raw event). One event is only its line: its tooltip says the same.
     var markerCopyText: String {
+        if hasInjectedOrigin { return markerContent?.copyText ?? userInput }
         guard hasTaskWakeOrigin, let content = markerContent else { return userInput }
         guard content.tooltipLines.count > 1 else { return content.line }
         return ([content.line] + content.tooltipLines).joined(separator: "\n")
