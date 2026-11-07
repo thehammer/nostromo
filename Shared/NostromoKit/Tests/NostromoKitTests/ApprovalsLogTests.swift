@@ -66,6 +66,15 @@ final class ApprovalsLogTests: XCTestCase {
                        #"{"id":"e1","type":"approvals_log_entry"}"#)
     }
 
+    func testAnInputReadsAsItsOwnLinesNotAsEscapedJSON() throws {
+        let one = try JSONDecoder().decode(ApprovalJSON.self, from: Data(#"{"command":"a\nb ⟨U+202E⟩"}"#.utf8))
+        XCTAssertEqual(one.inputText, "a\nb ⟨U+202E⟩")
+        let two = try JSONDecoder().decode(ApprovalJSON.self, from: Data(#"{"description":"d","command":"ls"}"#.utf8))
+        XCTAssertEqual(two.inputText, "command: ls\ndescription: d")
+        let nested = try JSONDecoder().decode(ApprovalJSON.self, from: Data(#"{"a":{"b":1}}"#.utf8))
+        XCTAssertTrue(nested.inputText.contains("\"b\""), "a nested value falls back to JSON")
+    }
+
     // MARK: words
 
     func testTheOutcomeWordsReuseTheTranscriptRowsWhereOneExists() {

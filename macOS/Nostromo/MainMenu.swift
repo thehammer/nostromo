@@ -23,6 +23,7 @@ import AppKit
     func copyMotherNoticeStats()
     func copyTerminalStagingStats()
     func openSecondWindowQA(_ sender: Any?)
+    func showApprovalsLog(_ sender: Any?)
 }
 
 enum MainMenu {
@@ -211,6 +212,18 @@ enum MainMenu {
         approvalCardItem.keyEquivalentModifierMask = [.command, .option]
         approvalCardItem.target = target
         sessionMenu.addItem(approvalCardItem)
+
+        // Window: macOS adds Minimize, Zoom and the window list to the menu set as `windowsMenu`. Approvals (AP5)
+        // is its first item and has no key equivalent: it only opens the read-only log.
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenuItem.submenu = windowMenu
+        let approvalsItem = NSMenuItem(title: "Approvals", action: #selector(MainMenuActions.showApprovalsLog(_:)),
+                                       keyEquivalent: "")
+        approvalsItem.target = target
+        windowMenu.addItem(approvalsItem)
+        NSApplication.shared.windowsMenu = windowMenu
 
         return mainMenu
     }

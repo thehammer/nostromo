@@ -179,6 +179,25 @@ extension ApprovalJSON {
         return text
     }
 
+    /// A tool input as text, every line as recorded: an object of strings reads as its value (one field, a
+    /// Bash `command`) or as `key: value` lines; anything else as sorted, indented JSON.
+    public var inputText: String {
+        guard case .object(let fields) = self, !fields.isEmpty else { return displayText }
+        var strings: [(String, String)] = []
+        for key in fields.keys.sorted() {
+            guard case .string(let value)? = fields[key] else { return displayText }
+            strings.append((key, value))
+        }
+        if strings.count == 1 { return strings[0].1 }
+        // `command` (or `file_path`) first: it is what the request is about.
+        let lead = ["command", "file_path"]
+        strings.sort { a, b in
+            let (ia, ib) = (lead.firstIndex(of: a.0) ?? lead.count, lead.firstIndex(of: b.0) ?? lead.count)
+            return ia != ib ? ia < ib : a.0 < b.0
+        }
+        return strings.map { "\($0.0): \($0.1)" }.joined(separator: "\n")
+    }
+
     /// An object's string field (the command of a Bash input, say).
     public func stringField(_ key: String) -> String? {
         if case .object(let fields) = self, case .string(let s)? = fields[key] { return s }
