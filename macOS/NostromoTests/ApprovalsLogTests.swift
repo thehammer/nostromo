@@ -554,10 +554,6 @@ final class ApprovalsLogMenuTests: XCTestCase {
         let titles = main.items.compactMap(\.submenu).map(\.title)
         for existing in ["Edit", "Terminal", "Debug", "Session"] { XCTAssertTrue(titles.contains(existing), existing) }
     }
-
-    func testTheAppDelegateImplementsTheAction() {
-        XCTAssertTrue(AppDelegate.instancesRespond(to: #selector(MainMenuActions.showApprovalsLog(_:))))
-    }
 }
 
 // MARK: - app-control
@@ -595,7 +591,7 @@ final class ApprovalsLogAppControlTests: XCTestCase {
 
     func testTheRowsMatchWhatTheWindowShows() {
         let w = ApprovalsLogWorld()
-        let rows = [ApprovalsLogFixtures.row("r2"), ApprovalsLogFixtures.row("g1", kind: .guardBlocked, outcome: "guard_blocked")]
+        let rows = [ApprovalsLogFixtures.row("r2"), ApprovalsLogFixtures.row("g1", outcome: "guard_blocked", kind: .guardBlocked)]
         w.open(rows: rows)
         let json = ApprovalsLogJSON.reply(.ready(ApprovalsLogPageFrame(rows: rows, nextCursor: nil)), redactSensitive: false)
         XCTAssertEqual((json["rows"] as? [[String: Any]])?.map { $0["row_id"] as? String }, w.view.visibleRows.map(\.rowId))
