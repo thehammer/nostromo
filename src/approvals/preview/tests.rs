@@ -552,7 +552,10 @@ fn a_tcc_folder_under_an_outer_target_is_not_entered_but_one_we_are_in_is() {
     assert!(t.flags.contains(&PreviewFlag::NotCounted));
     // an outer target that contains a protected folder never opens it
     let f = Fake::default()
-        .dir("/home/u/Pictures", &["Photos Library.photoslibrary", "keep.png"])
+        .dir(
+            "/home/u/Pictures",
+            &["Photos Library.photoslibrary", "keep.png"],
+        )
         .file("/home/u/Pictures/keep.png", 7)
         .dir("/home/u/Pictures/Photos Library.photoslibrary", &["db"])
         .file("/home/u/Pictures/Photos Library.photoslibrary/db", 1);
@@ -560,7 +563,10 @@ fn a_tcc_folder_under_an_outer_target_is_not_entered_but_one_we_are_in_is() {
     assert!(t.flags.contains(&PreviewFlag::NotCounted), "{:?}", t.flags);
     assert_eq!(t.dirs, Some(1));
     assert_eq!(t.files, Some(1));
-    assert!(!read_under(&f, "/home/u/Pictures/Photos Library.photoslibrary"));
+    assert!(!read_under(
+        &f,
+        "/home/u/Pictures/Photos Library.photoslibrary"
+    ));
 }
 
 #[test]
