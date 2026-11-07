@@ -228,10 +228,58 @@ pub enum TurnOrigin {
         #[serde(default, skip_serializing_if = "is_zero")]
         omitted: u32,
     },
+    /// Messages from other Claude sessions (see [`parse_peer_origin`]): one
+    /// item per message, back-to-back ones merged, `omitted` more beyond the
+    /// cap. Never the session's title and never counted as a prompt.
+    PeerMessage {
+        items: Vec<PeerMessageItem>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: u32,
+    },
+    /// Text the CLI injected as a user message that the user did not type: a
+    /// loaded skill (`kind` `skill`), a conversation summary (`summary`) or
+    /// anything else the daemon knows it did not write (`other`). `text` is
+    /// sanitised and capped. Never the title, never counted as a prompt.
+    InjectedContext {
+        kind: String,
+        title: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+    },
     /// An origin this build does not know (a newer daemon wrote it): read as
     /// such rather than failing the whole turn.
     #[serde(other)]
     Unknown,
+}
+
+impl TurnOrigin {
+    /// An origin the CLI created: a message the user did not type, whose
+    /// provenance the session manager checks against what the daemon wrote.
+    pub fn is_cli_injected(&self) -> bool {
+        matches!(
+            self,
+            Self::PeerMessage { .. } | Self::InjectedContext { .. }
+        )
+    }
+}
+
+/// One `<cross-session-message>` element of a [`TurnOrigin::PeerMessage`].
+/// Plain, sanitised and capped data; `from_mode` is a string so a newer value
+/// never fails a decode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerMessageItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_socket: Option<String>,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -373,6 +421,12 @@ pub enum ParsedLine {
         text: String,
         is_replay: bool,
         timestamp: Option<String>,
+        /// The line says the host sent it (`promptSource`/`turnOrigin` of
+        /// `sdk`, as a stored session records a prompt written on stdin): so
+        /// its text is the user's or the daemon's, whatever shape it has.
+        host_sent: bool,
+        /// The line says it is a conversation summary (`isCompactSummary`).
+        compact_summary: bool,
     },
     /// A `<task-notification>` user event: the CLI woke the agent for a
     /// finished background task or a Monitor event. Opens a turn of its own.
@@ -697,9 +751,13 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
     // block (rendered expandable in the GUI). The one exception: a sidechain
     // event made only of `tool_result` blocks carries a subagent call's
     // result, not a prompt, and is kept (tagged with its parent).
-    if obj.get("isSidechain").and_then(|x| x.as_bool()) == Some(true)
-        && !is_only_tool_results(content)
-    {
+    // A newer CLI tags the prompt with `parent_tool_use_id` alone.
+    let sidechain = obj.get("isSidechain").and_then(|x| x.as_bool()) == Some(true)
+        || obj
+            .get("parent_tool_use_id")
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| !p.is_empty());
+    if sidechain && !is_only_tool_results(content) {
         return None;
     }
 
@@ -722,6 +780,8 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
                 .get("timestamp")
                 .and_then(|x| x.as_str())
                 .map(str::to_string),
+            host_sent: line_is_host_sent(obj),
+            compact_summary: obj.get("isCompactSummary").and_then(|x| x.as_bool()) == Some(true),
         });
     }
 
@@ -775,7 +835,18 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
             .get("timestamp")
             .and_then(|x| x.as_str())
             .map(str::to_string),
+        host_sent: line_is_host_sent(obj),
+        compact_summary: obj.get("isCompactSummary").and_then(|x| x.as_bool()) == Some(true),
     })
+}
+
+/// A stored session records a prompt the host wrote on stdin with
+/// `promptSource: "sdk"` (and `turnOrigin: "sdk"`); the CLI's own injections
+/// (peer messages, skills) carry `system` or neither.
+fn line_is_host_sent(obj: &serde_json::Map<String, Value>) -> bool {
+    ["promptSource", "turnOrigin"]
+        .iter()
+        .any(|k| obj.get(*k).and_then(|x| x.as_str()) == Some("sdk"))
 }
 
 /// `content` is a non-empty array made only of `tool_result` blocks.
@@ -1748,7 +1819,10 @@ impl SessionTranscript {
     /// count. Notes older than the retained turns are dropped; notes past the
     /// newest group follow the newest turn.
     pub fn merge_ledger_notes(&mut self, notes: &[LedgerNote]) {
-        let is_counted = |t: &Turn| !matches!(t.origin, Some(TurnOrigin::TaskWake { .. }));
+        let is_counted = |t: &Turn| {
+            !matches!(t.origin, Some(TurnOrigin::TaskWake { .. }))
+                && !t.origin.as_ref().is_some_and(TurnOrigin::is_cli_injected)
+        };
         let counted_retained = self.turns.iter().filter(|t| is_counted(t)).count() as u64;
         let first_retained = self.prompt_count.saturating_sub(counted_retained) + 1;
         // Index of the last turn of each retained prompt's group.
@@ -1844,15 +1918,32 @@ impl SessionTranscript {
             }
 
             ParsedLine::UserPrompt {
-                text, timestamp, ..
+                text,
+                timestamp,
+                host_sent,
+                compact_summary,
+                ..
             } => {
                 let mut deltas: Vec<TurnDelta> = self.discard_orphan_prompt().into_iter().collect();
+                let origin = parse_terminal_origin(&text)
+                    .or_else(|| parse_mother_origin(&text))
+                    .or_else(|| {
+                        // A line the host sent is the user's or the daemon's,
+                        // whatever its shape; only a summary says so itself.
+                        (!host_sent || compact_summary)
+                            .then(|| parse_injected_origin(&text, compact_summary))
+                            .flatten()
+                    });
+                // Before the flush below: a peer message may merge into the
+                // open peer turn.
+                if let Some(origin) = origin.as_ref().filter(|o| o.is_cli_injected()) {
+                    return self.ingest_injected(origin.clone(), timestamp, deltas);
+                }
                 // Flush any still-open turn (defensive; stored JSONL has no
                 // `result` lines and delimits turns by the next user prompt).
                 if let Some(last) = self.turns.last_mut() {
                     last.is_complete = true;
                 }
-                let origin = parse_terminal_origin(&text).or_else(|| parse_mother_origin(&text));
                 // A Mother job notice is never the session's title.
                 let notice = matches!(origin, Some(TurnOrigin::MotherJobNotice { .. }));
                 if self.first_user_input.is_none() && !notice {
@@ -2002,6 +2093,107 @@ impl SessionTranscript {
         deltas.push(TurnDelta::TurnStarted { turn });
         self.enforce_limits();
         deltas
+    }
+
+    /// A message the CLI injected (peer message, skill, summary). Two peer
+    /// messages in a row with no reply between them merge into the open peer
+    /// turn (an origin update, no delta); otherwise it opens a turn of its own.
+    /// Not a prompt: not counted in `prompt_count`, never the session's title.
+    fn ingest_injected(
+        &mut self,
+        origin: TurnOrigin,
+        timestamp: Option<String>,
+        mut deltas: Vec<TurnDelta>,
+    ) -> Vec<TurnDelta> {
+        if let (
+            TurnOrigin::PeerMessage {
+                items: new_items, ..
+            },
+            Some(turn),
+        ) = (&origin, self.turns.last_mut())
+        {
+            let bare = turn
+                .blocks
+                .iter()
+                .all(|b| matches!(b, TurnBlock::Note { .. }));
+            if let (false, true, Some(TurnOrigin::PeerMessage { items, omitted })) =
+                (turn.is_complete, bare, turn.origin.as_mut())
+            {
+                for item in new_items {
+                    if items.len() < MAX_PEER_ITEMS {
+                        items.push(item.clone());
+                    } else {
+                        *omitted = omitted.saturating_add(1);
+                    }
+                }
+                turn.user_input = turn.origin.as_ref().map(injected_line).unwrap_or_default();
+                if let Some(origin) = turn.origin.clone() {
+                    self.origin_update = Some((turn.id.clone(), origin));
+                }
+                return deltas;
+            }
+        }
+        if let Some(last) = self.turns.last_mut() {
+            last.is_complete = true;
+        }
+        let id = self.alloc_id();
+        let turn = Turn {
+            id,
+            user_input: injected_line(&origin),
+            timestamp,
+            blocks: std::mem::take(&mut self.orphan_notes),
+            is_complete: false,
+            origin: Some(origin),
+        };
+        self.retained_bytes += turn_bytes(&turn);
+        self.turns.push(turn.clone());
+        deltas.push(TurnDelta::TurnStarted { turn });
+        self.enforce_limits();
+        deltas
+    }
+
+    /// Turn `turn_id` was written by the user or the daemon, whatever its text
+    /// says: take back a peer-message or injected-context origin read from that
+    /// text, and give the turn its text back (`raw`), its place among the
+    /// prompts and, if it is the first real prompt, the title. Returns whether
+    /// anything changed.
+    pub fn disown_injected_origin(&mut self, turn_id: &str, raw: &str) -> bool {
+        let Some(turn) = self.turns.iter_mut().find(|t| t.id == turn_id) else {
+            return false;
+        };
+        if !turn
+            .origin
+            .as_ref()
+            .is_some_and(TurnOrigin::is_cli_injected)
+        {
+            return false;
+        }
+        turn.origin = None;
+        turn.user_input = raw.to_owned();
+        self.prompt_count += 1;
+        if self.first_user_input.is_none() {
+            self.first_user_input = Some(raw.to_owned());
+        }
+        true
+    }
+
+    /// Turn `turn_id` was begun by the CLI itself (the daemon wrote nothing for
+    /// it) and its text matches no shape the daemon knows: it is injected
+    /// context, not a prompt. Gives it the generic origin and takes it out of
+    /// the prompt count and the title. Returns the new origin.
+    pub fn adopt_injected_origin(&mut self, turn_id: &str) -> Option<TurnOrigin> {
+        let turn = self.turns.iter_mut().find(|t| t.id == turn_id)?;
+        if turn.origin.is_some() {
+            return None;
+        }
+        let origin = other_injected_origin(&turn.user_input);
+        let raw = std::mem::replace(&mut turn.user_input, injected_line(&origin));
+        turn.origin = Some(origin.clone());
+        self.prompt_count = self.prompt_count.saturating_sub(1);
+        if self.first_user_input.as_deref() == Some(raw.as_str()) {
+            self.first_user_input = None;
+        }
+        Some(origin)
     }
 
     /// The newest wake merge since the last call: the turn's id and its full
@@ -2380,7 +2572,10 @@ pub fn transcript_from_jsonl(content: &str, max_turns: usize) -> SessionTranscri
             !matches!(
                 turn.origin,
                 Some(TurnOrigin::MotherJobNotice { .. } | TurnOrigin::TaskWake { .. })
-            )
+            ) && !turn
+                .origin
+                .as_ref()
+                .is_some_and(TurnOrigin::is_cli_injected)
         })
         .map(|turn| turn.user_input.clone());
     t
@@ -2413,6 +2608,17 @@ pub fn load_scrollback(session_id: &str, max_turns: usize) -> SessionTranscript 
     }
     SessionTranscript::new()
 }
+
+#[path = "stream_json_injected.rs"]
+mod injected;
+pub use injected::{
+    injected_line, other_injected_origin, parse_injected_origin, parse_peer_origin,
+    INJECTED_BODY_BYTES, MAX_PEER_ITEMS, PEER_OPEN,
+};
+
+#[cfg(test)]
+#[path = "stream_json_injected_tests.rs"]
+mod injected_tests;
 
 #[cfg(test)]
 #[path = "stream_json_origin_tests.rs"]
@@ -2520,6 +2726,8 @@ mod tests {
                 text: "hi there".into(),
                 is_replay: true,
                 timestamp: Some("2026-05-30T22:00:00.000Z".into()),
+                host_sent: false,
+                compact_summary: false,
             })
         );
     }

@@ -14,12 +14,19 @@ public struct WakeMarkerContent: Equatable {
     public let tooltipLines: [String]
     public let accessibilityLabel: String
     public let target: WakeMarkerTarget
+    /// A word of `line` drawn as a small warning-coloured badge (a peer in `bypass` mode); nil for none.
+    public let badge: String?
+    /// What the marker's Copy menu copies when it is not the turn's raw text (a peer message's body).
+    public let copyText: String?
 
-    public init(line: String, tooltipLines: [String], accessibilityLabel: String, target: WakeMarkerTarget) {
+    public init(line: String, tooltipLines: [String], accessibilityLabel: String, target: WakeMarkerTarget,
+                badge: String? = nil, copyText: String? = nil) {
         self.line = line
         self.tooltipLines = tooltipLines
         self.accessibilityLabel = accessibilityLabel
         self.target = target
+        self.badge = badge
+        self.copyText = copyText
     }
 }
 
