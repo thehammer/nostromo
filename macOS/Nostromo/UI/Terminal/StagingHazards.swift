@@ -55,7 +55,7 @@ enum StagingDestructivePatterns {
         if any(hasAwsS3Remove) { found.append("aws s3 rm/rb") }
         if any(hasDdOutput) { found.append("dd of=") }
         if any({ StagingHazards.redirectionSplitWords(of: $0).contains { program($0).unicodeScalars.starts(with: "mkfs".unicodeScalars) } }) { found.append("mkfs") }
-        if any({ StagingHazards.redirectionSplitWords(of: $0).contains { program($0) == "shred" } }) { found.append("shred") }
+        if any({ StagingHazards.redirectionSplitWords(of: $0).contains { StagingHazards.same(program($0), "shred") } }) { found.append("shred") }
         if hasUnquotedTruncation(command, views: views) { found.append("> file") }
         if any(hasFindDelete) { found.append("find -delete") }
         if any(hasXargsOrPipedRemove) { found.append("xargs/piped rm") }
@@ -74,14 +74,14 @@ enum StagingDestructivePatterns {
     /// as everywhere else (`segmentWords`: also at `<` and `>`, so `rm>/dev/null -rf x` is seen).
     private static func hasRecursiveForcedRemove(_ command: String) -> Bool {
         for words in segmentWords(command) {
-            for (index, word) in words.enumerated() where program(word) == "rm" {
+            for (index, word) in words.enumerated() where StagingHazards.same(program(word), "rm") {
                 var recursive = false
                 var force = false
                 for argument in words[(index + 1)...] where argument.unicodeScalars.first == "-" {
                     if argument.unicodeScalars.starts(with: "--".unicodeScalars) {
                         if argument.unicodeScalars.count >= 3 {
-                            if "--recursive".hasPrefix(argument) { recursive = true }
-                            if "--force".hasPrefix(argument) { force = true }
+                            if "--recursive".unicodeScalars.starts(with: argument.unicodeScalars) { recursive = true }
+                            if "--force".unicodeScalars.starts(with: argument.unicodeScalars) { force = true }
                         }
                         continue
                     }
@@ -113,12 +113,12 @@ enum StagingDestructivePatterns {
     /// Laravel accepts a shortened command name (`ca:cl`, `q:fl`, `mi:fr`, `db:w`): a word of two letters-only
     /// parts, each a non-empty prefix of the matching part of `name`. Over-matching (`c:c`) is the cheap side.
     private static func usesArtisanAbbreviation(of name: String, in text: String) -> Bool {
-        let target = name.split(separator: ":").map(String.init)
+        let target = StagingHazards.splitScalars(name, where: { $0 == ":" })
         for word in StagingHazards.splitScalars(text.lowercased(), where: { $0 == " " || $0 == "\t" || $0 == ";" || $0 == "|" || $0 == "&" }) {
             let parts = StagingHazards.splitScalars(word, omittingEmpty: false, where: { $0 == ":" })
             guard parts.count == 2, target.count == 2 else { continue }
             let lettersOnly = parts.allSatisfy { !$0.isEmpty && $0.unicodeScalars.allSatisfy { $0.isASCII && $0.properties.isAlphabetic } }
-            if lettersOnly && target[0].hasPrefix(parts[0]) && target[1].hasPrefix(parts[1]) { return true }
+            if lettersOnly && target[0].unicodeScalars.starts(with: parts[0].unicodeScalars) && target[1].unicodeScalars.starts(with: parts[1].unicodeScalars) { return true }
         }
         return false
     }
@@ -132,7 +132,7 @@ enum StagingDestructivePatterns {
 
     private static func segmentWords(_ view: String) -> [[String]] {
         StagingHazards.splitScalars(view, where: { $0 == ";" || $0 == "|" || $0 == "&" })
-            .map { StagingHazards.splitScalars($0, where: { $0 == " " || $0 == "\t" || $0 == "<" || $0 == ">" }) }
+            .map { StagingHazards.splitWords($0, where: { $0 == " " || $0 == "\t" || $0 == "<" || $0 == ">" }) }
             .filter { !$0.isEmpty }
     }
 
@@ -142,26 +142,27 @@ enum StagingDestructivePatterns {
 
     /// Is any word of the view (split at whitespace, `;`, `|`, `&`, `<`, `>`) one of `programs`?
     private static func hasProgram(_ view: String, _ programs: [String]) -> Bool {
-        StagingHazards.redirectionSplitWords(of: view).contains { programs.contains(program($0)) }
+        StagingHazards.redirectionSplitWords(of: view).contains { StagingHazards.isOneOf(program($0), programs) }
     }
 
     /// The words after the first word whose program is one of `programs`.
     private static func afterProgram(_ words: [String], _ programs: [String]) -> [String]? {
-        guard let at = words.firstIndex(where: { programs.contains(program($0)) }) else { return nil }
+        guard let at = words.firstIndex(where: { StagingHazards.isOneOf(program($0), programs) }) else { return nil }
         return Array(words[(at + 1)...])
     }
 
     /// Is there a segment with one of `programs` followed later by one of `verbs` (lowercased compare)?
     private static func programThen(_ view: String, _ programs: [String], _ verbs: [String]) -> Bool {
         segmentWords(view).contains { words in
-            afterProgram(words, programs)?.contains { verbs.contains($0.lowercased()) } ?? false
+            afterProgram(words, programs)?.contains { StagingHazards.isOneOf($0.lowercased(), verbs) } ?? false
         }
     }
 
     /// Is `word` (lowercase) signal 9? Numerically, so `09` and `0009` count as they do in a shell.
     private static func isKillSignal(_ word: String) -> Bool {
-        if word == "kill" || word == "sigkill" { return true }
-        return !word.isEmpty && word.allSatisfy { $0.isASCII && $0.isNumber } && word.drop(while: { $0 == "0" }) == "9"
+        if StagingHazards.same(word, "kill") || StagingHazards.same(word, "sigkill") { return true }
+        let scalars = Array(word.unicodeScalars)
+        return !scalars.isEmpty && scalars.allSatisfy(StagingHazards.isASCIIDigit) && Array(scalars.drop(while: { $0 == "0" })) == ["9"]
     }
 
     /// The original `kill`/`pkill`/`killall` + force signal, and a kill program followed anywhere later in the same
@@ -181,7 +182,7 @@ enum StagingDestructivePatterns {
                     if flag.unicodeScalars.first == "s" || flag.unicodeScalars.first == "n",
                        isKillSignal(StagingHazards.string(flag.unicodeScalars.dropFirst())) { return true }
                 }
-                if ["-s", "-n", "--signal"].contains(word), index + 1 < rest.count, isKillSignal(rest[index + 1]) { return true }
+                if StagingHazards.isOneOf(word, ["-s", "-n", "--signal"]), index + 1 < rest.count, isKillSignal(rest[index + 1]) { return true }
             }
         }
         return false
@@ -196,21 +197,21 @@ enum StagingDestructivePatterns {
     private static func hasTerraformDestroy(_ view: String) -> Bool {
         let programs = ["terraform", "tofu", "terragrunt", "pulumi"]
         for words in segmentWords(view) {
-            guard let at = words.firstIndex(where: { programs.contains(program($0)) }) else { continue }
-            let pulumi = program(words[at]) == "pulumi"
+            guard let at = words.firstIndex(where: { StagingHazards.isOneOf(program($0), programs) }) else { continue }
+            let pulumi = StagingHazards.same(program(words[at]), "pulumi")
             let lowered = words[(at + 1)...].map { $0.lowercased() }
             func then(_ first: String, _ verbs: [String]) -> Bool {
-                guard let found = lowered.firstIndex(of: first) else { return false }
-                return lowered[(found + 1)...].contains { verbs.contains($0) }
+                guard let found = StagingHazards.wordIndex(first, in: lowered) else { return false }
+                return lowered[(found + 1)...].contains { StagingHazards.isOneOf($0, verbs) }
             }
             if then("workspace", ["delete"]) || then("state", ["rm", "remove", "push", "delete"])
                 || then("stack", ["rm", "remove"]) { return true }
             for word in lowered {
-                if ["destroy", "destroy-all", "taint", "force-unlock"].contains(word) || (pulumi && word == "down") { return true }
+                if StagingHazards.isOneOf(word, ["destroy", "destroy-all", "taint", "force-unlock"]) || (pulumi && StagingHazards.same(word, "down")) { return true }
                 if word.unicodeScalars.first == "-" {
                     let flag = StagingHazards.string(word.unicodeScalars.drop(while: { $0 == "-" }))
                     let name = StagingHazards.splitScalars(flag, omittingEmpty: false, where: { $0 == "=" }).first ?? ""
-                    if name == "destroy" || name == "replace" { return true }
+                    if StagingHazards.same(name, "destroy") || StagingHazards.same(name, "replace") { return true }
                 }
             }
         }
@@ -225,22 +226,22 @@ enum StagingDestructivePatterns {
         let verbs = ["delete-", "batch-delete-", "terminate-", "remove-", "deregister-", "purge-"]
         // A shell tool parses `+0` and `-0` as 0 too.
         func isZero(_ text: String) -> Bool {
-            var digits = Substring(text)
+            var digits = Array(text.unicodeScalars)[...]
             if let first = digits.first, first == "+" || first == "-" { digits = digits.dropFirst() }
             return !digits.isEmpty && digits.allSatisfy { $0 == "0" }
         }
         for words in segmentWords(view) {
             guard let after = afterProgram(words, ["aws"]) else { continue }
             let rest = after.map { $0.lowercased() }
-            if rest.contains("update-service") {
+            if StagingHazards.wordsContain(rest, "update-service") {
                 for (index, word) in rest.enumerated() {
                     if word.unicodeScalars.starts(with: "--desired-count=".unicodeScalars),
                        isZero(StagingHazards.string(word.unicodeScalars.dropFirst("--desired-count=".count))) { return true }
-                    if word == "--desired-count", index + 1 < rest.count, isZero(rest[index + 1]) { return true }
+                    if StagingHazards.same(word, "--desired-count"), index + 1 < rest.count, isZero(rest[index + 1]) { return true }
                 }
             }
             for word in rest {
-                if word == "schedule-key-deletion" || word == "stop-instances" { return true }
+                if StagingHazards.same(word, "schedule-key-deletion") || StagingHazards.same(word, "stop-instances") { return true }
                 for verb in verbs where word.unicodeScalars.starts(with: verb.unicodeScalars) {
                     let tail = word.unicodeScalars.dropFirst(verb.unicodeScalars.count)
                     if !tail.isEmpty && tail.allSatisfy({ ($0.value >= 0x61 && $0.value <= 0x7A) || StagingHazards.isASCIIDigit($0) || $0 == "-" }) { return true }
@@ -256,11 +257,11 @@ enum StagingDestructivePatterns {
         for words in segmentWords(view) {
             guard let after = afterProgram(words, ["aws"]) else { continue }
             let rest = after.map { $0.lowercased() }
-            guard let s3 = rest.firstIndex(of: "s3") else { continue }
+            guard let s3 = StagingHazards.wordIndex("s3", in: rest) else { continue }
             let tail = Array(rest[(s3 + 1)...])
-            if tail.contains("rm") || tail.contains("rb") { return true }
-            if let cp = tail.firstIndex(of: "cp"), tail[(cp + 1)...].contains("/dev/null") { return true }
-            if let sync = tail.firstIndex(of: "sync"), tail[(sync + 1)...].contains("--delete") { return true }
+            if StagingHazards.wordsContain(tail, "rm") || StagingHazards.wordsContain(tail, "rb") { return true }
+            if let cp = StagingHazards.wordIndex("cp", in: tail), StagingHazards.wordsContain(Array(tail[(cp + 1)...]), "/dev/null") { return true }
+            if let sync = StagingHazards.wordIndex("sync", in: tail), StagingHazards.wordsContain(Array(tail[(sync + 1)...]), "--delete") { return true }
         }
         return false
     }
@@ -301,11 +302,11 @@ enum StagingDestructivePatterns {
                 if scalar != "'" && scalar != "\"" && scalar != "\\" { target.unicodeScalars.append(scalar) }
                 i += 1
             }
-            var digits = Substring(target)
+            var digits = Array(target.unicodeScalars)[...]
             while digits.last == "-" { digits = digits.dropLast() }
-            let descriptor = target == "-" || (!digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber })
+            let descriptor = StagingHazards.same(target, "-") || (!digits.isEmpty && digits.allSatisfy(StagingHazards.isASCIIDigit))
             if duplication && descriptor { continue }
-            if ["/dev/null", "/dev/stderr", "/dev/stdout"].contains(target) { continue }
+            if StagingHazards.isOneOf(target, ["/dev/null", "/dev/stderr", "/dev/stdout"]) { continue }
             return true
         }
         return false
@@ -316,23 +317,23 @@ enum StagingDestructivePatterns {
     private static func hasFindDelete(_ view: String) -> Bool {
         let words = StagingHazards.redirectionSplitWords(of: view).map { $0.lowercased() }
         guard let rest = afterProgram(words, ["find"]) else { return false }
-        if rest.contains("-delete") { return true }
-        guard let exec = rest.firstIndex(where: { ["-exec", "-execdir", "-ok", "-okdir"].contains($0) }) else { return false }
-        return rest[(exec + 1)...].contains { program($0) == "rm" }
+        if StagingHazards.wordsContain(rest, "-delete") { return true }
+        guard let exec = rest.firstIndex(where: { StagingHazards.isOneOf($0, ["-exec", "-execdir", "-ok", "-okdir"]) }) else { return false }
+        return rest[(exec + 1)...].contains { StagingHazards.same(program($0), "rm") }
     }
 
     /// An `xargs` or `parallel` program followed later anywhere in the text by an `rm` program (`parallel rm ::: a b`),
     /// or an `rm` program after a single `|` (a pipe, not `||`) anywhere in the text.
     private static func hasXargsOrPipedRemove(_ view: String) -> Bool {
         let words = StagingHazards.redirectionSplitWords(of: view)
-        if afterProgram(words, ["xargs", "parallel"])?.contains(where: { program($0) == "rm" }) ?? false { return true }
+        if afterProgram(words, ["xargs", "parallel"])?.contains(where: { StagingHazards.same(program($0), "rm") }) ?? false { return true }
         let chars = Array(view.unicodeScalars)
         guard let pipe = chars.indices.first(where: { index in
             chars[index] == "|" && (index == 0 || chars[index - 1] != "|") && (index + 1 >= chars.count || chars[index + 1] != "|")
         }) else { return false }
         var rest = String.UnicodeScalarView()
         rest.append(contentsOf: chars[(pipe + 1)...])
-        return StagingHazards.redirectionSplitWords(of: String(rest)).contains { program($0) == "rm" }
+        return StagingHazards.redirectionSplitWords(of: String(rest)).contains { StagingHazards.same(program($0), "rm") }
     }
 
     /// `text` up to a SQL comment start (`-- `, a trailing `--`, `#`): a `WHERE` after one is not part of the statement.
@@ -401,7 +402,7 @@ enum StagingDestructivePatterns {
     /// Programs that run what follows them as a command, so a later word in the same segment may be the command
     /// (`bash -c 'reboot'`, `ssh host reboot`, `xargs systemctl stop`, `find -exec shutdown`): the quote wrappers
     /// (`StagingHazards.quoteWrappers`) and these.
-    private static let moreCommandWrappers: Set<String> = ["xargs", "nsenter", "chroot", "find"]
+    private static let moreCommandWrappers = ["xargs", "nsenter", "chroot", "find"]
 
     /// The indexes of the words of one segment that are in command position: the first word, then each word after
     /// only prefix words (an assignment, a prefix program, an option, an option's value, a duration), and, once a
@@ -415,13 +416,16 @@ enum StagingDestructivePatterns {
         for (index, word) in words.enumerated() {
             if leading || wrapped { positions.append(index) }
             let name = program(word)
-            let runsOthers = ["kubectl", "docker", "podman"].contains(name)
-                && words[(index + 1)...].contains { ["exec", "run"].contains($0.lowercased()) }
-            if StagingHazards.quoteWrappers.contains(name) || moreCommandWrappers.contains(name) || word == "_" || runsOthers
-                || (leading && StagingHazards.isDotWrapper(word)) {
+            let runsOthers = StagingHazards.isOneOf(name, ["kubectl", "docker", "podman"])
+                && words[(index + 1)...].contains { StagingHazards.isOneOf($0.lowercased(), ["exec", "run"]) }
+            if StagingHazards.isQuoteWrapper(name, leading: leading) || StagingHazards.isOneOf(name, moreCommandWrappers)
+                || StagingHazards.same(word, "_") || runsOthers || (leading && StagingHazards.isDotWrapper(word)) {
                 wrapped = true
             }
-            if leading { (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption) }
+            if leading {
+                let previous = index > 0 ? program(words[index - 1]) : ""
+                (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption, previous: previous)
+            }
         }
         return positions
     }
@@ -434,17 +438,71 @@ enum StagingDestructivePatterns {
     /// later by `stop`, each only in command position
     /// (`commandPositions`): `last reboot | head` and `grep -i shutdown /var/log/syslog` merely mention one.
     private static func hasStopOrShutdown(_ view: String) -> Bool {
-        for words in segmentWords(view) {
-            for at in commandPositions(words) {
-                func later(_ verbs: [String]) -> Bool { words[(at + 1)...].contains { verbs.contains($0.lowercased()) } }
-                switch program(words[at]) {
-                case "shutdown", "reboot", "halt", "poweroff": return true
-                case "systemctl": if later(["stop", "disable", "mask"]) || later(powerVerbs) { return true }
-                case "loginctl", "machinectl": if later(powerVerbs) { return true }
-                case "service": if later(["stop"]) { return true }
-                default: break
-                }
+        for (words, fedShell) in pipedSegments(view) {
+            // What a shell is fed is run as code: every word of it is in command position.
+            for at in fedShell ? Array(words.indices) : commandPositions(words) {
+                func later(_ verbs: [String]) -> Bool { words[(at + 1)...].contains { StagingHazards.isOneOf($0.lowercased(), verbs) } }
+                let name = program(words[at])
+                if StagingHazards.isOneOf(name, ["shutdown", "reboot", "halt", "poweroff"]) { return true }
+                if StagingHazards.same(name, "systemctl"), later(["stop", "disable", "mask"]) || later(powerVerbs) { return true }
+                if StagingHazards.isOneOf(name, ["loginctl", "machinectl"]), later(powerVerbs) { return true }
+                if StagingHazards.same(name, "service"), later(["stop"]) { return true }
             }
+        }
+        return false
+    }
+
+    /// The segments of the view (as `segmentWords`), each with whether it feeds a shell: it is piped (a single `|`, or
+    /// `|&`; also a `(...)` or `{ ...; }` group, which the views turn into `;`) into a segment whose command is a shell
+    /// or a command wrapper (`feedsAShell`: `echo reboot | sh`, `printf reboot | ssh h`). The daemon's `piped_segments`.
+    private static func pipedSegments(_ view: String) -> [(words: [String], fedShell: Bool)] {
+        let chars = Array(view.unicodeScalars)
+        // Each raw segment, and whether a single pipe ended it.
+        var raw: [(text: String, pipes: Bool)] = []
+        var current = String.UnicodeScalarView()
+        for (index, c) in chars.enumerated() {
+            guard c == ";" || c == "|" || c == "&" else {
+                current.append(c)
+                continue
+            }
+            // The `&` of `|&` belongs to the pipe.
+            if c == "&" && index > 0 && chars[index - 1] == "|" { continue }
+            let singlePipe = c == "|" && !(index + 1 < chars.count && chars[index + 1] == "|") && !(index > 0 && chars[index - 1] == "|")
+            raw.append((String(current), singlePipe))
+            current = String.UnicodeScalarView()
+        }
+        raw.append((String(current), false))
+        var segments: [[String]] = []
+        var pipedInto: [Bool] = []
+        for (text, pipes) in raw {
+            let words = StagingHazards.splitWords(text, where: { $0 == " " || $0 == "\t" || $0 == "<" || $0 == ">" })
+            if words.isEmpty {
+                // A pipe that follows an empty segment (`(echo reboot) | sh` is `;echo reboot; | sh`) pipes every earlier segment.
+                if pipes { pipedInto = pipedInto.map { _ in true } }
+                continue
+            }
+            segments.append(words)
+            pipedInto.append(pipes)
+        }
+        return segments.indices.map { index in
+            (segments[index], pipedInto[index] && index + 1 < segments.count && feedsAShell(segments[index + 1]))
+        }
+    }
+
+    /// Is the command of this segment (after its prefix words: `sudo`, `env`, options, assignments) a shell or a command
+    /// wrapper (`StagingHazards.quoteWrappers`, a lone `.`), or a `$` or backtick word or substitution placeholder that
+    /// may be one?
+    private static func feedsAShell(_ words: [String]) -> Bool {
+        var leading = true
+        var afterOption = false
+        for (index, word) in words.enumerated() {
+            if !leading { return false }
+            if StagingHazards.isQuoteWrapper(program(word), leading: true) || StagingHazards.isDotWrapper(word)
+                || StagingHazards.same(word, "_") || word.unicodeScalars.contains(where: { $0 == "$" || $0 == "`" }) {
+                return true
+            }
+            let previous = index > 0 ? program(words[index - 1]) : ""
+            (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption, previous: previous)
         }
         return false
     }
@@ -481,22 +539,22 @@ enum StagingHazards {
             if next != " " && next != "=" && next != "(" { return true }
         }
         return normalisedViews(command).contains { view in
-            words(of: view).contains(where: { $0 == "fc" || $0 == "history" })
+            words(of: view).contains(where: { same($0, "fc") || same($0, "history") })
                 || segments(of: view).contains { segment in
-                    splitScalars(segment, where: { $0 == " " || $0 == "\t" })
-                        .first(where: { !leavesCommandPosition($0) }) == "r"
+                    splitScalars(segment, where: { $0.properties.isWhitespace })
+                        .first(where: { !leavesCommandPosition($0) }).map { same($0, "r") } ?? false
                 }
         }
     }
 
-    private static let prefixWords: Set<String> = ["then", "do", "else", "elif", "if", "while", "until", "!", "-", "command", "builtin",
+    private static let prefixWords: [String] = ["then", "do", "else", "elif", "if", "while", "until", "!", "-", "command", "builtin",
                                                    "eval", "exec", "time", "sudo", "noglob", "nocorrect", "nohup", "nice", "env", "coproc"]
 
     /// Does `word` leave the next word in command position? A prefix word, a prefix assignment (`X=1 r` runs the
     /// builtin), an option or a number (`nice -n 5 r`). Only read before a segment's command, so `ls -r` stops at `ls`.
     private static func leavesCommandPosition(_ word: String) -> Bool {
         let scalars = Array(word.unicodeScalars)
-        if prefixWords.contains(word) || scalars.first == "-" || scalars.allSatisfy(isASCIIDigit) { return true }
+        if isOneOf(word, prefixWords) || scalars.first == "-" || scalars.allSatisfy(isASCIIDigit) { return true }
         guard let equals = scalars.firstIndex(of: "="), equals > 0, !isASCIIDigit(scalars[0]) else { return false }
         return scalars[..<equals].allSatisfy { isASCIIAlphanumeric($0) || $0 == "_" }
     }
@@ -559,6 +617,21 @@ enum StagingHazards {
         default: return false
         }
     }
+
+    /// Scalar-wise string equality. `String ==` compares canonical equivalence (U+212A KELVIN SIGN is `K`), the daemon
+    /// compares code points: a word is matched against the rules' ASCII names the daemon's way.
+    static func same(_ a: String, _ b: String) -> Bool { a.unicodeScalars.elementsEqual(b.unicodeScalars) }
+
+    /// Is `word` (scalar-wise) one of `list`?
+    static func isOneOf<C: Collection>(_ word: String, _ list: C) -> Bool where C.Element == String {
+        list.contains { same(word, $0) }
+    }
+
+    /// Is `needle` (scalar-wise) a member of `words`?
+    static func wordsContain(_ words: [String], _ needle: String) -> Bool { isOneOf(needle, words) }
+
+    /// The index of `needle` (scalar-wise) in `words`.
+    static func wordIndex(_ needle: String, in words: [String]) -> Int? { words.firstIndex { same($0, needle) } }
 
     /// Does `text` hold `needle` as a run of scalars? (`String.contains` compares Characters: a combining mark glued
     /// to the last letter of `needle` would hide it.)
@@ -776,9 +849,9 @@ enum StagingHazards {
         // A word that ended at `end`: `case` in command position, followed by whitespace (not `case=1`), opens a case;
         // `esac` in command position closes one.
         func endWord(_ end: Unicode.Scalar) {
-            if wordAtCommand && word == "case" && end.properties.isWhitespace {
+            if wordAtCommand && same(word, "case") && end.properties.isWhitespace {
                 cases += 1
-            } else if wordAtCommand && word == "esac" && end != "=" {
+            } else if wordAtCommand && same(word, "esac") && end != "=" {
                 cases = max(0, cases - 1)
             }
             word = ""
@@ -855,8 +928,17 @@ enum StagingHazards {
         "ssh", "mosh", "parallel", "watch", "su", "script", "flock", "runuser", "gosu", "su-exec", "pdsh", "ansible",
         "source", "at", "batch"]
 
+    /// Wrappers that count only in command position: `at`, `batch` and `source` are also ordinary words
+    /// (`grep at 'a > b' file` is a search, not a job).
+    static let commandPositionWrappers = ["source", "at", "batch"]
+
+    /// Is `name` (a program) a `quoteWrappers` entry here? `leading`: the word is in command position.
+    static func isQuoteWrapper(_ name: String, leading: Bool) -> Bool {
+        isOneOf(name, quoteWrappers) && (leading || !isOneOf(name, commandPositionWrappers))
+    }
+
     /// A lone `.` is `source`: it runs its file, which may be `<(echo '...')` or `/dev/stdin`.
-    static func isDotWrapper(_ word: String) -> Bool { word == "." }
+    static func isDotWrapper(_ word: String) -> Bool { same(word, ".") }
 
     private static func programName(_ word: String) -> String {
         (splitScalars(word, omittingEmpty: false, where: { $0 == "/" }).last ?? word).lowercased()
@@ -865,7 +947,7 @@ enum StagingHazards {
     private static func maskedOperator(_ c: Unicode.Scalar) -> Unicode.Scalar { c == ">" || c == "{" || c == "}" ? "_" : c }
 
     /// Programs that run another program after their own words, so what follows them is still in command position.
-    private static let prefixPrograms: Set<String> = [
+    private static let prefixPrograms: [String] = [
         "then", "do", "else", "elif", "if", "while", "until", "!", "-", "command", "builtin", "eval", "exec",
         "time", "sudo", "doas", "noglob", "nocorrect", "nohup", "nice", "ionice", "setsid", "env", "timeout",
         "pkexec", "busybox", "stdbuf", "systemd-run", "strace", "ltrace", "taskset", "chrt", "numactl", "unbuffer",
@@ -874,7 +956,7 @@ enum StagingHazards {
     /// Options of the prefix programs that take a value (`sudo -u deploy`, `timeout -s KILL 5`, `ionice -c 2`,
     /// `exec -a name`, `strace -o file`, `sudo -D dir`, `env -S 'cmd'`; compared lowercased). A long option
     /// without `=` is taken to have one too (`sudo --user deploy reboot`): that only ever asks more.
-    private static let optionsWithValue: Set<String> = ["-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n", "-a", "-o", "-w", "-d"]
+    private static let optionsWithValue: [String] = ["-u", "-g", "-h", "-p", "-r", "-t", "-c", "-s", "-k", "-n", "-a", "-o", "-w", "-d"]
 
     /// A `name=value` prefix assignment.
     private static func isAssignment(_ word: String) -> Bool {
@@ -896,13 +978,31 @@ enum StagingHazards {
 
     /// While reading the words before a segment's command: does `word` leave the next word in command position (a prefix
     /// word), and does it take a value of its own (so the word after it is one too)?
-    static func leadingStep(_ word: String, afterOption: Bool) -> (prefix: Bool, takesValue: Bool) {
+    /// `previous` is the program of the word before it: `-p` is a flag of `time` and `command`, not an option with a value.
+    static func leadingStep(_ word: String, afterOption: Bool, previous: String) -> (prefix: Bool, takesValue: Bool) {
         let dash = word.unicodeScalars.first == "-"
-        let prefix = afterOption || isAssignment(word) || prefixPrograms.contains(programName(word)) || dash || isDuration(word)
+        let prefix = afterOption || isAssignment(word) || isOneOf(programName(word), prefixPrograms) || dash || isDuration(word)
         let takesValue = dash
-            && (optionsWithValue.contains(word.lowercased())
+            && ((isOneOf(word.lowercased(), optionsWithValue) && !(same(word, "-p") && isOneOf(previous, ["time", "command", "builtin"])))
                 || (word.unicodeScalars.starts(with: "--".unicodeScalars) && !word.unicodeScalars.contains("=")))
         return (prefix, takesValue)
+    }
+
+    /// Programs that run a command given after their own words (and, for `runnerSkip`, a first argument of their own):
+    /// what follows is in command position, so a wildcard there is a program name (`xargs /bin/r? -rf`,
+    /// `ssh h /bin/r? -rf /x`, `find . -exec /bin/r? -rf {} \;`).
+    private static let commandRunners = ["xargs", "nsenter", "chroot", "ssh", "mosh", "parallel", "watch", "flock", "runuser",
+                                         "gosu", "su-exec", "pdsh"]
+
+    /// The words a runner takes before its command: a host (`ssh HOST cmd`), a root (`chroot DIR cmd`), a lock file, a user.
+    private static func runnerSkip(_ name: String) -> Int {
+        isOneOf(name, ["ssh", "mosh", "pdsh", "chroot", "flock", "gosu", "su-exec"]) ? 1 : 0
+    }
+
+    /// `leadingStep` for the words after a runner: `xargs -I {} cmd`, `-L 1` and `-E eof` take a value too.
+    private static func runnerStep(_ word: String, afterOption: Bool, previous: String) -> (prefix: Bool, takesValue: Bool) {
+        let step = leadingStep(word, afterOption: afterOption, previous: previous)
+        return (step.prefix, step.takesValue || isOneOf(word, ["-I", "-L", "-E"]))
     }
 
     /// `text` with the operators that a quoted string cannot use replaced by `_`: a `>` (not a redirection), `{` and `}`
@@ -938,6 +1038,8 @@ enum StagingHazards {
         var fedShell = false
         /// A command word holds a wildcard (`hasWildcardCommandWord`).
         var wildcardCommand = false
+        /// How many `case` statements are open: a `)` inside one ends a pattern, and a command follows it.
+        var cases = 0
     }
 
     private static func scanQuotes(_ text: String) -> (masked: String, scan: QuoteScan) {
@@ -957,11 +1059,51 @@ enum StagingHazards {
         /// A `xargs`-like word has been seen: a `$` word after it may be the command it runs.
         var runsOthers = false
         var piped: Bool
+        /// After a command runner (`commandRunners`, `find -exec`): the words so far are options, so the next may be the
+        /// command; read like `leading`, and a wildcard in one counts.
+        var runnerLeading = false
+        var runnerAfterOption = false
+        var runnerSkip = 0
+        /// A `find` is in command position in this segment: `-exec` and friends start a command.
+        var inFind = false
+        /// The program of the previous word of the segment.
+        var previous = ""
 
         mutating func endWord(_ scan: inout QuoteScan) {
             if word.isEmpty { return }
             let name = StagingHazards.programName(word)
-            let wrapper = StagingHazards.quoteWrappers.contains(name) || (leading && StagingHazards.isDotWrapper(word))
+            let wasLeading = leading
+            let wasRunnerLeading = runnerLeading
+            // A wildcard in any leading word (the command, a prefix program's option or value: `time -p /bin/r?`) or in a
+            // runner's command words is a program name no text rule can follow. `[`, `[[` and assignments are not.
+            if wasLeading || wasRunnerLeading,
+               word.unicodeScalars.contains(where: { $0 == "?" || $0 == "*" || $0 == "[" }),
+               !StagingHazards.isOneOf(word, ["[", "[["]),
+               !StagingHazards.isAssignment(word) {
+                scan.wildcardCommand = true
+            }
+            if wasLeading && StagingHazards.same(word, "case") {
+                scan.cases += 1
+            } else if wasLeading && StagingHazards.same(word, "esac") {
+                scan.cases = max(0, scan.cases - 1)
+            }
+            if wasRunnerLeading {
+                let step = StagingHazards.runnerStep(word, afterOption: runnerAfterOption, previous: previous)
+                runnerAfterOption = step.takesValue
+                if !step.prefix {
+                    if runnerSkip > 0 { runnerSkip -= 1 } else { runnerLeading = false }
+                }
+            }
+            if inFind && StagingHazards.isOneOf(word, ["-exec", "-execdir", "-ok", "-okdir"]) {
+                (runnerLeading, runnerAfterOption, runnerSkip) = (true, false, 0)
+            }
+            if wasLeading || wasRunnerLeading {
+                if StagingHazards.isOneOf(name, StagingHazards.commandRunners) {
+                    (runnerLeading, runnerAfterOption, runnerSkip) = (true, false, StagingHazards.runnerSkip(name))
+                }
+                if StagingHazards.same(name, "find") { inFind = true }
+            }
+            let wrapper = StagingHazards.isQuoteWrapper(name, leading: leading) || (leading && StagingHazards.isDotWrapper(word))
             if wrapper { wrapperSeen = true }
             // `env -S 'cmd'` runs its string as a command line.
             if leading && (word.unicodeScalars.starts(with: "-S".unicodeScalars) || word.unicodeScalars.starts(with: "--split-string".unicodeScalars)) {
@@ -972,17 +1114,13 @@ enum StagingHazards {
             let dynamicCommand = (leading || runsOthers) && word.unicodeScalars.contains(where: { $0 == "$" || $0 == "`" })
             if dynamicCommand { wrapperSeen = true }
             if piped && (wrapper || dynamicCommand) { scan.fedShell = true }
-            if ["xargs", "nsenter", "chroot", "find", "kubectl", "docker", "podman"].contains(name) { runsOthers = true }
+            if StagingHazards.isOneOf(name, ["xargs", "nsenter", "chroot", "find", "kubectl", "docker", "podman"]) { runsOthers = true }
             if leading {
-                (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption)
-                // A group (`{ cmd; }`) starts with a command.
-                if word == "{" { leading = true }
-                // The first word that is not a prefix is the command word.
-                if !leading && word != "[" && word != "[["
-                    && word.unicodeScalars.contains(where: { $0 == "?" || $0 == "*" || $0 == "[" }) {
-                    scan.wildcardCommand = true
-                }
+                (leading, afterOption) = StagingHazards.leadingStep(word, afterOption: afterOption, previous: previous)
             }
+            // A group (`{ cmd; }`, `function f { cmd; }`) starts with a command.
+            if StagingHazards.same(word, "{") { leading = true }
+            previous = name
             word = ""
         }
     }
@@ -993,6 +1131,9 @@ enum StagingHazards {
     private static func maskInto(_ chars: [Unicode.Scalar], _ out: inout String, _ scan: inout QuoteScan, quotedText: Bool = false) {
         var segment = MaskSegment(piped: false)
         segment.leading = !quotedText
+        // Inside a backtick pair: the segment outside it, and whether the next word after the pair is in command position
+        // (an assignment's value or an option's value: `` x=`date` /bin/r? ``).
+        var backtick: (outer: MaskSegment, leadingAfter: Bool)?
         var index = 0
         while index < chars.count {
             let c = chars[index]
@@ -1023,6 +1164,11 @@ enum StagingHazards {
                     return
                 }
                 let content = Array(chars[(index + 1)..<end])
+                // `env -S'cmd'`: the string glued to the option runs as a command line.
+                if segment.leading && (segment.word.unicodeScalars.starts(with: "-S".unicodeScalars)
+                                       || segment.word.unicodeScalars.starts(with: "--split-string".unicodeScalars)) {
+                    segment.wrapperSeen = true
+                }
                 out.unicodeScalars.append(c)
                 if segment.wrapperSeen {
                     maskInto(content, &out, &scan)
@@ -1035,8 +1181,33 @@ enum StagingHazards {
                     out.unicodeScalars.append(contentsOf: content.map(maskedOperator))
                 }
                 out.unicodeScalars.append(c)
-                segment.word.unicodeScalars.append(contentsOf: content)
+                // A string analysed as live code is not a word of this segment (`ssh h 'ls /var/log/*'`).
+                if !segment.wrapperSeen { segment.word.unicodeScalars.append(contentsOf: content) }
                 index = end + 1
+            case "`" where backtick != nil:
+                segment.endWord(&scan)
+                if let pair = backtick {
+                    segment = pair.outer
+                    (segment.leading, segment.afterOption) = (pair.leadingAfter, false)
+                }
+                backtick = nil
+                out.unicodeScalars.append(c)
+                index += 1
+            case "`" where closingBacktick(chars, from: index) != nil:
+                // A backtick pair holds a command of its own.
+                let (wasLeading, wasValue) = (segment.leading, segment.afterOption)
+                let commandPosition = wasLeading || segment.runsOthers
+                let gluedAssignment = isAssignment(segment.word)
+                segment.endWord(&scan)
+                // A substitution where the command goes may be a shell: `` `which bash` -c '...' ``.
+                if commandPosition {
+                    segment.wrapperSeen = true
+                    if segment.piped { scan.fedShell = true }
+                }
+                backtick = (segment, wasLeading && (wasValue || gluedAssignment))
+                (segment.leading, segment.afterOption) = (true, false)
+                out.unicodeScalars.append(c)
+                index += 1
             case "&" where index > 0 && chars[index - 1] == "|":
                 // The `&` of `|&` belongs to the pipe: the segment it ends is still fed by it.
                 segment.endWord(&scan)
@@ -1052,8 +1223,9 @@ enum StagingHazards {
             default:
                 if c.properties.isWhitespace || c == "(" || c == ")" {
                     segment.endWord(&scan)
-                    // A subshell, `$(`, `<(` or `((` starts a command of its own.
-                    if c == "(" { (segment.leading, segment.afterOption) = (true, false) }
+                    // A subshell, `$(`, `<(` or `((` starts a command of its own, and so does what follows the `)` of a
+                    // `case` pattern.
+                    if c == "(" || (c == ")" && scan.cases > 0) { (segment.leading, segment.afterOption) = (true, false) }
                 } else {
                     segment.word.unicodeScalars.append(c)
                 }
@@ -1229,6 +1401,28 @@ enum StagingHazards {
         return " \(name) \(operand) "
     }
 
+    /// `text` split at the scalars for which `isSeparator` holds, with a glued `env -S<command>` or `--split-string=<command>`
+    /// word as two words (`env -Sreboot` is `env -S reboot`): the option, then the command it runs.
+    static func splitWords(_ text: String, where isSeparator: (Unicode.Scalar) -> Bool) -> [String] {
+        var words: [String] = []
+        for word in splitScalars(text, where: isSeparator) {
+            let scalars = word.unicodeScalars
+            var glued: (option: String, rest: String)?
+            if scalars.starts(with: "--split-string=".unicodeScalars) {
+                glued = ("--split-string", string(scalars.dropFirst("--split-string=".unicodeScalars.count)))
+            } else if scalars.starts(with: "-S".unicodeScalars) {
+                glued = ("-S", string(scalars.dropFirst(2)))
+            }
+            if let glued = glued, !glued.rest.isEmpty {
+                words.append(glued.option)
+                words.append(glued.rest)
+            } else {
+                words.append(word)
+            }
+        }
+        return words
+    }
+
     /// Words, split at whitespace and at `;`, `|` and `&`.
     static func words(of text: String) -> [String] {
         splitScalars(text) { $0.properties.isWhitespace || $0 == ";" || $0 == "|" || $0 == "&" }
@@ -1238,7 +1432,7 @@ enum StagingHazards {
     /// to a word (`kubectl delete>/dev/null ns x`) still leaves the verb a word of its own. The history check keeps
     /// [`words(of:)`].
     static func redirectionSplitWords(of text: String) -> [String] {
-        splitScalars(text) { $0.properties.isWhitespace || ";|&<>".unicodeScalars.contains($0) }
+        splitWords(text) { $0.properties.isWhitespace || ";|&<>".unicodeScalars.contains($0) }
     }
 
     /// `⚠ Matches a destructive pattern (queue:flush). Insert asks first. No label does not mean safe.`
@@ -1267,8 +1461,14 @@ enum StagingHazards {
 
     /// The command split into segments at `;`, `&` (and so `&&`), `|` (and so `||`).
     static func segments(of command: String) -> [String] {
-        splitScalars(command, where: { $0 == ";" || $0 == "|" || $0 == "&" })
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+        splitScalars(command, where: { $0 == ";" || $0 == "|" || $0 == "&" }).map { segment in
+            // Trimmed scalar by scalar, of every Unicode whitespace as the daemon's `trim` does (not `.whitespaces`, which
+            // keeps a line break; the daemon refuses one before any rule runs).
+            var scalars = segment.unicodeScalars[...]
+            while let first = scalars.first, first.properties.isWhitespace { scalars = scalars.dropFirst() }
+            while let last = scalars.last, last.properties.isWhitespace { scalars = scalars.dropLast() }
+            return string(scalars)
+        }
     }
 
     /// ICU's `\b` skips combining marks and the daemon's regex engine does not: `\b` is spelled out here as the

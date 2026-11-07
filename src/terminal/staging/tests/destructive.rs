@@ -1909,3 +1909,42 @@ fn the_read_only_corpus_never_asks_in_production_and_never_carries_a_label() {
         );
     }
 }
+
+// ── fixture integrity ─────────────────────────────────────────────────────────
+
+/// The exact number of rows in `hazards.json`. Bump it with every row added (or removed on purpose), so a
+/// silent truncation of the fixture, which would quietly drop coverage, is noticed.
+const EXPECTED_ROWS: usize = 1083;
+
+#[test]
+fn the_hazards_fixture_has_exactly_the_pinned_row_count_and_unique_names() {
+    let rows: Vec<serde_json::Value> = serde_json::from_str(HAZARDS).expect("hazards.json");
+    assert_eq!(
+        rows.len(),
+        EXPECTED_ROWS,
+        "hazards.json row count changed: bump EXPECTED_ROWS here and in StagingHazardsTests.swift if on purpose"
+    );
+    let mut names = std::collections::BTreeSet::new();
+    for row in &rows {
+        let name = row["name"].as_str().expect("every row has a name");
+        assert!(names.insert(name), "duplicate fixture name {name}");
+    }
+}
+
+#[test]
+fn the_hazards_fixture_keeps_a_real_combining_mark_scalar() {
+    // An editor or git filter that re-saves the file as NFC would fold U+0301 into its neighbour and quietly
+    // neutralise the combining-mark rows. At least one row must still carry the raw scalar.
+    let rows: Vec<serde_json::Value> = serde_json::from_str(HAZARDS).expect("hazards.json");
+    assert!(
+        rows.iter()
+            .any(|r| r["text"].as_str().is_some_and(|t| t.contains('\u{0301}'))),
+        "no hazards.json row contains a U+0301 scalar; the file was probably re-normalised"
+    );
+}
+
+#[test]
+fn a_multi_line_command_is_refused_before_any_matcher_sees_it() {
+    assert!(validate_command_in("rm -rf x\nls", true).is_err());
+    assert!(validate_command_in("rm -rf x\r\nls", true).is_err());
+}
