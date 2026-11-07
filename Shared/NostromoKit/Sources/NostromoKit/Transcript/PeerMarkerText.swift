@@ -43,7 +43,7 @@ extension WakeMarkerText {
             return WakeMarkerContent(
                 line: "\(peerMark) \(name)\(modeText): \(head)",
                 tooltipLines: tooltip,
-                accessibilityLabel: "Message from session \(name),\(mode.map { " \($0) mode," } ?? "") \(capped(text, to: tooltipBodyLimit)).",
+                accessibilityLabel: "Message from session \(name)\(mode.map { ", \($0) mode" } ?? ""): \(capped(text, to: tooltipBodyLimit)).",
                 target: .none,
                 badge: mode == warningMode ? mode : nil,
                 copyText: copy)
