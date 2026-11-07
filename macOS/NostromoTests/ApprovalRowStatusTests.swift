@@ -2485,6 +2485,91 @@ final class AskQuestionRecordViewTests: MouseQueueTestCase {
         XCTAssertFalse(view.statusLine.hasPrefix("Answered"), "and never says it was answered")
     }
 
+    // MARK: A refused Deny, and a Deny sent after a refusal
+
+    private let denyNotAccepted = "Deny was not accepted; try Deny again above"
+
+    func testADenyTheDaemonRefusesWithNoAnswerEverSentSaysTheDenyWasNotAcceptedNotTheAnswer() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+        let view = record(store)
+
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+
+        XCTAssertEqual(AskQuestionRecordView.denyNotAcceptedText, denyNotAccepted, "the words the person reads")
+        XCTAssertEqual(view.statusLine, denyNotAccepted)
+        XCTAssertEqual(view.accessibilityValue() as? String, denyNotAccepted, "and VoiceOver")
+        XCTAssertEqual(record(store).statusLine, denyNotAccepted, "and a record built afterwards")
+        XCTAssertTrue(store.isDenyNotAccepted(toolUseId: "toolu_a"))
+        XCTAssertFalse(store.isAnswerNotAccepted(toolUseId: "toolu_a"), "no answer was refused")
+    }
+
+    func testADenySentAfterARefusedAnswerSaysDenyingNotThatItWaitsForAnAnswer() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+        let view = record(store)
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+        XCTAssertEqual(view.statusLine, AskQuestionRecordView.answerNotAcceptedText, "premise")
+
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+
+        XCTAssertEqual(AskQuestionRecordView.denyingText, "Denying…", "the words the person reads")
+        XCTAssertEqual(view.statusLine, "Denying…")
+        XCTAssertEqual(view.accessibilityValue() as? String, "Denying…")
+        XCTAssertEqual(record(store).statusLine, "Denying…", "and a record built afterwards")
+    }
+
+    func testADenyInFlightWithNoEarlierRefusalStillSaysItWaitsForAnAnswer() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+
+        XCTAssertEqual(record(store).statusLine, "Waiting for your answer above")
+    }
+
+    func testARefusedAnswerWithNoDenySentStillSaysTheAnswerWasNotAccepted() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+
+        XCTAssertEqual(record(store).statusLine, AskQuestionRecordView.answerNotAcceptedText)
+        XCTAssertTrue(store.isAnswerNotAccepted(toolUseId: "toolu_a"))
+        XCTAssertFalse(store.isDenyNotAccepted(toolUseId: "toolu_a"))
+    }
+
+    func testARefusedAnswerThenADenyTheDaemonRefusesToSaysTheDenyWasNotAccepted() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+        let view = record(store)
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+        XCTAssertEqual(view.statusLine, "Denying…", "premise")
+
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+
+        XCTAssertEqual(view.statusLine, denyNotAccepted)
+        XCTAssertEqual(record(store).statusLine, denyNotAccepted)
+        XCTAssertTrue(store.isDenyNotAccepted(toolUseId: "toolu_a"))
+        XCTAssertFalse(store.isAnswerNotAccepted(toolUseId: "toolu_a"))
+    }
+
+    func testTheStatusTextTableForARefusedDenyAndADenyAfterARefusal() {
+        typealias R = AskQuestionRecordView
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: nil, denyNotAccepted: true), denyNotAccepted)
+        XCTAssertEqual(R.statusText(awaiting: false, chosen: nil, denyNotAccepted: true), denyNotAccepted)
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: nil, denying: true), "Denying…")
+        XCTAssertEqual(R.statusText(awaiting: false, chosen: nil, denying: true), "Denying…")
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: ["A"], denyNotAccepted: true), "Answered: A", "labels outrank the rest")
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: ["A"], denying: true), "Answered: A", "labels outrank the rest")
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: nil), "Waiting for your answer above", "neither new flag: unchanged")
+    }
+
     func testARefusalSayingTheRequestIsUnknownLeavesTheRecordWithNoAnswerAndNoWaiting() throws {
         let (store, _) = make()
         store.handle(.request(try QuestionTestRequests.ask(id: "a")))

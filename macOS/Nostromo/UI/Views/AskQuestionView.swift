@@ -424,15 +424,22 @@ final class AskQuestionRecordView: NSView {
     /// What the status line says, first match wins:
     /// - labels were sent and not refused: `Answered: …`;
     /// - the daemon refused the answer and the card is `.notSent` (only Deny works): `answerNotAcceptedText`;
+    /// - the daemon refused a Deny: `denyNotAcceptedText`;
+    /// - a Deny is in flight after a refusal (the card says `Denying…`): `denyingText`;
     /// - the request waits for the person: `Waiting for your answer above`;
     /// - otherwise nothing (never an invented answer).
-    static func statusText(awaiting: Bool, chosen: [String]?, notAccepted: Bool = false) -> String {
+    static func statusText(awaiting: Bool, chosen: [String]?, notAccepted: Bool = false,
+                           denyNotAccepted: Bool = false, denying: Bool = false) -> String {
         if let chosen, !chosen.isEmpty { return "Answered: " + chosen.joined(separator: ", ") }
         if notAccepted { return answerNotAcceptedText }
+        if denyNotAccepted { return denyNotAcceptedText }
+        if denying { return denyingText }
         return awaiting ? "Waiting for your answer above" : ""
     }
 
     static let answerNotAcceptedText = "Answer was not accepted; only Deny works above"
+    static let denyNotAcceptedText = "Deny was not accepted; try Deny again above"
+    static let denyingText = "Denying…"
 
     private let data: AskQuestionData
     private let toolUseId: String
@@ -495,7 +502,9 @@ final class AskQuestionRecordView: NSView {
         statusLabel.stringValue = Self.statusText(
             awaiting: store?.isAwaitingAnswer(toolUseId: toolUseId) ?? false,
             chosen: store?.chosenLabels(toolUseId: toolUseId),
-            notAccepted: store?.isAnswerNotAccepted(toolUseId: toolUseId) ?? false)
+            notAccepted: store?.isAnswerNotAccepted(toolUseId: toolUseId) ?? false,
+            denyNotAccepted: store?.isDenyNotAccepted(toolUseId: toolUseId) ?? false,
+            denying: store?.isDenyingAfterRefusal(toolUseId: toolUseId) ?? false)
         let spoken = [Self.questionText(for: data), statusLabel.stringValue].filter { !$0.isEmpty }
         setAccessibilityLabel(spoken.joined(separator: ". "))
         setAccessibilityValue(statusLabel.stringValue)
