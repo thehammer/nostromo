@@ -2391,7 +2391,7 @@ final class AskQuestionHandledStoreTests: MouseQueueTestCase {
         XCTAssertTrue(tap.values.dropFirst(beforeDeny).contains("toolu_a"), "the record is told it changed")
     }
 
-    func testARefusedDenyIsAlsoNotAcceptedAndPublishesEvenThoughNoLabelsWereKept() throws {
+    func testARefusedDenyIsNotAcceptedAndPublishesEvenThoughNoLabelsWereKept() throws {
         let (store, _) = make()
         let tap = ApprovalTap(store.statusChanges)
         try ask(store, "a")
@@ -2400,7 +2400,7 @@ final class AskQuestionHandledStoreTests: MouseQueueTestCase {
 
         store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "not_operator_app")))
 
-        XCTAssertTrue(store.isAnswerNotAccepted(toolUseId: "toolu_a"))
+        XCTAssertTrue(store.isDenyNotAccepted(toolUseId: "toolu_a"), "a refused Deny is worded as one, not as a refused answer")
         XCTAssertTrue(tap.values.dropFirst(before).contains("toolu_a"), "there was no choice to forget, the record still has to refresh")
     }
 
