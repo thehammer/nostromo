@@ -2500,6 +2500,13 @@ pub enum ServerMsg {
         tag: String,
         request: crate::approvals::wire::ApprovalRequestWire,
     },
+    /// The counts of a held request's consequence preview, once they are known (AP7).
+    /// Replaces the `preview` the card was shown with `state: counting`. `LocalOnly`.
+    ApprovalPreview {
+        tag: String,
+        request_id: String,
+        preview: crate::approvals::wire::ApprovalPreviewWire,
+    },
     /// Every request still held, sent once to a connection that subscribes
     /// with `renders_approvals` (targeted).
     ApprovalsSnapshot {
@@ -6307,6 +6314,7 @@ mod work_wire_tests {
             session_rule_candidates: vec![],
             created_at_ms: 1_760_000_000_000,
             deadline_at_ms: 1_760_000_900_000,
+            preview: None,
         }
     }
 
@@ -6388,6 +6396,7 @@ mod work_wire_tests {
             session_rule_candidates: vec![],
             created_at_ms: 1,
             deadline_at_ms: 2,
+            preview: None,
         }
     }
 
@@ -6657,6 +6666,64 @@ mod work_wire_tests {
             },
             r#"{"type":"approval_guard_blocked","tag":"cody-1","tool_use_id":"toolu_9","entry_id":"entry-1","at_ms":5,"summary":"Bash ecs_connect"}"#,
         );
+    }
+
+    fn sample_preview() -> crate::approvals::wire::ApprovalPreviewWire {
+        use crate::approvals::wire::*;
+        ApprovalPreviewWire {
+            state: PreviewState::Partial,
+            targets: vec![PreviewTargetWire {
+                command: PreviewCommand::Rm,
+                path: Some("/tmp/x".into()),
+                cant_resolve: None,
+                why: None,
+                relative: true,
+                exists: Some(true),
+                kind: Some(PreviewKind::Dir),
+                dirs: Some(3),
+                files: Some(41208),
+                bytes: Some(1_200_000_000),
+                at_least: true,
+                flags: vec![PreviewFlag::OutsideCwd],
+                dest: None,
+            }],
+            more: 2,
+        }
+    }
+
+    #[test]
+    fn approval_preview_has_this_exact_wire_form() {
+        assert_server_golden(
+            ServerMsg::ApprovalPreview {
+                tag: "cody-1".into(),
+                request_id: "r1".into(),
+                preview: sample_preview(),
+            },
+            r#"{"type":"approval_preview","tag":"cody-1","request_id":"r1","preview":{"state":"partial","targets":[{"command":"rm","path":"/tmp/x","relative":true,"exists":true,"kind":"dir","dirs":3,"files":41208,"bytes":1200000000,"at_least":true,"flags":["outside_cwd"]}],"more":2}}"#,
+        );
+    }
+
+    #[test]
+    fn approval_request_carries_a_preview_only_when_it_has_one() {
+        let without = serde_json::to_value(ServerMsg::ApprovalRequest {
+            tag: "cody-1".into(),
+            request: minimal_approval_wire(),
+        })
+        .unwrap();
+        assert!(without["request"].get("preview").is_none());
+        let mut wire = minimal_approval_wire();
+        wire.preview = Some(sample_preview());
+        let with = serde_json::to_value(ServerMsg::ApprovalRequest {
+            tag: "cody-1".into(),
+            request: wire,
+        })
+        .unwrap();
+        assert_eq!(with["request"]["preview"]["state"], "partial");
+        let back: ServerMsg = serde_json::from_value(with).unwrap();
+        let ServerMsg::ApprovalRequest { request, .. } = back else {
+            panic!()
+        };
+        assert_eq!(request.preview, Some(sample_preview()));
     }
 
     #[test]

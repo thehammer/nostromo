@@ -585,24 +585,62 @@ const MAX_HELPERS: usize = 4;
 static HELPERS_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Counts one helper thread; dropping it (the thread ending, even by a panic) gives the slot back.
-struct HelperSlot;
+struct HelperSlot(&'static std::sync::atomic::AtomicUsize);
 
 impl HelperSlot {
-    fn take() -> Option<Self> {
+    fn take(in_flight: &'static std::sync::atomic::AtomicUsize, max: usize) -> Option<Self> {
         use std::sync::atomic::Ordering::SeqCst;
-        let taken = HELPERS_IN_FLIGHT.fetch_add(1, SeqCst);
-        if taken >= MAX_HELPERS {
-            HELPERS_IN_FLIGHT.fetch_sub(1, SeqCst);
+        let taken = in_flight.fetch_add(1, SeqCst);
+        if taken >= max {
+            in_flight.fetch_sub(1, SeqCst);
             return None;
         }
-        Some(Self)
+        Some(Self(in_flight))
     }
 }
 
 impl Drop for HelperSlot {
     fn drop(&mut self) {
-        HELPERS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
+}
+
+/// Run `f` on a helper thread counted in `in_flight` (at most `max` at once); false if the
+/// cap is reached or the thread could not start. Nothing waits for it.
+pub(crate) fn spawn_capped(
+    in_flight: &'static std::sync::atomic::AtomicUsize,
+    max: usize,
+    name: &str,
+    f: impl FnOnce() + Send + 'static,
+) -> bool {
+    let Some(slot) = HelperSlot::take(in_flight, max) else {
+        return false;
+    };
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let _slot = slot;
+            f();
+        })
+        .is_ok()
+}
+
+/// Like [`bounded`], with its own helper cap.
+pub(crate) fn bounded_capped<T: Send + 'static>(
+    in_flight: &'static std::sync::atomic::AtomicUsize,
+    max: usize,
+    name: &str,
+    timeout: std::time::Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = spawn_capped(in_flight, max, name, move || {
+        let _ = tx.send(f());
+    });
+    if !started {
+        return None;
+    }
+    rx.recv_timeout(timeout).ok()
 }
 
 /// Run `f` on a helper thread; `None` if it has not finished within `timeout` or too many
@@ -611,16 +649,7 @@ fn bounded<T: Send + 'static>(
     timeout: std::time::Duration,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
-    let slot = HelperSlot::take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("rule-match".into())
-        .spawn(move || {
-            let _slot = slot;
-            let _ = tx.send(f());
-        })
-        .ok()?;
-    rx.recv_timeout(timeout).ok()
+    bounded_capped(&HELPERS_IN_FLIGHT, MAX_HELPERS, "rule-match", timeout, f)
 }
 
 /// A request that passed every eligibility check: its trimmed command and words.

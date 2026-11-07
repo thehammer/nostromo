@@ -142,6 +142,8 @@ struct ApprovalCardListing: Equatable {
     let headline: String
     /// The input as displayed: the view's lines with invisible characters as tokens.
     let input: String
+    /// The consequence preview's lines as the card shows them (additive: `preview`, empty when none).
+    var preview: [String] = []
     let lines: [Line]
     let commandCount: Int?
     let invisibleCount: Int
@@ -201,6 +203,7 @@ struct ApprovalCardListing: Equatable {
         json["session_selected"] = sessionSelectedID ?? NSNull()
         json["session_panel"] = sessionPanel ?? NSNull()
         json["questions"] = questions.map { $0.map(\.jsonObject) } ?? NSNull()
+        json["preview"] = preview
         json["command_count"] = commandCount ?? NSNull()
         json["banner"] = banner ?? NSNull()
         return json
@@ -285,6 +288,9 @@ final class ApprovalCardView: NSView {
     private let bannerLabel = NSTextField(wrappingLabelWithString: "")
     private let countLabel = NSTextField(labelWithString: "")
     private let agentSaysLabel = NSTextField(wrappingLabelWithString: "")
+    /// What an `rm` / `rmdir` / `mv` would touch (AP7). Its height is fixed when the card is built.
+    private let previewView: ConsequencePreviewView
+    private var preview: ApprovalPreview?
     private let noticeLabel = NSTextField(wrappingLabelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
     private let noteField = NSTextField()
@@ -324,6 +330,8 @@ final class ApprovalCardView: NSView {
         model = ApprovalDisplayModel(request: entry.request)
         options = ApprovalCardOptions(request: entry.request)
         inputView = ApprovalInputView(model: model)
+        previewView = ConsequencePreviewView(reservedLines: ApprovalPreviewText.reservedLineCount(for: entry.request.preview))
+        preview = entry.request.preview
         #if DEBUG
         inputView.isWindowShowing = isOnScreen
         #endif
@@ -399,10 +407,20 @@ final class ApprovalCardView: NSView {
 
     /// The request's state changed (answered, ended, refused). Only text and enabled flags change.
     func update(entry: ApprovalEntry) {
-        guard entry.request.id == request.id, entry.state != state else { return }
+        guard entry.request.id == request.id else { return }
+        if entry.request.preview != preview {
+            // Counts arrived: only what is drawn changes, never a frame (the room was reserved at build).
+            preview = entry.request.preview
+            showPreview()
+        }
+        guard entry.state != state else { return }
         state = entry.state
         clearSessionSelection()   // the request changed: a pick made for the old state does not carry over
         refresh()
+    }
+
+    private func showPreview() {
+        previewView.setPreview(preview, cwd: request.cwd, home: NSHomeDirectory())
     }
 
     var canAllow: Bool {
@@ -510,6 +528,7 @@ final class ApprovalCardView: NSView {
             secondsLeft: countdown.secondsLeft, state: stateDescription,
             displayFailed: inputView.displayFailed, questions: questionListing,
             page: currentPage?.position ?? 1, of: currentPage?.count ?? 1)
+        listing.preview = previewView.isHidden ? [] : previewView.lineTexts
         listing.sessionRules = self.options.sessionRules.map {
             .init(id: $0.id, ruleText: $0.ruleText, summary: $0.summary, kind: $0.kind.rawValue, overrides: $0.overrides)
         }
@@ -835,6 +854,10 @@ final class ApprovalCardView: NSView {
             countLabel.isHidden = true
         }
 
+        // The consequence preview: under the input. No room at all when there is none, and none on a question card.
+        previewView.isHidden = previewView.reservedLines == 0   // a question card hides it below
+        showPreview()
+
         // The agent's claim: below the exact input, muted and labelled.
         configureWrapping(agentSaysLabel, lines: 4)
         if let description = request.description, !description.isEmpty {
@@ -874,6 +897,7 @@ final class ApprovalCardView: NSView {
             form.permit = { [weak self] control, name in self?.isHuman(on: control, control: name) ?? false }
             form.onChange = { [weak self] in self?.refresh() }
             questionForm = form
+            previewView.isHidden = true
             formScroll.documentView = form
             formScroll.hasVerticalScroller = true
             formScroll.hasHorizontalScroller = false
@@ -955,7 +979,7 @@ final class ApprovalCardView: NSView {
         for label in sessionLabels { label.isHidden = true }
 
         for v in [headlineLabel, pageLabel, pagePreviousButton, pageNextButton, collapseButton, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
-                  formScroll, inputView, agentSaysLabel, noticeLabel, noteRow,
+                  formScroll, inputView, previewView, agentSaysLabel, noticeLabel, noteRow,
                   sessionRuleLabel, sessionSummaryLabel, sessionScopeLabel, sessionOverridesLabel, statusLabel, buttonRow] {
             v.translatesAutoresizingMaskIntoConstraints = true
             addSubview(v)
@@ -1220,6 +1244,7 @@ final class ApprovalCardView: NSView {
             if detailsExpanded { place(inputView, height: inputHeight) }
         } else {
             place(inputView, height: inputHeight)
+            if !previewView.isHidden { place(previewView, height: previewView.reservedHeight) }
             if !agentSaysLabel.isHidden { place(agentSaysLabel, height: wrappedHeight(agentSaysLabel, width: inner)) }
         }
         if !noticeLabel.isHidden { place(noticeLabel, height: wrappedHeight(noticeLabel, width: inner)) }

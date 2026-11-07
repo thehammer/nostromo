@@ -371,8 +371,13 @@ public struct ApprovalRequestWire: Codable, Equatable, Identifiable {
     public let sessionRuleCandidates: [ApprovalSessionRuleCandidate]
     public let createdAtMs: UInt64
     public let deadlineAtMs: UInt64
+    /// What an `rm` / `rmdir` / `mv` in the command would touch (AP7). Extra lines on the card; never
+    /// changes what is offered. Nil when there is none, or when it does not decode (ignored, never an error).
+    /// The daemon's later `approval_preview` frame replaces it (`ApprovalStore`).
+    public var preview: ApprovalPreview?
 
     enum CodingKeys: String, CodingKey {
+        case preview
         case requestId = "request_id"
         case tag
         case toolUseId = "tool_use_id"
@@ -407,6 +412,113 @@ public struct ApprovalRequestWire: Codable, Equatable, Identifiable {
                                                       forKey: .sessionRuleCandidates)?.elements ?? []
         createdAtMs = try c.decode(UInt64.self, forKey: .createdAtMs)
         deadlineAtMs = try c.decode(UInt64.self, forKey: .deadlineAtMs)
+        preview = try? c.decodeIfPresent(ApprovalPreview.self, forKey: .preview)
+    }
+}
+
+// MARK: - Consequence preview (AP7)
+
+/// Something worth a warning about a preview target. An unknown flag is dropped.
+public enum ApprovalPreviewFlag: String, Codable, Equatable {
+    case outsideCwd = "outside_cwd"
+    case homeCritical = "home_critical"
+    case symlink
+    case otherVolume = "other_volume"
+    case unreadable
+    case notCounted = "not_counted"
+    case network
+    case busy
+}
+
+/// One operand of an `rm` / `rmdir` / `mv`. Strings are the daemon's, already sanitized.
+public struct ApprovalPreviewTarget: Codable, Equatable {
+    /// `rm`, `rmdir` or `mv`.
+    public let command: String
+    /// The absolute path; nil when it can't be resolved.
+    public let path: String?
+    /// The operand as written, when it can't be resolved.
+    public let cantResolve: String?
+    public let why: String?
+    /// Resolved against the session's start folder.
+    public let relative: Bool
+    public let exists: Bool?
+    /// `file`, `dir`, `symlink` or `other`.
+    public let kind: String?
+    public let dirs: UInt64?
+    public let files: UInt64?
+    public let bytes: UInt64?
+    /// The counts stopped at a budget: they are lower bounds.
+    public let atLeast: Bool
+    public let flags: [ApprovalPreviewFlag]
+    public let dest: String?
+
+    enum CodingKeys: String, CodingKey {
+        case command, path, why, relative, exists, kind, dirs, files, bytes, flags, dest
+        case cantResolve = "cant_resolve"
+        case atLeast = "at_least"
+    }
+
+    public init(command: String, path: String? = nil, cantResolve: String? = nil, why: String? = nil,
+                relative: Bool = false, exists: Bool? = nil, kind: String? = nil, dirs: UInt64? = nil,
+                files: UInt64? = nil, bytes: UInt64? = nil, atLeast: Bool = false,
+                flags: [ApprovalPreviewFlag] = [], dest: String? = nil) {
+        self.command = command; self.path = path; self.cantResolve = cantResolve; self.why = why
+        self.relative = relative; self.exists = exists; self.kind = kind; self.dirs = dirs
+        self.files = files; self.bytes = bytes; self.atLeast = atLeast; self.flags = flags; self.dest = dest
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        command = try c.decode(String.self, forKey: .command)
+        path = try c.decodeIfPresent(String.self, forKey: .path)
+        cantResolve = try c.decodeIfPresent(String.self, forKey: .cantResolve)
+        why = try c.decodeIfPresent(String.self, forKey: .why)
+        relative = try c.decodeIfPresent(Bool.self, forKey: .relative) ?? false
+        exists = try c.decodeIfPresent(Bool.self, forKey: .exists)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind)
+        dirs = try c.decodeIfPresent(UInt64.self, forKey: .dirs)
+        files = try c.decodeIfPresent(UInt64.self, forKey: .files)
+        bytes = try c.decodeIfPresent(UInt64.self, forKey: .bytes)
+        atLeast = try c.decodeIfPresent(Bool.self, forKey: .atLeast) ?? false
+        flags = try c.decodeIfPresent(ApprovalLossyArray<ApprovalPreviewFlag>.self, forKey: .flags)?.elements ?? []
+        dest = try c.decodeIfPresent(String.self, forKey: .dest)
+    }
+}
+
+/// The consequence preview of a held command. An unknown `state` makes the whole preview nil on the request.
+public struct ApprovalPreview: Codable, Equatable {
+    public enum State: String, Codable, Equatable {
+        case complete, partial, counting, omitted
+    }
+
+    public let state: State
+    public let targets: [ApprovalPreviewTarget]
+    /// Targets the daemon left out (over its cap).
+    public let more: Int
+
+    public init(state: State, targets: [ApprovalPreviewTarget], more: Int = 0) {
+        self.state = state; self.targets = targets; self.more = more
+    }
+
+    enum CodingKeys: String, CodingKey { case state, targets, more }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = try c.decode(State.self, forKey: .state)
+        targets = try c.decodeIfPresent(ApprovalLossyArray<ApprovalPreviewTarget>.self, forKey: .targets)?.elements ?? []
+        more = try c.decodeIfPresent(Int.self, forKey: .more) ?? 0
+    }
+}
+
+/// `approval_preview`: the counts of a held request's preview, once known.
+public struct ApprovalPreviewFrame: Decodable, Equatable {
+    public let tag: String
+    public let requestId: String
+    public let preview: ApprovalPreview
+
+    enum CodingKeys: String, CodingKey {
+        case tag, preview
+        case requestId = "request_id"
     }
 }
 

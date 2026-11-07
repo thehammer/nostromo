@@ -1,0 +1,29 @@
+{
+  "description": "remove x in sub",
+  "tool_uses": [
+    {
+      "id": "toolu_preview_cant_0",
+      "name": "Bash",
+      "input": {
+        "command": "cd sub && rm -rf x",
+        "description": "remove x in sub"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "cd sub && rm -rf x",
+          "description": "remove x in sub"
+        },
+        "description": "remove x in sub",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_preview_cant_0"
+      }
+    }
+  ]
+}

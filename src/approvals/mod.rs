@@ -14,12 +14,14 @@
 //! - [`display`]: the exact-text breakdown of a request (round-trip safe).
 //! - [`broker`]: hears every permission request, logs it, and always answers it.
 //! - [`questions`]: reading an `AskUserQuestion` request and building the answered input.
+//! - [`preview`]: the read-only consequence preview of an `rm` / `rmdir` / `mv` (AP7).
 //! - [`wire`]: the payloads of the approval frames the Mac app sees and answers.
 
 pub mod audit;
 pub mod broker;
 pub mod display;
 pub mod guard;
+pub mod preview;
 pub mod questions;
 pub mod request;
 pub mod rules;
