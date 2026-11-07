@@ -12052,3 +12052,167 @@ async fn a_local_script_cannot_read_the_log_even_with_a_nonce() {
     }
     assert_still_usable(&mut script).await;
 }
+
+// ── AP6: persisted "Always allow…" rules ─────────────────────────────────────
+//
+// Creating (`approval_answer` with `allow_always`), removing, keeping and discarding persisted
+// rules change what the daemon allows without a card, so they are the verified Mac app's alone
+// (with its connection's nonce) and never a network peer's or another local process's.
+// `approval_rules` names commands and paths: local-only. (What each does when it is applied, and
+// the refusal log, are in `tests/approvals_persisted_rules.rs` and `tests/approvals_wire.rs`.)
+
+fn persisted_rule_msgs(nonce: Option<&str>) -> Vec<(&'static str, ClientMsg)> {
+    let n = || nonce.map(str::to_owned);
+    vec![
+        (
+            "approval_remove_rule",
+            ClientMsg::ApprovalRemoveRule {
+                rule_id: "rule-1".into(),
+                operator_nonce: n(),
+            },
+        ),
+        (
+            "approval_rules_keep",
+            ClientMsg::ApprovalRulesKeep {
+                file_sha256: "abc123".into(),
+                operator_nonce: n(),
+            },
+        ),
+        (
+            "approval_rules_discard",
+            ClientMsg::ApprovalRulesDiscard {
+                operator_nonce: n(),
+            },
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_tcp_peer_cannot_remove_keep_or_discard_persisted_rules_but_a_unix_peer_reaches_the_handler(
+) {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    let (mut unix, nonce) = h.unix_operator(vec![]).await;
+
+    for (name, msg) in persisted_rule_msgs(None) {
+        // Control: on the Unix socket the verb is decoded and gated by the operator check.
+        let frames = send_and_expect_error(&mut unix, msg, is_not_operator_app_error, name).await;
+        assert!(!frames.iter().any(is_network_refusal), "{name}: {frames:?}");
+    }
+    // A TCP peer is refused outright, with and without a nonce (even the app's own).
+    for nonce in [None, Some("guess"), nonce.as_deref()] {
+        for (name, msg) in persisted_rule_msgs(nonce) {
+            let frames = send_and_expect_error(&mut tcp, msg, is_network_refusal, name).await;
+            assert!(
+                !frames.iter().any(is_not_operator_app_error),
+                "{name}: {frames:?}"
+            );
+        }
+    }
+    assert_still_usable(&mut tcp).await;
+}
+
+#[tokio::test]
+async fn a_raw_tcp_persisted_rule_verb_is_refused_whatever_it_claims() {
+    let h = spawn_server().await;
+    for frame in [
+        json!({"type": "approval_remove_rule", "rule_id": "rule-1", "operator_nonce": "x"}),
+        json!({"type": "approval_rules_keep", "file_sha256": "abc123", "operator_nonce": "x"}),
+        json!({"type": "approval_rules_discard", "operator_nonce": "x"}),
+    ] {
+        let mut s = raw_tcp(&h).await;
+        raw_handshake(
+            &mut s,
+            json!({"type": "subscribe", "topics": [], "renders_decisions": false, "renders_approvals": true}),
+        )
+        .await
+        .expect("handshake");
+        send_json(&mut s, &frame).await;
+
+        loop {
+            let reply = try_recv_json(&mut s)
+                .await
+                .expect("the connection stays open and answers");
+            let refused = reply["type"] == "error"
+                && reply["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("requires_secure_connection"));
+            if refused {
+                break;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_local_script_cannot_remove_keep_or_discard_persisted_rules_even_with_a_nonce() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+
+    for nonce in [None, Some("made-up")] {
+        for (name, msg) in persisted_rule_msgs(nonce) {
+            send_and_expect_error(&mut script, msg, is_not_operator_app_error, name).await;
+        }
+    }
+    assert_still_usable(&mut script).await;
+}
+
+#[tokio::test]
+async fn an_approval_rules_frame_is_never_sent_to_a_tcp_peer() {
+    const CANARY: &str = "persisted-canary-7c1e";
+    let h = spawn_server().await;
+    let (mut all, _) = h.tcp(vec![]).await;
+    let (mut named, _) = h
+        .tcp(vec![
+            Topic::Activity,
+            Topic::MotherJobs,
+            Topic::MotherStatusline,
+            Topic::Focuses,
+            Topic::MotherPeek,
+            Topic::Perri,
+            Topic::Fred,
+            Topic::Teri,
+            Topic::Work,
+            Topic::Layout,
+            Topic::Decision,
+            Topic::Model,
+        ])
+        .await;
+
+    h.broadcast(ServerMsg::ApprovalRules {
+        rules: vec![nostromo::approvals::wire::PersistedRuleWire {
+            id: "rule-1".into(),
+            rule_text: format!("Bash(rm -rf ~/Library/Caches/{CANARY}:*)"),
+            summary: "s".into(),
+            kind: nostromo::approvals::rules::CandidateKind::PathPrefix,
+            scope: nostromo::approvals::wire::RuleScopeChoice::Repo,
+            root: Some(format!("/work/{CANARY}")),
+            created_at_ms: 1,
+            created_from_request_id: "req".into(),
+            uses: 0,
+            active: true,
+            inactive_reason: None,
+        }],
+        quarantined: Some(nostromo::approvals::wire::RulesQuarantineWire {
+            reason: "external_change".into(),
+            file_sha256: CANARY.into(),
+            rules_in_file: vec![],
+        }),
+        path: format!("/h/.nostromo/approvals/{CANARY}/rules.json"),
+    });
+    // Control: a frame the peers are allowed to see arrives after it, so the rules frame had its chance.
+    h.broadcast(health_probe());
+    for (who, s) in [("topics []", &mut all), ("every topic", &mut named)] {
+        let frames = recv_until(s, |m| matches!(m, ServerMsg::ActivityHealth { .. })).await;
+        assert!(
+            !frames
+                .iter()
+                .any(|m| matches!(m, ServerMsg::ApprovalRules { .. })),
+            "{who}: {frames:?}"
+        );
+        assert!(
+            !json_of(&frames).contains(CANARY),
+            "{who}: the rules reached a network peer"
+        );
+    }
+}

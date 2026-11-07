@@ -57,8 +57,10 @@ impl CandidateKind {
     }
 }
 
-/// What a rule matches.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a rule matches. Serializable only so [`PersistedRuleRecord`] can be stored; a stored
+/// spec is never trusted: [`revalidate`] rebuilds it from the stored source command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Spec {
     /// The trimmed command, byte for byte. `pinned` is where every absolute or `~/` operand
     /// resolved when the rule was offered (none of them may pass through a symlink, a
@@ -504,13 +506,24 @@ pub fn matches(
     home: &Path,
     cwd: Option<&Path>,
 ) -> bool {
+    spec_covers(&rule.spec, req, reason_kind, home, cwd)
+}
+
+/// [`matches`] for a bare [`Spec`]: the one matcher, shared by session and persisted rules.
+pub(super) fn spec_covers(
+    spec: &Spec,
+    req: &PermissionRequest,
+    reason_kind: ReasonKind,
+    home: &Path,
+    cwd: Option<&Path>,
+) -> bool {
     let Some(plain) = eligible(req, reason_kind, home, cwd) else {
         return false;
     };
-    if !spec_matches(&rule.spec, &plain, home) {
+    if !spec_matches(spec, &plain, home) {
         return false;
     }
-    match &rule.spec {
+    match spec {
         // The operands must still resolve to where they did when the rule was offered.
         Spec::Exact { pinned, .. } => pin_operands(&plain.words, home).as_ref() == Some(pinned),
         Spec::PathPrefix {
@@ -577,6 +590,109 @@ pub fn first_match_within(
     .flatten()
 }
 
+/// What a persisted rule claims, as stored in `rules.json`. Only `source_command` is an
+/// input to [`revalidate`]; the rest is compared against what AP4 offers for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedRuleRecord {
+    pub rule_text: String,
+    pub kind: CandidateKind,
+    pub spec: Spec,
+    /// The plain command of the request the rule was created from.
+    pub source_command: String,
+}
+
+/// Why a stored rule is not active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Inactive {
+    /// AP4 no longer offers this rule text for its source command (or never did: a
+    /// hand-edited rule).
+    NoLongerOffered,
+    /// The pinned operands or the prefix directory resolve differently now.
+    PathChanged,
+}
+
+impl Inactive {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoLongerOffered => "no_longer_offered",
+            Self::PathChanged => "path_changed",
+        }
+    }
+}
+
+/// Re-derive `stored`'s spec the way AP4 would offer it today: rebuild a plain Bash request
+/// from `source_command` and run [`candidates`] (no working directory). The fresh spec is
+/// returned only if a candidate has the same kind and byte-identical rule text **and** the
+/// same pinned / resolved paths as stored. The file is never a source of specs.
+pub fn revalidate(stored: &PersistedRuleRecord, home: &Path) -> Result<Spec, Inactive> {
+    let value = serde_json::json!({
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "input": { "command": stored.source_command },
+        "tool_use_id": "revalidate",
+    });
+    let Ok(req) = PermissionRequest::from_cli(&value) else {
+        return Err(Inactive::NoLongerOffered);
+    };
+    let reason = Reason {
+        kind: ReasonKind::Other,
+        text: String::new(),
+        rule: None,
+    };
+    let offered = candidates(&req, &reason, home, None);
+    let Some(fresh) = offered
+        .into_iter()
+        .find(|c| c.kind == stored.kind && c.rule_text == stored.rule_text)
+    else {
+        return Err(Inactive::NoLongerOffered);
+    };
+    if fresh.spec == stored.spec {
+        Ok(fresh.spec)
+    } else {
+        Err(Inactive::PathChanged)
+    }
+}
+
+/// [`revalidate`] on a helper thread: a file system that does not answer within `timeout`
+/// counts as `PathChanged` (inactive).
+pub fn revalidate_within(
+    timeout: std::time::Duration,
+    stored: &PersistedRuleRecord,
+    home: &Path,
+) -> Result<Spec, Inactive> {
+    let (stored, home) = (stored.clone(), home.to_path_buf());
+    bounded(timeout, move || revalidate(&stored, &home)).unwrap_or(Err(Inactive::PathChanged))
+}
+
+/// Would `candidate` be refused at confirmation as too broad (whole tool, a bare verb, a
+/// single word, or a protected / home-critical prefix)? Defence in depth on top of "it is
+/// one of the request's own candidates".
+pub fn too_broad_for_persisting(candidate: &Candidate, home: &Path) -> Option<&'static str> {
+    match &candidate.spec {
+        Spec::Exact { command, .. } => command
+            .is_empty()
+            .then_some("an empty command is not a rule"),
+        Spec::PathPrefix {
+            head,
+            prefix,
+            resolved,
+        } => {
+            if head.is_empty() || prefix.trim_matches('/').is_empty() {
+                return Some("a bare verb or empty prefix is not a rule");
+            }
+            let dir = expand(prefix.trim_end_matches('/'), home);
+            if path_is_protected(&dir, home)
+                || path_is_protected(resolved, home)
+                || path_contains_protected(resolved, home)
+            {
+                return Some("that location is protected");
+            }
+            None
+        }
+    }
+}
+
 /// How many timed-out helper threads may still be stuck in the file system at once. A thread
 /// blocked in a syscall on a dead mount cannot be cancelled; it ends when the call returns.
 /// Past this many, new work is refused (no match, no candidate) instead of piling up more.
@@ -607,7 +723,7 @@ impl Drop for HelperSlot {
 
 /// Run `f` on a helper thread; `None` if it has not finished within `timeout` or too many
 /// earlier helpers are still stuck.
-fn bounded<T: Send + 'static>(
+pub(super) fn bounded<T: Send + 'static>(
     timeout: std::time::Duration,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
@@ -1029,7 +1145,7 @@ fn lexically_inside(word: &str, prefix: &str, home: &Path) -> bool {
 }
 
 /// The nearest existing ancestor of `path`, canonicalized, with the rest appended.
-fn canonical_lenient(path: &Path) -> Option<PathBuf> {
+pub(super) fn canonical_lenient(path: &Path) -> Option<PathBuf> {
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut cur = path.to_path_buf();
     loop {
@@ -2692,5 +2808,297 @@ mod tests {
     #[test]
     fn the_rule_cap_is_32() {
         assert_eq!(MAX_RULES_PER_SESSION, 32);
+    }
+
+    // ── AP6: revalidating a stored rule, and what may be persisted ────────────────
+
+    /// A home directory of the test's own, with `Library/Caches` in it.
+    fn real_home() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join("Library/Caches")).unwrap();
+        std::fs::create_dir_all(home.join("Elsewhere")).unwrap();
+        (tmp, home)
+    }
+
+    fn offered(home: &Path, command: &str, kind: CandidateKind) -> Candidate {
+        let req = cmd(command);
+        let reason = req.reason(None, &NoSettings);
+        candidates(&req, &reason, home, None)
+            .into_iter()
+            .find(|c| c.kind == kind)
+            .unwrap_or_else(|| panic!("AP4 offers no {kind:?} rule for {command}"))
+    }
+
+    fn stored(c: &Candidate, source: &str) -> PersistedRuleRecord {
+        PersistedRuleRecord {
+            rule_text: c.rule_text.clone(),
+            kind: c.kind,
+            spec: c.spec.clone(),
+            source_command: source.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_stored_exact_rule_revalidates_to_the_spec_ap4_offers_today() {
+        let (_tmp, home) = real_home();
+        let c = offered(&home, "rm -rf ~/Library/Caches/a", CandidateKind::Exact);
+
+        let spec = revalidate(&stored(&c, "rm -rf ~/Library/Caches/a"), &home);
+
+        assert_eq!(spec, Ok(c.spec));
+    }
+
+    #[test]
+    fn a_stored_path_prefix_rule_revalidates_to_the_spec_ap4_offers_today() {
+        let (_tmp, home) = real_home();
+        let c = offered(
+            &home,
+            "rm -rf ~/Library/Caches/a",
+            CandidateKind::PathPrefix,
+        );
+
+        let spec = revalidate(&stored(&c, "rm -rf ~/Library/Caches/a"), &home);
+
+        assert_eq!(spec, Ok(c.spec));
+    }
+
+    // REQUIRED: the human allowed an `rm`, the `rm` ran, and its operands are gone. The rule is
+    // still exactly what AP4 would offer for that command (a missing leaf pins its nearest
+    // existing ancestor), so it must stay active.
+    #[test]
+    fn a_rule_whose_source_operands_no_longer_exist_still_revalidates() {
+        let (_tmp, home) = real_home();
+        let victim = home.join("Library/Caches/a");
+        std::fs::create_dir_all(victim.join("deep")).unwrap();
+        let exact = offered(&home, "rm -rf ~/Library/Caches/a", CandidateKind::Exact);
+        let prefix = offered(
+            &home,
+            "rm -rf ~/Library/Caches/a",
+            CandidateKind::PathPrefix,
+        );
+        std::fs::remove_dir_all(&victim).unwrap();
+
+        assert_eq!(
+            revalidate(&stored(&exact, "rm -rf ~/Library/Caches/a"), &home),
+            Ok(exact.spec.clone()),
+            "exact"
+        );
+        assert_eq!(
+            revalidate(&stored(&prefix, "rm -rf ~/Library/Caches/a"), &home),
+            Ok(prefix.spec.clone()),
+            "path prefix"
+        );
+        // And one made when the leaf never existed.
+        let never = offered(
+            &home,
+            "rm -rf ~/Library/Caches/never-there",
+            CandidateKind::Exact,
+        );
+        assert!(revalidate(
+            &stored(&never, "rm -rf ~/Library/Caches/never-there"),
+            &home
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_rule_text_ap4_does_not_offer_for_its_source_command_is_inactive() {
+        let (_tmp, home) = real_home();
+        let c = offered(&home, "rm -rf ~/Library/Caches/a", CandidateKind::Exact);
+        let mut s = stored(&c, "rm -rf ~/Library/Caches/a");
+        s.rule_text = "Bash(rm -rf ~/Library/Caches/b)".into();
+
+        assert_eq!(revalidate(&s, &home), Err(Inactive::NoLongerOffered));
+
+        // The source command changed under the rule: not what AP4 offers for it.
+        let s = stored(&c, "rm -rf ~/Library/Caches/zzz");
+        assert_eq!(revalidate(&s, &home), Err(Inactive::NoLongerOffered));
+        // A source that is not plain Bash any more (compound).
+        let s = stored(&c, "rm -rf ~/Library/Caches/a && echo hi");
+        assert_eq!(revalidate(&s, &home), Err(Inactive::NoLongerOffered));
+    }
+
+    #[test]
+    fn hand_edited_broader_rule_texts_are_inactive_whatever_spec_they_carry() {
+        let (_tmp, home) = real_home();
+        let legit = offered(
+            &home,
+            "rm -rf ~/Library/Caches/a",
+            CandidateKind::PathPrefix,
+        );
+        let broad_specs = [
+            legit.spec.clone(),
+            Spec::PathPrefix {
+                head: vec!["rm".into()],
+                prefix: "/".into(),
+                resolved: PathBuf::from("/"),
+            },
+            Spec::PathPrefix {
+                head: vec!["rm".into(), "-rf".into()],
+                prefix: "~/".into(),
+                resolved: home.clone(),
+            },
+        ];
+        for text in [
+            "Bash(rm:*)",
+            "Bash(rm -rf ~/:*)",
+            "Bash(rm -rf /:*)",
+            "Bash",
+            "Bash(*)",
+            "",
+        ] {
+            for kind in [CandidateKind::Exact, CandidateKind::PathPrefix] {
+                for spec in &broad_specs {
+                    let s = PersistedRuleRecord {
+                        rule_text: text.to_owned(),
+                        kind,
+                        spec: spec.clone(),
+                        source_command: "rm -rf ~/Library/Caches/a".to_owned(),
+                    };
+                    assert_eq!(
+                        revalidate(&s, &home),
+                        Err(Inactive::NoLongerOffered),
+                        "{text:?} as {kind:?} with {spec:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // The text is AP4's, but the stored spec was edited: never trusted.
+    #[test]
+    fn a_stored_spec_that_differs_from_the_one_ap4_derives_is_inactive_even_with_honest_text() {
+        let (_tmp, home) = real_home();
+        let c = offered(
+            &home,
+            "rm -rf ~/Library/Caches/a",
+            CandidateKind::PathPrefix,
+        );
+        let mut s = stored(&c, "rm -rf ~/Library/Caches/a");
+        s.spec = Spec::PathPrefix {
+            head: vec!["rm".into(), "-rf".into()],
+            prefix: "~/Library/Caches/".into(),
+            resolved: home.join("Elsewhere"),
+        };
+
+        assert_eq!(revalidate(&s, &home), Err(Inactive::PathChanged));
+    }
+
+    #[test]
+    fn a_pinned_path_that_later_became_a_symlink_is_inactive() {
+        let (_tmp, home) = real_home();
+        let dir = home.join("Library/Caches/pinned");
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = offered(
+            &home,
+            "rm -rf ~/Library/Caches/pinned",
+            CandidateKind::Exact,
+        );
+        let s = stored(&c, "rm -rf ~/Library/Caches/pinned");
+        assert!(
+            revalidate(&s, &home).is_ok(),
+            "control: valid before the swap"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(home.join("Elsewhere"), &dir).unwrap();
+
+        // AP4 stops offering a path through a symlink, so the reason is `NoLongerOffered`;
+        // `PathChanged` is for a text still offered whose pins moved (separate test).
+        assert_eq!(revalidate(&s, &home), Err(Inactive::NoLongerOffered));
+    }
+
+    // Whatever the label, a pinned path that became a symlink must never stay in force.
+    #[test]
+    fn a_pinned_path_that_later_became_a_symlink_never_revalidates() {
+        let (_tmp, home) = real_home();
+        let dir = home.join("Library/Caches/pinned");
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = offered(
+            &home,
+            "rm -rf ~/Library/Caches/pinned",
+            CandidateKind::PathPrefix,
+        );
+        let s = stored(&c, "rm -rf ~/Library/Caches/pinned");
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(home.join("Elsewhere"), &dir).unwrap();
+
+        assert!(revalidate(&s, &home).is_err());
+    }
+
+    #[test]
+    fn revalidate_within_agrees_with_revalidate_when_the_file_system_answers() {
+        let (_tmp, home) = real_home();
+        let c = offered(&home, "rm -rf ~/Library/Caches/a", CandidateKind::Exact);
+        let s = stored(&c, "rm -rf ~/Library/Caches/a");
+
+        assert_eq!(
+            revalidate_within(std::time::Duration::from_secs(5), &s, &home),
+            revalidate(&s, &home)
+        );
+    }
+
+    fn broad(spec: Spec, kind: CandidateKind) -> Candidate {
+        Candidate {
+            id: "c".into(),
+            rule_text: "Bash(x)".into(),
+            summary: "s".into(),
+            kind,
+            overrides: None,
+            spec,
+        }
+    }
+
+    #[test]
+    fn a_candidate_that_is_too_broad_is_refused_for_persisting_and_a_real_one_is_not() {
+        let home = home();
+        let prefix = |head: &[&str], prefix: &str, resolved: &str| {
+            broad(
+                Spec::PathPrefix {
+                    head: head.iter().map(|s| s.to_string()).collect(),
+                    prefix: prefix.into(),
+                    resolved: PathBuf::from(resolved),
+                },
+                CandidateKind::PathPrefix,
+            )
+        };
+        for (what, c) in [
+            (
+                "an empty command",
+                broad(
+                    Spec::Exact {
+                        command: String::new(),
+                        pinned: vec![],
+                    },
+                    CandidateKind::Exact,
+                ),
+            ),
+            (
+                "no command word",
+                prefix(&[], "~/Library/Caches/", "/Users/tester/Library/Caches"),
+            ),
+            ("the filesystem root", prefix(&["rm", "-rf"], "/", "/")),
+            ("an empty prefix", prefix(&["rm", "-rf"], "", "")),
+            (
+                "ssh keys",
+                prefix(&["rm", "-rf"], "~/.ssh/", "/Users/tester/.ssh"),
+            ),
+            ("/etc", prefix(&["cat"], "/etc/a/", "/etc/a")),
+            (
+                "a git directory",
+                prefix(
+                    &["rm", "-rf"],
+                    "~/code/proj/.git/",
+                    "/Users/tester/code/proj/.git",
+                ),
+            ),
+        ] {
+            assert!(too_broad_for_persisting(&c, &home).is_some(), "{what}");
+        }
+        let (_tmp, real) = real_home();
+        for kind in [CandidateKind::Exact, CandidateKind::PathPrefix] {
+            let c = offered(&real, "rm -rf ~/Library/Caches/a", kind);
+            assert_eq!(too_broad_for_persisting(&c, &real), None, "{kind:?}");
+        }
     }
 }

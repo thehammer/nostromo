@@ -14,12 +14,15 @@
 //! - [`display`]: the exact-text breakdown of a request (round-trip safe).
 //! - [`broker`]: hears every permission request, logs it, and always answers it.
 //! - [`questions`]: reading an `AskUserQuestion` request and building the answered input.
+//! - [`rules`] / [`persisted`]: AP4's session rules and AP6's "Always allow…" rules, the
+//!   latter kept in a Nostromo-owned file and revalidated against the former on every load.
 //! - [`wire`]: the payloads of the approval frames the Mac app sees and answers.
 
 pub mod audit;
 pub mod broker;
 pub mod display;
 pub mod guard;
+pub mod persisted;
 pub mod questions;
 pub mod request;
 pub mod rules;
