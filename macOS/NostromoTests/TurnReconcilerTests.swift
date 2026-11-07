@@ -1,4 +1,5 @@
 import XCTest
+import NostromoKit
 // ChatTurn, TurnBlock and TurnReconciler are compiled into this target directly
 // (logic test — no host app). No module imports needed.
 
@@ -691,7 +692,7 @@ final class TurnReconcilerTests: XCTestCase {
         let injected = ChatTurn(
             userInput: text, timestamp: Self.baseDate.addingTimeInterval(10),
             timestampRaw: Self.rawTimestamp(10), blocks: [], isComplete: true, daemonId: "t10", epoch: 1,
-            origin: .peerMessage(items: [PeerMessageItemWire(fromName: "Bob", body: "invented body")], omitted: 0))
+            origin: .peerMessage(items: [PeerMessageItemWire(fromName: "Bob", fromMode: nil, fromSocket: nil, body: "invented body", truncated: false)], omitted: 0))
         let snapshot = makeSnapshot(Array(0 ..< 10), epoch: 1) + [injected]
 
         let outcome = TurnReconciler.reconcile(retained: body + [echo], snapshot: snapshot,
