@@ -181,23 +181,39 @@ fn regex<'a>(cell: &'a OnceLock<Regex>, pattern: &str) -> &'a Regex {
 /// redirection glued to a word, `kubectl delete>/dev/null ns x`, still leaves the verb a word of its own).
 fn segment_words(view: &str) -> Vec<Vec<String>> {
     view.split([';', '|', '&'])
-        .map(|segment| {
-            segment
-                .split([' ', '\t', '<', '>'])
-                .filter(|w| !w.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
+        .map(|segment| split_words(segment, &[' ', '\t', '<', '>']))
         .filter(|words: &Vec<String>| !words.is_empty())
         .collect()
 }
 
+/// `text` split at `separators`, with a glued `env -S<command>` or `--split-string=<command>` word as two
+/// words (`env -Sreboot` is `env -S reboot`): the option, then the command it runs.
+fn split_words(text: &str, separators: &[char]) -> Vec<String> {
+    let mut words = Vec::new();
+    for word in text.split(separators).filter(|w| !w.is_empty()) {
+        let glued = word
+            .strip_prefix("--split-string=")
+            .map(|rest| ("--split-string", rest))
+            .or_else(|| word.strip_prefix("-S").map(|rest| ("-S", rest)));
+        match glued {
+            Some((option, rest)) if !rest.is_empty() => {
+                words.push(option.to_string());
+                words.push(rest.to_string());
+            }
+            _ => words.push(word.to_string()),
+        }
+    }
+    words
+}
+
 /// Every word of the view, split at whitespace and at `;`, `|`, `&`, `<` and `>`.
 fn all_words(view: &str) -> Vec<String> {
-    view.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>'))
-        .filter(|w| !w.is_empty())
-        .map(str::to_string)
-        .collect()
+    let mut words = Vec::new();
+    for part in view.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>'))
+    {
+        words.extend(split_words(part, &[]));
+    }
+    words
 }
 
 /// A word's program: its last path component, lowercased.
@@ -603,6 +619,15 @@ const QUOTE_WRAPPERS: &[&str] = &[
     "su-exec", "pdsh", "ansible", "source", "at", "batch",
 ];
 
+/// Wrappers that count only in command position: `at`, `batch` and `source` are also ordinary words
+/// (`grep at 'a > b' file` is a search, not a job).
+const COMMAND_POSITION_WRAPPERS: &[&str] = &["source", "at", "batch"];
+
+/// Is `name` (a program) a [`QUOTE_WRAPPERS`] entry here? `leading`: the word is in command position.
+fn is_quote_wrapper(name: &str, leading: bool) -> bool {
+    QUOTE_WRAPPERS.contains(&name) && (leading || !COMMAND_POSITION_WRAPPERS.contains(&name))
+}
+
 /// Programs that run what follows them as a command, so a later word in the same segment may be the command
 /// (`bash -c 'reboot'`, `ssh host reboot`, `xargs systemctl stop`, `find -exec shutdown`): the wrappers above
 /// and these.
@@ -678,15 +703,17 @@ fn is_duration(word: &str) -> bool {
 }
 
 /// While reading the words before a segment's command: does `word` leave the next word in command position
-/// (a prefix word), and does it take a value of its own (so the word after it is one too)?
-fn leading_step(word: &str, after_option: bool) -> (bool, bool) {
+/// (a prefix word), and does it take a value of its own (so the word after it is one too)? `previous` is the
+/// program of the word before it: `-p` is a flag of `time` and `command`, not an option with a value.
+fn leading_step(word: &str, after_option: bool, previous: &str) -> (bool, bool) {
     let prefix = after_option
         || is_assignment(word)
         || PREFIX_PROGRAMS.contains(&program(word).as_str())
         || word.starts_with('-')
         || is_duration(word);
     let takes_value = word.starts_with('-')
-        && (OPTIONS_WITH_VALUE.contains(&word.to_lowercase().as_str())
+        && ((OPTIONS_WITH_VALUE.contains(&word.to_lowercase().as_str())
+            && !(word == "-p" && matches!(previous, "time" | "command" | "builtin")))
             || (word.starts_with("--") && !word.contains('=')));
     (prefix, takes_value)
 }
@@ -702,7 +729,7 @@ fn command_positions(words: &[String]) -> Vec<usize> {
             positions.push(index);
         }
         let name = program(word);
-        if QUOTE_WRAPPERS.contains(&name.as_str())
+        if is_quote_wrapper(&name, leading)
             || MORE_COMMAND_WRAPPERS.contains(&name.as_str())
             || word == "_"
             || (leading && is_dot_wrapper(word))
@@ -714,10 +741,85 @@ fn command_positions(words: &[String]) -> Vec<usize> {
             wrapped = true;
         }
         if leading {
-            (leading, after_option) = leading_step(word, after_option);
+            let previous = index
+                .checked_sub(1)
+                .map_or(String::new(), |p| program(&words[p]));
+            (leading, after_option) = leading_step(word, after_option, &previous);
         }
     }
     positions
+}
+
+/// The segments of the view (as [`segment_words`]), each with whether it feeds a shell: it is piped (a single `|`,
+/// or `|&`; also a `(...)` or `{ ...; }` group, which the views turn into `;`) into a segment whose command is a
+/// shell or a command wrapper ([`feeds_a_shell`]: `echo reboot | sh`, `printf reboot | ssh h`). What such a
+/// segment holds is run as code, so every word of it is in command position.
+fn piped_segments(view: &str) -> Vec<(Vec<String>, bool)> {
+    let chars: Vec<char> = view.chars().collect();
+    // Each raw segment, and whether a single pipe ended it.
+    let mut raw: Vec<(String, bool)> = Vec::new();
+    let mut current = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !matches!(c, ';' | '|' | '&') {
+            current.push(c);
+            continue;
+        }
+        // The `&` of `|&` belongs to the pipe.
+        if c == '&' && i > 0 && chars[i - 1] == '|' {
+            continue;
+        }
+        let single_pipe =
+            c == '|' && chars.get(i + 1) != Some(&'|') && (i == 0 || chars[i - 1] != '|');
+        raw.push((std::mem::take(&mut current), single_pipe));
+    }
+    raw.push((current, false));
+    let mut segments: Vec<Vec<String>> = Vec::new();
+    let mut piped_into: Vec<bool> = Vec::new();
+    // A pipe that follows an empty segment (`(echo reboot) | sh` is `;echo reboot; | sh`) pipes every earlier segment.
+    for (text, pipes) in raw {
+        let words = split_words(&text, &[' ', '\t', '<', '>']);
+        if words.is_empty() {
+            if pipes {
+                piped_into.iter_mut().for_each(|piped| *piped = true);
+            }
+            continue;
+        }
+        segments.push(words);
+        piped_into.push(pipes);
+    }
+    (0..segments.len())
+        .map(|index| {
+            let fed = piped_into[index]
+                && segments
+                    .get(index + 1)
+                    .is_some_and(|next| feeds_a_shell(next));
+            (segments[index].clone(), fed)
+        })
+        .collect()
+}
+
+/// Is the command of this segment (after its prefix words: `sudo`, `env`, options, assignments) a shell or a
+/// command wrapper ([`QUOTE_WRAPPERS`], a lone `.`), or a `$` or backtick word or substitution placeholder that
+/// may be one?
+fn feeds_a_shell(words: &[String]) -> bool {
+    let (mut leading, mut after_option) = (true, false);
+    for (index, word) in words.iter().enumerate() {
+        if !leading {
+            return false;
+        }
+        if is_quote_wrapper(&program(word), true)
+            || is_dot_wrapper(word)
+            || word == "_"
+            || word.contains(['$', '`'])
+        {
+            return true;
+        }
+        let previous = index
+            .checked_sub(1)
+            .map_or(String::new(), |p| program(&words[p]));
+        (leading, after_option) = leading_step(word, after_option, &previous);
+    }
+    false
 }
 
 /// The verbs of `systemctl`, `loginctl` and `machinectl` that take the machine (or a guest) down or out of service.
@@ -737,8 +839,13 @@ const POWER_VERBS: &[&str] = &[
 /// `service` followed later by `stop`, each only in command position
 /// ([`command_positions`]): `last reboot | head` and `grep -i shutdown /var/log/syslog` merely mention one.
 fn has_stop_or_shutdown(view: &str) -> bool {
-    segment_words(view).iter().any(|words| {
-        command_positions(words).iter().any(|&at| {
+    piped_segments(view).iter().any(|(words, fed_shell)| {
+        let positions: Vec<usize> = if *fed_shell {
+            (0..words.len()).collect()
+        } else {
+            command_positions(words)
+        };
+        positions.iter().any(|&at| {
             let later = |verbs: &[&str]| {
                 words[at + 1..]
                     .iter()
@@ -796,6 +903,8 @@ struct Scan {
     fed_shell: bool,
     /// A command word holds a wildcard ([`wildcard_command_word`]).
     wildcard_command: bool,
+    /// How many `case` statements are open: a `)` inside one ends a pattern, and a command follows it.
+    cases: usize,
 }
 
 fn scan_quotes(text: &str) -> (String, Scan) {
@@ -811,8 +920,31 @@ fn is_dot_wrapper(word: &str) -> bool {
     word == "."
 }
 
+/// Programs that run a command given after their own words (and, for [`runner_skip`], a first argument of their
+/// own): what follows is in command position, so a wildcard there is a program name
+/// (`xargs /bin/r? -rf`, `ssh h /bin/r? -rf /x`, `find . -exec /bin/r? -rf {} \;`).
+const COMMAND_RUNNERS: &[&str] = &[
+    "xargs", "nsenter", "chroot", "ssh", "mosh", "parallel", "watch", "flock", "runuser", "gosu",
+    "su-exec", "pdsh",
+];
+
+/// The words a runner takes before its command: a host (`ssh HOST cmd`), a root (`chroot DIR cmd`), a lock file,
+/// a user.
+fn runner_skip(name: &str) -> u8 {
+    u8::from(matches!(
+        name,
+        "ssh" | "mosh" | "pdsh" | "chroot" | "flock" | "gosu" | "su-exec"
+    ))
+}
+
+/// [`leading_step`] for the words after a runner: `xargs -I {} cmd`, `-L 1` and `-E eof` take a value too.
+fn runner_step(word: &str, after_option: bool, previous: &str) -> (bool, bool) {
+    let (prefix, takes_value) = leading_step(word, after_option, previous);
+    (prefix, takes_value || matches!(word, "-I" | "-L" | "-E"))
+}
+
 /// What the mask scan knows about the segment it is in.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct MaskSegment {
     /// The current word as a shell reads it: quotes and backslashes dropped, quoted text kept.
     word: String,
@@ -822,6 +954,15 @@ struct MaskSegment {
     /// A `xargs`-like word has been seen: a `$` word after it may be the command it runs.
     runs_others: bool,
     piped: bool,
+    /// After a command runner ([`COMMAND_RUNNERS`], `find -exec`): the words so far are options, so the next may be
+    /// the command; read like `leading`, and a wildcard in one counts.
+    runner_leading: bool,
+    runner_after_option: bool,
+    runner_skip: u8,
+    /// A `find` is in command position in this segment: `-exec` and friends start a command.
+    in_find: bool,
+    /// The program of the previous word of the segment.
+    previous: String,
 }
 
 impl MaskSegment {
@@ -838,8 +979,53 @@ impl MaskSegment {
             return;
         }
         let name = program(&self.word);
+        let was_leading = self.leading;
+        let was_runner_leading = self.runner_leading;
+        // A wildcard in any leading word (the command, a prefix program's option or value: `time -p /bin/r?`) or in a
+        // runner's command words is a program name no text rule can follow. `[`, `[[` and assignments are not.
+        if (was_leading || was_runner_leading)
+            && self.word.contains(['?', '*', '['])
+            && !matches!(self.word.as_str(), "[" | "[[")
+            && !is_assignment(&self.word)
+        {
+            scan.wildcard_command = true;
+        }
+        if was_leading && self.word == "case" {
+            scan.cases += 1;
+        } else if was_leading && self.word == "esac" {
+            scan.cases = scan.cases.saturating_sub(1);
+        }
+        if was_runner_leading {
+            let (prefix, takes_value) =
+                runner_step(&self.word, self.runner_after_option, &self.previous);
+            self.runner_after_option = takes_value;
+            if !prefix {
+                if self.runner_skip > 0 {
+                    self.runner_skip -= 1;
+                } else {
+                    self.runner_leading = false;
+                }
+            }
+        }
+        if self.in_find && matches!(self.word.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+            (
+                self.runner_leading,
+                self.runner_after_option,
+                self.runner_skip,
+            ) = (true, false, 0);
+        }
+        if was_leading || was_runner_leading {
+            if COMMAND_RUNNERS.contains(&name.as_str()) {
+                (
+                    self.runner_leading,
+                    self.runner_after_option,
+                    self.runner_skip,
+                ) = (true, false, runner_skip(&name));
+            }
+            self.in_find |= name == "find";
+        }
         let wrapper =
-            QUOTE_WRAPPERS.contains(&name.as_str()) || (self.leading && is_dot_wrapper(&self.word));
+            is_quote_wrapper(&name, self.leading) || (self.leading && is_dot_wrapper(&self.word));
         if wrapper {
             self.wrapper_seen = true;
         }
@@ -863,17 +1049,14 @@ impl MaskSegment {
             self.runs_others = true;
         }
         if self.leading {
-            (self.leading, self.after_option) = leading_step(&self.word, self.after_option);
-            // A group (`{ cmd; }`) starts with a command.
-            self.leading |= self.word == "{";
-            // The first word that is not a prefix is the command word.
-            if !self.leading
-                && self.word.contains(['?', '*', '['])
-                && !matches!(self.word.as_str(), "[" | "[[")
-            {
-                scan.wildcard_command = true;
-            }
+            (self.leading, self.after_option) =
+                leading_step(&self.word, self.after_option, &self.previous);
         }
+        // A group (`{ cmd; }`, `function f { cmd; }`) starts with a command.
+        if self.word == "{" {
+            self.leading = true;
+        }
+        self.previous = name;
         self.word.clear();
     }
 }
@@ -885,6 +1068,9 @@ fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan, quoted_text: boo
     let masked = |c: char| if matches!(c, '>' | '{' | '}') { '_' } else { c };
     let (mut segment, mut i) = (MaskSegment::new(false), 0);
     segment.leading = !quoted_text;
+    // Inside a backtick pair: the segment outside it, and whether the next word after the pair is in command
+    // position (an assignment's value or an option's value: `` x=`date` /bin/r? ``).
+    let mut backtick: Option<(MaskSegment, bool)> = None;
     while i < chars.len() {
         let c = chars[i];
         if c == '$' {
@@ -918,6 +1104,13 @@ fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan, quoted_text: boo
                     return;
                 };
                 let content = &chars[i + 1..end];
+                // `env -S'cmd'`: the string glued to the option runs as a command line.
+                if segment.leading
+                    && (segment.word.starts_with("-S")
+                        || segment.word.starts_with("--split-string"))
+                {
+                    segment.wrapper_seen = true;
+                }
                 out.push(c);
                 if segment.wrapper_seen {
                     mask_into(content, out, scan, false);
@@ -930,8 +1123,41 @@ fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan, quoted_text: boo
                     out.extend(content.iter().map(|&n| masked(n)));
                 }
                 out.push(c);
-                segment.word.extend(content);
+                // A string analysed as live code is not a word of this segment (`ssh h 'ls /var/log/*'`).
+                if !segment.wrapper_seen {
+                    segment.word.extend(content);
+                }
                 i = end + 1;
+            }
+            '`' if backtick.is_some() => {
+                segment.end_word(scan);
+                if let Some((outer, leading_after)) = backtick.take() {
+                    segment = outer;
+                    (segment.leading, segment.after_option) = (leading_after, false);
+                }
+                out.push(c);
+                i += 1;
+            }
+            // A backtick pair holds a command of its own.
+            '`' if closing_backtick(chars, i).is_some() => {
+                let (was_leading, was_value) = (segment.leading, segment.after_option);
+                let command_position = was_leading || segment.runs_others;
+                let glued_assignment = is_assignment(&segment.word);
+                segment.end_word(scan);
+                // A substitution where the command goes may be a shell: `` `which bash` -c '...' ``.
+                if command_position {
+                    segment.wrapper_seen = true;
+                    if segment.piped {
+                        scan.fed_shell = true;
+                    }
+                }
+                backtick = Some((
+                    segment.clone(),
+                    was_leading && (was_value || glued_assignment),
+                ));
+                (segment.leading, segment.after_option) = (true, false);
+                out.push(c);
+                i += 1;
             }
             // The `&` of `|&` belongs to the pipe: the segment it ends is still fed by it.
             '&' if i > 0 && chars[i - 1] == '|' => {
@@ -949,8 +1175,9 @@ fn mask_into(chars: &[char], out: &mut String, scan: &mut Scan, quoted_text: boo
             }
             c if c.is_whitespace() || matches!(c, '(' | ')') => {
                 segment.end_word(scan);
-                // A subshell, `$(`, `<(` or `((` starts a command of its own.
-                if c == '(' {
+                // A subshell, `$(`, `<(` or `((` starts a command of its own, and so does what follows the `)` of a
+                // `case` pattern.
+                if c == '(' || (c == ')' && scan.cases > 0) {
                     (segment.leading, segment.after_option) = (true, false);
                 }
                 out.push(c);

@@ -243,3 +243,36 @@ pub fn clean_note(note: &str) -> Option<String> {
         .collect();
     (!cleaned.trim().is_empty()).then_some(cleaned)
 }
+
+/// An Approvals-log query (`approvals_log_query`), as the server hands it to the store.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalsLogQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// An outcome group name (`allowed`, `denied`, `timed_out`, `guard_blocked`, `refused`, `rules`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<i64>,
+    pub limit: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// One row of the Approvals log. `sensitive` is true when the row's focus is a
+/// sensitive (Teri/Fred-derived) one: the real app's `approvals log` command
+/// withholds such rows' text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalsLogRow {
+    #[serde(flatten)]
+    pub row: super::audit::LogRow,
+    pub sensitive: bool,
+}
+
+/// One log entry in full.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalsLogDetail {
+    #[serde(flatten)]
+    pub detail: super::audit::LogDetail,
+    pub sensitive: bool,
+}

@@ -2008,3 +2008,6 @@ mod s2;
 // test module where they expect `crate::terminal::staging::destructive`.
 #[path = "tests/destructive.rs"]
 mod destructive_cases;
+
+#[path = "tests/differential.rs"]
+mod differential_cases;

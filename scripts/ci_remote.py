@@ -51,6 +51,7 @@ _RUSTC_ARROW = re.compile(r"^\s*--> (\S+?):(\d+):\d+")
 _SWIFT_COMPILE = re.compile(r"^(\S.*?\.swift):(\d+):\d+: error: (.*)$")
 _UNITTEST = re.compile(r"^(?:FAIL|ERROR): (\w+) \(([\w.]+)\)")
 _ARROW_LOOKAHEAD = 3
+_MAC_SHARD_JOB = re.compile(r"^Mac tests shard (\d+)/\d+( \(dispatch\))?$")
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +67,15 @@ def parse_failed_log(text):
             items = [UNPARSED_TAG + line for line in lines[-UNPARSED_TAIL_LINES:]]
         result[job] = items
     return result
+
+
+def display_job_name(job):
+    """`Mac tests shard 2/3 (dispatch)` -> `Swift tests (Mac app) (dispatch) / shard 2`, so a
+    shard failure reads as a failure of the Mac check it belongs to."""
+    m = _MAC_SHARD_JOB.match(job)
+    if not m:
+        return job
+    return "Swift tests (Mac app)%s / shard %s" % (m.group(2) or "", m.group(1))
 
 
 def select_run(runs, head_sha, not_before):
@@ -249,7 +259,7 @@ def _wait(run_id, args):
             for job, state in summarize(run)[0].items():
                 if last_state.get(job) != state:
                     last_state[job] = state
-                    _say("  %s: %s" % (job, state))
+                    _say("  %s: %s" % (display_job_name(job), state))
             if run.get("status") == "completed":
                 return run, url
         if time.monotonic() >= deadline:
@@ -262,10 +272,10 @@ def _report_failures(run_id, jobs):
     parsed = parse_failed_log(proc.stdout) if proc.returncode == 0 else {}
     for job, items in parsed.items():
         for item in items:
-            _say("FAILED %s: %s" % (job, item))
+            _say("FAILED %s: %s" % (display_job_name(job), item))
     for job, state in jobs.items():
         if state not in GOOD_CONCLUSIONS and job not in parsed:
-            _say("FAILED %s: %s (no failed-step log available)" % (job, state))
+            _say("FAILED %s: %s (no failed-step log available)" % (display_job_name(job), state))
 
 
 def _reattach_hint(run_id, url):
@@ -283,7 +293,7 @@ def _parse_args(argv):
     parser.add_argument("--only", choices=ONLY_CHOICES, default="all", help="which jobs to run")
     parser.add_argument("--run-id", help="attach to this run instead of dispatching")
     parser.add_argument("--timeout-min", type=float, default=50,
-                        help="give up waiting after this long (default 50, above the Mac job's 45)")
+                        help="give up waiting after this long (default 50, above the longest job's limit)")
     parser.add_argument("--interval-s", type=float, default=30, help="poll interval")
     parser.add_argument("--discover-interval-s", type=float, default=3)
     parser.add_argument("--discover-timeout-s", type=float, default=60)

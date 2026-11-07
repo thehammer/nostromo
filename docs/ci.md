@@ -18,7 +18,8 @@ instead; see "Skipping the Swift jobs" below.
 | `Rust tests` | ubuntu-latest | `cargo test` (compiles and links the lib, the bins and every test binary) | same | see "Where the time goes" |
 | `Detect changed paths` | ubuntu-latest | `scripts/ci_changes.py` over the PR's changed paths | n/a | ~10 s |
 | `Python tooling tests` | macos-latest | `make python-test` (fails on any skip) | `make python-test` | ~4 min |
-| `Swift tests (Mac app)` | macos-26 | `make mac-test` (the `NostromoTests` scheme, ~5,800 tests, fully serial), then the compile gate | `make mac-test` | see "Where the time goes" |
+| `Mac tests shard 1/3`, `2/3`, `3/3` | macos-26 (x3, parallel) | `make mac-test SHARD=<n>`: one third of the `NostromoTests` classes (~7,700 tests in all, serial inside a shard); shard 1 also runs the compile gate | `make mac-test` (all classes) or `make mac-test SHARD=<n>` | see "Where the time goes" |
+| `Swift tests (Mac app)` | ubuntu-latest | **the aggregate of the three Mac shards** (`scripts/ci_mac_aggregate.py`): green only if every shard ran, passed and reported tests, and the total reaches the floor in `macOS/ci/mac-shards.json`. Takes no macOS slot. | n/a | seconds after the last shard |
 | `Swift tests (NostromoKit)` | macos-26 | `make kit-test` — `swift test` over `Shared/NostromoKit`, ~570 tests | `make kit-test` | ~2.5 min |
 | `iOS simulator build` | macos-26 | `xcodebuild -scheme Nostromo -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` (compile only; no device, no tests) | `make ios-build` is the device build; the simulator command is in the workflow | ~1.7 min |
 | `Launch smoke (advisory)` | macos-26 | see below (path-filtered, advisory) | `make mac-smoke` | ~5 min |
@@ -27,8 +28,62 @@ Every job except the advisory launch smoke can also be dispatched by hand on a
 branch, alone or in groups; see "Running CI on a branch (dispatch)" below.
 
 `make mac-test` and `make kit-test` remain the local commands; the Swift jobs
-run exactly those Makefile targets, so a local failure and a PR-checks failure
-are the same failure.
+run exactly those Makefile targets (the shards add `SHARD=<n>`), so a local
+failure and a PR-checks failure are the same failure.
+
+### How the Mac tests are sharded
+
+`Swift tests (Mac app)` is an aggregate (the same pattern as `Build & Lint`) over
+three parallel jobs, `Mac tests shard N/3`, each on its own `macos-26` runner
+(each builds the bundle itself, ~200 s). The assignment is
+`macOS/ci/mac-shards.json`:
+
+- Shards 1 and 2 list classes and run exactly those (`-only-testing:NostromoTests/<Class>`).
+- Shard 3 is the **catch-all**: it runs everything *not* listed in 1 and 2
+  (`-skip-testing:NostromoTests/<Class>` for each of their classes). A new test
+  class therefore always runs, in shard 3, with no config change.
+- Classes are never split, so any ordering or shared-state assumption inside a
+  class (`MouseQueueTestCase` subclasses, the defaults guard, display tests) is
+  unchanged. A cross-class assumption (state one class leaves for another) would
+  show as a failure once shard membership changes; fix the test, do not pin it.
+
+Guards (each is a failing check, not a log line):
+
+| Guard | Where |
+|---|---|
+| a class listed in the config that does not exist (a typo would run zero tests) | `scripts/mac_shards.py` (`make mac-test SHARD=n` and the report step fail) |
+| a shard that executed no tests | `scripts/ci_mac_aggregate.py` |
+| total executed across shards < `expected_min_executed` | aggregate |
+| a skipped, cancelled, failed or missing shard job | aggregate (`needs.<shard>.result` must be `success`; "skipped" fails when Swift paths changed, because a skipped required check counts as passing on GitHub) |
+| no shard reported a passing `MotherDetailWidthConstraintTests` case | aggregate (the per-shard step rejects skips) |
+
+`swift == 'false'` (the path classifier) makes the aggregate green without any
+shard, exactly as the single job behaved with its steps skipped.
+
+**Rebalancing.** Each shard uploads `shard-<n>.json` (report) for 14 days, and on
+`main` pushes also `mac-test-log-shard-<n>` (the full log). To rebalance after
+many new tests (shards more than ~15% apart in the job times): download the three
+logs, concatenate them and run
+
+```
+cat shard-*-logs/mac-test-full.log > /tmp/all.log
+python3 scripts/mac_shards.py regenerate --log /tmp/all.log --balanced-from <run id> --write
+```
+
+`regenerate` balances by per-class duration (greedy, deterministic). A concatenated
+log has three grand totals, so pass `--floor <97% of the sum of the three shards' executed counts>`
+(from the `shard-<n>.json` reports); without `--floor` it uses 97% of the last total only. `--from-source` estimates from
+test-method counts (how the first assignment was made, before any timing log
+existed). The floor only guards against an accidental large drop; raise it when
+you add many tests.
+
+**macOS slots.** GitHub Free allows 5 concurrent macOS jobs for the account. One
+run now uses 3 shards + one Kit-then-iOS chain (`iOS simulator build` `needs`
+`Swift tests (NostromoKit)`, so they share a slot) + `Python tooling tests`
+(`macos-latest`, ~4.5 min) = 5, plus `Launch smoke (advisory)` on the PRs it
+runs for, which queues briefly. A second overlapping run (or a `make ci-remote`
+dispatch) queues behind. Five shards are deliberately not used: they would starve
+everything else for ~2 min of gain.
 
 ### The Swift jobs
 
@@ -78,6 +133,16 @@ From main run 40720495299 (`40f95ba4`) and the same source after the Rust split
 |---|---|---|---|
 | `Build & Lint` | 848 s | ~650 s (aggregate) | Before: cargo cache restore 59-295 s of a 7.6 GB target dir, build 218 s, clippy 76 s, tests 483 s. After: `Rust format` 14 s, clippy 112 s and tests 643 s run as parallel jobs; `Build & Lint` is now an aggregate job that depends on them. |
 | `Swift tests (Mac app)` | 1,322 s | 1,322 s (unchanged) | `make mac-test` 1,245 s = about 197 s build + 1,048 s executing 5,836 tests; the compile gate is 59 s. |
+
+**Mac tests, sharded.** Baseline before sharding (green PR run 41621628581):
+`Swift tests (Mac app)` 1,710 s, `Swift tests (NostromoKit)` 149 s, `iOS simulator
+build` 122 s, `Rust tests` 666 s, `Python tooling tests` 273 s, `Rust clippy` 130 s;
+`make mac-test` executed 7,704 tests (the unsharded count the sharded total must
+match). With three shards the expected Mac wall-clock is setup ~90 s + build ~200 s +
+execution / 3 + the compile gate (about 11-13 min). The first assignment was balanced
+by test-method count and ran 356 s / 589 s / 580 s of test time; it was then regenerated
+from dispatch run 42353503588's logs (508 s each, floor 7,614 = 97% of the 7,850 tests that run executed). Measured
+per-shard times and the 5-slot cap result are recorded in the sharding PR description.
 
 The required check name `Build & Lint` is unchanged (it is the aggregate job), so
 branch protection needs no change.
@@ -134,9 +199,13 @@ branch protection needs no change.
     `clip.needsLayout = true` was possible when the document cannot be as narrow as the clip,
     and is now bounded). Prefer chunks of about 10 iterations; the workflow's `chunks` input
     does this.
-- **DerivedData cache and test sharding:** deliberately not done. A restored
-  DerivedData can let a stale build product pass a test the current source would
-  fail, which is how #345 got through; sharding needs the parallel-safety above.
+- **DerivedData cache:** deliberately not done. A restored DerivedData can let a
+  stale build product pass a test the current source would fail, which is how
+  #345 got through. (Test sharding was first deferred for the same parallel-safety
+  reasons; it shipped as separate jobs, one process each, so none of the
+  in-process parallel-testing risk applies: see "How the Mac tests are sharded".)
+- **Rust tests are now the longest remaining job** (~11 min): the next candidate
+  for the same treatment (`cargo test` partitioning or nextest).
 - **Path gate:** docs, `.claude`, `tests/*.rs` and Cargo-file-only changes skip the
   Swift jobs. `src/` is **not** skippable because `StatusBarPostureWindowsTests`
   scans `src/**/*.rs`. Verified on throwaway PRs #370-#372 (closed).
@@ -164,7 +233,8 @@ failed build) stays green. The app-build step is the compile gate.
 Required status checks are a repo setting (Settings → Branches → branch
 protection rule for `main`, or a ruleset → "Require status checks to pass"),
 not something the workflow file controls. The check names to add are the job
-names above: `Swift tests (Mac app)`, `Swift tests (NostromoKit)` and
+names above: `Swift tests (Mac app)` (the aggregate; do **not** add the
+`Mac tests shard N/3` names, a rename of a shard would then block every PR), `Swift tests (NostromoKit)` and
 `iOS simulator build` (and `Build & Lint` / `Python tooling tests` if they
 are not already required). Keep `Launch smoke (advisory)` out of the
 required set; see its promotion criteria below.
@@ -250,7 +320,11 @@ from the failed-step logs (XCTest, Swift Testing, cargo test, rustc/clippy,
 Swift compiler, Python unittest; a failed job with no recognised line gets its
 last 30 log lines tagged `[unparsed]`). Exit codes: 0 green, 1 a job failed,
 2 could not start, 3 timed out or run not found. It never cancels a run; on a
-timeout or Ctrl-C it prints `make ci-remote RUN=<id>` to reattach.
+timeout or Ctrl-C it prints `make ci-remote RUN=<id>` to reattach. The Mac tests run
+as three shard jobs; their failures are attributed as
+`FAILED Swift tests (Mac app) / shard 2: <test>` (`... (dispatch) / shard 2` on a dispatch).
+The aggregate `Swift tests (Mac app)` job may add an `[unparsed]` line saying which
+shard guard tripped.
 
 `scripts/ci_remote.py` needs `gh` logged in with the `repo` and `workflow`
 scopes (those include `actions: write`, which dispatching needs; the workflow's
@@ -263,8 +337,8 @@ own `permissions:` stay `contents: read`).
 | `all` (default) | every job |
 | `rust` | `Build & Lint` and its three parts (`Rust format`, `Rust clippy`, `Rust tests`) |
 | `python` | `Python tooling tests` |
-| `swift` | `Swift tests (Mac app)`, `Swift tests (NostromoKit)`, `iOS simulator build` |
-| `mac` | `Swift tests (Mac app)` |
+| `swift` | `Swift tests (Mac app)` (and its three shards), `Swift tests (NostromoKit)`, `iOS simulator build` |
+| `mac` | `Swift tests (Mac app)` (and its three shards) |
 | `kit` | `Swift tests (NostromoKit)` |
 | `ios` | `iOS simulator build` |
 
@@ -310,8 +384,9 @@ on one branch queue; a third replaces the pending second.
 The repo is public, so standard GitHub-hosted runners (including `macos-26`)
 cost **$0**. The real limit is concurrency: a personal Free account runs at most
 5 macOS jobs at once (an assumption from GitHub's published limits; check
-Settings > Billing). A full dispatch uses 4 macOS jobs (python-tooling, mac, kit,
-ios), so two simultaneous full dispatches plus a PR run will queue. Prefer
+Settings > Billing). A full dispatch uses up to 5 macOS slots at once (python-tooling, 3 Mac shards, and
+the Kit-then-iOS chain one at a time), so two simultaneous full dispatches or a
+dispatch plus a PR run will queue. Prefer
 `ONLY=swift`, `mac` or `kit`. Typical wall time: about 14 min for everything
 (`Build & Lint` dominates), about 7.5 min without it, about 2 min for `kit`.
 

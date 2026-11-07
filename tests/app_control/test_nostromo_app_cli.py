@@ -474,3 +474,68 @@ class TasksCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApprovalsLogCliTests(unittest.TestCase):
+    """`approvals log` (AP5): read-only, polls while `loading`, exits non-zero on an error state."""
+
+    def run_log(self, argv, replies):
+        sent = []
+        def fake(req):
+            sent.append(req)
+            return replies[min(len(sent), len(replies)) - 1]
+        out = io.StringIO()
+        code = 0
+        with mock.patch.object(cli, "call", fake), mock.patch("time.sleep", lambda s: None), \
+                mock.patch("sys.argv", ["nostromo-app", "approvals", "log"] + argv), redirect_stdout(out):
+            try:
+                cli.main()
+            except SystemExit as e:
+                code = e.code
+        return sent, code, out.getvalue()
+
+    def test_maps_the_filters(self):
+        sent, code, _ = self.run_log(["--focus", "kate", "--outcome", "denied", "--limit", "20",
+                                      "--since", "2026-11-01T00:00:00Z"], [{"state": "ready", "rows": []}])
+        self.assertEqual(code, 0)
+        self.assertEqual(sent, [{"cmd": "approvals", "window": 0, "sub": "log", "limit": 20, "focus": "kate",
+                                 "outcome": "denied", "since_ms": 1793491200000}])
+
+    def test_since_accepts_days_ago(self):
+        import time
+        before = time.time()
+        sent, _, _ = self.run_log(["--since", "-2d"], [{"state": "ready", "rows": []}])
+        self.assertAlmostEqual(sent[0]["since_ms"] / 1000, before - 2 * 86400, delta=5)
+
+    def test_asks_again_while_loading_and_prints_the_rows(self):
+        import json
+        sent, code, out = self.run_log([], [{"state": "loading"}, {"state": "loading"},
+                                            {"state": "ready", "rows": [{"row_id": "r1"}]}])
+        self.assertEqual((len(sent), code), (3, 0))
+        self.assertEqual(json.loads(out)["rows"], [{"row_id": "r1"}])
+
+    def test_gives_up_after_wait_seconds(self):
+        import json
+        sent, code, out = self.run_log(["--wait", "0"], [{"state": "loading"}])
+        self.assertEqual((len(sent), code), (1, 0))
+        self.assertEqual(json.loads(out)["state"], "loading")
+
+    def test_an_error_state_exits_non_zero(self):
+        _, code, _ = self.run_log([], [{"state": "error", "error": "not connected"}])
+        self.assertNotEqual(code, 0)
+
+    def test_rejects_a_bad_limit_outcome_or_since_and_sends_nothing(self):
+        for argv in (["--limit", "0"], ["--limit", "501"], ["--outcome", "everything"], ["--since", "yesterday"]):
+            with self.subTest(argv=argv):
+                sent, code, _ = self.run_log(argv, [{"state": "ready"}])
+                self.assertEqual(code, 2)
+                self.assertEqual(sent, [])
+
+    def test_never_sends_anything_that_acts_and_is_documented_read_only(self):
+        acting = {"click", "drag", "key", "type", "paste", "drop", "activate", "restore"}
+        sent, _, _ = self.run_log([], [{"state": "ready"}])
+        self.assertNotIn(sent[0]["cmd"], acting)
+        lines = [l for l in (cli.__doc__ or "").splitlines() if l.strip().startswith("nostromo-app approvals log")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("READ-ONLY", lines[0])
+        self.assertIn("WITHHOLDS", lines[0])

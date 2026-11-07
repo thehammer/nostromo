@@ -29,6 +29,7 @@ window-content points with a TOP-LEFT origin, i.e. what a screenshot shows.
     nostromo-app tasks output TASK_ID [--focus TAG] [--wait SECONDS] [-w N]   READ-ONLY (sends no event, opens no window, stops nothing): the output the task's window shows, from the same model: state (loading / ready / unavailable / error), source (file / cli_tail), truncated (any of the output is missing from text), end_truncated (it is the end that is missing), total_bytes and text (the end of it, at most 1 MiB). The first ask starts the read, so it re-asks until the state is not loading, for up to --wait seconds (default 5). The real app WITHHOLDS the text (text is null, refusal says why); only the isolated QA instance returns it, and even there the text can hold anything a command printed (paths, hostnames, tokens): check it before pasting it into logs, PRs or tickets; JSON; exit 1 if no pane / unknown --focus / no such task / app unreachable
     nostromo-app capture-render-state     Debug > Capture render state now, from a script: writes a content-free capture (pane-blank-<hash>-<UTC>.json) for every transcript pane on screen, no rate limit; prints the paths
     nostromo-app approvals session-rules [--focus TAG]   READ-ONLY: the active "Allow for this session" rules per focus: {focuses: [{tag, rules: [{id, rule_text, summary, kind, created_at_ms, uses, agent_id}]}]}. Nothing here presses, selects or revokes anything (both steps of creating a rule, and Revoke, need a real human gesture)
+    nostromo-app approvals log [--focus TAG] [--outcome GROUP] [--since ISO8601|-Nd] [--limit N] [--wait SECONDS]   READ-ONLY (sends no event, opens no window, edits and deletes nothing): the Approvals window's rows, newest first, from the same store: {state, rows: [{row_id, kind, ts, tag, session_id, tool_use_id, request_id, entry_ids, agent, subagent, tool_name, summary, outcome, outcome_text, by_window, latency_ms, refusal_code, rule_label, sensitive}], next_cursor}. GROUP is allowed, denied, timed_out, guard_blocked, refused or rules; --since is an ISO 8601 time or -Nd (N days ago); --limit is 1-500 (default 50). The first ask starts the read, so it re-asks until the state is not loading, for up to --wait seconds (default 5). The real app WITHHOLDS the summary of a row whose focus is sensitive (Teri/Fred-derived): it carries "withheld": true instead; only the isolated QA instance returns everything. JSON; exit 1 if the read failed / app unreachable
     nostromo-app approvals badges   READ-ONLY: the red "needs you now" sidebar pills and the Dock badge: {focuses: [{tag, pill}], dock} (dock is null when clear)
     nostromo-app approvals list [--focus TAG] [-w N]   READ-ONLY (sends no event, answers nothing): the permission-approval cards on screen, from the cards' own views: request_id, focus, agent, tool, the input as displayed (invisible characters as tokens), command_count, invisible_count, reason_line, options [{id, enabled, label}] (a card with session-rule candidates also lists `allow_session`, plus session_rules [{id, rule_text, summary, kind, overrides}], session_selected (the picked candidate's id or null) and session_panel (the lines the card shows for it); Allow once reads "Scroll to the end to allow" until the input was scrolled to its end), default_to_no_kind, seconds_left, collapsed (the card is a one-line bar; window_cards[].collapsed, .bar_text, .bar_countdown), page/of (`1 of 3`), windows (every window showing the request) and window_cards [{window, page, of, state}] (that window's card; `state` is the outcome text once answered); `guard_bars` lists the production-shell guard bars on screen [{window, focus, text}]. With -w N only that window is read (without it, every window); JSON
     nostromo-app key    CHARS [--mod cmd,shift] [-w N]
@@ -52,6 +53,21 @@ def resolve_socket(arg=None, env=None):
 
 SOCK = resolve_socket()
 SCREEN = os.environ.get("NOSTROMO_QA_SCREEN")   # also settable via the env, for scripts
+
+
+def parse_since(text, parser):
+    """`-Nd` (N days ago) or an ISO 8601 time, as milliseconds since the epoch."""
+    import datetime, re, time
+    m = re.fullmatch(r"-(\d+)d", text)
+    if m:
+        return int((time.time() - int(m.group(1)) * 86400) * 1000)
+    try:
+        when = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        parser.error(f"--since: not an ISO 8601 time or -Nd: {text!r}")
+    if when.tzinfo is None:
+        when = when.astimezone()   # no zone given: the local one
+    return int(when.timestamp() * 1000)
 
 
 def call(req):
@@ -143,8 +159,12 @@ def main():
         tp.add_argument("-w", "--window", type=int, default=argparse.SUPPRESS)
     sub.add_parser("capture-render-state", help="write a content-free render-state capture for every visible transcript pane now")
     ap = sub.add_parser("approvals", help="READ-ONLY approval cards on screen (what each card shows, its options and which are enabled)")
-    ap.add_argument("sub", choices=["list", "badges", "session-rules"])
-    ap.add_argument("--focus", metavar="TAG", help="only the cards of this focus")
+    ap.add_argument("sub", choices=["list", "badges", "session-rules", "log"])
+    ap.add_argument("--focus", metavar="TAG", help="only the cards of this focus (log: only this focus's rows)")
+    ap.add_argument("--outcome", metavar="GROUP", choices=["allowed", "denied", "timed_out", "guard_blocked", "refused", "rules"], help="log: only this outcome group")
+    ap.add_argument("--since", metavar="WHEN", help="log: only rows at or after this ISO 8601 time, or -Nd (N days ago)")
+    ap.add_argument("--limit", type=int, default=50, metavar="N", help="log: how many rows (1-500, default 50)")
+    ap.add_argument("--wait", type=float, default=5.0, metavar="SECONDS", help="log: how long to keep asking while the state is `loading` (default 5)")
     k = sub.add_parser("key"); k.add_argument("chars"); k.add_argument("--mod", default="")
     k.add_argument("--key-code", type=int, default=0)
     ty = sub.add_parser("type"); ty.add_argument("text")
@@ -217,6 +237,24 @@ def main():
                 reply = call(r)
             print(json.dumps(reply, indent=2))
             return
+    elif a.cmd == "approvals" and a.sub == "log":
+        if not 1 <= a.limit <= 500: p.error("--limit must be 1-500")
+        r["sub"] = "log"
+        r["limit"] = a.limit
+        if a.focus: r["focus"] = a.focus
+        if a.outcome: r["outcome"] = a.outcome
+        if a.since: r["since_ms"] = parse_since(a.since, p)
+        import time
+        deadline = time.time() + a.wait
+        reply = call(r)
+        # The first ask starts the read: ask again until it has finished (or time is up).
+        while isinstance(reply, dict) and reply.get("state") == "loading" and time.time() < deadline:
+            time.sleep(0.25)
+            reply = call(r)
+        print(json.dumps(reply, indent=2))
+        if isinstance(reply, dict) and reply.get("state") == "error":
+            sys.exit(f"error: {reply.get('error')}")
+        return
     elif a.cmd == "approvals":
         r["sub"] = a.sub
         if a.focus: r["focus"] = a.focus

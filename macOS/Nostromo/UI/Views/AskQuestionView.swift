@@ -1,6 +1,32 @@
 import AppKit
 import Combine
 
+// MARK: - OptionRowStyle
+
+/// The look of an option row, shared by the transcript card (`AskQuestionView`) and the approval
+/// form (`ApprovalQuestionFormView`): a full-width row, the label on the left, its description muted
+/// beside it, a quiet hover tint, a thin divider between rows.
+enum OptionRowStyle {
+    static let rowHeight: CGFloat = 36
+    static let inset: CGFloat = 14
+    static let checkSize: CGFloat = 14
+    static let checkGap: CGFloat = 8
+    static let descriptionGap: CGFloat = 10
+    static let labelFont = NSFont.systemFont(ofSize: 12, weight: .medium)
+    static let descriptionFont = NSFont.systemFont(ofSize: 11)
+    static var chosenTint: CGColor { Theme.sage.withAlphaComponent(0.12).cgColor }
+    static var hoverTint: CGColor { Theme.cornflower.withAlphaComponent(0.12).cgColor }
+    static var topDivider: CGColor { Theme.borderInactive.withAlphaComponent(0.4).cgColor }
+    static var rowDivider: CGColor { Theme.borderInactive.withAlphaComponent(0.25).cgColor }
+
+    static func checkmarkImage() -> NSImageView {
+        let check = NSImageView()
+        check.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "chosen")
+        check.contentTintColor = Theme.sage
+        return check
+    }
+}
+
 // MARK: - AskQuestionView
 
 /// Native card rendered when an agent calls `AskUserQuestion`.
@@ -109,7 +135,7 @@ final class AskQuestionView: NSView {
             // Divider
             let divider = NSView()
             divider.wantsLayer = true
-            divider.layer?.backgroundColor = Theme.borderInactive.withAlphaComponent(0.4).cgColor
+            divider.layer?.backgroundColor = OptionRowStyle.topDivider
             divider.translatesAutoresizingMaskIntoConstraints = false
             addSubview(divider)
             NSLayoutConstraint.activate([
@@ -137,7 +163,7 @@ final class AskQuestionView: NSView {
                 if idx < data.options.count - 1 {
                     let sep = NSView()
                     sep.wantsLayer = true
-                    sep.layer?.backgroundColor = Theme.borderInactive.withAlphaComponent(0.25).cgColor
+                    sep.layer?.backgroundColor = OptionRowStyle.rowDivider
                     sep.translatesAutoresizingMaskIntoConstraints = false
                     addSubview(sep)
                     NSLayoutConstraint.activate([
@@ -262,16 +288,13 @@ final class AskQuestionView: NSView {
 
             // Checkmark — hidden by default; space is always reserved so revealing
             // it causes no layout shift (label leading is anchored to checkmark.trailing).
-            let check = NSImageView()
-            check.image = NSImage(systemSymbolName: "checkmark.circle.fill",
-                                  accessibilityDescription: "chosen")
-            check.contentTintColor = Theme.sage
+            let check = OptionRowStyle.checkmarkImage()
             check.isHidden  = true
             check.alphaValue = 0
             check.translatesAutoresizingMaskIntoConstraints = false
             checkmark = check
 
-            let labelFont = NSFont.systemFont(ofSize: 12, weight: .medium)
+            let labelFont = OptionRowStyle.labelFont
             let lbl: NSTextField
             if option.recommended {
                 // Append a muted "(recommended)" suffix so Perri's pick stands out
@@ -315,7 +338,7 @@ final class AskQuestionView: NSView {
 
             if !option.description.isEmpty {
                 let desc = NSTextField(labelWithString: option.description)
-                desc.font                 = .systemFont(ofSize: 11)
+                desc.font                 = OptionRowStyle.descriptionFont
                 desc.textColor            = Theme.fgMuted
                 desc.lineBreakMode        = .byTruncatingTail
                 desc.maximumNumberOfLines = 1
@@ -332,7 +355,7 @@ final class AskQuestionView: NSView {
 
             for sub in subs { addSubview(sub) }
             NSLayoutConstraint.activate(constraints + [
-                heightAnchor.constraint(equalToConstant: 36),
+                heightAnchor.constraint(equalToConstant: OptionRowStyle.rowHeight),
             ])
         }
 
@@ -371,7 +394,7 @@ final class AskQuestionView: NSView {
             } else {
                 label.font = chosenFont
             }
-            layer?.backgroundColor = Theme.sage.withAlphaComponent(0.12).cgColor
+            layer?.backgroundColor = OptionRowStyle.chosenTint
         }
 
         override func updateTrackingAreas() {
@@ -389,7 +412,7 @@ final class AskQuestionView: NSView {
 
         override func mouseEntered(with event: NSEvent) {
             guard isEnabled, !chosen else { return }
-            layer?.backgroundColor = Theme.cornflower.withAlphaComponent(0.12).cgColor
+            layer?.backgroundColor = OptionRowStyle.hoverTint
         }
 
         override func mouseExited(with event: NSEvent) {
@@ -424,15 +447,22 @@ final class AskQuestionRecordView: NSView {
     /// What the status line says, first match wins:
     /// - labels were sent and not refused: `Answered: …`;
     /// - the daemon refused the answer and the card is `.notSent` (only Deny works): `answerNotAcceptedText`;
+    /// - the daemon refused a Deny: `denyNotAcceptedText`;
+    /// - a Deny is in flight after a refusal (the card says `Denying…`): `denyingText`;
     /// - the request waits for the person: `Waiting for your answer above`;
     /// - otherwise nothing (never an invented answer).
-    static func statusText(awaiting: Bool, chosen: [String]?, notAccepted: Bool = false) -> String {
+    static func statusText(awaiting: Bool, chosen: [String]?, notAccepted: Bool = false,
+                           denyNotAccepted: Bool = false, denying: Bool = false) -> String {
         if let chosen, !chosen.isEmpty { return "Answered: " + chosen.joined(separator: ", ") }
         if notAccepted { return answerNotAcceptedText }
+        if denyNotAccepted { return denyNotAcceptedText }
+        if denying { return denyingText }
         return awaiting ? "Waiting for your answer above" : ""
     }
 
     static let answerNotAcceptedText = "Answer was not accepted; only Deny works above"
+    static let denyNotAcceptedText = "Deny was not accepted; try Deny again above"
+    static let denyingText = "Denying…"
 
     private let data: AskQuestionData
     private let toolUseId: String
@@ -495,7 +525,9 @@ final class AskQuestionRecordView: NSView {
         statusLabel.stringValue = Self.statusText(
             awaiting: store?.isAwaitingAnswer(toolUseId: toolUseId) ?? false,
             chosen: store?.chosenLabels(toolUseId: toolUseId),
-            notAccepted: store?.isAnswerNotAccepted(toolUseId: toolUseId) ?? false)
+            notAccepted: store?.isAnswerNotAccepted(toolUseId: toolUseId) ?? false,
+            denyNotAccepted: store?.isDenyNotAccepted(toolUseId: toolUseId) ?? false,
+            denying: store?.isDenyingAfterRefusal(toolUseId: toolUseId) ?? false)
         let spoken = [Self.questionText(for: data), statusLabel.stringValue].filter { !$0.isEmpty }
         setAccessibilityLabel(spoken.joined(separator: ". "))
         setAccessibilityValue(statusLabel.stringValue)

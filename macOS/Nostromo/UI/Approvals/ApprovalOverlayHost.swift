@@ -25,6 +25,9 @@ final class ApprovalOverlayHost: NSView {
 
     /// Gap between the card and the bottom of the transcript.
     static let bottomInset: CGFloat = 8
+
+    /// What `View in log` does (AP5): open the Approvals window on the link. Tests replace it.
+    static var openLog: (ApprovalsLogLink) -> Void = { ApprovalsWindowManager.shared.show(link: $0) }
     /// Left and right margin of the card: the transcript column's. The right one also clears the vertical scroller.
     static let leadingInset: CGFloat = 12
     static let trailingInset: CGFloat = 24
@@ -315,6 +318,11 @@ final class ApprovalOverlayHost: NSView {
         bar.onClose = { [weak self] in
             guard let self else { return }
             self.store.dismissGuardNotice(tag: self.focusTag)
+        }
+        // The entry is read when pressed: a newer block replaces the notice the bar shows.
+        bar.onViewInLog = { [weak self] in
+            guard let self, let notice = self.store.guardNotice(tag: self.focusTag) else { return }
+            Self.openLog(ApprovalsLogLink(tag: self.focusTag, entryId: notice.frame.entryId))
         }
         addSubview(bar)
         guardBar = bar

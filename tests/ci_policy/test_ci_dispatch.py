@@ -38,19 +38,43 @@ JOBS = {
     "rust-test": ("Rust tests", {"all", "rust"}, None),
     "build": ("Build & Lint", {"all", "rust"}, "always"),
     "python-tooling": ("Python tooling tests", {"all", "python"}, None),
-    "swift-tests-mac": ("Swift tests (Mac app)", {"all", "swift", "mac"}, None),
     "swift-tests-kit": ("Swift tests (NostromoKit)", {"all", "swift", "kit"}, None),
-    "ios-simulator-build": ("iOS simulator build", {"all", "swift", "ios"}, None),
+    # `needs` Kit so the two share one macOS slot; `!cancelled()` so a Kit result never skips it.
+    "ios-simulator-build": ("iOS simulator build", {"all", "swift", "ios"}, "not-cancelled"),
+    # Last on purpose: the "bites" tests below patch the first matching line, which must belong
+    # to a step-gated Swift job, not to this aggregate.
+    # The aggregate of the three Mac test shards; see check_mac_aggregate_judges_every_shard.
+    "swift-tests-mac": ("Swift tests (Mac app)", {"all", "swift", "mac"}, "always"),
+}
+# The matrix job that actually runs the Mac tests. Its name is a format() expression over
+# matrix.shard, so it is checked by check_mac_shard_job instead of the plain-name regex.
+SHARD_JOB = "swift-tests-mac-shard"
+SHARD_SELECTORS = {"all", "swift", "mac"}
+SHARD_NAME_RE = re.compile(
+    r"^\$\{\{ github\.event_name == 'workflow_dispatch' && format\('Mac tests shard \{0\}/3 \(dispatch\)', matrix\.shard\) "
+    r"\|\| format\('Mac tests shard \{0\}/3', matrix\.shard\) \}\}$"
+)
+NEEDS = {
+    "swift-tests-mac": ["changes", SHARD_JOB],
+    SHARD_JOB: ["changes"],
+    "swift-tests-kit": ["changes"],
+    "ios-simulator-build": ["changes", "swift-tests-kit"],
 }
 WRAPPER_PREFIX = {
     "always": "always()",
+    "not-cancelled": "!cancelled()",
 }
 SWIFT_GATE = "needs.changes.outputs.swift == 'true'"
 CHANGES_JOB = ("changes", "Detect changed paths")
 # The only job whose display name may be the required check's name.
 REQUIRED_CHECK_NAME = "Build & Lint"
 RUST_PARTS = ("rust-fmt", "rust-clippy", "rust-test")
-SWIFT_JOBS = ("swift-tests-mac", "swift-tests-kit", "ios-simulator-build")
+# Jobs whose every step (but checkout) is gated per step on the path classifier.
+SWIFT_JOBS = (SHARD_JOB, "swift-tests-kit", "ios-simulator-build")
+# The aggregate reads the classifier too, but evaluates its verdict unconditionally.
+MAC_AGGREGATE = "swift-tests-mac"
+# Extra step conditions allowed on the shard job only (after the swift gate).
+SHARD_STEP_SUFFIXES = (" && github.event_name != 'pull_request'", " && matrix.shard == 1")
 
 DISPATCH_NAME_RE = re.compile(
     r"^\s*\$\{\{\s*github\.event_name\s*==\s*'workflow_dispatch'\s*&&\s*'(?P<dispatch>[^']*)'"
@@ -217,7 +241,9 @@ def check_job_names_carry_dispatch_suffix(text):
 def check_job_if_selects_by_only_input(text):
     blocks = _job_blocks(text)
     violations = []
-    for key, (_, selectors, wrapper) in JOBS.items():
+    for key, (_, selectors, wrapper) in list(JOBS.items()) + [
+        (SHARD_JOB, (None, SHARD_SELECTORS, None))
+    ]:
         if key not in blocks:
             violations.append("job `%s` is missing" % key)
             continue
@@ -361,8 +387,8 @@ def check_swift_jobs_wait_for_the_path_classifier(text):
             violations.append("job `%s` is missing" % key)
             continue
         block = blocks[key]
-        if _needs_of(block) != ["changes"]:
-            violations.append("job `%s` needs %r, expected ['changes']" % (key, _needs_of(block)))
+        if _needs_of(block) != NEEDS[key]:
+            violations.append("job `%s` needs %r, expected %r" % (key, _needs_of(block), NEEDS[key]))
         if "needs.changes" in (_job_level(block, "if") or ""):
             violations.append(
                 "job `%s` is skipped by a job-level `if:` on the classifier; that posts the check "
@@ -377,15 +403,85 @@ def check_swift_jobs_wait_for_the_path_classifier(text):
                 continue
             m = re.search(r"(?m)^        if:[ \t]*(.*?)[ \t]*$", step)
             cond = m.group(1) if m else ""
-            if cond not in (SWIFT_GATE, SWIFT_GATE + " && failure()"):
+            allowed = [SWIFT_GATE, SWIFT_GATE + " && failure()"]
+            if key == SHARD_JOB:
+                allowed += [SWIFT_GATE + suffix for suffix in SHARD_STEP_SUFFIXES]
+            if cond not in allowed:
                 violations.append(
                     "job `%s` step %r `if:` is %r; it must be exactly `%s` (optionally `&& failure()`)"
                     % (key, first.strip(), cond, SWIFT_GATE)
                 )
     for key in blocks:
-        if key not in SWIFT_JOBS and key != CHANGES_JOB[0] and "needs.changes" in blocks[key]:
+        if key not in SWIFT_JOBS and key not in (CHANGES_JOB[0], MAC_AGGREGATE) and "needs.changes" in blocks[key]:
             violations.append("job `%s` is gated on the path classifier; only the Swift jobs may be" % key)
     return violations
+
+
+def check_mac_shard_job(text):
+    """The matrix job: three shards, never fail-fast, on macOS, one concurrency group per shard,
+    running the sharded make target."""
+    blocks = _job_blocks(text)
+    block = blocks.get(SHARD_JOB)
+    if block is None:
+        return ["job `%s` is missing" % SHARD_JOB]
+    violations = []
+    name = _unquote(_job_level(block, "name") or "")
+    if not SHARD_NAME_RE.match(name):
+        violations.append("job `%s` name is %r, not the shard format() expression with a (dispatch) variant" % (SHARD_JOB, name))
+    if not re.search(r"(?m)^      matrix:\s*\n\s+shard:\s*\[1, 2, 3\]\s*$", block):
+        violations.append("job `%s` matrix is not exactly `shard: [1, 2, 3]`" % SHARD_JOB)
+    if not re.search(r"(?m)^      fail-fast:\s*false\s*$", block):
+        violations.append("job `%s` must set `fail-fast: false` so one run shows every failing shard" % SHARD_JOB)
+    if _job_level(block, "runs-on") != "macos-26":
+        violations.append("job `%s` must run on macos-26" % SHARD_JOB)
+    group = re.search(r"(?m)^      group:[ \t]*(.*)$", block)
+    if group is None or "matrix.shard" not in group.group(1):
+        violations.append("job `%s` concurrency group must include `matrix.shard` (one group per shard)" % SHARD_JOB)
+    if "make mac-test SHARD=${{ matrix.shard }}" not in block:
+        violations.append("job `%s` never runs `make mac-test SHARD=${{ matrix.shard }}`" % SHARD_JOB)
+    if re.search(r"(?m)^\s+continue-on-error:", block):
+        violations.append("job `%s` has continue-on-error" % SHARD_JOB)
+    return violations
+
+
+def check_mac_aggregate_judges_every_shard(text):
+    """`Swift tests (Mac app)` must be an ubuntu job that depends on the shard job, always runs,
+    and delegates its verdict to scripts/ci_mac_aggregate.py with the shard result and the
+    path-classifier output. Skipped counts as passing on GitHub, so a bare `needs` would be a hole."""
+    blocks = _job_blocks(text)
+    block = blocks.get(MAC_AGGREGATE)
+    if block is None:
+        return ["job `%s` (the `Swift tests (Mac app)` check) is missing" % MAC_AGGREGATE]
+    violations = []
+    if _needs_of(block) != NEEDS[MAC_AGGREGATE]:
+        violations.append("job `%s` needs %r, expected %r" % (MAC_AGGREGATE, _needs_of(block), NEEDS[MAC_AGGREGATE]))
+    if _job_level(block, "runs-on") != "ubuntu-latest":
+        violations.append("job `%s` must run on ubuntu-latest (no macOS slot)" % MAC_AGGREGATE)
+    if "needs.%s.result" % SHARD_JOB not in block:
+        violations.append("job `%s` never reads `needs.%s.result`" % (MAC_AGGREGATE, SHARD_JOB))
+    if "needs.changes.outputs.swift" not in block:
+        violations.append("job `%s` never reads the path classifier output" % MAC_AGGREGATE)
+    if not re.search(r"ci_mac_aggregate\.py --swift \"\$SWIFT\" --shards-result \"\$SHARDS\"", block):
+        violations.append("job `%s` must run scripts/ci_mac_aggregate.py with --swift and --shards-result" % MAC_AGGREGATE)
+    steps = _steps_of(block)
+    if not steps or "ci_mac_aggregate.py" not in steps[-1]:
+        violations.append("job `%s`: the last step must be the aggregate verdict" % MAC_AGGREGATE)
+    elif re.search(r"(?m)^        if:", steps[-1]):
+        violations.append("job `%s`: the verdict step must be unconditional" % MAC_AGGREGATE)
+    if re.search(r"(?m)^\s+continue-on-error:", block):
+        violations.append("job `%s` has continue-on-error" % MAC_AGGREGATE)
+    return violations
+
+
+def check_ios_runs_after_kit_without_being_skipped_by_it(text):
+    """Kit and iOS share one macOS slot via `needs`; `always()` (checked by the selector check) stops
+    a Kit failure or dispatch-skip from skipping iOS."""
+    block = _job_blocks(text).get("ios-simulator-build")
+    if block is None:
+        return ["job `ios-simulator-build` is missing"]
+    if "swift-tests-kit" not in (_needs_of(block) or []):
+        return ["job `ios-simulator-build` does not need `swift-tests-kit`; the Swift jobs would exceed the macOS slot budget"]
+    return []
 
 
 def check_concurrency_is_per_event_and_cancels_only_prs(text):
@@ -481,12 +577,17 @@ def good_workflow(
         % (CHANGES_JOB[1], CHANGES_JOB[1])
     )
     out += ["    runs-on: ubuntu-latest", "    steps:", "      - uses: actions/checkout@v4", ""]
-    for key, (original, selectors, wrapper) in JOBS.items():
-        name = names.get(
-            key,
-            "${{ github.event_name == 'workflow_dispatch' && '%s (dispatch)' || '%s' }}"
-            % (original, original),
-        )
+    for key, (original, selectors, wrapper) in list(JOBS.items()) + [(SHARD_JOB, (None, SHARD_SELECTORS, None))]:
+        if key == SHARD_JOB:
+            default_name = (
+                "${{ github.event_name == 'workflow_dispatch' && format('Mac tests shard {0}/3 (dispatch)', "
+                "matrix.shard) || format('Mac tests shard {0}/3', matrix.shard) }}"
+            )
+        else:
+            default_name = (
+                "${{ github.event_name == 'workflow_dispatch' && '%s (dispatch)' || '%s' }}" % (original, original)
+            )
+        name = names.get(key, default_name)
         cond = "github.event_name != 'workflow_dispatch' || contains(fromJSON('%s'), inputs.only)" % (
             json.dumps(sorted(selectors)),
         )
@@ -496,19 +597,43 @@ def good_workflow(
         out.append("  %s:" % key)
         if name is not None:
             out.append("    name: %s" % name)
-        if key in SWIFT_JOBS:
-            out.append("    needs: changes")
+        if key in NEEDS:
+            out.append("    needs: [%s]" % ", ".join(NEEDS[key]))
         if key == "build":
             out.append("    needs: [%s]" % ", ".join(RUST_PARTS))
         if cond is not None:
             out.append("    if: %s" % cond)
-        out.append("    runs-on: ubuntu-latest")
+        out.append("    runs-on: %s" % ("macos-26" if key == SHARD_JOB else "ubuntu-latest"))
+        if key == SHARD_JOB:
+            out += ["    strategy:", "      fail-fast: false", "      matrix:", "        shard: [1, 2, 3]"]
         out.append("    concurrency:")
-        out.append("      group: %s-%s" % (key, group_suffix))
+        out.append("      group: %s-%s" % (key if key != SHARD_JOB else SHARD_JOB + "-${{ matrix.shard }}", group_suffix))
         out.append("      cancel-in-progress: %s" % cancel)
         if extra_job_lines:
             out.append(extra_job_lines)
         out += ["    steps:", "      - uses: actions/checkout@v4"]
+        if key == MAC_AGGREGATE:
+            out += [
+                "      - name: Download shard reports",
+                "        if: %s" % SWIFT_GATE,
+                "        run: true",
+                "      - name: Every Mac shard must have run and passed",
+                "        env:",
+                "          SWIFT: ${{ needs.changes.outputs.swift }}",
+                "          SHARDS: ${{ needs.%s.result }}" % SHARD_JOB,
+                '        run: python3 scripts/ci_mac_aggregate.py --swift "$SWIFT" --shards-result "$SHARDS" --reports shard-reports',
+                "",
+            ]
+            continue
+        if key == SHARD_JOB:
+            out += [
+                "      - name: Run the shard",
+                "        if: %s" % SWIFT_GATE,
+                "        run: make mac-test SHARD=${{ matrix.shard }}",
+                "      - name: Compile gate",
+                "        if: %s && matrix.shard == 1" % SWIFT_GATE,
+                "        run: true",
+            ]
         if key in SWIFT_JOBS:
             out += [
                 "      - name: Select Xcode",
@@ -560,11 +685,14 @@ class SyntheticBaselineTests(unittest.TestCase):
             check_no_path_filters,
             check_required_check_is_the_aggregate_of_the_rust_parts,
             check_swift_jobs_wait_for_the_path_classifier,
+            check_mac_shard_job,
+            check_mac_aggregate_judges_every_shard,
+            check_ios_runs_after_kit_without_being_skipped_by_it,
         ):
             self.assertEqual(check(text), [], check.__name__)
 
     def test_job_block_splitter_finds_every_job(self):
-        self.assertEqual(sorted(_job_blocks(good_workflow())), sorted(list(JOBS) + [CHANGES_JOB[0]]))
+        self.assertEqual(sorted(_job_blocks(good_workflow())), sorted(list(JOBS) + [SHARD_JOB, CHANGES_JOB[0]]))
 
 
 # ---------------------------------------------------------------------------
@@ -650,8 +778,8 @@ class JobIfTests(unittest.TestCase):
         self.assertTrue(check_job_if_selects_by_only_input(good_workflow(ifs={"build": bad})))
 
     def test_selector_order_does_not_matter(self):
-        ok = ("github.event_name != 'workflow_dispatch' || "
-              "contains(fromJSON('[\"mac\",\"all\",\"swift\"]'), inputs.only)")
+        ok = ("always() && (github.event_name != 'workflow_dispatch' || "
+              "contains(fromJSON('[\"mac\",\"all\",\"swift\"]'), inputs.only))")
         self.assertEqual(
             check_job_if_selects_by_only_input(good_workflow(ifs={"swift-tests-mac": ok})), [])
 
@@ -805,7 +933,7 @@ class RequiredCheckAggregateTests(unittest.TestCase):
 
 class SwiftJobsPathGateTests(unittest.TestCase):
     def test_bites_when_a_swift_job_does_not_need_changes(self):
-        text = good_workflow().replace("    needs: changes\n", "", 1)
+        text = good_workflow().replace("    needs: [changes]\n", "", 1)
         self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
 
     def test_bites_when_a_step_is_not_gated(self):
@@ -845,6 +973,105 @@ class SwiftJobsPathGateTests(unittest.TestCase):
 
     def test_real_ci_yml_swift_jobs_wait_for_the_classifier(self):
         self.assertEqual(check_swift_jobs_wait_for_the_path_classifier(_real_ci_yml()), [])
+
+
+# ---------------------------------------------------------------------------
+# 9. The Mac tests are three shards, judged by an aggregate that cannot be skipped green
+# ---------------------------------------------------------------------------
+
+class MacShardJobTests(unittest.TestCase):
+    def test_bites_when_fail_fast_is_not_disabled(self):
+        text = good_workflow().replace("      fail-fast: false\n", "", 1)
+        self.assertTrue(check_mac_shard_job(text))
+
+    def test_bites_when_the_matrix_loses_a_shard(self):
+        text = good_workflow().replace("shard: [1, 2, 3]", "shard: [1, 2]", 1)
+        self.assertTrue(check_mac_shard_job(text))
+
+    def test_bites_when_the_shard_group_is_shared(self):
+        text = good_workflow().replace(SHARD_JOB + "-${{ matrix.shard }}-", SHARD_JOB + "-", 1)
+        self.assertTrue(check_mac_shard_job(text))
+
+    def test_bites_when_the_job_does_not_run_the_sharded_target(self):
+        text = good_workflow().replace("make mac-test SHARD=${{ matrix.shard }}", "make mac-test", 1)
+        self.assertTrue(check_mac_shard_job(text))
+
+    def test_bites_when_the_dispatch_name_variant_is_missing(self):
+        text = good_workflow(names={SHARD_JOB: "Mac tests shard ${{ matrix.shard }}/3"})
+        self.assertTrue(check_mac_shard_job(text))
+
+    def test_bites_when_the_shard_job_is_not_selected_by_mac(self):
+        bad = ("github.event_name != 'workflow_dispatch' || "
+               "contains(fromJSON('[\"all\",\"swift\"]'), inputs.only)")
+        self.assertTrue(check_job_if_selects_by_only_input(good_workflow(ifs={SHARD_JOB: bad})))
+
+    def test_bites_when_a_shard_step_loses_the_swift_gate(self):
+        text = good_workflow().replace("        if: %s\n        run: make mac-test" % SWIFT_GATE, "        run: make mac-test", 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_bites_when_a_shard_step_has_an_unknown_extra_condition(self):
+        text = good_workflow().replace("%s && matrix.shard == 1" % SWIFT_GATE, "%s && matrix.shard == 2" % SWIFT_GATE, 1)
+        self.assertTrue(check_swift_jobs_wait_for_the_path_classifier(text))
+
+    def test_real_ci_yml_shard_job(self):
+        self.assertEqual(check_mac_shard_job(_real_ci_yml()), [])
+
+
+class MacAggregateTests(unittest.TestCase):
+    def _check(self, text):
+        return check_mac_aggregate_judges_every_shard(text)
+
+    def test_bites_when_the_aggregate_does_not_need_the_shards(self):
+        text = good_workflow().replace("needs: [changes, %s]" % SHARD_JOB, "needs: [changes]", 1)
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_it_stops_reading_the_shard_result(self):
+        text = good_workflow().replace("needs.%s.result" % SHARD_JOB, "needs.changes.result", 1)
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_it_moves_to_macos(self):
+        text = good_workflow().replace(
+            "  swift-tests-mac:\n    name:", "  swift-tests-mac:\n    name:", 1)
+        block = _job_blocks(text)[MAC_AGGREGATE]
+        moved = text.replace(block, block.replace("runs-on: ubuntu-latest", "runs-on: macos-26"), 1)
+        self.assertTrue(self._check(moved))
+
+    def test_bites_when_the_verdict_step_is_conditional(self):
+        text = good_workflow().replace(
+            "      - name: Every Mac shard must have run and passed\n",
+            "      - name: Every Mac shard must have run and passed\n        if: success()\n", 1)
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_the_verdict_is_a_bare_needs_comparison(self):
+        text = good_workflow().replace(
+            'run: python3 scripts/ci_mac_aggregate.py --swift "$SWIFT" --shards-result "$SHARDS" --reports shard-reports',
+            'run: test "$SHARDS" != failure', 1)
+        self.assertTrue(self._check(text))
+
+    def test_bites_when_it_is_not_always_run(self):
+        text = good_workflow()
+        block = _job_blocks(text)[MAC_AGGREGATE]
+        self.assertIn("always() && (", block)
+        text = text.replace(block, block.replace("always() && (", "(", 1), 1)
+        self.assertTrue(check_job_if_selects_by_only_input(text))
+
+    def test_real_ci_yml_aggregate(self):
+        self.assertEqual(self._check(_real_ci_yml()), [])
+
+
+class IosAfterKitTests(unittest.TestCase):
+    def test_bites_when_ios_does_not_wait_for_kit(self):
+        text = good_workflow().replace("needs: [changes, swift-tests-kit]", "needs: [changes]", 1)
+        self.assertTrue(check_ios_runs_after_kit_without_being_skipped_by_it(text))
+
+    def test_bites_when_ios_loses_its_cancelled_guard(self):
+        text = good_workflow()
+        block = _job_blocks(text)["ios-simulator-build"]
+        text = text.replace(block, block.replace("!cancelled() && (", "(", 1), 1)
+        self.assertTrue(check_job_if_selects_by_only_input(text))
+
+    def test_real_ci_yml_ios_after_kit(self):
+        self.assertEqual(check_ios_runs_after_kit_without_being_skipped_by_it(_real_ci_yml()), [])
 
 
 # ---------------------------------------------------------------------------
