@@ -145,7 +145,7 @@ final class PeerMarkerAppearanceTests: XCTestCase {
             let text = try XCTUnwrap(view.wakeMarkerView.flatMap { labelText(of: $0) }, "the marker draws its line in a label")
 
             XCTAssertEqual(runs(text).filter { same($0.color, Theme.amber) }.map { $0.text }.joined(), badge, "mode \(mode)")
-            XCTAssertEqual(text.string, mode == "bypass" ? PeerFixtures.line : "↘ PDO Demo · default: run the tests please")
+            XCTAssertEqual(text.string, mode == "bypass" ? PeerFixtures.line : "↘ Peer PDO Demo · default: run the tests please")
         }
     }
 

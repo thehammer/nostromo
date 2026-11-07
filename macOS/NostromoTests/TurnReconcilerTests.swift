@@ -682,6 +682,26 @@ final class TurnReconcilerTests: XCTestCase {
         assertUniqueViewIdentities(outcome.turns)
     }
 
+    func testATypedMessageIsNotSwallowedByAnInjectedTurnWithTheSameText() {
+        // The operator typed exactly what a peer marker's stand-in says; the snapshot holds only the
+        // injected turn. The typed echo must survive: the injected turn is not the daemon's record of it.
+        let text = "Peer message from Bob"
+        let body = makeRetained(Array(0 ..< 10))
+        let echo = makeOptimisticEcho(text: text)
+        let injected = ChatTurn(
+            userInput: text, timestamp: Self.baseDate.addingTimeInterval(10),
+            timestampRaw: Self.rawTimestamp(10), blocks: [], isComplete: true, daemonId: "t10", epoch: 1,
+            origin: .peerMessage(items: [PeerMessageItemWire(fromName: "Bob", body: "invented body")], omitted: 0))
+        let snapshot = makeSnapshot(Array(0 ..< 10), epoch: 1) + [injected]
+
+        let outcome = TurnReconciler.reconcile(retained: body + [echo], snapshot: snapshot,
+                                               sessionIdChanged: false)
+
+        XCTAssertEqual(outcome.turns.count, 12, "the injected turn and the typed echo are both kept")
+        XCTAssertEqual(outcome.turns.last?.id, echo.id)
+        XCTAssertNil(outcome.turns.last?.daemonId, "the echo is still un-acknowledged")
+    }
+
     // MARK: - 13. replacedFrom is accurate
 
     func testReplacedFromMarksExactlyTheUnchangedPrefixOnAPartialOverlap() {

@@ -20,7 +20,7 @@ extension WakeMarkerText {
     /// The mode that draws a warning badge; every other mode is quiet text.
     public static let warningMode = "bypass"
 
-    /// `↘ <name> · <mode>: <first line>…`; several messages from one sender merge into
+    /// `↘ Peer <name> · <mode>: <first line>…`; several messages from one sender merge into
     /// `↘ 3 messages from <name>`, the first lines in the tooltip and all bodies in the copy text.
     public static func peerMessage(_ items: [PeerMessageItemWire], omitted: Int) -> WakeMarkerContent {
         let total = items.count + max(0, omitted)
@@ -41,7 +41,7 @@ extension WakeMarkerText {
             var tooltip = [capped(text, to: tooltipBodyLimit)]
             if let socket { tooltip.append("From \(socket)") }
             return WakeMarkerContent(
-                line: "\(peerMark) \(name)\(modeText): \(head)",
+                line: "\(peerMark) Peer \(name)\(modeText): \(head)",
                 tooltipLines: tooltip,
                 accessibilityLabel: "Message from session \(name)\(mode.map { ", \($0) mode" } ?? ""): \(capped(text, to: tooltipBodyLimit)).",
                 target: .none,

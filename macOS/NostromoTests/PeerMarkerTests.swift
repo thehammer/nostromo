@@ -21,7 +21,7 @@ enum PeerFixtures {
     static let body = "run the tests please"
     /// What the agent received (`userInput` of a peer turn): the raw tag, untrusted, never drawn.
     static let rawTag = "<cross-session-message from=\"/tmp/pdo.sock\" from-name=\"PDO Demo\" from-mode=\"bypass\">\n\(body)\n</cross-session-message>"
-    static let line = "↘ PDO Demo · bypass: run the tests please"
+    static let line = "↘ Peer PDO Demo · bypass: run the tests please"
 
     static func item(name: String? = "PDO Demo", mode: String? = "bypass", body: String = PeerFixtures.body) -> PeerMessageItemWire {
         PeerMessageItemWire(fromName: name, fromMode: mode, fromSocket: nil, body: body, truncated: false)
@@ -118,7 +118,7 @@ final class PeerMarkerTurnViewTests: MouseQueueTestCase {
         }
     }
 
-    func testATurnWhoseOriginDidNotDecodeShowsAPlainBubbleWithTheFullTag() throws {
+    func testATurnWhoseOriginHasNoReadableItemShowsAMarkerNotABubble() throws {
         let json = """
         {"id":"t1","user_input":\(String(data: try JSONEncoder().encode(PeerFixtures.rawTag), encoding: .utf8)!),
          "timestamp":null,"blocks":[],"is_complete":true,"origin":{"type":"peer_message","items":[7,"x"]}}
@@ -127,8 +127,8 @@ final class PeerMarkerTurnViewTests: MouseQueueTestCase {
 
         let view = MotherNoticeFixtures.turnView(PeerFixtures.turn(userInput: decoded.userInput, origin: decoded.origin))
 
-        XCTAssertNil(view.wakeMarkerView)
-        XCTAssertEqual(view.userBubbleContent?.text, PeerFixtures.rawTag)
+        XCTAssertNotNil(view.wakeMarkerView)
+        XCTAssertFalse(view.hasUserBubble)
     }
 
     // MARK: Origin predicates

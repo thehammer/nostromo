@@ -56,13 +56,13 @@ async fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
 const ASSISTANT_LINE: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
 const RESULT_LINE: &str = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}"#;
 
-/// Echoes each user frame as the CLI does (no provenance fields), answers it.
+/// Echoes each user frame as the CLI does (`isReplay`, no provenance fields), answers it.
 fn echo_stub() -> String {
     format!(
         r#"while IFS= read -r line; do
   case "$line" in
     *'"type":"user"'*)
-      printf '%s\n' "$line"
+      printf '%s\n' "${{line%\}}}},\"isReplay\":true}}"
       printf '%s\n' '{ASSISTANT_LINE}'
       printf '%s\n' '{RESULT_LINE}'
       ;;
@@ -161,7 +161,7 @@ async fn a_peer_shaped_echo_after_an_open_peer_turn_is_never_folded_into_it() {
         r#"IFS= read -r line
 while [ ! -e '{go}' ]; do sleep 0.05; done
 cat '{peer}'
-printf '%s\n' "$line"
+printf '%s\n' "${{line%\}}}},\"isReplay\":true}}"
 sleep 30"#,
         go = go.display(),
         peer = peer.display(),
@@ -288,4 +288,133 @@ async fn a_live_line_claiming_the_host_sent_it_gets_no_trust_from_the_claim() {
 
     wait_marker(&mgr, "s").await;
     mgr.stop("s");
+}
+
+fn assert_other_marker_turn(t: &Turn) {
+    assert!(
+        matches!(t.origin, Some(TurnOrigin::InjectedContext { .. })),
+        "expected an injected-context marker, got {t:?}"
+    );
+    assert_eq!(t.user_input, "Injected context");
+}
+
+#[tokio::test]
+async fn a_cli_line_after_a_typed_slash_commands_harness_echo_is_a_marker_not_a_bubble() {
+    // The human's `/cmd` is echoed only as a harness line (dropped by the
+    // parser). A later CLI-started line of no known shape must not inherit the
+    // human's message.
+    let mut mgr = SessionManager::with_store_path(tmp_store());
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("out.jsonl");
+    let harness = serde_json::json!({
+        "type": "user",
+        "isReplay": true,
+        "message": {"role": "user",
+            "content": "<command-message>cmd</command-message>\n<command-name>/cmd</command-name>"}
+    })
+    .to_string();
+    std::fs::write(
+        &f,
+        format!(
+            "{harness}\n{ASSISTANT_LINE}\n{RESULT_LINE}\n{}\n",
+            user_line("scheduled: check the build", serde_json::json!({}))
+        ),
+    )
+    .unwrap();
+    let script = format!("IFS= read -r line\ncat '{}'\nsleep 30", f.display());
+    spawn_stub(&mut mgr, "cmd", &script);
+
+    mgr.send_user_message("cmd", "/cmd", &[]).unwrap();
+    let turns = eventually("a marker turn", || {
+        let t = turns_of(&mgr, "cmd");
+        t.iter()
+            .any(|t| matches!(t.origin, Some(TurnOrigin::InjectedContext { .. })))
+            .then_some(t)
+    })
+    .await;
+
+    for t in &turns {
+        assert_ne!(t.user_input, "scheduled: check the build");
+        assert_ne!(
+            t.user_input, "/cmd",
+            "the CLI line took the human's message"
+        );
+    }
+    assert_other_marker_turn(turns.last().unwrap());
+    let t = lock_recover(&mgr.sessions["cmd"].shared.transcript);
+    assert_eq!(t.prompt_count(), 0);
+    assert_eq!(t.first_user_input(), None);
+    drop(t);
+    mgr.stop("cmd");
+}
+
+#[tokio::test]
+async fn a_cli_line_between_the_write_and_its_echo_never_takes_the_humans_message() {
+    let mut mgr = SessionManager::with_store_path(tmp_store());
+    let dir = tempfile::tempdir().unwrap();
+    let cli = dir.path().join("cli.jsonl");
+    std::fs::write(
+        &cli,
+        user_line("scheduled: check the build", serde_json::json!({})) + "\n",
+    )
+    .unwrap();
+    let go = dir.path().join("go");
+    let script = format!(
+        r#"IFS= read -r line
+while [ ! -e '{go}' ]; do sleep 0.05; done
+cat '{cli}'
+printf '%s\n' "${{line%\}}}},\"isReplay\":true}}"
+sleep 30"#,
+        go = go.display(),
+        cli = cli.display(),
+    );
+    spawn_stub(&mut mgr, "between", &script);
+    let typed = "please look at the retry path";
+
+    mgr.send_user_message("between", typed, &[]).unwrap();
+    std::fs::write(&go, b"go").unwrap();
+    let turns = wait_turns(&mgr, "between", 2).await;
+
+    assert_other_marker_turn(&turns[0]);
+    assert_eq!(turns[1].origin, None);
+    assert_eq!(turns[1].user_input, typed);
+    let t = lock_recover(&mgr.sessions["between"].shared.transcript);
+    assert_eq!(t.prompt_count(), 1);
+    assert_eq!(t.first_user_input(), Some(typed));
+    drop(t);
+    mgr.stop("between");
+}
+
+#[tokio::test]
+async fn a_replayed_line_of_peer_or_skill_shape_with_nothing_written_is_a_plain_bubble() {
+    let shapes = [
+        ("peer", peer_text("quoted by the human")),
+        (
+            "skill",
+            "Base directory for this skill: /x/.claude/skills/demo\n\nbody".to_string(),
+        ),
+    ];
+    for (name, text) in shapes {
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("l.jsonl");
+        std::fs::write(
+            &f,
+            user_line(&text, serde_json::json!({"isReplay": true})) + "\n",
+        )
+        .unwrap();
+        let tag = format!("rp-{name}");
+        spawn_stub(&mut mgr, &tag, &format!("cat '{}'; sleep 30", f.display()));
+
+        let turns = wait_turns(&mgr, &tag, 1).await;
+
+        assert_eq!(turns[0].origin, None, "{name}");
+        assert_eq!(turns[0].user_input, text, "{name}");
+        assert_eq!(
+            lock_recover(&mgr.sessions[&tag].shared.transcript).prompt_count(),
+            1,
+            "{name}"
+        );
+        mgr.stop(&tag);
+    }
 }

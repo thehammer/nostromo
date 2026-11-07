@@ -319,28 +319,22 @@ pub(super) fn on_wake_turn_started(shared: &Shared) -> TurnAuthor {
     TurnAuthor::of(cell.bound.as_ref())
 }
 
-/// A turn the transcript read as CLI-injected by shape (a peer message, a
-/// skill, a summary) started. As for a wake ([`on_wake_turn_started`]): it is
-/// the message the daemon last wrote only if that message's own text has such a
-/// shape too (a user or injected message that quotes one); otherwise the CLI
-/// began it and it binds to nothing. Decided from the daemon's own queue,
-/// never from the turn's text alone.
-pub(super) fn on_injected_turn_started(shared: &Shared, raw: Option<&str>) -> TurnAuthor {
+/// A live user line without `isReplay` started a turn. Every echo of a stdin
+/// write carries `isReplay` (`--replay-user-messages` is always passed), so
+/// this line is the CLI's own (a scheduled prompt, a hook's text, a peer
+/// message): it binds to nothing and never takes the message the daemon wrote,
+/// which is still waiting for its own echo.
+pub(super) fn on_cli_turn_started(shared: &Shared) -> TurnAuthor {
     let mut cell = lock_recover(&shared.login.cell);
-    // The written message must also BE this line's text: a user's peer-shaped
-    // message waiting in the queue is not the author of a peer line the CLI
-    // sent meanwhile.
-    let is_ours = cell.written.as_ref().is_some_and(|msg| {
-        let written = strip_nostromo_note(&msg.text);
-        raw.is_some_and(|r| r.trim() == written.trim())
-            && crate::ipc::stream_json::parse_injected_origin(written, false).is_some()
-    });
-    if is_ours {
-        cell.bound = cell.written.take();
-    } else {
-        cell.bound = None;
-    }
-    TurnAuthor::of(cell.bound.as_ref())
+    cell.bound = None;
+    TurnAuthor::of(None)
+}
+
+/// The CLI echoed a line the host wrote that opens no turn (the harness line of
+/// a typed slash command): the written message is spent, so nothing later can
+/// bind it.
+pub(super) fn on_unbound_echo(shared: &Shared) {
+    lock_recover(&shared.login.cell).written = None;
 }
 
 /// The turn that last started was a phantom (a replayed system entry), dropped

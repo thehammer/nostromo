@@ -2793,6 +2793,11 @@ fn run_reader(
         let parsed = parse_line(&line);
         auth.feed(classify_line(&line), parsed.as_ref());
         let Some(parsed) = parsed else {
+            // The echo of a typed slash command is only a harness line, which
+            // parsing drops: the written message is spent with it.
+            if is_replayed_harness_echo(&line) {
+                login::on_unbound_echo(&shared);
+            }
             continue;
         };
 
@@ -2896,15 +2901,16 @@ fn run_reader(
                         .origin
                         .as_ref()
                         .is_some_and(TurnOrigin::is_cli_injected);
+                    // Only an `isReplay` line (the echo of a stdin write) may
+                    // take the message the daemon wrote; any other live user
+                    // line is the CLI's own.
+                    let replayed = prompt.as_ref().is_some_and(|(_, r)| *r);
                     let author = if is_wake {
                         login::on_wake_turn_started(&shared)
-                    } else if is_injected {
-                        login::on_injected_turn_started(
-                            &shared,
-                            prompt.as_ref().map(|(raw, _)| raw.as_str()),
-                        )
-                    } else {
+                    } else if replayed {
                         login::on_turn_started(&shared)
+                    } else {
+                        login::on_cli_turn_started(&shared)
                     };
                     // A peer message the CLI began right after an open peer
                     // turn folds into it (no new turn). Only the CLI's own
@@ -2940,8 +2946,10 @@ fn run_reader(
                         turn.origin = None;
                     }
                     // Likewise a peer message, skill or summary: only a turn the
-                    // CLI began itself is one. A written one is the user's text.
-                    if is_injected && !matches!(author, TurnAuthor::Cli) {
+                    // CLI began itself is one. A written one is the user's text,
+                    // and so is any echo (`isReplay`), even with nothing left in
+                    // the written queue.
+                    if is_injected && (replayed || !matches!(author, TurnAuthor::Cli)) {
                         if let Some((raw, _)) = &prompt {
                             if lock_recover(&shared.transcript)
                                 .disown_injected_origin(&turn.id, raw)
@@ -3016,6 +3024,30 @@ fn run_reader(
     publish_model_state(&shared);
     shared.turn_event(&tag, TurnEvent::Exited);
     tracing::warn!(tag = %tag, "session reader EOF — child stdout closed (crash or clean exit)");
+}
+
+/// Is `line` the replayed echo (`isReplay`) of a stdin write that came back as
+/// nothing but a harness line (`<command-name>`, `<command-message>`)?
+fn is_replayed_harness_echo(line: &str) -> bool {
+    if !line.contains("\"isReplay\"") {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    let content = &v["message"]["content"];
+    let text = content.as_str().map(str::to_owned).or_else(|| {
+        content
+            .as_array()?
+            .iter()
+            .find_map(|b| b.get("text")?.as_str().map(str::to_owned))
+    });
+    v["type"] == "user"
+        && v["isReplay"] == true
+        && text.is_some_and(|t| {
+            let t = t.trim_start();
+            t.starts_with("<command-name>") || t.starts_with("<command-message>")
+        })
 }
 
 /// The approval broker and the generation of the process a reader reads.

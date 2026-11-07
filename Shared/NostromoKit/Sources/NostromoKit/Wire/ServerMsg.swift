@@ -394,10 +394,12 @@ public enum TurnOriginWire: Codable, Equatable {
             let omitted = (try? c.decodeIfPresent(Int.self, forKey: .omitted)) ?? 0
             self = .taskWake(items: items, omitted: max(0, omitted))
         case "peer_message":
-            let items = try c.decode([LossyPeerItem].self, forKey: .items).compactMap(\.value)
+            // A peer message with nothing readable is still not something the user typed: it
+            // becomes the generic marker, never a nil origin (which draws the placeholder as a bubble).
+            let items = ((try? c.decode([LossyPeerItem].self, forKey: .items)) ?? []).compactMap(\.value)
             guard !items.isEmpty else {
-                throw DecodingError.dataCorruptedError(forKey: .items, in: c,
-                    debugDescription: "peer_message without a readable item")
+                self = .injectedContext(kind: "other", title: "", text: "", truncated: false)
+                return
             }
             let omitted = (try? c.decodeIfPresent(Int.self, forKey: .omitted)) ?? 0
             self = .peerMessage(items: items, omitted: max(0, omitted))

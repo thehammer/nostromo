@@ -740,22 +740,34 @@ fn the_peer_text_on_a_host_sent_line_is_the_users_plain_prompt() {
 }
 
 #[test]
-fn either_sdk_marker_alone_makes_a_line_host_sent() {
+fn only_prompt_source_sdk_alone_makes_a_line_host_sent() {
     let text = standard_peer("BODY");
     let only_source = json!({"type": "user", "promptSource": "sdk",
         "message": {"role": "user", "content": text}})
     .to_string();
-    let only_origin = json!({"type": "user", "turnOrigin": "sdk",
+    let t = transcript_of(std::slice::from_ref(&only_source));
+    let turns = t.snapshot();
+    assert_eq!(turns[0].origin, None);
+    assert_eq!(turns[0].user_input, text);
+    assert_eq!(t.prompt_count(), 1);
+}
+
+#[test]
+fn turn_origin_sdk_alone_does_not_make_a_peer_shaped_line_host_sent() {
+    // `turnOrigin` names the turn, not the line: the shape parser still reads it.
+    let text = standard_peer("BODY");
+    let line = json!({"type": "user", "turnOrigin": "sdk",
         "message": {"role": "user", "content": text}})
     .to_string();
-
-    for line in [only_source, only_origin] {
-        let t = transcript_of(std::slice::from_ref(&line));
-        let turns = t.snapshot();
-        assert_eq!(turns[0].origin, None, "{line}");
-        assert_eq!(turns[0].user_input, text);
-        assert_eq!(t.prompt_count(), 1);
-    }
+    let t = transcript_of(&[line]);
+    let turns = t.snapshot();
+    assert!(
+        matches!(turns[0].origin, Some(TurnOrigin::PeerMessage { .. })),
+        "{:?}",
+        turns[0].origin
+    );
+    assert_eq!(t.prompt_count(), 0);
+    assert_eq!(t.first_user_input(), None);
 }
 
 #[test]
@@ -1487,8 +1499,8 @@ fn no_log_line_in_the_injected_message_code_names_a_body_text_name_or_title() {
     // The scan is not vacuous: it reaches the new code, it sees logging calls,
     // and it flags a leak and passes a clean call.
     assert!(parser.contains("parse_peer_origin"));
-    assert!(manager.contains("on_injected_turn_started"));
-    assert!(login.contains("fn on_injected_turn_started"));
+    assert!(manager.contains("on_cli_turn_started"));
+    assert!(login.contains("fn on_cli_turn_started"));
     assert!(!log_calls(manager).is_empty());
     assert!(!log_calls(login).is_empty());
     assert!(names_content("info!(tag, \"peer {}\", item.body);"));
@@ -1772,4 +1784,98 @@ fn stored_provenance_fields_are_not_read_on_a_live_transcript() {
     let mut t = live_transcript();
     t.ingest_line(&stored(json!({"isMeta": true}), "some text"));
     assert_eq!(t.snapshot()[0].origin, None);
+}
+
+// ── a bubble is only what the human typed or Nostromo sent for them ───────────
+
+const SDK_TURN_FIELDS_NOTE: &str = "invented plain text from the cli";
+
+#[test]
+fn a_visible_in_transcript_only_line_in_an_sdk_turn_is_a_marker() {
+    let t = reloaded(&[stored(
+        json!({"turnOrigin": "sdk", "isVisibleInTranscriptOnly": true}),
+        SDK_TURN_FIELDS_NOTE,
+    )]);
+    assert_other_marker(&t, SDK_TURN_FIELDS_NOTE);
+}
+
+#[test]
+fn a_meta_line_in_an_sdk_turn_is_a_marker() {
+    let t = reloaded(&[stored(
+        json!({"turnOrigin": "sdk", "isMeta": true}),
+        SDK_TURN_FIELDS_NOTE,
+    )]);
+    assert_other_marker(&t, SDK_TURN_FIELDS_NOTE);
+}
+
+#[test]
+fn a_compaction_summary_in_an_sdk_turn_is_a_summary_marker_and_not_the_title() {
+    let t = reloaded(&[stored(
+        json!({"turnOrigin": "sdk", "isCompactSummary": true}),
+        SUMMARY_TEXT,
+    )]);
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 1);
+    let (kind, _, _, _) = injected_of(turns[0].origin.clone());
+    assert_eq!(kind, "summary");
+    assert_eq!(t.prompt_count(), 0);
+    assert_eq!(t.first_user_input(), None);
+}
+
+#[test]
+fn a_tool_linked_or_companion_line_in_an_sdk_turn_is_a_marker() {
+    for (label, fields) in [
+        (
+            "sourceToolUseID",
+            json!({"turnOrigin": "sdk", "sourceToolUseID": "toolu_invented"}),
+        ),
+        (
+            "turnCompanion",
+            json!({"turnOrigin": "sdk", "turnCompanion": "invented-companion"}),
+        ),
+    ] {
+        let t = reloaded(&[stored(fields, SDK_TURN_FIELDS_NOTE)]);
+        eprintln!("case: {label}");
+        assert_other_marker(&t, SDK_TURN_FIELDS_NOTE);
+    }
+}
+
+#[test]
+fn typed_text_shaped_like_a_summary_or_skill_reloads_as_a_bubble_and_the_title() {
+    let skill = "Base directory for this skill: /x/.claude/skills/demo";
+    for (label, fields) in [
+        ("origin human", json!({"origin": {"kind": "human"}})),
+        ("promptSource typed", json!({"promptSource": "typed"})),
+        ("promptSource queued", json!({"promptSource": "queued"})),
+    ] {
+        for text in [SUMMARY_TEXT, skill] {
+            let t = reloaded(&[stored(fields.clone(), text)]);
+            assert_bubble_and_title(&t, text, label);
+        }
+    }
+}
+
+#[test]
+fn typed_text_shaped_like_a_peer_message_reloads_as_a_bubble() {
+    let text = standard_peer("quoted by the human");
+    for (label, fields) in [
+        ("origin human", json!({"origin": {"kind": "human"}})),
+        ("promptSource typed", json!({"promptSource": "typed"})),
+    ] {
+        assert_bubble_and_title(&reloaded(&[stored(fields, &text)]), &text, label);
+    }
+}
+
+#[test]
+fn a_compact_summary_flag_beats_a_typed_prompt_source() {
+    let t = reloaded(&[stored(
+        json!({"promptSource": "typed", "isCompactSummary": true}),
+        SUMMARY_TEXT,
+    )]);
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 1);
+    let (kind, _, _, _) = injected_of(turns[0].origin.clone());
+    assert_eq!(kind, "summary");
+    assert_eq!(t.prompt_count(), 0);
+    assert_eq!(t.first_user_input(), None);
 }

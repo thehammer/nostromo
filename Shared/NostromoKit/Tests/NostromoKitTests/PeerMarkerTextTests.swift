@@ -53,27 +53,27 @@ final class PeerMarkerTextTests: XCTestCase {
     func testOnePeerMessageIsOneLineWithTheNameTheModeAndTheFirstLineOfTheBody() {
         let content = peer([item()])
 
-        XCTAssertEqual(content.line, "↘ PDO Demo · bypass: run the tests")
+        XCTAssertEqual(content.line, "↘ Peer PDO Demo · bypass: run the tests")
         XCTAssertEqual(content.target, .none)
     }
 
     func testWithoutAModeTheLineHasNoModeSeparator() {
         let content = peer([item(mode: nil)])
 
-        XCTAssertEqual(content.line, "↘ PDO Demo: run the tests")
+        XCTAssertEqual(content.line, "↘ Peer PDO Demo: run the tests")
         XCTAssertNil(content.badge)
     }
 
     func testAMissingOrEmptyNameReadsAsAnotherSession() {
-        XCTAssertEqual(peer([item(nil, mode: nil)]).line, "↘ another session: run the tests")
-        XCTAssertEqual(peer([item("", mode: nil)]).line, "↘ another session: run the tests")
+        XCTAssertEqual(peer([item(nil, mode: nil)]).line, "↘ Peer another session: run the tests")
+        XCTAssertEqual(peer([item("", mode: nil)]).line, "↘ Peer another session: run the tests")
     }
 
     func testOnlyTheFirstLineOfAMultiLineBodyIsOnTheLineAndTheTooltipHasTheRest() {
         let body = "first line\nsecond line\nthird line"
         let content = peer([item(body: body)])
 
-        XCTAssertEqual(content.line, "↘ PDO Demo · bypass: first line")
+        XCTAssertEqual(content.line, "↘ Peer PDO Demo · bypass: first line")
         XCTAssertFalse(content.line.contains("second"))
         XCTAssertTrue(content.tooltipLines.joined(separator: "\n").contains("second line\nthird line"))
         XCTAssertEqual(content.copyText, body)
@@ -82,24 +82,24 @@ final class PeerMarkerTextTests: XCTestCase {
     func testALongBodyIsCappedToOneBoundedLineEndingInAnEllipsis() {
         let content = peer([item(mode: nil, body: String(repeating: "b", count: 500))])
 
-        XCTAssertEqual(content.line, "↘ PDO Demo: " + String(repeating: "b", count: 119) + "…")
+        XCTAssertEqual(content.line, "↘ Peer PDO Demo: " + String(repeating: "b", count: 119) + "…")
     }
 
     func testALongNameIsCappedAndStillLeavesTheBody() {
         let content = peer([item(String(repeating: "N", count: 100), mode: nil)])
 
-        XCTAssertEqual(content.line, "↘ " + String(repeating: "N", count: 39) + "…: run the tests")
+        XCTAssertEqual(content.line, "↘ Peer " + String(repeating: "N", count: 39) + "…: run the tests")
     }
 
     func testALongModeIsCut() {
         let content = peer([item(mode: String(repeating: "a", count: 40))])
 
-        XCTAssertEqual(content.line, "↘ PDO Demo · " + String(repeating: "a", count: 16) + ": run the tests")
+        XCTAssertEqual(content.line, "↘ Peer PDO Demo · " + String(repeating: "a", count: 16) + ": run the tests")
     }
 
     func testATruncatedBodyEndsInAnEllipsisAndAWholeOneDoesNot() {
-        XCTAssertEqual(peer([item(mode: nil, body: "hello", truncated: true)]).line, "↘ PDO Demo: hello…")
-        XCTAssertEqual(peer([item(mode: nil, body: "hello", truncated: false)]).line, "↘ PDO Demo: hello")
+        XCTAssertEqual(peer([item(mode: nil, body: "hello", truncated: true)]).line, "↘ Peer PDO Demo: hello…")
+        XCTAssertEqual(peer([item(mode: nil, body: "hello", truncated: false)]).line, "↘ Peer PDO Demo: hello")
     }
 
     func testTheTooltipHoldsTheBodyAndTheSendersSocket() {
@@ -147,7 +147,7 @@ final class PeerMarkerTextTests: XCTestCase {
     }
 
     func testAModeOfOnlySeparatorsIsNoMode() {
-        XCTAssertEqual(peer([item(mode: "·:")]).line, "↘ PDO Demo: run the tests")
+        XCTAssertEqual(peer([item(mode: "·:")]).line, "↘ Peer PDO Demo: run the tests")
     }
 
     // MARK: - The badge
@@ -189,7 +189,7 @@ final class PeerMarkerTextTests: XCTestCase {
     }
 
     func testAnotherModeIsPlainTextOnTheLine() {
-        XCTAssertEqual(peer([item(mode: "plan")]).line, "↘ PDO Demo · plan: run the tests")
+        XCTAssertEqual(peer([item(mode: "plan")]).line, "↘ Peer PDO Demo · plan: run the tests")
     }
 
     // MARK: - Spoken label, copy text, tooltip
@@ -237,7 +237,7 @@ final class PeerMarkerTextTests: XCTestCase {
         XCTAssertEqual(one.tooltipLines, ["one", "…and 2 more"])
 
         XCTAssertEqual(peer([item(), item()], omitted: 5).line, "↘ 7 messages from PDO Demo · bypass")
-        XCTAssertEqual(peer([item()], omitted: -3).line, "↘ PDO Demo · bypass: run the tests", "a negative count is no count")
+        XCTAssertEqual(peer([item()], omitted: -3).line, "↘ Peer PDO Demo · bypass: run the tests", "a negative count is no count")
     }
 
     func testTheTooltipListsTwentyMessagesAndCountsTheRest() {
@@ -345,7 +345,7 @@ final class PeerMarkerTextTests: XCTestCase {
 
         XCTAssertEqual(marker?.label, "Peer")
         XCTAssertEqual(marker?.content, peer([item("You")]))
-        XCTAssertTrue(marker?.content.line.hasPrefix("↘ ") == true)
+        XCTAssertTrue(marker?.content.line.hasPrefix("↘ Peer ") == true)
     }
 
     func testASkillAndOtherInjectedContextAreLabelledSkillAndInjected() {

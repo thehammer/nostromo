@@ -425,6 +425,9 @@ pub enum ParsedLine {
         /// `sdk`, as a stored session records a prompt written on stdin): so
         /// its text is the user's or the daemon's, whatever shape it has.
         host_sent: bool,
+        /// The line says a person typed it (`origin.kind: "human"`, `promptSource`
+        /// `typed`/`queued`): its text is the user's, whatever its shape.
+        human: bool,
         /// The line says it is a conversation summary (`isCompactSummary`).
         compact_summary: bool,
         /// A stored line says the CLI injected it (`isMeta`, a peer/scheduled
@@ -785,6 +788,7 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
                 .and_then(|x| x.as_str())
                 .map(str::to_string),
             host_sent: line_is_host_sent(obj),
+            human: line_is_human(obj),
             compact_summary: obj.get("isCompactSummary").and_then(|x| x.as_bool()) == Some(true),
             injected: line_is_injected(obj),
         });
@@ -841,42 +845,83 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
             .and_then(|x| x.as_str())
             .map(str::to_string),
         host_sent: line_is_host_sent(obj),
+        human: line_is_human(obj),
         compact_summary: obj.get("isCompactSummary").and_then(|x| x.as_bool()) == Some(true),
         injected: line_is_injected(obj),
     })
 }
 
-/// A stored session records a prompt the host wrote on stdin with
-/// `promptSource: "sdk"` (and `turnOrigin: "sdk"`); the CLI's own injections
-/// (peer messages, skills) carry `system` or neither.
-fn line_is_host_sent(obj: &serde_json::Map<String, Value>) -> bool {
-    ["promptSource", "turnOrigin"]
-        .iter()
-        .any(|k| obj.get(*k).and_then(|x| x.as_str()) == Some("sdk"))
+/// Does a stored line carry a signal that the CLI (not a person) wrote it?
+/// These always win over any other provenance field: `turnOrigin` describes the
+/// TURN, and the CLI writes lines of its own (compaction summaries, slash-command
+/// lines, artifact content) inside a turn the host started.
+fn has_injected_signal(obj: &serde_json::Map<String, Value>) -> bool {
+    // `task-notification` is not here: a scheduled trigger on plain content stays
+    // a prompt (BA6a).
+    const INJECTED_ORIGIN_KINDS: [&str; 2] = ["peer", "system"];
+    const INJECTED_TURN_ORIGINS: [&str; 4] = ["peer", "scheduled", "system", "task_notification"];
+    let flag = |k: &str| obj.get(k).and_then(|x| x.as_bool()) == Some(true);
+    let str_of = |k: &str| obj.get(k).and_then(|x| x.as_str());
+    let origin_kind = obj
+        .get("origin")
+        .filter(|o| o.is_object())
+        .and_then(|o| o.get("kind"))
+        .and_then(|k| k.as_str());
+    flag("isMeta")
+        || flag("isVisibleInTranscriptOnly")
+        || flag("isCompactSummary")
+        || obj.get("sourceToolUseID").is_some_and(|v| !v.is_null())
+        || obj.get("turnCompanion").is_some_and(|v| !v.is_null())
+        || origin_kind.is_some_and(|k| INJECTED_ORIGIN_KINDS.contains(&k))
+        || str_of("promptSource") == Some("system")
+        || str_of("turnOrigin").is_some_and(|o| INJECTED_TURN_ORIGINS.contains(&o))
 }
 
-/// Does a stored line say the CLI injected it (not the user)? Never for a
-/// host-sent line. Provenance is judged by explicit lists, so text a human
-/// typed in a terminal session (`origin.kind: "human"`, `turnOrigin: "human"`,
-/// `promptSource: "typed"` or `"queued"`) is never demoted to a marker.
+/// A stored session records a prompt the host wrote on stdin with
+/// `promptSource: "sdk"`. Not `turnOrigin`: that names the turn, and CLI-written
+/// lines inside a host-started turn carry it too. Never true on a line with an
+/// injected signal.
+fn line_is_host_sent(obj: &serde_json::Map<String, Value>) -> bool {
+    !has_injected_signal(obj) && obj.get("promptSource").and_then(|x| x.as_str()) == Some("sdk")
+}
+
+/// The line says a person typed it: `origin.kind: "human"` or `promptSource` of
+/// `typed`/`queued`. Its text is the user's whatever its shape. Never true on a
+/// line with an injected signal.
+fn line_is_human(obj: &serde_json::Map<String, Value>) -> bool {
+    !has_injected_signal(obj)
+        && (obj
+            .get("origin")
+            .and_then(|o| o.get("kind"))
+            .and_then(|k| k.as_str())
+            == Some("human")
+            || matches!(
+                obj.get("promptSource").and_then(|x| x.as_str()),
+                Some("typed" | "queued")
+            ))
+}
+
+/// Does a stored line say the CLI injected it (not the user)? Provenance is
+/// judged by explicit lists, so text a human typed in a terminal session
+/// (`origin.kind: "human"`, `turnOrigin: "human"`, `promptSource: "typed"` or
+/// `"queued"`) is never demoted to a marker.
 ///
-/// * Injected signals win: `isMeta: true`; `origin.kind: "peer"`;
-///   `promptSource: "system"`; `turnOrigin` of `peer`, `scheduled`, `system`
-///   or `task_notification`.
+/// * Injected signals win ([`has_injected_signal`]), even over `sdk` fields.
+/// * Else a host-sent line (`promptSource: "sdk"`) is not injected.
 /// * Else human signals: `origin.kind: "human"`, `turnOrigin` of `human`,
-///   `user` or `sdk`, `promptSource` of `typed`, `queued` or `sdk`: not injected.
+///   `user` or `sdk`, `promptSource` of `typed` or `queued`: not injected.
 /// * Else provenance of a value on neither list (an `origin` of an unknown
 ///   kind, an unknown `turnOrigin` or `promptSource`) counts as injected, so it
-///   fails toward a marker. A `task-notification` origin on plain content is
-///   the exception: a scheduled trigger stays a prompt (BA6a).
+///   fails toward a marker.
 /// * A line with no provenance field at all is not injected; the reader still
 ///   gives a known text shape its marker.
 fn line_is_injected(obj: &serde_json::Map<String, Value>) -> bool {
-    const INJECTED_ORIGIN_KINDS: [&str; 1] = ["peer"];
-    const INJECTED_TURN_ORIGINS: [&str; 4] = ["peer", "scheduled", "system", "task_notification"];
     const HUMAN_TURN_ORIGINS: [&str; 3] = ["human", "user", "sdk"];
-    const HUMAN_PROMPT_SOURCES: [&str; 3] = ["typed", "queued", "sdk"];
+    const HUMAN_PROMPT_SOURCES: [&str; 2] = ["typed", "queued"];
 
+    if has_injected_signal(obj) {
+        return true;
+    }
     if line_is_host_sent(obj) {
         return false;
     }
@@ -890,13 +935,6 @@ fn line_is_injected(obj: &serde_json::Map<String, Value>) -> bool {
     let turn_origin = str_of("turnOrigin");
     let prompt_source = str_of("promptSource");
 
-    if obj.get("isMeta").and_then(|x| x.as_bool()) == Some(true)
-        || origin_kind.is_some_and(|k| INJECTED_ORIGIN_KINDS.contains(&k))
-        || prompt_source == Some("system")
-        || turn_origin.is_some_and(|o| INJECTED_TURN_ORIGINS.contains(&o))
-    {
-        return true;
-    }
     let human = origin_kind == Some("human")
         || turn_origin.is_some_and(|o| HUMAN_TURN_ORIGINS.contains(&o))
         || prompt_source.is_some_and(|p| HUMAN_PROMPT_SOURCES.contains(&p));
@@ -1984,6 +2022,7 @@ impl SessionTranscript {
                 text,
                 timestamp,
                 host_sent,
+                human,
                 compact_summary,
                 injected,
                 ..
@@ -1991,14 +2030,18 @@ impl SessionTranscript {
                 // The live stream carries no provenance fields: a live line's
                 // provenance is the daemon's `written` queue, judged by the
                 // session reader. Stored fields apply to a replay only.
-                let (host_sent, injected) = (host_sent && !self.live, injected && !self.live);
+                let (host_sent, human, injected) = (
+                    host_sent && !self.live,
+                    human && !self.live,
+                    injected && !self.live,
+                );
                 let mut deltas: Vec<TurnDelta> = self.discard_orphan_prompt().into_iter().collect();
                 let origin = parse_terminal_origin(&text)
                     .or_else(|| parse_mother_origin(&text))
                     .or_else(|| {
                         // A line the host sent is the user's or the daemon's,
                         // whatever its shape; only a summary says so itself.
-                        (!host_sent || compact_summary)
+                        (!(host_sent || human) || compact_summary)
                             .then(|| parse_injected_origin(&text, compact_summary))
                             .flatten()
                     })
@@ -2859,6 +2902,7 @@ mod tests {
                 is_replay: true,
                 timestamp: Some("2026-05-30T22:00:00.000Z".into()),
                 host_sent: false,
+                human: false,
                 compact_summary: false,
                 injected: false,
             })

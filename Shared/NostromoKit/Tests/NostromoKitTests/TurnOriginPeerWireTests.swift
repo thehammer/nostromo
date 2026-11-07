@@ -136,32 +136,33 @@ final class TurnOriginPeerWireTests: XCTestCase {
         XCTAssertEqual(peerItems(decoded), [PeerMessageItemWire(fromName: "A", body: "ok"), PeerMessageItemWire(body: "also ok")])
     }
 
-    func testAPeerMessageWithNoReadableItemIsNotAnOrigin() {
+    private let genericMarker = TurnOriginWire.injectedContext(kind: "other", title: "", text: "", truncated: false)
+
+    func testAPeerMessageWithNoReadableItemIsTheGenericMarker() throws {
         for items in ["[]", #"[7,"x",null]"#, #"[[],[1]]"#] {
-            XCTAssertThrowsError(try peerOrigin(items: items), "items \(items)")
+            XCTAssertEqual(try peerOrigin(items: items), genericMarker, "items \(items)")
         }
     }
 
-    func testAPeerMessageWhoseItemsAreAbsentOrNotAnArrayIsNotAnOrigin() {
+    func testAPeerMessageWhoseItemsAreAbsentOrNotAnArrayIsTheGenericMarker() throws {
         for json in [#"{"type":"peer_message"}"#, #"{"type":"peer_message","items":null}"#,
                      #"{"type":"peer_message","items":"x"}"#, #"{"type":"peer_message","items":{"body":"x"}}"#] {
-            XCTAssertThrowsError(try origin(json), json)
+            XCTAssertEqual(try origin(json), genericMarker, json)
         }
     }
 
-    func testATurnWhosePeerOriginHasNoReadableItemDecodesWithNoOriginAndKeepsItsText() throws {
+    func testATurnWhosePeerOriginHasNoReadableItemKeepsItsTextButDrawsAMarkerOrigin() throws {
         let decoded = try turn(origin: #"{"type":"peer_message","items":[7,"x"]}"#)
 
-        XCTAssertNil(decoded.origin, "the transcript shows the plain bubble it would otherwise hide")
+        XCTAssertEqual(decoded.origin, genericMarker, "never a nil origin: that would draw the placeholder as a bubble")
         XCTAssertEqual(decoded.userInput, "raw tag text")
     }
 
-    func testAFrameWhoseOriginDoesNotDecodeIsUnknown() {
-        for origin in [#"{"type":"peer_message","items":[]}"#, #"{"type":"peer_message","items":[1]}"#,
-                       #"{"type":"peer_messages","items":[{"body":"x"}]}"#] {
-            let json = #"{"type":"session_turn_origin","tag":"t","turn_id":"t0","origin":\#(origin)}"#
-            guard case .unknown = ServerMsg.decode(from: Data(json.utf8)) else { return XCTFail(origin) }
-        }
+    func testAFrameWhosePeerOriginHasNoReadableItemCarriesTheGenericMarkerAndAnUnknownTypeIsUnknown() {
+        let bad = #"{"type":"session_turn_origin","tag":"t","turn_id":"t0","origin":{"type":"peer_messages","items":[{"body":"x"}]}}"#
+        guard case .unknown = ServerMsg.decode(from: Data(bad.utf8)) else { return XCTFail("unknown type") }
+        let empty = #"{"type":"session_turn_origin","tag":"t","turn_id":"t0","origin":{"type":"peer_message","items":[1]}}"#
+        if case .unknown = ServerMsg.decode(from: Data(empty.utf8)) { XCTFail("decodes as the generic marker") }
     }
 
     // MARK: - injected_context

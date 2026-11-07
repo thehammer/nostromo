@@ -243,7 +243,7 @@ enum TurnReconciler {
         let floor = max(replacedFrom, base.count - echoAdoptionWindow, 0)
         var available: [String: Int] = [:]
         if floor < base.count {
-            for turn in base[floor...] where turn.marker == nil {
+            for turn in base[floor...] where turn.marker == nil && !turn.hasInjectedOrigin {
                 available[turn.userInput, default: 0] += 1
             }
         }
