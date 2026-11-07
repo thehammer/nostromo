@@ -557,7 +557,7 @@ while IFS= read -r line; do
     *'"type":"user"'*)
       n=$((n+1))
       {wait}
-      printf '%s\n' "$line"
+      printf '%s\n' "${{line%\}}}},\"isReplay\":true}}"
       printf '%s\n' '{assistant}'
       printf '%s\n' '{result}'
       ;;
