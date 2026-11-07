@@ -2591,6 +2591,9 @@ pub enum ServerMsg {
     /// `bad_cursor` or `unavailable` (targeted).
     ApprovalsLogRefused {
         code: String,
+        /// The `request_id` of the query this refuses, when it had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     /// An `ApprovalAnswer` was not applied (targeted).
     ApprovalAnswerRefused {
@@ -6748,6 +6751,63 @@ mod work_wire_tests {
     }
 
     #[test]
+    fn approvals_log_request_id_and_row_time_have_this_exact_wire_form() {
+        assert_client_golden(
+            ClientMsg::ApprovalsLogQuery {
+                tag: None,
+                outcome: None,
+                since_ms: None,
+                limit: 100,
+                cursor: Some("abc".into()),
+                request_id: Some("log-7".into()),
+                operator_nonce: Some("n".into()),
+            },
+            r#"{"type":"approvals_log_query","limit":100,"cursor":"abc","request_id":"log-7","operator_nonce":"n"}"#,
+        );
+        assert_client_golden(
+            ClientMsg::ApprovalsLogEntry {
+                id: "e1".into(),
+                ts_ms: Some(1_700_000_000_500),
+                operator_nonce: Some("n".into()),
+            },
+            r#"{"type":"approvals_log_entry","id":"e1","ts_ms":1700000000500,"operator_nonce":"n"}"#,
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalsLogPage {
+                rows: vec![],
+                next_cursor: Some("c".into()),
+                request_id: Some("log-7".into()),
+            },
+            r#"{"type":"approvals_log_page","rows":[],"next_cursor":"c","request_id":"log-7"}"#,
+        );
+        // Frames from an app or daemon that does not know the fields still read.
+        let old_query: ClientMsg =
+            serde_json::from_str(r#"{"type":"approvals_log_query","limit":10}"#).unwrap();
+        assert!(matches!(
+            old_query,
+            ClientMsg::ApprovalsLogQuery {
+                request_id: None,
+                ..
+            }
+        ));
+        let old_entry: ClientMsg =
+            serde_json::from_str(r#"{"type":"approvals_log_entry","id":"e1"}"#).unwrap();
+        assert!(matches!(
+            old_entry,
+            ClientMsg::ApprovalsLogEntry { ts_ms: None, .. }
+        ));
+        let old_page: ServerMsg =
+            serde_json::from_str(r#"{"type":"approvals_log_page","rows":[]}"#).unwrap();
+        assert!(matches!(
+            old_page,
+            ServerMsg::ApprovalsLogPage {
+                request_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn approvals_log_frames_have_this_exact_wire_form() {
         use crate::approvals::audit::{LogDetail, LogRow, RowKind};
         use crate::approvals::wire::{ApprovalsLogDetail, ApprovalsLogRow};
@@ -6866,8 +6926,9 @@ mod work_wire_tests {
         assert_server_golden(
             ServerMsg::ApprovalsLogRefused {
                 code: "bad_cursor".into(),
+                request_id: Some("log-7".into()),
             },
-            r#"{"type":"approvals_log_refused","code":"bad_cursor"}"#,
+            r#"{"type":"approvals_log_refused","code":"bad_cursor","request_id":"log-7"}"#,
         );
     }
 

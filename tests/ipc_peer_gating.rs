@@ -11921,6 +11921,7 @@ fn log_query_frame(nonce: Option<&str>) -> ClientMsg {
         since_ms: None,
         limit: 50,
         cursor: None,
+        request_id: None,
         operator_nonce: nonce.map(str::to_owned),
     }
 }
@@ -11928,12 +11929,13 @@ fn log_query_frame(nonce: Option<&str>) -> ClientMsg {
 fn log_entry_frame(nonce: Option<&str>) -> ClientMsg {
     ClientMsg::ApprovalsLogEntry {
         id: "e1".into(),
+        ts_ms: None,
         operator_nonce: nonce.map(str::to_owned),
     }
 }
 
 fn is_log_refused(m: &ServerMsg) -> bool {
-    matches!(m, ServerMsg::ApprovalsLogRefused { code } if code == "not_operator_app")
+    matches!(m, ServerMsg::ApprovalsLogRefused { code, .. } if code == "not_operator_app")
 }
 
 #[tokio::test]
@@ -11946,6 +11948,7 @@ async fn a_tcp_client_subscribed_to_everything_never_receives_a_log_page_or_deta
     h.broadcast(ServerMsg::ApprovalsLogPage {
         rows: vec![],
         next_cursor: Some(CANARY.into()),
+        request_id: None,
     });
     h.broadcast(ServerMsg::ApprovalsLogDetail {
         id: CANARY.into(),
@@ -11953,6 +11956,7 @@ async fn a_tcp_client_subscribed_to_everything_never_receives_a_log_page_or_deta
     });
     h.broadcast(ServerMsg::ApprovalsLogRefused {
         code: CANARY.into(),
+        request_id: None,
     });
     h.broadcast(focus_registry_updated());
     seen.extend(

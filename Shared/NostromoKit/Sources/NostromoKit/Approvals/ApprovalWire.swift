@@ -852,8 +852,15 @@ public struct ApprovalsLogDetailFrame: Decodable, Equatable {
 /// `approvals_log_refused`: `not_operator_app`, `requires_secure_connection`, `bad_cursor` or `unavailable`.
 public struct ApprovalsLogRefusedFrame: Decodable, Equatable {
     public let code: String
+    /// The `request_id` of the query this refuses, when it had one.
+    public let requestId: String?
 
-    public init(code: String) { self.code = code }
+    public init(code: String, requestId: String? = nil) { self.code = code; self.requestId = requestId }
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case requestId = "request_id"
+    }
 }
 
 /// `approvals_log_query`: one page, newest first. `operatorNonce` echoes this connection's `welcome` nonce.

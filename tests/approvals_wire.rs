@@ -4197,6 +4197,7 @@ fn log_query_msg(nonce: Option<&str>) -> ClientMsg {
         since_ms: None,
         limit: 50,
         cursor: None,
+        request_id: None,
         operator_nonce: nonce.map(str::to_owned),
     }
 }
@@ -4206,7 +4207,7 @@ fn is_log_page(m: &ServerMsg) -> bool {
 }
 
 fn is_log_refused_with(code: &'static str) -> impl Fn(&ServerMsg) -> bool {
-    move |m| matches!(m, ServerMsg::ApprovalsLogRefused { code: c } if c == code)
+    move |m| matches!(m, ServerMsg::ApprovalsLogRefused { code: c, .. } if c == code)
 }
 
 // Fails if anyone but the verified app with its nonce can read the log, or if the app cannot.
@@ -4232,6 +4233,7 @@ fn only_the_operator_app_with_its_nonce_reads_the_approvals_log() {
         agent
             .send(&ClientMsg::ApprovalsLogEntry {
                 id: wire.request_id.clone(),
+                ts_ms: None,
                 operator_nonce: Some(nonce.clone()),
             })
             .await;
@@ -4271,6 +4273,7 @@ fn only_the_operator_app_with_its_nonce_reads_the_approvals_log() {
 
         app.send(&ClientMsg::ApprovalsLogEntry {
             id: wire.request_id.clone(),
+            ts_ms: None,
             operator_nonce: Some(nonce.clone()),
         })
         .await;
@@ -4295,10 +4298,138 @@ fn only_the_operator_app_with_its_nonce_reads_the_approvals_log() {
             since_ms: None,
             limit: 5,
             cursor: Some("not a cursor".into()),
+            request_id: None,
             operator_nonce: Some(nonce),
         })
         .await;
         app.next("a refusal", is_log_refused_with("bad_cursor"))
             .await;
+    });
+}
+
+fn log_query_with(nonce: &str, request_id: Option<&str>, since_ms: Option<i64>) -> ClientMsg {
+    ClientMsg::ApprovalsLogQuery {
+        tag: None,
+        outcome: None,
+        since_ms,
+        limit: 50,
+        cursor: None,
+        request_id: request_id.map(str::to_owned),
+        operator_nonce: Some(nonce.to_owned()),
+    }
+}
+
+// Fails if a page does not name the query it answers (the app drops a page that names another),
+// if a query without an id gets one made up, or if a `since_ms` the clock cannot hold is read as
+// "no filter" instead of a bad request.
+#[test]
+fn a_log_page_echoes_its_querys_request_id_and_an_unrepresentable_since_is_a_bad_request() {
+    run(GUARDED, |rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let nonce = app.nonce.clone().unwrap();
+
+        app.send(&log_query_with(&nonce, Some("log-7"), None)).await;
+        match app.next("a log page", is_log_page).await {
+            ServerMsg::ApprovalsLogPage { request_id, .. } => {
+                assert_eq!(request_id.as_deref(), Some("log-7"));
+            }
+            other => panic!("{other:?}"),
+        }
+        app.send(&log_query_with(&nonce, Some("log-8"), Some(0)))
+            .await;
+        match app.next("a log page", is_log_page).await {
+            ServerMsg::ApprovalsLogPage { request_id, .. } => {
+                assert_eq!(
+                    request_id.as_deref(),
+                    Some("log-8"),
+                    "a real since still reads"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        app.send(&log_query_with(&nonce, None, None)).await;
+        match app.next("a log page", is_log_page).await {
+            ServerMsg::ApprovalsLogPage { request_id, .. } => {
+                assert_eq!(request_id, None, "no id asked, none answered");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        for since in [i64::MAX, i64::MIN] {
+            app.send(&log_query_with(&nonce, Some("log-9"), Some(since)))
+                .await;
+            app.next("a refusal", is_log_refused_with("bad_request"))
+                .await;
+        }
+        // The connection is still good afterwards.
+        app.send(&log_query_with(&nonce, Some("log-10"), None))
+            .await;
+        app.next("a log page", is_log_page).await;
+    });
+}
+
+// Fails if the row time sent with an entry request is ignored: an entry far from the hinted time
+// must not be found (only the days around it are read), and the right hint, or none, finds it.
+#[test]
+fn a_log_entry_request_with_a_row_time_reads_only_the_days_around_it() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let (_fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        app.deny(&wire.request_id, "w").await;
+        app.next_resolved().await;
+        let nonce = app.nonce.clone().unwrap();
+
+        // The entry is in the log once a page has the row.
+        let mut found = false;
+        for _ in 0..200 {
+            app.send(&log_query_with(&nonce, None, None)).await;
+            if let ServerMsg::ApprovalsLogPage { rows, .. } =
+                app.next("a log page", is_log_page).await
+            {
+                if rows
+                    .iter()
+                    .any(|r| r.row.request_id.as_deref() == Some(wire.request_id.as_str()))
+                {
+                    found = true;
+                    break;
+                }
+            }
+            settle().await;
+        }
+        assert!(found, "the request is in the log");
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let day_ms = 24 * 60 * 60 * 1000;
+        for (hint, should_find) in [
+            (None, true),
+            (Some(now_ms), true),
+            (Some(now_ms - 10 * day_ms), false),
+            (Some(now_ms + 10 * day_ms), false),
+        ] {
+            app.send(&ClientMsg::ApprovalsLogEntry {
+                id: wire.request_id.clone(),
+                ts_ms: hint,
+                operator_nonce: Some(nonce.clone()),
+            })
+            .await;
+            match app
+                .next("a detail", |m| {
+                    matches!(m, ServerMsg::ApprovalsLogDetail { .. })
+                })
+                .await
+            {
+                ServerMsg::ApprovalsLogDetail { detail, .. } => {
+                    assert_eq!(detail.is_some(), should_find, "hint {hint:?}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     });
 }

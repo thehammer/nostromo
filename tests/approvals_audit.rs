@@ -1217,6 +1217,251 @@ mod query {
         assert!(log.entry_detail("nope", NOW()).unwrap().is_none());
     }
 
+    // ── a query scans a big day without holding it ────────────────────────────────────────
+
+    /// One expected row: its id, its time, and the outcome it should show.
+    struct Expected {
+        row_id: String,
+        ts_ms: i64,
+        outcome: Option<&'static str>,
+    }
+
+    /// `groups` groups of five rows written straight to the day's file (an append syncs every
+    /// entry, too slow for tens of thousands): three requests answered 300 ms later, one guard
+    /// block, one request still waiting. Eight entries per group. Returns the rows a query
+    /// should show, newest first.
+    fn write_day(log: &AuditLog, day: DateTime<Utc>, groups: u32) -> Vec<Expected> {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::fs::File::create(log.file_for(day)).unwrap());
+        let mut expected = Vec::new();
+        let mut put = |e: &Entry| {
+            serde_json::to_writer(&mut out, e).unwrap();
+            out.write_all(b"\n").unwrap();
+        };
+        for g in 0..groups {
+            for k in 0..5u32 {
+                let u = g * 5 + k;
+                let ts = day + Duration::seconds(u as i64);
+                let rid = format!("r{u}");
+                match k {
+                    0..=2 => {
+                        put(&req(ts, &rid, "A", "ls"));
+                        put(&outcome(
+                            ts + Duration::milliseconds(300),
+                            Some(&rid),
+                            "denied",
+                        ));
+                        expected.push(Expected {
+                            row_id: rid,
+                            ts_ms: ts.timestamp_millis(),
+                            outcome: Some("denied"),
+                        });
+                    }
+                    3 => {
+                        let b = blocked(ts, Some("A"));
+                        expected.push(Expected {
+                            row_id: b.id.clone(),
+                            ts_ms: ts.timestamp_millis(),
+                            outcome: Some("guard_blocked"),
+                        });
+                        put(&b);
+                    }
+                    _ => {
+                        put(&req(ts, &rid, "A", "ls"));
+                        expected.push(Expected {
+                            row_id: rid,
+                            ts_ms: ts.timestamp_millis(),
+                            outcome: None,
+                        });
+                    }
+                }
+            }
+        }
+        out.flush().unwrap();
+        expected.sort_by_key(|e| std::cmp::Reverse(e.ts_ms));
+        expected
+    }
+
+    /// What a scan for a page of `limit` rows may hold at once: twice what it keeps, plus the
+    /// row that tips it over.
+    fn held_bound(limit: usize) -> usize {
+        2 * (limit + 1) + 1
+    }
+
+    fn assert_page_is(page: &nostromo::approvals::audit::LogPage, expected: &[Expected]) {
+        let got: Vec<(&str, Option<&str>)> = page
+            .rows
+            .iter()
+            .map(|r| (r.row_id.as_str(), r.outcome.as_deref()))
+            .collect();
+        let want: Vec<(&str, Option<&str>)> = expected
+            .iter()
+            .map(|e| (e.row_id.as_str(), e.outcome))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_page_of_a_fifty_thousand_entry_day_is_read_holding_a_bounded_number_of_rows() {
+        let (_d, log) = store();
+        let day = at(2026, 11, 7, 0, 0, 0);
+        let expected = write_day(&log, day, 6_250); // 50,000 entries, 31,250 rows
+        assert_eq!(expected.len(), 31_250);
+
+        let (first, stats) = log.query_with_stats(&q(50), NOW()).unwrap();
+        assert_page_is(&first, &expected[..50]);
+        assert!(first.next_cursor.is_some());
+        assert!(
+            stats.peak_rows_held <= held_bound(50),
+            "held {} rows at once",
+            stats.peak_rows_held
+        );
+
+        // A page deep in the day, reached by cursor, is just as small and just as right.
+        let (second, stats) = log
+            .query_with_stats(
+                &LogQuery {
+                    limit: 50,
+                    cursor: first.next_cursor.clone(),
+                    ..Default::default()
+                },
+                NOW(),
+            )
+            .unwrap();
+        assert_page_is(&second, &expected[50..100]);
+        assert!(
+            stats.peak_rows_held <= held_bound(50),
+            "held {} rows at once",
+            stats.peak_rows_held
+        );
+
+        // A filter that drops most rows does not make the scan hold more.
+        let denied: Vec<&Expected> = expected
+            .iter()
+            .filter(|e| e.outcome == Some("denied"))
+            .collect();
+        let (filtered, stats) = log
+            .query_with_stats(
+                &LogQuery {
+                    limit: 50,
+                    outcome: Some(OutcomeFilter::Denied),
+                    ..Default::default()
+                },
+                NOW(),
+            )
+            .unwrap();
+        let got: Vec<&str> = filtered.rows.iter().map(|r| r.row_id.as_str()).collect();
+        let want: Vec<&str> = denied[..50].iter().map(|e| e.row_id.as_str()).collect();
+        assert_eq!(got, want);
+        assert!(
+            stats.peak_rows_held <= held_bound(50),
+            "held {} rows at once",
+            stats.peak_rows_held
+        );
+
+        // The bound follows the page size, not the size of the day.
+        let (big, stats) = log.query_with_stats(&q(500), NOW()).unwrap();
+        assert_page_is(&big, &expected[..500]);
+        assert!(
+            stats.peak_rows_held <= held_bound(500),
+            "held {} rows at once",
+            stats.peak_rows_held
+        );
+    }
+
+    #[test]
+    fn paging_a_whole_busy_day_newest_first_has_no_gap_no_repeat_and_no_row_out_of_order() {
+        let (_d, log) = store();
+        let expected = write_day(&log, at(2026, 11, 7, 0, 0, 0), 250); // 2,000 entries, 1,250 rows
+        assert_eq!(expected.len(), 1_250);
+
+        let mut seen: Vec<(String, Option<String>)> = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            let (page, stats) = log
+                .query_with_stats(
+                    &LogQuery {
+                        limit: 50,
+                        cursor: cursor.clone(),
+                        ..Default::default()
+                    },
+                    NOW(),
+                )
+                .unwrap();
+            pages += 1;
+            assert!(page.rows.len() <= 50);
+            assert!(
+                stats.peak_rows_held <= held_bound(50),
+                "page {pages} held {} rows at once",
+                stats.peak_rows_held
+            );
+            seen.extend(
+                page.rows
+                    .iter()
+                    .map(|r| (r.row_id.clone(), r.outcome.clone())),
+            );
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+            assert!(pages < 100, "paging does not end");
+        }
+        assert_eq!(pages, 25);
+        let want: Vec<(String, Option<String>)> = expected
+            .iter()
+            .map(|e| (e.row_id.clone(), e.outcome.map(String::from)))
+            .collect();
+        assert_eq!(
+            seen, want,
+            "every row once, newest first, each with its outcome"
+        );
+    }
+
+    #[test]
+    fn entry_detail_with_a_row_time_reads_only_the_days_around_it() {
+        let (_d, log) = store();
+        let old = req(at(2026, 11, 1, 10, 0, 0), "r-old", "A", "echo old");
+        let old_entry_id = old.id.clone();
+        log.append(&old).unwrap();
+        log.append(&outcome(
+            at(2026, 11, 1, 10, 0, 3),
+            Some("r-old"),
+            "allowed_once",
+        ))
+        .unwrap();
+        log.append(&req(at(2026, 11, 7, 10, 0, 0), "r-new", "A", "echo new"))
+            .unwrap();
+        let found = |id: &str, near: Option<DateTime<Utc>>| {
+            log.entry_detail_near(id, near, NOW()).unwrap().is_some()
+        };
+
+        // No hint: every day within retention is searched, as `entry_detail` does.
+        assert!(found("r-old", None));
+        assert!(log.entry_detail("r-old", NOW()).unwrap().is_some());
+        // The row's own day, or a day beside it, finds it, by request id or by entry id.
+        assert!(found("r-old", Some(at(2026, 11, 1, 23, 59, 0))));
+        assert!(found(&old_entry_id, Some(at(2026, 11, 1, 10, 0, 0))));
+        assert!(found("r-old", Some(at(2026, 11, 2, 0, 30, 0))));
+        assert!(found("r-old", Some(at(2026, 10, 31, 12, 0, 0))));
+        // A hint more than a day away does not reach it.
+        assert!(!found("r-old", Some(at(2026, 11, 7, 10, 0, 0))));
+        assert!(!found(&old_entry_id, Some(at(2026, 11, 7, 10, 0, 0))));
+        assert!(!found("r-old", Some(at(2026, 11, 3, 10, 0, 0))));
+        // The detail it finds is the whole entry, with its outcome.
+        let d = log
+            .entry_detail_near("r-old", Some(at(2026, 11, 1, 10, 0, 0)), NOW())
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.outcome.as_deref(), Some("allowed_once"));
+        // The newer entry is found from its own day and not from the older one.
+        assert!(found("r-new", Some(at(2026, 11, 7, 11, 0, 0))));
+        assert!(!found("r-new", Some(at(2026, 11, 1, 10, 0, 0))));
+        // An id nothing has is none, with a hint and without.
+        assert!(!found("nope", None));
+        assert!(!found("nope", Some(at(2026, 11, 7, 10, 0, 0))));
+    }
+
     #[test]
     fn the_query_layer_has_no_way_to_edit_or_delete_an_entry() {
         let src = std::fs::read_to_string(concat!(

@@ -141,7 +141,11 @@ final class ApprovalsLogStore {
             complete(job, .page(page))
         case (.approvalsLogDetail(let detail), .entry(let id)) where detail.id == id:
             complete(job, .detail(detail))
-        case (.approvalsLogRefused(let refusal), _):
+        case (.approvalsLogRefused(let refusal), .query(let requestId)):
+            // A refusal of an older (timed-out) query is not this one's.
+            guard refusal.requestId == requestId else { return }
+            complete(job, .refused(refusal.code))
+        case (.approvalsLogRefused(let refusal), .entry):
             complete(job, .refused(refusal.code))
         default:
             break

@@ -24,13 +24,25 @@ final class ApprovalsLogRecorder: ApprovalsLogSending {
     }
 
     private(set) var queries: [Query] = []
+    /// The request id each query carried, in the order sent.
+    private(set) var requestIds: [String] = []
     private(set) var entries: [String] = []
+    /// The row time (ms) each entry request carried, in the order sent.
+    private(set) var entryTimes: [Int64?] = []
 
-    func sendApprovalsLogQuery(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?) {
+    /// The request id of the query sent last: what a daemon would echo in the page that answers it.
+    var lastRequestId: String? { requestIds.last }
+
+    func sendApprovalsLogQuery(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?,
+                               requestId: String) {
         queries.append(Query(tag: tag, outcome: outcome, sinceMs: sinceMs, limit: limit, cursor: cursor))
+        requestIds.append(requestId)
     }
 
-    func sendApprovalsLogEntry(id: String) { entries.append(id) }
+    func sendApprovalsLogEntry(id: String, tsMs: Int64?) {
+        entries.append(id)
+        entryTimes.append(tsMs)
+    }
 }
 
 /// A transcript revealer that records, and answers `canReveal` as told.
@@ -56,8 +68,8 @@ enum ApprovalsLogFixtures {
                         byWindow: "w1", latencyMs: 1500, sensitive: sensitive)
     }
 
-    static func page(_ rows: [ApprovalsLogRow], next: String? = nil) -> ServerMsg {
-        .approvalsLogPage(ApprovalsLogPageFrame(rows: rows, nextCursor: next))
+    static func page(_ rows: [ApprovalsLogRow], next: String? = nil, requestId: String? = nil) -> ServerMsg {
+        .approvalsLogPage(ApprovalsLogPageFrame(rows: rows, nextCursor: next, requestId: requestId))
     }
 
     /// An entry whose recorded input holds `command`.
@@ -103,10 +115,15 @@ final class ApprovalsLogWorld {
     /// Run every timeout the store asked for, as if its time had passed.
     func runTimeouts() { timeoutRunner() }
 
+    /// The page a daemon sends for the query sent last: it echoes that query's request id.
+    func page(_ rows: [ApprovalsLogRow], next: String? = nil) -> ServerMsg {
+        ApprovalsLogFixtures.page(rows, next: next, requestId: recorder.lastRequestId)
+    }
+
     /// Open the view on every row and answer its first query with `rows`.
     func open(rows: [ApprovalsLogRow], next: String? = nil, link: ApprovalsLogLink? = nil) {
         view.apply(link: link)
-        store.ingest(ApprovalsLogFixtures.page(rows, next: next))
+        store.ingest(page(rows, next: next))
         view.layoutSubtreeIfNeeded()
     }
 }
@@ -123,10 +140,10 @@ final class ApprovalsLogStoreTests: XCTestCase {
         XCTAssertEqual(w.recorder.queries.map(\.tag), ["a"], "the second waits")
         XCTAssertEqual(w.store.pendingCount, 2)
 
-        w.store.ingest(ApprovalsLogFixtures.page([]))
+        w.store.ingest(w.page([]))
         XCTAssertEqual(answers, ["first"])
         XCTAssertEqual(w.recorder.queries.map(\.tag), ["a", "b"], "the second starts now")
-        w.store.ingest(ApprovalsLogFixtures.page([]))
+        w.store.ingest(w.page([]))
         XCTAssertEqual(answers, ["first", "second"])
         XCTAssertEqual(w.store.pendingCount, 0)
     }
@@ -137,7 +154,7 @@ final class ApprovalsLogStoreTests: XCTestCase {
         w.store.entry(id: "r1") { if case .answered(let d) = $0 { got.append(d) } }
         w.store.ingest(try ApprovalsLogFixtures.detailFrame(id: "someone-else", command: "x"))
         XCTAssertTrue(got.isEmpty, "another id's answer is not ours")
-        w.store.ingest(ApprovalsLogFixtures.page([]))
+        w.store.ingest(w.page([]))
         XCTAssertTrue(got.isEmpty, "a page does not answer an entry request")
         w.store.ingest(try ApprovalsLogFixtures.detailFrame(id: "r1", command: "echo hi"))
         XCTAssertEqual(got.count, 1)
@@ -149,9 +166,20 @@ final class ApprovalsLogStoreTests: XCTestCase {
         let w = ApprovalsLogWorld()
         var reply: ApprovalsLogReply<ApprovalsLogPageFrame>?
         w.store.query(tag: nil, outcome: nil, sinceMs: nil, limit: 10, cursor: "junk") { reply = $0 }
-        w.store.ingest(.approvalsLogRefused(ApprovalsLogRefusedFrame(code: "bad_cursor")))
+        w.store.ingest(.approvalsLogRefused(ApprovalsLogRefusedFrame(code: "bad_cursor", requestId: "log-1")))
         guard case .refused(let code)? = reply else { return XCTFail("\(String(describing: reply))") }
         XCTAssertEqual(code, "bad_cursor")
+    }
+
+    func testARefusalThatNamesAnotherQueryDoesNotResolveTheOneInFlight() {
+        let w = ApprovalsLogWorld()
+        var reply: ApprovalsLogReply<ApprovalsLogPageFrame>?
+        w.store.query(tag: nil, outcome: nil, sinceMs: nil, limit: 10, cursor: nil) { reply = $0 }
+        w.store.ingest(.approvalsLogRefused(ApprovalsLogRefusedFrame(code: "bad_cursor", requestId: "log-0")))
+        w.store.ingest(.approvalsLogRefused(ApprovalsLogRefusedFrame(code: "bad_cursor")))
+        XCTAssertNil(reply, "a refusal for an older query, or for none, is not this query's")
+        w.store.ingest(.approvalsLogRefused(ApprovalsLogRefusedFrame(code: "bad_cursor", requestId: "log-1")))
+        XCTAssertNotNil(reply)
     }
 
     func testATimeoutEndsTheRequestAndALateAnswerIsIgnored() {
@@ -164,7 +192,7 @@ final class ApprovalsLogStoreTests: XCTestCase {
         }
         w.runTimeouts()
         XCTAssertTrue(timedOut)
-        w.store.ingest(ApprovalsLogFixtures.page([]))
+        w.store.ingest(w.page([]))
         XCTAssertEqual(answers, 1, "the completion ran once")
     }
 
@@ -190,6 +218,63 @@ final class ApprovalsLogStoreTests: XCTestCase {
         XCTAssertTrue(failed)
         XCTAssertTrue(w.recorder.queries.isEmpty)
     }
+
+    // MARK: Matching a page to its query
+
+    func testALatePageForATimedOutQueryDoesNotAnswerTheQueryThatFollowsIt() throws {
+        let w = ApprovalsLogWorld()
+        var aReplies: [String] = []
+        var bRows: [[String]] = []
+        w.store.query(tag: "a", outcome: nil, sinceMs: nil, limit: 10, cursor: nil) {
+            if case .timedOut = $0 { aReplies.append("timedOut") } else { aReplies.append("other") }
+        }
+        let idA = try XCTUnwrap(w.recorder.lastRequestId)
+        w.runTimeouts()
+        XCTAssertEqual(aReplies, ["timedOut"], "A gave up after its timeout")
+
+        w.store.query(tag: "b", outcome: nil, sinceMs: nil, limit: 10, cursor: nil) {
+            if case .answered(let page) = $0 { bRows.append(page.rows.map(\.rowId)) }
+        }
+        let idB = try XCTUnwrap(w.recorder.lastRequestId)
+        XCTAssertNotEqual(idA, idB, "each query carries its own request id")
+        XCTAssertEqual(w.recorder.requestIds, [idA, idB])
+
+        // A's page arrives late, while B is waiting.
+        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("from-a")], requestId: idA))
+        XCTAssertTrue(bRows.isEmpty, "B must not be answered with A's rows")
+        XCTAssertEqual(w.store.pendingCount, 1, "B is still waiting")
+
+        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("from-b")], requestId: idB))
+        XCTAssertEqual(bRows, [["from-b"]], "B is answered by its own page")
+        XCTAssertEqual(w.store.pendingCount, 0)
+        XCTAssertEqual(aReplies, ["timedOut"], "A's completion never runs a second time")
+    }
+
+    func testAPageThatNamesNoQueryOrAnotherOneIsDropped() throws {
+        let w = ApprovalsLogWorld()
+        var answers = 0
+        w.store.query(tag: nil, outcome: nil, sinceMs: nil, limit: 10, cursor: nil) { _ in answers += 1 }
+        let id = try XCTUnwrap(w.recorder.lastRequestId)
+
+        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("no-id")], requestId: nil))
+        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("other-id")], requestId: id + "-other"))
+        XCTAssertEqual(answers, 0)
+        XCTAssertEqual(w.store.pendingCount, 1, "the query is still waiting for its own page")
+
+        w.store.ingest(ApprovalsLogFixtures.page([], requestId: id))
+        XCTAssertEqual(answers, 1)
+    }
+
+    func testAnEntryRequestCarriesTheRowTimeWhenItIsKnown() {
+        let w = ApprovalsLogWorld()
+        w.store.entry(id: "r1", ts: Date(timeIntervalSince1970: 1_700_000_000.5)) { _ in }
+        w.store.failPendingRequests(reason: "done")
+        w.store.entry(id: "r2") { _ in }
+        XCTAssertEqual(w.recorder.entries, ["r1", "r2"])
+        XCTAssertEqual(w.recorder.entryTimes.count, 2)
+        XCTAssertEqual(w.recorder.entryTimes[0], 1_700_000_000_500, "milliseconds since the epoch")
+        XCTAssertNil(w.recorder.entryTimes[1], "no time known: none sent")
+    }
 }
 
 // MARK: - The window's content
@@ -204,7 +289,7 @@ final class ApprovalsLogViewTests: XCTestCase {
         let w = ApprovalsLogWorld()
         w.view.apply(link: nil)
         XCTAssertEqual(w.recorder.queries, [.init(tag: nil, outcome: nil, sinceMs: nil, limit: ApprovalsLogStore.pageSize, cursor: nil)])
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r3"), ApprovalsLogFixtures.row("r2"),
+        w.store.ingest(w.page([ApprovalsLogFixtures.row("r3"), ApprovalsLogFixtures.row("r2"),
                                                   ApprovalsLogFixtures.row("r1")]))
         XCTAssertEqual(w.view.visibleRows.map(\.rowId), ["r3", "r2", "r1"], "newest first, as sent")
         XCTAssertEqual(w.view.tableView.numberOfRows, 3)
@@ -219,7 +304,7 @@ final class ApprovalsLogViewTests: XCTestCase {
         w.view.setFocusFilter("ada-2")
         XCTAssertEqual(w.recorder.queries.last?.tag, "ada-2")
         XCTAssertTrue(w.view.visibleRows.isEmpty, "the old rows are dropped until the answer")
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r2", tag: "ada-2")]))
+        w.store.ingest(w.page([ApprovalsLogFixtures.row("r2", tag: "ada-2")]))
         XCTAssertEqual(w.view.visibleRows.map(\.rowId), ["r2"])
     }
 
@@ -228,7 +313,7 @@ final class ApprovalsLogViewTests: XCTestCase {
         w.open(rows: [ApprovalsLogFixtures.row("r1")])
         w.view.setOutcomeFilter(.timedOut)
         XCTAssertEqual(w.recorder.queries.last?.outcome, "timed_out")
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r9", outcome: "timed_out")]))
+        w.store.ingest(w.page([ApprovalsLogFixtures.row("r9", outcome: "timed_out")]))
         XCTAssertEqual(w.view.visibleRows.map(\.rowId), ["r9"])
         w.view.setOutcomeFilter(nil)
         XCTAssertNil(w.recorder.queries.last?.outcome)
@@ -264,7 +349,7 @@ final class ApprovalsLogViewTests: XCTestCase {
         w.open(rows: [ApprovalsLogFixtures.row("r9", toolUseId: "toolu_9")], next: "c1",
                link: ApprovalsLogLink(toolUseId: "toolu_1"))
         XCTAssertEqual(w.recorder.queries.last?.cursor, "c1", "no match yet: the next page is asked for")
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")], next: "c2"))
+        w.store.ingest(w.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")], next: "c2"))
         XCTAssertEqual(w.view.visibleRows.map(\.rowId), ["r1"])
         XCTAssertEqual(w.recorder.queries.count, 2, "found it: it stops reading")
     }
@@ -274,7 +359,7 @@ final class ApprovalsLogViewTests: XCTestCase {
         w.open(rows: [ApprovalsLogFixtures.row("r2"), ApprovalsLogFixtures.row("r1")], next: "c1")
         w.view.loadNextPage()
         XCTAssertEqual(w.recorder.queries.last?.cursor, "c1")
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r1"), ApprovalsLogFixtures.row("r0")]))
+        w.store.ingest(w.page([ApprovalsLogFixtures.row("r1"), ApprovalsLogFixtures.row("r0")]))
         XCTAssertEqual(w.view.visibleRows.map(\.rowId), ["r2", "r1", "r0"])
         let before = w.recorder.queries.count
         w.view.loadNextPage()
@@ -284,7 +369,7 @@ final class ApprovalsLogViewTests: XCTestCase {
     func testAFailedReadSaysSoInsteadOfShowingAnEmptyLog() {
         let w = ApprovalsLogWorld()
         w.view.apply(link: nil)
-        w.store.ingest(.approvalsLogRefused(ApprovalsLogRefusedFrame(code: "not_operator_app")))
+        w.store.ingest(.approvalsLogRefused(ApprovalsLogRefusedFrame(code: "not_operator_app", requestId: "log-1")))
         XCTAssertTrue(w.view.statusLabel.stringValue.contains("not_operator_app"), w.view.statusLabel.stringValue)
     }
 
@@ -319,6 +404,15 @@ final class ApprovalsLogViewTests: XCTestCase {
         XCTAssertTrue(text.string.contains("\u{27E8}U+202E"), text.string)
     }
 
+    func testExpandingARowAsksForItsEntryAtTheRowsTime() {
+        let w = ApprovalsLogWorld()
+        w.open(rows: [ApprovalsLogFixtures.row("r1", ts: "2026-11-07T14:02:03Z")])
+        w.view.toggleExpanded(rowId: "r1")
+        let expected = ApprovalsLogText.timestamp("2026-11-07T14:02:03Z").map { Int64($0.timeIntervalSince1970 * 1000) }
+        XCTAssertNotNil(expected)
+        XCTAssertEqual(w.recorder.entryTimes, [expected], "the daemon is told which day to read")
+    }
+
     func testCollapsingAndExpandingAgainDoesNotAskTwice() throws {
         let w = ApprovalsLogWorld()
         w.open(rows: [ApprovalsLogFixtures.row("r1")])
@@ -346,9 +440,9 @@ final class ApprovalsLogViewTests: XCTestCase {
         w.open(rows: [ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1"), ApprovalsLogFixtures.row("r2", toolUseId: "toolu_2")])
         // Everything else the window can do.
         w.view.setOutcomeFilter(.denied)
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")]))
+        w.store.ingest(w.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")]))
         w.view.setFocusFilter("cody-1")
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")]))
+        w.store.ingest(w.page([ApprovalsLogFixtures.row("r1", toolUseId: "toolu_1")]))
         w.view.toggleExpanded(rowId: "r1")
         w.store.ingest(try ApprovalsLogFixtures.detailFrame(id: "r1", command: "ls"))
         w.view.toggleExpanded(rowId: "r1")
@@ -587,6 +681,65 @@ final class ApprovalsLogAppControlTests: XCTestCase {
         XCTAssertEqual(ordinary["summary"] as? String, "ls -la", "every other row is returned in full")
     }
 
+    // MARK: Withholding
+
+    /// Every string anywhere in the serialized reply, as one text.
+    private func serialized(_ json: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: json)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func logRow(_ kind: ApprovalsLogRowKind, summary: String, ruleLabel: String? = nil,
+                        refusalCode: String? = nil, outcome: String? = nil, sensitive: Bool = true) -> ApprovalsLogRow {
+        ApprovalsLogRow(rowId: "x1", kind: kind, ts: "2026-11-07T14:02:03Z", tag: "teri-1", entryIds: ["x1"],
+                        summary: summary, outcome: outcome, refusalCode: refusalCode, ruleLabel: ruleLabel,
+                        sensitive: sensitive)
+    }
+
+    func testTheRealAppShowsNoRuleTextAnywhereInASensitiveRuleRow() throws {
+        let row = logRow(.rule, summary: "session rule granted: Bash(gh pr view 123:*)", ruleLabel: "Bash(gh pr view 123:*)")
+        let real = ApprovalsLogJSON.row(for: row, redactSensitive: true)
+        XCTAssertEqual(real["withheld"] as? Bool, true)
+        let text = try serialized(real)
+        XCTAssertFalse(text.contains("gh pr view"), "no command text anywhere in the row: \(text)")
+        XCTAssertFalse(text.contains("Bash("), "no rule text anywhere in the row: \(text)")
+        XCTAssertNil(real["summary"])
+        XCTAssertNil(real["rule_label"])
+        XCTAssertFalse((real["outcome_text"] as? String ?? "").contains("gh pr view"))
+    }
+
+    func testTheQAInstanceStillShowsTheRuleOfASensitiveRuleRow() throws {
+        let row = logRow(.rule, summary: "session rule granted: Bash(gh pr view 123:*)", ruleLabel: "Bash(gh pr view 123:*)")
+        let qa = ApprovalsLogJSON.row(for: row, redactSensitive: false)
+        XCTAssertNil(qa["withheld"])
+        XCTAssertEqual(qa["rule_label"] as? String, "Bash(gh pr view 123:*)")
+        XCTAssertEqual(qa["summary"] as? String, "session rule granted: Bash(gh pr view 123:*)")
+        XCTAssertTrue((qa["outcome_text"] as? String ?? "").contains("gh pr view"), "the outcome text names the rule")
+    }
+
+    func testTheRealAppShowsNoSummaryTextOfASensitiveRowOfAnyOtherKind() throws {
+        let secret = "Dana's diagnosis is in the attached file"
+        let rows = [
+            logRow(.other, summary: secret),
+            logRow(.guardBlocked, summary: secret, ruleLabel: secret, outcome: "guard_blocked"),
+            logRow(.refusal, summary: secret, refusalCode: "not_operator_app"),
+            logRow(.request, summary: secret, outcome: "denied"),
+        ]
+        for row in rows {
+            let text = try serialized(ApprovalsLogJSON.row(for: row, redactSensitive: true))
+            XCTAssertFalse(text.contains("Dana"), "\(row.kind): \(text)")
+            XCTAssertFalse(text.contains("diagnosis"), "\(row.kind): \(text)")
+        }
+    }
+
+    func testARowThatIsNotSensitiveIsNeverWithheldEvenInTheRealApp() throws {
+        let row = logRow(.rule, summary: "session rule granted: Bash(ls:*)", ruleLabel: "Bash(ls:*)", sensitive: false)
+        let real = ApprovalsLogJSON.row(for: row, redactSensitive: true)
+        XCTAssertNil(real["withheld"])
+        XCTAssertEqual(real["rule_label"] as? String, "Bash(ls:*)")
+        XCTAssertTrue((real["outcome_text"] as? String ?? "").contains("Bash(ls:*)"))
+    }
+
     func testTheRowsMatchWhatTheWindowShows() {
         let w = ApprovalsLogWorld()
         let rows = [ApprovalsLogFixtures.row("r2"), ApprovalsLogFixtures.row("g1", outcome: "guard_blocked", kind: .guardBlocked)]
@@ -610,7 +763,7 @@ final class ApprovalsLogAppControlTests: XCTestCase {
         guard case .loading = read(at: t0.addingTimeInterval(0.25)) else { return XCTFail("still reading") }
         XCTAssertEqual(w.recorder.queries.count, 1, "asking again does not start a second read")
 
-        w.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r1")]))
+        w.store.ingest(w.page([ApprovalsLogFixtures.row("r1")]))
         guard case .ready(let page) = read(at: t0.addingTimeInterval(0.5)) else { return XCTFail("ready") }
         XCTAssertEqual(page.rows.map(\.rowId), ["r1"])
         guard case .ready = read(at: t0.addingTimeInterval(1)) else { return XCTFail("kept for the poll") }
@@ -657,15 +810,15 @@ final class ApprovalsLogScrollSafetyTests: XCTestCase {
             }
             let view = try XCTUnwrap(windows.logView)
             rig.assertNoMove("the first page arrives \(at)", following: following) {
-                world.store.ingest(ApprovalsLogFixtures.page(rows))
+                world.store.ingest(world.page(rows))
             }
             rig.assertNoMove("the outcome filter changes \(at)", following: following) {
                 view.setOutcomeFilter(.denied)
-                world.store.ingest(ApprovalsLogFixtures.page(rows))
+                world.store.ingest(world.page(rows))
             }
             rig.assertNoMove("the focus filter changes \(at)", following: following) {
                 view.setFocusFilter("cody-1")
-                world.store.ingest(ApprovalsLogFixtures.page(rows))
+                world.store.ingest(world.page(rows))
             }
             rig.assertNoMove("a row expands \(at)", following: following) {
                 view.toggleExpanded(rowId: "r1")
@@ -676,18 +829,18 @@ final class ApprovalsLogScrollSafetyTests: XCTestCase {
             }
             rig.assertNoMove("the next page loads \(at)", following: following) {
                 view.loadNextPage()
-                world.store.ingest(ApprovalsLogFixtures.page([ApprovalsLogFixtures.row("r0")]))
+                world.store.ingest(world.page([ApprovalsLogFixtures.row("r0")]))
             }
             rig.assertNoMove("a click on an approval status opens the window on a call \(at)", following: following) {
                 windows.show(link: ApprovalsLogLink(toolUseId: "toolu_1"))
-                world.store.ingest(ApprovalsLogFixtures.page(rows))
+                world.store.ingest(world.page(rows))
             }
             rig.assertNoMove("the guard bar's View in log opens it on an entry \(at)", following: following) {
                 let bar = GuardBlockedBar(text: "Blocked: Cody tried to open a production shell")
                 bar.frame = NSRect(x: 0, y: 0, width: 600, height: GuardBlockedBar.height)
                 bar.onViewInLog = { windows.show(link: ApprovalsLogLink(tag: "cody-1", entryId: "gate-1")) }
                 bar.logLink.performClick(nil)
-                world.store.ingest(ApprovalsLogFixtures.page([]))
+                world.store.ingest(world.page([]))
             }
             XCTAssertTrue(world.revealer.revealed.isEmpty, "none of these revealed a call \(at)")
             rig.assertNoMove("the window closes \(at)", following: following) {

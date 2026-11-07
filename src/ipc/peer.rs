@@ -3752,6 +3752,7 @@ mod tests {
                 ServerMsg::ApprovalsLogPage {
                     rows: vec![],
                     next_cursor: None,
+                    request_id: None,
                 },
             ),
             (
@@ -3765,6 +3766,7 @@ mod tests {
                 "approvals_log_refused",
                 ServerMsg::ApprovalsLogRefused {
                     code: "not_operator_app".into(),
+                    request_id: None,
                 },
             ),
             (

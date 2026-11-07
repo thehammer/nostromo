@@ -66,6 +66,35 @@ final class ApprovalsLogTests: XCTestCase {
                        #"{"id":"e1","type":"approvals_log_entry"}"#)
     }
 
+    func testAQueryEncodesItsRequestIdAndAnEntryRequestItsRowTime() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let query = ClientApprovalsLogQuery(tag: nil, outcome: nil, sinceMs: nil, limit: 50, cursor: "c",
+                                            requestId: "log-7", operatorNonce: "n")
+        XCTAssertEqual(String(data: try encoder.encode(query), encoding: .utf8),
+                       #"{"cursor":"c","limit":50,"operator_nonce":"n","request_id":"log-7","type":"approvals_log_query"}"#)
+        let entry = ClientApprovalsLogEntry(id: "e1", tsMs: 1_700_000_000_500, operatorNonce: "n")
+        XCTAssertEqual(String(data: try encoder.encode(entry), encoding: .utf8),
+                       #"{"id":"e1","operator_nonce":"n","ts_ms":1700000000500,"type":"approvals_log_entry"}"#)
+    }
+
+    func testAPageFrameDecodesTheRequestIdItEchoesAndToleratesItsAbsence() throws {
+        let with = try JSONDecoder().decode(ApprovalsLogPageFrame.self,
+                                            from: Data(#"{"rows":[],"next_cursor":"c","request_id":"log-7"}"#.utf8))
+        XCTAssertEqual(with.requestId, "log-7")
+        XCTAssertEqual(with.nextCursor, "c")
+        let without = try JSONDecoder().decode(ApprovalsLogPageFrame.self, from: Data(#"{"rows":[]}"#.utf8))
+        XCTAssertNil(without.requestId, "a daemon that does not echo it")
+    }
+
+    func testARefusalFrameDecodesTheRequestIdItNames() throws {
+        let with = try JSONDecoder().decode(ApprovalsLogRefusedFrame.self,
+                                            from: Data(#"{"code":"bad_cursor","request_id":"log-7"}"#.utf8))
+        XCTAssertEqual(with.requestId, "log-7")
+        let without = try JSONDecoder().decode(ApprovalsLogRefusedFrame.self, from: Data(#"{"code":"bad_cursor"}"#.utf8))
+        XCTAssertNil(without.requestId)
+    }
+
     func testAnInputReadsAsItsOwnLinesNotAsEscapedJSON() throws {
         let one = try JSONDecoder().decode(ApprovalJSON.self, from: Data(#"{"command":"a\nb ⟨U+202E⟩"}"#.utf8))
         XCTAssertEqual(one.inputText, "a\nb ⟨U+202E⟩")
@@ -84,6 +113,26 @@ final class ApprovalsLogTests: XCTestCase {
         XCTAssertEqual(ApprovalsLogText.outcomePhrase(row("a", outcome: "allowed_by_session_rule")), "allowed by session rule")
         XCTAssertEqual(ApprovalsLogText.outcomePhrase(row("a")), "awaiting an answer")
         XCTAssertEqual(ApprovalsLogText.outcomePhrase(row("a", outcome: "from_the_future")), "from the future")
+    }
+
+    func testWithholdingKeepsTheRuleAndTheSummaryOutOfTheOutcomePhrase() {
+        let rule = ApprovalsLogRow(rowId: "r", kind: .rule, ts: "2026-11-07T14:02:03Z",
+                                   summary: "session rule granted: Bash(gh pr view 123:*)",
+                                   ruleLabel: "Bash(gh pr view 123:*)", sensitive: true)
+        XCTAssertTrue(ApprovalsLogText.outcomePhrase(rule).contains("gh pr view"), "shown by default")
+        let withheld = ApprovalsLogText.outcomePhrase(rule, withholding: true)
+        XCTAssertFalse(withheld.contains("gh pr view"), withheld)
+        XCTAssertFalse(withheld.contains("Bash("), withheld)
+        XCTAssertTrue(withheld.contains("session rule granted"), "it still says what kind of event it was")
+
+        let other = ApprovalsLogRow(rowId: "o", kind: .other, ts: "2026-11-07T14:02:03Z",
+                                    summary: "something about Dana", sensitive: true)
+        XCTAssertEqual(ApprovalsLogText.outcomePhrase(other), "something about Dana")
+        XCTAssertFalse(ApprovalsLogText.outcomePhrase(other, withholding: true).contains("Dana"))
+
+        let denied = row("d", outcome: "denied")
+        XCTAssertEqual(ApprovalsLogText.outcomePhrase(denied, withholding: true), "denied by you",
+                       "words that carry no text are unchanged")
     }
 
     func testEveryRefusalCodeHasItsPhrase() {

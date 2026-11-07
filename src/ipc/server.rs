@@ -1703,7 +1703,7 @@ fn handle_client_msg(
             ..
         } => {
             let broker = session_mgr.lock().unwrap().approvals().cloned();
-            if !log_request_allowed(trust, answer_check, targeted_tx) {
+            if !log_request_allowed(None, trust, answer_check, targeted_tx) {
                 return;
             }
             // A time the clock cannot hold is a bad request, not "no filter".
@@ -1711,6 +1711,7 @@ fn handle_client_msg(
                 Some(None) => {
                     let _ = targeted_tx.send(ServerMsg::ApprovalsLogRefused {
                         code: "bad_request".to_string(),
+                        request_id: request_id.clone(),
                     });
                     return;
                 }
@@ -1720,6 +1721,7 @@ fn handle_client_msg(
             let Some(broker) = broker else {
                 let _ = targeted_tx.send(ServerMsg::ApprovalsLogRefused {
                     code: "unavailable".to_string(),
+                    request_id: request_id.clone(),
                 });
                 return;
             };
@@ -1737,11 +1739,11 @@ fn handle_client_msg(
                 let reply = match broker.log_query(&query) {
                     Ok(page) => log_page_frame(page, &sensitive, request_id),
                     Err(crate::approvals::audit::LogError::BadCursor) => {
-                        ServerMsg::ApprovalsLogRefused { code: "bad_cursor".to_string() }
+                        ServerMsg::ApprovalsLogRefused { code: "bad_cursor".to_string(), request_id: None }
                     }
                     Err(e) => {
                         warn!("approvals log query failed: {e}");
-                        ServerMsg::ApprovalsLogRefused { code: "unavailable".to_string() }
+                        ServerMsg::ApprovalsLogRefused { code: "unavailable".to_string(), request_id: None }
                     }
                 };
                 let _ = tx.send(reply);
@@ -1750,12 +1752,13 @@ fn handle_client_msg(
 
         ClientMsg::ApprovalsLogEntry { id, ts_ms, .. } => {
             let broker = session_mgr.lock().unwrap().approvals().cloned();
-            if !log_request_allowed(trust, answer_check, targeted_tx) {
+            if !log_request_allowed(None, trust, answer_check, targeted_tx) {
                 return;
             }
             let Some(broker) = broker else {
                 let _ = targeted_tx.send(ServerMsg::ApprovalsLogRefused {
                     code: "unavailable".to_string(),
+                    request_id: None,
                 });
                 return;
             };
@@ -1772,7 +1775,7 @@ fn handle_client_msg(
                     },
                     Err(e) => {
                         warn!("approvals log entry failed: {e}");
-                        ServerMsg::ApprovalsLogRefused { code: "unavailable".to_string() }
+                        ServerMsg::ApprovalsLogRefused { code: "unavailable".to_string(), request_id: None }
                     }
                 };
                 let _ = tx.send(reply);
@@ -3375,6 +3378,7 @@ const LOG_PAGE_MARGIN: usize = 64 * 1024;
 /// Gate for the log requests: `true` when the peer is the verified app and its nonce
 /// check passed. Otherwise the asker is told why, and nothing is read.
 fn log_request_allowed(
+    request_id: Option<&str>,
     trust: PeerTrust,
     answer_check: Option<Result<(), String>>,
     targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
@@ -3391,6 +3395,7 @@ fn log_request_allowed(
         Some(code) => {
             let _ = targeted_tx.send(ServerMsg::ApprovalsLogRefused {
                 code: code.to_string(),
+                request_id: request_id.map(str::to_owned),
             });
             false
         }
