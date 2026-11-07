@@ -280,7 +280,9 @@ pub fn fold_state(kind: &str, data: &EventData) -> FoldResult {
         "queued" | "ready" | "running" | "succeeded" | "failed" | "cancelled" => {
             FoldResult::SetState(kind.to_string())
         }
-        "awaiting_input" | "paused_for_quota" => FoldResult::SetState("awaiting".to_string()),
+        "awaiting_input" | "paused_for_quota" | "paused_for_limiter" => {
+            FoldResult::SetState("awaiting".to_string())
+        }
         "resumed" | "auto_resumed" => FoldResult::SetState("ready".to_string()),
         "retried" | "escalated" => {
             let state = data.to_state.clone().unwrap_or_else(|| "ready".to_string());
@@ -430,6 +432,16 @@ mod tests {
         assert_eq!(
             fold_state("paused_for_quota", &data),
             FoldResult::SetState("awaiting".to_string())
+        );
+        assert_eq!(
+            fold_state("paused_for_limiter", &data),
+            FoldResult::SetState("awaiting".to_string())
+        );
+        // `held` / `hold_released` are activity-only: they never change state.
+        assert_eq!(fold_state("held", &data), FoldResult::NoStateChange);
+        assert_eq!(
+            fold_state("hold_released", &data),
+            FoldResult::NoStateChange
         );
     }
 

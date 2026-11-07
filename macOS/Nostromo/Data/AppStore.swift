@@ -48,6 +48,9 @@ class AppStore: ObservableObject {
     /// Mother's quota block as the broker last reported it; nil when it sent none (an older Mother) or the
     /// link is down. Published only when it changes. The gate shown is this, never what was just requested.
     @Published private(set) var motherQuota: MotherQuota?
+    /// Mother's backpressure limiter block as the broker last reported it; nil when it sent none (an older Mother)
+    /// or the link is down. Read-only: nothing here changes the limiter.
+    @Published private(set) var motherLimiter: MotherLimiter?
     /// A `quota-gate` command is waiting for its ack.
     @Published private(set) var motherQuotaGateInFlight = false
     /// The broker's refusal of the last `quota-gate` command, plainly; cleared by the next attempt or a success.
@@ -763,6 +766,9 @@ class AppStore: ObservableObject {
         case .quota(let quota):
             setMotherQuota(quota)
 
+        case .limiter(let limiter):
+            setMotherLimiter(limiter)
+
         case .newJob(let job):
             // A job that was queued after the initial snapshot arrived.
             // The broker embeds the full payload in the "queued" event so
@@ -814,6 +820,7 @@ class AppStore: ObservableObject {
             jobMap.removeAll()
             motherPeeks.removeAll()
             setMotherQuota(nil)
+            setMotherLimiter(nil)
             motherQuotaGateError = nil
             resnapshotGuard.disconnected(now: Date())
             publishJobsAndStatus()
@@ -881,7 +888,8 @@ class AppStore: ObservableObject {
             state = eventKind; q = nil; pr = nil
         case "awaiting_input":
             state = "awaiting"; q = question; pr = nil
-        case "paused_for_quota":
+        case "paused_for_quota", "paused_for_limiter":
+            // `held` / `hold_released` (a later limiter slice) are activity-only: they fall to `default`.
             state = "awaiting"; q = nil; pr = pausedReason
         case "resumed", "auto_resumed":
             state = "ready"; q = nil; pr = nil
@@ -901,7 +909,8 @@ class AppStore: ObservableObject {
             phases: job.phases,
             cycles: job.cycles,
             crew:   job.crew,
-            originLabel: job.originLabel
+            originLabel: job.originLabel,
+            limiterWait: (state == "ready" || state == "queued") ? job.limiterWait : nil
         )
     }
 
@@ -1120,6 +1129,10 @@ class AppStore: ObservableObject {
         case .unknownCode(let code): return "Mother refused it (\(code))."
         default: return error.userFacingMessage
         }
+    }
+
+    private func setMotherLimiter(_ limiter: MotherLimiter?) {
+        if motherLimiter != limiter { motherLimiter = limiter }
     }
 
     private func setMotherQuota(_ quota: MotherQuota?) {

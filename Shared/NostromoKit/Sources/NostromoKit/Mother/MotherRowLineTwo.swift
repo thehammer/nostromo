@@ -130,7 +130,10 @@ public struct MotherRowLineTwo: Equatable, Sendable {
         case "failed":
             let reason = MotherOriginDisplay.clean(model.failureReason, cap: factCap)
             return reason.isEmpty ? "failed" : "failed: \(reason)"
-        case "cancelled", "queued", "ready":
+        case "queued", "ready":
+            let wait = MotherOriginDisplay.clean(model.waitText, cap: factCap)
+            return wait.isEmpty ? model.state : wait
+        case "cancelled":
             return model.state
         default:
             let s = MotherOriginDisplay.clean(model.state, cap: 20)

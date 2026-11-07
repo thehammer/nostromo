@@ -36,7 +36,10 @@ MOTHER_REPO = "thehammer/mother"
 MOTHER_PATH = "plugins/mother/tests/fixtures/contract"
 FILES = ["gates_fix_pass.ndjson", "lens_wave.ndjson", "gate_hold_answered.ndjson"]
 # Fixtures that live elsewhere in the Mother repo (name -> path). Vendored when the ref has them.
-EXTRA_FILES = {"quota_block.json": "plugins/mother/tests/fixtures/quota_block.json"}
+EXTRA_FILES = {
+    "quota_block.json": "plugins/mother/tests/fixtures/quota_block.json",
+    "limiter_block.json": "plugins/mother/tests/fixtures/limiter_block.json",
+}
 DEFAULT_REF = "origin/main"
 ONLINE_BASE = "https://raw.githubusercontent.com/thehammer/mother/main"
 

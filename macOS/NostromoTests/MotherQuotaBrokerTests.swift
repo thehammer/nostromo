@@ -152,7 +152,7 @@ extension MotherBrokerClientTests {
         XCTAssertEqual(quota.gate, .offUntilReset)
         XCTAssertEqual(quota.until, Date(timeIntervalSince1970: 1_793_658_600))
         XCTAssertEqual(quota.sevenDay?.usedPct, 100)
-        XCTAssertEqual(recorder.names, ["snapshot", "quota"], "the jobs first, then the quota")
+        XCTAssertEqual(recorder.names, ["snapshot", "quota", "limiter"], "the jobs first, then the quota, then the limiter")
     }
 
     func testASnapshotWithNoQuotaBlockDeliversNoQuota() throws {
@@ -163,7 +163,7 @@ extension MotherBrokerClientTests {
 
         qbWait("the quota event") { recorder.quotas.count == 1 }
         XCTAssertNil(recorder.quotas[0], "an older Mother: no quota status, so nothing to show")
-        XCTAssertEqual(recorder.names, ["snapshot", "quota"])
+        XCTAssertEqual(recorder.names, ["snapshot", "quota", "limiter"])
     }
 
     func testASnapshotWhoseQuotaIsNullOrNotAnObjectDeliversNoQuota() throws {

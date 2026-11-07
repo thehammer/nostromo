@@ -73,6 +73,7 @@ class MotherView: NSView {
     private let countsStrip = MotherCountsStrip()
     /// The quota windows, the gate badge and the gate control; zero height unless Mother sends a quota block.
     private let quotaStrip  = MotherQuotaStrip()
+    private let limiterStrip = MotherLimiterStrip()
     /// One line under the strip; zero height unless the "staying quiet" note is raised.
     private let notifyNote  = MotherNotifyNoteRow()
     /// "Session notices off": zero height unless the global switch is off.
@@ -160,7 +161,7 @@ class MotherView: NSView {
         handle.onResize = { [weak self] in self?.setListWidth($0) }
         handle.onCommit = { [weak self] in self?.rememberListWidth() }
 
-        for v in [countsStrip, quotaStrip, notifyNote, offStrip, jobList, divider, detailContainer, handle] as [NSView] {
+        for v in [countsStrip, quotaStrip, limiterStrip, notifyNote, offStrip, jobList, divider, detailContainer, handle] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -177,8 +178,13 @@ class MotherView: NSView {
             quotaStrip.leadingAnchor.constraint(equalTo: leadingAnchor),
             quotaStrip.trailingAnchor.constraint(equalTo: trailingAnchor),
 
+            // Limiter line — under the quota strip, zero height while Mother sends no limiter block or it is off
+            limiterStrip.topAnchor.constraint(equalTo: quotaStrip.bottomAnchor),
+            limiterStrip.leadingAnchor.constraint(equalTo: leadingAnchor),
+            limiterStrip.trailingAnchor.constraint(equalTo: trailingAnchor),
+
             // Note row — full width, zero height unless raised
-            notifyNote.topAnchor.constraint(equalTo: quotaStrip.bottomAnchor),
+            notifyNote.topAnchor.constraint(equalTo: limiterStrip.bottomAnchor),
             notifyNote.leadingAnchor.constraint(equalTo: leadingAnchor),
             notifyNote.trailingAnchor.constraint(equalTo: trailingAnchor),
 
@@ -822,6 +828,12 @@ final class MotherJobListViewModel: ObservableObject {
                               currentName: { [self] in currentName(forTag: $0) })
     }
 
+    /// `Waiting: <reason>` for a ready or queued job the limiter lists; nil otherwise.
+    static func waitText(for job: MotherJob) -> String? {
+        guard job.state == "ready" || job.state == "queued", let wait = job.limiterWait else { return nil }
+        return MotherLimiterPresentation.waitText(wait)
+    }
+
     func rowModel(for job: MotherJob, now: Date? = nil) -> MotherJobRowModel {
         let now = now ?? clock()
         let progress = job.state == "running" || job.state == "awaiting"
@@ -844,7 +856,8 @@ final class MotherJobListViewModel: ObservableObject {
             failureReason: job.failureReason,
             cost: job.costUsd.flatMap { $0.isFinite && $0 >= 0 ? String(format: "$%.2f", $0) : nil },
             noticeMark: MotherNoticeMark.make(notice: annotations[job.id]?.notice,
-                                              originName: origin.kind == .focus && origin.isClickable ? origin.name : nil, now: now)
+                                              originName: origin.kind == .focus && origin.isClickable ? origin.name : nil, now: now),
+            waitText: Self.waitText(for: job)
         )
     }
 
