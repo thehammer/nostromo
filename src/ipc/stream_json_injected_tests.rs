@@ -1644,6 +1644,128 @@ fn a_reloaded_human_line_is_a_bubble_and_the_title() {
     assert_eq!(t.first_user_input(), Some("fix the failing test"));
 }
 
+// ── provenance allowlist: what a reload treats as human vs injected ───────────
+
+fn assert_bubble_and_title(t: &SessionTranscript, text: &str, label: &str) {
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 1, "{label}: {turns:?}");
+    assert_eq!(turns[0].origin, None, "{label}: must not be a marker");
+    assert_eq!(turns[0].user_input, text, "{label}");
+    assert_eq!(t.prompt_count(), 1, "{label}");
+    assert_eq!(t.first_user_input(), Some(text), "{label}: the title");
+}
+
+#[test]
+fn a_reloaded_terminal_typed_prompt_is_a_bubble_and_the_title() {
+    // What the terminal CLI writes for a line a human typed: no sdk marker.
+    let text = "rename the config loader";
+    let t = reloaded(&[stored(
+        json!({"origin": {"kind": "human"}, "turnOrigin": "human", "promptSource": "typed"}),
+        text,
+    )]);
+    assert_bubble_and_title(&t, text, "typed");
+}
+
+#[test]
+fn a_reloaded_terminal_queued_prompt_is_a_bubble_and_the_title() {
+    // A prompt typed while the agent was busy is stored as `queued`.
+    let text = "also update the changelog";
+    let t = reloaded(&[stored(
+        json!({"origin": {"kind": "human"}, "turnOrigin": "human", "promptSource": "queued"}),
+        text,
+    )]);
+    assert_bubble_and_title(&t, text, "queued");
+}
+
+#[test]
+fn any_single_human_signal_keeps_a_reloaded_line_a_bubble() {
+    let text = "check the retry path";
+    for (label, fields) in [
+        ("origin human", json!({"origin": {"kind": "human"}})),
+        ("turnOrigin human", json!({"turnOrigin": "human"})),
+        ("turnOrigin user", json!({"turnOrigin": "user"})),
+        ("promptSource typed", json!({"promptSource": "typed"})),
+        ("promptSource queued", json!({"promptSource": "queued"})),
+    ] {
+        assert_bubble_and_title(&reloaded(&[stored(fields, text)]), text, label);
+    }
+}
+
+#[test]
+fn each_injected_provenance_signal_reloads_as_a_marker_never_a_bubble() {
+    let text = "Periodic status line";
+    for (label, fields) in [
+        ("isMeta", json!({"isMeta": true})),
+        ("origin peer", json!({"origin": {"kind": "peer"}})),
+        ("turnOrigin peer", json!({"turnOrigin": "peer"})),
+        ("promptSource system", json!({"promptSource": "system"})),
+        ("turnOrigin scheduled", json!({"turnOrigin": "scheduled"})),
+        ("turnOrigin system", json!({"turnOrigin": "system"})),
+        (
+            "turnOrigin task_notification",
+            json!({"turnOrigin": "task_notification"}),
+        ),
+    ] {
+        let t = reloaded(&[stored(fields, text)]);
+        eprintln!("case: {label}");
+        assert_other_marker(&t, text);
+    }
+}
+
+#[test]
+fn an_injected_signal_beats_a_human_signal_on_the_same_line() {
+    let text = "Hook output to relay";
+    let t = reloaded(&[stored(
+        json!({"isMeta": true, "origin": {"kind": "human"}, "turnOrigin": "human",
+               "promptSource": "typed"}),
+        text,
+    )]);
+    assert_other_marker(&t, text);
+}
+
+#[test]
+fn a_reloaded_line_of_unlisted_provenance_is_a_marker() {
+    // Fails toward a marker: a value this build has never heard of is not
+    // something the user is known to have typed.
+    let text = "Something new the CLI injects";
+    for (label, fields) in [
+        ("origin mystery", json!({"origin": {"kind": "mystery"}})),
+        ("turnOrigin mystery", json!({"turnOrigin": "mystery"})),
+        ("promptSource mystery", json!({"promptSource": "mystery"})),
+    ] {
+        let t = reloaded(&[stored(fields, text)]);
+        eprintln!("case: {label}");
+        assert_other_marker(&t, text);
+    }
+}
+
+#[test]
+fn an_unlisted_provenance_value_does_not_demote_a_line_a_human_typed() {
+    let text = "ship it";
+    let t = reloaded(&[stored(
+        json!({"origin": {"kind": "mystery"}, "promptSource": "typed"}),
+        text,
+    )]);
+    assert_bubble_and_title(&t, text, "mystery origin + typed");
+}
+
+#[test]
+fn a_reloaded_line_with_no_provenance_and_unknown_shape_is_a_bubble() {
+    let text = "plain words with no known shape";
+    let t = reloaded(&[stored(json!({}), text)]);
+    assert_bubble_and_title(&t, text, "no provenance");
+}
+
+#[test]
+fn a_host_sent_line_stays_a_bubble_even_with_injected_looking_fields() {
+    let text = "do the thing";
+    let t = reloaded(&[stored(
+        json!({"promptSource": "sdk", "turnOrigin": "sdk", "origin": {"kind": "mystery"}}),
+        text,
+    )]);
+    assert_bubble_and_title(&t, text, "host sent");
+}
+
 #[test]
 fn stored_provenance_fields_are_not_read_on_a_live_transcript() {
     // The live stream carries none; the daemon's written queue decides there.

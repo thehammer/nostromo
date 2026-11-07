@@ -855,24 +855,57 @@ fn line_is_host_sent(obj: &serde_json::Map<String, Value>) -> bool {
         .any(|k| obj.get(*k).and_then(|x| x.as_str()) == Some("sdk"))
 }
 
-/// A stored line records that the CLI injected it: `isMeta`, an `origin`
-/// object, `promptSource: "system"` or a `turnOrigin` other than `sdk`/`user`
-/// (`peer`, `scheduled`, …). Never set for a host-sent line.
+/// Does a stored line say the CLI injected it (not the user)? Never for a
+/// host-sent line. Provenance is judged by explicit lists, so text a human
+/// typed in a terminal session (`origin.kind: "human"`, `turnOrigin: "human"`,
+/// `promptSource: "typed"` or `"queued"`) is never demoted to a marker.
+///
+/// * Injected signals win: `isMeta: true`; `origin.kind: "peer"`;
+///   `promptSource: "system"`; `turnOrigin` of `peer`, `scheduled`, `system`
+///   or `task_notification`.
+/// * Else human signals: `origin.kind: "human"`, `turnOrigin` of `human`,
+///   `user` or `sdk`, `promptSource` of `typed`, `queued` or `sdk`: not injected.
+/// * Else provenance of a value on neither list (an `origin` of an unknown
+///   kind, an unknown `turnOrigin` or `promptSource`) counts as injected, so it
+///   fails toward a marker. A `task-notification` origin on plain content is
+///   the exception: a scheduled trigger stays a prompt (BA6a).
+/// * A line with no provenance field at all is not injected; the reader still
+///   gives a known text shape its marker.
 fn line_is_injected(obj: &serde_json::Map<String, Value>) -> bool {
+    const INJECTED_ORIGIN_KINDS: [&str; 1] = ["peer"];
+    const INJECTED_TURN_ORIGINS: [&str; 4] = ["peer", "scheduled", "system", "task_notification"];
+    const HUMAN_TURN_ORIGINS: [&str; 3] = ["human", "user", "sdk"];
+    const HUMAN_PROMPT_SOURCES: [&str; 3] = ["typed", "queued", "sdk"];
+
     if line_is_host_sent(obj) {
         return false;
     }
-    obj.get("isMeta").and_then(|x| x.as_bool()) == Some(true)
-        // A `task-notification` origin on plain content is an existing,
-        // tested contract (a scheduled trigger stays a prompt: BA6a).
-        || obj.get("origin").is_some_and(|o| {
-            o.is_object() && o.get("kind").and_then(|k| k.as_str()) != Some("task-notification")
-        })
-        || obj.get("promptSource").and_then(|x| x.as_str()) == Some("system")
-        || obj
-            .get("turnOrigin")
+    let str_of = |k: &str| {
+        obj.get(k)
             .and_then(|x| x.as_str())
-            .is_some_and(|o| !o.is_empty() && o != "user")
+            .filter(|s| !s.is_empty())
+    };
+    let origin = obj.get("origin").filter(|o| o.is_object());
+    let origin_kind = origin.and_then(|o| o.get("kind")).and_then(|k| k.as_str());
+    let turn_origin = str_of("turnOrigin");
+    let prompt_source = str_of("promptSource");
+
+    if obj.get("isMeta").and_then(|x| x.as_bool()) == Some(true)
+        || origin_kind.is_some_and(|k| INJECTED_ORIGIN_KINDS.contains(&k))
+        || prompt_source == Some("system")
+        || turn_origin.is_some_and(|o| INJECTED_TURN_ORIGINS.contains(&o))
+    {
+        return true;
+    }
+    let human = origin_kind == Some("human")
+        || turn_origin.is_some_and(|o| HUMAN_TURN_ORIGINS.contains(&o))
+        || prompt_source.is_some_and(|p| HUMAN_PROMPT_SOURCES.contains(&p));
+    if human {
+        return false;
+    }
+    (origin.is_some() && origin_kind != Some("task-notification"))
+        || turn_origin.is_some()
+        || prompt_source.is_some()
 }
 
 /// `content` is a non-empty array made only of `tool_result` blocks.
