@@ -1226,7 +1226,13 @@ final class AlwaysAllowCardTests: MouseQueueTestCase {
     func testThePanelClosesWhenTheRequestChanges() throws {
         let h = harness(try request())
         open(h)
+        // An answer in flight keeps the panel (disabled), so a refusal is read where it was chosen.
         h.store.answer("req-1", ApprovalDecisionWire(kind: .deny), windowID: "w")
+        h.sync()
+        XCTAssertTrue(h.card.alwaysIsOpen)
+        XCTAssertFalse(h.card.alwaysWriteButton!.isEnabled, "nothing can be written while another answer is on its way")
+        // The request ending closes it.
+        h.store.handle(.resolved(try ApprovalAP2bFixtures.resolved(id: "req-1", outcome: "denied")))
         h.sync()
         XCTAssertFalse(h.card.alwaysIsOpen)
         XCTAssertNil(h.card.listing.alwaysPanel)
@@ -1280,7 +1286,9 @@ final class AlwaysAllowCardTests: MouseQueueTestCase {
             clock = 100
             let h = harness(try request(id: "req-\(index)"))
             open(h, time: 10)
-            XCTAssertTrue(write(h, number: 2, time: 11), c.code)
+            // A pop-up choice first (the open-then-write path has its own test), then Write rule.
+            XCTAssertTrue(choose(h, h.card.alwaysScopePopup!, index: 0, number: 2, time: 20), c.code)
+            XCTAssertTrue(write(h, number: 3, time: 21), c.code)
             h.store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "req-\(index)", code: c.code, reason: c.reason)))
             h.sync()
             relayout(h)
