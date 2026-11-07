@@ -657,3 +657,43 @@ fn the_preview_source_has_no_way_to_change_anything() {
         );
     }
 }
+
+#[test]
+fn an_outer_glob_never_lists_a_tcc_folder_but_a_glob_inside_one_does() {
+    let f = Fake::default()
+        .dir("/home/u", &["Desktop", "proj"])
+        .dir("/home/u/Desktop", &["a.txt"])
+        .file("/home/u/Desktop/a.txt", 1)
+        .dir("/home/u/proj", &["a.txt"])
+        .file("/home/u/proj/a.txt", 1);
+    let outer = run(&f, "/home/u/*/a.txt");
+    assert!(!f
+        .reads
+        .lock()
+        .unwrap()
+        .contains(&PathBuf::from("/home/u/Desktop")));
+    assert!(outer
+        .targets
+        .iter()
+        .any(|t| t.path.as_deref() == Some("/home/u/proj/a.txt")));
+    let inner = run(&f, "/home/u/Desktop/*.txt");
+    assert_eq!(
+        inner.targets[0].path.as_deref(),
+        Some("/home/u/Desktop/a.txt")
+    );
+}
+
+#[test]
+fn builtin_and_command_wrappers_count_as_a_directory_change() {
+    for cmd in [
+        "builtin cd sub; rm y",
+        "command cd sub; rm y",
+        "export PWD=/x; rm y",
+    ] {
+        let t = specs(cmd, Some("/w"));
+        assert!(
+            matches!(t.last().unwrap().operand, Operand::CantResolve { .. }),
+            "{cmd}"
+        );
+    }
+}

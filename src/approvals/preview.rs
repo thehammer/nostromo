@@ -100,7 +100,10 @@ fn preview_command(name: &str) -> Option<PreviewCommand> {
 /// Does this command change (or run something in) another working directory?
 fn changes_directory(name: &str, command: &SimpleCommand) -> bool {
     match name {
-        "cd" | "pushd" | "popd" | "chdir" => true,
+        // Anything that can change the directory or HOME/PWD for what follows: after it,
+        // a relative or `~` operand is not trustworthy.
+        "cd" | "pushd" | "popd" | "chdir" | "builtin" | "command" | "export" | "unset"
+        | "source" | "." | "exec" => true,
         "env" | "git" => command
             .words
             .iter()
@@ -586,6 +589,11 @@ fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<PathBuf>, u32) {
     }
     let mut frontier = vec![PathBuf::new()];
     let mut extra = 0u32;
+    // The part of the operand before its first glob component.
+    let literal: PathBuf = path
+        .components()
+        .take_while(|c| !has_glob(&c.as_os_str().to_string_lossy()))
+        .collect();
     for comp in path.components() {
         let name = comp.as_os_str().to_string_lossy().into_owned();
         let mut next = Vec::new();
@@ -596,6 +604,16 @@ fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<PathBuf>, u32) {
             }
             if w.fs.is_network(base) {
                 // Never list a network volume: the literal path stands.
+                next.push(base.join(comp));
+                continue;
+            }
+            // A privacy-guarded folder is listed only when the operand itself names a path
+            // inside it (the session is working there), never from an outer glob.
+            let guarded = w
+                .tcc
+                .iter()
+                .any(|f| base.starts_with(f) && !literal.starts_with(f));
+            if guarded {
                 next.push(base.join(comp));
                 continue;
             }
