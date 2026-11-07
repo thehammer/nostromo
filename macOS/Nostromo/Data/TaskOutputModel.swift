@@ -302,6 +302,10 @@ final class TaskOutputModel {
         if phase == .idle && text.isEmpty { state = .loading }
         phase = .loadingTail
         loadGeneration += 1
+        // A head fetch for the load this one replaces is dropped when it answers (the generation guard in
+        // `fetchHeadChunk`) and will not clear this flag: a reload that then fails would leave the model
+        // saying `loading` for ever. `applyTail` sets it again if this load needs a head.
+        isFillingHead = false
         failedPolls = 0
         headFetchFailed = false
         readInFlight = true
