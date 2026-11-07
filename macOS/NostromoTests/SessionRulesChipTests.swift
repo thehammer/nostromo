@@ -862,3 +862,466 @@ final class SessionRulesSlotTests: MouseQueueTestCase {
         }
     }
 }
+
+// MARK: - AP6: the chip's popover and the log link into the Rules list
+
+final class PersistedRulesNavigationTests: MouseQueueTestCase {
+
+    func testTheSessionRulesPopoverHasAnAllRulesButtonThatOpensTheRulesWindow() {
+        _ = NSApplication.shared
+        let store = ApprovalRecorder().makeStore()
+        store.handle(RuleFixtures.frame("cody-1", [RuleFixtures.rule("a")]))
+        let content = SessionRulesPopoverContent(tag: "cody-1", store: store, gesture: SessionRuleGesture(permit: anyHuman),
+                                                 currentEvent: { nil }, timeZone: TimeZone(identifier: "UTC")!)
+        var opened = 0
+        content.openAllRules = { opened += 1 }
+        let button = try! XCTUnwrap(content.allRulesButton)
+        XCTAssertEqual(button.title, "All rules…")
+        button.performClick(nil)
+        XCTAssertEqual(opened, 1)
+        XCTAssertEqual(store.persistedRules, [], "opening the list changes nothing")
+    }
+
+    func testTheApprovalsWindowHasARulesButtonThatOpensTheRulesWindow() {
+        let world = ApprovalsLogWorld()
+        var opened = 0
+        world.view.openRules = { opened += 1 }
+        XCTAssertEqual(world.view.rulesButton.title, "Rules…")
+        world.view.rulesButton.performClick(nil)
+        XCTAssertEqual(opened, 1)
+    }
+}
+
+// MARK: - AP6: "Always allow…" on the card
+
+/// The panel behind `This session ▾ ▸ Always allow…`: two steps (open, then Write rule), exactly the rule and
+/// scope shown, and nothing sent until the second, separate human gesture.
+final class AlwaysAllowCardTests: MouseQueueTestCase {
+
+    private var current: NSEvent?
+    /// The handlers' clock (the gate takes the smaller of this gap and the events' own).
+    private var clock: TimeInterval = 100
+    private var pasteboards: [NSPasteboard] = []
+
+    override func tearDown() {
+        pasteboards.forEach { $0.releaseGlobally() }
+        pasteboards = []
+        super.tearDown()
+    }
+
+    private static let root = "/opt/work/x"
+    private static let options = RuleFixtures.options + ["allow_always"]
+
+    private func request(id: String = "req-1", candidates: [[String: Any]] = RuleFixtures.candidates,
+                         options: [String] = AlwaysAllowCardTests.options, root: String? = AlwaysAllowCardTests.root,
+                         isGit: Bool? = true, reasonKind: String = "ask_rule") throws -> ApprovalRequestWire {
+        try ApprovalTestRequests.bash("rm -rf ~/Library/Caches/a", id: id, reasonKind: reasonKind, options: options,
+                                      sessionRuleCandidates: candidates, repoRoot: root, repoIsGit: isGit)
+    }
+
+    private func harness(_ request: ApprovalRequestWire, permit: @escaping SessionRuleGesture.Permit = anyHuman) -> ApprovalCardHarness {
+        ApprovalCardHarness(self, request: request,
+                            gesture: SessionRuleGesture(permit: permit, uptime: { [unowned self] in self.clock }),
+                            currentEvent: { [unowned self] in self.current })
+    }
+
+    private func click(_ view: NSView, number: Int, time: TimeInterval, in window: NSWindow, clickCount: Int = 1) -> NSEvent {
+        let point = view.convert(NSPoint(x: 4, y: 4), to: nil)
+        return NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [], timestamp: time,
+                                  windowNumber: window.windowNumber, context: nil, eventNumber: number,
+                                  clickCount: clickCount, pressure: 1)!
+    }
+
+    /// What the host does when the card asks for more room.
+    private func relayout(_ h: ApprovalCardHarness) {
+        h.card.frame.size.height = h.card.preferredHeight(forWidth: h.card.frame.width, maxHeight: 520)
+        h.relayout()
+    }
+
+    /// Step 1 by a person: `Always allow…` chosen in the menu at event time `time` (the handler clock is `time + 90`).
+    @discardableResult
+    private func open(_ h: ApprovalCardHarness, number: Int = 1, time: TimeInterval = 10) -> Bool {
+        let button = h.card.sessionButton!
+        current = click(button, number: number, time: time, in: h.window)
+        clock = time + 90
+        let opened = h.card.openAlwaysPanel(control: button)
+        relayout(h)
+        return opened
+    }
+
+    /// Change a pop-up to item `index` as a person at event time `time`; returns whether the card accepted it.
+    @discardableResult
+    private func choose(_ h: ApprovalCardHarness, _ popup: NSPopUpButton, index: Int, number: Int, time: TimeInterval) -> Bool {
+        popup.selectItem(at: index)
+        current = click(popup, number: number, time: time, in: h.window)
+        clock = time + 90
+        let accepted = h.card.changeAlwaysChoice(from: popup)
+        relayout(h)
+        return accepted
+    }
+
+    /// Press `Write rule` as a person's event at `time` (handler clock `time + 90`).
+    @discardableResult
+    private func write(_ h: ApprovalCardHarness, number: Int, time: TimeInterval, clickCount: Int = 1) -> Bool {
+        let button = h.card.alwaysWriteButton!
+        current = click(button, number: number, time: time, in: h.window, clickCount: clickCount)
+        clock = time + 90
+        return h.card.writeRule(from: button)
+    }
+
+    private func decision(_ id: String, _ text: String, _ scope: ApprovalRuleScope) -> ApprovalDecisionWire {
+        ApprovalDecisionWire(kind: .allowAlways, candidateId: id, ruleText: text, scope: scope)
+    }
+
+    // MARK: What the card offers
+
+    func testAlwaysAllowIsOfferedWhenTheDaemonListedItWithACandidateAndARepoRootAndAddsNoButton() throws {
+        let h = harness(try request())
+        XCTAssertTrue(h.card.listing.alwaysOffered)
+        XCTAssertEqual(h.card.sessionButton?.title, "This session ▾")
+        XCTAssertEqual(h.card.listing.options.map(\.id), ["deny", "deny_with_note", "deny_and_stop", "allow_once", "allow_session"],
+                       "Always allow… is a menu item, never a button")
+        XCTAssertNil(h.card.listing.alwaysPanel, "closed until chosen")
+        XCTAssertEqual(h.card.listing.jsonObject["always_offered"] as? Bool, true)
+        XCTAssertTrue(h.card.listing.jsonObject["always_panel"] is NSNull)
+    }
+
+    func testAlwaysAllowIsNotOfferedWithoutTheOptionACandidateOrARepoRoot() throws {
+        let unlisted = harness(try request(options: RuleFixtures.options))
+        XCTAssertFalse(unlisted.card.listing.alwaysOffered)
+        XCTAssertFalse(unlisted.card.openAlwaysPanel(control: unlisted.card.sessionButton!))
+
+        let noCandidates = harness(try request(id: "req-2", candidates: []))
+        XCTAssertFalse(noCandidates.card.listing.alwaysOffered)
+
+        let noRoot = harness(try request(id: "req-3", root: nil, isGit: nil))
+        XCTAssertFalse(noRoot.card.listing.alwaysOffered)
+        XCTAssertFalse(noRoot.card.openAlwaysPanel(control: noRoot.card.sessionButton!))
+        XCTAssertFalse(noRoot.card.alwaysIsOpen)
+
+        let safety = harness(try request(id: "req-4", reasonKind: "safety_check"))
+        XCTAssertFalse(safety.card.listing.alwaysOffered)
+    }
+
+    func testAlwaysAllowAloneStillGivesTheMenuItsButton() throws {
+        // The daemon listed allow_always but not allow_session: the menu exists for Always allow… alone.
+        let h = harness(try request(options: ApprovalTestRequests.allOptions + ["allow_always"]))
+        XCTAssertTrue(h.card.listing.alwaysOffered)
+        XCTAssertNotNil(h.card.sessionButton)
+        XCTAssertEqual(h.card.listing.options.map(\.id), ["deny", "deny_with_note", "deny_and_stop", "allow_once"])
+    }
+
+    // MARK: Step 1 opens a panel and sends nothing
+
+    func testOpeningThePanelPreselectsTheExactRuleAndTheRepositoryAndShowsEveryLine() throws {
+        // The daemon sent the broad candidate first: the exact one is still the preselected.
+        let h = harness(try request(candidates: Array(RuleFixtures.candidates.reversed())))
+        XCTAssertTrue(open(h))
+
+        XCTAssertEqual(h.card.listing.alwaysPanel, [
+            RuleFixtures.exactText,
+            "Write this rule to ~/.nostromo/approvals/rules.json",
+            "This repository (/opt/work/x)",
+            "Every Nostromo session in /opt/work/x will run this without asking",
+            "Your ~/.claude/settings.json is not changed",
+        ])
+        XCTAssertEqual(h.card.alwaysCandidatePopup?.titleOfSelectedItem, RuleFixtures.exactText)
+        XCTAssertEqual(h.card.alwaysCandidatePopup?.itemTitles, [RuleFixtures.exactText, RuleFixtures.prefixText])
+        XCTAssertEqual(h.card.alwaysScopePopup?.titleOfSelectedItem, "This repository (/opt/work/x)")
+        XCTAssertEqual(h.card.alwaysScopePopup?.itemTitles, ["This repository (/opt/work/x)", "All repositories"])
+        XCTAssertEqual(h.card.alwaysWriteButton?.title, "Write rule")
+        XCTAssertEqual(h.card.alwaysCopyButton?.title, "Copy rule")
+        XCTAssertEqual(h.card.alwaysCancelButton?.title, "Cancel")
+        XCTAssertEqual(h.recorder.sent, [], "step 1 answers nothing")
+        XCTAssertEqual(h.recorder.reports, [])
+        XCTAssertEqual(h.store.entry(id: "req-1")?.state, .pending)
+        // Inside the card's own frame, not a sheet.
+        for view in [h.card.alwaysWriteButton!, h.card.alwaysCopyButton!, h.card.alwaysCancelButton!] {
+            let frame = h.card.convert(view.bounds, from: view)
+            XCTAssertTrue(h.card.bounds.insetBy(dx: -0.5, dy: -0.5).contains(frame), "\(frame) in \(h.card.bounds)")
+        }
+    }
+
+    func testAFolderThatIsNotARepositoryIsCalledAFolder() throws {
+        let h = harness(try request(isGit: false))
+        XCTAssertTrue(open(h))
+        XCTAssertEqual(h.card.alwaysScopePopup?.titleOfSelectedItem, "This folder (/opt/work/x)")
+        XCTAssertEqual(h.card.listing.alwaysPanel?[2], "This folder (/opt/work/x)")
+    }
+
+    func testNothingIsSentByOpeningChangingEitherPopUpCopyingOrCancelling() throws {
+        let h = harness(try request())
+        let board = NSPasteboard(name: NSPasteboard.Name("nostromo.test.\(UUID().uuidString)"))
+        pasteboards.append(board)
+        h.card.pasteboard = board
+        XCTAssertTrue(open(h, number: 1, time: 10))
+        XCTAssertTrue(choose(h, h.card.alwaysCandidatePopup!, index: 1, number: 2, time: 20))
+        XCTAssertTrue(choose(h, h.card.alwaysScopePopup!, index: 1, number: 3, time: 30))
+
+        h.card.alwaysCopyButton!.performClick(nil)
+        XCTAssertEqual(board.string(forType: .string), RuleFixtures.prefixText, "Copy rule puts the rule as shown on the pasteboard")
+        XCTAssertEqual(h.recorder.sent, [])
+
+        h.card.alwaysCancelButton!.performClick(nil)
+        XCTAssertFalse(h.card.alwaysIsOpen)
+        XCTAssertNil(h.card.listing.alwaysPanel)
+        XCTAssertEqual(h.recorder.sent, [], "nothing was sent at any step")
+        XCTAssertEqual(h.recorder.reports, [])
+        XCTAssertEqual(h.store.entry(id: "req-1")?.state, .pending)
+    }
+
+    func testChangingEitherPopUpUpdatesWhatThePanelShows() throws {
+        let h = harness(try request())
+        open(h)
+        choose(h, h.card.alwaysCandidatePopup!, index: 1, number: 2, time: 20)
+        XCTAssertEqual(h.card.listing.alwaysPanel?[0], RuleFixtures.prefixText)
+        choose(h, h.card.alwaysScopePopup!, index: 1, number: 3, time: 30)
+        let panel = try XCTUnwrap(h.card.listing.alwaysPanel)
+        XCTAssertEqual(panel[2], "All repositories")
+        XCTAssertEqual(panel[3], "Every Nostromo session in all repositories will run this without asking")
+        XCTAssertEqual(panel[4], "Your ~/.claude/settings.json is not changed")
+    }
+
+    // MARK: Step 2 writes
+
+    func testWriteRuleAfterTheGapSendsExactlyOneAllowAlwaysNamingTheShownRuleAndScope() throws {
+        let h = harness(try request())
+        open(h, time: 10)
+        XCTAssertTrue(h.card.alwaysWriteButton!.isEnabled)
+
+        current = click(h.card.alwaysWriteButton!, number: 2, time: 10.5, in: h.window)
+        clock = 100.5
+        h.card.alwaysWriteButton!.performClick(nil)
+        h.card.alwaysWriteButton!.performClick(nil)   // a second press changes nothing: the store answers once
+
+        XCTAssertEqual(h.recorder.sent.count, 1)
+        XCTAssertEqual(h.recorder.sent.first?.requestID, "req-1")
+        XCTAssertEqual(h.recorder.sent.first?.decision, decision("c-exact", RuleFixtures.exactText, .repo))
+        XCTAssertEqual(h.recorder.sent.first?.windowID, "w-test")
+    }
+
+    func testWriteRuleNamesTheRuleAndScopeLastChosenNotThePreselectedOnes() throws {
+        let h = harness(try request())
+        open(h, number: 1, time: 10)
+        choose(h, h.card.alwaysCandidatePopup!, index: 1, number: 2, time: 20)
+        choose(h, h.card.alwaysScopePopup!, index: 1, number: 3, time: 30)
+
+        XCTAssertTrue(write(h, number: 4, time: 31))
+        XCTAssertEqual(h.recorder.sent.map(\.decision), [decision("c-prefix", RuleFixtures.prefixText, .allRepos)])
+    }
+
+    func testAFastDoubleActionAfterAPopUpChangeCannotWriteABroaderRule() throws {
+        let h = harness(try request())
+        open(h, number: 1, time: 10)
+        // Long after opening, the person widens the scope, and a second action follows at once.
+        choose(h, h.card.alwaysScopePopup!, index: 1, number: 2, time: 20)
+        XCTAssertFalse(write(h, number: 3, time: 20.1), "0.1 s after the last choice")
+        XCTAssertEqual(h.recorder.sent, [])
+        XCTAssertTrue(h.card.alwaysIsOpen, "the panel stays, showing the broader scope")
+        XCTAssertEqual(h.card.listing.alwaysPanel?[2], "All repositories")
+
+        XCTAssertTrue(write(h, number: 4, time: 21), "a separate gesture after the gap")
+        XCTAssertEqual(h.recorder.sent.map(\.decision), [decision("c-exact", RuleFixtures.exactText, .allRepos)])
+    }
+
+    func testAFastDoubleActionAfterChangingTheRuleCannotWriteTheNewRule() throws {
+        let h = harness(try request())
+        open(h, number: 1, time: 10)
+        choose(h, h.card.alwaysCandidatePopup!, index: 1, number: 2, time: 20)
+        XCTAssertFalse(write(h, number: 3, time: 20.2))
+        XCTAssertEqual(h.recorder.sent, [])
+    }
+
+    func testWriteRuleIsRefusedWhenTheEventIsTheOneThatOpenedThePanel() throws {
+        let h = harness(try request())
+        // A key event (space) opens the panel; the very same event "presses" Write rule.
+        let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 10,
+                                   windowNumber: h.window.windowNumber, context: nil, characters: " ",
+                                   charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49)!
+        current = key
+        clock = 100
+        XCTAssertTrue(h.card.openAlwaysPanel(control: h.card.sessionButton!))
+        relayout(h)
+        clock = 101
+        XCTAssertFalse(h.card.writeRule(from: h.card.alwaysWriteButton!))
+        XCTAssertEqual(h.recorder.sent, [])
+        XCTAssertTrue(h.card.alwaysIsOpen)
+    }
+
+    func testWriteRuleIsRefusedForAClickOutsideTheButtonADoubleClickAndAHandlerClockThatHasNotMoved() throws {
+        let h = harness(try request())
+        open(h, number: 1, time: 10)
+
+        current = click(h.card.alwaysCancelButton!, number: 2, time: 11, in: h.window)   // aimed at another control
+        clock = 101
+        XCTAssertFalse(h.card.writeRule(from: h.card.alwaysWriteButton!))
+
+        XCTAssertFalse(write(h, number: 3, time: 12, clickCount: 2), "a double click")
+
+        // Event times far apart, but the handlers ran back to back with the pick (forged timestamps).
+        current = click(h.card.alwaysWriteButton!, number: 4, time: 50, in: h.window)
+        clock = 100.05
+        XCTAssertFalse(h.card.writeRule(from: h.card.alwaysWriteButton!))
+
+        XCTAssertEqual(h.recorder.sent, [])
+        XCTAssertTrue(h.card.alwaysIsOpen, "a refused Write rule keeps the panel")
+    }
+
+    func testASyntheticWriteRuleSendsNothingAndIsReportedAsAppControl() throws {
+        let appControl: SessionRuleGesture.Permit = { _, _, menu in
+            menu ? .human(sourcePid: nil, sourceState: nil) : .refused(reason: .appControl)
+        }
+        let h = harness(try request(), permit: appControl)
+        open(h, time: 10)
+
+        XCTAssertFalse(write(h, number: 2, time: 11))
+
+        XCTAssertEqual(h.recorder.sent, [])
+        XCTAssertEqual(h.recorder.reports, [ApprovalRecorder.Report(requestID: "req-1", control: "allow_always", channel: .appControl)])
+    }
+
+    func testASyntheticOpenOpensNothingAndIsReported() throws {
+        let h = harness(try request(), permit: { _, _, _ in .refused(reason: .accessibilityPress) })
+        XCTAssertFalse(h.card.openAlwaysPanel(control: h.card.sessionButton!))
+        XCTAssertFalse(h.card.alwaysIsOpen)
+        XCTAssertNil(h.card.listing.alwaysPanel)
+        XCTAssertEqual(h.recorder.reports, [ApprovalRecorder.Report(requestID: "req-1", control: "allow_always", channel: .accessibility)])
+        XCTAssertEqual(h.recorder.sent, [])
+    }
+
+    func testARefusedPopUpChangePutsThePopUpBackAndChangesNothing() throws {
+        var human = true
+        let h = harness(try request(), permit: { _, _, _ in
+            human ? .human(sourcePid: nil, sourceState: nil) : .refused(reason: .appControl)
+        })
+        open(h)
+        human = false
+
+        XCTAssertFalse(choose(h, h.card.alwaysScopePopup!, index: 1, number: 2, time: 20))
+
+        XCTAssertEqual(h.card.alwaysScopePopup?.titleOfSelectedItem, "This repository (/opt/work/x)", "put back on what the panel shows")
+        XCTAssertEqual(h.card.listing.alwaysPanel?[2], "This repository (/opt/work/x)")
+        XCTAssertEqual(h.recorder.reports, [ApprovalRecorder.Report(requestID: "req-1", control: "allow_always", channel: .appControl)])
+        XCTAssertEqual(h.recorder.sent, [])
+    }
+
+    func testWriteRuleIsDisabledUntilTheWholeInputWasShown() throws {
+        let long = try ApprovalTestRequests.bash(ApprovalTestRequests.heredoc300Command, commandCount: 14,
+                                                 options: Self.options, sessionRuleCandidates: RuleFixtures.candidates,
+                                                 repoRoot: Self.root, repoIsGit: true)
+        let h = harness(long)
+        XCTAssertTrue(open(h))
+        XCTAssertFalse(h.card.alwaysWriteButton!.isEnabled, "the input has lines nobody has seen")
+        XCTAssertFalse(h.card.canWriteRule)
+        XCTAssertFalse(write(h, number: 2, time: 11))
+        XCTAssertEqual(h.recorder.sent, [])
+
+        ApprovalTestViews.readThrough(h.card.inputView)
+        h.relayout()
+        XCTAssertTrue(h.card.alwaysWriteButton!.isEnabled)
+    }
+
+    // MARK: Reverting
+
+    func testThePanelClosesWhenTheRequestChanges() throws {
+        let h = harness(try request())
+        open(h)
+        h.store.answer("req-1", ApprovalDecisionWire(kind: .deny), windowID: "w")
+        h.sync()
+        XCTAssertFalse(h.card.alwaysIsOpen)
+        XCTAssertNil(h.card.listing.alwaysPanel)
+    }
+
+    func testThePanelClosesWhenTheCardLeavesItsWindow() throws {
+        let h = harness(try request())
+        open(h)
+        h.card.removeFromSuperview()
+        XCTAssertFalse(h.card.alwaysIsOpen)
+    }
+
+    func testThePanelRevertsAfterTheSessionPicksLifetime() throws {
+        let h = harness(try request())
+        open(h)
+        XCTAssertTrue(h.card.alwaysIsOpen)
+        let expiry = expectation(description: "the panel reverts")
+        DispatchQueue.main.asyncAfter(deadline: .now() + SessionRuleGesture.selectionLifetime + 0.5) { expiry.fulfill() }
+        wait(for: [expiry], timeout: SessionRuleGesture.selectionLifetime + 3)
+        XCTAssertFalse(h.card.alwaysIsOpen)
+        XCTAssertEqual(h.recorder.sent, [])
+    }
+
+    func testChoosingASessionRuleClosesTheAlwaysPanelAndOpeningTheAlwaysPanelDropsASessionPick() throws {
+        let h = harness(try request())
+        open(h, number: 1, time: 10)
+        current = click(h.card.sessionButton!, number: 2, time: 20, in: h.window)
+        clock = 110
+        XCTAssertTrue(h.card.selectSessionRule(h.card.options.sessionRules[0], control: h.card.sessionButton!))
+        XCTAssertFalse(h.card.alwaysIsOpen, "one panel at a time")
+        XCTAssertEqual(h.card.selectedCandidate?.id, "c-exact")
+
+        current = click(h.card.sessionButton!, number: 3, time: 30, in: h.window)
+        clock = 120
+        XCTAssertTrue(h.card.openAlwaysPanel(control: h.card.sessionButton!))
+        XCTAssertNil(h.card.selectedCandidate)
+        XCTAssertNil(h.card.listing.sessionPanel)
+        XCTAssertTrue(h.card.alwaysIsOpen)
+    }
+
+    // MARK: Refusals from the daemon
+
+    func testARuleRefusalKeepsThePanelWithItsReasonAndDenyStaysAvailable() throws {
+        let cases: [(code: String, reason: String?, text: String)] = [
+            ("rule_refused", "That rule is too broad", "Not sent: That rule is too broad"),
+            ("rules_quarantined", nil, "Not sent: The rules file changed outside Nostromo. Review it in Approval Rules first."),
+            ("rule_limit", nil, "Not sent: There are 200 rules already. Remove one in Approval Rules first."),
+            ("rule_write_failed", nil, "Not sent: The rules file could not be written. Nothing was allowed."),
+        ]
+        for (index, c) in cases.enumerated() {
+            clock = 100
+            let h = harness(try request(id: "req-\(index)"))
+            open(h, time: 10)
+            XCTAssertTrue(write(h, number: 2, time: 11), c.code)
+            h.store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "req-\(index)", code: c.code, reason: c.reason)))
+            h.sync()
+            relayout(h)
+
+            XCTAssertTrue(h.card.alwaysIsOpen, "\(c.code): the panel stays, so the reason is read where it was chosen")
+            XCTAssertEqual(h.card.listing.alwaysPanel?.last, c.text, c.code)
+            XCTAssertTrue(h.card.denyButton.isEnabled, "\(c.code): Deny is never stranded")
+            XCTAssertFalse(h.card.alwaysWriteButton!.isEnabled, "\(c.code): the rule is not re-sent")
+
+            h.card.denyButton.performClick(nil)
+            XCTAssertEqual(h.recorder.sent.map(\.decision).last, ApprovalDecisionWire(kind: .deny), c.code)
+            XCTAssertEqual(h.recorder.sent.count, 2, "\(c.code): the rule once, then the Deny")
+        }
+    }
+
+    // MARK: Height
+
+    func testThePanelChangesTheCardsHeightOnlyWhenItOpensAndCloses() throws {
+        let h = harness(try request())
+        let board = NSPasteboard(name: NSPasteboard.Name("nostromo.test.\(UUID().uuidString)"))
+        pasteboards.append(board)
+        h.card.pasteboard = board
+        let width = h.card.frame.width
+        let closed = h.card.preferredHeight(forWidth: width, maxHeight: 520)
+
+        open(h, number: 1, time: 10)
+        let opened = h.card.preferredHeight(forWidth: width, maxHeight: 520)
+        XCTAssertGreaterThan(opened, closed, "the panel has room of its own inside the card")
+
+        choose(h, h.card.alwaysCandidatePopup!, index: 1, number: 2, time: 20)
+        XCTAssertEqual(h.card.preferredHeight(forWidth: width, maxHeight: 520), opened, "a pop-up change moves nothing")
+        choose(h, h.card.alwaysScopePopup!, index: 1, number: 3, time: 30)
+        XCTAssertEqual(h.card.preferredHeight(forWidth: width, maxHeight: 520), opened, "nor does the scope")
+        h.card.alwaysCopyButton!.performClick(nil)
+        XCTAssertEqual(h.card.preferredHeight(forWidth: width, maxHeight: 520), opened, "nor Copy rule")
+
+        h.card.alwaysCancelButton!.performClick(nil)
+        XCTAssertEqual(h.card.preferredHeight(forWidth: width, maxHeight: 520), closed, "closing gives the room back")
+    }
+}
+
+private extension NSPopUpButton {
+    var itemTitles: [String] { itemArray.map(\.title) }
+}
