@@ -4369,6 +4369,61 @@ fn a_log_page_echoes_its_querys_request_id_and_an_unrepresentable_since_is_a_bad
     });
 }
 
+// Fails if a refusal does not name the query it answers: the app drops a refusal whose id does
+// not match its query, so an unnamed `bad_cursor` or `not_operator_app` would read as a timeout.
+#[test]
+fn every_log_query_refusal_echoes_the_querys_request_id() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let mut agent = rig.agent(vec![Topic::Decision]).await;
+        let nonce = app.nonce.clone().unwrap();
+
+        let refused_id = |m: ServerMsg| match m {
+            ServerMsg::ApprovalsLogRefused { request_id, .. } => request_id,
+            other => panic!("{other:?}"),
+        };
+
+        app.send(&ClientMsg::ApprovalsLogQuery {
+            tag: None,
+            outcome: None,
+            since_ms: None,
+            limit: 50,
+            cursor: Some("not a cursor".into()),
+            request_id: Some("log-c".into()),
+            operator_nonce: Some(nonce.clone()),
+        })
+        .await;
+        let m = app
+            .next("a bad cursor", is_log_refused_with("bad_cursor"))
+            .await;
+        assert_eq!(refused_id(m).as_deref(), Some("log-c"));
+
+        agent
+            .send(&log_query_with(&nonce, Some("log-n"), None))
+            .await;
+        let m = agent
+            .next("not the app", is_log_refused_with("not_operator_app"))
+            .await;
+        assert_eq!(refused_id(m).as_deref(), Some("log-n"));
+
+        app.send(&ClientMsg::ApprovalsLogQuery {
+            tag: None,
+            outcome: None,
+            since_ms: None,
+            limit: 50,
+            cursor: None,
+            request_id: Some("log-w".into()),
+            operator_nonce: Some("wrong".into()),
+        })
+        .await;
+        let m = app
+            .next("a wrong nonce", is_log_refused_with("not_operator_app"))
+            .await;
+        assert_eq!(refused_id(m).as_deref(), Some("log-w"));
+    });
+}
+
 // Fails if the row time sent with an entry request is ignored: an entry far from the hinted time
 // must not be found (only the days around it are read), and the right hint, or none, finds it.
 #[test]

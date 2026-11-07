@@ -1703,7 +1703,8 @@ fn handle_client_msg(
             ..
         } => {
             let broker = session_mgr.lock().unwrap().approvals().cloned();
-            if !log_request_allowed(None, trust, answer_check, targeted_tx) {
+            // Every refusal names the query it answers: the app drops one that does not.
+            if !log_request_allowed(request_id.as_deref(), trust, answer_check, targeted_tx) {
                 return;
             }
             // A time the clock cannot hold is a bad request, not "no filter".
@@ -1726,6 +1727,7 @@ fn handle_client_msg(
                 return;
             };
             let (tx, sensitive) = (targeted_tx.clone(), sensitive.clone());
+            let refusal_id = request_id.clone();
             tokio::task::spawn_blocking(move || {
                 let query = crate::approvals::audit::LogQuery {
                     tag,
@@ -1738,12 +1740,13 @@ fn handle_client_msg(
                 };
                 let reply = match broker.log_query(&query) {
                     Ok(page) => log_page_frame(page, &sensitive, request_id),
-                    Err(crate::approvals::audit::LogError::BadCursor) => {
-                        ServerMsg::ApprovalsLogRefused { code: "bad_cursor".to_string(), request_id: None }
-                    }
+                    Err(crate::approvals::audit::LogError::BadCursor) => ServerMsg::ApprovalsLogRefused {
+                        code: "bad_cursor".to_string(),
+                        request_id: refusal_id,
+                    },
                     Err(e) => {
                         warn!("approvals log query failed: {e}");
-                        ServerMsg::ApprovalsLogRefused { code: "unavailable".to_string(), request_id: None }
+                        ServerMsg::ApprovalsLogRefused { code: "unavailable".to_string(), request_id: refusal_id }
                     }
                 };
                 let _ = tx.send(reply);
