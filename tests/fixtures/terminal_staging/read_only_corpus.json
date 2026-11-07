@@ -66,6 +66,7 @@
  {"name": "cp_with_a_brace_group_for_a_backup_copy", "text": "cp file{,.bak}", "expect": "sheet", "reason": "a glued brace group is read as an expansion no text rule can follow, so the sheet asks first"},
  {"name": "ls_with_a_brace_group_of_directories", "text": "ls -la /var/log/{nginx,app}", "expect": "sheet", "reason": "a glued brace group is read as an expansion no text rule can follow, so the sheet asks first"},
  {"name": "tail_follow_with_a_brace_group_of_directories", "text": "tail -f /var/log/{nginx,app}/error.log", "expect": "sheet", "reason": "a glued brace group is read as an expansion no text rule can follow, so the sheet asks first"},
- {"name": "scp_with_a_literal_angle_bracket_placeholder", "text": "scp <file> host", "expect": "sheet", "reason": "the literal <file> is read as two redirections, so the second truncates host"}
+ {"name": "scp_with_a_literal_angle_bracket_placeholder", "text": "scp <file> host", "expect": "sheet", "reason": "the literal <file> is read as two redirections, so the second truncates host"},
+ {"name": "ls_with_numbered_files_in_a_brace_group", "text": "ls file{1,2}.txt", "expect": "sheet", "reason": "a glued brace group is read as an expansion no text rule can follow, so the sheet asks first"}
 ]
 }

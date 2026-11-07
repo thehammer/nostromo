@@ -809,3 +809,712 @@ fn bypass_appending_through_a_symlinked_daily_file_fails_and_leaves_the_target_a
     log.append(&blocked(at(2026, 10, 18, 12, 0, 0), None))
         .expect("a normal file still works");
 }
+
+// ── AP5: the read-only query layer ──────────────────────────────────────────────────────────
+
+mod query {
+    use super::*;
+    use nostromo::approvals::audit::{LogQuery, OutcomeFilter, RowKind};
+
+    fn store() -> (tempfile::TempDir, AuditLog) {
+        let dir = tempfile::tempdir().unwrap();
+        let log = AuditLog::open(&dir.path().join("a")).unwrap();
+        (dir, log)
+    }
+
+    fn req(ts: DateTime<Utc>, rid: &str, tag: &str, command: &str) -> Entry {
+        let mut e = Entry::new(
+            Event::Request {
+                tool_name: "Bash".into(),
+                input: json!({ "command": command }),
+                display_text: None,
+                reason: Some(json!({"kind": "ask"})),
+                flags: None,
+                options: None,
+                cli_request: None,
+            },
+            ts,
+        );
+        e.request_id = Some(rid.into());
+        e.tag = Some(tag.into());
+        e.tool_use_id = Some(format!("toolu_{rid}"));
+        e.agent = Some("main".into());
+        e
+    }
+
+    fn outcome(ts: DateTime<Utc>, rid: Option<&str>, name: &str) -> Entry {
+        let mut e = Entry::new(
+            Event::Outcome {
+                outcome: name.into(),
+                rule: None,
+                by_window: Some("w1".into()),
+                latency_ms: Some(1234),
+                watchdog: false,
+            },
+            ts,
+        );
+        e.request_id = rid.map(String::from);
+        e
+    }
+
+    fn q(limit: usize) -> LogQuery {
+        LogQuery {
+            limit,
+            ..Default::default()
+        }
+    }
+
+    #[allow(non_snake_case)]
+    fn NOW() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 7, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn a_request_and_its_outcome_are_one_row_newest_first() {
+        let (_d, log) = store();
+        log.append(&req(at(2026, 11, 7, 10, 0, 0), "r1", "A", "ls"))
+            .unwrap();
+        log.append(&outcome(
+            at(2026, 11, 7, 10, 0, 5),
+            Some("r1"),
+            "allowed_once",
+        ))
+        .unwrap();
+        log.append(&req(at(2026, 11, 7, 11, 0, 0), "r2", "B", "rm x"))
+            .unwrap();
+        log.append(&outcome(at(2026, 11, 7, 11, 0, 5), Some("r2"), "denied"))
+            .unwrap();
+        let page = log.query(&q(50), NOW()).unwrap();
+        assert_eq!(page.rows.len(), 2);
+        assert_eq!(page.rows[0].request_id.as_deref(), Some("r2"));
+        assert_eq!(page.rows[0].outcome.as_deref(), Some("denied"));
+        assert_eq!(page.rows[0].summary, "rm x");
+        assert_eq!(page.rows[0].latency_ms, Some(1234));
+        assert_eq!(page.rows[0].by_window.as_deref(), Some("w1"));
+        assert_eq!(page.rows[0].entry_ids.len(), 2);
+        assert_eq!(page.rows[1].outcome.as_deref(), Some("allowed_once"));
+        assert_eq!(page.rows[1].tool_use_id.as_deref(), Some("toolu_r1"));
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn a_request_with_no_outcome_yet_is_a_row_without_one() {
+        let (_d, log) = store();
+        log.append(&req(at(2026, 11, 7, 10, 0, 0), "r1", "A", "ls"))
+            .unwrap();
+        let page = log.query(&q(50), NOW()).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].outcome, None);
+    }
+
+    #[test]
+    fn the_merge_works_across_a_utc_day_boundary() {
+        let (_d, log) = store();
+        log.append(&req(at(2026, 11, 6, 23, 59, 50), "r1", "A", "ls"))
+            .unwrap();
+        log.append(&outcome(
+            at(2026, 11, 7, 0, 0, 20),
+            Some("r1"),
+            "allowed_once",
+        ))
+        .unwrap();
+        for limit in [1, 2, 50] {
+            let page = log.query(&q(limit), NOW()).unwrap();
+            assert_eq!(page.rows.len(), 1, "limit {limit}");
+            assert_eq!(page.rows[0].outcome.as_deref(), Some("allowed_once"));
+            assert_eq!(page.rows[0].ts, at(2026, 11, 6, 23, 59, 50));
+        }
+        log.append(&req(at(2026, 11, 7, 5, 0, 0), "r2", "A", "pwd"))
+            .unwrap();
+        let page = log.query(&q(1), NOW()).unwrap();
+        assert_eq!(page.rows[0].request_id.as_deref(), Some("r2"));
+        let page2 = log
+            .query(
+                &LogQuery {
+                    limit: 5,
+                    cursor: page.next_cursor,
+                    ..Default::default()
+                },
+                NOW(),
+            )
+            .unwrap();
+        assert_eq!(page2.rows.len(), 1);
+        assert_eq!(page2.rows[0].request_id.as_deref(), Some("r1"));
+        assert_eq!(page2.rows[0].outcome.as_deref(), Some("allowed_once"));
+    }
+
+    #[test]
+    fn an_outcome_with_no_request_is_its_own_row() {
+        let (_d, log) = store();
+        log.append(&outcome(
+            at(2026, 11, 7, 9, 0, 0),
+            Some("gone"),
+            "restart_crash",
+        ))
+        .unwrap();
+        log.append(&outcome(
+            at(2026, 11, 7, 9, 1, 0),
+            None,
+            "request_unparseable",
+        ))
+        .unwrap();
+        let page = log.query(&q(50), NOW()).unwrap();
+        assert_eq!(page.rows.len(), 2);
+        assert_eq!(page.rows[0].outcome.as_deref(), Some("request_unparseable"));
+        assert_eq!(page.rows[1].outcome.as_deref(), Some("restart_crash"));
+        assert!(page.rows.iter().all(|r| r.kind == RowKind::Request));
+    }
+
+    #[test]
+    fn every_other_entry_kind_is_a_row_including_an_unknown_one() {
+        let (_d, log) = store();
+        log.append(&blocked(at(2026, 11, 7, 8, 0, 0), Some("A")))
+            .unwrap();
+        let mut refusal = Entry::new(
+            Event::Refusal {
+                refusal_code: "not_operator_app".into(),
+                peer: Some(json!({"kind": "local_other"})),
+                channel: Some("app_control".into()),
+                control: Some("allow".into()),
+            },
+            at(2026, 11, 7, 8, 1, 0),
+        );
+        refusal.tag = Some("A".into());
+        log.append(&refusal).unwrap();
+        log.append(&Entry::new(
+            Event::SessionRuleGranted {
+                rule: json!({"rule_text": "Bash(ls:*)"}),
+            },
+            at(2026, 11, 7, 8, 2, 0),
+        ))
+        .unwrap();
+        log.append(&Entry::new(
+            Event::RuleWritten {
+                rule: json!({"rule_text": "Bash(pwd)"}),
+            },
+            at(2026, 11, 7, 8, 3, 0),
+        ))
+        .unwrap();
+        let line = json!({"v": 1, "id": "u-1", "ts": "2026-11-07T08:04:00Z",
+            "event": "from_the_future", "tag": "A"});
+        let path = log.file_for(at(2026, 11, 7, 0, 0, 0));
+        let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        use std::io::Write;
+        writeln!(f, "{line}").unwrap();
+
+        let page = log.query(&q(50), NOW()).unwrap();
+        let kinds: Vec<_> = page.rows.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                RowKind::Other,
+                RowKind::Rule,
+                RowKind::Rule,
+                RowKind::Refusal,
+                RowKind::GuardBlocked
+            ]
+        );
+        assert_eq!(page.rows[0].summary, "from_the_future");
+        assert_eq!(page.rows[2].rule_label.as_deref(), Some("Bash(ls:*)"));
+        assert_eq!(
+            page.rows[3].refusal_code.as_deref(),
+            Some("not_operator_app")
+        );
+        assert_eq!(page.rows[4].outcome.as_deref(), Some("guard_blocked"));
+        assert_eq!(page.rows[4].tool_name.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn a_preview_entry_appears_in_the_log_as_a_generic_row() {
+        let (_d, log) = store();
+        let mut e = Entry::new(
+            Event::Preview {
+                preview: json!({"state": "complete", "targets": [], "more": 0}),
+            },
+            at(2026, 11, 7, 8, 0, 0),
+        );
+        e.request_id = Some("r1".into());
+        e.tag = Some("A".into());
+        log.append(&e).unwrap();
+
+        let page = log.query(&q(50), NOW()).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].kind, RowKind::Other);
+        assert_eq!(page.rows[0].summary, "preview");
+        assert_eq!(page.rows[0].request_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
+    fn filters_by_focus_outcome_group_and_since() {
+        let (_d, log) = store();
+        let cases = [
+            ("r1", "A", "allowed_once", 1),
+            ("r2", "A", "allowed_by_session_rule", 2),
+            ("r3", "B", "denied", 3),
+            ("r4", "B", "denied_and_stopped", 4),
+            ("r5", "A", "timed_out", 5),
+            ("r6", "A", "no_app", 6),
+            ("r7", "A", "answered", 7),
+        ];
+        for (rid, tag, name, h) in cases {
+            log.append(&req(at(2026, 11, 7, h, 0, 0), rid, tag, "x"))
+                .unwrap();
+            log.append(&outcome(at(2026, 11, 7, h, 0, 9), Some(rid), name))
+                .unwrap();
+        }
+        log.append(&blocked(at(2026, 11, 7, 8, 0, 0), Some("A")))
+            .unwrap();
+        let ids = |f: LogQuery| -> Vec<String> {
+            log.query(&f, NOW())
+                .unwrap()
+                .rows
+                .into_iter()
+                .map(|r| r.request_id.unwrap_or(r.row_id))
+                .collect()
+        };
+        let base = || q(50);
+        assert_eq!(
+            ids(LogQuery {
+                tag: Some("B".into()),
+                ..base()
+            }),
+            ["r4", "r3"]
+        );
+        assert_eq!(
+            ids(LogQuery {
+                outcome: Some(OutcomeFilter::Allowed),
+                ..base()
+            }),
+            ["r7", "r2", "r1"]
+        );
+        assert_eq!(
+            ids(LogQuery {
+                outcome: Some(OutcomeFilter::Denied),
+                ..base()
+            }),
+            ["r4", "r3"]
+        );
+        assert_eq!(
+            ids(LogQuery {
+                outcome: Some(OutcomeFilter::TimedOut),
+                ..base()
+            }),
+            ["r6", "r5"]
+        );
+        assert_eq!(
+            log.query(
+                &LogQuery {
+                    outcome: Some(OutcomeFilter::GuardBlocked),
+                    ..base()
+                },
+                NOW()
+            )
+            .unwrap()
+            .rows
+            .len(),
+            1
+        );
+        assert_eq!(
+            ids(LogQuery {
+                since: Some(at(2026, 11, 7, 6, 0, 0)),
+                ..base()
+            })
+            .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn paging_has_no_duplicates_or_gaps_across_pages() {
+        let (_d, log) = store();
+        for i in 0..25u32 {
+            let day = 5 + i / 10;
+            let ts = at(2026, 11, day, i % 10, 0, 0);
+            log.append(&req(ts, &format!("r{i:02}"), "A", "x")).unwrap();
+            log.append(&outcome(
+                ts + Duration::seconds(3),
+                Some(&format!("r{i:02}")),
+                "denied",
+            ))
+            .unwrap();
+        }
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            let page = log
+                .query(
+                    &LogQuery {
+                        limit: 10,
+                        cursor: cursor.clone(),
+                        ..Default::default()
+                    },
+                    NOW(),
+                )
+                .unwrap();
+            pages += 1;
+            assert!(page
+                .rows
+                .iter()
+                .all(|r| r.outcome.as_deref() == Some("denied")));
+            seen.extend(page.rows.iter().map(|r| r.request_id.clone().unwrap()));
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(pages, 3);
+        let mut expect: Vec<String> = (0..25).map(|i| format!("r{i:02}")).collect();
+        expect.sort_by_key(|r| {
+            let i: u32 = r[1..].parse().unwrap();
+            std::cmp::Reverse((i / 10, i % 10))
+        });
+        assert_eq!(seen, expect);
+    }
+
+    #[test]
+    fn limit_is_clamped_and_a_garbage_cursor_is_an_error_not_a_panic() {
+        let (_d, log) = store();
+        for i in 0..520u32 {
+            log.append(&blocked(
+                at(2026, 11, 7, 0, 0, 0) + Duration::seconds(i as i64),
+                None,
+            ))
+            .unwrap();
+        }
+        assert_eq!(log.query(&q(10_000), NOW()).unwrap().rows.len(), 500);
+        assert_eq!(log.query(&q(0), NOW()).unwrap().rows.len(), 1);
+        for bad in ["", "!!!", "bm90LWEtY3Vyc29y", "Zm9vOmJhcg"] {
+            let r = log.query(
+                &LogQuery {
+                    limit: 5,
+                    cursor: Some(bad.into()),
+                    ..Default::default()
+                },
+                NOW(),
+            );
+            assert!(r.is_err(), "cursor {bad:?}");
+        }
+    }
+
+    #[test]
+    fn old_entries_leave_the_query_after_a_sweep_and_a_reopened_store_returns_the_same_rows() {
+        let (d, log) = store();
+        let old = NOW() - Duration::days(RETENTION_DAYS + 5);
+        log.append(&blocked(old, None)).unwrap();
+        log.append(&blocked(NOW() - Duration::hours(1), None))
+            .unwrap();
+        assert_eq!(log.sweep(NOW()).unwrap(), 1);
+        let page = log.query(&q(50), NOW()).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        let again = AuditLog::open(&d.path().join("a"))
+            .unwrap()
+            .query(&q(50), NOW())
+            .unwrap();
+        assert_eq!(again.rows, page.rows);
+    }
+
+    #[test]
+    fn entry_detail_returns_the_full_input_by_request_id_or_entry_id() {
+        let (_d, log) = store();
+        let big = "x".repeat(5000);
+        let r = req(at(2026, 11, 7, 10, 0, 0), "r1", "A", &big);
+        let entry_id = r.id.clone();
+        log.append(&r).unwrap();
+        log.append(&outcome(
+            at(2026, 11, 7, 10, 0, 3),
+            Some("r1"),
+            "allowed_once",
+        ))
+        .unwrap();
+        for id in ["r1", entry_id.as_str()] {
+            let d = log.entry_detail(id, NOW()).unwrap().unwrap();
+            assert_eq!(d.input.unwrap()["command"], json!(big));
+            assert_eq!(d.reason, Some(json!({"kind": "ask"})));
+        }
+        let d = log.entry_detail("r1", NOW()).unwrap().unwrap();
+        assert_eq!(d.outcome.as_deref(), Some("allowed_once"));
+        assert!(log.entry_detail("nope", NOW()).unwrap().is_none());
+    }
+
+    // ── a query scans a big day without holding it ────────────────────────────────────────
+
+    /// One expected row: its id, its time, and the outcome it should show.
+    struct Expected {
+        row_id: String,
+        ts_ms: i64,
+        outcome: Option<&'static str>,
+    }
+
+    /// `groups` groups of five rows written straight to the day's file (an append syncs every
+    /// entry, too slow for tens of thousands): three requests answered 300 ms later, one guard
+    /// block, one request still waiting. Eight entries per group. Returns the rows a query
+    /// should show, newest first.
+    fn write_day(log: &AuditLog, day: DateTime<Utc>, groups: u32) -> Vec<Expected> {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::fs::File::create(log.file_for(day)).unwrap());
+        let mut expected = Vec::new();
+        let mut put = |e: &Entry| {
+            serde_json::to_writer(&mut out, e).unwrap();
+            out.write_all(b"\n").unwrap();
+        };
+        for g in 0..groups {
+            for k in 0..5u32 {
+                let u = g * 5 + k;
+                let ts = day + Duration::seconds(u as i64);
+                let rid = format!("r{u}");
+                match k {
+                    0..=2 => {
+                        put(&req(ts, &rid, "A", "ls"));
+                        put(&outcome(
+                            ts + Duration::milliseconds(300),
+                            Some(&rid),
+                            "denied",
+                        ));
+                        expected.push(Expected {
+                            row_id: rid,
+                            ts_ms: ts.timestamp_millis(),
+                            outcome: Some("denied"),
+                        });
+                    }
+                    3 => {
+                        let b = blocked(ts, Some("A"));
+                        expected.push(Expected {
+                            row_id: b.id.clone(),
+                            ts_ms: ts.timestamp_millis(),
+                            outcome: Some("guard_blocked"),
+                        });
+                        put(&b);
+                    }
+                    _ => {
+                        put(&req(ts, &rid, "A", "ls"));
+                        expected.push(Expected {
+                            row_id: rid,
+                            ts_ms: ts.timestamp_millis(),
+                            outcome: None,
+                        });
+                    }
+                }
+            }
+        }
+        out.flush().unwrap();
+        expected.sort_by_key(|e| std::cmp::Reverse(e.ts_ms));
+        expected
+    }
+
+    /// What a scan for a page of `limit` rows may hold at once: twice what it keeps, plus the
+    /// row that tips it over.
+    fn held_bound(limit: usize) -> usize {
+        2 * (limit + 1) + 1
+    }
+
+    fn assert_page_is(page: &nostromo::approvals::audit::LogPage, expected: &[Expected]) {
+        let got: Vec<(&str, Option<&str>)> = page
+            .rows
+            .iter()
+            .map(|r| (r.row_id.as_str(), r.outcome.as_deref()))
+            .collect();
+        let want: Vec<(&str, Option<&str>)> = expected
+            .iter()
+            .map(|e| (e.row_id.as_str(), e.outcome))
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_page_of_a_fifty_thousand_entry_day_is_read_holding_a_bounded_number_of_rows() {
+        let (_d, log) = store();
+        let day = at(2026, 11, 7, 0, 0, 0);
+        let expected = write_day(&log, day, 6_250); // 50,000 entries, 31,250 rows
+        assert_eq!(expected.len(), 31_250);
+
+        let (first, stats) = log.query_with_stats(&q(50), NOW()).unwrap();
+        assert_page_is(&first, &expected[..50]);
+        assert!(first.next_cursor.is_some());
+        assert!(
+            stats.peak_rows_held <= held_bound(50),
+            "held {} rows at once",
+            stats.peak_rows_held
+        );
+
+        // A page deep in the day, reached by cursor, is just as small and just as right.
+        let (second, stats) = log
+            .query_with_stats(
+                &LogQuery {
+                    limit: 50,
+                    cursor: first.next_cursor.clone(),
+                    ..Default::default()
+                },
+                NOW(),
+            )
+            .unwrap();
+        assert_page_is(&second, &expected[50..100]);
+        assert!(
+            stats.peak_rows_held <= held_bound(50),
+            "held {} rows at once",
+            stats.peak_rows_held
+        );
+
+        // A filter that drops most rows does not make the scan hold more.
+        let denied: Vec<&Expected> = expected
+            .iter()
+            .filter(|e| e.outcome == Some("denied"))
+            .collect();
+        let (filtered, stats) = log
+            .query_with_stats(
+                &LogQuery {
+                    limit: 50,
+                    outcome: Some(OutcomeFilter::Denied),
+                    ..Default::default()
+                },
+                NOW(),
+            )
+            .unwrap();
+        let got: Vec<&str> = filtered.rows.iter().map(|r| r.row_id.as_str()).collect();
+        let want: Vec<&str> = denied[..50].iter().map(|e| e.row_id.as_str()).collect();
+        assert_eq!(got, want);
+        assert!(
+            stats.peak_rows_held <= held_bound(50),
+            "held {} rows at once",
+            stats.peak_rows_held
+        );
+
+        // The bound follows the page size, not the size of the day.
+        let (big, stats) = log.query_with_stats(&q(500), NOW()).unwrap();
+        assert_page_is(&big, &expected[..500]);
+        assert!(
+            stats.peak_rows_held <= held_bound(500),
+            "held {} rows at once",
+            stats.peak_rows_held
+        );
+    }
+
+    #[test]
+    fn paging_a_whole_busy_day_newest_first_has_no_gap_no_repeat_and_no_row_out_of_order() {
+        let (_d, log) = store();
+        let expected = write_day(&log, at(2026, 11, 7, 0, 0, 0), 250); // 2,000 entries, 1,250 rows
+        assert_eq!(expected.len(), 1_250);
+
+        let mut seen: Vec<(String, Option<String>)> = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            let (page, stats) = log
+                .query_with_stats(
+                    &LogQuery {
+                        limit: 50,
+                        cursor: cursor.clone(),
+                        ..Default::default()
+                    },
+                    NOW(),
+                )
+                .unwrap();
+            pages += 1;
+            assert!(page.rows.len() <= 50);
+            assert!(
+                stats.peak_rows_held <= held_bound(50),
+                "page {pages} held {} rows at once",
+                stats.peak_rows_held
+            );
+            seen.extend(
+                page.rows
+                    .iter()
+                    .map(|r| (r.row_id.clone(), r.outcome.clone())),
+            );
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+            assert!(pages < 100, "paging does not end");
+        }
+        assert_eq!(pages, 25);
+        let want: Vec<(String, Option<String>)> = expected
+            .iter()
+            .map(|e| (e.row_id.clone(), e.outcome.map(String::from)))
+            .collect();
+        assert_eq!(
+            seen, want,
+            "every row once, newest first, each with its outcome"
+        );
+    }
+
+    #[test]
+    fn entry_detail_with_a_row_time_reads_only_the_days_around_it() {
+        let (_d, log) = store();
+        let old = req(at(2026, 11, 1, 10, 0, 0), "r-old", "A", "echo old");
+        let old_entry_id = old.id.clone();
+        log.append(&old).unwrap();
+        log.append(&outcome(
+            at(2026, 11, 1, 10, 0, 3),
+            Some("r-old"),
+            "allowed_once",
+        ))
+        .unwrap();
+        log.append(&req(at(2026, 11, 7, 10, 0, 0), "r-new", "A", "echo new"))
+            .unwrap();
+        let found = |id: &str, near: Option<DateTime<Utc>>| {
+            log.entry_detail_near(id, near, NOW()).unwrap().is_some()
+        };
+
+        // No hint: every day within retention is searched, as `entry_detail` does.
+        assert!(found("r-old", None));
+        assert!(log.entry_detail("r-old", NOW()).unwrap().is_some());
+        // The row's own day, or a day beside it, finds it, by request id or by entry id.
+        assert!(found("r-old", Some(at(2026, 11, 1, 23, 59, 0))));
+        assert!(found(&old_entry_id, Some(at(2026, 11, 1, 10, 0, 0))));
+        assert!(found("r-old", Some(at(2026, 11, 2, 0, 30, 0))));
+        assert!(found("r-old", Some(at(2026, 10, 31, 12, 0, 0))));
+        // A hint more than a day away does not reach it.
+        assert!(!found("r-old", Some(at(2026, 11, 7, 10, 0, 0))));
+        assert!(!found(&old_entry_id, Some(at(2026, 11, 7, 10, 0, 0))));
+        assert!(!found("r-old", Some(at(2026, 11, 3, 10, 0, 0))));
+        // The detail it finds is the whole entry, with its outcome.
+        let d = log
+            .entry_detail_near("r-old", Some(at(2026, 11, 1, 10, 0, 0)), NOW())
+            .unwrap()
+            .unwrap();
+        assert_eq!(d.outcome.as_deref(), Some("allowed_once"));
+        // The newer entry is found from its own day and not from the older one.
+        assert!(found("r-new", Some(at(2026, 11, 7, 11, 0, 0))));
+        assert!(!found("r-new", Some(at(2026, 11, 1, 10, 0, 0))));
+        // An id nothing has is none, with a hint and without.
+        assert!(!found("nope", None));
+        assert!(!found("nope", Some(at(2026, 11, 7, 10, 0, 0))));
+    }
+
+    #[test]
+    fn the_query_layer_has_no_way_to_edit_or_delete_an_entry() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/approvals/audit.rs"
+        ))
+        .unwrap();
+        let mut kept = String::new();
+        let mut skipping = false;
+        for line in src.lines() {
+            if line.starts_with("    pub fn sweep") || line.starts_with("    pub fn append") {
+                skipping = true;
+            } else if skipping && line == "    }" {
+                skipping = false;
+                continue;
+            }
+            if !skipping && !line.trim_start().starts_with("//") {
+                kept.push_str(line);
+                kept.push('\n');
+            }
+        }
+        for banned in [
+            "remove_file",
+            "truncate(",
+            "set_len",
+            ".seek(",
+            "write_at",
+            "OpenOptions::new",
+        ] {
+            assert!(
+                !kept.contains(banned),
+                "audit.rs uses {banned} outside sweep/append"
+            );
+        }
+    }
+}

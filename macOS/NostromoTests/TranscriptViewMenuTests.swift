@@ -123,8 +123,8 @@ final class TranscriptViewMenuTests: XCTestCase {
     func testTheViewMenuSitsBetweenEditAndTerminal() {
         let titles = MainMenu.make(target: nil).items.map { $0.submenu?.title ?? "" }
 
-        XCTAssertEqual(titles.count, 6, "App, Edit, View, Terminal, Debug, Session: \(titles)")
-        XCTAssertEqual(Array(titles.dropFirst()), ["Edit", "View", "Terminal", "Debug", "Session"])
+        XCTAssertEqual(titles.count, 7, "App, Edit, View, Terminal, Debug, Session, Window: \(titles)")
+        XCTAssertEqual(Array(titles.dropFirst()), ["Edit", "View", "Terminal", "Debug", "Session", "Window"])
     }
 
     func testTheViewMenuHoldsFocusShowAllActivityAndTheDefaultSubmenu() throws {

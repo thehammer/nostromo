@@ -758,6 +758,61 @@ final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
         XCTAssertEqual(recorder.opened, [])
         XCTAssertEqual(recorder.listsShown, 0)
     }
+
+    private func wakeMarker(in view: NSView) -> WakeMarkerView? {
+        if let turn = view as? ChatTurnView, let marker = turn.wakeMarkerView { return marker }
+        for sub in view.subviews { if let found = wakeMarker(in: sub) { return found } }
+        return nil
+    }
+
+    /// The wiring itself: the turn views a real `ReplView` builds for a session's own turns must send a click
+    /// on their wake marker through that pane's router. The other router tests hand `repl.wakeMarkerRouter`
+    /// to the rig, so they would still pass if `ReplView` stopped passing it on. This one does not: removing
+    /// `markerRouter: wakeMarkerRouter` where `ReplView.makeTurnView` builds its `ChatTurnView` (the turn views
+    /// then use `WakeMarkerView.defaultRouter`) leaves the recorder empty and fails it.
+    func testAWakeMarkerInARealPaneRoutesItsClickThroughThatPanesOwnRouter() throws {
+        let recorder = RouteRecorder()
+        let folds = FV4StoreWorld(self)
+        let window = makeRigWindow(self, size: NSSize(width: 900, height: 700))
+        let repl = fv4MakePane(tag: paneTag, store: folds.store, in: window)
+        repl.renderWatch.captureDirectory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("wake-route-\(UUID().uuidString)", isDirectory: true)
+        repl.renderWatch.visibilityOverride = true
+        repl.wakeMarkerOpensTask = { recorder.open($0, $1) }
+        repl.wakeMarkerShowsList = { recorder.showList() }
+        window.alphaValue = 0
+        window.orderFront(nil)
+        addTeardownBlock {
+            repl.renderWatch.visibilityOverride = false
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        func settle() {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            window.contentView?.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+        }
+        settle()
+
+        // The turn comes the way the daemon sends it, into the session the pane shows.
+        let client = AppStore.shared.client
+        client.messages.send(.sessionSpawned(tag: paneTag, sessionId: "session-\(paneTag)"))
+        client.messages.send(.sessionTurns(tag: paneTag, turns: [
+            DaemonTurn(id: "wake-1", userInput: TaskWakeFixtures.fallback, timestamp: "2026-11-01T15:00:00.000Z",
+                       blocks: [], isComplete: true, origin: TaskWakeFixtures.origin(1)),
+        ]))
+        modelWaitUntil {
+            settle()
+            return self.wakeMarker(in: repl) != nil
+        }
+
+        let marker = try XCTUnwrap(wakeMarker(in: repl), "the wake marker is not on screen")
+        marker.activate()
+
+        XCTAssertEqual(recorder.opened, [.init(tag: paneTag, taskId: "bmon01")],
+                       "the click went through the pane's own router, under its tag")
+        XCTAssertEqual(recorder.listsShown, 0)
+    }
 }
 
 // MARK: - Background wake: session frame rules and reattach

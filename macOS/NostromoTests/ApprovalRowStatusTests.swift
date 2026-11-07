@@ -895,7 +895,12 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
         XCTAssertEqual(withStore.approvalField.stringValue, "· denied by you")
     }
 
-    func testTheRowStaysOneControlAndAClickOnTheStatusTogglesItLikeAClickAnywhere() throws {
+    func testAClickOnTheStatusOpensTheLogAndAClickAnywhereElseOnTheRowStillTogglesIt() throws {
+        // AP5: the status is the one part of the row that is a link: it opens the Approvals log, not the fold.
+        let saved = FoldRowView.approvalLogOpener
+        defer { FoldRowView.approvalLogOpener = saved }
+        var opened: [ApprovalsLogLink] = []
+        FoldRowView.approvalLogOpener = { opened.append($0) }
         let (store, recorder) = makeStore()
         try request(store, "a")
         let (window, row) = makeRow(settledGroup(["toolu_a"]), store: store)
@@ -905,7 +910,8 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
 
         try AppControlMouse.click(in: window, at: NSPoint(x: rect.midX, y: rect.midY))
 
-        XCTAssertEqual(toggles, [true], "the whole row is one control: the click toggled it")
+        XCTAssertEqual(opened, [ApprovalsLogLink(toolUseId: "toolu_a")], "the click on the status opened the log on the call")
+        XCTAssertTrue(toggles.isEmpty, "and did not toggle the fold")
         XCTAssertTrue(recorder.sent.isEmpty, "and answered nothing")
         XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.pending)
         XCTAssertEqual(row.approvalField.stringValue, "· awaiting your approval")
@@ -1879,22 +1885,27 @@ final class ApprovalGuardBarTests: MouseQueueTestCase {
         p.assertComposerUntouched("the bar timed out")
     }
 
-    // MARK: The link is inert until the log exists
+    // MARK: The link opens the Approvals log (AP5)
 
-    func testTheLogLinkDoesNothingYet() throws {
+    func testTheLogLinkIsLiveAndOpensTheLogWithoutClosingTheBar() throws {
+        let saved = ApprovalOverlayHost.openLog
+        defer { ApprovalOverlayHost.openLog = saved }
+        var opened: [ApprovalsLogLink] = []
+        ApprovalOverlayHost.openLog = { opened.append($0) }
         let p = ApprovalPane(self)
         try block(p)
         let bar = try XCTUnwrap(p.host.guardBar)
         let link = bar.logLink
 
-        XCTAssertFalse(link.isEnabled, "disabled")
-        XCTAssertNil(link.target, "no target")
-        XCTAssertNil(link.action, "no action")
+        XCTAssertTrue(link.isEnabled, "enabled")
+        XCTAssertNotNil(link.target, "it has a target")
+        XCTAssertNotNil(link.action, "and an action")
 
         link.performClick(nil)
         p.layout()
 
-        XCTAssertNotNil(p.host.guardBar, "pressing it neither closes the bar nor opens anything")
+        XCTAssertEqual(opened.count, 1, "pressing it opens the log")
+        XCTAssertNotNil(p.host.guardBar, "pressing it does not close the bar")
         XCTAssertNotNil(p.store.guardNotice(tag: "cody-1"))
         XCTAssertTrue(p.recorder.sent.isEmpty)
     }
@@ -2391,7 +2402,7 @@ final class AskQuestionHandledStoreTests: MouseQueueTestCase {
         XCTAssertTrue(tap.values.dropFirst(beforeDeny).contains("toolu_a"), "the record is told it changed")
     }
 
-    func testARefusedDenyIsAlsoNotAcceptedAndPublishesEvenThoughNoLabelsWereKept() throws {
+    func testARefusedDenyIsNotAcceptedAndPublishesEvenThoughNoLabelsWereKept() throws {
         let (store, _) = make()
         let tap = ApprovalTap(store.statusChanges)
         try ask(store, "a")
@@ -2400,7 +2411,7 @@ final class AskQuestionHandledStoreTests: MouseQueueTestCase {
 
         store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "not_operator_app")))
 
-        XCTAssertTrue(store.isAnswerNotAccepted(toolUseId: "toolu_a"))
+        XCTAssertTrue(store.isDenyNotAccepted(toolUseId: "toolu_a"), "a refused Deny is worded as one, not as a refused answer")
         XCTAssertTrue(tap.values.dropFirst(before).contains("toolu_a"), "there was no choice to forget, the record still has to refresh")
     }
 
@@ -2483,6 +2494,91 @@ final class AskQuestionRecordViewTests: MouseQueueTestCase {
 
         XCTAssertNotEqual(view.statusLine, AskQuestionRecordView.answerNotAcceptedText, "the Deny is out: the record leaves \"not accepted\"")
         XCTAssertFalse(view.statusLine.hasPrefix("Answered"), "and never says it was answered")
+    }
+
+    // MARK: A refused Deny, and a Deny sent after a refusal
+
+    private let denyNotAccepted = "Deny was not accepted; try Deny again above"
+
+    func testADenyTheDaemonRefusesWithNoAnswerEverSentSaysTheDenyWasNotAcceptedNotTheAnswer() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+        let view = record(store)
+
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+
+        XCTAssertEqual(AskQuestionRecordView.denyNotAcceptedText, denyNotAccepted, "the words the person reads")
+        XCTAssertEqual(view.statusLine, denyNotAccepted)
+        XCTAssertEqual(view.accessibilityValue() as? String, denyNotAccepted, "and VoiceOver")
+        XCTAssertEqual(record(store).statusLine, denyNotAccepted, "and a record built afterwards")
+        XCTAssertTrue(store.isDenyNotAccepted(toolUseId: "toolu_a"))
+        XCTAssertFalse(store.isAnswerNotAccepted(toolUseId: "toolu_a"), "no answer was refused")
+    }
+
+    func testADenySentAfterARefusedAnswerSaysDenyingNotThatItWaitsForAnAnswer() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+        let view = record(store)
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+        XCTAssertEqual(view.statusLine, AskQuestionRecordView.answerNotAcceptedText, "premise")
+
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+
+        XCTAssertEqual(AskQuestionRecordView.denyingText, "Denying…", "the words the person reads")
+        XCTAssertEqual(view.statusLine, "Denying…")
+        XCTAssertEqual(view.accessibilityValue() as? String, "Denying…")
+        XCTAssertEqual(record(store).statusLine, "Denying…", "and a record built afterwards")
+    }
+
+    func testADenyInFlightWithNoEarlierRefusalStillSaysItWaitsForAnAnswer() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+
+        XCTAssertEqual(record(store).statusLine, "Waiting for your answer above")
+    }
+
+    func testARefusedAnswerWithNoDenySentStillSaysTheAnswerWasNotAccepted() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+
+        XCTAssertEqual(record(store).statusLine, AskQuestionRecordView.answerNotAcceptedText)
+        XCTAssertTrue(store.isAnswerNotAccepted(toolUseId: "toolu_a"))
+        XCTAssertFalse(store.isDenyNotAccepted(toolUseId: "toolu_a"))
+    }
+
+    func testARefusedAnswerThenADenyTheDaemonRefusesToSaysTheDenyWasNotAccepted() throws {
+        let (store, _) = make()
+        store.handle(.request(try QuestionTestRequests.ask(id: "a")))
+        XCTAssertTrue(store.answer("a", Fx.answer(["SQLite"]), windowID: "w"))
+        let view = record(store)
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+        XCTAssertTrue(store.answer("a", ApprovalDecisionWire(kind: .deny), windowID: "w"))
+        XCTAssertEqual(view.statusLine, "Denying…", "premise")
+
+        store.handle(.answerRefused(try ApprovalTestRequests.refused(id: "a", code: "invalid_answer")))
+
+        XCTAssertEqual(view.statusLine, denyNotAccepted)
+        XCTAssertEqual(record(store).statusLine, denyNotAccepted)
+        XCTAssertTrue(store.isDenyNotAccepted(toolUseId: "toolu_a"))
+        XCTAssertFalse(store.isAnswerNotAccepted(toolUseId: "toolu_a"))
+    }
+
+    func testTheStatusTextTableForARefusedDenyAndADenyAfterARefusal() {
+        typealias R = AskQuestionRecordView
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: nil, denyNotAccepted: true), denyNotAccepted)
+        XCTAssertEqual(R.statusText(awaiting: false, chosen: nil, denyNotAccepted: true), denyNotAccepted)
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: nil, denying: true), "Denying…")
+        XCTAssertEqual(R.statusText(awaiting: false, chosen: nil, denying: true), "Denying…")
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: ["A"], denyNotAccepted: true), "Answered: A", "labels outrank the rest")
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: ["A"], denying: true), "Answered: A", "labels outrank the rest")
+        XCTAssertEqual(R.statusText(awaiting: true, chosen: nil), "Waiting for your answer above", "neither new flag: unchanged")
     }
 
     func testARefusalSayingTheRequestIsUnknownLeavesTheRecordWithNoAnswerAndNoWaiting() throws {

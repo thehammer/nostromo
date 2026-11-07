@@ -182,6 +182,13 @@ final class TaskOutputFakeDaemon: TaskRequestSending {
         answer(queue.removeFirst())
     }
 
+    /// Answer the held read at `index` (0 is the oldest) ahead of the ones before it: a daemon answers
+    /// reads in any order.
+    func answerQueued(at index: Int) {
+        guard queue.indices.contains(index) else { return }
+        answer(queue.remove(at: index))
+    }
+
     func dropQueued() {
         queue.removeAll()
     }
@@ -2218,6 +2225,64 @@ extension TaskOutputModelTests {
         rig.timeouts.fireAll()                                  // the daemon never answers the reload
 
         XCTAssertFalse(model.isRefreshing, "a reload nobody answers must not leave the output loading for ever")
+    }
+
+    /// A model whose first tail has landed and whose head fetch is out (answers are held): the file is
+    /// larger than the window, so the tail is not the whole window.
+    private func openWithHeadFetchOut(_ rig: TaskOutputRig) -> TaskOutputModel {
+        rig.daemon.setLines(farBehindTotalLines)
+        rig.daemon.defersAnswers = true
+        let model = rig.makeModel(windowBytes: Self.window, readBytes: Self.farRead)
+        model.acquire()
+        addTeardownBlock { model.release() }
+        rig.daemon.answerNext()                                 // the tail lands; the head is fetched behind it
+        XCTAssertTrue(model.isFillingHead, "premise: the head fetch is out")
+        XCTAssertEqual(rig.daemon.queuedCount, 1, "premise: the head fetch is the one request out")
+        return model
+    }
+
+    /// With the head fetch of `openWithHeadFetchOut` still out, a poll finds the file more than the window
+    /// ahead and the model asks for its tail again. The held reads are then [old head fetch, tail reload].
+    private func reloadTailWhileHeadFetchIsOut(_ rig: TaskOutputRig) throws {
+        rig.daemon.appendLines(80 * 1_024 / 64)                 // 176 KiB: 80 KiB past the cursor
+        rig.clock.advance(0.5)
+        try rig.firePoll()
+        rig.daemon.answerQueued(at: 1)                          // the poll's read, ahead of the head fetch
+        XCTAssertEqual(rig.daemon.queuedCount, 2, "premise: the old head fetch and the tail reload are out")
+        XCTAssertNil(rig.daemon.reads.last?.offset, "premise: the reload asks for the tail")
+    }
+
+    func testAReloadThatFailsAfterTheHeadFetchItReplacedWasDroppedLeavesTheOutputNotLoading() throws {
+        let rig = TaskOutputRig()
+        let model = openWithHeadFetchOut(rig)
+        try reloadTailWhileHeadFetchIsOut(rig)
+
+        rig.daemon.answerQueued(at: 0)                          // the old head fetch answers: it is stale
+        model.taskEnded()                                       // nothing will poll again
+        rig.timeouts.fireAll()                                  // and the daemon never answers the reload
+
+        XCTAssertFalse(model.isFillingHead, "no head is being fetched any more")
+        XCTAssertFalse(model.isRefreshing)
+        XCTAssertNotEqual(model.stateName, "loading", "the output must not read as loading for ever")
+    }
+
+    func testAStaleHeadFetchAnsweringAfterTheReloadLandedDoesNotEndTheBusyStateOfTheNewHeadFetch() throws {
+        let rig = TaskOutputRig()
+        let model = openWithHeadFetchOut(rig)
+        try reloadTailWhileHeadFetchIsOut(rig)
+
+        rig.daemon.answerQueued(at: 1)                          // the reload lands; its own head is fetched
+        XCTAssertTrue(model.isFillingHead, "premise: the new head fetch is out")
+        rig.daemon.answerQueued(at: 0)                          // the old head fetch answers: it is stale
+
+        XCTAssertTrue(model.isFillingHead, "the new head fetch keeps the model busy")
+
+        rig.drainAnswers()
+        XCTAssertFalse(model.isFillingHead)
+        XCTAssertFalse(model.isRefreshing)
+        let firstLine = Int(Self.window) / 64
+        XCTAssertEqual(model.text, visible((farBehindTotalLines + 80 * 1_024 / 64 - firstLine)..<(farBehindTotalLines + 80 * 1_024 / 64)),
+                       "the last 48 KiB of the file as it is now")
     }
 
     func testATaskThatEndsWhileTheWindowIsFarBehindReloadsItsTailForTheFinalReadAndIsNotCutShort() {

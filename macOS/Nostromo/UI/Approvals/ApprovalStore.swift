@@ -111,6 +111,10 @@ final class ApprovalStore {
     /// if the daemon's snapshot drops it and then lists it again, it comes back refused (Deny still
     /// possible), not as "sent".
     private var refusalTexts: [String: String] = [:]
+    /// What kind of decision the daemon refused, by request id, until the request ends: the transcript
+    /// record words a refused answer and a refused Deny differently, and says `Denying…` for a Deny sent
+    /// after a refusal.
+    private var refusedKinds: [String: ApprovalDecisionKind] = [:]
     /// Ids whose arrival has been announced to VoiceOver.
     private var announced = Set<String>()
     /// What each tool call's row says about its request, for the session's lifetime (bounded per focus).
@@ -330,9 +334,33 @@ final class ApprovalStore {
 
     /// True while the daemon has refused the answer for `toolUseId` and the request still waits: the card
     /// accepts only a Deny then (`answer`), so a record must not say it waits for an answer.
+    /// Not true when what was refused was a Deny (`isDenyNotAccepted`).
     func isAnswerNotAccepted(toolUseId: String) -> Bool {
         guard let id = waitOwner[toolUseId], case .notSent? = entries[id]?.state else { return false }
-        return true
+        return !(refusedKinds[id].map(Self.isDeny) ?? false)
+    }
+
+    /// True while the daemon has refused a Deny for `toolUseId` (no answer need ever have been sent) and
+    /// the request still waits.
+    func isDenyNotAccepted(toolUseId: String) -> Bool {
+        guard let id = waitOwner[toolUseId], case .notSent? = entries[id]?.state else { return false }
+        return refusedKinds[id].map(Self.isDeny) ?? false
+    }
+
+    /// True while a Deny is in flight for `toolUseId` after the daemon refused an earlier decision: the
+    /// card says `Denying…`, so the record must not say it still waits for an answer.
+    func isDenyingAfterRefusal(toolUseId: String) -> Bool {
+        guard let id = waitOwner[toolUseId], refusedKinds[id] != nil,
+              case .inFlight(let kind)? = entries[id]?.state else { return false }
+        return Self.isDeny(kind)
+    }
+
+    /// The kinds the card words `Denying…` (every in-flight kind but the allows and the answer).
+    private static func isDeny(_ kind: ApprovalDecisionKind) -> Bool {
+        switch kind {
+        case .allowOnce, .allowSession, .answerQuestions: return false
+        case .deny, .denyAndStop: return true
+        }
     }
 
     /// The labels the person chose for `toolUseId`, if this process saw them answer.
@@ -517,6 +545,7 @@ final class ApprovalStore {
     private func end(_ id: String, text: String) {
         guard var entry = entries[id], !entry.isEnded else { return }
         refusalTexts[id] = nil
+        refusedKinds[id] = nil
         entry.state = .ended(text)
         entries[id] = entry
         changes.send(entry.request.tag)
@@ -555,6 +584,7 @@ final class ApprovalStore {
     private func hold(_ id: String, text: String) {
         guard var entry = entries[id] else { return }
         if answered.contains(id) { refusalTexts[id] = text }
+        if case .inFlight(let kind) = entry.state { refusedKinds[id] = kind }
         forgetChoice(for: entry.request)   // the answer was not taken: the record must not say it was
         entry.state = .notSent(text)
         entries[id] = entry

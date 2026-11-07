@@ -765,3 +765,275 @@ public struct ClientApprovalRefusalReport: Encodable, Equatable {
         try c.encode(channel, forKey: .channel)
     }
 }
+
+// MARK: - The Approvals log (AP5)
+//
+// Read-only. The app asks with `approvals_log_query` / `approvals_log_entry` (each echoing the connection's
+// nonce; the daemon refuses anyone else) and the daemon answers with a targeted `approvals_log_page`,
+// `approvals_log_detail` or `approvals_log_refused`. Mirrors `ApprovalsLogRow` / `ApprovalsLogDetail` in
+// `src/approvals/wire.rs`. An unknown row kind decodes as `.other`.
+
+public enum ApprovalsLogRowKind: String, Equatable {
+    case request, refusal, guardBlocked = "guard_blocked", rule, other
+}
+
+extension ApprovalsLogRowKind: Decodable {
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ApprovalsLogRowKind(rawValue: raw) ?? .other
+    }
+}
+
+/// One row of the log: a request merged with its outcome, or one standalone entry. No full input.
+public struct ApprovalsLogRow: Decodable, Equatable, Identifiable {
+    public let rowId: String
+    public let kind: ApprovalsLogRowKind
+    /// RFC 3339, as the daemon wrote it. See `date`.
+    public let ts: String
+    public let tag: String?
+    public let sessionId: String?
+    public let toolUseId: String?
+    public let requestId: String?
+    public let entryIds: [String]
+    public let agent: String?
+    public let subagent: ApprovalSubagent?
+    public let toolName: String?
+    public let summary: String
+    public let outcome: String?
+    public let byWindow: String?
+    public let latencyMs: UInt64?
+    public let refusalCode: String?
+    public let ruleLabel: String?
+    /// The row's focus is a sensitive (Teri/Fred-derived) one.
+    public let sensitive: Bool
+
+    public var id: String { rowId }
+
+    public init(rowId: String, kind: ApprovalsLogRowKind, ts: String, tag: String? = nil, sessionId: String? = nil,
+                toolUseId: String? = nil, requestId: String? = nil, entryIds: [String] = [], agent: String? = nil,
+                subagent: ApprovalSubagent? = nil, toolName: String? = nil, summary: String = "",
+                outcome: String? = nil, byWindow: String? = nil, latencyMs: UInt64? = nil,
+                refusalCode: String? = nil, ruleLabel: String? = nil, sensitive: Bool = false) {
+        self.rowId = rowId; self.kind = kind; self.ts = ts; self.tag = tag; self.sessionId = sessionId
+        self.toolUseId = toolUseId; self.requestId = requestId; self.entryIds = entryIds; self.agent = agent
+        self.subagent = subagent; self.toolName = toolName; self.summary = summary; self.outcome = outcome
+        self.byWindow = byWindow; self.latencyMs = latencyMs; self.refusalCode = refusalCode
+        self.ruleLabel = ruleLabel; self.sensitive = sensitive
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case rowId = "row_id", kind, ts, tag
+        case sessionId = "session_id", toolUseId = "tool_use_id", requestId = "request_id", entryIds = "entry_ids"
+        case agent, subagent, toolName = "tool_name", summary, outcome
+        case byWindow = "by_window", latencyMs = "latency_ms", refusalCode = "refusal_code", ruleLabel = "rule_label"
+        case sensitive
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rowId = try c.decode(String.self, forKey: .rowId)
+        kind = (try? c.decode(ApprovalsLogRowKind.self, forKey: .kind)) ?? .other
+        ts = try c.decode(String.self, forKey: .ts)
+        tag = try c.decodeIfPresent(String.self, forKey: .tag)
+        sessionId = try c.decodeIfPresent(String.self, forKey: .sessionId)
+        toolUseId = try c.decodeIfPresent(String.self, forKey: .toolUseId)
+        requestId = try c.decodeIfPresent(String.self, forKey: .requestId)
+        entryIds = (try? c.decodeIfPresent([String].self, forKey: .entryIds)) ?? []
+        agent = try c.decodeIfPresent(String.self, forKey: .agent)
+        subagent = (try? c.decodeIfPresent(ApprovalSubagent.self, forKey: .subagent)) ?? nil
+        toolName = try c.decodeIfPresent(String.self, forKey: .toolName)
+        summary = (try? c.decodeIfPresent(String.self, forKey: .summary)) ?? ""
+        outcome = try c.decodeIfPresent(String.self, forKey: .outcome)
+        byWindow = try c.decodeIfPresent(String.self, forKey: .byWindow)
+        latencyMs = try c.decodeIfPresent(UInt64.self, forKey: .latencyMs)
+        refusalCode = try c.decodeIfPresent(String.self, forKey: .refusalCode)
+        ruleLabel = try c.decodeIfPresent(String.self, forKey: .ruleLabel)
+        sensitive = (try? c.decodeIfPresent(Bool.self, forKey: .sensitive)) ?? false
+    }
+}
+
+/// `approvals_log_page`: rows newest first; `nextCursor` is set when more follow.
+public struct ApprovalsLogPageFrame: Decodable, Equatable {
+    public let rows: [ApprovalsLogRow]
+    public let nextCursor: String?
+    /// The `request_id` of the query this page answers; nil from a daemon that does not echo it.
+    public let requestId: String?
+
+    public init(rows: [ApprovalsLogRow], nextCursor: String?, requestId: String? = nil) {
+        self.rows = rows
+        self.nextCursor = nextCursor
+        self.requestId = requestId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case rows
+        case nextCursor = "next_cursor"
+        case requestId = "request_id"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rows = try c.decode(ApprovalLossyArray<ApprovalsLogRow>.self, forKey: .rows).elements
+        nextCursor = try c.decodeIfPresent(String.self, forKey: .nextCursor)
+        requestId = try c.decodeIfPresent(String.self, forKey: .requestId)
+    }
+}
+
+/// One log entry in full.
+public struct ApprovalsLogDetail: Decodable, Equatable {
+    public let id: String
+    public let event: String
+    public let ts: String
+    public let tag: String?
+    public let requestId: String?
+    public let toolName: String?
+    /// The full input exactly as recorded (invisible characters are already `⟨U+202E⟩` tokens).
+    public let input: ApprovalJSON?
+    public let displayText: String?
+    public let reason: ApprovalJSON?
+    public let flags: ApprovalJSON?
+    public let options: ApprovalJSON?
+    public let outcome: String?
+    public let byWindow: String?
+    public let latencyMs: UInt64?
+    public let rule: ApprovalJSON?
+    public let detail: String?
+    public let refusalCode: String?
+    public let peer: ApprovalJSON?
+    public let channel: String?
+    public let control: String?
+    public let sensitive: Bool
+
+    public init(id: String, event: String, ts: String, tag: String? = nil, requestId: String? = nil,
+                toolName: String? = nil, input: ApprovalJSON? = nil, displayText: String? = nil,
+                reason: ApprovalJSON? = nil, flags: ApprovalJSON? = nil, options: ApprovalJSON? = nil,
+                outcome: String? = nil, byWindow: String? = nil, latencyMs: UInt64? = nil,
+                rule: ApprovalJSON? = nil, detail: String? = nil, refusalCode: String? = nil,
+                peer: ApprovalJSON? = nil, channel: String? = nil, control: String? = nil, sensitive: Bool = false) {
+        self.id = id; self.event = event; self.ts = ts; self.tag = tag; self.requestId = requestId
+        self.toolName = toolName; self.input = input; self.displayText = displayText; self.reason = reason
+        self.flags = flags; self.options = options; self.outcome = outcome; self.byWindow = byWindow
+        self.latencyMs = latencyMs; self.rule = rule; self.detail = detail; self.refusalCode = refusalCode
+        self.peer = peer; self.channel = channel; self.control = control; self.sensitive = sensitive
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, event, ts, tag, requestId = "request_id", toolName = "tool_name", input
+        case displayText = "display_text", reason, flags, options, outcome
+        case byWindow = "by_window", latencyMs = "latency_ms", rule, detail
+        case refusalCode = "refusal_code", peer, channel, control, sensitive
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        event = try c.decode(String.self, forKey: .event)
+        ts = try c.decode(String.self, forKey: .ts)
+        tag = try c.decodeIfPresent(String.self, forKey: .tag)
+        requestId = try c.decodeIfPresent(String.self, forKey: .requestId)
+        toolName = try c.decodeIfPresent(String.self, forKey: .toolName)
+        input = try c.decodeIfPresent(ApprovalJSON.self, forKey: .input)
+        displayText = try c.decodeIfPresent(String.self, forKey: .displayText)
+        reason = try c.decodeIfPresent(ApprovalJSON.self, forKey: .reason)
+        flags = try c.decodeIfPresent(ApprovalJSON.self, forKey: .flags)
+        options = try c.decodeIfPresent(ApprovalJSON.self, forKey: .options)
+        outcome = try c.decodeIfPresent(String.self, forKey: .outcome)
+        byWindow = try c.decodeIfPresent(String.self, forKey: .byWindow)
+        latencyMs = try c.decodeIfPresent(UInt64.self, forKey: .latencyMs)
+        rule = try c.decodeIfPresent(ApprovalJSON.self, forKey: .rule)
+        detail = try c.decodeIfPresent(String.self, forKey: .detail)
+        refusalCode = try c.decodeIfPresent(String.self, forKey: .refusalCode)
+        peer = try c.decodeIfPresent(ApprovalJSON.self, forKey: .peer)
+        channel = try c.decodeIfPresent(String.self, forKey: .channel)
+        control = try c.decodeIfPresent(String.self, forKey: .control)
+        sensitive = (try? c.decodeIfPresent(Bool.self, forKey: .sensitive)) ?? false
+    }
+}
+
+/// `approvals_log_detail`: `detail` is nil when no entry has `id`.
+public struct ApprovalsLogDetailFrame: Decodable, Equatable {
+    public let id: String
+    public let detail: ApprovalsLogDetail?
+
+    public init(id: String, detail: ApprovalsLogDetail?) {
+        self.id = id
+        self.detail = detail
+    }
+}
+
+/// `approvals_log_refused`: `not_operator_app`, `requires_secure_connection`, `bad_cursor` or `unavailable`.
+public struct ApprovalsLogRefusedFrame: Decodable, Equatable {
+    public let code: String
+    /// The `request_id` of the query this refuses, when it had one.
+    public let requestId: String?
+
+    public init(code: String, requestId: String? = nil) { self.code = code; self.requestId = requestId }
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case requestId = "request_id"
+    }
+}
+
+/// `approvals_log_query`: one page, newest first. `operatorNonce` echoes this connection's `welcome` nonce.
+public struct ClientApprovalsLogQuery: Encodable, Equatable {
+    let type_ = "approvals_log_query"
+    public let tag: String?
+    public let outcome: String?
+    public let sinceMs: Int64?
+    public let limit: Int
+    public let cursor: String?
+    /// Echoed in the page, so a late page for an older query can be told apart.
+    public let requestId: String?
+    public let operatorNonce: String?
+
+    public init(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?,
+                requestId: String? = nil, operatorNonce: String?) {
+        self.tag = tag; self.outcome = outcome; self.sinceMs = sinceMs; self.limit = limit
+        self.cursor = cursor; self.requestId = requestId; self.operatorNonce = operatorNonce
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", tag, outcome, sinceMs = "since_ms", limit, cursor
+        case requestId = "request_id", operatorNonce = "operator_nonce"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encodeIfPresent(tag, forKey: .tag)
+        try c.encodeIfPresent(outcome, forKey: .outcome)
+        try c.encodeIfPresent(sinceMs, forKey: .sinceMs)
+        try c.encode(limit, forKey: .limit)
+        try c.encodeIfPresent(cursor, forKey: .cursor)
+        try c.encodeIfPresent(requestId, forKey: .requestId)
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
+    }
+}
+
+/// `approvals_log_entry`: one entry in full (`id` is a request id or an entry id).
+public struct ClientApprovalsLogEntry: Encodable, Equatable {
+    let type_ = "approvals_log_entry"
+    public let id: String
+    /// The time of the row the entry belongs to, when known: the daemon reads only the days around it.
+    public let tsMs: Int64?
+    public let operatorNonce: String?
+
+    public init(id: String, tsMs: Int64? = nil, operatorNonce: String?) {
+        self.id = id
+        self.tsMs = tsMs
+        self.operatorNonce = operatorNonce
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", id, tsMs = "ts_ms", operatorNonce = "operator_nonce"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encode(id, forKey: .id)
+        try c.encodeIfPresent(tsMs, forKey: .tsMs)
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
+    }
+}
