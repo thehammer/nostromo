@@ -44,6 +44,7 @@ python-test:
 	python3 -m unittest discover -s tests/ci_policy -v
 	python3 -m unittest discover -s tests/operator_pin -v
 	python3 -m unittest discover -s tests/ci_remote -v
+	python3 -m unittest discover -s tests/mac_shards -v
 	python3 -m unittest discover -s scripts/qa/tests -v
 	python3 -m unittest discover -s scripts/tracker/tests -v
 	python3 -m unittest discover -s tests/gates -v
@@ -199,9 +200,15 @@ mac:
 ## macOS/build/mac-test-full.log so the last started test can always be named.
 MAC_TEST_ALLOWANCE     ?= 120
 MAC_TEST_MAX_ALLOWANCE ?= 300
+## SHARD=1|2|3 runs one third of the classes (CI runs the three in parallel jobs; the
+## assignment is macOS/ci/mac-shards.json, see docs/ci.md). Without SHARD it runs everything.
+## The selection args are computed first so a bad config fails the target.
 mac-test:
-	set -o pipefail; mkdir -p macOS/build; cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
-	  -destination 'platform=macOS' -derivedDataPath build \
+	set -o pipefail; mkdir -p macOS/build; \
+	shard_args=""; \
+	if [ -n "$(SHARD)" ]; then shard_args=$$(python3 scripts/mac_shards.py args --shard "$(SHARD)") || exit 1; fi; \
+	cd macOS && xcodebuild -project Nostromo.xcodeproj -scheme NostromoTests \
+	  -destination 'platform=macOS' -derivedDataPath build $$shard_args \
 	  -test-timeouts-enabled YES -default-test-execution-time-allowance $(MAC_TEST_ALLOWANCE) \
 	  -maximum-test-execution-time-allowance $(MAC_TEST_MAX_ALLOWANCE) test \
 	  2>&1 | tee build/mac-test-full.log \

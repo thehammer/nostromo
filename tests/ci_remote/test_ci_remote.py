@@ -682,6 +682,34 @@ class CliRunIdTests(CliHarness):
 # Belt and braces: this suite itself must never skip.
 # ---------------------------------------------------------------------------
 
+class ShardAttributionTests(ModuleTestCase):
+    def test_shard_job_names_read_as_the_mac_check_they_belong_to(self):
+        d = self.mod.display_job_name
+        self.assertEqual(d("Mac tests shard 2/3"), "Swift tests (Mac app) / shard 2")
+        self.assertEqual(d("Mac tests shard 3/3 (dispatch)"), "Swift tests (Mac app) (dispatch) / shard 3")
+
+    def test_other_job_names_are_unchanged(self):
+        d = self.mod.display_job_name
+        for name in ("Swift tests (Mac app)", "Build & Lint", "Swift tests (NostromoKit) (dispatch)", "Mac tests shard x/3"):
+            self.assertEqual(d(name), name)
+
+    def test_failed_log_keys_stay_raw_so_attribution_is_a_display_concern(self):
+        text = line("Mac tests shard 2/3", "Test Case '-[NostromoTests.FooTests testBar]' failed (0.1 seconds).") + "\n"
+        self.assertEqual(
+            self.mod.parse_failed_log(text),
+            {"Mac tests shard 2/3": ["NostromoTests.FooTests/testBar"]},
+        )
+
+    def test_a_failed_shard_makes_the_run_fail_even_if_the_aggregate_is_skipped(self):
+        run = {"conclusion": "failure", "jobs": [
+            {"name": "Mac tests shard 1/3", "conclusion": "success"},
+            {"name": "Mac tests shard 2/3", "conclusion": "failure"},
+            {"name": "Swift tests (Mac app)", "conclusion": "failure"},
+        ]}
+        _, code = self.mod.summarize(run)
+        self.assertEqual(code, 1)
+
+
 class SuiteNeverSkipsTests(unittest.TestCase):
     """The CI job greps this suite's output for the skip report and fails on
     it; this is a source-level second guard, parsed with `ast` so the check
