@@ -168,6 +168,7 @@ enum ApprovalFixtures {
 
     static let allOptions = ["allow_once", "deny", "deny_and_stop", "deny_with_note"]
     static let sessionOptions = allOptions + ["allow_session"]
+    static let alwaysOptions = sessionOptions + ["allow_always"]
 
     /// The two candidates the daemon derives for `rm -rf ~/Library/Caches/a`.
     static let cacheCandidates: [Obj] = [
@@ -193,7 +194,9 @@ enum ApprovalFixtures {
         flags: [String: Bool] = [:],
         options: [String] = ApprovalFixtures.allOptions,
         description: String? = nil,
-        sessionRuleCandidates: [Obj] = []
+        sessionRuleCandidates: [Obj] = [],
+        repoRoot: String? = nil,
+        repoIsGit: Bool? = nil
     ) throws -> ApprovalRequestWire {
         var flagValues: [String: Bool] = [
             "default_to_no": false,
@@ -224,6 +227,8 @@ enum ApprovalFixtures {
         ]
         if let mcp = mcp { root["mcp"] = mcp }
         if let cwd = cwd { root["cwd"] = cwd }
+        if let repoRoot = repoRoot { root["repo_root"] = repoRoot }
+        if let repoIsGit = repoIsGit { root["repo_is_git"] = repoIsGit }
         if let description = description { root["description"] = description }
         let data = try JSONSerialization.data(withJSONObject: root)
         return try JSONDecoder().decode(ApprovalRequestWire.self, from: data)
