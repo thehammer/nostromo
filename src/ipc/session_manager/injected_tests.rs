@@ -441,10 +441,15 @@ async fn a_replayed_peer_line_with_nothing_written_is_never_merged_into_an_open_
 
     let turns = wait_turns(&mgr, "rm", 2).await;
 
-    assert!(matches!(turns[0].origin, Some(TurnOrigin::PeerMessage { .. })));
+    assert!(matches!(
+        turns[0].origin,
+        Some(TurnOrigin::PeerMessage { .. })
+    ));
     if let Some(TurnOrigin::PeerMessage { items, .. }) = &turns[0].origin {
         assert_eq!(items.len(), 1, "the replayed line merged: {items:?}");
-        assert!(items.iter().all(|i| !i.body.contains("replayed human text")));
+        assert!(items
+            .iter()
+            .all(|i| !i.body.contains("replayed human text")));
     }
     assert_eq!(turns[1].origin, None);
     assert_eq!(turns[1].user_input, peer_text("replayed human text"));
