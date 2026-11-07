@@ -484,3 +484,126 @@ final class MotherQuotaStrip: NSView {
         ])
     }
 }
+
+// MARK: - MotherLimiterStrip
+
+/// One compact, read-only line under the quota strip: Mother's backpressure limiter.
+/// `Limiter (observe) · would allow 3 of 5 · 4 running · backoff: cut 6m ago after 429; +1 in 9m · last 429 6m ago`.
+/// In observe mode the numbers are what the limiter *would* do. A stale or faulted limiter says
+/// "limiter not running — fixed concurrency" in the warning colour. Zero height and hidden while the broker sends
+/// no limiter block (an older Mother) or the mode is `off`. A click opens a popover with the on-demand values;
+/// hovering shows them as a tooltip. There are no controls: nothing here can change the limiter.
+final class MotherLimiterStrip: NSView {
+    static let visibleHeight: CGFloat = 22
+
+    let label = NSTextField(labelWithString: "")
+
+    private var heightConstraint: NSLayoutConstraint!
+    private var cancellables = Set<AnyCancellable>()
+    private var popover: NSPopover?
+    private(set) var limiter: MotherLimiter?
+
+    /// The plain text of the line as last drawn ("" while hidden).
+    var labelText: String { label.stringValue }
+    /// The popover's rows (`title: value`) as they would show now.
+    var detailLines: [String] { limiter.map(Self.detailLines) ?? [] }
+    var isShown: Bool { !isHidden }
+
+    /// - Parameter observeStore: tests pass false and drive `apply` themselves.
+    init(observeStore: Bool = true) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 0.13, alpha: 1).cgColor
+        isHidden = true
+
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = Theme.fgMuted
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addSubview(label)
+        heightConstraint = heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            heightConstraint,
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -14),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        setAccessibilityRole(.button)
+        setAccessibilityHelp("Shows the limiter's details")
+
+        if observeStore {
+            AppStore.shared.$motherLimiter
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] in self?.apply(limiter: $0) }
+                .store(in: &cancellables)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Show the broker's limiter block (nil or mode `off`: the line disappears).
+    func apply(limiter: MotherLimiter?) {
+        self.limiter = limiter
+        guard let limiter, limiter.isShown else {
+            isHidden = true
+            heightConstraint.constant = 0
+            label.stringValue = ""
+            label.toolTip = nil
+            popover?.close()
+            return
+        }
+        let text = MotherLimiterPresentation.lineText(limiter)
+        isHidden = false
+        heightConstraint.constant = Self.visibleHeight
+        label.stringValue = text
+        label.textColor = limiter.isNotRunning ? Theme.amber : Theme.fgMuted
+        label.font = .systemFont(ofSize: 11, weight: limiter.isNotRunning ? .medium : .regular)
+        let details = Self.detailLines(limiter).joined(separator: "\n")
+        label.toolTip = details
+        setAccessibilityLabel(text)
+        setAccessibilityValue(details)
+    }
+
+    static func detailLines(_ limiter: MotherLimiter) -> [String] {
+        MotherLimiterPresentation.detailRows(limiter).map { "\($0.title): \($0.value)" }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard limiter?.isShown == true else { return super.mouseDown(with: event) }
+        togglePopover()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard limiter?.isShown == true else { return false }
+        togglePopover()
+        return true
+    }
+
+    private func togglePopover() {
+        if let popover, popover.isShown { popover.close(); return }
+        guard let limiter else { return }
+        let text = NSTextField(wrappingLabelWithString: Self.detailLines(limiter).joined(separator: "\n"))
+        text.font = .systemFont(ofSize: 11)
+        text.textColor = Theme.fg
+        text.isSelectable = true
+        text.preferredMaxLayoutWidth = 360
+        text.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView()
+        container.addSubview(text)
+        NSLayoutConstraint.activate([
+            text.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            text.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+            text.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+        ])
+        let controller = NSViewController()
+        controller.view = container
+        let pop = NSPopover()
+        pop.behavior = .transient
+        pop.contentViewController = controller
+        popover = pop
+        pop.show(relativeTo: label.bounds, of: label, preferredEdge: .maxY)
+    }
+}

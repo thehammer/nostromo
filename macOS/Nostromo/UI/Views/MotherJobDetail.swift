@@ -1979,8 +1979,15 @@ final class MotherJobDetail: NSView {
         if let f = job.finishedAt   { pairs.append(("Finished",  relativeTime(f))) }
         if let p = job.planPath     { pairs.append(("Plan",      (p as NSString).lastPathComponent)) }
         if let q = job.question     { pairs.append(("Question",  q)) }
+        if let w = Self.waitingLine(for: job) { pairs.append(("Waiting", w)) }
         if let a = job.adherenceStatus { pairs.append(("Adherence", a)) }
         return pairs.map { MetaPair(key: $0.0, value: $0.1) }
+    }
+
+    /// The reason a ready or queued job waits (`<reason>`, plus `(would: <reason>)` when the limiter's view differs).
+    static func waitingLine(for job: MotherJob) -> String? {
+        guard let text = MotherJobListViewModel.waitText(for: job) else { return nil }
+        return String(text.dropFirst("Waiting: ".count))
     }
 
     private func rebuildMeta(_ pairs: [MetaPair]) {

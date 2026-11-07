@@ -157,6 +157,9 @@ enum BrokerEvent {
     /// Mother's quota gate block: from every snapshot (nil when the broker sent none, an older Mother), from each
     /// `quota` event and from a `quota-gate` ack. The gate shown is only ever what the broker last said.
     case quota(MotherQuota?)
+    /// Mother's backpressure limiter block: from every snapshot (nil when the broker sent none) and from each
+    /// `limiter` event. Display only.
+    case limiter(MotherLimiter?)
     /// Liveness ping — ignore.
     case ping
     /// Client reconnected after disconnect — AppStore must clear jobMap and await next snapshot.
@@ -611,6 +614,8 @@ class MotherBrokerClient {
         var filtered = caps.isEmpty ? Array(desired) : Array(desired.intersection(caps))
         // `progress` is newer than the rest: only ever asked for when advertised.
         if caps.contains("progress") { filtered.append("progress") }
+        // `limiter` likewise: only ever asked for when advertised.
+        if caps.contains("limiter") { filtered.append("limiter") }
 
         var data: [String: Any] = [
             "sub":        "queue",
@@ -833,9 +838,11 @@ class MotherBrokerClient {
             let jobs = decodeJobList(jobsRaw)
             log.debug("broker snapshot: \(jobs.count, privacy: .public) jobs")
             let quota = MotherQuota.decode(dataDict["quota"])
+            let limiter = MotherLimiter.decode(dataDict["limiter"])
             DispatchQueue.main.async { [weak self] in
                 self?.events.send(.snapshot(jobs))
                 self?.events.send(.quota(quota))
+                self?.events.send(.limiter(limiter))
             }
 
         case "quota":
@@ -844,6 +851,13 @@ class MotherBrokerClient {
             guard let quota = MotherQuota.decode(dataDict["quota"]) else { return }
             DispatchQueue.main.async { [weak self] in
                 self?.events.send(.quota(quota))
+            }
+
+        case "limiter":
+            // The top-level limiter block (no job). An unreadable block changes nothing.
+            guard let limiter = MotherLimiter.decode(dataDict["limiter"]) else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.events.send(.limiter(limiter))
             }
 
         case "awaiting_notified":

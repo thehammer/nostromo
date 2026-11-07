@@ -376,6 +376,8 @@ struct MotherJob: Identifiable, Equatable {
     /// Mother's `failure_reason` and `actual_cost_usd`, when the list read carries them (row line two).
     var failureReason: String? = nil
     var costUsd: Double? = nil
+    /// Why a `ready`/`queued` job is waiting, from the job's `limiter.wait` (Mother's backpressure limiter).
+    var limiterWait: MotherLimiter.Waiting? = nil
 
     /// Apply a `progress_updated` overlay. A strictly older `updated_at` is ignored (events can
     /// arrive out of order, or after a `query.get` that already has a later one); a tie goes to
@@ -492,11 +494,38 @@ struct MotherJobSlim: Decodable {
     let originLabel:     String?
     let failureReason:   String?
     let costUsd:         Double?
+    let limiterWait:     MotherLimiter.Waiting?
 
     private struct Origin: Decodable { let label: String? }
 
+    /// The job's `limiter` object; only `wait` is read, through the Kit's lenient decoder.
+    private struct LimiterField: Decodable {
+        let wait: MotherLimiter.Waiting?
+        private enum Keys: String, CodingKey { case wait }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            let raw = try? c.decodeIfPresent(WireValue.self, forKey: .wait)
+            wait = MotherLimiter.decodeWait(raw?.value)
+        }
+    }
+
+    /// Any JSON value, as `JSONSerialization` would have given it.
+    private struct WireValue: Decodable {
+        let value: Any
+        init(from decoder: Decoder) throws {
+            let c = try decoder.singleValueContainer()
+            if let b = try? c.decode(Bool.self) { value = b }
+            else if let i = try? c.decode(Int.self) { value = i }
+            else if let d = try? c.decode(Double.self) { value = d }
+            else if let s = try? c.decode(String.self) { value = s }
+            else if let a = try? c.decode([WireValue].self) { value = a.map(\.value) }
+            else if let o = try? c.decode([String: WireValue].self) { value = o.mapValues(\.value) }
+            else { value = NSNull() }
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
-        case id, state, repo, isolation, title, question, kind, phases, cycles, origin
+        case id, state, repo, isolation, title, question, kind, phases, cycles, origin, limiter
         case createdAt       = "created_at"
         case startedAt       = "started_at"
         case finishedAt      = "finished_at"
@@ -534,6 +563,7 @@ struct MotherJobSlim: Decodable {
         // Display-only extras: a wrong type never costs the job.
         failureReason   = (try? c.decodeIfPresent(String.self, forKey: .failureReason)) ?? nil
         costUsd         = (try? c.decodeIfPresent(Double.self, forKey: .costUsd)) ?? nil
+        limiterWait     = ((try? c.decodeIfPresent(LimiterField.self, forKey: .limiter)) ?? nil)?.wait
     }
 
     private static let fmtFrac: ISO8601DateFormatter = {
@@ -568,7 +598,8 @@ struct MotherJobSlim: Decodable {
                   crew:            crew,
                   originLabel:     originLabel,
                   failureReason:   failureReason,
-                  costUsd:         costUsd)
+                  costUsd:         costUsd,
+                  limiterWait:     limiterWait)
     }
 }
 

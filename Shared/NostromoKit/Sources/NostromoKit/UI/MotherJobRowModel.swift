@@ -38,6 +38,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
     public let prMerged: Bool
     public let failureReason: String?
     public let cost: String?
+    /// `Waiting: <reason>` for a ready or queued job Mother's limiter lists (see `MotherLimiterPresentation.waitText`).
+    public let waitText: String?
     /// The notified mark (`✓ told Claudia`, `⏸ held`); nil when the job's focus is not notified.
     public let noticeMark: MotherNoticeMark?
 
@@ -58,7 +60,8 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         prMerged: Bool = false,
         failureReason: String? = nil,
         cost: String? = nil,
-        noticeMark: MotherNoticeMark? = nil
+        noticeMark: MotherNoticeMark? = nil,
+        waitText: String? = nil
     ) {
         self.id               = id
         self.state            = state
@@ -77,6 +80,7 @@ public struct MotherJobRowModel: Identifiable, Equatable {
         self.failureReason = failureReason
         self.cost = cost
         self.noticeMark = noticeMark
+        self.waitText = waitText
     }
 
     /// The row's spoken form. Without an origin (iOS) just the title. With one: the title, `From <origin>.`,
