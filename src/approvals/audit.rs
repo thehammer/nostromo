@@ -177,6 +177,10 @@ pub enum Event {
     RuleRemoved {
         rule: Value,
     },
+    /// The consequence preview the card showed (AP7), written once its counts are final.
+    Preview {
+        preview: Value,
+    },
 }
 
 impl Event {
@@ -191,6 +195,7 @@ impl Event {
             Event::SessionRuleRevoked { .. } => "session_rule_revoked",
             Event::RuleWritten { .. } => "rule_written",
             Event::RuleRemoved { .. } => "rule_removed",
+            Event::Preview { .. } => "preview",
         }
     }
 }

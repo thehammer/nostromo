@@ -760,6 +760,7 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::ApprovalResolved { .. }
         | ServerMsg::ApprovalSessionRules { .. }
         | ServerMsg::ApprovalGuardBlocked { .. }
+        | ServerMsg::ApprovalPreview { .. }
         | ServerMsg::ApprovalsLogPage { .. }
         | ServerMsg::ApprovalsLogDetail { .. }
         | ServerMsg::ApprovalsLogRefused { .. }
@@ -3704,6 +3705,7 @@ mod tests {
             session_rule_candidates: vec![],
             created_at_ms: 1,
             deadline_at_ms: 2,
+            preview: None,
         };
         vec![
             (
@@ -3745,6 +3747,18 @@ mod tests {
                     entry_id: "e1".into(),
                     at_ms: 4,
                     summary: "Bash ecs_connect".into(),
+                },
+            ),
+            (
+                "approval_preview",
+                ServerMsg::ApprovalPreview {
+                    tag: "cody-plain".into(),
+                    request_id: "r1".into(),
+                    preview: crate::approvals::wire::ApprovalPreviewWire {
+                        state: crate::approvals::wire::PreviewState::Complete,
+                        targets: vec![],
+                        more: 0,
+                    },
                 },
             ),
             (

@@ -571,6 +571,49 @@ final class ApprovalScrollSafetyTests: XCTestCase {
         }
     }
 
+    // MARK: Consequence preview (AP7)
+
+    func testThePreviewCountsArrivingMoveNothing() throws {
+        let request = try ApprovalTestRequests.withPreview(state: "counting")
+        let frame = try ApprovalTestRequests.previewFrame()
+        for following in [true, false] {
+            let p = pane(following: following)
+            let card = try arrive(request, in: p)
+            let cardFrame = card.frame, scrollFrame = p.rig.scrollView.frame, barFrame = p.rig.inputBar.frame
+
+            p.rig.assertNoMove("the preview counts arrive (following: \(following))", following: following) {
+                p.store.handle(.preview(frame))
+            }
+
+            XCTAssertEqual(card.frame, cardFrame, "the card's frame did not change")
+            XCTAssertTrue(p.host.listings.first?.preview.first?.contains("1.2 GB") ?? false)
+            try assertCardFloatsInsideThePane(p, scrollFrame: scrollFrame, barFrame: barFrame, name: "preview (following: \(following))")
+        }
+    }
+
+    func testThePreviewCountsArrivingInTwoWindowsMoveNothingInEither() throws {
+        let request = try ApprovalTestRequests.withPreview(state: "counting")
+        let frame = try ApprovalTestRequests.previewFrame()
+        for following in [true, false] {
+            let a = pane(following: following)
+            let b = pane(following: following, sharing: a, windowID: "w-gate-2")
+            a.store.handle(.request(request))
+            settle(a); settle(b)
+            let aCard = try XCTUnwrap(a.host.card).frame, bCard = try XCTUnwrap(b.host.card).frame
+
+            a.rig.assertNoMove("window A: the counts arrive (following: \(following))", following: following) {
+                b.rig.assertNoMove("window B: the counts arrive (following: \(following))", following: following) {
+                    a.store.handle(.preview(frame))
+                }
+            }
+
+            XCTAssertEqual(a.host.card?.frame, aCard)
+            XCTAssertEqual(b.host.card?.frame, bCard)
+            XCTAssertEqual(a.host.listings.first?.preview, b.host.listings.first?.preview)
+            XCTAssertTrue(a.recorder.sent.isEmpty, "neither window sent anything")
+        }
+    }
+
     // MARK: A second window
 
     func testASecondWindowsCardResolvingRemotelyMovesNothingInEitherWindow() throws {

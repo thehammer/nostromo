@@ -22,6 +22,8 @@ enum ApprovalEvent {
     /// Every request still held, sent on (re)subscribe: the daemon's view replaces ours.
     case snapshot([ApprovalRequestWire])
     case resolved(ApprovalResolvedFrame)
+    /// The counts of a held request's consequence preview (AP7).
+    case preview(ApprovalPreviewFrame)
     case answerRefused(ApprovalAnswerRefusedFrame)
     /// The production-shell guard blocked a tool call (no request, no card).
     case guardBlocked(ApprovalGuardBlockedFrame)
@@ -53,7 +55,8 @@ enum ApprovalAnswerState: Equatable {
 }
 
 struct ApprovalEntry: Equatable {
-    let request: ApprovalRequestWire
+    /// Only its `preview` ever changes after it arrives (AP7).
+    var request: ApprovalRequestWire
     var state: ApprovalAnswerState
 
     var isEnded: Bool {
@@ -178,6 +181,8 @@ final class ApprovalStore {
                 setStatus(.allowedBySessionRule, toolUseId: toolUseId, tag: frame.tag)
             }
             end(frame.requestId, text: Self.outcomeText(frame.outcome))
+        case .preview(let frame):
+            setPreview(frame)
         case .answerRefused(let frame):
             refused(frame)
         case .guardBlocked(let frame):
@@ -189,6 +194,17 @@ final class ApprovalStore {
             sessionRulesByTag.removeAll()
             tags.forEach { sessionRulesChanges.send($0) }
         }
+    }
+
+    // MARK: Consequence preview (AP7)
+
+    /// The counts of a request's preview arrived. Merged into the request that is held; a request that
+    /// already ended (or is unknown) ignores it. Only lines are added: no option, no button, no state changes.
+    private func setPreview(_ frame: ApprovalPreviewFrame) {
+        guard var entry = entries[frame.requestId], !entry.isEnded, entry.request.preview != frame.preview else { return }
+        entry.request.preview = frame.preview
+        entries[frame.requestId] = entry
+        changes.send(entry.request.tag)
     }
 
     // MARK: Session rules (AP4)

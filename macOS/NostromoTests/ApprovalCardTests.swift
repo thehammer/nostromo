@@ -165,7 +165,8 @@ enum ApprovalTestRequests {
         options: [String] = ApprovalTestRequests.allOptions,
         description: String? = nil,
         deadlineAtMs: UInt64? = nil,
-        sessionRuleCandidates: [Obj] = []
+        sessionRuleCandidates: [Obj] = [],
+        preview: Obj? = nil
     ) throws -> ApprovalRequestWire {
         var flagValues: [String: Bool] = [
             "default_to_no": false,
@@ -198,6 +199,7 @@ enum ApprovalTestRequests {
         if let mcp = mcp { root["mcp"] = mcp }
         if let cwd = cwd { root["cwd"] = cwd }
         if let description = description { root["description"] = description }
+        if let preview = preview { root["preview"] = preview }
         let data = try JSONSerialization.data(withJSONObject: root)
         return try JSONDecoder().decode(ApprovalRequestWire.self, from: data)
     }
@@ -218,14 +220,48 @@ enum ApprovalTestRequests {
         options: [String] = ApprovalTestRequests.allOptions,
         description: String? = nil,
         deadlineAtMs: UInt64? = nil,
-        sessionRuleCandidates: [Obj] = []
+        sessionRuleCandidates: [Obj] = [],
+        preview: Obj? = nil
     ) throws -> ApprovalRequestWire {
         try request(id: id, tag: tag, agentName: agentName, subagentType: subagentType,
                     input: ["command": command],
                     display: display(lines: lines ?? plainBashLines(command), commandCount: commandCount),
                     cwd: cwd, reasonKind: reasonKind, reasonText: reasonText, flags: flags,
                     options: options, description: description, deadlineAtMs: deadlineAtMs,
-                    sessionRuleCandidates: sessionRuleCandidates)
+                    sessionRuleCandidates: sessionRuleCandidates, preview: preview)
+    }
+
+    // MARK: Consequence preview (AP7)
+
+    /// A preview target as the daemon sends it.
+    static func previewTarget(_ path: String, dirs: Int = 3, files: Int = 41_208, bytes: Int = 1_200_000_000,
+                              flags: [String] = [], relative: Bool = false) -> Obj {
+        ["command": "rm", "path": path, "relative": relative, "exists": true, "kind": "dir", "dirs": dirs,
+         "files": files, "bytes": bytes, "at_least": false, "flags": flags]
+    }
+
+    /// The same target while its counts are still being taken.
+    static func countingTarget(_ path: String, flags: [String] = [], relative: Bool = false) -> Obj {
+        ["command": "rm", "path": path, "relative": relative, "at_least": false, "flags": flags]
+    }
+
+    static func preview(_ state: String, _ targets: [Obj], more: Int = 0) -> Obj {
+        ["state": state, "targets": targets, "more": more]
+    }
+
+    /// `rm -rf build/ && rm -rf /etc/x` with a preview: a relative target and one outside the working folder.
+    static func withPreview(state: String = "counting", id: String = "req-1") throws -> ApprovalRequestWire {
+        let counting = state == "counting"
+        let targets: [Obj] = counting
+            ? [countingTarget("/w/build", relative: true), countingTarget("/etc/x", flags: ["outside_cwd"])]
+            : [previewTarget("/w/build", relative: true), previewTarget("/etc/x", flags: ["outside_cwd"])]
+        return try bash(compoundCommand, id: id, cwd: "/w", preview: preview(state, targets))
+    }
+
+    static func previewFrame(id: String = "req-1", state: String = "complete") throws -> ApprovalPreviewFrame {
+        let targets: [Obj] = [previewTarget("/w/build", relative: true), previewTarget("/etc/x", flags: ["outside_cwd"])]
+        let json: Obj = ["tag": "cody-1", "request_id": id, "preview": preview(state, targets)]
+        return try JSONDecoder().decode(ApprovalPreviewFrame.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
     // MARK: Bash fixtures
@@ -501,6 +537,11 @@ final class ApprovalRecorder {
 // MARK: - Reading views
 
 enum ApprovalTestViews {
+
+    /// Every view of type `type` below `view`, hidden or not.
+    static func all<T: NSView>(_ type: T.Type, in view: NSView) -> [T] {
+        rigAllSubviews(of: view).compactMap { $0 as? T }
+    }
 
     static func buttons(in view: NSView, visibleOnly: Bool = false) -> [NSButton] {
         rigAllSubviews(of: view).compactMap { $0 as? NSButton }
@@ -3301,6 +3342,128 @@ final class ApprovalCardTests: MouseQueueTestCase {
         h.card.removeFromSuperview()
 
         XCTAssertFalse(h.card.countdown.isRunning, "a gone card leaves nothing ticking")
+    }
+
+    // MARK: Consequence preview (AP7)
+
+    private func frames(of card: ApprovalCardView) -> [String: NSRect] {
+        var out: [String: NSRect] = ["input": card.inputView.frame, "card": card.frame]
+        for button in ApprovalTestViews.buttons(in: card, visibleOnly: false) {
+            out["button:" + button.title + ":\(out.count)"] = card.convert(button.bounds, from: button)
+        }
+        return out
+    }
+
+    func testThePreviewShowsOneLinePerTargetUnderTheInputWithWarningsInTheWarningColour() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.withPreview(state: "complete"))
+        let lines = h.card.listing.preview
+        XCTAssertEqual(lines.count, 3, "two targets and the relative note")
+        // The flagged target comes first.
+        XCTAssertTrue(lines[0].contains("outside the working folder"), lines[0])
+        XCTAssertTrue(lines[1].hasSuffix("— 3 directories · 41,208 files · 1.2 GB"), lines[1])
+        XCTAssertTrue(lines[2].hasPrefix("(relative to "), lines[2])
+        // Where it sits: below the input, above `Agent says` / the buttons.
+        let preview = try XCTUnwrap(ApprovalTestViews.all(ConsequencePreviewView.self, in: h.card).first)
+        XCTAssertGreaterThanOrEqual(preview.frame.minY, h.card.inputView.frame.maxY)
+        XCTAssertEqual(preview.warningLines, [true, false, true], "the flagged target and the relative note")
+        let warn = preview.attributedString(for: preview.lines[0])
+        var colours = Set<NSColor>()
+        warn.enumerateAttribute(NSAttributedString.Key.foregroundColor, in: NSRange(location: 0, length: warn.length)) { v, _, _ in
+            if let c = v as? NSColor { colours.insert(c) }
+        }
+        XCTAssertTrue(colours.contains(ApprovalPalette.warning), "the flag takes the warning colour")
+        XCTAssertFalse(preview.acceptsFirstResponder)
+        XCTAssertNil(preview.hitTest(NSPoint(x: 1, y: 1)), "it takes no click")
+    }
+
+    func testACommandWithoutAPreviewHasNoPreviewRow() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.simpleRm())
+        XCTAssertEqual(h.card.listing.preview, [])
+        let preview = try XCTUnwrap(ApprovalTestViews.all(ConsequencePreviewView.self, in: h.card).first)
+        XCTAssertTrue(preview.isHidden)
+    }
+
+    func testTheCountsArrivingMoveNothingAndKeepTheHeight() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.withPreview(state: "counting"))
+        XCTAssertTrue(h.card.listing.preview[0].contains("counting…"), h.card.listing.preview[0])
+        let before = frames(of: h.card)
+        let height = h.card.preferredHeight(forWidth: 560, maxHeight: 520)
+
+        h.store.handle(.preview(try ApprovalTestRequests.previewFrame()))
+        h.sync()
+        h.window.contentView!.layoutSubtreeIfNeeded()
+        h.card.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(h.card.listing.preview[0].contains("1.2 GB"), "the counts are shown")
+        XCTAssertEqual(frames(of: h.card), before, "no button, the input or the card moved")
+        XCTAssertEqual(h.card.preferredHeight(forWidth: 560, maxHeight: 520), height, "the height did not change")
+    }
+
+    func testAPreviewThatGrowsAfterCountingKeepsTheButtonsPutAndShowsTheSummary() throws {
+        let one = ApprovalTestRequests.preview("counting", [ApprovalTestRequests.countingTarget("/w/a", relative: true)])
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.bash(ApprovalTestRequests.simpleRmCommand, cwd: "/w", preview: one))
+        let before = frames(of: h.card)
+        let height = h.card.preferredHeight(forWidth: 560, maxHeight: 520)
+
+        let targets = (0..<64).map { ApprovalTestRequests.previewTarget("/w/f\($0)", relative: true) }
+        let json: [String: Any] = ["tag": "cody-1", "request_id": "req-1",
+                                   "preview": ApprovalTestRequests.preview("complete", targets, more: 6)]
+        let frame = try JSONDecoder().decode(ApprovalPreviewFrame.self, from: JSONSerialization.data(withJSONObject: json))
+        h.store.handle(.preview(frame))
+        h.sync()
+        h.window.contentView!.layoutSubtreeIfNeeded()
+        h.card.layoutSubtreeIfNeeded()
+
+        let lines = h.card.listing.preview
+        XCTAssertTrue(lines.contains("and 64 more"), "the summary line is shown: \(lines)")
+        XCTAssertEqual(frames(of: h.card), before, "nothing moved")
+        XCTAssertEqual(h.card.preferredHeight(forWidth: 560, maxHeight: 520), height)
+    }
+
+    func testLinesThatDoNotFitAreCutWithAFinalNoteNotDroppedSilently() {
+        let lines = (0..<5).map { ApprovalPreviewText.Line(spans: [.init(text: "line \($0)", style: .normal)]) }
+        let shown = ConsequencePreviewView.fit(lines, into: 3)
+        XCTAssertEqual(shown.count, 3)
+        XCTAssertEqual(shown.last?.text, "and 3 more lines not shown")
+        XCTAssertTrue(shown.last?.hasWarning ?? false)
+        XCTAssertEqual(ConsequencePreviewView.fit(lines, into: 5), lines)
+    }
+
+    func testALongPathKeepsItsCountsAtANarrowWidth() {
+        let view = ConsequencePreviewView(reservedLines: 1)
+        let path = "/Users/me/" + String(repeating: "long-folder/", count: 12) + "x"
+        let t = ApprovalPreviewTarget(command: "rm", path: path, exists: true, kind: "dir", dirs: 3, files: 41_208,
+                                      bytes: 1_200_000_000, flags: [.outsideCwd])
+        let line = ApprovalPreviewText.lines(for: ApprovalPreview(state: .complete, targets: [t]), cwd: "/w")[0]
+        let drawn = view.fittedString(for: line, width: 460).string
+        XCTAssertTrue(drawn.contains("…"))
+        XCTAssertTrue(drawn.contains("3 directories · 41,208 files · 1.2 GB"), drawn)
+        XCTAssertTrue(drawn.hasSuffix("outside the working folder"), drawn)
+    }
+
+    func testAPreviewForAnEndedRequestIsIgnored() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.withPreview(state: "counting"))
+        h.store.handle(.resolved(try ApprovalTestRequests.resolved(id: "req-1", outcome: "denied")))
+        h.store.handle(.preview(try ApprovalTestRequests.previewFrame()))
+        XCTAssertEqual(h.store.entry(id: "req-1")?.request.preview?.state, .counting)
+        h.store.handle(.preview(try ApprovalTestRequests.previewFrame(id: "nobody")))
+        XCTAssertNil(h.store.entry(id: "nobody"))
+    }
+
+    func testAPreviewNeverChangesTheOptionsOrWhichButtonsAreEnabled() throws {
+        let plain = ApprovalCardHarness(self, request: try ApprovalTestRequests.bash(ApprovalTestRequests.compoundCommand, cwd: "/w"))
+        let withPreview = ApprovalCardHarness(self, request: try ApprovalTestRequests.withPreview(state: "complete"))
+        XCTAssertEqual(withPreview.card.listing.options, plain.card.listing.options)
+        XCTAssertEqual(withPreview.card.canAllow, plain.card.canAllow)
+        XCTAssertEqual(withPreview.card.listing.options.map(\.enabled), plain.card.listing.options.map(\.enabled))
+        let counting = ApprovalCardHarness(self, request: try ApprovalTestRequests.withPreview(state: "counting"))
+        XCTAssertEqual(counting.card.listing.options, plain.card.listing.options)
+    }
+
+    func testTheListingJSONCarriesThePreviewLines() throws {
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.withPreview(state: "complete"))
+        let json = h.card.listing.jsonObject
+        XCTAssertEqual((json["preview"] as? [String])?.count, 3)
     }
 }
 
