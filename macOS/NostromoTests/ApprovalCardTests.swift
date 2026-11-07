@@ -3398,6 +3398,48 @@ final class ApprovalCardTests: MouseQueueTestCase {
         XCTAssertEqual(h.card.preferredHeight(forWidth: 560, maxHeight: 520), height, "the height did not change")
     }
 
+    func testAPreviewThatGrowsAfterCountingKeepsTheButtonsPutAndShowsTheSummary() throws {
+        let one = ApprovalTestRequests.preview("counting", [ApprovalTestRequests.countingTarget("/w/a", relative: true)])
+        let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.bash(ApprovalTestRequests.simpleRmCommand, cwd: "/w", preview: one))
+        let before = frames(of: h.card)
+        let height = h.card.preferredHeight(forWidth: 560, maxHeight: 520)
+
+        let targets = (0..<64).map { ApprovalTestRequests.previewTarget("/w/f\($0)", relative: true) }
+        let json: [String: Any] = ["tag": "cody-1", "request_id": "req-1",
+                                   "preview": ApprovalTestRequests.preview("complete", targets, more: 6)]
+        let frame = try JSONDecoder().decode(ApprovalPreviewFrame.self, from: JSONSerialization.data(withJSONObject: json))
+        h.store.handle(.preview(frame))
+        h.sync()
+        h.window.contentView!.layoutSubtreeIfNeeded()
+        h.card.layoutSubtreeIfNeeded()
+
+        let lines = h.card.listing.preview
+        XCTAssertTrue(lines.contains("and 70 more"), "the summary line is shown: \(lines)")
+        XCTAssertEqual(frames(of: h.card), before, "nothing moved")
+        XCTAssertEqual(h.card.preferredHeight(forWidth: 560, maxHeight: 520), height)
+    }
+
+    func testLinesThatDoNotFitAreCutWithAFinalNoteNotDroppedSilently() {
+        let lines = (0..<5).map { ApprovalPreviewText.Line(spans: [.init(text: "line \($0)", style: .normal)]) }
+        let shown = ConsequencePreviewView.fit(lines, into: 3)
+        XCTAssertEqual(shown.count, 3)
+        XCTAssertEqual(shown.last?.text, "and 3 more lines not shown")
+        XCTAssertTrue(shown.last?.hasWarning ?? false)
+        XCTAssertEqual(ConsequencePreviewView.fit(lines, into: 5), lines)
+    }
+
+    func testALongPathKeepsItsCountsAtANarrowWidth() {
+        let view = ConsequencePreviewView(reservedLines: 1)
+        let path = "/Users/me/" + String(repeating: "long-folder/", count: 12) + "x"
+        let t = ApprovalPreviewTarget(command: "rm", path: path, exists: true, kind: "dir", dirs: 3, files: 41_208,
+                                      bytes: 1_200_000_000, flags: [.outsideCwd])
+        let line = ApprovalPreviewText.lines(for: ApprovalPreview(state: .complete, targets: [t]), cwd: "/w")[0]
+        let drawn = view.fittedString(for: line, width: 320).string
+        XCTAssertTrue(drawn.contains("…"))
+        XCTAssertTrue(drawn.contains("3 directories · 41,208 files · 1.2 GB"), drawn)
+        XCTAssertTrue(drawn.hasSuffix("outside the working folder"), drawn)
+    }
+
     func testAPreviewForAnEndedRequestIsIgnored() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.withPreview(state: "counting"))
         h.store.handle(.resolved(try ApprovalTestRequests.resolved(id: "req-1", outcome: "denied")))

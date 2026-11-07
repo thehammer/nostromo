@@ -88,10 +88,10 @@ final class ApprovalPreviewTextTests: XCTestCase {
         XCTAssertEqual(texts(preview([t], state: .counting)), ["/tmp/x — counting…"])
     }
 
-    func testARelativeTargetAddsTheStartFolderNoteInMutedText() {
+    func testARelativeTargetAddsTheStartFolderNoteInTheWarningColour() {
         let lines = ApprovalPreviewText.lines(for: preview([dir("/w/build", relative: true)]), cwd: "/Users/me/w", home: "/Users/me")
-        XCTAssertEqual(lines.last?.text, "(relative to ~/w, where the session started)")
-        XCTAssertEqual(lines.last?.spans.first?.style, .muted)
+        XCTAssertEqual(lines.last?.text, "(relative to ~/w, where the session started; an earlier cd would change this)")
+        XCTAssertEqual(lines.last?.spans.first?.style, .warning)
     }
 
     func testOverTheLimitSaysAndNMore() {
@@ -102,27 +102,74 @@ final class ApprovalPreviewTextTests: XCTestCase {
         XCTAssertEqual(texts(preview(many.prefix(2).map { $0 }, more: 4)).last, "and 4 more")
     }
 
-    func testReservedLinesMatchTheLinesWhateverTheCountsSay() {
+    func testReservedLinesNeverFallShortOfTheLines() {
         let cases: [ApprovalPreview] = [
             preview([dir("/a")]),
             preview([dir("/a", relative: true)]),
             preview((0..<9).map { dir("/d\($0)", relative: $0 == 2) }, more: 2),
             preview([dir("/a")], more: 1),
+            preview([dir("/a/*.log")], state: .partial),
         ]
         for p in cases {
-            XCTAssertEqual(ApprovalPreviewText.reservedLineCount(for: p),
-                           ApprovalPreviewText.lines(for: p, cwd: "/w").count)
-            // The same targets, still counting: the same number of lines.
+            let reserved = ApprovalPreviewText.reservedLineCount(for: p)
+            XCTAssertGreaterThanOrEqual(reserved, ApprovalPreviewText.lines(for: p, cwd: "/w").count)
+            // The same targets, still counting, then grown to the worst case: the same room.
             let counting = ApprovalPreview(state: .counting, targets: p.targets.map {
                 ApprovalPreviewTarget(command: $0.command, path: $0.path, relative: $0.relative)
             }, more: p.more)
-            XCTAssertEqual(ApprovalPreviewText.reservedLineCount(for: counting),
-                           ApprovalPreviewText.reservedLineCount(for: p))
-            XCTAssertEqual(ApprovalPreviewText.lines(for: counting, cwd: "/w").count,
-                           ApprovalPreviewText.lines(for: p, cwd: "/w").count)
+            XCTAssertEqual(ApprovalPreviewText.reservedLineCount(for: counting), ApprovalPreviewText.worstCaseLineCount)
+            XCTAssertLessThanOrEqual(ApprovalPreviewText.lines(for: p, cwd: "/w").count, ApprovalPreviewText.worstCaseLineCount)
         }
+        // Without globs or counting it is exact.
+        XCTAssertEqual(ApprovalPreviewText.reservedLineCount(for: preview([dir("/a")])), 1)
         XCTAssertEqual(ApprovalPreviewText.reservedLineCount(for: nil), 0)
         XCTAssertEqual(ApprovalPreviewText.reservedLineCount(for: ApprovalPreview(state: .omitted, targets: [])), 0)
+    }
+
+    func testAGrowingPreviewFitsTheRoomReservedWhileItWasCounting() {
+        let first = ApprovalPreview(state: .counting, targets: [ApprovalPreviewTarget(command: "rm", path: "/w/a", relative: true)])
+        let grown = preview((0..<64).map { dir("/w/f\($0)", relative: true) }, more: 6)
+        XCTAssertLessThanOrEqual(ApprovalPreviewText.lines(for: grown, cwd: "/w").count,
+                                 ApprovalPreviewText.reservedLineCount(for: first))
+        XCTAssertEqual(texts(grown)[6], "and 64 more")
+    }
+
+    func testFlaggedTargetsComeFirstAndTheSummaryCountsWhatIsLeftFlagged() {
+        var targets = (0..<8).map { dir("/w/calm\($0)") }
+        targets.append(dir("/etc/x", flags: [.outsideCwd]))
+        targets.append(ApprovalPreviewTarget(command: "rm", cantResolve: "$X", why: "uses a variable or substitution"))
+        let lines = ApprovalPreviewText.lines(for: preview(targets), cwd: "/w")
+        XCTAssertTrue(lines[0].text.contains("outside the working folder"), lines[0].text)
+        XCTAssertTrue(lines[1].text.hasPrefix("can't resolve"), lines[1].text)
+        XCTAssertEqual(lines[2].text.prefix(7), "/w/calm")
+        XCTAssertEqual(lines.last?.text, "and 4 more")
+        // Flagged targets beyond the cut are said to be there.
+        let flagged = (0..<8).map { dir("/etc/f\($0)", flags: [.homeCritical]) }
+        let cut = ApprovalPreviewText.lines(for: preview(flagged), cwd: "/w")
+        XCTAssertEqual(cut.last?.text, "and 2 more, 2 flagged")
+        XCTAssertEqual(cut.last?.spans.first?.style, .warning)
+    }
+
+    func testAPartialPreviewNeverReadsAsASmallerOne() {
+        let few = preview([dir("/w/a")], state: .partial)
+        XCTAssertEqual(texts(few).last, "and possibly more (stopped counting early)")
+        let many = preview((0..<8).map { dir("/w/f\($0)") }, state: .partial, more: 1)
+        XCTAssertEqual(texts(many).last, "and at least 3 more")
+        XCTAssertEqual(ApprovalPreviewText.lines(for: few, cwd: "/w").last?.spans.first?.style, .warning)
+    }
+
+    func testALongPathIsCutInTheMiddleAndTheCountsAndFlagsStay() {
+        let path = "/Users/me/" + String(repeating: "very-long-folder-name/", count: 8) + "target"
+        let line = ApprovalPreviewText.lines(for: preview([dir(path, flags: [.outsideCwd])]), cwd: "/w", home: "/Users/me")[0]
+        let fitted = ApprovalPreviewText.fit(line, toWidth: 90) { CGFloat($0.count) }
+        XCTAssertLessThanOrEqual(fitted.text.count, 90)
+        XCTAssertTrue(fitted.text.contains("…"))
+        XCTAssertTrue(fitted.text.hasPrefix("~/Users") || fitted.text.hasPrefix("~/"), fitted.text)
+        XCTAssertTrue(fitted.text.contains("target — 3 directories · 41,208 files · 1.2 GB"), fitted.text)
+        XCTAssertTrue(fitted.text.hasSuffix("outside the working folder"), fitted.text)
+        XCTAssertTrue(fitted.hasWarning)
+        // A line that fits is untouched.
+        XCTAssertEqual(ApprovalPreviewText.fit(line, toWidth: 10_000) { CGFloat($0.count) }, line)
     }
 
     func testByteSizesUseDecimalUnits() {

@@ -51,6 +51,8 @@ pub enum Operand {
         path: PathBuf,
         /// It was written relative and joined to the session's start folder.
         relative: bool,
+        /// It was written with a trailing slash (which makes `rm` follow a symlink).
+        trailing_slash: bool,
     },
     CantResolve {
         text: String,
@@ -68,6 +70,10 @@ pub fn targets(cmd: &str, parse: &ShellParse, cwd: Option<&Path>, home: &Path) -
         let name = command_name(command);
         if let Some(kind) = name.as_deref().and_then(preview_command) {
             operands(cmd, parse, command, kind, after_cd, cwd, home, &mut out);
+        } else if let Some(name) = name.as_deref() {
+            if let Some(spec) = wrapped_removal(name, command) {
+                out.push(spec);
+            }
         }
         if name
             .as_deref()
@@ -86,6 +92,82 @@ fn command_name(command: &SimpleCommand) -> Option<String> {
     }
     let base = word.text.rsplit('/').next().unwrap_or(&word.text);
     Some(base.to_lowercase())
+}
+
+/// Commands that run another command given as one of their words.
+const WRAPPERS: [&str; 18] = [
+    "sudo",
+    "doas",
+    "env",
+    "nice",
+    "ionice",
+    "nohup",
+    "timeout",
+    "xargs",
+    "command",
+    "builtin",
+    "exec",
+    "time",
+    "stdbuf",
+    "setsid",
+    "caffeinate",
+    "watch",
+    "parallel",
+    "chroot",
+];
+
+fn word_base(word: &super::shell::Word) -> Option<String> {
+    if word.dynamic {
+        return None;
+    }
+    Some(
+        word.text
+            .rsplit('/')
+            .next()
+            .unwrap_or(&word.text)
+            .to_lowercase(),
+    )
+}
+
+/// An `rm` / `rmdir` / `mv` run through a wrapper, or `find -delete` / `-exec rm`: its
+/// operands are not previewed, so the card says it can't resolve them.
+fn wrapped_removal(name: &str, command: &SimpleCommand) -> Option<TargetSpec> {
+    let words = &command.words[1..];
+    let (kind, text, via) = if WRAPPERS.contains(&name) {
+        let (word, kind) = words
+            .iter()
+            .find_map(|w| Some((w, preview_command(&word_base(w)?)?)))?;
+        (kind, word.text.clone(), name.to_string())
+    } else if name == "find" {
+        let exec = words.windows(2).find_map(|pair| {
+            let flag = pair[0].text.as_str();
+            if !matches!(flag, "-exec" | "-execdir" | "-ok" | "-okdir") {
+                return None;
+            }
+            preview_command(&word_base(&pair[1])?)
+        });
+        if let Some(kind) = exec {
+            (kind, "find".to_string(), "find -exec".to_string())
+        } else if words.iter().any(|w| !w.dynamic && w.text == "-delete") {
+            (
+                PreviewCommand::Rm,
+                "find".to_string(),
+                "find -delete".to_string(),
+            )
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+    Some(TargetSpec {
+        command: kind,
+        operand: Operand::CantResolve {
+            text,
+            why: format!("runs via {via}"),
+        },
+        dest: None,
+    })
 }
 
 fn preview_command(name: &str) -> Option<PreviewCommand> {
@@ -243,6 +325,7 @@ fn resolve_word(
     Operand::Path {
         path: lexical(&base),
         relative,
+        trailing_slash: text.len() > 1 && text.ends_with('/'),
     }
 }
 
@@ -297,24 +380,55 @@ const NETWORK_ROOTS: [&str; 4] = ["/Volumes", "/Network", "/net", "/System/Volum
 
 /// Is `path` under one of the network / external / automount roots?
 pub fn is_network_path(path: &Path) -> bool {
-    NETWORK_ROOTS.iter().any(|r| path.starts_with(r))
-        || path.starts_with("/System/Volumes/Data/net")
-        || path.starts_with("/System/Volumes/Data/home")
+    let folded = key(path);
+    let raw = PathBuf::from(path.to_string_lossy().to_lowercase());
+    NETWORK_ROOTS
+        .iter()
+        .any(|r| path.starts_with(r) || folded.starts_with(r.to_lowercase()))
+        || ["/system/volumes/data/net", "/system/volumes/data/home"]
+            .iter()
+            .any(|r| raw.starts_with(r))
+}
+
+/// A path as the file system sees it for comparison: case-folded (APFS is case
+/// insensitive), with the `/System/Volumes/Data` firmlink and the `/private/{var,tmp,etc}`
+/// aliases removed. Only for comparing, never for reading.
+fn key(path: &Path) -> PathBuf {
+    let mut comps: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    if comps.len() >= 3 && comps[..3] == ["system", "volumes", "data"] {
+        comps.drain(..3);
+    }
+    if comps.len() >= 2
+        && comps[0] == "private"
+        && ["var", "tmp", "etc"].contains(&comps[1].as_str())
+    {
+        comps.remove(0);
+    }
+    let mut out = PathBuf::from("/");
+    out.extend(comps);
+    out
+}
+
+/// `path` is `base` or inside it, by [`key`].
+fn within(path: &Path, base: &Path) -> bool {
+    key(path).starts_with(key(base))
 }
 
 impl PreviewFs for RealFs {
     fn symlink_metadata(&self, path: &Path) -> io::Result<Meta> {
         use std::os::unix::fs::MetadataExt;
         let m = std::fs::symlink_metadata(path)?;
-        let t = m.file_type();
-        let kind = if t.is_symlink() {
-            EntryKind::Symlink
-        } else if t.is_dir() {
-            EntryKind::Dir
-        } else if t.is_file() {
-            EntryKind::File
-        } else {
-            EntryKind::Other
+        let kind = match m.mode() & 0o170_000 {
+            0o120_000 => EntryKind::Symlink,
+            0o040_000 => EntryKind::Dir,
+            0o100_000 => EntryKind::File,
+            _ => EntryKind::Other,
         };
         Ok(Meta {
             kind,
@@ -366,12 +480,17 @@ fn tcc_folders(home: &Path) -> Vec<PathBuf> {
         "Desktop",
         "Documents",
         "Downloads",
+        "Library/Application Support/AddressBook",
+        "Library/Calendars",
+        "Library/Cookies",
         "Library/Mail",
         "Library/Messages",
         "Library/Safari",
         "Library/Containers",
         "Library/Group Containers",
         "Library/Mobile Documents",
+        "Movies",
+        "Music",
         "Pictures/Photos Library.photoslibrary",
     ]
     .iter()
@@ -389,7 +508,7 @@ fn is_home_critical(path: &Path, home: &Path) -> bool {
         home.join(".claude"),
     ]
     .iter()
-    .any(|critical| critical.starts_with(path))
+    .any(|critical| within(critical, path))
 }
 
 /// Walk state shared by every target of one preview.
@@ -447,7 +566,11 @@ pub fn walk(
                     more += 1;
                 }
             }
-            Operand::Path { path, relative } => {
+            Operand::Path {
+                path,
+                relative,
+                trailing_slash,
+            } => {
                 let (matches, extra) = expand_glob(&mut w, path);
                 more = more.saturating_add(extra);
                 for m in matches {
@@ -455,9 +578,17 @@ pub fn walk(
                         more += 1;
                         continue;
                     }
-                    let (t, hit_budget) = inspect(&mut w, spec, &m, *relative);
-                    partial |= hit_budget;
-                    targets.push(t);
+                    match m {
+                        Expanded::Cant(p, why) => {
+                            targets.push(cant_target(spec, &p.to_string_lossy(), why));
+                        }
+                        Expanded::Path(p) => {
+                            let (t, hit_budget) =
+                                inspect(&mut w, spec, &p, *relative, *trailing_slash);
+                            partial |= hit_budget;
+                            targets.push(t);
+                        }
+                    }
                 }
             }
         }
@@ -485,7 +616,7 @@ pub fn counting(specs: &[TargetSpec], env: &Env) -> ApprovalPreviewWire {
         }
         targets.push(match &spec.operand {
             Operand::CantResolve { text, why } => cant_target(spec, text, why),
-            Operand::Path { path, relative } => {
+            Operand::Path { path, relative, .. } => {
                 let mut t = base_target(spec, path, *relative);
                 set_pure_flags(&mut t, path, env);
                 t
@@ -569,7 +700,7 @@ fn base_target(spec: &TargetSpec, path: &Path, relative: bool) -> PreviewTargetW
 }
 
 fn set_pure_flags(t: &mut PreviewTargetWire, path: &Path, env: &Env) {
-    if env.cwd.as_deref().is_some_and(|cwd| !path.starts_with(cwd)) {
+    if env.cwd.as_deref().is_some_and(|cwd| !within(path, cwd)) {
         t.flags.push(PreviewFlag::OutsideCwd);
     }
     if is_home_critical(path, &env.home) {
@@ -577,17 +708,26 @@ fn set_pure_flags(t: &mut PreviewTargetWire, path: &Path, env: &Env) {
     }
 }
 
-/// Expand glob components of `path` against the file system. A path with no glob, or a
-/// glob with no match, comes back as itself (what `rm` would then report). The second
-/// value counts matches left out over [`MAX_GLOB_MATCHES`].
-fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<PathBuf>, u32) {
+/// One result of expanding a glob operand.
+enum Expanded {
+    Path(PathBuf),
+    /// Not looked at: it would need a read inside a protected folder, or a listing failed.
+    Cant(PathBuf, &'static str),
+}
+
+/// Expand glob components of `path` against the file system. A path with no glob comes
+/// back as itself. A glob with no match comes back as itself only when every listing
+/// succeeded (what `rm` would then report); a glob that needs a protected, unreadable or
+/// unfinished listing becomes "can't resolve", never a path that gets looked at. The
+/// second value counts matches left out over [`MAX_GLOB_MATCHES`].
+fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<Expanded>, u32) {
     if !path
         .components()
         .any(|c| has_glob(&c.as_os_str().to_string_lossy()))
     {
-        return (vec![path.to_path_buf()], 0);
+        return (vec![Expanded::Path(path.to_path_buf())], 0);
     }
-    let mut frontier = vec![PathBuf::new()];
+    let mut frontier: Vec<Expanded> = vec![Expanded::Path(PathBuf::new())];
     let mut extra = 0u32;
     // The part of the operand before its first glob component.
     let literal: PathBuf = path
@@ -597,14 +737,21 @@ fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<PathBuf>, u32) {
     for comp in path.components() {
         let name = comp.as_os_str().to_string_lossy().into_owned();
         let mut next = Vec::new();
-        for base in &frontier {
+        for item in frontier {
+            let base = match item {
+                Expanded::Path(base) => base,
+                Expanded::Cant(base, why) => {
+                    next.push(Expanded::Cant(base.join(comp), why));
+                    continue;
+                }
+            };
             if !has_glob(&name) || matches!(comp, Component::RootDir | Component::Prefix(_)) {
-                next.push(base.join(comp));
+                next.push(Expanded::Path(base.join(comp)));
                 continue;
             }
-            if w.fs.is_network(base) {
-                // Never list a network volume: the literal path stands.
-                next.push(base.join(comp));
+            if w.fs.is_network(&base) {
+                // Never list a network volume: the literal path stands (it is not read).
+                next.push(Expanded::Path(base.join(comp)));
                 continue;
             }
             // A privacy-guarded folder is listed only when the operand itself names a path
@@ -612,13 +759,22 @@ fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<PathBuf>, u32) {
             let guarded = w
                 .tcc
                 .iter()
-                .any(|f| base.starts_with(f) && !literal.starts_with(f));
+                .any(|f| within(&base, f) && !within(&literal, f));
             if guarded {
-                next.push(base.join(comp));
+                next.push(Expanded::Cant(
+                    base.join(comp),
+                    "not counted: protected folder",
+                ));
                 continue;
             }
-            let Ok(names) = w.fs.read_dir(base) else {
-                continue;
+            let names = match w.fs.read_dir(&base) {
+                Ok(names) => names,
+                // The folder is not there: nothing matches.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    next.push(Expanded::Cant(base.join(comp), "could not list the folder"));
+                    continue;
+                }
             };
             let mut hits: BTreeSet<OsString> = BTreeSet::new();
             for entry in names {
@@ -634,9 +790,9 @@ fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<PathBuf>, u32) {
                     hits.insert(entry);
                 }
             }
-            next.extend(hits.into_iter().map(|h| base.join(h)));
+            next.extend(hits.into_iter().map(|h| Expanded::Path(base.join(h))));
         }
-        next.sort();
+        next.sort_by(|a, b| expanded_path(a).cmp(expanded_path(b)));
         if next.len() > MAX_GLOB_MATCHES {
             extra += (next.len() - MAX_GLOB_MATCHES) as u32;
             next.truncate(MAX_GLOB_MATCHES);
@@ -644,9 +800,55 @@ fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<PathBuf>, u32) {
         frontier = next;
     }
     if frontier.is_empty() {
-        return (vec![path.to_path_buf()], 0);
+        if w.spent {
+            return (
+                vec![Expanded::Cant(
+                    path.to_path_buf(),
+                    "listing stopped (too big or too slow)",
+                )],
+                0,
+            );
+        }
+        return (vec![Expanded::Path(path.to_path_buf())], 0);
     }
     (frontier, extra)
+}
+
+fn expanded_path(e: &Expanded) -> &Path {
+    match e {
+        Expanded::Path(p) | Expanded::Cant(p, _) => p,
+    }
+}
+
+/// Is any folder between the session's start folder (or home) and `path` a symlink?
+/// Looks at the folders only, each by `symlink_metadata`; never at a protected folder.
+fn through_a_link(w: &Walker, path: &Path) -> bool {
+    let base = [w.env.cwd.as_deref(), Some(w.env.home.as_path())]
+        .into_iter()
+        .flatten()
+        .filter(|b| within(path, b))
+        .max_by_key(|b| b.components().count());
+    let Some(base) = base else { return false };
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        if key(dir).components().count() <= key(base).components().count() {
+            break;
+        }
+        let protected = w.tcc.iter().any(|f| key(f) == key(dir));
+        if !protected
+            && matches!(
+                w.fs.symlink_metadata(dir),
+                Ok(Meta {
+                    kind: EntryKind::Symlink,
+                    ..
+                })
+            )
+        {
+            return true;
+        }
+        ancestor = dir.parent();
+    }
+    false
 }
 
 /// One target's line. The bool is true when the walk ran out of budget on it.
@@ -655,6 +857,7 @@ fn inspect(
     spec: &TargetSpec,
     path: &Path,
     relative: bool,
+    trailing_slash: bool,
 ) -> (PreviewTargetWire, bool) {
     let mut t = base_target(spec, path, relative);
     set_pure_flags(&mut t, path, w.env);
@@ -662,6 +865,10 @@ fn inspect(
         t.flags.push(PreviewFlag::Network);
         t.flags.push(PreviewFlag::NotCounted);
         return (t, false);
+    }
+    if through_a_link(w, path) {
+        let cant = cant_target(spec, &path.to_string_lossy(), "path goes through a link");
+        return (cant, false);
     }
     let meta = match w.fs.symlink_metadata(path) {
         Ok(m) => m,
@@ -674,6 +881,14 @@ fn inspect(
             return (t, false);
         }
     };
+    if trailing_slash && meta.kind == EntryKind::Symlink {
+        let cant = cant_target(
+            spec,
+            &path.to_string_lossy(),
+            "a trailing slash follows the link",
+        );
+        return (cant, false);
+    }
     t.exists = Some(true);
     t.kind = Some(match meta.kind {
         EntryKind::File => PreviewKind::File,
@@ -690,7 +905,9 @@ fn inspect(
         EntryKind::Dir => {
             // A home-critical folder is flagged, not counted: the flag is the message.
             // A TCC-guarded folder that is itself the target is not opened either.
-            if t.flags.contains(&PreviewFlag::HomeCritical) || w.tcc.iter().any(|f| f == path) {
+            if t.flags.contains(&PreviewFlag::HomeCritical)
+                || w.tcc.iter().any(|f| key(f) == key(path))
+            {
                 t.flags.push(PreviewFlag::NotCounted);
                 return (t, false);
             }
@@ -759,7 +976,7 @@ fn count_dir(w: &mut Walker, root: &Path, dev: u64) -> Tally {
                     } else if w.fs.is_network(&path) {
                         tally.flags.push(PreviewFlag::Network);
                         tally.flags.push(PreviewFlag::NotCounted);
-                    } else if w.tcc.iter().any(|f| f == &path) {
+                    } else if w.tcc.iter().any(|f| key(f) == key(&path)) {
                         tally.flags.push(PreviewFlag::NotCounted);
                     } else {
                         stack.push(path);

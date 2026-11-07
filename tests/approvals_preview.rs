@@ -1146,12 +1146,23 @@ fn a_hung_file_system_never_stalls_the_next_request() {
             "the broker's worker must not wait on the file system: {:?}",
             started.elapsed()
         );
-        // The helpers were busy: the second one says so instead of waiting.
-        let state = second.preview.unwrap();
-        assert!(matches!(
-            state.state,
-            PreviewState::Counting | PreviewState::Complete
-        ));
+        // Both helpers were taken (the first request's quick and full walks): the second
+        // request's card shows its targets, and a follow-up says "not counted (busy)".
+        assert_eq!(second.preview.unwrap().state, PreviewState::Counting);
+        let ServerMsg::ApprovalPreview {
+            request_id,
+            preview,
+            ..
+        } = app.next("the busy preview", is_preview).await
+        else {
+            unreachable!()
+        };
+        assert_eq!(request_id, second.request_id);
+        assert_eq!(preview.state, PreviewState::Complete);
+        let t = &preview.targets[0];
+        assert!(t.flags.contains(&PreviewFlag::Busy), "{:?}", t.flags);
+        assert!(t.flags.contains(&PreviewFlag::NotCounted), "{:?}", t.flags);
+        assert_eq!(t.files, None);
         std::thread::sleep(Duration::from_secs(5)); // let the stuck helpers end
     });
 }

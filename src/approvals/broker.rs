@@ -2425,7 +2425,6 @@ struct Finished {
     entry_id: String,
 }
 
-/// The serialized size of the frame that shows `wire`.
 /// What the preview looks at in this request: the `rm` / `rmdir` / `mv` operands of a
 /// Bash command, with the session's start folder and the user's home.
 fn preview_targets(
@@ -2447,6 +2446,7 @@ fn preview_targets(
     (preview::targets(command, &parse, cwd, home), env)
 }
 
+/// The serialized size of the frame that shows `wire`.
 fn wire_len(wire: &ApprovalRequestWire) -> usize {
     serde_json::to_vec(wire).map_or(usize::MAX, |v| v.len())
 }

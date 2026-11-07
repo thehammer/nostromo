@@ -11,7 +11,7 @@ fn specs(cmd: &str, cwd: Option<&str>) -> Vec<TargetSpec> {
 
 fn path_of(s: &TargetSpec) -> (String, bool) {
     match &s.operand {
-        Operand::Path { path, relative } => (path.to_string_lossy().into_owned(), *relative),
+        Operand::Path { path, relative, .. } => (path.to_string_lossy().into_owned(), *relative),
         other => panic!("expected a path, got {other:?}"),
     }
 }
@@ -157,6 +157,7 @@ fn spec_for(path: PathBuf) -> TargetSpec {
         operand: Operand::Path {
             path,
             relative: false,
+            trailing_slash: false,
         },
         dest: None,
     }
@@ -167,7 +168,7 @@ fn touch(p: &Path, bytes: usize) {
     std::fs::write(p, vec![b'x'; bytes]).unwrap();
 }
 
-/// Relative paths, kinds, sizes, mtimes and symlink targets: any change shows.
+/// Relative paths, kinds, sizes, modes, mtimes, content hashes and symlink targets: any change shows.
 fn fingerprint(root: &Path) -> BTreeMap<String, String> {
     fn go(dir: &Path, root: &Path, out: &mut BTreeMap<String, String>) {
         for e in std::fs::read_dir(dir).unwrap() {
@@ -177,14 +178,23 @@ fn fingerprint(root: &Path) -> BTreeMap<String, String> {
             let link = std::fs::read_link(&p)
                 .map(|l| l.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let content = if m.is_file() {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&std::fs::read(&p).unwrap(), &mut h);
+                std::hash::Hasher::finish(&h)
+            } else {
+                0
+            };
             out.insert(
                 rel,
                 format!(
-                    "{:?}|{}|{:?}|{}",
+                    "{:?}|{}|{:?}|{}|{:o}|{:x}",
                     m.file_type(),
                     m.len(),
                     m.modified().unwrap(),
-                    link
+                    link,
+                    std::os::unix::fs::MetadataExt::mode(&m),
+                    content
                 ),
             );
             if m.is_dir() {
@@ -540,17 +550,17 @@ fn a_tcc_folder_under_an_outer_target_is_not_entered_but_one_we_are_in_is() {
     // the folder itself is never opened
     let t = &run(&f, "/home/u/Desktop").targets[0];
     assert!(t.flags.contains(&PreviewFlag::NotCounted));
-    // an outer target that contains it: ~/Library's TCC children
+    // an outer target that contains a protected folder never opens it
     let f = Fake::default()
-        .dir("/home/u/Library/x", &["Mail", "keep"])
-        .dir("/home/u/Library/x/keep", &[])
-        .dir("/home/u/Library/Mail", &["m"])
-        .file("/home/u/Library/Mail/m", 1);
-    let mut f2 = f;
-    f2.dirs
-        .insert(PathBuf::from("/home/u/Library"), vec!["Mail"]);
-    let t = &run(&f2, "/home/u/Library/Mail").targets[0];
-    assert!(t.flags.contains(&PreviewFlag::NotCounted));
+        .dir("/home/u/Pictures", &["Photos Library.photoslibrary", "keep.png"])
+        .file("/home/u/Pictures/keep.png", 7)
+        .dir("/home/u/Pictures/Photos Library.photoslibrary", &["db"])
+        .file("/home/u/Pictures/Photos Library.photoslibrary/db", 1);
+    let t = &run(&f, "/home/u/Pictures").targets[0];
+    assert!(t.flags.contains(&PreviewFlag::NotCounted), "{:?}", t.flags);
+    assert_eq!(t.dirs, Some(1));
+    assert_eq!(t.files, Some(1));
+    assert!(!read_under(&f, "/home/u/Pictures/Photos Library.photoslibrary"));
 }
 
 #[test]
@@ -637,9 +647,27 @@ fn invisible_characters_in_a_path_show_as_tokens() {
 // ---- read-only proof ----
 
 #[test]
-fn the_preview_source_has_no_way_to_change_anything() {
+fn the_preview_source_only_reads_metadata_and_listings() {
     let src = include_str!("../preview.rs");
+    // Every `fs::` path is one of the two reads (or the unix mode extension trait).
+    let mut seen = BTreeSet::new();
+    for (at, _) in src.match_indices("fs::") {
+        let name: String = src[at + 4..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        seen.insert(name);
+    }
+    let allowed: BTreeSet<String> = ["symlink_metadata", "read_dir", "MetadataExt"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        seen, allowed,
+        "preview.rs touches the file system through other calls"
+    );
     for banned in [
+        // changes
         "remove_",
         "rename",
         "create_dir",
@@ -648,8 +676,23 @@ fn the_preview_source_has_no_way_to_change_anything() {
         "write",
         "set_permissions",
         "set_len",
-        "Command::new",
+        "hard_link",
+        "symlink(",
+        "fs::copy",
+        // reads that follow a link or open a file
+        ".metadata(",
+        "fs::metadata",
+        ".exists()",
+        ".is_dir()",
+        ".is_file()",
+        "File::open",
         "canonicalize",
+        // processes and escape hatches
+        "Command::new",
+        "std::process",
+        "spawn",
+        "libc",
+        "unsafe",
     ] {
         assert!(
             !src.contains(banned),
@@ -696,4 +739,238 @@ fn builtin_and_command_wrappers_count_as_a_directory_change() {
             "{cmd}"
         );
     }
+}
+
+// ---- review fix-ups: the preview fails toward "can't resolve", never toward calm ----
+
+fn mac_env() -> Env {
+    Env {
+        cwd: Some(PathBuf::from("/tmp/w")),
+        home: PathBuf::from("/Users/me"),
+    }
+}
+
+fn run_in(fake: &Fake, p: &str, env: &Env) -> ApprovalPreviewWire {
+    walk(&[spec_for(PathBuf::from(p))], Budget::FULL, fake, env)
+}
+
+/// Was anything inside `dir` (not `dir` itself) read?
+fn read_under(f: &Fake, dir: &str) -> bool {
+    let dir = dir.trim_end_matches('/');
+    f.reads
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|p| p != Path::new(dir) && p.starts_with(dir))
+}
+
+#[test]
+fn protected_folders_match_without_regard_to_case_or_alias() {
+    for p in [
+        "/Users/me/documents",
+        "/Users/me/DOCUMENTS",
+        "/System/Volumes/Data/Users/me/Documents",
+        "/System/Volumes/Data/Users/me/desktop",
+    ] {
+        let f = Fake::default()
+            .dir(p, &["inner"])
+            .file(&format!("{p}/inner"), 1);
+        let t = &run_in(&f, p, &mac_env()).targets[0];
+        assert!(t.flags.contains(&PreviewFlag::NotCounted), "{p}");
+        assert_eq!(t.files, None, "{p}");
+        assert!(!read_under(&f, &format!("{p}/")), "{p} was read");
+    }
+}
+
+#[test]
+fn home_critical_matches_without_regard_to_case_or_alias() {
+    for p in [
+        "/Users/me/LIBRARY",
+        "/Users/me/.SSH",
+        "/System/Volumes/Data/Users/me/.ssh",
+        "/System/Volumes/Data/Users/me",
+        "/users/ME",
+    ] {
+        let f = Fake::default()
+            .dir(p, &["inner"])
+            .file(&format!("{p}/inner"), 1);
+        let t = &run_in(&f, p, &mac_env()).targets[0];
+        assert!(t.flags.contains(&PreviewFlag::HomeCritical), "{p}");
+        assert!(t.flags.contains(&PreviewFlag::NotCounted), "{p}");
+        assert!(!read_under(&f, &format!("{p}/")), "{p} was read");
+    }
+}
+
+#[test]
+fn private_aliases_are_the_same_place_for_the_working_folder() {
+    let f = Fake::default().dir("/private/tmp/w/x", &[]);
+    let t = &run_in(&f, "/private/tmp/w/x", &mac_env()).targets[0];
+    assert!(!t.flags.contains(&PreviewFlag::OutsideCwd));
+    let f = Fake::default().dir("/tmp/other", &[]);
+    let t = &run_in(&f, "/tmp/other", &mac_env()).targets[0];
+    assert!(t.flags.contains(&PreviewFlag::OutsideCwd));
+}
+
+#[test]
+fn newly_listed_privacy_folders_are_never_opened() {
+    for dir in ["Music", "Movies", "Library/Calendars", "Library/Cookies"] {
+        let p = format!("/Users/me/{dir}");
+        let f = Fake::default().dir(&p, &["x"]).file(&format!("{p}/x"), 1);
+        let t = &run_in(&f, &p, &mac_env()).targets[0];
+        assert!(t.flags.contains(&PreviewFlag::NotCounted), "{dir}");
+    }
+}
+
+#[test]
+fn a_glob_into_a_protected_folder_cannot_resolve_and_is_never_read() {
+    let f = Fake::default()
+        .dir("/home/u", &["Desktop", "proj"])
+        .dir("/home/u/Desktop", &["a.txt"])
+        .file("/home/u/Desktop/a.txt", 1)
+        .dir("/home/u/proj", &["a.txt"])
+        .file("/home/u/proj/a.txt", 1);
+    let p = run(&f, "/home/u/*/*.txt");
+    let cant = p
+        .targets
+        .iter()
+        .find(|t| t.cant_resolve.as_deref() == Some("/home/u/Desktop/*.txt"))
+        .expect("the protected glob is a can't-resolve line");
+    assert_eq!(cant.path, None);
+    assert_eq!(cant.exists, None);
+    assert_eq!(cant.why.as_deref(), Some("not counted: protected folder"));
+    assert!(
+        !f.reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with("/home/u/Desktop")),
+        "a protected folder was read"
+    );
+    assert!(p
+        .targets
+        .iter()
+        .any(|t| t.path.as_deref() == Some("/home/u/proj/a.txt")));
+}
+
+#[test]
+fn a_glob_through_an_unreadable_folder_cannot_resolve() {
+    let mut f = Fake::default().dir("/w/t", &["a.log"]);
+    f.denied.push(PathBuf::from("/w/t"));
+    let t = &run(&f, "/w/t/*.log").targets[0];
+    assert_eq!(t.cant_resolve.as_deref(), Some("/w/t/*.log"));
+    assert_eq!(t.exists, None, "never reported as not existing");
+    // a folder that is not there is an honest miss
+    let t = &run(&Fake::default(), "/w/gone/*.log").targets[0];
+    assert_eq!(t.exists, Some(false));
+}
+
+#[test]
+fn a_glob_whose_listing_ran_out_of_budget_cannot_resolve() {
+    let f = Fake::default().dir("/w/t", &["a.log", "b.log"]);
+    let p = walk(
+        &[spec_for(PathBuf::from("/w/t/*.log"))],
+        Budget {
+            max_entries: 0,
+            time: Duration::from_secs(5),
+        },
+        &f,
+        &fake_env(),
+    );
+    assert_eq!(p.state, PreviewState::Partial);
+    assert_eq!(p.targets[0].exists, None);
+    assert!(p.targets[0].cant_resolve.is_some());
+}
+
+#[test]
+fn a_target_through_a_symlinked_folder_cannot_resolve() {
+    let d = tempfile::tempdir().unwrap();
+    let r = d.path();
+    touch(&r.join("outside/file"), 1);
+    std::fs::create_dir_all(r.join("cwd")).unwrap();
+    symlink(r.join("outside"), r.join("cwd/link")).unwrap();
+    let p = walked(r, &[spec_for(r.join("cwd/link/file"))]);
+    let t = &p.targets[0];
+    assert_eq!(t.why.as_deref(), Some("path goes through a link"));
+    assert_eq!(t.files, None);
+}
+
+#[test]
+fn a_trailing_slash_on_a_symlink_cannot_resolve() {
+    let d = tempfile::tempdir().unwrap();
+    let r = d.path();
+    touch(&r.join("outside/file"), 1);
+    std::fs::create_dir_all(r.join("cwd")).unwrap();
+    symlink(r.join("outside"), r.join("cwd/link")).unwrap();
+    let mut spec = spec_for(r.join("cwd/link"));
+    spec.operand = Operand::Path {
+        path: r.join("cwd/link"),
+        relative: false,
+        trailing_slash: true,
+    };
+    let t = &walked(r, &[spec]).targets[0];
+    assert!(t.cant_resolve.is_some());
+    assert!(t.why.as_deref().unwrap().contains("trailing slash"));
+    // without the slash it is the link itself
+    let t = &walked(r, &[spec_for(r.join("cwd/link"))]).targets[0];
+    assert_eq!(t.kind, Some(PreviewKind::Symlink));
+}
+
+#[test]
+fn the_parser_records_a_trailing_slash() {
+    match &specs("rm -r dir/ other", Some("/w"))[..] {
+        [a, b] => {
+            assert!(matches!(
+                a.operand,
+                Operand::Path {
+                    trailing_slash: true,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                b.operand,
+                Operand::Path {
+                    trailing_slash: false,
+                    ..
+                }
+            ));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_wrapped_removal_is_a_cant_resolve_line() {
+    for (cmd, via) in [
+        ("sudo rm -rf /x", "sudo"),
+        ("env A=1 rm /x", "env"),
+        ("nice -n 5 rm /x", "nice"),
+        ("timeout 5 rm /x", "timeout"),
+        ("xargs rm", "xargs"),
+        ("command rm /x", "command"),
+        ("sudo mv a b", "sudo"),
+        ("find . -delete", "find -delete"),
+        ("find . -name x -exec rm {} +", "find -exec"),
+    ] {
+        let t = specs(cmd, Some("/w"));
+        let wrapped = t
+            .iter()
+            .find(|s| matches!(&s.operand, Operand::CantResolve { why, .. } if why == &format!("runs via {via}")));
+        assert!(wrapped.is_some(), "{cmd}: {t:?}");
+    }
+    let t = specs("sudo rm -rf ~/x; rm foo", Some("/w"));
+    assert_eq!(t.len(), 2);
+    assert_eq!(cant_of(&t[0]).1, "runs via sudo");
+    assert_eq!(path_of(&t[1]).0, "/w/foo");
+    assert!(specs("echo rm /x", None).is_empty());
+    assert!(specs("find . -name x", None).is_empty());
+    assert!(specs("sudo ls /x", None).is_empty());
+}
+
+#[test]
+fn a_busy_preview_marks_every_path_not_counted() {
+    let b = busy(&[spec_for(PathBuf::from("/w/t"))], &fake_env());
+    let t = &b.targets[0];
+    assert!(t.flags.contains(&PreviewFlag::NotCounted));
+    assert!(t.flags.contains(&PreviewFlag::Busy));
+    assert_eq!(t.files, None);
 }
