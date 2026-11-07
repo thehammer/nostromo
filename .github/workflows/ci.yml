@@ -259,14 +259,23 @@ jobs:
   #     stale build product pass a test the current source would fail, which is
   #     how #345 got through.
   # ---------------------------------------------------------------------------
-  swift-tests-mac:
+  # Mac tests run as three parallel shards (macOS/ci/mac-shards.json, scripts/mac_shards.py;
+  # docs/ci.md). Shards 1 and 2 run their listed classes, shard 3 is the catch-all that runs
+  # everything else, so a new class can never be dropped. Each shard builds on its own
+  # runner (~200 s) and uploads a tiny report; `swift-tests-mac` below is the aggregate.
+  # `fail-fast: false` so one run shows every failing shard.
+  swift-tests-mac-shard:
     needs: changes
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only)
-    name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (Mac app) (dispatch)' || 'Swift tests (Mac app)' }}
+    name: ${{ github.event_name == 'workflow_dispatch' && format('Mac tests shard {0}/3 (dispatch)', matrix.shard) || format('Mac tests shard {0}/3', matrix.shard) }}
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     concurrency:
-      group: swift-tests-mac-${{ github.event_name }}-${{ github.ref }}
+      group: swift-tests-mac-shard-${{ matrix.shard }}-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
     steps:
@@ -304,19 +313,20 @@ jobs:
           unzip -q -o "$RUNNER_TEMP/FiraCode.zip" 'FiraCodeNerdFont-*.ttf' -d "$HOME/Library/Fonts"
           ls "$HOME/Library/Fonts"
 
-      # The same command a developer runs locally (the `NostromoTests` scheme).
-      # Fully serial: see docs/ci.md ("Deliberately not done") for why parallel
-      # testing is not enabled.
-      # Step timeout well under the 45-minute job limit (a green run takes ~21-25 min)
-      # so a hang fails the step and the next step can name the last running test.
-      - name: make mac-test
+      # The same command a developer runs locally (the `NostromoTests` scheme), restricted
+      # to this shard's classes. Fully serial inside a shard: see docs/ci.md ("Deliberately
+      # not done") for why in-process parallel testing is not enabled.
+      # Step timeout well under the job limit so a hang fails the step and the next step can
+      # name the last running test.
+      - name: make mac-test (shard)
         if: needs.changes.outputs.swift == 'true'
-        timeout-minutes: 35
-        run: make mac-test
+        timeout-minutes: 22
+        run: make mac-test SHARD=${{ matrix.shard }}
 
       # MotherDetailWidthConstraintTests read AppKit's constraint-conflict report from stderr and skip when it
       # cannot be read. A skip here would silently drop the only check that no required constraint is broken,
-      # so it fails the job (the tests also fail themselves when CI/GITHUB_ACTIONS is set).
+      # so it fails the job (the tests also fail themselves when CI/GITHUB_ACTIONS is set). The class runs in
+      # exactly one shard; the aggregate fails if no shard reports a passing case from it.
       - name: Constraint-conflict tests must not be skipped
         if: needs.changes.outputs.swift == 'true'
         run: |
@@ -324,13 +334,37 @@ jobs:
             echo "::error::a MotherDetailWidthConstraintTests case was skipped; its conflict assertions did not run"
             exit 1
           fi
-          grep -cE "Test Case .*MotherDetailWidthConstraintTests.* passed" macOS/build/mac-test-full.log
 
       - name: Last tests started (diagnosis)
         if: needs.changes.outputs.swift == 'true' && failure()
         run: grep "Test Case .* started" macOS/build/mac-test-full.log | tail -5 || true
 
-      # Compile gate for the app target. `make mac-test` builds only the
+      # Fails if the log has no `Executed N tests` total; the aggregate also checks every
+      # shard's count and the grand total.
+      - name: Write shard report
+        if: needs.changes.outputs.swift == 'true'
+        run: python3 scripts/mac_shards.py report --shard ${{ matrix.shard }} --log macOS/build/mac-test-full.log --out "$RUNNER_TEMP/shard-${{ matrix.shard }}.json"
+
+      - name: Upload shard report
+        if: needs.changes.outputs.swift == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-shard-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+      # Per-class durations for `scripts/mac_shards.py regenerate` (main pushes only).
+      - name: Upload full test log (main)
+        if: needs.changes.outputs.swift == 'true' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-test-log-shard-${{ matrix.shard }}
+          path: macOS/build/mac-test-full.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Compile gate for the app target, in shard 1 only. `make mac-test` builds only the
       # NostromoTests bundle, which does not include app-only sources such as
       # TerminalPaneHostView (they link SwiftTerm), so a non-compiling app could
       # pass it (PR #345). Same DerivedData as the test step above, so SwiftTerm
@@ -338,7 +372,7 @@ jobs:
       # same sources as Release. This is the real "the app builds" gate;
       # "Launch smoke (advisory)" green does not imply it.
       - name: Build Mac app (compile gate)
-        if: needs.changes.outputs.swift == 'true'
+        if: needs.changes.outputs.swift == 'true' && matrix.shard == 1
         run: |
           set -o pipefail
           xcodebuild -project macOS/Nostromo.xcodeproj -scheme Nostromo \
@@ -351,21 +385,50 @@ jobs:
         if: needs.changes.outputs.swift == 'true' && failure()
         uses: actions/upload-artifact@v4
         with:
-          name: mac-app-build-log
+          name: mac-app-build-log-${{ matrix.shard }}
           path: ${{ runner.temp }}/mac-app-build.log
           if-no-files-found: warn
           retention-days: 14
 
-      # The Makefile filters xcodebuild's output down to a few lines, so the
+      # The Makefile filters the build output down to a few lines, so the
       # .xcresult bundle is where the per-test failure detail lives.
       - name: Upload test results
         if: needs.changes.outputs.swift == 'true' && failure()
         uses: actions/upload-artifact@v4
         with:
-          name: swift-tests-mac-xcresult
+          name: swift-tests-mac-xcresult-${{ matrix.shard }}
           path: macOS/build/Logs/Test
           if-no-files-found: warn
           retention-days: 14
+
+  # The `Swift tests (Mac app)` check, an aggregate of the shards (same pattern as
+  # `Build & Lint`). On ubuntu, so it takes no macOS slot. `always()` makes it run (and
+  # fail) when a shard failed, was cancelled or was SKIPPED; a skipped required check counts
+  # as passing, so the verdict is computed by scripts/ci_mac_aggregate.py (unit-tested),
+  # never by a bare `needs` conclusion. Do not weaken it.
+  swift-tests-mac:
+    needs: [changes, swift-tests-mac-shard]
+    if: always() && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only))
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (Mac app) (dispatch)' || 'Swift tests (Mac app)' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download shard reports
+        if: needs.changes.outputs.swift == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mac-shard-report-*
+          path: shard-reports
+          merge-multiple: true
+
+      - name: Every Mac shard must have run and passed
+        env:
+          SWIFT: ${{ needs.changes.outputs.swift }}
+          SHARDS: ${{ needs.swift-tests-mac-shard.result }}
+        run: python3 scripts/ci_mac_aggregate.py --swift "$SWIFT" --shards-result "$SHARDS" --reports shard-reports
 
   swift-tests-kit:
     needs: changes
@@ -406,9 +469,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # Runs after `swift-tests-kit` (needs) so the two share one macOS slot at a time: GitHub Free
+  # allows 5 concurrent macOS jobs across the account (3 Mac shards + this chain + Python
+  # tooling = 5). `always()` because the jobs are independent: a failed, cancelled or
+  # dispatch-skipped Kit job must not skip this one.
   ios-simulator-build:
-    needs: changes
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only)
+    needs: [changes, swift-tests-kit]
+    if: always() && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only))
     name: ${{ github.event_name == 'workflow_dispatch' && 'iOS simulator build (dispatch)' || 'iOS simulator build' }}
     runs-on: macos-26
     timeout-minutes: 30
