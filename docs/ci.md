@@ -70,8 +70,9 @@ cat shard-*-logs/mac-test-full.log > /tmp/all.log
 python3 scripts/mac_shards.py regenerate --log /tmp/all.log --balanced-from <run id> --write
 ```
 
-`regenerate` balances by per-class duration (greedy, deterministic) and refreshes
-`expected_min_executed` to 97% of that run's total. `--from-source` estimates from
+`regenerate` balances by per-class duration (greedy, deterministic). A concatenated
+log has three grand totals, so pass `--floor <97% of the sum of the three shards' executed counts>`
+(from the `shard-<n>.json` reports); without `--floor` it uses 97% of the last total only. `--from-source` estimates from
 test-method counts (how the first assignment was made, before any timing log
 existed). The floor only guards against an accidental large drop; raise it when
 you add many tests.
@@ -138,9 +139,9 @@ From main run 40720495299 (`40f95ba4`) and the same source after the Rust split
 build` 122 s, `Rust tests` 666 s, `Python tooling tests` 273 s, `Rust clippy` 130 s;
 `make mac-test` executed 7,704 tests (the unsharded count the sharded total must
 match). With three shards the expected Mac wall-clock is setup ~90 s + build ~200 s +
-execution / 3 + the compile gate (about 11-13 min). The first assignment is balanced
-by test-method count, not time (no per-class timing log existed); re-run
-`scripts/mac_shards.py regenerate` from the first `main` push's uploaded logs. Measured
+execution / 3 + the compile gate (about 11-13 min). The first assignment was balanced
+by test-method count and ran 356 s / 589 s / 580 s of test time; it was then regenerated
+from dispatch run 42353503588's logs (508 s each, floor 7,614 = 97% of the 7,850 tests that run executed). Measured
 per-shard times and the 5-slot cap result are recorded in the sharding PR description.
 
 The required check name `Build & Lint` is unchanged (it is the aggregate job), so
