@@ -678,7 +678,7 @@ final class ApprovalQuestionFormViewTests: MouseQueueTestCase {
         let variants: [(name: String, questions: [Q.Obj])] = [
             ("fixture", Q.fixture),
             ("long labels and descriptions", [
-                Q.question("Which one?", header: "H", options: [Q.option(long, long), Q.option("Short", long), Q.option(long, "")]),
+                Q.question("Which one?", header: "H", options: [Q.option(long, long), Q.option("Short", long), Q.option("Third " + long, "")]),
                 Q.question("Which others?", header: "M", multi: true, options: [Q.option("Alpha", long), Q.option(long, "Beta")]),
             ]),
         ]
