@@ -4373,7 +4373,7 @@ fn a_log_page_echoes_its_querys_request_id_and_an_unrepresentable_since_is_a_bad
 // not match its query, so an unnamed `bad_cursor` or `not_operator_app` would read as a timeout.
 #[test]
 fn every_log_query_refusal_echoes_the_querys_request_id() {
-    run(GUARDED, |mut rig| async move {
+    run(GUARDED, |rig| async move {
         use_tmp_home(&rig);
         let mut app = rig.app(true).await;
         let mut agent = rig.agent(vec![Topic::Decision]).await;
