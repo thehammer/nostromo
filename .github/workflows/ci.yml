@@ -352,16 +352,18 @@ jobs:
           name: mac-shard-report-${{ matrix.shard }}
           path: ${{ runner.temp }}/shard-${{ matrix.shard }}.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
-      # Per-class durations for `scripts/mac_shards.py regenerate` (main pushes only).
-      - name: Upload full test log (main)
-        if: needs.changes.outputs.swift == 'true' && github.event_name == 'push'
+      # Per-class durations for `scripts/mac_shards.py regenerate` (main pushes and dispatches).
+      - name: Upload full test log
+        if: needs.changes.outputs.swift == 'true' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: mac-test-log-shard-${{ matrix.shard }}
           path: macOS/build/mac-test-full.log
           if-no-files-found: warn
+          overwrite: true
           retention-days: 14
 
       # Compile gate for the app target, in shard 1 only. `make mac-test` builds only the
@@ -471,11 +473,11 @@ jobs:
 
   # Runs after `swift-tests-kit` (needs) so the two share one macOS slot at a time: GitHub Free
   # allows 5 concurrent macOS jobs across the account (3 Mac shards + this chain + Python
-  # tooling = 5). `always()` because the jobs are independent: a failed, cancelled or
-  # dispatch-skipped Kit job must not skip this one.
+  # tooling = 5). `!cancelled()` because the jobs are independent: a failed or dispatch-skipped
+  # Kit job must not skip this one (a cancelled run should not start it).
   ios-simulator-build:
     needs: [changes, swift-tests-kit]
-    if: always() && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only))
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","ios"]'), inputs.only)) }}
     name: ${{ github.event_name == 'workflow_dispatch' && 'iOS simulator build (dispatch)' || 'iOS simulator build' }}
     runs-on: macos-26
     timeout-minutes: 30

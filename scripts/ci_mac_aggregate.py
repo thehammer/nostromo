@@ -6,8 +6,8 @@
 
 Fails (exit 1) unless the Mac test shards verifiably ran and passed:
 
-* `--swift false` (the path classifier proved nothing Swift changed): success, as the
-  single job did before the split.
+* `--swift false` (the path classifier proved nothing Swift changed): success as long as no
+  shard job failed or was cancelled, as the single job did before the split.
 * anything else: every shard job must have `success` (failure, cancelled and skipped
   all fail; a skipped required check counts as passing on GitHub, so it must be turned
   into a failure here), each shard must have reported at least one executed test with
@@ -30,6 +30,10 @@ SHARD_COUNT = 3
 def decide(swift, shards_result, reports, expected_min_executed):
     """(ok, [reasons]). `reports` is {shard number: report dict}."""
     if swift == "false":
+        # The shards start but skip their steps, so they report success; a shard that failed
+        # anyway (checkout, runner setup) must still fail this check, as the single job did.
+        if shards_result not in ("success", "skipped"):
+            return False, ["swift=false but the shard jobs result is %r" % shards_result]
         return True, ["swift=false: no Swift paths changed, nothing to aggregate"]
     problems = []
     if swift != "true":

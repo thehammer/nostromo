@@ -39,8 +39,8 @@ JOBS = {
     "build": ("Build & Lint", {"all", "rust"}, "always"),
     "python-tooling": ("Python tooling tests", {"all", "python"}, None),
     "swift-tests-kit": ("Swift tests (NostromoKit)", {"all", "swift", "kit"}, None),
-    # `needs` Kit so the two share one macOS slot; `always()` so a Kit result never skips it.
-    "ios-simulator-build": ("iOS simulator build", {"all", "swift", "ios"}, "always"),
+    # `needs` Kit so the two share one macOS slot; `!cancelled()` so a Kit result never skips it.
+    "ios-simulator-build": ("iOS simulator build", {"all", "swift", "ios"}, "not-cancelled"),
     # Last on purpose: the "bites" tests below patch the first matching line, which must belong
     # to a step-gated Swift job, not to this aggregate.
     # The aggregate of the three Mac test shards; see check_mac_aggregate_judges_every_shard.
@@ -62,6 +62,7 @@ NEEDS = {
 }
 WRAPPER_PREFIX = {
     "always": "always()",
+    "not-cancelled": "!cancelled()",
 }
 SWIFT_GATE = "needs.changes.outputs.swift == 'true'"
 CHANGES_JOB = ("changes", "Detect changed paths")
@@ -73,7 +74,7 @@ SWIFT_JOBS = (SHARD_JOB, "swift-tests-kit", "ios-simulator-build")
 # The aggregate reads the classifier too, but evaluates its verdict unconditionally.
 MAC_AGGREGATE = "swift-tests-mac"
 # Extra step conditions allowed on the shard job only (after the swift gate).
-SHARD_STEP_SUFFIXES = (" && github.event_name == 'push'", " && matrix.shard == 1")
+SHARD_STEP_SUFFIXES = (" && github.event_name != 'pull_request'", " && matrix.shard == 1")
 
 DISPATCH_NAME_RE = re.compile(
     r"^\s*\$\{\{\s*github\.event_name\s*==\s*'workflow_dispatch'\s*&&\s*'(?P<dispatch>[^']*)'"
@@ -1063,10 +1064,10 @@ class IosAfterKitTests(unittest.TestCase):
         text = good_workflow().replace("needs: [changes, swift-tests-kit]", "needs: [changes]", 1)
         self.assertTrue(check_ios_runs_after_kit_without_being_skipped_by_it(text))
 
-    def test_bites_when_ios_loses_always(self):
+    def test_bites_when_ios_loses_its_cancelled_guard(self):
         text = good_workflow()
         block = _job_blocks(text)["ios-simulator-build"]
-        text = text.replace(block, block.replace("always() && (", "(", 1), 1)
+        text = text.replace(block, block.replace("!cancelled() && (", "(", 1), 1)
         self.assertTrue(check_job_if_selects_by_only_input(text))
 
     def test_real_ci_yml_ios_after_kit(self):

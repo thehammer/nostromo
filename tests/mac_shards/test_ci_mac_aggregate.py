@@ -44,15 +44,22 @@ class DecideMatrixTests(unittest.TestCase):
             for result in self.RESULTS:
                 with self.subTest(swift=swift, shards_result=result):
                     ok, reasons = agg.decide(swift, result, good_reports(), FLOOR)
-                    expected = swift == "false" or (swift == "true" and result == "success")
+                    expected = (swift == "false" and result in ("success", "skipped")) or (
+                        swift == "true" and result == "success")
                     self.assertEqual(ok, expected, reasons)
                     self.assertTrue(reasons)
 
-    def test_swift_false_passes_without_any_reports_whatever_the_shard_result(self):
-        for result in self.RESULTS:
+    def test_swift_false_passes_without_any_reports_when_shards_did_not_fail(self):
+        for result in ("success", "skipped"):
             with self.subTest(shards_result=result):
                 ok, _ = agg.decide("false", result, {}, FLOOR)
                 self.assertTrue(ok)
+
+    def test_swift_false_still_fails_when_a_shard_failed_or_was_cancelled(self):
+        for result in ("failure", "cancelled"):
+            with self.subTest(shards_result=result):
+                ok, _ = agg.decide("false", result, {}, FLOOR)
+                self.assertFalse(ok)
 
     def test_skipped_shards_with_swift_true_fail_even_with_good_reports(self):
         ok, reasons = agg.decide("true", "skipped", good_reports(), FLOOR)
