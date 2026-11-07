@@ -79,7 +79,7 @@ final class PeerMarkerTurnViewTests: MouseQueueTestCase {
     func testABurstFromOneSenderDrawsTheCountedMarker() {
         let view = MotherNoticeFixtures.turnView(PeerFixtures.turn(origin: PeerFixtures.origin(3)))
 
-        XCTAssertEqual(view.wakeMarkerView?.shownText, "↘ 3 messages from PDO Demo · bypass")
+        XCTAssertEqual(view.wakeMarkerView?.shownText, "↘ 3 peer messages from PDO Demo · bypass")
         XCTAssertFalse(view.hasUserBubble)
     }
 
@@ -406,7 +406,7 @@ final class PeerMarkerSessionTests: XCTestCase {
         XCTAssertEqual(session.turns[1].id, before.id)
         XCTAssertEqual(session.turns[1].userInput, before.userInput)
         XCTAssertEqual(session.turns[1].identityKey, before.identityKey)
-        XCTAssertEqual(session.turns[1].markerContent?.line, "↘ 2 messages from PDO Demo · bypass")
+        XCTAssertEqual(session.turns[1].markerContent?.line, "↘ 2 peer messages from PDO Demo · bypass")
         XCTAssertTrue(changes.contains { if case .spliced(let from) = $0 { return from == 1 } else { return false } })
         sub.cancel()
     }
@@ -416,7 +416,7 @@ final class PeerMarkerSessionTests: XCTestCase {
 
         frame(client, id: "d1", PeerFixtures.origin(1, omitted: 2))
 
-        XCTAssertEqual(session.turns[1].markerContent?.line, "↘ 3 messages from PDO Demo · bypass")
+        XCTAssertEqual(session.turns[1].markerContent?.line, "↘ 3 peer messages from PDO Demo · bypass")
     }
 
     func testARepeatFrameChangesNothingAndTellsNoOne() {
@@ -499,6 +499,6 @@ final class PeerMarkerSessionTests: XCTestCase {
         XCTAssertEqual(session.turns.count, 2)
         XCTAssertEqual(session.turns.filter { $0.isGapMarker }.count, 0)
         XCTAssertEqual(session.turns.map(\.id), ids)
-        XCTAssertEqual(session.turns[1].markerContent?.line, "↘ 2 messages from PDO Demo · bypass")
+        XCTAssertEqual(session.turns[1].markerContent?.line, "↘ 2 peer messages from PDO Demo · bypass")
     }
 }

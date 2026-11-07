@@ -21,7 +21,7 @@ extension WakeMarkerText {
     public static let warningMode = "bypass"
 
     /// `↘ Peer <name> · <mode>: <first line>…`; several messages from one sender merge into
-    /// `↘ 3 messages from <name>`, the first lines in the tooltip and all bodies in the copy text.
+    /// `↘ 3 peer messages from <name>`, the first lines in the tooltip and all bodies in the copy text.
     public static func peerMessage(_ items: [PeerMessageItemWire], omitted: Int) -> WakeMarkerContent {
         let total = items.count + max(0, omitted)
         guard let first = items.first else {
@@ -58,7 +58,7 @@ extension WakeMarkerText {
         // Any message from a session in `bypass` mode puts the badge on the merged line too.
         let badge = items.lazy.compactMap { senderMode($0) }.first(where: { isWarning($0) })
         return WakeMarkerContent(
-            line: "\(peerMark) \(total) messages from \(who)" + (badge.map { " · \($0)" } ?? ""),
+            line: "\(peerMark) \(total) peer messages from \(who)" + (badge.map { " · \($0)" } ?? ""),
             tooltipLines: lines,
             accessibilityLabel: "\(total) messages from \(sameSender ? "session \(name)" : "other sessions")"
                 + (badge.map { ", \($0) mode" } ?? "") + ". " + lines.joined(separator: "; "),

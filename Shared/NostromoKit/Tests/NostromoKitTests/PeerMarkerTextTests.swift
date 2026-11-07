@@ -177,7 +177,7 @@ final class PeerMarkerTextTests: XCTestCase {
         let content = peer([item("A", mode: "default"), item("A", mode: "Bypass"), item("A", mode: "default")])
 
         XCTAssertEqual(content.badge, "Bypass")
-        XCTAssertEqual(content.line, "↘ 3 messages from A · Bypass")
+        XCTAssertEqual(content.line, "↘ 3 peer messages from A · Bypass")
         XCTAssertTrue(content.accessibilityLabel.contains("Bypass mode"), content.accessibilityLabel)
     }
 
@@ -185,7 +185,7 @@ final class PeerMarkerTextTests: XCTestCase {
         let content = peer([item("A", mode: "default"), item("A", mode: nil)])
 
         XCTAssertNil(content.badge)
-        XCTAssertEqual(content.line, "↘ 2 messages from A")
+        XCTAssertEqual(content.line, "↘ 2 peer messages from A")
     }
 
     func testAnotherModeIsPlainTextOnTheLine() {
@@ -210,7 +210,7 @@ final class PeerMarkerTextTests: XCTestCase {
     func testSeveralMessagesFromOneSenderAreOneCountedLine() {
         let content = peer([item(body: "one"), item(body: "two"), item(body: "three")])
 
-        XCTAssertEqual(content.line, "↘ 3 messages from PDO Demo · bypass")
+        XCTAssertEqual(content.line, "↘ 3 peer messages from PDO Demo · bypass")
         XCTAssertEqual(content.tooltipLines, ["one", "two", "three"])
         XCTAssertEqual(content.copyText, "one\n\ntwo\n\nthree")
         XCTAssertEqual(content.target, .none)
@@ -219,7 +219,7 @@ final class PeerMarkerTextTests: XCTestCase {
     func testMessagesFromDifferentSendersAreFromOtherSessionsAndTheTooltipNamesEach() {
         let content = peer([item("A", body: "one"), item("B", body: "two"), item("A", body: "three")])
 
-        XCTAssertEqual(content.line, "↘ 3 messages from other sessions · bypass")
+        XCTAssertEqual(content.line, "↘ 3 peer messages from other sessions · bypass")
         XCTAssertEqual(content.tooltipLines, ["A: one", "B: two", "A: three"])
         XCTAssertTrue(content.accessibilityLabel.hasPrefix("3 messages from other sessions, bypass mode"))
     }
@@ -233,17 +233,17 @@ final class PeerMarkerTextTests: XCTestCase {
 
     func testMessagesTheDaemonDroppedCountTowardTheTotalAndAreCountedInTheTooltip() {
         let one = peer([item(body: "one")], omitted: 2)
-        XCTAssertEqual(one.line, "↘ 3 messages from PDO Demo · bypass")
+        XCTAssertEqual(one.line, "↘ 3 peer messages from PDO Demo · bypass")
         XCTAssertEqual(one.tooltipLines, ["one", "…and 2 more"])
 
-        XCTAssertEqual(peer([item(), item()], omitted: 5).line, "↘ 7 messages from PDO Demo · bypass")
+        XCTAssertEqual(peer([item(), item()], omitted: 5).line, "↘ 7 peer messages from PDO Demo · bypass")
         XCTAssertEqual(peer([item()], omitted: -3).line, "↘ Peer PDO Demo · bypass: run the tests", "a negative count is no count")
     }
 
     func testTheTooltipListsTwentyMessagesAndCountsTheRest() {
         let content = peer((0 ..< 25).map { item(body: "m\($0)") })
 
-        XCTAssertEqual(content.line, "↘ 25 messages from PDO Demo · bypass")
+        XCTAssertEqual(content.line, "↘ 25 peer messages from PDO Demo · bypass")
         XCTAssertEqual(content.tooltipLines.count, 21)
         XCTAssertEqual(content.tooltipLines[19], "m19")
         XCTAssertEqual(content.tooltipLines.last, "…and 5 more")

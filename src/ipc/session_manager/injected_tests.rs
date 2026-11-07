@@ -418,3 +418,35 @@ async fn a_replayed_line_of_peer_or_skill_shape_with_nothing_written_is_a_plain_
         mgr.stop(&tag);
     }
 }
+
+#[tokio::test]
+async fn a_replayed_peer_line_with_nothing_written_is_never_merged_into_an_open_cli_peer_turn() {
+    let mut mgr = SessionManager::with_store_path(tmp_store());
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("l.jsonl");
+    // The CLI's own peer turn opens, then an echo (`isReplay`) of peer shape
+    // arrives with nothing in the daemon's written queue.
+    std::fs::write(
+        &f,
+        user_line(&peer_text("from the peer"), serde_json::json!({}))
+            + "\n"
+            + &user_line(
+                &peer_text("replayed human text"),
+                serde_json::json!({"isReplay": true}),
+            )
+            + "\n",
+    )
+    .unwrap();
+    spawn_stub(&mut mgr, "rm", &format!("cat '{}'; sleep 30", f.display()));
+
+    let turns = wait_turns(&mgr, "rm", 2).await;
+
+    assert!(matches!(turns[0].origin, Some(TurnOrigin::PeerMessage { .. })));
+    if let Some(TurnOrigin::PeerMessage { items, .. }) = &turns[0].origin {
+        assert_eq!(items.len(), 1, "the replayed line merged: {items:?}");
+        assert!(items.iter().all(|i| !i.body.contains("replayed human text")));
+    }
+    assert_eq!(turns[1].origin, None);
+    assert_eq!(turns[1].user_input, peer_text("replayed human text"));
+    mgr.stop("rm");
+}

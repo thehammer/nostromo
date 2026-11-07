@@ -2916,6 +2916,7 @@ fn run_reader(
                     // turn folds into it (no new turn). Only the CLI's own
                     // turn may: a written one is the user's text.
                     if matches!(author, TurnAuthor::Cli)
+                        && !replayed
                         && matches!(turn.origin, Some(TurnOrigin::PeerMessage { .. }))
                     {
                         let merged = {
