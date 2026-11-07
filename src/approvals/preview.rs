@@ -127,6 +127,19 @@ const NOT_RUNNERS: [&str; 12] = [
 /// after them (`git rm x`) is still flagged.
 const DATA_PROGRAMS: [&str; 2] = ["git", "gh"];
 
+/// Flags of those programs whose next word is free text (a message, a pattern). Only a
+/// quoted word right after one of these is skipped; any other quoted word is still scanned.
+const DATA_FLAGS: [&str; 8] = [
+    "-m",
+    "-am",
+    "--message",
+    "--body",
+    "-b",
+    "--title",
+    "-t",
+    "--grep",
+];
+
 /// A word with more than one token in it: a quoted sentence or command line.
 fn is_quoted_payload(text: &str) -> bool {
     text.contains(|c: char| c.is_whitespace() || ";&|()'\"`".contains(c))
@@ -140,6 +153,8 @@ fn runs_a_command(words: &[super::shell::Word]) -> bool {
         w.dynamic
             || t == "config"
             || t == "-x"
+            || t == "-u"
+            || t == "-o"
             || t.starts_with("-c")
             || [
                 "exec", "filter", "extcmd", "alias", "cmd", "command", "hook", "editor",
@@ -202,8 +217,12 @@ fn wrapped_removal(name: &str, command: &SimpleCommand) -> Option<TargetSpec> {
             return None;
         }
         let data_only = DATA_PROGRAMS.contains(&name) && !runs_a_command(words);
-        let (kind, word) = words.iter().find_map(|w| {
-            if w.dynamic || (data_only && is_quoted_payload(&w.text)) {
+        let (kind, word) = words.iter().enumerate().find_map(|(i, w)| {
+            let is_message = data_only
+                && is_quoted_payload(&w.text)
+                && i > 0
+                && DATA_FLAGS.contains(&words[i - 1].text.as_str());
+            if w.dynamic || is_message {
                 return None;
             }
             w.text
