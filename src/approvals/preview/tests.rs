@@ -967,6 +967,8 @@ fn a_command_the_preview_does_not_analyse_that_mentions_rm_cannot_resolve() {
         ("docker exec c rm -rf /x", "docker"),
         ("su -c \"rm -rf /x\" root", "su"),
         ("ssh host mv a b", "ssh"),
+        ("ssh host /bin/rm -rf /x", "ssh"),
+        ("rg --pre rm x", "rg"),
     ] {
         let t = specs(cmd, Some("/w"));
         assert!(

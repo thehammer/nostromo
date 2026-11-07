@@ -118,9 +118,8 @@ const WRAPPERS: [&str; 18] = [
 
 /// Programs that only read or print their words, or whose `-c` payload the parser already
 /// looks into: a word `rm` after them is not a removal run through them.
-const NOT_RUNNERS: [&str; 14] = [
-    "echo", "printf", "grep", "egrep", "fgrep", "rg", "man", "which", "type", "ls", "cat", "bash",
-    "sh", "zsh",
+const NOT_RUNNERS: [&str; 12] = [
+    "echo", "printf", "grep", "egrep", "fgrep", "which", "type", "ls", "cat", "bash", "sh", "zsh",
 ];
 
 fn word_base(word: &super::shell::Word) -> Option<String> {
@@ -181,7 +180,11 @@ fn wrapped_removal(name: &str, command: &SimpleCommand) -> Option<TargetSpec> {
             }
             w.text
                 .split(|c: char| c.is_whitespace() || ";&|()'\"`".contains(c))
-                .find_map(|tok| Some((preview_command(&tok.to_lowercase())?, w)))
+                .find_map(|tok| {
+                    let base = tok.rsplit('/').next().unwrap_or(tok);
+                    let base = base.trim_start_matches('\\').to_lowercase();
+                    Some((preview_command(&base)?, w))
+                })
         })?;
         (kind, word.text.clone(), name.to_string())
     };
