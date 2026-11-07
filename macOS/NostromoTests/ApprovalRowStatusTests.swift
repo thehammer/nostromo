@@ -1907,6 +1907,8 @@ final class ApprovalGuardBarTests: MouseQueueTestCase {
         XCTAssertEqual(opened.count, 1, "pressing it opens the log")
         XCTAssertNotNil(p.host.guardBar, "pressing it does not close the bar")
         XCTAssertNotNil(p.store.guardNotice(tag: "cody-1"))
+        XCTAssertTrue(p.recorder.sent.isEmpty)
+    }
 
     // MARK: The row says so too
 
