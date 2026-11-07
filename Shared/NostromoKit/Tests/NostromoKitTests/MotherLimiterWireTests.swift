@@ -295,11 +295,11 @@ final class MotherLimiterWireTests: XCTestCase {
 
     // MARK: - Unknown enums
 
-    func testAnUnknownModeIsUnknownAndNotShown() throws {
+    func testAnUnknownModeIsUnknownAndShownWithItsName() throws {
         let l = try decoded { $0["mode"] = "paused" }
         XCTAssertEqual(l.mode, .unknown("paused"))
-        XCTAssertFalse(l.isShown)
-        XCTAssertEqual(MotherLimiterPresentation.lineText(l), "")
+        XCTAssertTrue(l.isShown, "a newer Mother's mode must not vanish silently")
+        XCTAssertTrue(MotherLimiterPresentation.lineText(l).hasPrefix("Limiter (paused)"), MotherLimiterPresentation.lineText(l))
         XCTAssertEqual(l.concurrency?.allowed, 3, "the rest of the block still decodes")
     }
 

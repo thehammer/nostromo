@@ -162,8 +162,15 @@ final class MotherLimiterStripTests: XCTestCase {
         XCTAssertTrue(off.detailLines.isEmpty || !off.isShown)
     }
 
-    func testAnUnknownModeIsHidden() throws {
+    func testAnUnknownModeIsShownWithItsName() throws {
+        // A newer Mother's mode must not vanish: it shows as `Limiter (<mode>)`.
         let s = strip(try LimiterFixture.block { $0["mode"] = "turbo" })
+        XCTAssertTrue(s.isShown)
+        XCTAssertTrue(s.labelText.hasPrefix("Limiter (turbo)"), s.labelText)
+    }
+
+    func testAnEmptyModeIsHidden() throws {
+        let s = strip(try LimiterFixture.block { $0["mode"] = "" })
         XCTAssertFalse(s.isShown)
         XCTAssertEqual(s.labelText, "")
     }

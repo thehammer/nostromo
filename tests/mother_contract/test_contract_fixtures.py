@@ -110,9 +110,9 @@ def vendored_contents() -> dict:
 
 
 class ManifestTests(unittest.TestCase):
-    def test_manifest_names_exactly_the_contract_fixtures_and_the_quota_fixture_with_provenance(self):
+    def test_manifest_names_exactly_the_contract_fixtures_and_the_quota_and_limiter_fixtures_with_provenance(self):
         manifest = json.loads(read(MANIFEST))
-        self.assertEqual(sorted(manifest["files"]), sorted(FILES + ["quota_block.json"]))
+        self.assertEqual(sorted(manifest["files"]), sorted(FILES + ["quota_block.json", "limiter_block.json"]))
         self.assertEqual(manifest["mother_repo"], "thehammer/mother")
         self.assertEqual(manifest["mother_path"], "plugins/mother/tests/fixtures/contract")
         self.assertRegex(manifest["mother_commit"], r"^[0-9a-f]{40}$")

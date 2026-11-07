@@ -135,11 +135,14 @@ public struct MotherLimiter: Equatable, Sendable {
     /// The limiter is not computing: dispatch uses fixed concurrency.
     public var isNotRunning: Bool { stale || fault != nil }
 
-    /// A decoded block of a mode the build knows (not `off`, not unknown) is shown as a strip line.
+    /// Every mode except `off` is shown as a strip line. A mode this build does not know (a newer Mother) is
+    /// shown as `Limiter (<mode>)` rather than hidden, so a new mode can never disappear silently; an empty or
+    /// missing mode string is not shown.
     public var isShown: Bool {
         switch mode {
         case .observe, .enforce: return true
-        case .off, .unknown: return false
+        case .off: return false
+        case .unknown(let raw): return !raw.isEmpty
         }
     }
 
@@ -255,7 +258,9 @@ public enum MotherLimiterPresentation {
     public static func lineText(_ limiter: MotherLimiter) -> String {
         guard limiter.isShown else { return "" }
         let observe = limiter.mode == .observe
-        var parts = [observe ? "Limiter (observe)" : "Limiter"]
+        var head = observe ? "Limiter (observe)" : "Limiter"
+        if case .unknown(let raw) = limiter.mode { head = "Limiter (\(raw))" }
+        var parts = [head]
         if limiter.isNotRunning { parts.append(notRunningText); return parts.joined(separator: " · ") }
         if let c = limiter.concurrency {
             if let allowed = c.allowed {
