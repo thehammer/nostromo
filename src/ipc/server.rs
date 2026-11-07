@@ -3715,6 +3715,7 @@ fn is_approval_frame(msg: &ServerMsg) -> bool {
             | ServerMsg::ApprovalResolved { .. }
             | ServerMsg::ApprovalSessionRules { .. }
             | ServerMsg::ApprovalGuardBlocked { .. }
+            | ServerMsg::ApprovalPreview { .. }
             | ServerMsg::ApprovalAnswerRefused { .. }
             | ServerMsg::ApprovalPending { .. }
     )
@@ -3728,6 +3729,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         | ServerMsg::ApprovalResolved { .. }
         | ServerMsg::ApprovalSessionRules { .. }
         | ServerMsg::ApprovalGuardBlocked { .. }
+        | ServerMsg::ApprovalPreview { .. }
         | ServerMsg::ApprovalAnswerRefused { .. }
         // Targeted replies to the operator app's log requests: no broadcast path carries them.
         | ServerMsg::ApprovalsLogPage { .. }

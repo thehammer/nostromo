@@ -59,6 +59,105 @@ pub struct ApprovalRequestWire {
     pub session_rule_candidates: Vec<SessionRuleCandidateWire>,
     pub created_at_ms: u64,
     pub deadline_at_ms: u64,
+    /// What an `rm` / `rmdir` / `mv` in the command would touch (AP7): read-only metadata.
+    /// Only on a held Bash request that has such a command. Extra lines on the card; it
+    /// never changes the options offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<ApprovalPreviewWire>,
+}
+
+/// How far a consequence preview got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewState {
+    Complete,
+    /// Stopped at a budget: the counts are "at least".
+    Partial,
+    /// The targets are known; the counts are still being taken (an `approval_preview`
+    /// frame follows).
+    Counting,
+    /// Left out (it would not fit in a frame).
+    Omitted,
+}
+
+/// Which command a preview target belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewCommand {
+    Rm,
+    Rmdir,
+    Mv,
+}
+
+/// What a target is on disk (symlinks are never followed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewKind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+/// Something worth a warning about a target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewFlag {
+    OutsideCwd,
+    HomeCritical,
+    Symlink,
+    OtherVolume,
+    Unreadable,
+    NotCounted,
+    Network,
+    /// Not counted because too many previews were already running.
+    Busy,
+}
+
+/// One operand of an `rm` / `rmdir` / `mv`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewTargetWire {
+    pub command: PreviewCommand,
+    /// The absolute path (a glob match is its own target). Absent when it can't resolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The operand as written, when it can't be resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cant_resolve: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// The path was relative and resolved against the session's start folder.
+    #[serde(default)]
+    pub relative: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exists: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PreviewKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// The counts stopped at a budget: they are lower bounds.
+    #[serde(default)]
+    pub at_least: bool,
+    #[serde(default)]
+    pub flags: Vec<PreviewFlag>,
+    /// For `mv`: where it goes (as written, resolved when it can be).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dest: Option<String>,
+}
+
+/// The consequence preview of a command (AP7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalPreviewWire {
+    pub state: PreviewState,
+    #[serde(default)]
+    pub targets: Vec<PreviewTargetWire>,
+    /// Targets left out of `targets` (over the cap).
+    #[serde(default)]
+    pub more: u32,
 }
 
 /// Who is asking: the session's agent, and the sub-agent if it is one.

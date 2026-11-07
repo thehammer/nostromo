@@ -1025,6 +1025,26 @@ mod query {
     }
 
     #[test]
+    fn a_preview_entry_appears_in_the_log_as_a_generic_row() {
+        let (_d, log) = store();
+        let mut e = Entry::new(
+            Event::Preview {
+                preview: json!({"state": "complete", "targets": [], "more": 0}),
+            },
+            at(2026, 11, 7, 8, 0, 0),
+        );
+        e.request_id = Some("r1".into());
+        e.tag = Some("A".into());
+        log.append(&e).unwrap();
+
+        let page = log.query(&q(50), NOW()).unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].kind, RowKind::Other);
+        assert_eq!(page.rows[0].summary, "preview");
+        assert_eq!(page.rows[0].request_id.as_deref(), Some("r1"));
+    }
+
+    #[test]
     fn filters_by_focus_outcome_group_and_since() {
         let (_d, log) = store();
         let cases = [
