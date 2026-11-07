@@ -480,9 +480,23 @@ impl BrokerParts {
             presenters,
             probe: Arc::new(|| Box::new(SystemPaneProbe::new())),
             settings: Arc::new(FileSettings::new()),
-            timeout: APPROVAL_TIMEOUT,
+            timeout: qa_timeout_override(|k| std::env::var(k).ok()).unwrap_or(APPROVAL_TIMEOUT),
         }
     }
+}
+
+/// `NOSTROMO_QA_APPROVAL_TIMEOUT_SECS` (clamped to 5-900), honoured only when
+/// `NOSTROMO_QA_DAEMON=1`: a QA run can make a request time out in seconds. `env`
+/// reads one variable.
+pub fn qa_timeout_override(env: impl Fn(&str) -> Option<String>) -> Option<Duration> {
+    if env("NOSTROMO_QA_DAEMON").as_deref() != Some("1") {
+        return None;
+    }
+    let secs: u64 = env("NOSTROMO_QA_APPROVAL_TIMEOUT_SECS")?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(secs.clamp(5, 900)))
 }
 
 /// A session the broker can answer.
@@ -1167,6 +1181,19 @@ impl ApprovalBroker {
         if let Some(Err(e)) = remaining.map(|notes| write_notes(self.inner.audit.dir(), &notes)) {
             warn!(tag, "could not update {RESTART_NOTES_FILE}: {e}");
         }
+    }
+
+    /// One page of the audit log, newest first. Read-only.
+    pub fn log_query(
+        &self,
+        q: &super::audit::LogQuery,
+    ) -> Result<super::audit::LogPage, super::audit::LogError> {
+        self.inner.audit.query(q, Utc::now())
+    }
+
+    /// One audit entry in full (`id` is a request id or an entry id). Read-only.
+    pub fn log_entry(&self, id: &str) -> io::Result<Option<super::audit::LogDetail>> {
+        self.inner.audit.entry_detail(id, Utc::now())
     }
 
     /// Delete audit files past retention ([`AuditLog::sweep`]).
@@ -2521,4 +2548,51 @@ fn write_notes(dir: &Path, notes: &BTreeMap<String, String>) -> io::Result<()> {
     )?;
     file.sync_data()?;
     std::fs::rename(tmp, path)
+}
+
+#[cfg(test)]
+mod qa_timeout_tests {
+    use super::*;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == k)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
+
+    #[test]
+    fn the_qa_timeout_is_ignored_unless_the_qa_daemon_flag_is_one() {
+        assert_eq!(
+            qa_timeout_override(env(&[("NOSTROMO_QA_APPROVAL_TIMEOUT_SECS", "20")])),
+            None
+        );
+        assert_eq!(
+            qa_timeout_override(env(&[
+                ("NOSTROMO_QA_DAEMON", "0"),
+                ("NOSTROMO_QA_APPROVAL_TIMEOUT_SECS", "20")
+            ])),
+            None
+        );
+        assert_eq!(
+            qa_timeout_override(env(&[("NOSTROMO_QA_DAEMON", "1")])),
+            None
+        );
+    }
+
+    #[test]
+    fn the_qa_timeout_is_clamped_to_five_to_nine_hundred_seconds() {
+        let with = |secs: &'static str| {
+            qa_timeout_override(env(&[
+                ("NOSTROMO_QA_DAEMON", "1"),
+                ("NOSTROMO_QA_APPROVAL_TIMEOUT_SECS", secs),
+            ]))
+        };
+        assert_eq!(with("20"), Some(Duration::from_secs(20)));
+        assert_eq!(with("1"), Some(Duration::from_secs(5)));
+        assert_eq!(with("100000"), Some(Duration::from_secs(900)));
+        assert_eq!(with("soon"), None);
+    }
 }

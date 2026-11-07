@@ -1168,6 +1168,8 @@ where
                             ClientMsg::DecisionAnswer { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalAnswer { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalRevokeSessionRule { operator_nonce: sent, .. }
+                            | ClientMsg::ApprovalsLogQuery { operator_nonce: sent, .. }
+                            | ClientMsg::ApprovalsLogEntry { operator_nonce: sent, .. }
                             | ClientMsg::ClaudeLoginAction { operator_nonce: sent, .. }
                             | ClientMsg::PaneAction { operator_nonce: sent, .. }
                                 if trust == PeerTrust::OperatorApp =>
@@ -1686,6 +1688,82 @@ fn handle_client_msg(
                 {
                     let _ = tx.send(refusal);
                 }
+            });
+        }
+
+        // The Approvals log (AP5): read-only, and only for the verified Mac app with the
+        // connection's nonce. Anyone else is told no and nothing is read.
+        ClientMsg::ApprovalsLogQuery {
+            tag,
+            outcome,
+            since_ms,
+            limit,
+            cursor,
+            ..
+        } => {
+            let broker = session_mgr.lock().unwrap().approvals().cloned();
+            if !log_request_allowed(trust, answer_check, targeted_tx) {
+                return;
+            }
+            let Some(broker) = broker else {
+                let _ = targeted_tx.send(ServerMsg::ApprovalsLogRefused {
+                    code: "unavailable".to_string(),
+                });
+                return;
+            };
+            let (tx, sensitive) = (targeted_tx.clone(), sensitive.clone());
+            tokio::task::spawn_blocking(move || {
+                let query = crate::approvals::audit::LogQuery {
+                    tag,
+                    outcome: outcome
+                        .as_deref()
+                        .and_then(crate::approvals::audit::OutcomeFilter::parse),
+                    since: since_ms.and_then(chrono::DateTime::from_timestamp_millis),
+                    limit: limit as usize,
+                    cursor,
+                };
+                let reply = match broker.log_query(&query) {
+                    Ok(page) => log_page_frame(page, &sensitive),
+                    Err(crate::approvals::audit::LogError::BadCursor) => {
+                        ServerMsg::ApprovalsLogRefused { code: "bad_cursor".to_string() }
+                    }
+                    Err(e) => {
+                        warn!("approvals log query failed: {e}");
+                        ServerMsg::ApprovalsLogRefused { code: "unavailable".to_string() }
+                    }
+                };
+                let _ = tx.send(reply);
+            });
+        }
+
+        ClientMsg::ApprovalsLogEntry { id, .. } => {
+            let broker = session_mgr.lock().unwrap().approvals().cloned();
+            if !log_request_allowed(trust, answer_check, targeted_tx) {
+                return;
+            }
+            let Some(broker) = broker else {
+                let _ = targeted_tx.send(ServerMsg::ApprovalsLogRefused {
+                    code: "unavailable".to_string(),
+                });
+                return;
+            };
+            let (tx, sensitive) = (targeted_tx.clone(), sensitive.clone());
+            tokio::task::spawn_blocking(move || {
+                let reply = match broker.log_entry(&id) {
+                    Ok(detail) => ServerMsg::ApprovalsLogDetail {
+                        id,
+                        detail: detail.map(|d| {
+                            let sensitive =
+                                d.tag.as_deref().is_some_and(|t| sensitive.tag_is_sensitive(t));
+                            crate::approvals::wire::ApprovalsLogDetail { detail: d, sensitive }
+                        }),
+                    },
+                    Err(e) => {
+                        warn!("approvals log entry failed: {e}");
+                        ServerMsg::ApprovalsLogRefused { code: "unavailable".to_string() }
+                    }
+                };
+                let _ = tx.send(reply);
             });
         }
 
@@ -3279,6 +3357,66 @@ fn audit_refusal_then(
     });
 }
 
+/// Room left in a log page's frame for the envelope around its rows.
+const LOG_PAGE_MARGIN: usize = 64 * 1024;
+
+/// Gate for the log requests: `true` when the peer is the verified app and its nonce
+/// check passed. Otherwise the asker is told why, and nothing is read.
+fn log_request_allowed(
+    trust: PeerTrust,
+    answer_check: Option<Result<(), String>>,
+    targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
+) -> bool {
+    let refusal = if trust.is_network() {
+        Some("requires_secure_connection")
+    } else if trust != PeerTrust::OperatorApp || !matches!(answer_check, Some(Ok(()))) {
+        Some("not_operator_app")
+    } else {
+        None
+    };
+    match refusal {
+        None => true,
+        Some(code) => {
+            let _ = targeted_tx.send(ServerMsg::ApprovalsLogRefused {
+                code: code.to_string(),
+            });
+            false
+        }
+    }
+}
+
+/// The page frame for `page`: rows stop when the encoded frame would pass
+/// `MAX_FRAME_LEN` less a margin, and `next_cursor` then points after the last row kept.
+fn log_page_frame(page: crate::approvals::audit::LogPage, sensitive: &SensitiveTags) -> ServerMsg {
+    let mut rows = Vec::new();
+    let mut size = 0usize;
+    let mut cut = false;
+    for row in page.rows {
+        let wire = crate::approvals::wire::ApprovalsLogRow {
+            sensitive: row
+                .tag
+                .as_deref()
+                .is_some_and(|t| sensitive.tag_is_sensitive(t)),
+            row,
+        };
+        let row_len = serde_json::to_vec(&wire).map_or(0, |b| b.len() + 1);
+        if !rows.is_empty()
+            && size + row_len > crate::ipc::protocol::MAX_FRAME_LEN - LOG_PAGE_MARGIN
+        {
+            cut = true;
+            break;
+        }
+        size += row_len;
+        rows.push(wire);
+    }
+    let next_cursor = if cut {
+        rows.last().map(|r| r.row.cursor())
+    } else {
+        page.next_cursor
+    };
+    ServerMsg::ApprovalsLogPage { rows, next_cursor }
+}
+
 /// Answer a refused request from a network peer with
 /// `requires_secure_connection`, in the targeted frame that matches the
 /// request (or a plain `Error` for requests that have no result frame).
@@ -3563,6 +3701,10 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         | ServerMsg::ApprovalSessionRules { .. }
         | ServerMsg::ApprovalGuardBlocked { .. }
         | ServerMsg::ApprovalAnswerRefused { .. }
+        // Targeted replies to the operator app's log requests: no broadcast path carries them.
+        | ServerMsg::ApprovalsLogPage { .. }
+        | ServerMsg::ApprovalsLogDetail { .. }
+        | ServerMsg::ApprovalsLogRefused { .. }
         | ServerMsg::SessionPermissionRequest { .. } => false,
         // The count: for anyone who follows decisions (an empty list included).
         ServerMsg::ApprovalPending { .. } => subscribed(topics, Topic::Decision),

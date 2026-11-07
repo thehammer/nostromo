@@ -760,6 +760,9 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         | ServerMsg::ApprovalResolved { .. }
         | ServerMsg::ApprovalSessionRules { .. }
         | ServerMsg::ApprovalGuardBlocked { .. }
+        | ServerMsg::ApprovalsLogPage { .. }
+        | ServerMsg::ApprovalsLogDetail { .. }
+        | ServerMsg::ApprovalsLogRefused { .. }
         | ServerMsg::ApprovalAnswerRefused { .. } => ServerClass::LocalOnly,
         // Which sessions wait for a Claude sign-in: names tags and the claude
         // path; no content. A network peer has no use for it yet.
@@ -1021,6 +1024,9 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::ApprovalAnswer { .. }
         | ClientMsg::ApprovalRevokeSessionRule { .. }
         | ClientMsg::ApprovalRefusalReport { .. }
+        // Read the audit log, which holds full tool inputs: operator app only.
+        | ClientMsg::ApprovalsLogQuery { .. }
+        | ClientMsg::ApprovalsLogEntry { .. }
         // Resends or drops a session's held message: it writes to a session.
         | ClientMsg::ClaudeLoginAction { .. }
         // Acts on a document pane (Huey's setup, regenerate, verdicts): operator app only.
@@ -1130,6 +1136,9 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         // Name a request id (or none), never a tag; refused for a network peer anyway.
         | ClientMsg::ApprovalAnswer { .. }
         | ClientMsg::ApprovalRefusalReport { .. }
+        // The log names no session (an optional focus filter, not a target).
+        | ClientMsg::ApprovalsLogQuery { .. }
+        | ClientMsg::ApprovalsLogEntry { .. }
         | ClientMsg::WorkDetailRequest { .. }
         | ClientMsg::WorkRefresh { .. }
         | ClientMsg::PicksRefresh { .. }
@@ -2022,6 +2031,18 @@ mod tests {
                 rule_id: "r".into(),
                 operator_nonce: None,
             },
+            ClientMsg::ApprovalsLogQuery {
+                tag: None,
+                outcome: None,
+                since_ms: None,
+                limit: 50,
+                cursor: None,
+                operator_nonce: None,
+            },
+            ClientMsg::ApprovalsLogEntry {
+                id: "e1".into(),
+                operator_nonce: None,
+            },
             ClientMsg::ApprovalRefusalReport {
                 request_id: None,
                 control: "allow_once".into(),
@@ -2186,7 +2207,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 70;
+    const CLIENT_MSG_VARIANTS: usize = 72;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2261,6 +2282,8 @@ mod tests {
             ClientMsg::TerminalStagingSetGlobal { .. } => 67,
             ClientMsg::TerminalStagingUiEvent { .. } => 68,
             ClientMsg::ApprovalRevokeSessionRule { .. } => 69,
+            ClientMsg::ApprovalsLogQuery { .. } => 70,
+            ClientMsg::ApprovalsLogEntry { .. } => 71,
         }
     }
 
@@ -2299,9 +2322,10 @@ mod tests {
         assert_eq!(by_name("PtyList"), 9);
         // 62 since `PaneAction` (H6) was added after the retired verbs, so no ordinal moved;
         // 65 with the three command-staging verbs; 66 with `MotherNoticeSettingsSet`;
-        // 69 with the S2 staging frames (set_enabled, set_global, ui_event); 70 with `ApprovalRevokeSessionRule`.
-        assert_eq!(CLIENT_MSG_VARIANTS, 70);
-        assert_eq!(every_client_msg().len(), 70);
+        // 69 with the S2 staging frames (set_enabled, set_global, ui_event); 70 with `ApprovalRevokeSessionRule`;
+        // 72 with the two Approvals-log requests.
+        assert_eq!(CLIENT_MSG_VARIANTS, 72);
+        assert_eq!(every_client_msg().len(), 72);
     }
 
     #[test]
@@ -3719,6 +3743,26 @@ mod tests {
                     entry_id: "e1".into(),
                     at_ms: 4,
                     summary: "Bash ecs_connect".into(),
+                },
+            ),
+            (
+                "approvals_log_page",
+                ServerMsg::ApprovalsLogPage {
+                    rows: vec![],
+                    next_cursor: None,
+                },
+            ),
+            (
+                "approvals_log_detail",
+                ServerMsg::ApprovalsLogDetail {
+                    id: "e1".into(),
+                    detail: None,
+                },
+            ),
+            (
+                "approvals_log_refused",
+                ServerMsg::ApprovalsLogRefused {
+                    code: "not_operator_app".into(),
                 },
             ),
             (

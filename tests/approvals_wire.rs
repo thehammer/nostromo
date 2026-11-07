@@ -4187,3 +4187,118 @@ fn a_path_prefix_rule_over_the_wire_allows_a_sibling_path_and_leaves_every_other
         fake.assert_no_updated_permissions();
     });
 }
+
+// ── AP5: the Approvals log is read-only and operator-only ─────────────────────────────────────
+
+fn log_query_msg(nonce: Option<&str>) -> ClientMsg {
+    ClientMsg::ApprovalsLogQuery {
+        tag: None,
+        outcome: None,
+        since_ms: None,
+        limit: 50,
+        cursor: None,
+        operator_nonce: nonce.map(str::to_owned),
+    }
+}
+
+fn is_log_page(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::ApprovalsLogPage { .. })
+}
+
+fn is_log_refused_with(code: &'static str) -> impl Fn(&ServerMsg) -> bool {
+    move |m| matches!(m, ServerMsg::ApprovalsLogRefused { code: c } if c == code)
+}
+
+// Fails if anyone but the verified app with its nonce can read the log, or if the app cannot.
+#[test]
+fn only_the_operator_app_with_its_nonce_reads_the_approvals_log() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home(&rig);
+        let mut app = rig.app(true).await;
+        let mut agent = rig.agent(vec![Topic::Decision]).await;
+        let mut tcp = rig.tcp(vec![]).await;
+        let (_fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        app.deny(&wire.request_id, "w").await;
+        app.next_resolved().await;
+        let nonce = app.nonce.clone().unwrap();
+
+        // A local process that is not the app, and a TCP peer.
+        agent.send(&log_query_msg(Some(&nonce))).await;
+        agent
+            .next("a refusal", is_log_refused_with("not_operator_app"))
+            .await;
+        agent
+            .send(&ClientMsg::ApprovalsLogEntry {
+                id: wire.request_id.clone(),
+                operator_nonce: Some(nonce.clone()),
+            })
+            .await;
+        agent
+            .next("a refusal", is_log_refused_with("not_operator_app"))
+            .await;
+        tcp.send(&log_query_msg(Some(&nonce))).await;
+        tcp.next("a refusal", |m| matches!(m, ServerMsg::Error { .. }))
+            .await;
+        // The app without, or with a wrong, nonce.
+        app.send(&log_query_msg(None)).await;
+        app.next("a refusal", is_log_refused_with("not_operator_app"))
+            .await;
+        app.send(&log_query_msg(Some("wrong"))).await;
+        app.next("a refusal", is_log_refused_with("not_operator_app"))
+            .await;
+
+        // The app with its nonce reads the merged row (the outcome is written a moment later).
+        let mut row = None;
+        for _ in 0..200 {
+            app.send(&log_query_msg(Some(&nonce))).await;
+            if let ServerMsg::ApprovalsLogPage { rows, .. } =
+                app.next("a log page", is_log_page).await
+            {
+                if let Some(r) = rows.into_iter().find(|r| r.row.outcome.is_some()) {
+                    row = Some(r);
+                    break;
+                }
+            }
+            settle().await;
+        }
+        let row = row.expect("a row with its outcome");
+        assert_eq!(row.row.tag.as_deref(), Some("cody-1"));
+        assert_eq!(row.row.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(row.row.outcome.as_deref(), Some("denied"));
+        assert!(!row.sensitive);
+
+        app.send(&ClientMsg::ApprovalsLogEntry {
+            id: wire.request_id.clone(),
+            operator_nonce: Some(nonce.clone()),
+        })
+        .await;
+        match app
+            .next("a detail", |m| {
+                matches!(m, ServerMsg::ApprovalsLogDetail { .. })
+            })
+            .await
+        {
+            ServerMsg::ApprovalsLogDetail {
+                detail: Some(d), ..
+            } => {
+                assert_eq!(d.detail.input.unwrap(), wire.input);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A bad cursor is refused, not a panic.
+        app.send(&ClientMsg::ApprovalsLogQuery {
+            tag: None,
+            outcome: None,
+            since_ms: None,
+            limit: 5,
+            cursor: Some("not a cursor".into()),
+            operator_nonce: Some(nonce),
+        })
+        .await;
+        app.next("a refusal", is_log_refused_with("bad_cursor"))
+            .await;
+    });
+}

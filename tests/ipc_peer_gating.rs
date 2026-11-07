@@ -11908,3 +11908,143 @@ async fn an_approval_session_rules_frame_is_never_sent_to_a_tcp_peer() {
         );
     }
 }
+
+// ── AP5: the Approvals log ───────────────────────────────────────────────────
+//
+// `approvals_log_query` and `approvals_log_entry` read full tool inputs: the verified app's
+// alone, never a network peer's or another local process's. Their replies are `LocalOnly`.
+
+fn log_query_frame(nonce: Option<&str>) -> ClientMsg {
+    ClientMsg::ApprovalsLogQuery {
+        tag: None,
+        outcome: None,
+        since_ms: None,
+        limit: 50,
+        cursor: None,
+        operator_nonce: nonce.map(str::to_owned),
+    }
+}
+
+fn log_entry_frame(nonce: Option<&str>) -> ClientMsg {
+    ClientMsg::ApprovalsLogEntry {
+        id: "e1".into(),
+        operator_nonce: nonce.map(str::to_owned),
+    }
+}
+
+fn is_log_refused(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::ApprovalsLogRefused { code } if code == "not_operator_app")
+}
+
+#[tokio::test]
+async fn a_tcp_client_subscribed_to_everything_never_receives_a_log_page_or_detail() {
+    const CANARY: &str = "log-canary-3d9e";
+    let h = spawn_server().await;
+    let (mut tcp, mut seen) = h.tcp(vec![]).await;
+
+    // Even broadcast by a buggy daemon, the log stays off the network.
+    h.broadcast(ServerMsg::ApprovalsLogPage {
+        rows: vec![],
+        next_cursor: Some(CANARY.into()),
+    });
+    h.broadcast(ServerMsg::ApprovalsLogDetail {
+        id: CANARY.into(),
+        detail: None,
+    });
+    h.broadcast(ServerMsg::ApprovalsLogRefused {
+        code: CANARY.into(),
+    });
+    h.broadcast(focus_registry_updated());
+    seen.extend(
+        recv_until(&mut tcp, |m| {
+            matches!(m, ServerMsg::FocusRegistryUpdated { .. })
+        })
+        .await,
+    );
+
+    assert_eq!(
+        count(&seen, |m| matches!(
+            m,
+            ServerMsg::ApprovalsLogPage { .. }
+                | ServerMsg::ApprovalsLogDetail { .. }
+                | ServerMsg::ApprovalsLogRefused { .. }
+        )),
+        0,
+        "a log frame reached a network peer: {seen:?}"
+    );
+    assert!(!json_of(&seen).contains(CANARY));
+}
+
+#[tokio::test]
+async fn a_tcp_peer_cannot_read_the_log_but_a_unix_peer_reaches_the_handler() {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    let (mut unix, nonce) = h.unix_operator(vec![]).await;
+
+    // Control: the Unix operator socket gets the handler's own refusal for a missing nonce.
+    for msg in [log_query_frame(None), log_entry_frame(None)] {
+        send(&mut unix, &msg).await;
+        let frames = recv_until(&mut unix, is_log_refused).await;
+        assert!(!frames.iter().any(is_network_refusal), "{frames:?}");
+    }
+    // A TCP peer is refused outright, with and without a nonce (even the app's own).
+    for nonce in [None, Some("guess"), nonce.as_deref()] {
+        for msg in [log_query_frame(nonce), log_entry_frame(nonce)] {
+            let frames = send_and_expect_error(&mut tcp, msg, is_network_refusal, "log").await;
+            assert!(
+                !frames.iter().any(|m| matches!(
+                    m,
+                    ServerMsg::ApprovalsLogPage { .. } | ServerMsg::ApprovalsLogDetail { .. }
+                )),
+                "{frames:?}"
+            );
+        }
+    }
+    assert_still_usable(&mut tcp).await;
+}
+
+#[tokio::test]
+async fn a_raw_tcp_log_query_is_refused_whatever_it_claims() {
+    let h = spawn_server().await;
+    let mut s = raw_tcp(&h).await;
+    raw_handshake(
+        &mut s,
+        json!({"type": "subscribe", "topics": [], "renders_decisions": false, "renders_approvals": true}),
+    )
+    .await
+    .expect("handshake");
+
+    send_json(
+        &mut s,
+        &json!({"type": "approvals_log_query", "limit": 500, "operator_nonce": "x"}),
+    )
+    .await;
+    loop {
+        let frame = try_recv_json(&mut s)
+            .await
+            .expect("the connection stays open and answers");
+        assert_ne!(frame["type"], "approvals_log_page");
+        if frame["type"] == "error"
+            && frame["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("requires_secure_connection"))
+        {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_local_script_cannot_read_the_log_even_with_a_nonce() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+
+    for nonce in [None, Some("made-up")] {
+        for msg in [log_query_frame(nonce), log_entry_frame(nonce)] {
+            send(&mut script, &msg).await;
+            let frames = recv_until(&mut script, is_log_refused).await;
+            assert!(is_log_refused(frames.last().unwrap()), "{frames:?}");
+        }
+    }
+    assert_still_usable(&mut script).await;
+}

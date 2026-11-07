@@ -1467,6 +1467,31 @@ pub enum ClientMsg {
         operator_nonce: Option<String>,
     },
 
+    /// A page of the Approvals log (AP5), newest first. Read-only. Applied only
+    /// from the verified Mac app with the connection's `operator_nonce`; answered
+    /// with `ApprovalsLogPage` or `ApprovalsLogRefused`. Refused for network peers.
+    ApprovalsLogQuery {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_ms: Option<i64>,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
+    /// One log entry in full (`id` is a request id or an entry id). Same rules as
+    /// `ApprovalsLogQuery`; answered with `ApprovalsLogDetail`.
+    ApprovalsLogEntry {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
     /// The Mac app reports an input it refused to treat as a human's: a
     /// synthetic click or key aimed at an Allow control. Written to the audit
     /// log; accepted only from the verified app. Refused for network peers.
@@ -2539,6 +2564,24 @@ pub enum ServerMsg {
         entry_id: String,
         at_ms: u64,
         summary: String,
+    },
+    /// A page of the Approvals log, newest first (targeted, `LocalOnly`: it carries
+    /// tool inputs). `next_cursor` is set when more rows follow.
+    ApprovalsLogPage {
+        rows: Vec<crate::approvals::wire::ApprovalsLogRow>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
+    },
+    /// One log entry in full (targeted, `LocalOnly`); `detail` is absent when no entry has `id`.
+    ApprovalsLogDetail {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<crate::approvals::wire::ApprovalsLogDetail>,
+    },
+    /// A log request was not applied: `not_operator_app`, `requires_secure_connection`,
+    /// `bad_cursor` or `unavailable` (targeted).
+    ApprovalsLogRefused {
+        code: String,
     },
     /// An `ApprovalAnswer` was not applied (targeted).
     ApprovalAnswerRefused {
@@ -6693,6 +6736,125 @@ mod work_wire_tests {
                 "the audit log writes the same code the wire carries"
             );
         }
+    }
+
+    #[test]
+    fn approvals_log_frames_have_this_exact_wire_form() {
+        use crate::approvals::audit::{LogDetail, LogRow, RowKind};
+        use crate::approvals::wire::{ApprovalsLogDetail, ApprovalsLogRow};
+        let ts = chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap();
+        assert_client_golden(
+            ClientMsg::ApprovalsLogQuery {
+                tag: Some("cody-1".into()),
+                outcome: Some("denied".into()),
+                since_ms: Some(5),
+                limit: 50,
+                cursor: Some("abc".into()),
+                operator_nonce: Some("n".into()),
+            },
+            r#"{"type":"approvals_log_query","tag":"cody-1","outcome":"denied","since_ms":5,"limit":50,"cursor":"abc","operator_nonce":"n"}"#,
+        );
+        assert_client_golden(
+            ClientMsg::ApprovalsLogQuery {
+                tag: None,
+                outcome: None,
+                since_ms: None,
+                limit: 10,
+                cursor: None,
+                operator_nonce: None,
+            },
+            r#"{"type":"approvals_log_query","limit":10}"#,
+        );
+        assert_client_golden(
+            ClientMsg::ApprovalsLogEntry {
+                id: "e1".into(),
+                operator_nonce: Some("n".into()),
+            },
+            r#"{"type":"approvals_log_entry","id":"e1","operator_nonce":"n"}"#,
+        );
+        let row = LogRow {
+            row_id: "r1".into(),
+            kind: RowKind::Request,
+            ts,
+            tag: Some("cody-1".into()),
+            session_id: None,
+            tool_use_id: Some("toolu_1".into()),
+            request_id: Some("r1".into()),
+            entry_ids: vec!["e1".into(), "e2".into()],
+            agent: None,
+            subagent: None,
+            tool_name: Some("Bash".into()),
+            summary: "ls".into(),
+            outcome: Some("denied".into()),
+            by_window: None,
+            latency_ms: Some(7),
+            refusal_code: None,
+            rule_label: None,
+        };
+        assert_server_golden(
+            ServerMsg::ApprovalsLogPage {
+                rows: vec![ApprovalsLogRow {
+                    row,
+                    sensitive: false,
+                }],
+                next_cursor: Some("c".into()),
+            },
+            r#"{"type":"approvals_log_page","rows":[{"row_id":"r1","kind":"request","ts":"2023-11-14T22:13:20Z","tag":"cody-1","tool_use_id":"toolu_1","request_id":"r1","entry_ids":["e1","e2"],"tool_name":"Bash","summary":"ls","outcome":"denied","latency_ms":7,"sensitive":false}],"next_cursor":"c"}"#,
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalsLogPage {
+                rows: vec![],
+                next_cursor: None,
+            },
+            r#"{"type":"approvals_log_page","rows":[]}"#,
+        );
+        let detail = LogDetail {
+            id: "e1".into(),
+            kind: RowKind::Request,
+            event: "request".into(),
+            ts,
+            tag: None,
+            request_id: None,
+            tool_name: Some("Bash".into()),
+            input: Some(serde_json::json!({"command": "ls"})),
+            display_text: None,
+            reason: None,
+            flags: None,
+            options: None,
+            cli_request: None,
+            outcome: None,
+            by_window: None,
+            latency_ms: None,
+            rule: None,
+            detail: None,
+            refusal_code: None,
+            peer: None,
+            channel: None,
+            control: None,
+        };
+        assert_server_golden(
+            ServerMsg::ApprovalsLogDetail {
+                id: "e1".into(),
+                detail: Some(ApprovalsLogDetail {
+                    detail,
+                    sensitive: true,
+                }),
+            },
+            r#"{"type":"approvals_log_detail","id":"e1","detail":{"id":"e1","kind":"request","event":"request","ts":"2023-11-14T22:13:20Z","tool_name":"Bash","input":{"command":"ls"},"sensitive":true}}"#,
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalsLogDetail {
+                id: "x".into(),
+                detail: None,
+            },
+            r#"{"type":"approvals_log_detail","id":"x"}"#,
+        );
+        assert_server_golden(
+            ServerMsg::ApprovalsLogRefused {
+                code: "bad_cursor".into(),
+            },
+            r#"{"type":"approvals_log_refused","code":"bad_cursor"}"#,
+        );
     }
 
     #[test]
