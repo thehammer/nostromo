@@ -207,7 +207,11 @@ async fn a_peer_turn_the_cli_began_is_a_marker_and_a_second_one_merges_into_it()
         ),
     )
     .unwrap();
-    spawn_stub(&mut mgr, "p", &format!("cat '{}'; sleep 30", lines.display()));
+    spawn_stub(
+        &mut mgr,
+        "p",
+        &format!("cat '{}'; sleep 30", lines.display()),
+    );
 
     let turns = eventually("both peer messages in one turn", || {
         let t = turns_of(&mgr, "p");

@@ -611,7 +611,10 @@ fn the_stand_in_line_names_the_sender_the_skill_or_the_kind() {
         items: vec![peer_item("a"), peer_item("b")],
         omitted: 1,
     };
-    assert_eq!(injected_line(&many), "3 peer messages from Claudia in Nostromo");
+    assert_eq!(
+        injected_line(&many),
+        "3 peer messages from Claudia in Nostromo"
+    );
 
     let unnamed = TurnOrigin::PeerMessage {
         items: vec![PeerMessageItem {
@@ -864,7 +867,10 @@ fn two_back_to_back_peer_lines_are_one_turn_with_an_origin_update() {
     let (items, omitted) = peer_items_of(&turns[0]);
     assert_eq!(items, vec![peer_item("one"), peer_item("two")]);
     assert_eq!(omitted, 0);
-    assert_eq!(turns[0].user_input, "2 peer messages from Claudia in Nostromo");
+    assert_eq!(
+        turns[0].user_input,
+        "2 peer messages from Claudia in Nostromo"
+    );
     let (id, origin) = t.take_origin_update().expect("the merge is announced");
     assert_eq!(id, turns[0].id);
     assert_eq!(Some(origin), turns[0].origin.clone());
@@ -887,7 +893,10 @@ fn a_peer_turn_keeps_at_most_eight_messages_and_counts_the_rest() {
     assert_eq!(omitted, 3);
     let bodies: Vec<&str> = items.iter().map(|i| i.body.as_str()).collect();
     assert_eq!(bodies, ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7"]);
-    assert_eq!(turns[0].user_input, "11 peer messages from Claudia in Nostromo");
+    assert_eq!(
+        turns[0].user_input,
+        "11 peer messages from Claudia in Nostromo"
+    );
     let (_, origin) = t.take_origin_update().unwrap();
     assert_eq!(Some(origin), turns[0].origin.clone());
 }
@@ -1588,7 +1597,10 @@ fn assert_other_marker(t: &SessionTranscript, text: &str) {
     let turns = t.snapshot();
     assert_eq!(turns.len(), 1, "{turns:?}");
     let (kind, title, body, _) = injected_of(turns[0].origin.clone());
-    assert_eq!((kind.as_str(), title.as_str()), ("other", "Injected context"));
+    assert_eq!(
+        (kind.as_str(), title.as_str()),
+        ("other", "Injected context")
+    );
     assert_eq!(body, text);
     assert_eq!(turns[0].user_input, "Injected context");
     assert_eq!(t.prompt_count(), 0);

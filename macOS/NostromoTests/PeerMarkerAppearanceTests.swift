@@ -101,8 +101,14 @@ final class PeerMarkerAppearanceTests: XCTestCase {
         }
     }
 
+    func testBypassInAnyCaseIsDrawnWithTheBadge() {
+        for mode in ["Bypass", "BYPASS"] {
+            XCTAssertEqual(amberText(peer(PeerFixtures.item(mode: mode))), mode)
+        }
+    }
+
     func testEveryOtherModeIsDrawnEntirelyInTheMutedColour() {
-        for mode in [nil, "default", "plan", "acceptEdits", "Bypass", "BYPASS", "bypass2"] as [String?] {
+        for mode in [nil, "default", "plan", "acceptEdits", "bypass2"] as [String?] {
             let content = peer(PeerFixtures.item(mode: mode))
 
             XCTAssertTrue(allMuted(content), "mode \(mode ?? "nil"): \(content.line)")
