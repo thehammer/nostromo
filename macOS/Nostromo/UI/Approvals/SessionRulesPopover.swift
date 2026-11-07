@@ -31,6 +31,10 @@ final class SessionRulesPopoverContent: NSView {
     private var subscription: AnyCancellable?
     private(set) var revokeButtons: [String: ApprovalButton] = [:]
     private(set) var rows: [SessionRuleRowListing] = []
+    /// `All rules…` at the foot: opens the Approval Rules window (the persisted rules). Plain navigation.
+    private(set) var allRulesButton: NSButton?
+    /// What `All rules…` does; a test replaces it.
+    var openAllRules: () -> Void = { PersistedRulesWindowManager.shared.show() }
     /// Called when the last rule is gone (the popover has nothing left to show).
     var onEmpty: (() -> Void)?
 
@@ -124,8 +128,21 @@ final class SessionRulesPopoverContent: NSView {
             y += 16 + Self.rowGap
             DispatchQueue.main.async { [weak self] in self?.onEmpty?() }
         }
-        setFrameSize(NSSize(width: Self.width, height: y + pad - Self.rowGap))
+        y += Self.rowGap - 4
+        let all = NSButton(title: "All rules…", target: self, action: #selector(allRulesPressed))
+        all.bezelStyle = .inline
+        all.controlSize = .small
+        all.font = .systemFont(ofSize: 11)
+        all.refusesFirstResponder = true
+        all.setAccessibilityLabel("Open the Approval Rules window")
+        all.frame = NSRect(x: pad, y: y, width: 80, height: 18)
+        addSubview(all)
+        allRulesButton = all
+        y += 18
+        setFrameSize(NSSize(width: Self.width, height: y + pad))
     }
+
+    @objc private func allRulesPressed() { openAllRules() }
 
     /// Revoke pressed: a human gesture aimed at this button, then the store sends it.
     @objc private func revokePressed(_ sender: ApprovalButton) {

@@ -603,9 +603,10 @@ final class AppControlServer {
         let sub = req.string("sub") ?? "list"
         if sub == "badges" { return approvalBadges() }
         if sub == "session-rules" { return approvalSessionRules(focus: req.string("focus")) }
+        if sub == "rules" { return approvalPersistedRules() }
         if sub == "log" { return try approvalsLog(req) }
         guard sub == "list" else {
-            throw AppControlError.badRequest("approvals: only `list`, `badges`, `session-rules` and `log` exist (all read-only)")
+            throw AppControlError.badRequest("approvals: only `list`, `badges`, `session-rules`, `rules` and `log` exist (all read-only)")
         }
         let focus = req.string("focus")
         let onlyWindow = req.int("only_window")
@@ -670,6 +671,25 @@ final class AppControlServer {
              }]
         }
         return ["focuses": focuses]
+    }
+
+    /// READ-ONLY: the persisted "Always allow…" rules (`approvals rules`), as the store holds them:
+    /// `{path, quarantined, rules: [{id, rule_text, summary, kind, scope, root, created_at_ms,
+    /// created_from_request_id, uses, active, inactive_reason}]}`. `quarantined` is null or
+    /// `{reason, file_sha256, rules_in_file: […]}`. Presses, selects, writes, removes, keeps and discards
+    /// nothing: no app-control command can complete a gesture of the gate.
+    private func approvalPersistedRules() -> Any {
+        let store = ApprovalStore.shared
+        func json(_ rule: PersistedRule) -> [String: Any] {
+            ["id": rule.id, "rule_text": rule.ruleText, "summary": rule.summary, "kind": rule.kind.rawValue,
+             "scope": rule.scope.rawValue, "root": rule.root ?? NSNull(), "created_at_ms": rule.createdAtMs,
+             "created_from_request_id": rule.createdFromRequestId, "uses": rule.uses, "active": rule.active,
+             "inactive_reason": rule.inactiveReason ?? NSNull()]
+        }
+        let quarantined: Any = store.rulesQuarantine.map { q -> [String: Any] in
+            ["reason": q.reason, "file_sha256": q.fileSha256, "rules_in_file": q.rulesInFile.map(json)]
+        } ?? NSNull()
+        return ["path": store.rulesPath, "quarantined": quarantined, "rules": store.persistedRules.map(json)]
     }
 
     /// READ-ONLY: what the approvals surfaces outside the card show (`approvals badges`): the red "needs

@@ -375,6 +375,8 @@ final class ApprovalsLogView: NSView, NSTableViewDataSource, NSTableViewDelegate
     let outcomePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     let linkLabel = NSTextField(labelWithString: "")
     let showAllButton = NSButton()
+    /// `Rules…`: opens the Approval Rules window (AP6). Plain navigation: it changes nothing.
+    let rulesButton = NSButton()
     let statusLabel = NSTextField(labelWithString: "")
     let tableView = NSTableView()
     let scrollView = NSScrollView()
@@ -573,6 +575,14 @@ final class ApprovalsLogView: NSView, NSTableViewDataSource, NSTableViewDelegate
         showAllButton.target = self
         showAllButton.action = #selector(showAllPressed)
         showAllButton.refusesFirstResponder = true
+        rulesButton.title = "Rules…"
+        rulesButton.bezelStyle = .inline
+        rulesButton.controlSize = .small
+        rulesButton.font = .systemFont(ofSize: 11)
+        rulesButton.target = self
+        rulesButton.action = #selector(rulesPressed)
+        rulesButton.refusesFirstResponder = true
+        rulesButton.setAccessibilityLabel("Open the Approval Rules window")
         statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.textColor = ApprovalPalette.mutedText
         statusLabel.lineBreakMode = .byTruncatingTail
@@ -607,7 +617,7 @@ final class ApprovalsLogView: NSView, NSTableViewDataSource, NSTableViewDelegate
         NotificationCenter.default.addObserver(self, selector: #selector(scrolled(_:)),
                                                name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
 
-        for v in [focusPopup, outcomePopup, linkLabel, showAllButton, statusLabel, headerView, scrollView] as [NSView] {
+        for v in [focusPopup, outcomePopup, linkLabel, showAllButton, rulesButton, statusLabel, headerView, scrollView] as [NSView] {
             addSubview(v)
         }
         syncControls()
@@ -621,10 +631,11 @@ final class ApprovalsLogView: NSView, NSTableViewDataSource, NSTableViewDelegate
         let barY = bounds.height - Self.barHeight + 6
         focusPopup.frame = NSRect(x: pad, y: barY, width: 170, height: 22)
         outcomePopup.frame = NSRect(x: focusPopup.frame.maxX + 8, y: barY, width: 170, height: 22)
-        statusLabel.frame = NSRect(x: bounds.width - 260 - pad, y: barY + 2, width: 260, height: 16)
+        statusLabel.frame = NSRect(x: bounds.width - 190 - pad, y: barY + 2, width: 190, height: 16)
+        rulesButton.frame = NSRect(x: statusLabel.frame.minX - 64 - 6, y: barY, width: 64, height: 22)
         let showAllWidth: CGFloat = showAllButton.isHidden ? 0 : 64
         let linkX = outcomePopup.frame.maxX + 12
-        let linkWidth = max(0, statusLabel.frame.minX - linkX - showAllWidth - 12)
+        let linkWidth = max(0, rulesButton.frame.minX - linkX - showAllWidth - 12)
         linkLabel.frame = NSRect(x: linkX, y: barY + 2, width: linkWidth, height: 16)
         showAllButton.frame = NSRect(x: linkLabel.frame.maxX + 6, y: barY, width: showAllWidth, height: 22)
         let headerY = bounds.height - Self.barHeight - Self.headerHeight
@@ -656,6 +667,11 @@ final class ApprovalsLogView: NSView, NSTableViewDataSource, NSTableViewDelegate
     }
 
     @objc private func showAllPressed() { showAll() }
+
+    @objc private func rulesPressed() { openRules() }
+
+    /// Open the Approval Rules window (the `Rules…` button). Overridable so a test can see it was asked.
+    var openRules: () -> Void = { PersistedRulesWindowManager.shared.show() }
 
     /// Bring the controls in line with the filters and link.
     private func syncControls() {

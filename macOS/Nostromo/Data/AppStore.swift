@@ -482,6 +482,11 @@ class AppStore: ObservableObject {
         client.approvalRevokeSessionRule(tag: tag, ruleId: ruleId)
     }
 
+    /// Persisted rules (AP6): remove one, keep the quarantined file the person reviewed, discard it.
+    func removePersistedRule(ruleId: String) { client.approvalRemoveRule(ruleId: ruleId) }
+    func keepPersistedRules(fileSha256: String) { client.approvalRulesKeep(fileSha256: fileSha256) }
+    func discardPersistedRules() { client.approvalRulesDiscard() }
+
     /// Report an input that was refused at an approval control (`ApprovalStore.reportRefusal`).
     func reportApprovalRefusal(requestId: String?, control: String, channel: ApprovalRefusalChannel) {
         client.approvalRefusalReport(requestId: requestId, control: control, channel: channel)
@@ -1822,6 +1827,8 @@ class AppStore: ObservableObject {
             approvalEvents.send(.answerRefused(frame))
         case .approvalSessionRules(let frame):
             approvalEvents.send(.sessionRules(frame))
+        case .approvalRules(let frame):
+            approvalEvents.send(.rules(frame))
         case .approvalGuardBlocked(let frame):
             approvalEvents.send(.guardBlocked(frame))
         case .approvalPending:
@@ -1971,7 +1978,10 @@ extension ApprovalStore {
             send: { AppStore.shared.answerApproval(requestId: $0, decision: $1, windowID: $2) },
             report: { AppStore.shared.reportApprovalRefusal(requestId: $0, control: $1, channel: $2) },
             canSend: { AppStore.shared.client.hasConnection },
-            revoke: { AppStore.shared.revokeSessionRule(tag: $0, ruleId: $1) })
+            revoke: { AppStore.shared.revokeSessionRule(tag: $0, ruleId: $1) },
+            removeRule: { AppStore.shared.removePersistedRule(ruleId: $0) },
+            keepRules: { AppStore.shared.keepPersistedRules(fileSha256: $0) },
+            discardRules: { AppStore.shared.discardPersistedRules() })
         store.attach(to: AppStore.shared.approvalEvents)
         return store
     }()

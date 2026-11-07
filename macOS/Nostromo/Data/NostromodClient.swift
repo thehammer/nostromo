@@ -287,6 +287,8 @@ enum ServerMsg {
     case approvalsLogRefused(ApprovalsLogRefusedFrame)
     /// A focus's active session rules (full picture; replaces the last).
     case approvalSessionRules(ApprovalSessionRulesFrame)
+    /// The persisted "Always allow…" rules and any quarantine (full picture; replaces the last).
+    case approvalRules(ApprovalRulesFrame)
 
     // ── Claude sign-in (CL1; CL2 renders it) ──────────────────────────────────
     /// Every session waiting for a Claude sign-in (full picture; replaces the last).
@@ -1162,6 +1164,36 @@ class NostromodClient {
         writeFrameLocked(body, to: curFd, type: "approval_revoke_session_rule", tag: tag)
     }
 
+    /// Remove one persisted rule (AP6). Carries the connection's `operator_nonce`, like `approvalAnswer`.
+    func approvalRemoveRule(ruleId: String) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("approval_remove_rule dropped — not connected"); return }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(ClientApprovalRemoveRule(ruleId: ruleId, operatorNonce: nonce)) else { return }
+        writeFrameLocked(body, to: curFd, type: "approval_remove_rule", tag: nil)
+    }
+
+    /// Keep the quarantined rules file the human reviewed (`fileSha256` is its hash).
+    func approvalRulesKeep(fileSha256: String) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("approval_rules_keep dropped — not connected"); return }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(ClientApprovalRulesKeep(fileSha256: fileSha256, operatorNonce: nonce)) else { return }
+        writeFrameLocked(body, to: curFd, type: "approval_rules_keep", tag: nil)
+    }
+
+    /// Discard the quarantined rules file.
+    func approvalRulesDiscard() {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("approval_rules_discard dropped — not connected"); return }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(ClientApprovalRulesDiscard(operatorNonce: nonce)) else { return }
+        writeFrameLocked(body, to: curFd, type: "approval_rules_discard", tag: nil)
+    }
+
     /// Ask for a page of the Approvals log (read-only). Carries the connection's `operator_nonce`.
     func sendApprovalsLogQuery(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?,
                                requestId: String) {
@@ -1815,6 +1847,13 @@ class NostromodClient {
                 return .approvalSessionRules(m)
             } else {
                 log.error("failed to decode approval_session_rules")
+            }
+
+        case "approval_rules":
+            if let m = try? decoder.decode(ApprovalRulesFrame.self, from: raw) {
+                return .approvalRules(m)
+            } else {
+                log.error("failed to decode approval_rules")
             }
 
         case "approval_pending":

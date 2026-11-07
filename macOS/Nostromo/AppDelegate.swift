@@ -467,6 +467,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         ApprovalsWindowManager.shared.show()
     }
 
+    /// Window ▸ Approval Rules: the persisted "Always allow…" rules, with Remove (AP6). No shortcut.
+    @objc func showApprovalRules(_ sender: Any?) {
+        PersistedRulesWindowManager.shared.show()
+    }
+
     /// ⇧⌘M with focus outside every input bar (a list, the transcript): open the key
     /// window's bar. A bar that holds focus handles the action itself, before this.
     @objc func showModelPopover(_ sender: Any?) {

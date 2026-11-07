@@ -647,6 +647,10 @@ pub fn revalidate(stored: &PersistedRuleRecord, home: &Path) -> Result<Spec, Ina
     else {
         return Err(Inactive::NoLongerOffered);
     };
+    // The checks a new rule must pass at confirmation apply to one loaded from disk too.
+    if too_broad_for_persisting(&fresh, home).is_some() {
+        return Err(Inactive::NoLongerOffered);
+    }
     if fresh.spec == stored.spec {
         Ok(fresh.spec)
     } else {
