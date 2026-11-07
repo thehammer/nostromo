@@ -79,7 +79,7 @@ final class PeerMarkerTurnViewTests: MouseQueueTestCase {
     func testABurstFromOneSenderDrawsTheCountedMarker() {
         let view = MotherNoticeFixtures.turnView(PeerFixtures.turn(origin: PeerFixtures.origin(3)))
 
-        XCTAssertEqual(view.wakeMarkerView?.shownText, "↘ 3 messages from PDO Demo")
+        XCTAssertEqual(view.wakeMarkerView?.shownText, "↘ 3 messages from PDO Demo · bypass")
         XCTAssertFalse(view.hasUserBubble)
     }
 
@@ -416,7 +416,7 @@ final class PeerMarkerSessionTests: XCTestCase {
 
         frame(client, id: "d1", PeerFixtures.origin(1, omitted: 2))
 
-        XCTAssertEqual(session.turns[1].markerContent?.line, "↘ 3 messages from PDO Demo")
+        XCTAssertEqual(session.turns[1].markerContent?.line, "↘ 3 messages from PDO Demo · bypass")
     }
 
     func testARepeatFrameChangesNothingAndTellsNoOne() {
