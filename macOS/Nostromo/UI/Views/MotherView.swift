@@ -855,9 +855,9 @@ final class MotherJobListViewModel: ObservableObject {
             prNumber: Self.prNumber(fromURL: job.crew.prUrl),
             failureReason: job.failureReason,
             cost: job.costUsd.flatMap { $0.isFinite && $0 >= 0 ? String(format: "$%.2f", $0) : nil },
-            waitText: Self.waitText(for: job),
             noticeMark: MotherNoticeMark.make(notice: annotations[job.id]?.notice,
-                                              originName: origin.kind == .focus && origin.isClickable ? origin.name : nil, now: now)
+                                              originName: origin.kind == .focus && origin.isClickable ? origin.name : nil, now: now),
+            waitText: Self.waitText(for: job)
         )
     }
 
