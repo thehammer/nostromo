@@ -471,8 +471,18 @@ class ChatSession: ObservableObject {
             // Bounded to the newest few turns: an unbounded search would let an
             // identical message sent an hour ago ("yes", "continue") swallow
             // this turn and strand every subsequent block delta.
+            //
+            // A turn the CLI injected (a peer's message, a skill) never adopts an
+            // echo: its `userInput` is the daemon's stand-in line, and a human
+            // message that happens to read the same is still the human's.
             let searchFloor = max(0, turns.count - TurnReconciler.echoAdoptionWindow)
-            let echoIndex = turns[searchFloor...].lastIndex {
+            let injected: Bool = {
+                switch turn.origin {
+                case .peerMessage?, .injectedContext?: return true
+                default: return false
+                }
+            }()
+            let echoIndex = injected ? nil : turns[searchFloor...].lastIndex {
                 $0.daemonId == nil && $0.marker == nil && $0.userInput == turn.userInput
             }
             if let i = echoIndex {

@@ -132,9 +132,9 @@ pub fn injected_line(origin: &TurnOrigin) -> String {
                 .and_then(|i| i.from_name.as_deref())
                 .unwrap_or("another session");
             if total == 1 {
-                format!("Message from {name}")
+                format!("Peer message from {name}")
             } else {
-                format!("{total} messages from {name}")
+                format!("{total} peer messages from {name}")
             }
         }
         TurnOrigin::InjectedContext { kind, title, .. } if kind == "skill" => {

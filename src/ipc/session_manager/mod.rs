@@ -80,6 +80,8 @@ mod control;
 mod inject;
 #[cfg(test)]
 mod inject_tests;
+#[cfg(test)]
+mod injected_tests;
 mod login;
 mod model_switch;
 #[cfg(test)]
@@ -2873,12 +2875,12 @@ fn run_reader(
 
         // What the transcript needs to judge a started turn's provenance.
         let prompt = match &parsed {
+            // Only `isReplay` (the echo of a line the host wrote on stdin): the
+            // live stream carries no `promptSource`, so the daemon's `written`
+            // queue is the sole live provenance.
             ParsedLine::UserPrompt {
-                text,
-                is_replay,
-                host_sent,
-                ..
-            } => Some((text.clone(), *is_replay || *host_sent)),
+                text, is_replay, ..
+            } => Some((text.clone(), *is_replay)),
             _ => None,
         };
         let (deltas, origin_update) = {
@@ -2889,7 +2891,6 @@ fn run_reader(
         for mut delta in deltas {
             match &mut delta {
                 TurnDelta::TurnStarted { turn } => {
-                    auth.begin_turn();
                     let is_wake = matches!(turn.origin, Some(TurnOrigin::TaskWake { .. }));
                     let is_injected = turn
                         .origin
@@ -2898,10 +2899,32 @@ fn run_reader(
                     let author = if is_wake {
                         login::on_wake_turn_started(&shared)
                     } else if is_injected {
-                        login::on_injected_turn_started(&shared)
+                        login::on_injected_turn_started(
+                            &shared,
+                            prompt.as_ref().map(|(raw, _)| raw.as_str()),
+                        )
                     } else {
                         login::on_turn_started(&shared)
                     };
+                    // A peer message the CLI began right after an open peer
+                    // turn folds into it (no new turn). Only the CLI's own
+                    // turn may: a written one is the user's text.
+                    if matches!(author, TurnAuthor::Cli)
+                        && matches!(turn.origin, Some(TurnOrigin::PeerMessage { .. }))
+                    {
+                        let merged = {
+                            let mut transcript = lock_recover(&shared.transcript);
+                            transcript
+                                .merge_into_previous_peer(&turn.id)
+                                .then(|| transcript.take_origin_update())
+                                .flatten()
+                        };
+                        if let Some((turn_id, origin)) = merged {
+                            shared.broadcast(SessionEvent::TurnOrigin { turn_id, origin });
+                            continue;
+                        }
+                    }
+                    auth.begin_turn();
                     // The transcript read a notice origin from the prompt's
                     // text; only a turn the daemon wrote as a notice keeps it.
                     if !author.is_notice()

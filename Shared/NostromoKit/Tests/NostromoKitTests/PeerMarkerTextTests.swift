@@ -160,9 +160,32 @@ final class PeerMarkerTextTests: XCTestCase {
     }
 
     func testEveryOtherModeHasNoBadge() {
-        for mode in [nil, "default", "plan", "acceptEdits", "Bypass", "BYPASS", "bypass2", "bypass-all", ""] as [String?] {
+        for mode in [nil, "default", "plan", "acceptEdits", "bypass2", "bypass-all", ""] as [String?] {
             XCTAssertNil(peer([item(mode: mode)]).badge, "mode \(mode ?? "nil")")
         }
+    }
+
+    func testTheBypassModeMatchesWhateverItsCase() {
+        for mode in ["Bypass", "BYPASS"] {
+            let content = peer([item(mode: mode)])
+            XCTAssertEqual(content.badge, mode)
+            XCTAssertTrue(content.line.contains(" · \(mode):"), mode)
+        }
+    }
+
+    func testAMergedPeerTurnShowsTheBadgeWhenAnyMessageCameFromABypassSession() {
+        let content = peer([item("A", mode: "default"), item("A", mode: "Bypass"), item("A", mode: "default")])
+
+        XCTAssertEqual(content.badge, "Bypass")
+        XCTAssertEqual(content.line, "↘ 3 messages from A · Bypass")
+        XCTAssertTrue(content.accessibilityLabel.contains("Bypass mode"), content.accessibilityLabel)
+    }
+
+    func testAMergedPeerTurnWithNoBypassMessageHasNoBadgeAndKeepsItsLine() {
+        let content = peer([item("A", mode: "default"), item("A", mode: nil)])
+
+        XCTAssertNil(content.badge)
+        XCTAssertEqual(content.line, "↘ 2 messages from A")
     }
 
     func testAnotherModeIsPlainTextOnTheLine() {
@@ -313,5 +336,32 @@ final class PeerMarkerTextTests: XCTestCase {
 
     func testAnInjectedContextWithNoTextHasNoTooltip() {
         XCTAssertEqual(WakeMarkerText.injectedContext(kind: "summary", title: "", text: "", truncated: false).tooltipLines, [])
+    }
+
+    // MARK: - The marker an injected turn is drawn as on a client with no marker view of its own
+
+    func testAPeerTurnIsLabelledPeerEvenWhenTheSenderCallsItselfYou() {
+        let marker = WakeMarkerText.injectedTurnMarker(for: .peerMessage(items: [item("You")], omitted: 0))
+
+        XCTAssertEqual(marker?.label, "Peer")
+        XCTAssertEqual(marker?.content, peer([item("You")]))
+        XCTAssertTrue(marker?.content.line.hasPrefix("↘ ") == true)
+    }
+
+    func testASkillAndOtherInjectedContextAreLabelledSkillAndInjected() {
+        let skill = WakeMarkerText.injectedTurnMarker(for: .injectedContext(kind: "skill", title: "portal-open", text: "x", truncated: false))
+        let summary = WakeMarkerText.injectedTurnMarker(for: .injectedContext(kind: "summary", title: "", text: "x", truncated: false))
+        let other = WakeMarkerText.injectedTurnMarker(for: .injectedContext(kind: "other", title: "", text: "x", truncated: false))
+
+        XCTAssertEqual(skill?.label, "Skill")
+        XCTAssertEqual(summary?.label, "Injected")
+        XCTAssertEqual(other?.label, "Injected")
+        XCTAssertEqual(other?.content.line, "ⓘ Injected context")
+    }
+
+    func testAnyOtherOriginOrNoneHasNoInjectedMarker() {
+        XCTAssertNil(WakeMarkerText.injectedTurnMarker(for: nil))
+        XCTAssertNil(WakeMarkerText.injectedTurnMarker(for: .taskWake(items: [], omitted: 0)))
+        XCTAssertNil(WakeMarkerText.injectedTurnMarker(for: .terminalDelivery(items: [])))
     }
 }

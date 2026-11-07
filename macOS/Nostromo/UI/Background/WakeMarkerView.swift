@@ -103,7 +103,7 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
             .font: font, .foregroundColor: Theme.fgMuted,
         ])
         if let badge = content.badge,
-           let separator = content.line.range(of: " · \(badge):"),
+           let separator = content.line.range(of: " · \(badge)"),
            let word = content.line.range(of: badge, range: separator) {
             text.addAttributes([
                 .foregroundColor: Theme.amber,

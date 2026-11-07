@@ -605,13 +605,13 @@ fn the_stand_in_line_names_the_sender_the_skill_or_the_kind() {
         items: vec![peer_item("hi")],
         omitted: 0,
     };
-    assert_eq!(injected_line(&one), "Message from Claudia in Nostromo");
+    assert_eq!(injected_line(&one), "Peer message from Claudia in Nostromo");
 
     let many = TurnOrigin::PeerMessage {
         items: vec![peer_item("a"), peer_item("b")],
         omitted: 1,
     };
-    assert_eq!(injected_line(&many), "3 messages from Claudia in Nostromo");
+    assert_eq!(injected_line(&many), "3 peer messages from Claudia in Nostromo");
 
     let unnamed = TurnOrigin::PeerMessage {
         items: vec![PeerMessageItem {
@@ -624,7 +624,7 @@ fn the_stand_in_line_names_the_sender_the_skill_or_the_kind() {
         omitted: 0,
     };
     let line = injected_line(&unnamed);
-    assert!(line.starts_with("Message from "), "{line}");
+    assert!(line.starts_with("Peer message from "), "{line}");
     assert!(!line.contains("uds:"), "{line}");
 
     let skill = parse_injected_origin(&skill_text(SKILL_PATH, SKILL_BODY), false).unwrap();
@@ -657,7 +657,7 @@ fn a_cli_peer_line_opens_a_peer_turn_with_a_one_line_stand_in() {
         [TurnDelta::TurnStarted { turn }] => turn.clone(),
         other => panic!("a peer message opens one turn: {other:?}"),
     };
-    assert_eq!(turn.user_input, "Message from Claudia in Nostromo");
+    assert_eq!(turn.user_input, "Peer message from Claudia in Nostromo");
     assert!(!turn.user_input.contains("cross-session"));
     let (items, omitted) = peer_items_of(&turn);
     assert_eq!(omitted, 0);
@@ -864,7 +864,7 @@ fn two_back_to_back_peer_lines_are_one_turn_with_an_origin_update() {
     let (items, omitted) = peer_items_of(&turns[0]);
     assert_eq!(items, vec![peer_item("one"), peer_item("two")]);
     assert_eq!(omitted, 0);
-    assert_eq!(turns[0].user_input, "2 messages from Claudia in Nostromo");
+    assert_eq!(turns[0].user_input, "2 peer messages from Claudia in Nostromo");
     let (id, origin) = t.take_origin_update().expect("the merge is announced");
     assert_eq!(id, turns[0].id);
     assert_eq!(Some(origin), turns[0].origin.clone());
@@ -887,7 +887,7 @@ fn a_peer_turn_keeps_at_most_eight_messages_and_counts_the_rest() {
     assert_eq!(omitted, 3);
     let bodies: Vec<&str> = items.iter().map(|i| i.body.as_str()).collect();
     assert_eq!(bodies, ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7"]);
-    assert_eq!(turns[0].user_input, "11 messages from Claudia in Nostromo");
+    assert_eq!(turns[0].user_input, "11 peer messages from Claudia in Nostromo");
     let (_, origin) = t.take_origin_update().unwrap();
     assert_eq!(Some(origin), turns[0].origin.clone());
 }
@@ -1490,4 +1490,152 @@ fn no_log_line_in_the_injected_message_code_names_a_body_text_name_or_title() {
         log_calls("fn f() { info!(tag, \"peer {}\", item.body); }").len(),
         1
     );
+}
+
+// ── review fixes: a live line is never merged on shape alone ──────────────────
+
+fn live_transcript() -> SessionTranscript {
+    let mut t = SessionTranscript::new();
+    t.set_live(true);
+    t
+}
+
+fn started_id(deltas: &[TurnDelta]) -> String {
+    match deltas.last() {
+        Some(TurnDelta::TurnStarted { turn }) => turn.id.clone(),
+        other => panic!("expected TurnStarted, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_live_peer_shaped_line_after_an_open_peer_turn_opens_its_own_turn() {
+    let mut t = live_transcript();
+    t.ingest_line(&peer_line(&standard_peer("from the peer")));
+    // The user typed this: no provenance field says so on a live line.
+    let typed = t.ingest_line(&bare_line(&standard_peer("typed by the human")));
+
+    assert!(
+        matches!(typed.as_slice(), [TurnDelta::TurnStarted { .. }]),
+        "the reader must see it start to judge who wrote it: {typed:?}"
+    );
+    assert_eq!(t.snapshot().len(), 2);
+    assert_eq!(t.take_origin_update(), None);
+}
+
+#[test]
+fn the_reader_disowning_the_second_live_peer_line_leaves_the_typed_text_a_user_turn() {
+    let mut t = live_transcript();
+    t.ingest_line(&peer_line(&standard_peer("from the peer")));
+    let typed_text = standard_peer("typed by the human");
+    let id = started_id(&t.ingest_line(&bare_line(&typed_text)));
+
+    assert!(t.disown_injected_origin(&id, &typed_text));
+
+    let turns = t.snapshot();
+    assert_eq!(turns[1].origin, None);
+    assert_eq!(turns[1].user_input, typed_text);
+    assert_eq!(t.prompt_count(), 1);
+}
+
+#[test]
+fn merge_into_previous_peer_folds_a_cli_peer_turn_into_the_open_one() {
+    let mut t = live_transcript();
+    t.ingest_line(&peer_line(&standard_peer("one")));
+    let id = started_id(&t.ingest_line(&peer_line(&standard_peer("two"))));
+
+    assert!(t.merge_into_previous_peer(&id));
+
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        peer_items_of(&turns[0]).0,
+        vec![peer_item("one"), peer_item("two")]
+    );
+    let (turn_id, _) = t.take_origin_update().expect("announced");
+    assert_eq!(turn_id, turns[0].id);
+}
+
+#[test]
+fn merge_into_previous_peer_refuses_when_the_open_turn_was_answered() {
+    let mut t = live_transcript();
+    t.ingest_line(&peer_line(&standard_peer("one")));
+    t.ingest_line(&reply("on it"));
+    let id = started_id(&t.ingest_line(&peer_line(&standard_peer("two"))));
+
+    assert!(!t.merge_into_previous_peer(&id));
+    assert_eq!(t.snapshot().len(), 2);
+}
+
+// ── review fixes: reload applies the stored provenance ────────────────────────
+
+fn stored(fields: Value, text: &str) -> String {
+    let mut line = json!({
+        "type": "user",
+        "message": {"role": "user", "content": text},
+        "timestamp": "2026-11-07T12:00:00.000Z",
+    });
+    for (k, v) in fields.as_object().unwrap() {
+        line[k] = v.clone();
+    }
+    line.to_string()
+}
+
+fn reloaded(lines: &[String]) -> SessionTranscript {
+    transcript_from_jsonl(&lines.join("\n"), 100)
+}
+
+fn assert_other_marker(t: &SessionTranscript, text: &str) {
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    let (kind, title, body, _) = injected_of(turns[0].origin.clone());
+    assert_eq!((kind.as_str(), title.as_str()), ("other", "Injected context"));
+    assert_eq!(body, text);
+    assert_eq!(turns[0].user_input, "Injected context");
+    assert_eq!(t.prompt_count(), 0);
+    assert_eq!(t.first_user_input(), None, "never the session title");
+}
+
+#[test]
+fn a_reloaded_hook_text_is_an_injected_marker_not_a_bubble() {
+    let text = "Stop hook feedback: run the linter";
+    assert_other_marker(&reloaded(&[stored(json!({"isMeta": true}), text)]), text);
+}
+
+#[test]
+fn a_reloaded_scheduled_prompt_is_an_injected_marker_not_a_bubble() {
+    let text = "Periodic check on PR #5840";
+    let t = reloaded(&[stored(
+        json!({"isMeta": true, "promptSource": "system", "turnOrigin": "scheduled"}),
+        text,
+    )]);
+    assert_other_marker(&t, text);
+}
+
+#[test]
+fn a_reloaded_peer_message_whose_head_does_not_parse_is_an_injected_marker() {
+    let text = "Another Claude session sent a message:\n<cross-session-message from=>\nhi\n</cross-session-message>";
+    let t = reloaded(&[stored(
+        json!({"isMeta": true, "promptSource": "system", "turnOrigin": "peer",
+               "origin": {"kind": "peer"}}),
+        text,
+    )]);
+    assert_other_marker(&t, text);
+}
+
+#[test]
+fn a_reloaded_human_line_is_a_bubble_and_the_title() {
+    let t = reloaded(&[host_line("fix the failing test")]);
+    let turns = t.snapshot();
+    assert_eq!(turns[0].origin, None);
+    assert_eq!(turns[0].user_input, "fix the failing test");
+    assert_eq!(t.prompt_count(), 1);
+    assert_eq!(t.first_user_input(), Some("fix the failing test"));
+}
+
+#[test]
+fn stored_provenance_fields_are_not_read_on_a_live_transcript() {
+    // The live stream carries none; the daemon's written queue decides there.
+    let mut t = live_transcript();
+    t.ingest_line(&stored(json!({"isMeta": true}), "some text"));
+    assert_eq!(t.snapshot()[0].origin, None);
 }

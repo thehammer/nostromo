@@ -126,7 +126,9 @@ final class PeerMarkerAppearanceTests: XCTestCase {
     }
 
     func testBurstsAndInjectedContextAreDrawnEntirelyMuted() {
-        XCTAssertTrue(allMuted(WakeMarkerText.peerMessage([PeerFixtures.item(), PeerFixtures.item()], omitted: 0)))
+        // A burst from a `bypass` session carries the badge too; one from a quiet mode is all muted.
+        XCTAssertEqual(amberText(WakeMarkerText.peerMessage([PeerFixtures.item(), PeerFixtures.item()], omitted: 0)), "bypass")
+        XCTAssertTrue(allMuted(WakeMarkerText.peerMessage([PeerFixtures.item(mode: "default"), PeerFixtures.item(mode: "default")], omitted: 0)))
         XCTAssertTrue(allMuted(WakeMarkerText.injectedContext(kind: "skill", title: "bypass", text: "x", truncated: false)))
         XCTAssertTrue(allMuted(WakeMarkerText.injectedContext(kind: "summary", title: "", text: "x", truncated: false)))
     }

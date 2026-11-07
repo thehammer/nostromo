@@ -45,7 +45,7 @@ extension WakeMarkerText {
                 tooltipLines: tooltip,
                 accessibilityLabel: "Message from session \(name)\(mode.map { ", \($0) mode" } ?? ""): \(capped(text, to: tooltipBodyLimit)).",
                 target: .none,
-                badge: mode == warningMode ? mode : nil,
+                badge: isWarning(mode) ? mode : nil,
                 copyText: copy)
         }
         let who = sameSender ? name : "other sessions"
@@ -55,12 +55,15 @@ extension WakeMarkerText {
         }
         var lines = tipLines
         if total > lines.count { lines.append("…and \(total - lines.count) more") }
+        // Any message from a session in `bypass` mode puts the badge on the merged line too.
+        let badge = items.lazy.compactMap { senderMode($0) }.first(where: { isWarning($0) })
         return WakeMarkerContent(
-            line: "\(peerMark) \(total) messages from \(who)",
+            line: "\(peerMark) \(total) messages from \(who)" + (badge.map { " · \($0)" } ?? ""),
             tooltipLines: lines,
-            accessibilityLabel: "\(total) messages from \(sameSender ? "session \(name)" : "other sessions"). " + lines.joined(separator: "; "),
+            accessibilityLabel: "\(total) messages from \(sameSender ? "session \(name)" : "other sessions")"
+                + (badge.map { ", \($0) mode" } ?? "") + ". " + lines.joined(separator: "; "),
             target: .none,
-            badge: nil,
+            badge: badge,
             copyText: copy)
     }
 
@@ -86,7 +89,32 @@ extension WakeMarkerText {
             copyText: body)
     }
 
+    /// What the app calls a turn the CLI injected as a user message: a muted marker row, never a user
+    /// bubble. `label` is the word that names it ("Peer", "Skill", "Injected") for a client that draws
+    /// it with a leading label of its own.
+    public struct InjectedTurnMarker: Equatable {
+        public let label: String
+        public let content: WakeMarkerContent
+    }
+
+    /// The marker of a peer-message or injected-context origin; nil for any other origin.
+    public static func injectedTurnMarker(for origin: TurnOriginWire?) -> InjectedTurnMarker? {
+        switch origin {
+        case .peerMessage(let items, let omitted)?:
+            return InjectedTurnMarker(label: "Peer", content: peerMessage(items, omitted: omitted))
+        case .injectedContext(let kind, let title, let text, let truncated)?:
+            return InjectedTurnMarker(label: kind == "skill" ? "Skill" : "Injected",
+                                      content: injectedContext(kind: kind, title: title, text: text, truncated: truncated))
+        default:
+            return nil
+        }
+    }
+
     // MARK: Pieces
+
+    private static func isWarning(_ mode: String?) -> Bool {
+        mode?.lowercased() == warningMode
+    }
 
     /// The name as one line, capped, without the separators the line itself draws (`:` and `·`).
     private static func senderName(_ item: PeerMessageItemWire) -> String {

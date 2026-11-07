@@ -216,8 +216,13 @@ private struct TurnCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // User message
-            if !turn.userInput.isEmpty {
+            // A message the CLI injected (a peer's, a skill, context) is not the
+            // user's: a muted, labelled marker row, never a user bubble. The
+            // daemon's stand-in `userInput` for it is not drawn.
+            if let injected = WakeMarkerText.injectedTurnMarker(for: turn.origin) {
+                InjectedMarkerRow(marker: injected)
+            } else if !turn.userInput.isEmpty {
+                // User message
                 HStack {
                     Spacer()
                     Text(turn.userInput)
@@ -233,6 +238,30 @@ private struct TurnCard: View {
                 BlockView(block: block, onAnswer: onAnswer)
             }
         }
+    }
+}
+
+// MARK: - InjectedMarkerRow
+
+/// A peer message, loaded skill or injected context: left-aligned (the user's
+/// bubbles are right-aligned), muted, no bubble, with a leading glyph (in the
+/// kit's line) and a "Peer" / "Skill" / "Injected" label the sender cannot set.
+private struct InjectedMarkerRow: View {
+    let marker: WakeMarkerText.InjectedTurnMarker
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(marker.label.uppercased())
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(marker.content.line)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(marker.content.accessibilityLabel)
     }
 }
 

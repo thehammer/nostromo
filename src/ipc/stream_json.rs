@@ -427,6 +427,10 @@ pub enum ParsedLine {
         host_sent: bool,
         /// The line says it is a conversation summary (`isCompactSummary`).
         compact_summary: bool,
+        /// A stored line says the CLI injected it (`isMeta`, a peer/scheduled
+        /// `origin`/`turnOrigin`, `promptSource: "system"`). Only a stored
+        /// session records this: the live stream carries none of these fields.
+        injected: bool,
     },
     /// A `<task-notification>` user event: the CLI woke the agent for a
     /// finished background task or a Monitor event. Opens a turn of its own.
@@ -782,6 +786,7 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
                 .map(str::to_string),
             host_sent: line_is_host_sent(obj),
             compact_summary: obj.get("isCompactSummary").and_then(|x| x.as_bool()) == Some(true),
+            injected: line_is_injected(obj),
         });
     }
 
@@ -837,6 +842,7 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
             .map(str::to_string),
         host_sent: line_is_host_sent(obj),
         compact_summary: obj.get("isCompactSummary").and_then(|x| x.as_bool()) == Some(true),
+        injected: line_is_injected(obj),
     })
 }
 
@@ -847,6 +853,26 @@ fn line_is_host_sent(obj: &serde_json::Map<String, Value>) -> bool {
     ["promptSource", "turnOrigin"]
         .iter()
         .any(|k| obj.get(*k).and_then(|x| x.as_str()) == Some("sdk"))
+}
+
+/// A stored line records that the CLI injected it: `isMeta`, an `origin`
+/// object, `promptSource: "system"` or a `turnOrigin` other than `sdk`/`user`
+/// (`peer`, `scheduled`, …). Never set for a host-sent line.
+fn line_is_injected(obj: &serde_json::Map<String, Value>) -> bool {
+    if line_is_host_sent(obj) {
+        return false;
+    }
+    obj.get("isMeta").and_then(|x| x.as_bool()) == Some(true)
+        // A `task-notification` origin on plain content is an existing,
+        // tested contract (a scheduled trigger stays a prompt: BA6a).
+        || obj.get("origin").is_some_and(|o| {
+            o.is_object() && o.get("kind").and_then(|k| k.as_str()) != Some("task-notification")
+        })
+        || obj.get("promptSource").and_then(|x| x.as_str()) == Some("system")
+        || obj
+            .get("turnOrigin")
+            .and_then(|x| x.as_str())
+            .is_some_and(|o| !o.is_empty() && o != "user")
 }
 
 /// `content` is a non-empty array made only of `tool_result` blocks.
@@ -1689,6 +1715,10 @@ pub struct SessionTranscript {
     /// The newest wake merge not yet taken: the turn id and its full new
     /// origin (see [`Self::take_origin_update`]).
     origin_update: Option<(String, TurnOrigin)>,
+    /// The id of an open, unanswered peer turn that the live peer-shaped line
+    /// just ingested followed: the reader may fold that line back into it
+    /// ([`Self::merge_into_previous_peer`]).
+    peer_merge_candidate: Option<String>,
 }
 
 impl SessionTranscript {
@@ -1922,8 +1952,13 @@ impl SessionTranscript {
                 timestamp,
                 host_sent,
                 compact_summary,
+                injected,
                 ..
             } => {
+                // The live stream carries no provenance fields: a live line's
+                // provenance is the daemon's `written` queue, judged by the
+                // session reader. Stored fields apply to a replay only.
+                let (host_sent, injected) = (host_sent && !self.live, injected && !self.live);
                 let mut deltas: Vec<TurnDelta> = self.discard_orphan_prompt().into_iter().collect();
                 let origin = parse_terminal_origin(&text)
                     .or_else(|| parse_mother_origin(&text))
@@ -1933,7 +1968,10 @@ impl SessionTranscript {
                         (!host_sent || compact_summary)
                             .then(|| parse_injected_origin(&text, compact_summary))
                             .flatten()
-                    });
+                    })
+                    // Stored as CLI-injected, of no known shape: a marker,
+                    // never a bubble or the title.
+                    .or_else(|| injected.then(|| other_injected_origin(&text)));
                 // Before the flush below: a peer message may merge into the
                 // open peer turn.
                 if let Some(origin) = origin.as_ref().filter(|o| o.is_cli_injected()) {
@@ -2105,12 +2143,16 @@ impl SessionTranscript {
         timestamp: Option<String>,
         mut deltas: Vec<TurnDelta>,
     ) -> Vec<TurnDelta> {
+        // Only a replay merges here. A live line may be the user's own text
+        // (peer-shaped): the session reader merges it once the daemon's
+        // `written` queue says the CLI began it (`merge_into_previous_peer`).
         if let (
+            false,
             TurnOrigin::PeerMessage {
                 items: new_items, ..
             },
             Some(turn),
-        ) = (&origin, self.turns.last_mut())
+        ) = (self.live, &origin, self.turns.last_mut())
         {
             let bare = turn
                 .blocks
@@ -2133,6 +2175,19 @@ impl SessionTranscript {
                 return deltas;
             }
         }
+        self.peer_merge_candidate = match (self.live, &origin, self.turns.last()) {
+            (true, TurnOrigin::PeerMessage { .. }, Some(last))
+                if !last.is_complete
+                    && matches!(last.origin, Some(TurnOrigin::PeerMessage { .. }))
+                    && last
+                        .blocks
+                        .iter()
+                        .all(|b| matches!(b, TurnBlock::Note { .. })) =>
+            {
+                Some(last.id.clone())
+            }
+            _ => None,
+        };
         if let Some(last) = self.turns.last_mut() {
             last.is_complete = true;
         }
@@ -2150,6 +2205,50 @@ impl SessionTranscript {
         deltas.push(TurnDelta::TurnStarted { turn });
         self.enforce_limits();
         deltas
+    }
+
+    /// Turn `turn_id`, the newest, is a peer message the CLI began itself and
+    /// follows an open peer turn with no reply between them: fold it into that
+    /// turn (an origin update, announced by [`Self::take_origin_update`]) and
+    /// drop it. Returns whether it merged; if not, nothing changed.
+    pub fn merge_into_previous_peer(&mut self, turn_id: &str) -> bool {
+        let n = self.turns.len();
+        if n < 2 || self.turns[n - 1].id != turn_id {
+            return false;
+        }
+        let new_items = match &self.turns[n - 1].origin {
+            Some(TurnOrigin::PeerMessage { items, omitted }) if *omitted == 0 => items.clone(),
+            _ => return false,
+        };
+        let prev = &mut self.turns[n - 2];
+        if self.peer_merge_candidate.take().as_deref() != Some(prev.id.as_str()) {
+            return false;
+        }
+        let Some(TurnOrigin::PeerMessage { items, omitted }) = prev.origin.as_mut() else {
+            return false;
+        };
+        // Flushed shut by the line's own ingest; it was open before it.
+        prev.is_complete = false;
+        for item in new_items {
+            if items.len() < MAX_PEER_ITEMS {
+                items.push(item);
+            } else {
+                *omitted = omitted.saturating_add(1);
+            }
+        }
+        prev.user_input = prev.origin.as_ref().map(injected_line).unwrap_or_default();
+        let (prev_id, origin) = (prev.id.clone(), prev.origin.clone());
+        let Some(dropped) = self.turns.pop() else {
+            return false;
+        };
+        self.retained_bytes = self.retained_bytes.saturating_sub(turn_bytes(&dropped));
+        // Notes the dropped turn took lead the merged turn's blocks.
+        let prev = self.turns.last_mut().expect("previous turn");
+        prev.blocks.extend(dropped.blocks);
+        if let Some(origin) = origin {
+            self.origin_update = Some((prev_id, origin));
+        }
+        true
     }
 
     /// Turn `turn_id` was written by the user or the daemon, whatever its text
@@ -2728,6 +2827,7 @@ mod tests {
                 timestamp: Some("2026-05-30T22:00:00.000Z".into()),
                 host_sent: false,
                 compact_summary: false,
+                injected: false,
             })
         );
     }
