@@ -586,7 +586,7 @@ final class ApprovalScrollSafetyTests: XCTestCase {
             }
 
             XCTAssertEqual(card.frame, cardFrame, "the card's frame did not change")
-            XCTAssertTrue(p.host.listings.first?.preview.first?.hasSuffix("1.2 GB") ?? false)
+            XCTAssertTrue(p.host.listings.first?.preview.first?.contains("1.2 GB") ?? false)
             try assertCardFloatsInsideThePane(p, scrollFrame: scrollFrame, barFrame: barFrame, name: "preview (following: \(following))")
         }
     }

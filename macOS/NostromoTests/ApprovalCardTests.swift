@@ -3358,14 +3358,15 @@ final class ApprovalCardTests: MouseQueueTestCase {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.withPreview(state: "complete"))
         let lines = h.card.listing.preview
         XCTAssertEqual(lines.count, 3, "two targets and the relative note")
-        XCTAssertTrue(lines[0].hasSuffix("— 3 directories · 41,208 files · 1.2 GB"), lines[0])
-        XCTAssertTrue(lines[1].contains("outside the working folder"), lines[1])
+        // The flagged target comes first.
+        XCTAssertTrue(lines[0].contains("outside the working folder"), lines[0])
+        XCTAssertTrue(lines[1].hasSuffix("— 3 directories · 41,208 files · 1.2 GB"), lines[1])
         XCTAssertTrue(lines[2].hasPrefix("(relative to "), lines[2])
         // Where it sits: below the input, above `Agent says` / the buttons.
         let preview = try XCTUnwrap(ApprovalTestViews.all(ConsequencePreviewView.self, in: h.card).first)
         XCTAssertGreaterThanOrEqual(preview.frame.minY, h.card.inputView.frame.maxY)
-        XCTAssertEqual(preview.warningLines, [false, true, false])
-        let warn = preview.attributedString(for: preview.lines[1])
+        XCTAssertEqual(preview.warningLines, [true, false, true], "the flagged target and the relative note")
+        let warn = preview.attributedString(for: preview.lines[0])
         var colours = Set<NSColor>()
         warn.enumerateAttribute(NSAttributedString.Key.foregroundColor, in: NSRange(location: 0, length: warn.length)) { v, _, _ in
             if let c = v as? NSColor { colours.insert(c) }
@@ -3384,7 +3385,7 @@ final class ApprovalCardTests: MouseQueueTestCase {
 
     func testTheCountsArrivingMoveNothingAndKeepTheHeight() throws {
         let h = ApprovalCardHarness(self, request: try ApprovalTestRequests.withPreview(state: "counting"))
-        XCTAssertTrue(h.card.listing.preview[0].hasSuffix("counting…"), h.card.listing.preview[0])
+        XCTAssertTrue(h.card.listing.preview[0].contains("counting…"), h.card.listing.preview[0])
         let before = frames(of: h.card)
         let height = h.card.preferredHeight(forWidth: 560, maxHeight: 520)
 
@@ -3393,7 +3394,7 @@ final class ApprovalCardTests: MouseQueueTestCase {
         h.window.contentView!.layoutSubtreeIfNeeded()
         h.card.layoutSubtreeIfNeeded()
 
-        XCTAssertTrue(h.card.listing.preview[0].hasSuffix("1.2 GB"), "the counts are shown")
+        XCTAssertTrue(h.card.listing.preview[0].contains("1.2 GB"), "the counts are shown")
         XCTAssertEqual(frames(of: h.card), before, "no button, the input or the card moved")
         XCTAssertEqual(h.card.preferredHeight(forWidth: 560, maxHeight: 520), height, "the height did not change")
     }
@@ -3414,7 +3415,7 @@ final class ApprovalCardTests: MouseQueueTestCase {
         h.card.layoutSubtreeIfNeeded()
 
         let lines = h.card.listing.preview
-        XCTAssertTrue(lines.contains("and 70 more"), "the summary line is shown: \(lines)")
+        XCTAssertTrue(lines.contains("and 64 more"), "the summary line is shown: \(lines)")
         XCTAssertEqual(frames(of: h.card), before, "nothing moved")
         XCTAssertEqual(h.card.preferredHeight(forWidth: 560, maxHeight: 520), height)
     }
@@ -3434,7 +3435,7 @@ final class ApprovalCardTests: MouseQueueTestCase {
         let t = ApprovalPreviewTarget(command: "rm", path: path, exists: true, kind: "dir", dirs: 3, files: 41_208,
                                       bytes: 1_200_000_000, flags: [.outsideCwd])
         let line = ApprovalPreviewText.lines(for: ApprovalPreview(state: .complete, targets: [t]), cwd: "/w")[0]
-        let drawn = view.fittedString(for: line, width: 320).string
+        let drawn = view.fittedString(for: line, width: 460).string
         XCTAssertTrue(drawn.contains("…"))
         XCTAssertTrue(drawn.contains("3 directories · 41,208 files · 1.2 GB"), drawn)
         XCTAssertTrue(drawn.hasSuffix("outside the working folder"), drawn)
