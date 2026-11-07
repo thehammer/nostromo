@@ -1279,3 +1279,67 @@ extension StagingHazardsTests {
         }
     }
 }
+
+// MARK: - Fixture integrity (hazards.json)
+
+extension StagingHazardsTests {
+
+    /// The exact number of rows in `hazards.json`. Bump it with every row added (or removed on purpose), so a
+    /// silent truncation of the fixture, which would quietly drop coverage, is noticed. The daemon's tests pin
+    /// the same number.
+    private static let expectedHazardRows = 1083
+
+    func testTheHazardsFixtureHasExactlyThePinnedRowCountAndUniqueNames() throws {
+        let cases = try StagingFixtures.hazards()
+        XCTAssertEqual(cases.count, Self.expectedHazardRows, "hazards.json row count changed: bump expectedHazardRows here and EXPECTED_ROWS in the daemon's tests if on purpose")
+        let names = cases.compactMap { $0["name"] as? String }
+        XCTAssertEqual(names.count, cases.count, "every row has a name")
+        XCTAssertEqual(Set(names).count, names.count, "fixture names are unique")
+    }
+
+    func testTheHazardsFixtureKeepsARealCombiningMarkScalar() throws {
+        // A re-save as NFC would fold U+0301 into its neighbour and quietly neutralise the combining-mark rows.
+        let mark = Unicode.Scalar(0x0301)!
+        let cases = try StagingFixtures.hazards()
+        let found = cases.contains { entry in
+            (entry["text"] as? String)?.unicodeScalars.contains(mark) ?? false
+        }
+        XCTAssertTrue(found, "no hazards.json row contains a U+0301 scalar; the file was probably re-normalised")
+    }
+}
+
+// MARK: - Differential corpus (differential_corpus.json)
+
+extension StagingHazardsTests {
+
+    /// 3000 generated commands with the daemon's verdict for every field, produced by the Rust matcher
+    /// (`regenerate_the_differential_corpus`, `#[ignore]`). The app's matcher must give the same answer for each.
+    func testTheDifferentialCorpusAgreesWithTheDaemonsVerdictOnEveryField() throws {
+        let data = try StagingFixtures.fixtureData("differential_corpus.json")
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        XCTAssertEqual(rows.count, 3000, "the corpus is exactly 3000 commands")
+        var disagreements: [String] = []
+        for row in rows {
+            let text = try XCTUnwrap(row["text"] as? String)
+            let got: [String: Any] = [
+                "destructive": StagingDestructivePatterns.matches(text),
+                "brace_glued": StagingHazards.hasBraceGluedWord(text),
+                "escape_quoted": StagingHazards.escapeQuotedWordLabel(text) != nil,
+                "non_ascii": StagingHazards.containsNonASCII(text),
+                "wildcard_command": StagingHazards.hasWildcardCommandWord(text),
+                "asks_in_production": StagingHazards.asksFirstInProduction(text),
+            ]
+            for (field, value) in got {
+                let matches: Bool
+                if let names = value as? [String] {
+                    matches = (row[field] as? [String]) == names
+                } else {
+                    matches = (row[field] as? Bool) == (value as? Bool)
+                }
+                if !matches { disagreements.append("\(field) of \(text.debugDescription): daemon \(String(describing: row[field])), app \(value)") }
+            }
+        }
+        XCTAssertTrue(disagreements.isEmpty, "\(disagreements.count) disagreements, first ones:\n" + disagreements.prefix(20).joined(separator: "\n"))
+        XCTAssertTrue(rows.contains { ($0["text"] as? String)?.unicodeScalars.contains(Unicode.Scalar(0x0301)!) ?? false }, "the corpus carries real U+0301 scalars")
+    }
+}
