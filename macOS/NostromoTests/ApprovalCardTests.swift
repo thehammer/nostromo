@@ -538,6 +538,11 @@ final class ApprovalRecorder {
 
 enum ApprovalTestViews {
 
+    /// Every view of type `type` below `view`, hidden or not.
+    static func all<T: NSView>(_ type: T.Type, in view: NSView) -> [T] {
+        rigAllSubviews(of: view).compactMap { $0 as? T }
+    }
+
     static func buttons(in view: NSView, visibleOnly: Bool = false) -> [NSButton] {
         rigAllSubviews(of: view).compactMap { $0 as? NSButton }
             .filter { !visibleOnly || !$0.isHiddenOrHasHiddenAncestor }
@@ -3362,7 +3367,7 @@ final class ApprovalCardTests: MouseQueueTestCase {
         XCTAssertEqual(preview.warningLines, [false, true, false])
         let warn = preview.attributedString(for: preview.lines[1])
         var colours = Set<NSColor>()
-        warn.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: warn.length)) { v, _, _ in
+        warn.enumerateAttribute(NSAttributedString.Key.foregroundColor, in: NSRange(location: 0, length: warn.length)) { v, _, _ in
             if let c = v as? NSColor { colours.insert(c) }
         }
         XCTAssertTrue(colours.contains(ApprovalPalette.warning), "the flag takes the warning colour")
