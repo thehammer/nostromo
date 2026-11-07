@@ -895,7 +895,12 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
         XCTAssertEqual(withStore.approvalField.stringValue, "· denied by you")
     }
 
-    func testTheRowStaysOneControlAndAClickOnTheStatusTogglesItLikeAClickAnywhere() throws {
+    func testAClickOnTheStatusOpensTheLogAndAClickAnywhereElseOnTheRowStillTogglesIt() throws {
+        // AP5: the status is the one part of the row that is a link: it opens the Approvals log, not the fold.
+        let saved = FoldRowView.approvalLogOpener
+        defer { FoldRowView.approvalLogOpener = saved }
+        var opened: [ApprovalsLogLink] = []
+        FoldRowView.approvalLogOpener = { opened.append($0) }
         let (store, recorder) = makeStore()
         try request(store, "a")
         let (window, row) = makeRow(settledGroup(["toolu_a"]), store: store)
@@ -905,7 +910,8 @@ final class ApprovalRowStatusRowTests: ApprovalRowTestCase {
 
         try AppControlMouse.click(in: window, at: NSPoint(x: rect.midX, y: rect.midY))
 
-        XCTAssertEqual(toggles, [true], "the whole row is one control: the click toggled it")
+        XCTAssertEqual(opened, [ApprovalsLogLink(toolUseId: "toolu_a")], "the click on the status opened the log on the call")
+        XCTAssertTrue(toggles.isEmpty, "and did not toggle the fold")
         XCTAssertTrue(recorder.sent.isEmpty, "and answered nothing")
         XCTAssertEqual(store.entry(id: "a")?.state, ApprovalAnswerState.pending)
         XCTAssertEqual(row.approvalField.stringValue, "· awaiting your approval")
@@ -1879,22 +1885,27 @@ final class ApprovalGuardBarTests: MouseQueueTestCase {
         p.assertComposerUntouched("the bar timed out")
     }
 
-    // MARK: The link is inert until the log exists
+    // MARK: The link opens the Approvals log (AP5)
 
-    func testTheLogLinkDoesNothingYet() throws {
+    func testTheLogLinkIsLiveAndOpensTheLogWithoutClosingTheBar() throws {
+        let saved = ApprovalOverlayHost.openLog
+        defer { ApprovalOverlayHost.openLog = saved }
+        var opened: [ApprovalsLogLink] = []
+        ApprovalOverlayHost.openLog = { opened.append($0) }
         let p = ApprovalPane(self)
         try block(p)
         let bar = try XCTUnwrap(p.host.guardBar)
         let link = bar.logLink
 
-        XCTAssertFalse(link.isEnabled, "disabled")
-        XCTAssertNil(link.target, "no target")
-        XCTAssertNil(link.action, "no action")
+        XCTAssertTrue(link.isEnabled, "enabled")
+        XCTAssertNotNil(link.target, "it has a target")
+        XCTAssertNotNil(link.action, "and an action")
 
         link.performClick(nil)
         p.layout()
 
-        XCTAssertNotNil(p.host.guardBar, "pressing it neither closes the bar nor opens anything")
+        XCTAssertEqual(opened.count, 1, "pressing it opens the log")
+        XCTAssertNotNil(p.host.guardBar, "pressing it does not close the bar")
         XCTAssertNotNil(p.store.guardNotice(tag: "cody-1"))
         XCTAssertTrue(p.recorder.sent.isEmpty)
     }

@@ -279,6 +279,12 @@ enum ServerMsg {
     case approvalGuardBlocked(ApprovalGuardBlockedFrame)
     /// An `approval_answer` was not applied.
     case approvalAnswerRefused(ApprovalAnswerRefusedFrame)
+    /// A page of the Approvals log (AP5; the answer to `approvals_log_query`).
+    case approvalsLogPage(ApprovalsLogPageFrame)
+    /// One log entry in full (the answer to `approvals_log_entry`).
+    case approvalsLogDetail(ApprovalsLogDetailFrame)
+    /// A log request was refused (`not_operator_app`, `bad_cursor`, `unavailable`, …).
+    case approvalsLogRefused(ApprovalsLogRefusedFrame)
     /// A focus's active session rules (full picture; replaces the last).
     case approvalSessionRules(ApprovalSessionRulesFrame)
 
@@ -1156,6 +1162,30 @@ class NostromodClient {
         writeFrameLocked(body, to: curFd, type: "approval_revoke_session_rule", tag: tag)
     }
 
+    /// Ask for a page of the Approvals log (read-only). Carries the connection's `operator_nonce`.
+    func sendApprovalsLogQuery(tag: String?, outcome: String?, sinceMs: Int64?, limit: Int, cursor: String?,
+                               requestId: String) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("approvals_log_query dropped — not connected"); return }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(ClientApprovalsLogQuery(tag: tag, outcome: outcome, sinceMs: sinceMs,
+                                                                     limit: limit, cursor: cursor, requestId: requestId,
+                                                                     operatorNonce: nonce))
+        else { return }
+        writeFrameLocked(body, to: curFd, type: "approvals_log_query", tag: nil)
+    }
+
+    /// Ask for one log entry in full (read-only). Carries the connection's `operator_nonce`.
+    func sendApprovalsLogEntry(id: String, tsMs: Int64?) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("approvals_log_entry dropped — not connected"); return }
+        let nonce = operatorNonce.flatMap { $0.sock == curFd ? $0.value : nil }
+        guard let body = try? encoder.encode(ClientApprovalsLogEntry(id: id, tsMs: tsMs, operatorNonce: nonce)) else { return }
+        writeFrameLocked(body, to: curFd, type: "approvals_log_entry", tag: nil)
+    }
+
     /// Whether the connection's last `welcome` advertised `tasks` (background task frames, BA0).
     var daemonAdvertisesTasks: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
@@ -1806,6 +1836,27 @@ class NostromodClient {
                 return .approvalAnswerRefused(m)
             } else {
                 log.error("failed to decode approval_answer_refused")
+            }
+
+        case "approvals_log_page":
+            if let m = try? decoder.decode(ApprovalsLogPageFrame.self, from: raw) {
+                return .approvalsLogPage(m)
+            } else {
+                log.error("failed to decode approvals_log_page")
+            }
+
+        case "approvals_log_detail":
+            if let m = try? decoder.decode(ApprovalsLogDetailFrame.self, from: raw) {
+                return .approvalsLogDetail(m)
+            } else {
+                log.error("failed to decode approvals_log_detail")
+            }
+
+        case "approvals_log_refused":
+            if let m = try? decoder.decode(ApprovalsLogRefusedFrame.self, from: raw) {
+                return .approvalsLogRefused(m)
+            } else {
+                log.error("failed to decode approvals_log_refused")
             }
 
         case "claude_login_state":

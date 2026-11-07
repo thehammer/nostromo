@@ -516,6 +516,7 @@ class AppStore: ObservableObject {
         log.info("AppStore starting")
         ModelStore.shared.sender = client
         TaskRequests.shared.sender = client
+        ApprovalsLogStore.shared.sender = client
 
         // IPC messages (session, activity)
         client.messages
@@ -652,6 +653,7 @@ class AppStore: ObservableObject {
                 } else {
                     WorkStore.shared.failPendingRequests(reason: "The daemon connection was lost")
                     TaskRequests.shared.failPendingRequests(reason: "The daemon connection was lost")
+                    ApprovalsLogStore.shared.failPendingRequests(reason: "The daemon connection was lost")
                     // The CLI dies with the daemon: nothing shows running until a new snapshot says so.
                     BackgroundTaskStore.shared.daemonDisconnected()
                     // Tracker panes keep their last board; the reconnect's replay replaces it in place.
@@ -1824,6 +1826,9 @@ class AppStore: ObservableObject {
             approvalEvents.send(.guardBlocked(frame))
         case .approvalPending:
             break
+        // The Approvals log (AP5): the answers to the window's and `approvals log`'s reads.
+        case .approvalsLogPage, .approvalsLogDetail, .approvalsLogRefused:
+            ApprovalsLogStore.shared.ingest(msg)
 
         // A document pane's action was answered: toast the message, open the URL if it is allowed.
         case .paneActionResult(let result):

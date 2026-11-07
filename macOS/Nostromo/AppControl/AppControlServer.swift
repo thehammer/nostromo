@@ -603,8 +603,9 @@ final class AppControlServer {
         let sub = req.string("sub") ?? "list"
         if sub == "badges" { return approvalBadges() }
         if sub == "session-rules" { return approvalSessionRules(focus: req.string("focus")) }
+        if sub == "log" { return try approvalsLog(req) }
         guard sub == "list" else {
-            throw AppControlError.badRequest("approvals: only `list`, `badges` and `session-rules` exist (all read-only)")
+            throw AppControlError.badRequest("approvals: only `list`, `badges`, `session-rules` and `log` exist (all read-only)")
         }
         let focus = req.string("focus")
         let onlyWindow = req.int("only_window")
@@ -638,6 +639,21 @@ final class AppControlServer {
             }
         }
         return ["approvals": order.compactMap { byRequest[$0] }, "guard_bars": guardBars]
+    }
+
+    /// READ-ONLY: the Approvals window's rows (`approvals log [--focus TAG] [--outcome GROUP] [--since …] [--limit N]`),
+    /// from the same store the window reads. Sends no event, opens no window, edits and deletes nothing. A first ask
+    /// starts the read and answers `state: loading`; ask again. The real app withholds the summary of a row whose
+    /// focus is sensitive; the QA instance (`SyntheticInputGate.allowsSynthetic`) returns everything.
+    private func approvalsLog(_ req: AppControlRequest) throws -> Any {
+        if let outcome = req.string("outcome"), ApprovalsLogOutcomeGroup(rawValue: outcome) == nil {
+            throw AppControlError.badRequest("approvals log: unknown outcome group \"\(outcome)\"")
+        }
+        let limit = req.int("limit") ?? 50
+        guard (1...500).contains(limit) else { throw AppControlError.badRequest("approvals log: --limit is 1-500") }
+        let result = ApprovalsLogReader.shared.read(tag: req.string("focus"), outcome: req.string("outcome"),
+                                                    sinceMs: req.int("since_ms").map(Int64.init), limit: limit)
+        return ApprovalsLogJSON.reply(result, redactSensitive: !SyntheticInputGate.allowsSynthetic)
     }
 
     /// READ-ONLY: the active "Allow for this session" rules (`approvals session-rules [--focus TAG]`), as the

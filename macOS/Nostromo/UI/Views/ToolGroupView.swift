@@ -540,6 +540,8 @@ class FoldRowView: NSView {
     private var runningTaskId: String?
     /// The press began on the `◷` (it ends there, or does nothing).
     private var pressedBackground = false
+    /// The press began on the approval status (AP5): a click on it opens the Approvals log.
+    private var pressedApproval = false
     /// Where the approval status is read from (AP2b), and what the row shows of it now.
     private var approvalStore: ApprovalStore?
     private var approvalSubscription: AnyCancellable?
@@ -678,6 +680,7 @@ class FoldRowView: NSView {
         approval.isHidden = text == nil
         setText(text.map { "· \($0)" } ?? "", on: approval, color: Theme.fgMuted)
         approval.setAccessibilityLabel(text)
+        approval.toolTip = text == nil ? nil : "Show in the Approvals log"
         applyActivity()
     }
 
@@ -721,6 +724,25 @@ class FoldRowView: NSView {
         guard let id = runningTaskId, let binding = backgroundBinding else { return false }
         binding.open(id)
         return true
+    }
+
+    /// What a click on the approval status does (AP5): open the Approvals window on the call. Tests replace it.
+    static var approvalLogOpener: (ApprovalsLogLink) -> Void = { ApprovalsWindowManager.shared.show(link: $0) }
+
+    /// Open the Approvals log on the call the status stands for: the one whose status the row shows (the
+    /// first with one), else the first. The window moves no transcript and takes no focus from a composer.
+    @discardableResult
+    func openApprovalLog() -> Bool {
+        guard !approval.isHidden else { return false }
+        let ids = approvalToolUseIds
+        guard let id = ids.first(where: { approvalStore?.rowStatus(toolUseIds: [$0]) != nil }) ?? ids.first else { return false }
+        Self.approvalLogOpener(ApprovalsLogLink(toolUseId: id))
+        return true
+    }
+
+    private func isOnApprovalField(_ event: NSEvent) -> Bool {
+        guard !approval.isHidden else { return false }
+        return approval.frame.contains(approval.superview.map { $0.convert(event.locationInWindow, from: nil) } ?? .zero)
     }
 
     private func isOnBackgroundField(_ event: NSEvent) -> Bool {
@@ -891,10 +913,11 @@ class FoldRowView: NSView {
         mouseDownEvent = event
         forwardedDrag = false
         pressedBackground = isOnBackgroundField(event)
+        pressedApproval = !pressedBackground && isOnApprovalField(event)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard !pressedBackground else { return }
+        guard !pressedBackground, !pressedApproval else { return }
         guard let down = mouseDownEvent, !forwardedDrag,
               distance(event.locationInWindow, down.locationInWindow) > Self.clickSlop
         else { return }
@@ -905,7 +928,12 @@ class FoldRowView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { mouseDownEvent = nil; forwardedDrag = false; pressedBackground = false }
+        defer { mouseDownEvent = nil; forwardedDrag = false; pressedBackground = false; pressedApproval = false }
+        if pressedApproval {
+            // A press that began on the approval status opens the log only if it ends there; otherwise nothing.
+            if isOnApprovalField(event) { openApprovalLog() }
+            return
+        }
         if pressedBackground {
             // A press that began on the `◷` opens the task only if it ends there; otherwise nothing.
             if isOnBackgroundField(event) { openBackgroundTask() }

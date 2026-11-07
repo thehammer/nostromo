@@ -3,8 +3,8 @@ import NostromoKit
 
 // AP2b: the production-shell guard's bar. A one-line, non-blocking notice floating above the approval card
 // slot: `Blocked: Cody tried to send input to a production shell`. There is no card and no answer for it:
-// the guard decided before anything was asked. It has a close button, and a link to the approvals log that
-// is inert until AP5 wires it. It never takes focus: nothing here is first responder, and nothing makes it so.
+// the guard decided before anything was asked. It has a close button, and `View in log` (AP5), which opens the
+// Approvals window on this block's entry. It never takes focus: nothing here is first responder, and nothing makes it so.
 
 final class GuardBlockedBar: NSView {
 
@@ -14,11 +14,13 @@ final class GuardBlockedBar: NSView {
 
     let textLabel = NSTextField(labelWithString: "")
     let closeButton = NSButton()
-    /// `View in log`: disabled and without a target until AP5.
+    /// `View in log`: opens the Approvals window filtered to this block's entry (`onViewInLog`).
     let logLink = NSButton()
 
     /// The person pressed close.
     var onClose: (() -> Void)?
+    /// The person pressed `View in log`.
+    var onViewInLog: (() -> Void)?
 
     init(text: String) {
         super.init(frame: .zero)
@@ -35,14 +37,16 @@ final class GuardBlockedBar: NSView {
         textLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         logLink.isBordered = false
-        logLink.isEnabled = false
+        logLink.isEnabled = true
         logLink.refusesFirstResponder = true
+        logLink.target = self
+        logLink.action = #selector(viewInLogPressed)
         logLink.attributedTitle = NSAttributedString(string: "View in log", attributes: [
             .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: ApprovalPalette.mutedText,
             .underlineStyle: NSUnderlineStyle.single.rawValue,
         ])
-        logLink.setAccessibilityLabel("View in the approvals log (not available yet)")
+        logLink.setAccessibilityLabel("View in the approvals log")
 
         closeButton.isBordered = false
         closeButton.title = "✕"
@@ -91,4 +95,6 @@ final class GuardBlockedBar: NSView {
     }
 
     @objc private func closePressed() { onClose?() }
+
+    @objc private func viewInLogPressed() { onViewInLog?() }
 }

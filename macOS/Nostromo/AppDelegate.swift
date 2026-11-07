@@ -462,6 +462,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         if !ApprovalOverlayHost.focusCard(in: NSApp.keyWindow) { NSSound.beep() }
     }
 
+    /// Window ▸ Approvals: open the read-only Approvals log (AP5). No shortcut.
+    @objc func showApprovalsLog(_ sender: Any?) {
+        ApprovalsWindowManager.shared.show()
+    }
+
     /// ⇧⌘M with focus outside every input bar (a list, the transcript): open the key
     /// window's bar. A bar that holds focus handles the action itself, before this.
     @objc func showModelPopover(_ sender: Any?) {
