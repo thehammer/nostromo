@@ -582,20 +582,25 @@ pub fn first_match_within(
 /// Past this many, new work is refused (no match, no candidate) instead of piling up more.
 const MAX_HELPERS: usize = 4;
 
-static HELPERS_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static HELPERS_IN_FLIGHT: std::sync::LazyLock<HelperCount> =
+    std::sync::LazyLock::new(HelperCount::default);
+
+/// A count of helper threads in flight. Each owner (the rule matcher, each broker's previews)
+/// has its own, so one cannot starve another.
+pub(crate) type HelperCount = std::sync::Arc<std::sync::atomic::AtomicUsize>;
 
 /// Counts one helper thread; dropping it (the thread ending, even by a panic) gives the slot back.
-struct HelperSlot(&'static std::sync::atomic::AtomicUsize);
+struct HelperSlot(HelperCount);
 
 impl HelperSlot {
-    fn take(in_flight: &'static std::sync::atomic::AtomicUsize, max: usize) -> Option<Self> {
+    fn take(in_flight: &HelperCount, max: usize) -> Option<Self> {
         use std::sync::atomic::Ordering::SeqCst;
         let taken = in_flight.fetch_add(1, SeqCst);
         if taken >= max {
             in_flight.fetch_sub(1, SeqCst);
             return None;
         }
-        Some(Self(in_flight))
+        Some(Self(in_flight.clone()))
     }
 }
 
@@ -608,7 +613,7 @@ impl Drop for HelperSlot {
 /// Run `f` on a helper thread counted in `in_flight` (at most `max` at once); false if the
 /// cap is reached or the thread could not start. Nothing waits for it.
 pub(crate) fn spawn_capped(
-    in_flight: &'static std::sync::atomic::AtomicUsize,
+    in_flight: &HelperCount,
     max: usize,
     name: &str,
     f: impl FnOnce() + Send + 'static,
@@ -627,7 +632,7 @@ pub(crate) fn spawn_capped(
 
 /// Like [`bounded`], with its own helper cap.
 pub(crate) fn bounded_capped<T: Send + 'static>(
-    in_flight: &'static std::sync::atomic::AtomicUsize,
+    in_flight: &HelperCount,
     max: usize,
     name: &str,
     timeout: std::time::Duration,

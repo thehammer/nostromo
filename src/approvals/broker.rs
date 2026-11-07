@@ -78,7 +78,6 @@ const PREVIEW_QUICK_WAIT: std::time::Duration = std::time::Duration::from_millis
 /// Preview walks that may run at once (the quick and the full pass share it), apart from
 /// the helpers session-rule matching uses.
 const MAX_PREVIEW_WALKS: usize = 2;
-static PREVIEWS_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The most one request may spend on all of its session-rule file system work, matching
 /// (every rule together) and, separately, deriving candidates.
@@ -594,6 +593,10 @@ struct Inner {
     home: Mutex<PathBuf>,
     /// The file system the consequence preview reads (the real one; tests inject theirs).
     preview_fs: Mutex<Arc<dyn PreviewFs>>,
+    /// Preview walks in flight (this broker's own count).
+    preview_slots: rules::HelperCount,
+    /// How long the worker waits for the quick pass (and the quick pass's own budget).
+    preview_quick_wait: Mutex<std::time::Duration>,
     weak: Weak<Inner>,
 }
 
@@ -833,6 +836,8 @@ impl ApprovalBroker {
                 dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/nonexistent-home")),
             ),
             preview_fs: Mutex::new(Arc::new(RealFs)),
+            preview_slots: rules::HelperCount::default(),
+            preview_quick_wait: Mutex::new(PREVIEW_QUICK_WAIT),
             weak: weak.clone(),
         });
         let worker = Arc::downgrade(&inner);
@@ -1482,6 +1487,13 @@ impl ApprovalBroker {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_preview_fs_for_test(&self, fs: Arc<dyn PreviewFs>) {
         *lock(&self.inner.preview_fs) = fs;
+    }
+
+    /// Wait this long (instead of 50 ms) for the quick preview pass, and give that pass the
+    /// same budget. For tests that must not depend on the file system's speed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_preview_quick_wait_for_test(&self, wait: std::time::Duration) {
+        *lock(&self.inner.preview_quick_wait) = wait;
     }
 
     /// Put a hand-built rule on `tag`'s process `generation`, as if the human had created it.
@@ -2194,12 +2206,17 @@ impl Inner {
     ) -> (ApprovalPreviewWire, bool) {
         let fs = lock(&self.preview_fs).clone();
         let (job_specs, job_env) = (specs.to_vec(), env.clone());
+        let wait = *lock(&self.preview_quick_wait);
+        let budget = preview::Budget {
+            time: wait,
+            ..preview::Budget::QUICK
+        };
         let done = rules::bounded_capped(
-            &PREVIEWS_IN_FLIGHT,
+            &self.preview_slots,
             MAX_PREVIEW_WALKS,
             "approval-preview",
-            PREVIEW_QUICK_WAIT,
-            move || preview::walk(&job_specs, preview::Budget::QUICK, &*fs, &job_env),
+            wait,
+            move || preview::walk(&job_specs, budget, &*fs, &job_env),
         );
         match done {
             Some(p) if p.state == PreviewState::Complete => (p, false),
@@ -2225,7 +2242,7 @@ impl Inner {
         let (job_id, job_ident) = (request_id.to_owned(), ident.clone());
         let (job_specs, job_env) = (specs.clone(), env.clone());
         let started = rules::spawn_capped(
-            &PREVIEWS_IN_FLIGHT,
+            &self.preview_slots,
             MAX_PREVIEW_WALKS,
             "approval-preview",
             move || {

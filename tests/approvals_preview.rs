@@ -988,10 +988,62 @@ fn preview_entries(rig: &Rig) -> Vec<Entry> {
 }
 
 /// A session's working folder exists before the fake starts, so prepare it first.
+/// The quick pass gets a generous wait, so a card's preview never depends on how fast this
+/// machine's file system is; tests that need a slow walk call [`slow_fs`] afterwards.
 fn prepare(rig: &Rig, f: impl FnOnce(&Path)) {
     let work = rig.tmp.path().join("work");
     std::fs::create_dir_all(&work).unwrap();
     f(&work);
+    rig.broker
+        .set_preview_quick_wait_for_test(Duration::from_secs(10));
+}
+
+/// A file system that takes `each` per call, with the quick pass cut at 50 ms: the card
+/// always goes out `Counting` and the counts follow. `each` must be over 50 ms.
+fn slow_fs(rig: &Rig, each: Duration) {
+    assert!(each > Duration::from_millis(50));
+    rig.broker.set_preview_fs_for_test(Arc::new(Slow(each)));
+    rig.broker
+        .set_preview_quick_wait_for_test(Duration::from_millis(50));
+}
+
+/// A file system whose every call blocks until the test opens it (at most 10 s, so a
+/// failed test never leaves a thread behind). Counts the calls that have entered and left.
+#[derive(Clone, Default)]
+struct Gate {
+    open: Arc<std::sync::atomic::AtomicBool>,
+    entered: Arc<std::sync::atomic::AtomicUsize>,
+    inside: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Gate {
+    fn pass(&self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.entered.fetch_add(1, SeqCst);
+        self.inside.fetch_add(1, SeqCst);
+        let start = Instant::now();
+        while !self.open.load(SeqCst) && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.inside.fetch_sub(1, SeqCst);
+    }
+}
+
+impl PreviewFs for Gate {
+    fn symlink_metadata(&self, path: &Path) -> std::io::Result<Meta> {
+        self.pass();
+        RealFs.symlink_metadata(path)
+    }
+    fn read_dir(
+        &self,
+        path: &Path,
+    ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<std::ffi::OsString>>>> {
+        self.pass();
+        RealFs.read_dir(path)
+    }
+    fn is_network(&self, path: &Path) -> bool {
+        RealFs.is_network(path)
+    }
 }
 
 #[test]
@@ -1065,8 +1117,7 @@ fn an_unresolvable_operand_is_shown_as_such() {
 fn the_card_is_sent_without_waiting_for_the_walk_and_the_counts_follow() {
     run(GUARDED, |mut rig| async move {
         prepare(&rig, |w| files(&w.join("build"), 3, "a"));
-        rig.broker
-            .set_preview_fs_for_test(Arc::new(Slow(Duration::from_millis(100))));
+        slow_fs(&rig, Duration::from_millis(100));
         let mut app = rig.app(true).await;
         let started = Instant::now();
         let (_fake, wire) = rig
@@ -1107,18 +1158,32 @@ fn the_card_is_sent_without_waiting_for_the_walk_and_the_counts_follow() {
 #[test]
 fn no_preview_frame_follows_a_request_that_ended() {
     run(GUARDED, |mut rig| async move {
+        use std::sync::atomic::Ordering::SeqCst;
         prepare(&rig, |w| files(&w.join("build"), 3, "a"));
+        // The walk is held shut until after the request has ended, so it cannot finish
+        // (and broadcast) before the deny; then it is let go.
+        let gate = Gate::default();
+        rig.broker.set_preview_fs_for_test(Arc::new(gate.clone()));
         rig.broker
-            .set_preview_fs_for_test(Arc::new(Slow(Duration::from_millis(100))));
+            .set_preview_quick_wait_for_test(Duration::from_millis(50));
         let mut app = rig.app(true).await;
         let (fake, wire) = rig
             .held(&mut app, "cody-1", "FIXTURE:preview_rm_build")
             .await;
         assert_eq!(wire.preview.unwrap().state, PreviewState::Counting);
+        wait_until("the walk to reach the file system", || {
+            (gate.entered.load(SeqCst) > 0).then_some(())
+        })
+        .await;
         app.deny(&wire.request_id, "w").await;
         fake.wait_responses(1).await;
         app.next_resolved().await;
-        std::thread::sleep(Duration::from_millis(900)); // the walk ends
+        gate.open.store(true, SeqCst);
+        wait_until("the walks to leave the gate", || {
+            (gate.inside.load(SeqCst) == 0).then_some(())
+        })
+        .await;
+        std::thread::sleep(Duration::from_millis(500)); // the walks run to their end
         let s = rig.sentinel();
         app.through(&s).await;
         assert!(!app.saw(is_preview));
@@ -1130,8 +1195,7 @@ fn no_preview_frame_follows_a_request_that_ended() {
 fn a_hung_file_system_never_stalls_the_next_request() {
     run(GUARDED, |mut rig| async move {
         prepare(&rig, |w| files(&w.join("build"), 1, "a"));
-        rig.broker
-            .set_preview_fs_for_test(Arc::new(Slow(Duration::from_millis(1500))));
+        slow_fs(&rig, Duration::from_millis(1500));
         let mut app = rig.app(true).await;
         let (_f1, first) = rig
             .held(&mut app, "cody-1", "FIXTURE:preview_rm_build")
@@ -1184,8 +1248,7 @@ fn a_preview_over_the_cap_lists_the_first_targets_and_counts_the_rest() {
 fn a_lan_peer_never_receives_a_preview_in_any_frame() {
     run(GUARDED, |mut rig| async move {
         prepare(&rig, |w| files(&w.join("build"), 2, "a"));
-        rig.broker
-            .set_preview_fs_for_test(Arc::new(Slow(Duration::from_millis(100))));
+        slow_fs(&rig, Duration::from_millis(100));
         let mut app = rig.app(true).await;
         let mut tcp_all = rig.tcp(ALL_TOPICS.to_vec()).await;
         let mut tcp_empty = rig.tcp(vec![]).await;

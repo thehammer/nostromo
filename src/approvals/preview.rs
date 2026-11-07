@@ -13,7 +13,7 @@
 //!   inject slowness, `EACCES`, other devices and macOS-only paths. It is bounded by an
 //!   entry count and a time budget.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -122,6 +122,33 @@ const NOT_RUNNERS: [&str; 12] = [
     "echo", "printf", "grep", "egrep", "fgrep", "which", "type", "ls", "cat", "bash", "sh", "zsh",
 ];
 
+/// Programs whose quoted arguments are text (a commit message, a search pattern), not a
+/// command line, unless a flag says otherwise (see [`runs_a_command`]). A bare `rm` word
+/// after them (`git rm x`) is still flagged.
+const DATA_PROGRAMS: [&str; 2] = ["git", "gh"];
+
+/// A word with more than one token in it: a quoted sentence or command line.
+fn is_quoted_payload(text: &str) -> bool {
+    text.contains(|c: char| c.is_whitespace() || ";&|()'\"`".contains(c))
+}
+
+/// Do the words of a [`DATA_PROGRAMS`] program carry something it will run (`git rebase
+/// --exec`, `-c alias.x=!...`, `--tree-filter`, `config`, `--extcmd`)?
+fn runs_a_command(words: &[super::shell::Word]) -> bool {
+    words.iter().any(|w| {
+        let t = w.text.to_lowercase();
+        w.dynamic
+            || t == "config"
+            || t == "-x"
+            || t.starts_with("-c")
+            || [
+                "exec", "filter", "extcmd", "alias", "cmd", "command", "hook", "editor",
+            ]
+            .iter()
+            .any(|m| t.contains(m))
+    })
+}
+
 fn word_base(word: &super::shell::Word) -> Option<String> {
     if word.dynamic {
         return None;
@@ -174,12 +201,13 @@ fn wrapped_removal(name: &str, command: &SimpleCommand) -> Option<TargetSpec> {
         if NOT_RUNNERS.contains(&name) {
             return None;
         }
+        let data_only = DATA_PROGRAMS.contains(&name) && !runs_a_command(words);
         let (kind, word) = words.iter().find_map(|w| {
-            if w.dynamic {
+            if w.dynamic || (data_only && is_quoted_payload(&w.text)) {
                 return None;
             }
             w.text
-                .split(|c: char| c.is_whitespace() || ";&|()'\"`".contains(c))
+                .split(|c: char| c.is_whitespace() || ";&|()'\"`!=".contains(c))
                 .find_map(|tok| {
                     let base = tok.rsplit('/').next().unwrap_or(tok);
                     let base = base.trim_start_matches('\\').to_lowercase();
@@ -550,6 +578,10 @@ struct Walker<'a> {
     fs: &'a dyn PreviewFs,
     env: &'a Env,
     tcc: Vec<PathBuf>,
+    /// [`key`] of each of `tcc`, computed once.
+    tcc_keys: Vec<PathBuf>,
+    /// Folders already checked for being a link (each is stat'd at most once per walk).
+    links: HashMap<PathBuf, bool>,
     deadline: Instant,
     max_entries: usize,
     entries: usize,
@@ -579,10 +611,13 @@ pub fn walk(
     fs: &dyn PreviewFs,
     env: &Env,
 ) -> ApprovalPreviewWire {
+    let tcc = tcc_folders(&env.home);
     let mut w = Walker {
         fs,
         env,
-        tcc: tcc_folders(&env.home),
+        tcc_keys: tcc.iter().map(|f| key(f)).collect(),
+        tcc,
+        links: HashMap::new(),
         deadline: Instant::now() + budget.time,
         max_entries: budget.max_entries,
         entries: 0,
@@ -790,10 +825,12 @@ fn expand_glob(w: &mut Walker, path: &Path) -> (Vec<Expanded>, u32) {
             }
             // A privacy-guarded folder is listed only when the operand itself names a path
             // inside it (the session is working there), never from an outer glob.
+            let base_key = key(&base);
             let guarded = w
                 .tcc
                 .iter()
-                .any(|f| within(&base, f) && !may_enter(w, f, &literal));
+                .zip(&w.tcc_keys)
+                .any(|(f, fk)| base_key.starts_with(fk) && !may_enter(w, f, &literal));
             if guarded {
                 next.push(Expanded::Cant(
                     base.join(comp),
@@ -862,32 +899,44 @@ fn expanded_path(e: &Expanded) -> &Path {
 }
 
 /// Is any folder above `path` a symlink? Looks at the folders only, each by
-/// `symlink_metadata`, never at a protected folder, and at most [`MAX_ANCESTORS`] of them.
-fn through_a_link(w: &Walker, path: &Path) -> bool {
+/// `symlink_metadata` (once per walk, and each look counts against the walk's budget),
+/// never at a protected folder, and at most [`MAX_ANCESTORS`] of them. `None` when the
+/// budget ran out before the answer was known.
+fn through_a_link(w: &mut Walker, path: &Path) -> Option<bool> {
     let mut ancestor = path.parent();
     for _ in 0..MAX_ANCESTORS {
         let Some(dir) = ancestor else { break };
         if dir.parent().is_none() {
             break;
         }
-        let protected = w.tcc.iter().any(|f| key(f) == key(dir));
-        // `/var`, `/tmp` and `/etc` are the system's own links into `/private`.
-        let system = ["/var", "/tmp", "/etc"].iter().any(|s| dir == Path::new(s));
-        if !protected
-            && !system
-            && matches!(
-                w.fs.symlink_metadata(dir),
-                Ok(Meta {
-                    kind: EntryKind::Symlink,
-                    ..
-                })
-            )
-        {
-            return true;
+        let is_link = match w.links.get(dir) {
+            Some(known) => *known,
+            None => {
+                // `/var`, `/tmp` and `/etc` are the system's own links into `/private`.
+                let system = ["/var", "/tmp", "/etc"].iter().any(|s| dir == Path::new(s));
+                let is_link = if system || w.tcc_keys.contains(&key(dir)) {
+                    false
+                } else if !w.tick() {
+                    return None;
+                } else {
+                    matches!(
+                        w.fs.symlink_metadata(dir),
+                        Ok(Meta {
+                            kind: EntryKind::Symlink,
+                            ..
+                        })
+                    )
+                };
+                w.links.insert(dir.to_path_buf(), is_link);
+                is_link
+            }
+        };
+        if is_link {
+            return Some(true);
         }
         ancestor = dir.parent();
     }
-    false
+    Some(false)
 }
 
 /// Most folders above one target that are checked for being links.
@@ -908,9 +957,11 @@ fn inspect(
         .components()
         .take_while(|c| !has_glob(&c.as_os_str().to_string_lossy()))
         .collect();
+    let path_key = key(path);
     if w.tcc
         .iter()
-        .any(|f| key(path) != key(f) && within(path, f) && !may_enter(w, f, &literal))
+        .zip(&w.tcc_keys)
+        .any(|(f, fk)| path_key != *fk && path_key.starts_with(fk) && !may_enter(w, f, &literal))
     {
         let cant = cant_target(
             spec,
@@ -926,9 +977,16 @@ fn inspect(
         t.flags.push(PreviewFlag::NotCounted);
         return (t, false);
     }
-    if through_a_link(w, path) {
-        let cant = cant_target(spec, &path.to_string_lossy(), "path goes through a link");
-        return (cant, false);
+    match through_a_link(w, path) {
+        Some(false) => {}
+        Some(true) => {
+            let cant = cant_target(spec, &path.to_string_lossy(), "path goes through a link");
+            return (cant, false);
+        }
+        None => {
+            t.flags.push(PreviewFlag::NotCounted);
+            return (t, true);
+        }
     }
     let meta = match w.fs.symlink_metadata(path) {
         Ok(m) => m,
@@ -965,9 +1023,7 @@ fn inspect(
         EntryKind::Dir => {
             // A home-critical folder is flagged, not counted: the flag is the message.
             // A TCC-guarded folder that is itself the target is not opened either.
-            if t.flags.contains(&PreviewFlag::HomeCritical)
-                || w.tcc.iter().any(|f| key(f) == key(path))
-            {
+            if t.flags.contains(&PreviewFlag::HomeCritical) || w.tcc_keys.contains(&path_key) {
                 t.flags.push(PreviewFlag::NotCounted);
                 return (t, false);
             }
@@ -1036,7 +1092,7 @@ fn count_dir(w: &mut Walker, root: &Path, dev: u64) -> Tally {
                     } else if w.fs.is_network(&path) {
                         tally.flags.push(PreviewFlag::Network);
                         tally.flags.push(PreviewFlag::NotCounted);
-                    } else if w.tcc.iter().any(|f| key(f) == key(&path)) {
+                    } else if w.tcc_keys.contains(&key(&path)) {
                         tally.flags.push(PreviewFlag::NotCounted);
                     } else {
                         stack.push(path);

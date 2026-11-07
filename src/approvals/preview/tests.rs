@@ -372,7 +372,10 @@ fn the_entry_budget_gives_a_partial_count() {
     assert_eq!(p.state, PreviewState::Partial);
     let t = &p.targets[0];
     assert!(t.at_least);
-    assert_eq!(t.files, Some(10));
+    // The folders above the target are looked at first and count against the same budget,
+    // so the tally is the budget less however many of those there were.
+    let n = t.files.expect("a partial count");
+    assert!((1..=10).contains(&n), "{n}");
 }
 
 // ---- injected file system ----
@@ -1104,4 +1107,172 @@ fn a_busy_preview_marks_every_path_not_counted() {
     assert!(t.flags.contains(&PreviewFlag::NotCounted));
     assert!(t.flags.contains(&PreviewFlag::Busy));
     assert_eq!(t.files, None);
+}
+
+// ---- ancestor link checks: budgeted and memoised ----
+
+fn reads_of(f: &Fake, p: &str) -> usize {
+    f.reads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.as_path() == Path::new(p))
+        .count()
+}
+
+#[test]
+fn ancestor_link_checks_count_against_the_budget_and_never_guess_a_verdict() {
+    let f = Fake::default()
+        .dir("/a", &["b"])
+        .dir("/a/b", &["c"])
+        .dir("/a/b/c", &["d"])
+        .dir("/a/b/c/d", &["e"])
+        .dir("/a/b/c/d/e", &["f"])
+        .dir("/a/b/c/d/e/f", &["file"])
+        .file("/a/b/c/d/e/f/file", 7);
+    let p = walk(
+        &[spec_for(PathBuf::from("/a/b/c/d/e/f/file"))],
+        Budget {
+            max_entries: 2,
+            time: Duration::from_secs(5),
+        },
+        &f,
+        &fake_env(),
+    );
+    assert_eq!(p.state, PreviewState::Partial);
+    let t = &p.targets[0];
+    assert!(t.flags.contains(&PreviewFlag::NotCounted), "{:?}", t.flags);
+    assert_eq!(t.files, None);
+    assert_eq!(t.exists, None, "nothing was learned about the target");
+    assert_eq!(t.cant_resolve, None, "no link verdict was guessed");
+    assert_eq!(t.why, None);
+    assert!(
+        f.reads.lock().unwrap().len() <= 2,
+        "the budget bounds the reads: {:?}",
+        f.reads.lock().unwrap()
+    );
+    // with the budget to spare the same target is counted
+    let p = run(&f, "/a/b/c/d/e/f/file");
+    assert_eq!(p.state, PreviewState::Complete);
+    assert_eq!(p.targets[0].exists, Some(true));
+}
+
+#[test]
+fn targets_sharing_ancestors_look_at_each_ancestor_folder_once() {
+    let f = Fake::default()
+        .dir("/w", &["x"])
+        .dir("/w/x", &["a", "b"])
+        .file("/w/x/a", 1)
+        .file("/w/x/b", 2);
+    let p = walk(
+        &[
+            spec_for(PathBuf::from("/w/x/a")),
+            spec_for(PathBuf::from("/w/x/b")),
+        ],
+        Budget::FULL,
+        &f,
+        &fake_env(),
+    );
+    assert_eq!(p.state, PreviewState::Complete);
+    assert_eq!(p.targets.len(), 2);
+    assert_eq!(p.targets[0].files, Some(1));
+    assert_eq!(p.targets[1].files, Some(1));
+    assert_eq!(reads_of(&f, "/w/x"), 1);
+    assert_eq!(reads_of(&f, "/w"), 1);
+}
+
+#[test]
+fn a_link_found_once_condemns_every_target_beneath_it() {
+    let mut f = Fake::default()
+        .dir("/w", &["l"])
+        .dir("/w/l", &["a", "b"])
+        .file("/w/l/a", 1)
+        .file("/w/l/b", 1);
+    f.links.push(PathBuf::from("/w/l"));
+    let p = walk(
+        &[
+            spec_for(PathBuf::from("/w/l/a")),
+            spec_for(PathBuf::from("/w/l/b")),
+        ],
+        Budget::FULL,
+        &f,
+        &fake_env(),
+    );
+    for t in &p.targets {
+        assert_eq!(t.why.as_deref(), Some("path goes through a link"));
+        assert_eq!(t.files, None);
+    }
+    assert_eq!(reads_of(&f, "/w/l"), 1);
+}
+
+// ---- wrappers: quoted text is not a command, unless the program runs it ----
+
+fn runs_via(cmd: &str) -> Option<String> {
+    specs(cmd, Some("/w"))
+        .iter()
+        .find_map(|s| match &s.operand {
+            Operand::CantResolve { why, .. } if why.starts_with("runs via") => Some(why.clone()),
+            _ => None,
+        })
+}
+
+#[test]
+fn a_commit_message_or_pr_body_that_mentions_rm_or_mv_is_not_a_removal() {
+    for cmd in [
+        "git commit -m \"mv foo\"",
+        "git commit -m \"rm x\"",
+        "git commit -am \"rm -rf the old build\"",
+        "gh pr create --title t --body \"rm x\"",
+        "gh pr create --body \"mv a b; rm c\"",
+        "git log --grep \"rm x\"",
+    ] {
+        assert_eq!(runs_via(cmd), None, "{cmd}");
+        assert!(specs(cmd, Some("/w")).is_empty(), "{cmd}");
+    }
+}
+
+#[test]
+fn a_git_program_that_runs_a_command_is_still_flagged() {
+    for (cmd, via) in [
+        ("git rm x", "git"),
+        ("git rebase -i --exec \"rm x\" main", "git"),
+        ("git rebase --exec 'rm x' main", "git"),
+        ("git filter-branch --tree-filter \"rm x\" HEAD", "git"),
+        ("gh alias set clean 'rm x'", "gh"),
+    ] {
+        assert_eq!(
+            runs_via(cmd).as_deref(),
+            Some(&*format!("runs via {via}")),
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn quoted_payloads_of_programs_that_run_them_are_flagged() {
+    // sh and bash: the parser looks into the payload, so it is a real target
+    for cmd in ["sh -c \"rm x\"", "bash -c \"rm -rf x\""] {
+        assert_eq!(specs(cmd, Some("/w")).len(), 1, "{cmd}");
+    }
+    for (cmd, via) in [
+        ("ssh host \"rm -rf /x\"", "ssh"),
+        ("su -c \"rm -rf /x\" root", "su"),
+        ("docker exec c \"rm -rf /x\"", "docker"),
+        ("eval \"rm -rf x\"", "eval"),
+        ("xargs \"rm\"", "xargs"),
+        ("xargs -0 rm", "xargs"),
+    ] {
+        assert!(
+            runs_via(cmd).is_some(),
+            "{cmd}: expected a runs-via row (e.g. {via}), got {:?}",
+            specs(cmd, Some("/w"))
+        );
+    }
+}
+
+#[test]
+fn a_git_alias_that_shells_out_to_rm_is_flagged() {
+    for cmd in ["git -c alias.x='!rm y' x", "git -c 'alias.x=!rm y' x"] {
+        assert_eq!(runs_via(cmd).as_deref(), Some("runs via git"), "{cmd}");
+    }
 }
