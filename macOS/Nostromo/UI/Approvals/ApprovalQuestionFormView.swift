@@ -3,43 +3,118 @@ import NostromoKit
 
 // AP2c: the form that answers an `AskUserQuestion` request on the approval card.
 //
-//   DATABASE                                   (header chip)
-//   Which database should we use?              (question, wraps)
-//   ◉ Postgres                                 (radio, or a checkbox when multi-select)
-//       Relational, strong consistency         (the option's description, muted)
-//   ○ SQLite
-//       Embedded, zero setup
-//   ○ [ Other…                              ]  (free text; typing chooses it)
+//   DATABASE                                          (header chip)
+//   Which database should we use?                     (question, wraps)
+//   ─────────────────────────────────────────────
+//   ✓ Postgres      Relational, strong consistency    (option rows: label left, description muted)
+//   ─────────────────────────────────────────────
+//     SQLite        Embedded, zero setup
+//   ─────────────────────────────────────────────
+//     [ Other…                                  ]     (free text; typing chooses it)
+//
+// The rows look like the transcript card's (`OptionRowStyle`). A row is a radio button (a checkbox when
+// the question is multi-select) to assistive technology; each question keeps its own selection. The rows
+// are toggle buttons, not radio-type buttons, so AppKit never groups the rows of two questions.
 //
 // What it is: a draft. It holds what is chosen (`ApprovalQuestionSelection`, one per question)
-// and nothing else; the answer is only sent when the card's Submit is pressed by a person.
+// and nothing else; the answer is only sent when the card's Submit is pressed by a person. Choosing a
+// row never submits.
 //
 // What keeps it safe and inside its pane:
 //   * No control has a key equivalent and none can be a default button.
 //   * Choosing an option, or toggling Other, asks `permit` first (the card passes the human-gesture
-//     check). A refused click changes nothing: the controls are put back as the model says.
+//     check). A refused click changes nothing: the rows are put back as the model says.
 //   * Layout is by frame, top to bottom, from a measured height. A label wraps at the width it is
 //     given and a text field scrolls its own text, so no string, however long, can ask for more
 //     width than the form has. (Labels also carry a low horizontal compression resistance.)
+//   * Selecting never changes a row's height or width (the label's weight does not change).
 //   * Every string from the request is drawn with hidden or direction-changing characters as
 //     visible tokens (`ApprovalContextText`), like the rest of the card.
 
-/// A radio button or checkbox that can take keyboard focus when enabled and never answers to Return.
+/// One option row (or the Other row): a full-width toggle button that draws its own selected and hover
+/// look, takes keyboard focus when enabled, and never answers to Return. Space toggles it; the arrow keys
+/// only move focus to the neighbouring row.
 final class ApprovalChoiceButton: NSButton {
+    let checkmark = OptionRowStyle.checkmarkImage()
+    private var hovering = false
+
+    init(multi: Bool) {
+        super.init(frame: .zero)
+        setButtonType(.toggle)
+        isBordered = false
+        title = ""
+        imagePosition = .noImage
+        wantsLayer = true
+        layer?.cornerRadius = 0
+        focusRingType = .default
+        translatesAutoresizingMaskIntoConstraints = true
+        // Said outright: a titleless button would otherwise report an unknown role.
+        setAccessibilityRole(multi ? .checkBox : .radioButton)
+        // The row's texts are its label and help; they are not separate elements.
+        setAccessibilityChildren([])
+        checkmark.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(checkmark)
+        refreshLook()
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { isEnabled }
     override var keyEquivalent: String {
         get { "" }
         set { /* never */ }
     }
-}
 
-/// An option's text. Clicking it presses the option's button (a real click, so the same gesture check applies).
-private final class ApprovalChoiceLabel: NSTextField {
-    weak var button: ApprovalChoiceButton?
+    override var state: NSControl.StateValue {
+        didSet { refreshLook() }
+    }
 
-    override func mouseDown(with event: NSEvent) {
-        guard let button, button.isEnabled else { return }
-        button.performClick(self)
+    override var isEnabled: Bool {
+        didSet { if !isEnabled { hovering = false }; refreshLook() }
+    }
+
+    override func accessibilityValue() -> Any? { NSNumber(value: state == .on ? 1 : 0) }
+
+    /// A click anywhere in the row is a click on the row, whatever text is drawn there.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(convert(point, from: superview)) ? self : nil
+    }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 125, 124: window?.selectKeyView(following: self)   // down, right
+        case 126, 123: window?.selectKeyView(preceding: self)   // up, left
+        default: super.keyDown(with: event)
+        }
+    }
+
+    override func drawFocusRingMask() { NSBezierPath(rect: bounds).fill() }
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard isEnabled else { return }
+        hovering = true
+        refreshLook()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovering = false
+        refreshLook()
+    }
+
+    /// Selected: sage tint and the check. Hover: a quiet tint, only when not selected. Never changes the row's size.
+    private func refreshLook() {
+        let selected = state == .on
+        checkmark.isHidden = !selected
+        layer?.backgroundColor = selected ? OptionRowStyle.chosenTint : (hovering ? OptionRowStyle.hoverTint : nil)
     }
 }
 
@@ -73,17 +148,18 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
         ApprovalQuestions.answers(for: questions, selections: selections)
     }
 
-    static let indent: CGFloat = 24
-    static let controlSize: CGFloat = 18
+    static let textLeading = OptionRowStyle.inset + OptionRowStyle.checkSize + OptionRowStyle.checkGap
     static let sectionGap: CGFloat = 14
-    static let rowGap: CGFloat = 6
+    static let questionGap: CGFloat = 8
+    static let verticalPad: CGFloat = 9
+    static let dividerHeight: CGFloat = 1
     static let otherFieldHeight: CGFloat = 22
 
     private let questions: [ApprovalQuestion]
 
     private struct OptionRow {
         let button: ApprovalChoiceButton
-        let label: ApprovalChoiceLabel
+        let label: NSTextField
         let description: NSTextField
     }
 
@@ -93,6 +169,8 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
         let options: [OptionRow]
         let otherButton: ApprovalChoiceButton
         let otherField: NSTextField
+        /// One above each row, the Other row last: `options.count + 1`.
+        let dividers: [NSView]
     }
 
     private var sections: [Section] = []
@@ -153,10 +231,53 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
         return ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: 100_000)).height)
     }
 
+    /// Natural single-line width of a label's text (0 when hidden or empty).
+    private func naturalWidth(_ label: NSTextField) -> CGFloat {
+        guard !label.isHidden, let cell = label.cell else { return 0 }
+        return ceil(cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: 100_000, height: 100_000)).width) + 1
+    }
+
+    /// Where a row's texts go, relative to the row: label and description side by side when both fit on
+    /// one line, otherwise the label wrapped over the description wrapped.
+    private struct RowMetrics {
+        var height: CGFloat
+        var label: NSRect
+        var description: NSRect
+    }
+
+    private func metrics(of row: OptionRow, width: CGFloat) -> RowMetrics {
+        let textWidth = max(40, width - Self.textLeading - OptionRowStyle.inset)
+        let descriptionVisible = !row.description.isHidden
+        let labelNatural = naturalWidth(row.label)
+        let descriptionNatural = naturalWidth(row.description)
+        let singleLines = !row.label.stringValue.contains("\n") && !row.description.stringValue.contains("\n")
+        if descriptionVisible, singleLines,
+           labelNatural + OptionRowStyle.descriptionGap + descriptionNatural <= textWidth {
+            let labelHeight = wrappedHeight(row.label, width: labelNatural)
+            let descriptionHeight = wrappedHeight(row.description, width: descriptionNatural)
+            let x = Self.textLeading
+            return RowMetrics(
+                height: OptionRowStyle.rowHeight,
+                label: NSRect(x: x, y: floor((OptionRowStyle.rowHeight - labelHeight) / 2), width: labelNatural, height: labelHeight),
+                description: NSRect(x: x + labelNatural + OptionRowStyle.descriptionGap,
+                                    y: floor((OptionRowStyle.rowHeight - descriptionHeight) / 2),
+                                    width: descriptionNatural, height: descriptionHeight))
+        }
+        let labelHeight = wrappedHeight(row.label, width: textWidth)
+        let descriptionHeight = wrappedHeight(row.description, width: textWidth)
+        let stacked = Self.verticalPad * 2 + labelHeight + (descriptionHeight > 0 ? descriptionHeight + 2 : 0)
+        let height = max(OptionRowStyle.rowHeight, stacked)
+        let top = descriptionVisible || labelHeight > 20 ? Self.verticalPad : floor((height - labelHeight) / 2)
+        return RowMetrics(
+            height: height,
+            label: NSRect(x: Self.textLeading, y: top, width: textWidth, height: labelHeight),
+            description: NSRect(x: Self.textLeading, y: top + labelHeight + 2, width: textWidth, height: descriptionHeight))
+    }
+
     @discardableResult
     private func rows(width requested: CGFloat, apply: Bool) -> CGFloat {
         let width = max(60, requested)
-        let textWidth = max(40, width - Self.indent)
+        let textWidth = max(40, width - Self.textLeading - OptionRowStyle.inset)
         var y: CGFloat = 0
         for (i, section) in sections.enumerated() {
             if i > 0 { y += Self.sectionGap }
@@ -167,27 +288,39 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
             }
             let questionHeight = wrappedHeight(section.question, width: width)
             if apply { section.question.frame = NSRect(x: 0, y: y, width: width, height: questionHeight) }
-            y += questionHeight + Self.rowGap
+            y += questionHeight + Self.questionGap
 
-            for row in section.options {
-                let labelHeight = wrappedHeight(row.label, width: textWidth)
-                let descriptionHeight = wrappedHeight(row.description, width: textWidth)
-                let rowHeight = max(Self.controlSize + 2, labelHeight + (descriptionHeight > 0 ? descriptionHeight + 2 : 0))
+            func placeDivider(_ index: Int) {
                 if apply {
-                    row.button.frame = NSRect(x: 0, y: y + 1, width: Self.controlSize, height: Self.controlSize)
-                    row.label.frame = NSRect(x: Self.indent, y: y + (labelHeight < Self.controlSize ? 1 : 0),
-                                             width: textWidth, height: labelHeight)
-                    row.description.frame = NSRect(x: Self.indent, y: y + labelHeight + 2,
-                                                   width: textWidth, height: descriptionHeight)
+                    let inset = index == 0 ? 0 : OptionRowStyle.inset
+                    section.dividers[index].frame = NSRect(x: inset, y: y, width: width - inset, height: Self.dividerHeight)
                 }
-                y += rowHeight + Self.rowGap
+                y += Self.dividerHeight
             }
 
-            if apply {
-                section.otherButton.frame = NSRect(x: 0, y: y + 2, width: Self.controlSize, height: Self.controlSize)
-                section.otherField.frame = NSRect(x: Self.indent, y: y, width: textWidth, height: Self.otherFieldHeight)
+            for (o, row) in section.options.enumerated() {
+                placeDivider(o)
+                let m = metrics(of: row, width: width)
+                if apply {
+                    row.button.frame = NSRect(x: 0, y: y, width: width, height: m.height)
+                    row.button.checkmark.frame = NSRect(x: OptionRowStyle.inset, y: 10, width: OptionRowStyle.checkSize,
+                                                        height: OptionRowStyle.checkSize)
+                    row.label.frame = m.label
+                    row.description.frame = m.description
+                }
+                y += m.height
             }
-            y += Self.otherFieldHeight
+
+            placeDivider(section.options.count)
+            let otherHeight = OptionRowStyle.rowHeight
+            if apply {
+                section.otherButton.frame = NSRect(x: 0, y: y, width: width, height: otherHeight)
+                section.otherButton.checkmark.frame = NSRect(x: OptionRowStyle.inset, y: 10, width: OptionRowStyle.checkSize,
+                                                             height: OptionRowStyle.checkSize)
+                section.otherField.frame = NSRect(x: Self.textLeading, y: y + (otherHeight - Self.otherFieldHeight) / 2,
+                                                  width: textWidth, height: Self.otherFieldHeight)
+            }
+            y += otherHeight
         }
         return y
     }
@@ -218,33 +351,45 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
         addSubview(questionLabel)
 
         var rows: [OptionRow] = []
+        var dividers: [NSView] = []
+        func divider() {
+            let line = NSView()
+            line.wantsLayer = true
+            line.layer?.backgroundColor = dividers.isEmpty ? OptionRowStyle.topDivider : OptionRowStyle.rowDivider
+            addSubview(line)
+            dividers.append(line)
+        }
         for (optionIndex, option) in question.options.enumerated() {
+            divider()
             let button = choiceButton(multi: question.multiSelect, id: "q\(index)_opt\(optionIndex)",
                                       action: #selector(optionPressed(_:)))
             button.setAccessibilityLabel(ApprovalDisplayModel.contextText(option.label, keepingLineFeeds: false))
             if !option.description.isEmpty {
                 button.setAccessibilityHelp(ApprovalDisplayModel.contextText(option.description, keepingLineFeeds: false))
             }
-            let label = ApprovalChoiceLabel(wrappingLabelWithString: "")
+            let label = NSTextField(wrappingLabelWithString: "")
             configureWrapping(label)
             label.isSelectable = false
-            label.button = button
             ApprovalContextText.set(label, option.label, wraps: true,
-                                    font: .systemFont(ofSize: 12), color: ApprovalPalette.commandText)
+                                    font: OptionRowStyle.labelFont, color: ApprovalPalette.commandText)
             let description = wrappingLabel()
             description.isSelectable = false
             if option.description.isEmpty {
                 description.isHidden = true
             } else {
                 ApprovalContextText.set(description, option.description, wraps: true,
-                                        font: .systemFont(ofSize: 11), color: ApprovalPalette.mutedText)
+                                        font: OptionRowStyle.descriptionFont, color: ApprovalPalette.mutedText)
             }
-            for v in [button, label, description] { addSubview(v) }
+            addSubview(button)
+            button.addSubview(label)
+            button.addSubview(description)
             rows.append(OptionRow(button: button, label: label, description: description))
         }
+        divider()
 
         let otherButton = choiceButton(multi: question.multiSelect, id: "q\(index)_other", action: #selector(otherPressed(_:)))
         otherButton.setAccessibilityLabel("Other")
+        addSubview(otherButton)
         let field = NSTextField()
         field.identifier = NSUserInterfaceItemIdentifier("q\(index)_other_field")
         field.placeholderString = "Other…"
@@ -257,9 +402,9 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
         field.cell?.wraps = false
         field.delegate = self
         field.setAccessibilityLabel("Other answer: \(ApprovalDisplayModel.contextText(question.question, keepingLineFeeds: false))")
-        addSubview(otherButton)
-        addSubview(field)
-        return Section(chip: chip, question: questionLabel, options: rows, otherButton: otherButton, otherField: field)
+        addSubview(field)   // above the Other row, so a click in the field reaches the field
+        return Section(chip: chip, question: questionLabel, options: rows, otherButton: otherButton, otherField: field,
+                       dividers: dividers)
     }
 
     private func wrappingLabel() -> NSTextField {
@@ -279,16 +424,10 @@ final class ApprovalQuestionFormView: NSView, NSTextFieldDelegate {
     }
 
     private func choiceButton(multi: Bool, id: String, action: Selector) -> ApprovalChoiceButton {
-        let button = ApprovalChoiceButton()
-        button.setButtonType(multi ? .switch : .radio)
-        // Said outright: a titleless button would otherwise report an unknown role.
-        button.setAccessibilityRole(multi ? .checkBox : .radioButton)
-        button.title = ""
+        let button = ApprovalChoiceButton(multi: multi)
         button.identifier = NSUserInterfaceItemIdentifier(id)
         button.target = self
         button.action = action
-        button.focusRingType = .default
-        button.translatesAutoresizingMaskIntoConstraints = true
         return button
     }
 

@@ -73,17 +73,24 @@ use super::audit::{sanitize_string, AuditFilter, AuditLog, Entry, Event};
 use super::display::ApprovalDisplay;
 use super::guard::{self, GuardVerdict, HookPayload, PaneProbe, SystemPaneProbe};
 use super::persisted::{AddError, ChangeError, External, PersistedRule, RulesStore, Scope};
+use super::preview::{self, PreviewFs, RealFs, TargetSpec};
 use super::questions;
 use super::request::{FileSettings, PermissionRequest, Reason, SettingsSource};
 use super::rules::{self, Candidate, SessionRule};
+
+/// The longest the broker's worker waits on the file system for a consequence preview.
+const PREVIEW_QUICK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+/// Preview walks that may run at once (the quick and the full pass share it), apart from
+/// the helpers session-rule matching uses.
+const MAX_PREVIEW_WALKS: usize = 2;
 
 /// The most one request may spend on all of its session-rule file system work, matching
 /// (every rule together) and, separately, deriving candidates.
 const RULE_MATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 use super::wire::{
     clean_note, AgentWire, AnswerRefusal, ApprovalDecision, ApprovalFlags, ApprovalOption,
-    ApprovalRequestWire, DecisionKind, RefusalChannel, RuleScopeChoice, SessionRuleCandidateWire,
-    SessionRuleWire, SubagentWire,
+    ApprovalPreviewWire, ApprovalRequestWire, DecisionKind, PreviewState, RefusalChannel,
+    RuleScopeChoice, SessionRuleCandidateWire, SessionRuleWire, SubagentWire,
 };
 use super::ApprovalsPaths;
 use crate::data::work::is_invisible;
@@ -686,6 +693,12 @@ struct Inner {
     home: Mutex<PathBuf>,
     /// The persisted rules (AP6), once opened ([`ApprovalBroker::attach_rules_store`]).
     persisted: Mutex<Option<Arc<RulesStore>>>,
+    /// The file system the consequence preview reads (the real one; tests inject theirs).
+    preview_fs: Mutex<Arc<dyn PreviewFs>>,
+    /// Preview walks in flight (this broker's own count).
+    preview_slots: rules::HelperCount,
+    /// How long the worker waits for the quick pass (and the quick pass's own budget).
+    preview_quick_wait: Mutex<std::time::Duration>,
     weak: Weak<Inner>,
 }
 
@@ -925,6 +938,9 @@ impl ApprovalBroker {
                 dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/nonexistent-home")),
             ),
             persisted: Mutex::new(None),
+            preview_fs: Mutex::new(Arc::new(RealFs)),
+            preview_slots: rules::HelperCount::default(),
+            preview_quick_wait: Mutex::new(PREVIEW_QUICK_WAIT),
             weak: weak.clone(),
         });
         let worker = Arc::downgrade(&inner);
@@ -1831,6 +1847,19 @@ impl ApprovalBroker {
         *lock(&self.inner.home) = home;
     }
 
+    /// Read the consequence preview through `fs` instead of the real file system. For tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_preview_fs_for_test(&self, fs: Arc<dyn PreviewFs>) {
+        *lock(&self.inner.preview_fs) = fs;
+    }
+
+    /// Wait this long (instead of 50 ms) for the quick preview pass, and give that pass the
+    /// same budget. For tests that must not depend on the file system's speed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_preview_quick_wait_for_test(&self, wait: std::time::Duration) {
+        *lock(&self.inner.preview_quick_wait) = wait;
+    }
+
     /// Put a hand-built rule on `tag`'s process `generation`, as if the human had created it.
     /// For tests of the matcher's guard ordering and scope; nothing in production calls it.
     #[cfg(any(test, feature = "test-support"))]
@@ -2715,7 +2744,7 @@ impl Inner {
             // Bounded like the match: the paths in the command are the agent's choice.
             let candidates =
                 rules::candidates_within(RULE_MATCH_TIMEOUT, &req, &reason, &home, cwd.as_deref());
-            let wire = approval_wire(
+            let mut wire = approval_wire(
                 request_id,
                 &ident.tag,
                 &session.agent,
@@ -2725,6 +2754,18 @@ impl Inner {
                 cwd.as_deref(),
                 self.parts.timeout,
             );
+            let (specs, env) = preview_targets(&req, cwd.as_deref(), &home);
+            let mut full_walk = false;
+            if !specs.is_empty() {
+                let (quick, needs_full) = self.quick_preview(&specs, &env);
+                full_walk = needs_full;
+                wire.preview = Some(quick);
+                if wire_len(&wire) > MAX_FRAME_LEN - FRAME_MARGIN {
+                    wire.preview = Some(preview::omitted());
+                    full_walk = false;
+                }
+            }
+            let shown = wire.preview.clone();
             self.hold(
                 request_id,
                 wire,
@@ -2732,12 +2773,110 @@ impl Inner {
                 req.input.clone(),
                 epoch_at_check,
             );
+            // After the card is out (so the follow-up frame cannot overtake it).
+            if let Some(shown) = shown {
+                if full_walk {
+                    self.start_full_preview(request_id, ident, specs, env);
+                } else if shown.state != PreviewState::Omitted {
+                    self.log_preview(ident, &shown);
+                }
+            }
         } else {
             self.finish(
                 request_id,
                 Ending::cannot_ask(session.guarded, self.parts.presenter.app_connected()),
             );
         }
+    }
+
+    /// The preview the card is built with, and whether the full walk must still run.
+    /// The worker never waits more than [`PREVIEW_QUICK_WAIT`] on the file system for it.
+    fn quick_preview(
+        &self,
+        specs: &[TargetSpec],
+        env: &preview::Env,
+    ) -> (ApprovalPreviewWire, bool) {
+        let fs = lock(&self.preview_fs).clone();
+        let (job_specs, job_env) = (specs.to_vec(), env.clone());
+        let wait = *lock(&self.preview_quick_wait);
+        let budget = preview::Budget {
+            time: wait,
+            ..preview::Budget::QUICK
+        };
+        let done = rules::bounded_capped(
+            &self.preview_slots,
+            MAX_PREVIEW_WALKS,
+            "approval-preview",
+            wait,
+            move || preview::walk(&job_specs, budget, &*fs, &job_env),
+        );
+        match done {
+            Some(p) if p.state == PreviewState::Complete => (p, false),
+            // Out of time, or slow: show the targets now and count in the background.
+            Some(_) | None => {
+                let counting = preview::counting(specs, env);
+                // `None` can also mean the cap is full; the full walk then says busy.
+                (counting, true)
+            }
+        }
+    }
+
+    /// Count in the background; when done, if the request is still held, tell the app.
+    fn start_full_preview(
+        &self,
+        request_id: &str,
+        ident: &Ident,
+        specs: Vec<TargetSpec>,
+        env: preview::Env,
+    ) {
+        let fs = lock(&self.preview_fs).clone();
+        let weak = self.weak.clone();
+        let (job_id, job_ident) = (request_id.to_owned(), ident.clone());
+        let (job_specs, job_env) = (specs.clone(), env.clone());
+        let started = rules::spawn_capped(
+            &self.preview_slots,
+            MAX_PREVIEW_WALKS,
+            "approval-preview",
+            move || {
+                let done = preview::walk(&job_specs, preview::Budget::FULL, &*fs, &job_env);
+                if let Some(inner) = weak.upgrade() {
+                    inner.finish_preview(&job_id, &job_ident, done);
+                }
+            },
+        );
+        if !started {
+            let busy = preview::busy(&specs, &env);
+            self.finish_preview(request_id, ident, busy);
+        }
+    }
+
+    /// The final preview of a held request: remember it for late joiners, tell the app and
+    /// log it. Nothing if the request already ended.
+    fn finish_preview(&self, request_id: &str, ident: &Ident, done: ApprovalPreviewWire) {
+        let tag = {
+            let mut st = lock(&self.state);
+            let Some(p) = st.pending.get_mut(request_id).filter(|p| p.held) else {
+                return;
+            };
+            if let Some(w) = p.wire.as_mut() {
+                w.preview = Some(done.clone());
+            }
+            p.ident.tag.clone()
+        };
+        self.broadcast(ServerMsg::ApprovalPreview {
+            tag,
+            request_id: request_id.to_owned(),
+            preview: done.clone(),
+        });
+        self.log_preview(ident, &done);
+    }
+
+    /// One `preview` audit entry (the log is append-only and the `request` entry is out).
+    fn log_preview(&self, ident: &Ident, preview: &ApprovalPreviewWire) {
+        let Ok(value) = serde_json::to_value(preview) else {
+            return;
+        };
+        self.append(entry(Event::Preview { preview: value }, ident, Utc::now()));
     }
 
     /// The ending the guard imposes on `req`, or `None` if it lets the request through.
@@ -2908,6 +3047,27 @@ struct Finished {
     entry_id: String,
 }
 
+/// What the preview looks at in this request: the `rm` / `rmdir` / `mv` operands of a
+/// Bash command, with the session's start folder and the user's home.
+fn preview_targets(
+    req: &PermissionRequest,
+    cwd: Option<&Path>,
+    home: &Path,
+) -> (Vec<TargetSpec>, preview::Env) {
+    let env = preview::Env {
+        cwd: cwd.map(Path::to_path_buf),
+        home: home.to_path_buf(),
+    };
+    if req.tool_name != "Bash" {
+        return (Vec::new(), env);
+    }
+    let Some(command) = req.input.get("command").and_then(Value::as_str) else {
+        return (Vec::new(), env);
+    };
+    let parse = super::shell::parse(command);
+    (preview::targets(command, &parse, cwd, home), env)
+}
+
 /// The serialized size of the frame that shows `wire`.
 fn wire_len(wire: &ApprovalRequestWire) -> usize {
     serde_json::to_vec(wire).map_or(usize::MAX, |v| v.len())
@@ -2983,6 +3143,7 @@ fn approval_wire(
             .collect(),
         created_at_ms,
         deadline_at_ms: created_at_ms + timeout.as_millis() as u64,
+        preview: None,
     }
 }
 

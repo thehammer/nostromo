@@ -196,7 +196,8 @@ enum ApprovalFixtures {
         description: String? = nil,
         sessionRuleCandidates: [Obj] = [],
         repoRoot: String? = nil,
-        repoIsGit: Bool? = nil
+        repoIsGit: Bool? = nil,
+        preview: Obj? = nil
     ) throws -> ApprovalRequestWire {
         var flagValues: [String: Bool] = [
             "default_to_no": false,
@@ -230,16 +231,18 @@ enum ApprovalFixtures {
         if let repoRoot = repoRoot { root["repo_root"] = repoRoot }
         if let repoIsGit = repoIsGit { root["repo_is_git"] = repoIsGit }
         if let description = description { root["description"] = description }
+        if let preview = preview { root["preview"] = preview }
         let data = try JSONSerialization.data(withJSONObject: root)
         return try JSONDecoder().decode(ApprovalRequestWire.self, from: data)
     }
 
     /// A Bash request: `lines` default to a faithful no-operator display of `command`.
     static func bashRequest(_ command: String, lines: [Obj]? = nil, commandCount: Int? = 1,
-                            unparsed: Bool = false) throws -> ApprovalRequestWire {
+                            unparsed: Bool = false, cwd: String? = nil, preview: Obj? = nil) throws -> ApprovalRequestWire {
         try request(input: ["command": command],
                     display: display(lines: lines ?? plainBashLines(command),
-                                     commandCount: commandCount, unparsed: unparsed))
+                                     commandCount: commandCount, unparsed: unparsed),
+                    cwd: cwd, preview: preview)
     }
 
     // MARK: - Bash fixtures (inputs from tests/fixtures/approvals, displays as the daemon builds them)

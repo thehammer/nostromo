@@ -1823,6 +1823,8 @@ class AppStore: ObservableObject {
             approvalEvents.send(.snapshot(requests))
         case .approvalResolved(let frame):
             approvalEvents.send(.resolved(frame))
+        case .approvalPreview(let frame):
+            approvalEvents.send(.preview(frame))
         case .approvalAnswerRefused(let frame):
             approvalEvents.send(.answerRefused(frame))
         case .approvalSessionRules(let frame):

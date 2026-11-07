@@ -273,6 +273,8 @@ enum ServerMsg {
     case approvalsSnapshot([ApprovalRequestWire])
     /// A held request ended.
     case approvalResolved(ApprovalResolvedFrame)
+    /// The counts of a held request's consequence preview (AP7).
+    case approvalPreview(ApprovalPreviewFrame)
     /// How many requests a focus has held.
     case approvalPending(tag: String, count: Int)
     /// The production-shell guard blocked a call.
@@ -1840,6 +1842,13 @@ class NostromodClient {
                 return .approvalResolved(m)
             } else {
                 log.error("failed to decode approval_resolved")
+            }
+
+        case "approval_preview":
+            if let m = try? decoder.decode(ApprovalPreviewFrame.self, from: raw) {
+                return .approvalPreview(m)
+            } else {
+                log.error("failed to decode approval_preview")
             }
 
         case "approval_session_rules":

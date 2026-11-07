@@ -1,0 +1,29 @@
+{
+  "description": "remove the f files",
+  "tool_uses": [
+    {
+      "id": "toolu_preview_glob_0",
+      "name": "Bash",
+      "input": {
+        "command": "rm -f f*",
+        "description": "remove the f files"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "request": {
+        "subtype": "can_use_tool",
+        "tool_name": "Bash",
+        "display_name": "Bash",
+        "input": {
+          "command": "rm -f f*",
+          "description": "remove the f files"
+        },
+        "description": "remove the f files",
+        "decision_reason_type": "rule",
+        "tool_use_id": "toolu_preview_glob_0"
+      }
+    }
+  ]
+}

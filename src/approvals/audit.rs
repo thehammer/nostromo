@@ -195,6 +195,10 @@ pub enum Event {
         inactive: u64,
         quarantined: bool,
     },
+    /// The consequence preview the card showed (AP7), written once its counts are final.
+    Preview {
+        preview: Value,
+    },
 }
 
 impl Event {
@@ -213,6 +217,7 @@ impl Event {
             Event::RulesKept { .. } => "rules_kept",
             Event::RulesDiscarded { .. } => "rules_discarded",
             Event::RulesLoaded { .. } => "rules_loaded",
+            Event::Preview { .. } => "preview",
         }
     }
 }
