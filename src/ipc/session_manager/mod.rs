@@ -570,6 +570,11 @@ pub struct SessionManager {
     mcp_socket: Option<PathBuf>,
     /// `--mcp-config` file path registering the `nostromo-mcp-bridge` stdio server.
     mcp_config: Option<PathBuf>,
+    /// True from [`SessionManager::await_mcp_bridge`] until the daemon has either
+    /// configured the bridge or declared it unavailable. While set, no real
+    /// session is spawned: one started now would silently have no
+    /// `mcp__nostromo__*` tools for its whole life.
+    awaiting_mcp_bridge: bool,
     /// Supplies current pane content for attach replay (D8). Set by the
     /// daemon via [`SessionManager::configure_pane_content_provider`]; `None`
     /// in tests / non-daemon use.
@@ -690,6 +695,7 @@ impl SessionManager {
             pane_registry: None,
             mcp_socket: None,
             mcp_config: None,
+            awaiting_mcp_bridge: false,
             pane_content_provider: None,
             tracker_frame_provider: None,
             perri_state_provider: None,
@@ -813,6 +819,20 @@ impl SessionManager {
         self.pane_registry = Some(pane_registry);
         self.mcp_socket = Some(mcp_socket);
         self.mcp_config = Some(mcp_config);
+        self.awaiting_mcp_bridge = false;
+    }
+
+    /// Hold every real-session spawn (client spawns, restore, crash recovery)
+    /// until [`Self::configure_mcp_bridge`] or [`Self::mcp_bridge_unavailable`]
+    /// runs. The daemon calls this at construction, before anything can connect.
+    pub fn await_mcp_bridge(&mut self) {
+        self.awaiting_mcp_bridge = true;
+    }
+
+    /// The daemon could not set the bridge up: release the hold. Sessions then
+    /// start without the tools, and each says so in the log.
+    pub fn mcp_bridge_unavailable(&mut self) {
+        self.awaiting_mcp_bridge = false;
     }
 
     /// Access the shared pane registry (if wired up). Used by the IPC server
@@ -1063,6 +1083,16 @@ impl SessionManager {
             }
         }
 
+        if self.awaiting_mcp_bridge {
+            warn!(
+                tag,
+                "session start refused: the daemon's MCP bridge is not configured yet"
+            );
+            return Err(anyhow!(
+                "daemon is still starting (MCP bridge not configured); retry"
+            ));
+        }
+
         // Resolve the session id: explicit arg › persisted store › fresh uuid.
         let store = load_id_store(&self.store_path);
         let resolved = session_id.or_else(|| store.get(&tag).cloned());
@@ -1238,21 +1268,28 @@ impl SessionManager {
         // the agent can call the layout/introspection tools against the daemon.
         // The focus tag is the identity key (NOSTROMO_PTY_ID) and the view id.
         if respawn_fixed.is_none() {
-            if let (Some(socket), Some(config)) = (&self.mcp_socket, &self.mcp_config) {
-                cmd.env("NOSTROMO_MCP_SOCKET", socket);
-                cmd.env("NOSTROMO_PTY_ID", &tag);
-                cmd.env("NOSTROMO_VIEW_ID", &tag);
-                // Attribution (activity-path wedge): lets the
-                // `nostromo-activity-hook` producer stamp every hook payload
-                // with the owning focus tag directly, with no session-id
-                // reverse lookup needed on the fast path.
-                cmd.env("NOSTROMO_FOCUS_TAG", &tag);
-                // The session id this daemon spawned with: a `mother add` in
-                // the session's shell records it as `origin.session` with no
-                // flags, and the daemon can verify the claim against its
-                // per-focus session history.
-                cmd.env("MOTHER_ORIGIN_SESSION", &session_id);
-                cmd.arg("--mcp-config").arg(config);
+            match (&self.mcp_socket, &self.mcp_config) {
+                (Some(socket), Some(config)) => {
+                    cmd.env("NOSTROMO_MCP_SOCKET", socket);
+                    cmd.env("NOSTROMO_PTY_ID", &tag);
+                    cmd.env("NOSTROMO_VIEW_ID", &tag);
+                    // Attribution (activity-path wedge): lets the
+                    // `nostromo-activity-hook` producer stamp every hook payload
+                    // with the owning focus tag directly, with no session-id
+                    // reverse lookup needed on the fast path.
+                    cmd.env("NOSTROMO_FOCUS_TAG", &tag);
+                    // The session id this daemon spawned with: a `mother add` in
+                    // the session's shell records it as `origin.session` with no
+                    // flags, and the daemon can verify the claim against its
+                    // per-focus session history.
+                    cmd.env("MOTHER_ORIGIN_SESSION", &session_id);
+                    cmd.arg("--mcp-config").arg(config);
+                }
+                _ => warn!(
+                    tag,
+                    resume,
+                    "session spawned WITHOUT --mcp-config: the daemon's MCP bridge is not configured, so it has no mcp__nostromo__* tools"
+                ),
             }
         }
         // Child working directory. When the focus carries no project dir, default
@@ -1912,6 +1949,10 @@ impl SessionManager {
     /// 3. **Decision**: guard check, then exit-code-aware restart or backoff
     ///    scheduling.
     pub fn reap_and_recover(&mut self) {
+        // Recovery respawns real sessions: wait for the MCP bridge so they get it.
+        if self.awaiting_mcp_bridge {
+            return;
+        }
         let crashed: Vec<String> = self
             .sessions
             .iter()
@@ -4239,6 +4280,100 @@ mod tests {
         std::env::set_var(CLAUDE_BIN_ENV, "/custom/path/to/claude");
         let p = resolve_claude().unwrap();
         assert_eq!(p, PathBuf::from("/custom/path/to/claude"));
+        std::env::remove_var(CLAUDE_BIN_ENV);
+    }
+
+    // ── MCP wiring on every real spawn path ───────────────────────────────────
+    //
+    // A stub `claude` writes its argv and the NOSTROMO_* env to a file per run.
+
+    fn argv_dump_script(dir: &std::path::Path, dump: &std::path::Path) -> PathBuf {
+        let script = dir.join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{{ echo \"ARGS: $*\"; echo \"PTY=$NOSTROMO_PTY_ID SOCK=$NOSTROMO_MCP_SOCKET\"; }} >> '{}'\nsleep 5\n",
+                dump.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    async fn dump_lines(dump: &std::path::Path, want: usize) -> Vec<String> {
+        for _ in 0..400 {
+            let text = std::fs::read_to_string(dump).unwrap_or_default();
+            let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+            if lines.len() >= want {
+                return lines;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!(
+            "stub claude never reported {want} lines: {:?}",
+            std::fs::read_to_string(dump)
+        );
+    }
+
+    fn assert_wired(lines: &[String], tag: &str) {
+        let args: Vec<_> = lines.iter().filter(|l| l.starts_with("ARGS:")).collect();
+        assert!(!args.is_empty());
+        for a in args {
+            assert!(a.contains("--mcp-config"), "no --mcp-config: {a}");
+        }
+        for l in lines.iter().filter(|l| l.starts_with("PTY=")) {
+            assert!(
+                l.contains(&format!("PTY={tag} SOCK=/tmp/test-mcp.sock")),
+                "identity env missing: {l}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_session_spawned_before_the_mcp_bridge_is_configured_is_refused_then_wired() {
+        let _env = CLAUDE_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let dump = dir.path().join("dump");
+        std::env::set_var(CLAUDE_BIN_ENV, argv_dump_script(dir.path(), &dump));
+        let mut mgr = SessionManager::with_store_path(tmp_store());
+        mgr.await_mcp_bridge();
+
+        let early = mgr.spawn_session(
+            "claudia".into(),
+            "claudia".into(),
+            "C".into(),
+            None,
+            Some("sid-1".into()),
+            false,
+        );
+        assert!(
+            early.is_err(),
+            "a spawn before configure must not produce a tool-less session"
+        );
+        mgr.reap_and_recover(); // deferred too, must not panic or spawn
+
+        mgr.configure_mcp_bridge(
+            Arc::new(Mutex::new(PaneRegistry::new())),
+            PathBuf::from("/tmp/test-mcp.sock"),
+            PathBuf::from("/tmp/test-mcp.json"),
+        );
+        mgr.spawn_session(
+            "claudia".into(),
+            "claudia".into(),
+            "C".into(),
+            None,
+            Some("sid-1".into()),
+            false,
+        )
+        .unwrap();
+
+        let lines = dump_lines(&dump, 2).await;
+        assert_wired(&lines, "claudia");
         std::env::remove_var(CLAUDE_BIN_ENV);
     }
 
