@@ -203,11 +203,32 @@ async fn main() -> Result<()> {
     // stopped will never apply: clear it, with a note, before anything can
     // connect and respawn the session.
     session_mgr.lock().unwrap().clear_persisted_pending();
+    // No real session may spawn until the MCP bridge is configured (just below):
+    // one started earlier would have no `mcp__nostromo__*` tools for its life.
+    session_mgr.lock().unwrap().await_mcp_bridge();
 
     // ── Pane registry (agent-authored layout) ──────────────────────────────────
     // Single source of truth for every focus's pane tree. Persisted to disk so
     // an assembled layout survives a daemon restart.
     let pane_registry: Arc<Mutex<PaneRegistry>> = Arc::new(Mutex::new(PaneRegistry::new()));
+
+    // ── MCP bridge wiring for spawned sessions ────────────────────────────────
+    // Configured here, before the IPC server binds and the crash supervisor
+    // starts, so every spawn (client, restore, recovery) carries `--mcp-config`
+    // and the NOSTROMO_* identity env. The MCP server itself binds further down.
+    let mcp_socket = daemon_socket_path();
+    let mcp_config = write_bridge_mcp_config();
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        match &mcp_config {
+            Some(config) => mgr.configure_mcp_bridge(
+                Arc::clone(&pane_registry),
+                mcp_socket.clone(),
+                config.clone(),
+            ),
+            None => mgr.mcp_bridge_unavailable(),
+        }
+    }
 
     // ── Terminal panes ────────────────────────────────────────────────────────
     // Daemon-owned shells. Only the verified Mac app can type into, read,
@@ -566,17 +587,8 @@ async fn main() -> Result<()> {
     // mutations are applied to `pane_registry` and broadcast as `FocusLayout` /
     // `PaneContent` / `FocusCreated` to all clients. Bind failure is non-fatal —
     // the daemon keeps running without the layout surface.
-    let mcp_socket = daemon_socket_path();
-    let _mcp_server: Option<McpServer> = match write_bridge_mcp_config() {
-        Some(mcp_config) => {
-            {
-                let mut mgr = session_mgr.lock().unwrap();
-                mgr.configure_mcp_bridge(
-                    Arc::clone(&pane_registry),
-                    mcp_socket.clone(),
-                    mcp_config,
-                );
-            }
+    let _mcp_server: Option<McpServer> = match mcp_config {
+        Some(_) => {
             // ── ticket provider registry (W4 — curated-agent-views) ─────────────
             // `jira` is always registered; whether it's actually *configured*
             // (credentials resolved) is logged once so a deployment missing
