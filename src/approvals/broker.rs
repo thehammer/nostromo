@@ -2604,7 +2604,9 @@ impl Inner {
             },
         };
         if let Some(why) = super::persisted::scope_problem(&scope, &home) {
-            return Err(refused(&format!("This repository cannot hold a saved rule: {why}.")));
+            return Err(refused(&format!(
+                "This repository cannot hold a saved rule: {why}."
+            )));
         }
         match store.can_add() {
             Ok(()) => {}
