@@ -344,14 +344,19 @@ final class PersistedRulesViewTests: MouseQueueTestCase {
     func testReviewShowsWhatIsInTheFileAndWhichRulesWouldStayInactiveAndSendsNothing() {
         makeView()
         let inFile = [AP6Rules.rule("q1", text: "Bash(ls)"),
-                      AP6Rules.rule("q2", text: "Bash(rm)", active: false, inactiveReason: "path_changed")]
+                      AP6Rules.rule("q2", text: "Bash(rm)", active: false, inactiveReason: "path_changed"),
+                      AP6Rules.rule("q3", text: "Bash(rm -rf /tmp/a)", scope: .allRepos, active: false,
+                                    inactiveReason: "scope_unconfirmed")]
         feed(AP6Rules.frame([], quarantined: AP6Rules.quarantine(rules: inFile)))
         click(view.reviewButton!, number: 1, time: 10)
 
         XCTAssertTrue(view.review(button: view.reviewButton!))
 
-        XCTAssertEqual(view.reviewLines, ["Bash(ls)  ·  would stay active",
-                                          "Bash(rm)  ·  would stay inactive: a path it covers has changed"])
+        XCTAssertEqual(view.reviewLines, [
+            "Bash(ls)  ·  Repository: ~/Code/x · would stay active",
+            "Bash(rm)  ·  Repository: ~/Code/x · would stay inactive: a path it covers has changed",
+            "Bash(rm -rf /tmp/a)  ·  ALL repositories · would stay inactive: it applies to all repositories and has not been confirmed again",
+        ])
         XCTAssertNotNil(view.turnOnButton)
         XCTAssertNotNil(view.cancelReviewButton)
         XCTAssertEqual(recorder.keptRules, [], "Review… sends nothing")

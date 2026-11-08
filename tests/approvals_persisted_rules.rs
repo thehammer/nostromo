@@ -1300,6 +1300,33 @@ async fn a_repo_rule_covers_sessions_inside_that_repository_and_no_other() {
         .await;
 }
 
+// A dotfiles repository at `~/.git` makes the "repository" the home folder: no saved rule may
+// be scoped to it (the card's "All repositories" is the explicit, wider choice).
+#[tokio::test(start_paused = true)]
+async fn a_repository_that_is_the_home_folder_cannot_hold_a_saved_rule() {
+    let rig = Rig::with_app();
+    std::fs::create_dir_all(rig.l.home.join(".git")).unwrap();
+    let generation = rig
+        .broker
+        .register_session(session("focus-home", true, &rig.l.home), FakeSink::new());
+    let wire = rig
+        .hold_on("focus-home", generation, "toolu_home", CACHES_A)
+        .await;
+    let c = candidate(&wire, CandidateKind::PathPrefix);
+
+    match rig.broker.answer(
+        &wire.request_id,
+        &allow_always(&c, RuleScopeChoice::Repo),
+        "w-always",
+        "app",
+    ) {
+        AnswerResult::RuleRefused(why) => assert!(!why.is_empty()),
+        other => panic!("a home-folder repository must be refused, got {other:?}"),
+    }
+
+    assert!(rig.rules().is_empty(), "nothing was written");
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_all_repos_rule_covers_every_repository() {
     let rig = Rig::with_app();
@@ -1559,7 +1586,10 @@ async fn hand_edited_broader_rules_are_listed_inactive_and_never_match_even_afte
             &l.home,
             CACHES_A,
             CandidateKind::PathPrefix,
-            Scope::AllRepos,
+            // Not all repositories: a kept file never revives one of those unconfirmed.
+            Scope::Repo {
+                root: l.proj.clone(),
+            },
         );
         let mut all = vec![legit.clone()];
         all.extend(hand_edited_broad_rules(&legit, &l.home));
@@ -1753,7 +1783,15 @@ async fn the_file_watcher_notices_an_external_edit_within_seconds() {
         std::thread::sleep(Duration::from_millis(20));
         tokio::task::yield_now().await;
     }
-    assert!(!rig.entries_of("rules_quarantined").is_empty());
+    // The log entry follows the quarantine by a moment (the rules are judged in between).
+    while rig.entries_of("rules_quarantined").is_empty() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "no rules_quarantined entry"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        tokio::task::yield_now().await;
+    }
     rig.assert_card("toolu_after", CACHES_A).await;
 }
 
@@ -1902,7 +1940,7 @@ async fn keep_needs_the_reviewed_hash_then_revalidates_logs_and_turns_the_rules_
             "toolu_1",
             CACHES_A,
             CandidateKind::Exact,
-            RuleScopeChoice::AllRepos,
+            RuleScopeChoice::Repo,
         )
         .await;
     tamper_content(&rig);

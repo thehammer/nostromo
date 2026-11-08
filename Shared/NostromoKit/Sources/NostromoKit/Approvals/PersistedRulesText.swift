@@ -127,6 +127,8 @@ public enum PersistedRulesText {
         switch reason {
         case "no_longer_offered": return "Nostromo no longer offers this rule"
         case "path_changed": return "a path it covers has changed"
+        case "bad_scope": return "its repository folder is not valid here"
+        case "scope_unconfirmed": return "it applies to all repositories and has not been confirmed again"
         default: return "it did not pass Nostromo's checks"
         }
     }
@@ -137,8 +139,14 @@ public enum PersistedRulesText {
          usesText(rule.uses), stateText(rule)].joined(separator: " · ")
     }
 
-    /// How a quarantined rule reads in the review: whether it would stay on after Keep.
-    public static func reviewText(_ rule: PersistedRule) -> String {
-        rule.active ? "would stay active" : "would stay inactive: " + inactiveReasonText(rule.inactiveReason)
+    /// Where a rule applies, as the Keep review shows it (an all-repositories rule is shouted).
+    public static func reviewScopeText(_ rule: PersistedRule, home: String) -> String {
+        rule.scope == .allRepos ? "ALL repositories" : scopeText(rule, home: home)
+    }
+
+    /// How a quarantined rule reads in the review: where it applies and whether it would stay on after Keep.
+    public static func reviewText(_ rule: PersistedRule, home: String) -> String {
+        let state = rule.active ? "would stay active" : "would stay inactive: " + inactiveReasonText(rule.inactiveReason)
+        return reviewScopeText(rule, home: home) + " · " + state
     }
 }

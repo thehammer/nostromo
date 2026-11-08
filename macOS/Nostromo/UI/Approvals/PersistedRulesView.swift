@@ -247,7 +247,7 @@ final class PersistedRulesView: NSView {
             for line in reviewLines ?? [] {
                 let label = NSTextField(wrappingLabelWithString: line)
                 label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-                label.textColor = line.contains("inactive") ? ApprovalPalette.warning : ApprovalPalette.commandText
+                label.textColor = line.contains("inactive") || line.contains("ALL repositories") ? ApprovalPalette.warning : ApprovalPalette.commandText
                 label.isSelectable = true
                 document.addSubview(label)
                 reviewViews.append(label)
@@ -398,7 +398,7 @@ final class PersistedRulesView: NSView {
         switch gesture.select(event: currentEvent(), control: button) {
         case .allowed:
             reviewedHash = q.fileSha256
-            var lines = q.rulesInFile.map { "\($0.ruleText)  ·  \(PersistedRulesText.reviewText($0))" }
+            var lines = q.rulesInFile.map { "\($0.ruleText)  ·  \(PersistedRulesText.reviewText($0, home: home))" }
             if lines.isEmpty { lines = ["No rules could be read from the file"] }
             reviewLines = lines
             reviewGeneration += 1

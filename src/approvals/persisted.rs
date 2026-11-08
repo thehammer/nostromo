@@ -54,13 +54,34 @@ pub enum Scope {
         root: PathBuf,
     },
     AllRepos,
+    /// `AllRepos` from a file the human kept after it was changed outside the daemon. Off until
+    /// the human confirms "applies to all repositories" again ([`RulesStore::confirm_all_repos`]).
+    AllReposUnconfirmed,
+}
+
+/// Why a scope cannot be used (`None`: it can). A repository root must be an absolute,
+/// existing directory that is neither `/` nor the home folder nor one of its ancestors.
+/// `AllRepos` is valid; whether it was confirmed is [`Scope::AllReposUnconfirmed`].
+pub fn scope_problem(scope: &Scope, home: &Path) -> Option<&'static str> {
+    let Scope::Repo { root } = scope else {
+        return None;
+    };
+    if !root.is_absolute() || !root.is_dir() {
+        return Some("the repository folder is not an existing absolute path");
+    }
+    let canon = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (root, home) = (canon(root), canon(home));
+    if root.parent().is_none() || home.starts_with(&root) {
+        return Some("the repository folder is the home folder or contains it");
+    }
+    None
 }
 
 impl Scope {
     pub fn choice(&self) -> RuleScopeChoice {
         match self {
             Self::Repo { .. } => RuleScopeChoice::Repo,
-            Self::AllRepos => RuleScopeChoice::AllRepos,
+            Self::AllRepos | Self::AllReposUnconfirmed => RuleScopeChoice::AllRepos,
         }
     }
 
@@ -69,6 +90,7 @@ impl Scope {
     fn covers(&self, cwd: Option<&Path>) -> bool {
         match self {
             Self::AllRepos => true,
+            Self::AllReposUnconfirmed => false,
             Self::Repo { root } => {
                 let Some(cwd) = cwd else { return false };
                 let cwd = rules::canonical_lenient(cwd).unwrap_or_else(|| cwd.to_path_buf());
@@ -189,6 +211,7 @@ struct Inner {
 pub struct RulesStore {
     dir: PathBuf,
     inner: Mutex<Inner>,
+    reval: Revalidator,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -248,11 +271,44 @@ fn parse(bytes: &[u8]) -> Result<Vec<PersistedRule>, &'static str> {
     Ok(body.rules)
 }
 
-fn judge(rules: Vec<PersistedRule>, home: &Path) -> Vec<StoredRule> {
+/// Re-derives a stored rule's spec (see [`rules::revalidate_within`]); a field so tests can
+/// make it slow.
+type Revalidator = Box<dyn Fn(&PersistedRuleRecord, &Path) -> Result<Spec, Inactive> + Send + Sync>;
+
+fn default_revalidator() -> Revalidator {
+    Box::new(|record, home| rules::revalidate_within(REVALIDATE_TIMEOUT, record, home))
+}
+
+/// A file kept after an outside change holds no confirmed all-repository rule.
+fn unconfirm_all_repos(rules: Vec<PersistedRule>) -> Vec<PersistedRule> {
+    rules
+        .into_iter()
+        .map(|mut rule| {
+            if rule.scope == Scope::AllRepos {
+                rule.scope = Scope::AllReposUnconfirmed;
+            }
+            rule
+        })
+        .collect()
+}
+
+/// Decide which of `rules` may match. Slow (file-system checks): never call with the store's
+/// lock held.
+fn judge(rules: Vec<PersistedRule>, home: &Path, reval: &Revalidator) -> Vec<StoredRule> {
     rules
         .into_iter()
         .map(|rule| {
-            let inactive = rules::revalidate_within(REVALIDATE_TIMEOUT, &rule.record(), home).err();
+            let inactive = if scope_problem(&rule.scope, home).is_some() {
+                Some(Inactive::BadScope)
+            } else {
+                match reval(&rule.record(), home) {
+                    Err(why) => Some(why),
+                    Ok(_) if rule.scope == Scope::AllReposUnconfirmed => {
+                        Some(Inactive::ScopeUnconfirmed)
+                    }
+                    Ok(_) => None,
+                }
+            };
             StoredRule { rule, inactive }
         })
         .collect()
@@ -261,7 +317,12 @@ fn judge(rules: Vec<PersistedRule>, home: &Path) -> Vec<StoredRule> {
 impl RulesStore {
     /// Open the store in `dir` (the approvals directory) and load the file.
     pub fn open(dir: &Path, home: &Path) -> (Self, LoadReport) {
+        Self::open_with(dir, home, default_revalidator())
+    }
+
+    fn open_with(dir: &Path, home: &Path, reval: Revalidator) -> (Self, LoadReport) {
         let store = Self {
+            reval,
             dir: dir.to_path_buf(),
             inner: Mutex::new(Inner {
                 rules: Vec::new(),
@@ -283,20 +344,22 @@ impl RulesStore {
         self.dir.join(SIDECAR_FILE)
     }
 
-    /// Read the file, check it against its hash and revalidate every rule.
+    /// Read the file, check it against its hash and revalidate every rule (not under the lock).
     fn load(&self, home: &Path) -> LoadReport {
-        let mut inner = lock(&self.inner);
-        inner.rules.clear();
-        inner.quarantine = None;
-        inner.written_sha = None;
+        {
+            let mut inner = lock(&self.inner);
+            inner.rules.clear();
+            inner.quarantine = None;
+            inner.written_sha = None;
+        }
         let bytes = match read_file(&self.path(), true) {
-            Ok(None) => return Self::report(&inner),
+            Ok(None) => return Self::report(&lock(&self.inner)),
             Ok(Some(b)) => b,
             Err(reason) => {
                 // Unreadable or untrustworthy: show what can be shown, trust nothing.
                 let parsed = read_file(&self.path(), false).ok().flatten();
-                self.quarantine(&mut inner, reason, parsed.as_deref(), home);
-                return Self::report(&inner);
+                self.quarantine(reason, parsed.as_deref(), home);
+                return Self::report(&lock(&self.inner));
             }
         };
         let sha = sha_hex(&bytes);
@@ -305,17 +368,21 @@ impl RulesStore {
             .flatten()
             .map(|b| String::from_utf8_lossy(&b).trim().to_owned());
         if recorded.as_deref() != Some(sha.as_str()) {
-            self.quarantine(&mut inner, "hash_mismatch", Some(&bytes), home);
-            return Self::report(&inner);
+            self.quarantine("hash_mismatch", Some(&bytes), home);
+            return Self::report(&lock(&self.inner));
         }
         match parse(&bytes) {
             Ok(rules) => {
-                inner.rules = judge(rules, home);
+                let judged = judge(rules, home, &self.reval);
+                let mut inner = lock(&self.inner);
+                inner.rules = judged;
                 inner.written_sha = Some(sha);
             }
-            Err(reason) => self.quarantine(&mut inner, reason, Some(&bytes), home),
+            Err(reason) => {
+                self.quarantine(reason, Some(&bytes), home);
+            }
         }
-        Self::report(&inner)
+        Self::report(&lock(&self.inner))
     }
 
     fn report(inner: &Inner) -> LoadReport {
@@ -326,65 +393,86 @@ impl RulesStore {
         }
     }
 
-    /// Turn the rules off until the human reviews `bytes` (what the file holds now).
-    fn quarantine(&self, inner: &mut Inner, reason: &str, bytes: Option<&[u8]>, home: &Path) {
-        let file_sha256 = bytes.map(sha_hex).unwrap_or_default();
-        let rules = bytes
-            .and_then(|b| parse(b).ok())
-            .map(|rules| {
-                judge(rules, home)
-                    .into_iter()
-                    .map(|s| (s.rule, s.inactive))
-                    .collect()
-            })
-            .unwrap_or_default();
+    /// Turn the rules off until the human reviews `bytes` (what the file holds now): the
+    /// quarantine is in force at once, and what the file's rules would be is filled in after
+    /// the (slow) revalidation, which runs without the lock. Returns `(reason, hash)`.
+    fn quarantine(&self, reason: &str, bytes: Option<&[u8]>, home: &Path) -> (String, String) {
+        let summary = Self::begin_quarantine(&mut lock(&self.inner), reason, bytes);
+        self.finish_quarantine(&summary.1, bytes, home);
+        summary
+    }
+
+    fn begin_quarantine(inner: &mut Inner, reason: &str, bytes: Option<&[u8]>) -> (String, String) {
         inner.rules.clear();
         inner.written_sha = None;
-        inner.quarantine = Some(Quarantine {
+        let q = Quarantine {
             reason: reason.to_owned(),
-            file_sha256,
-            rules,
-        });
+            file_sha256: bytes.map(sha_hex).unwrap_or_default(),
+            rules: Vec::new(),
+        };
+        let summary = q.summary();
+        inner.quarantine = Some(q);
+        summary
+    }
+
+    /// Fill in what the quarantined file's rules would be, unless the quarantine has moved on.
+    fn finish_quarantine(&self, sha: &str, bytes: Option<&[u8]>, home: &Path) {
+        let Some(rules) = bytes.and_then(|b| parse(b).ok()) else {
+            return;
+        };
+        // As Keep would leave them, so the review shows what would be live.
+        let judged: Vec<_> = judge(unconfirm_all_repos(rules), home, &self.reval)
+            .into_iter()
+            .map(|s| (s.rule, s.inactive))
+            .collect();
+        if let Some(q) = lock(&self.inner)
+            .quarantine
+            .as_mut()
+            .filter(|q| q.file_sha256 == sha)
+        {
+            q.rules = judged;
+        }
     }
 
     /// Has the file changed in a way the daemon did not make? Called when the directory
-    /// watcher fires. A change quarantines everything.
+    /// watcher fires. A change quarantines everything; a further change to a quarantined file
+    /// quarantines it again under the new hash, so the review always matches the file.
     pub fn check_external(&self, home: &Path) -> External {
-        let mut inner = lock(&self.inner);
-        if inner.quarantine.is_some() {
-            return External::Unchanged;
-        }
-        match read_file(&self.path(), false) {
-            Ok(None) => {
-                if inner.written_sha.is_some() || !inner.rules.is_empty() {
-                    inner.rules.clear();
-                    inner.written_sha = None;
-                    inner.uses_dirty = false;
-                    return External::Deleted;
-                }
-                External::Unchanged
-            }
-            Ok(Some(bytes)) => {
-                if inner.written_sha.as_deref() == Some(sha_hex(&bytes).as_str()) {
+        let (bytes, summary) = {
+            let mut inner = lock(&self.inner);
+            let quarantined = inner.quarantine.as_ref().map(|q| q.file_sha256.clone());
+            let (reason, bytes) = match read_file(&self.path(), false) {
+                Ok(None) => {
+                    if quarantined.is_none()
+                        && (inner.written_sha.is_some() || !inner.rules.is_empty())
+                    {
+                        inner.rules.clear();
+                        inner.written_sha = None;
+                        inner.uses_dirty = false;
+                        return External::Deleted;
+                    }
                     return External::Unchanged;
                 }
-                self.quarantine_externally(&mut inner, "external_change", Some(&bytes), home)
-            }
-            Err(reason) => self.quarantine_externally(&mut inner, reason, None, home),
-        }
-    }
-
-    /// [`Self::quarantine`], reported as what [`Self::check_external`] decided.
-    fn quarantine_externally(
-        &self,
-        inner: &mut Inner,
-        reason: &str,
-        bytes: Option<&[u8]>,
-        home: &Path,
-    ) -> External {
-        self.quarantine(inner, reason, bytes, home);
-        let (reason, sha) = inner.quarantine.as_ref().expect("just set").summary();
-        External::Quarantined(reason, sha)
+                Ok(Some(bytes)) => {
+                    let sha = sha_hex(&bytes);
+                    let known = quarantined.as_deref().or(inner.written_sha.as_deref());
+                    if known == Some(sha.as_str()) {
+                        return External::Unchanged;
+                    }
+                    ("external_change", Some(bytes))
+                }
+                Err(reason) => {
+                    if quarantined.as_deref() == Some("") {
+                        return External::Unchanged;
+                    }
+                    (reason, None)
+                }
+            };
+            let summary = Self::begin_quarantine(&mut inner, reason, bytes.as_deref());
+            (bytes, summary)
+        };
+        self.finish_quarantine(&summary.1, bytes.as_deref(), home);
+        External::Quarantined(summary.0, summary.1)
     }
 
     pub fn quarantined(&self) -> Option<(String, String)> {
@@ -479,7 +567,8 @@ impl RulesStore {
         let (req, home, cwd) = (req.clone(), home.to_path_buf(), cwd.map(Path::to_path_buf));
         rules::bounded(timeout, move || {
             rules.into_iter().find(|r| {
-                r.scope.covers(cwd.as_deref())
+                scope_problem(&r.scope, &home).is_none()
+                    && r.scope.covers(cwd.as_deref())
                     && rules::spec_covers(&r.spec, &req, reason_kind, &home, cwd.as_deref())
             })
         })
@@ -513,24 +602,32 @@ impl RulesStore {
     }
 
     /// Keep the quarantined file: only if it is still exactly the one the human reviewed
-    /// (`expected_sha`). Every rule is revalidated; the file is rewritten and re-bound.
+    /// (`expected_sha`). Every rule is revalidated (without the lock); the file is rewritten
+    /// and re-bound. A rule for all repositories is kept **off** until it is confirmed again.
     pub fn keep(&self, expected_sha: &str, home: &Path) -> Result<LoadReport, ChangeError> {
+        let (sha, rules) = {
+            let inner = lock(&self.inner);
+            let Some(q) = inner.quarantine.as_ref() else {
+                return Err(ChangeError::NotQuarantined);
+            };
+            let bytes = match read_file(&self.path(), false) {
+                Ok(Some(b)) => b,
+                Ok(None) => return Err(ChangeError::Unreadable("missing")),
+                Err(reason) => return Err(ChangeError::Unreadable(reason)),
+            };
+            let sha = sha_hex(&bytes);
+            if expected_sha.is_empty() || sha != expected_sha || sha != q.file_sha256 {
+                return Err(ChangeError::StaleHash);
+            }
+            (sha, parse(&bytes).map_err(ChangeError::Unreadable)?)
+        };
+        let judged = judge(unconfirm_all_repos(rules), home, &self.reval);
         let mut inner = lock(&self.inner);
-        let Some(q) = inner.quarantine.as_ref() else {
-            return Err(ChangeError::NotQuarantined);
-        };
-        let reviewed = q.file_sha256.clone();
-        let bytes = match read_file(&self.path(), false) {
-            Ok(Some(b)) => b,
-            Ok(None) => return Err(ChangeError::Unreadable("missing")),
-            Err(reason) => return Err(ChangeError::Unreadable(reason)),
-        };
-        let sha = sha_hex(&bytes);
-        if expected_sha.is_empty() || sha != expected_sha || sha != reviewed {
+        // The file may have been changed (and re-quarantined) while the rules were checked.
+        if inner.quarantine.as_ref().map(|q| q.file_sha256.as_str()) != Some(sha.as_str()) {
             return Err(ChangeError::StaleHash);
         }
-        let rules = parse(&bytes).map_err(ChangeError::Unreadable)?;
-        inner.rules = judge(rules, home);
+        inner.rules = judged;
         inner.quarantine = None;
         if let Err(e) = self.write_locked(&mut inner) {
             // Not re-bound: stay off.
@@ -543,6 +640,39 @@ impl RulesStore {
             return Err(ChangeError::Write(e));
         }
         Ok(Self::report(&inner))
+    }
+
+    /// The human confirmed, from the rules list, that rule `id` applies to all repositories.
+    /// `Ok(false)`: there is no such unconfirmed rule.
+    pub fn confirm_all_repos(&self, id: &str) -> Result<bool, ChangeError> {
+        let mut inner = lock(&self.inner);
+        if inner.quarantine.is_some() {
+            return Err(ChangeError::Quarantined);
+        }
+        let Some(stored) = inner
+            .rules
+            .iter_mut()
+            .find(|r| r.rule.id == id && r.rule.scope == Scope::AllReposUnconfirmed)
+        else {
+            return Ok(false);
+        };
+        // Only the scope held it off, unless its spec failed the check too.
+        let was_off = stored.inactive;
+        stored.rule.scope = Scope::AllRepos;
+        if was_off == Some(Inactive::ScopeUnconfirmed) {
+            stored.inactive = None;
+        }
+        if let Err(e) = self.write_locked(&mut inner) {
+            let stored = inner
+                .rules
+                .iter_mut()
+                .find(|r| r.rule.id == id)
+                .expect("found");
+            stored.rule.scope = Scope::AllReposUnconfirmed;
+            stored.inactive = was_off;
+            return Err(ChangeError::Write(e));
+        }
+        Ok(true)
     }
 
     /// Discard the quarantined file: replace it with an empty rule set.
@@ -615,7 +745,7 @@ fn wire_rule(rule: &PersistedRule, inactive: Option<Inactive>) -> PersistedRuleW
         scope: rule.scope.choice(),
         root: match &rule.scope {
             Scope::Repo { root } => Some(root.to_string_lossy().into_owned()),
-            Scope::AllRepos => None,
+            Scope::AllRepos | Scope::AllReposUnconfirmed => None,
         },
         created_at_ms: rule.created_at_ms,
         created_from_request_id: rule.created_from_request_id.clone(),
@@ -1012,5 +1142,233 @@ mod tests {
         let (_, report) = open(&w);
         assert_eq!(report.quarantined, None);
         assert!(matches!(store.discard(), Err(ChangeError::NotQuarantined)));
+    }
+
+    // ---- scope validation (review fix-ups) ----
+
+    fn bash_request(command: &str) -> super::super::request::PermissionRequest {
+        PermissionRequest::from_cli(&json!({
+            "subtype": "can_use_tool",
+            "tool_name": "Bash",
+            "input": { "command": command },
+            "tool_use_id": "toolu_2",
+        }))
+        .unwrap()
+    }
+
+    fn matches(store: &RulesStore, w: &World, cwd: &Path) -> bool {
+        let req = bash_request("rm -rf ~/Library/Caches/a");
+        let reason = req.reason(None, &NoSettings);
+        store
+            .first_match(
+                Duration::from_secs(5),
+                &req,
+                reason.kind,
+                &w.home,
+                Some(cwd),
+            )
+            .is_some()
+    }
+
+    fn scoped(w: &World, scope: Scope) -> PersistedRule {
+        PersistedRule {
+            scope,
+            ..rule(w, "r1")
+        }
+    }
+
+    fn bad_scopes(w: &World) -> Vec<(&'static str, Scope)> {
+        let repo = |p: &Path| Scope::Repo {
+            root: p.to_path_buf(),
+        };
+        vec![
+            ("empty root", repo(Path::new(""))),
+            ("slash", repo(Path::new("/"))),
+            ("home", repo(&w.home)),
+            ("ancestor of home", repo(w.home.parent().unwrap())),
+            ("relative root", repo(Path::new("work/proj"))),
+            ("missing root", repo(&w.dir.join("nope"))),
+        ]
+    }
+
+    #[test]
+    fn a_rule_with_a_bad_scope_is_inactive_and_never_matches_after_a_restart() {
+        let w = world();
+        let project = w.dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        for (name, scope) in bad_scopes(&w) {
+            let _ = fs::remove_file(w.dir.join(RULES_FILE));
+            let (store, _) = open(&w);
+            store.add(scoped(&w, scope)).unwrap();
+            let (store, report) = open(&w);
+            assert_eq!((report.active, report.inactive), (0, 1), "{name}");
+            let (rules, _) = store.wire();
+            assert_eq!(
+                rules[0].inactive_reason.as_deref(),
+                Some("bad_scope"),
+                "{name}"
+            );
+            assert!(!matches(&store, &w, &project), "{name} must not match");
+            assert!(
+                !matches(&store, &w, &w.home),
+                "{name} must not match in home"
+            );
+        }
+        // The control: a real repository folder works.
+        let _ = fs::remove_file(w.dir.join(RULES_FILE));
+        let (store, _) = open(&w);
+        store
+            .add(scoped(
+                &w,
+                Scope::Repo {
+                    root: project.clone(),
+                },
+            ))
+            .unwrap();
+        let (store, report) = open(&w);
+        assert_eq!((report.active, report.inactive), (1, 0));
+        assert!(matches(&store, &w, &project));
+        assert!(!matches(&store, &w, &w.dir));
+    }
+
+    #[test]
+    fn a_hand_edited_scope_stays_off_after_keep_and_all_repos_waits_for_confirmation() {
+        let w = world();
+        let project = w.dir.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let mut cases = bad_scopes(&w);
+        cases.push(("forged all repos", Scope::AllRepos));
+        for (name, scope) in cases {
+            let _ = fs::remove_file(w.dir.join(RULES_FILE));
+            let (store, _) = open(&w);
+            store
+                .add(scoped(
+                    &w,
+                    Scope::Repo {
+                        root: project.clone(),
+                    },
+                ))
+                .unwrap();
+            let mut edited: serde_json::Value =
+                serde_json::from_slice(&fs::read(w.dir.join(RULES_FILE)).unwrap()).unwrap();
+            edited["rules"][0]["scope"] = serde_json::to_value(&scope).unwrap();
+            fs::write(w.dir.join(RULES_FILE), serde_json::to_vec(&edited).unwrap()).unwrap();
+            assert!(matches!(
+                store.check_external(&w.home),
+                External::Quarantined(..)
+            ));
+            let (_, reviewed) = store.quarantined().unwrap();
+            let review = store.wire().1.unwrap();
+            assert!(
+                !review.rules_in_file[0].active,
+                "{name}: the review shows it off"
+            );
+
+            store.keep(&reviewed, &w.home).unwrap();
+
+            assert!(
+                !matches(&store, &w, &project),
+                "{name} must not match after Keep"
+            );
+            assert!(
+                !matches(&store, &w, &w.dir),
+                "{name} must not match after Keep"
+            );
+            let (reopened, report) = open(&w);
+            assert_eq!(report.active, 0, "{name}: still off after a restart");
+            assert!(!matches(&reopened, &w, &project), "{name}");
+            if scope == Scope::AllRepos {
+                let (rules, _) = reopened.wire();
+                assert_eq!(
+                    rules[0].inactive_reason.as_deref(),
+                    Some("scope_unconfirmed")
+                );
+                // The human confirms from the list: now it is live, and stays so.
+                assert!(reopened.confirm_all_repos("r1").unwrap());
+                assert!(matches(&reopened, &w, &w.dir));
+                let (again, report) = open(&w);
+                assert_eq!(report.active, 1);
+                assert!(matches(&again, &w, &w.dir));
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_edit_of_a_quarantined_file_is_quarantined_again_under_the_new_hash() {
+        let w = world();
+        let (store, _) = open(&w);
+        store.add(rule(&w, "r1")).unwrap();
+        let path = w.dir.join(RULES_FILE);
+        let original = fs::read(&path).unwrap();
+        fs::write(&path, [&original[..], b" "].concat()).unwrap();
+        assert!(matches!(
+            store.check_external(&w.home),
+            External::Quarantined(..)
+        ));
+        let (_, first) = store.quarantined().unwrap();
+        assert_eq!(store.check_external(&w.home), External::Unchanged);
+
+        fs::write(&path, [&original[..], b"  "].concat()).unwrap();
+        let External::Quarantined(_, second) = store.check_external(&w.home) else {
+            panic!("a further change is noticed");
+        };
+
+        assert_ne!(first, second);
+        assert_eq!(store.quarantined().unwrap().1, second);
+        assert!(matches!(
+            store.keep(&first, &w.home),
+            Err(ChangeError::StaleHash)
+        ));
+        store.keep(&second, &w.home).unwrap();
+        assert!(store.quarantined().is_none());
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn a_slow_revalidation_does_not_hold_the_store_lock() {
+        use std::sync::mpsc;
+        use std::sync::{Arc, Mutex};
+        let w = world();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let slow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (flag, gate) = (slow.clone(), release_rx.clone());
+        let (store, _) = RulesStore::open_with(
+            &w.dir,
+            &w.home,
+            Box::new(move |record, home| {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(20));
+                }
+                rules::revalidate(record, home)
+            }),
+        );
+        let store = Arc::new(store);
+        store.add(rule(&w, "r1")).unwrap();
+        let path = w.dir.join(RULES_FILE);
+        let original = fs::read(&path).unwrap();
+        fs::write(&path, [&original[..], b" "].concat()).unwrap();
+        slow.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let (s, home) = (store.clone(), w.home.clone());
+        let checker = std::thread::spawn(move || s.check_external(&home));
+        std::thread::sleep(Duration::from_millis(300));
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let s = store.clone();
+        std::thread::spawn(move || {
+            let _ = observed_tx.send((
+                s.quarantined().is_some(),
+                s.wire().0.len(),
+                s.can_add().is_err(),
+            ));
+        });
+        let observed = observed_rx.recv_timeout(Duration::from_secs(3));
+        release_tx.send(()).unwrap();
+        release_tx.send(()).ok();
+        checker.join().unwrap();
+        assert_eq!(
+            observed.expect("the store answered while a revalidation was running"),
+            (true, 0, true)
+        );
     }
 }

@@ -610,6 +610,12 @@ pub enum Inactive {
     NoLongerOffered,
     /// The pinned operands or the prefix directory resolve differently now.
     PathChanged,
+    /// The rule's scope is not one a rule may have: a repository root that is not an absolute,
+    /// existing directory below the home folder.
+    BadScope,
+    /// The rule applies to all repositories but came from a file the human only kept after a
+    /// change; it stays off until it is confirmed again.
+    ScopeUnconfirmed,
 }
 
 impl Inactive {
@@ -617,6 +623,8 @@ impl Inactive {
         match self {
             Self::NoLongerOffered => "no_longer_offered",
             Self::PathChanged => "path_changed",
+            Self::BadScope => "bad_scope",
+            Self::ScopeUnconfirmed => "scope_unconfirmed",
         }
     }
 }

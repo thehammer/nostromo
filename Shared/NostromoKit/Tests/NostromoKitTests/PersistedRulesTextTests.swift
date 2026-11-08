@@ -114,11 +114,21 @@ final class PersistedRulesTextTests: XCTestCase {
         XCTAssertEqual(PersistedRulesText.stateText(on), "active")
     }
 
-    func testTheReviewSaysWhichRulesWouldStayInactive() {
-        let on = PersistedRule(id: "a", ruleText: "Bash(ls)", active: true)
-        let off = PersistedRule(id: "b", ruleText: "Bash(rm)", active: false, inactiveReason: "path_changed")
-        XCTAssertEqual(PersistedRulesText.reviewText(on), "would stay active")
-        XCTAssertEqual(PersistedRulesText.reviewText(off), "would stay inactive: a path it covers has changed")
+    func testTheReviewSaysWhereEachRuleAppliesAndWhetherItWouldStayActive() {
+        let home = "/Users/me"
+        let on = PersistedRule(id: "a", ruleText: "Bash(ls)", scope: .repo, root: "/Users/me/Code/x", active: true)
+        let off = PersistedRule(id: "b", ruleText: "Bash(rm)", scope: .repo, root: "/Users/me/Code/x", active: false, inactiveReason: "path_changed")
+        let all = PersistedRule(id: "c", ruleText: "Bash(rm)", scope: .allRepos, active: true)
+        let unconfirmed = PersistedRule(id: "d", ruleText: "Bash(rm)", scope: .allRepos, active: false, inactiveReason: "scope_unconfirmed")
+        let bad = PersistedRule(id: "e", ruleText: "Bash(rm)", scope: .repo, root: "/", active: false, inactiveReason: "bad_scope")
+        XCTAssertEqual(PersistedRulesText.reviewText(on, home: home), "Repository: ~/Code/x · would stay active")
+        XCTAssertEqual(PersistedRulesText.reviewText(off, home: home),
+                       "Repository: ~/Code/x · would stay inactive: a path it covers has changed")
+        XCTAssertEqual(PersistedRulesText.reviewText(all, home: home), "ALL repositories · would stay active")
+        XCTAssertEqual(PersistedRulesText.reviewText(unconfirmed, home: home),
+                       "ALL repositories · would stay inactive: it applies to all repositories and has not been confirmed again")
+        XCTAssertEqual(PersistedRulesText.reviewText(bad, home: home),
+                       "Repository: / · would stay inactive: its repository folder is not valid here")
     }
 
     func testRemoveHasAnAccessibilityLabelNamingTheRule() {

@@ -2479,7 +2479,7 @@ impl Inner {
             "scope": rule.scope.choice(),
             "root": match &rule.scope {
                 Scope::Repo { root } => Some(root.to_string_lossy().into_owned()),
-                Scope::AllRepos => None,
+                Scope::AllRepos | Scope::AllReposUnconfirmed => None,
             },
             "source_command": rule.source_command,
             "created_at": DateTime::<Utc>::from_timestamp_millis(rule.created_at_ms as i64)
@@ -2603,6 +2603,9 @@ impl Inner {
                 None => return Err(refused("This session has no working folder to scope to.")),
             },
         };
+        if let Some(why) = super::persisted::scope_problem(&scope, &home) {
+            return Err(refused(&format!("This repository cannot hold a saved rule: {why}.")));
+        }
         match store.can_add() {
             Ok(()) => {}
             Err(AddError::Quarantined) => return Err(AnswerResult::RulesQuarantined),
