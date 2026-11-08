@@ -1126,6 +1126,24 @@ final class ChatSessionToolFoldTests: XCTestCase {
         XCTAssertEqual(t.subagentTextParents, [1: "toolu_agent1"])
     }
 
+    func testAnInjectedTurnWhoseStandInEqualsTheHumansMessageDoesNotAdoptTheEcho() {
+        session.send("Skill loaded: commit-helper")
+        XCTAssertEqual(session.turns.count, 1)
+
+        let injected = DaemonTurn(id: "t0", userInput: "Skill loaded: commit-helper", timestamp: nil, blocks: [], isComplete: false,
+                                  origin: .injectedContext(kind: "skill", title: "commit-helper", text: "x", truncated: false))
+        delta(.turnStarted(injected))
+        modelWaitUntil { self.session.turns.count == 2 }
+
+        XCTAssertNil(session.turns[0].daemonId, "the human's echo stays unbound, waiting for its own turn")
+        XCTAssertNil(session.turns[0].origin)
+        XCTAssertEqual(session.turns[1].daemonId, "t0")
+
+        delta(.turnStarted(turn("t1", input: "Skill loaded: commit-helper", complete: false, [])))
+        XCTAssertEqual(session.turns.count, 2, "the human's own turn then adopts its echo")
+        XCTAssertEqual(session.turns[0].daemonId, "t1")
+    }
+
     func testANewTurnStartedByTheDaemonCarriesFoldedResultsAndSubagentParents() {
         delta(.turnStarted(turn("t0", complete: false,
                                 [call("toolu_A"), result("toolu_A"), .text("sub", parentToolUseId: "toolu_agent1")])))

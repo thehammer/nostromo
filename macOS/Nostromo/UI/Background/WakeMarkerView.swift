@@ -43,6 +43,7 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
 
     static let copyMenuTitle = "Copy Notice Text"
     static let copyEventMenuTitle = "Copy Event Text"
+    static let copyTextMenuTitle = "Copy Text"
 
     private let content: WakeMarkerContent
     private let noticeText: String
@@ -67,9 +68,9 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
         self.pasteboard = pasteboard
         super.init(frame: .zero)
 
-        label.stringValue = content.line
         label.font = .systemFont(ofSize: 11)
         label.textColor = Theme.fgMuted
+        label.attributedStringValue = Self.attributedLine(content, font: label.font ?? .systemFont(ofSize: 11))
         label.alignment = .right
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
@@ -93,6 +94,24 @@ final class WakeMarkerView: NSView, ArithmeticIsland {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The line in the muted colour, with the content's badge word (a peer in `bypass` mode) in the
+    /// warning colour and bold. The badge is found in the line the app built, never in untrusted text:
+    /// the name before it cannot contain the separators that precede it.
+    static func attributedLine(_ content: WakeMarkerContent, font: NSFont) -> NSAttributedString {
+        let text = NSMutableAttributedString(string: content.line, attributes: [
+            .font: font, .foregroundColor: Theme.fgMuted,
+        ])
+        if let badge = content.badge,
+           let separator = content.line.range(of: " · \(badge)"),
+           let word = content.line.range(of: badge, range: separator) {
+            text.addAttributes([
+                .foregroundColor: Theme.amber,
+                .font: NSFont.boldSystemFont(ofSize: font.pointSize),
+            ], range: NSRange(word, in: content.line))
+        }
+        return text
+    }
 
     // MARK: Action
 

@@ -360,8 +360,13 @@ public enum TurnOriginWire: Codable, Equatable {
     /// Background task events (a Monitor line, a finished shell or agent) that woke the agent;
     /// `omitted` counts events the daemon dropped past its cap.
     case taskWake(items: [TaskWakeItemWire], omitted: Int)
+    /// Messages other Claude sessions sent (`peer_message`); `omitted` counts messages past the cap.
+    case peerMessage(items: [PeerMessageItemWire], omitted: Int)
+    /// Text the CLI injected as a user message that the user did not type (`injected_context`): a
+    /// loaded skill (`skill`), a conversation summary (`summary`) or other context (`other`).
+    case injectedContext(kind: String, title: String, text: String, truncated: Bool)
 
-    private enum K: String, CodingKey { case type, items, omitted }
+    private enum K: String, CodingKey { case type, items, omitted, kind, title, text, truncated }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -388,6 +393,22 @@ public enum TurnOriginWire: Codable, Equatable {
             }
             let omitted = (try? c.decodeIfPresent(Int.self, forKey: .omitted)) ?? 0
             self = .taskWake(items: items, omitted: max(0, omitted))
+        case "peer_message":
+            // A peer message with nothing readable is still not something the user typed: it
+            // becomes the generic marker, never a nil origin (which draws the placeholder as a bubble).
+            let items = ((try? c.decode([LossyPeerItem].self, forKey: .items)) ?? []).compactMap(\.value)
+            guard !items.isEmpty else {
+                self = .injectedContext(kind: "other", title: "", text: "", truncated: false)
+                return
+            }
+            let omitted = (try? c.decodeIfPresent(Int.self, forKey: .omitted)) ?? 0
+            self = .peerMessage(items: items, omitted: max(0, omitted))
+        case "injected_context":
+            self = .injectedContext(
+                kind: (try? c.decodeIfPresent(String.self, forKey: .kind)) ?? "other",
+                title: (try? c.decodeIfPresent(String.self, forKey: .title)) ?? "",
+                text: (try? c.decodeIfPresent(String.self, forKey: .text)) ?? "",
+                truncated: (try? c.decodeIfPresent(Bool.self, forKey: .truncated)) ?? false)
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c,
                 debugDescription: "unknown TurnOrigin type: \(other)")
@@ -410,6 +431,16 @@ public enum TurnOriginWire: Codable, Equatable {
             try c.encode("task_wake", forKey: .type)
             try c.encode(items, forKey: .items)
             if omitted > 0 { try c.encode(omitted, forKey: .omitted) }
+        case .peerMessage(let items, let omitted):
+            try c.encode("peer_message", forKey: .type)
+            try c.encode(items, forKey: .items)
+            if omitted > 0 { try c.encode(omitted, forKey: .omitted) }
+        case .injectedContext(let kind, let title, let text, let truncated):
+            try c.encode("injected_context", forKey: .type)
+            try c.encode(kind, forKey: .kind)
+            try c.encode(title, forKey: .title)
+            try c.encode(text, forKey: .text)
+            if truncated { try c.encode(true, forKey: .truncated) }
         }
     }
 
@@ -417,7 +448,7 @@ public enum TurnOriginWire: Codable, Equatable {
     public var items: [TerminalOriginItem] {
         switch self {
         case .terminalDelivery(let items), .terminalFollowNotice(let items): return items
-        case .motherJobNotice, .taskWake: return []
+        case .motherJobNotice, .taskWake, .peerMessage, .injectedContext: return []
         }
     }
 
@@ -437,6 +468,11 @@ public enum TurnOriginWire: Codable, Equatable {
     public var motherNoticeItems: [MotherNoticeItemWire] {
         if case .motherJobNotice(let items) = self { return items }
         return []
+    }
+
+    private struct LossyPeerItem: Decodable {
+        let value: PeerMessageItemWire?
+        init(from decoder: Decoder) throws { value = try? PeerMessageItemWire(from: decoder) }
     }
 
     private struct LossyWakeItem: Decodable {

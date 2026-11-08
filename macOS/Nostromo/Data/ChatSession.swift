@@ -431,18 +431,35 @@ class ChatSession: ObservableObject {
     /// A frame that changes nothing, or that holds fewer events than the marker already counts (a merge
     /// only adds), is dropped.
     private func applyOrigin(_ origin: TurnOriginWire, toDaemonTurn turnId: String) {
-        guard case .taskWake = origin,
+        let sameKind: Bool
+        switch origin {
+        case .taskWake: sameKind = true
+        case .peerMessage: sameKind = true
+        default: sameKind = false
+        }
+        guard sameKind,
               let i = index(ofDaemonId: turnId),
-              turns[i].hasTaskWakeOrigin,
               let current = turns[i].origin,
+              Self.isMerge(of: origin, into: current),
               current != origin,
               Self.wakeEventCount(origin) >= Self.wakeEventCount(current) else { return }
         turns[i].origin = origin
         changes.send(.spliced(replacedFrom: i))
     }
 
+    /// Both origins are the same merging kind (a wake into a wake, a peer message into a peer message).
+    private static func isMerge(of origin: TurnOriginWire, into current: TurnOriginWire) -> Bool {
+        switch (origin, current) {
+        case (.taskWake, .taskWake), (.peerMessage, .peerMessage): return true
+        default: return false
+        }
+    }
+
     private static func wakeEventCount(_ origin: TurnOriginWire) -> Int {
-        origin.taskWakeItems.count + origin.taskWakeOmitted
+        switch origin {
+        case .peerMessage(let items, let omitted): return items.count + omitted
+        default: return origin.taskWakeItems.count + origin.taskWakeOmitted
+        }
     }
 
     private func apply(_ delta: DaemonTurnDelta) {
@@ -454,8 +471,18 @@ class ChatSession: ObservableObject {
             // Bounded to the newest few turns: an unbounded search would let an
             // identical message sent an hour ago ("yes", "continue") swallow
             // this turn and strand every subsequent block delta.
+            //
+            // A turn the CLI injected (a peer's message, a skill) never adopts an
+            // echo: its `userInput` is the daemon's stand-in line, and a human
+            // message that happens to read the same is still the human's.
             let searchFloor = max(0, turns.count - TurnReconciler.echoAdoptionWindow)
-            let echoIndex = turns[searchFloor...].lastIndex {
+            let injected: Bool = {
+                switch turn.origin {
+                case .peerMessage?, .injectedContext?: return true
+                default: return false
+                }
+            }()
+            let echoIndex = injected ? nil : turns[searchFloor...].lastIndex {
                 $0.daemonId == nil && $0.marker == nil && $0.userInput == turn.userInput
             }
             if let i = echoIndex {

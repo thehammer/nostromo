@@ -428,7 +428,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             let marker = WakeMarkerView(content: content, noticeText: turn.markerCopyText,
                                         router: markerRouter ?? WakeMarkerView.defaultRouter,
                                         copyMenuTitle: turn.hasTaskWakeOrigin ? WakeMarkerView.copyEventMenuTitle
-                                                                              : WakeMarkerView.copyMenuTitle)
+                                                          : turn.hasInjectedOrigin ? WakeMarkerView.copyTextMenuTitle
+                                                                                   : WakeMarkerView.copyMenuTitle)
             wakeMarker = marker
             bubbleWidthConstraint = attachIsland(marker, width: slotWidth())
         // The sentinel only ever marks a confirm-card reply, which has no terminal origin: on a

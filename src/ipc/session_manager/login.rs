@@ -319,6 +319,24 @@ pub(super) fn on_wake_turn_started(shared: &Shared) -> TurnAuthor {
     TurnAuthor::of(cell.bound.as_ref())
 }
 
+/// A live user line without `isReplay` started a turn. Every echo of a stdin
+/// write carries `isReplay` (`--replay-user-messages` is always passed), so
+/// this line is the CLI's own (a scheduled prompt, a hook's text, a peer
+/// message): it binds to nothing and never takes the message the daemon wrote,
+/// which is still waiting for its own echo.
+pub(super) fn on_cli_turn_started(shared: &Shared) -> TurnAuthor {
+    let mut cell = lock_recover(&shared.login.cell);
+    cell.bound = None;
+    TurnAuthor::of(None)
+}
+
+/// The CLI echoed a line the host wrote that opens no turn (the harness line of
+/// a typed slash command): the written message is spent, so nothing later can
+/// bind it.
+pub(super) fn on_unbound_echo(shared: &Shared) {
+    lock_recover(&shared.login.cell).written = None;
+}
+
 /// The turn that last started was a phantom (a replayed system entry), dropped
 /// as the real prompt arrives: the message it took belongs to that prompt.
 pub(super) fn on_turn_discarded(shared: &Shared) {

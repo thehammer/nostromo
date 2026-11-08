@@ -235,7 +235,7 @@ fn echo_stub() -> String {
         r#"while IFS= read -r line; do
   case "$line" in
     *'"type":"user"'*)
-      printf '%s\n' "$line"
+      printf '%s\n' "${{line%\}}}},\"isReplay\":true}}"
       printf '%s\n' '{ASSISTANT_LINE}'
       printf '%s\n' '{RESULT_LINE}'
       ;;
@@ -323,7 +323,7 @@ cat '{wake}'
 printf '%s\n' '{ASSISTANT_LINE}'
 printf '%s\n' '{RESULT_LINE}'
 IFS= read -r line
-printf '%s\n' "$line"
+printf '%s\n' "${{line%\}}}},\"isReplay\":true}}"
 printf '%s\n' '{ASSISTANT_LINE}'
 printf '%s\n' '{RESULT_LINE}'
 sleep 30"#,

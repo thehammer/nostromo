@@ -66,8 +66,8 @@ use super::peer::{
 };
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo, TaskDetailMsg, TasksSnapshot};
 use super::stream_json::{
-    load_scrollback, parse_line, ParsedLine, SessionState, SessionTranscript, TurnDelta,
-    TurnOrigin, NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN, SCROLLBACK_TURNS,
+    injected_line, load_scrollback, parse_line, ParsedLine, SessionState, SessionTranscript,
+    TurnDelta, TurnOrigin, NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN, SCROLLBACK_TURNS,
 };
 use crate::model::hub::ModelHub;
 use crate::model::notes::{self, NoteKind};
@@ -80,6 +80,8 @@ mod control;
 mod inject;
 #[cfg(test)]
 mod inject_tests;
+#[cfg(test)]
+mod injected_tests;
 mod login;
 mod model_switch;
 #[cfg(test)]
@@ -2791,6 +2793,11 @@ fn run_reader(
         let parsed = parse_line(&line);
         auth.feed(classify_line(&line), parsed.as_ref());
         let Some(parsed) = parsed else {
+            // The echo of a typed slash command is only a harness line, which
+            // parsing drops: the written message is spent with it.
+            if is_replayed_harness_echo(&line) {
+                login::on_unbound_echo(&shared);
+            }
             continue;
         };
 
@@ -2871,6 +2878,16 @@ fn run_reader(
             _ => {}
         }
 
+        // What the transcript needs to judge a started turn's provenance.
+        let prompt = match &parsed {
+            // Only `isReplay` (the echo of a line the host wrote on stdin): the
+            // live stream carries no `promptSource`, so the daemon's `written`
+            // queue is the sole live provenance.
+            ParsedLine::UserPrompt {
+                text, is_replay, ..
+            } => Some((text.clone(), *is_replay)),
+            _ => None,
+        };
         let (deltas, origin_update) = {
             let mut transcript = lock_recover(&shared.transcript);
             let deltas = transcript.ingest_parsed(parsed);
@@ -2879,13 +2896,42 @@ fn run_reader(
         for mut delta in deltas {
             match &mut delta {
                 TurnDelta::TurnStarted { turn } => {
-                    auth.begin_turn();
                     let is_wake = matches!(turn.origin, Some(TurnOrigin::TaskWake { .. }));
+                    let is_injected = turn
+                        .origin
+                        .as_ref()
+                        .is_some_and(TurnOrigin::is_cli_injected);
+                    // Only an `isReplay` line (the echo of a stdin write) may
+                    // take the message the daemon wrote; any other live user
+                    // line is the CLI's own.
+                    let replayed = prompt.as_ref().is_some_and(|(_, r)| *r);
                     let author = if is_wake {
                         login::on_wake_turn_started(&shared)
-                    } else {
+                    } else if replayed {
                         login::on_turn_started(&shared)
+                    } else {
+                        login::on_cli_turn_started(&shared)
                     };
+                    // A peer message the CLI began right after an open peer
+                    // turn folds into it (no new turn). Only the CLI's own
+                    // turn may: a written one is the user's text.
+                    if matches!(author, TurnAuthor::Cli)
+                        && !replayed
+                        && matches!(turn.origin, Some(TurnOrigin::PeerMessage { .. }))
+                    {
+                        let merged = {
+                            let mut transcript = lock_recover(&shared.transcript);
+                            transcript
+                                .merge_into_previous_peer(&turn.id)
+                                .then(|| transcript.take_origin_update())
+                                .flatten()
+                        };
+                        if let Some((turn_id, origin)) = merged {
+                            shared.broadcast(SessionEvent::TurnOrigin { turn_id, origin });
+                            continue;
+                        }
+                    }
+                    auth.begin_turn();
                     // The transcript read a notice origin from the prompt's
                     // text; only a turn the daemon wrote as a notice keeps it.
                     if !author.is_notice()
@@ -2899,6 +2945,34 @@ fn run_reader(
                         && lock_recover(&shared.transcript).disown_wake_origin(&turn.id)
                     {
                         turn.origin = None;
+                    }
+                    // Likewise a peer message, skill or summary: only a turn the
+                    // CLI began itself is one. A written one is the user's text,
+                    // and so is any echo (`isReplay`), even with nothing left in
+                    // the written queue.
+                    if is_injected && (replayed || !matches!(author, TurnAuthor::Cli)) {
+                        if let Some((raw, _)) = &prompt {
+                            if lock_recover(&shared.transcript)
+                                .disown_injected_origin(&turn.id, raw)
+                            {
+                                turn.origin = None;
+                                turn.user_input = raw.clone();
+                            }
+                        }
+                    }
+                    // A turn the CLI began itself whose text has no known shape
+                    // is injected context (a scheduled prompt, a hook's text),
+                    // not the user's. Replays and host-sent lines are never it.
+                    if turn.origin.is_none()
+                        && matches!(author, TurnAuthor::Cli)
+                        && prompt.as_ref().is_some_and(|(_, not_new)| !*not_new)
+                    {
+                        if let Some(origin) =
+                            lock_recover(&shared.transcript).adopt_injected_origin(&turn.id)
+                        {
+                            turn.user_input = injected_line(&origin);
+                            turn.origin = Some(origin);
+                        }
                     }
                     shared.set_state(SessionState::MidTurn);
                     shared.turn_event(&tag, TurnEvent::Started { author });
@@ -2951,6 +3025,30 @@ fn run_reader(
     publish_model_state(&shared);
     shared.turn_event(&tag, TurnEvent::Exited);
     tracing::warn!(tag = %tag, "session reader EOF — child stdout closed (crash or clean exit)");
+}
+
+/// Is `line` the replayed echo (`isReplay`) of a stdin write that came back as
+/// nothing but a harness line (`<command-name>`, `<command-message>`)?
+fn is_replayed_harness_echo(line: &str) -> bool {
+    if !line.contains("\"isReplay\"") {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    let content = &v["message"]["content"];
+    let text = content.as_str().map(str::to_owned).or_else(|| {
+        content
+            .as_array()?
+            .iter()
+            .find_map(|b| b.get("text")?.as_str().map(str::to_owned))
+    });
+    v["type"] == "user"
+        && v["isReplay"] == true
+        && text.is_some_and(|t| {
+            let t = t.trim_start();
+            t.starts_with("<command-name>") || t.starts_with("<command-message>")
+        })
 }
 
 /// The approval broker and the generation of the process a reader reads.
