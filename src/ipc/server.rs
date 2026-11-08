@@ -763,6 +763,7 @@ where
                 requests: broker.presenter_connected(&conn_key),
             });
             approvals_replay.extend(broker.session_rules_replay());
+            approvals_replay.extend(broker.rules_replay());
         }
     }
 
@@ -1133,6 +1134,7 @@ where
                                     let requests = broker.presenter_connected(&conn_key);
                                     let mut frames = vec![ServerMsg::ApprovalsSnapshot { requests }];
                                     frames.extend(broker.session_rules_replay());
+                                    frames.extend(broker.rules_replay());
                                     replay_messages(&mut writer, frames).await;
                                 }
                             } else if presents_approvals && !renders_approvals {
@@ -1168,6 +1170,9 @@ where
                             ClientMsg::DecisionAnswer { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalAnswer { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalRevokeSessionRule { operator_nonce: sent, .. }
+                            | ClientMsg::ApprovalRemoveRule { operator_nonce: sent, .. }
+                            | ClientMsg::ApprovalRulesKeep { operator_nonce: sent, .. }
+                            | ClientMsg::ApprovalRulesDiscard { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalsLogQuery { operator_nonce: sent, .. }
                             | ClientMsg::ApprovalsLogEntry { operator_nonce: sent, .. }
                             | ClientMsg::ClaudeLoginAction { operator_nonce: sent, .. }
@@ -1389,6 +1394,29 @@ fn handle_client_msg(
                 peer_json(trust, peer),
                 None,
                 Some("revoke_session_rule".to_string()),
+                move || {
+                    let _ = tx.send(reply);
+                },
+            );
+            return;
+        }
+        // So are the persisted-rule verbs (AP6): logged before the peer is told no.
+        let rules_control = match &msg {
+            ClientMsg::ApprovalRemoveRule { .. } => Some("remove_rule"),
+            ClientMsg::ApprovalRulesKeep { .. } => Some("keep_rules"),
+            ClientMsg::ApprovalRulesDiscard { .. } => Some("discard_rules"),
+            _ => None,
+        };
+        if let Some(control) = rules_control {
+            let tx = targeted_tx.clone();
+            let reply = network_refusal_reply(&msg);
+            audit_refusal_then(
+                session_mgr.lock().unwrap().approvals().cloned(),
+                None,
+                AnswerRefusal::RequiresSecureConnection.as_str(),
+                peer_json(trust, peer),
+                None,
+                Some(control.to_string()),
                 move || {
                     let _ = tx.send(reply);
                 },
@@ -1644,6 +1672,7 @@ fn handle_client_msg(
                 request_id: request_id.clone(),
                 code,
                 outcome: None,
+                reason: None,
             };
             // Only the verified Mac app answers for the human, and only with the
             // connection's nonce from a process still verified (checked by the
@@ -1839,6 +1868,63 @@ fn handle_client_msg(
                         );
                     }
                 }
+            });
+        }
+
+        // Persisted rules (AP6): the same gate as an answer. Only the verified Mac app with
+        // the connection's nonce changes them; anyone else changes nothing and is logged.
+        ClientMsg::ApprovalRemoveRule { rule_id, .. } => {
+            let Some(broker) = rules_change_gate(
+                "remove_rule",
+                trust,
+                answer_check,
+                session_mgr,
+                peer,
+                conn_key,
+                targeted_tx,
+            ) else {
+                return;
+            };
+            let (conn, peer) = (conn_key.to_string(), peer_json(trust, peer));
+            tokio::task::spawn_blocking(move || {
+                let change = broker.remove_persisted_rule(&rule_id, &conn, "app");
+                log_rules_change_refusal(&broker, change, peer, "remove_rule");
+            });
+        }
+        ClientMsg::ApprovalRulesKeep { file_sha256, .. } => {
+            let Some(broker) = rules_change_gate(
+                "keep_rules",
+                trust,
+                answer_check,
+                session_mgr,
+                peer,
+                conn_key,
+                targeted_tx,
+            ) else {
+                return;
+            };
+            let (conn, peer) = (conn_key.to_string(), peer_json(trust, peer));
+            tokio::task::spawn_blocking(move || {
+                let change = broker.keep_quarantined(&file_sha256, &conn, "app");
+                log_rules_change_refusal(&broker, change, peer, "keep_rules");
+            });
+        }
+        ClientMsg::ApprovalRulesDiscard { .. } => {
+            let Some(broker) = rules_change_gate(
+                "discard_rules",
+                trust,
+                answer_check,
+                session_mgr,
+                peer,
+                conn_key,
+                targeted_tx,
+            ) else {
+                return;
+            };
+            let (conn, peer) = (conn_key.to_string(), peer_json(trust, peer));
+            tokio::task::spawn_blocking(move || {
+                let change = broker.discard_quarantined(&conn, "app");
+                log_rules_change_refusal(&broker, change, peer, "discard_rules");
             });
         }
 
@@ -3350,6 +3436,67 @@ fn refuse_approval_answer(
     );
 }
 
+/// The gate for a persisted-rule verb: the broker if the peer is the verified Mac app and its
+/// nonce check passed; otherwise the refusal is logged, the peer is told no, and `None` comes back.
+fn rules_change_gate(
+    control: &'static str,
+    trust: PeerTrust,
+    answer_check: Option<Result<(), String>>,
+    session_mgr: &Arc<Mutex<SessionManager>>,
+    peer: Option<&PeerInfo>,
+    conn_key: &str,
+    targeted_tx: &mpsc::UnboundedSender<ServerMsg>,
+) -> Option<ApprovalBroker> {
+    let broker = session_mgr.lock().unwrap().approvals().cloned();
+    let not_allowed = if trust != PeerTrust::OperatorApp {
+        Some("not the verified Nostromo app".to_string())
+    } else {
+        match answer_check {
+            Some(Ok(())) => None,
+            Some(Err(why)) => Some(why),
+            None => Some("not checked".to_string()),
+        }
+    };
+    if let Some(why) = not_allowed {
+        warn!(
+            conn_key,
+            control,
+            ?trust,
+            peer_pid = peer.map(|p| p.pid),
+            "{control} refused: {why}"
+        );
+        let tx = targeted_tx.clone();
+        audit_refusal_then(
+            broker,
+            None,
+            AnswerRefusal::NotOperatorApp.as_str(),
+            peer_json(trust, peer),
+            None,
+            Some(control.to_string()),
+            move || {
+                let _ = tx.send(ServerMsg::Error {
+                    message: "not_operator_app: only the Nostromo app can change persisted rules"
+                        .to_string(),
+                });
+            },
+        );
+        return None;
+    }
+    broker
+}
+
+/// A refused persisted-rule change leaves a `refusal` entry (an applied one has its own entries).
+fn log_rules_change_refusal(
+    broker: &ApprovalBroker,
+    change: crate::approvals::broker::RulesChange,
+    peer: serde_json::Value,
+    control: &str,
+) {
+    if let Some(code) = change.refusal_code() {
+        broker.record_refusal(None, code, peer, None, Some(control));
+    }
+}
+
 /// Write a `refusal` audit entry on the blocking pool, then run `then` (the reply
 /// to the peer), so the peer is never told "refused" before the log says so.
 fn audit_refusal_then(
@@ -3714,6 +3861,7 @@ fn is_approval_frame(msg: &ServerMsg) -> bool {
             | ServerMsg::ApprovalsSnapshot { .. }
             | ServerMsg::ApprovalResolved { .. }
             | ServerMsg::ApprovalSessionRules { .. }
+            | ServerMsg::ApprovalRules { .. }
             | ServerMsg::ApprovalGuardBlocked { .. }
             | ServerMsg::ApprovalPreview { .. }
             | ServerMsg::ApprovalAnswerRefused { .. }
@@ -3728,6 +3876,7 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         | ServerMsg::ApprovalsSnapshot { .. }
         | ServerMsg::ApprovalResolved { .. }
         | ServerMsg::ApprovalSessionRules { .. }
+        | ServerMsg::ApprovalRules { .. }
         | ServerMsg::ApprovalGuardBlocked { .. }
         | ServerMsg::ApprovalPreview { .. }
         | ServerMsg::ApprovalAnswerRefused { .. }

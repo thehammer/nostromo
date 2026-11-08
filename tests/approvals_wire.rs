@@ -41,7 +41,8 @@ use nostromo::approvals::request::{AskRule, SettingsSource};
 use nostromo::approvals::rules::CandidateKind;
 use nostromo::approvals::wire::{
     AnswerRefusal, ApprovalDecision, ApprovalOption, ApprovalRequestWire, DecisionKind,
-    QuestionAnswer, RefusalChannel, SessionRuleWire,
+    PersistedRuleWire, QuestionAnswer, RefusalChannel, RuleScopeChoice, RulesQuarantineWire,
+    SessionRuleWire,
 };
 use nostromo::ipc::codec::{read_frame, write_frame};
 use nostromo::ipc::decisions::DecisionRegistry;
@@ -648,6 +649,7 @@ impl Conn {
                 request_id,
                 code,
                 outcome,
+                ..
             } => (request_id, code, outcome),
             _ => unreachable!(),
         }
@@ -761,6 +763,7 @@ fn allow_once() -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -771,6 +774,7 @@ fn deny(note: Option<&str>) -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -781,6 +785,7 @@ fn deny_and_stop(note: Option<&str>) -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -2573,6 +2578,7 @@ fn answer_questions(answers: Vec<QuestionAnswer>) -> ApprovalDecision {
         answers: Some(answers),
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -2598,6 +2604,7 @@ fn ask_invalid_decisions() -> Vec<(&'static str, ApprovalDecision)> {
                 answers: None,
                 candidate_id: None,
                 rule_text: None,
+                scope: None,
             },
         ),
     ]
@@ -3090,6 +3097,7 @@ fn deny_on_a_question_request_tells_the_cli_the_usual_words_and_a_late_answer_is
             answers: Some(ask_valid_answers()),
             candidate_id: None,
             rule_text: None,
+            scope: None,
         };
 
         app.answer(&wire.request_id, decision, "win-d").await;
@@ -3399,6 +3407,7 @@ fn allow_session_with(candidate_id: &str, rule_text: &str) -> ApprovalDecision {
         answers: None,
         candidate_id: Some(candidate_id.into()),
         rule_text: Some(rule_text.into()),
+        scope: None,
     }
 }
 
@@ -3702,6 +3711,7 @@ fn only_a_valid_allow_session_from_the_operator_app_creates_a_rule() {
                 answers: None,
                 candidate_id: None,
                 rule_text: None,
+                scope: None,
             },
             "w",
         )
@@ -4487,4 +4497,924 @@ fn a_log_entry_request_with_a_row_time_reads_only_the_days_around_it() {
             }
         }
     });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 6. AP6: "Always allow…" rules, over the sockets
+//
+// The broker-level matrix is in `tests/approvals_persisted_rules.rs`; these prove the same
+// behaviour through the real daemon, the fake CLI and every kind of peer, and pin the wire forms.
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn is_persisted_rules(m: &ServerMsg) -> bool {
+    matches!(m, ServerMsg::ApprovalRules { .. })
+}
+
+fn is_quarantine_frame(m: &ServerMsg) -> bool {
+    matches!(
+        m,
+        ServerMsg::ApprovalRules {
+            quarantined: Some(_),
+            ..
+        }
+    )
+}
+
+/// The daemon's rules file in this rig, and its hash file.
+fn rules_file(rig: &Rig) -> PathBuf {
+    rig.tmp.path().join("approvals/rules.json")
+}
+
+/// `~/` means the test's own home and the persisted rules are loaded, as `nostromd` does at start.
+fn use_tmp_home_and_rules(rig: &Rig) {
+    use_tmp_home(rig);
+    rig.broker.attach_rules_store().expect("the store attaches");
+}
+
+fn allow_always_of(
+    wire: &ApprovalRequestWire,
+    kind: CandidateKind,
+    scope: Option<RuleScopeChoice>,
+) -> ApprovalDecision {
+    let c = wire
+        .session_rule_candidates
+        .iter()
+        .find(|c| c.kind == kind)
+        .unwrap_or_else(|| panic!("no {kind:?} candidate: {:?}", wire.session_rule_candidates));
+    ApprovalDecision {
+        kind: DecisionKind::AllowAlways,
+        note: None,
+        answers: None,
+        candidate_id: Some(c.id.clone()),
+        rule_text: Some(c.rule_text.clone()),
+        scope,
+    }
+}
+
+fn remove_rule_msg(rule_id: &str, nonce: Option<&str>) -> ClientMsg {
+    ClientMsg::ApprovalRemoveRule {
+        rule_id: rule_id.into(),
+        operator_nonce: nonce.map(str::to_owned),
+    }
+}
+
+fn keep_rules_msg(file_sha256: &str, nonce: Option<&str>) -> ClientMsg {
+    ClientMsg::ApprovalRulesKeep {
+        file_sha256: file_sha256.into(),
+        operator_nonce: nonce.map(str::to_owned),
+    }
+}
+
+fn discard_rules_msg(nonce: Option<&str>) -> ClientMsg {
+    ClientMsg::ApprovalRulesDiscard {
+        operator_nonce: nonce.map(str::to_owned),
+    }
+}
+
+type RulesFrame = (Vec<PersistedRuleWire>, Option<RulesQuarantineWire>, String);
+
+impl Conn {
+    /// The next `approval_rules` frame not handed out yet.
+    async fn next_persisted_rules(&mut self) -> RulesFrame {
+        match self.nth("approval_rules", is_persisted_rules).await {
+            ServerMsg::ApprovalRules {
+                rules,
+                quarantined,
+                path,
+            } => (rules, quarantined, path),
+            _ => unreachable!(),
+        }
+    }
+
+    fn persisted_rules_frames(&mut self) -> Vec<RulesFrame> {
+        self.all()
+            .iter()
+            .filter_map(|m| match m {
+                ServerMsg::ApprovalRules {
+                    rules,
+                    quarantined,
+                    path,
+                } => Some((rules.clone(), quarantined.clone(), path.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The next refusal frame, in full (`reason` too).
+    async fn next_refusal_frame(&mut self) -> (AnswerRefusal, Option<String>) {
+        match self.nth("approval_answer_refused", is_answer_refused).await {
+            ServerMsg::ApprovalAnswerRefused { code, reason, .. } => (code, reason),
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// Edit the rules file behind the daemon's back and let it notice (the watcher's job).
+fn tamper_with_rules_file(rig: &Rig) {
+    let mut file: Value = serde_json::from_slice(&std::fs::read(rules_file(rig)).unwrap()).unwrap();
+    file["rules"][0]["created_by_window"] = json!("edited-by-hand");
+    std::fs::write(rules_file(rig), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    rig.broker.rules_external_check();
+}
+
+// Over the real daemon: a card offers Always allow with the repository root, the app's answer
+// writes the rule and tells the CLI allow, the app hears the list, and the next matching request is
+// allowed with no card.
+#[test]
+fn allow_always_writes_a_rule_tells_the_cli_allow_and_the_next_matching_request_gets_no_card() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home_and_rules(&rig);
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        assert!(wire.options.contains(&ApprovalOption::AllowAlways));
+        let work = fake.work.to_string_lossy().into_owned();
+        assert_eq!(wire.repo_root.as_deref(), Some(work.as_str()));
+        assert!(
+            !wire.repo_is_git,
+            "the working folder is not a git repository"
+        );
+        let frame = app.request_frame(&wire.request_id);
+        assert_eq!(frame["request"]["repo_root"], work.as_str());
+        assert!(frame["request"].get("repo_is_git").is_none());
+        assert!(frame["request"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o == "allow_always"));
+        // On connect the app was told the (empty) list and where the file is.
+        let (rules, quarantined, path) = app.next_persisted_rules().await;
+        assert!((rules.is_empty(), quarantined.is_none()) == (true, true));
+        assert_eq!(path, rules_file(&rig).to_string_lossy());
+
+        app.answer(
+            &wire.request_id,
+            allow_always_of(
+                &wire,
+                CandidateKind::PathPrefix,
+                Some(RuleScopeChoice::Repo),
+            ),
+            "win-always",
+        )
+        .await;
+
+        let responses = fake.wait_responses(1).await;
+        let body = &responses[0]["response"]["response"]["response"];
+        assert_eq!(body["behavior"], "allow");
+        assert_eq!(body["updatedInput"], wire.input);
+        let (rules, _, _) = app.next_persisted_rules().await;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].rule_text, "Bash(rm -rf ~/Library/Caches/:*)");
+        assert_eq!(rules[0].scope, RuleScopeChoice::Repo);
+        assert_eq!(rules[0].root.as_deref(), Some(work.as_str()));
+        assert_eq!(app.next_resolved().await.1, "allowed_always");
+        let on_disk: Value =
+            serde_json::from_slice(&std::fs::read(rules_file(&rig)).unwrap()).unwrap();
+        assert_eq!(on_disk["rules"].as_array().unwrap().len(), 1);
+
+        // The next matching request (same command again) is allowed by the rule: no card.
+        rig.say("cody-1", "FIXTURE:session_rule_rm_a");
+        fake.wait_responses(2).await;
+        assert_eq!(app.next_resolved().await.1, "allowed_by_your_rule");
+        settle().await;
+        let names: Vec<String> = rig
+            .outcomes()
+            .iter()
+            .map(|e| outcome_name(e).to_owned())
+            .collect();
+        assert_eq!(names, ["allowed_always", "allowed_by_your_rule"]);
+        assert_eq!(fake.responses().len(), 2);
+        app.sync().await;
+        let mut requests = 0;
+        for m in app.all() {
+            if is_request(m) {
+                requests += 1;
+            }
+        }
+        assert_eq!(requests, 1, "the second request never became a card");
+        fake.assert_no_updated_permissions();
+    });
+}
+
+// Each refusal carries its code (and the words for `rule_refused`), leaves the request held and
+// writes nothing.
+#[test]
+fn a_refused_allow_always_tells_the_app_the_code_and_why_and_changes_nothing() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home_and_rules(&rig);
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+
+        // No scope: rule_refused, with words for the card.
+        app.answer(
+            &wire.request_id,
+            allow_always_of(&wire, CandidateKind::Exact, None),
+            "w",
+        )
+        .await;
+        let (code, reason) = app.next_refusal_frame().await;
+        assert_eq!(code, AnswerRefusal::RuleRefused);
+        assert!(reason.is_some_and(|r| !r.is_empty()));
+        // Edited text: invalid_rule.
+        let mut edited =
+            allow_always_of(&wire, CandidateKind::Exact, Some(RuleScopeChoice::AllRepos));
+        edited.rule_text = Some("Bash(rm:*)".into());
+        app.answer(&wire.request_id, edited, "w").await;
+        let (code, reason) = app.next_refusal_frame().await;
+        assert_eq!((code, reason), (AnswerRefusal::InvalidRule, None));
+        settle().await;
+        fake.assert_no_control_responses();
+        assert!(!rules_file(&rig).exists(), "nothing was written");
+        assert_eq!(rig.broker.snapshot().len(), 1, "still held");
+
+        // Quarantined: rules_quarantined.
+        app.answer(
+            &wire.request_id,
+            allow_always_of(&wire, CandidateKind::Exact, Some(RuleScopeChoice::AllRepos)),
+            "w-ok",
+        )
+        .await;
+        fake.wait_responses(1).await;
+        assert_eq!(app.next_resolved().await.1, "allowed_always");
+        tamper_with_rules_file(&rig);
+        app.next("the quarantine", is_quarantine_frame).await;
+        rig.say("cody-1", "FIXTURE:session_rule_rm_b");
+        let held = app.next_request().await;
+        let before = std::fs::read(rules_file(&rig)).unwrap();
+        app.answer(
+            &held.request_id,
+            allow_always_of(&held, CandidateKind::Exact, Some(RuleScopeChoice::AllRepos)),
+            "w",
+        )
+        .await;
+        let (code, _) = app.next_refusal_frame().await;
+        assert_eq!(code, AnswerRefusal::RulesQuarantined);
+        settle().await;
+        assert_eq!(std::fs::read(rules_file(&rig)).unwrap(), before);
+        assert_eq!(fake.responses().len(), 1, "only the first allow");
+        let mut codes: Vec<String> = rig
+            .wait_refusals(3)
+            .await
+            .iter()
+            .map(|e| refusal_code(e).to_owned())
+            .collect();
+        codes.sort();
+        assert_eq!(codes, ["invalid_rule", "rule_refused", "rules_quarantined"]);
+    });
+}
+
+// FND-1: only the verified app with its nonce may create a rule. Everyone else changes nothing and
+// leaves a refusal entry.
+#[test]
+fn only_the_operator_app_with_its_nonce_creates_a_persisted_rule() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home_and_rules(&rig);
+        let mut app = rig.app(true).await;
+        let mut agent = rig.agent(vec![Topic::Decision]).await;
+        let mut tcp = rig.tcp(vec![]).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        let always = allow_always_of(&wire, CandidateKind::Exact, Some(RuleScopeChoice::AllRepos));
+
+        agent.answer(&wire.request_id, always.clone(), "w").await;
+        tcp.answer(&wire.request_id, always.clone(), "w").await;
+        app.send(&approval_answer(
+            &wire.request_id,
+            always.clone(),
+            "w",
+            None,
+        ))
+        .await;
+        app.send(&approval_answer(
+            &wire.request_id,
+            always,
+            "w",
+            Some("wrong"),
+        ))
+        .await;
+
+        assert_eq!(agent.next_refused().await.1, AnswerRefusal::NotOperatorApp);
+        tcp.next("a refusal", is_secure_connection_refusal).await;
+        assert_eq!(
+            refused_codes(&mut app, 2).await,
+            ["not_operator_app", "not_operator_app"]
+        );
+        settle().await;
+        fake.assert_no_control_responses();
+        assert!(!rules_file(&rig).exists(), "no rule file");
+        assert_eq!(rig.broker.snapshot().len(), 1, "still held");
+        app.sync().await;
+        assert!(!app.saw(is_resolved));
+        assert_eq!(
+            app.persisted_rules_frames().len(),
+            1,
+            "only the list sent on connect: nothing changed"
+        );
+        let mut codes: Vec<String> = rig
+            .wait_refusals(4)
+            .await
+            .iter()
+            .map(|e| refusal_code(e).to_owned())
+            .collect();
+        codes.sort();
+        assert_eq!(
+            codes,
+            [
+                "not_operator_app",
+                "not_operator_app",
+                "not_operator_app",
+                "requires_secure_connection"
+            ]
+        );
+        assert!(rig.audit().iter().all(|e| e.event.kind() != "rule_written"));
+    });
+}
+
+/// Send `msg` from each peer that must be refused and check each was told no.
+async fn refuse_from_every_wrong_peer(
+    msg: impl Fn(Option<&str>) -> ClientMsg,
+    app: &mut Conn,
+    agent: &mut Conn,
+    tcp: &mut Conn,
+    nonce: &str,
+) {
+    agent.send(&msg(Some(nonce))).await;
+    agent.next("a refusal", is_not_operator_error).await;
+    tcp.send(&msg(Some(nonce))).await;
+    tcp.next("a refusal", is_secure_connection_refusal).await;
+    app.send(&msg(None)).await;
+    app.send(&msg(Some("wrong"))).await;
+    app.next("a refusal", is_not_operator_error).await;
+    app.next("a refusal", is_not_operator_error).await;
+}
+
+fn control_and_code(e: &Entry) -> (String, String) {
+    (
+        refusal_control(e).unwrap_or("").to_owned(),
+        refusal_code(e).to_owned(),
+    )
+}
+
+#[test]
+fn only_the_operator_app_with_its_nonce_removes_a_persisted_rule() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home_and_rules(&rig);
+        let mut app = rig.app(true).await;
+        let mut agent = rig.agent(vec![Topic::Decision]).await;
+        let mut tcp = rig.tcp(vec![]).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        app.answer(
+            &wire.request_id,
+            allow_always_of(&wire, CandidateKind::Exact, Some(RuleScopeChoice::AllRepos)),
+            "w",
+        )
+        .await;
+        fake.wait_responses(1).await;
+        app.next_persisted_rules().await; // on connect
+        let (rules, _, _) = app.next_persisted_rules().await;
+        let rule = rules[0].clone();
+        let nonce = app.nonce.clone().unwrap();
+        let before = std::fs::read(rules_file(&rig)).unwrap();
+
+        refuse_from_every_wrong_peer(
+            |n| remove_rule_msg(&rule.id, n),
+            &mut app,
+            &mut agent,
+            &mut tcp,
+            &nonce,
+        )
+        .await;
+
+        let mut seen: Vec<(String, String)> = rig
+            .wait_refusals(4)
+            .await
+            .iter()
+            .map(control_and_code)
+            .collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            [
+                ("remove_rule".to_owned(), "not_operator_app".to_owned()),
+                ("remove_rule".to_owned(), "not_operator_app".to_owned()),
+                ("remove_rule".to_owned(), "not_operator_app".to_owned()),
+                (
+                    "remove_rule".to_owned(),
+                    "requires_secure_connection".to_owned()
+                ),
+            ]
+        );
+        let tcp_refusal = rig
+            .refusals()
+            .into_iter()
+            .find(|e| refusal_code(e) == "requires_secure_connection")
+            .unwrap();
+        assert_eq!(entry_peer(&tcp_refusal)["trust"], "tcp");
+        settle().await;
+        assert_eq!(
+            std::fs::read(rules_file(&rig)).unwrap(),
+            before,
+            "nothing was removed"
+        );
+        assert_eq!(rig.broker.rules_replay().len(), 1);
+        match rig.broker.rules_frame() {
+            ServerMsg::ApprovalRules { rules, .. } => assert_eq!(rules, vec![rule.clone()]),
+            other => panic!("{other:?}"),
+        }
+        assert!(rig.audit().iter().all(|e| e.event.kind() != "rule_removed"));
+
+        // An unknown rule from the app: refused, logged, nothing changes.
+        app.send(&remove_rule_msg("no-such-rule", Some(&nonce)))
+            .await;
+        let refusals = rig.wait_refusals(5).await;
+        assert!(refusals.iter().any(
+            |e| refusal_control(e) == Some("remove_rule") && refusal_code(e) == "unknown_rule"
+        ));
+        assert_eq!(std::fs::read(rules_file(&rig)).unwrap(), before);
+        let (still, _, _) = app.next_persisted_rules().await;
+        assert_eq!(
+            still,
+            vec![rule.clone()],
+            "the app is told what is true now"
+        );
+
+        // The app, with its nonce: removed, logged, broadcast, and the next request is a card.
+        app.send(&remove_rule_msg(&rule.id, Some(&nonce))).await;
+        let (rules, _, _) = app.next_persisted_rules().await;
+        assert!(rules.is_empty());
+        let removed = wait_until("the removal entry", || {
+            rig.audit()
+                .into_iter()
+                .find(|e| matches!(e.event, Event::RuleRemoved { .. }))
+        })
+        .await;
+        match &removed.event {
+            Event::RuleRemoved { rule: body } => {
+                assert_eq!(body["id"], rule.id.as_str());
+                assert_eq!(body["reason"], "user");
+            }
+            other => panic!("{other:?}"),
+        }
+        rig.say("cody-1", "FIXTURE:session_rule_rm_a");
+        let again = app.next_request().await;
+        assert_eq!(again.tool_use_id, "toolu_session_rule_rm_a_0");
+        settle().await;
+        assert_eq!(fake.responses().len(), 1, "only the first allow");
+    });
+}
+
+#[test]
+fn only_the_operator_app_with_its_nonce_keeps_or_discards_a_quarantined_rules_file() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home_and_rules(&rig);
+        let mut app = rig.app(true).await;
+        let mut agent = rig.agent(vec![Topic::Decision]).await;
+        let mut tcp = rig.tcp(vec![]).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        app.answer(
+            &wire.request_id,
+            allow_always_of(&wire, CandidateKind::Exact, Some(RuleScopeChoice::AllRepos)),
+            "w",
+        )
+        .await;
+        fake.wait_responses(1).await;
+        let nonce = app.nonce.clone().unwrap();
+        tamper_with_rules_file(&rig);
+        let reviewed = match app.next("the quarantine", is_quarantine_frame).await {
+            ServerMsg::ApprovalRules {
+                quarantined: Some(q),
+                rules,
+                ..
+            } => {
+                assert!(rules.is_empty(), "nothing is in force while quarantined");
+                assert_eq!(q.rules_in_file.len(), 1);
+                q.file_sha256
+            }
+            other => panic!("{other:?}"),
+        };
+        let before = std::fs::read(rules_file(&rig)).unwrap();
+
+        refuse_from_every_wrong_peer(
+            |n| keep_rules_msg(&reviewed, n),
+            &mut app,
+            &mut agent,
+            &mut tcp,
+            &nonce,
+        )
+        .await;
+        refuse_from_every_wrong_peer(discard_rules_msg, &mut app, &mut agent, &mut tcp, &nonce)
+            .await;
+
+        let mut seen: Vec<(String, String)> = rig
+            .wait_refusals(8)
+            .await
+            .iter()
+            .map(control_and_code)
+            .collect();
+        seen.sort();
+        let mut want = Vec::new();
+        for control in ["discard_rules", "keep_rules"] {
+            for code in [
+                "not_operator_app",
+                "not_operator_app",
+                "not_operator_app",
+                "requires_secure_connection",
+            ] {
+                want.push((control.to_owned(), code.to_owned()));
+            }
+        }
+        assert_eq!(seen, want);
+        settle().await;
+        assert_eq!(
+            std::fs::read(rules_file(&rig)).unwrap(),
+            before,
+            "the file is untouched"
+        );
+        assert!(rig.broker.rules_replay().iter().any(is_quarantine_frame));
+        assert!(rig
+            .audit()
+            .iter()
+            .all(|e| !matches!(e.event.kind(), "rules_kept" | "rules_discarded")));
+
+        // The app: a stale hash is refused and logged; the reviewed one is kept.
+        app.send(&keep_rules_msg("0000", Some(&nonce))).await;
+        let refusals = rig.wait_refusals(9).await;
+        assert!(refusals
+            .iter()
+            .any(|e| refusal_control(e) == Some("keep_rules")
+                && refusal_code(e) == "rules_file_changed"));
+        assert!(rig.broker.rules_replay().iter().any(is_quarantine_frame));
+        app.send(&keep_rules_msg(&reviewed, Some(&nonce))).await;
+        let frame = app
+            .next("the list after Keep", |m| {
+                matches!(m, ServerMsg::ApprovalRules { quarantined: None, rules, .. } if rules.len() == 1)
+            })
+            .await;
+        assert!(matches!(frame, ServerMsg::ApprovalRules { .. }));
+        wait_until("the rules_kept entry", || {
+            rig.audit()
+                .into_iter()
+                .find(|e| e.event.kind() == "rules_kept")
+        })
+        .await;
+        // Discard with nothing quarantined: refused, logged, nothing lost.
+        app.send(&discard_rules_msg(Some(&nonce))).await;
+        let refusals = rig.wait_refusals(10).await;
+        assert!(refusals
+            .iter()
+            .any(|e| refusal_control(e) == Some("discard_rules")
+                && refusal_code(e) == "rules_not_quarantined"));
+        assert_eq!(
+            rig.audit()
+                .iter()
+                .filter(|e| e.event.kind() == "rules_discarded")
+                .count(),
+            0
+        );
+        // Quarantine again and discard for real.
+        tamper_with_rules_file(&rig);
+        app.next("the second quarantine", is_quarantine_frame).await;
+        app.send(&discard_rules_msg(Some(&nonce))).await;
+        let frame = app
+            .next("the list after Discard", |m| {
+                matches!(m, ServerMsg::ApprovalRules { quarantined: None, rules, .. } if rules.is_empty())
+            })
+            .await;
+        assert!(matches!(frame, ServerMsg::ApprovalRules { .. }));
+        wait_until("the rules_discarded entry", || {
+            rig.audit()
+                .into_iter()
+                .find(|e| e.event.kind() == "rules_discarded")
+        })
+        .await;
+        let on_disk: Value =
+            serde_json::from_slice(&std::fs::read(rules_file(&rig)).unwrap()).unwrap();
+        assert_eq!(on_disk["rules"], json!([]));
+    });
+}
+
+// A rule names commands and paths: no network peer, and no local process that is not the app, is ever
+// sent the list, whatever it subscribed to or claims to render.
+#[test]
+fn a_tcp_peer_and_a_local_process_that_is_not_the_app_never_receive_an_approval_rules_frame() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home_and_rules(&rig);
+        let mut app = rig.app(true).await;
+        let mut tcp_all = rig.tcp(ALL_TOPICS.to_vec()).await;
+        let mut tcp_none = rig.tcp(vec![]).await;
+        let mut agent = rig.agent(ALL_TOPICS.to_vec()).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        app.answer(
+            &wire.request_id,
+            allow_always_of(
+                &wire,
+                CandidateKind::PathPrefix,
+                Some(RuleScopeChoice::Repo),
+            ),
+            "w",
+        )
+        .await;
+        fake.wait_responses(1).await;
+        let (rules, _, _) = {
+            app.next_persisted_rules().await;
+            app.next_persisted_rules().await
+        };
+        let nonce = app.nonce.clone().unwrap();
+        // A change, a quarantine, a removal: every kind of rules frame has been broadcast.
+        tamper_with_rules_file(&rig);
+        app.next("the quarantine", is_quarantine_frame).await;
+        app.send(&discard_rules_msg(Some(&nonce))).await;
+        app.next("the list after Discard", |m| {
+            matches!(
+                m,
+                ServerMsg::ApprovalRules {
+                    quarantined: None,
+                    ..
+                }
+            )
+        })
+        .await;
+        assert_eq!(rules.len(), 1);
+        let s = rig.sentinel();
+        app.through(&s).await;
+
+        for (who, c) in [
+            ("tcp, every topic", &mut tcp_all),
+            ("tcp, no topics", &mut tcp_none),
+            ("a local process that is not the app", &mut agent),
+        ] {
+            c.through(&s).await;
+            assert!(!c.saw(is_persisted_rules), "{who}: {:?}", c.all());
+            for raw in &c.raw {
+                let text = String::from_utf8_lossy(raw);
+                for needle in [
+                    "approval_rules",
+                    "Library/Caches",
+                    "rule_text",
+                    "rm -rf",
+                    "rules.json",
+                    "file_sha256",
+                ] {
+                    assert!(!text.contains(needle), "{who}: {text} leaks {needle:?}");
+                }
+            }
+        }
+    });
+}
+
+// The list is replayed to a connection that starts rendering approvals, at connect or by
+// resubscribing: also when it is empty, and always with where the file is.
+#[test]
+fn the_rules_list_is_replayed_to_a_connection_that_renders_approvals_even_when_empty() {
+    run(GUARDED, |mut rig| async move {
+        use_tmp_home_and_rules(&rig);
+        let expected_path = rules_file(&rig).to_string_lossy().into_owned();
+
+        // Empty.
+        let fresh = rig.app(true).await;
+        let replay: Vec<&ServerMsg> = fresh
+            .connect_frames
+            .iter()
+            .filter(|m| is_persisted_rules(m))
+            .collect();
+        assert_eq!(replay.len(), 1, "{:?}", fresh.connect_frames);
+        match replay[0] {
+            ServerMsg::ApprovalRules {
+                rules,
+                quarantined,
+                path,
+            } => {
+                assert!(rules.is_empty() && quarantined.is_none());
+                assert_eq!(*path, expected_path);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // With a rule, and after a quarantine.
+        let mut app = rig.app(true).await;
+        let (fake, wire) = rig
+            .held(&mut app, "cody-1", "FIXTURE:session_rule_rm_a")
+            .await;
+        app.answer(
+            &wire.request_id,
+            allow_always_of(&wire, CandidateKind::Exact, Some(RuleScopeChoice::AllRepos)),
+            "w",
+        )
+        .await;
+        fake.wait_responses(1).await;
+        app.next_persisted_rules().await;
+        app.next_persisted_rules().await;
+        let with_rule = rig.app(true).await;
+        let replay: Vec<&ServerMsg> = with_rule
+            .connect_frames
+            .iter()
+            .filter(|m| is_persisted_rules(m))
+            .collect();
+        assert_eq!(replay.len(), 1);
+        assert!(matches!(replay[0], ServerMsg::ApprovalRules { rules, .. } if rules.len() == 1));
+        tamper_with_rules_file(&rig);
+        let quarantined = rig.app(true).await;
+        assert!(quarantined.connect_frames.iter().any(is_quarantine_frame));
+
+        // A connection that does not render approvals gets none; resubscribing makes it a presenter.
+        let mut quiet = rig.app(false).await;
+        assert!(!quiet.connect_frames.iter().any(is_persisted_rules));
+        quiet
+            .send(&ClientMsg::Subscribe {
+                topics: vec![Topic::Decision],
+                renders_decisions: false,
+                renders_approvals: true,
+                capabilities: vec![],
+                operator_nonce: None,
+            })
+            .await;
+        quiet.next("the snapshot", is_snapshot).await;
+        let (rules, quarantine, path) = quiet.next_persisted_rules().await;
+        assert!(rules.is_empty(), "nothing is in force while quarantined");
+        assert!(quarantine.is_some());
+        assert_eq!(path, expected_path);
+        quiet.sync().await;
+        assert_eq!(quiet.persisted_rules_frames().len(), 1, "once");
+    });
+}
+
+// ── golden wire forms ─────────────────────────────────────────────────────────
+
+#[track_caller]
+fn golden_client(msg: ClientMsg, expected: &str) {
+    assert_eq!(serde_json::to_string(&msg).unwrap(), expected);
+    let back: ClientMsg = serde_json::from_str(expected).expect("the golden form decodes");
+    assert_eq!(serde_json::to_string(&back).unwrap(), expected);
+}
+
+#[track_caller]
+fn golden_server(msg: ServerMsg, expected: &str) {
+    assert_eq!(serde_json::to_string(&msg).unwrap(), expected);
+    let back: ServerMsg = serde_json::from_str(expected).expect("the golden form decodes");
+    assert_eq!(serde_json::to_string(&back).unwrap(), expected);
+}
+
+fn golden_rule(active: bool) -> PersistedRuleWire {
+    PersistedRuleWire {
+        id: "r1".into(),
+        rule_text: "Bash(rm -rf ~/Library/Caches/:*)".into(),
+        summary: "s".into(),
+        kind: CandidateKind::PathPrefix,
+        scope: RuleScopeChoice::Repo,
+        root: Some("/work/proj".into()),
+        created_at_ms: 1_760_000_000_000,
+        created_from_request_id: "req-1".into(),
+        uses: 2,
+        active,
+        inactive_reason: (!active).then(|| "no_longer_offered".to_owned()),
+    }
+}
+
+const GOLDEN_RULE_ACTIVE: &str = r#"{"id":"r1","rule_text":"Bash(rm -rf ~/Library/Caches/:*)","summary":"s","kind":"path_prefix","scope":"repo","root":"/work/proj","created_at_ms":1760000000000,"created_from_request_id":"req-1","uses":2,"active":true}"#;
+const GOLDEN_RULE_INACTIVE: &str = r#"{"id":"r1","rule_text":"Bash(rm -rf ~/Library/Caches/:*)","summary":"s","kind":"path_prefix","scope":"repo","root":"/work/proj","created_at_ms":1760000000000,"created_from_request_id":"req-1","uses":2,"active":false,"inactive_reason":"no_longer_offered"}"#;
+
+#[test]
+fn the_three_persisted_rule_verbs_have_these_exact_wire_forms() {
+    golden_client(
+        remove_rule_msg("r1", Some("ab12")),
+        r#"{"type":"approval_remove_rule","rule_id":"r1","operator_nonce":"ab12"}"#,
+    );
+    golden_client(
+        remove_rule_msg("r1", None),
+        r#"{"type":"approval_remove_rule","rule_id":"r1"}"#,
+    );
+    golden_client(
+        keep_rules_msg("abc123", Some("ab12")),
+        r#"{"type":"approval_rules_keep","file_sha256":"abc123","operator_nonce":"ab12"}"#,
+    );
+    golden_client(
+        keep_rules_msg("abc123", None),
+        r#"{"type":"approval_rules_keep","file_sha256":"abc123"}"#,
+    );
+    golden_client(
+        discard_rules_msg(Some("ab12")),
+        r#"{"type":"approval_rules_discard","operator_nonce":"ab12"}"#,
+    );
+    golden_client(
+        discard_rules_msg(None),
+        r#"{"type":"approval_rules_discard"}"#,
+    );
+}
+
+#[test]
+fn an_allow_always_decision_has_this_exact_wire_form_with_its_scope() {
+    golden_client(
+        ClientMsg::ApprovalAnswer {
+            request_id: "r1".into(),
+            decision: ApprovalDecision {
+                kind: DecisionKind::AllowAlways,
+                note: None,
+                answers: None,
+                candidate_id: Some("c1".into()),
+                rule_text: Some("Bash(ls /a/b)".into()),
+                scope: Some(RuleScopeChoice::Repo),
+            },
+            window_id: "win-1".into(),
+            operator_nonce: Some("ab12".into()),
+        },
+        r#"{"type":"approval_answer","request_id":"r1","decision":{"kind":"allow_always","candidate_id":"c1","rule_text":"Bash(ls /a/b)","scope":"repo"},"window_id":"win-1","operator_nonce":"ab12"}"#,
+    );
+    let all_repos = serde_json::to_string(&RuleScopeChoice::AllRepos).unwrap();
+    assert_eq!(all_repos, r#""all_repos""#);
+    // Every other decision still leaves `scope` off the wire.
+    assert!(!serde_json::to_string(&allow_once())
+        .unwrap()
+        .contains("scope"));
+}
+
+#[test]
+fn approval_rules_has_this_exact_wire_form() {
+    golden_server(
+        ServerMsg::ApprovalRules {
+            rules: vec![],
+            quarantined: None,
+            path: "/h/.nostromo/approvals/rules.json".into(),
+        },
+        r#"{"type":"approval_rules","rules":[],"path":"/h/.nostromo/approvals/rules.json"}"#,
+    );
+    golden_server(
+        ServerMsg::ApprovalRules {
+            rules: vec![golden_rule(true), golden_rule(false)],
+            quarantined: None,
+            path: "/p/rules.json".into(),
+        },
+        &format!(
+            r#"{{"type":"approval_rules","rules":[{GOLDEN_RULE_ACTIVE},{GOLDEN_RULE_INACTIVE}],"path":"/p/rules.json"}}"#
+        ),
+    );
+    golden_server(
+        ServerMsg::ApprovalRules {
+            rules: vec![],
+            quarantined: Some(RulesQuarantineWire {
+                reason: "external_change".into(),
+                file_sha256: "abc123".into(),
+                rules_in_file: vec![golden_rule(false)],
+            }),
+            path: "/p/rules.json".into(),
+        },
+        &format!(
+            r#"{{"type":"approval_rules","rules":[],"quarantined":{{"reason":"external_change","file_sha256":"abc123","rules_in_file":[{GOLDEN_RULE_INACTIVE}]}},"path":"/p/rules.json"}}"#
+        ),
+    );
+    // An AllRepos rule has no `root` on the wire.
+    let mut all = golden_rule(true);
+    all.scope = RuleScopeChoice::AllRepos;
+    all.root = None;
+    let json = serde_json::to_value(&all).unwrap();
+    assert_eq!(json["scope"], "all_repos");
+    assert!(json.get("root").is_none());
+}
+
+#[test]
+fn the_new_refusal_codes_and_their_reason_have_these_exact_wire_forms() {
+    for (code, name) in [
+        (AnswerRefusal::RuleRefused, "rule_refused"),
+        (AnswerRefusal::RuleWriteFailed, "rule_write_failed"),
+        (AnswerRefusal::RulesQuarantined, "rules_quarantined"),
+        (AnswerRefusal::RuleLimit, "rule_limit"),
+    ] {
+        assert_eq!(code.as_str(), name, "the audit log's name");
+        golden_server(
+            ServerMsg::ApprovalAnswerRefused {
+                request_id: "r1".into(),
+                code,
+                outcome: None,
+                reason: None,
+            },
+            &format!(r#"{{"type":"approval_answer_refused","request_id":"r1","code":"{name}"}}"#),
+        );
+    }
+    golden_server(
+        ServerMsg::ApprovalAnswerRefused {
+            request_id: "r1".into(),
+            code: AnswerRefusal::RuleRefused,
+            outcome: None,
+            reason: Some("The guard blocks this command, so no rule can cover it.".into()),
+        },
+        r#"{"type":"approval_answer_refused","request_id":"r1","code":"rule_refused","reason":"The guard blocks this command, so no rule can cover it."}"#,
+    );
+    golden_server(
+        ServerMsg::ApprovalAnswerRefused {
+            request_id: "r1".into(),
+            code: AnswerRefusal::AlreadyResolved,
+            outcome: Some("allowed_once".into()),
+            reason: None,
+        },
+        r#"{"type":"approval_answer_refused","request_id":"r1","code":"already_resolved","outcome":"allowed_once"}"#,
+    );
 }

@@ -24,6 +24,7 @@ import AppKit
     func copyTerminalStagingStats()
     func openSecondWindowQA(_ sender: Any?)
     func showApprovalsLog(_ sender: Any?)
+    func showApprovalRules(_ sender: Any?)
 }
 
 enum MainMenu {
@@ -223,6 +224,11 @@ enum MainMenu {
                                        keyEquivalent: "")
         approvalsItem.target = target
         windowMenu.addItem(approvalsItem)
+        // Approval Rules (AP6): the persisted "Always allow…" rules and Remove. No key equivalent.
+        let rulesItem = NSMenuItem(title: "Approval Rules", action: #selector(MainMenuActions.showApprovalRules(_:)),
+                                   keyEquivalent: "")
+        rulesItem.target = target
+        windowMenu.addItem(rulesItem)
         NSApplication.shared.windowsMenu = windowMenu
 
         return mainMenu

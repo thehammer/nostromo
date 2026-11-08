@@ -157,6 +157,7 @@ fn allow_once() -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -167,6 +168,7 @@ fn deny(note: Option<&str>) -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -177,6 +179,7 @@ fn deny_and_stop(note: Option<&str>) -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -396,7 +399,7 @@ async fn a_request_is_held_and_broadcast_when_the_session_is_guarded_and_a_prese
         15 * 60 * 1000,
         "the card's countdown is the 15-minute deadline"
     );
-    // The usual four, then (AP4) `allow_session`: a plain `rm -rf /tmp/x` has an exact rule to offer.
+    // The usual four, then (AP4) `allow_session` and (AP6) `allow_always`: a plain `rm -rf /tmp/x` has an exact rule to offer.
     assert_eq!(
         wire.options,
         vec![
@@ -404,7 +407,8 @@ async fn a_request_is_held_and_broadcast_when_the_session_is_guarded_and_a_prese
             ApprovalOption::Deny,
             ApprovalOption::DenyAndStop,
             ApprovalOption::DenyWithNote,
-            ApprovalOption::AllowSession
+            ApprovalOption::AllowSession,
+            ApprovalOption::AllowAlways
         ]
     );
     assert_eq!(
@@ -754,6 +758,7 @@ async fn an_allow_never_carries_the_note_it_was_sent_with() {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     };
     assert_eq!(
         rig.broker.answer(&wire.request_id, &decision, "w", "app"),

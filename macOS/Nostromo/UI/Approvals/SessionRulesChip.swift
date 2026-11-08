@@ -75,14 +75,18 @@ final class SessionRuleGesture {
 
     private let permit: Permit
     private let uptime: () -> TimeInterval
+    /// How long a pick stands before the confirm refuses it (the rules review gets longer than a card's pick).
+    private let lifetime: TimeInterval
     private var selection: (stamp: SessionRuleEventStamp?, handlerTime: TimeInterval)?
 
     init(permit: @escaping Permit = { event, view, menu in
              HumanGesture.permit(event, control: view, menuSelection: menu, contextMenuPick: menu)
          },
-         uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+         uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         lifetime: TimeInterval = SessionRuleGesture.selectionLifetime) {
         self.permit = permit
         self.uptime = uptime
+        self.lifetime = lifetime
     }
 
     var hasSelection: Bool { selection != nil }
@@ -116,7 +120,7 @@ final class SessionRuleGesture {
         if let reason = note(permit(event, button, false)) { return .refused(.notHuman(reason)) }
         guard let pick = selection else { return .refused(.noSelection) }
         let now = uptime()
-        if now - pick.handlerTime > Self.selectionLifetime {
+        if now - pick.handlerTime > lifetime {
             selection = nil
             return .refused(.expired)
         }

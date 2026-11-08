@@ -74,6 +74,8 @@ public enum ApprovalOption: String, Codable, Equatable {
     case answerQuestions = "answer_questions"
     /// Listed only on a request the daemon derived session-rule candidates for.
     case allowSession = "allow_session"
+    /// Listed only on a request with candidates: the persisted "Always allow…" rule (AP6).
+    case allowAlways = "allow_always"
     case unknown
 
     public init(from decoder: Decoder) throws {
@@ -135,6 +137,12 @@ public enum ApprovalAnswerRefusalCode: String, Codable, Equatable {
     case invalidAnswer = "invalid_answer"
     /// An `allow_session` decision that names no candidate of the request, or other text.
     case invalidRule = "invalid_rule"
+    /// An `allow_always` the daemon will not write (the guard, too broad, no scope). The frame's `reason` says why.
+    case ruleRefused = "rule_refused"
+    case ruleWriteFailed = "rule_write_failed"
+    /// The rules file changed outside Nostromo and is off until reviewed.
+    case rulesQuarantined = "rules_quarantined"
+    case ruleLimit = "rule_limit"
     case unknown
 
     public init(from decoder: Decoder) throws {
@@ -151,6 +159,14 @@ public enum ApprovalDecisionKind: String, Codable, Equatable {
     case answerQuestions = "answer_questions"
     /// Allow this call and create the session rule the decision's `candidate_id` names.
     case allowSession = "allow_session"
+    /// Allow this call and write the persisted rule the decision's `candidate_id` names, with `scope` (AP6).
+    case allowAlways = "allow_always"
+}
+
+/// Where a persisted rule applies (`scope`): the app sends only the choice; the daemon computes the root.
+public enum ApprovalRuleScope: String, Codable, Equatable {
+    case repo
+    case allRepos = "all_repos"
 }
 
 /// What a session rule covers (`kind`).
@@ -362,6 +378,9 @@ public struct ApprovalRequestWire: Codable, Equatable, Identifiable {
     public let input: ApprovalJSON
     public let display: ApprovalDisplay
     public let cwd: String?
+    /// The repository root the daemon would scope an "Always allow…" rule to, and whether it is a git repository.
+    public let repoRoot: String?
+    public let repoIsGit: Bool
     public let reason: ApprovalReason
     public let flags: ApprovalFlags
     /// The agent's own description of the call: a claim, not a fact.
@@ -386,6 +405,8 @@ public struct ApprovalRequestWire: Codable, Equatable, Identifiable {
         case displayName = "display_name"
         case toolKind = "tool_kind"
         case mcp, input, display, cwd, reason, flags, description, options
+        case repoRoot = "repo_root"
+        case repoIsGit = "repo_is_git"
         case sessionRuleCandidates = "session_rule_candidates"
         case createdAtMs = "created_at_ms"
         case deadlineAtMs = "deadline_at_ms"
@@ -404,6 +425,8 @@ public struct ApprovalRequestWire: Codable, Equatable, Identifiable {
         input = try c.decode(ApprovalJSON.self, forKey: .input)
         display = try c.decode(ApprovalDisplay.self, forKey: .display)
         cwd = try c.decodeIfPresent(String.self, forKey: .cwd)
+        repoRoot = try c.decodeIfPresent(String.self, forKey: .repoRoot)
+        repoIsGit = try c.decodeIfPresent(Bool.self, forKey: .repoIsGit) ?? false
         reason = try c.decode(ApprovalReason.self, forKey: .reason)
         flags = try c.decode(ApprovalFlags.self, forKey: .flags)
         description = try c.decodeIfPresent(String.self, forKey: .description)
@@ -575,6 +598,115 @@ public struct ApprovalSessionRulesFrame: Decodable, Equatable {
     }
 }
 
+/// One persisted rule (`approval_rules.rules[]`). `inactiveReason` is the daemon's name for why it is off.
+public struct PersistedRule: Decodable, Equatable, Identifiable {
+    public let id: String
+    public let ruleText: String
+    public let summary: String
+    public let kind: ApprovalSessionRuleKind
+    public let scope: ApprovalRuleScope
+    /// The repository root for a `repo` rule.
+    public let root: String?
+    public let createdAtMs: UInt64
+    public let createdFromRequestId: String
+    public let uses: UInt64
+    public let active: Bool
+    public let inactiveReason: String?
+
+    public init(id: String, ruleText: String, summary: String = "", kind: ApprovalSessionRuleKind = .exact,
+                scope: ApprovalRuleScope = .allRepos, root: String? = nil, createdAtMs: UInt64 = 0,
+                createdFromRequestId: String = "", uses: UInt64 = 0, active: Bool = true,
+                inactiveReason: String? = nil) {
+        self.id = id
+        self.ruleText = ruleText
+        self.summary = summary
+        self.kind = kind
+        self.scope = scope
+        self.root = root
+        self.createdAtMs = createdAtMs
+        self.createdFromRequestId = createdFromRequestId
+        self.uses = uses
+        self.active = active
+        self.inactiveReason = inactiveReason
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case ruleText = "rule_text"
+        case summary, kind, scope, root
+        case createdAtMs = "created_at_ms"
+        case createdFromRequestId = "created_from_request_id"
+        case uses, active
+        case inactiveReason = "inactive_reason"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        ruleText = try c.decode(String.self, forKey: .ruleText)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        kind = try c.decodeIfPresent(ApprovalSessionRuleKind.self, forKey: .kind) ?? .unknown
+        scope = try c.decode(ApprovalRuleScope.self, forKey: .scope)
+        root = try c.decodeIfPresent(String.self, forKey: .root)
+        createdAtMs = try c.decodeIfPresent(UInt64.self, forKey: .createdAtMs) ?? 0
+        createdFromRequestId = try c.decodeIfPresent(String.self, forKey: .createdFromRequestId) ?? ""
+        uses = try c.decodeIfPresent(UInt64.self, forKey: .uses) ?? 0
+        active = try c.decodeIfPresent(Bool.self, forKey: .active) ?? false
+        inactiveReason = try c.decodeIfPresent(String.self, forKey: .inactiveReason)
+    }
+}
+
+/// A rules file that is off until the human reviews it (`approval_rules.quarantined`). For display:
+/// `rulesInFile` marks which rules would stay active after Keep.
+public struct RulesQuarantine: Decodable, Equatable {
+    public let reason: String
+    /// The hash of the file the human reviews; sent back with Keep.
+    public let fileSha256: String
+    public let rulesInFile: [PersistedRule]
+
+    public init(reason: String, fileSha256: String, rulesInFile: [PersistedRule]) {
+        self.reason = reason
+        self.fileSha256 = fileSha256
+        self.rulesInFile = rulesInFile
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case reason
+        case fileSha256 = "file_sha256"
+        case rulesInFile = "rules_in_file"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        reason = try c.decode(String.self, forKey: .reason)
+        fileSha256 = try c.decode(String.self, forKey: .fileSha256)
+        rulesInFile = try c.decodeIfPresent(ApprovalLossyArray<PersistedRule>.self, forKey: .rulesInFile)?.elements ?? []
+    }
+}
+
+/// `approval_rules`: the persisted rules as a whole (REPLACE semantics), and the quarantine if any.
+public struct ApprovalRulesFrame: Decodable, Equatable {
+    public let rules: [PersistedRule]
+    public let quarantined: RulesQuarantine?
+    /// Where the rules file is.
+    public let path: String
+
+    public init(rules: [PersistedRule], quarantined: RulesQuarantine? = nil, path: String) {
+        self.rules = rules
+        self.quarantined = quarantined
+        self.path = path
+    }
+
+    enum CodingKeys: String, CodingKey { case rules, quarantined, path }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rules = try c.decode(ApprovalLossyArray<PersistedRule>.self, forKey: .rules).elements
+        quarantined = try? c.decodeIfPresent(RulesQuarantine.self, forKey: .quarantined)
+        path = try c.decode(String.self, forKey: .path)
+    }
+}
+
 /// `approval_pending`: how many requests a focus has held. The count only.
 public struct ApprovalPendingFrame: Decodable, Equatable {
     public let tag: String
@@ -605,10 +737,12 @@ public struct ApprovalAnswerRefusedFrame: Decodable, Equatable {
     public let code: ApprovalAnswerRefusalCode
     /// For `already_resolved`: how the request ended.
     public let outcome: String?
+    /// For `rule_refused`: why, in words for the card.
+    public let reason: String?
 
     enum CodingKeys: String, CodingKey {
         case requestId = "request_id"
-        case code, outcome
+        case code, outcome, reason
     }
 }
 
@@ -646,20 +780,24 @@ public struct ApprovalDecisionWire: Encodable, Equatable {
     /// `allow_session` only: the id of one of the request's own candidates, and its text as shown.
     public let candidateId: String?
     public let ruleText: String?
+    /// `allow_always` only: where the rule applies. The daemon computes the repository root.
+    public let scope: ApprovalRuleScope?
 
     public init(kind: ApprovalDecisionKind, note: String? = nil, answers: [ApprovalQuestionAnswer]? = nil,
-                candidateId: String? = nil, ruleText: String? = nil) {
+                candidateId: String? = nil, ruleText: String? = nil, scope: ApprovalRuleScope? = nil) {
         self.kind = kind
         self.note = note
         self.answers = answers
         self.candidateId = candidateId
         self.ruleText = ruleText
+        self.scope = scope
     }
 
     enum CodingKeys: String, CodingKey {
         case kind, note, answers
         case candidateId = "candidate_id"
         case ruleText = "rule_text"
+        case scope
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -669,6 +807,7 @@ public struct ApprovalDecisionWire: Encodable, Equatable {
         try c.encodeIfPresent(answers, forKey: .answers)
         try c.encodeIfPresent(candidateId, forKey: .candidateId)
         try c.encodeIfPresent(ruleText, forKey: .ruleText)
+        try c.encodeIfPresent(scope, forKey: .scope)
     }
 }
 
@@ -733,6 +872,77 @@ public struct ClientApprovalRevokeSessionRule: Encodable, Equatable {
         try c.encode(type_, forKey: .type_)
         try c.encode(tag, forKey: .tag)
         try c.encode(ruleId, forKey: .ruleId)
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
+    }
+}
+
+/// `approval_remove_rule`: the human removed one persisted rule (AP6).
+public struct ClientApprovalRemoveRule: Encodable, Equatable {
+    let type_ = "approval_remove_rule"
+    public let ruleId: String
+    public let operatorNonce: String?
+
+    public init(ruleId: String, operatorNonce: String?) {
+        self.ruleId = ruleId
+        self.operatorNonce = operatorNonce
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type"
+        case ruleId = "rule_id"
+        case operatorNonce = "operator_nonce"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encode(ruleId, forKey: .ruleId)
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
+    }
+}
+
+/// `approval_rules_keep`: the human turns on the quarantined file they reviewed; `fileSha256` is its hash.
+public struct ClientApprovalRulesKeep: Encodable, Equatable {
+    let type_ = "approval_rules_keep"
+    public let fileSha256: String
+    public let operatorNonce: String?
+
+    public init(fileSha256: String, operatorNonce: String?) {
+        self.fileSha256 = fileSha256
+        self.operatorNonce = operatorNonce
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type"
+        case fileSha256 = "file_sha256"
+        case operatorNonce = "operator_nonce"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
+        try c.encode(fileSha256, forKey: .fileSha256)
+        try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
+    }
+}
+
+/// `approval_rules_discard`: the human discards the quarantined file (it is replaced by an empty rule set).
+public struct ClientApprovalRulesDiscard: Encodable, Equatable {
+    let type_ = "approval_rules_discard"
+    public let operatorNonce: String?
+
+    public init(operatorNonce: String?) {
+        self.operatorNonce = operatorNonce
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type"
+        case operatorNonce = "operator_nonce"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type_, forKey: .type_)
         try c.encodeIfPresent(operatorNonce, forKey: .operatorNonce)
     }
 }

@@ -634,6 +634,17 @@ final class ApprovalsLogMenuTests: XCTestCase {
         XCTAssertTrue(windowMenu.items.allSatisfy { $0.keyEquivalent.isEmpty }, "the Window menu takes no shortcut")
     }
 
+    func testWindowApprovalRulesIsInTheWindowMenuWithNoKeyEquivalent() throws {
+        _ = NSApplication.shared
+        let main = MainMenu.make(target: nil)
+        let windowMenu = try XCTUnwrap(main.items.compactMap(\.submenu).first { $0.title == "Window" }, "no Window menu")
+        let item = try XCTUnwrap(windowMenu.items.first { $0.title == "Approval Rules" }, "no Approval Rules item")
+        XCTAssertEqual(item.keyEquivalent, "")
+        XCTAssertEqual(item.action, #selector(MainMenuActions.showApprovalRules(_:)))
+        XCTAssertEqual(windowMenu.items.first?.title, "Approvals", "Approvals stays first")
+        XCTAssertTrue(windowMenu.items.allSatisfy { $0.keyEquivalent.isEmpty }, "the Window menu takes no shortcut")
+    }
+
     func testNoExistingShortcutChanged() throws {
         _ = NSApplication.shared
         let main = MainMenu.make(target: nil)

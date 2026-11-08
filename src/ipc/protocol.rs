@@ -1467,6 +1467,29 @@ pub enum ClientMsg {
         operator_nonce: Option<String>,
     },
 
+    /// The human removed one persisted rule (AP6). Applied only from the verified Mac app with
+    /// the connection's `operator_nonce`; an unknown rule changes nothing. Refused for network peers.
+    ApprovalRemoveRule {
+        rule_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
+    /// The human chose to keep the quarantined rules file they reviewed (AP6): applied only if
+    /// the file's SHA-256 is still `file_sha256`. Same gate as `ApprovalRemoveRule`.
+    ApprovalRulesKeep {
+        file_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
+    /// The human discarded the quarantined rules file (AP6): it is replaced by an empty rule
+    /// set. Same gate as `ApprovalRemoveRule`.
+    ApprovalRulesDiscard {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_nonce: Option<String>,
+    },
+
     /// A page of the Approvals log (AP5), newest first. Read-only. Applied only
     /// from the verified Mac app with the connection's `operator_nonce`; answered
     /// with `ApprovalsLogPage` or `ApprovalsLogRefused`. Refused for network peers.
@@ -2563,6 +2586,16 @@ pub enum ServerMsg {
         tag: String,
         rules: Vec<crate::approvals::wire::SessionRuleWire>,
     },
+    /// The persisted rules ("Always allow…", AP6) as a whole (REPLACE semantics), with the
+    /// quarantine when the rules file changed outside Nostromo. Broadcast to presenters on every
+    /// change and replayed to a connection that renders approvals. `LocalOnly`.
+    ApprovalRules {
+        rules: Vec<crate::approvals::wire::PersistedRuleWire>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quarantined: Option<crate::approvals::wire::RulesQuarantineWire>,
+        /// Where the rules file is.
+        path: String,
+    },
     /// How many requests are held for a focus. The count only: the one approval
     /// frame a network peer may receive (for a non-sensitive focus).
     ApprovalPending {
@@ -2608,6 +2641,9 @@ pub enum ServerMsg {
         code: crate::approvals::wire::AnswerRefusal,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<String>,
+        /// Why, in words for the card (`rule_refused`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 
     /// Which sessions are waiting for a Claude sign-in, as a whole picture
@@ -6369,6 +6405,8 @@ mod work_wire_tests {
             session_rule_candidates: vec![],
             created_at_ms: 1_760_000_000_000,
             deadline_at_ms: 1_760_000_900_000,
+            repo_is_git: false,
+            repo_root: None,
             preview: None,
         }
     }
@@ -6451,6 +6489,8 @@ mod work_wire_tests {
             session_rule_candidates: vec![],
             created_at_ms: 1,
             deadline_at_ms: 2,
+            repo_is_git: false,
+            repo_root: None,
             preview: None,
         }
     }
@@ -6669,6 +6709,7 @@ mod work_wire_tests {
                     answers: None,
                     candidate_id: Some("c1".into()),
                     rule_text: Some("Bash(ls /a/b)".into()),
+                    scope: None,
                 },
                 window_id: "w".into(),
                 operator_nonce: None,
@@ -6788,6 +6829,7 @@ mod work_wire_tests {
                 request_id: "r1".into(),
                 code: AnswerRefusal::AlreadyResolved,
                 outcome: Some("allowed_once".into()),
+                reason: None,
             },
             r#"{"type":"approval_answer_refused","request_id":"r1","code":"already_resolved","outcome":"allowed_once"}"#,
         );
@@ -6804,6 +6846,7 @@ mod work_wire_tests {
                     request_id: "r1".into(),
                     code,
                     outcome: None,
+                    reason: None,
                 },
                 &format!(
                     r#"{{"type":"approval_answer_refused","request_id":"r1","code":"{name}"}}"#
@@ -7010,6 +7053,7 @@ mod work_wire_tests {
                     answers: None,
                     candidate_id: None,
                     rule_text: None,
+                    scope: None,
                 },
                 window_id: "win-1".into(),
                 operator_nonce: Some("ab12".into()),
@@ -7025,6 +7069,7 @@ mod work_wire_tests {
                     answers: None,
                     candidate_id: None,
                     rule_text: None,
+                    scope: None,
                 },
                 window_id: "win-1".into(),
                 operator_nonce: Some("ab12".into()),
@@ -7040,6 +7085,7 @@ mod work_wire_tests {
                     answers: None,
                     candidate_id: None,
                     rule_text: None,
+                    scope: None,
                 },
                 window_id: "win-2".into(),
                 operator_nonce: None,
@@ -7076,7 +7122,8 @@ mod work_wire_tests {
             "",
             "ALLOW_ONCE",
             "ALLOW_SESSION",
-            "allow_always",
+            "ALLOW_ALWAYS",
+            "always",
         ] {
             let text = format!(
                 r#"{{"type":"approval_answer","request_id":"r1","decision":{{"kind":"{kind}"}},"window_id":"w"}}"#

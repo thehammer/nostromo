@@ -166,6 +166,8 @@ enum ApprovalTestRequests {
         description: String? = nil,
         deadlineAtMs: UInt64? = nil,
         sessionRuleCandidates: [Obj] = [],
+        repoRoot: String? = nil,
+        repoIsGit: Bool? = nil,
         preview: Obj? = nil
     ) throws -> ApprovalRequestWire {
         var flagValues: [String: Bool] = [
@@ -198,6 +200,8 @@ enum ApprovalTestRequests {
         ]
         if let mcp = mcp { root["mcp"] = mcp }
         if let cwd = cwd { root["cwd"] = cwd }
+        if let repoRoot = repoRoot { root["repo_root"] = repoRoot }
+        if let repoIsGit = repoIsGit { root["repo_is_git"] = repoIsGit }
         if let description = description { root["description"] = description }
         if let preview = preview { root["preview"] = preview }
         let data = try JSONSerialization.data(withJSONObject: root)
@@ -221,6 +225,8 @@ enum ApprovalTestRequests {
         description: String? = nil,
         deadlineAtMs: UInt64? = nil,
         sessionRuleCandidates: [Obj] = [],
+        repoRoot: String? = nil,
+        repoIsGit: Bool? = nil,
         preview: Obj? = nil
     ) throws -> ApprovalRequestWire {
         try request(id: id, tag: tag, agentName: agentName, subagentType: subagentType,
@@ -228,7 +234,7 @@ enum ApprovalTestRequests {
                     display: display(lines: lines ?? plainBashLines(command), commandCount: commandCount),
                     cwd: cwd, reasonKind: reasonKind, reasonText: reasonText, flags: flags,
                     options: options, description: description, deadlineAtMs: deadlineAtMs,
-                    sessionRuleCandidates: sessionRuleCandidates, preview: preview)
+                    sessionRuleCandidates: sessionRuleCandidates, repoRoot: repoRoot, repoIsGit: repoIsGit, preview: preview)
     }
 
     // MARK: Consequence preview (AP7)
@@ -447,9 +453,10 @@ enum ApprovalTestRequests {
         return try JSONDecoder().decode(ApprovalResolvedFrame.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
-    static func refused(id: String, code: String, outcome: String? = nil) throws -> ApprovalAnswerRefusedFrame {
+    static func refused(id: String, code: String, outcome: String? = nil, reason: String? = nil) throws -> ApprovalAnswerRefusedFrame {
         var json: Obj = ["request_id": id, "code": code]
         if let outcome = outcome { json["outcome"] = outcome }
+        if let reason = reason { json["reason"] = reason }
         return try JSONDecoder().decode(ApprovalAnswerRefusedFrame.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
@@ -508,6 +515,10 @@ final class ApprovalRecorder {
     private(set) var sent: [Sent] = []
     private(set) var reports: [Report] = []
     private(set) var revoked: [Revoke] = []
+    /// AP6: what the store was asked to send for the persisted rules.
+    private(set) var removedRules: [String] = []
+    private(set) var keptRules: [String] = []
+    private(set) var discards = 0
     /// The store's outcome-drop timer: `(delay, work)`, run by hand.
     var scheduled: [(delay: TimeInterval, work: () -> Void)] = []
 
@@ -523,7 +534,10 @@ final class ApprovalRecorder {
                 self.scheduled.append((delay: delay, work: work))
             },
             canSend: canSend,
-            revoke: { tag, ruleID in self.revoked.append(Revoke(tag: tag, ruleID: ruleID)) })
+            revoke: { tag, ruleID in self.revoked.append(Revoke(tag: tag, ruleID: ruleID)) },
+            removeRule: { self.removedRules.append($0) },
+            keepRules: { self.keptRules.append($0) },
+            discardRules: { self.discards += 1 })
     }
 
     /// Run every scheduled drop, as if the 2 s had passed.

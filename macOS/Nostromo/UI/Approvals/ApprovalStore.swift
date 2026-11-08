@@ -29,6 +29,8 @@ enum ApprovalEvent {
     case guardBlocked(ApprovalGuardBlockedFrame)
     /// A focus's active session rules (REPLACE for that focus).
     case sessionRules(ApprovalSessionRulesFrame)
+    /// The persisted "Always allow…" rules and any quarantine (REPLACE).
+    case rules(ApprovalRulesFrame)
     /// A new daemon connection was established: every session rule held here is stale until the daemon replays.
     case connectionStarted
 }
@@ -99,6 +101,16 @@ final class ApprovalStore {
     private let canSend: () -> Bool
     /// Revoke a session rule. `(tag, ruleId)`.
     private let revokeRule: (String, String) -> Void
+    /// Persisted rules (AP6): remove one `(ruleId)`, keep the quarantined file `(fileSha256)`, discard it.
+    private let removePersistedRule: (String) -> Void
+    private let keepRulesFile: (String) -> Void
+    private let discardRulesFile: () -> Void
+    /// The persisted rules the daemon last listed, the quarantine (if any) and the file's path.
+    private(set) var persistedRules: [PersistedRule] = []
+    private(set) var rulesQuarantine: RulesQuarantine?
+    private(set) var rulesPath: String = PersistedRulesText.rulesFilePath
+    /// Fires whenever the persisted rules or the quarantine changed.
+    let persistedRulesChanges = PassthroughSubject<Void, Never>()
     /// The active session rules per focus: only ever what `approval_session_rules` last said.
     private var sessionRulesByTag: [String: [ApprovalSessionRule]] = [:]
 
@@ -150,12 +162,18 @@ final class ApprovalStore {
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          },
          canSend: @escaping () -> Bool = { true },
-         revoke: @escaping (String, String) -> Void = { _, _ in }) {
+         revoke: @escaping (String, String) -> Void = { _, _ in },
+         removeRule: @escaping (String) -> Void = { _ in },
+         keepRules: @escaping (String) -> Void = { _ in },
+         discardRules: @escaping () -> Void = { }) {
         self.send = send
         self.report = report
         self.schedule = schedule
         self.canSend = canSend
         self.revokeRule = revoke
+        self.removePersistedRule = removeRule
+        self.keepRulesFile = keepRules
+        self.discardRulesFile = discardRules
     }
 
     // MARK: Feeding
@@ -177,8 +195,10 @@ final class ApprovalStore {
                 endWait(of: entry.request, outcome: frame.outcome, atMs: frame.atMs)
             } else if frame.outcome == "allowed_by_session_rule", let toolUseId = frame.toolUseId {
                 // A call a session rule allowed was never shown, so no request is known for it: its row still says so.
-                // Only this outcome: any other ending of an unknown request changes nothing.
+                // Only these outcomes: any other ending of an unknown request changes nothing.
                 setStatus(.allowedBySessionRule, toolUseId: toolUseId, tag: frame.tag)
+            } else if frame.outcome == "allowed_by_your_rule", let toolUseId = frame.toolUseId {
+                setStatus(.allowedByYourRule, toolUseId: toolUseId, tag: frame.tag)
             }
             end(frame.requestId, text: Self.outcomeText(frame.outcome))
         case .preview(let frame):
@@ -189,11 +209,50 @@ final class ApprovalStore {
             guardBlocked(frame)
         case .sessionRules(let frame):
             setSessionRules(frame.rules, tag: frame.tag)
+        case .rules(let frame):
+            let changed = persistedRules != frame.rules || rulesQuarantine != frame.quarantined || rulesPath != frame.path
+            persistedRules = frame.rules
+            rulesQuarantine = frame.quarantined
+            rulesPath = frame.path
+            if changed { persistedRulesChanges.send() }
         case .connectionStarted:
             let tags = Array(sessionRulesByTag.keys)
             sessionRulesByTag.removeAll()
             tags.forEach { sessionRulesChanges.send($0) }
+            // The daemon replays its own persisted rules; until then what is shown may be stale.
+            if !persistedRules.isEmpty || rulesQuarantine != nil {
+                persistedRules = []
+                rulesQuarantine = nil
+                persistedRulesChanges.send()
+            }
         }
+    }
+
+    // MARK: Persisted rules (AP6)
+
+    /// Remove persisted rule `ruleId`. Sends nothing without a connection or for an unknown rule. The rule
+    /// leaves the list only when the daemon's next `approval_rules` says so.
+    @discardableResult
+    func removeRule(id ruleId: String) -> Bool {
+        guard canSend(), persistedRules.contains(where: { $0.id == ruleId }) else { return false }
+        removePersistedRule(ruleId)
+        return true
+    }
+
+    /// Turn on the quarantined file the person reviewed: only the hash the daemon listed is ever sent.
+    @discardableResult
+    func keepQuarantinedRules(fileSha256: String) -> Bool {
+        guard canSend(), let q = rulesQuarantine, q.fileSha256 == fileSha256, !fileSha256.isEmpty else { return false }
+        keepRulesFile(fileSha256)
+        return true
+    }
+
+    /// Discard the quarantined file (it is replaced by an empty rule set).
+    @discardableResult
+    func discardQuarantinedRules() -> Bool {
+        guard canSend(), rulesQuarantine != nil else { return false }
+        discardRulesFile()
+        return true
     }
 
     // MARK: Consequence preview (AP7)
@@ -358,7 +417,7 @@ final class ApprovalStore {
     /// The kinds the card words `Denying…` (every in-flight kind but the allows and the answer).
     private static func isDeny(_ kind: ApprovalDecisionKind) -> Bool {
         switch kind {
-        case .allowOnce, .allowSession, .answerQuestions: return false
+        case .allowOnce, .allowSession, .allowAlways, .answerQuestions: return false
         case .deny, .denyAndStop: return true
         }
     }
@@ -440,6 +499,8 @@ final class ApprovalStore {
         case "allowed_once": return "Allowed once"
         case "allowed_for_session": return "Allowed for this session"
         case "allowed_by_session_rule": return "Allowed by session rule"
+        case "allowed_always": return "Allowed, and the rule was written"
+        case "allowed_by_your_rule": return "Allowed by your rule"
         case "answered": return "Answered"
         case "denied": return "Denied"
         case "denied_and_stopped": return "Denied and stopped"
@@ -462,6 +523,7 @@ final class ApprovalStore {
         case "denied", "denied_and_stopped": return "Already denied"
         case "allowed_once": return "Already allowed once"
         case "allowed_for_session": return "Already allowed for this session"
+        case "allowed_always": return "Already allowed (the rule was written)"
         case .some(let other): return "Already resolved: \(other.replacingOccurrences(of: "_", with: " "))"
         case nil: return "Already resolved"
         }
@@ -576,6 +638,9 @@ final class ApprovalStore {
             hold(frame.requestId, text: "Not sent: the daemon refused these answers")
         case .invalidRule:
             hold(frame.requestId, text: "Not sent: the daemon refused this session rule")
+        case .ruleRefused, .ruleWriteFailed, .rulesQuarantined, .ruleLimit:
+            let why = PersistedRulesText.refusalText(code: frame.code, reason: frame.reason) ?? "the daemon refused this rule"
+            hold(frame.requestId, text: "Not sent: \(why)")
         case .unknown:
             hold(frame.requestId, text: "Not sent: the daemon refused the answer")
         }

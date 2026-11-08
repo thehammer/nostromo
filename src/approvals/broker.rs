@@ -17,16 +17,20 @@
 //! # Invariants
 //!
 //! - **Never auto-approve (T-INV-3).** `"behavior":"allow"` is written by exactly
-//!   four endings, and only they set [`Ending::allow`]. Three are the human's answer
+//!   six endings, and only they set [`Ending::allow`]. Four are the human's answer
 //!   to that very request ([`ApprovalBroker::answer`], which the server calls only
 //!   for the verified app's connection): `allow_once` (`allowed_once`),
 //!   `answer_questions` (`answered`; the answers fit the held `AskUserQuestion`
-//!   request's own questions) and `allow_session` (`allowed_for_session`; it also
-//!   creates the session rule the human chose from that request's own candidates).
-//!   The fourth is `allowed_by_session_rule`: [`Inner::process`] answers a later
-//!   request itself, after the guard, only when it matches a rule created by that
-//!   third ending for the same session process (tag + generation) and the same
-//!   requester, while an app that can show and revoke rules is connected. Every other
+//!   request's own questions), `allow_session` (`allowed_for_session`; it also
+//!   creates the session rule the human chose from that request's own candidates) and
+//!   `allow_always` (`allowed_always`; it also writes the persisted rule the human chose
+//!   from that request's own candidates, after the daemon re-checked the guard and the
+//!   protected lists). The other two are matches of a rule such an answer created:
+//!   `allowed_by_session_rule` and `allowed_by_your_rule`. [`Inner::process`] answers a later
+//!   request itself, after the guard, only when it matches a session rule (same session
+//!   process (tag + generation) and requester) or a persisted rule (its scope covers the
+//!   session's working directory, it passed [`rules::revalidate`], and the file is not
+//!   quarantined), while an app that can show and remove rules is connected. Every other
 //!   ending (timeout, error, restart, no app, a closed channel, a failed write) writes
 //!   a deny or nothing. `updatedPermissions` is never sent (the CLI keeps its own rules).
 //! - **Exactly one ending per request.** A request lives in `pending` until one
@@ -68,6 +72,7 @@ use tracing::{debug, error, info, warn};
 use super::audit::{sanitize_string, AuditFilter, AuditLog, Entry, Event};
 use super::display::ApprovalDisplay;
 use super::guard::{self, GuardVerdict, HookPayload, PaneProbe, SystemPaneProbe};
+use super::persisted::{AddError, ChangeError, External, PersistedRule, RulesStore, Scope};
 use super::preview::{self, PreviewFs, RealFs, TargetSpec};
 use super::questions;
 use super::request::{FileSettings, PermissionRequest, Reason, SettingsSource};
@@ -85,7 +90,7 @@ const RULE_MATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
 use super::wire::{
     clean_note, AgentWire, AnswerRefusal, ApprovalDecision, ApprovalFlags, ApprovalOption,
     ApprovalPreviewWire, ApprovalRequestWire, DecisionKind, PreviewState, RefusalChannel,
-    SessionRuleCandidateWire, SessionRuleWire, SubagentWire,
+    RuleScopeChoice, SessionRuleCandidateWire, SessionRuleWire, SubagentWire,
 };
 use super::ApprovalsPaths;
 use crate::data::work::is_invisible;
@@ -162,6 +167,10 @@ pub enum Outcome {
     AllowedForSession,
     /// A session rule the human created covers this call: the daemon allowed it.
     AllowedBySessionRule,
+    /// The human allowed this call and wrote a persisted rule from it (AP6).
+    AllowedAlways,
+    /// A persisted rule the human wrote covers this call: the daemon allowed it (AP6).
+    AllowedByYourRule,
     /// The human answered an `AskUserQuestion` request (an allow whose input carries the answers).
     Answered,
     Denied,
@@ -187,6 +196,8 @@ impl Outcome {
             Self::AllowedOnce => "allowed_once",
             Self::AllowedForSession => "allowed_for_session",
             Self::AllowedBySessionRule => "allowed_by_session_rule",
+            Self::AllowedAlways => "allowed_always",
+            Self::AllowedByYourRule => "allowed_by_your_rule",
             Self::Answered => "answered",
             Self::Denied => "denied",
             Self::DeniedAndStopped => "denied_and_stopped",
@@ -210,9 +221,10 @@ struct Ending {
     rule: Option<Value>,
     watchdog: bool,
     /// Write `{"behavior":"allow","updatedInput":<this>}` instead of a deny. Set
-    /// only by [`Ending::allow_once`], [`Ending::answered`] and
-    /// [`Ending::allowed_for_session`] (which only [`ApprovalBroker::answer`] calls) and
-    /// [`Ending::allowed_by_session_rule`] (which only [`Inner::process`] calls, for a rule
+    /// only by [`Ending::allow_once`], [`Ending::answered`],
+    /// [`Ending::allowed_for_session`] and [`Ending::allowed_always`] (which only
+    /// [`ApprovalBroker::answer`] calls) and [`Ending::allowed_by_session_rule`] and
+    /// [`Ending::allowed_by_your_rule`] (which only [`Inner::process`] calls, for a rule
     /// the human created).
     allow: Option<Value>,
     /// The deny also interrupts the agent (`deny_and_stop`).
@@ -258,6 +270,25 @@ impl Ending {
             by_window: Some(by_window.to_owned()),
             rule: Some(rule),
             ..Self::silent(Outcome::AllowedForSession)
+        }
+    }
+
+    /// The human allowed this call and wrote the persisted rule `rule` (its identity, for the log).
+    fn allowed_always(input: Value, by_window: &str, rule: Value) -> Self {
+        Self {
+            allow: Some(input),
+            by_window: Some(by_window.to_owned()),
+            rule: Some(rule),
+            ..Self::silent(Outcome::AllowedAlways)
+        }
+    }
+
+    /// A persisted rule the human wrote covers this call (`rule`: its identity, for the log).
+    fn allowed_by_your_rule(input: Value, rule: Value) -> Self {
+        Self {
+            allow: Some(input),
+            rule: Some(rule),
+            ..Self::silent(Outcome::AllowedByYourRule)
         }
     }
 
@@ -535,6 +566,49 @@ pub enum AnswerResult {
     InvalidAnswer,
     /// An `allow_session` decision that names no candidate of the request, or other text. Still held.
     InvalidRule,
+    /// An `allow_always` decision the daemon will not write, with the reason. Still held.
+    RuleRefused(String),
+    /// The rules file could not be written. Still held.
+    RuleWriteFailed,
+    /// The rules file is quarantined. Still held.
+    RulesQuarantined,
+    /// The rule limit is reached. Still held.
+    RuleLimit,
+}
+
+/// What a change to the persisted rules (remove, keep, discard) did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulesChange {
+    Applied,
+    /// Remove: no such rule; nothing changed.
+    Unknown,
+    /// The connection is not one that renders approvals.
+    NotPresenter,
+    /// Remove: the file is quarantined; review it first.
+    Quarantined,
+    /// Keep or discard: nothing is quarantined.
+    NotQuarantined,
+    /// Keep: the file is no longer the one the human reviewed.
+    Stale,
+    /// Keep: the file cannot be read as rules.
+    Unreadable,
+    WriteFailed,
+}
+
+impl RulesChange {
+    /// The refusal code written to the audit log, or `None` if applied.
+    pub fn refusal_code(self) -> Option<&'static str> {
+        match self {
+            Self::Applied => None,
+            Self::Unknown => Some("unknown_rule"),
+            Self::NotPresenter => Some("not_operator_app"),
+            Self::Quarantined => Some("rules_quarantined"),
+            Self::NotQuarantined => Some("rules_not_quarantined"),
+            Self::Stale => Some("rules_file_changed"),
+            Self::Unreadable => Some("rules_unreadable"),
+            Self::WriteFailed => Some("rule_write_failed"),
+        }
+    }
 }
 
 /// What [`ApprovalBroker::revoke_session_rule`] did.
@@ -559,6 +633,18 @@ impl AnswerResult {
             Self::NotPresenter => Some((AnswerRefusal::NotOperatorApp, None)),
             Self::InvalidAnswer => Some((AnswerRefusal::InvalidAnswer, None)),
             Self::InvalidRule => Some((AnswerRefusal::InvalidRule, None)),
+            Self::RuleRefused(_) => Some((AnswerRefusal::RuleRefused, None)),
+            Self::RuleWriteFailed => Some((AnswerRefusal::RuleWriteFailed, None)),
+            Self::RulesQuarantined => Some((AnswerRefusal::RulesQuarantined, None)),
+            Self::RuleLimit => Some((AnswerRefusal::RuleLimit, None)),
+        }
+    }
+
+    /// Why an `allow_always` was refused, in words for the card.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::RuleRefused(why) => Some(why),
+            _ => None,
         }
     }
 }
@@ -605,6 +691,8 @@ struct Inner {
     grace_epoch: AtomicU64,
     /// The home directory `~/` in a session rule means (the user's; tests set their own).
     home: Mutex<PathBuf>,
+    /// The persisted rules (AP6), once opened ([`ApprovalBroker::attach_rules_store`]).
+    persisted: Mutex<Option<Arc<RulesStore>>>,
     /// The file system the consequence preview reads (the real one; tests inject theirs).
     preview_fs: Mutex<Arc<dyn PreviewFs>>,
     /// Preview walks in flight (this broker's own count).
@@ -849,6 +937,7 @@ impl ApprovalBroker {
             home: Mutex::new(
                 dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/nonexistent-home")),
             ),
+            persisted: Mutex::new(None),
             preview_fs: Mutex::new(Arc::new(RealFs)),
             preview_slots: rules::HelperCount::default(),
             preview_quick_wait: Mutex::new(PREVIEW_QUICK_WAIT),
@@ -1087,6 +1176,11 @@ impl ApprovalBroker {
             }
         }
         self.inner.drop_session_rules(|_| true, "session_ended");
+        if let Some(store) = self.inner.rules_store() {
+            if let Err(e) = store.flush() {
+                warn!("could not write the rules' use counts: {e}");
+            }
+        }
         written
     }
 
@@ -1374,6 +1468,9 @@ impl ApprovalBroker {
                 );
                 return self.finish_allow_session(request_id, ending, choice, conn_key);
             }
+            DecisionKind::AllowAlways => {
+                return self.answer_allow_always(request_id, decision, input, window_id, conn_key);
+            }
             DecisionKind::AnswerQuestions => {
                 // Only a request the daemon itself listed as answerable, and only with answers
                 // that fit its questions: anything else leaves the request held and sends nothing.
@@ -1509,6 +1606,241 @@ impl ApprovalBroker {
             .collect()
     }
 
+    /// Open the persisted rules (`rules.json` beside the audit log): load, check the hash,
+    /// revalidate every rule. Writes `rules_loaded` (and `rules_quarantined`). Call once at
+    /// start, after [`Self::startup_reconcile`].
+    pub fn attach_rules_store(&self) -> Option<super::persisted::LoadReport> {
+        let home = lock(&self.inner.home).clone();
+        let (store, report) = RulesStore::open(self.inner.audit.dir(), &home);
+        *lock(&self.inner.persisted) = Some(Arc::new(store));
+        self.log_rules_loaded(&report);
+        if let Some((reason, sha)) = &report.quarantined {
+            self.log_quarantined(reason, sha);
+        }
+        Some(report)
+    }
+
+    fn log_rules_loaded(&self, report: &super::persisted::LoadReport) {
+        self.inner.append(Entry::new(
+            Event::RulesLoaded {
+                active: report.active as u64,
+                inactive: report.inactive as u64,
+                quarantined: report.quarantined.is_some(),
+            },
+            Utc::now(),
+        ));
+    }
+
+    fn log_quarantined(&self, reason: &str, sha: &str) {
+        self.inner.append(Entry::new(
+            Event::RulesQuarantined {
+                reason: sanitize_string(reason),
+                file_sha256: sanitize_string(sha),
+            },
+            Utc::now(),
+        ));
+    }
+
+    /// The persisted rules and any quarantine as one frame.
+    pub fn rules_frame(&self) -> ServerMsg {
+        self.inner.rules_frame()
+    }
+
+    /// The frames a connection that has just started rendering approvals needs.
+    pub fn rules_replay(&self) -> Vec<ServerMsg> {
+        if self.inner.rules_store().is_none() {
+            return Vec::new();
+        }
+        vec![self.inner.rules_frame()]
+    }
+
+    /// Did the rules file change behind the daemon's back? Called by the watcher; a change
+    /// quarantines every persisted rule.
+    pub fn rules_external_check(&self) {
+        let Some(store) = self.inner.rules_store() else {
+            return;
+        };
+        let home = lock(&self.inner.home).clone();
+        match store.check_external(&home) {
+            External::Unchanged => {}
+            External::Quarantined(reason, sha) => {
+                warn!(
+                    reason,
+                    "the rules file changed outside Nostromo: rules are off"
+                );
+                self.log_quarantined(&reason, &sha);
+                self.inner.broadcast_persisted_rules();
+            }
+            External::Deleted => self.inner.broadcast_persisted_rules(),
+        }
+    }
+
+    /// Watch the approvals directory for changes to `rules.json` the daemon did not make.
+    /// The caller keeps the returned watcher alive.
+    pub fn start_rules_watcher(&self) -> io::Result<notify::RecommendedWatcher> {
+        use notify::{RecursiveMode, Watcher};
+        let weak = Arc::downgrade(&self.inner);
+        let dir = self.inner.audit.dir().to_path_buf();
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let Ok(event) = res else { return };
+            let touches = event.paths.iter().any(|p| {
+                p.file_name()
+                    .is_some_and(|n| n == super::persisted::RULES_FILE)
+            });
+            if !touches {
+                return;
+            }
+            if let Some(inner) = weak.upgrade() {
+                ApprovalBroker { inner }.rules_external_check();
+            }
+        })
+        .map_err(io::Error::other)?;
+        watcher
+            .watch(&dir, RecursiveMode::NonRecursive)
+            .map_err(io::Error::other)?;
+        Ok(watcher)
+    }
+
+    /// The human removed persisted rule `rule_id` from `window_id` of connection `conn_key`
+    /// (the server has already checked the connection is the verified app with its nonce).
+    pub fn remove_persisted_rule(
+        &self,
+        rule_id: &str,
+        conn_key: &str,
+        window_id: &str,
+    ) -> RulesChange {
+        self.change_rules(conn_key, RulesChange::Unknown, |store| {
+            match store.remove(rule_id) {
+                Ok(Some(rule)) => {
+                    self.inner.log_persisted_rule(
+                        false,
+                        &rule,
+                        None,
+                        json!({ "reason": "user", "by_window": sanitize_string(window_id) }),
+                    );
+                    RulesChange::Applied
+                }
+                Ok(None) => RulesChange::Unknown,
+                Err(ChangeError::Quarantined) => RulesChange::Quarantined,
+                Err(_) => RulesChange::WriteFailed,
+            }
+        })
+    }
+
+    /// The human chose to keep the quarantined rules file they reviewed (`file_sha256`).
+    /// Applied only if the file is still exactly that; every rule is revalidated.
+    pub fn keep_quarantined(
+        &self,
+        file_sha256: &str,
+        conn_key: &str,
+        _window_id: &str,
+    ) -> RulesChange {
+        self.change_rules(conn_key, RulesChange::NotQuarantined, |store| {
+            let home = lock(&self.inner.home).clone();
+            match store.keep(file_sha256, &home) {
+                Ok(report) => {
+                    self.inner.append(Entry::new(
+                        Event::RulesKept {
+                            file_sha256: sanitize_string(file_sha256),
+                        },
+                        Utc::now(),
+                    ));
+                    self.log_rules_loaded(&report);
+                    RulesChange::Applied
+                }
+                Err(ChangeError::NotQuarantined) => RulesChange::NotQuarantined,
+                Err(ChangeError::StaleHash) => RulesChange::Stale,
+                Err(ChangeError::Unreadable(_)) => RulesChange::Unreadable,
+                Err(_) => RulesChange::WriteFailed,
+            }
+        })
+    }
+
+    /// The human discarded the quarantined rules file: it is replaced with an empty rule set.
+    pub fn discard_quarantined(&self, conn_key: &str, _window_id: &str) -> RulesChange {
+        self.change_rules(conn_key, RulesChange::NotQuarantined, |store| {
+            match store.discard() {
+                Ok(()) => {
+                    self.inner
+                        .append(Entry::new(Event::RulesDiscarded {}, Utc::now()));
+                    RulesChange::Applied
+                }
+                Err(ChangeError::NotQuarantined) => RulesChange::NotQuarantined,
+                Err(_) => RulesChange::WriteFailed,
+            }
+        })
+    }
+
+    /// The shared frame of a persisted-rules change: only a presenter may change them; with no
+    /// store open the answer is `without_store`; whatever happened, every window is shown the
+    /// rules as they now are.
+    fn change_rules(
+        &self,
+        conn_key: &str,
+        without_store: RulesChange,
+        change: impl FnOnce(&RulesStore) -> RulesChange,
+    ) -> RulesChange {
+        if !self.inner.parts.presenters.is_presenter(conn_key) {
+            return RulesChange::NotPresenter;
+        }
+        let Some(store) = self.inner.rules_store() else {
+            return without_store;
+        };
+        let result = change(&store);
+        self.inner.broadcast_persisted_rules();
+        result
+    }
+
+    /// `allow_always`: write the persisted rule, then allow this one call. The request stays
+    /// held (and nothing is written) if any check fails.
+    fn answer_allow_always(
+        &self,
+        request_id: &str,
+        decision: &ApprovalDecision,
+        input: Value,
+        window_id: &str,
+        conn_key: &str,
+    ) -> AnswerResult {
+        let (rule, store, ident) =
+            match self.inner.persisted_choice(request_id, decision, window_id) {
+                Ok(choice) => choice,
+                Err(refusal) => {
+                    debug!(conn_key, request_id, ?refusal, "allow_always refused");
+                    return refusal;
+                }
+            };
+        match store.add(rule.clone()) {
+            Ok(()) => {}
+            Err(AddError::Quarantined) => return AnswerResult::RulesQuarantined,
+            Err(AddError::Limit) => return AnswerResult::RuleLimit,
+            Err(AddError::Write(e)) => {
+                warn!("could not write the rules file: {e}");
+                return AnswerResult::RuleWriteFailed;
+            }
+        }
+        self.inner
+            .log_persisted_rule(true, &rule, Some(&ident.tag), json!({}));
+        let ending = Ending::allowed_always(input, window_id, persisted_identity(&rule));
+        let result = match self.inner.finish(request_id, ending) {
+            Some(done) => {
+                // The rule exists only because this very allow was written.
+                if !(done.wrote && done.outcome == Outcome::AllowedAlways) {
+                    self.inner
+                        .undo_persisted(&store, &rule, "allow_not_written");
+                }
+                AnswerResult::Applied {
+                    outcome: done.outcome.as_str().to_owned(),
+                }
+            }
+            None => {
+                self.inner.undo_persisted(&store, &rule, "request_ended");
+                lock(&self.inner.state).answer_to_ended(request_id)
+            }
+        };
+        self.inner.broadcast_persisted_rules();
+        result
+    }
+
     /// Use `home` as the directory `~/` in session rules means. For tests.
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_home_for_test(&self, home: PathBuf) {
@@ -1556,6 +1888,7 @@ impl ApprovalBroker {
             request_id: request_id.to_owned(),
             code,
             outcome: outcome.map(str::to_owned),
+            reason: result.reason().map(str::to_owned),
         })
     }
 
@@ -1723,7 +2056,12 @@ impl Inner {
         let entry_id = self.log_outcome(&pending.ident, outcome, &ending, latency_ms);
         // A request answered by a session rule was never held (never shown), but the
         // app still needs to mark its row.
-        if pending.held || outcome == Outcome::AllowedBySessionRule {
+        if pending.held
+            || matches!(
+                outcome,
+                Outcome::AllowedBySessionRule | Outcome::AllowedByYourRule
+            )
+        {
             self.broadcast(ServerMsg::ApprovalResolved {
                 tag: pending.ident.tag.clone(),
                 request_id: request_id.to_owned(),
@@ -2080,6 +2418,218 @@ impl Inner {
         self.append(e);
     }
 
+    fn rules_store(&self) -> Option<Arc<RulesStore>> {
+        lock(&self.persisted).clone()
+    }
+
+    /// The persisted rule that covers `req`, if any.
+    fn matching_persisted_rule(
+        &self,
+        req: &PermissionRequest,
+        reason: &Reason,
+        cwd: Option<&Path>,
+    ) -> Option<PersistedRule> {
+        let store = self.rules_store()?;
+        let home = lock(&self.home).clone();
+        store.first_match(RULE_MATCH_TIMEOUT, req, reason.kind, &home, cwd)
+    }
+
+    /// The persisted rules and any quarantine, as one frame.
+    fn rules_frame(&self) -> ServerMsg {
+        match self.rules_store() {
+            Some(store) => {
+                let (rules, quarantined) = store.wire();
+                ServerMsg::ApprovalRules {
+                    rules,
+                    quarantined,
+                    path: store.path().to_string_lossy().into_owned(),
+                }
+            }
+            None => ServerMsg::ApprovalRules {
+                rules: Vec::new(),
+                quarantined: None,
+                path: self
+                    .audit
+                    .dir()
+                    .join(super::persisted::RULES_FILE)
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+        }
+    }
+
+    fn broadcast_persisted_rules(&self) {
+        self.broadcast(self.rules_frame());
+    }
+
+    /// Append `rule_written` or `rule_removed` for a persisted rule; `extra` is merged into the
+    /// rule object (`reason`, `by_window`).
+    fn log_persisted_rule(
+        &self,
+        written: bool,
+        rule: &PersistedRule,
+        tag: Option<&str>,
+        extra: Value,
+    ) {
+        let mut body = json!({
+            "id": rule.id,
+            "rule_text": rule.rule_text,
+            "kind": rule.kind.as_str(),
+            "summary": rule.summary,
+            "scope": rule.scope.choice(),
+            "root": match &rule.scope {
+                Scope::Repo { root } => Some(root.to_string_lossy().into_owned()),
+                Scope::AllRepos | Scope::AllReposUnconfirmed => None,
+            },
+            "source_command": rule.source_command,
+            "created_at": DateTime::<Utc>::from_timestamp_millis(rule.created_at_ms as i64)
+                .map(|t| t.to_rfc3339()),
+            "created_from_request_id": rule.created_from_request_id,
+            "created_by_window": rule.created_by_window,
+            "uses": rule.uses,
+        });
+        if let (Some(map), Some(more)) = (body.as_object_mut(), extra.as_object()) {
+            map.extend(more.clone());
+        }
+        let body = super::audit::sanitize_recorded(&body);
+        let event = if written {
+            Event::RuleWritten { rule: body }
+        } else {
+            Event::RuleRemoved { rule: body }
+        };
+        let mut e = Entry::new(event, Utc::now());
+        e.tag = tag.map(str::to_owned);
+        if written {
+            e.request_id = Some(rule.created_from_request_id.clone());
+        }
+        self.append(e);
+    }
+
+    /// A rule that was written but whose allow was not: take it back out.
+    fn undo_persisted(&self, store: &RulesStore, rule: &PersistedRule, reason: &str) {
+        if let Ok(Some(removed)) = store.remove(&rule.id) {
+            self.log_persisted_rule(false, &removed, None, json!({ "reason": reason }));
+        }
+    }
+
+    /// Validate an `allow_always` decision against the held request: one of its own candidates
+    /// with identical text, a scope, the guard and the protected lists once more, and room in
+    /// an unquarantined file. Nothing is written here.
+    fn persisted_choice(
+        &self,
+        request_id: &str,
+        decision: &ApprovalDecision,
+        window: &str,
+    ) -> Result<(PersistedRule, Arc<RulesStore>, Ident), AnswerResult> {
+        let Some(store) = self.rules_store() else {
+            return Err(AnswerResult::RuleWriteFailed);
+        };
+        let (Some(candidate_id), Some(rule_text)) = (
+            decision.candidate_id.as_deref(),
+            decision.rule_text.as_deref(),
+        ) else {
+            return Err(AnswerResult::InvalidRule);
+        };
+        let (candidate, ident, cwd, raw, source_command) = {
+            let st = lock(&self.state);
+            let p = st
+                .pending
+                .get(request_id)
+                .filter(|p| p.held)
+                .ok_or(AnswerResult::InvalidRule)?;
+            let offered = p
+                .wire
+                .as_ref()
+                .is_some_and(|w| w.options.contains(&ApprovalOption::AllowAlways));
+            if !offered {
+                return Err(AnswerResult::InvalidRule);
+            }
+            let candidate = p
+                .candidates
+                .iter()
+                .find(|c| c.id == candidate_id && c.rule_text == rule_text)
+                .cloned()
+                .ok_or(AnswerResult::InvalidRule)?;
+            st.session(&p.ident.tag, p.generation)
+                .ok_or(AnswerResult::InvalidRule)?;
+            let command = p
+                .input
+                .as_ref()
+                .and_then(|i| i.get("command"))
+                .and_then(Value::as_str)
+                .map(|c| c.trim_matches(' ').to_owned())
+                .ok_or(AnswerResult::InvalidRule)?;
+            (
+                candidate,
+                p.ident.clone(),
+                p.cwd.clone(),
+                p.raw.clone(),
+                command,
+            )
+        };
+        let refused = |why: &str| AnswerResult::RuleRefused(why.to_owned());
+        let Some(choice) = decision.scope else {
+            return Err(refused("Choose where the rule applies."));
+        };
+        let home = lock(&self.home).clone();
+        if let Some(why) = rules::too_broad_for_persisting(&candidate, &home) {
+            return Err(refused(&format!("This rule is too broad to keep: {why}.")));
+        }
+        // The guard once more, on the command the rule stands for (and the one it came from).
+        let representative = match &candidate.spec {
+            rules::Spec::Exact { command, .. } => command.clone(),
+            rules::Spec::PathPrefix { head, prefix, .. } => format!("{} {prefix}", head.join(" ")),
+        };
+        for command in [&representative, &source_command] {
+            let mut value = raw.clone();
+            if let Some(input) = value.get_mut("input").and_then(Value::as_object_mut) {
+                input.insert("command".into(), json!(command));
+            }
+            let blocked = PermissionRequest::from_cli(&value)
+                .map(|req| self.guard_block(&req, &ident, cwd.as_deref()).is_some())
+                .unwrap_or(true);
+            if blocked {
+                return Err(refused(
+                    "The guard blocks this command, so no rule can cover it.",
+                ));
+            }
+        }
+        let scope = match choice {
+            RuleScopeChoice::AllRepos => Scope::AllRepos,
+            RuleScopeChoice::Repo => match &cwd {
+                Some(cwd) => Scope::Repo {
+                    root: crate::tracker::paths::find_repo_root(cwd).dir,
+                },
+                None => return Err(refused("This session has no working folder to scope to.")),
+            },
+        };
+        if let Some(why) = super::persisted::scope_problem(&scope, &home) {
+            return Err(refused(&format!(
+                "This repository cannot hold a saved rule: {why}."
+            )));
+        }
+        match store.can_add() {
+            Ok(()) => {}
+            Err(AddError::Quarantined) => return Err(AnswerResult::RulesQuarantined),
+            Err(AddError::Limit) => return Err(AnswerResult::RuleLimit),
+            Err(AddError::Write(_)) => return Err(AnswerResult::RuleWriteFailed),
+        }
+        let rule = PersistedRule {
+            id: uuid::Uuid::new_v4().to_string(),
+            rule_text: candidate.rule_text.clone(),
+            summary: candidate.summary.clone(),
+            kind: candidate.kind,
+            spec: candidate.spec.clone(),
+            source_command,
+            scope,
+            created_at_ms: now_ms(),
+            created_from_request_id: request_id.to_owned(),
+            created_by_window: window.to_owned(),
+            uses: 0,
+        };
+        Ok((rule, store, ident))
+    }
+
     fn handle(&self, job: Job) {
         match job {
             Job::Request {
@@ -2176,6 +2726,21 @@ impl Inner {
                 if let Some(done) = self.finish(request_id, ending) {
                     if done.wrote && done.outcome == Outcome::AllowedBySessionRule {
                         self.count_rule_use(&ident.tag, generation, &rule.id);
+                    }
+                }
+                return;
+            }
+            // Then a persisted rule (AP6): after the guard and the session rules, before a
+            // card, under the same conditions (an app that can show and remove it is connected).
+            if let Some(rule) = self.matching_persisted_rule(&req, &reason, cwd.as_deref()) {
+                let ending =
+                    Ending::allowed_by_your_rule(req.input.clone(), persisted_identity(&rule));
+                if let Some(done) = self.finish(request_id, ending) {
+                    if done.wrote && done.outcome == Outcome::AllowedByYourRule {
+                        if let Some(store) = self.rules_store() {
+                            store.record_use(&rule.id);
+                        }
+                        self.broadcast_persisted_rules();
                     }
                 }
                 return;
@@ -2450,6 +3015,19 @@ struct SessionRuleChoice {
     ident: Ident,
 }
 
+/// A persisted rule's identity, as the outcome entry records it.
+fn persisted_identity(rule: &PersistedRule) -> Value {
+    super::audit::sanitize_recorded(&json!({
+        "rule_id": rule.id,
+        "rule_text": rule.rule_text,
+        "kind": rule.kind.as_str(),
+        "scope": rule.scope.choice(),
+        "created_at": DateTime::<Utc>::from_timestamp_millis(rule.created_at_ms as i64)
+            .map(|t| t.to_rfc3339()),
+        "created_from_request_id": rule.created_from_request_id,
+    }))
+}
+
 fn rule_wire(rule: &SessionRule) -> SessionRuleWire {
     SessionRuleWire {
         id: rule.id.clone(),
@@ -2523,7 +3101,9 @@ fn approval_wire(
     }
     if !candidates.is_empty() {
         options.push(ApprovalOption::AllowSession);
+        options.push(ApprovalOption::AllowAlways);
     }
+    let repo = cwd.map(crate::tracker::paths::find_repo_root);
     ApprovalRequestWire {
         request_id: request_id.to_owned(),
         tag: tag.to_owned(),
@@ -2545,6 +3125,8 @@ fn approval_wire(
         input: req.input.clone(),
         display: ApprovalDisplay::build(req.tool_kind, &req.input),
         cwd: cwd.map(|c| c.to_string_lossy().into_owned()),
+        repo_root: repo.as_ref().map(|r| r.dir.to_string_lossy().into_owned()),
+        repo_is_git: repo.as_ref().is_some_and(|r| r.git),
         reason,
         flags: ApprovalFlags {
             default_to_no: req.default_to_no.unwrap_or(false),

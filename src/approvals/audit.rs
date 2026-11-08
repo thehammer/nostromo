@@ -177,6 +177,24 @@ pub enum Event {
     RuleRemoved {
         rule: Value,
     },
+    /// The rules file changed outside Nostromo (or failed its checks): every persisted
+    /// rule is off until the human reviews it.
+    RulesQuarantined {
+        reason: String,
+        file_sha256: String,
+    },
+    /// The human chose to keep the quarantined file (the hash they reviewed).
+    RulesKept {
+        file_sha256: String,
+    },
+    /// The human replaced the quarantined file with an empty rule set.
+    RulesDiscarded {},
+    /// The daemon loaded the rules file at start.
+    RulesLoaded {
+        active: u64,
+        inactive: u64,
+        quarantined: bool,
+    },
     /// The consequence preview the card showed (AP7), written once its counts are final.
     Preview {
         preview: Value,
@@ -195,6 +213,10 @@ impl Event {
             Event::SessionRuleRevoked { .. } => "session_rule_revoked",
             Event::RuleWritten { .. } => "rule_written",
             Event::RuleRemoved { .. } => "rule_removed",
+            Event::RulesQuarantined { .. } => "rules_quarantined",
+            Event::RulesKept { .. } => "rules_kept",
+            Event::RulesDiscarded { .. } => "rules_discarded",
+            Event::RulesLoaded { .. } => "rules_loaded",
             Event::Preview { .. } => "preview",
         }
     }

@@ -12,7 +12,7 @@
 //!   process, requester and focus, after the guard, while an app that can revoke is connected;
 //! - R4: a rule dies with its session process, however that ends, and never outlives a restart
 //!   of the daemon;
-//! - R6: revoking (broker level), R13: nothing but the four known endings writes an allow and
+//! - R6: revoking (broker level), R13: nothing but the six known endings (AP6 added two) writes an allow and
 //!   `updatedPermissions` is never sent, R14: the audit trail.
 //!
 //! Time: paused tokio time; the broker's worker is a plain thread, so effects are polled for
@@ -188,6 +188,7 @@ fn decision_with(id: Option<&str>, text: Option<&str>) -> ApprovalDecision {
         answers: None,
         candidate_id: id.map(str::to_owned),
         rule_text: text.map(str::to_owned),
+        scope: None,
     }
 }
 
@@ -202,6 +203,7 @@ fn allow_once() -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -212,6 +214,7 @@ fn deny() -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -879,6 +882,7 @@ async fn an_allow_session_that_does_not_name_one_of_this_requests_candidates_is_
                 request_id,
                 code,
                 outcome,
+                ..
             } => {
                 assert_eq!(request_id, wire.request_id);
                 assert_eq!(code.as_str(), "invalid_rule");
@@ -1758,22 +1762,23 @@ async fn a_revoke_of_an_unknown_rule_another_focus_or_from_a_non_presenter_chang
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// R13. Only four endings ever allow, and `updatedPermissions` is never sent
+// R13. Only six endings ever allow, and `updatedPermissions` is never sent
 // ═════════════════════════════════════════════════════════════════════════════
 
-const ALLOW_OUTCOMES: [&str; 4] = [
+const ALLOW_OUTCOMES: [&str; 6] = [
     "allowed_once",
     "answered",
     "allowed_for_session",
+    "allowed_always",
     "allowed_by_session_rule",
+    "allowed_by_your_rule",
 ];
 
 // T-INV-3 for rules. Fails if any other ending (timeout, guard, no app, a refused
 // allow_session, a cancel) ever writes an allow, or if an allow is written that no allowing
 // outcome accounts for.
 #[tokio::test(start_paused = true)]
-async fn the_only_allows_written_are_allowed_once_allowed_for_session_and_allowed_by_session_rule()
-{
+async fn the_only_allows_written_are_the_six_known_endings_and_every_other_ending_denies() {
     let rig = Rig::with_app();
     // allowed_once, deny, a refused allow_session that is then denied
     let once = rig.hold_ask("toolu_once", "ls /tmp/cap/once").await;
@@ -1813,6 +1818,36 @@ async fn the_only_allows_written_are_allowed_once_allowed_for_session_and_allowe
         .await;
     rig.assert_allowed_by_rule("toolu_use", "ls /tmp/cap/grant")
         .await;
+    // allowed_always (AP6) then allowed_by_your_rule
+    rig.broker.attach_rules_store();
+    let always = rig.hold_ask("toolu_always", "ls /tmp/cap/always").await;
+    let c = candidate(&always, CandidateKind::Exact);
+    assert_eq!(
+        rig.broker.answer(
+            &always.request_id,
+            &ApprovalDecision {
+                kind: DecisionKind::AllowAlways,
+                note: None,
+                answers: None,
+                candidate_id: Some(c.id.clone()),
+                rule_text: Some(c.rule_text.clone()),
+                scope: Some(nostromo::approvals::wire::RuleScopeChoice::AllRepos),
+            },
+            "w",
+            "app"
+        ),
+        applied("allowed_always")
+    );
+    rig.submit_value(
+        T,
+        rig.generation,
+        "toolu_yours",
+        ask_request("toolu_yours", "ls /tmp/cap/always"),
+    );
+    assert_eq!(
+        outcome_name(&rig.wait_outcome("toolu_yours").await),
+        "allowed_by_your_rule"
+    );
     // guard_blocked, even with a rule that would match
     rig.broker.inject_session_rule_for_test(
         T,
@@ -1900,8 +1935,8 @@ async fn the_only_allows_written_are_allowed_once_allowed_for_session_and_allowe
         }
     }
     assert_eq!(
-        allowing, 3,
-        "allowed_once, allowed_for_session, allowed_by_session_rule"
+        allowing, 5,
+        "allowed_once, allowed_for_session, allowed_always, allowed_by_session_rule, allowed_by_your_rule"
     );
     assert_eq!(outcome_of("toolu_guard").as_deref(), Some("guard_blocked"));
     assert_eq!(outcome_of("toolu_noapp").as_deref(), Some("no_app"));

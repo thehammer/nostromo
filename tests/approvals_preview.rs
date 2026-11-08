@@ -649,6 +649,7 @@ impl Conn {
                 request_id,
                 code,
                 outcome,
+                ..
             } => (request_id, code, outcome),
             _ => unreachable!(),
         }
@@ -762,6 +763,7 @@ fn allow_once() -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -772,6 +774,7 @@ fn deny(note: Option<&str>) -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -782,6 +785,7 @@ fn deny_and_stop(note: Option<&str>) -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 

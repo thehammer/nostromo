@@ -48,6 +48,13 @@ pub struct ApprovalRequestWire {
     /// Where the session runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// The repository root the daemon would scope an "Always allow…" rule to
+    /// (`find_repo_root(cwd).dir`), so the card can show the exact path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<String>,
+    /// Whether `repo_root` is a git repository (else it is just the working folder).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repo_is_git: bool,
     pub reason: Reason,
     pub flags: ApprovalFlags,
     /// The agent's own description of the call (sanitized): a claim, not a fact.
@@ -198,6 +205,9 @@ pub enum ApprovalOption {
     /// Only on a request with session-rule candidates (`rules::candidates`); never
     /// part of [`ApprovalOption::ALL`].
     AllowSession,
+    /// Only on a request with session-rule candidates; never part of [`ApprovalOption::ALL`].
+    /// A persisted rule (AP6), written only after a second gesture.
+    AllowAlways,
 }
 
 impl ApprovalOption {
@@ -226,6 +236,45 @@ pub struct ApprovalDecision {
     /// `allow_session` only: that candidate's rule text, exactly as shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule_text: Option<String>,
+    /// `allow_always` only: where the rule applies. The app sends only the choice; the daemon
+    /// computes the repository root itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<RuleScopeChoice>,
+}
+
+/// Where a persisted rule applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleScopeChoice {
+    Repo,
+    AllRepos,
+}
+
+/// A persisted rule (AP6), as the Rules list shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedRuleWire {
+    pub id: String,
+    pub rule_text: String,
+    pub summary: String,
+    pub kind: super::rules::CandidateKind,
+    pub scope: RuleScopeChoice,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    pub created_at_ms: u64,
+    pub created_from_request_id: String,
+    pub uses: u64,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inactive_reason: Option<String>,
+}
+
+/// A rules file that is off until the human reviews it. For display only: `rules_in_file`
+/// marks which rules would stay active (`active`) after Keep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulesQuarantineWire {
+    pub reason: String,
+    pub file_sha256: String,
+    pub rules_in_file: Vec<PersistedRuleWire>,
 }
 
 /// A rule the human may choose for a held request.
@@ -276,6 +325,8 @@ pub enum DecisionKind {
     AnswerQuestions,
     /// Allow this call and create the session rule `candidate_id` names.
     AllowSession,
+    /// Allow this call and write the persisted rule `candidate_id` names (AP6).
+    AllowAlways,
 }
 
 /// The verdict `approval_resolved` carries is the audit log's outcome name
@@ -295,6 +346,15 @@ pub enum AnswerRefusal {
     InvalidAnswer,
     /// An `allow_session` decision that names no candidate of the request, or text that differs.
     InvalidRule,
+    /// An `allow_always` decision the daemon will not write (the guard blocks the command,
+    /// the rule is too broad, or no scope was named). The request stays held.
+    RuleRefused,
+    /// The rules file could not be written. The request stays held.
+    RuleWriteFailed,
+    /// The rules file is quarantined: no new rule until the human reviews it.
+    RulesQuarantined,
+    /// [`crate::approvals::persisted::MAX_PERSISTED_RULES`] rules exist.
+    RuleLimit,
 }
 
 impl AnswerRefusal {
@@ -307,6 +367,10 @@ impl AnswerRefusal {
             Self::UnknownRequest => "unknown_request",
             Self::InvalidAnswer => "invalid_answer",
             Self::InvalidRule => "invalid_rule",
+            Self::RuleRefused => "rule_refused",
+            Self::RuleWriteFailed => "rule_write_failed",
+            Self::RulesQuarantined => "rules_quarantined",
+            Self::RuleLimit => "rule_limit",
         }
     }
 }

@@ -59,6 +59,12 @@ final class ApprovalRowStatusTextTests: XCTestCase {
         XCTAssertEqual(ApprovalRowStatus.forOutcome("allowed_by_your_rule", atMs: 1), .allowedByYourRule)
     }
 
+    func testAnAlwaysAllowOutcomeReadsAsApprovedByYouAndAYourRuleOutcomeAsYourRule() {
+        XCTAssertEqual(ApprovalRowStatus.forOutcome("allowed_always", atMs: 42), .approved(atMs: 42))
+        XCTAssertEqual(ApprovalRowStatus.forOutcome("allowed_by_your_rule", atMs: 42).text(timeZone: utc), "allowed by your rule")
+        XCTAssertFalse(ApprovalRowStatus.forOutcome("allowed_always", atMs: 42).isRefusal)
+    }
+
     func testWithdrawnAndCancelledOutcomesLeaveTheRowSayingNothing() {
         XCTAssertEqual(ApprovalRowStatus.forOutcome("withdrawn", atMs: 1), .withdrawn)
         XCTAssertEqual(ApprovalRowStatus.forOutcome("cancelled", atMs: 1), .withdrawn)

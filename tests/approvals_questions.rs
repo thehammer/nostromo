@@ -105,6 +105,7 @@ fn answer_questions(answers: Vec<QuestionAnswer>) -> ApprovalDecision {
         answers: Some(answers),
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -1133,6 +1134,7 @@ fn the_existing_decisions_still_serialise_without_an_answers_key() {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     };
     let deny = ApprovalDecision {
         kind: DecisionKind::Deny,
@@ -1140,6 +1142,7 @@ fn the_existing_decisions_still_serialise_without_an_answers_key() {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     };
     let stop = ApprovalDecision {
         kind: DecisionKind::DenyAndStop,
@@ -1147,6 +1150,7 @@ fn the_existing_decisions_still_serialise_without_an_answers_key() {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     };
 
     assert_eq!(json_of(&allow), r#"{"kind":"allow_once"}"#);
@@ -1247,6 +1251,7 @@ fn approval_answer_with_the_existing_decisions_has_no_answers_key_on_the_wire() 
                 answers: None,
                 candidate_id: None,
                 rule_text: None,
+                scope: None,
             },
             window_id: "win-1".into(),
             operator_nonce: Some("ab12".into()),
@@ -1262,6 +1267,7 @@ fn approval_answer_with_the_existing_decisions_has_no_answers_key_on_the_wire() 
                 answers: None,
                 candidate_id: None,
                 rule_text: None,
+                scope: None,
             },
             window_id: "win-1".into(),
             operator_nonce: Some("ab12".into()),
@@ -1277,6 +1283,7 @@ fn approval_answer_with_the_existing_decisions_has_no_answers_key_on_the_wire() 
                 answers: None,
                 candidate_id: None,
                 rule_text: None,
+                scope: None,
             },
             window_id: "win-2".into(),
             operator_nonce: None,
@@ -1292,6 +1299,7 @@ fn approval_answer_refused_with_invalid_answer_has_this_exact_wire_form() {
             request_id: "r1".into(),
             code: AnswerRefusal::InvalidAnswer,
             outcome: None,
+            reason: None,
         },
         r#"{"type":"approval_answer_refused","request_id":"r1","code":"invalid_answer"}"#,
     );
@@ -1423,6 +1431,7 @@ fn allow_once() -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -1433,6 +1442,7 @@ fn deny(note: Option<&str>) -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -1443,6 +1453,7 @@ fn deny_and_stop(note: Option<&str>) -> ApprovalDecision {
         answers: None,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     }
 }
 
@@ -1867,9 +1878,10 @@ async fn a_bash_request_is_offered_the_usual_options_and_never_answer_questions(
 
     let wire = rig.hold_bash("toolu_b").await;
 
-    // The usual four, then (AP4) `allow_session` for a plain command: nothing else.
+    // The usual four, then (AP4) `allow_session` and (AP6) `allow_always` for a plain command: nothing else.
     let mut expected = ApprovalOption::ALL.to_vec();
     expected.push(ApprovalOption::AllowSession);
+    expected.push(ApprovalOption::AllowAlways);
     assert_eq!(wire.options, expected);
     assert!(!wire.options.contains(&ApprovalOption::AnswerQuestions));
 }
@@ -1956,6 +1968,7 @@ async fn assert_refused_and_still_held(answers: Option<Vec<QuestionAnswer>>) {
         answers,
         candidate_id: None,
         rule_text: None,
+        scope: None,
     };
 
     let result = rig.broker.answer(&wire.request_id, &decision, "w", "app");
@@ -1970,6 +1983,7 @@ async fn assert_refused_and_still_held(answers: Option<Vec<QuestionAnswer>>) {
             request_id,
             code,
             outcome,
+            ..
         }) => {
             assert_eq!(
                 (request_id.as_str(), code, outcome),
@@ -2337,6 +2351,7 @@ async fn an_invalid_answer_after_the_request_ended_is_told_already_resolved_not_
             answers,
             candidate_id: None,
             rule_text: None,
+            scope: None,
         };
         assert_eq!(
             rig.broker.answer(&wire.request_id, &decision, "w", "app"),
@@ -2371,6 +2386,7 @@ async fn an_answer_for_an_id_no_request_ever_had_is_unknown_and_writes_nothing()
             answers,
             candidate_id: None,
             rule_text: None,
+            scope: None,
         };
         assert_eq!(
             rig.broker.answer("no-such-request", &decision, "w", "app"),
@@ -2537,6 +2553,7 @@ async fn deny_on_a_question_request_sends_the_usual_deny_words_and_ignores_any_a
         answers: Some(valid_answers()),
         candidate_id: None,
         rule_text: None,
+        scope: None,
     };
 
     assert_eq!(
@@ -2578,6 +2595,7 @@ async fn deny_and_stop_on_a_question_request_sends_the_usual_words_with_interrup
         answers: Some(valid_answers()),
         candidate_id: None,
         rule_text: None,
+        scope: None,
     };
 
     assert_eq!(
@@ -2793,6 +2811,7 @@ async fn the_only_allow_written_for_a_question_is_a_valid_answer_from_the_operat
                 answers: None,
                 candidate_id: None,
                 rule_text: None,
+                scope: None,
             },
         ),
         ("app", "empty answers", answer_questions(vec![])),
@@ -2839,6 +2858,7 @@ async fn the_only_allow_written_for_a_question_is_a_valid_answer_from_the_operat
                 answers: Some(valid_answers()),
                 candidate_id: Some("made-up".into()),
                 rule_text: Some("Bash(ls)".into()),
+                scope: None,
             },
         ),
         (
@@ -2850,6 +2870,7 @@ async fn the_only_allow_written_for_a_question_is_a_valid_answer_from_the_operat
                 answers: None,
                 candidate_id: None,
                 rule_text: None,
+                scope: None,
             },
         ),
     ];

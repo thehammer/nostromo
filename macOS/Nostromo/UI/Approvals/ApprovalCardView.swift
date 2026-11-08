@@ -166,6 +166,9 @@ struct ApprovalCardListing: Equatable {
     /// The candidate the person selected, and the panel text the card shows for it (additive; null when none).
     var sessionSelectedID: String?
     var sessionPanel: [String]?
+    /// AP6: whether the `This session ▾` menu offers `Always allow…`, and the confirmation panel's lines while it is open.
+    var alwaysOffered = false
+    var alwaysPanel: [String]?
 
     /// One candidate of the `This session` menu: the exact rule text and what the daemon says it covers.
     struct SessionRule: Equatable {
@@ -202,6 +205,8 @@ struct ApprovalCardListing: Equatable {
         }
         json["session_selected"] = sessionSelectedID ?? NSNull()
         json["session_panel"] = sessionPanel ?? NSNull()
+        json["always_offered"] = alwaysOffered
+        json["always_panel"] = alwaysPanel ?? NSNull()
         json["questions"] = questions.map { $0.map(\.jsonObject) } ?? NSNull()
         json["preview"] = preview
         json["command_count"] = commandCount ?? NSNull()
@@ -264,6 +269,28 @@ final class ApprovalCardView: NSView {
     private let sessionSummaryLabel = NSTextField(wrappingLabelWithString: "")
     private let sessionScopeLabel = NSTextField(wrappingLabelWithString: "")
     private let sessionOverridesLabel = NSTextField(wrappingLabelWithString: "")
+
+    // AP6: the `Always allow…` confirmation panel, inside the card (not a sheet). Opening and closing it
+    // is the only thing that changes the card's height.
+    /// The rule shown in the panel, and where it would apply; nil while the panel is closed. Changing either
+    /// pop-up restarts the confirm gate, so a fast double action cannot write a broader rule than the one last shown.
+    private(set) var alwaysCandidate: ApprovalSessionRuleCandidate?
+    private(set) var alwaysScope: ApprovalRuleScope = .repo
+    var alwaysIsOpen: Bool { alwaysCandidate != nil }
+    private let alwaysPanel = AlwaysPanelView()
+    private(set) var alwaysCandidatePopup: NSPopUpButton?
+    private(set) var alwaysScopePopup: NSPopUpButton?
+    private(set) var alwaysCopyButton: ApprovalButton?
+    private(set) var alwaysWriteButton: ApprovalButton?
+    private(set) var alwaysCancelButton: ApprovalButton?
+    private let alwaysDestinationLabel = NSTextField(wrappingLabelWithString: "")
+    private let alwaysAffectsLabel = NSTextField(wrappingLabelWithString: "")
+    private let alwaysSettingsLabel = NSTextField(wrappingLabelWithString: "")
+    private let alwaysRefusalLabel = NSTextField(wrappingLabelWithString: "")
+    private var alwaysGeneration = 0
+    /// Where `Copy rule` puts the rule text (a test supplies its own).
+    var pasteboard: NSPasteboard = .general
+    private let home = NSHomeDirectory()
 
     /// Asked to re-measure the card (its content changed height: the note row opened).
     var onNeedsLayout: (() -> Void)?
@@ -416,6 +443,10 @@ final class ApprovalCardView: NSView {
         guard entry.state != state else { return }
         state = entry.state
         clearSessionSelection()   // the request changed: a pick made for the old state does not carry over
+        switch entry.state {
+        case .inFlight, .notSent: break   // the panel stays, disabled, so a refusal is read where it was chosen
+        case .pending, .ended: closeAlwaysPanel()
+        }
         refresh()
     }
 
@@ -431,6 +462,17 @@ final class ApprovalCardView: NSView {
     /// Allow once needs holds (armed, the whole input shown, a verified display).
     var canAllowSession: Bool {
         state == .pending && selectedCandidate != nil && canAllow
+    }
+
+    /// `Always allow…` is offered: the daemon listed it with a candidate, and a repository root to scope it to.
+    var alwaysAvailable: Bool {
+        options.offersAllowAlways && PersistedRulesText.offersRepoScope(repoRoot: request.repoRoot)
+    }
+
+    /// `Write rule` can be pressed: the panel is open, the request is waiting, and everything Allow once
+    /// needs holds (armed, the whole input shown, a verified display).
+    var canWriteRule: Bool {
+        state == .pending && alwaysCandidate != nil && canAllow
     }
 
     /// What Allow once says: the reason it can't be pressed yet, or `Allow once`.
@@ -534,6 +576,8 @@ final class ApprovalCardView: NSView {
         }
         listing.sessionSelectedID = selectedCandidate?.id
         listing.sessionPanel = sessionPanelTexts
+        listing.alwaysOffered = alwaysAvailable
+        listing.alwaysPanel = alwaysPanelTexts
         return listing
     }
 
@@ -566,7 +610,7 @@ final class ApprovalCardView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { countdown.stop(); clearSessionSelection() } else { countdown.start() }
+        if window == nil { countdown.stop(); clearSessionSelection(); closeAlwaysPanel() } else { countdown.start() }
         startArming()
     }
 
@@ -627,6 +671,14 @@ final class ApprovalCardView: NSView {
             if candidate.id == selectedCandidate?.id { item.state = .on }
             menu.addItem(item)
         }
+        if alwaysAvailable {
+            // Step 1 of a persisted rule: choosing this only opens the confirmation panel. Nothing is sent.
+            if menu.numberOfItems > 0 { menu.addItem(.separator()) }
+            let always = NSMenuItem(title: "Always allow…", action: #selector(alwaysItemChosen(_:)), keyEquivalent: "")
+            always.target = self
+            always.toolTip = "Write a rule to Nostromo's own rules file. You confirm it in the next step."
+            menu.addItem(always)
+        }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
     }
 
@@ -644,6 +696,7 @@ final class ApprovalCardView: NSView {
         switch gesture.select(event: currentEvent(), control: control) {
         case .allowed:
             cardLog.notice("approval \(self.request.id, privacy: .public) allow_session rule picked by a user gesture (\(self.gesture.lastProvenance, privacy: .public))")
+            closeAlwaysPanel(clearingGesture: false)
             selectedCandidate = candidate
             selectionGeneration += 1
             let generation = selectionGeneration
@@ -699,6 +752,15 @@ final class ApprovalCardView: NSView {
         onNeedsLayout?()
     }
 
+    /// Drop a session pick's panel and button without touching the gesture (a newer `select` is recorded in it).
+    private func closeSessionPanelKeepingGesture() {
+        selectionGeneration += 1
+        guard selectedCandidate != nil else { return }
+        selectedCandidate = nil
+        for label in sessionLabels { label.isHidden = true }
+        sessionConfirmButton?.isHidden = true
+    }
+
     private var sessionLabels: [NSTextField] {
         [sessionRuleLabel, sessionSummaryLabel, sessionScopeLabel, sessionOverridesLabel]
     }
@@ -729,6 +791,219 @@ final class ApprovalCardView: NSView {
         refresh()
         needsLayout = true
         onNeedsLayout?()
+    }
+
+    // MARK: Always allow… (AP6)
+
+    /// Step 1: `Always allow…` chosen from the menu. This only opens the panel (the exact rule and
+    /// `This repository` preselected); nothing is sent.
+    @objc private func alwaysItemChosen(_ item: NSMenuItem) {
+        guard let button = sessionButton, state == .pending else { return }
+        openAlwaysPanel(control: button)
+    }
+
+    /// Step 1, by the gate. Returns whether the panel is now open.
+    @discardableResult
+    func openAlwaysPanel(control: NSView) -> Bool {
+        guard alwaysAvailable, state == .pending else { return false }
+        switch gesture.select(event: currentEvent(), control: control) {
+        case .allowed:
+            cardLog.notice("approval \(self.request.id, privacy: .public) allow_always panel opened by a user gesture (\(self.gesture.lastProvenance, privacy: .public))")
+            // The session pick goes away first: clearing it after `select` would also wipe the pick just recorded.
+            closeSessionPanelKeepingGesture()
+            let candidates = PersistedRulesText.orderedCandidates(options.alwaysRules)
+            guard let first = candidates.first else { return false }
+            alwaysCandidate = first
+            alwaysScope = .repo
+            populateAlwaysPopups(candidates)
+            armAlwaysExpiry()
+            showAlwaysPanel()
+            return true
+        case .refused(let refusal):
+            reportRefusal(refusal, control: "allow_always")
+            return false
+        }
+    }
+
+    private func populateAlwaysPopups(_ candidates: [ApprovalSessionRuleCandidate]) {
+        guard let candidatePopup = alwaysCandidatePopup, let scopePopup = alwaysScopePopup else { return }
+        candidatePopup.removeAllItems()
+        for c in candidates {
+            candidatePopup.addItem(withTitle: ApprovalDisplayModel.contextText(c.ruleText, keepingLineFeeds: false))
+            candidatePopup.lastItem?.representedObject = c.id
+            candidatePopup.lastItem?.toolTip = ApprovalDisplayModel.contextText(c.summary, keepingLineFeeds: false)
+        }
+        candidatePopup.selectItem(at: candidates.firstIndex(where: { $0.id == alwaysCandidate?.id }) ?? 0)
+        scopePopup.removeAllItems()
+        let scopes: [ApprovalRuleScope] = [.repo, .allRepos]
+        for scope in scopes {
+            scopePopup.addItem(withTitle: PersistedRulesText.scopeTitle(scope, repoRoot: request.repoRoot,
+                                                                         repoIsGit: request.repoIsGit, home: home))
+            scopePopup.lastItem?.representedObject = scope.rawValue
+        }
+        scopePopup.selectItem(at: alwaysScope == .repo ? 0 : 1)
+    }
+
+    /// The pick reverts after the same lifetime as a session pick.
+    private func armAlwaysExpiry() {
+        alwaysGeneration += 1
+        let generation = alwaysGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + SessionRuleGesture.selectionLifetime) { [weak self] in
+            guard let self, self.alwaysGeneration == generation else { return }
+            self.closeAlwaysPanel()
+        }
+    }
+
+    /// Either pop-up changed: that is a new choice, so the confirm gate starts over (a fresh `select`, which
+    /// the confirm must be at least 0.3 s after). A refused change puts the pop-up back.
+    @objc private func alwaysPopupChanged(_ sender: NSPopUpButton) {
+        guard alwaysCandidate != nil, state == .pending else { return }
+        _ = changeAlwaysChoice(from: sender)
+    }
+
+    /// Returns whether the change was accepted.
+    @discardableResult
+    func changeAlwaysChoice(from sender: NSPopUpButton) -> Bool {
+        switch gesture.select(event: currentEvent(), control: sender) {
+        case .allowed:
+            if sender === alwaysCandidatePopup,
+               let id = sender.selectedItem?.representedObject as? String,
+               let c = options.alwaysRules.first(where: { $0.id == id }) {
+                alwaysCandidate = c
+            } else if sender === alwaysScopePopup,
+                      let raw = sender.selectedItem?.representedObject as? String,
+                      let scope = ApprovalRuleScope(rawValue: raw) {
+                alwaysScope = scope
+            }
+            armAlwaysExpiry()
+            showAlwaysPanel()
+            return true
+        case .refused(let refusal):
+            // Put the pop-up back on what the panel last showed.
+            if sender === alwaysCandidatePopup {
+                sender.selectItem(at: PersistedRulesText.orderedCandidates(options.alwaysRules)
+                    .firstIndex(where: { $0.id == alwaysCandidate?.id }) ?? 0)
+            } else {
+                sender.selectItem(at: alwaysScope == .repo ? 0 : 1)
+            }
+            reportRefusal(refusal, control: "allow_always")
+            return false
+        }
+    }
+
+    /// `Copy rule`: puts `Bash(…)` on the pasteboard for the user's own settings. Nostromo writes nothing there.
+    @objc private func copyRulePressed(_ sender: ApprovalButton) {
+        guard let candidate = alwaysCandidate else { return }
+        pasteboard.clearContents()
+        pasteboard.setString(PersistedRulesText.copyText(for: candidate), forType: .string)
+    }
+
+    @objc private func cancelAlwaysPressed(_ sender: ApprovalButton) { closeAlwaysPanel() }
+
+    /// Step 2: `Write rule`, a distinct gesture at least 0.3 s after the last choice. Sends one `allow_always`
+    /// naming the rule and scope shown, or nothing.
+    @objc private func writeRulePressed(_ sender: ApprovalButton) { _ = writeRule(from: sender) }
+
+    @discardableResult
+    func writeRule(from sender: NSView) -> Bool {
+        // Disabled controls don't fire, but the rule is checked where it matters.
+        guard canWriteRule, let candidate = alwaysCandidate else { return false }
+        switch gesture.confirm(event: currentEvent(), button: sender) {
+        case .allowed:
+            cardLog.notice("approval \(self.request.id, privacy: .public) allow_always confirmed by a user gesture (\(self.gesture.lastProvenance, privacy: .public))")
+            submit(ApprovalDecisionWire(kind: .allowAlways, candidateId: candidate.id, ruleText: candidate.ruleText,
+                                        scope: alwaysScope))
+            return true
+        case .refused(let refusal):
+            cardLog.notice("allow_always refused: \(String(describing: refusal), privacy: .public) on approval \(self.request.id, privacy: .public)")
+            reportRefusal(refusal, control: "allow_always")
+            return false
+        }
+    }
+
+    /// Close the panel and drop the pick.
+    func closeAlwaysPanel(clearingGesture: Bool = true) {
+        alwaysGeneration += 1
+        guard alwaysCandidate != nil else { return }
+        if clearingGesture { gesture.clear() }
+        alwaysCandidate = nil
+        alwaysScope = .repo
+        alwaysPanel.isHidden = true
+        refresh()
+        needsLayout = true
+        onNeedsLayout?()
+    }
+
+    private func showAlwaysPanel() {
+        guard let candidate = alwaysCandidate else { return }
+        let scopeText = PersistedRulesText.scopeDescription(alwaysScope, repoRoot: request.repoRoot, home: home)
+        alwaysDestinationLabel.stringValue = PersistedRulesText.destinationLine
+        alwaysAffectsLabel.stringValue = PersistedRulesText.affectsLine(scopeDescription: scopeText)
+        alwaysSettingsLabel.stringValue = PersistedRulesText.settingsUnchangedLine
+        alwaysCandidatePopup?.toolTip = ApprovalDisplayModel.contextText(candidate.summary, keepingLineFeeds: false)
+        alwaysPanel.isHidden = false
+        refresh()
+        needsLayout = true
+        onNeedsLayout?()
+    }
+
+    /// A refusal by `HumanGesture.permit` is reported to the daemon, which logs it; the others change nothing.
+    private func reportRefusal(_ refusal: SessionRuleGesture.Refusal, control: String) {
+        guard case .notHuman(let reason) = refusal else { return }
+        let channel: ApprovalRefusalChannel
+        switch reason {
+        case .appControl: channel = .appControl
+        case .accessibilityPress: channel = .accessibility
+        default: channel = .unknown
+        }
+        store.reportRefusal(requestId: request.id, control: control, channel: channel)
+    }
+
+    /// The panel's lines as shown, top to bottom, while it is open.
+    private var alwaysPanelTexts: [String]? {
+        guard let candidate = alwaysCandidate else { return nil }
+        var lines = [candidate.ruleText, alwaysDestinationLabel.stringValue,
+                     PersistedRulesText.scopeTitle(alwaysScope, repoRoot: request.repoRoot,
+                                                   repoIsGit: request.repoIsGit, home: home),
+                     alwaysAffectsLabel.stringValue, alwaysSettingsLabel.stringValue]
+        if !alwaysRefusalLabel.isHidden { lines.append(alwaysRefusalLabel.stringValue) }
+        return lines
+    }
+
+    /// Lay the panel's contents out for `width`; with `apply` set their frames. Returns its height.
+    @discardableResult
+    private func layoutAlwaysPanel(width: CGFloat, apply: Bool) -> CGFloat {
+        let gap: CGFloat = 4
+        var y: CGFloat = 0
+        func label(_ l: NSTextField) {
+            let h = wrappedHeight(l, width: width)
+            if apply { l.frame = NSRect(x: 0, y: y, width: width, height: h) }
+            y += h + gap
+        }
+        func popup(_ p: NSPopUpButton?) {
+            if apply { p?.frame = NSRect(x: 0, y: y, width: width, height: 22) }
+            y += 22 + gap
+        }
+        popup(alwaysCandidatePopup)
+        label(alwaysDestinationLabel)
+        popup(alwaysScopePopup)
+        label(alwaysAffectsLabel)
+        label(alwaysSettingsLabel)
+        if !alwaysRefusalLabel.isHidden { label(alwaysRefusalLabel) }
+        y += 2
+        if apply {
+            var x: CGFloat = 0
+            for b in [alwaysCopyButton, alwaysCancelButton] {
+                guard let b else { continue }
+                let w: CGFloat = b === alwaysCopyButton ? 84 : 64
+                b.frame = NSRect(x: x, y: y, width: w, height: Self.buttonHeight)
+                x += w + 8
+            }
+            let w = min(Self.allowButtonWidth, width)
+            alwaysWriteButton?.frame = NSRect(x: width - w, y: y, width: w, height: Self.buttonHeight)
+        }
+        y += Self.buttonHeight
+        return y
     }
 
     @objc private func detailsPressed(_ sender: ApprovalButton) {
@@ -956,7 +1231,8 @@ final class ApprovalCardView: NSView {
                                      tip: "Run this one call only.")
             allowButton?.lineBreakMode = .byTruncatingTail
         }
-        if options.offersAllowSession {
+        if alwaysAvailable { buildAlwaysPanel() }
+        if options.offersAllowSession || alwaysAvailable {
             let pop = ApprovalButton(title: "This session ▾", target: self, action: #selector(showSessionMenu(_:)))
             configure(pop, id: "session_menu", action: #selector(showSessionMenu(_:)))
             pop.title = "This session ▾"
@@ -980,10 +1256,12 @@ final class ApprovalCardView: NSView {
 
         for v in [headlineLabel, pageLabel, pagePreviousButton, pageNextButton, collapseButton, countdown.label, whyLabel, inLabel, bannerLabel, countLabel,
                   formScroll, inputView, previewView, agentSaysLabel, noticeLabel, noteRow,
-                  sessionRuleLabel, sessionSummaryLabel, sessionScopeLabel, sessionOverridesLabel, statusLabel, buttonRow] {
+                  sessionRuleLabel, sessionSummaryLabel, sessionScopeLabel, sessionOverridesLabel, alwaysPanel,
+                  statusLabel, buttonRow] {
             v.translatesAutoresizingMaskIntoConstraints = true
             addSubview(v)
         }
+        alwaysPanel.isHidden = true   // opened only by `Always allow…`
         formScroll.isHidden = questionForm == nil
         configureKeyLoop()
         applyDetails()
@@ -1002,6 +1280,11 @@ final class ApprovalCardView: NSView {
         if let b = sessionButton { ring.append(b) }
         if let b = allowButton { ring.append(b) }
         if let b = sessionConfirmButton { ring.append(b) }
+        if let b = alwaysCandidatePopup { ring.append(b) }
+        if let b = alwaysScopePopup { ring.append(b) }
+        if let b = alwaysCopyButton { ring.append(b) }
+        if let b = alwaysWriteButton { ring.append(b) }
+        if let b = alwaysCancelButton { ring.append(b) }
         if let b = submitButton { ring.append(b) }
         ring.append(collapseButton)
         for (i, view) in ring.enumerated() { view.nextKeyView = ring[(i + 1) % ring.count] }
@@ -1025,6 +1308,54 @@ final class ApprovalCardView: NSView {
         refresh()
         needsLayout = true
         onNeedsLayout?()
+    }
+
+    /// The `Always allow…` panel's controls, all inside `alwaysPanel` (hidden until the panel is opened).
+    private func buildAlwaysPanel() {
+        let candidatePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        candidatePopup.target = self
+        candidatePopup.action = #selector(alwaysPopupChanged(_:))
+        candidatePopup.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
+        candidatePopup.setAccessibilityLabel("Rule to write")
+        let scopePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        scopePopup.target = self
+        scopePopup.action = #selector(alwaysPopupChanged(_:))
+        scopePopup.font = .systemFont(ofSize: 11)
+        scopePopup.setAccessibilityLabel("Where the rule applies")
+        func button(_ title: String, _ action: Selector, id: String, label: String, tip: String) -> ApprovalButton {
+            let b = ApprovalButton(title: title, target: self, action: action)
+            configure(b, id: id, action: action)
+            b.title = title
+            b.setAccessibilityLabel(label)
+            b.toolTip = tip
+            return b
+        }
+        let copy = button("Copy rule", #selector(copyRulePressed(_:)), id: "allow_always_copy",
+                          label: "Copy the rule", tip: "Copy the rule so you can add it to your own settings. Nostromo writes nothing there.")
+        let write = button("Write rule", #selector(writeRulePressed(_:)), id: "allow_always_write",
+                           label: "Write rule", tip: "Write this rule to Nostromo's rules file and allow this call.")
+        let cancel = button("Cancel", #selector(cancelAlwaysPressed(_:)), id: "allow_always_cancel",
+                            label: "Cancel", tip: "Close this panel. Nothing is written.")
+        for label in [alwaysDestinationLabel, alwaysAffectsLabel, alwaysSettingsLabel, alwaysRefusalLabel] {
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = ApprovalPalette.mutedText
+            label.maximumNumberOfLines = 0
+            label.lineBreakMode = .byWordWrapping
+            label.isSelectable = true
+        }
+        alwaysAffectsLabel.textColor = ApprovalPalette.warning
+        alwaysRefusalLabel.textColor = ApprovalPalette.warning
+        alwaysRefusalLabel.isHidden = true
+        for v in [candidatePopup, scopePopup, alwaysDestinationLabel, alwaysAffectsLabel, alwaysSettingsLabel,
+                  alwaysRefusalLabel, copy, write, cancel] as [NSView] {
+            alwaysPanel.addSubview(v)
+        }
+        alwaysCandidatePopup = candidatePopup
+        alwaysScopePopup = scopePopup
+        alwaysCopyButton = copy
+        alwaysWriteButton = write
+        alwaysCancelButton = cancel
+        alwaysPanel.isHidden = true
     }
 
     /// `Allow for this session`: in the card's own rows (not the button row), hidden until a rule is selected.
@@ -1098,6 +1429,20 @@ final class ApprovalCardView: NSView {
         sessionButton?.isEnabled = pending
         sessionConfirmButton?.isEnabled = canAllowSession
         sessionConfirmButton?.setAccessibilityHelp(canAllowSession ? nil : "Scroll the input to its end before allowing")
+        alwaysWriteButton?.isEnabled = canWriteRule
+        alwaysWriteButton?.setAccessibilityHelp(canWriteRule ? nil : "Scroll the input to its end before allowing")
+        alwaysCopyButton?.isEnabled = alwaysCandidate != nil
+        alwaysCancelButton?.isEnabled = alwaysCandidate != nil && state == .pending
+        alwaysCandidatePopup?.isEnabled = state == .pending
+        alwaysScopePopup?.isEnabled = state == .pending
+        // A refused `Write rule` says why where it was chosen; Deny stays available (a refused answer never locks it).
+        if alwaysCandidate != nil, case .notSent(let text) = state {
+            alwaysRefusalLabel.stringValue = text
+            alwaysRefusalLabel.isHidden = false
+        } else {
+            alwaysRefusalLabel.stringValue = ""
+            alwaysRefusalLabel.isHidden = true
+        }
         submitButton?.isEnabled = canSubmit
         submitButton?.setAccessibilityHelp(canSubmit ? nil : "Answer every question to submit")
         questionForm?.isEnabled = pending
@@ -1116,6 +1461,7 @@ final class ApprovalCardView: NSView {
             switch kind {
             case .allowOnce: statusLabel.stringValue = "Allowing…"
             case .allowSession: statusLabel.stringValue = "Allowing for this session…"
+            case .allowAlways: statusLabel.stringValue = "Allowing, and writing the rule…"
             case .answerQuestions: statusLabel.stringValue = "Sending answers…"
             default: statusLabel.stringValue = "Denying…"
             }
@@ -1253,6 +1599,9 @@ final class ApprovalCardView: NSView {
             let w = min(Self.allowButtonWidth, inner)
             place(confirm, height: Self.buttonHeight, x: pad + inner - w, width: w)
         }
+        if alwaysIsOpen {
+            place(alwaysPanel, height: layoutAlwaysPanel(width: inner, apply: apply))
+        }
         if !noteRow.isHidden {
             if apply { layoutNoteRow(width: inner) }
             place(noteRow, height: 24)
@@ -1298,4 +1647,10 @@ final class ApprovalCardView: NSView {
             submit.frame = NSRect(x: width - w, y: 0, width: w, height: Self.buttonHeight)
         }
     }
+}
+
+
+/// The container of the `Always allow…` panel: top-down, like the card.
+private final class AlwaysPanelView: NSView {
+    override var isFlipped: Bool { true }
 }

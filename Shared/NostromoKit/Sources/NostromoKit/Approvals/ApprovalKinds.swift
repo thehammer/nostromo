@@ -6,8 +6,9 @@
 //
 // Rules, from the PRD's "Kinds of request with narrower options":
 //   * Allow once, Deny and Deny & stop are the menu, plus (AP4) "This session" only when the
-//     daemon listed `allow_session` AND sent at least one candidate that decodes. There is no
-//     "always" option here (AP6).
+//     daemon listed `allow_session` AND sent at least one candidate that decodes. "Always allow…"
+//     (AP6, a persisted rule) is offered, inside that menu, only when the daemon listed
+//     `allow_always` AND sent at least one candidate that decodes; it is never a button of its own.
 //   * `requires_user_interaction`: Deny only, plus the explanation. The exception
 //     (AP2c) is an `AskUserQuestion` request the daemon lists as answerable: Deny
 //     and the answer form's Submit.
@@ -55,12 +56,27 @@ public struct ApprovalCardOptions: Equatable {
     /// `allow_once`) and sent a candidate for; never for a safety check, a settings write, or a request
     /// that asked for no always-allow rule. The daemon already withholds all of these: this repeats it.
     private static func mayOfferAllowSession(_ request: ApprovalRequestWire, listed: Set<ApprovalOption>) -> Bool {
-        listed.contains(.allowSession) && listed.contains(.allowOnce)
+        listed.contains(.allowSession) && mayOfferRule(request, listed: listed)
+    }
+
+    private static func mayOfferAllowAlways(_ request: ApprovalRequestWire, listed: Set<ApprovalOption>) -> Bool {
+        listed.contains(.allowAlways) && mayOfferRule(request, listed: listed)
+    }
+
+    private static func mayOfferRule(_ request: ApprovalRequestWire, listed: Set<ApprovalOption>) -> Bool {
+        listed.contains(.allowOnce)
             && !request.sessionRuleCandidates.isEmpty
             && request.toolKind == .bash
             && !request.flags.suppressAlwaysAllowRule
             && request.reason.kind != .safetyCheck && request.reason.kind != .settingsWrite
     }
+
+    /// The rules the human may choose to persist ("Always allow…"): set only when the daemon listed
+    /// `allow_always`, the request is a plain Bash one it may be offered for, and a candidate decoded.
+    public let alwaysRules: [ApprovalSessionRuleCandidate]
+
+    /// "Always allow…" is offered in the "This session" menu.
+    public var offersAllowAlways: Bool { !alwaysRules.isEmpty }
 
     public var offersAllowOnce: Bool { controls.contains(.allowOnce) }
     public var offersAllowSession: Bool { controls.contains(.allowSession) }
@@ -71,6 +87,7 @@ public struct ApprovalCardOptions: Equatable {
             ? ApprovalQuestions.parse(request.input) : nil
         let interactionOnly = request.flags.requiresUserInteraction && questions == nil
         var controls: [ApprovalControl] = [.deny]
+        var offersAlways = false
         if questions != nil {
             controls.append(.answerQuestions)
         } else if !interactionOnly {
@@ -78,7 +95,9 @@ public struct ApprovalCardOptions: Equatable {
             if listed.contains(.denyAndStop) { controls.append(.denyAndStop) }
             if listed.contains(.allowOnce) { controls.append(.allowOnce) }
             if Self.mayOfferAllowSession(request, listed: listed) { controls.append(.allowSession) }
+            offersAlways = Self.mayOfferAllowAlways(request, listed: listed)
         }
+        self.alwaysRules = offersAlways ? request.sessionRuleCandidates : []
         self.sessionRules = controls.contains(.allowSession) ? request.sessionRuleCandidates : []
         self.controls = controls
         self.questions = questions

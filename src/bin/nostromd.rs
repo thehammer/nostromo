@@ -153,6 +153,9 @@ async fn main() -> Result<()> {
     // log was pending when the last daemon died; it ends as `restart_crash` before
     // any session can start. Without a broker (the directory can't be made) the
     // sessions' readers deny every request themselves.
+    // Kept alive for the daemon's lifetime: it quarantines `rules.json` if anything but
+    // the daemon changes it.
+    let mut _rules_watcher = None;
     match nostromo::approvals::broker::ApprovalBroker::open(
         &nostromo::approvals::ApprovalsPaths::resolve(),
     ) {
@@ -168,6 +171,24 @@ async fn main() -> Result<()> {
             }
             if let Err(e) = broker.sweep(now) {
                 warn!("approval log sweep failed: {e}");
+            }
+            // The persisted "Always allow…" rules (AP6): load, check the hash, revalidate.
+            if let Some(report) = broker.attach_rules_store() {
+                match &report.quarantined {
+                    Some((reason, _)) => warn!(
+                        reason,
+                        "the rules file failed its checks: persisted rules are off until reviewed"
+                    ),
+                    None => info!(
+                        active = report.active,
+                        inactive = report.inactive,
+                        "persisted approval rules loaded"
+                    ),
+                }
+            }
+            match broker.start_rules_watcher() {
+                Ok(w) => _rules_watcher = Some(w),
+                Err(e) => warn!("cannot watch the rules file: {e}"),
             }
             session_mgr.lock().unwrap().configure_approvals(broker);
         }
