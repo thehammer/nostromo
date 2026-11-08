@@ -54,8 +54,9 @@ pub enum Scope {
         root: PathBuf,
     },
     AllRepos,
-    /// `AllRepos` from a file the human kept after it was changed outside the daemon. Off until
-    /// the human confirms "applies to all repositories" again ([`RulesStore::confirm_all_repos`]).
+    /// `AllRepos` from a file the human kept after it was changed outside the daemon. Off for
+    /// good: an all-repositories rule is only ever made live from an approval card, so the human
+    /// removes it from the rules list and creates it again from a card if it is still wanted.
     AllReposUnconfirmed,
 }
 
@@ -640,39 +641,6 @@ impl RulesStore {
             return Err(ChangeError::Write(e));
         }
         Ok(Self::report(&inner))
-    }
-
-    /// The human confirmed, from the rules list, that rule `id` applies to all repositories.
-    /// `Ok(false)`: there is no such unconfirmed rule.
-    pub fn confirm_all_repos(&self, id: &str) -> Result<bool, ChangeError> {
-        let mut inner = lock(&self.inner);
-        if inner.quarantine.is_some() {
-            return Err(ChangeError::Quarantined);
-        }
-        let Some(stored) = inner
-            .rules
-            .iter_mut()
-            .find(|r| r.rule.id == id && r.rule.scope == Scope::AllReposUnconfirmed)
-        else {
-            return Ok(false);
-        };
-        // Only the scope held it off, unless its spec failed the check too.
-        let was_off = stored.inactive;
-        stored.rule.scope = Scope::AllRepos;
-        if was_off == Some(Inactive::ScopeUnconfirmed) {
-            stored.inactive = None;
-        }
-        if let Err(e) = self.write_locked(&mut inner) {
-            let stored = inner
-                .rules
-                .iter_mut()
-                .find(|r| r.rule.id == id)
-                .expect("found");
-            stored.rule.scope = Scope::AllReposUnconfirmed;
-            stored.inactive = was_off;
-            return Err(ChangeError::Write(e));
-        }
-        Ok(true)
     }
 
     /// Discard the quarantined file: replace it with an empty rule set.
@@ -1283,12 +1251,11 @@ mod tests {
                     rules[0].inactive_reason.as_deref(),
                     Some("scope_unconfirmed")
                 );
-                // The human confirms from the list: now it is live, and stays so.
-                assert!(reopened.confirm_all_repos("r1").unwrap());
-                assert!(matches(&reopened, &w, &w.dir));
+                // There is no way to switch it back on from the list: it stays off after
+                // another restart (remove it and create it again from a card).
                 let (again, report) = open(&w);
-                assert_eq!(report.active, 1);
-                assert!(matches(&again, &w, &w.dir));
+                assert_eq!(report.active, 0);
+                assert!(!matches(&again, &w, &w.dir));
             }
         }
     }
