@@ -2212,6 +2212,7 @@ extension TaskOutputModelTests {
         XCTAssertEqual(model.text, visible((Int(Self.window) / 64)..<farBehindTotalLines), "the last 48 KiB")
     }
 
+    // Mutation-checked: removing `isRefreshing = false` at the top of `tailArrived` fails this test
     func testAnUnansweredTailReloadStopsBeingBusyWhenItsRequestTimesOut() throws {
         let rig = TaskOutputRig()
         let model = open(rig, lines: farBehindLines, windowBytes: Self.window, readBytes: Self.farRead)
@@ -2252,6 +2253,7 @@ extension TaskOutputModelTests {
         XCTAssertNil(rig.daemon.reads.last?.offset, "premise: the reload asks for the tail")
     }
 
+    // Mutation-checked: removing `isFillingHead = false` in `loadTail` fails this test (see the PR table)
     func testAReloadThatFailsAfterTheHeadFetchItReplacedWasDroppedLeavesTheOutputNotLoading() throws {
         let rig = TaskOutputRig()
         let model = openWithHeadFetchOut(rig)
@@ -2266,6 +2268,7 @@ extension TaskOutputModelTests {
         XCTAssertNotEqual(model.stateName, "loading", "the output must not read as loading for ever")
     }
 
+    // Mutation-checked: removing the `loadGeneration == generation` guard in `fetchHeadChunk` fails this test
     func testAStaleHeadFetchAnsweringAfterTheReloadLandedDoesNotEndTheBusyStateOfTheNewHeadFetch() throws {
         let rig = TaskOutputRig()
         let model = openWithHeadFetchOut(rig)
