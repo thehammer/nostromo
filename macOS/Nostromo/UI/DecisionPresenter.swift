@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import NostromoKit
 
 /// The single app-wide AppKit adapter for decision-modal presentation.
 ///
