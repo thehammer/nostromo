@@ -56,21 +56,42 @@ public struct TrackerFoldState: Equatable {
 
 /// One entry of the "Waiting on you" strip.
 public struct TrackerWaitingEntry: Equatable {
-    /// Unique across sources (`item:<id>` for a tracker item).
+    /// What a click on the entry goes to. Content-free: an id or a tag, never text from a request.
+    public enum Target: Equatable {
+        /// Nothing to go to (a source that only informs).
+        case none
+        /// A board item (a `needs-you` item or a staged command): the pane scrolls to it.
+        case boardItem(String)
+        /// A pending `nostromo_ask_decision` request: its sheet.
+        case decision(String)
+        /// The focus's pending approvals: select the focus and show its card.
+        case approvals(String)
+        /// A failed background task: the background popover.
+        case backgroundTask(String)
+    }
+
+    /// Unique across sources (`item:<id>` for a tracker item). Two sources that name the same
+    /// item share its key, so it is listed once.
     public let key: String
     public let text: String
     /// Where it comes from, shown muted (the section title for a tracker item).
     public let detail: String?
+    public let target: Target
+    /// How much of the strip's count it stands for: 1, except the approvals entry, which is one
+    /// row for however many requests wait (so the count matches the sidebar pill).
+    public let weight: Int
 
-    public init(key: String, text: String, detail: String?) {
+    public init(key: String, text: String, detail: String?, target: Target = .none, weight: Int = 1) {
         self.key = key
         self.text = text
         self.detail = detail
+        self.target = target
+        self.weight = weight
     }
 }
 
-/// Something that can put entries in the strip. T1 has one source (the board's `needs-you`
-/// items); later slices add pending decisions and background work as further conformers.
+/// Something that can put entries in the strip: the board's `needs-you` items, its un-run staged
+/// commands, the focus's pending decisions and approvals, and its failed background tasks.
 public protocol TrackerWaitingSource {
     func waitingEntries(board: TrackerBoardViewWire) -> [TrackerWaitingEntry]
 }
@@ -89,12 +110,164 @@ public struct TrackerNeedsYouSource: TrackerWaitingSource {
             case .item(let item) where item.status == .needsYou:
                 entries.append(TrackerWaitingEntry(key: "item:\(item.id)",
                                                    text: TrackerText.plain(item.textSpans),
-                                                   detail: titles[item.section]))
+                                                   detail: titles[item.section],
+                                                   target: .boardItem(item.id)))
             default:
                 break
             }
         }
         return entries
+    }
+}
+
+/// Staged commands the user has not ticked "Ran it" on (`kind == command && !ran`), in file order.
+/// Reads the board data only; it does not depend on how the pane draws a command.
+public struct TrackerUnrunCommandSource: TrackerWaitingSource {
+    public init() {}
+
+    public func waitingEntries(board: TrackerBoardViewWire) -> [TrackerWaitingEntry] {
+        var titles: [String: String] = [:]
+        var entries: [TrackerWaitingEntry] = []
+        for node in board.nodes {
+            switch node {
+            case .section(let id, let title, _):
+                titles[id] = title
+            case .item(let item) where item.kind == .command && !item.ran && item.status != .done:
+                entries.append(TrackerWaitingEntry(key: "item:\(item.id)",
+                                                   text: TrackerText.plain(item.textSpans),
+                                                   detail: titles[item.section],
+                                                   target: .boardItem(item.id)))
+            default:
+                break
+            }
+        }
+        return entries
+    }
+}
+
+/// A pending decision as the strip shows it: the request and a one-line summary.
+public struct TrackerDecisionSummary: Equatable {
+    public let requestId: String
+    public let text: String
+
+    public init(requestId: String, text: String) {
+        self.requestId = requestId
+        self.text = text
+    }
+}
+
+/// The focus's pending `nostromo_ask_decision` requests, in the order given (oldest first).
+public struct TrackerDecisionSource: TrackerWaitingSource {
+    private let decisions: [TrackerDecisionSummary]
+
+    public init(decisions: [TrackerDecisionSummary]) { self.decisions = decisions }
+
+    public func waitingEntries(board: TrackerBoardViewWire) -> [TrackerWaitingEntry] {
+        decisions.map {
+            TrackerWaitingEntry(key: "decision:\($0.requestId)", text: $0.text, detail: "Decision",
+                                target: .decision($0.requestId))
+        }
+    }
+}
+
+/// The focus's pending approvals: one entry with the count and a link to the card, and never a
+/// word of any request's tool or input.
+public struct TrackerApprovalsSource: TrackerWaitingSource {
+    private let tag: String
+    private let pendingCount: Int
+
+    public init(tag: String, pendingCount: Int) {
+        self.tag = tag
+        self.pendingCount = pendingCount
+    }
+
+    public func waitingEntries(board: TrackerBoardViewWire) -> [TrackerWaitingEntry] {
+        guard pendingCount > 0 else { return [] }
+        let text = pendingCount == 1 ? "1 approval waiting" : "\(pendingCount) approvals waiting"
+        return [TrackerWaitingEntry(key: "approvals", text: text, detail: "Approvals",
+                                    target: .approvals(tag), weight: pendingCount)]
+    }
+}
+
+/// Background tasks whose last state is `failed` and which the user has not seen yet (the popover
+/// was not opened since they ended: BA's own "seen" rule, so a task leaves here when it leaves the
+/// chip). Newest failure first. It lists the tasks, never counts them: the numbers shown for
+/// background work come from BA's chip (`TrackerBackgroundSummary`).
+public struct TrackerFailedTaskSource: TrackerWaitingSource {
+    private let tasks: [TaskMetaWire]
+    private let seenEndedAtMs: UInt64?
+
+    public init(tasks: [TaskMetaWire], seenEndedAtMs: UInt64?) {
+        self.tasks = tasks
+        self.seenEndedAtMs = seenEndedAtMs
+    }
+
+    public func waitingEntries(board: TrackerBoardViewWire) -> [TrackerWaitingEntry] {
+        var latest: [String: TaskMetaWire] = [:]   // a later entry with the same id wins, as in BA's list
+        for task in tasks { latest[task.id] = task }
+        let failed = latest.values.filter { task in
+            BackgroundTaskList.isListed(task) && !task.housekeeping && task.status == .failed
+                && (seenEndedAtMs.map { (task.endedAtMs ?? 0) > $0 } ?? true)
+        }
+        return failed
+            .sorted { ($0.endedAtMs ?? 0, $1.id) > ($1.endedAtMs ?? 0, $0.id) }
+            .map { task in
+                TrackerWaitingEntry(key: "task:\(task.id)", text: BackgroundTaskList.title(task),
+                                    detail: "Background task failed", target: .backgroundTask(task.id))
+            }
+    }
+}
+
+/// The strip's sources in the order the strip lists them: approvals, decisions, un-run commands,
+/// `needs-you` items, failed background tasks.
+public enum TrackerWaitingSources {
+    public static func make(tag: String,
+                            approvalsPending: Int,
+                            decisions: [TrackerDecisionSummary],
+                            tasks: [TaskMetaWire],
+                            seenEndedAtMs: UInt64?) -> [TrackerWaitingSource] {
+        [TrackerApprovalsSource(tag: tag, pendingCount: approvalsPending),
+         TrackerDecisionSource(decisions: decisions),
+         TrackerUnrunCommandSource(),
+         TrackerNeedsYouSource(),
+         TrackerFailedTaskSource(tasks: tasks, seenEndedAtMs: seenEndedAtMs)]
+    }
+}
+
+/// The one line under the strip for background work: BA's chip text, and nothing counted here.
+/// Hidden when the chip is hidden. It tracks the chip because it is built from it.
+public struct TrackerBackgroundSummary: Equatable {
+    public let chip: BackgroundChipState
+
+    public init(chip: BackgroundChipState) { self.chip = chip }
+
+    public init(list: BackgroundTaskList) { self.init(chip: list.chip) }
+
+    public var isHidden: Bool { chip == .hidden }
+
+    /// `◷ 2 running in the background`, `✕ 1 failed in the background`; nil when hidden.
+    public var text: String? { chip.text.map { "\($0) in the background" } }
+
+    public var accessibilityLabel: String? { chip.accessibilityLabel }
+}
+
+/// A tracker producer for the app-wide "needs you" source (`NeedsYou.swift`): the board's waiting
+/// items as one content-free item each, with no tracker text (a surface shows the reason only).
+public enum TrackerNeedsYouProducer {
+    public static let name = "tracker"
+
+    /// The `needs-you` board items and un-run commands only. Decisions, approvals and background
+    /// tasks already have their own producers (`decisions`, `approvals`); listing them here would
+    /// count them twice.
+    public static func items(tag: String, board: TrackerBoardViewWire) -> [NeedsYouItem] {
+        var seen = Set<String>()
+        var out: [NeedsYouItem] = []
+        let entries = TrackerUnrunCommandSource().waitingEntries(board: board)
+            + TrackerNeedsYouSource().waitingEntries(board: board)
+        for entry in entries where seen.insert(entry.key).inserted {
+            out.append(NeedsYouItem(id: "\(name):\(tag):\(entry.key)", source: .focus(tag), reason: .trackerWaiting))
+        }
+        return out
     }
 }
 
@@ -124,9 +297,10 @@ public struct TrackerStrip: Equatable {
     public static let key = "strip"
     public let entries: [TrackerWaitingEntry]
     public init(entries: [TrackerWaitingEntry]) { self.entries = entries }
-    public var count: Int { entries.count }
+    /// The sum of the entries' weights (one each, except approvals).
+    public var count: Int { entries.reduce(0) { $0 + $1.weight } }
     /// "Waiting on you (N)".
-    public var title: String { "Waiting on you (\(entries.count))" }
+    public var title: String { "Waiting on you (\(count))" }
 }
 
 public struct TrackerSectionRow: Equatable {
@@ -317,12 +491,19 @@ public enum TrackerPresenter {
         return TrackerPresentation(
             header: header,
             banner: board.banner.flatMap { banner(for: $0, path: board.path, now: now, timeZone: timeZone) },
-            strip: TrackerStrip(entries: sources.flatMap { $0.waitingEntries(board: board) }),
+            strip: TrackerStrip(entries: uniqued(sources.flatMap { $0.waitingEntries(board: board) })),
             rows: builder.rows,
             filter: filter,
             foldedItems: builder.folded,
             hiddenItems: builder.hidden,
             hiddenByUser: board.hiddenByUser)
+    }
+
+    /// The first entry for each key: an item two sources name (a staged command marked needs-you)
+    /// is listed once.
+    private static func uniqued(_ entries: [TrackerWaitingEntry]) -> [TrackerWaitingEntry] {
+        var seen = Set<String>()
+        return entries.filter { seen.insert($0.key).inserted }
     }
 
     /// "Can't read index.md (line 42: duplicate item id). Showing the version from 10:42" and

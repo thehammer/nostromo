@@ -742,6 +742,7 @@ class AppStore: ObservableObject {
         TranscriptFoldStore.shared.removeFocus(tag: tag)
         TranscriptDiagnostics.forgetTag(tag)
         TrackerStore.shared.forget(tag: tag)
+        TrackerNeedsYouBadges.live?.refresh()
         BackgroundTaskStore.shared.forget(tag: tag)
         TaskWindowManager.shared.closeWindows(forFocus: tag)
     }

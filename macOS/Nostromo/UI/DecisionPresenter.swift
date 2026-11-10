@@ -61,6 +61,27 @@ final class DecisionPresenter {
 
     private init() {}
 
+    /// The focus's requests still waiting on the operator, oldest first, one line each.
+    func pendingDecisions(tag: String) -> [TrackerDecisionSummary] {
+        coordinator.pendingDecisions(tag: tag).map {
+            TrackerDecisionSummary(requestId: $0.requestId, text: Self.summaryLine(of: $0.prompt))
+        }
+    }
+
+    /// A focus tag whose waiting requests changed.
+    var decisionsChanged: AnyPublisher<String, Never> { coordinator.changes.eraseToAnyPublisher() }
+
+    /// Show the request's sheet (the strip's decision row was clicked).
+    func showDecision(requestId: String) { coordinator.reveal(requestId: requestId) }
+
+    /// The prompt's first line, cut to fit a strip line.
+    static func summaryLine(of prompt: String) -> String {
+        let first = prompt.split(whereSeparator: \.isNewline).first.map(String.init)?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        guard !first.isEmpty else { return "Decision needed" }
+        return first.count > 100 ? String(first.prefix(99)) + "\u{2026}" : first
+    }
+
     func start() {
         AppStore.shared.decisionRequests
             .receive(on: DispatchQueue.main)

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import os
 
@@ -85,6 +86,12 @@ final class DecisionCoordinator {
 
     /// Requests that are outstanding, whether or not a sheet is up right now.
     private var activeDecisions: [String: PendingDecision] = [:]
+    /// The outstanding request ids, oldest first.
+    private var activeOrder: [String] = []
+
+    /// A focus tag whose outstanding requests changed (one arrived or one is done). The tracker's
+    /// "Waiting on you" strip listens; nothing here depends on it.
+    let changes = PassthroughSubject<String, Never>()
     private var presented: [String: Presented] = [:]
     /// Windows that announced `windowWillClose` and have not yet left `windows()`.
     /// The close itself posts window notifications (occlusion, screen, app-active)
@@ -121,6 +128,8 @@ final class DecisionCoordinator {
             return
         }
         activeDecisions[requestId] = decision
+        activeOrder.append(requestId)
+        changes.send(decision.tag)
         attention.raiseAttention(tag: decision.tag, key: Self.attentionKey(requestId))
         attachToBestWindow(decision)
     }
@@ -212,6 +221,29 @@ final class DecisionCoordinator {
         }
     }
 
+    /// The requests still waiting on the operator for focus `tag`, oldest first.
+    func pendingDecisions(tag: String) -> [PendingDecision] {
+        activeOrder.compactMap { activeDecisions[$0] }.filter { $0.tag == tag }
+    }
+
+    /// The operator asked to see `requestId` (a click in the tracker's strip): show its sheet on the
+    /// best window now, even if it sits on another one, or present it if no sheet is up. Never
+    /// answers, activates the app or switches a focus.
+    func reveal(requestId: String) {
+        guard let decision = activeDecisions[requestId], store.resolution(for: requestId) == nil else { return }
+        guard let entry = presented[requestId] else {
+            if store.claimPresentation(requestId: requestId) { attachToBestWindow(decision) }
+            return
+        }
+        let candidates = candidateWindows()
+        guard let best = selectDecisionTargets(windows: windowInfos(of: candidates), requestTag: decision.tag).first,
+              best.id != entry.window.map(ObjectIdentifier.init),
+              let target = candidates.first(where: { ObjectIdentifier($0) == best.id }) else { return }
+        presented.removeValue(forKey: requestId)
+        entry.sheet.closeWithoutAnswering(reason: .retargeting)
+        attach(decision, to: target)
+    }
+
     /// The window currently holding the sheet for `requestId`, if any.
     func presentedWindow(for requestId: String) -> DecisionHostWindow? {
         presented[requestId]?.window
@@ -274,8 +306,10 @@ final class DecisionCoordinator {
     /// The request is done: nothing is outstanding, so nothing is flagged.
     private func finish(requestId: String) {
         presented.removeValue(forKey: requestId)
-        activeDecisions.removeValue(forKey: requestId)
+        let finished = activeDecisions.removeValue(forKey: requestId)
+        activeOrder.removeAll { $0 == requestId }
         attention.clearAttention(key: Self.attentionKey(requestId))
         store.releasePresentation(requestId: requestId)
+        if let finished { changes.send(finished.tag) }
     }
 }

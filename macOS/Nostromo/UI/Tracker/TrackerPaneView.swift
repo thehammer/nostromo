@@ -42,6 +42,7 @@ final class TrackerPaneView: NSView {
     let header = TrackerHeaderView()
     let banner = TrackerBannerView()
     let strip = TrackerWaitingStrip()
+    let backgroundRow = TrackerBackgroundRow()
     let scrollView = NSScrollView()
     let clipView = TrackerClipView()
     let documentView = TrackerFlippedView()
@@ -62,7 +63,17 @@ final class TrackerPaneView: NSView {
     /// How many row views the last render built or updated.
     private(set) var rowsUpdatedLast = 0
 
+    /// The focus's REPL pane, found through the focus view's leaf map (`DynamicFocusView` installs it);
+    /// nil while it has none, which disables the summary row.
+    var replProvider: () -> TrackerBackgroundListOpening? = { nil } {
+        didSet { render() }   // the row is enabled while there is a REPL to open it from
+    }
+
     private let store: TrackerStore
+    private let decisions: TrackerDecisionProviding
+    private let approvals: ApprovalStore
+    private let background: BackgroundTaskStore
+    private let actions: TrackerWaitingActions
     private let now: () -> Date
     private let reduceMotion: () -> Bool
     private let pasteboard: NSPasteboard
@@ -74,6 +85,7 @@ final class TrackerPaneView: NSView {
     private let pointerLocation: (() -> NSPoint?)?
     private let isMouseButtonDown: () -> Bool
 
+    private var backgroundSummary = TrackerBackgroundSummary(chip: .hidden)
     private var cancellables = Set<AnyCancellable>()
     private var observers: [NSObjectProtocol] = []
     private var tickTimer: Timer?
@@ -101,6 +113,10 @@ final class TrackerPaneView: NSView {
     ///   - isMouseButtonDown: whether any mouse button is down; nothing is released meanwhile.
     init(tag: String,
          store: TrackerStore = .shared,
+         decisions: TrackerDecisionProviding = DecisionPresenter.shared,
+         approvals: ApprovalStore = .shared,
+         background: BackgroundTaskStore = .shared,
+         actions: TrackerWaitingActions = .live,
          now: @escaping () -> Date = Date.init,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
          pasteboard: NSPasteboard = .general,
@@ -117,6 +133,10 @@ final class TrackerPaneView: NSView {
          isMouseButtonDown: @escaping () -> Bool = { NSEvent.pressedMouseButtons != 0 }) {
         self.focusTag = tag
         self.store = store
+        self.decisions = decisions
+        self.approvals = approvals
+        self.background = background
+        self.actions = actions
         self.now = now
         self.reduceMotion = reduceMotion
         self.pasteboard = pasteboard
@@ -131,6 +151,22 @@ final class TrackerPaneView: NSView {
         setUp()
         let myTag = tag
         store.changes
+            .filter { $0 == myTag }
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &cancellables)
+        // Anything else that can wait on the person changes the strip and the summary row. A decision
+        // answered elsewhere leaves within one delivery of its store; approvals and background work
+        // arrive coalesced by their own stores (BA's at most 4 a second).
+        decisions.decisionsChanged
+            .filter { $0 == myTag }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &cancellables)
+        approvals.changes
+            .filter { $0 == myTag }
+            .sink { [weak self] _ in self?.render() }
+            .store(in: &cancellables)
+        background.changes
             .filter { $0 == myTag }
             .sink { [weak self] _ in self?.render() }
             .store(in: &cancellables)
@@ -158,6 +194,9 @@ final class TrackerPaneView: NSView {
         addSubview(header)
         addSubview(banner)
         addSubview(strip)
+        addSubview(backgroundRow)
+        strip.onSelect = { [weak self] entry in self?.select(entry) }
+        backgroundRow.onClick = { [weak self] in self?.openBackgroundList() }
 
         clipView.drawsBackground = false
         clipView.postsBoundsChangedNotifications = true
@@ -202,8 +241,48 @@ final class TrackerPaneView: NSView {
     func render() {
         guard let board = store.board(for: focusTag) else { return }
         self.board = board
-        commit(TrackerPresenter.present(board: board, now: now(), filter: filter, folds: folds, timeZone: timeZone),
+        let list = background.list(for: focusTag)
+        backgroundSummary = TrackerBackgroundSummary(list: list)
+        let sources = TrackerWaitingSources.make(
+            tag: focusTag,
+            approvalsPending: approvals.pendingCount(tag: focusTag),
+            decisions: decisions.pendingDecisions(tag: focusTag),
+            tasks: background.state(for: focusTag)?.allTasks ?? [],
+            seenEndedAtMs: background.seenMark(tag: focusTag))
+        commit(TrackerPresenter.present(board: board, now: now(), filter: filter, folds: folds, sources: sources,
+                                        timeZone: timeZone),
                highlight: true)
+    }
+
+    /// A click on a strip entry: go to what it names. A user act; nothing here answers anything.
+    func select(_ entry: TrackerWaitingEntry) {
+        switch entry.target {
+        case .none:
+            break
+        case .boardItem(let id):
+            scrollToItem(id)
+        case .decision(let requestId):
+            decisions.showDecision(requestId: requestId)
+        case .approvals(let tag):
+            actions.showApprovals(tag)
+        case .backgroundTask:
+            openBackgroundList()
+        }
+    }
+
+    /// Scroll so the item's row is at the top (the filter goes to All when it hides the item).
+    func scrollToItem(_ id: String) {
+        let key = TrackerRow.itemKey(id)
+        if rowViews[key] == nil, filter != .all { setFilter(.all) }
+        guard let view = rowViews[key] else { return }
+        let maxY = max(documentView.frame.height - clipView.bounds.height, 0)
+        clipView.scroll(to: NSPoint(x: 0, y: min(max(view.frame.minY, 0), maxY)))
+        scrollView.reflectScrolledClipView(clipView)
+    }
+
+    /// The summary row's click: the focus's Background activity popover, from its input bar.
+    func openBackgroundList() {
+        replProvider()?.showBackgroundList()
     }
 
     /// Relative times moved on: refresh them (in place, no layout change, no highlight).
@@ -274,6 +353,7 @@ final class TrackerPaneView: NSView {
         header.update(target.header)
         banner.update(target.banner)
         strip.update(target.strip)
+        backgroundRow.update(backgroundSummary, enabled: replProvider() != nil)
 
         let result = deferral.resolve(displayed: displayedRows, target: target,
                                       visibleKeys: visible, selectedKey: currentSelectedKey())
@@ -375,7 +455,7 @@ final class TrackerPaneView: NSView {
         if contentWidth != laidOutWidth { layoutRows(width: contentWidth) }
     }
 
-    /// Header, banner and strip stacked at the top; the scroll view takes the rest.
+    /// Header, banner, strip and background row stacked at the top; the scroll view takes the rest.
     private func layoutChrome() {
         let width = bounds.width
         var y: CGFloat = 0
@@ -387,6 +467,9 @@ final class TrackerPaneView: NSView {
         let stripHeight = strip.preferredHeight
         strip.frame = NSRect(x: 0, y: y, width: width, height: stripHeight)
         y += stripHeight
+        let backgroundHeight = backgroundRow.preferredHeight
+        backgroundRow.frame = NSRect(x: 0, y: y, width: width, height: backgroundHeight)
+        y += backgroundHeight
         let scrollFrame = NSRect(x: 0, y: y, width: width, height: max(bounds.height - y, 0))
         if scrollView.frame != scrollFrame {
             scrollView.frame = scrollFrame
