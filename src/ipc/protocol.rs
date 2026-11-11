@@ -1490,6 +1490,20 @@ pub enum ClientMsg {
         operator_nonce: Option<String>,
     },
 
+    /// The user clicked link `link_index` of tracker item `item_id` in the
+    /// pane of focus `tag` (T6). A PR link opens that PR's conversation, a
+    /// Jira key its ticket and a repo-relative file path the file at its line,
+    /// each as a `nostromo.show` would (same placement, same frames, the
+    /// detail region's tab focused, never the transcript). Other links are
+    /// opened by the client itself. The daemon takes the link from its own
+    /// copy of the board, never from the client. A link that opens nothing is
+    /// answered with `ServerMsg::Error`. Refused for network peers.
+    TrackerOpenLink {
+        tag: String,
+        item_id: String,
+        link_index: u32,
+    },
+
     /// A page of the Approvals log (AP5), newest first. Read-only. Applied only
     /// from the verified Mac app with the connection's `operator_nonce`; answered
     /// with `ApprovalsLogPage` or `ApprovalsLogRefused`. Refused for network peers.

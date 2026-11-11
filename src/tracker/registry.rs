@@ -18,6 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{DateTime, FixedOffset, Utc};
@@ -26,17 +27,18 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+use super::bindings::{with_source_line, Binding, Desired, FILE_WRITE_INTERVAL};
 use super::changelog::{ChangeLog, Cursors, Since};
 use super::clock::{Clock, SystemClock};
 use super::diff::diff;
 use super::format::{parse, template, Malformed, ParsedBoard};
-use super::model::{fnv1a64, slug, Author, Board, Counts, Kind, Stamp, Status};
-use super::ops::{apply_to_file, Op, OpError, WriteError};
+use super::model::{fnv1a64, slug, Author, Board, Counts, Kind, Link, Stamp, Status};
+use super::ops::{apply_to_file, LinkInput, Op, OpError, Upsert, WriteError};
 use super::paths::{
     default_path, find_repo_root, is_valid_topic, probe_committable, resolve_board_path, RepoRoot,
 };
 use super::render::{compact_full, delta_entries};
-use super::view::{self, Banner, Committable, TrackerBoardView, ViewFacts};
+use super::view::{self, Banner, BoundView, Committable, TrackerBoardView, ViewFacts};
 use super::watch::{
     spawn_dir_watcher, write_atomic, BoardFs, FileSignature, RealBoardFs, WatchHost,
 };
@@ -238,6 +240,47 @@ struct BoardEntry {
     banner: Option<Banner>,
     last_good_at: Option<DateTime<Utc>>,
     committable: Option<Committable>,
+    /// Items bound to a live source, by item id (T6).
+    live: HashMap<String, LiveItem>,
+}
+
+/// One bound item's live state. The board in memory shows what the source
+/// says at once; the file line follows at most once per
+/// [`FILE_WRITE_INTERVAL`], and only when the displayed status changed.
+struct LiveItem {
+    binding: Binding,
+    /// When the item became live: the staleness clock before the source's
+    /// first report.
+    since: DateTime<Utc>,
+    /// When the source last reported on this item.
+    as_of: Option<DateTime<Utc>>,
+    /// The last source state applied.
+    state: Option<String>,
+    /// The status the file line has.
+    file_status: Status,
+    /// What the source shows that the file may not yet; reapplied on top of
+    /// every re-read of the file.
+    overlay: Option<Overlay>,
+    last_write: Option<DateTime<Utc>>,
+    /// The last published staleness.
+    badly_stale: bool,
+}
+
+#[derive(Clone)]
+struct Overlay {
+    /// The status the source set at its last state change; `None` leaves the
+    /// file's status.
+    status: Option<Status>,
+    note_line: String,
+    link: Option<Link>,
+}
+
+/// A bound item on some board, for the feeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveRef {
+    pub path: PathBuf,
+    pub item_id: String,
+    pub binding: Binding,
 }
 
 impl BoardEntry {
@@ -252,6 +295,7 @@ impl BoardEntry {
             banner: None,
             last_good_at: None,
             committable: None,
+            live: HashMap::new(),
         }
     }
 }
@@ -277,6 +321,8 @@ pub struct TrackerRegistry {
     /// Serialises `flush` so two snapshots of one board can't cross.
     flush_lock: Mutex<()>,
     watch: Mutex<Option<WatchHost>>,
+    /// Seconds of source silence after which a live item is badly stale.
+    badly_stale_secs: AtomicU64,
 }
 
 impl Default for TrackerRegistry {
@@ -338,6 +384,7 @@ impl TrackerRegistry {
             utc_offset: parts.utc_offset,
             flush_lock: Mutex::new(()),
             watch: Mutex::new(None),
+            badly_stale_secs: AtomicU64::new(super::bindings::badly_stale_after().as_secs()),
         };
         registry.load();
         registry
@@ -544,8 +591,31 @@ impl TrackerRegistry {
                 banner: entry.banner.clone(),
                 committable: entry.committable.clone(),
                 hidden_by_user: inner.hidden.contains(tag),
+                bound: self.bound_views(entry),
             },
         ))
+    }
+
+    /// Link `index` of item `item_id` of the board bound to `tag`, with the
+    /// item's live binding (it names the repo of a bare `PR #n`). The daemon's
+    /// own copy: a client never says what a link is.
+    pub fn link_of(
+        &self,
+        tag: &str,
+        item_id: &str,
+        index: usize,
+    ) -> Option<(Link, Option<Binding>)> {
+        let inner = self.lock();
+        let entry = inner.boards.get(inner.bindings.get(tag)?)?;
+        let item = entry
+            .parsed
+            .as_ref()?
+            .board
+            .items
+            .iter()
+            .find(|i| i.id == item_id)?;
+        let binding = entry.live.get(item_id).map(|live| live.binding.clone());
+        Some((item.links.get(index)?.clone(), binding))
     }
 
     /// Whether `tag` has a tracker and its per-status counts.
@@ -827,6 +897,7 @@ impl TrackerRegistry {
         entry.last_ingested = Some(bytes.clone());
         entry.banner = None;
         entry.last_good_at = Some(self.clock.now());
+        self.sync_live(entry);
         self.store_last_good(path, &bytes);
     }
 
@@ -840,6 +911,20 @@ impl TrackerRegistry {
         path: &Path,
         ops: &[Op],
         author: &Author,
+    ) -> Result<(), TrackerError> {
+        self.write_ops_logged(entry, path, ops, author, true)
+    }
+
+    /// [`Self::write_ops`]; `log: false` writes without appending the
+    /// changes (a live item's state change was logged when it happened, and
+    /// the file only catches up).
+    fn write_ops_logged(
+        &self,
+        entry: &mut BoardEntry,
+        path: &Path,
+        ops: &[Op],
+        author: &Author,
+        log: bool,
     ) -> Result<(), TrackerError> {
         // The board may have been moved or swapped for a symlink since it was
         // opened: the path is checked again before anything is written.
@@ -877,7 +962,10 @@ impl TrackerRegistry {
         entry.parsed = Some(applied.parsed);
         entry.banner = None;
         entry.last_good_at = Some(now);
-        entry.log.append(applied.changes);
+        if log {
+            entry.log.append(applied.changes);
+        }
+        self.sync_live(entry);
         Ok(())
     }
 
@@ -946,8 +1034,11 @@ impl TrackerRegistry {
                 };
                 replace_banner(entry, banner)
             }
-            Ok(parsed) => {
+            Ok(mut parsed) => {
                 let now = self.clock.now();
+                // What the live sources show on top of the file is not an
+                // edit: put it on the new board before diffing.
+                sync_live_items(&mut entry.live, &mut parsed, now);
                 if let Some(old) = &entry.parsed {
                     let changes = diff(&old.board, &parsed.board, &Author::File, now);
                     entry.log.append(changes);
@@ -1068,6 +1159,7 @@ impl TrackerRegistry {
                 }
             }
             self.ingest_from_disk(&mut entry, &path);
+            self.sync_live(&mut entry);
             inner.boards.insert(path, entry);
         }
         for (tag, key) in state.bindings {
@@ -1081,6 +1173,193 @@ impl TrackerRegistry {
         let paths: Vec<PathBuf> = inner.boards.keys().cloned().collect();
         inner.dirty.extend(paths);
         self.persist(&inner);
+    }
+
+    // ── live items (T6) ──────────────────────────────────────────────────────
+
+    /// How long a source may be silent before its items are badly stale.
+    pub fn set_badly_stale_after(&self, after: std::time::Duration) {
+        self.badly_stale_secs
+            .store(after.as_secs(), Ordering::Relaxed);
+    }
+
+    /// Every item bound to a live source, on every board.
+    pub fn live_bindings(&self) -> Vec<LiveRef> {
+        let inner = self.lock();
+        let mut out: Vec<LiveRef> = inner
+            .boards
+            .iter()
+            .flat_map(|(path, entry)| {
+                entry.live.iter().map(|(id, live)| LiveRef {
+                    path: path.clone(),
+                    item_id: id.clone(),
+                    binding: live.binding.clone(),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.path, &a.item_id).cmp(&(&b.path, &b.item_id)));
+        out
+    }
+
+    /// A source reports `desired` for the item `item_id` of the board at
+    /// `path`, as of `observed_at`.
+    ///
+    /// The in-memory board takes the new values at once; the pane is told.
+    /// A change of the source *state* is logged as a change attributed
+    /// `source <name>`, so it reaches the agent's next delta, and is the only
+    /// thing that sets the item's status (an agent's own status on a bound
+    /// item stands until the next state change). A different note under the
+    /// same state (a count) updates the view and nothing else. The file
+    /// follows through [`Self::tick_live`]'s throttle. `true` when the view
+    /// changed.
+    pub fn apply_source(
+        &self,
+        path: &Path,
+        item_id: &str,
+        desired: &Desired,
+        observed_at: DateTime<Utc>,
+    ) -> bool {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let Some(entry) = inner.boards.get_mut(path) else {
+            return false;
+        };
+        let now = self.clock.now();
+        let after = self.badly_stale_after();
+        let changed = apply_to_live_item(entry, item_id, desired, observed_at, now, after);
+        if changed.logged {
+            self.persist(inner);
+        }
+        if changed.view {
+            inner.dirty.insert(path.to_path_buf());
+        }
+        // The first change of a quiet item reaches the file at once.
+        let wrote = match inner.boards.get_mut(path) {
+            Some(entry) => self.write_due_live_items(entry, path, now),
+            None => false,
+        };
+        if wrote {
+            inner.dirty.insert(path.to_path_buf());
+        }
+        changed.view || wrote
+    }
+
+    /// The periodic pass over live items: writes the file lines the throttle
+    /// held back (each item at most once per [`FILE_WRITE_INTERVAL`]) and
+    /// re-checks staleness. `true` when a view changed; call [`Self::flush`].
+    pub fn tick_live(&self) -> bool {
+        let mut guard = self.lock();
+        let inner = &mut *guard;
+        let now = self.clock.now();
+        let after = self.badly_stale_after();
+        let mut dirty = Vec::new();
+        for (path, entry) in inner.boards.iter_mut() {
+            let mut changed = false;
+            for live in entry.live.values_mut() {
+                changed |= refresh_staleness(live, now, after);
+            }
+            changed |= self.write_due_live_items(entry, path, now);
+            if changed {
+                dirty.push(path.clone());
+            }
+        }
+        let any = !dirty.is_empty();
+        inner.dirty.extend(dirty);
+        any
+    }
+
+    fn badly_stale_after(&self) -> chrono::Duration {
+        chrono::Duration::seconds(self.badly_stale_secs.load(Ordering::Relaxed) as i64)
+    }
+
+    /// Writes, for every live item of `entry` whose displayed status differs
+    /// from the file's and whose last file write is at least
+    /// [`FILE_WRITE_INTERVAL`] ago, that item's line. `true` if a file was
+    /// written. A failed write waits out the interval before trying again.
+    fn write_due_live_items(
+        &self,
+        entry: &mut BoardEntry,
+        path: &Path,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let interval = chrono::Duration::from_std(FILE_WRITE_INTERVAL).unwrap_or_default();
+        let due: Vec<String> = entry
+            .live
+            .iter()
+            .filter(|(_, live)| {
+                live.overlay
+                    .as_ref()
+                    .and_then(|o| o.status)
+                    .is_some_and(|status| status != live.file_status)
+                    && live.last_write.is_none_or(|at| now - at >= interval)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut wrote = false;
+        for id in due {
+            let Some(item) = entry
+                .parsed
+                .as_ref()
+                .and_then(|p| p.board.items.iter().find(|i| i.id == id))
+            else {
+                continue;
+            };
+            let author = Author::Source {
+                name: entry.live[&id].binding.source_name().to_string(),
+            };
+            let op = Op::Upsert(Upsert {
+                id: Some(id.clone()),
+                status: Some(item.status.wire().to_string()),
+                note: Some(item.note.clone().unwrap_or_default()),
+                links: Some(
+                    item.links
+                        .iter()
+                        .map(|l| LinkInput::Full {
+                            text: l.text.clone(),
+                            url: l.url.clone(),
+                        })
+                        .collect(),
+                ),
+                ..Upsert::default()
+            });
+            let result = self.write_ops_logged(entry, path, &[op], &author, false);
+            if let Some(live) = entry.live.get_mut(&id) {
+                live.last_write = Some(now);
+            }
+            match result {
+                Ok(()) => wrote = true,
+                Err(e) => tracing::warn!("tracker: live item {id} not written: {e}"),
+            }
+        }
+        wrote
+    }
+
+    /// Brings `entry.live` in line with its board's `bind` markers and puts
+    /// the sources' overlays on top of the file's values.
+    fn sync_live(&self, entry: &mut BoardEntry) {
+        let now = self.clock.now();
+        if let Some(parsed) = entry.parsed.as_mut() {
+            sync_live_items(&mut entry.live, parsed, now);
+        }
+    }
+
+    fn bound_views(&self, entry: &BoardEntry) -> HashMap<String, BoundView> {
+        let now = self.clock.now();
+        let after = self.badly_stale_after();
+        entry
+            .live
+            .iter()
+            .map(|(id, live)| {
+                (
+                    id.clone(),
+                    BoundView {
+                        source: live.binding.source_name().to_string(),
+                        as_of: live.as_of,
+                        badly_stale: is_badly_stale(live, now, after),
+                    },
+                )
+            })
+            .collect()
     }
 
     // ── small helpers ────────────────────────────────────────────────────────
@@ -1131,6 +1410,177 @@ impl TrackerFrameProvider for TrackerRegistry {
 
     fn has_bound_board(&self, tag: &str) -> bool {
         TrackerRegistry::has_bound_board(self, tag)
+    }
+}
+
+/// What an application of a source report changed.
+struct LiveChange {
+    /// What the pane shows differs.
+    view: bool,
+    /// A change was appended to the board's log.
+    logged: bool,
+}
+
+fn is_badly_stale(live: &LiveItem, now: DateTime<Utc>, after: chrono::Duration) -> bool {
+    now - live.as_of.unwrap_or(live.since) > after
+}
+
+/// Re-evaluates staleness; `true` when it flipped.
+fn refresh_staleness(live: &mut LiveItem, now: DateTime<Utc>, after: chrono::Duration) -> bool {
+    let stale = is_badly_stale(live, now, after);
+    std::mem::replace(&mut live.badly_stale, stale) != stale
+}
+
+/// Applies one source report to the in-memory board (see
+/// [`TrackerRegistry::apply_source`]).
+fn apply_to_live_item(
+    entry: &mut BoardEntry,
+    item_id: &str,
+    desired: &Desired,
+    observed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    after: chrono::Duration,
+) -> LiveChange {
+    let mut out = LiveChange {
+        view: false,
+        logged: false,
+    };
+    let (Some(parsed), Some(live)) = (entry.parsed.as_mut(), entry.live.get_mut(item_id)) else {
+        return out;
+    };
+    let Some(pos) = parsed.board.items.iter().position(|i| i.id == item_id) else {
+        return out;
+    };
+    if live.as_of.is_none_or(|at| observed_at > at) {
+        live.as_of = Some(observed_at);
+    }
+    out.view |= refresh_staleness(live, now, after);
+
+    let state_changed = live.state.as_deref() != Some(desired.state.as_str());
+    let item = &parsed.board.items[pos];
+    let new_status = match (state_changed, desired.status) {
+        (true, Some(status)) => status,
+        _ => item.status,
+    };
+    let new_note = with_source_line(
+        item.note.as_deref(),
+        live.binding.note_prefix(),
+        &desired.note_line,
+    );
+    let mut new_links = item.links.clone();
+    if let Some(link) = desired.link.as_ref().filter(|_| state_changed) {
+        if !new_links.contains(link) {
+            new_links.push(link.clone());
+        }
+    }
+    let differs = new_status != item.status
+        || item.note.as_deref() != Some(new_note.as_str())
+        || new_links != item.links;
+    if !differs {
+        live.state = Some(desired.state.clone());
+        return out;
+    }
+
+    // With no status pending for the file, the board's status is the file's.
+    if live.overlay.as_ref().is_none_or(|o| o.status.is_none()) {
+        live.file_status = item.status;
+    }
+    let before = state_changed.then(|| parsed.board.clone());
+    let previous = live.overlay.take();
+    live.overlay = Some(Overlay {
+        status: if state_changed {
+            desired.status
+        } else {
+            previous.as_ref().and_then(|o| o.status)
+        },
+        note_line: desired.note_line.clone(),
+        link: if state_changed {
+            desired.link.clone()
+        } else {
+            previous.and_then(|o| o.link)
+        },
+    });
+    let item = &mut parsed.board.items[pos];
+    item.status = new_status;
+    item.note = Some(new_note);
+    item.links = new_links;
+    live.state = Some(desired.state.clone());
+    out.view = true;
+    if let Some(before) = before {
+        parsed.board.items[pos].updated_at = Some(now);
+        let author = Author::Source {
+            name: live.binding.source_name().to_string(),
+        };
+        let changes = diff(&before, &parsed.board, &author, now);
+        out.logged = !changes.is_empty();
+        entry.log.append(changes);
+    }
+    out
+}
+
+/// Makes `live` follow the `bind` markers of `parsed` and lays each live
+/// item's overlay over the file's values. A status the file has since
+/// changed (the user or an agent wrote it) ends the overlay: the writer wins
+/// until the source's next state change.
+fn sync_live_items(
+    live: &mut HashMap<String, LiveItem>,
+    parsed: &mut ParsedBoard,
+    now: DateTime<Utc>,
+) {
+    let mut seen: HashSet<String> = HashSet::new();
+    for item in parsed.board.items.iter_mut() {
+        let Some(binding) = item.bind.as_deref().and_then(|k| Binding::parse(k).ok()) else {
+            continue;
+        };
+        seen.insert(item.id.clone());
+        let slot = live
+            .entry(item.id.clone())
+            .or_insert_with(|| LiveItem::new(binding.clone(), item.status, now));
+        if slot.binding != binding {
+            *slot = LiveItem::new(binding, item.status, now);
+        }
+        match slot.overlay.clone() {
+            Some(ov)
+                if ov.status.is_none()
+                    || ov.status.is_some() && item.status == slot.file_status =>
+            {
+                if let Some(status) = ov.status {
+                    item.status = status;
+                } else {
+                    slot.file_status = item.status;
+                }
+                item.note = Some(with_source_line(
+                    item.note.as_deref(),
+                    slot.binding.note_prefix(),
+                    &ov.note_line,
+                ));
+                if let Some(link) = ov.link {
+                    if !item.links.contains(&link) {
+                        item.links.push(link);
+                    }
+                }
+            }
+            _ => {
+                slot.overlay = None;
+                slot.file_status = item.status;
+            }
+        }
+    }
+    live.retain(|id, _| seen.contains(id));
+}
+
+impl LiveItem {
+    fn new(binding: Binding, status: Status, now: DateTime<Utc>) -> LiveItem {
+        LiveItem {
+            binding,
+            since: now,
+            as_of: None,
+            state: None,
+            file_status: status,
+            overlay: None,
+            last_write: None,
+            badly_stale: false,
+        }
     }
 }
 

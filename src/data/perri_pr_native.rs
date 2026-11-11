@@ -849,46 +849,50 @@ async fn fetch_ci_checks(
     etags: &Arc<Mutex<HashMap<String, String>>>,
     body_cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> (Vec<CiCheck>, BodyFreshness) {
-    let url = check_runs_url(owner, repo, head_sha);
-
-    // Conditional (W7/D5.1): `?per_page=100` of check-runs is the second
-    // biggest response in the cycle and it is unchanged on most polls — a
-    // finished CI run's check-runs list never changes again.
-    let fetched = match etag_get_as(client, &url, GITHUB_JSON_ACCEPT, etags, body_cache).await {
+    match try_fetch_ci_checks(client, owner, repo, head_sha, etags, body_cache, true).await {
         Ok(fetched) => fetched,
+        // `Fresh` here is a **sentinel for "add no degraded reason"**, not
+        // a claim that a 2xx happened — no response and no body exist on
+        // this path. It is deliberate: an outright CI-checks failure
+        // yields the empty list, which already reads as "unknown", and a CI
+        // outage must not invalidate an otherwise-good diff by marking the
+        // whole snapshot stale. That is a different case from the
+        // `CachedAfterFailure` that `etag_get_as` propagates up, which *is*
+        // dishonest if unreported and *does* mark the snapshot stale.
         Err(e) => {
-            warn!("check-runs fetch failed: {e}");
-            // `Fresh` here is a **sentinel for "add no degraded reason"**, not
-            // a claim that a 2xx happened — no response and no body exist on
-            // this path. It is deliberate: an outright CI-checks failure
-            // yields the empty list below, which already reads as "unknown",
-            // and a CI outage must not invalidate an otherwise-good diff by
-            // marking the whole snapshot stale. That is a different case from
-            // the `CachedAfterFailure` that `etag_get_as` propagates up, which
-            // *is* dishonest if unreported and *does* mark the snapshot stale.
-            // Abusing `Fresh` against its documented meaning ("A 2xx. This
-            // body is the endpoint's current answer.") is the cost; returning
-            // `Option<(Vec<CiCheck>, BodyFreshness)>` instead is filed as a
-            // follow-up rather than done here.
-            return (vec![], BodyFreshness::Fresh);
+            warn!("check-runs fetch failed: {e:#}");
+            (vec![], BodyFreshness::Fresh)
         }
-    };
-    let freshness = fetched.freshness;
+    }
+}
 
-    let body: CheckRunsResponse = match serde_json::from_str(&fetched.body) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!("check-runs parse failed: {e:#}");
-            // Same sentinel, same reason as the fetch-error arm above: an
-            // unparseable body yields "unknown", not "the diff is stale".
-            return (vec![], BodyFreshness::Fresh);
-        }
-    };
+/// [`fetch_ci_checks`] that says when it failed. `with_detail` also fetches
+/// the failure log of each failing check (a live poller doesn't).
+///
+/// Conditional (W7/D5.1): `?per_page=100` of check-runs is the second
+/// biggest response in the cycle and it is unchanged on most polls — a
+/// finished CI run's check-runs list never changes again.
+async fn try_fetch_ci_checks(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    head_sha: &str,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+    with_detail: bool,
+) -> Result<(Vec<CiCheck>, BodyFreshness)> {
+    let url = check_runs_url(owner, repo, head_sha);
+    let fetched = etag_get_as(client, &url, GITHUB_JSON_ACCEPT, etags, body_cache)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let freshness = fetched.freshness;
+    let body: CheckRunsResponse =
+        serde_json::from_str(&fetched.body).context("check-runs parse failed")?;
 
     let mut checks = Vec::with_capacity(body.check_runs.len());
     for run in body.check_runs {
         let state = CiState::from_check(run.status.as_deref(), run.conclusion.as_deref());
-        let detail = if state == CiState::Failure {
+        let detail = if with_detail && state == CiState::Failure {
             Some(fetch_failure_detail(client, owner, repo, &run).await)
         } else {
             None
@@ -899,7 +903,57 @@ async fn fetch_ci_checks(
             detail,
         });
     }
-    (checks, freshness)
+    Ok((checks, freshness))
+}
+
+/// A PR's check runs right now, for a live tracker item: the PR's head SHA
+/// (a conditional GET of the PR), then [`try_fetch_ci_checks`] (conditional
+/// too) without failure logs. `Err` when GitHub couldn't be asked; a body
+/// served from cache after a failed refresh is also an `Err`, so a caller
+/// never mistakes it for a fresh observation.
+pub async fn fetch_pr_ci(
+    client: &GithubClient,
+    repo: &str,
+    number: u64,
+    etags: &Arc<Mutex<HashMap<String, String>>>,
+    body_cache: &Arc<Mutex<HashMap<String, String>>>,
+) -> Result<Vec<CiCheck>> {
+    #[derive(Deserialize)]
+    struct PrHead {
+        sha: String,
+    }
+    #[derive(Deserialize)]
+    struct PrMeta {
+        head: PrHead,
+    }
+    let (owner, name) = split_repo(repo)?;
+    let url = diff_url(&owner, &name, number);
+    let meta = etag_get_as(client, &url, GITHUB_JSON_ACCEPT, etags, body_cache)
+        .await
+        .map_err(|e| anyhow::anyhow!("PR fetch {e}"))?;
+    anyhow::ensure!(
+        matches!(
+            meta.freshness,
+            BodyFreshness::Fresh | BodyFreshness::NotModified
+        ),
+        "PR could not be refreshed"
+    );
+    let meta: PrMeta = serde_json::from_str(&meta.body).context("PR parse failed")?;
+    let (checks, freshness) = try_fetch_ci_checks(
+        client,
+        &owner,
+        &name,
+        &meta.head.sha,
+        etags,
+        body_cache,
+        false,
+    )
+    .await?;
+    anyhow::ensure!(
+        matches!(freshness, BodyFreshness::Fresh | BodyFreshness::NotModified),
+        "check runs could not be refreshed"
+    );
+    Ok(checks)
 }
 
 /// Fetch the failure log for a failing check-run (D3).

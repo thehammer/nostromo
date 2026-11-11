@@ -2023,6 +2023,28 @@ fn handle_client_msg(
             });
         }
 
+        ClientMsg::TrackerOpenLink {
+            tag,
+            item_id,
+            link_index,
+        } => {
+            // A network peer never gets here (`refuse_for_network`). The link
+            // is read from the daemon's own board; what opens is a `show`.
+            let provider = session_mgr.lock().unwrap().pane_content_provider();
+            let tx = targeted_tx.clone();
+            tokio::spawn(async move {
+                let opened = match provider {
+                    Some(p) => p.tracker_open_link(&tag, &item_id, link_index as usize).await,
+                    None => Err("not_supported".to_string()),
+                };
+                if let Err(why) = opened {
+                    let _ = tx.send(ServerMsg::Error {
+                        message: format!("tracker link not opened: {why}"),
+                    });
+                }
+            });
+        }
+
         ClientMsg::ApprovalRefusalReport {
             request_id,
             control,

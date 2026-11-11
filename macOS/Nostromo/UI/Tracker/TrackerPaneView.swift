@@ -77,6 +77,10 @@ final class TrackerPaneView: NSView {
     private let now: () -> Date
     private let reduceMotion: () -> Bool
     private let pasteboard: NSPasteboard
+    /// Asks the daemon to open link `index` of an item (PR, ticket and file chips): `(tag, item id, index)`.
+    private let openLinkInDaemon: (String, String, Int) -> Void
+    /// Opens a URL chip in the browser (injected; tests record the call).
+    private let openURL: (URL) -> Void
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
     private let timeZone: TimeZone
     private let tickInterval: TimeInterval?
@@ -120,6 +124,10 @@ final class TrackerPaneView: NSView {
          now: @escaping () -> Date = Date.init,
          reduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
          pasteboard: NSPasteboard = .general,
+         openLinkInDaemon: @escaping (String, String, Int) -> Void = { tag, item, index in
+             AppStore.shared.client.sendTrackerOpenLink(tag: tag, itemId: item, linkIndex: index)
+         },
+         openURL: @escaping (URL) -> Void = { ActivationAudit.note("tracker-link:open-external-url"); NSWorkspace.shared.open($0) },
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          },
@@ -140,6 +148,8 @@ final class TrackerPaneView: NSView {
         self.now = now
         self.reduceMotion = reduceMotion
         self.pasteboard = pasteboard
+        self.openLinkInDaemon = openLinkInDaemon
+        self.openURL = openURL
         self.schedule = schedule
         self.timeZone = timeZone
         self.tickInterval = tickInterval
@@ -428,7 +438,18 @@ final class TrackerPaneView: NSView {
         view.onToggleNote = { [weak self] id in self?.toggleNote(item: id) }
         view.onToggleLog = { [weak self] in self?.toggleLog() }
         view.onCopyMarkdown = { [weak self] row in self?.copyMarkdown(for: row) }
+        view.onOpenLink = { [weak self] item, action in self?.openLink(item: item, action: action) }
         return view
+    }
+
+    /// A link chip was clicked. The daemon opens PR, ticket and file links as a `show` (the detail
+    /// region's tab; never the transcript); a URL goes to the browser. The pane itself does not move.
+    func openLink(item: String, action: TrackerLinkAction) {
+        switch action {
+        case .openInPane(let index): openLinkInDaemon(focusTag, item, index)
+        case .openURL(let url): openURL(url)
+        case .inert: break
+        }
     }
 
     // MARK: - Layout

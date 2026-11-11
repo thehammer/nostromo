@@ -1028,6 +1028,8 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::ApprovalRemoveRule { .. }
         | ClientMsg::ApprovalRulesKeep { .. }
         | ClientMsg::ApprovalRulesDiscard { .. }
+        // Opens views in a focus's panes: the operator's own client only.
+        | ClientMsg::TrackerOpenLink { .. }
         | ClientMsg::ApprovalRefusalReport { .. }
         // Read the audit log, which holds full tool inputs: operator app only.
         | ClientMsg::ApprovalsLogQuery { .. }
@@ -1120,7 +1122,8 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::SessionTaskStop { tag, .. }
         | ClientMsg::SessionTaskOutput { tag, .. }
         | ClientMsg::ClaudeLoginAction { tag, .. }
-        | ClientMsg::PaneAction { tag, .. } => tags.tag_is_sensitive(tag),
+        | ClientMsg::PaneAction { tag, .. }
+        | ClientMsg::TrackerOpenLink { tag, .. } => tags.tag_is_sensitive(tag),
 
         ClientMsg::Hello { .. }
         | ClientMsg::Subscribe { .. }
@@ -2052,6 +2055,11 @@ mod tests {
             ClientMsg::ApprovalRulesDiscard {
                 operator_nonce: None,
             },
+            ClientMsg::TrackerOpenLink {
+                tag: "x1".into(),
+                item_id: "deploy-ap".into(),
+                link_index: 0,
+            },
             ClientMsg::ApprovalsLogQuery {
                 tag: None,
                 outcome: None,
@@ -2230,7 +2238,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 75;
+    const CLIENT_MSG_VARIANTS: usize = 76;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2310,6 +2318,7 @@ mod tests {
             ClientMsg::ApprovalRemoveRule { .. } => 72,
             ClientMsg::ApprovalRulesKeep { .. } => 73,
             ClientMsg::ApprovalRulesDiscard { .. } => 74,
+            ClientMsg::TrackerOpenLink { .. } => 75,
         }
     }
 
@@ -2349,9 +2358,10 @@ mod tests {
         // 62 since `PaneAction` (H6) was added after the retired verbs, so no ordinal moved;
         // 65 with the three command-staging verbs; 66 with `MotherNoticeSettingsSet`;
         // 69 with the S2 staging frames (set_enabled, set_global, ui_event); 70 with `ApprovalRevokeSessionRule`;
-        // 72 with the two Approvals-log requests; 75 with the three persisted-rule verbs (AP6).
-        assert_eq!(CLIENT_MSG_VARIANTS, 75);
-        assert_eq!(every_client_msg().len(), 75);
+        // 72 with the two Approvals-log requests; 75 with the three persisted-rule verbs (AP6);
+        // 76 with `TrackerOpenLink` (T6; expect a trivial conflict on this constant with T3a's tracker verbs).
+        assert_eq!(CLIENT_MSG_VARIANTS, 76);
+        assert_eq!(every_client_msg().len(), 76);
     }
 
     #[test]
@@ -4636,6 +4646,25 @@ mod huey_surface_tests {
             &pane_action("cody-core-1"),
             &tags
         ));
+    }
+
+    #[test]
+    fn t6_a_tracker_open_link_targets_a_sensitive_session_exactly_when_its_tag_is_one() {
+        let open_link = |tag: &str| ClientMsg::TrackerOpenLink {
+            tag: tag.into(),
+            item_id: "deploy-ap".into(),
+            link_index: 0,
+        };
+        let tags = SensitiveTags::in_memory();
+        assert!(targets_sensitive_session(&open_link("huey"), &tags));
+        assert!(refuse_for_network(&open_link("huey"), &tags));
+        assert!(!targets_sensitive_session(&open_link("cody-core-1"), &tags));
+        tags.mark_tag("cody-core-1");
+        assert!(
+            targets_sensitive_session(&open_link("cody-core-1"), &tags),
+            "opening a link on a sensitive session's board is refused to a peer without access"
+        );
+        assert!(refuse_for_network(&open_link("cody-core-1"), &tags));
     }
 
     #[test]

@@ -579,6 +579,18 @@ async fn main() -> Result<()> {
         // A layout call that drops the tracker pane (the user's close
         // included) leaves the board bound but hidden.
         registry.follow_panes(&pane_registry, broadcast_tx.clone());
+        // Live items (T6): bound items follow Mother's job list and their
+        // PR's CI with no agent call.
+        tokio::spawn(nostromo::tracker::bindings::run_mother_feed(
+            registry.clone(),
+            broadcast_tx.clone(),
+            jobs_feed.clone(),
+        ));
+        tokio::spawn(nostromo::tracker::ci_poller::run(
+            registry.clone(),
+            broadcast_tx.clone(),
+            config.github_token_path.clone(),
+        ));
         registry
     };
 

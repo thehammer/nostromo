@@ -11586,6 +11586,420 @@ async fn a_local_client_receives_the_tracker_board_live_and_on_attach_for_every_
     }
 }
 
+// ── live tracker items and link chips (T6, PRD 51-55): network gating ─────────
+//
+// A tracker item bound to a source (`bind:`) shows `bound{source, as_of,
+// badly_stale}` in the pane's `tracker_board` (LocalOnly); a `tracker_summary`
+// stays a tag, a flag and five counts. `tracker_open_link` opens views in a
+// focus's panes, so it is the operator's own client's alone. The sentinels sit
+// in the bind keys (the PR's repo name, the Mother job id), the item text and
+// the link URL, so any of them reaching a network peer is a failure here.
+
+impl TrackerWorld {
+    /// Opens a board for `tag` with a PR-CI-bound item (`ci-item`, linked to a
+    /// PR whose URL carries a sentinel) and a Mother-bound item (`job-item`).
+    /// Sentinels `n` to `n + 7`: the title, topic and path, the item texts, the
+    /// repo of the PR binding (`n + 4`), the PR link's repo (`n + 5`) and the
+    /// Mother job id (`n + 6`).
+    async fn open_bound_board(&self, tag: &str, n: u32) {
+        let s = |k: u32| format!("SECRET-TRACKER-{}", n + k);
+        self.call(
+            tag,
+            json!({
+                "op": "open",
+                "title": format!("{} title", s(0)),
+                "topic": format!("secret-tracker-{}", n + 1),
+                "path": format!(".claude/wip/{}/board.md", s(2)),
+                "sections": [format!("{} section", s(3))],
+            }),
+        )
+        .await;
+        self.call(
+            tag,
+            json!({"ops": [
+                {"op": "upsert", "id": "ci-item", "text": format!("{} ci item", s(3)),
+                 "bind": format!("pr.ci/acme/secret-tracker-{}#7", n + 4),
+                 "links": [{"text": "PR #253",
+                            "url": format!("https://github.com/acme/secret-tracker-{}/pull/253", n + 5)}]},
+                {"op": "upsert", "id": "job-item", "text": format!("{} job item", s(3)),
+                 "bind": format!("mother.job/{}", s(6))},
+            ]}),
+        )
+        .await;
+    }
+
+    /// The feeds report on every bound item opened with
+    /// [`Self::open_bound_board`] (`n` as there): the PR's CI is failing and
+    /// the Mother job is running. The frames go out as the daemon's feeds send
+    /// them.
+    fn feeds_report(&self, h: &Harness, ns: &[u32]) {
+        let seen_at = chrono::DateTime::from_timestamp(1_760_540_000, 0).expect("a timestamp");
+        let hub = nostromo::tracker::BindingHub::new(Arc::clone(&self.registry));
+        let failing =
+            nostromo::tracker::CiObservation::from_checks(&[nostromo::data::perri_pr::CiCheck {
+                name: "build".into(),
+                state: nostromo::data::perri_queue::CiState::Failure,
+                detail: None,
+            }]);
+        let jobs: Vec<nostromo::mother::MotherJob> = ns
+            .iter()
+            .map(|n| {
+                serde_json::from_value(json!({
+                    "id": format!("SECRET-TRACKER-{}", n + 6),
+                    "state": "running",
+                    "title": "a bound job",
+                }))
+                .expect("a MotherJob")
+            })
+            .collect();
+        for n in ns {
+            assert!(
+                hub.apply_ci(
+                    &format!("acme/secret-tracker-{}", n + 4),
+                    7,
+                    &failing,
+                    seen_at
+                ),
+                "the CI feed changed a bound item ({n})"
+            );
+        }
+        assert!(
+            hub.apply_mother(&jobs, Some(seen_at)),
+            "the Mother feed changed a bound item"
+        );
+        self.registry.flush(&h.server.tx);
+    }
+}
+
+/// Every `bound.source` anywhere in `value`.
+fn bound_sources(value: &Value) -> Vec<String> {
+    fn walk(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(source) = map.get("bound").and_then(|b| b["source"].as_str()) {
+                    out.push(source.to_string());
+                }
+                map.values().for_each(|child| walk(child, out));
+            }
+            Value::Array(items) => items.iter().for_each(|child| walk(child, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(value, &mut out);
+    out
+}
+
+/// A frame that says anything about live bindings.
+fn mentions_a_binding(frames: &[Value]) -> bool {
+    frames.iter().any(|f| {
+        let text = f.to_string();
+        ["\"bound\"", "badly_stale", "pr.ci", "mother.job"]
+            .iter()
+            .any(|needle| text.contains(needle))
+    })
+}
+
+#[tokio::test]
+async fn a_source_driven_change_of_a_bound_item_reaches_a_local_client_with_its_source_and_a_tcp_peer_never_sees_it(
+) {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    derive_focus(&mut unix, W).await;
+    let mut tcp = raw_tcp(&h).await;
+    raw_handshake(&mut tcp, subscribe_everything())
+        .await
+        .expect("tcp handshake");
+    let mut local = raw_unix(&h).await;
+    raw_handshake(&mut local, subscribe_everything())
+        .await
+        .expect("local handshake");
+
+    let world = tracker_world(&h);
+    world.open_bound_board(TRACKER_ORDINARY, 21).await;
+    world.open_bound_board(W, 31).await;
+    world.feeds_report(&h, &[21, 31]);
+
+    let tcp_frames = raw_sync_via_broadcast(&h, &mut tcp).await;
+    let local_frames = raw_sync_via_broadcast(&h, &mut local).await;
+
+    // Control: the local client's boards carry the bound source of both kinds,
+    // for both focuses, after the feeds' report.
+    for tag in [TRACKER_ORDINARY, W] {
+        let boards = frames_of(&local_frames, "tracker_board", tag);
+        let last = boards
+            .last()
+            .unwrap_or_else(|| panic!("control: {tag} has a tracker_board: {local_frames:?}"));
+        let sources = bound_sources(last);
+        for source in ["pr.ci", "mother.job"] {
+            assert!(
+                sources.iter().any(|s| s == source),
+                "control: {tag}'s board says an item is bound to {source}: {last}"
+            );
+        }
+    }
+
+    // The network peer: no board, no binding, no sentinel, anywhere.
+    assert!(
+        !types(&tcp_frames).iter().any(|t| t == "tracker_board"),
+        "a tracker_board reached a TCP peer: {tcp_frames:?}"
+    );
+    assert!(
+        !mentions_a_tracker_sentinel(&tcp_frames),
+        "tracker text reached a TCP peer: {tcp_frames:?}"
+    );
+    assert!(
+        !mentions_a_binding(&tcp_frames),
+        "a live binding reached a TCP peer: {tcp_frames:?}"
+    );
+
+    // What it is told: counts of the ordinary focus, in the same five-key
+    // summary as before, and nothing of the sensitive one.
+    let summaries = frames_of(&tcp_frames, "tracker_summary", TRACKER_ORDINARY);
+    assert!(
+        !summaries.is_empty(),
+        "the ordinary focus's summary still flows: {tcp_frames:?}"
+    );
+    for summary in &summaries {
+        assert_summary_shape(summary);
+    }
+    let last = summaries.last().unwrap();
+    assert_eq!(
+        last["counts"],
+        json!({"todo": 0, "in_progress": 1, "blocked": 1, "needs_you": 0, "done": 0}),
+        "the source-driven changes are counted: {last}"
+    );
+    assert!(
+        !tcp_frames
+            .iter()
+            .any(|f| f["type"].as_str().is_some_and(|t| t.starts_with("tracker")) && f["tag"] == W),
+        "a tracker frame for a sensitive focus reached a TCP peer: {tcp_frames:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_tcp_peer_that_connects_after_items_are_bound_is_replayed_no_binding_and_no_board_text() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    derive_focus(&mut unix, W).await;
+    let world = tracker_world(&h);
+    world.open_bound_board(TRACKER_ORDINARY, 21).await;
+    world.open_bound_board(W, 31).await;
+    world.feeds_report(&h, &[21, 31]);
+
+    // Control: a local client attaching late is replayed the bound sources.
+    let mut local = raw_unix(&h).await;
+    let (_welcome, local_replay) = raw_handshake(&mut local, subscribe_everything())
+        .await
+        .expect("local handshake");
+    let boards = frames_of(&local_replay, "tracker_board", TRACKER_ORDINARY);
+    assert_eq!(boards.len(), 1, "{local_replay:?}");
+    assert!(
+        bound_sources(boards[0]).iter().any(|s| s == "pr.ci"),
+        "control: {}",
+        boards[0]
+    );
+
+    for topics in [json!([]), json!(["layout"]), json!(["focuses", "activity"])] {
+        let mut tcp = raw_tcp(&h).await;
+        let (welcome, replay) = raw_handshake(
+            &mut tcp,
+            json!({"type": "subscribe", "topics": topics.clone(), "renders_decisions": false}),
+        )
+        .await
+        .expect("tcp handshake");
+        let mut everything = replay.clone();
+        everything.push(welcome);
+
+        assert!(
+            !types(&replay).iter().any(|t| t == "tracker_board"),
+            "topics {topics}: a tracker_board was replayed to a TCP peer: {replay:?}"
+        );
+        assert!(
+            !mentions_a_tracker_sentinel(&everything),
+            "topics {topics}: tracker text reached a TCP peer on attach: {replay:?}"
+        );
+        assert!(
+            !mentions_a_binding(&everything),
+            "topics {topics}: a live binding reached a TCP peer on attach: {replay:?}"
+        );
+        let summaries = frames_of(&replay, "tracker_summary", TRACKER_ORDINARY);
+        assert_eq!(summaries.len(), 1, "topics {topics}: {replay:?}");
+        assert_summary_shape(summaries[0]);
+    }
+}
+
+/// A raw `tracker_open_link`, as a client writes it.
+fn raw_open_link(tag: &str, item_id: &str, link_index: u32) -> Value {
+    json!({
+        "type": "tracker_open_link",
+        "tag": tag,
+        "item_id": item_id,
+        "link_index": link_index,
+    })
+}
+
+/// Reads frames until one of `ty` arrives; returns them all (it last).
+async fn read_until_type<S: AsyncRead + Unpin>(stream: &mut S, ty: &str) -> Vec<Value> {
+    let mut frames = Vec::new();
+    loop {
+        let frame = try_recv_json(stream)
+            .await
+            .unwrap_or_else(|e| panic!("waiting for a {ty} frame: {e}; got {frames:?}"));
+        let done = frame["type"] == ty;
+        frames.push(frame);
+        if done {
+            return frames;
+        }
+    }
+}
+
+/// The layout the daemon's MCP state keeps for `tag`, as JSON.
+fn layout_of(world: &TrackerWorld, tag: &str) -> Option<Value> {
+    let daemon = world.state.daemon.as_ref().expect("a daemon backend");
+    let panes = daemon.pane_registry.lock().unwrap();
+    let layout = panes
+        .get(tag)
+        .map(|tree| serde_json::to_value(tree).expect("a tree is JSON"));
+    layout
+}
+
+#[tokio::test]
+async fn a_raw_tcp_tracker_open_link_is_refused_and_opens_nothing_while_the_app_s_opens_the_pr() {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let world = tracker_world(&h);
+    // The daemon's provider of what a link click does, as `nostromd` installs it.
+    h.session_mgr
+        .lock()
+        .unwrap()
+        .configure_pane_content_provider(Arc::new(
+            nostromo::mcp::pane_sources::McpPaneContentProvider(world.state.clone()),
+        ));
+    world.open_bound_board(TRACKER_ORDINARY, 21).await;
+
+    // A second subscriber that sees every broadcast, caught up past the setup.
+    let mut observer = raw_unix(&h).await;
+    raw_handshake(&mut observer, subscribe_everything())
+        .await
+        .expect("observer handshake");
+    let mut tcp = raw_tcp(&h).await;
+    raw_handshake(&mut tcp, subscribe_everything())
+        .await
+        .expect("tcp handshake");
+    let layout_before = layout_of(&world, TRACKER_ORDINARY);
+
+    // The network peer asks for the PR chip (link 0 of the item) and for one
+    // that does not exist: each is refused, whatever it names.
+    for link_index in [0, 7] {
+        send_json(
+            &mut tcp,
+            &raw_open_link(TRACKER_ORDINARY, "ci-item", link_index),
+        )
+        .await;
+        let mut answered = Vec::new();
+        loop {
+            let frame = try_recv_json(&mut tcp)
+                .await
+                .expect("the connection stays open and answers");
+            let refused = frame["type"] == "error"
+                && frame["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("requires_secure_connection"));
+            answered.push(frame);
+            if refused {
+                break;
+            }
+        }
+        assert!(
+            !answered
+                .iter()
+                .any(|f| f["type"] == "focus_layout" || f["type"] == "pane_content"),
+            "link {link_index}: the refused peer was sent layout or content: {answered:?}"
+        );
+        assert!(!mentions_a_tracker_sentinel(&answered), "{answered:?}");
+    }
+
+    // Nothing was opened: no layout or content went to anyone, no pane changed,
+    // and the refused peer is still served.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let seen = raw_sync_via_broadcast(&h, &mut observer).await;
+    assert!(
+        !seen
+            .iter()
+            .any(|f| f["type"] == "focus_layout" || f["type"] == "pane_content"),
+        "a refused tracker_open_link opened something: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|f| f["type"] == "error" && f["message"].to_string().contains("tracker link")),
+        "the handler ran for a network peer: {seen:?}"
+    );
+    assert_eq!(
+        layout_of(&world, TRACKER_ORDINARY),
+        layout_before,
+        "the focus's layout is untouched"
+    );
+    raw_sync(&mut tcp).await.expect("still served");
+
+    // Control: the same request from the app opens the PR's conversation as a
+    // tab of the detail region, foregrounded, and the transcript stays where
+    // it is. (So the silence above is the gate's doing, not the daemon's.)
+    let mut app = raw_unix(&h).await;
+    raw_handshake(&mut app, subscribe_everything())
+        .await
+        .expect("app handshake");
+    send_json(&mut app, &raw_open_link(TRACKER_ORDINARY, "ci-item", 0)).await;
+    let opened = read_until_type(&mut observer, "pane_content").await;
+    let layout = opened
+        .iter()
+        .find(|f| f["type"] == "focus_layout" && f["tag"] == TRACKER_ORDINARY)
+        .unwrap_or_else(|| panic!("control: the click broadcast a layout: {opened:?}"));
+    let content = opened.last().unwrap();
+    assert_eq!(content["tag"], TRACKER_ORDINARY, "{content}");
+    assert_eq!(
+        layout["focused_pane"], content["pane_id"],
+        "the opened tab is the foregrounded one: {opened:?}"
+    );
+    assert_ne!(layout["focused_pane"], json!("repl"), "{layout}");
+    assert_ne!(
+        layout_of(&world, TRACKER_ORDINARY),
+        layout_before,
+        "control: the app's click changed the layout"
+    );
+}
+
+#[tokio::test]
+async fn a_local_peer_that_asks_for_a_link_the_board_does_not_have_gets_a_not_opened_error_not_the_network_refusal(
+) {
+    let _guard = RegistryGuard::acquire().await;
+    let h = spawn_server().await;
+    let world = tracker_world(&h);
+    h.session_mgr
+        .lock()
+        .unwrap()
+        .configure_pane_content_provider(Arc::new(
+            nostromo::mcp::pane_sources::McpPaneContentProvider(world.state.clone()),
+        ));
+    world.open_bound_board(TRACKER_ORDINARY, 21).await;
+
+    let mut app = raw_unix(&h).await;
+    raw_handshake(&mut app, subscribe_everything())
+        .await
+        .expect("app handshake");
+    send_json(&mut app, &raw_open_link(TRACKER_ORDINARY, "ci-item", 7)).await;
+    let frames = read_until_type(&mut app, "error").await;
+    let message = frames.last().unwrap()["message"].as_str().unwrap_or("");
+    assert!(
+        message.starts_with("tracker link not opened"),
+        "the verb reached its handler for a local peer: {frames:?}"
+    );
+    assert!(!message.contains("requires_secure_connection"), "{message}");
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Command staging (S1a): the staging list and its client frames never cross to
 // the network, and no local process but the verified app can use them.

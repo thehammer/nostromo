@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::bindings::Binding;
 use super::diff::diff;
 use super::format::{
     is_reserved_tail_token, parse, reread, serialise_item, splice, validate_command_text,
@@ -68,6 +69,10 @@ pub struct Upsert {
     /// `prod|canada|demo|staging|local|unset`.
     #[serde(default)]
     pub env: Option<String>,
+    /// A live source (T6): `mother.job/<id>` or `pr.ci/<owner>/<repo>#<n>[!green]`;
+    /// an empty string unbinds. Any other value is `invalid_args`.
+    #[serde(default)]
+    pub bind: Option<String>,
 }
 
 /// One operation. Deserialises from the tool's `{"op": "status", ...}` shape.
@@ -484,6 +489,16 @@ impl Apply<'_> {
                 ),
             });
         }
+        if let Some(bind) = &u.bind {
+            f.bind = Some(match bind.trim() {
+                "" => None,
+                b => Some(
+                    Binding::parse(b)
+                        .map_err(|reason| self.invalid(reason))?
+                        .to_key(),
+                ),
+            });
+        }
         Ok(f)
     }
 
@@ -556,6 +571,7 @@ struct Fields {
     kind: Option<Kind>,
     command: Option<Option<String>>,
     env: Option<Option<Env>>,
+    bind: Option<Option<String>>,
 }
 
 impl Fields {
@@ -598,6 +614,9 @@ impl Fields {
         }
         if let Some(env) = self.env {
             changed |= set(&mut item.env, env);
+        }
+        if let Some(bind) = &self.bind {
+            changed |= set(&mut item.bind, bind.clone());
         }
         changed
     }

@@ -704,6 +704,18 @@ private struct DecisionAnswerMsg: Encodable {
     }
 }
 
+/// `tracker_open_link`: the reader clicked a PR, ticket or file chip of a tracker item. The daemon
+/// opens it as a `nostromo.show` would. Refused for network peers; needs no operator nonce.
+private struct ClientTrackerOpenLink: Encodable {
+    let type_ = "tracker_open_link"
+    let tag: String
+    let itemId: String
+    let linkIndex: Int
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", tag, itemId = "item_id", linkIndex = "link_index"
+    }
+}
+
 /// `pane_action`: the reader pressed a button, or followed a `nostromo-action:` link, in a document
 /// pane. The daemon applies it only from the verified app, echoing the connection's operator nonce.
 private struct ClientPaneAction: Encodable {
@@ -1265,6 +1277,19 @@ class NostromodClient {
                                                               operatorNonce: nonce))
         else { return false }
         writeFrameLocked(body, to: curFd, type: "pane_action", tag: tag)
+        return true
+    }
+
+    /// Ask the daemon to open link `linkIndex` of tracker item `itemId` of `tag`'s board. Returns
+    /// whether the frame was written (dropped when not connected).
+    @discardableResult
+    func sendTrackerOpenLink(tag: String, itemId: String, linkIndex: Int) -> Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        let curFd = fd
+        guard curFd >= 0 else { log.debug("tracker_open_link dropped — not connected"); return false }
+        guard let body = try? encoder.encode(ClientTrackerOpenLink(tag: tag, itemId: itemId, linkIndex: linkIndex))
+        else { return false }
+        writeFrameLocked(body, to: curFd, type: "tracker_open_link", tag: tag)
         return true
     }
 

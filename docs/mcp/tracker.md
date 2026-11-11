@@ -22,7 +22,7 @@ caller's focus, so item calls need no topic.
 | op | fields | notes |
 |---|---|---|
 | `open` | `topic`, `title?`, `sections?[]`, `path?`, `show?` | idempotent. Creates the board from the template if absent, adopts a hand-written file (only id markers are added to task lines), recreates a deleted one from its last good copy. `show:true` re-adds a pane the user closed. Not allowed inside `ops`. |
-| `upsert` | `id?`, `section?`, `text?`, `status?`, `owner?`, `note?`, `links?[]`, `kind?`, `command?`, `env?` | only the given fields change; omit `id` to create (the id is generated). An empty string clears `owner`, `note`, `command`, `env`; `links:[]` clears links. |
+| `upsert` | `id?`, `section?`, `text?`, `status?`, `owner?`, `note?`, `links?[]`, `kind?`, `command?`, `env?`, `bind?` | only the given fields change; omit `id` to create (the id is generated). An empty string clears `owner`, `note`, `command`, `env`, `bind`; `links:[]` clears links. `bind` makes the item live (see Live items). |
 | `status` | `id`, `status` | the commonest call. |
 | `remove` | `id` | |
 | `move` | `id`, `section`, `before?` or `after?` | |
@@ -88,6 +88,72 @@ characters), never instructions.
 | `unidentified_caller` | no `pty_id` (not a Nostromo-spawned session) |
 | `not_supported` | the MCP server isn't hosted by the daemon |
 | `io_error` | the file system refused; the error kind is in `reason`. `reason:"concurrent_edit"`: the user kept saving the file while the write was built (it is retried once, on top of the user's edit); nothing was written, call again. |
+
+## Live items
+
+An item can follow a source the daemon keeps fresh, with no agent call. The set
+of sources is closed:
+
+| `bind` | follows | marker flag |
+|---|---|---|
+| `mother.job/<job id>` | the Mother job (the daemon's job feed, polled every 2 s) | `bind:mother.job/<id>` |
+| `pr.ci/<owner>/<repo>#<n>[!green]` | the PR's check runs (polled every 8 s, conditional GETs, only while an item is bound to a PR) | `bind:pr.ci/<owner>/<repo>#<n>[!green]` |
+
+Any other source is `invalid_args` for an agent and is ignored (the item is not
+live) when a human wrote it into the file. `bind:""` unbinds. The repo name may not be `.` or `..`.
+
+PR polling is capped at 20 distinct PRs per 8 s across all boards (each costs
+two conditional GETs on your GitHub token). Past 20 bound PRs no bind is refused:
+every PR is polled less often (the period grows in 8 s steps, e.g. 16 s for 21 to
+40 PRs).
+
+The daemon keeps no per-item source state across a restart. After one, the first
+report of each bound item counts as a state change: it overrides an agent-set
+status, appears as one delta entry attributed to the source, and may rewrite the
+file's line.
+
+How a source changes the item:
+
+| source says | status | note first line |
+|---|---|---|
+| Mother `running` | in-progress | `Mother job running` (with a `PR #n` link added once the job has a PR) |
+| Mother `succeeded`, `pr_merged` | done | |
+| Mother `failed` | blocked | `Mother job failed (<class>)` (the failure class, never Mother's own text) |
+| Mother `cancelled` | blocked | |
+| Mother `awaiting` | needs-you | the question's first line |
+| any other Mother state | in-progress | `Mother job state: <the raw state>` |
+| CI pending | in-progress | `CI pending (3/5 checks passed)` |
+| CI failure | blocked | `CI failing: <first failing check>` |
+| CI success | done with `!green`, otherwise unchanged | `CI green` |
+
+The source owns the note's **first line** (`Mother job …` / `CI …`) and the
+`PR #n` link; the rest of the note is yours. An agent's or the user's own
+status on a bound item stands until the source's next *state* change.
+
+Reaching the file and the agent:
+
+- The pane and the in-memory board change **at once**; the file's line is
+  rewritten **at most once per 60 s per item**, and only when the displayed
+  *status* changed (a count such as `3/5 checks passed` never writes the file).
+- A state change reaches the agent's next delta as one entry attributed
+  `source mother.job` or `source pr.ci`; count-only changes make no entry.
+- A source that goes silent leaves the item with its last value. After
+  `badly_stale_after` (300 s) the pane's view of the item carries
+  `bound.badly_stale: true` with `as_of`, and the pane shows a quiet
+  "as of 10:42"; the next report clears it.
+
+## Links
+
+An item's links render as chips: `PR #253`, `CORE-2841`, `Sentry PORTAL-1F2`,
+`run 9912`, `index.md:42`. Clicking a PR, ticket or file chip sends
+`tracker_open_link {tag, item_id, link_index}`; the daemon takes the link from
+its own copy of the board and opens it as `nostromo.show` would (same
+placement, same frames; the detail region's tab is focused, never the
+transcript): a PR link → `pr_conversation`, a Jira key → `ticket`, a
+repo-relative path with an optional `:line` → `file` anchored to the line.
+Other links (Sentry, run, URL) are opened by the app in the browser. A link
+that opens nothing is answered with an `Error`. The verb is refused for network
+peers.
 
 ## Where it appears
 
@@ -219,6 +285,7 @@ while it was down is ingested as `file`.
 |---|---|---|
 | `tracker_board {tag, board}` | `LocalOnly` | the whole board as the pane shows it, or `null` |
 | `tracker_summary {tag, has_tracker, counts}` | `Focus(tag)` | the only tracker frame a network peer receives, and only for a non-sensitive focus |
+| `tracker_open_link {tag, item_id, link_index}` | client → daemon, refused for network peers | open a link chip (see Links) |
 
 Both are sent to every focus bound to a board after any change, and replayed on
 attach (the board frame to local clients only). Golden JSON for both is in

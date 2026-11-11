@@ -51,6 +51,7 @@ fn board_frame() -> ServerMsg {
             banner: None,
             committable: None,
             hidden_by_user: false,
+            bound: Default::default(),
         },
     );
     ServerMsg::TrackerBoard {

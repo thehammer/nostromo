@@ -71,6 +71,18 @@ pub trait PaneContentProvider: Send + Sync {
             open_url: None,
         }
     }
+
+    /// Open link `link_index` of tracker item `item_id` the way a
+    /// `nostromo.show` would (`ClientMsg::TrackerOpenLink`), after the server
+    /// has checked the peer. `Err` says why nothing opened.
+    async fn tracker_open_link(
+        &self,
+        _tag: &str,
+        _item_id: &str,
+        _link_index: usize,
+    ) -> Result<(), String> {
+        Err("not_supported".to_string())
+    }
 }
 
 /// Supplies the tracker frames (`TrackerBoard`, `TrackerSummary`) of every

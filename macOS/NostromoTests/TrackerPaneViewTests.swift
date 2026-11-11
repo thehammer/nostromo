@@ -1867,7 +1867,12 @@ final class TrackerHostileTextTests: MouseQueueTestCase {
 
         let row = try XCTUnwrap(rig.rowView("item:verif-1037"))
         XCTAssertNotNil(row.proseView, "setup: the short note is shown, with its own text views")
-        XCTAssertGreaterThanOrEqual(row.allTextViews.count, 3, "setup: item text, note and link texts are all text views")
+        XCTAssertGreaterThanOrEqual(row.allTextViews.count, 1, "setup: the item text is a text view")
+        // T6: link texts are chips. A chip is a click target, so what it opens is checked here: a plain
+        // https URL opens in the browser (the app's injected opener, never run in this test), and a
+        // javascript: URL is inert.
+        XCTAssertEqual(row.linkChips.map(\.action), [.openURL(URL(string: evil)!), .inert],
+                       "an https link opens as a URL; a javascript: link opens nothing")
         let all = row.visibleText
         XCTAssertTrue(all.contains("evil"), "the link's label is shown: \(all)")
         XCTAssertTrue(all.contains(evil), "a plain URL is shown as text")
