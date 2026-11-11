@@ -107,45 +107,47 @@ final class ApprovalBadgesTests: XCTestCase {
         rig.arrive(try ApprovalTestRequests.simpleRm(id: "c", tag: "perri-1"))
         rig.coordinator.setAttentionTags(["cody-1"])
 
-        let counts = SidebarBadgeModel.needsYouNowCounts(from: rig.coordinator.snapshot)
+        let counts = SidebarBadgeModel.needsYouCounts(from: rig.coordinator.snapshot)
 
-        XCTAssertEqual(counts, ["cody-1": 2, "perri-1": 1])
+        XCTAssertEqual(counts.blocking.filter { $0.value > 0 }, ["cody-1": 2, "perri-1": 1])
+        XCTAssertTrue(counts.waiting.filter { $0.value > 0 }.isEmpty, "an approval blocks; it is never merely waiting")
     }
 
-    func testTheNeedsYouNowLevelOutranksAttentionAndKeepsTheSecondLine() {
+    func testABlockingCountOutranksAttentionAndLeavesTheOwnPillAndSecondLineAlone() {
         var registry = FocusBadgeRegistry()
         registry.publish(tag: "fred", sourceKey: "fred",
                          badge: FocusBadge(pill: "12", detail: "Next: Eng sync", level: .attention, accessibilityLabel: "Fred, 12 unread"))
-        registry.publish(tag: "fred", sourceKey: "needs-you-now", badge: .needsYouNow(count: 2))
+        registry.publish(tag: "fred", sourceKey: "needs-you", badge: .needsYou(blocking: 2, waiting: 0))
 
         let badge = registry.badge(for: "fred")
 
         XCTAssertEqual(badge?.level, .needsYouNow)
-        XCTAssertEqual(badge?.pill, "2")
+        XCTAssertEqual(badge?.pill, "12", "the red pill is its own pill now; it never replaces Fred's count")
+        XCTAssertEqual(badge?.blocking, 2)
         XCTAssertEqual(badge?.detail, "Next: Eng sync")
-        XCTAssertEqual(badge?.accessibilityLabel, "2 waiting on you")
+        XCTAssertEqual(badge?.accessibilityLabel, "Fred, 12 unread, 2 approvals blocking")
         XCTAssertEqual(registry.attentionTags, ["fred"], "the dot logic still sees the attention source")
     }
 
     func testTheModelPublishesChangesAndClearsAFocusThatNoLongerNeedsYou() {
         var model = SidebarBadgeModel()
-        model.setNeedsYouNow(["cody-1": 1, "perri-1": 3])
-        XCTAssertEqual(model.badge(for: "cody-1")?.pill, "1")
+        model.setNeedsYou(NeedsYouCounts(blocking: ["cody-1": 1, "perri-1": 3]))
+        XCTAssertEqual(model.badge(for: "cody-1")?.blocking, 1)
         XCTAssertEqual(model.badge(for: "perri-1")?.level, .needsYouNow)
 
-        model.setNeedsYouNow(["cody-1": 2])
-        XCTAssertEqual(model.badge(for: "cody-1")?.pill, "2")
+        model.setNeedsYou(NeedsYouCounts(blocking: ["cody-1": 2]))
+        XCTAssertEqual(model.badge(for: "cody-1")?.blocking, 2)
         XCTAssertNil(model.badge(for: "perri-1"))
 
-        model.setNeedsYouNow([:])
+        model.setNeedsYou(NeedsYouCounts())
         XCTAssertNil(model.badge(for: "cody-1"))
     }
 
     func testThePurpleDecisionDotAndTheRedPillCanShowTogether() {
         var model = SidebarBadgeModel()
-        model.setNeedsYouNow(["cody-1": 1])
+        model.setNeedsYou(NeedsYouCounts(blocking: ["cody-1": 1]))
         XCTAssertEqual(model.combinedAttentionTags(storeTags: ["cody-1"]), ["cody-1"], "the dot's tag is untouched")
-        XCTAssertEqual(model.badge(for: "cody-1")?.pill, "1")
+        XCTAssertEqual(model.badge(for: "cody-1")?.blocking, 1)
     }
 
     private func makeItem(secondary: String?, width: CGFloat = 180) -> NavTabItem {
@@ -157,32 +159,31 @@ final class ApprovalBadgesTests: XCTestCase {
         return item
     }
 
-    func testThePillIsRedShowsTheCountAndNeverChangesTheRowHeight() {
-        for secondary in [nil, "base line"] as [String?] {
-            for attention in [false, true] {
-                let item = makeItem(secondary: secondary)
-                let expected = secondary == nil ? Theme.navItemHeight : Theme.navItemSubtitleHeight
-                let fitting = item.fittingSize.height
-                item.needsAttention = attention
+    func testTheRedPillShowsTheCountHighlightsTheRowAndNeverChangesItsHeight() {
+        // Every focus row has a second line (the git branch), so that is the row under test.
+        for attention in [false, true] {
+            let item = makeItem(secondary: "base line")
+            let fitting = item.fittingSize.height
+            item.needsAttention = attention
 
-                item.setBadge(.needsYouNow(count: 12))
-                item.layoutSubtreeIfNeeded()
-                XCTAssertEqual(item.pillText, "12")
-                XCTAssertTrue(item.showsNeedsYouNow)
-                XCTAssertEqual(item.frame.height, expected, "pill shown (attention dot: \(attention))")
-                XCTAssertEqual(item.fittingSize.height, fitting)
-                XCTAssertEqual(item.accessibilityLabel(), "12 waiting on you, needs you now")
-                if attention, let pill = item.pillFrame, let dot = item.attentionDotFrame {
-                    XCTAssertLessThanOrEqual(pill.maxX, dot.minX, "the pill sits left of the dot")
-                }
-
-                item.setBadge(nil)
-                item.layoutSubtreeIfNeeded()
-                XCTAssertNil(item.pillText)
-                XCTAssertFalse(item.showsNeedsYouNow)
-                XCTAssertEqual(item.frame.height, expected, "pill hidden (attention dot: \(attention))")
-                XCTAssertEqual(item.fittingSize.height, fitting)
+            item.setBadge(FocusBadge.needsYou(blocking: 12, waiting: 0))
+            item.layoutSubtreeIfNeeded()
+            XCTAssertEqual(item.blockingPillText, "12")
+            XCTAssertNil(item.pillText, "the red pill is not the row's own pill")
+            XCTAssertTrue(item.showsBlockingHighlight)
+            XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight, "pill shown (attention dot: \(attention))")
+            XCTAssertEqual(item.fittingSize.height, fitting)
+            XCTAssertEqual(item.accessibilityLabel(), "12 approvals blocking")
+            if attention, let pill = item.blockingPillFrame, let dot = item.attentionDotFrame {
+                XCTAssertFalse(pill.intersects(dot), "the pill never sits on the purple dot")
             }
+
+            item.setBadge(nil)
+            item.layoutSubtreeIfNeeded()
+            XCTAssertNil(item.blockingPillText)
+            XCTAssertFalse(item.showsBlockingHighlight)
+            XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight, "pill hidden (attention dot: \(attention))")
+            XCTAssertEqual(item.fittingSize.height, fitting)
         }
     }
 
@@ -280,7 +281,9 @@ final class ApprovalBadgesTests: XCTestCase {
 
         XCTAssertTrue(rig.center.added.isEmpty, "what a relaunch finds waiting is the baseline, not a burst")
         XCTAssertEqual(rig.coordinator.dockLabel, "2")
-        XCTAssertEqual(SidebarBadgeModel.needsYouNowCounts(from: rig.coordinator.snapshot), ["cody-1": 2])
+        let launch = SidebarBadgeModel.needsYouCounts(from: rig.coordinator.snapshot)
+        XCTAssertEqual(launch.blocking, ["cody-1": 2])
+        XCTAssertTrue(launch.waiting.isEmpty)
 
         rig.arrive(try rm("c"))
         XCTAssertEqual(rig.postedIDs, ["approvals:c"], "the first request after the baseline alerts, and only it")
@@ -292,7 +295,7 @@ final class ApprovalBadgesTests: XCTestCase {
         rig.recorder.runScheduled()
 
         XCTAssertNil(rig.coordinator.dockLabel)
-        XCTAssertTrue(SidebarBadgeModel.needsYouNowCounts(from: rig.coordinator.snapshot).isEmpty)
+        XCTAssertEqual(SidebarBadgeModel.needsYouCounts(from: rig.coordinator.snapshot), NeedsYouCounts())
         XCTAssertEqual(rig.dock, ["2", "3", "2", "1", nil], "each change once, and the clear exactly once")
     }
 
@@ -418,7 +421,7 @@ final class ApprovalBadgesTests: XCTestCase {
         }
 
         mutating func apply(_ snapshot: NeedsYouSnapshot) {
-            model.setNeedsYouNow(SidebarBadgeModel.needsYouNowCounts(from: snapshot))
+            model.setNeedsYou(SidebarBadgeModel.needsYouCounts(from: snapshot))
             for (tag, item) in rows {
                 item.setBadge(model.badge(for: tag))
                 item.layoutSubtreeIfNeeded()
@@ -440,9 +443,11 @@ final class ApprovalBadgesTests: XCTestCase {
         right.apply(rig.coordinator.snapshot)
 
         for window in [left, right] {
-            XCTAssertEqual(window.rows["cody-1"]?.pillText, "2")
-            XCTAssertEqual(window.rows["cody-1"]?.showsNeedsYouNow, true)
-            XCTAssertNil(window.rows["perri-1"]?.pillText, "only the focus that is waiting shows a pill")
+            XCTAssertEqual(window.rows["cody-1"]?.blockingPillText, "2")
+            XCTAssertEqual(window.rows["cody-1"]?.showsBlockingHighlight, true)
+            XCTAssertNil(window.rows["perri-1"]?.blockingPillText, "only the focus that is blocked shows a pill")
+            XCTAssertNil(window.rows["perri-1"]?.waitingPillText)
+            XCTAssertEqual(window.rows["perri-1"]?.showsBlockingHighlight, false)
             for item in window.rows.values {
                 XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight)
             }
@@ -457,8 +462,9 @@ final class ApprovalBadgesTests: XCTestCase {
         right.apply(rig.coordinator.snapshot)
 
         for window in [left, right] {
-            XCTAssertEqual(window.rows["cody-1"]?.pillText, "2", "the same count after a focus switch")
-            XCTAssertNil(window.rows["perri-1"]?.pillText)
+            XCTAssertEqual(window.rows["cody-1"]?.blockingPillText, "2", "the same count after a focus switch")
+            XCTAssertEqual(window.rows["cody-1"]?.showsBlockingHighlight, true, "blocked whether or not it is the one on screen")
+            XCTAssertNil(window.rows["perri-1"]?.blockingPillText)
             for item in window.rows.values {
                 XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight)
             }
@@ -469,8 +475,8 @@ final class ApprovalBadgesTests: XCTestCase {
         try rig.end("a")
         left.apply(rig.coordinator.snapshot)
         right.apply(rig.coordinator.snapshot)
-        XCTAssertEqual(left.rows["cody-1"]?.pillText, "1")
-        XCTAssertEqual(right.rows["cody-1"]?.pillText, "1")
+        XCTAssertEqual(left.rows["cody-1"]?.blockingPillText, "1")
+        XCTAssertEqual(right.rows["cody-1"]?.blockingPillText, "1")
     }
 
     // MARK: The click

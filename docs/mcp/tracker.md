@@ -33,6 +33,10 @@ Statuses: `todo`, `in-progress`, `blocked`, `needs-you`, `done`. Environments:
 `prod`, `canada`, `demo`, `staging`, `local`, `unset`. Links are `"PR #253"` or
 `{text, url}`.
 
+On the Mac a needs-you item raises the sidebar's amber **waiting** pill for its focus; it
+never raises the red **blocking** pill, which is only for a pending approval. See
+`docs/sidebar-badges.md`.
+
 Field caps (characters): item text, link text and Log line 500; owner 32; note
 8,000; command 4,000. Over a cap is `invalid_args` naming the field.
 
