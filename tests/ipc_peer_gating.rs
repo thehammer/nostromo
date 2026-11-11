@@ -12153,6 +12153,37 @@ async fn a_local_script_s_staging_frames_are_refused_and_change_nothing() {
     }
 }
 
+fn staging_only_invite() -> ClientMsg {
+    ClientMsg::TerminalFollowInviteStagingOnly {
+        terminal_id: "t-staging".into(),
+        follower_tag: "cody-plain".into(),
+    }
+}
+
+#[tokio::test]
+async fn a_tcp_client_s_staging_only_invite_is_refused_with_requires_secure_connection() {
+    let h = spawn_server().await;
+    let (mut tcp, _) = h.tcp(vec![]).await;
+
+    let frames = attack(&mut tcp, staging_only_invite()).await;
+    assert_refused(&frames, "terminal_follow_invite_staging_only");
+}
+
+#[tokio::test]
+async fn a_local_script_s_staging_only_invite_is_refused_as_a_follow_invite() {
+    let h = spawn_server_with_verifier(Arc::new(FakePeerVerifier::always_script())).await;
+    let (mut script, _) = h.unix(vec![]).await;
+
+    let frames = attack(&mut script, staging_only_invite()).await;
+    assert!(
+        frames.iter().any(|m| {
+            matches!(m, ServerMsg::TerminalRefused { op, code, .. }
+                if op == "follow_invite" && code == "terminal_control_forbidden")
+        }),
+        "expected a terminal_refused for follow_invite, got {frames:?}"
+    );
+}
+
 // ── AP4: session rules ───────────────────────────────────────────────────────
 //
 // `approval_revoke_session_rule` removes a rule that lets the daemon allow commands without a

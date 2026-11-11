@@ -134,6 +134,30 @@ mod tests {
     }
 
     #[test]
+    fn the_text_offers_staging_only_and_says_staging_for_a_remote_shell_marks_the_session() {
+        let t = nostromo_instructions(Some(&"t".repeat(64)));
+        assert!(
+            t.contains(
+                "\n  mode:\"staging_only\" asks only to stage for it: no output, no screen reads, no notice when the user places an entry (call list).\n"
+            ),
+            "{t}"
+        );
+        assert!(
+            t.contains(
+                "\nFollowing a remote shell, or staging for one, marks the session sensitive for the rest of the session."
+            ),
+            "{t}"
+        );
+        // With the longest topic line the text still fits.
+        assert!(t.lines().count() <= 25, "{} lines", t.lines().count());
+        assert!(
+            t.chars().count() <= MAX_INSTRUCTIONS_CHARS,
+            "{} chars",
+            t.chars().count()
+        );
+    }
+
+    #[test]
     fn the_dynamic_line_names_the_topic_and_the_budget_holds() {
         let t = nostromo_instructions(Some("sentry-triage"));
         assert!(t.ends_with(

@@ -4058,3 +4058,238 @@ follow_test! {
         assert_eq!(d.mcp_refusals("list").len(), 1);
     }
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// S3a: staging only, over MCP
+// ═════════════════════════════════════════════════════════════════════════════
+
+const STAGING: &str = "nostromo.terminal_staging";
+
+/// What an app that can grant staging only declares.
+const STAGING_ONLY_CAPS: [&str; 5] = [
+    "terminal_ui",
+    "terminal_follow_ui",
+    "remote_shell_confirm",
+    "terminal_staging_ui",
+    "terminal_staging_only_ui",
+];
+
+/// [`rig`], with an app that can grant staging only.
+async fn rig_staging_only() -> Rig {
+    let d = Daemon::start(&[Peer::App]).await;
+    let mut app = d.app_with(&STAGING_ONLY_CAPS, true).await;
+    let a = d.session(A, "cody").await;
+    let (guard, cwd) = canonical_tmp();
+    let t = Some(app.open_control_terminal(A, &cwd).await);
+    let mcp = d.mcp(Some(A)).await;
+    Rig {
+        d,
+        app,
+        mcp,
+        a,
+        b: None,
+        t,
+        cwd,
+        _cwd_guard: guard,
+    }
+}
+
+impl Rig {
+    /// Ask to follow the control terminal in `mode` and wait for the sheet.
+    async fn ask_mode(&mut self, mode: &str) -> (i64, Sheet) {
+        let id = self.id();
+        let from = self.app.mark();
+        let call = self
+            .mcp
+            .start_call(FOLLOW, json!({ "terminal_id": id, "mode": mode }))
+            .await;
+        let sheet = self.app.wait_sheet(from).await;
+        (call, sheet)
+    }
+}
+
+#[test]
+fn request_follow_has_a_mode_and_terminal_staging_has_no_way_to_change_access() {
+    let tools = tool_descriptors();
+    let follow = tools.iter().find(|t| t["name"] == FOLLOW).unwrap();
+    let mode = &follow["inputSchema"]["properties"]["mode"];
+    assert_eq!(mode["enum"], json!(["full", "staging_only"]));
+    assert!(
+        !follow["inputSchema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "mode"),
+        "mode is optional"
+    );
+    assert!(follow["description"]
+        .as_str()
+        .unwrap()
+        .contains("without receiving its output or screen"));
+    let staging = tools.iter().find(|t| t["name"] == STAGING).unwrap();
+    let properties = staging["inputSchema"]["properties"].as_object().unwrap();
+    for forbidden in ["mode", "access", "output", "follow_mode", "staging_only"] {
+        assert!(
+            !properties.contains_key(forbidden),
+            "terminal_staging has a `{forbidden}` property"
+        );
+    }
+}
+
+follow_test! {
+    async fn a_mode_that_is_not_full_or_staging_only_is_invalid_args_and_asks_nobody() {
+        let mut r = rig_staging_only().await;
+        let id = r.id();
+        for bad in [json!("everything"), json!(""), json!("FULL"), json!(1), json!(null), json!(["full"])] {
+            let from = r.app.mark();
+            let res = r.mcp.call(FOLLOW, json!({ "terminal_id": id, "mode": bad })).await;
+            assert_eq!(
+                res,
+                json!({ "error": "invalid_args", "detail": "mode is full or staging_only" }),
+                "mode {bad}"
+            );
+            r.app.assert_no_sheet_since(from, "an invalid mode").await;
+        }
+        assert_eq!(r.d.follower_of(&id), None);
+    }
+}
+
+follow_test! {
+    async fn a_staging_only_request_names_the_pane_says_will_not_and_offers_exactly_allow_staging_only_and_deny() {
+        let mut r = rig_staging_only().await;
+        let (call, sheet) = r.ask_mode("staging_only").await;
+        assert!(sheet.prompt.contains("will NOT"), "{}", sheet.prompt);
+        assert!(sheet.prompt.contains("local shell in"), "{}", sheet.prompt);
+        assert_eq!(
+            sheet.choices,
+            vec![
+                ("allow_staging_only".to_string(), "Allow staging only".to_string()),
+                ("deny".to_string(), "Deny".to_string()),
+            ]
+        );
+        // A full follow's `allow` is not a choice of this sheet.
+        r.app.answer_sheet(&sheet.request_id, Some("allow")).await;
+        r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
+        let res = r.mcp.finish(call).await;
+        assert_eq!(res["error"], "denied", "{res}");
+        assert_eq!(r.d.follower_of(&r.id()), None, "`allow` granted nothing");
+    }
+}
+
+follow_test! {
+    async fn allowing_staging_only_gives_a_follow_that_stages_lists_and_reads_nothing_of_the_terminal() {
+        let mut r = rig_staging_only().await;
+        let id = r.id();
+        let from = r.a.count();
+        let (call, sheet) = r.ask_mode("staging_only").await;
+        r.app.answer_sheet(&sheet.request_id, Some("allow_staging_only")).await;
+        let res = r.mcp.finish(call).await;
+        assert_eq!(res, json!({ "ok": true, "outcome": "staging_only" }), "{res}");
+        let (_, started) = r.a.wait_started(from).await;
+        assert!(started.contains("reason=\"staging_only\""), "{started}");
+        r.d.wait_idle(A).await;
+
+        // It shows as followed, in its mode.
+        let listed = r.mcp.call(LIST, json!({})).await;
+        let mine = &listed["terminals"][0];
+        assert_eq!(mine["followed_by_you"], true, "{listed}");
+        assert_eq!(mine["follow_mode"], "staging_only", "{listed}");
+
+        // It cannot read the screen, and is told why.
+        let read = r.mcp.call(READ, json!({ "terminal_id": id })).await;
+        assert_eq!(read["error"], "terminal_read_forbidden", "{read}");
+        assert_eq!(
+            read["detail"],
+            "staging only: you may stage for this terminal but not read it",
+            "{read}"
+        );
+        assert!(read.get("text").is_none(), "{read}");
+
+        // It can stage, and `list` says how it follows and never a foreground program.
+        let staged = r
+            .mcp
+            .call(STAGING, json!({ "op": "stage", "terminal_id": id, "command": "ls -la" }))
+            .await;
+        assert_eq!(staged["ok"], true, "{staged}");
+        let list = r.mcp.call(STAGING, json!({ "op": "list", "terminal_id": id })).await;
+        assert_eq!(list["follow_mode"], "staging_only", "{list}");
+        assert!(list.get("foreground").is_none(), "{list}");
+
+        // Output the terminal prints never reaches it.
+        let before = r.a.count();
+        r.run("printf 'STAGING-ONLY-CANARY\\n'").await;
+        assert!(r.app.wait_view_from(&id, 0, "STAGING-ONLY-CANARY", WAIT).await);
+        r.a.assert_quiet_after(before, "a staging-only follower hears no output").await;
+    }
+}
+
+follow_test! {
+    async fn without_an_app_that_declared_staging_only_the_request_is_no_operator_with_a_detail_and_nobody_is_asked() {
+        // The ordinary rig's app declares the follow control and the remote-shell sheet only.
+        let mut r = rig().await;
+        let id = r.id();
+        let from = r.app.mark();
+        let res = r
+            .mcp
+            .call(FOLLOW, json!({ "terminal_id": id, "mode": "staging_only" }))
+            .await;
+        assert_eq!(res["error"], "no_operator", "{res}");
+        assert_eq!(
+            res["detail"],
+            "the Nostromo app is not open, or too old to grant staging only",
+            "{res}"
+        );
+        r.app.assert_no_sheet_since(from, "no app can grant staging only").await;
+        assert_eq!(r.d.follower_of(&id), None);
+        // A full request is still asked as before.
+        let (call, sheet) = r.ask(None).await;
+        r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
+        assert_eq!(r.mcp.finish(call).await["error"], "denied");
+    }
+}
+
+follow_test! {
+    async fn a_staging_only_follower_asking_for_full_is_asked_again_and_a_full_follower_asking_staging_only_already_has_more() {
+        let mut r = rig_staging_only().await;
+        let id = r.id();
+        let (call, sheet) = r.ask_mode("staging_only").await;
+        r.app.answer_sheet(&sheet.request_id, Some("allow_staging_only")).await;
+        assert_eq!(r.mcp.finish(call).await["outcome"], "staging_only");
+        r.d.wait_idle(A).await;
+
+        // Asking staging only again: nothing to ask.
+        let from = r.app.mark();
+        let again = r
+            .mcp
+            .call(FOLLOW, json!({ "terminal_id": id, "mode": "staging_only" }))
+            .await;
+        assert_eq!(again, json!({ "ok": true, "outcome": "staging_only" }));
+        r.app.assert_no_sheet_since(from, "already staging only").await;
+
+        // Asking for full: a fresh sheet whose only allow is `allow`; deny leaves the follow alone.
+        let (call, sheet) = r.ask_mode("full").await;
+        assert_eq!(sheet.choices[0].0, "allow", "{:?}", sheet.choices);
+        assert!(sheet.prompt.contains("without seeing output"), "{}", sheet.prompt);
+        r.app.answer_sheet(&sheet.request_id, Some("deny")).await;
+        assert_eq!(r.mcp.finish(call).await["error"], "denied");
+        assert_eq!(r.d.follower_of(&id).map(|f| f.mode), Some(nostromo::ipc::protocol::FollowAccess::StagingOnly));
+        let kept = r.mcp.call(STAGING, json!({ "op": "list", "terminal_id": id })).await;
+        assert_eq!(kept["entries"], json!([]), "{kept}");
+    }
+}
+
+follow_test! {
+    async fn a_full_follower_asking_staging_only_gets_following_with_no_sheet() {
+        let mut r = rig_staging_only().await;
+        let id = r.id();
+        r.invite_a(false).await;
+        let from = r.app.mark();
+        let res = r
+            .mcp
+            .call(FOLLOW, json!({ "terminal_id": id, "mode": "staging_only" }))
+            .await;
+        assert_eq!(res, json!({ "ok": true, "outcome": "following" }), "{res}");
+        r.app.assert_no_sheet_since(from, "a full follower has more").await;
+        assert_eq!(r.d.follower_of(&id).map(|f| f.mode), Some(nostromo::ipc::protocol::FollowAccess::Full));
+    }
+}
