@@ -743,26 +743,31 @@ extension TerminalStagingStoreTests {
         XCTAssertTrue(another.hasPendingAutoArchive(terminalId: id), "on: an insert waits for a person's Enter")
     }
 
-    func testTheLaunchValueDoesNotComeFromUserDefaultsOrAFileAndUntickingIsNeverStored() throws {
+    func testTheLaunchValueIsNotReadFromUserDefaultsAndUntickingIsNeverStored() {
         // The launch value is the constant; a person's untick changes memory only.
         let (_, suite) = makeStore()
         let keys = ["nostromo.terminal.autoArchive", "nostromo.terminal.stagingAutoArchive", "autoArchive"]
         TerminalStagingStore.setAutoArchive(false)
         for key in keys { XCTAssertNil(suite.object(forKey: key), "unticking writes no \(key)") }
-        XCTAssertNil(UserDefaults.standard.object(forKey: "nostromo.terminal.autoArchive"))
-        XCTAssertNil(UserDefaults.standard.object(forKey: "nostromo.terminal.stagingAutoArchive"))
         TerminalStagingStore.resetAutoArchiveForTests()
         XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled, "a relaunch (the reset) is back on whatever was ticked")
-        // A planted preference or file changes nothing.
         for key in keys { UserDefaults.standard.set(false, forKey: key) }
         addTeardownBlock { for key in keys { UserDefaults.standard.removeObject(forKey: key) } }
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("autoarchive-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
-        try Data("{\"autoArchive\":false}".utf8).write(to: dir.appendingPathComponent("autoArchive.json"))
         TerminalStagingStore.resetAutoArchiveForTests()
-        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled)
-        XCTAssertEqual(TerminalStagingStore.launchDefaultAutoArchive, true)
+        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled, "a planted preference changes nothing")
+    }
+
+    func testTogglingAutoArchiveWritesNothingToUserDefaultsUnderAnyKey() {
+        let (_, suite) = makeStore()
+        let standardBefore = UserDefaults.standard.dictionaryRepresentation() as NSDictionary
+        let suiteBefore = suite.dictionaryRepresentation() as NSDictionary
+        TerminalStagingStore.setAutoArchive(false)
+        TerminalStagingStore.setAutoArchive(true)
+        TerminalStagingStore.setAutoArchive(false)
+        XCTAssertEqual(UserDefaults.standard.dictionaryRepresentation() as NSDictionary, standardBefore,
+                       "no key added or changed in the standard defaults")
+        XCTAssertEqual(suite.dictionaryRepresentation() as NSDictionary, suiteBefore,
+                       "no key added or changed in the store's defaults")
     }
 
     func testUntickingAutoArchiveMakesAnEnterArchiveNothing() {

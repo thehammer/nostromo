@@ -20,7 +20,7 @@
 # (h) privacy: a canary staged and inserted; no file under the QA home's .nostromo holds it.
 # (j)-(l) S2 production pane (fake ECS): the red-frame drawer, confirm only on a destructive pattern, the
 #     per-terminal switch, and agent staging never keeping the shell open (NOSTROMO_QA_IDLE_SECS=30).
-# (m)-(o) S2 archive/close/reopen, auto-archive off by default, and the foreground (`sleep 30`) case.
+# (m)-(o) S2 archive/close/reopen, auto-archive on at launch, and the foreground (`sleep 30`) case.
 # (i) with `start --no-synthetic`: a synthesized click on a row sends zero bytes (the screen shows no command).
 #
 # Reading the app is by its accessibility tree. Where app-control cannot reach a control (the badge popover, a
@@ -363,8 +363,8 @@ if open_logged_terminal; then
   ctl click --text "Hide Staged Commands" >/dev/null 2>&1 || inconc "could not hide the drawer"
   ok_if "the pane header shows a staged chip" poll 20 tree_has "staged"
 
-  echo "== (n) auto-archive is off until turned on =="
-  ok_unless "Archive Commands After I Run Them starts unchecked" tree_has "Archive Commands After I Run Them.*checked"
+  echo "== (n) auto-archive is on at every launch =="
+  ok_if "Archive Commands After I Run Them starts checked" tree_has "Archive Commands After I Run Them.*checked"
 
   echo "== (o) foreground: sleep 30 makes the pane RUNNING; Ctrl-C returns it =="
   stage stage '{"command": "echo fg-row"}' || fail "stage refused"
