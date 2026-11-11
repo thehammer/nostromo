@@ -111,7 +111,7 @@ final class TrackerPaneView: NSView {
          openLinkInDaemon: @escaping (String, String, Int) -> Void = { tag, item, index in
              AppStore.shared.client.sendTrackerOpenLink(tag: tag, itemId: item, linkIndex: index)
          },
-         openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
+         openURL: @escaping (URL) -> Void = { ActivationAudit.note("tracker-link:open-external-url"); NSWorkspace.shared.open($0) },
          schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          },

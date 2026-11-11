@@ -177,7 +177,9 @@ final class TrackerAppearanceTests: XCTestCase {
             measure("muted-time", pane.rowViews[plain]?.timeLabel, scrollingTo: plain)
             measure("muted-section-count", pane.rowViews["section:now"].flatMap { label("10", in: $0) }, scrollingTo: "section:now")
             let noted = "item:check-1000"
-            measure("muted-note-first-line", pane.rowViews[noted].flatMap { $0.textViews.count > 1 ? $0.textViews[1] : nil }, scrollingTo: noted)
+            measure("muted-note-first-line", pane.rowViews[noted]?.proseView, scrollingTo: noted)
+            // A link chip (T6): its text on the chip's fill.
+            measure("link-chip", pane.rowViews[noted]?.linkChips.first, scrollingTo: noted)
             measure("muted-done-group", pane.rowViews["done:done"]?.textViews.first, scrollingTo: "done:done")
 
             // Status marks.
@@ -234,7 +236,7 @@ final class TrackerAppearanceTests: XCTestCase {
     }
 
     func testMutedMetadataIsAtLeastFourPointFiveToOne() {
-        assertAtLeast(4.5, ["muted-owner", "muted-time", "muted-section-count", "muted-note-first-line", "muted-done-group"],
+        assertAtLeast(4.5, ["muted-owner", "muted-time", "muted-section-count", "muted-note-first-line", "muted-done-group", "link-chip"],
                       "muted metadata")
     }
 
