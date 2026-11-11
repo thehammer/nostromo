@@ -29,6 +29,7 @@ pub mod terminal;
 pub mod terminal_follow;
 pub mod terminal_staging;
 pub mod tracker;
+pub mod tracker_link;
 
 use serde_json::{json, Value};
 

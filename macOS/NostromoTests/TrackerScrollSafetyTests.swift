@@ -401,6 +401,9 @@ final class TrackerGateHarness {
 
     static let tag = "gate-tracker"
 
+    /// What the pane asked its injected openers to do (T6): nothing reaches a daemon or the browser.
+    let links = TrackerGateLinkRecorder()
+
     let pane: TrackerPaneView
     let store: TrackerStore
     let paneClock: TrackerGateClock
@@ -418,8 +421,11 @@ final class TrackerGateHarness {
         let store = TrackerStore(now: { storeClock.tickingDate() }, schedule: { _, work in work() })
         self.paneClock = paneClock
         self.store = store
+        let links = self.links
         pane = TrackerPaneView(tag: TrackerGateHarness.tag, store: store, now: { paneClock.date },
                                reduceMotion: { true }, pasteboard: rigPrivatePasteboard(testCase),
+                               openLinkInDaemon: { tag, item, index in links.daemonOpens.append(.init(tag: tag, item: item, index: index)) },
+                               openURL: { links.urlOpens.append($0) },
                                schedule: { _, _ in }, timeZone: TimeZone(identifier: "UTC")!, tickInterval: nil)
     }
 

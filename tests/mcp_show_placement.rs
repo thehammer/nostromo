@@ -110,6 +110,12 @@ struct Harness {
 }
 
 fn make_daemon_state() -> Harness {
+    make_daemon_state_with(Default::default())
+}
+
+/// [`make_daemon_state`] over the given tracker registry (T6: tests whose
+/// focus has a tracker board with links on it).
+fn make_daemon_state_with(tracker: Arc<nostromo::tracker::TrackerRegistry>) -> Harness {
     let dir = TempDir::new().unwrap();
     let pane_registry = Arc::new(std::sync::Mutex::new(PaneRegistry::with_store_path(
         dir.path().join("panes.json"),
@@ -129,7 +135,7 @@ fn make_daemon_state() -> Harness {
             nostromo::ipc::decisions::DecisionRegistry::default(),
         )),
         tickets: TicketRegistryState::default(),
-        tracker: Default::default(),
+        tracker,
         terminals: nostromo::terminal::TerminalAgentApi::in_memory(),
     };
     Harness {
@@ -1594,4 +1600,355 @@ async fn a_terminal_tab_in_the_detail_region_is_never_the_tab_show_evicts() {
         !ids.contains(&files[0]),
         "the evicted file tab is gone: {ids:?}"
     );
+}
+
+// ── T6 (PRD 55): a tracker item's link chip opens exactly like `nostromo.show` ─
+//
+// `ClientMsg::TrackerOpenLink` is answered by `tracker_link::open_link`: a PR
+// chip is a `pr_conversation` show, a Jira key a `ticket` show, a repo-relative
+// `path:line` a `file` show anchored at the line, each through the show
+// handler itself, so placement, eviction and frames are a show's own. Other
+// chips (Sentry, run, URL) are the Mac's to open: no frame, no tree change.
+//
+// Each case compares two identical, fresh focuses: one on which the agent calls
+// `nostromo.show`, one on which the chip is clicked (a tracker board with the
+// link on an item). Frames are compared as the wire would carry them, minus
+// clock-valued fields.
+
+use nostromo::mcp::tools::{show as show_tool, tracker_link};
+use nostromo::tracker::{Author, FakeClock, Op, OpenArgs, RegistryParts, TrackerRegistry};
+
+const LINK_TAG: &str = "perri";
+const LINK_SESSION: &str = "sess-link";
+
+/// A focus `LINK_TAG` with a tracker board holding one item, `it`, carrying
+/// `links` (the tool's `links` JSON) and optionally bound with `bind`.
+struct LinkedFocus {
+    harness: Harness,
+    _tmp: TempDir,
+}
+
+fn focus_with_item(links: Value, bind: Option<&str>) -> LinkedFocus {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let repo = base.join("repo");
+    let home = base.join("home");
+    for dir in [&repo, &home] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let registry = Arc::new(TrackerRegistry::new(RegistryParts::hermetic(
+        base.join("state"),
+        home,
+        Arc::new(FakeClock::at_secs(1_760_540_000)),
+    )));
+    registry
+        .open(
+            LINK_TAG,
+            LINK_SESSION,
+            &OpenArgs {
+                topic: Some("links".into()),
+                cwd: repo,
+                ..Default::default()
+            },
+        )
+        .expect("open a board");
+    let mut upsert = json!({
+        "op": "upsert", "id": "it", "section": "now",
+        "text": "Item with links", "links": links,
+    });
+    if let Some(bind) = bind {
+        upsert["bind"] = json!(bind);
+    }
+    let op: Op = serde_json::from_value(upsert).expect("an upsert op");
+    registry
+        .apply(
+            LINK_TAG,
+            LINK_SESSION,
+            &[op],
+            &Author::Agent {
+                focus: LINK_TAG.into(),
+                session_id: LINK_SESSION.into(),
+                name: LINK_TAG.into(),
+            },
+        )
+        .expect("seed the item");
+    LinkedFocus {
+        harness: make_daemon_state_with(registry),
+        _tmp: tmp,
+    }
+}
+
+/// Everything broadcast so far on `rx`.
+fn drain(rx: &mut broadcast::Receiver<ServerMsg>) -> Vec<ServerMsg> {
+    let mut frames = Vec::new();
+    while let Ok(frame) = rx.try_recv() {
+        frames.push(frame);
+    }
+    frames
+}
+
+/// The frames as JSON without clock-valued fields (`as_of`, `*_at`).
+fn on_the_wire(frames: &[ServerMsg]) -> Vec<Value> {
+    fn strip_clock(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                map.retain(|key, _| key != "as_of" && !key.ends_with("_at"));
+                map.values_mut().for_each(strip_clock);
+            }
+            Value::Array(items) => items.iter_mut().for_each(strip_clock),
+            _ => {}
+        }
+    }
+    frames
+        .iter()
+        .map(|f| {
+            let mut value = serde_json::to_value(f).expect("a frame is JSON");
+            strip_clock(&mut value);
+            value
+        })
+        .collect()
+}
+
+/// What `nostromo.show` with `args` does on a fresh focus: its reply and its
+/// broadcast frames.
+async fn show_on_a_fresh_focus(args: &Value) -> (Value, Vec<ServerMsg>) {
+    let fresh = make_daemon_state();
+    let mut rx = fresh.broadcast_tx.subscribe();
+    let reply = show_tool::show(&fresh.state, args, Some(LINK_TAG)).await;
+    (reply, drain(&mut rx))
+}
+
+/// The pane a `FocusLayout` foregrounds, the pane a `PaneContent` fills, and
+/// the panes of the layout's tree.
+fn placement_of(frames: &[ServerMsg]) -> (Option<String>, Option<String>, Vec<String>) {
+    let mut focused = None;
+    let mut tree_panes = Vec::new();
+    let mut content = None;
+    for frame in frames {
+        match frame {
+            ServerMsg::FocusLayout {
+                tree, focused_pane, ..
+            } => {
+                focused = focused_pane.clone();
+                tree_panes = tree.pane_ids();
+            }
+            ServerMsg::PaneContent { pane_id, .. } => content = Some(pane_id.clone()),
+            _ => {}
+        }
+    }
+    (focused, content, tree_panes)
+}
+
+/// The click opened what the show opened, in the detail region and not the
+/// transcript.
+fn assert_same_as_show(clicked: &[ServerMsg], shown: &[ServerMsg]) {
+    assert!(
+        shown
+            .iter()
+            .any(|f| matches!(f, ServerMsg::FocusLayout { .. })),
+        "control: the show broadcast a layout: {shown:?}"
+    );
+    assert!(
+        shown
+            .iter()
+            .any(|f| matches!(f, ServerMsg::PaneContent { .. })),
+        "control: the show broadcast content: {shown:?}"
+    );
+    assert_eq!(
+        on_the_wire(clicked),
+        on_the_wire(shown),
+        "a chip click is the same placement and frames as the show"
+    );
+    let (focused, content, tree_panes) = placement_of(clicked);
+    assert!(
+        focused.is_some() && focused == content,
+        "the tab the click opened is the one foregrounded: {focused:?} vs {content:?}"
+    );
+    assert_ne!(
+        focused.as_deref(),
+        Some("repl"),
+        "opening a link never foregrounds the transcript"
+    );
+    assert!(
+        tree_panes.iter().any(|p| p == "repl"),
+        "the transcript is still in the layout, untouched: {tree_panes:?}"
+    );
+}
+
+#[tokio::test]
+async fn clicking_a_pr_chip_places_and_broadcasts_exactly_like_showing_that_prs_conversation() {
+    let _home = HomeOverride::new();
+    let (reply, shown) = show_on_a_fresh_focus(&json!({
+        "type": "pr_conversation", "target": { "repo": "acme/web", "number": 253 }
+    }))
+    .await;
+    assert_eq!(reply["ok"], true, "{reply}");
+
+    let focus = focus_with_item(
+        json!([{ "text": "PR #253", "url": "https://github.com/acme/web/pull/253" }]),
+        None,
+    );
+    let mut rx = focus.harness.broadcast_tx.subscribe();
+    let opened = tracker_link::open_link(&focus.harness.state, LINK_TAG, "it", 0).await;
+    assert_eq!(opened, Ok(()));
+
+    assert_same_as_show(&drain(&mut rx), &shown);
+}
+
+#[tokio::test]
+async fn clicking_a_bare_pr_chip_on_a_ci_bound_item_opens_the_pr_the_binding_names() {
+    let _home = HomeOverride::new();
+    let (_, shown) = show_on_a_fresh_focus(&json!({
+        "type": "pr_conversation", "target": { "repo": "acme/web", "number": 253 }
+    }))
+    .await;
+
+    let focus = focus_with_item(json!(["PR #253"]), Some("pr.ci/acme/web#253"));
+    let mut rx = focus.harness.broadcast_tx.subscribe();
+    let opened = tracker_link::open_link(&focus.harness.state, LINK_TAG, "it", 0).await;
+    assert_eq!(opened, Ok(()));
+
+    assert_same_as_show(&drain(&mut rx), &shown);
+}
+
+#[tokio::test]
+async fn clicking_a_second_pr_chip_replaces_the_review_the_way_a_second_show_does() {
+    let _home = HomeOverride::new();
+    let shown_twice = {
+        let fresh = make_daemon_state();
+        let mut rx = fresh.broadcast_tx.subscribe();
+        for number in [253, 254] {
+            let reply = show_tool::show(
+                &fresh.state,
+                &json!({ "type": "pr_conversation", "target": { "repo": "acme/web", "number": number } }),
+                Some(LINK_TAG),
+            )
+            .await;
+            assert_eq!(reply["ok"], true, "{reply}");
+        }
+        drain(&mut rx)
+    };
+
+    let focus = focus_with_item(
+        json!([
+            { "text": "PR #253", "url": "https://github.com/acme/web/pull/253" },
+            { "text": "PR #254", "url": "https://github.com/acme/web/pull/254" },
+        ]),
+        None,
+    );
+    let mut rx = focus.harness.broadcast_tx.subscribe();
+    for index in [0, 1] {
+        assert_eq!(
+            tracker_link::open_link(&focus.harness.state, LINK_TAG, "it", index).await,
+            Ok(())
+        );
+    }
+
+    assert_eq!(on_the_wire(&drain(&mut rx)), on_the_wire(&shown_twice));
+}
+
+#[tokio::test]
+async fn clicking_a_file_chip_opens_the_file_tab_anchored_at_that_line_like_a_show() {
+    let _home = HomeOverride::new();
+    let root = temp_file_root();
+    let contents: String = (1..=60).map(|n| format!("line {n}\n")).collect();
+    let path = write_rel_file(root.path(), "notes.md", &contents);
+
+    let (reply, shown) = show_on_a_fresh_focus(&json!({
+        "type": "file", "target": { "path": path }, "anchor": { "kind": "line", "line": 42 }
+    }))
+    .await;
+    assert_eq!(reply["ok"], true, "{reply}");
+
+    let focus = focus_with_item(json!([format!("{path}:42")]), None);
+    let mut rx = focus.harness.broadcast_tx.subscribe();
+    let opened = tracker_link::open_link(&focus.harness.state, LINK_TAG, "it", 0).await;
+    assert_eq!(opened, Ok(()));
+    let clicked = drain(&mut rx);
+
+    assert_same_as_show(&clicked, &shown);
+    let address = clicked
+        .iter()
+        .find_map(|f| match f {
+            ServerMsg::PaneContent { address, .. } => address.clone(),
+            _ => None,
+        })
+        .expect("the file tab is addressed");
+    assert_eq!(
+        address.anchor,
+        Some(nostromo::ipc::protocol::Anchor::Line {
+            path: None,
+            line: 42
+        })
+    );
+}
+
+#[tokio::test]
+async fn clicking_a_jira_chip_asks_for_the_ticket_exactly_as_a_ticket_show_does() {
+    let _home = HomeOverride::new();
+    // This harness has no ticket provider, so both end in the same fetch-level
+    // refusal (see `a_ticket_show_refuses_with_a_fetch_level_error_...`): that
+    // the chip reaches the *ticket* source is what makes the errors equal.
+    let (reply, shown) = show_on_a_fresh_focus(&json!({
+        "type": "ticket", "target": { "provider": "jira", "key": "CORE-2841" }
+    }))
+    .await;
+    let shown_error = reply["error"].as_str().expect("the show is refused");
+
+    let focus = focus_with_item(json!(["CORE-2841"]), None);
+    let mut rx = focus.harness.broadcast_tx.subscribe();
+    let opened = tracker_link::open_link(&focus.harness.state, LINK_TAG, "it", 0).await;
+
+    assert_eq!(opened, Err(shown_error.to_string()));
+    assert_ne!(shown_error, "opened_by_client");
+    assert_eq!(on_the_wire(&drain(&mut rx)), on_the_wire(&shown));
+}
+
+#[tokio::test]
+async fn sentry_run_and_url_chips_are_left_to_the_client_and_broadcast_nothing() {
+    let _home = HomeOverride::new();
+    let focus = focus_with_item(
+        json!([
+            "Sentry PORTAL-1F2",
+            "run 9912",
+            { "text": "design doc", "url": "https://example.com/design" },
+        ]),
+        None,
+    );
+    let mut rx = focus.harness.broadcast_tx.subscribe();
+
+    for index in 0..3 {
+        assert_eq!(
+            tracker_link::open_link(&focus.harness.state, LINK_TAG, "it", index).await,
+            Err("opened_by_client".to_string()),
+            "link {index}"
+        );
+    }
+    assert!(
+        drain(&mut rx).is_empty(),
+        "nothing moved: no layout, no content"
+    );
+}
+
+#[tokio::test]
+async fn a_link_that_is_not_on_the_daemons_board_opens_nothing() {
+    let _home = HomeOverride::new();
+    let focus = focus_with_item(json!(["PR #253"]), Some("pr.ci/acme/web#253"));
+    let mut rx = focus.harness.broadcast_tx.subscribe();
+    let state = &focus.harness.state;
+
+    // The daemon reads the link from its own copy of the board: an item or an
+    // index it does not have, or a focus with no board, opens nothing.
+    for (tag, item, index) in [
+        (LINK_TAG, "it", 1),
+        (LINK_TAG, "no-such-item", 0),
+        ("cody-without-a-board", "it", 0),
+    ] {
+        assert_eq!(
+            tracker_link::open_link(state, tag, item, index).await,
+            Err("unknown_link".to_string()),
+            "{tag} {item} {index}"
+        );
+    }
+    assert!(drain(&mut rx).is_empty(), "nothing was opened");
 }

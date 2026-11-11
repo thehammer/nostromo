@@ -156,11 +156,47 @@ public struct TrackerLinkWire: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey { case text, url, kind }
 
+    public init(text: String, url: String? = nil, kind: TrackerLinkKindWire) {
+        self.text = text
+        self.url = url
+        self.kind = kind
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         text = try c.decodeIfPresent(String.self, forKey: .text) ?? ""
         url = try c.decodeIfPresent(String.self, forKey: .url)
         kind = try c.decodeIfPresent(TrackerLinkKindWire.self, forKey: .kind) ?? .url
+    }
+}
+
+/// The live source an item follows (T6): which one and how fresh. Only in `tracker_board`, which a
+/// network peer never receives.
+public struct TrackerBoundWire: Decodable, Equatable {
+    /// `mother.job` or `pr.ci`.
+    public let source: String
+    /// When the source last reported on the item (absent before its first report).
+    public let asOf: Date?
+    /// The source has been silent past the badly-stale limit; the item keeps its last value.
+    public let badlyStale: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case source
+        case asOf = "as_of"
+        case badlyStale = "badly_stale"
+    }
+
+    public init(source: String, asOf: Date? = nil, badlyStale: Bool = false) {
+        self.source = source
+        self.asOf = asOf
+        self.badlyStale = badlyStale
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
+        asOf = try? c.decodeIfPresent(Date.self, forKey: .asOf)
+        badlyStale = try c.decodeIfPresent(Bool.self, forKey: .badlyStale) ?? false
     }
 }
 
@@ -222,8 +258,8 @@ public struct TrackerItemWire: Decodable, Equatable {
     public let command: String?
     public let env: TrackerEnvWire?
     public let ran: Bool
-    /// `<source>/<key>` of a live binding.
-    public let bound: String?
+    /// The live source this item follows and how fresh it is.
+    public let bound: TrackerBoundWire?
     public let source: String
 
     enum CodingKeys: String, CodingKey {
@@ -247,7 +283,7 @@ public struct TrackerItemWire: Decodable, Equatable {
         command = try c.decodeIfPresent(String.self, forKey: .command)
         env = try c.decodeIfPresent(TrackerEnvWire.self, forKey: .env)
         ran = try c.decodeIfPresent(Bool.self, forKey: .ran) ?? false
-        bound = try c.decodeIfPresent(String.self, forKey: .bound)
+        bound = try? c.decodeIfPresent(TrackerBoundWire.self, forKey: .bound)
         source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
     }
 }

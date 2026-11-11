@@ -158,8 +158,14 @@ public struct TrackerItemRow: Equatable {
     public let noteIsCollapsible: Bool
     /// The whole note is shown (a short note, or a long one the user expanded).
     public let noteExpanded: Bool
-    /// Link texts, rendered as plain muted text in T1 (T6 makes them chips).
+    /// Link texts (what `tracker show` reports).
     public let linkTexts: [String]
+    /// The links, rendered as chips.
+    public let links: [TrackerLinkWire]
+    /// The live source the item follows, if any.
+    public let bound: TrackerBoundWire?
+    /// "as of 10:42" when the source is badly stale (the item keeps its last value); nil otherwise.
+    public let staleFootnote: String?
     public let env: TrackerEnvWire?
     /// `PROD`, `CANADA`, `DEMO`, `STAGING`, `LOCAL`, `ENV?`.
     public let envBadge: String?
@@ -266,7 +272,8 @@ extension TrackerItemRow {
         TrackerItemRow(id: id, sectionId: sectionId, sectionTitle: sectionTitle, status: status, mark: mark,
                        textSpans: textSpans, text: text, owner: owner, updatedAt: updated, relativeTime: relative,
                        noteBlocks: noteBlocks, noteFirstLine: noteFirstLine, noteIsCollapsible: noteIsCollapsible,
-                       noteExpanded: noteExpanded, linkTexts: linkTexts, env: env, envBadge: envBadge,
+                       noteExpanded: noteExpanded, linkTexts: linkTexts, links: links, bound: bound,
+                       staleFootnote: staleFootnote, env: env, envBadge: envBadge,
                        isHazard: isHazard, kind: kind, source: source)
     }
 }
@@ -491,6 +498,9 @@ public enum TrackerPresenter {
             noteIsCollapsible: collapsible,
             noteExpanded: !collapsible || folds.expandedNotes.contains(wire.id),
             linkTexts: wire.links.map(\.text),
+            links: wire.links,
+            bound: wire.bound,
+            staleFootnote: TrackerBoundFootnote.text(wire.bound, timeZone: timeZone),
             env: wire.env,
             envBadge: wire.env.flatMap(TrackerEnvBadge.text),
             isHazard: wire.env.map(TrackerEnvBadge.isHazard) ?? false,

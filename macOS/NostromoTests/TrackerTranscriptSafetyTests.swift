@@ -79,7 +79,8 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
         return Pane(rig: rig, harness: harness, split: split, left: content, leftWidth: leftWidth)
     }
 
-    private func runScript(following: Bool) throws {
+    private func runScript(following: Bool, events: [TrackerGateEvent] = TrackerGateScript.events(),
+                           label: String = "") throws {
         let p = try makePane(following: following)
         let rig = p.rig
         let tracker = p.harness.pane
@@ -101,8 +102,8 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
         let leftFrame = p.left.frame
         let trackerFrame = tracker.frame
 
-        for (i, event) in TrackerGateScript.events().enumerated() {
-            let name = "\(following ? "following" : "scrolled up") #\(i + 1) \(event.name)"
+        for (i, event) in events.enumerated() {
+            let name = "\(label)\(following ? "following" : "scrolled up") #\(i + 1) \(event.name)"
             rig.assertNoMove(name, following: following) {
                 do {
                     try p.harness.perform(event)
@@ -123,5 +124,17 @@ final class TrackerTranscriptSafetyTests: XCTestCase {
 
     func testThirtyTrackerUpdatesKeepAFollowingTranscriptAtTheBottomWithItsComposerUntouched() throws {
         try runScript(following: true)
+    }
+
+    // T6: link chips and the stale footnote next to a transcript. Clicking a chip (PR, ticket, file,
+    // URL) and a bound item going badly stale and recovering move neither the divider, the transcript
+    // nor the composer, and the tracker does not take focus.
+
+    func testLinkClicksAndStaleFootnotesLeaveAScrolledUpTranscriptUntouched() throws {
+        try runScript(following: false, events: TrackerLinkGateScript.events(), label: "links ")
+    }
+
+    func testLinkClicksAndStaleFootnotesKeepAFollowingTranscriptAtTheBottom() throws {
+        try runScript(following: true, events: TrackerLinkGateScript.events(), label: "links ")
     }
 }

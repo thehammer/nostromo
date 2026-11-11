@@ -78,6 +78,8 @@ final class TrackerRowView: NSView {
     var onToggleLog: (() -> Void)?
     /// Copy as Markdown on this row (an item or a section).
     var onCopyMarkdown: ((TrackerRow) -> Void)?
+    /// A link chip of the item (its id, what the chip does) was clicked.
+    var onOpenLink: ((String, TrackerLinkAction) -> Void)?
 
     /// The ≤ 1 s change highlight is showing.
     private(set) var isHighlighted = false
@@ -92,7 +94,13 @@ final class TrackerRowView: NSView {
     private var noteText: TrackerTextView?
     /// The row's prose (a prose row, or an expanded note).
     private(set) var proseView: TrackerProseView?
-    private var linksText: TrackerTextView?
+    /// The item's link chips, in order.
+    private(set) var linkChips: [TrackerLinkChip] = []
+    /// The quiet "as of 10:42" of a badly stale bound item (nil unless shown).
+    private(set) var staleFootnote: NSTextField?
+    /// The chips' line exists (links, or a bound item): its height is reserved whether or not the
+    /// footnote shows, so a source going stale never shifts a row.
+    private var hasChipLine = false
     private var disclosure: NSButton?
     private var hazardEdge: NSView?
     private let highlightLayer = CALayer()
@@ -131,6 +139,8 @@ final class TrackerRowView: NSView {
         var parts: [String] = []
         if let markLabel { parts.append(markLabel.stringValue) }
         parts += textViews.map(\.string).filter { !$0.isEmpty }
+        if !linkChips.isEmpty { parts.append(linkChips.map { $0.link.text }.joined(separator: " · ")) }
+        if let staleFootnote { parts.append(staleFootnote.stringValue) }
         if let proseView { parts.append(proseView.plainText) }
         parts += badges.map(\.stringValue)
         if let timeLabel, !timeLabel.stringValue.isEmpty { parts.append(timeLabel.stringValue) }
@@ -347,11 +357,22 @@ final class TrackerRowView: NSView {
             disclosure.frame = NSRect(x: textX, y: y, width: size.width, height: size.height)
             y += size.height
         }
-        if let linksText {
+        if hasChipLine {
             y += 2
-            let lh = linksText.height(forWidth: blockWidth)
-            linksText.frame = NSRect(x: textX, y: y, width: blockWidth, height: lh)
-            y += lh
+            var right = textX + blockWidth
+            if let staleFootnote {
+                let w = min(ceil(staleFootnote.intrinsicContentSize.width), blockWidth)
+                staleFootnote.frame = NSRect(x: right - w, y: y, width: w, height: Self.chipHeight)
+                right -= w + Self.gap
+            }
+            var x = textX
+            for chip in linkChips {
+                let w = min(chip.fittingWidth, max(right - x, 0))
+                chip.isHidden = w < 24
+                chip.frame = NSRect(x: x, y: y, width: w, height: Self.chipHeight)
+                x += w + 4
+            }
+            y += Self.chipHeight
         }
         let height = y + v
         hazardEdge?.frame = NSRect(x: 0, y: 0, width: 3, height: max(height, minimumHeight))
@@ -376,7 +397,9 @@ final class TrackerRowView: NSView {
         mainText = nil
         noteText = nil
         proseView = nil
-        linksText = nil
+        linkChips = []
+        staleFootnote = nil
+        hasChipLine = false
         disclosure = nil
         hazardEdge = nil
         measured = nil
@@ -487,9 +510,19 @@ final class TrackerRowView: NSView {
                 disclosure = addButton(item.noteExpanded ? "less" : "more", action: #selector(toggleNote(_:)))
             }
         }
-        if !item.linkTexts.isEmpty {
-            linksText = addText(NSAttributedString(string: item.linkTexts.joined(separator: " · "), attributes: [
-                .font: TrackerTheme.metaFont, .foregroundColor: muted]))
+        hasChipLine = !item.links.isEmpty || item.bound != nil
+        for (index, link) in item.links.enumerated() {
+            let chip = TrackerLinkChip(link: link, index: index, muted: muted)
+            let itemId = item.id
+            chip.onActivate = { [weak self] action in self?.onOpenLink?(itemId, action) }
+            addSubview(chip)
+            linkChips.append(chip)
+        }
+        if let footnote = item.staleFootnote {
+            let label = addLabel(footnote, color: muted, font: TrackerTheme.metaFont)
+            label.alignment = .right
+            label.toolTip = "The source has not reported since then; this is its last value."
+            staleFootnote = label
         }
     }
 

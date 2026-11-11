@@ -246,6 +246,15 @@ impl PaneContentProvider for McpPaneContentProvider {
     async fn pane_action(&self, tag: &str, pane_id: &str, action_id: &str) -> ServerMsg {
         pane_action(&self.0, tag, pane_id, action_id).await
     }
+
+    async fn tracker_open_link(
+        &self,
+        tag: &str,
+        item_id: &str,
+        link_index: usize,
+    ) -> Result<(), String> {
+        crate::mcp::tools::tracker_link::open_link(&self.0, tag, item_id, link_index).await
+    }
 }
 
 /// Carry out a document pane's action. Only a pane bound to a Huey source of

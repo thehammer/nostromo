@@ -33,6 +33,20 @@ pub struct Committable {
     pub remote: Option<String>,
 }
 
+/// A live item's source and how fresh it is (T6): the view's `bound`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundView {
+    /// The source's name (`mother.job`, `pr.ci`).
+    pub source: String,
+    /// When the source last reported on this item; absent before the first
+    /// report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_of: Option<DateTime<Utc>>,
+    /// The source has been silent past the badly-stale limit: the item keeps
+    /// its last value, and the pane says "as of …".
+    pub badly_stale: bool,
+}
+
 /// Facts the registry passes in (the engine has no I/O).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ViewFacts {
@@ -45,6 +59,8 @@ pub struct ViewFacts {
     pub banner: Option<Banner>,
     pub committable: Option<Committable>,
     pub hidden_by_user: bool,
+    /// Live items by item id (T6).
+    pub bound: HashMap<String, BoundView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,9 +82,9 @@ pub struct ViewItem {
     pub env: Option<Env>,
     /// Ran-it state of a command (T4; always false here).
     pub ran: bool,
-    /// `<source>/<key>` of a live binding (T6).
+    /// The live source this item follows and how fresh it is (T6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bound: Option<String>,
+    pub bound: Option<BoundView>,
     pub source: String,
 }
 
@@ -170,7 +186,7 @@ pub fn build(parsed: &ParsedBoard, facts: &ViewFacts) -> TrackerBoardView {
                     source,
                 }
             }
-            SegmentKind::Item(i) => ViewNode::Item(view_item(&board.items[i], source)),
+            SegmentKind::Item(i) => ViewNode::Item(view_item(&board.items[i], source, facts)),
             SegmentKind::LogLine(i) => ViewNode::LogLine {
                 time: board.log[i].time.clone(),
                 text: board.log[i].text.clone(),
@@ -224,7 +240,7 @@ impl ViewNode {
     }
 }
 
-fn view_item(item: &Item, source: String) -> ViewItem {
+fn view_item(item: &Item, source: String, facts: &ViewFacts) -> ViewItem {
     ViewItem {
         id: item.id.clone(),
         section: item.section.clone(),
@@ -242,7 +258,7 @@ fn view_item(item: &Item, source: String) -> ViewItem {
         command: item.command.clone(),
         env: item.env,
         ran: false,
-        bound: item.bind.clone(),
+        bound: facts.bound.get(&item.id).cloned(),
         source,
     }
 }
