@@ -581,6 +581,7 @@ final class AppControlTasksTests: XCTestCase {
 
     // MARK: The one-mebibyte cap
 
+    // Mutation-checked: `capped` returning the whole text (no cut), or dropping `text.wasCut` from `truncated`, fails this test
     func testTheTextCapKeepsTheEndOfTheOutputAndSetsTruncated() throws {
         let rig = TaskOutputRig()
         let lines = 3 * 1_048_576 / 64      // 3 MiB: the model holds all of it (it is under the 10 MB window)
@@ -600,6 +601,7 @@ final class AppControlTasksTests: XCTestCase {
         XCTAssertEqual(number(payload["total_bytes"]), UInt64(3 * 1_048_576), "the total is the output's, not the cap's")
     }
 
+    // Mutation-checked: changing the cap guard in `capped` from `>` to `>=` fails this test
     func testAnOutputExactlyAtTheCapIsReturnedWholeAndNotTruncated() throws {
         let rig = TaskOutputRig()
         let lines = 1_048_576 / 64
@@ -613,6 +615,7 @@ final class AppControlTasksTests: XCTestCase {
         XCTAssertEqual(payload["truncated"] as? Bool, false)
     }
 
+    // Mutation-checked: `capped` returning the whole text (no cut), or dropping `text.wasCut` from `truncated`, fails this test
     func testOneLineOverTheCapIsCutAndFlagged() throws {
         let rig = TaskOutputRig()
         rig.daemon.setLines(1_048_576 / 64 + 1)
@@ -668,6 +671,7 @@ final class AppControlTasksTests: XCTestCase {
         XCTAssertEqual(payload["source"] as? String, "cli_tail")
     }
 
+    // Mutation-checked: dropping `text.wasCut` from `truncated`, or `capped` returning the whole text (size bound), fails this test
     func testForAnOutputPastTheCapTheCommandReturnsTheEndOfWhatTheViewerShows() throws {
         let rig = TaskOutputRig()
         let lines = 3 * 1_048_576 / 64
@@ -683,11 +687,15 @@ final class AppControlTasksTests: XCTestCase {
         let payload = AppControlTasks.output(tag: tag, taskId: "b1", model: model, allowsText: true)
 
         let text = try XCTUnwrap(payload["text"] as? String)
+        // Before: with no cut at all `text` was the whole of `view.shownText`, which is also "the end of" it,
+        // so the suffix check passed under the mutation "`capped` returns the whole text". The size bound fails it.
+        XCTAssertLessThanOrEqual(text.utf8.count, AppControlTasks.outputTextLimit, "and it is at most the cap")
         XCTAssertTrue(view.shownText.hasSuffix(text), "the command's text is the end of the viewer's")
         XCTAssertEqual(payload["truncated"] as? Bool, true, "the cap cut the start of what the viewer shows")
         XCTAssertEqual(number(payload["total_bytes"]), model.totalBytes)
     }
 
+    // Mutation-checked: `capped` returning the whole text fails this test (the size bound added by the mutation check)
     func testAnOutputTheModelCutIsTruncatedAndKeepsTheModelsTotal() throws {
         let rig = TaskOutputRig()
         rig.daemon.setLines(12 * 1_048_576 / 64)
@@ -699,6 +707,9 @@ final class AppControlTasksTests: XCTestCase {
         XCTAssertEqual(number(payload["total_bytes"]), UInt64(12 * 1_048_576))
         XCTAssertEqual(payload["state"] as? String, "ready")
         let text = try XCTUnwrap(payload["text"] as? String)
+        // Before: only `truncated` (the model's own flag), `total_bytes`, `state` and the suffix were checked,
+        // all of which hold with no cap applied. The size bound fails under "`capped` returns the whole text".
+        XCTAssertLessThanOrEqual(text.utf8.count, AppControlTasks.outputTextLimit, "the cap applies on top of the model's cut")
         XCTAssertTrue(text.hasSuffix(TaskOutputFakeDaemon.visibleLine(12 * 1_048_576 / 64 - 1)), "it is the end")
     }
 

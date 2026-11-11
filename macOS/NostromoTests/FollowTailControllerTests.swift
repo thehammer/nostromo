@@ -551,6 +551,7 @@ extension FollowTailControllerTests {
 /// follow-tail controller, overlay and virtualizer).
 final class TranscriptRevealFollowTests: XCTestCase {
 
+    // Mutation-checked: `reveal` pinning to false (never re-pinning) fails this test
     func testRevealingAnItemInTheLastViewportWhileFollowingTheTailKeepsFollowingAndShowsNoJumpPill() {
         let rig = SafetyRig.followingTail(self)
         XCTAssertTrue(rig.followTail.isPinned, "precondition")
@@ -565,6 +566,7 @@ final class TranscriptRevealFollowTests: XCTestCase {
         XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1, "and the viewport is at the bottom")
     }
 
+    // Mutation-checked: `reveal` pinning to false (never re-pinning) fails this test
     func testANewTurnAfterRevealingAnItemInTheLastViewportIsFollowed() {
         let rig = SafetyRig.followingTail(self)
         rig.coordinator.reveal(documentY: rig.virtualizer.documentHeight - 100)
@@ -580,6 +582,7 @@ final class TranscriptRevealFollowTests: XCTestCase {
         XCTAssertTrue(rig.overlay.button.isHidden)
     }
 
+    // Mutation-checked: `reveal` pinning to false (never re-pinning) fails this test
     func testNewBlocksOnTheLastTurnAfterRevealingAnItemInTheLastViewportAreFollowed() {
         let rig = SafetyRig.followingTail(self)
         rig.coordinator.reveal(documentY: rig.virtualizer.documentHeight - 100)
@@ -594,6 +597,7 @@ final class TranscriptRevealFollowTests: XCTestCase {
         XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1)
     }
 
+    // Mutation-checked: `reveal` pinning to false (never re-pinning) fails this test
     func testRevealingAnItemInTheLastViewportWhileFollowingFlipsNothingAtAll() {
         // Pinned and staying pinned is no flip: `onFlip` (the log of every change) must not hear a
         // pinned-false followed by a pinned-true for a reveal that changes nothing.
@@ -608,6 +612,9 @@ final class TranscriptRevealFollowTests: XCTestCase {
         XCTAssertTrue(rig.followTail.isPinned)
     }
 
+    // Mutation-checked: `reveal` pinning to true (`setPinned(true, cause: .boundsChange)`) fails this test, through the
+    // cause assertion. Before the cause was asserted it PASSED under that mutation: the scroll that follows moves
+    // the viewport and the bounds-change rule un-pins by itself, with the same single flip to false.
     func testRevealingAnItemFarAboveTheEndWhileFollowingFlipsOnceAndNotBack() {
         let rig = SafetyRig.followingTail(self)
         rig.flips = []
@@ -616,9 +623,14 @@ final class TranscriptRevealFollowTests: XCTestCase {
         rig.settle()
 
         XCTAssertEqual(rig.flips.map(\.pinned), [false], "one flip, to not following: \(rig.flips)")
+        XCTAssertEqual(rig.flips.map(\.cause), [.userScroll], "made by the reveal (the operator asked for it), not left to the bounds change")
         XCTAssertFalse(rig.followTail.isPinned)
     }
 
+    // Guard, NOT mutation-sensitive to `reveal`'s own `setPinned`: with it pinning to false the test still passes,
+    // because the scroll to the bottom that follows is a bounds change that re-pins with the same single flip to
+    // true. It proves the end result (one flip, bottom in view), not that `reveal` sets the flag itself; the
+    // "following" tests above fail under that mutation. A reveal that moves nothing cannot be built on this rig.
     func testRevealingAnItemInTheLastViewportAfterScrollingUpFlipsOnceToFollowing() {
         let rig = SafetyRig.scrolledUp(self)
         XCTAssertFalse(rig.followTail.isPinned, "precondition")
@@ -631,6 +643,9 @@ final class TranscriptRevealFollowTests: XCTestCase {
         XCTAssertEqual(rig.gapBelowViewport, 0, accuracy: 1)
     }
 
+    // Guard on the end result only (not following, pill shown): the bounds-change rule un-pins after the scroll
+    // whatever `reveal` set, so mutating `reveal`'s pin does not fail this test. The cause assertion in
+    // `testRevealingAnItemFarAboveTheEndWhileFollowingFlipsOnceAndNotBack` is what pins `reveal`'s own flag.
     func testRevealingAnItemFarAboveTheEndStopsFollowingAndOffersTheJumpPill() {
         let rig = SafetyRig.followingTail(self)
         XCTAssertTrue(rig.followTail.isPinned, "precondition")

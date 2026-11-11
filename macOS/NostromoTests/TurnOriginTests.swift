@@ -720,6 +720,7 @@ final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
         }
     }
 
+    // Mutation-checked: building `wakeMarkerRouter` with a tag other than `session.tag` fails this test
     func testClickingAOneEventWakeMarkerOpensThatTasksWindowOnThePanesTagAndNotTheList() {
         let recorder = RouteRecorder()
 
@@ -729,6 +730,7 @@ final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
         XCTAssertEqual(recorder.listsShown, 0, "the window opened: no list")
     }
 
+    // Mutation-checked: building `wakeMarkerRouter` with a tag other than `session.tag` fails this test
     func testClickingAOneEventWakeMarkerForATaskTheStoreDoesNotKnowShowsThePanesListInstead() {
         let recorder = RouteRecorder()
         recorder.knowsTask = false
@@ -770,6 +772,8 @@ final class TaskWakeScrollSafetyTests: MouseQueueTestCase {
     /// to the rig, so they would still pass if `ReplView` stopped passing it on. This one does not: removing
     /// `markerRouter: wakeMarkerRouter` where `ReplView.makeTurnView` builds its `ChatTurnView` (the turn views
     /// then use `WakeMarkerView.defaultRouter`) leaves the recorder empty and fails it.
+    // Mutation-checked: removing `markerRouter: wakeMarkerRouter` from `ReplView.makeTurnView`, or building the router with a
+    // tag other than `session.tag`, fails this test
     func testAWakeMarkerInARealPaneRoutesItsClickThroughThatPanesOwnRouter() throws {
         let recorder = RouteRecorder()
         let folds = FV4StoreWorld(self)
