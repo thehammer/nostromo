@@ -339,7 +339,7 @@ final class StagingInsertController {
         return .done
     }
 
-    /// Archive Commands After I Run Them (memory only; off at every launch). A person's menu choice only.
+    /// Archive Commands After I Run Them (memory only; on at every launch). A person's menu choice only.
     @discardableResult
     func setAutoArchive(_ on: Bool, event: NSEvent?, control: NSView) -> Bool {
         guard gate(event, control, true) else {

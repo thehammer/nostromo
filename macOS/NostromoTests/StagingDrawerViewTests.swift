@@ -2695,7 +2695,7 @@ extension StagingDrawerViewTests {
                         "Hide Staged Commands", "Clear all"])
         for item in menu.items { XCTAssertEqual(item.keyEquivalent, "", item.title) }
         XCTAssertTrue(try XCTUnwrap(menu.items.first { $0.title == "Archive Placed Commands" }).isEnabled)
-        XCTAssertEqual(try XCTUnwrap(menu.items.first { $0.title == "Archive Commands After I Run Them" }).state, .off, "off by default")
+        XCTAssertEqual(try XCTUnwrap(menu.items.first { $0.title == "Archive Commands After I Run Them" }).state, .on, "on at launch")
         XCTAssertEqual(try XCTUnwrap(menu.items.first { $0.title == "Let Agents Stage Commands Here" }).state, .on)
 
         let (_, none) = productionHost(kind: .local)

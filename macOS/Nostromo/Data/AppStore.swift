@@ -626,7 +626,7 @@ class AppStore: ObservableObject {
         // Terminal frames go out through this app's one daemon connection.
         TerminalSessionStore.shared.transport = { [client] in client.sendTerminal($0) }
         TerminalStagingStore.shared.transport = { [client] in client.sendTerminal($0) }
-        // A person's own input feeds auto-archive (Archive Commands After I Run Them; off by default).
+        // A person's own input feeds auto-archive (Archive Commands After I Run Them; on at every launch, memory only).
         TerminalSessionStore.shared.onPersonInput = { TerminalStagingStore.shared.personTyped(terminalId: $0, bytes: $1) }
         // The global staging switch goes to the daemon right after every Subscribe that declares `terminal_staging_ui`.
         client.onStagingUISubscribed = { TerminalStagingStore.shared.resendGlobal() }

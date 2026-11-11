@@ -47,14 +47,24 @@ final class TerminalStagingStore {
     /// At most this many archived entries are kept for each terminal (the oldest is dropped).
     static let maxArchived = 12
 
-    /// Archive Commands After I Run Them. **Memory only and off at every launch**: it is never stored in
-    /// UserDefaults or a file and nothing but the gated drawer menu item (through `StagingInsertController`)
-    /// sets it.
-    private(set) static var autoArchiveEnabled = false
+    /// What Archive Commands After I Run Them is at every launch: **on**. A person can still untick it for the
+    /// session from the drawer menu.
+    static let launchDefaultAutoArchive = true
+
+    /// Archive Commands After I Run Them. **Memory only, on at every launch** (`launchDefaultAutoArchive`): the
+    /// launch value is a constant, never read from UserDefaults or a file, and the setting is never stored
+    /// anywhere, so no same-user process can tamper with it. Nothing but the gated drawer menu item (through
+    /// `StagingInsertController`) changes it.
+    private(set) static var autoArchiveEnabled = launchDefaultAutoArchive
 
     /// Only `StagingInsertController.setAutoArchive`, after the human-gesture gate, calls this.
     static func setAutoArchive(_ on: Bool) {
         autoArchiveEnabled = on
+    }
+
+    /// Tests: back to the launch value, so each test starts from the state a fresh launch has.
+    static func resetAutoArchiveForTests() {
+        autoArchiveEnabled = launchDefaultAutoArchive
     }
 
     /// Sends one frame to the daemon (`AppStore` points it at the client; dropped when not connected).

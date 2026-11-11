@@ -234,6 +234,8 @@ final class StagingRig {
          status: TerminalStatus? = .running, isMirror: Bool = false) {
         let s = StagingRigState()
         box = s
+        // Every rig starts from what a fresh launch has (auto-archive on); a test that needs it off unticks it.
+        TerminalStagingStore.resetAutoArchiveForTests()
         // A private suite: a test of the global switch must never write the real preferences.
         let suite = UserDefaults(suiteName: "redd.staging.\(UUID().uuidString)")!
         staging = TerminalStagingStore(clock: { s.storeClock }, transport: { frame in
@@ -288,6 +290,7 @@ final class StagingRig {
         for window in windows { window.close() }
         windows = []
         pasteboard.releaseGlobally()
+        TerminalStagingStore.resetAutoArchiveForTests()
     }
 
     // MARK: Driving the store and the clocks
@@ -396,6 +399,11 @@ final class StagingRig {
 final class StagingInsertControllerTests: MouseQueueTestCase {
 
     private var rigs: [StagingRig] = []
+
+    override func setUp() {
+        super.setUp()
+        TerminalStagingStore.resetAutoArchiveForTests()
+    }
 
     override func tearDown() {
         for rig in rigs { rig.tearDown() }
@@ -1338,18 +1346,26 @@ extension StagingInsertControllerTests {
 
     // MARK: Auto-archive
 
-    func testAutoArchiveIsOffByDefaultAndASyntheticEventCannotTurnItOn() {
-        XCTAssertFalse(TerminalStagingStore.autoArchiveEnabled)
+    func testAutoArchiveIsOnAtLaunchAndASyntheticEventCannotUntickIt() {
+        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled, "on at launch")
         let rig = makeRig(gate: StagingGates.real())
-        XCTAssertFalse(rig.controller.setAutoArchive(true, event: nil, control: NSView()))
-        XCTAssertFalse(TerminalStagingStore.autoArchiveEnabled)
+        XCTAssertFalse(rig.controller.setAutoArchive(false, event: nil, control: NSView()))
+        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled, "a refused untick leaves it on")
         XCTAssertEqual(rig.refusals, [.stagingSwitch])
+    }
+
+    func testAPersonsGatedUntickTurnsItOffAndTickingItAgainTurnsItOn() {
+        let (rig, window, row) = readyRow(command: "ls -la")
+        let person = StagingEvents.mouse(.leftMouseUp, in: window, at: .zero)
+        XCTAssertTrue(rig.controller.setAutoArchive(false, event: person, control: row))
+        XCTAssertFalse(TerminalStagingStore.autoArchiveEnabled)
+        XCTAssertTrue(rig.controller.setAutoArchive(true, event: person, control: row))
+        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled)
     }
 
     private func autoArchiveRig() -> (rig: StagingRig, window: NSWindow, row: StagingRowView) {
         let (rig, window, row) = readyRow(command: "ls -la")
-        XCTAssertTrue(rig.controller.setAutoArchive(true, event: StagingEvents.mouse(.leftMouseUp, in: window, at: .zero), control: row))
-        addTeardownBlock { _ = TerminalStagingStore.setAutoArchive(false) }
+        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled, "the launch value")
         return (rig, window, row)
     }
 
@@ -1383,6 +1399,7 @@ extension StagingInsertControllerTests {
 
     func testWithAutoArchiveOffAnEnterArchivesNothing() {
         let (rig, window, row) = readyRow(command: "ls -la")
+        TerminalStagingStore.setAutoArchive(false)
         rig.click(row, in: window)
         rig.typeEnter()
         XCTAssertTrue(rig.staging.archivedEntries(for: StagingFixtures.terminalId).isEmpty)

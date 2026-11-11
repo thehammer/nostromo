@@ -29,10 +29,12 @@ final class TerminalStagingStoreTests: XCTestCase {
         clock = 500
         frames = []
         revision = 0
+        TerminalStagingStore.resetAutoArchiveForTests()
         store = TerminalStagingStore(clock: { [unowned self] in self.clock }, transport: { [unowned self] in self.frames.append($0) })
     }
 
     override func tearDown() {
+        TerminalStagingStore.resetAutoArchiveForTests()
         store = nil
         super.tearDown()
     }
@@ -724,26 +726,62 @@ extension TerminalStagingStoreTests {
         XCTAssertEqual(frames, [.stagingInserted(terminalId: id, entryId: "a", bytes: 3, confirmed: true)])
     }
 
-    // MARK: Auto-archive (memory only, off by default)
+    // MARK: Auto-archive (memory only, on at every launch)
 
-    func testAutoArchiveIsOffInAFreshProcessAndNoUserDefaultsWriteTurnsItOn() {
-        XCTAssertFalse(TerminalStagingStore.autoArchiveEnabled)
+    func testAutoArchiveIsOnInAFreshProcessAndNoUserDefaultsWriteChangesIt() {
+        XCTAssertTrue(TerminalStagingStore.launchDefaultAutoArchive)
+        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled, "on at launch")
         let (made, suite) = makeStore()
         for key in ["nostromo.terminal.autoArchive", "nostromo.terminal.stagingAutoArchive", "autoArchive", TerminalStagingStore.globalEnabledKey] {
-            suite.set(true, forKey: key)
+            suite.set(false, forKey: key)
         }
         _ = made
         let (another, _) = makeStore(defaults: suite)
-        _ = another
-        XCTAssertFalse(TerminalStagingStore.autoArchiveEnabled, "it is never read from UserDefaults")
+        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled, "it is never read from UserDefaults")
         another.ingest(listFrame([placed("a", "ls")]))
         another.notePlaced(terminalId: id, entryId: "a", command: "ls")
-        XCTAssertFalse(another.hasPendingAutoArchive(terminalId: id), "off: an insert waits for nothing")
+        XCTAssertTrue(another.hasPendingAutoArchive(terminalId: id), "on: an insert waits for a person's Enter")
+    }
+
+    func testTheLaunchValueIsNotReadFromUserDefaultsAndUntickingIsNeverStored() {
+        // The launch value is the constant; a person's untick changes memory only.
+        let (_, suite) = makeStore()
+        let keys = ["nostromo.terminal.autoArchive", "nostromo.terminal.stagingAutoArchive", "autoArchive"]
+        TerminalStagingStore.setAutoArchive(false)
+        for key in keys { XCTAssertNil(suite.object(forKey: key), "unticking writes no \(key)") }
+        TerminalStagingStore.resetAutoArchiveForTests()
+        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled, "a relaunch (the reset) is back on whatever was ticked")
+        for key in keys { UserDefaults.standard.set(false, forKey: key) }
+        addTeardownBlock { for key in keys { UserDefaults.standard.removeObject(forKey: key) } }
+        TerminalStagingStore.resetAutoArchiveForTests()
+        XCTAssertTrue(TerminalStagingStore.autoArchiveEnabled, "a planted preference changes nothing")
+    }
+
+    func testTogglingAutoArchiveWritesNothingToUserDefaultsUnderAnyKey() {
+        let (_, suite) = makeStore()
+        let standardBefore = UserDefaults.standard.dictionaryRepresentation() as NSDictionary
+        let suiteBefore = suite.dictionaryRepresentation() as NSDictionary
+        // Compare after each value: a key already written with one value (by an earlier test in this process)
+        // would hide a write of that same value, but not of the other.
+        for on in [true, false] {
+            TerminalStagingStore.setAutoArchive(on)
+            XCTAssertEqual(UserDefaults.standard.dictionaryRepresentation() as NSDictionary, standardBefore,
+                           "setAutoArchive(\(on)): no key added or changed in the standard defaults")
+            XCTAssertEqual(suite.dictionaryRepresentation() as NSDictionary, suiteBefore,
+                           "setAutoArchive(\(on)): no key added or changed in the store's defaults")
+        }
+    }
+
+    func testUntickingAutoArchiveMakesAnEnterArchiveNothing() {
+        TerminalStagingStore.setAutoArchive(false)
+        store.ingest(listFrame([placed("a", "ls")]))
+        store.notePlaced(terminalId: id, entryId: "a", command: "ls")
+        XCTAssertFalse(store.hasPendingAutoArchive(terminalId: id))
+        store.personTyped(terminalId: id, bytes: [0x0D])
+        XCTAssertTrue(store.archivedEntries(for: id).isEmpty)
     }
 
     func testAutoArchiveArchivesAPlacedEntryOnlyAfterAPersonsEnterForTheIdenticalCommand() {
-        TerminalStagingStore.setAutoArchive(true)
-        addTeardownBlock { TerminalStagingStore.setAutoArchive(false) }
         store.ingest(listFrame([placed("a", "ls"), placed("b", "pwd", number: 2)]))
         store.notePlaced(terminalId: id, entryId: "a", command: "ls")
         XCTAssertTrue(store.hasPendingAutoArchive(terminalId: id))
@@ -757,8 +795,6 @@ extension TerminalStagingStoreTests {
     }
 
     func testCtrlUOrCtrlCBeforeTheEnterDropsThePendingEntries() {
-        TerminalStagingStore.setAutoArchive(true)
-        addTeardownBlock { TerminalStagingStore.setAutoArchive(false) }
         for key: UInt8 in [0x15, 0x03] {
             store.ingest(listFrame([placed("a", "ls")]))
             store.notePlaced(terminalId: id, entryId: "a", command: "ls")
@@ -769,8 +805,6 @@ extension TerminalStagingStoreTests {
     }
 
     func testAReplaceThatChangedTheCommandDropsTheAutoArchivePending() {
-        TerminalStagingStore.setAutoArchive(true)
-        addTeardownBlock { TerminalStagingStore.setAutoArchive(false) }
         store.ingest(listFrame([placed("a", "ls")]))
         store.notePlaced(terminalId: id, entryId: "a", command: "ls")
         store.ingest(listFrame([placed("a", "rm -rf /tmp/x")]))
