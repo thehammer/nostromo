@@ -105,6 +105,9 @@ pub struct StagingList {
     /// shell (see [`crate::terminal::session::Foreground`]). Shown to the user
     /// only: never told to the agent, never audited or logged.
     pub foreground: Option<String>,
+    /// The follower that made the list receives no output (staging only). Kept
+    /// when the list freezes: it still says how it was made.
+    pub staging_only: bool,
 }
 
 impl StagingList {
@@ -252,6 +255,7 @@ impl State {
         pane_id: &str,
         owner: &str,
         agent_name: &str,
+        staging_only: bool,
         by: &'static str,
     ) {
         let unused = self.lists.get(terminal_id).map_or(0, StagingList::unused);
@@ -266,6 +270,7 @@ impl State {
                 revision: 0,
                 entries: Vec::new(),
                 foreground: None,
+                staging_only,
             },
         );
         self.emit(terminal_id);
@@ -630,6 +635,7 @@ impl StagingStore {
         pane_id: &str,
         owner: &str,
         agent_name: &str,
+        staging_only: bool,
     ) {
         let mut state = self.lock();
         if state.disabled.contains(terminal_id) {
@@ -650,7 +656,7 @@ impl StagingStore {
         } else {
             "follow_started"
         };
-        state.create_list(terminal_id, pane_id, owner, agent_name, by);
+        state.create_list(terminal_id, pane_id, owner, agent_name, staging_only, by);
     }
 
     /// The user turned staging back on (here or everywhere) while `owner`
@@ -661,12 +667,20 @@ impl StagingStore {
         pane_id: &str,
         owner: &str,
         agent_name: &str,
+        staging_only: bool,
     ) {
         let mut state = self.lock();
         if state.disabled.contains(terminal_id) || state.lists.contains_key(terminal_id) {
             return;
         }
-        state.create_list(terminal_id, pane_id, owner, agent_name, "enabled");
+        state.create_list(
+            terminal_id,
+            pane_id,
+            owner,
+            agent_name,
+            staging_only,
+            "enabled",
+        );
     }
 
     /// The follow ended by the user (or the follower's session ended): the list
@@ -702,7 +716,7 @@ impl StagingStore {
         terminal_id: &str,
         pane_id: &str,
         enabled: bool,
-        follower: Option<(&str, &str)>,
+        follower: Option<(&str, &str, bool)>,
     ) {
         let mut state = self.lock();
         if !enabled {
@@ -713,9 +727,10 @@ impl StagingStore {
             }
         } else {
             state.disabled.remove(terminal_id);
-            if let (Some((owner, name)), false) = (follower, state.lists.contains_key(terminal_id))
+            if let (Some((owner, name, staging_only)), false) =
+                (follower, state.lists.contains_key(terminal_id))
             {
-                state.create_list(terminal_id, pane_id, owner, name, "enabled");
+                state.create_list(terminal_id, pane_id, owner, name, staging_only, "enabled");
                 return;
             }
             if state.lists.contains_key(terminal_id) {
@@ -846,6 +861,7 @@ pub(crate) fn frame_of(list: &StagingList) -> ServerMsg {
         entries: wire_entries(list),
         enabled: true,
         foreground: list.foreground.clone(),
+        staging_only: list.staging_only,
     }
 }
 
@@ -866,5 +882,6 @@ pub(crate) fn none_frame(
         entries: Vec::new(),
         enabled,
         foreground: None,
+        staging_only: false,
     }
 }

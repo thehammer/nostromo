@@ -26,9 +26,9 @@ const COMMON_KEYS: [&str; 2] = ["op", "terminal_id"];
 pub const DESCRIPTION: &str = "Edits a display list only. Nothing here types, pastes or runs; the user clicks an entry to place it at the prompt and presses Enter themselves. \
 For a terminal you follow (see nostromo.request_follow), keep up to 12 single-line commands the user can click to place at its prompt. One command per entry, plainly; no secrets; never disguise what a command does. \
 Ops: list; stage {command, note?, position?} (position inserts before that entry number, default the end); replace {entry_id, command? and/or note?} (note '' clears it); remove {entry_id}; clear. \
-Returns { ok, ... }: list gives { terminal_id, staging, frozen, entries: [{ id, number, command, note?, staged_at, inserted_count, last_inserted_at? }], limits }; stage gives { entry: { id, number }, entries }. \
-A notice in your conversation says when the user placed an entry at the prompt, not that it ran. Entries are kept in memory only, and the user can remove them. \
-Errors (nothing changed): invalid_args, unknown_argument (a key not allowed for that op), unknown_view, not_following (you do not follow that terminal, or the follow ended), terminal_not_running, no_operator (the Nostromo app is not open to show the drawer), staging_disabled (the user turned staging off, here or everywhere), rate_limited (retry_after seconds), invalid_text (one non-empty printable line: no line break, tab, control or invisible character, no leading or trailing space, no space but U+0020, at most 4 spaces in a row), entry_too_long (1000 characters), note_too_long (120), looks_like_secret (never stage secrets or personal data), remote_shell_command (ask with nostromo.request_remote_shell instead), history_expansion (in a remote shell, or a local one running a program: history expansion runs something other than what the user reads; spell the command out), types_into_another_terminal (staging never types into another pane), invalid_position, unknown_entry, list_full (12 entries).";
+Returns { ok, ... }: list gives { terminal_id, staging, frozen, follow_mode ('full', or 'staging_only' when you receive none of its output), entries: [{ id, number, command, note?, staged_at, inserted_count, last_inserted_at? }], limits }; stage gives { entry: { id, number }, entries }. \
+Following in full, a notice in your conversation says when the user placed an entry at the prompt, not that it ran; following for staging only (no output reaches you) there is no such notice: call list and read inserted_count. Entries are kept in memory only, and the user can remove them. \
+Errors (nothing changed): invalid_args, unknown_argument (a key not allowed for that op), unknown_view, not_following (you do not follow that terminal, or the follow ended), terminal_not_running, no_operator (the Nostromo app is not open to show the drawer), staging_disabled (the user turned staging off, here or everywhere), rate_limited (retry_after seconds), invalid_text (one non-empty printable line: no line break, tab, control or invisible character, no leading or trailing space, no space but U+0020, at most 4 spaces in a row), entry_too_long (1000 characters), note_too_long (120), looks_like_secret (never stage secrets or personal data), remote_shell_command (ask with nostromo.request_remote_shell instead), history_expansion (in a remote shell, a local one running a program, or whenever you follow for staging only: history expansion runs something other than what the user reads; spell the command out), types_into_another_terminal (staging never types into another pane), invalid_position, unknown_entry, list_full (12 entries).";
 
 /// The descriptor registered in `tool_descriptors()`.
 pub fn descriptor() -> Value {
@@ -255,6 +255,7 @@ fn render_list(terminal_id: &str, list: &StagingList) -> Value {
         "terminal_id": terminal_id,
         "staging": "on",
         "frozen": false,
+        "follow_mode": if list.staging_only { "staging_only" } else { "full" },
         "entries": entries,
         "limits": {
             "max_entries": MAX_ENTRIES,

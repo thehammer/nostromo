@@ -131,6 +131,12 @@ pub const TERMINAL_FOLLOW_UI: &str = "terminal_follow_ui";
 /// and one must be connected before an agent may stage.
 pub const TERMINAL_STAGING_UI: &str = "terminal_staging_ui";
 
+/// The capability an operator connection declares when it can show a
+/// staging-only follow (no output to the agent) and grant one. Together with
+/// [`TERMINAL_FOLLOW_UI`] and [`TERMINAL_STAGING_UI`] it is what a
+/// staging-only request needs: without it every such request is `no_operator`.
+pub const TERMINAL_STAGING_ONLY_UI: &str = "terminal_staging_only_ui";
+
 /// How often the foreground program of a staged terminal is looked at.
 const FOREGROUND_PROBE_EVERY: Duration = Duration::from_millis(250);
 
@@ -592,6 +598,23 @@ impl TerminalManager {
     pub fn follow_ui_connected(&self) -> bool {
         self.operator_conns.values().any(|c| {
             !c.targeted.is_closed() && c.capabilities.iter().any(|cap| cap == TERMINAL_FOLLOW_UI)
+        })
+    }
+
+    /// Is a verified operator-app connection that declared
+    /// [`TERMINAL_FOLLOW_UI`], [`TERMINAL_STAGING_UI`] and
+    /// [`TERMINAL_STAGING_ONLY_UI`] still connected? Nothing may start a
+    /// staging-only follow without one.
+    pub fn staging_only_ui_connected(&self) -> bool {
+        self.operator_conns.values().any(|c| {
+            !c.targeted.is_closed()
+                && [
+                    TERMINAL_FOLLOW_UI,
+                    TERMINAL_STAGING_UI,
+                    TERMINAL_STAGING_ONLY_UI,
+                ]
+                .iter()
+                .all(|want| c.capabilities.iter().any(|cap| cap == want))
         })
     }
 
@@ -1486,13 +1509,16 @@ impl TerminalManager {
             .and_then(|f| f.current_follower(terminal_id))
             .map(|f| {
                 let name = staging::text::sanitize_agent_name(None, &f.tag);
-                (f.tag, name)
+                let staging_only = !f.mode.is_full();
+                (f.tag, name, staging_only)
             });
         self.staging.set_enabled(
             terminal_id,
             &pane_id,
             enabled,
-            follower.as_ref().map(|(t, n)| (t.as_str(), n.as_str())),
+            follower
+                .as_ref()
+                .map(|(t, n, only)| (t.as_str(), n.as_str(), *only)),
         );
         self.flush_staging();
         Ok(())
@@ -1534,8 +1560,13 @@ impl TerminalManager {
         for (id, t) in &self.terminals {
             if let Some(f) = follow.current_follower(id) {
                 let name = staging::text::sanitize_agent_name(None, &f.tag);
-                self.staging
-                    .enabled_for_follower(id, &t.info.pane_id, &f.tag, &name);
+                self.staging.enabled_for_follower(
+                    id,
+                    &t.info.pane_id,
+                    &f.tag,
+                    &name,
+                    !f.mode.is_full(),
+                );
             }
         }
     }
@@ -2198,7 +2229,8 @@ pub fn op_of(msg: &ClientMsg) -> Option<&'static str> {
         ClientMsg::TerminalRestart { .. } => "restart",
         ClientMsg::TerminalKeepAlive { .. } => "keep_alive",
         ClientMsg::TerminalRefusalReport { .. } => "refusal_report",
-        ClientMsg::TerminalFollowInvite { .. } => "follow_invite",
+        ClientMsg::TerminalFollowInvite { .. }
+        | ClientMsg::TerminalFollowInviteStagingOnly { .. } => "follow_invite",
         ClientMsg::TerminalFollowStop { .. } => "follow_stop",
         ClientMsg::TerminalFollowResume { .. } => "follow_resume",
         ClientMsg::TerminalSendSelection { .. } => "send_selection",
@@ -2227,6 +2259,7 @@ pub fn terminal_id_of(msg: &ClientMsg) -> Option<&str> {
         | ClientMsg::TerminalRestart { terminal_id }
         | ClientMsg::TerminalKeepAlive { terminal_id }
         | ClientMsg::TerminalFollowInvite { terminal_id, .. }
+        | ClientMsg::TerminalFollowInviteStagingOnly { terminal_id, .. }
         | ClientMsg::TerminalFollowStop { terminal_id }
         | ClientMsg::TerminalFollowResume { terminal_id }
         | ClientMsg::TerminalSendSelection { terminal_id, .. }

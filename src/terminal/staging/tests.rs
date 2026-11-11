@@ -722,6 +722,7 @@ impl World {
                 entries,
                 enabled,
                 foreground,
+                ..
             } = msg
             {
                 out.push(Frame {
@@ -1057,7 +1058,7 @@ fn a_list_the_follow_stopped_on_is_audited_as_frozen_with_counts_only() {
 #[test]
 fn freezing_a_list_that_is_already_frozen_or_missing_audits_and_sends_nothing() {
     let store = StagingStore::new();
-    store.follow_started("t-1", "terminal-00000001", A, "Cody");
+    store.follow_started("t-1", "terminal-00000001", A, "Cody", false);
     store
         .stage(A, "t-1", "Cody", "echo hi", None, None)
         .unwrap();

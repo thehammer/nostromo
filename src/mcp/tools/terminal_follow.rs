@@ -15,11 +15,15 @@
 use serde_json::{json, Map, Value};
 
 use crate::mcp::state::McpSharedState;
-use crate::terminal::agent_api::{AgentFollowRequest, FollowRequestResult};
+use crate::terminal::agent_api::{
+    AgentFollowRequest, FollowRefusal, FollowRequestResult, ScreenReadRefused,
+};
+use crate::terminal::follow::FollowAccess;
 use crate::terminal::remote_request::DEFAULT_TIMEOUT;
 
 const TERMINAL_ID: &str = "terminal_id";
 const REASON: &str = "reason";
+const MODE: &str = "mode";
 
 /// Handle `nostromo.list_terminals`.
 pub async fn list_terminals(
@@ -36,13 +40,17 @@ pub async fn list_terminals(
         .list_terminals(&tag)
         .into_iter()
         .map(|t| {
-            json!({
+            let mut terminal = json!({
                 "terminal_id": t.terminal_id,
                 "label": t.label,
                 "kind": t.kind,
                 "status": t.status,
                 "followed_by_you": t.followed_by_you,
-            })
+            });
+            if let Some(mode) = t.follow_mode {
+                terminal["follow_mode"] = json!(mode.as_str());
+            }
+            terminal
         })
         .collect();
     json!({ "ok": true, "terminals": terminals })
@@ -54,7 +62,7 @@ pub async fn request_follow(
     arguments: Option<&Value>,
     pty_id: Option<&str>,
 ) -> Value {
-    let (daemon, tag, args) = match caller(state, arguments, pty_id, &[TERMINAL_ID, REASON]) {
+    let (daemon, tag, args) = match caller(state, arguments, pty_id, &[TERMINAL_ID, REASON, MODE]) {
         Ok(ok) => ok,
         Err(refusal) => return refusal,
     };
@@ -65,6 +73,14 @@ pub async fn request_follow(
     let reason = match super::remote_shell::optional_reason(args.get(REASON)) {
         Ok(reason) => reason,
         Err(refusal) => return refusal,
+    };
+    let access = match args.get(MODE) {
+        None => FollowAccess::Full,
+        Some(Value::String(m)) if m == "full" => FollowAccess::Full,
+        Some(Value::String(m)) if m == "staging_only" => FollowAccess::StagingOnly,
+        Some(_) => {
+            return json!({ "error": "invalid_args", "detail": "mode is full or staging_only" })
+        }
     };
     let agent = super::remote_shell::agent_name(daemon, &tag);
 
@@ -77,6 +93,7 @@ pub async fn request_follow(
                 terminal_id,
                 reason,
                 timeout: DEFAULT_TIMEOUT,
+                access,
             },
             &daemon.decisions,
             &daemon.broadcast_tx,
@@ -87,8 +104,16 @@ pub async fn request_follow(
         FollowRequestResult::Denied => json!({ "error": "denied" }),
         FollowRequestResult::Dismissed => json!({ "error": "dismissed" }),
         FollowRequestResult::TimedOut => json!({ "error": "timeout" }),
+        FollowRequestResult::StagingOnly => json!({ "ok": true, "outcome": "staging_only" }),
+        FollowRequestResult::NoOperator if access == FollowAccess::StagingOnly => json!({
+            "error": "no_operator",
+            "detail": "the Nostromo app is not open, or too old to grant staging only",
+        }),
         FollowRequestResult::NoOperator => json!({ "error": "no_operator" }),
         FollowRequestResult::Cancelled => json!({ "error": "cancelled" }),
+        FollowRequestResult::Refused(FollowRefusal::StagingDisabled) => {
+            json!({ "error": "staging_disabled", "detail": "the user turned staging off" })
+        }
         FollowRequestResult::Refused(refusal) => json!({ "error": refusal.code() }),
     }
 }
@@ -116,6 +141,10 @@ pub async fn read_screen(
             "text": screen.text,
             "lines": screen.lines,
             "redactions": screen.redactions,
+        }),
+        Err(ScreenReadRefused::StagingOnly) => json!({
+            "error": ScreenReadRefused::StagingOnly.code(),
+            "detail": "staging only: you may stage for this terminal but not read it",
         }),
         Err(refused) => json!({ "error": refused.code() }),
     }

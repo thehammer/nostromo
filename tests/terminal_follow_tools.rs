@@ -1613,7 +1613,7 @@ fn the_three_follow_tools_are_registered_with_closed_schemas_and_no_field_for_a_
     let tools = tool_descriptors();
     for (name, properties, required) in [
         (LIST, vec![], vec![]),
-        (FOLLOW, vec!["reason", "terminal_id"], vec!["terminal_id"]),
+        (FOLLOW, vec!["mode", "reason", "terminal_id"], vec!["terminal_id"]),
         (READ, vec!["terminal_id"], vec!["terminal_id"]),
     ] {
         let found: Vec<&Value> = tools.iter().filter(|t| t["name"] == name).collect();
@@ -2036,6 +2036,7 @@ follow_test! {
                     terminal_id: id,
                     reason: Some("Look at the logs".into()),
                     timeout: Duration::from_secs(20),
+                    access: nostromo::ipc::protocol::FollowAccess::Full,
                 },
                 &decisions,
                 &tx,
@@ -2235,6 +2236,7 @@ follow_test! {
                     terminal_id: id.clone(),
                     reason: None,
                     timeout: Duration::from_millis(300),
+                    access: nostromo::ipc::protocol::FollowAccess::Full,
                 },
                 &r.d.decisions,
                 &r.d.server.tx,
@@ -2284,6 +2286,7 @@ follow_test! {
             terminal_id: terminal_id.into(),
             reason: None,
             timeout: Duration::from_secs(20),
+            access: nostromo::ipc::protocol::FollowAccess::Full,
         };
         let api = r.d.api.clone();
         let decisions = Arc::clone(&r.d.decisions);
@@ -2661,6 +2664,7 @@ follow_test! {
                     terminal_id: id.clone(),
                     reason: None,
                     timeout: Duration::from_millis(300),
+                    access: nostromo::ipc::protocol::FollowAccess::Full,
                 },
                 &r.d.decisions,
                 &r.d.server.tx,

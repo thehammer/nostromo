@@ -71,6 +71,7 @@ fn list_frame(
         entries,
         enabled: true,
         foreground: None,
+        staging_only: false,
     }
 }
 
@@ -85,6 +86,7 @@ fn none_frame() -> ServerMsg {
         entries: Vec::new(),
         enabled: true,
         foreground: None,
+        staging_only: false,
     }
 }
 
@@ -302,6 +304,7 @@ fn a_frame_with_a_foreground_program_matches_its_golden_file() {
             entries,
             enabled,
             foreground: Some("ssh".into()),
+            staging_only: false,
         },
         other => panic!("{other:?}"),
     };

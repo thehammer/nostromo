@@ -1146,6 +1146,11 @@ pub(crate) mod base64_bytes {
 /// `claude_login_state` and takes `claude_login_action`.
 pub const FEATURE_LOGIN: &str = "claude_login_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon takes
+/// `terminal_follow_invite_staging_only` and a follower may be staging only
+/// (`TerminalFollower.mode`, `TerminalStagingList.staging_only`).
+pub const FEATURE_TERMINAL_STAGING_ONLY: &str = "terminal_staging_only_v1";
+
 /// What a session waiting for a Claude sign-in is doing (`ClaudeLoginSession`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1843,6 +1848,15 @@ pub enum ClientMsg {
         #[serde(default)]
         include_screen: bool,
     },
+    /// Invite the focus `follower_tag` to stage commands for a terminal
+    /// without receiving its output or screen (staging only). A frame of its
+    /// own, not a field of `terminal_follow_invite`: a daemon that ignored an
+    /// unknown field would start a full follow. Operator app declaring
+    /// `terminal_follow_ui` and `terminal_staging_only_ui` only.
+    TerminalFollowInviteStagingOnly {
+        terminal_id: String,
+        follower_tag: String,
+    },
     /// Stop following at once; output not yet delivered is discarded.
     /// Operator app only.
     TerminalFollowStop {
@@ -2174,6 +2188,30 @@ pub struct RemoteShellEnvironment {
     pub services: Vec<String>,
 }
 
+/// What a follower receives of a terminal: its output, or nothing of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowAccess {
+    /// Redacted output and screen reads, and staging.
+    #[default]
+    Full,
+    /// Staging only: no output, no screen, nothing derived from either.
+    StagingOnly,
+}
+
+impl FollowAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::StagingOnly => "staging_only",
+        }
+    }
+
+    pub fn is_full(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 /// The focus following a terminal (`TerminalInfo.follower`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalFollower {
@@ -2183,6 +2221,10 @@ pub struct TerminalFollower {
     /// Why it paused: `too_much_output` or `too_many_deliveries`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_reason: Option<String>,
+    /// What the follower receives. Sent only for `staging_only`: an older app
+    /// ignores it and shows "Followed by", which overstates the exposure.
+    #[serde(default, skip_serializing_if = "FollowAccess::is_full")]
+    pub mode: FollowAccess,
 }
 
 /// A terminal's metadata. Never its bytes.
@@ -2944,6 +2986,10 @@ pub enum ServerMsg {
         /// Never told to the agent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         foreground: Option<String>,
+        /// The follower receives no output (staging only). Kept by a frozen
+        /// list. Sent only when true.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        staging_only: bool,
     },
 
     // ── remote shells (2a; all `LocalOnly`) ───────────────────────────────────

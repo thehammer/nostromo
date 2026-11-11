@@ -1549,7 +1549,8 @@ follow_test! {
             Some(TerminalFollower {
                 tag: "cody-a".into(),
                 paused: true,
-                pause_reason: Some("too_much_output".into())
+                pause_reason: Some("too_much_output".into()),
+                mode: nostromo::ipc::protocol::FollowAccess::Full
             })
         );
         let (_, paused) = r
@@ -1921,7 +1922,8 @@ follow_test! {
             Some(TerminalFollower {
                 tag: "cody-a".into(),
                 paused: false,
-                pause_reason: None
+                pause_reason: None,
+                mode: nostromo::ipc::protocol::FollowAccess::Full
             })
         );
 

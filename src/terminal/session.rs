@@ -685,6 +685,16 @@ impl TerminalSession {
         value
     }
 
+    /// How many screen hooks are installed (tests: a staging-only follow adds none).
+    #[cfg(test)]
+    pub(crate) fn screen_hook_count(&self) -> usize {
+        self.screen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen_hooks
+            .len()
+    }
+
     /// Run `f` on the current screen model (no chunk is read meanwhile).
     pub fn with_screen<T>(&self, f: impl FnOnce(&vt100::Screen) -> T) -> T {
         f(self

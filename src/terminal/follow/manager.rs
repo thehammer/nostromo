@@ -41,6 +41,7 @@ use super::{
 };
 use crate::ipc::decisions::DecisionOutcome;
 use crate::ipc::peer::{SensitiveHold, SensitiveTags};
+pub use crate::ipc::protocol::FollowAccess;
 use crate::ipc::protocol::{TerminalFollower, TerminalInfo, TerminalKind};
 use crate::ipc::session_manager::SELECTION_KEY_PREFIX;
 use crate::ipc::stream_json::{escape_attribute, TERMINAL_ELEMENT_PREFIX};
@@ -70,6 +71,10 @@ pub const SELECTION_ADVISORY: &str = "[Text the user selected in a terminal and 
 
 /// The decision choice that lets an agent follow, and the one that does not.
 pub(crate) const FOLLOW_ALLOW: &str = "allow";
+/// The one choice that lets an agent follow for staging only (no output).
+/// A decision offers one or the other, never both, so the registry itself
+/// refuses `allow` on a staging-only decision.
+pub(crate) const FOLLOW_ALLOW_STAGING_ONLY: &str = "allow_staging_only";
 pub(crate) const FOLLOW_DENY: &str = "deny";
 
 /// Where the session side of following lives. Implemented for the daemon's
@@ -150,16 +155,25 @@ pub enum ScreenReadError {
 #[derive(Debug)]
 pub(crate) struct FollowGrant {
     via: FollowVia,
+    pub(crate) access: FollowAccess,
 }
 
 impl FollowGrant {
-    /// The operator chose Allow on a follow request's decision.
-    pub(crate) fn from_decision(outcome: &DecisionOutcome) -> Option<Self> {
-        matches!(outcome, DecisionOutcome::Answered(choice) if choice == FOLLOW_ALLOW).then_some(
-            Self {
-                via: FollowVia::Request,
-            },
-        )
+    /// The operator chose Allow on a follow request's decision, for the access
+    /// that was requested: `allow` grants a full follow only and
+    /// `allow_staging_only` a staging-only one only.
+    pub(crate) fn from_decision(
+        outcome: &DecisionOutcome,
+        requested: FollowAccess,
+    ) -> Option<Self> {
+        let want = match requested {
+            FollowAccess::Full => FOLLOW_ALLOW,
+            FollowAccess::StagingOnly => FOLLOW_ALLOW_STAGING_ONLY,
+        };
+        matches!(outcome, DecisionOutcome::Answered(choice) if choice == want).then_some(Self {
+            via: FollowVia::Request,
+            access: requested,
+        })
     }
 
     /// The operator clicked Connect with the follow box ticked.
@@ -172,6 +186,7 @@ impl FollowGrant {
         )
         .then_some(Self {
             via: FollowVia::Sheet,
+            access: FollowAccess::Full,
         })
     }
 }
@@ -260,6 +275,93 @@ fn pause_sentence(reason: PauseReason) -> &'static str {
     }
 }
 
+/// Everything the manager tells a follower outside a delivery. One renderer
+/// keeps every element and sentence in one place (the Mac's transcript parser
+/// matches these bytes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FollowNotice {
+    Started,
+    StartedStagingOnly,
+    Resumed,
+    Paused(PauseReason),
+    Stopped(EndReason),
+    StagedInserted(u8),
+}
+
+impl FollowNotice {
+    /// May a staging-only follower be told this? An exhaustive match with no
+    /// wildcard: a new notice cannot compile without a decision. Only what
+    /// says nothing about output, and nothing a staging-only follow can
+    /// cause, reaches it.
+    fn reaches_staging_only(&self) -> bool {
+        match self {
+            Self::StartedStagingOnly | Self::Stopped(_) => true,
+            Self::Started | Self::Resumed | Self::Paused(_) | Self::StagedInserted(_) => false,
+        }
+    }
+
+    fn render(&self, terminal_id: &str, pane: &str) -> String {
+        match self {
+            Self::Started => notice(
+                terminal_id,
+                pane,
+                "started",
+                None,
+                &format!(
+                    "You are now following {pane}. Output it produces from now on will be delivered to you; you cannot type into it."
+                ),
+            ),
+            Self::StartedStagingOnly => notice(
+                terminal_id,
+                pane,
+                "started",
+                Some("staging_only"),
+                &format!(
+                    "You may now stage commands for {pane} with nostromo.terminal_staging. You will not receive its output or read its screen, and you are not told when the user places an entry (call list). You cannot type into it."
+                ),
+            ),
+            Self::Resumed => notice(
+                terminal_id,
+                pane,
+                "resumed",
+                None,
+                &format!(
+                    "Following {pane} resumed. Output it produces from now on will be delivered to you."
+                ),
+            ),
+            Self::Paused(reason) => notice(
+                terminal_id,
+                pane,
+                "paused",
+                Some(pause_code(*reason)),
+                &format!(
+                    "Following {pane} paused itself: {}. Nothing more is delivered until the user resumes it.",
+                    pause_sentence(*reason)
+                ),
+            ),
+            Self::Stopped(reason) => notice(
+                terminal_id,
+                pane,
+                "stopped",
+                Some(&reason.code()),
+                &format!(
+                    "You are no longer following {pane} ({}).",
+                    reason.sentence()
+                ),
+            ),
+            Self::StagedInserted(number) => notice(
+                terminal_id,
+                pane,
+                "staged_inserted",
+                Some(&format!("entry_{number}")),
+                &format!(
+                    "The user placed staged entry {number} at the prompt of {pane}. Only the user's Enter runs it; any output arrives as usual."
+                ),
+            ),
+        }
+    }
+}
+
 fn kind_name(kind: DeliveryKind) -> &'static str {
     match kind {
         DeliveryKind::Lines => "lines",
@@ -283,16 +385,47 @@ struct Follow {
     terminal_tag: String,
     /// How deliveries name the terminal.
     pane: String,
-    session: Arc<TerminalSession>,
-    paused: Option<PauseReason>,
     /// The terminal is a remote (ECS) shell: whatever text of it reaches the
-    /// follower marks it sensitive for good (see [`FollowManager::inject`]).
+    /// follower marks it sensitive for good (see [`FollowManager::inject_notice`]).
     is_remote: bool,
     /// Keeps the follower sensitive while it follows a remote shell, so even
     /// its notices are named as a sensitive focus's; released when the follow
     /// is dropped. Text delivered from the shell outlasts it, which is what
     /// `is_remote` is for.
     _hold: Option<SensitiveHold>,
+    /// What the follower receives. Everything that touches a terminal's output
+    /// lives in the [`OutputFeed`] of [`FollowMode::Full`]: a staging-only
+    /// follow has no session, no hook, no pump and no buffers to reach.
+    mode: FollowMode,
+}
+
+/// What a follow receives of its terminal.
+enum FollowMode {
+    Full(OutputFeed),
+    StagingOnly,
+}
+
+impl Follow {
+    /// Stop the hook; the pump stops at its next look.
+    fn end(&self) {
+        if let FollowMode::Full(feed) = &self.mode {
+            feed.live.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn access(&self) -> FollowAccess {
+        match self.mode {
+            FollowMode::Full(_) => FollowAccess::Full,
+            FollowMode::StagingOnly => FollowAccess::StagingOnly,
+        }
+    }
+}
+
+/// Everything a full follow holds of its terminal's output: the session, the
+/// buffers, the policy and the pump's state. Only [`FollowMode::Full`] has one.
+struct OutputFeed {
+    session: Arc<TerminalSession>,
+    paused: Option<PauseReason>,
     assembler: LineAssembler,
     policy: DeliveryPolicy,
     redactor: Redactor,
@@ -312,12 +445,7 @@ struct Follow {
     live: Arc<AtomicBool>,
 }
 
-impl Follow {
-    /// Stop the hook; the pump stops at its next look.
-    fn end(&self) {
-        self.live.store(false, Ordering::SeqCst);
-    }
-
+impl OutputFeed {
     /// Forget the output not yet delivered.
     fn discard_buffered(&mut self) {
         self.unreported = 0;
@@ -394,15 +522,15 @@ impl Follow {
             }
         }
     }
-}
 
-/// `follow`'s terminal screen, redacted and capped. A snapshot stands alone, so
-/// it is redacted with a fresh state and never reaches the follow's policy.
-fn redacted_screen(follow: &Follow) -> Delivery {
-    let key_open = follow.redactor.inside_private_key();
-    follow
-        .session
-        .with_screen(|screen| deliver_snapshot_in(screen, &mut DeliveryPolicy::new(), key_open))
+    /// The feed's terminal screen, redacted and capped. A snapshot stands
+    /// alone, so it is redacted with a fresh state and never reaches the
+    /// feed's policy.
+    fn redacted_screen(&self) -> Delivery {
+        let key_open = self.redactor.inside_private_key();
+        self.session
+            .with_screen(|screen| deliver_snapshot_in(screen, &mut DeliveryPolicy::new(), key_open))
+    }
 }
 
 fn split_lines(text: &str) -> Vec<String> {
@@ -526,11 +654,35 @@ impl FollowManager {
         include_screen: bool,
         via: FollowVia,
     ) -> Result<(), FollowError> {
-        self.start(terminal_id, follower_tag, include_screen, via)
+        self.start(
+            terminal_id,
+            follower_tag,
+            include_screen,
+            via,
+            FollowAccess::Full,
+        )
+    }
+
+    /// [`Self::invite`] for staging only (the pane popover): the follower may
+    /// stage commands for `terminal_id` but receives none of its output.
+    pub fn invite_staging_only(
+        &self,
+        _cap: &OperatorCap,
+        terminal_id: &str,
+        follower_tag: &str,
+    ) -> Result<(), FollowError> {
+        self.start(
+            terminal_id,
+            follower_tag,
+            false,
+            FollowVia::Control,
+            FollowAccess::StagingOnly,
+        )
     }
 
     /// [`Self::invite`] for a follow the operator granted through an answer
-    /// (see [`FollowGrant`]): without the screen, `via` as the grant says.
+    /// (see [`FollowGrant`]): without the screen, `via` and the access as the
+    /// grant says.
     ///
     /// The answer that granted it came before this call, so the app may have
     /// gone in between. Following starts, then the app is looked for again: if
@@ -546,11 +698,11 @@ impl FollowManager {
     ) -> Result<(), FollowError> {
         // Looked for before (so the follower is told nothing when there is no
         // one) and after.
-        if !self.follow_ui_connected() {
+        if !self.ui_connected(grant.access) {
             return Err(FollowError::NoOperator);
         }
-        self.start(terminal_id, follower_tag, false, grant.via)?;
-        if !self.follow_ui_connected() {
+        self.start(terminal_id, follower_tag, false, grant.via, grant.access)?;
+        if !self.ui_connected(grant.access) {
             // Cannot fail with `NotFollowed`: a follow only ends in between if
             // something else ended it, which is what is wanted anyway.
             let _ = self.end(terminal_id, &EndReason::AppClosed);
@@ -559,11 +711,15 @@ impl FollowManager {
         Ok(())
     }
 
-    /// Is an app that can show who follows, and stop it, connected?
-    fn follow_ui_connected(&self) -> bool {
-        self.terminals
-            .upgrade()
-            .is_some_and(|tm| lock(&tm).follow_ui_connected())
+    /// Is an app that can show who follows (in this access), and stop it, connected?
+    fn ui_connected(&self, access: FollowAccess) -> bool {
+        self.terminals.upgrade().is_some_and(|tm| {
+            let tm = lock(&tm);
+            match access {
+                FollowAccess::Full => tm.follow_ui_connected(),
+                FollowAccess::StagingOnly => tm.staging_only_ui_connected(),
+            }
+        })
     }
 
     fn start(
@@ -572,6 +728,7 @@ impl FollowManager {
         follower_tag: &str,
         include_screen: bool,
         via: FollowVia,
+        access: FollowAccess,
     ) -> Result<(), FollowError> {
         let (info, session) = self
             .terminals
@@ -598,72 +755,61 @@ impl FollowManager {
             state.next_id += 1;
             let id = state.next_id;
             let pane = pane_name(&info);
-            let (sender, receiver) = mpsc::channel(CHUNK_QUEUE);
-            let overflow = Arc::new(AtomicBool::new(false));
-            let live = Arc::new(AtomicBool::new(true));
-            let hook = forwarding_hook(sender, Arc::clone(&overflow), Arc::clone(&live));
-            let (alt_screen, screen) = session.add_screen_hook(|screen| {
-                let now = (
-                    screen.alternate_screen(),
-                    include_screen.then(|| screen_snapshot(screen)),
-                );
-                (now, hook)
-            });
+            // The feed, and with it the only way to the terminal's output, is
+            // made for a full follow alone. A staging-only one only needed the
+            // session to know the terminal exists, and lets it go.
+            let (mode, receiver, screen) = match access {
+                FollowAccess::Full => {
+                    let (feed, receiver, screen) = self.output_feed(session, include_screen);
+                    (FollowMode::Full(feed), Some(receiver), screen)
+                }
+                FollowAccess::StagingOnly => {
+                    debug_assert!(!include_screen, "a staging-only follow has no screen");
+                    drop(session);
+                    (FollowMode::StagingOnly, None, None)
+                }
+            };
             let mut follow = Follow {
                 id,
                 follower: follower_tag.to_string(),
                 terminal_tag: info.tag.clone(),
                 pane,
-                session,
-                paused: None,
                 is_remote,
                 _hold: hold,
-                assembler: LineAssembler::new(),
-                policy: DeliveryPolicy::new(),
-                redactor: Redactor::new(),
-                pending_staged: Vec::new(),
-                alt_screen,
-                screen_dirty: false,
-                unreported: 0,
-                overflow,
-                live,
+                mode,
             };
-            if alt_screen {
-                follow.assembler.suspend();
-            }
             self.audit(AuditEvent::FollowInvited {
                 terminal_id: terminal_id.to_string(),
                 tag: self.audit_tag(&follow.terminal_tag),
                 follower: self.audit_tag(follower_tag),
-                include_screen,
+                include_screen: include_screen && access == FollowAccess::Full,
                 via: via.as_str().to_string(),
+                mode: access.as_str().to_string(),
             });
-            let mut message = notice(
-                terminal_id,
-                &follow.pane,
-                "started",
-                None,
-                &format!(
-                    "You are now following {}. Output it produces from now on will be delivered to you; you cannot type into it.",
-                    follow.pane
-                ),
-            );
             let mut screen_delivery = None;
-            if let Some(screen) = screen {
+            let mut screen_element = None;
+            if let (FollowMode::Full(feed), Some(screen)) = (&mut follow.mode, screen) {
                 let delivery = deliver_lines(
                     split_lines(&screen),
-                    &mut follow.redactor,
-                    &mut follow.policy,
+                    &mut feed.redactor,
+                    &mut feed.policy,
                 );
-                if let Some(element) =
-                    self.delivery_element(terminal_id, &follow, DeliveryKind::Screen, &delivery)
-                {
-                    message.push_str("\n\n");
-                    message.push_str(&element);
+                screen_element =
+                    self.delivery_element(terminal_id, &follow.pane, DeliveryKind::Screen, &delivery);
+                if screen_element.is_some() {
                     screen_delivery = Some(delivery);
                 }
             }
-            if self.inject(&follow, &message, terminal_id, screen_delivery.is_some()) {
+            let started = match access {
+                FollowAccess::Full => FollowNotice::Started,
+                FollowAccess::StagingOnly => FollowNotice::StartedStagingOnly,
+            };
+            if self.inject_notices(
+                &follow,
+                terminal_id,
+                &[started],
+                screen_element.as_deref(),
+            ) {
                 if let Some(delivery) = screen_delivery {
                     self.audit_delivery(terminal_id, &follow, DeliveryKind::Screen, &delivery);
                 }
@@ -676,12 +822,52 @@ impl FollowManager {
                 &info.pane_id,
                 follower_tag,
                 &sanitize_agent_name(None, follower_tag),
+                access == FollowAccess::StagingOnly,
             );
             state.follows.insert(terminal_id.to_string(), follow);
-            self.spawn_pump(terminal_id, id, receiver);
+            if let Some(receiver) = receiver {
+                self.spawn_pump(terminal_id, id, receiver);
+            }
         }
         self.broadcast_state(terminal_id);
         Ok(())
+    }
+
+    /// A full follow's feed for `session`: its screen hook is installed here,
+    /// and `include_screen` also takes the visible screen in the same step.
+    fn output_feed(
+        &self,
+        session: Arc<TerminalSession>,
+        include_screen: bool,
+    ) -> (OutputFeed, mpsc::Receiver<Chunk>, Option<String>) {
+        let (sender, receiver) = mpsc::channel(CHUNK_QUEUE);
+        let overflow = Arc::new(AtomicBool::new(false));
+        let live = Arc::new(AtomicBool::new(true));
+        let hook = forwarding_hook(sender, Arc::clone(&overflow), Arc::clone(&live));
+        let (alt_screen, screen) = session.add_screen_hook(|screen| {
+            let now = (
+                screen.alternate_screen(),
+                include_screen.then(|| screen_snapshot(screen)),
+            );
+            (now, hook)
+        });
+        let mut feed = OutputFeed {
+            session,
+            paused: None,
+            assembler: LineAssembler::new(),
+            policy: DeliveryPolicy::new(),
+            redactor: Redactor::new(),
+            pending_staged: Vec::new(),
+            alt_screen,
+            screen_dirty: false,
+            unreported: 0,
+            overflow,
+            live,
+        };
+        if alt_screen {
+            feed.assembler.suspend();
+        }
+        (feed, receiver, screen)
     }
 
     /// Stop following `terminal_id` at once: output not yet delivered (buffered
@@ -727,29 +913,23 @@ impl FollowManager {
                 .follows
                 .get_mut(terminal_id)
                 .ok_or(FollowError::NotFollowed)?;
-            if follow.paused.is_none() {
+            // A staging-only follow has no output to pause, so nothing to resume.
+            let FollowMode::Full(feed) = &mut follow.mode else {
+                return Err(FollowError::NotPaused);
+            };
+            if feed.paused.is_none() {
                 return Err(FollowError::NotPaused);
             }
-            follow.paused = None;
-            follow.discard_buffered();
-            follow.policy.resume(now());
-            follow.overflow.store(false, Ordering::SeqCst);
+            feed.paused = None;
+            feed.discard_buffered();
+            feed.policy.resume(now());
+            feed.overflow.store(false, Ordering::SeqCst);
             self.audit(AuditEvent::FollowResumed {
                 terminal_id: terminal_id.to_string(),
                 tag: self.audit_tag(&follow.terminal_tag),
                 follower: self.audit_tag(&follow.follower),
             });
-            let message = notice(
-                terminal_id,
-                &follow.pane,
-                "resumed",
-                None,
-                &format!(
-                    "Following {} resumed. Output it produces from now on will be delivered to you.",
-                    follow.pane
-                ),
-            );
-            self.inject(follow, &message, terminal_id, false);
+            self.inject_notices(follow, terminal_id, &[FollowNotice::Resumed], None);
         }
         self.broadcast_state(terminal_id);
         Ok(())
@@ -765,13 +945,30 @@ impl FollowManager {
             .is_some_and(|f| f.follower == follower_tag)
     }
 
+    /// What `follower_tag` receives of `terminal_id` while it follows it (in
+    /// any mode); `None` when it does not.
+    pub fn access_of(&self, follower_tag: &str, terminal_id: &str) -> Option<FollowAccess> {
+        self.lock_state()
+            .follows
+            .get(terminal_id)
+            .filter(|f| f.follower == follower_tag)
+            .map(Follow::access)
+    }
+
     /// Who follows `terminal_id`, if anyone.
     pub fn current_follower(&self, terminal_id: &str) -> Option<TerminalFollower> {
         let state = self.lock_state();
-        state.follows.get(terminal_id).map(|f| TerminalFollower {
-            tag: f.follower.clone(),
-            paused: f.paused.is_some(),
-            pause_reason: f.paused.map(|r| pause_code(r).to_string()),
+        state.follows.get(terminal_id).map(|f| {
+            let paused = match &f.mode {
+                FollowMode::Full(feed) => feed.paused,
+                FollowMode::StagingOnly => None,
+            };
+            TerminalFollower {
+                tag: f.follower.clone(),
+                paused: paused.is_some(),
+                pause_reason: paused.map(|r| pause_code(r).to_string()),
+                mode: f.access(),
+            }
         })
     }
 
@@ -779,8 +976,10 @@ impl FollowManager {
     /// followed; `None` otherwise.
     pub fn screen_snapshot_redacted(&self, terminal_id: &str) -> Option<String> {
         let state = self.lock_state();
-        let follow = state.follows.get(terminal_id)?;
-        redacted_screen(follow).text().map(str::to_owned)
+        let FollowMode::Full(feed) = &state.follows.get(terminal_id)?.mode else {
+            return None;
+        };
+        feed.redacted_screen().text().map(str::to_owned)
     }
 
     /// What the agent `follower_tag` sees of `terminal_id`'s screen: only while
@@ -799,14 +998,18 @@ impl FollowManager {
             .get(terminal_id)
             .filter(|f| f.follower == follower_tag)
             .ok_or(ScreenReadError::NotFollowing)?;
+        // A staging-only follow has no feed: there is no screen to read.
+        let FollowMode::Full(feed) = &follow.mode else {
+            return Err(ScreenReadError::NotFollowing);
+        };
         #[cfg(test)]
         let screen = if self.withhold_screens.load(Ordering::SeqCst) {
             Delivery::Withheld
         } else {
-            redacted_screen(follow)
+            feed.redacted_screen()
         };
         #[cfg(not(test))]
-        let screen = redacted_screen(follow);
+        let screen = feed.redacted_screen();
         let Delivery::Text {
             text,
             lines_total,
@@ -983,17 +1186,19 @@ impl FollowManager {
     /// delivery. The terminal manager calls this under its lock.
     pub(crate) fn note_staged_insert(&self, terminal_id: &str, owner: &str, number: u8) {
         let mut state = self.lock_state();
-        let Some(follow) = state
+        // A staging-only follow has no feed to carry the notice: it is not told
+        // (it calls `list`).
+        let Some(FollowMode::Full(feed)) = state
             .follows
             .get_mut(terminal_id)
             .filter(|f| f.follower == owner)
+            .map(|f| &mut f.mode)
         else {
             return;
         };
-        if !follow.pending_staged.contains(&number)
-            && follow.pending_staged.len() < MAX_PENDING_STAGED
+        if !feed.pending_staged.contains(&number) && feed.pending_staged.len() < MAX_PENDING_STAGED
         {
-            follow.pending_staged.push(number);
+            feed.pending_staged.push(number);
         }
     }
 
@@ -1065,12 +1270,17 @@ impl FollowManager {
     /// gone.
     fn on_chunk(&self, terminal_id: &str, id: u64, chunk: Chunk) -> bool {
         let mut state = self.lock_state();
-        let Some(follow) = state.follows.get_mut(terminal_id).filter(|f| f.id == id) else {
+        let Some(FollowMode::Full(feed)) = state
+            .follows
+            .get_mut(terminal_id)
+            .filter(|f| f.id == id)
+            .map(|f| &mut f.mode)
+        else {
             return false;
         };
         // While paused, output is dropped: resume delivers only what follows.
-        if follow.paused.is_none() {
-            follow.feed(&chunk, now());
+        if feed.paused.is_none() {
+            feed.feed(&chunk, now());
         }
         true
     }
@@ -1083,10 +1293,13 @@ impl FollowManager {
             let Some(follow) = state.follows.get_mut(terminal_id).filter(|f| f.id == id) else {
                 return false;
             };
-            if follow.paused.is_some() {
+            let FollowMode::Full(feed) = &mut follow.mode else {
+                return false;
+            };
+            if feed.paused.is_some() {
                 return true;
             }
-            match follow.decide() {
+            match feed.decide() {
                 Decision::Wait => false,
                 Decision::Deliver { kind } => {
                     self.deliver_due(terminal_id, follow, kind);
@@ -1106,20 +1319,27 @@ impl FollowManager {
 
     /// Under `state`: deliver the output that is due to the follower.
     fn deliver_due(&self, terminal_id: &str, follow: &mut Follow, kind: DeliveryKind) {
-        let delivery = follow.take_delivery(kind);
-        if let Some(element) = self.delivery_element(terminal_id, follow, kind, &delivery) {
+        let FollowMode::Full(feed) = &mut follow.mode else {
+            return;
+        };
+        let delivery = feed.take_delivery(kind);
+        if let Some(element) = self.delivery_element(terminal_id, &follow.pane, kind, &delivery) {
             // Entries the user placed at the prompt are told first, in the
             // same message (so the same coalesce key as the delivery). They are
             // forgotten only once the session has taken the message: one it
             // could not take leaves them for the next delivery.
-            let mut message = String::new();
-            for number in &follow.pending_staged {
-                message.push_str(&staged_inserted_notice(terminal_id, &follow.pane, *number));
-                message.push_str("\n\n");
-            }
-            message.push_str(&element);
-            if self.inject(follow, &message, terminal_id, true) {
-                follow.pending_staged.clear();
+            let FollowMode::Full(feed) = &follow.mode else {
+                return;
+            };
+            let notices: Vec<FollowNotice> = feed
+                .pending_staged
+                .iter()
+                .map(|n| FollowNotice::StagedInserted(*n))
+                .collect();
+            if self.inject_notices(follow, terminal_id, &notices, Some(&element)) {
+                if let FollowMode::Full(feed) = &mut follow.mode {
+                    feed.pending_staged.clear();
+                }
                 self.audit_delivery(terminal_id, follow, kind, &delivery);
             }
         }
@@ -1127,26 +1347,18 @@ impl FollowManager {
 
     /// Under `state`: the follow pauses itself, and the follower is told.
     fn pause(&self, terminal_id: &str, follow: &mut Follow, reason: PauseReason) {
-        follow.paused = Some(reason);
-        follow.discard_buffered();
+        let FollowMode::Full(feed) = &mut follow.mode else {
+            return;
+        };
+        feed.paused = Some(reason);
+        feed.discard_buffered();
         self.audit(AuditEvent::FollowPaused {
             terminal_id: terminal_id.to_string(),
             tag: self.audit_tag(&follow.terminal_tag),
             follower: self.audit_tag(&follow.follower),
             reason: pause_code(reason).to_string(),
         });
-        let message = notice(
-            terminal_id,
-            &follow.pane,
-            "paused",
-            Some(pause_code(reason)),
-            &format!(
-                "Following {} paused itself: {}. Nothing more is delivered until the user resumes it.",
-                follow.pane,
-                pause_sentence(reason)
-            ),
-        );
-        self.inject(follow, &message, terminal_id, false);
+        self.inject_notices(follow, terminal_id, &[FollowNotice::Paused(reason)], None);
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -1157,7 +1369,7 @@ impl FollowManager {
     fn delivery_element(
         &self,
         terminal_id: &str,
-        follow: &Follow,
+        pane: &str,
         kind: DeliveryKind,
         delivery: &Delivery,
     ) -> Option<String> {
@@ -1177,7 +1389,7 @@ impl FollowManager {
         Some(format!(
             "<nostromo-terminal-output terminal_id=\"{}\" pane=\"{}\" kind=\"{}\" lines=\"{lines_total}\" omitted=\"{omitted}\" redactions=\"{}\">\n{ADVISORY}\n{}\n</nostromo-terminal-output>",
             escape_attribute(terminal_id),
-            escape_attribute(&follow.pane),
+            escape_attribute(pane),
             kind_name(kind),
             redactions.len(),
             neutralize_elements(text),
@@ -1217,18 +1429,12 @@ impl FollowManager {
     /// output not yet delivered dropped, its follower told.
     fn ended_with_notice(&self, terminal_id: &str, follow: &Follow, reason: &EndReason) {
         self.audit_stopped(terminal_id, follow, reason);
-        let message = notice(
+        self.inject_notices(
+            follow,
             terminal_id,
-            &follow.pane,
-            "stopped",
-            Some(&reason.code()),
-            &format!(
-                "You are no longer following {} ({}).",
-                follow.pane,
-                reason.sentence()
-            ),
+            &[FollowNotice::Stopped(reason.clone())],
+            None,
         );
-        self.inject(follow, &message, terminal_id, false);
     }
 
     fn audit_stopped(&self, terminal_id: &str, follow: &Follow, reason: &EndReason) {
@@ -1240,26 +1446,53 @@ impl FollowManager {
         });
     }
 
-    /// Deliver into the follower's conversation. A session that cannot take
-    /// it (it is down) loses it: following such a session ends with its end
-    /// hook. Whether it was injected.
+    /// Tell the follower `notices` (and, after them, `output`: a delivery
+    /// element, for a full follow alone) in one message. The only way anything
+    /// is injected into a follower. A session that cannot take it (it is down)
+    /// loses it: following such a session ends with its end hook. Whether it
+    /// was injected.
+    ///
+    /// A notice a staging-only follower must not get ([`FollowNotice::reaches_staging_only`])
+    /// is refused, and so is any output for one: a bug, so debug builds
+    /// assert; release builds send nothing.
     ///
     /// A sensitive focus's terminal makes its follower sensitive first, so its
     /// output never reaches a network peer through the follower's turns.
     ///
-    /// So does a remote (ECS) terminal's text, and for good: `has_output` says
-    /// `text` carries some of the terminal's output (a delivery, or the screen
-    /// in the started message). It stays in the follower's conversation after
-    /// the follow ends, so the follower is marked before it is handed over, and
-    /// the hold that lapses with the follow is not what protects it. A follow
-    /// that only ever sent notices leaves nothing of the terminal behind, so
-    /// it does not mark: the hold covers it while it lasts.
-    fn inject(&self, follow: &Follow, text: &str, terminal_id: &str, has_output: bool) -> bool {
+    /// So does a remote (ECS) terminal's text, and for good: `output` is some
+    /// of the terminal's text (a delivery, or the screen in the started
+    /// message). It stays in the follower's conversation after the follow
+    /// ends, so the follower is marked before it is handed over, and the hold
+    /// that lapses with the follow is not what protects it. A follow that only
+    /// ever sent notices leaves nothing of the terminal behind, so it does not
+    /// mark: the hold covers it while it lasts.
+    fn inject_notices(
+        &self,
+        follow: &Follow,
+        terminal_id: &str,
+        notices: &[FollowNotice],
+        output: Option<&str>,
+    ) -> bool {
+        if matches!(follow.mode, FollowMode::StagingOnly) {
+            let allowed =
+                output.is_none() && notices.iter().all(FollowNotice::reaches_staging_only);
+            debug_assert!(allowed, "a staging-only follower was sent {notices:?}");
+            if !allowed {
+                return false;
+            }
+        }
+        let mut parts: Vec<String> = notices
+            .iter()
+            .map(|n| n.render(terminal_id, &follow.pane))
+            .collect();
+        parts.extend(output.map(str::to_owned));
+        let text = parts.join("\n\n");
+        let has_output = output.is_some();
         if (follow.is_remote && has_output) || self.sensitive.tag_is_sensitive(&follow.terminal_tag)
         {
             self.sensitive.mark_tag(&follow.follower);
         }
-        match self.sink.inject(&follow.follower, text, terminal_id) {
+        match self.sink.inject(&follow.follower, &text, terminal_id) {
             Ok(()) => true,
             Err(e) => {
                 debug!(
@@ -1380,18 +1613,10 @@ fn notice(
 }
 
 /// The notice that the user placed staged entry `number` at the prompt of
-/// `pane`: the element, then one plain sentence. The Mac's transcript parser
-/// matches these bytes. It says the text was *placed*, never that it ran.
+/// `pane` (tests; the manager renders it through [`FollowNotice`]).
+#[cfg(test)]
 pub(crate) fn staged_inserted_notice(terminal_id: &str, pane: &str, number: u8) -> String {
-    notice(
-        terminal_id,
-        pane,
-        "staged_inserted",
-        Some(&format!("entry_{number}")),
-        &format!(
-            "The user placed staged entry {number} at the prompt of {pane}. Only the user's Enter runs it; any output arrives as usual."
-        ),
-    )
+    FollowNotice::StagedInserted(number).render(terminal_id, pane)
 }
 
 /// Terminal output with every `<nostromo-terminal-` made harmless, so it can

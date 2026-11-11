@@ -12025,6 +12025,7 @@ fn staging_list_frame(state: &str, command: &str) -> ServerMsg {
         }],
         enabled: true,
         foreground: Some("ssh".into()),
+        staging_only: false,
     }
 }
 
