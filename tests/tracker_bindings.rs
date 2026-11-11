@@ -941,6 +941,9 @@ fn an_unknown_or_malformed_bind_is_invalid_args_and_changes_nothing() {
         "mother.job/has space",
         "pr.ci/o/r",
         "pr.ci/o/r#0",
+        "pr.ci/owner/..#1",
+        "pr.ci/owner/.#1",
+        "pr.ci/./x#1",
     ] {
         let err = rig.bind("plain", bad).expect_err(bad);
         assert!(
@@ -1308,4 +1311,17 @@ fn a_source_change_is_broadcast_to_the_pane_with_the_items_freshness() {
             badly_stale: false,
         })
     );
+}
+
+#[test]
+fn the_default_staleness_threshold_is_five_minutes() {
+    // No `set_badly_stale_after`: the registry's own default applies.
+    let rig = Rig::standard();
+    rig.mother("JOB1", "running");
+    rig.advance(299);
+    rig.hub.tick();
+    assert!(!rig.view_item("job").bound.unwrap().badly_stale);
+    rig.advance(2);
+    rig.hub.tick();
+    assert!(rig.view_item("job").bound.unwrap().badly_stale);
 }

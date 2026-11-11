@@ -89,6 +89,9 @@ impl Binding {
                     .ok()
                     .filter(|n| *n > 0)
                     .ok_or_else(|| format!("bind {text:?}: invalid PR number"))?;
+                if matches!(&caps[2], "." | "..") {
+                    return Err(format!("bind {text:?}: invalid repo name"));
+                }
                 Ok(Binding::PrCi {
                     repo: format!("{}/{}", &caps[1], &caps[2]),
                     number,
@@ -474,6 +477,10 @@ mod tests {
             "pr.ci/o/r#0",
             "pr.ci/o/r#x",
             "pr.ci/o#1",
+            "pr.ci/owner/..#1",
+            "pr.ci/owner/.#1",
+            "pr.ci/./x#1",
+            "pr.ci/../x#1",
             "nonsense",
             "",
         ] {

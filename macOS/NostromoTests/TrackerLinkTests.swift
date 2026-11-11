@@ -211,6 +211,26 @@ final class TrackerLinkTests: XCTestCase {
         XCTAssertEqual(fresh.frame.height, rowHeight, accuracy: 1)
     }
 
+    func testABoundItemWithNoLinksYetReservesTheFootnoteLineSoGoingStaleShiftsNothing() throws {
+        let harness = try makeHarness(.mid)
+        let item = try harness.requireItem(.inside) { $0.links.isEmpty && $0.bound == nil && !$0.isDone }
+        let key = TrackerRow.itemKey(item.id)
+        // Mother-bound, no PR yet, so no links.
+        try harness.mutate { board in
+            try board.editItem(item.id) { $0["bound"] = TrackerLinkGateScript.bound(stale: false) }
+        }
+        let rowHeight = try XCTUnwrap(harness.pane.rowViews[key]).frame.height
+
+        try harness.mutate { board in
+            try board.editItem(item.id) { $0["bound"] = TrackerLinkGateScript.bound(stale: true) }
+        }
+        let stale = try XCTUnwrap(harness.pane.rowViews[key])
+        XCTAssertEqual(stale.staleFootnote?.stringValue, "as of 16:42")
+        XCTAssertTrue(stale.linkChips.isEmpty)
+        XCTAssertEqual(stale.frame.height, rowHeight, accuracy: 1,
+                       "the chip line was reserved for the bound item before any footnote or link")
+    }
+
     // MARK: - Gate
 
     func testLinkAndStaleEventsNeverMoveTheReadingPositionWhenScrolledMidBoard() throws {

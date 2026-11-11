@@ -100,7 +100,17 @@ of sources is closed:
 | `pr.ci/<owner>/<repo>#<n>[!green]` | the PR's check runs (polled every 8 s, conditional GETs, only while an item is bound to a PR) | `bind:pr.ci/<owner>/<repo>#<n>[!green]` |
 
 Any other source is `invalid_args` for an agent and is ignored (the item is not
-live) when a human wrote it into the file. `bind:""` unbinds.
+live) when a human wrote it into the file. `bind:""` unbinds. The repo name may not be `.` or `..`.
+
+PR polling is capped at 20 distinct PRs per 8 s across all boards (each costs
+two conditional GETs on your GitHub token). Past 20 bound PRs no bind is refused:
+every PR is polled less often (the period grows in 8 s steps, e.g. 16 s for 21 to
+40 PRs).
+
+The daemon keeps no per-item source state across a restart. After one, the first
+report of each bound item counts as a state change: it overrides an agent-set
+status, appears as one delta entry attributed to the source, and may rewrite the
+file's line.
 
 How a source changes the item:
 

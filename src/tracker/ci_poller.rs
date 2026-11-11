@@ -26,6 +26,18 @@ use crate::ipc::protocol::ServerMsg;
 /// Each bound PR is asked for its CI at most this often.
 pub const POLL_PERIOD: Duration = Duration::from_secs(8);
 
+/// At most this many distinct PRs are asked per [`POLL_PERIOD`] (each costs two
+/// conditional GETs on the user's token). With more bound PRs than this, every
+/// PR is polled less often (the period stretches in whole multiples of
+/// [`POLL_PERIOD`]) rather than any bind being refused: all stay live, just
+/// slower, so the request rate is bounded whatever the boards hold.
+pub const MAX_PRS_PER_PERIOD: usize = 20;
+
+/// The period each of `distinct_prs` bound PRs is polled at.
+pub fn poll_period(distinct_prs: usize) -> Duration {
+    POLL_PERIOD * distinct_prs.div_ceil(MAX_PRS_PER_PERIOD).max(1) as u32
+}
+
 /// How often the loop looks for work (bindings appear between polls).
 const LOOP_TICK: Duration = Duration::from_secs(1);
 
@@ -63,7 +75,7 @@ impl CiPoller {
                 .clear();
             return false;
         }
-        let period = chrono::Duration::from_std(POLL_PERIOD).unwrap_or_default();
+        let period = chrono::Duration::from_std(poll_period(bound.len())).unwrap_or_default();
         let mut changed = false;
         for (repo, number) in bound {
             let key = (repo.clone(), number);
@@ -117,5 +129,29 @@ pub async fn run(
         }
         hub.tick();
         registry.flush(&tx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn up_to_the_cap_every_pr_is_polled_every_period() {
+        for n in [0, 1, MAX_PRS_PER_PERIOD] {
+            assert_eq!(poll_period(n), POLL_PERIOD, "{n} PRs");
+        }
+    }
+
+    #[test]
+    fn beyond_the_cap_the_period_stretches_so_the_request_rate_stays_bounded() {
+        assert_eq!(poll_period(MAX_PRS_PER_PERIOD + 1), POLL_PERIOD * 2);
+        assert_eq!(poll_period(2 * MAX_PRS_PER_PERIOD), POLL_PERIOD * 2);
+        assert_eq!(poll_period(500), POLL_PERIOD * 25);
+        // PRs asked per POLL_PERIOD never exceeds the cap.
+        for n in 1..=500usize {
+            let periods = (poll_period(n).as_secs() / POLL_PERIOD.as_secs()) as usize;
+            assert!(n.div_ceil(periods) <= MAX_PRS_PER_PERIOD, "{n} PRs");
+        }
     }
 }

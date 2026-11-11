@@ -4649,6 +4649,25 @@ mod huey_surface_tests {
     }
 
     #[test]
+    fn t6_a_tracker_open_link_targets_a_sensitive_session_exactly_when_its_tag_is_one() {
+        let open_link = |tag: &str| ClientMsg::TrackerOpenLink {
+            tag: tag.into(),
+            item_id: "deploy-ap".into(),
+            link_index: 0,
+        };
+        let tags = SensitiveTags::in_memory();
+        assert!(targets_sensitive_session(&open_link("huey"), &tags));
+        assert!(refuse_for_network(&open_link("huey"), &tags));
+        assert!(!targets_sensitive_session(&open_link("cody-core-1"), &tags));
+        tags.mark_tag("cody-core-1");
+        assert!(
+            targets_sensitive_session(&open_link("cody-core-1"), &tags),
+            "opening a link on a sensitive session's board is refused to a peer without access"
+        );
+        assert!(refuse_for_network(&open_link("cody-core-1"), &tags));
+    }
+
+    #[test]
     fn h6_11_the_huey_focus_and_its_hidden_run_session_are_sensitive_whatever_the_case() {
         let tags = SensitiveTags::in_memory();
         for tag in ["huey", "Huey", "HUEY", "huey-run", "Huey-Run", " huey "] {
