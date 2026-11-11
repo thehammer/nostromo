@@ -761,13 +761,15 @@ extension TerminalStagingStoreTests {
         let (_, suite) = makeStore()
         let standardBefore = UserDefaults.standard.dictionaryRepresentation() as NSDictionary
         let suiteBefore = suite.dictionaryRepresentation() as NSDictionary
-        TerminalStagingStore.setAutoArchive(false)
-        TerminalStagingStore.setAutoArchive(true)
-        TerminalStagingStore.setAutoArchive(false)
-        XCTAssertEqual(UserDefaults.standard.dictionaryRepresentation() as NSDictionary, standardBefore,
-                       "no key added or changed in the standard defaults")
-        XCTAssertEqual(suite.dictionaryRepresentation() as NSDictionary, suiteBefore,
-                       "no key added or changed in the store's defaults")
+        // Compare after each value: a key already written with one value (by an earlier test in this process)
+        // would hide a write of that same value, but not of the other.
+        for on in [true, false] {
+            TerminalStagingStore.setAutoArchive(on)
+            XCTAssertEqual(UserDefaults.standard.dictionaryRepresentation() as NSDictionary, standardBefore,
+                           "setAutoArchive(\(on)): no key added or changed in the standard defaults")
+            XCTAssertEqual(suite.dictionaryRepresentation() as NSDictionary, suiteBefore,
+                           "setAutoArchive(\(on)): no key added or changed in the store's defaults")
+        }
     }
 
     func testUntickingAutoArchiveMakesAnEnterArchiveNothing() {
