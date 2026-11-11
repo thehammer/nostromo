@@ -401,7 +401,7 @@ struct Follow {
 
 /// What a follow receives of its terminal.
 enum FollowMode {
-    Full(OutputFeed),
+    Full(Box<OutputFeed>),
     StagingOnly,
 }
 
@@ -761,7 +761,7 @@ impl FollowManager {
             let (mode, receiver, screen) = match access {
                 FollowAccess::Full => {
                     let (feed, receiver, screen) = self.output_feed(session, include_screen);
-                    (FollowMode::Full(feed), Some(receiver), screen)
+                    (FollowMode::Full(Box::new(feed)), Some(receiver), screen)
                 }
                 FollowAccess::StagingOnly => {
                     debug_assert!(!include_screen, "a staging-only follow has no screen");
@@ -789,13 +789,14 @@ impl FollowManager {
             let mut screen_delivery = None;
             let mut screen_element = None;
             if let (FollowMode::Full(feed), Some(screen)) = (&mut follow.mode, screen) {
-                let delivery = deliver_lines(
-                    split_lines(&screen),
-                    &mut feed.redactor,
-                    &mut feed.policy,
+                let delivery =
+                    deliver_lines(split_lines(&screen), &mut feed.redactor, &mut feed.policy);
+                screen_element = self.delivery_element(
+                    terminal_id,
+                    &follow.pane,
+                    DeliveryKind::Screen,
+                    &delivery,
                 );
-                screen_element =
-                    self.delivery_element(terminal_id, &follow.pane, DeliveryKind::Screen, &delivery);
                 if screen_element.is_some() {
                     screen_delivery = Some(delivery);
                 }
@@ -804,12 +805,7 @@ impl FollowManager {
                 FollowAccess::Full => FollowNotice::Started,
                 FollowAccess::StagingOnly => FollowNotice::StartedStagingOnly,
             };
-            if self.inject_notices(
-                &follow,
-                terminal_id,
-                &[started],
-                screen_element.as_deref(),
-            ) {
+            if self.inject_notices(&follow, terminal_id, &[started], screen_element.as_deref()) {
                 if let Some(delivery) = screen_delivery {
                     self.audit_delivery(terminal_id, &follow, DeliveryKind::Screen, &delivery);
                 }

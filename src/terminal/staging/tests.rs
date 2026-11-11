@@ -42,7 +42,7 @@ use crate::terminal::agent_api::{
     StagingOp, StagingOutcome, StagingRefusal, StagingRequest, TerminalAgentApi,
 };
 use crate::terminal::audit::AuditLog;
-use crate::terminal::follow::{FollowManager, FollowSink, FollowVia};
+use crate::terminal::follow::{FollowAccess, FollowManager, FollowSink, FollowVia};
 use crate::terminal::launcher::Placement;
 use crate::terminal::session::TerminalSession;
 use crate::terminal::store::TerminalStore;
@@ -428,6 +428,10 @@ struct Frame {
 struct World {
     terminals: Arc<Mutex<TerminalManager>>,
     follow: Arc<FollowManager>,
+    /// What the follow manager injected into each follower's session.
+    rec: Arc<Rec>,
+    /// Everything the terminal manager broadcast to clients.
+    broadcast: Mutex<broadcast::Receiver<ServerMsg>>,
     api: TerminalAgentApi,
     clock: Arc<Mutex<Instant>>,
     frames: Option<mpsc::UnboundedReceiver<ServerMsg>>,
@@ -482,7 +486,7 @@ impl World {
             store,
             pane_registry: None,
         });
-        let (tx, _rx) = broadcast::channel(4096);
+        let (tx, broadcast) = broadcast::channel(4096);
         terminals.lock().unwrap().configure_broadcast(tx);
         let rec = Arc::new(Rec::default());
         *rec.running.lock().unwrap() = [A, B].iter().map(|t| t.to_string()).collect();
@@ -496,6 +500,8 @@ impl World {
         let mut world = Self {
             terminals,
             follow,
+            rec,
+            broadcast: Mutex::new(broadcast),
             api,
             clock,
             frames: None,
@@ -586,15 +592,17 @@ impl World {
     }
 
     fn ecs(&mut self, tag: &str) -> Term {
+        self.ecs_with(tag, RAW_CHILD)
+    }
+
+    /// A remote (ECS) terminal of focus `tag` whose process is `script` (a
+    /// log-and-ready child), handed over as a launcher would hand it.
+    fn ecs_with(&mut self, tag: &str, script: &str) -> Term {
         self.spawned += 1;
         let ready = self.dir.path().join(format!("ready-{}", self.spawned));
         let log = self.dir.path().join(format!("log-{}", self.spawned));
         let session = TerminalSession::spawn_argv(
-            &[
-                "/bin/sh".to_string(),
-                "-c".to_string(),
-                RAW_CHILD.to_string(),
-            ],
+            &["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
             self.dir.path(),
             &[
                 ("READY".to_string(), ready.display().to_string()),
@@ -639,9 +647,13 @@ impl World {
     }
 
     fn follow(&self, t: &Term, tag: &str) {
-        self.follow
-            .invite(&cap(), &t.id, tag, false, FollowVia::Control)
-            .expect("the invite is accepted");
+        self.follow_as(t, tag, FollowAccess::Full);
+    }
+
+    /// The operator invites `tag` to follow `t` with `access` (the pane's
+    /// Follow control, or its staging-only popover).
+    fn follow_as(&self, t: &Term, tag: &str, access: FollowAccess) {
+        invite_as(&self.follow, &t.id, tag, access).expect("the invite is accepted");
     }
 
     fn stop(&self, t: &Term) {
@@ -764,6 +776,21 @@ impl World {
             .unwrap()
             .staging_inserted(&cap(), &t.id, entry_id, bytes, false)
             .unwrap();
+    }
+}
+
+/// Both follow modes: every S1/S2 rule holds in each (bar the strict history rule).
+const ACCESSES: [FollowAccess; 2] = [FollowAccess::Full, FollowAccess::StagingOnly];
+
+fn invite_as(
+    follow: &FollowManager,
+    terminal_id: &str,
+    tag: &str,
+    access: FollowAccess,
+) -> Result<(), crate::terminal::follow::FollowError> {
+    match access {
+        FollowAccess::Full => follow.invite(&cap(), terminal_id, tag, false, FollowVia::Control),
+        FollowAccess::StagingOnly => follow.invite_staging_only(&cap(), terminal_id, tag),
     }
 }
 
@@ -1229,9 +1256,15 @@ fn assert_untouched(w: &mut World, t: &Term, before: &Option<StagingList>) {
 
 #[test]
 fn not_running_comes_before_no_operator_and_staging_disabled() {
+    for access in ACCESSES {
+        not_running_comes_first(access);
+    }
+}
+
+fn not_running_comes_first(access: FollowAccess) {
     let mut w = World::new();
     let t = w.local(A);
-    w.follow(&t, A);
+    w.follow_as(&t, A, access);
     t.session.kill();
     wait_for("the terminal to end", || {
         w.terminals
@@ -1252,21 +1285,23 @@ fn not_running_comes_before_no_operator_and_staging_disabled() {
 
 #[test]
 fn without_an_app_every_call_is_no_operator_and_nothing_changes() {
-    let mut w = World::without_app();
-    let t = w.local(A);
-    w.follow(&t, A);
-    for op in [
-        StagingOp::List,
-        stage_op("ls", None, None),
-        remove("s-00000001"),
-        StagingOp::Clear,
-    ] {
-        assert_eq!(w.refusal(A, &t, op), "no_operator");
+    for access in ACCESSES {
+        let mut w = World::without_app();
+        let t = w.local(A);
+        w.follow_as(&t, A, access);
+        for op in [
+            StagingOp::List,
+            stage_op("ls", None, None),
+            remove("s-00000001"),
+            StagingOp::Clear,
+        ] {
+            assert_eq!(w.refusal(A, &t, op), "no_operator", "{access:?}");
+        }
+        assert_eq!(w.peek(&t).unwrap().entries.len(), 0);
+        // An app that cannot show the drawer is no app for this.
+        let _follow_only = w.connect_app("follow-only", &[TERMINAL_FOLLOW_UI]);
+        assert_eq!(w.refusal(A, &t, StagingOp::List), "no_operator");
     }
-    assert_eq!(w.peek(&t).unwrap().entries.len(), 0);
-    // An app that cannot show the drawer is no app for this.
-    let _follow_only = w.connect_app("follow-only", &[TERMINAL_FOLLOW_UI]);
-    assert_eq!(w.refusal(A, &t, StagingOp::List), "no_operator");
 }
 
 // S2 inverts the two S1 tests that pinned remote panes as refused:
@@ -1384,9 +1419,15 @@ fn the_31st_change_in_a_minute_and_the_301st_in_an_hour_are_rate_limited() {
 
 #[test]
 fn content_errors_come_in_order_and_change_nothing() {
+    for access in ACCESSES {
+        content_errors_in_order(access);
+    }
+}
+
+fn content_errors_in_order(access: FollowAccess) {
     let mut w = World::new();
     let t = w.local(A);
-    w.follow(&t, A);
+    w.follow_as(&t, A, access);
     let id = w.staged_id(A, &t, "ls");
     w.frames();
     let before = w.peek(&t);
@@ -1427,7 +1468,7 @@ fn content_errors_come_in_order_and_change_nothing() {
     ];
     for (op, code) in cases {
         step(&w);
-        assert_eq!(w.refusal(A, &t, op.clone()), code, "{op:?}");
+        assert_eq!(w.refusal(A, &t, op.clone()), code, "{access:?}: {op:?}");
         assert_untouched(&mut w, &t, &before);
     }
 
@@ -1813,7 +1854,7 @@ fn drive_everything(w: &World, mcp: &Mcp, t: &Term) {
 
 /// Threads that change the list while the app reports insertions and the follow
 /// is stopped and started, bounded; everything must finish.
-fn timing_attacks(w: &Arc<World>, t: &Arc<Term>) {
+fn timing_attacks(w: &Arc<World>, t: &Arc<Term>, access: FollowAccess) {
     let done = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
@@ -1855,13 +1896,7 @@ fn timing_attacks(w: &Arc<World>, t: &Arc<Term>) {
             let mut i = 0;
             while !stop.load(Ordering::SeqCst) && i < 200 {
                 let _ = w.follow.stop(&cap(), &t.id);
-                let _ = w.follow.invite(
-                    &cap(),
-                    &t.id,
-                    if i % 2 == 0 { A } else { B },
-                    false,
-                    FollowVia::Control,
-                );
+                let _ = invite_as(&w.follow, &t.id, if i % 2 == 0 { A } else { B }, access);
                 i += 1;
             }
             done.fetch_add(1, Ordering::SeqCst);
@@ -1884,14 +1919,16 @@ fn timing_attacks(w: &Arc<World>, t: &Arc<Term>) {
 #[test]
 fn nothing_an_agent_can_do_with_staging_puts_a_byte_into_the_shell() {
     for ecs in [false, true] {
-        nothing_an_agent_can_do_puts_a_byte_into_the_shell(ecs);
+        for access in ACCESSES {
+            nothing_an_agent_can_do_puts_a_byte_into_the_shell(ecs, access);
+        }
     }
 }
 
-fn nothing_an_agent_can_do_puts_a_byte_into_the_shell(ecs: bool) {
+fn nothing_an_agent_can_do_puts_a_byte_into_the_shell(ecs: bool, access: FollowAccess) {
     let mut w = World::new();
     let t = if ecs { w.ecs(A) } else { w.local(A) };
-    w.follow(&t, A);
+    w.follow_as(&t, A, access);
     let mcp = Mcp::new(&w, &[A, B]);
 
     drive_everything(&w, &mcp, &t);
@@ -1899,15 +1936,15 @@ fn nothing_an_agent_can_do_puts_a_byte_into_the_shell(ecs: bool) {
     w.stop(&t);
     let _ = w.stage(A, &t, "ls");
     mcp.call(A, json!({"op": "list", "terminal_id": t.id}));
-    w.follow(&t, A);
+    w.follow_as(&t, A, access);
 
     let w = Arc::new(w);
     let t = Arc::new(t);
-    timing_attacks(&w, &t);
+    timing_attacks(&w, &t, access);
 
     // Zero by the daemon's own accounting of every byte put to the PTY master...
-    assert_eq!(t.session.input_bytes_accepted(), 0);
-    assert_eq!(t.session.input_bytes_written(), 0);
+    assert_eq!(t.session.input_bytes_accepted(), 0, "{access:?}, ecs {ecs}");
+    assert_eq!(t.session.input_bytes_written(), 0, "{access:?}, ecs {ecs}");
     // ...and nothing arrived at the child. The sentinel goes through the
     // operator's input path, behind anything that might have been written
     // before it: the log must hold the sentinel and nothing else.
@@ -1919,20 +1956,26 @@ fn nothing_an_agent_can_do_puts_a_byte_into_the_shell(ecs: bool) {
     wait_for("the sentinel to reach the child", || {
         read_log(&t).len() >= SENTINEL.len()
     });
-    assert_eq!(read_log(&t), SENTINEL, "something else reached the shell");
+    assert_eq!(
+        read_log(&t),
+        SENTINEL,
+        "something else reached the shell ({access:?}, ecs {ecs})"
+    );
 }
 
 #[test]
 fn the_operators_own_input_delivers_exactly_the_entrys_bytes_once_with_no_line_break() {
     for ecs in [false, true] {
-        the_operators_insert_delivers_exactly_the_entrys_bytes(ecs);
+        for access in ACCESSES {
+            the_operators_insert_delivers_exactly_the_entrys_bytes(ecs, access);
+        }
     }
 }
 
-fn the_operators_insert_delivers_exactly_the_entrys_bytes(ecs: bool) {
+fn the_operators_insert_delivers_exactly_the_entrys_bytes(ecs: bool, access: FollowAccess) {
     let mut w = World::new();
     let t = if ecs { w.ecs(A) } else { w.local(A) };
-    w.follow(&t, A);
+    w.follow_as(&t, A, access);
     for entry in commands() {
         // One entry at a time keeps the log readable; the clock keeps the limit away.
         w.advance(Duration::from_secs(13));
@@ -1949,7 +1992,11 @@ fn the_operators_insert_delivers_exactly_the_entrys_bytes(ecs: bool) {
             read_log(&t).len() >= want
         });
         let log = read_log(&t);
-        assert_eq!(&log[before.len()..], entry.as_bytes(), "{entry}");
+        assert_eq!(
+            &log[before.len()..],
+            entry.as_bytes(),
+            "{access:?}: {entry}"
+        );
         assert!(
             !log.contains(&b'\n') && !log.contains(&b'\r'),
             "a line break arrived"
@@ -1997,13 +2044,15 @@ fn staging_insert_reports_and_follow_changes_from_threads_do_not_deadlock() {
     w.follow(&t, A);
     let w = Arc::new(w);
     let t = Arc::new(t);
-    timing_attacks(&w, &t);
+    timing_attacks(&w, &t, FollowAccess::Full);
     // The world still answers.
     w.follow(&t, A);
     assert!(w.list(A, &t).is_ok());
 }
 
 mod s2;
+
+mod s3;
 
 // Named `destructive_cases`, not `destructive`: `use super::*` in sibling test modules would otherwise find this
 // test module where they expect `crate::terminal::staging::destructive`.

@@ -2633,3 +2633,6 @@ fn no_staging_notice_says_a_command_ran() {
         assert!(sentence.contains("placed") && sentence.contains("only the user's enter runs it"));
     }
 }
+
+#[path = "manager_tests_s3.rs"]
+mod s3;

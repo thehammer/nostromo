@@ -1,0 +1,2 @@
+<nostromo-terminal-follow event="started" terminal_id="t-1" pane="local shell in /tmp/project" reason="staging_only"/>
+You may now stage commands for local shell in /tmp/project with nostromo.terminal_staging. You will not receive its output or read its screen, and you are not told when the user places an entry (call list). You cannot type into it.

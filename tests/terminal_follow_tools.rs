@@ -1613,7 +1613,11 @@ fn the_three_follow_tools_are_registered_with_closed_schemas_and_no_field_for_a_
     let tools = tool_descriptors();
     for (name, properties, required) in [
         (LIST, vec![], vec![]),
-        (FOLLOW, vec!["mode", "reason", "terminal_id"], vec!["terminal_id"]),
+        (
+            FOLLOW,
+            vec!["mode", "reason", "terminal_id"],
+            vec!["terminal_id"],
+        ),
         (READ, vec!["terminal_id"], vec!["terminal_id"]),
     ] {
         let found: Vec<&Value> = tools.iter().filter(|t| t["name"] == name).collect();
