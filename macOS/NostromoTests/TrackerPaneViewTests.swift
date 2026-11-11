@@ -502,7 +502,8 @@ final class TrackerPaneViewTests: MouseQueueTestCase {
         let (rig, script) = try goldenRig()
         let needs = script.itemIDs(status: "needs-you")
         XCTAssertEqual(needs.count, 10)
-        XCTAssertTrue(rig.pane.strip.text.contains("Waiting on you (10)"), rig.pane.strip.text)
+        // 10 needs-you items plus the 3 un-run commands that are not needs-you (retry-1074, verif-1481, rotat-2702).
+        XCTAssertTrue(rig.pane.strip.text.contains("Waiting on you (13)"), rig.pane.strip.text)
         XCTAssertFalse(rig.pane.strip.isHidden)
         for id in needs {
             XCTAssertTrue(rig.pane.strip.text.contains(script.text(id) ?? "?"), "\(id) is in the strip")

@@ -58,6 +58,9 @@ class ReplView: NSView {
     }
     lazy var wakeMarkerShowsList: () -> Void = { [weak self] in self?.inputBar.showBackgroundPopover(nil) }
 
+    /// Open this focus's Background activity popover from its input bar (the tracker's summary row).
+    func showBackgroundList() { inputBar.showBackgroundPopover(nil) }
+
     /// The router a pane with `tag` installs on its wake markers. `openTask` says whether the task's
     /// window opened (`TaskWindowManager` by default); if not, `showList` runs. Tests pass recorders.
     static func wakeMarkerRouter(

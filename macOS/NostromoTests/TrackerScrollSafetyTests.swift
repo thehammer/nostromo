@@ -87,6 +87,8 @@ struct TrackerGateBoard {
         var out = TrackerGateBoard(root: board)
         out.mapItems { item in
             if item["status"] as? String == "needs-you" { item["status"] = "todo" }
+            // An un-run staged command waits on the person too (T5): none do at the start.
+            if item["kind"] as? String == "command" { item["ran"] = true }
         }
         return out
     }

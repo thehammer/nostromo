@@ -162,17 +162,19 @@ final class AppControlTrackerTests: XCTestCase {
     func testShowReportsTheWaitingStripAsThePaneShowsIt() throws {
         let (rig, script) = try goldenRig()
         let strip = object(rig.pane.showReport()["strip"], "strip")
-        XCTAssertEqual(strip["count"] as? Int, 10)
-        XCTAssertEqual(strip["title"] as? String, "Waiting on you (10)")
+        // 10 needs-you items plus the 3 un-run commands that are not needs-you.
+        XCTAssertEqual(strip["count"] as? Int, 13)
+        XCTAssertEqual(strip["title"] as? String, "Waiting on you (13)")
         XCTAssertTrue(rig.pane.strip.text.contains(strip["title"] as? String ?? "?"), rig.pane.strip.text)
 
         let entries = list(strip["items"], "strip items")
         XCTAssertEqual(entries.compactMap { $0["text"] as? String }, rig.pane.strip.strip.entries.map(\.text))
         XCTAssertEqual(entries.compactMap { $0["key"] as? String }, rig.pane.strip.strip.entries.map(\.key))
         XCTAssertEqual(Set(entries.compactMap { $0["key"] as? String }),
-                       Set(script.itemIDs(status: "needs-you").map { "item:\($0)" }))
+                       Set((script.itemIDs(status: "needs-you") + ["retry-1074", "verif-1481", "rotat-2702"]).map { "item:\($0)" }))
         for entry in entries { XCTAssertTrue(rig.pane.strip.text.contains(entry["text"] as? String ?? "?")) }
-        XCTAssertEqual(entries.first?["detail"] as? String, "Waiting on you", "each entry says which section it is from")
+        let needsYouEntry = entries.first { ($0["key"] as? String) == "item:docum-1740" }
+        XCTAssertEqual(needsYouEntry?["detail"] as? String, "Waiting on you", "each entry says which section it is from")
     }
 
     func testAnEmptyStripReportsZero() throws {
@@ -180,6 +182,8 @@ final class AppControlTrackerTests: XCTestCase {
         let rig = Fx.makeRig(self, tag: tag)
         var script = try TrackerBoardScript(tag: tag)
         for id in script.itemIDs(status: "needs-you") { try script.setStatus(id, "todo") }
+        // Un-run staged commands wait on the person too: finish them.
+        for id in ["retry-1074", "verif-1481", "check-1888", "rotat-2702"] { try script.setStatus(id, "done") }
         rig.push(script)
         let strip = object(rig.pane.showReport()["strip"], "strip")
         XCTAssertEqual(strip["count"] as? Int, 0)

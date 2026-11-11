@@ -14,6 +14,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
     private(set) var windows: [NostromoWindow] = []
     /// Publishes pending approvals into the app-wide "needs you" source.
     private var approvalBadges: ApprovalBadges?
+    private var trackerNeedsYou: TrackerNeedsYouBadges?
 
     /// Every window is bound to ONE display, keyed by its stable display UUID
     /// (not `NSScreenNumber`, which can change across reconnects; not the window
@@ -100,6 +101,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
             AppStore.shared.needsYouCoordinator.setProducer(ApprovalsNeedsYouProducer.name, items: items,
                                                             baseline: baseline)
         }
+        // The tracker's waiting items (needs-you, un-run commands) are one more producer into that source.
+        trackerNeedsYou = TrackerNeedsYouBadges(store: .shared) { items in
+            AppStore.shared.needsYouCoordinator.setProducer(TrackerNeedsYouProducer.name, items: items)
+        }
+        TrackerNeedsYouBadges.live = trackerNeedsYou
         AppStore.shared.start()
         AppStore.shared.startMemoryWatchdog()
         // The single app-wide owner of decision-modal presentation — started
