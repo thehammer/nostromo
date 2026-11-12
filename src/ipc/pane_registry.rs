@@ -1768,8 +1768,30 @@ fn save_store(
         migrations: migrations.clone(),
     };
     if let Ok(bytes) = serde_json::to_vec_pretty(&store) {
-        let _ = std::fs::write(path, bytes);
+        let _ = write_atomically(path, &bytes, |from, to| std::fs::rename(from, to));
     }
+}
+
+/// Write `bytes` to a temp file beside `path`, then `rename` it over `path`, so
+/// a crash mid-write leaves the old file whole rather than a truncated store.
+/// `rename` is a parameter so a test can make it fail; when it does (or the
+/// temp write does) the old file is untouched and the temp file is removed.
+fn write_atomically(
+    path: &std::path::Path,
+    bytes: &[u8],
+    rename: impl FnOnce(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut tmp_name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    let result = std::fs::write(&tmp, bytes).and_then(|()| rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -4073,6 +4095,58 @@ mod native_surface_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("daemon-panes.json");
         (dir, path)
+    }
+
+    #[test]
+    fn a_failed_rename_leaves_the_old_store_intact_and_no_temp_file_behind() {
+        let (dir, path) = temp_store();
+        std::fs::write(&path, b"the old store").unwrap();
+
+        let result = write_atomically(&path, b"the new store", |_, _| {
+            Err(std::io::Error::other("rename refused"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"the old store");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            leftovers,
+            vec![std::ffi::OsString::from("daemon-panes.json")]
+        );
+    }
+
+    #[test]
+    fn a_store_write_replaces_the_file_whole_and_leaves_no_temp_file() {
+        let (dir, path) = temp_store();
+        std::fs::write(&path, b"the old store").unwrap();
+
+        write_atomically(&path, b"the new store", |from, to| {
+            std::fs::rename(from, to)
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"the new store");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn saving_a_store_round_trips_through_the_atomic_write() {
+        let (dir, path) = temp_store();
+        let mut trees = HashMap::new();
+        trees.insert(
+            "teri".to_string(),
+            crate::mcp::views::tree::default_teri_tree(),
+        );
+        save_store(&path, &trees, &HashMap::new(), &BTreeSet::new());
+        let reg = PaneRegistry::with_store_path(path);
+        assert_eq!(
+            reg.get("teri"),
+            Some(&crate::mcp::views::tree::default_teri_tree())
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

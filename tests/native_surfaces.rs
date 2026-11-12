@@ -42,7 +42,12 @@ fn spawn() -> Daemon {
 /// A daemon whose pane store was written by an older daemon: `store` is the
 /// V3 envelope's `trees` object, as JSON.
 fn spawn_with_store(store: Option<serde_json::Value>) -> Daemon {
-    let tmp = TempDir::new().unwrap();
+    spawn_in(TempDir::new().unwrap(), store)
+}
+
+/// A daemon started in `tmp`. With `store` it first writes the pane store; without it, a
+/// store already in `tmp` (from an earlier daemon) is what the daemon loads.
+fn spawn_in(tmp: TempDir, store: Option<serde_json::Value>) -> Daemon {
     let socket_path = tmp.path().join("nostromd.sock");
     if let Some(trees) = store {
         let envelope = json!({ "version": 3, "trees": trees, "bindings": {} });
@@ -700,4 +705,62 @@ async fn recv_any<S: tokio::io::AsyncRead + Unpin>(s: &mut S) -> ServerMsg {
         .expect("timed out waiting for a server frame")
         .expect("read frame");
     serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Stop `d` and start a new daemon on the same state directory, as a relaunch does.
+fn restart(d: Daemon) -> Daemon {
+    let Daemon { _server, _tmp, .. } = d;
+    drop(_server);
+    spawn_in(_tmp, None)
+}
+
+fn old_teri_default_store() -> serde_json::Value {
+    json!({
+        "teri": { "kind": "split", "direction": "horizontal",
+                  "children": [ {"kind": "leaf", "pane_id": "teri_surface"},
+                                {"kind": "leaf", "pane_id": "repl"} ],
+                  "ratios": [0.62, 0.38] }
+    })
+}
+
+#[tokio::test]
+async fn a_persisted_old_default_teri_layout_reaches_the_app_as_the_new_vertical_default_once() {
+    let d = spawn_with_store(Some(old_teri_default_store()));
+    let new_default = nostromo::mcp::views::tree::default_teri_tree();
+
+    // What a connecting app is sent is the converted tree, not the persisted one.
+    assert_eq!(replayed_layout(&d, "teri").await, Some(new_default.clone()));
+
+    // The app's registry push has nothing left to seed: no further layout frame.
+    let mut client = connect(&d).await;
+    let frames = push_and_settle(&mut client, vec![meta("teri", "teri")]).await;
+    assert!(layouts_for(&frames, "teri").is_empty(), "{frames:?}");
+
+    // A second start finds the marker on disk and sends the same layout, unchanged.
+    let d = restart(d);
+    assert_eq!(replayed_layout(&d, "teri").await, Some(new_default));
+    let mut client = connect(&d).await;
+    let frames = push_and_settle(&mut client, vec![meta("teri", "teri")]).await;
+    assert!(layouts_for(&frames, "teri").is_empty(), "{frames:?}");
+}
+
+#[tokio::test]
+async fn a_side_by_side_layout_arranged_after_the_conversion_survives_a_restart() {
+    let d = spawn_with_store(Some(old_teri_default_store()));
+    assert_eq!(
+        replayed_layout(&d, "teri").await,
+        Some(nostromo::mcp::views::tree::default_teri_tree())
+    );
+
+    // The user arranges the old side-by-side layout again.
+    let side_by_side: PaneTree =
+        serde_json::from_value(old_teri_default_store()["teri"].clone()).unwrap();
+    d.registry
+        .lock()
+        .unwrap()
+        .set_layout("teri", &json!({ "tree": side_by_side }))
+        .unwrap();
+
+    let d = restart(d);
+    assert_eq!(replayed_layout(&d, "teri").await, Some(side_by_side));
 }
