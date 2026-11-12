@@ -180,6 +180,11 @@ final class FollowControlView: NSView {
     /// the include-screen box, the warning and Invite's spoken label.
     private func refreshForm() {
         fillPicker(keeping: selectedTag)
+        refreshDetails()
+    }
+
+    /// `refreshForm` without refilling the picker.
+    private func refreshDetails() {
         headingLabel?.stringValue = model.inviteHeading(forTag: selectedTag, mode: inviteMode)
         let output = inviteMode == .output
         // With no output going out there is no screen to include.
@@ -257,9 +262,11 @@ final class FollowControlView: NSView {
     /// and keeps the person's choice. Sends nothing.
     func update(model newModel: FollowModel) {
         guard newModel.focuses != model.focuses else { return }
+        let chosen = selectedTag
         model = newModel
         guard mode == .invite else { return }
-        refreshForm()
+        fillPicker(keeping: chosen)
+        refreshDetails()
     }
 
     private var selectedTag: String? {

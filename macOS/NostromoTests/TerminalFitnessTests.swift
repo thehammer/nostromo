@@ -468,7 +468,9 @@ final class TerminalFitnessTests: XCTestCase {
                      "UI/Terminal/StagingDrawerView.swift", "UI/Terminal/StagingRowView.swift",
                      // S2: the destructive patterns and hazards, the confirm sheet (AppKit only, driven for real) and the stats.
                      "UI/Terminal/StagingHazards.swift", "UI/Terminal/StagingConfirmSheet.swift",
-                     "Data/TerminalStagingStats.swift"],
+                     "Data/TerminalStagingStats.swift",
+                     // S3b: the Follow popover is driven for real (its radios, Invite and the guard's refusals).
+                     "UI/Terminal/FollowControlView.swift"],
                     underApp: true, inApp: true, inTests: true, project: try Project())
     }
 
@@ -476,7 +478,6 @@ final class TerminalFitnessTests: XCTestCase {
         assertBuilt(["UI/Terminal/NostromoTerminalView.swift", "UI/Terminal/TerminalPaneHostView.swift",
                      "UI/Terminal/RemoteShellConfirmSheet.swift", "UI/Terminal/RemoteShellPresenter.swift",
                      "UI/Terminal/NewRemoteShellSheet.swift", "UI/Terminal/RemoteShellFailureSheet.swift",
-                     "UI/Terminal/FollowControlView.swift",
                      "UI/Views/TerminalDeliveryBlockView.swift"],
                     underApp: true, inApp: true, inTests: false, project: try Project())
     }
@@ -913,7 +914,6 @@ final class TerminalFitnessTests: XCTestCase {
     }
 
     func testAnOpenInvitePopoverRefreshesItsFocusNamesWhenTheFocusesChange() throws {
-        // The view is not in the unit-test target, so this reads the source.
         let host = try funcBody("closeFollowPopoverIfStale", in: "TerminalPaneHostView.swift")
         XCTAssertTrue(host.contains("followContent?.update(model:"), "the host must hand the open popover the current model:\n\(host)")
         let update = try funcBody("update", in: "FollowControlView.swift")
