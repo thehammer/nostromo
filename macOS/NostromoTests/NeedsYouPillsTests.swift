@@ -958,6 +958,31 @@ final class NeedsYouPillsRowTests: XCTestCase {
         }
     }
 
+    func testARegularRowIsAnAccessibilityElementWithItsBranchEvenWithNoBadge() {
+        for branch in ["main", Self.longBranch] {
+            for (blockingCount, waitingCount) in [(0, 0), (2, 0), (0, 7), (2, 7), (0, 0)] {
+                let item = makeItem(label: "Cody in Nostromo", branch: branch)
+                apply(item, blocking: blockingCount, waiting: waitingCount)
+                let at = "blocking \(blockingCount), waiting \(waitingCount)"
+                XCTAssertTrue(item.isAccessibilityElement(), "reachable: \(at)")
+                XCTAssertEqual(item.accessibilityHelp(), branch, "branch is the help: \(at)")
+                let spoken = item.accessibilityLabel() ?? ""
+                if blockingCount == 0 && waitingCount == 0 {
+                    XCTAssertEqual(spoken, "Cody in Nostromo", "the name when there is no badge")
+                } else {
+                    XCTAssertEqual(spoken, FocusBadge.needsYou(blocking: blockingCount, waiting: waitingCount).accessibilityLabel, at)
+                }
+            }
+        }
+    }
+
+    func testABuiltInRowWithNoBadgeIsStillNotAnElement() {
+        let item = makeItem(focus: builtIn("mother"), label: "Mother", branch: "idle")
+        apply(item)
+        XCTAssertFalse(item.isAccessibilityElement())
+        XCTAssertNil(item.accessibilityLabel())
+    }
+
     func testTheRowHeightAndThePillPlacesAreTheSameWhateverThePillsSay() throws {
         for indented in [false, true] {
             for (blockingCount, waitingCount) in [(0, 0), (2, 0), (0, 7), (2, 7)] {
@@ -1455,5 +1480,51 @@ final class NeedsYouPillsContrastTests: XCTestCase {
         let waiting = try rgba(Theme.waitingPillText), red = try rgba(Theme.needsYouNow)
         let distance = abs(waiting.r - red.r) + abs(waiting.g - red.g) + abs(waiting.b - red.b)
         XCTAssertGreaterThan(distance, 0.5, "the two pills must not read as the same class")
+    }
+}
+
+
+// MARK: - Row height as TabBarView builds it
+
+final class SidebarRowHeightThroughTabBarTests: XCTestCase {
+
+    private func navItems(in v: NSView) -> [NavTabItem] {
+        v.subviews.flatMap { ($0 as? NavTabItem).map { [$0] } ?? [] } + v.subviews.flatMap(navItems(in:))
+    }
+
+    func testEveryFocusRowIs52PointsHighWithOrWithoutTextAndWhateverThePillsSay() {
+        _ = NSApplication.shared
+        let withText = Focus(id: "11111111-aaaa", agentTag: "cody", projectPath: "/Users/hammer/Code/nostromo",
+                             isBuiltIn: false, org: "Carefeed", sessionSummary: "Wiring the sidebar")
+        let noText = Focus(id: "22222222-bbbb", agentTag: "cody", projectPath: nil, isBuiltIn: false, org: "Carefeed")
+        let rows = buildNavRows([withText, noText])
+        let secondaries: [String?] = rows.compactMap { if case .focus(_, _, let s, _) = $0 { return s } else { return nil } }
+        XCTAssertTrue(secondaries.contains(""), "the fixture has a row with no text")
+
+        let tabBar = TabBarView(frame: NSRect(x: 0, y: 0, width: Theme.sidebarWidth, height: 600))
+        let window = NSWindow(contentRect: tabBar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+        window.contentView = tabBar
+        defer { window.close() }
+        tabBar.setFocuses([withText, noText])
+        tabBar.layoutSubtreeIfNeeded()
+
+        let items = navItems(in: tabBar).filter { !$0.focus.isBuiltIn }
+        XCTAssertEqual(items.count, 2)
+        var titleFrames: [Int: [NSRect]] = [:]
+        for (blockingCount, waitingCount) in [(0, 0), (2, 0), (0, 7), (2, 7)] {
+            for (index, item) in items.enumerated() {
+                item.setBadge(blockingCount == 0 && waitingCount == 0 ? nil
+                              : FocusBadge.needsYou(blocking: blockingCount, waiting: waitingCount))
+                tabBar.layoutSubtreeIfNeeded()
+                XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight,
+                               "row \(index), blocking \(blockingCount), waiting \(waitingCount)")
+                titleFrames[index, default: []].append(item.labelFrame)
+            }
+        }
+        for (index, frames) in titleFrames {
+            XCTAssertEqual(Set(frames.map { "\($0)" }).count, 1, "title frame is identical across states, row \(index): \(frames)")
+        }
     }
 }

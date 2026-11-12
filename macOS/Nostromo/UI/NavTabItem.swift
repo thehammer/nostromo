@@ -298,6 +298,13 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             toolTip = secondary
             setAccessibilityHelp(secondary)
         }
+        if !focus.isBuiltIn {
+            // A regular row is always one VoiceOver element (name, plus any badge phrase), so the
+            // branch / last-message help is reachable with or without a notification.
+            setAccessibilityElement(true)
+            setAccessibilityRole(.button)
+            setAccessibilityLabel(displayLabel)
+        }
 
         let leadingInset: CGFloat = indented ? 6 + Theme.navChildIndent : 6
 
@@ -588,8 +595,12 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             setAccessibilityRole(.button)
             setAccessibilityLabel(badge.accessibilityLabel + suffix)
         } else {
-            setAccessibilityElement(false)
-            setAccessibilityLabel(nil)
+            if focus.isBuiltIn {
+                setAccessibilityElement(false)
+                setAccessibilityLabel(nil)
+            } else {
+                setAccessibilityLabel(displayOverride)
+            }
         }
     }
 
