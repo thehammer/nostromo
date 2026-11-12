@@ -1152,6 +1152,10 @@ follow_test! {
         let (refused_id, code) = old_app.refused(from, "follow_invite").await;
         assert_eq!(refused_id.as_deref(), Some(id.as_str()));
         assert_eq!(code, "terminal_follow_ui_required");
+        d.wait_audit("the refusal is audited", |l| {
+            l["event"] == "refused" && l["code"] == "terminal_follow_ui_required"
+        })
+        .await;
         assert_eq!(d.follower_of(&id), None);
         assert_eq!(a.count(), 0, "nothing was delivered to the session");
     }
@@ -2158,6 +2162,10 @@ follow_test! {
         assert_eq!(code, "terminal_staging_only_ui_required");
         assert_eq!(d.follower_of(&id), None);
         assert_eq!(a.count(), 0, "nothing was delivered to the session");
+        d.wait_audit("the refusal is audited", |l| {
+            l["event"] == "refused" && l["code"] == "terminal_staging_only_ui_required"
+        })
+        .await;
 
         // The plain follow control is not enough either (an older app).
         let mut old = d.app().await;

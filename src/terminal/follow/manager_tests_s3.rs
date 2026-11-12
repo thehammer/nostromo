@@ -525,3 +525,80 @@ async fn a_granted_staging_only_follow_needs_an_app_that_declared_staging_only()
         Some("staging_only")
     );
 }
+
+// ── narrowing a follow discards what the full follow queued ───────────────────
+
+/// What `tag`'s session would still hold under `key` if its turn were running
+/// the whole time: injects join (as `SessionManager::inject` does for one key)
+/// and a drop takes back everything queued before it.
+fn queued_under(events: &[Ev], tag: &str, key: &str) -> Vec<String> {
+    let mut queue = Vec::new();
+    for e in events {
+        match e {
+            Ev::Inject {
+                tag: t,
+                text,
+                key: k,
+            } if t == tag && k == key => queue.push(text.clone()),
+            Ev::Drop { tag: t, key: k } if t == tag && k == key => queue.clear(),
+            _ => {}
+        }
+    }
+    queue
+}
+
+#[tokio::test(start_paused = true)]
+async fn narrowing_or_widening_the_same_agents_follow_drops_what_was_queued_for_it() {
+    let mut w = World::new();
+    let t = w.local("focus-1", "");
+    w.invite(&t, A, false);
+    w.run_and_settle(&t, "printf 'FULL-ERA\\n'").await;
+    assert_eq!(w.rec.deliveries_for(A, 0).len(), 1);
+
+    // Full to staging only, for the same agent.
+    let mark = w.rec.mark();
+    invite_staging_only(&w, &t, A);
+    let after: Vec<Ev> = w.rec.events().into_iter().skip(mark).collect();
+    assert!(
+        matches!(
+            after.as_slice(),
+            [Ev::Drop { tag, key }, Ev::Inject { tag: t2, key: k2, .. }]
+                if tag == A && key == &t.id && t2 == A && k2 == &t.id
+        ),
+        "the queued output is taken back, then the notice is queued: {after:?}"
+    );
+
+    // And back to full: the staging-only follow's queue goes too.
+    let mark = w.rec.mark();
+    w.invite(&t, A, false);
+    let after: Vec<Ev> = w.rec.events().into_iter().skip(mark).collect();
+    assert!(
+        matches!(after.first(), Some(Ev::Drop { tag, key }) if tag == A && key == &t.id),
+        "{after:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn output_queued_before_a_full_follow_was_narrowed_is_not_in_the_message_the_agent_gets() {
+    let mut w = World::new();
+    let t = w.local("focus-1", "");
+    let pane = format!("local shell in {}", w.cwd.display());
+    w.invite(&t, A, false);
+    w.run_and_settle(&t, "printf 'FULL-ERA-QZ9\\n'").await;
+    // The agent is mid-turn: what was delivered is still waiting in its queue.
+    let queued = queued_under(&w.rec.events(), A, &t.id);
+    assert!(
+        queued.iter().any(|q| q.contains("FULL-ERA-QZ9")),
+        "{queued:?}"
+    );
+
+    invite_staging_only(&w, &t, A);
+    w.run_and_settle(&t, "printf 'STAGING-ERA-QZ9\\n'").await;
+    advance_ms(30_000).await;
+
+    assert_eq!(
+        queued_under(&w.rec.events(), A, &t.id),
+        vec![FollowNotice::StartedStagingOnly.render(&t.id, &pane)],
+        "the agent is told only that it is staging-only"
+    );
+}

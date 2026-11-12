@@ -746,8 +746,14 @@ impl FollowManager {
             let mut state = self.lock_state();
             if let Some(previous) = state.follows.remove(terminal_id) {
                 previous.end();
-                if previous.follower != follower_tag {
+                // Output queued under the old follow must not reach the agent
+                // alongside the new follow's notice (the keys are the same):
+                // not when the follower changes, and not when the same agent
+                // is narrowed from a full follow to staging-only.
+                if previous.follower != follower_tag || previous.access() != access {
                     self.sink.drop_injected(&previous.follower, terminal_id);
+                }
+                if previous.follower != follower_tag {
                     let reason = EndReason::MovedTo(self.audit_tag(follower_tag));
                     self.ended_with_notice(terminal_id, &previous, &reason);
                 }

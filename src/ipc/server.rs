@@ -3054,6 +3054,19 @@ fn handle_follow_msg(
             code: code.to_string(),
         });
     };
+    // A verified app that lacks a capability is refused and audited like any
+    // other refusal here.
+    let refuse_ui_required = |code: &str| {
+        lock_terminals(terminals).audit_refused(
+            TerminalRefusalChannel::Ipc,
+            op,
+            Some(code),
+            terminal_id.as_deref(),
+            peer.map(|p| p.pid),
+            peer.map(|p| p.exe.display().to_string()),
+        );
+        refuse(code);
+    };
     let Some(cap) = cap else {
         let code = terminal::forbidden_code(op);
         // Audited before the peer is told no.
@@ -3088,7 +3101,7 @@ fn handle_follow_msg(
             include_screen,
         } => {
             if !can_show {
-                refuse("terminal_follow_ui_required");
+                refuse_ui_required("terminal_follow_ui_required");
                 return;
             }
             follow.invite(
@@ -3104,7 +3117,7 @@ fn handle_follow_msg(
             follower_tag,
         } => {
             if !can_show || !can_show_staging_only {
-                refuse("terminal_staging_only_ui_required");
+                refuse_ui_required("terminal_staging_only_ui_required");
                 return;
             }
             follow.invite_staging_only(cap, &terminal_id, &follower_tag)
