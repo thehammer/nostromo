@@ -283,8 +283,18 @@ pub struct PaneRegistry {
     /// `trees`. Not persisted here: the terminal store re-registers them at
     /// daemon start.
     terminal_leaves: HashMap<String, BTreeSet<String>>,
+    /// Names of the one-time layout migrations that have already run against
+    /// this store (see [`MIGRATION_TERI_CHAT_AT_BOTTOM`]). Persisted, so each
+    /// runs once: a layout the user arranges afterwards is never converted
+    /// again at the next launch.
+    migrations: BTreeSet<String>,
     store_path: Option<PathBuf>,
 }
+
+/// One-time migration: Teri's old default (the surface beside the chat) becomes
+/// the new one (the surface above the chat, full width). Runs at most once per
+/// store, whether or not it found anything to convert.
+const MIGRATION_TERI_CHAT_AT_BOTTOM: &str = "teri-chat-at-bottom";
 
 /// A client's report of what it actually rendered for one `(window_id, tag)`
 /// pair, as recorded by [`PaneRegistry::record_rendered_shape`].
@@ -319,7 +329,8 @@ impl PaneRegistry {
     /// Construct backed by a specific store path (used by tests).
     pub fn with_store_path(store_path: PathBuf) -> Self {
         let (trees, bindings) = load_store(&store_path);
-        Self {
+        let migrations = load_migrations(&store_path);
+        let mut registry = Self {
             trees,
             bindings,
             painted: HashMap::new(),
@@ -327,8 +338,11 @@ impl PaneRegistry {
             rendered_shapes: HashMap::new(),
             pane_set_hook: None,
             terminal_leaves: HashMap::new(),
+            migrations,
             store_path: Some(store_path),
-        }
+        };
+        registry.run_one_time_migrations();
+        registry
     }
 
     /// Construct an in-memory registry with no persistence (used by tests that
@@ -342,6 +356,7 @@ impl PaneRegistry {
             rendered_shapes: HashMap::new(),
             pane_set_hook: None,
             terminal_leaves: HashMap::new(),
+            migrations: BTreeSet::new(),
             store_path: None,
         }
     }
@@ -572,8 +587,8 @@ impl PaneRegistry {
             tag,
             crate::mcp::views::tree::TERI_SURFACE,
             crate::mcp::views::tree::TERI_NATIVE_RATIO,
-            0.38,
-            SplitDirection::Horizontal,
+            crate::mcp::views::tree::TERI_REPL_RATIO,
+            SplitDirection::Vertical,
             crate::mcp::views::tree::default_teri_tree(),
         )
     }
@@ -1252,8 +1267,43 @@ impl PaneRegistry {
 
     fn persist(&self) {
         if let Some(path) = &self.store_path {
-            save_store(path, &self.trees, &self.bindings);
+            save_store(path, &self.trees, &self.bindings, &self.migrations);
         }
+    }
+
+    /// Run each one-time layout migration that this store has not run yet.
+    /// Called once, when a registry is loaded from disk.
+    fn run_one_time_migrations(&mut self) {
+        self.migrate_teri_chat_to_bottom();
+    }
+
+    /// Convert a persisted Teri layout that is EXACTLY the old default (the
+    /// surface beside the chat, see
+    /// [`crate::mcp::views::tree::is_legacy_teri_default`]) to the new one, the
+    /// surface above the chat. Any other shape is a layout somebody arranged and
+    /// stays as it is. The migration is recorded as done either way (written
+    /// with the next store write; at once when it converted something), so a
+    /// side-by-side layout the user arranges later is never flipped back.
+    /// Returns the new tree when it converted one.
+    fn migrate_teri_chat_to_bottom(&mut self) -> Option<PaneTree> {
+        if !self
+            .migrations
+            .insert(MIGRATION_TERI_CHAT_AT_BOTTOM.to_string())
+        {
+            return None;
+        }
+        let tag = crate::mcp::views::tree::TERI_TAG;
+        let legacy = self
+            .trees
+            .get(tag)
+            .is_some_and(crate::mcp::views::tree::is_legacy_teri_default);
+        if !legacy {
+            return None;
+        }
+        let tree = crate::mcp::views::tree::default_teri_tree();
+        self.trees.insert(tag.to_string(), tree.clone());
+        self.persist();
+        Some(tree)
     }
 }
 
@@ -1578,6 +1628,10 @@ struct StoreV3 {
     trees: HashMap<String, PaneTree>,
     #[serde(default)]
     bindings: HashMap<String, HashMap<String, SourceBinding>>,
+    /// One-time layout migrations that already ran (see
+    /// `PaneRegistry::migrations`). Absent in a file written before it existed.
+    #[serde(default)]
+    migrations: BTreeSet<String>,
 }
 
 /// The pre-params store format (D3): bindings were a bare source name.
@@ -1683,6 +1737,17 @@ fn load_store(path: &std::path::Path) -> LoadedStore {
     (trees, filtered)
 }
 
+/// The one-time migrations a store file records as done: the `migrations` of
+/// its V3 envelope, empty for any other format or an unreadable file.
+fn load_migrations(path: &std::path::Path) -> BTreeSet<String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<StoreV3>(&bytes).ok())
+        .filter(|store| store.version == 3)
+        .map(|store| store.migrations)
+        .unwrap_or_default()
+}
+
 /// Serialise store writes so concurrent focus mutations can't clobber the file.
 static SAVE_STORE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1690,6 +1755,7 @@ fn save_store(
     path: &std::path::Path,
     trees: &HashMap<String, PaneTree>,
     bindings: &HashMap<String, HashMap<String, SourceBinding>>,
+    migrations: &BTreeSet<String>,
 ) {
     let _guard = SAVE_STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(parent) = path.parent() {
@@ -1699,6 +1765,7 @@ fn save_store(
         version: 3,
         trees: trees.clone(),
         bindings: bindings.clone(),
+        migrations: migrations.clone(),
     };
     if let Ok(bytes) = serde_json::to_vec_pretty(&store) {
         let _ = std::fs::write(path, bytes);
@@ -3666,7 +3733,7 @@ mod mother_layout_tests {
 #[cfg(test)]
 mod native_surface_tests {
     //! Teri and Fred each own a Mac-hosted native pane (`teri_surface` /
-    //! `fred_hud`) that sits beside the REPL and cannot be dropped.
+    //! `fred_hud`) that sits above the REPL and cannot be dropped.
     use super::*;
 
     fn fresh() -> PaneRegistry {
@@ -3692,7 +3759,7 @@ mod native_surface_tests {
     }
 
     #[test]
-    fn a_bare_teri_focus_gets_its_surface_beside_the_repl() {
+    fn a_bare_teri_focus_gets_its_surface_above_the_repl() {
         let mut reg = fresh();
         let tree = reg
             .ensure_teri_layout("teri")
@@ -3701,12 +3768,27 @@ mod native_surface_tests {
             tree.pane_ids(),
             vec!["teri_surface".to_string(), "repl".to_string()]
         );
-        assert_eq!(direction_of(&tree), SplitDirection::Horizontal);
+        assert_eq!(direction_of(&tree), SplitDirection::Vertical);
         assert_eq!(
             reg.pane_ids("teri"),
             tree.pane_ids(),
             "the registry holds what was returned"
         );
+    }
+
+    #[test]
+    fn a_bare_repl_teri_focus_becomes_the_new_default_with_the_new_ratios() {
+        let mut reg = fresh();
+        reg.trees.insert("teri".to_string(), PaneTree::repl_leaf());
+        let tree = reg
+            .ensure_teri_layout("teri")
+            .expect("a bare repl is seeded");
+        assert_eq!(tree, crate::mcp::views::tree::default_teri_tree());
+        assert_eq!(direction_of(&tree), SplitDirection::Vertical);
+        match tree {
+            PaneTree::Split { ratios, .. } => assert_eq!(ratios, vec![0.68, 0.32]),
+            other => panic!("expected a split, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3762,6 +3844,69 @@ mod native_surface_tests {
         }
         assert_eq!(after.len(), before.len() + 1);
         assert_eq!(reg.pane_ids("teri"), after);
+    }
+
+    #[test]
+    fn a_wrapped_teri_layout_puts_the_surface_on_top_at_the_new_ratios() {
+        let mut reg = fresh();
+        agent_built(&mut reg, "teri");
+        let tree = reg.ensure_teri_layout("teri").expect("wrapped");
+        match tree {
+            PaneTree::Split {
+                direction,
+                children,
+                ratios,
+            } => {
+                assert_eq!(direction, SplitDirection::Vertical);
+                assert_eq!(
+                    children[0],
+                    PaneTree::Leaf {
+                        pane_id: "teri_surface".to_string()
+                    }
+                );
+                assert_eq!(ratios, vec![0.68, 0.32]);
+            }
+            other => panic!("expected a split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_buried_teri_surface_is_lifted_out_and_put_on_top() {
+        let mut reg = fresh();
+        let buried = PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Tabs {
+                    children: vec![
+                        PaneTree::Leaf {
+                            pane_id: "teri_surface".to_string(),
+                        },
+                        PaneTree::Leaf {
+                            pane_id: "notes".to_string(),
+                        },
+                    ],
+                    labels: vec!["Teri".to_string(), "Notes".to_string()],
+                    active: 0,
+                    region: None,
+                },
+                PaneTree::Leaf {
+                    pane_id: "repl".to_string(),
+                },
+            ],
+            ratios: vec![0.5, 0.5],
+        };
+        reg.trees.insert("teri".to_string(), buried);
+        let tree = reg.ensure_teri_layout("teri").expect("lifted out");
+        assert!(crate::mcp::views::tree::is_top_level_leaf(
+            &tree,
+            "teri_surface"
+        ));
+        assert_eq!(direction_of(&tree), SplitDirection::Vertical);
+        assert_eq!(
+            tree.pane_ids().first().map(String::as_str),
+            Some("teri_surface")
+        );
+        assert!(tree.pane_ids().contains(&"notes".to_string()));
     }
 
     #[test]
@@ -3896,6 +4041,295 @@ mod native_surface_tests {
 
         assert_eq!(reg.pane_ids("teri"), vec!["teri_surface", "repl"]);
         assert_eq!(reg.pane_ids("fred"), vec!["fred_hud", "repl"]);
+    }
+
+    // ── one-time migration of the old Teri default (surface beside the chat) ──
+
+    fn old_teri_default(ratios: Vec<f32>) -> PaneTree {
+        PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                PaneTree::Leaf {
+                    pane_id: "teri_surface".into(),
+                },
+                PaneTree::Leaf {
+                    pane_id: "repl".into(),
+                },
+            ],
+            ratios,
+        }
+    }
+
+    /// A store file holding exactly `trees`, in the V3 envelope, with no migration marker.
+    fn write_store(path: &std::path::Path, trees: serde_json::Value) {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&serde_json::json!({ "version": 3, "trees": trees })).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn temp_store() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon-panes.json");
+        (dir, path)
+    }
+
+    #[test]
+    fn the_old_teri_default_is_converted_once_on_load_and_the_marker_is_persisted() {
+        let (_dir, path) = temp_store();
+        write_store(
+            &path,
+            serde_json::json!({ "teri": old_teri_default(vec![0.62, 0.38]) }),
+        );
+
+        let reg = PaneRegistry::with_store_path(path.clone());
+        assert_eq!(
+            reg.get("teri"),
+            Some(&crate::mcp::views::tree::default_teri_tree())
+        );
+
+        // Written at once, with the marker.
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            on_disk["migrations"],
+            serde_json::json!(["teri-chat-at-bottom"])
+        );
+        assert_eq!(on_disk["trees"]["teri"]["direction"], "vertical");
+        assert_eq!(
+            on_disk["trees"]["teri"]["children"][0]["pane_id"],
+            "teri_surface"
+        );
+    }
+
+    #[test]
+    fn the_migration_converts_the_old_default_whatever_its_ratios() {
+        for ratios in [vec![0.62, 0.38], vec![0.3, 0.7], vec![0.9, 0.1]] {
+            let (_dir, path) = temp_store();
+            write_store(
+                &path,
+                serde_json::json!({ "teri": old_teri_default(ratios) }),
+            );
+            let reg = PaneRegistry::with_store_path(path);
+            assert_eq!(
+                reg.get("teri"),
+                Some(&crate::mcp::views::tree::default_teri_tree())
+            );
+        }
+    }
+
+    #[test]
+    fn the_migration_runs_only_once_a_side_by_side_layout_arranged_later_stays() {
+        let (_dir, path) = temp_store();
+        write_store(
+            &path,
+            serde_json::json!({ "teri": old_teri_default(vec![0.62, 0.38]) }),
+        );
+        {
+            // First launch: converted. The user then arranges Teri side by side again.
+            let mut reg = PaneRegistry::with_store_path(path.clone());
+            let side_by_side = old_teri_default(vec![0.5, 0.5]);
+            reg.set_layout("teri", &serde_json::json!({ "tree": side_by_side }))
+                .unwrap();
+        }
+        // Second launch: the marker is on disk, so the layout is left alone.
+        let reg = PaneRegistry::with_store_path(path.clone());
+        assert_eq!(reg.get("teri"), Some(&old_teri_default(vec![0.5, 0.5])));
+        // Third launch: still alone.
+        let reg = PaneRegistry::with_store_path(path);
+        assert_eq!(reg.get("teri"), Some(&old_teri_default(vec![0.5, 0.5])));
+    }
+
+    #[test]
+    fn a_customised_teri_layout_is_left_alone_and_the_marker_is_recorded() {
+        let customised: Vec<(&str, PaneTree)> = vec![
+            (
+                "an extra pane",
+                PaneTree::Split {
+                    direction: SplitDirection::Horizontal,
+                    children: vec![
+                        PaneTree::Leaf {
+                            pane_id: "teri_surface".into(),
+                        },
+                        PaneTree::Leaf {
+                            pane_id: "notes".into(),
+                        },
+                        PaneTree::Leaf {
+                            pane_id: "repl".into(),
+                        },
+                    ],
+                    ratios: vec![0.5, 0.2, 0.3],
+                },
+            ),
+            (
+                "a swapped order",
+                PaneTree::Split {
+                    direction: SplitDirection::Horizontal,
+                    children: vec![
+                        PaneTree::Leaf {
+                            pane_id: "repl".into(),
+                        },
+                        PaneTree::Leaf {
+                            pane_id: "teri_surface".into(),
+                        },
+                    ],
+                    ratios: vec![0.38, 0.62],
+                },
+            ),
+            (
+                "the new default arranged vertically",
+                crate::mcp::views::tree::default_teri_tree(),
+            ),
+            (
+                "a vertical split of other panes",
+                PaneTree::Split {
+                    direction: SplitDirection::Vertical,
+                    children: vec![
+                        PaneTree::Leaf {
+                            pane_id: "teri_surface".into(),
+                        },
+                        PaneTree::Split {
+                            direction: SplitDirection::Horizontal,
+                            children: vec![
+                                PaneTree::Leaf {
+                                    pane_id: "notes".into(),
+                                },
+                                PaneTree::Leaf {
+                                    pane_id: "repl".into(),
+                                },
+                            ],
+                            ratios: vec![0.5, 0.5],
+                        },
+                    ],
+                    ratios: vec![0.5, 0.5],
+                },
+            ),
+            (
+                "the surface in a nested horizontal split",
+                PaneTree::Split {
+                    direction: SplitDirection::Horizontal,
+                    children: vec![
+                        PaneTree::Split {
+                            direction: SplitDirection::Horizontal,
+                            children: vec![
+                                PaneTree::Leaf {
+                                    pane_id: "teri_surface".into(),
+                                },
+                                PaneTree::Leaf {
+                                    pane_id: "notes".into(),
+                                },
+                            ],
+                            ratios: vec![0.5, 0.5],
+                        },
+                        PaneTree::Leaf {
+                            pane_id: "repl".into(),
+                        },
+                    ],
+                    ratios: vec![0.7, 0.3],
+                },
+            ),
+        ];
+        for (name, tree) in customised {
+            let (_dir, path) = temp_store();
+            write_store(&path, serde_json::json!({ "teri": tree }));
+            let reg = PaneRegistry::with_store_path(path.clone());
+            assert_eq!(reg.get("teri"), Some(&tree), "{name}: left unchanged");
+
+            // The marker goes out with the next store write.
+            reg.persist();
+            let on_disk: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                on_disk["migrations"],
+                serde_json::json!(["teri-chat-at-bottom"]),
+                "{name}: marker recorded"
+            );
+            assert_eq!(
+                PaneRegistry::with_store_path(path).get("teri"),
+                Some(&tree),
+                "{name}: still unchanged on the next launch"
+            );
+        }
+    }
+
+    #[test]
+    fn the_migration_only_touches_teri_and_is_safe_without_a_teri_tree() {
+        let (_dir, path) = temp_store();
+        let fred_like = old_teri_default(vec![0.5, 0.5]);
+        write_store(&path, serde_json::json!({ "other": fred_like.clone() }));
+        let mut reg = PaneRegistry::with_store_path(path.clone());
+        assert_eq!(reg.get("teri"), None, "no teri tree is invented");
+        assert_eq!(
+            reg.get("other"),
+            Some(&fred_like),
+            "another focus is untouched"
+        );
+
+        // A teri focus created afterwards gets the new default; a later launch keeps it.
+        reg.init_focus("teri");
+        let again = PaneRegistry::with_store_path(path);
+        assert_eq!(
+            again.get("teri"),
+            Some(&crate::mcp::views::tree::default_teri_tree())
+        );
+    }
+
+    #[test]
+    fn the_migration_is_a_no_op_when_the_file_is_missing_or_unreadable() {
+        let (_dir, path) = temp_store();
+        let reg = PaneRegistry::with_store_path(path.clone());
+        assert_eq!(reg.get("teri"), None);
+        assert!(!path.exists(), "nothing is written for a missing store");
+
+        std::fs::write(&path, b"not json at all").unwrap();
+        let reg = PaneRegistry::with_store_path(path.clone());
+        assert_eq!(reg.get("teri"), None);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"not json at all",
+            "an unparseable store is left on disk untouched"
+        );
+    }
+
+    #[test]
+    fn the_migration_upgrades_a_v2_store_and_keeps_its_bindings() {
+        let (_dir, path) = temp_store();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "trees": { "teri": old_teri_default(vec![0.62, 0.38]) },
+                "bindings": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let reg = PaneRegistry::with_store_path(path);
+        assert_eq!(
+            reg.get("teri"),
+            Some(&crate::mcp::views::tree::default_teri_tree())
+        );
+    }
+
+    #[test]
+    fn the_converted_layout_keeps_the_surface_a_protected_top_level_leaf() {
+        let (_dir, path) = temp_store();
+        write_store(
+            &path,
+            serde_json::json!({ "teri": old_teri_default(vec![0.62, 0.38]) }),
+        );
+        let mut reg = PaneRegistry::with_store_path(path);
+        let tree = reg.get("teri").unwrap().clone();
+        assert!(crate::mcp::views::tree::is_top_level_leaf(
+            &tree,
+            "teri_surface"
+        ));
+        assert_eq!(reg.ensure_teri_layout("teri"), None, "nothing left to seed");
+        assert_eq!(
+            reg.close_tab("teri", "teri_surface"),
+            Err(PaneError::NotClosable)
+        );
     }
 
     // ── fresh spawn seeds the native tree (init_focus) ───────────────────────
@@ -4147,7 +4581,7 @@ mod native_surface_tests {
         let path = dir.path().join("panes.json");
         let mut trees = HashMap::new();
         trees.insert(tag.to_string(), tree);
-        save_store(&path, &trees, &HashMap::new());
+        save_store(&path, &trees, &HashMap::new(), &BTreeSet::new());
         (PaneRegistry::with_store_path(path), dir)
     }
 

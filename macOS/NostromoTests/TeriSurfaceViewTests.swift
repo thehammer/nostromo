@@ -1036,6 +1036,34 @@ final class TeriSurfaceViewTests: XCTestCase {
         XCTAssertEqual(Double(rig.surface.listPaneFraction), 0.4, accuracy: 0.02)
     }
 
+    func testWithNothingRememberedAWideSurfaceGivesTheListTheDefaultFraction() {
+        // The surface now spans the window above the chat: a wide, short area.
+        let rig = makeRig(size: NSSize(width: 1400, height: 400))
+        rig.surface.layoutSubtreeIfNeeded()
+
+        _ = waitUntil { abs(rig.surface.listPaneFraction - TeriSurfaceView.defaultListFraction) < 0.02 }
+
+        XCTAssertEqual(rig.surface.listPaneFraction, TeriSurfaceView.defaultListFraction, accuracy: 0.02)
+    }
+
+    func testAShortSurfaceKeepsItsTabStripAndAUsableListHeight() throws {
+        let rig = makeRig(size: NSSize(width: 1200, height: 260))
+        rig.surface.layoutSubtreeIfNeeded()
+        let split = try XCTUnwrap(splitView(rig))
+        split.layoutSubtreeIfNeeded()
+
+        XCTAssertGreaterThanOrEqual(split.frame.height, TeriSurfaceView.minSplitHeight,
+                                    "the list and detail keep a usable height")
+        let tabTitles = Set(TeriTab.allCases.map(\.title))
+        let buttons = rigAllSubviews(of: rig.surface).compactMap { $0 as? NSButton }
+            .filter { button in tabTitles.contains { button.title.hasPrefix($0) } }
+        XCTAssertEqual(buttons.count, TeriTab.allCases.count)
+        for button in buttons {
+            let frame = rig.surface.convert(button.bounds, from: button)
+            XCTAssertTrue(rig.surface.bounds.contains(frame), "\(button.title) is clipped: \(frame)")
+        }
+    }
+
     func testTheSplitIsRememberedInTheViewStateAndNotInAGlobalDefaultsKey() throws {
         func splitKeys() -> Set<String> {
             Set(UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.hasPrefix("NSSplitView") })

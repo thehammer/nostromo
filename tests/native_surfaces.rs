@@ -2,7 +2,7 @@
 //!
 //! When the Mac app pushes its focus registry, the daemon gives the built-in
 //! `teri` focus a `teri_surface` pane and the built-in `fred` focus a
-//! `fred_hud` pane beside the REPL, and tells subscribed clients with one
+//! `fred_hud` pane above the REPL, and tells subscribed clients with one
 //! `FocusLayout` each. The native pane cannot be dropped by an agent's
 //! `apply_layout`; an agent-built layout is wrapped rather than discarded.
 //!
@@ -216,7 +216,7 @@ fn registry_ids(d: &Daemon, tag: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn pushing_the_registry_gives_teri_and_fred_their_native_panes_beside_the_repl() {
+async fn pushing_the_registry_gives_teri_and_fred_their_native_panes_above_the_repl() {
     let d = spawn();
     let mut client = connect(&d).await;
 

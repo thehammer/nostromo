@@ -62,6 +62,14 @@ final class TeriSurfaceView: NSView {
     /// again whenever the split view's width changes (a window resize keeps the ratio).
     private var splitAppliedWidth: CGFloat = 0
 
+    /// Width of the list pane, as a fraction of the split, until the user drags the divider.
+    /// The surface sits above the chat at the full width of the window, so the list should not
+    /// stay a narrow column with a huge detail pane beside it.
+    static let defaultListFraction: CGFloat = 0.4
+    /// The least height the list and detail get. The surface shares the window's height with
+    /// the chat below it, so it is no longer a tall column and must not be squeezed to nothing.
+    static let minSplitHeight: CGFloat = 160
+
     // MARK: Init
 
     init(store: WorkStore, defaults: UserDefaults = .standard, center: NotificationCenter = .default,
@@ -257,6 +265,7 @@ final class TeriSurfaceView: NSView {
         splitView.addArrangedSubview(detailView)
         listHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         detailView.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        splitView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minSplitHeight).isActive = true
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         splitView.setContentHuggingPriority(.defaultLow, for: .vertical)
         tabStrip.setContentHuggingPriority(.required, for: .vertical)
@@ -545,13 +554,15 @@ extension TeriSurfaceView {
         viewState.update { $0.splitFraction = fraction }
     }
 
-    /// Put the divider where the user left it, and keep that proportion when the window is resized.
+    /// Put the divider where the user left it (or at the default for a wide area, when they have
+    /// not), and keep that proportion when the window is resized.
     fileprivate func applyRememberedSplit() {
         let width = splitView.bounds.width
-        guard width > 0, width != splitAppliedWidth, let fraction = viewState.state.splitFraction else { return }
+        guard width > 0, width != splitAppliedWidth else { return }
+        let fraction = viewState.state.splitFraction.map { CGFloat($0) } ?? Self.defaultListFraction
         splitAppliedWidth = width
         splitView.layoutSubtreeIfNeeded()
-        splitView.setPosition(CGFloat(fraction) * width, ofDividerAt: 0)
+        splitView.setPosition(fraction * width, ofDividerAt: 0)
     }
 }
 
