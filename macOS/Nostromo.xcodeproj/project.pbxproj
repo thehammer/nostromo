@@ -708,6 +708,7 @@
 		TP000000000000000000A023 /* RemoteShellFailureSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F023 /* RemoteShellFailureSheet.swift */; };
 		TP000000000000000000A024 /* PasteConfirmSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F024 /* PasteConfirmSheet.swift */; };
 		TP000000000000000000A025 /* FollowControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F025 /* FollowControlView.swift */; };
+		TP000000000000000000T025 /* FollowControlView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F025 /* FollowControlView.swift */; };
 		TP000000000000000000A026 /* TerminalDeliveryBlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F026 /* TerminalDeliveryBlockView.swift */; };
 		TP000000000000000000T027 /* RemoteShellStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F027 /* RemoteShellStoreTests.swift */; };
 		TP000000000000000000T028 /* RemoteShellWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F028 /* RemoteShellWireTests.swift */; };
@@ -2236,6 +2237,7 @@
 				TP000000000000000000T044 /* TerminalPaneHeaderView.swift in TestSources */,
 				TP000000000000000000T045 /* IdleBannerView.swift in TestSources */,
 				TP000000000000000000T018 /* FollowModel.swift in TestSources */,
+				TP000000000000000000T025 /* FollowControlView.swift in TestSources */,
 				TS000000000000000000T001 /* TerminalStagingWire.swift in TestSources */,
 				TS000000000000000000T002 /* TerminalStagingStore.swift in TestSources */,
 				TS000000000000000000T003 /* AgentDisplayText.swift in TestSources */,
