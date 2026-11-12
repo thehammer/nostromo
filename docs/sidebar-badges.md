@@ -18,11 +18,14 @@ is also shaped differently (hand vs list, filled vs outlined), so nothing relies
 - **Title line:** the focus name, its environment tags (`PRODUCTION`) and the attention dot. No
   "needs you" pill ever sits here. A built-in's own count (Fred's unread, Perri's queue) is the one
   exception: it keeps its place on the title line.
-- **Second line:** the branch text (or the built-in's subtitle) on the left, then the blocking and the
-  waiting pill right-aligned. The pills take room from the branch text only; the title, the row height
-  and the row's other contents never move when a pill appears, changes or goes.
-- **Narrow rows give up, in order:** the branch text (to nothing), then the waiting pill's padding and
-  outline (glyph and count only). The blocking pill is never squeezed.
+- **Second line:** a regular focus row shows only the blocking and the waiting pill here, right-aligned;
+  there is no branch or last-message text. That text lives in the row's tooltip and its accessibility
+  help (the visible accessibility label is unchanged). The line keeps its height with no pills
+  (`Theme.navItemSubtitleHeight`, 52 pt, same as before), so a row never jumps when a pill appears or
+  goes. A built-in's own subtitle (Fred, Mother, Teri, Perri's PR) stays on the left of the pills, and
+  the pills take room from it only; the title and the row height never move.
+- **Narrow rows give up, in order:** a built-in's subtitle (to nothing), then the waiting pill's padding
+  and outline (glyph and count only). The blocking pill is never squeezed.
 - **Highlight when the row is also the active focus:** the cornflower active bar stays at the edge and
   the red bar sits beside it, and the red fill replaces the cornflower tint. Active, blocked and both
   are three distinct looks (`NavRowHighlight.style`).

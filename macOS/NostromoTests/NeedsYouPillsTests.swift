@@ -937,7 +937,44 @@ final class NeedsYouPillsRowTests: XCTestCase {
 
     // MARK: Where the pills sit
 
-    func testThePillsSitOnTheSecondLineRightAlignedAndTheBranchStaysLeftOfThem() throws {
+    func testARegularRowsSecondLineHasNoTextWhateverThePillsSay() {
+        for (blockingCount, waitingCount) in [(0, 0), (2, 0), (0, 7), (2, 7)] {
+            for branch in ["main", Self.longBranch] {
+                let item = makeItem(branch: branch)
+                apply(item, blocking: blockingCount, waiting: waitingCount)
+                XCTAssertEqual(item.secondaryText ?? "", "", "blocking \(blockingCount), waiting \(waitingCount), branch \(branch)")
+            }
+        }
+    }
+
+    func testARegularRowsBranchIsInItsTooltipAndAccessibilityHelp() {
+        for branch in ["main", Self.longBranch] {
+            for (blockingCount, waitingCount) in [(0, 0), (2, 7)] {
+                let item = makeItem(branch: branch)
+                apply(item, blocking: blockingCount, waiting: waitingCount)
+                XCTAssertEqual(item.toolTip, branch, "tooltip, blocking \(blockingCount), waiting \(waitingCount)")
+                XCTAssertEqual(item.accessibilityHelp(), branch, "accessibility help, blocking \(blockingCount), waiting \(waitingCount)")
+            }
+        }
+    }
+
+    func testTheRowHeightAndThePillPlacesAreTheSameWhateverThePillsSay() throws {
+        for indented in [false, true] {
+            for (blockingCount, waitingCount) in [(0, 0), (2, 0), (0, 7), (2, 7)] {
+                let item = makeItem(width: Theme.sidebarWidth, indented: indented)
+                apply(item, blocking: blockingCount, waiting: waitingCount)
+                let at = "blocking \(blockingCount), waiting \(waitingCount), indented \(indented)"
+                XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight, at)
+                XCTAssertEqual(item.bounds.height, Theme.navItemSubtitleHeight, at)
+                for pill in [item.blockingPillFrame, item.waitingPillFrame].compactMap({ $0 }) {
+                    XCTAssertTrue(inBounds(pill, of: item), "pill inside the row: \(at)")
+                    XCTAssertLessThan(pill.midY, item.labelFrame.minY, "pill on the second line: \(at)")
+                }
+            }
+        }
+    }
+
+    func testThePillsSitOnTheSecondLineRightAligned() throws {
         let item = makeItem(width: Theme.sidebarWidth)
         apply(item, blocking: 2, waiting: 7)
         let blocking = try XCTUnwrap(item.blockingPillFrame), waiting = try XCTUnwrap(item.waitingPillFrame)
@@ -949,13 +986,18 @@ final class NeedsYouPillsRowTests: XCTestCase {
         XCTAssertLessThan(blocking.maxX, waiting.minX)
         XCTAssertLessThanOrEqual(waiting.maxX, item.bounds.width - 8 + 0.5, "right-aligned with the row's trailing inset")
         XCTAssertGreaterThanOrEqual(waiting.maxX, item.bounds.width - 16, "and hugging that edge")
+    }
 
-        XCTAssertTrue(item.secondaryVisible, "there is room for the branch at the sidebar's width")
+    func testABuiltInsSecondLineTextStaysAndStaysLeftOfThePills() throws {
+        let item = makeItem(focus: builtIn("perri"), label: "Perri", branch: "owner/repo#12", width: Theme.sidebarWidth)
+        apply(item, blocking: 2, waiting: 7)
+        let blocking = try XCTUnwrap(item.blockingPillFrame), waiting = try XCTUnwrap(item.waitingPillFrame)
+        XCTAssertEqual(item.secondaryText, "owner/repo#12", "the built-in keeps its second line text")
+        XCTAssertTrue(item.secondaryVisible, "there is room for it at the sidebar's width")
         let line = try XCTUnwrap(item.secondaryFrame)
-        XCTAssertLessThanOrEqual(line.maxX, blocking.minX + 0.5, "the branch ends before the first pill")
-        XCTAssertEqual(blocking.midY, line.midY, accuracy: 3, "pills share the branch's line")
+        XCTAssertLessThanOrEqual(line.maxX, blocking.minX + 0.5, "the text ends before the first pill")
+        XCTAssertEqual(blocking.midY, line.midY, accuracy: 3, "pills share its line")
         XCTAssertEqual(waiting.midY, line.midY, accuracy: 3)
-        XCTAssertEqual(item.secondaryText, "main", "the second line keeps its text")
     }
 
     func testASinglePillIsRightAligned() throws {
@@ -965,7 +1007,6 @@ final class NeedsYouPillsRowTests: XCTestCase {
         XCTAssertLessThanOrEqual(blocking.maxX, blockingOnly.bounds.width - 8 + 0.5)
         XCTAssertGreaterThanOrEqual(blocking.maxX, blockingOnly.bounds.width - 16)
         XCTAssertLessThan(blocking.midY, blockingOnly.labelFrame.minY)
-        XCTAssertLessThanOrEqual(try XCTUnwrap(blockingOnly.secondaryFrame).maxX, blocking.minX + 0.5)
 
         let waitingOnly = makeItem()
         apply(waitingOnly, waiting: 7)
@@ -973,23 +1014,22 @@ final class NeedsYouPillsRowTests: XCTestCase {
         XCTAssertLessThanOrEqual(waiting.maxX, waitingOnly.bounds.width - 8 + 0.5)
         XCTAssertGreaterThanOrEqual(waiting.maxX, waitingOnly.bounds.width - 16)
         XCTAssertLessThan(waiting.midY, waitingOnly.labelFrame.minY)
-        XCTAssertLessThanOrEqual(try XCTUnwrap(waitingOnly.secondaryFrame).maxX, waiting.minX + 0.5)
     }
 
     func testTheSecondLineHasNoPillFramesWhenThereAreNoCounts() {
         let item = makeItem()
         XCTAssertNil(item.blockingPillFrame)
         XCTAssertNil(item.waitingPillFrame)
-        XCTAssertTrue(item.secondaryVisible)
-        XCTAssertNotNil(item.secondaryFrame)
+        XCTAssertEqual(item.secondaryText ?? "", "")
+        XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight, "the second line keeps its height with no pills")
         XCTAssertFalse(item.waitingPillIsCollapsed)
     }
 
-    func testTheBranchNeverRunsUnderAPillAtTheNormalWidthWithZeroOneOrTwoPills() throws {
+    func testABuiltInsTextNeverRunsUnderAPillAtTheNormalWidthWithZeroOneOrTwoPills() throws {
         for branch in ["main", Self.longBranch] {
             for indented in [false, true] {
                 for (blockingCount, waitingCount) in [(0, 0), (2, 0), (0, 7), (2, 7), (150, 150)] {
-                    let item = makeItem(branch: branch, width: Theme.sidebarWidth, indented: indented)
+                    let item = makeItem(focus: builtIn("perri"), label: "Perri", branch: branch, width: Theme.sidebarWidth, indented: indented)
                     apply(item, blocking: blockingCount, waiting: waitingCount)
                     let at = "branch \(branch), indented \(indented), blocking \(blockingCount), waiting \(waitingCount)"
                     guard item.secondaryVisible else { continue }
@@ -1004,9 +1044,9 @@ final class NeedsYouPillsRowTests: XCTestCase {
         }
     }
 
-    func testAPillAppearingOrGoingAwayOnlyTruncatesTheBranchItNeverMovesIt() throws {
+    func testAPillAppearingOrGoingAwayOnlyTruncatesABuiltInsTextItNeverMovesIt() throws {
         // A short branch has room at the normal width: its frame must not change at all.
-        let short = makeItem(branch: "main")
+        let short = makeItem(focus: builtIn("perri"), label: "Perri", branch: "main")
         let shortBefore = try XCTUnwrap(short.secondaryFrame)
         for (blockingCount, waitingCount) in [(2, 0), (0, 7), (2, 7)] {
             apply(short, blocking: blockingCount, waiting: waitingCount)
@@ -1016,7 +1056,7 @@ final class NeedsYouPillsRowTests: XCTestCase {
         assertSameRect(try XCTUnwrap(short.secondaryFrame), shortBefore, "short branch after the pills went away")
 
         // A long branch is truncated: only its trailing edge moves, and it comes back when the pills go.
-        let long = makeItem(branch: Self.longBranch)
+        let long = makeItem(focus: builtIn("perri"), label: "Perri", branch: Self.longBranch)
         let longBefore = try XCTUnwrap(long.secondaryFrame)
         var previousMaxX = longBefore.maxX
         for (blockingCount, waitingCount) in [(2, 0), (2, 7)] {
@@ -1044,8 +1084,9 @@ final class NeedsYouPillsRowTests: XCTestCase {
         let waiting: NSRect?
     }
 
-    private func sample(blocking: Int, waiting: Int, width: CGFloat, indented: Bool, branch: String) -> Sample {
-        let item = makeItem(branch: branch, width: width, indented: indented)
+    private func sample(blocking: Int, waiting: Int, width: CGFloat, indented: Bool, branch: String, builtIn isBuiltIn: Bool = false) -> Sample {
+        let item = isBuiltIn ? makeItem(focus: builtIn("perri"), label: "Perri", branch: branch, width: width, indented: indented)
+                             : makeItem(branch: branch, width: width, indented: indented)
         defer { item.window?.close() }
         apply(item, blocking: blocking, waiting: waiting)
         return Sample(width: width, secondaryVisible: item.secondaryVisible, secondaryFrame: item.secondaryFrame,
@@ -1057,20 +1098,29 @@ final class NeedsYouPillsRowTests: XCTestCase {
         Array(stride(from: Self.widest, through: Self.narrowest, by: -10))
     }
 
-    func testAsTheRowNarrowsTheBranchGoesFirstThenTheWaitingPillCollapsesAndTheBlockingPillNeverChanges() {
+    func testAsARegularRowNarrowsTheWaitingPillCollapsesAndTheBlockingPillNeverChanges() {
+        assertNarrowing(builtIn: false)
+    }
+
+    func testAsABuiltInRowNarrowsItsTextGoesFirstThenTheWaitingPillCollapsesAndTheBlockingPillNeverChanges() {
+        assertNarrowing(builtIn: true)
+    }
+
+    private func assertNarrowing(builtIn isBuiltIn: Bool) {
         let scenarios: [(String, Int, Int)] = [("blocking only", 2, 0), ("waiting only", 0, 7), ("both", 2, 7), ("both, 99+", 150, 150)]
         for (name, blockingCount, waitingCount) in scenarios {
             for indented in [false, true] {
                 for branch in ["main", Self.longBranch] {
-                    let context = "\(name), indented \(indented), branch \(branch)"
+                    let context = "\(name), indented \(indented), branch \(branch), built-in \(isBuiltIn)"
                     let reference = sample(blocking: blockingCount, waiting: waitingCount, width: Self.widest,
-                                           indented: indented, branch: branch)
-                    XCTAssertTrue(reference.secondaryVisible, "branch shows at \(Int(Self.widest)) pt: \(context)")
+                                           indented: indented, branch: branch, builtIn: isBuiltIn)
+                    if isBuiltIn { XCTAssertTrue(reference.secondaryVisible, "text shows at \(Int(Self.widest)) pt: \(context)") }
                     XCTAssertFalse(reference.collapsed, "nothing collapsed at \(Int(Self.widest)) pt: \(context)")
 
                     var branchGone = false, collapsedSeen = false
                     for width in descendingWidths {
-                        let s = sample(blocking: blockingCount, waiting: waitingCount, width: width, indented: indented, branch: branch)
+                        let s = sample(blocking: blockingCount, waiting: waitingCount, width: width, indented: indented,
+                                       branch: branch, builtIn: isBuiltIn)
                         let at = "\(context), \(Int(width)) pt"
 
                         // The blocking pill is never given up: same size as at the widest, always inside the row.
@@ -1079,6 +1129,7 @@ final class NeedsYouPillsRowTests: XCTestCase {
                             XCTAssertEqual(b.width, ref.width, accuracy: 0.5, "blocking pill kept its size: \(at)")
                             XCTAssertTrue(NSRect(x: -0.5, y: -0.5, width: width + 1, height: Theme.navItemSubtitleHeight + 1).contains(b),
                                           "blocking pill inside the row: \(at)")
+                            XCTAssertLessThan(b.midY, Theme.navItemSubtitleHeight / 2, "blocking pill on the second line: \(at)")
                         }
                         if waitingCount > 0 {
                             guard let w = s.waiting, let ref = reference.waiting else { XCTFail("no waiting pill: \(at)"); continue }
@@ -1093,6 +1144,7 @@ final class NeedsYouPillsRowTests: XCTestCase {
                             if s.collapsed {
                                 XCTAssertLessThan(w.width, ref.width, "a collapsed waiting pill is narrower: \(at)")
                             }
+                            XCTAssertLessThan(w.midY, Theme.navItemSubtitleHeight / 2, "waiting pill on the second line: \(at)")
                             if let b = s.blocking {
                                 XCTAssertLessThan(b.maxX, w.minX, "blocking left of waiting: \(at)")
                             }
@@ -1100,14 +1152,16 @@ final class NeedsYouPillsRowTests: XCTestCase {
                             XCTAssertFalse(s.collapsed, "no waiting pill to collapse: \(at)")
                         }
 
-                        // The order of giving up: the branch first, the waiting pill second.
-                        XCTAssertFalse(s.collapsed && s.secondaryVisible, "waiting pill collapsed while the branch still shows: \(at)")
-                        if branchGone { XCTAssertFalse(s.secondaryVisible, "the branch came back as the row narrowed: \(at)") }
+                        // The order of giving up: a built-in's text first, the waiting pill second. A regular row has
+                        // no second-line text to give up, but its waiting pill still never expands as the row narrows.
                         if collapsedSeen { XCTAssertTrue(s.collapsed, "the waiting pill expanded again as the row narrowed: \(at)") }
-                        branchGone = branchGone || !s.secondaryVisible
                         collapsedSeen = collapsedSeen || s.collapsed
+                        guard isBuiltIn else { continue }
+                        XCTAssertFalse(s.collapsed && s.secondaryVisible, "waiting pill collapsed while the text still shows: \(at)")
+                        if branchGone { XCTAssertFalse(s.secondaryVisible, "the text came back as the row narrowed: \(at)") }
+                        branchGone = branchGone || !s.secondaryVisible
 
-                        // While the branch shows it does not run under a pill.
+                        // While a built-in's text shows it does not run under a pill.
                         if s.secondaryVisible, let line = s.secondaryFrame {
                             let firstPill = [s.blocking, s.waiting].compactMap { $0 }.map(\.minX).min()
                             if let firstPill {
@@ -1121,11 +1175,22 @@ final class NeedsYouPillsRowTests: XCTestCase {
         }
     }
 
-    func testAtTheNarrowestWidthWithBothPillsTheBranchIsGivenUpAndTheWaitingPillIsCollapsed() {
+    func testAtTheNarrowestWidthWithBothPillsABuiltInsTextIsGivenUpAndTheWaitingPillIsCollapsed() {
         for indented in [false, true] {
-            let s = sample(blocking: 2, waiting: 7, width: Self.narrowest, indented: indented, branch: "main")
+            let s = sample(blocking: 2, waiting: 7, width: Self.narrowest, indented: indented, branch: "main", builtIn: true)
             XCTAssertFalse(s.secondaryVisible, "indented \(indented)")
             XCTAssertTrue(s.collapsed, "indented \(indented)")
+        }
+    }
+
+    func testAtTheNarrowestWidthARegularRowKeepsItsHeightAndItsPillsOnTheSecondLine() {
+        for indented in [false, true] {
+            let item = makeItem(width: Self.narrowest, indented: indented)
+            apply(item, blocking: 2, waiting: 7)
+            XCTAssertEqual(item.frame.height, Theme.navItemSubtitleHeight, "indented \(indented)")
+            XCTAssertTrue(item.waitingPillIsCollapsed, "indented \(indented)")
+            XCTAssertEqual(item.secondaryText ?? "", "", "indented \(indented)")
+            XCTAssertLessThan(item.blockingPillFrame?.midY ?? .infinity, item.labelFrame.minY, "indented \(indented)")
         }
     }
 
@@ -1205,9 +1270,9 @@ final class NeedsYouPillsRowTests: XCTestCase {
 
         let title = try click(at: NSPoint(x: item.labelFrame.minX + 4, y: item.labelFrame.midY), on: item)
         XCTAssertTrue(item.gestureRecognizer(recognizer, shouldAttemptToRecognizeWith: title))
-        let branch = try XCTUnwrap(item.secondaryFrame)
-        let onBranch = try click(at: NSPoint(x: branch.minX + 2, y: branch.midY), on: item)
-        XCTAssertTrue(item.gestureRecognizer(recognizer, shouldAttemptToRecognizeWith: onBranch), "the branch text is the row's")
+        let line = try XCTUnwrap(item.secondaryFrame)
+        let onLine = try click(at: NSPoint(x: line.minX + 2, y: line.midY), on: item)
+        XCTAssertTrue(item.gestureRecognizer(recognizer, shouldAttemptToRecognizeWith: onLine), "the second line's free space is the row's")
     }
 
     func testTheRowRecognizerTakesEveryClickOnceThePillsAreGone() throws {
