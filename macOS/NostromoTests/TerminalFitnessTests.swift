@@ -921,6 +921,21 @@ final class TerminalFitnessTests: XCTestCase {
         XCTAssertFalse(update.contains("store."), "refreshing names sends nothing:\n\(update)")
     }
 
+    // A refusal the daemon sent for this pane is shown in it, whatever op it was for (S3b: a refused invite).
+
+    func testTheHostShowsEveryRefusalThroughItsOverlayNoticeWithoutFilteringByOp() throws {
+        let show = try funcBody("showInputNotice", in: "TerminalPaneHostView.swift")
+        XCTAssertTrue(show.contains("frame.overlayNotice"), "the notice shown must be the frame's overlayNotice:\n\(show)")
+        for filter in ["frame.op", "frame.code", ".op ==", ".code =="] {
+            XCTAssertFalse(show.contains(filter), "showInputNotice must not filter refusals itself (`\(filter)`); overlayNotice decides:\n\(show)")
+        }
+        let handle = try funcBody("handle", in: "TerminalPaneHostView.swift")
+        XCTAssertTrue(handle.contains("showInputNotice(for: frame)"), "a refused change must reach showInputNotice:\n\(handle)")
+        for filter in ["frame.op", "frame.code"] {
+            XCTAssertFalse(handle.contains(filter), "handle must not filter refusals by op or code (`\(filter)`):\n\(handle)")
+        }
+    }
+
     func testOnlyTheInvitePopoverButtonStartsFollowingFromTheApp() throws {
         var sites: [String] = []
         for file in Repo.swiftFiles(under: Repo.app) {
@@ -937,6 +952,22 @@ final class TerminalFitnessTests: XCTestCase {
         let view = try terminalViewSource("NostromoTerminalView.swift")
         XCTAssertFalse(view.lines.contains { $0.contains("inviteFollow") || $0.contains("followInvite") },
                        "NostromoTerminalView sends selected text only; it must never invite a follower")
+    }
+
+    // The Send selection menu says when an item gives a staging-only follower output (S3b): every item is built by
+    // the model, never from the plain title, so the label cannot be left off by a call site.
+
+    func testTheSendSelectionMenuBuildsEveryItemThroughTheModelsLabelledItem() throws {
+        let url = Repo.app.appendingPathComponent("UI/Terminal/NostromoTerminalView.swift")
+        let source = try Repo.read(url)
+        let start = try XCTUnwrap(source.range(of: "func sendSelectionMenu()"), "sendSelectionMenu() not found")
+        let end = try XCTUnwrap(source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex), "end of sendSelectionMenu() not found")
+        let body = Repo.codeLines(String(source[start.lowerBound..<end.upperBound])).joined(separator: "\n")
+        XCTAssertTrue(body.contains("sendSelectionMenuItem("), "the menu's items must come from FollowModel.sendSelectionMenuItem(:\n\(body)")
+
+        let code = Repo.codeLines(source).joined(separator: "\n")
+        XCTAssertFalse(code.contains("sendSelectionTitle("), "NostromoTerminalView must not build the plain title itself")
+        XCTAssertFalse(code.contains("sendSelectionTooltip"), "NostromoTerminalView must not set the plain tooltip itself")
     }
 
     func testTheFollowPopoverIsBuiltOnlyWhereTheBadgeIsTapped() throws {

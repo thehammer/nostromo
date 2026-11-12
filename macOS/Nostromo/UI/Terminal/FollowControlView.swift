@@ -101,7 +101,7 @@ final class FollowControlView: NSView {
     }
 
     private func buildInviteForm() {
-        inviteMode = .output
+        inviteMode = model.defaultInviteMode
         let heading = makeLabel(model.inviteHeading,
                             font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor, id: "terminal-follow-heading")
         headingLabel = heading

@@ -114,11 +114,6 @@ struct FollowModel: Equatable {
         }
     }
 
-    /// The badge's spoken label: its text and its whole sentence.
-    var badgeAccessibilityLabel: String {
-        "\(badgeText). \(badgeDescription)"
-    }
-
     static func pausedText(reason: String?) -> String {
         switch reason {
         case "too_much_output":      return "Paused, too much output"
@@ -178,6 +173,14 @@ struct FollowModel: Equatable {
         case .output: return "Invite the chosen agent to follow this terminal"
         case .stagingOnly: return "Invite the chosen agent to stage commands only, with no output"
         }
+    }
+
+    /// What the invite form has selected when it opens: what the pane's follower already gets, so a Move
+    /// never turns a staging-only follow into a full one without a person choosing Output. Output for a
+    /// fresh invite (and whenever the staging-only mode is not on offer).
+    var defaultInviteMode: InviteMode {
+        guard offersStagingOnly, let follower = info.follower else { return .output }
+        return currentMode(of: follower)
     }
 
     /// The focus the invite popover starts on: the one that owns the pane, or, for a remote pane an
@@ -240,6 +243,29 @@ struct FollowModel: Equatable {
 
     static func sendSelectionTitle(to option: FollowFocusOption) -> String {
         "Send selection to \(option.name)"
+    }
+
+    /// The Send selection menu item for `option`. A focus that follows staging only gets a label and a
+    /// warning: sending a selection hands its model text it is otherwise never sent, so a person who
+    /// believes that agent is blind is told otherwise here. Every other focus reads as it always did.
+    func sendSelectionMenuItem(for option: FollowFocusOption, enabled: Bool, target: AnyObject?, action: Selector) -> NSMenuItem {
+        let stagingOnlyTarget = info.follower.map { $0.tag == option.tag && $0.isStagingOnly } ?? false
+        var title = Self.sendSelectionTitle(to: option)
+        var tooltip = Self.sendSelectionTooltip
+        var spoken = title
+        if stagingOnlyTarget {
+            title += " (staging only: this gives it output)"
+            tooltip = "\(option.name) follows this terminal staging only and is not sent its output. "
+                + "Sending this selection gives \(option.name)'s model text it would not otherwise see. " + tooltip
+            spoken = title + ". " + tooltip
+        }
+        let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        entry.target = target
+        entry.representedObject = option.tag
+        entry.toolTip = tooltip
+        entry.setAccessibilityLabel(spoken)
+        entry.isEnabled = enabled
+        return entry
     }
 
     // MARK: - Focus list

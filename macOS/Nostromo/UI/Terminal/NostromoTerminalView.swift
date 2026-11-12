@@ -206,13 +206,7 @@ final class NostromoTerminalView: TerminalView, TerminalViewDelegate, TerminalPi
         let menu = NSMenu(title: "Terminal")
         menu.autoenablesItems = false
         func item(_ option: FollowFocusOption) -> NSMenuItem {
-            let entry = NSMenuItem(title: FollowModel.sendSelectionTitle(to: option),
-                                   action: #selector(sendSelectionTapped(_:)), keyEquivalent: "")
-            entry.target = self
-            entry.representedObject = option.tag
-            entry.toolTip = FollowModel.sendSelectionTooltip
-            entry.isEnabled = enabled
-            return entry
+            model.sendSelectionMenuItem(for: option, enabled: enabled, target: self, action: #selector(sendSelectionTapped(_:)))
         }
         if let tag = model.defaultSelectionTag, let option = model.focuses.first(where: { $0.tag == tag }) {
             menu.addItem(item(option))

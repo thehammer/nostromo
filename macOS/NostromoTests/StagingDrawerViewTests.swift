@@ -2896,6 +2896,50 @@ extension StagingDrawerViewTests {
                       "\(frozen.visibleTexts)")
     }
 
+    // MARK: The pill is readable
+
+    private func relativeLuminance(_ color: NSColor) -> Double {
+        let c = color.usingColorSpace(.sRGB) ?? color
+        func linear(_ v: CGFloat) -> Double {
+            let x = Double(v)
+            return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(c.redComponent) + 0.7152 * linear(c.greenComponent) + 0.0722 * linear(c.blueComponent)
+    }
+
+    /// WCAG contrast ratio between two opaque colours.
+    private func contrastRatio(_ a: NSColor, _ b: NSColor) -> Double {
+        let (la, lb) = (relativeLuminance(a), relativeLuminance(b))
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    func testTheNoOutputPillIsAtLeastFourPointFiveToOneInLightAndDarkAppearance() throws {
+        XCTAssertEqual(contrastRatio(.black, .white), 21, accuracy: 0.01, "the helper measures WCAG contrast")
+        XCTAssertEqual(contrastRatio(.gray, .gray), 1, accuracy: 0.001)
+
+        for kind in [TerminalKind.local, .ecs] {
+            for name in [NSAppearance.Name.aqua, .darkAqua] {
+                let (_, host) = noOutputHost(width: 700, kind: kind)
+                host.window.appearance = NSAppearance(named: name)
+                host.drawer.appearance = NSAppearance(named: name)
+                host.relayout()
+                let label = host.drawer.noOutputLabel
+                XCTAssertFalse(label.isHidden, "\(kind) \(name.rawValue): the pill shows")
+
+                var text = label.textColor ?? .clear
+                var fill = NSColor.clear
+                label.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    text = (label.textColor ?? .clear).usingColorSpace(.sRGB) ?? .clear
+                    fill = label.layer?.backgroundColor.flatMap { NSColor(cgColor: $0) }?.usingColorSpace(.sRGB) ?? .clear
+                }
+                XCTAssertEqual(fill.alphaComponent, 1, accuracy: 0.001, "\(kind) \(name.rawValue): the pill has an opaque fill")
+                XCTAssertEqual(text.alphaComponent, 1, accuracy: 0.001, "\(kind) \(name.rawValue): the text is opaque")
+                let ratio = contrastRatio(text, fill)
+                XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(kind) \(name.rawValue): NO OUTPUT text on its pill is \(String(format: "%.2f", ratio)):1")
+            }
+        }
+    }
+
     // MARK: Clipping at every width
 
     func testTheTokenIsNeverClippedAndNoOutputOnlyHidesWhenTheRestOfTheRowWouldNotFit() throws {

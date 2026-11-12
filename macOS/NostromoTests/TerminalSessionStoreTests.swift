@@ -860,6 +860,74 @@ final class TerminalSessionStoreTests: XCTestCase {
         }
     }
 
+    // MARK: - Refused invite notice
+    //
+    // A refused invite (the daemon answers `follow_invite` for both a full and a staging-only invite) is shown in
+    // the pane, so a person who pressed Invite is never left wondering. The text is fixed and says nothing was
+    // changed; it never carries the code, the terminal id or the agent's tag.
+
+    private let unavailableNotice = "[invite not sent: following is not set up in this daemon. Nothing changed]"
+    private let notAllowedNotice = "[invite not sent: this app is not allowed to start that kind of follow. Nothing changed]"
+    private let refusedNotice = "[invite not sent: the daemon refused it. Nothing changed]"
+
+    private func inviteRefusal(_ code: String, terminalId: String? = "t1") -> TerminalRefusedFrame {
+        TerminalRefusedFrame(op: "follow_invite", terminalId: terminalId, code: code)
+    }
+
+    func testAnInviteTheDaemonHasNoFollowingFeatureForSaysFollowingIsNotSetUp() {
+        XCTAssertEqual(inviteRefusal("follow_unavailable").overlayNotice, unavailableNotice)
+    }
+
+    func testAnInviteThisAppIsNotAllowedToMakeSaysSo() {
+        XCTAssertEqual(inviteRefusal("terminal_follow_ui_required").overlayNotice, notAllowedNotice)
+        XCTAssertEqual(inviteRefusal("terminal_staging_only_ui_required").overlayNotice, notAllowedNotice)
+    }
+
+    func testAnyOtherRefusedInviteSaysTheDaemonRefusedIt() {
+        for code in ["unknown_terminal", "follower_not_running", "no_operator", "terminal_not_found", "something_new", "", "FOLLOW_UNAVAILABLE"] {
+            XCTAssertEqual(inviteRefusal(code).overlayNotice, refusedNotice, "code \(code)")
+        }
+    }
+
+    func testARefusedInviteWithNoTerminalIdStillGetsItsNotice() {
+        XCTAssertEqual(inviteRefusal("follow_unavailable", terminalId: nil).overlayNotice, unavailableNotice)
+    }
+
+    func testTheInviteNoticesAreFixedTextThatNeverEchoTheCodeTheTerminalOrTheTag() {
+        let canary = "CANARY-claudia-9f3a1c"
+        for code in ["follow_unavailable", "terminal_follow_ui_required", "terminal_staging_only_ui_required", "follower_not_running", "no_operator",
+                     "unknown_terminal-\(canary)"] {
+            let notice = inviteRefusal(code, terminalId: "t-\(canary)").overlayNotice ?? ""
+            XCTAssertFalse(notice.isEmpty, code)
+            XCTAssertFalse(notice.contains(canary), "\(code): \(notice)")
+            XCTAssertFalse(notice.contains("t-"), notice)
+            XCTAssertFalse(notice.contains(code), "the code is never echoed: \(notice)")
+            XCTAssertTrue(notice.hasSuffix("Nothing changed]"), notice)
+        }
+        XCTAssertEqual(Set([unavailableNotice, notAllowedNotice, refusedNotice]).count, 3, "the three notices are distinct")
+    }
+
+    func testOnlyARefusedInviteOrInputGetsAnOverlayNoticeNotTheOtherFollowOrSelectionOps() {
+        let codes = ["follow_unavailable", "terminal_follow_ui_required", "terminal_staging_only_ui_required", "unknown_terminal",
+                     "terminal_input_too_large"]
+        for op in ["follow_stop", "follow_resume", "send_selection", "close", "open", "resize", "follow_invite_staging_only", ""] {
+            for code in codes {
+                XCTAssertNil(TerminalRefusedFrame(op: op, terminalId: "t1", code: code).overlayNotice, "op \(op), code \(code)")
+            }
+        }
+    }
+
+    func testARefusedInviteReachesSubscribersSoThePaneCanShowTheNotice() {
+        let refused = inviteRefusal("follow_unavailable")
+        store.ingest(.terminalRefused(refused))
+        XCTAssertEqual(changes, [.refused(refused)])
+        if case .refused(let frame)? = changes.first {
+            XCTAssertEqual(frame.overlayNotice, unavailableNotice)
+        } else {
+            XCTFail("no refused change")
+        }
+    }
+
     // MARK: - Resize
 
     func testAResizeIsSentOncePerDistinctSize() {

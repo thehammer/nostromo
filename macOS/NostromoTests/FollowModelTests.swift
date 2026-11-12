@@ -332,14 +332,6 @@ final class FollowModelTests: XCTestCase {
                        "Claudia can stage commands for you to place. This terminal's output is not sent to Claudia's model.")
     }
 
-    func testAStagingOnlyBadgeIsReadAloudAsItsTextAndItsDescription() {
-        let m = model(info(follower: stagingOnly()))
-        XCTAssertEqual(m.badgeAccessibilityLabel, m.badgeText + ". " + m.badgeDescription)
-        XCTAssertEqual(m.badgeAccessibilityLabel,
-                       "Staging only: Claudia. Claudia can stage commands for you to place. "
-                       + "This terminal's output is not sent to Claudia's model.")
-    }
-
     func testAStagingOnlyPaneOffersStopAndMove() {
         XCTAssertEqual(model(info(follower: stagingOnly())).actions, [.stop, .move])
         XCTAssertEqual(model(info(status: .ended, follower: stagingOnly())).actions, [.stop, .move])
@@ -481,6 +473,116 @@ final class FollowModelTests: XCTestCase {
         XCTAssertEqual(m.inviteAccessibilityLabel(mode: .output), "Invite the chosen agent to follow this terminal")
         XCTAssertEqual(m.inviteAccessibilityLabel(mode: .stagingOnly), "Invite the chosen agent to stage commands only, with no output")
     }
+
+    // MARK: Staging only (S3b): the Send selection label
+    //
+    // Send selection hands the selected text to an agent's model. To a staging-only follower that is output it
+    // is deliberately not sent, so its menu item says so, in the title, the tooltip and the spoken label. Every
+    // other item is exactly what it was.
+
+    private func sendItem(_ m: FollowModel, _ option: FollowFocusOption, enabled: Bool = true,
+                          target: AnyObject? = nil, action: Selector = Selector(("sendSelectionTapped:"))) -> NSMenuItem {
+        m.sendSelectionMenuItem(for: option, enabled: enabled, target: target, action: action)
+    }
+
+    private func assertPlainSendItem(_ item: NSMenuItem, _ option: FollowFocusOption, _ note: String = "",
+                                     file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(item.title, "Send selection to \(option.name)", note, file: file, line: line)
+        XCTAssertEqual(item.toolTip, FollowModel.sendSelectionTooltip, note, file: file, line: line)
+        XCTAssertEqual(item.accessibilityLabel(), item.title, note, file: file, line: line)
+    }
+
+    func testTheSendSelectionItemOfAStagingOnlyFollowerSaysItGivesItOutput() {
+        let m = model(info(follower: stagingOnly()))
+        let item = sendItem(m, claudia)
+        XCTAssertEqual(item.title, "Send selection to Claudia (staging only: this gives it output)")
+        let tooltip = "Claudia follows this terminal staging only and is not sent its output. "
+            + "Sending this selection gives Claudia's model text it would not otherwise see. " + FollowModel.sendSelectionTooltip
+        XCTAssertEqual(item.toolTip, tooltip)
+        XCTAssertEqual(item.accessibilityLabel(), item.title + ". " + tooltip)
+    }
+
+    func testTheStagingOnlyLabelNamesTheFocusByItsLabelNotItsTag() {
+        let great = FollowFocusOption(tag: "claudia-1", name: "Claudia the Great")
+        let item = sendItem(model(info(follower: stagingOnly()), focuses: [core, great, cody]), great)
+        XCTAssertEqual(item.title, "Send selection to Claudia the Great (staging only: this gives it output)")
+        XCTAssertTrue(item.toolTip?.hasPrefix("Claudia the Great follows this terminal staging only") ?? false, item.toolTip ?? "")
+        XCTAssertFalse(item.title.contains("claudia-1"))
+    }
+
+    func testTheStagingOnlyLabelShowsWhateverTheBuildOffersAndWhateverThePausedFlagSays() {
+        let followers = [stagingOnly(), stagingOnly(paused: true, reason: "too_much_output")]
+        for follower in followers {
+            for offers in [true, false] {
+                let item = sendItem(offering(info(follower: follower), offers: offers), claudia)
+                XCTAssertTrue(item.title.hasSuffix("(staging only: this gives it output)"), "offers \(offers): \(item.title)")
+            }
+        }
+    }
+
+    func testTheSendSelectionItemOfAFullFollowerOrNoFollowerHasNoStagingOnlyLabel() {
+        let followers: [(String, TerminalFollower?)] = [
+            ("nobody follows", nil),
+            ("a full follower", following("claudia-1")),
+            ("a paused full follower", following("claudia-1", paused: true, reason: "too_much_output")),
+        ]
+        for (note, follower) in followers {
+            let m = model(info(follower: follower))
+            for option in [core, claudia, cody] { assertPlainSendItem(sendItem(m, option), option, "\(note), \(option.name)") }
+        }
+    }
+
+    func testAFollowerWhoseModeIsUnknownIsAFullFollowerForTheSendSelectionLabel() {
+        for mode in [nil, "future_mode", "STAGING_ONLY", ""] as [String?] {
+            let m = model(info(follower: TerminalFollower(tag: "claudia-1", paused: false, pauseReason: nil, mode: mode)))
+            assertPlainSendItem(sendItem(m, claudia), claudia, "mode \(String(describing: mode))")
+        }
+    }
+
+    func testOnlyTheStagingOnlyFollowersItemIsLabelledTheOtherFocusesAreUnchanged() {
+        let m = model(info(follower: stagingOnly()))
+        assertPlainSendItem(sendItem(m, core), core)
+        assertPlainSendItem(sendItem(m, cody), cody)
+        XCTAssertNotEqual(sendItem(m, claudia).title, FollowModel.sendSelectionTitle(to: claudia))
+    }
+
+    func testTheSendSelectionItemPassesThroughItsTargetActionTagAndEnabledFlag() {
+        let target = NSObject()
+        let action = Selector(("sendSelectionTapped:"))
+        for follower in [nil, stagingOnly()] as [TerminalFollower?] {
+            let m = model(info(follower: follower))
+            for enabled in [true, false] {
+                let item = sendItem(m, claudia, enabled: enabled, target: target, action: action)
+                XCTAssertEqual(item.representedObject as? String, "claudia-1")
+                XCTAssertTrue(item.target === target)
+                XCTAssertEqual(item.action, action)
+                XCTAssertEqual(item.isEnabled, enabled, "staging only: \(follower != nil), enabled: \(enabled)")
+            }
+        }
+    }
+
+    // MARK: Staging only (S3b): what the invite form opens on
+
+    func testAPaneWithAStagingOnlyFollowerOpensTheInviteFormOnStagingOnly() {
+        XCTAssertEqual(offering(info(follower: stagingOnly())).defaultInviteMode, .stagingOnly)
+        XCTAssertEqual(offering(info(follower: stagingOnly(paused: true, reason: "too_much_output"))).defaultInviteMode, .stagingOnly)
+        XCTAssertEqual(offering(info(kind: .ecs, target: target("production"), follower: stagingOnly())).defaultInviteMode, .stagingOnly)
+    }
+
+    func testEveryOtherPaneOpensTheInviteFormOnOutput() {
+        XCTAssertEqual(offering(info()).defaultInviteMode, .output, "nobody follows")
+        XCTAssertEqual(offering(info(kind: .ecs, target: target("production"))).defaultInviteMode, .output, "a remote pane nobody follows")
+        XCTAssertEqual(offering(info(follower: following("claudia-1"))).defaultInviteMode, .output, "a full follower")
+        XCTAssertEqual(offering(info(follower: following("claudia-1", paused: true, reason: "too_much_output"))).defaultInviteMode, .output,
+                       "a paused full follower")
+        XCTAssertEqual(offering(info(follower: TerminalFollower(tag: "claudia-1", paused: false, pauseReason: nil, mode: "future_mode"))).defaultInviteMode,
+                       .output, "an unknown mode is a full follow")
+    }
+
+    func testWithoutTheStagingOnlyChoiceTheFormOpensOnOutputWhateverTheFollower() {
+        XCTAssertEqual(offering(info(follower: stagingOnly()), offers: false).defaultInviteMode, .output)
+        XCTAssertEqual(model(info(follower: stagingOnly())).defaultInviteMode, .output)
+    }
 }
 
 // MARK: - The Follow popover (S3b)
@@ -529,13 +631,13 @@ final class FollowControlViewTests: MouseQueueTestCase {
 
     private func makeRig(follower: TerminalFollower? = nil, ownerTag: String = "claudia-1", kind: TerminalKind = .local,
                          environment: String = "production", offersStagingOnly: Bool = true,
-                         status: TerminalStatus = .running) -> Rig {
+                         status: TerminalStatus = .running, focuses: [FollowFocusOption]? = nil) -> Rig {
         let target = kind == .ecs ? TerminalTarget(project: "admin-portal", environment: environment, service: "scheduler", shellType: "shell") : nil
         let info = TerminalInfo(terminalId: "t1", tag: ownerTag, paneId: "terminal-a", kind: kind, label: "Terminal", cwd: nil, target: target,
                                 status: status, exitCode: nil, endedReason: nil, cols: 80, rows: 24,
                                 requestedBy: TerminalRequester(kind: "user", tag: nil), openedByRequest: nil,
                                 follower: follower, idleClosesAt: nil)
-        let model = FollowModel(info: info, focuses: [core, claudia, cody], offersStagingOnly: offersStagingOnly)
+        let model = FollowModel(info: info, focuses: focuses ?? [core, claudia, cody], offersStagingOnly: offersStagingOnly)
         let recorder = Recorder()
         let store = TerminalSessionStore(now: { recorder.now }, transport: { recorder.messages.append($0) })
         let view = FollowControlView(model: model, store: store, closePopover: { recorder.closeCount += 1 })
@@ -739,6 +841,35 @@ final class FollowControlViewTests: MouseQueueTestCase {
         XCTAssertEqual(rig.recorder.messages, [.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: false)])
     }
 
+    // MARK: A pane nobody follows defaults to Output, remote panes included
+
+    func testARemotePaneNobodyFollowsDefaultsToOutputAndInviteSendsAFullFollowInvite() throws {
+        for environment in ["production", "staging"] {
+            let rig = makeRig(kind: .ecs, environment: environment, offersStagingOnly: true)
+            let token = environment.uppercased()
+            XCTAssertEqual(try button(outputId, in: rig).state, .on, environment)
+            XCTAssertEqual(try button(stagingId, in: rig).state, .off, environment)
+            XCTAssertEqual(try text("terminal-follow-warning", in: rig), "Output from \(token) will be sent to Claudia's model.")
+            XCTAssertEqual(try button("terminal-follow-include-screen", in: rig).state, .off)
+
+            rig.person()
+            try invite(in: rig)
+            XCTAssertEqual(rig.recorder.messages, [.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: false)], environment)
+            XCTAssertFalse(rig.recorder.messages.contains { if case .followInviteStagingOnly = $0 { return true } else { return false } })
+            XCTAssertEqual(rig.recorder.closeCount, 1)
+        }
+    }
+
+    func testARemotePaneWhereTheDaemonDoesNotOfferStagingOnlyAlsoSendsAFullFollowInvite() throws {
+        let rig = makeRig(kind: .ecs, environment: "production", offersStagingOnly: false)
+        XCTAssertNil(find(outputId, in: rig))
+        XCTAssertNil(find(stagingId, in: rig))
+        XCTAssertEqual(try text("terminal-follow-warning", in: rig), "Output from PRODUCTION will be sent to Claudia's model.")
+        rig.person()
+        try invite(in: rig)
+        XCTAssertEqual(rig.recorder.messages, [.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: false)])
+    }
+
     // MARK: (c) A synthetic change of mode does nothing
 
     func testASyntheticChoiceOfStagingOnlyIsUndoneAndReported() throws {
@@ -850,27 +981,101 @@ final class FollowControlViewTests: MouseQueueTestCase {
         XCTAssertEqual(try text("terminal-follow-heading", in: rig), "Move this terminal to another agent")
     }
 
+    private var stagingOnlyClaudia: TerminalFollower {
+        TerminalFollower(tag: "claudia-1", paused: false, pauseReason: nil, mode: "staging_only")
+    }
+
     func testAStagingOnlyFollowerCanBeChangedToOutputFromTheMovePopover() throws {
-        let rig = makeRig(follower: TerminalFollower(tag: "claudia-1", paused: false, pauseReason: nil, mode: "staging_only"),
-                          ownerTag: "core-1")
+        let rig = makeRig(follower: stagingOnlyClaudia, ownerTag: "core-1")
         try openMove(rig)
+
+        // Move opens on what she has now. Output is a change a person makes with a click, never the default.
+        XCTAssertEqual(try button(stagingId, in: rig).state, .on)
+        XCTAssertEqual(try button(outputId, in: rig).state, .off)
+        XCTAssertEqual(try picker(in: rig).itemTitles, ["Core", "Cody"])
+        try choose(outputId, in: rig)
 
         XCTAssertEqual(try button(outputId, in: rig).state, .on)
         XCTAssertEqual(try picker(in: rig).itemTitles, ["Core", "Claudia", "Cody"], "she gets no output yet, so Output is a change")
         try pick("Claudia", in: rig)
         XCTAssertEqual(try text("terminal-follow-heading", in: rig), "Change what Claudia gets")
+        XCTAssertEqual(try text("terminal-follow-warning", in: rig), "Output will be sent to Claudia's model.")
+        XCTAssertTrue(rig.recorder.messages.isEmpty, "nothing is sent until Invite")
 
         rig.person()
         try invite(in: rig)
         XCTAssertEqual(rig.recorder.messages, [.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: false)])
     }
 
-    func testAStagingOnlyFollowerIsNotListedWhenStagingOnlyIsChosenAgain() throws {
-        let rig = makeRig(follower: TerminalFollower(tag: "claudia-1", paused: false, pauseReason: nil, mode: "staging_only"),
-                          ownerTag: "core-1")
+    func testMoveOnAStagingOnlyFollowedPaneOpensOnStagingOnlyAndNeverSendsAFullInvite() throws {
+        let rig = makeRig(follower: stagingOnlyClaudia, ownerTag: "core-1")
         try openMove(rig)
-        try choose(stagingId, in: rig)
+
+        XCTAssertEqual(try button(stagingId, in: rig).state, .on, "the Staging-only radio is on")
+        XCTAssertEqual(try button(outputId, in: rig).state, .off, "the Output radio is off")
+        XCTAssertEqual(try picker(in: rig).itemTitles, ["Core", "Cody"], "the other focuses, not the follower")
+        XCTAssertEqual(try text("terminal-follow-heading", in: rig), "Move this terminal to another agent")
+        XCTAssertEqual(try text("terminal-follow-warning", in: rig), rig.model.warning(forFocusTag: "core-1", mode: .stagingOnly))
+        XCTAssertFalse(try button("terminal-follow-include-screen", in: rig).isEnabled, "there is no output to include")
+        XCTAssertEqual(try button("terminal-follow-invite", in: rig).accessibilityLabel(), rig.model.inviteAccessibilityLabel(mode: .stagingOnly))
+
+        try pick("Cody", in: rig)
+        rig.person()
+        try invite(in: rig)
+        XCTAssertEqual(rig.recorder.messages, [.followInviteStagingOnly(terminalId: "t1", followerTag: "cody-1")])
+        XCTAssertFalse(rig.recorder.messages.contains { if case .followInvite = $0 { return true } else { return false } },
+                       "moving a staging-only follow must not start a full follow")
+        XCTAssertEqual(rig.recorder.closeCount, 1)
+    }
+
+    func testMovingAStagingOnlyFollowToOutputNeedsAPersonsClickOnTheOutputRadio() throws {
+        for makeSynthetic in [{ (rig: Rig) in rig.synthetic() }, { (rig: Rig) in rig.stamped() }] {
+            let rig = makeRig(follower: stagingOnlyClaudia, ownerTag: "core-1")
+            try openMove(rig)
+            makeSynthetic(rig)
+            try button(outputId, in: rig).performClick(nil)
+
+            XCTAssertEqual(try button(stagingId, in: rig).state, .on, "a synthetic click does not escalate to Output")
+            XCTAssertEqual(try button(outputId, in: rig).state, .off)
+            XCTAssertEqual(try picker(in: rig).itemTitles, ["Core", "Cody"])
+            XCTAssertEqual(rig.recorder.messages, [.refusalReport(terminalId: "t1", op: .followInvite, channel: "app_control")])
+
+            rig.person()
+            try invite(in: rig)
+            XCTAssertEqual(inviteFrames(rig), [.followInviteStagingOnly(terminalId: "t1", followerTag: "core-1")],
+                           "Invite after the refused click is still staging only")
+        }
+    }
+
+    func testMoveWithTheStagingOnlyFollowerAsTheOnlyFocusOffersNoOneAndDisablesInvite() throws {
+        let rig = makeRig(follower: stagingOnlyClaudia, ownerTag: "claudia-1", focuses: [claudia])
+        try openMove(rig)
+
+        XCTAssertEqual(try button(stagingId, in: rig).state, .on)
+        XCTAssertEqual(try button(outputId, in: rig).state, .off)
+        XCTAssertEqual(try picker(in: rig).itemTitles, [], "the follower is not offered staging only again")
+        XCTAssertFalse(try button("terminal-follow-invite", in: rig).isEnabled, "nothing escalates silently")
+        rig.person()
+        try invite(in: rig)
+        XCTAssertTrue(rig.recorder.messages.isEmpty, "Invite sends nothing, and certainly no full invite")
+        XCTAssertEqual(rig.recorder.closeCount, 0)
+
+        // Output is still a person's explicit choice, and then it is a visible change of what Claudia gets.
+        try choose(outputId, in: rig)
+        XCTAssertEqual(try picker(in: rig).itemTitles, ["Claudia"])
+        XCTAssertEqual(try text("terminal-follow-heading", in: rig), "Change what Claudia gets")
+        XCTAssertTrue(try button("terminal-follow-invite", in: rig).isEnabled)
+        try invite(in: rig)
+        XCTAssertEqual(rig.recorder.messages, [.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: false)])
+    }
+
+    func testMoveOnAFullFollowedPaneStillOpensOnOutput() throws {
+        let rig = makeRig(follower: TerminalFollower(tag: "claudia-1", paused: false, pauseReason: nil), ownerTag: "core-1")
+        try openMove(rig)
+        XCTAssertEqual(try button(outputId, in: rig).state, .on)
+        XCTAssertEqual(try button(stagingId, in: rig).state, .off)
         XCTAssertEqual(try picker(in: rig).itemTitles, ["Core", "Cody"])
+        XCTAssertEqual(try text("terminal-follow-warning", in: rig), "Output will be sent to Core's model.")
     }
 
     func testTheManagePopoverOfAStagingOnlyFollowerSaysSoAndOffersStopAndMove() throws {
