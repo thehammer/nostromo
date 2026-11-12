@@ -156,6 +156,11 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     var blockingPillFrame: NSRect? { blocking > 0 && !pillSlot.isHidden ? pillSlot.convert(blockingPill.frame, to: self) : nil }
     var waitingPillFrame: NSRect? { waiting > 0 && !pillSlot.isHidden ? pillSlot.convert(waitingPill.frame, to: self) : nil }
     var secondaryFrame: NSRect? { secondaryLabel?.frame }
+    /// What `updateAppearance` actually drew: the row's layer fill, each leading bar (hidden, colour) and
+    /// the waiting pill's outline (nil when it has none). Exposed for tests.
+    var drawnFill: CGColor? { layer?.backgroundColor }
+    var drawnBars: [(isHidden: Bool, color: CGColor?)] { bars.map { ($0.isHidden, $0.layer?.backgroundColor) } }
+    var waitingPillOutline: CGColor? { (waitingPill.layer?.borderWidth ?? 0) > 0 ? waitingPill.layer?.borderColor : nil }
     var secondaryVisible: Bool { secondaryLabel.map { !$0.isHidden } ?? false }
     var waitingPillIsCollapsed: Bool { waiting > 0 && waitingPill.isCollapsed }
     var blockingPillToolTip: String? { blockingPill.toolTip }

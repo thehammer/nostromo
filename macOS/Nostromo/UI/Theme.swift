@@ -27,8 +27,9 @@ enum Theme {
     /// session-health dots on a dark background.
     static let attention   = NSColor(red: 192/255, green: 132/255, blue: 252/255, alpha: 1)
     /// "Needs you now" pill background (a pending approval): an explicit dark red so the pill's
-    /// white digit reads at 5.6:1 (WCAG AA needs 4.5:1). Not `redSweater`, which is too light for white text.
-    static let needsYouNow = NSColor(red: 198/255, green: 40/255, blue: 40/255, alpha: 1)
+    /// white digit reads at 5.3:1 (WCAG AA needs 4.5:1). Not `redSweater`, which is too light for white text.
+    /// Light enough that the 3 pt leading bar clears 3:1 (non-text) over the row's own red fill too.
+    static let needsYouNow = NSColor(red: 205/255, green: 44/255, blue: 44/255, alpha: 1)
     /// The sidebar row of a focus an agent is blocked on (a pending approval): `needsYouNow` at 16% over
     /// the bar. Measured over `bgBar`, the row's label (`navRepoColor`, `fgMuted`) stays above 4.5:1
     /// and the waiting pill's text above 7:1 (pinned in `NeedsYouPillsTests`).

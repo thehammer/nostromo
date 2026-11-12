@@ -868,6 +868,73 @@ final class NeedsYouPillsRowTests: XCTestCase {
         assertSameRect(try XCTUnwrap(item.waitingPillFrame), waiting, "waiting pill with an environment tag and the dot")
     }
 
+    // MARK: What is actually drawn
+
+    private func assertDrawn(_ item: NavTabItem, active: Bool, blocking: Bool, _ context: String,
+                             file: StaticString = #filePath, line: UInt = #line) throws {
+        let want = NavRowHighlight.style(isActive: active, isBlocking: blocking)
+        let fill = try XCTUnwrap(item.drawnFill, "the row has no layer fill: \(context)", file: file, line: line)
+        if let wantFill = want.fill {
+            try assertSameColor(NSColor(cgColor: fill), wantFill, "row fill: \(context)", file: file, line: line)
+            XCTAssertGreaterThan(fill.alpha, 0.1, "the fill is visible: \(context)", file: file, line: line)
+        } else {
+            XCTAssertEqual(fill.alpha, 0, accuracy: 0.001, "no fill: \(context)", file: file, line: line)
+        }
+        let bars = item.drawnBars
+        XCTAssertEqual(bars.count, 2, file: file, line: line)
+        for (index, bar) in bars.enumerated() {
+            if index < want.bars.count {
+                XCTAssertFalse(bar.isHidden, "bar \(index) is shown: \(context)", file: file, line: line)
+                try assertSameColor(bar.color.flatMap { NSColor(cgColor: $0) }, want.bars[index], "bar \(index): \(context)",
+                                    file: file, line: line)
+            } else {
+                XCTAssertTrue(bar.isHidden, "bar \(index) is hidden: \(context)", file: file, line: line)
+            }
+        }
+    }
+
+    func testTheHighlightIsActuallyDrawnInAllFourStatesInLightAndDark() throws {
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            let item = makeItem()
+            item.appearance = try XCTUnwrap(NSAppearance(named: name))
+            let context = name.rawValue
+
+            item.isActive = false; apply(item)
+            try assertDrawn(item, active: false, blocking: false, "none, \(context)")
+
+            item.isActive = true
+            try assertDrawn(item, active: true, blocking: false, "active, \(context)")
+
+            apply(item, blocking: 2)
+            try assertDrawn(item, active: true, blocking: true, "active + blocking, \(context)")
+
+            item.isActive = false
+            try assertDrawn(item, active: false, blocking: true, "blocking, \(context)")
+
+            apply(item)
+            try assertDrawn(item, active: false, blocking: false, "cleared again, \(context)")
+        }
+    }
+
+    func testWaitingAloneDrawsNoHighlightSelectedOrNot() throws {
+        let item = makeItem()
+        apply(item, waiting: 7)
+        try assertDrawn(item, active: false, blocking: false, "waiting only")
+        item.isActive = true
+        try assertDrawn(item, active: true, blocking: false, "waiting only, selected")
+        XCTAssertEqual(item.drawnBars.filter { !$0.isHidden }.count, 1, "only the active bar")
+    }
+
+    func testTheRedFillAndBarAreTheBlockingRedAndTheActiveBarIsTheFirst() throws {
+        let item = makeItem()
+        item.isActive = true
+        apply(item, blocking: 1)
+        let bars = item.drawnBars
+        try assertSameColor(bars[0].color.flatMap { NSColor(cgColor: $0) }, Theme.cornflower, "first bar")
+        try assertSameColor(bars[1].color.flatMap { NSColor(cgColor: $0) }, Theme.needsYouNow, "second bar")
+        try assertSameColor(item.drawnFill.flatMap { NSColor(cgColor: $0) }, Theme.blockingRowFill, "fill")
+    }
+
     // MARK: Where the pills sit
 
     func testThePillsSitOnTheSecondLineRightAlignedAndTheBranchStaysLeftOfThem() throws {
@@ -916,6 +983,54 @@ final class NeedsYouPillsRowTests: XCTestCase {
         XCTAssertTrue(item.secondaryVisible)
         XCTAssertNotNil(item.secondaryFrame)
         XCTAssertFalse(item.waitingPillIsCollapsed)
+    }
+
+    func testTheBranchNeverRunsUnderAPillAtTheNormalWidthWithZeroOneOrTwoPills() throws {
+        for branch in ["main", Self.longBranch] {
+            for indented in [false, true] {
+                for (blockingCount, waitingCount) in [(0, 0), (2, 0), (0, 7), (2, 7), (150, 150)] {
+                    let item = makeItem(branch: branch, width: Theme.sidebarWidth, indented: indented)
+                    apply(item, blocking: blockingCount, waiting: waitingCount)
+                    let at = "branch \(branch), indented \(indented), blocking \(blockingCount), waiting \(waitingCount)"
+                    guard item.secondaryVisible else { continue }
+                    let line = try XCTUnwrap(item.secondaryFrame, at)
+                    let leadingPill = [item.blockingPillFrame, item.waitingPillFrame].compactMap { $0 }.map(\.minX).min()
+                    if let leadingPill {
+                        XCTAssertLessThanOrEqual(line.maxX, leadingPill + 0.5, "branch ends before the slot's leading edge: \(at)")
+                    }
+                    XCTAssertLessThanOrEqual(line.maxX, item.bounds.width, "inside the row: \(at)")
+                }
+            }
+        }
+    }
+
+    func testAPillAppearingOrGoingAwayOnlyTruncatesTheBranchItNeverMovesIt() throws {
+        // A short branch has room at the normal width: its frame must not change at all.
+        let short = makeItem(branch: "main")
+        let shortBefore = try XCTUnwrap(short.secondaryFrame)
+        for (blockingCount, waitingCount) in [(2, 0), (0, 7), (2, 7)] {
+            apply(short, blocking: blockingCount, waiting: waitingCount)
+            assertSameRect(try XCTUnwrap(short.secondaryFrame), shortBefore, "short branch with \(blockingCount)/\(waitingCount)")
+        }
+        apply(short)
+        assertSameRect(try XCTUnwrap(short.secondaryFrame), shortBefore, "short branch after the pills went away")
+
+        // A long branch is truncated: only its trailing edge moves, and it comes back when the pills go.
+        let long = makeItem(branch: Self.longBranch)
+        let longBefore = try XCTUnwrap(long.secondaryFrame)
+        var previousMaxX = longBefore.maxX
+        for (blockingCount, waitingCount) in [(2, 0), (2, 7)] {
+            apply(long, blocking: blockingCount, waiting: waitingCount)
+            let now = try XCTUnwrap(long.secondaryFrame)
+            XCTAssertEqual(now.minX, longBefore.minX, accuracy: 0.5, "only the trailing edge moves")
+            XCTAssertEqual(now.minY, longBefore.minY, accuracy: 0.5)
+            XCTAssertEqual(now.height, longBefore.height, accuracy: 0.5)
+            XCTAssertLessThan(now.maxX, previousMaxX + 0.5, "adding a pill never widens the branch")
+            XCTAssertLessThan(now.maxX, longBefore.maxX - 10, "the branch gave way to the pills")
+            previousMaxX = now.maxX
+        }
+        apply(long)
+        assertSameRect(try XCTUnwrap(long.secondaryFrame), longBefore, "long branch after the pills went away")
     }
 
     // MARK: Narrow widths
@@ -1218,6 +1333,49 @@ final class NeedsYouPillsContrastTests: XCTestCase {
         for (pair, ratio) in light {
             XCTAssertEqual(ratio, try XCTUnwrap(dark[pair]), accuracy: 1e-9, "\(pair) differs between appearances")
         }
+    }
+
+    // Non-text contrast (WCAG 1.4.11) is 3:1, measured as drawn: the translucent colour blended over the bar.
+    private static let nonText = 3.0
+
+    private func nonTextRatios() throws -> [String: Double] {
+        let bar = Theme.bgBar
+        let outline = Theme.waitingPillText.withAlphaComponent(0.6)
+        let activeBackdrop = try over(Theme.cornflower.withAlphaComponent(0.12), bar)
+        let blockingBackdrop = try over(Theme.blockingRowFill, bar)
+        return [
+            "waiting outline on the bar": try contrast(try over(outline, bar), bar),
+            "waiting outline on the selected row": try contrast(try over(outline, activeBackdrop), activeBackdrop),
+            "waiting outline on the blocking row": try contrast(try over(outline, blockingBackdrop), blockingBackdrop),
+            "red leading bar on the bar": try contrast(Theme.needsYouNow, bar),
+            "red leading bar on the row's own red fill": try contrast(Theme.needsYouNow, blockingBackdrop),
+        ]
+    }
+
+    func testNonTextElementsMeetThreeToOneInBothAppearances() throws {
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            let appearance = try XCTUnwrap(NSAppearance(named: name))
+            var computed: [String: Double] = [:]
+            var failure: Error?
+            appearance.performAsCurrentDrawingAppearance {
+                do { computed = try nonTextRatios() } catch { failure = error }
+            }
+            if let failure { throw failure }
+            XCTAssertEqual(computed.count, 5)
+            for (pair, ratio) in computed {
+                XCTAssertGreaterThanOrEqual(ratio, Self.nonText, "\(pair) under \(name.rawValue): \(ratio)")
+            }
+        }
+    }
+
+    func testTheOutlineIsTheAmberAtSixtyPercentAsDrawn() throws {
+        let item = NavTabItem(focus: Focus(id: "x", agentTag: "cody", projectPath: "/p", isBuiltIn: false, org: "o"),
+                              label: "L", secondary: "main", indented: false)
+        item.setBadge(FocusBadge.needsYou(blocking: 0, waiting: 3))
+        item.frame = NSRect(x: 0, y: 0, width: Theme.sidebarWidth, height: Theme.navItemSubtitleHeight)
+        item.layoutSubtreeIfNeeded()
+        try assertSameColor(item.waitingPillOutline.flatMap { NSColor(cgColor: $0) },
+                            Theme.waitingPillText.withAlphaComponent(0.6), "the outline the pill draws")
     }
 
     func testTheBlockingFillIsTheRedAtAboutSixteenPercent() throws {
