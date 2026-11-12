@@ -18,8 +18,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 use super::ecs::{EcsVocabulary, VocabError};
-use super::follow::manager::{pane_name, FollowGrant, FOLLOW_ALLOW, FOLLOW_DENY};
-use super::follow::{FollowError, ScreenRead, ScreenReadError};
+use super::follow::manager::{
+    pane_name, FollowGrant, FOLLOW_ALLOW, FOLLOW_ALLOW_STAGING_ONLY, FOLLOW_DENY,
+};
+use super::follow::{FollowAccess, FollowError, ScreenRead, ScreenReadError};
 use super::launcher::Placement;
 use super::remote_request::{
     self, clean_reason, Clock, FocusLimits, LimitRefused, RemoteRequest, RemoteResult,
@@ -88,13 +90,18 @@ pub struct AgentFollowRequest {
     pub reason: Option<String>,
     /// How long to wait for the user.
     pub timeout: Duration,
+    /// What the agent asks to receive: the output too, or staging only.
+    pub access: FollowAccess,
 }
 
 /// How [`TerminalAgentApi::request_follow`] ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FollowRequestResult {
-    /// Following started (or already was, for this focus).
+    /// Following started (or already was, for this focus; a staging-only
+    /// request of a full follower also ends here: it has that and more).
     Following,
+    /// Following for staging only started (or already was).
+    StagingOnly,
     Denied,
     Dismissed,
     TimedOut,
@@ -125,6 +132,9 @@ pub enum FollowRefusal {
     RequestLimit,
     /// The daemon has no follow engine.
     FollowUnavailable,
+    /// A staging-only request while the user has staging off (everywhere, or
+    /// for this terminal).
+    StagingDisabled,
     /// The user allowed it and following could not start.
     NotStarted(FollowError),
 }
@@ -139,6 +149,7 @@ impl FollowRefusal {
             Self::RequestCooldown => "request_cooldown",
             Self::RequestLimit => "request_limit",
             Self::FollowUnavailable => "follow_unavailable",
+            Self::StagingDisabled => "staging_disabled",
             Self::NotStarted(e) => e.code(),
         }
     }
@@ -153,6 +164,8 @@ pub struct AgentTerminal {
     pub status: TerminalStatus,
     /// The asking focus is the terminal's follower (active or paused).
     pub followed_by_you: bool,
+    /// What the asking focus receives, when it follows the terminal.
+    pub follow_mode: Option<FollowAccess>,
 }
 
 /// What an agent's focus may do with terminals: open a local one, request a
@@ -246,13 +259,19 @@ impl TerminalAgentApi {
             .list()
             .into_iter()
             .filter_map(|info| {
-                let followed_by_you = info.follower.as_ref().is_some_and(|f| f.tag == focus_tag);
+                let follow_mode = info
+                    .follower
+                    .as_ref()
+                    .filter(|f| f.tag == focus_tag)
+                    .map(|f| f.mode);
+                let followed_by_you = follow_mode.is_some();
                 (info.tag == focus_tag || followed_by_you).then_some(AgentTerminal {
                     terminal_id: info.terminal_id,
                     label: info.label,
                     kind: info.kind,
                     status: info.status,
                     followed_by_you,
+                    follow_mode,
                 })
             })
             .collect()
@@ -274,21 +293,40 @@ impl TerminalAgentApi {
         decisions: &Arc<Mutex<DecisionRegistry>>,
         broadcast: &broadcast::Sender<ServerMsg>,
     ) -> FollowRequestResult {
-        let (info, follow, sensitive, follow_ui) = {
+        let staging_only = request.access == FollowAccess::StagingOnly;
+        let (info, follow, sensitive, follow_ui, staging) = {
             let m = self.lock();
             (
                 m.info(&request.terminal_id),
                 m.follow(),
                 m.sensitive_tags().tag_is_sensitive(&request.tag),
-                m.follow_ui_connected(),
+                if staging_only {
+                    m.staging_only_ui_connected()
+                } else {
+                    m.follow_ui_connected()
+                },
+                (m.staging_global(), m.staging()),
             )
         };
         // Another focus's terminal is answered like one that does not exist.
         let Some(info) = info.filter(|i| i.tag == request.tag) else {
             return FollowRequestResult::Refused(FollowRefusal::UnknownTerminal);
         };
-        if info.follower.as_ref().is_some_and(|f| f.tag == request.tag) {
-            return FollowRequestResult::Following;
+        // Already following with the same or a greater access: nothing to ask.
+        // A staging-only follower asking for the output falls through to a
+        // fresh sheet: staging only never grows into a full follow unasked.
+        match (
+            info.follower
+                .as_ref()
+                .filter(|f| f.tag == request.tag)
+                .map(|f| f.mode),
+            request.access,
+        ) {
+            (Some(FollowAccess::Full), _) => return FollowRequestResult::Following,
+            (Some(FollowAccess::StagingOnly), FollowAccess::StagingOnly) => {
+                return FollowRequestResult::StagingOnly
+            }
+            (Some(FollowAccess::StagingOnly), FollowAccess::Full) | (None, _) => {}
         }
         if info.status != TerminalStatus::Running {
             return FollowRequestResult::Refused(FollowRefusal::TerminalNotRunning);
@@ -296,6 +334,12 @@ impl TerminalAgentApi {
         let Some(follow) = follow else {
             return FollowRequestResult::Refused(FollowRefusal::FollowUnavailable);
         };
+        if staging_only {
+            let (global, store) = staging;
+            if global == StagingGlobal::Off || store.is_disabled(&request.terminal_id) {
+                return FollowRequestResult::Refused(FollowRefusal::StagingDisabled);
+            }
+        }
         if !follow_ui || !lock(decisions).has_operator_for(sensitive) {
             return FollowRequestResult::NoOperator;
         }
@@ -320,7 +364,11 @@ impl TerminalAgentApi {
 
         let (request_id, mut rx, sheet) = lock(decisions).submit(
             request.tag.clone(),
-            follow_prompt(&info, &request),
+            if staging_only {
+                staging_only_prompt(&info, &request)
+            } else {
+                follow_prompt(&info, &request)
+            },
             request
                 .reason
                 .as_deref()
@@ -328,8 +376,18 @@ impl TerminalAgentApi {
                 .map(|reason| follow_detail(&reason)),
             vec![
                 DecisionChoice {
-                    id: FOLLOW_ALLOW.into(),
-                    label: "Allow".into(),
+                    id: if staging_only {
+                        FOLLOW_ALLOW_STAGING_ONLY
+                    } else {
+                        FOLLOW_ALLOW
+                    }
+                    .into(),
+                    label: if staging_only {
+                        "Allow staging only"
+                    } else {
+                        "Allow"
+                    }
+                    .into(),
                     detail: None,
                     is_default: false,
                 },
@@ -369,10 +427,14 @@ impl TerminalAgentApi {
         // The user's mind: an Allow clears the focus's cooldown; a no, a
         // dismissal or silence starts (or lengthens) it. A request whose caller
         // went away says nothing.
-        if let Some(grant) = FollowGrant::from_decision(&outcome) {
+        if let Some(grant) = FollowGrant::from_decision(&outcome, request.access) {
             lock(&self.follow_limits).approved(&request.tag);
+            let access = grant.access;
             return match follow.invite_granted(grant, &request.terminal_id, &request.tag) {
-                Ok(()) => FollowRequestResult::Following,
+                Ok(()) => match access {
+                    FollowAccess::Full => FollowRequestResult::Following,
+                    FollowAccess::StagingOnly => FollowRequestResult::StagingOnly,
+                },
                 // The app that said Allow is gone: nothing follows.
                 Err(FollowError::NoOperator) => FollowRequestResult::NoOperator,
                 Err(e) => FollowRequestResult::Refused(FollowRefusal::NotStarted(e)),
@@ -408,14 +470,20 @@ impl TerminalAgentApi {
         terminal_id: &str,
     ) -> Result<ScreenRead, ScreenReadRefused> {
         let follow = self.lock().follow();
+        let access = follow
+            .as_ref()
+            .and_then(|f| f.access_of(focus_tag, terminal_id));
         // Anyone who does not follow the terminal gets the one answer, whatever
         // the limits say; only a follower's reads are counted.
-        if !follow
-            .as_ref()
-            .is_some_and(|f| f.is_follower(focus_tag, terminal_id))
-        {
+        if access.is_none() {
             self.audit_refusal(Some(focus_tag), "read", READ_SCREEN_TOOL, READ_FORBIDDEN);
             return Err(ScreenReadRefused::Forbidden);
+        }
+        // A staging-only follower may stage for the terminal, never read it:
+        // refused before the limits, so it consumes no read budget.
+        if access == Some(FollowAccess::StagingOnly) {
+            self.audit_refusal(Some(focus_tag), "read", READ_SCREEN_TOOL, READ_FORBIDDEN);
+            return Err(ScreenReadRefused::StagingOnly);
         }
         // The limits bound the redaction work and the audit lines a follower can
         // cause. They are held across the read so two calls cannot both pass.
@@ -491,19 +559,26 @@ impl TerminalAgentApi {
             let m = self.lock();
             (m.follow(), m.staging())
         };
-        if !follow
+        let Some(access) = follow
             .as_ref()
-            .is_some_and(|f| f.is_follower(focus_tag, terminal_id))
-        {
+            .and_then(|f| f.access_of(focus_tag, terminal_id))
+        else {
             return Err(StagingRefusal::new("not_following"));
-        }
-        let (info, global) = {
+        };
+        let (info, global, sensitive) = {
             let m = self.lock();
-            (m.info(terminal_id), m.staging_global())
+            (m.info(terminal_id), m.staging_global(), m.sensitive_tags())
         };
         let Some(info) = info else {
             return Err(StagingRefusal::new("not_following"));
         };
+        // What a staging-only follower of a remote shell sends and is told stays
+        // in its transcript (the tool call names the production terminal), so it is
+        // marked for good from its first call on, accepted or refused. Only
+        // holding the focus sensitive covers it until then.
+        if access == FollowAccess::StagingOnly && info.kind != TerminalKind::Local {
+            sensitive.mark_tag(focus_tag);
+        }
         if info.status != TerminalStatus::Running {
             return Err(StagingRefusal::new("terminal_not_running"));
         }
@@ -520,8 +595,10 @@ impl TerminalAgentApi {
             return Err(StagingRefusal::new("staging_disabled")
                 .detail("the user turned staging off for this terminal"));
         }
-        // Anything not known to be a local shell is treated as remote.
-        let remote = info.kind != TerminalKind::Local;
+        // Anything not known to be a local shell is treated as remote, and a
+        // staging-only follow is always strict: a history expansion's refusal
+        // must not tell whether a program is in the foreground.
+        let remote = info.kind != TerminalKind::Local || access == FollowAccess::StagingOnly;
         if request.op.is_change() {
             store
                 .take_change(focus_tag, (self.clock)())
@@ -649,6 +726,8 @@ impl TerminalAgentApi {
 pub enum ScreenReadRefused {
     /// The asker may not read it: it does not follow the terminal.
     Forbidden,
+    /// The asker follows the terminal for staging only: no screen reads.
+    StagingOnly,
     /// Redaction failed, so nothing was returned (fail closed).
     Withheld,
     /// The follower read again within [`MIN_READ_INTERVAL`]. Nothing was read.
@@ -662,7 +741,7 @@ impl ScreenReadRefused {
     /// The code the agent is told.
     pub fn code(self) -> &'static str {
         match self {
-            Self::Forbidden => READ_FORBIDDEN,
+            Self::Forbidden | Self::StagingOnly => READ_FORBIDDEN,
             Self::Withheld => "redaction_failed",
             Self::TooSoon => READ_TOO_SOON,
             Self::Limit => READ_LIMIT,
@@ -834,10 +913,50 @@ fn follow_prompt(info: &TerminalInfo, request: &AgentFollowRequest) -> String {
             format!("{who} asks to follow {pane}. Output will be sent to {agent}'s model.")
         }
     };
-    // Allow moves the follow: the user is told whose it was.
+    match &info.follower {
+        // The asker already stages here without the output: allowing adds it.
+        Some(current) if current.tag == request.tag => prompt.push_str(&format!(
+            " {agent} can stage commands here now without seeing output; allowing also sends it this terminal's output."
+        )),
+        // Allow moves the follow: the user is told whose it was.
+        Some(current) => prompt.push_str(&format!(
+            " {} follows it now; allowing moves it to {agent}.",
+            clean(&current.tag)
+        )),
+        None => {}
+    }
+    prompt
+}
+
+/// What the user is asked for a staging-only request: who asks, for which
+/// pane, and that no output goes to the agent. A remote pane's sheet leads with
+/// the environment in capitals.
+fn staging_only_prompt(info: &TerminalInfo, request: &AgentFollowRequest) -> String {
+    let clean = |s: &str| clean_reason(s).unwrap_or_default();
+    let agent = request
+        .agent
+        .as_deref()
+        .and_then(clean_reason)
+        .map(|name| short_agent_name(&name))
+        .unwrap_or_else(|| "An agent".to_string());
+    let who = format!("{agent} in {}", clean(&request.tag));
+    let pane = clean(&pane_name(info));
+    let mut prompt = match (info.kind, &info.target) {
+        (TerminalKind::Ecs, target) => {
+            let environment = target
+                .as_ref()
+                .map_or_else(|| "REMOTE".to_string(), |t| t.environment.to_uppercase());
+            format!(
+                "Staging only for {environment}: {who} asks to stage commands for {pane}. Output from {environment} will NOT be sent to {agent}'s model. You place and run every command yourself."
+            )
+        }
+        (TerminalKind::Local, _) => format!(
+            "{who} asks to stage commands for {pane}. {agent} can stage commands but will NOT see this terminal's output or screen. You place and run every command yourself."
+        ),
+    };
     if let Some(current) = &info.follower {
         prompt.push_str(&format!(
-            " {} follows it now; allowing moves it to {agent}.",
+            " {} follows it now; allowing moves it to {agent} (staging only).",
             clean(&current.tag)
         ));
     }

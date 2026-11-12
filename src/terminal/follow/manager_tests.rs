@@ -675,7 +675,8 @@ async fn an_invite_sends_one_started_notice_that_names_the_pane_and_nothing_else
         Some(TerminalFollower {
             tag: A.into(),
             paused: false,
-            pause_reason: None
+            pause_reason: None,
+            mode: crate::ipc::protocol::FollowAccess::Full
         })
     );
 }
@@ -1079,7 +1080,8 @@ async fn a_flood_pauses_following_and_tells_the_agent_the_app_and_the_audit() {
         Some(TerminalFollower {
             tag: A.into(),
             paused: true,
-            pause_reason: Some("too_much_output".into())
+            pause_reason: Some("too_much_output".into()),
+            mode: crate::ipc::protocol::FollowAccess::Full
         })
     );
     let paused = w.rec.notices_for(A, "paused", mark);
@@ -1136,7 +1138,8 @@ async fn three_capped_deliveries_in_a_row_pause_following() {
         Some(TerminalFollower {
             tag: A.into(),
             paused: true,
-            pause_reason: Some("too_much_output".into())
+            pause_reason: Some("too_much_output".into()),
+            mode: crate::ipc::protocol::FollowAccess::Full
         }),
         "output that keeps overflowing the cap is a flood"
     );
@@ -1165,7 +1168,8 @@ async fn resuming_delivers_only_what_is_produced_after_the_resume() {
         Some(TerminalFollower {
             tag: A.into(),
             paused: false,
-            pause_reason: None
+            pause_reason: None,
+            mode: crate::ipc::protocol::FollowAccess::Full
         })
     );
     let resumed = w.rec.notices_for(A, "resumed", mark);
@@ -1659,7 +1663,8 @@ async fn every_change_of_follower_is_broadcast_as_terminal_state() {
             Some(TerminalFollower {
                 tag: A.into(),
                 paused: false,
-                pause_reason: None
+                pause_reason: None,
+                mode: crate::ipc::protocol::FollowAccess::Full
             })
         ))
     );
@@ -2628,3 +2633,6 @@ fn no_staging_notice_says_a_command_ran() {
         assert!(sentence.contains("placed") && sentence.contains("only the user's enter runs it"));
     }
 }
+
+#[path = "manager_tests_s3.rs"]
+mod s3;

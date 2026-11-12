@@ -1152,6 +1152,10 @@ follow_test! {
         let (refused_id, code) = old_app.refused(from, "follow_invite").await;
         assert_eq!(refused_id.as_deref(), Some(id.as_str()));
         assert_eq!(code, "terminal_follow_ui_required");
+        d.wait_audit("the refusal is audited", |l| {
+            l["event"] == "refused" && l["code"] == "terminal_follow_ui_required"
+        })
+        .await;
         assert_eq!(d.follower_of(&id), None);
         assert_eq!(a.count(), 0, "nothing was delivered to the session");
     }
@@ -1549,7 +1553,8 @@ follow_test! {
             Some(TerminalFollower {
                 tag: "cody-a".into(),
                 paused: true,
-                pause_reason: Some("too_much_output".into())
+                pause_reason: Some("too_much_output".into()),
+                mode: nostromo::ipc::protocol::FollowAccess::Full
             })
         );
         let (_, paused) = r
@@ -1921,7 +1926,8 @@ follow_test! {
             Some(TerminalFollower {
                 tag: "cody-a".into(),
                 paused: false,
-                pause_reason: None
+                pause_reason: None,
+                mode: nostromo::ipc::protocol::FollowAccess::Full
             })
         );
 
@@ -2050,5 +2056,170 @@ follow_test! {
             "and no terminal frame at all: [{}]",
             tcp.summary()
         );
+    }
+}
+
+// ── S3a: the staging-only invite frame ───────────────────────────────────────
+
+const STAGING_ONLY_CAPS: [&str; 4] = [
+    "terminal_ui",
+    "terminal_follow_ui",
+    "terminal_staging_ui",
+    "terminal_staging_only_ui",
+];
+
+impl Daemon {
+    /// The verified app of a build that can grant staging only.
+    async fn app_with_staging_only(&self) -> Unix {
+        let c = self.unix(Some("mac_app"), &STAGING_ONLY_CAPS).await;
+        assert!(c.nonce.is_some(), "the verified app gets an operator_nonce");
+        c
+    }
+}
+
+fn staging_only_invite(terminal_id: &str) -> ClientMsg {
+    ClientMsg::TerminalFollowInviteStagingOnly {
+        terminal_id: terminal_id.into(),
+        follower_tag: "cody-a".into(),
+    }
+}
+
+follow_test! {
+    async fn the_welcome_advertises_staging_only() {
+        let d = Daemon::start(&[Peer::App]).await;
+        let app = d.app().await;
+        let features = app
+            .log
+            .iter()
+            .find_map(|m| match m {
+                ServerMsg::Welcome { features, .. } => Some(features.clone()),
+                _ => None,
+            })
+            .expect("a Welcome");
+        assert!(
+            features.iter().any(|f| f == "terminal_staging_only_v1"),
+            "{features:?}"
+        );
+    }
+}
+
+follow_test! {
+    async fn an_app_with_the_three_capabilities_starts_a_staging_only_follow_and_the_agent_hears_only_started() {
+        let d = Daemon::start(&[Peer::App]).await;
+        let mut app = d.app_with_staging_only().await;
+        let a = d.session("cody-a", "cody").await;
+        let (_g, cwd) = canonical_tmp();
+        let t = app.open_control_terminal(&cwd).await;
+        let id = t.terminal_id.clone();
+
+        let from = app.mark();
+        app.send(&staging_only_invite(&id)).await;
+        app.wait_since(from, "a staging-only follower in terminal_state", |m| {
+            matches!(m, ServerMsg::TerminalState { terminal }
+                if terminal.terminal_id == id
+                    && terminal.follower.as_ref().is_some_and(|f|
+                        f.tag == "cody-a" && f.mode == nostromo::ipc::protocol::FollowAccess::StagingOnly))
+        })
+        .await;
+        let (_, started) = a
+            .wait_text(0, "the started notice", |t| notice_element(t, "started").is_some())
+            .await;
+        let element = notice_element(&started, "started").unwrap();
+        assert_eq!(attr(element, "reason").as_deref(), Some("staging_only"), "{started}");
+        assert!(started.contains("You will not receive its output"), "{started}");
+
+        // Output the terminal prints reaches nobody.
+        app.type_line(&id, "printf 'STAGING-ONLY-CANARY\\n'").await;
+        assert!(app.wait_view_from(&id, 0, "STAGING-ONLY-CANARY", WAIT).await);
+        a.assert_quiet_after(1, "a staging-only follower is told nothing about output").await;
+        assert!(!serde_json::to_string(&a.texts()).unwrap().contains("STAGING-ONLY-CANARY"));
+        assert!(
+            d.audit_text().contains("\"mode\":\"staging_only\""),
+            "follow_invited carries the mode"
+        );
+    }
+}
+
+follow_test! {
+    async fn the_staging_only_invite_is_refused_without_terminal_staging_only_ui() {
+        let d = Daemon::start(&[Peer::App, Peer::App]).await;
+        // Declares the follow control and the drawer, but not staging only.
+        let mut app = d
+            .unix(
+                Some("mac_app"),
+                &["terminal_ui", "terminal_follow_ui", "terminal_staging_ui"],
+            )
+            .await;
+        let a = d.session("cody-a", "cody").await;
+        let (_g, cwd) = canonical_tmp();
+        let t = app.open_control_terminal(&cwd).await;
+        let id = t.terminal_id.clone();
+
+        let from = app.mark();
+        app.send(&staging_only_invite(&id)).await;
+        let (refused_id, code) = app.refused(from, "follow_invite").await;
+        assert_eq!(refused_id.as_deref(), Some(id.as_str()));
+        assert_eq!(code, "terminal_staging_only_ui_required");
+        assert_eq!(d.follower_of(&id), None);
+        assert_eq!(a.count(), 0, "nothing was delivered to the session");
+        d.wait_audit("the refusal is audited", |l| {
+            l["event"] == "refused" && l["code"] == "terminal_staging_only_ui_required"
+        })
+        .await;
+
+        // The plain follow control is not enough either (an older app).
+        let mut old = d.app().await;
+        let from = old.mark();
+        old.send(&staging_only_invite(&id)).await;
+        let (_, code) = old.refused(from, "follow_invite").await;
+        assert_eq!(code, "terminal_staging_only_ui_required");
+        assert_eq!(d.follower_of(&id), None);
+    }
+}
+
+follow_test! {
+    async fn a_local_process_that_is_not_the_app_cannot_invite_staging_only() {
+        let d = Daemon::start(&[Peer::App, Peer::Script]).await;
+        let mut app = d.app_with_staging_only().await;
+        let a = d.session("cody-a", "cody").await;
+        let (_g, cwd) = canonical_tmp();
+        let t = app.open_control_terminal(&cwd).await;
+        let mut forged = d.unix(Some("mac_app"), &STAGING_ONLY_CAPS).await;
+        assert!(forged.nonce.is_none(), "precondition: not an operator");
+
+        let from = forged.mark();
+        forged.send(&staging_only_invite(&t.terminal_id)).await;
+        let (_, code) = forged.refused(from, "follow_invite").await;
+        assert_eq!(code, "terminal_control_forbidden");
+        assert_eq!(d.follower_of(&t.terminal_id), None);
+        assert_eq!(a.count(), 0);
+        let audit = d.wait_audit("the refusal", |l| {
+            l["event"] == "refused" && l["op"] == "follow_invite" && l["channel"] == "ipc"
+        })
+        .await;
+        assert_eq!(audit["code"], "terminal_control_forbidden", "{audit}");
+    }
+}
+
+follow_test! {
+    async fn a_tcp_peer_cannot_invite_staging_only() {
+        let d = Daemon::start(&[Peer::App]).await;
+        let mut app = d.app_with_staging_only().await;
+        let a = d.session("cody-a", "cody").await;
+        let (_g, cwd) = canonical_tmp();
+        let t = app.open_control_terminal(&cwd).await;
+        let mut tcp = d.tcp().await;
+
+        let from = tcp.mark();
+        tcp.send(&staging_only_invite(&t.terminal_id)).await;
+        tcp.sync().await;
+        assert!(
+            tcp.log[from..].iter().any(|m| matches!(m,
+                ServerMsg::Error { message } if message.starts_with("requires_secure_connection"))),
+            "expected `requires_secure_connection`, got [{}]",
+            tcp.summary()
+        );
+        assert_eq!(d.follower_of(&t.terminal_id), None);
+        assert_eq!(a.count(), 0);
     }
 }

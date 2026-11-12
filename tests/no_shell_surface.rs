@@ -13,6 +13,9 @@
 use nostromo::mcp::tools::tool_descriptors;
 use serde_json::{json, Value};
 
+#[path = "support/dispatched_tools.rs"]
+mod dispatched_tools;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellWrite {
     /// The tool cannot cause a byte to be written to a shell.
@@ -390,4 +393,20 @@ fn a_nested_suspect_property_and_a_suspect_op_value_are_both_caught() {
     assert_eq!(found.len(), 2, "{found:?}");
     assert!(found.iter().any(|f| f.contains("stdin")));
     assert!(found.iter().any(|f| f.contains("paste")));
+}
+
+#[test]
+fn the_tools_dispatched_are_exactly_the_tools_described() {
+    let described: std::collections::BTreeSet<String> = tool_descriptors()
+        .iter()
+        .filter_map(|d| d["name"].as_str().map(str::to_string))
+        .collect();
+    let dispatched = dispatched_tools::dispatched_tool_names();
+    let unlisted: Vec<&String> = dispatched.difference(&described).collect();
+    let undispatched: Vec<&String> = described.difference(&dispatched).collect();
+    assert!(
+        unlisted.is_empty() && undispatched.is_empty(),
+        "dispatched but not described (so never classified): {unlisted:?}; \
+         described but not dispatched: {undispatched:?}"
+    );
 }

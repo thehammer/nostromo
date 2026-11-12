@@ -17,7 +17,8 @@ use std::path::PathBuf;
 
 use chrono::{TimeZone, Timelike, Utc};
 use nostromo::ipc::protocol::{
-    ClientMsg, ServerMsg, StagedEntryWire, StagingArchive, TerminalStagingState,
+    ClientMsg, FollowAccess, ServerMsg, StagedEntryWire, StagingArchive, TerminalFollower,
+    TerminalInfo, TerminalKind, TerminalRequester, TerminalStagingState, TerminalStatus,
 };
 use serde::Serialize;
 
@@ -71,6 +72,7 @@ fn list_frame(
         entries,
         enabled: true,
         foreground: None,
+        staging_only: false,
     }
 }
 
@@ -85,6 +87,7 @@ fn none_frame() -> ServerMsg {
         entries: Vec::new(),
         enabled: true,
         foreground: None,
+        staging_only: false,
     }
 }
 
@@ -302,6 +305,7 @@ fn a_frame_with_a_foreground_program_matches_its_golden_file() {
             entries,
             enabled,
             foreground: Some("ssh".into()),
+            staging_only: false,
         },
         other => panic!("{other:?}"),
     };
@@ -338,4 +342,133 @@ fn a_plain_terminal_input_has_no_via_and_a_plain_remove_has_no_archive() {
         archive: None,
     });
     assert!(!text.contains("archive"));
+}
+
+// ── Staging only (S3a) ───────────────────────────────────────────────────────
+
+/// `list_frame` as a staging-only follower's list sends it.
+fn staging_only_frame(state: TerminalStagingState, revision: u64) -> ServerMsg {
+    match list_frame(state, revision, entries()) {
+        ServerMsg::TerminalStagingList {
+            terminal_id,
+            pane_id,
+            state,
+            owner_tag,
+            agent_name,
+            revision,
+            entries,
+            enabled,
+            foreground,
+            ..
+        } => ServerMsg::TerminalStagingList {
+            terminal_id,
+            pane_id,
+            state,
+            owner_tag,
+            agent_name,
+            revision,
+            entries,
+            enabled,
+            foreground,
+            staging_only: true,
+        },
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_staging_only_list_frame_matches_its_golden_file_active_and_frozen() {
+    for (name, state, revision) in [
+        (
+            "frame-terminal-staging-list-staging-only.json",
+            TerminalStagingState::Active,
+            11,
+        ),
+        (
+            "frame-terminal-staging-list-staging-only-frozen.json",
+            TerminalStagingState::Frozen,
+            12,
+        ),
+    ] {
+        let text = check_golden(name, &staging_only_frame(state, revision));
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["staging_only"], true, "{name}");
+        let decoded: ServerMsg = serde_json::from_str(&text).unwrap();
+        assert_eq!(rendered(&decoded), text, "{name} round-trips");
+    }
+}
+
+#[test]
+fn staging_only_is_omitted_from_every_frame_that_is_not_staging_only() {
+    for msg in [
+        list_frame(TerminalStagingState::Active, 7, entries()),
+        list_frame(TerminalStagingState::Frozen, 8, entries()),
+        none_frame(),
+    ] {
+        let value = serde_json::to_value(&msg).unwrap();
+        assert!(value.get("staging_only").is_none(), "{value}");
+    }
+}
+
+#[test]
+fn the_staging_only_invite_frame_matches_its_golden_file() {
+    let invite = ClientMsg::TerminalFollowInviteStagingOnly {
+        terminal_id: TERMINAL.into(),
+        follower_tag: "cody-fixture".into(),
+    };
+    let text = check_golden("client-terminal-follow-invite-staging-only.json", &invite);
+    let decoded: ClientMsg = serde_json::from_str(&text).unwrap();
+    assert_eq!(rendered(&decoded), text, "round-trips");
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["type"], "terminal_follow_invite_staging_only");
+}
+
+fn info_with(mode: FollowAccess) -> TerminalInfo {
+    TerminalInfo {
+        terminal_id: TERMINAL.into(),
+        tag: "cody-fixture".into(),
+        pane_id: PANE.into(),
+        kind: TerminalKind::Local,
+        label: "local shell".into(),
+        cwd: Some("/tmp/fixture".into()),
+        target: None,
+        status: TerminalStatus::Running,
+        exit_code: None,
+        ended_reason: None,
+        cols: 80,
+        rows: 24,
+        requested_by: TerminalRequester {
+            kind: "user".into(),
+            tag: None,
+        },
+        opened_by_request: None,
+        follower: Some(TerminalFollower {
+            tag: "cody-fixture".into(),
+            paused: false,
+            pause_reason: None,
+            mode,
+        }),
+        idle_closes_at: None,
+        idle_warn_after_secs: None,
+    }
+}
+
+#[test]
+fn a_terminal_info_with_a_staging_only_follower_matches_its_golden_file() {
+    let text = check_golden(
+        "terminal-info-follower-staging-only.json",
+        &info_with(FollowAccess::StagingOnly),
+    );
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["follower"]["mode"], "staging_only");
+    let decoded: TerminalInfo = serde_json::from_str(&text).unwrap();
+    assert_eq!(decoded.follower.unwrap().mode, FollowAccess::StagingOnly);
+}
+
+#[test]
+fn a_full_follower_serialises_no_mode_and_an_old_info_reads_as_full() {
+    let value = serde_json::to_value(info_with(FollowAccess::Full)).unwrap();
+    assert!(value["follower"].get("mode").is_none(), "{value}");
+    let decoded: TerminalInfo = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.follower.unwrap().mode, FollowAccess::Full);
 }

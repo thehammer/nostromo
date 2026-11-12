@@ -41,7 +41,8 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, FEATURE_LOGIN, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        SessionAction, Topic, FEATURE_LOGIN, FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN,
+        MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -561,6 +562,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
             FEATURE_TASKS.to_string(),
             FEATURE_APPROVALS.to_string(),
             FEATURE_LOGIN.to_string(),
+            FEATURE_TERMINAL_STAGING_ONLY.to_string(),
         ],
         operator_nonce,
         enabled_agents: Some(mgr.enabled_agents().wire_names()),
@@ -1200,6 +1202,7 @@ where
                                 | ClientMsg::RemoteShellAnswer { .. }
                                 // An invite, or a selection, sends a terminal's output to a model.
                                 | ClientMsg::TerminalFollowInvite { .. }
+                                | ClientMsg::TerminalFollowInviteStagingOnly { .. }
                                 | ClientMsg::TerminalSendSelection { .. } => true,
                                 ClientMsg::TerminalInput { .. } | ClientMsg::TerminalResize { .. } => {
                                     cap_checked_at.elapsed() >= TERMINAL_RECHECK
@@ -1469,6 +1472,7 @@ fn handle_client_msg(
 
         // Agent follow: invite, stop, resume. Operator app only.
         msg @ (ClientMsg::TerminalFollowInvite { .. }
+        | ClientMsg::TerminalFollowInviteStagingOnly { .. }
         | ClientMsg::TerminalFollowStop { .. }
         | ClientMsg::TerminalFollowResume { .. }
         | ClientMsg::TerminalSendSelection { .. }) => {
@@ -3050,6 +3054,19 @@ fn handle_follow_msg(
             code: code.to_string(),
         });
     };
+    // A verified app that lacks a capability is refused and audited like any
+    // other refusal here.
+    let refuse_ui_required = |code: &str| {
+        lock_terminals(terminals).audit_refused(
+            TerminalRefusalChannel::Ipc,
+            op,
+            Some(code),
+            terminal_id.as_deref(),
+            peer.map(|p| p.pid),
+            peer.map(|p| p.exe.display().to_string()),
+        );
+        refuse(code);
+    };
     let Some(cap) = cap else {
         let code = terminal::forbidden_code(op);
         // Audited before the peer is told no.
@@ -3064,11 +3081,12 @@ fn handle_follow_msg(
         refuse(code);
         return;
     };
-    let (follow, can_show) = {
+    let (follow, can_show, can_show_staging_only) = {
         let mgr = lock_terminals(terminals);
         (
             mgr.follow(),
             mgr.conn_has_capability(conn_key, terminal::TERMINAL_FOLLOW_UI),
+            mgr.conn_has_capability(conn_key, terminal::TERMINAL_STAGING_ONLY_UI),
         )
     };
     let Some(follow) = follow else {
@@ -3083,7 +3101,7 @@ fn handle_follow_msg(
             include_screen,
         } => {
             if !can_show {
-                refuse("terminal_follow_ui_required");
+                refuse_ui_required("terminal_follow_ui_required");
                 return;
             }
             follow.invite(
@@ -3093,6 +3111,16 @@ fn handle_follow_msg(
                 include_screen,
                 terminal::follow::FollowVia::Control,
             )
+        }
+        ClientMsg::TerminalFollowInviteStagingOnly {
+            terminal_id,
+            follower_tag,
+        } => {
+            if !can_show || !can_show_staging_only {
+                refuse_ui_required("terminal_staging_only_ui_required");
+                return;
+            }
+            follow.invite_staging_only(cap, &terminal_id, &follower_tag)
         }
         ClientMsg::TerminalFollowStop { terminal_id } => follow.stop(cap, &terminal_id),
         ClientMsg::TerminalFollowResume { terminal_id } => follow.resume(cap, &terminal_id),

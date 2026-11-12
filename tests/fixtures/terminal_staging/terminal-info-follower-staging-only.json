@@ -1,0 +1,19 @@
+{
+  "terminal_id": "5f0a8f7e-2d4c-4a4e-9a55-0f1f3a9d7c11",
+  "tag": "cody-fixture",
+  "pane_id": "terminal-00000001",
+  "kind": "local",
+  "label": "local shell",
+  "cwd": "/tmp/fixture",
+  "status": "running",
+  "cols": 80,
+  "rows": 24,
+  "requested_by": {
+    "kind": "user"
+  },
+  "follower": {
+    "tag": "cody-fixture",
+    "paused": false,
+    "mode": "staging_only"
+  }
+}

@@ -1071,6 +1071,7 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::RemoteShellAnswer { .. }
         // Agent follow: invite, stop, resume. A network peer does none of them.
         | ClientMsg::TerminalFollowInvite { .. }
+        | ClientMsg::TerminalFollowInviteStagingOnly { .. }
         | ClientMsg::TerminalFollowStop { .. }
         | ClientMsg::TerminalFollowResume { .. }
         // Send selection: terminal text to a model. A network peer never does.
@@ -1177,6 +1178,7 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::RemoteShellOpen { .. }
         | ClientMsg::RemoteShellAnswer { .. }
         | ClientMsg::TerminalFollowInvite { .. }
+        | ClientMsg::TerminalFollowInviteStagingOnly { .. }
         | ClientMsg::TerminalFollowStop { .. }
         | ClientMsg::TerminalFollowResume { .. }
         | ClientMsg::TerminalSendSelection { .. }
@@ -2160,6 +2162,10 @@ mod tests {
                 follower_tag: "x1".into(),
                 include_screen: true,
             },
+            ClientMsg::TerminalFollowInviteStagingOnly {
+                terminal_id: "t".into(),
+                follower_tag: "x1".into(),
+            },
             ClientMsg::TerminalFollowStop {
                 terminal_id: "t".into(),
             },
@@ -2238,7 +2244,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 76;
+    const CLIENT_MSG_VARIANTS: usize = 77;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2319,6 +2325,7 @@ mod tests {
             ClientMsg::ApprovalRulesKeep { .. } => 73,
             ClientMsg::ApprovalRulesDiscard { .. } => 74,
             ClientMsg::TrackerOpenLink { .. } => 75,
+            ClientMsg::TerminalFollowInviteStagingOnly { .. } => 76,
         }
     }
 
@@ -2359,9 +2366,10 @@ mod tests {
         // 65 with the three command-staging verbs; 66 with `MotherNoticeSettingsSet`;
         // 69 with the S2 staging frames (set_enabled, set_global, ui_event); 70 with `ApprovalRevokeSessionRule`;
         // 72 with the two Approvals-log requests; 75 with the three persisted-rule verbs (AP6);
-        // 76 with `TrackerOpenLink` (T6; expect a trivial conflict on this constant with T3a's tracker verbs).
-        assert_eq!(CLIENT_MSG_VARIANTS, 76);
-        assert_eq!(every_client_msg().len(), 76);
+        // 76 with `TrackerOpenLink` (T6; expect a trivial conflict on this constant with T3a's tracker verbs);
+        // 77 with `TerminalFollowInviteStagingOnly` (S3a).
+        assert_eq!(CLIENT_MSG_VARIANTS, 77);
+        assert_eq!(every_client_msg().len(), 77);
     }
 
     #[test]

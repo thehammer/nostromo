@@ -221,6 +221,8 @@ pub enum AuditEvent {
         follower: String,
         include_screen: bool,
         via: String,
+        /// What the follower receives: `full` or `staging_only`.
+        mode: String,
     },
     /// Following ended: `user_stopped`, `moved_to <focus>`, `pane_closed`,
     /// `terminal_restarted`, `session_ended` or `app_closed`.
