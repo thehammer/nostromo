@@ -265,10 +265,17 @@ final class TeriSurfaceView: NSView {
         splitView.addArrangedSubview(detailView)
         listHost.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         detailView.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
-        splitView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minSplitHeight).isActive = true
+        // A preference, not a requirement: the surface is given its height by the split it sits in (above the
+        // chat) and by the window, so a required minimum would fight those frames in a small window
+        // (unsatisfiable constraints, or a window that cannot shrink). Below the tab strip's own required
+        // height, so when there is not room the list and detail give way and the tab strip stays whole.
+        let minListHeight = splitView.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minSplitHeight)
+        minListHeight.priority = NSLayoutConstraint.Priority(740)
+        minListHeight.isActive = true
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         splitView.setContentHuggingPriority(.defaultLow, for: .vertical)
         tabStrip.setContentHuggingPriority(.required, for: .vertical)
+        tabStrip.setContentCompressionResistancePriority(.required, for: .vertical)
 
         let column = NSStackView(views: [tabStrip, disconnectedBanner, sourceBanner, splitView])
         column.orientation = .vertical

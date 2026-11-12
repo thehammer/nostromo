@@ -1067,12 +1067,15 @@ final class TeriSurfaceViewTests: XCTestCase {
 
     // MARK: A surface shorter than its own minimum (a small window, or a big chat)
 
-    /// What AppKit logged, since `start`, about constraints it could not all satisfy.
-    private func unsatisfiableConstraintLogs(since start: Date) -> [String] {
+    private final class ConflictProbeView: NSView {}
+
+    /// What AppKit logged, since `start`, about constraints it could not all satisfy that name `typeName`
+    /// (the log is process-wide, so conflicts other tests caused are not this test's).
+    private func unsatisfiableConstraintLogs(since start: Date, mentioning typeName: String) -> [String] {
         guard let store = try? OSLogStore(scope: .currentProcessIdentifier) else { return [] }
         let entries = (try? store.getEntries(at: store.position(date: start))) ?? AnySequence<OSLogEntry>([])
         return entries.compactMap { ($0 as? OSLogEntryLog)?.composedMessage }
-            .filter { $0.contains("Unable to simultaneously satisfy constraints") }
+            .filter { $0.contains("Unable to simultaneously satisfy constraints") && $0.contains(typeName) }
     }
 
     private func tabButtons(in surface: NSView) -> [NSButton] {
@@ -1085,7 +1088,7 @@ final class TeriSurfaceViewTests: XCTestCase {
     func testTheConflictProbeSeesAnUnsatisfiableRequiredConstraint() {
         let window = makeRigWindow(self, size: NSSize(width: 300, height: 100))
         let host = NSView(frame: window.contentView!.bounds)
-        let child = NSView()
+        let child = ConflictProbeView()
         child.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(child)
         window.contentView!.addSubview(host)
@@ -1098,29 +1101,38 @@ final class TeriSurfaceViewTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         rigSettle(0.05)
 
-        XCTAssertFalse(unsatisfiableConstraintLogs(since: start).isEmpty, "AppKit logs a required-constraint conflict")
+        XCTAssertFalse(unsatisfiableConstraintLogs(since: start, mentioning: "ConflictProbeView").isEmpty,
+                       "AppKit logs a required-constraint conflict")
     }
 
     func testASurfaceShorterThanTheStripPlusTheMinimumListHeightKeepsItsStripAndLetsTheMinimumYield() throws {
         let height: CGFloat = 120
         XCTAssertLessThan(height, 30 + TeriSurfaceView.minSplitHeight, "the surface is genuinely shorter than strip + minimum")
+        // A host of exactly that height inside a roomy window: nothing lets the window grow to fit the surface.
+        let window = makeRigWindow(self, size: NSSize(width: 1200, height: 600))
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 1200, height: height))
+        window.contentView!.addSubview(host)
         let start = Date()
-        let rig = makeRig(size: NSSize(width: 1200, height: height))
-        rig.surface.layoutSubtreeIfNeeded()
+        let surface = TeriSurfaceView(store: WorkStore(), defaults: makeDefaults(), center: NotificationCenter(), scheduler: .main)
+        surface.frame = host.bounds
+        surface.autoresizingMask = [.width, .height]
+        host.addSubview(surface)
+        surface.layoutSubtreeIfNeeded()
         rigSettle(0.05)
-        let split = try XCTUnwrap(splitView(rig))
+        let split = try XCTUnwrap(rigAllSubviews(of: surface).compactMap { $0 as? NSSplitView }.first { $0.isVertical })
 
-        XCTAssertEqual(unsatisfiableConstraintLogs(since: start), [], "no constraint conflict at a short height")
-        XCTAssertEqual(rig.surface.frame.height, height, accuracy: 0.5)
-        let splitFrame = rig.surface.convert(split.bounds, from: split)
-        XCTAssertLessThanOrEqual(splitFrame.maxY, rig.surface.bounds.maxY + 0.5, "the list and detail do not spill out of the surface")
-        XCTAssertGreaterThanOrEqual(splitFrame.minY, rig.surface.bounds.minY - 0.5)
+        XCTAssertEqual(unsatisfiableConstraintLogs(since: start, mentioning: "TeriSurfaceView"), [],
+                       "no constraint conflict at a short height")
+        XCTAssertEqual(surface.frame.height, height, accuracy: 0.5)
+        let splitFrame = surface.convert(split.bounds, from: split)
+        XCTAssertLessThanOrEqual(splitFrame.maxY, surface.bounds.maxY + 0.5, "the list and detail do not spill out of the surface")
+        XCTAssertGreaterThanOrEqual(splitFrame.minY, surface.bounds.minY - 0.5)
         XCTAssertGreaterThan(split.frame.height, 0, "the list and detail keep some height")
-        let buttons = tabButtons(in: rig.surface)
+        let buttons = tabButtons(in: surface)
         XCTAssertEqual(buttons.count, TeriTab.allCases.count)
         for button in buttons {
-            let frame = rig.surface.convert(button.bounds, from: button)
-            XCTAssertTrue(rig.surface.bounds.contains(frame), "\(button.title) is clipped: \(frame) in \(rig.surface.bounds)")
+            let frame = surface.convert(button.bounds, from: button)
+            XCTAssertTrue(surface.bounds.contains(frame), "\(button.title) is clipped: \(frame) in \(surface.bounds)")
             XCTAssertFalse(frame.intersects(splitFrame), "\(button.title) is covered by the list: \(frame) vs \(splitFrame)")
         }
     }
@@ -1147,7 +1159,8 @@ final class TeriSurfaceViewTests: XCTestCase {
         outer.layoutSubtreeIfNeeded()
         rigSettle(0.05)
 
-        XCTAssertEqual(unsatisfiableConstraintLogs(since: start), [], "no constraint conflict in a small window")
+        XCTAssertEqual(unsatisfiableConstraintLogs(since: start, mentioning: "TeriSurfaceView"), [],
+                       "no constraint conflict in a small window")
         XCTAssertGreaterThan(surface.frame.height, 0)
         XCTAssertGreaterThan(chat.frame.height, 0)
         let buttons = tabButtons(in: surface)
