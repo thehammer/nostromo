@@ -54,6 +54,7 @@ use crate::approvals::broker::{
 use super::auth_failure::{classify_line, TurnAuthTracker};
 use super::claude_login::{LoginCoordinator, LOGIN_QUEUE_CAP};
 use super::decisions::DecisionRegistry;
+use super::focus_activity::{ActivityBook, ActivityTally, FocusActivity, ProblemKind};
 use super::orphans::{
     self, child_unreaped, ledger_path_beside, ChildLedger, Target, MARKER_ENV,
     SESSIONS_LEAD_OWN_GROUP, SHUTDOWN_GRACE,
@@ -76,6 +77,8 @@ use crate::model::{Actor, ModelPaths, ModelTarget};
 use crate::mother::origin::OriginCaller;
 use crate::mother::{OriginBook, SessionHistory};
 
+#[cfg(test)]
+mod activity_tests;
 mod control;
 mod inject;
 #[cfg(test)]
@@ -248,6 +251,9 @@ struct Shared {
     /// one set later reaches sessions already running. A leaf lock: the hook is
     /// cloned out and called with nothing held.
     turn_hook: TurnHookCell,
+    /// The focus's activity counters: shared by every process the focus runs
+    /// (see `focus_activity`).
+    activity: Arc<FocusActivity>,
 }
 
 /// Where the manager keeps its [`TurnHook`] for every session's reader.
@@ -385,6 +391,9 @@ struct ManagedSession {
     /// The approval broker's generation number for this process, when the
     /// session is approval-capable and a broker is configured.
     approval_generation: Option<u64>,
+    /// The supervisor has counted this process's crash as a problem. It sees a
+    /// crashed session every tick until the session is respawned or given up on.
+    crash_counted: bool,
 }
 
 impl ManagedSession {
@@ -464,6 +473,7 @@ impl ManagedSession {
     }
 
     fn info(&self) -> SessionInfo {
+        let activity = self.shared.activity.snapshot();
         SessionInfo {
             tag: self.tag.clone(),
             agent_name: self.agent_name.clone(),
@@ -475,6 +485,11 @@ impl ManagedSession {
             stop_reason: self.stop_reason,
             // Known only to the manager (it holds the bridge registry).
             mcp_bridge_connected: None,
+            agent_turns: Some(activity.agent_turns),
+            agent_messages: Some(activity.agent_messages),
+            agent_problems: Some(activity.agent_problems),
+            activity_epoch: Some(activity.epoch),
+            last_problem: activity.last_problem,
         }
     }
 }
@@ -652,6 +667,9 @@ pub struct SessionManager {
     /// Mother job notices, when the daemon wires them in: told about focus
     /// registry pushes and reachable by the IPC server.
     notice_engine: Option<Arc<crate::mother::notices::NoticeEngine>>,
+    /// Every focus's activity counters, for the daemon's lifetime: a restart of
+    /// the focus's process reuses its entry (see `focus_activity`).
+    activity: ActivityBook,
 }
 
 impl SessionManager {
@@ -734,6 +752,7 @@ impl SessionManager {
             session_end_hook: None,
             turn_hook: Arc::new(std::sync::RwLock::new(None)),
             notice_engine: None,
+            activity: ActivityBook::default(),
         }
     }
 
@@ -1352,6 +1371,7 @@ impl SessionManager {
             tasks,
             login: login::LoginLink::new(self.login.clone()),
             turn_hook: Arc::clone(&self.turn_hook),
+            activity: self.activity.for_session(&tag, &session_id),
         };
         // Ends vanished tasks and flushes coalesced task snapshots; stops
         // when the CLI has exited.
@@ -1451,6 +1471,7 @@ impl SessionManager {
             own_process_group,
             ledger: Arc::clone(&self.ledger),
             approval_generation,
+            crash_counted: false,
         })
     }
 
@@ -1468,7 +1489,9 @@ impl SessionManager {
             .sessions
             .get(tag)
             .ok_or_else(|| anyhow!("unknown session tag: {tag}"))?;
+        let activity = Arc::clone(&session.shared.activity);
         if !session.alive() {
+            activity.note_problem(ProblemKind::SendRefused);
             anyhow::bail!("session {tag} is not alive");
         }
         // Decide under the state lock, then release it BEFORE touching stdin
@@ -1484,6 +1507,7 @@ impl SessionManager {
             // the held one, up to the cap (the refusal carries no content).
             let paused = session.shared.login.paused();
             if paused && lock_recover(&session.shared.pending).len() >= LOGIN_QUEUE_CAP {
+                activity.note_problem(ProblemKind::SendRefused);
                 anyhow::bail!("waiting_for_sign_in: queue full");
             }
             if *state == SessionState::Idle && !applying && !paused {
@@ -1519,6 +1543,7 @@ impl SessionManager {
             if let Err(e) = write_user_message(&session.shared, &outgoing) {
                 // The optimistic MidTurn would otherwise wedge the session.
                 *lock_recover(&session.shared.state) = SessionState::Idle;
+                activity.note_problem(ProblemKind::SendRefused);
                 return Err(e);
             }
             if note.is_some() {
@@ -1734,6 +1759,21 @@ impl SessionManager {
     /// so attached clients can clear any crash-loop indicator (this was a benign
     /// user-requested stop, not an alarm).
     pub fn stop(&mut self, tag: &str) {
+        // The operator's stop is a problem event (the sidebar marks it); a
+        // second press on a session already stopped this way is the same one.
+        if let Some(session) = self
+            .sessions
+            .get(tag)
+            .filter(|s| s.stop_reason != Some(StopReason::User))
+        {
+            session.shared.activity.note_problem(ProblemKind::Stopped);
+        }
+        self.stop_session(tag);
+    }
+
+    /// [`Self::stop`] without the problem event: what a restart, a new session
+    /// and the supervisor's own recovery stop a session with.
+    fn stop_session(&mut self, tag: &str) {
         // A switch still waiting for the turn this stop cuts short takes
         // effect when the session next starts. Its store write is made on the
         // hub's IO thread, not here (this runs under the manager lock and the
@@ -1845,7 +1885,7 @@ impl SessionManager {
             session.kill();
         }
         let carry = self.take_carry(tag);
-        self.stop(tag);
+        self.stop_session(tag);
         let old = self.sessions.remove(tag);
 
         if let Err(e) = self.respawn(tag, agent, view, cwd, sid, rc, fixed) {
@@ -1927,7 +1967,7 @@ impl SessionManager {
     /// Drop the persisted session id and stop the child; the next spawn starts
     /// a fresh conversation.
     pub fn new_session(&mut self, tag: &str) {
-        self.stop(tag);
+        self.stop_session(tag);
         self.sessions.remove(tag);
         save_id(&self.store_path, tag, None);
         self.login_changed();
@@ -2026,6 +2066,9 @@ impl SessionManager {
                     s.shared.broadcast(SessionEvent::Delta(d));
                 }
                 s.shared.set_state(SessionState::Crashed);
+                if !std::mem::replace(&mut s.crash_counted, true) {
+                    s.shared.activity.note_problem(ProblemKind::Crashed);
+                }
 
                 // Sliding-window bookkeeping: push this crash, evict stale entries.
                 let now = Instant::now();
@@ -2089,7 +2132,7 @@ impl SessionManager {
                     )
                 };
                 let carry = self.take_carry(&tag);
-                self.stop(&tag);
+                self.stop_session(&tag);
                 self.sessions.remove(&tag);
                 save_id(&self.store_path, &tag, None);
                 match self.spawn_session(tag.to_string(), agent, view, cwd, None, rc) {
@@ -2109,6 +2152,7 @@ impl SessionManager {
                 if let Some(s) = self.sessions.get_mut(&tag) {
                     s.intentional_stop.store(true, Ordering::SeqCst);
                     s.stop_reason = Some(StopReason::CrashLoopGuard);
+                    s.shared.activity.note_problem(ProblemKind::CrashLoopGuard);
                     // Given up on: it waits for no sign-in, and its held message is dropped.
                     s.shared.login.clear();
                     s.shared.broadcast(SessionEvent::PermanentlyDown {
@@ -2820,6 +2864,8 @@ fn run_reader(
     // Follows the turn now running, to tell at its end whether it failed to
     // authenticate and whether sending its message again repeats anything.
     let mut auth = TurnAuthTracker::new();
+    // Counts this process's own turns and messages for the focus's sidebar marks.
+    let mut tally = ActivityTally::new(Arc::clone(&shared.activity));
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -2929,12 +2975,25 @@ fn run_reader(
             } => Some((text.clone(), *is_replay)),
             _ => None,
         };
+        tally.on_line(&line, &parsed);
         let (deltas, origin_update) = {
             let mut transcript = lock_recover(&shared.transcript);
             let deltas = transcript.ingest_parsed(parsed);
             (deltas, transcript.take_origin_update())
         };
         for mut delta in deltas {
+            // A turn opening, or a phantom dropped: the tally needs no more of
+            // it. A turn's end is told below, with its sign-in verdict.
+            if matches!(
+                delta,
+                TurnDelta::TurnStarted { .. }
+                    | TurnDelta::TurnErrored {
+                        discarded: true,
+                        ..
+                    }
+            ) {
+                tally.on_delta(&delta, None);
+            }
             match &mut delta {
                 TurnDelta::TurnStarted { turn } => {
                     let is_wake = matches!(turn.origin, Some(TurnOrigin::TaskWake { .. }));
@@ -3034,7 +3093,9 @@ fn run_reader(
                     shared.broadcast(SessionEvent::Delta(delta.clone()));
                     // A turn that failed to authenticate makes a hold, and `step`
                     // does not drain the queue while one exists.
-                    login::on_turn_end(&shared, &tag, auth.finish());
+                    let auth_outcome = auth.finish();
+                    tally.on_delta(&delta, auth_outcome.map(|o| o.signal));
+                    login::on_turn_end(&shared, &tag, auth_outcome);
                     advance(&shared);
                     shared.turn_event(&tag, TurnEvent::Completed);
                     continue;

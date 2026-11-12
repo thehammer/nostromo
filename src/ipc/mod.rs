@@ -18,6 +18,7 @@
 //! - [`peer_verify`]     — who is on the other end of a Unix connection (the Mac app?)
 //! - [`auth_failure`]    — spotting a turn that failed because Claude could not sign in
 //! - [`claude_login`]    — the credential watch and the "sessions waiting for a sign-in" frame
+//! - [`focus_activity`]  — per-session counters of finished turns, agent messages and problems (sidebar marks)
 
 pub mod auth_failure;
 pub mod claude_login;
@@ -25,6 +26,7 @@ pub mod client;
 pub mod codec;
 mod control_scan;
 pub mod decisions;
+pub mod focus_activity;
 pub mod orphans;
 pub mod pane_registry;
 pub mod peer;

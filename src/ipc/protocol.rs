@@ -14,6 +14,7 @@ use crate::{
         perri_queue::{CiState, PrQueueItem},
     },
     ipc::{
+        focus_activity::ProblemKind,
         session_manager::StopReason,
         stream_json::{SessionState, Turn, TurnDelta, TurnOrigin},
     },
@@ -400,6 +401,29 @@ pub struct SessionInfo {
     /// identified as this tag). Additive: older peers ignore it.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub mcp_bridge_connected: Option<bool>,
+    /// How many agent turns this session has completed since its activity
+    /// `activity_epoch` began (see `ipc::focus_activity`). Monotonic within an
+    /// epoch. Absent from a daemon that does not send focus activity
+    /// (`focus_activity_v1`): read as unknown. Additive: older peers ignore it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_turns: Option<u64>,
+    /// How many assistant text messages the main agent has written since the
+    /// epoch began. Same rules as `agent_turns`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_messages: Option<u64>,
+    /// How many problem events (`ProblemKind`) the session has had since the
+    /// epoch began. Same rules as `agent_turns`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent_problems: Option<u64>,
+    /// Names the run of the three counters above: when it changes they can no
+    /// longer be compared with an earlier value (daemon restart, a new Claude
+    /// session id) and the reader starts over from the values it sees.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub activity_epoch: Option<String>,
+    /// The kind of the most recent problem in this epoch, for a tooltip. Absent
+    /// until the first one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_problem: Option<ProblemKind>,
 }
 
 /// Daemon-serveable projection of a Mac-side `Focus`. No absolute filesystem
@@ -1150,6 +1174,11 @@ pub const FEATURE_LOGIN: &str = "claude_login_v1";
 /// `terminal_follow_invite_staging_only` and a follower may be staging only
 /// (`TerminalFollower.mode`, `TerminalStagingList.staging_only`).
 pub const FEATURE_TERMINAL_STAGING_ONLY: &str = "terminal_staging_only_v1";
+
+/// The optional capability advertised in `Welcome.features`: this daemon fills
+/// `SessionInfo`'s per-session activity counters (`agent_turns`,
+/// `agent_messages`, `agent_problems`, `activity_epoch`, `last_problem`).
+pub const FEATURE_FOCUS_ACTIVITY: &str = "focus_activity_v1";
 
 /// What a session waiting for a Claude sign-in is doing (`ClaudeLoginSession`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3256,6 +3285,11 @@ mod tests {
                 state: SessionState::Idle,
                 stop_reason: None,
                 mcp_bridge_connected: None,
+                agent_turns: None,
+                agent_messages: None,
+                agent_problems: None,
+                activity_epoch: None,
+                last_problem: None,
             }],
         });
     }
@@ -4122,6 +4156,11 @@ mod tests {
                 state: SessionState::Idle,
                 stop_reason: Some(StopReason::CrashLoopGuard),
                 mcp_bridge_connected: None,
+                agent_turns: None,
+                agent_messages: None,
+                agent_problems: None,
+                activity_epoch: None,
+                last_problem: None,
             }],
         });
         // With no stop_reason.
@@ -4136,6 +4175,11 @@ mod tests {
                 state: SessionState::Idle,
                 stop_reason: None,
                 mcp_bridge_connected: None,
+                agent_turns: None,
+                agent_messages: None,
+                agent_problems: None,
+                activity_epoch: None,
+                last_problem: None,
             }],
         });
     }

@@ -53,6 +53,11 @@ fn session_info(bridge: Option<bool>) -> SessionInfo {
         state: SessionState::Idle,
         stop_reason: None,
         mcp_bridge_connected: bridge,
+        agent_turns: None,
+        agent_messages: None,
+        agent_problems: None,
+        activity_epoch: None,
+        last_problem: None,
     }
 }
 
