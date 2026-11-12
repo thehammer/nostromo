@@ -2771,3 +2771,244 @@ extension StagingDrawerViewTests {
         XCTAssertFalse(host.drawer.hasList)
     }
 }
+
+
+// MARK: - S3b: the NO OUTPUT label of a staging-only drawer
+
+// A staging-only list (the agent receives no output from this terminal) says so in the header with a fixed label,
+// `NO OUTPUT`, drawn by the app in the same row as the environment token: after the token in a production-treated
+// pane, first in a local one. Like the token it is never cut: it either shows whole or does not show. It gives way
+// in this order as the pane narrows: the agent's text truncates first, then `NO OUTPUT` hides, then the × and the
+// menu (S2's rule for the token: never clipped, never overlapped). Where the label is hidden the spoken label
+// still says "staging only", so a person who cannot see it still hears it.
+
+extension StagingDrawerViewTests {
+
+    private static let widths: [CGFloat] = [120, 200, 280, 400, 700]
+    private var fortyCharacterName: String { String(repeating: "A", count: 40) }
+
+    /// A drawer with `commands` staged and readable in a pane of `kind` (a production target for a remote one).
+    private func noOutputHost(width: CGFloat, kind: TerminalKind = .local, stagingOnly: Bool = true, agent: String? = nil,
+                              commands list: [String] = ["ls -la", "pwd"], state: TerminalStagingState = .active)
+        -> (rig: StagingRig, host: StagingDrawerHost) {
+        let rig = makeRig(kind: kind)
+        if kind != .local { rig.context?.target = StagingFixtures.productionTarget }
+        rig.typeEnter()
+        let host = makeHost(rig, width: width)
+        rig.ingest(StagingFixtures.entries(list), state: state, agent: agent ?? fortyCharacterName, stagingOnly: stagingOnly)
+        rig.settle()
+        host.drawer.refresh()
+        host.relayout()
+        return (rig, host)
+    }
+
+    private func menuButton(in host: StagingDrawerHost) -> StagingClickableLabel? {
+        host.clickables.first { $0.accessibilityLabel() == "Staged commands menu" }
+    }
+
+    /// The views that make up the header row (everything in the drawer but the scroll area and its divider).
+    private func headerViews(of host: StagingDrawerHost) -> [NSView] {
+        host.drawer.subviews.filter { !$0.isHidden && !($0 is NSScrollView) && !($0 is StagingDividerView) }
+    }
+
+    /// Where `NO OUTPUT` sits in a roomy drawer (700 pt): its width, and where it starts relative to the token's
+    /// right edge (a remote pane) or the drawer's left edge (a local one). Read from the drawn view, not assumed.
+    private struct NoOutputReference {
+        let labelWidth: CGFloat
+        let offset: CGFloat
+        let labelMinX: CGFloat
+    }
+
+    private func reference(kind: TerminalKind) throws -> NoOutputReference {
+        let (_, host) = noOutputHost(width: 700, kind: kind)
+        let label = host.drawer.noOutputLabel
+        XCTAssertFalse(label.isHidden, "a roomy drawer shows NO OUTPUT")
+        let token = host.drawer.tokenLabel
+        let origin = kind == .local ? 0 : token.frame.maxX
+        return NoOutputReference(labelWidth: label.frame.width, offset: label.frame.minX - origin, labelMinX: label.frame.minX)
+    }
+
+    /// Where the room for `NO OUTPUT` and the three controls starts at the current width: right after the token
+    /// (remote) or at the drawer's left (local), plus the label's own offset.
+    private func xAfterToken(_ host: StagingDrawerHost, kind: TerminalKind, _ ref: NoOutputReference) -> CGFloat {
+        (kind == .local ? 0 : host.drawer.tokenLabel.frame.maxX) + ref.offset
+    }
+
+    /// The rule: shown while `4 + x + label + 3 + chevron 14 + menu 18 + close 16` fits.
+    private func labelFits(width: CGFloat, x: CGFloat, _ ref: NoOutputReference) -> Bool {
+        (width - 4 - x) >= ref.labelWidth + 3 + 14 + 18 + 16
+    }
+
+    private func isShown(_ label: NSView) -> Bool { !label.isHidden && label.frame.width > 0 }
+
+    // MARK: What the label is
+
+    func testAStagingOnlyDrawerShowsAFixedNonTruncatingNoOutputLabel() throws {
+        for kind in [TerminalKind.local, .ecs] {
+            let (_, host) = noOutputHost(width: 700, kind: kind)
+            let label = host.drawer.noOutputLabel
+            XCTAssertFalse(label.isHidden, "\(kind)")
+            XCTAssertEqual(label.stringValue, "NO OUTPUT")
+            XCTAssertEqual(label.stringValue, StagingDrawerModel.noOutputLabel)
+            XCTAssertEqual(label.accessibilityIdentifier(), "staging-drawer-no-output")
+            XCTAssertEqual(label.lineBreakMode, .byClipping, "it is never truncated with an ellipsis")
+            XCTAssertEqual(label.contentCompressionResistancePriority(for: .horizontal), .required)
+            XCTAssertGreaterThanOrEqual(label.frame.width, label.intrinsicContentSize.width, "\(kind): the label is whole")
+        }
+    }
+
+    func testNoOutputIsFirstInALocalPaneAndAfterTheTokenInTheSameRowInARemoteOne() throws {
+        let (_, local) = noOutputHost(width: 700)
+        XCTAssertTrue(local.drawer.tokenLabel.isHidden, "a plain local pane has no token")
+        let chevron = try XCTUnwrap(local.chevron)
+        XCTAssertLessThanOrEqual(local.drawer.noOutputLabel.frame.maxX, chevron.frame.minX, "it comes before the chevron")
+        XCTAssertGreaterThanOrEqual(local.drawer.noOutputLabel.frame.minX, 0)
+
+        let (_, remote) = noOutputHost(width: 700, kind: .ecs)
+        let token = remote.drawer.tokenLabel, label = remote.drawer.noOutputLabel
+        XCTAssertEqual(token.stringValue, "PRODUCTION")
+        XCTAssertLessThanOrEqual(token.frame.maxX, label.frame.minX, "after the token")
+        XCTAssertLessThanOrEqual(label.frame.maxX, try XCTUnwrap(remote.chevron).frame.minX)
+        XCTAssertEqual(label.frame.midY, token.frame.midY, accuracy: 1, "the same row as the token")
+        XCTAssertFalse(overlaps(label.frame, token.frame))
+    }
+
+    func testAFullModeDrawerNeverShowsNoOutputAtAnyWidth() throws {
+        for kind in [TerminalKind.local, .ecs] {
+            for width in Self.widths {
+                let (_, host) = noOutputHost(width: width, kind: kind, stagingOnly: false)
+                XCTAssertTrue(host.drawer.noOutputLabel.isHidden, "\(kind) \(width) pt")
+                XCTAssertFalse(host.drawer.accessibilityLabel()?.contains("staging only") ?? false, "\(kind) \(width) pt")
+            }
+        }
+    }
+
+    func testAnEmptyAndAFrozenStagingOnlyDrawerStillSayNoOutput() throws {
+        let (_, empty) = noOutputHost(width: 700, commands: [])
+        XCTAssertFalse(empty.drawer.noOutputLabel.isHidden, "an empty staging-only list")
+        XCTAssertEqual(leadLabel(in: empty)?.stringValue,
+                       "Staged by \(fortyCharacterName) \u{00B7} nothing yet. \(fortyCharacterName) can't see this terminal's output. Click a staged command to put it at the prompt; you press Enter.")
+        XCTAssertLessThanOrEqual(empty.drawer.noOutputLabel.frame.maxX, empty.drawer.bounds.width)
+
+        let (_, frozen) = noOutputHost(width: 700, state: .frozen)
+        XCTAssertFalse(frozen.drawer.noOutputLabel.isHidden, "a frozen staging-only list keeps its mode")
+        XCTAssertTrue(frozen.visibleTexts.contains("\(fortyCharacterName)'s staging access ended; this list won't change"),
+                      "\(frozen.visibleTexts)")
+    }
+
+    // MARK: Clipping at every width
+
+    func testTheTokenIsNeverClippedAndNoOutputOnlyHidesWhenTheRestOfTheRowWouldNotFit() throws {
+        for kind in [TerminalKind.local, .ecs] {
+            let ref = try reference(kind: kind)
+            for width in Self.widths {
+                let (_, host) = noOutputHost(width: width, kind: kind)
+                let drawer = host.drawer
+                let label = drawer.noOutputLabel, token = drawer.tokenLabel
+                let tag = "\(kind) \(width) pt"
+
+                // S2's guarantees for the environment token still hold.
+                if kind == .ecs {
+                    XCTAssertFalse(token.isHidden, tag)
+                    XCTAssertEqual(token.stringValue, "PRODUCTION")
+                    XCTAssertGreaterThanOrEqual(token.frame.width, token.intrinsicContentSize.width, "\(tag): the token is whole")
+                    XCTAssertGreaterThanOrEqual(token.frame.minX, 0, tag)
+                    XCTAssertLessThanOrEqual(token.frame.maxX, drawer.bounds.width + 0.5, tag)
+                } else {
+                    XCTAssertTrue(token.isHidden, tag)
+                }
+
+                // NO OUTPUT is shown exactly when it fits with the chevron, the menu and the close x.
+                let x = xAfterToken(host, kind: kind, ref)
+                let shouldFit = labelFits(width: width, x: x, ref)
+                XCTAssertEqual(isShown(label), shouldFit, "\(tag): NO OUTPUT is \(shouldFit ? "hidden although" : "shown although") the row \(shouldFit ? "has" : "lacks") room")
+
+                // It hides only after the agent's text has truncated.
+                if !isShown(label), let lead = leadLabel(in: host), !lead.isHidden {
+                    XCTAssertLessThan(lead.frame.width, lead.attributedStringValue.size().width,
+                                      "\(tag): the agent's text has not truncated yet but NO OUTPUT is already hidden")
+                }
+
+                // Nothing visible in the header overlaps anything else or leaves the drawer.
+                let visible = headerViews(of: host)
+                for view in visible {
+                    XCTAssertGreaterThanOrEqual(view.frame.minX, -0.5, "\(tag): \(view)")
+                    XCTAssertLessThanOrEqual(view.frame.maxX, drawer.bounds.width + 0.5, "\(tag): \(view)")
+                }
+                for (i, a) in visible.enumerated() {
+                    for b in visible[(i + 1)...] where a.frame.width > 0 && b.frame.width > 0 {
+                        XCTAssertFalse(overlaps(a.frame, b.frame), "\(tag): \(a.accessibilityIdentifier()) \(a.frame) overlaps \(b.accessibilityIdentifier()) \(b.frame)")
+                    }
+                }
+
+                if isShown(label) {
+                    XCTAssertGreaterThanOrEqual(label.frame.width, label.intrinsicContentSize.width, "\(tag): not clipped")
+                    XCTAssertFalse(try XCTUnwrap(host.chevron).isHidden, "\(tag): the chevron stays")
+                    XCTAssertFalse(try XCTUnwrap(menuButton(in: host)).isHidden, "\(tag): the menu stays")
+                    XCTAssertFalse(try XCTUnwrap(clickable("\u{00D7}", in: host)).isHidden, "\(tag): the close x stays")
+                }
+            }
+        }
+    }
+
+    func testNoOutputHidesExactlyOnePointBelowTheWidthThatHoldsItAndTheControls() throws {
+        for kind in [TerminalKind.local, .ecs] {
+            let ref = try reference(kind: kind)
+            // The least width that holds the label (where it sits in a roomy drawer, after the token or first),
+            // a 3 pt gap, the chevron (14), the menu (18), the close x (16) and a 4 pt margin on the right.
+            let least = ceil(4 + ref.labelMinX + ref.labelWidth + 3 + 14 + 18 + 16)
+            let (_, atLeast) = noOutputHost(width: least, kind: kind)
+            XCTAssertTrue(isShown(atLeast.drawer.noOutputLabel), "\(kind): hidden at \(least) pt, which holds it")
+            XCTAssertFalse(try XCTUnwrap(atLeast.chevron).isHidden)
+            XCTAssertFalse(try XCTUnwrap(menuButton(in: atLeast)).isHidden)
+            XCTAssertFalse(try XCTUnwrap(clickable("\u{00D7}", in: atLeast)).isHidden)
+            let (_, below) = noOutputHost(width: least - 1, kind: kind)
+            XCTAssertFalse(isShown(below.drawer.noOutputLabel), "\(kind): shown at \(least - 1) pt, which cannot hold it with the controls")
+            if kind == .ecs {
+                XCTAssertFalse(below.drawer.tokenLabel.isHidden, "the token stays whatever happens to NO OUTPUT")
+                XCTAssertGreaterThanOrEqual(below.drawer.tokenLabel.frame.width, below.drawer.tokenLabel.intrinsicContentSize.width)
+            }
+        }
+    }
+
+    // MARK: Heard even where it is not seen
+
+    func testTheSpokenLabelSaysStagingOnlyAtEveryWidthEvenWhereTheLabelIsHidden() throws {
+        for kind in [TerminalKind.local, .ecs] {
+            for width in Self.widths {
+                let (_, host) = noOutputHost(width: width, kind: kind)
+                let spoken = try XCTUnwrap(host.drawer.accessibilityLabel(), "\(kind) \(width) pt")
+                XCTAssertTrue(spoken.contains("staging only, \(fortyCharacterName) does not see this terminal's output"),
+                              "\(kind) \(width) pt: \(spoken)")
+            }
+        }
+        let (_, remote) = noOutputHost(width: 120, kind: .ecs)
+        XCTAssertEqual(remote.drawer.accessibilityLabel(),
+                       "Staged by \(fortyCharacterName) \u{00B7} PRODUCTION \u{00B7} staging only, \(fortyCharacterName) does not see this terminal's output \u{00B7} you press Enter")
+        let (_, local) = noOutputHost(width: 120)
+        XCTAssertEqual(local.drawer.accessibilityLabel(),
+                       "Staged commands \u{00B7} staging only, \(fortyCharacterName) does not see this terminal's output")
+    }
+
+    // MARK: Collapsed
+
+    func testTheCollapsedStripSaysNoOutputInItsOwnTitleAndTheLabelIsNotDrawnTwice() throws {
+        for kind in [TerminalKind.local, .ecs] {
+            for stagingOnly in [true, false] {
+                let (_, host) = noOutputHost(width: 400, kind: kind, stagingOnly: stagingOnly, agent: "Claudia")
+                host.drawer.setCollapsed(true)
+                host.relayout()
+                let strip = try XCTUnwrap(host.stripButton, "\(kind) \(stagingOnly)")
+                let list = StagingFixtures.list(agent: "Claudia", revision: 1, entries: StagingFixtures.entries(["ls -la", "pwd"]), stagingOnly: stagingOnly)
+                XCTAssertEqual(strip.title, StagingDrawerModel.stripText(list))
+                XCTAssertEqual(strip.title, stagingOnly ? "NO OUTPUT \u{00B7} 2 staged by Claudia \u{25B8}" : "2 staged by Claudia \u{25B8}")
+                XCTAssertFalse(strip.isHidden)
+                XCTAssertTrue(host.drawer.noOutputLabel.isHidden, "the strip carries the words itself")
+                if kind == .ecs {
+                    XCTAssertFalse(host.drawer.tokenLabel.isHidden)
+                    XCTAssertLessThanOrEqual(host.drawer.tokenLabel.frame.maxX, strip.frame.minX, "the token stays first")
+                }
+            }
+        }
+    }
+}

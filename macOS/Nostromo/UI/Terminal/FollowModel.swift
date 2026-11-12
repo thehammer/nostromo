@@ -33,6 +33,16 @@ struct FollowModel: Equatable {
         case followed(by: String)
         /// `reason` is the daemon's pause code (`too_much_output`, `too_many_deliveries`), if any.
         case paused(by: String, reason: String?)
+        /// The follower may stage commands here and receives no output. `by` is the follower focus's label.
+        case stagingOnly(by: String)
+    }
+
+    /// What the invite popover gives the invited agent.
+    enum InviteMode: Equatable {
+        /// Today's follow: the terminal's output goes to the agent's model.
+        case output
+        /// The agent may stage commands for this terminal and receives no output.
+        case stagingOnly
     }
 
     static let notSharedText = "Not shared"
@@ -40,16 +50,24 @@ struct FollowModel: Equatable {
     /// The invite popover's checkbox. Off by default (the screen's current contents go out only when ticked).
     static let includeScreenTitle = "Include what's on screen now"
     static let includeScreenDefault = false
+    /// The popover's mode group (shown only when the daemon knows the staging-only follow).
+    static let modeGroupTitle = "What the agent gets"
+    static let outputOptionTitle = "Output: it reads this terminal"
+    static let stagingOnlyOptionTitle = "Staging only: it proposes commands and sees no output"
     /// The least width the header gives the badge when there is room: wide enough for "Not shared".
     static let badgeMinWidth: CGFloat = 72
 
     let info: TerminalInfo
     /// Every focus, in the sidebar's order.
     let focuses: [FollowFocusOption]
+    /// The daemon advertised `terminal_staging_only_v1`: the invite popover offers the staging-only mode.
+    /// Without it the popover is exactly what it was before the mode existed.
+    let offersStagingOnly: Bool
 
-    init(info: TerminalInfo, focuses: [FollowFocusOption]) {
+    init(info: TerminalInfo, focuses: [FollowFocusOption], offersStagingOnly: Bool = false) {
         self.info = info
         self.focuses = focuses
+        self.offersStagingOnly = offersStagingOnly
     }
 
     // MARK: - State and badge
@@ -57,6 +75,7 @@ struct FollowModel: Equatable {
     var state: State {
         guard let follower = info.follower else { return .notShared }
         let label = name(forTag: follower.tag)
+        if follower.isStagingOnly { return .stagingOnly(by: label) }
         return follower.paused ? .paused(by: label, reason: follower.pauseReason) : .followed(by: label)
     }
 
@@ -66,16 +85,18 @@ struct FollowModel: Equatable {
         case .notShared:                  return Self.notSharedText
         case .followed(let label):        return "Followed by \(label)"
         case .paused(_, let reason):      return Self.pausedText(reason: reason)
+        case .stagingOnly(let label):     return "Staging only: \(label)"
         }
     }
 
     /// Never red (a red header is how a remote pane says "production"): muted for nobody, blue while
-    /// followed, amber while paused. Drawn as a filled pill with dark text, so it reads on a red header too.
+    /// followed (blue means output flows), amber while paused, muted while staging only (no output flows). Drawn as a filled pill with dark text, so it reads on a red header too.
     var badgeColor: NSColor {
         switch state {
         case .notShared: return Theme.fgMuted
         case .followed:  return Theme.followBlue
         case .paused:    return Theme.amber
+        case .stagingOnly: return Theme.fgMuted
         }
     }
 
@@ -88,7 +109,14 @@ struct FollowModel: Equatable {
             return "Output from this terminal is being sent to \(label)'s model"
         case .paused(let label, let reason):
             return "\(Self.pausedText(reason: reason)). \(label) is not receiving this terminal's output until you resume"
+        case .stagingOnly(let label):
+            return "\(label) can stage commands for you to place. This terminal's output is not sent to \(label)'s model."
         }
+    }
+
+    /// The badge's spoken label: its text and its whole sentence.
+    var badgeAccessibilityLabel: String {
+        "\(badgeText). \(badgeDescription)"
     }
 
     static func pausedText(reason: String?) -> String {
@@ -108,6 +136,8 @@ struct FollowModel: Equatable {
         case .notShared: return info.status == .running ? [.invite] : []
         case .followed:  return [.stop, .move]
         case .paused:    return [.resume, .stop]
+        // Revoke is Stop: it ends the follow and freezes the staged list.
+        case .stagingOnly: return [.stop, .move]
         }
     }
 
@@ -121,6 +151,33 @@ struct FollowModel: Equatable {
     /// The focuses the picker lists. A Move is to another focus: the one that follows already is not offered.
     var inviteFocuses: [FollowFocusOption] {
         focuses.filter { $0.tag != info.follower?.tag }
+    }
+
+    /// The focuses the picker lists for `mode`. The current follower is left out only when `mode` is what it
+    /// already has, so a person can change its mode from here (staging only to full is a person's choice, and
+    /// the daemon starts a new follow with an empty list). Without the staging-only mode on offer, as `inviteFocuses`.
+    func inviteFocuses(for mode: InviteMode) -> [FollowFocusOption] {
+        guard offersStagingOnly, let follower = info.follower, currentMode(of: follower) != mode else {
+            return inviteFocuses
+        }
+        return focuses
+    }
+
+    /// The popover's title for the focus `tag` and `mode`: a mode change on the focus that follows already
+    /// reads `Change what Claudia gets`; anything else is `inviteHeading`.
+    func inviteHeading(forTag tag: String?, mode: InviteMode) -> String {
+        if offersStagingOnly, let tag, let follower = info.follower, follower.tag == tag, currentMode(of: follower) != mode {
+            return "Change what \(name(forTag: tag)) gets"
+        }
+        return inviteHeading
+    }
+
+    /// The Invite button's spoken label.
+    func inviteAccessibilityLabel(mode: InviteMode) -> String {
+        switch mode {
+        case .output: return "Invite the chosen agent to follow this terminal"
+        case .stagingOnly: return "Invite the chosen agent to stage commands only, with no output"
+        }
     }
 
     /// The focus the invite popover starts on: the one that owns the pane, or, for a remote pane an
@@ -139,8 +196,14 @@ struct FollowModel: Equatable {
 
     /// The line under the picker: where this pane's output would go. A remote pane names its environment
     /// in capitals ("Output from PRODUCTION will be sent to Claudia's model."); a local one does not.
-    func warning(forFocusTag tag: String) -> String {
+    func warning(forFocusTag tag: String, mode: InviteMode = .output) -> String {
         let agent = name(forTag: tag)
+        if mode == .stagingOnly {
+            if TerminalChromeModel.isRemote(info) {
+                return "Output from \(TerminalChromeModel.environmentToken(for: info)) will NOT be sent to \(agent)'s model. \(agent) can stage commands; you place and run each one."
+            }
+            return "\(agent) can stage commands for this terminal. Its output will NOT be sent to \(agent)'s model."
+        }
         if TerminalChromeModel.isRemote(info) {
             return "Output from \(TerminalChromeModel.environmentToken(for: info)) will be sent to \(agent)'s model."
         }
@@ -188,6 +251,10 @@ struct FollowModel: Equatable {
     }
 
     // MARK: - Private
+
+    private func currentMode(of follower: TerminalFollower) -> InviteMode {
+        follower.isStagingOnly ? .stagingOnly : .output
+    }
 
     /// The focus's label for `tag`; the tag itself for a focus that is gone.
     private func name(forTag tag: String) -> String {

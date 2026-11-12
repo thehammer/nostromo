@@ -21,6 +21,10 @@
 # (j)-(l) S2 production pane (fake ECS): the red-frame drawer, confirm only on a destructive pattern, the
 #     per-terminal switch, and agent staging never keeping the shell open (NOSTROMO_QA_IDLE_SECS=30).
 # (m)-(o) S2 archive/close/reopen, auto-archive on at launch, and the foreground (`sleep 30`) case.
+# (p) S3 staging only, no output: the agent asks for it, the sheet says output will NOT be sent, the badge reads
+#     "Staging only:", the agent's screen read is refused, nothing the shell printed reaches the agent's session,
+#     the drawer shows NO OUTPUT, a canary typed in the shell is nowhere in what the agent was sent, an upgrade
+#     request Denied keeps staging only, and Stop freezes the list ("staging access ended").
 # (i) with `start --no-synthetic`: a synthesized click on a row sends zero bytes (the screen shows no command).
 #
 # Reading the app is by its accessibility tree. Where app-control cannot reach a control (the badge popover, a
@@ -133,6 +137,8 @@ popover_press() {
 }
 # Open a terminal in the focus, run a logging bash in it, invite the focus to follow it.
 open_logged_terminal() {
+  local invite=1
+  [ "${1:-}" = "--no-invite" ] && invite=0
   ctl activate >/dev/null 2>&1 || true
   ctl click --text "Mother" >/dev/null 2>&1 || echo "note: could not click the Mother focus"
   sleep 1
@@ -146,6 +152,7 @@ open_logged_terminal() {
   : >"$work/accepted.log"
   tid="$(terminal_id)"
   [ -n "$tid" ] || { inconc "could not read the terminal id"; return 1; }
+  [ "$invite" = 1 ] || return 0
   popover_press "Invite" || { inconc "app-control could not press Invite: invite by hand, then re-run with the terminal open"; return 1; }
   poll 40 tree_has "Follow: Followed by" || { fail "Invite did not start following"; return 1; }
 }
@@ -375,6 +382,99 @@ if open_logged_terminal; then
   shot "o1-foreground"
 else
   inconc "no logged terminal, so (m)-(o) were skipped"
+fi
+stop_instance
+
+# ══════════════════════ S3: staging only, no output ═════════════════════════════════════════════════════
+
+start_instance
+require_visible
+tid=""
+if open_logged_terminal --no-invite; then
+  echo "== (p) staging only: the agent stages, and sees no output =="
+  (python3 -B "$qa_py" request-follow "$root" mother "$tid" "staging QA" 60 --mode staging_only \
+    >"$work/p1.json" 2>&1 || true) &
+  follow_pid=$!
+  if wait_sheet "will NOT"; then
+    pass "the sheet says output will NOT be sent"
+    ctl --sheet click --text "Allow staging only" >/dev/null 2>&1 || inconc "could not press Allow staging only"
+  else
+    fail "no staging-only sheet that says output will NOT be sent"
+  fi
+  wait "$follow_pid" || true
+  ok_if "the request was granted as staging_only" grep -qF '"outcome": "staging_only"' "$work/p1.json"
+  ok_if "the badge reads Staging only:" poll 20 tree_has "Staging only:"
+  if python3 -B "$qa_py" read-screen "$root" mother "$tid" >"$work/p2.json" 2>&1; then
+    fail "read-screen answered for a staging-only follower"
+  else
+    ok_if "the agent's screen read is refused terminal_read_forbidden" grep -qF terminal_read_forbidden "$work/p2.json"
+  fi
+  # The person types in the shell: its output is the one thing the agent must never receive.
+  canary="canary-$(python3 -I -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+  ctl type "echo $canary"$'\r' >/dev/null
+  wait_screen "$canary" || true
+  sleep 1
+  stage stage '{"command": "echo p-one"}' || fail "stage #1 refused for a staging-only follower"
+  stage stage '{"command": "echo p-two"}' || fail "stage #2 refused for a staging-only follower"
+  ok_if "the drawer shows NO OUTPUT" poll 20 tree_has "NO OUTPUT"
+  ok_if "the header counts two" tree_has "(2)"
+  if python3 -B "$qa_py" stage "$root" mother "$tid" stage '{"command": "!!"}' >"$work/p3.json" 2>&1; then
+    fail "history expansion was accepted for a staging-only follower"
+  else
+    ok_if "history expansion is refused (history_expansion)" grep -qF history_expansion "$work/p3.json"
+  fi
+  shot "p0-staging-only"
+  sleep 2   # the 1.5 s reading delay
+  : >"$work/accepted.log"
+  ctl click --text "echo p-one" >/dev/null 2>&1 || inconc "could not click row #1"
+  wait_screen "echo p-one" || fail "row #1 never reached the prompt"
+  ok_if "placing a row sent no Enter (the accepted-line log is empty)" log_empty
+  ctl type $'\r' >/dev/null
+  ok_if "Enter ran exactly that line" poll 20 log_is "echo p-one"
+  # What the QA daemon wrote to the agent's session (the fake CLI logs every stdin line verbatim).
+  fake_logs="$(find "$root/home/.nostromo/fake-claude" -name stdin.jsonl 2>/dev/null || true)"
+  if [ -n "$fake_logs" ] && grep -rqF "staging_only" "$root/home/.nostromo/fake-claude" 2>/dev/null; then
+    # shellcheck disable=SC2086  # the paths come from find and hold no spaces
+    if grep -qF -- "$canary" $fake_logs; then
+      fail "the canary the shell printed reached the agent's session"
+    else
+      pass "the canary the shell printed is not in anything sent to the agent's session"
+    fi
+  else
+    inconc "the QA daemon keeps no record of the agent's session (see the Rust proof in S3a: tests/staging_only_no_output)"
+  fi
+  # The agent asks for full: a fresh sheet; Deny keeps staging only.
+  (python3 -B "$qa_py" request-follow "$root" mother "$tid" "staging QA" 60 --mode full \
+    >"$work/p4.json" 2>&1 || true) &
+  upgrade_pid=$!
+  if wait_sheet "Deny"; then
+    ctl --sheet click --text "Deny" >/dev/null 2>&1 || inconc "could not press Deny"
+  else
+    fail "an agent asking for full output from a staging-only follow got no sheet"
+  fi
+  wait "$upgrade_pid" || true
+  ok_if "after Deny the badge still reads Staging only:" tree_has "Follow: Staging only:"
+  echo "== (p) Stop: the list freezes with its own wording =="
+  if popover_press "Stop following"; then
+    ok_if "the drawer says the staging access ended" poll 20 tree_has "staging access ended"
+  else
+    inconc "app-control could not press Stop following"
+  fi
+  ok_if "the audit records the staging-only invite" audit_has '"mode":"staging_only"'
+  echo "== (p) the popover's mode choice =="
+  if ctl click --text "Follow:" >/dev/null 2>&1; then
+    sleep 0.7
+    if ctl click --text "Staging only: it proposes commands and sees no output" >/dev/null 2>&1 \
+       && ctl click --text "Invite" >/dev/null 2>&1; then
+      ok_if "the popover's Staging only invite started a staging-only follow" poll 20 tree_has "Follow: Staging only:"
+    else
+      inconc "app-control could not reach the popover's radio: do it by hand (the PR's list)"
+    fi
+  else
+    inconc "app-control could not open the Follow popover: do it by hand (the PR's list)"
+  fi
+else
+  inconc "no logged terminal, so (p) was skipped"
 fi
 stop_instance
 

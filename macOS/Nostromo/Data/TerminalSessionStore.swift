@@ -365,6 +365,13 @@ final class TerminalSessionStore {
         transport(.followInvite(terminalId: terminalId, followerTag: followerTag, includeScreen: includeScreen))
     }
 
+    /// Invite focus `followerTag` to stage commands for `terminalId` with no output sent to it. Never a
+    /// `followInvite`: that frame starts a full follow.
+    func inviteFollowStagingOnly(terminalId: String, followerTag: String) {
+        guard !daemonUnavailable.contains(terminalId) else { return }
+        transport(.followInviteStagingOnly(terminalId: terminalId, followerTag: followerTag))
+    }
+
     /// Stop the following at once.
     func stopFollow(terminalId: String) {
         guard !daemonUnavailable.contains(terminalId) else { return }

@@ -353,3 +353,155 @@ extension TerminalStagingWireTests {
         XCTAssertNil(defaulted.foreground)
     }
 }
+
+
+// MARK: - S3b: staging only, no output
+
+extension TerminalStagingWireTests {
+
+    private func stagingOnlyList(_ fixture: String) throws -> TerminalStagingList {
+        try JSONDecoder().decode(TerminalStagingList.self, from: try StagingFixtures.fixtureData(fixture))
+    }
+
+    private func terminalInfo(fixture: String) throws -> TerminalInfo {
+        try JSONDecoder().decode(TerminalInfo.self, from: try StagingFixtures.fixtureData(fixture))
+    }
+
+    private func jsonDict(_ data: Data) throws -> [String: Any] {
+        try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    // The list frame
+
+    func testAStagingOnlyListFrameDecodesAsStagingOnlyAndActive() throws {
+        let list = try stagingOnlyList("frame-terminal-staging-list-staging-only.json")
+
+        XCTAssertTrue(list.stagingOnly)
+        XCTAssertEqual(list.state, .active)
+        XCTAssertEqual(list.revision, 11)
+        XCTAssertEqual(list.entries.map(\.command), ["git status --short", "ls -la src/terminal"])
+    }
+
+    func testAFrozenStagingOnlyListFrameKeepsItsStagingOnlyMark() throws {
+        let list = try stagingOnlyList("frame-terminal-staging-list-staging-only-frozen.json")
+
+        XCTAssertTrue(list.stagingOnly, "a frozen list from a staging-only follow stays marked, so the drawer can say so")
+        XCTAssertEqual(list.state, .frozen)
+        XCTAssertEqual(list.revision, 12)
+    }
+
+    func testAListFrameWithoutTheStagingOnlyKeyIsNotStagingOnly() throws {
+        for fixture in ["frame-terminal-staging-list-active.json", "frame-terminal-staging-list-frozen.json",
+                        "frame-terminal-staging-list-none.json", "frame-terminal-staging-list-fractional.json"] {
+            XCTAssertFalse(try stagingOnlyList(fixture).stagingOnly, fixture)
+        }
+    }
+
+    func testAnExplicitFalseStagingOnlyKeyIsNotStagingOnly() throws {
+        var frame = try jsonDict(try StagingFixtures.fixtureData("frame-terminal-staging-list-staging-only.json"))
+        frame["staging_only"] = false
+        let decoded = try JSONDecoder().decode(TerminalStagingList.self, from: try JSONSerialization.data(withJSONObject: frame))
+        XCTAssertFalse(decoded.stagingOnly)
+    }
+
+    func testAStagingOnlyListFrameReachesTheStoreAsAServerMessageWithItsMark() throws {
+        for (fixture, state) in [("frame-terminal-staging-list-staging-only.json", TerminalStagingState.active),
+                                 ("frame-terminal-staging-list-staging-only-frozen.json", .frozen)] {
+            let raw = try StagingFixtures.fixtureData(fixture)
+            let object = try jsonDict(raw)
+            let message = NostromodClient(socketPath: "/dev/null").decode(type_: try XCTUnwrap(object["type"] as? String),
+                                                                          json: object, raw: raw)
+            guard case .terminalStagingList(let list) = message else { return XCTFail("\(fixture) decoded as \(message)") }
+            XCTAssertTrue(list.stagingOnly, fixture)
+            XCTAssertEqual(list.state, state, fixture)
+        }
+    }
+
+    // The invitation frame
+
+    func testTheStagingOnlyInviteEncodesToTheGoldenFrame() throws {
+        let message = TerminalClientMessage.followInviteStagingOnly(terminalId: id, followerTag: "cody-fixture")
+        let golden = try jsonDict(try StagingFixtures.fixtureData("client-terminal-follow-invite-staging-only.json"))
+        let encoded = try jsonDict(try XCTUnwrap(message.encoded()))
+
+        XCTAssertEqual(Set(encoded.keys), Set(golden.keys), "same keys as the golden frame")
+        XCTAssertEqual(NSDictionary(dictionary: encoded), NSDictionary(dictionary: golden))
+    }
+
+    func testTheStagingOnlyInviteCarriesItsWireNameAndNoScreenChoice() throws {
+        let message = TerminalClientMessage.followInviteStagingOnly(terminalId: "t1", followerTag: "claudia-1")
+        XCTAssertEqual(message.wireType, "terminal_follow_invite_staging_only")
+
+        let object = try jsonDict(try XCTUnwrap(message.encoded()))
+        XCTAssertEqual(Set(object.keys), ["type", "terminal_id", "follower_tag"], "\(object)")
+        XCTAssertNil(object["include_screen"], "there is no screen to include: nothing is sent")
+        XCTAssertEqual(object["type"] as? String, "terminal_follow_invite_staging_only")
+        XCTAssertEqual(object["terminal_id"] as? String, "t1")
+        XCTAssertEqual(object["follower_tag"] as? String, "claudia-1")
+    }
+
+    func testTheStagingOnlyInviteIsADifferentFrameFromAFullInvite() {
+        XCTAssertNotEqual(TerminalClientMessage.followInviteStagingOnly(terminalId: "t1", followerTag: "c").wireType,
+                          TerminalClientMessage.followInvite(terminalId: "t1", followerTag: "c", includeScreen: false).wireType)
+    }
+
+    // The follower on terminal info
+
+    func testAStagingOnlyFollowerOnTerminalInfoIsStagingOnlyAndNotPaused() throws {
+        let follower = try XCTUnwrap(try terminalInfo(fixture: "terminal-info-follower-staging-only.json").follower)
+
+        XCTAssertEqual(follower.tag, "cody-fixture")
+        XCTAssertFalse(follower.paused)
+        XCTAssertEqual(follower.mode, "staging_only")
+        XCTAssertTrue(follower.isStagingOnly)
+    }
+
+    func testAnUnknownFollowerModeCountsAsAFullFollow() throws {
+        var info = try jsonDict(try StagingFixtures.fixtureData("terminal-info-follower-staging-only.json"))
+        var follower = try XCTUnwrap(info["follower"] as? [String: Any])
+        for mode in ["something_new", "STAGING_ONLY", "staging_only ", "full", ""] {
+            follower["mode"] = mode
+            info["follower"] = follower
+            let decoded = try JSONDecoder().decode(TerminalInfo.self, from: try JSONSerialization.data(withJSONObject: info))
+            XCTAssertFalse(try XCTUnwrap(decoded.follower).isStagingOnly, "mode \"\(mode)\" is not exactly staging_only")
+        }
+    }
+
+    func testAFollowerModeThatIsNotAStringDecodesAsNoModeInsteadOfFailingTheFrame() throws {
+        var info = try jsonDict(try StagingFixtures.fixtureData("terminal-info-follower-staging-only.json"))
+        var follower = try XCTUnwrap(info["follower"] as? [String: Any])
+        for bad: Any in [7, true, ["x": 1], ["staging_only"], NSNull()] {
+            follower["mode"] = bad
+            info["follower"] = follower
+            let decoded = try JSONDecoder().decode(TerminalInfo.self, from: try JSONSerialization.data(withJSONObject: info))
+            let decodedFollower = try XCTUnwrap(decoded.follower, "the terminal still decodes with its follower: \(bad)")
+            XCTAssertNil(decodedFollower.mode, "\(bad)")
+            XCTAssertFalse(decodedFollower.isStagingOnly, "\(bad)")
+            XCTAssertEqual(decodedFollower.tag, "cody-fixture")
+        }
+    }
+
+    func testAFollowerWithoutAModeIsAFullFollow() throws {
+        var info = try jsonDict(try StagingFixtures.fixtureData("terminal-info-follower-staging-only.json"))
+        var follower = try XCTUnwrap(info["follower"] as? [String: Any])
+        follower["mode"] = nil
+        info["follower"] = follower
+        let decoded = try JSONDecoder().decode(TerminalInfo.self, from: try JSONSerialization.data(withJSONObject: info))
+
+        XCTAssertNil(try XCTUnwrap(decoded.follower).mode)
+        XCTAssertFalse(try XCTUnwrap(decoded.follower).isStagingOnly)
+    }
+
+    func testTheFollowerMemberwiseInitDefaultsToAFullFollow() {
+        XCTAssertFalse(TerminalFollower(tag: "cody-1", paused: false, pauseReason: nil).isStagingOnly)
+        XCTAssertTrue(TerminalFollower(tag: "cody-1", paused: false, pauseReason: nil, mode: "staging_only").isStagingOnly)
+    }
+
+    // The capability and feature
+
+    func testTheOperatorAppDeclaresTheStagingOnlyUICapability() {
+        XCTAssertEqual(NostromodClient.terminalStagingOnlyUICapability, "terminal_staging_only_ui")
+        XCTAssertTrue(NostromodClient.operatorCapabilities.contains("terminal_staging_only_ui"))
+        XCTAssertTrue(NostromodClient.operatorCapabilities.contains("terminal_staging_ui"), "the older capability stays")
+    }
+}

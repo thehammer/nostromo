@@ -24,6 +24,8 @@ enum TerminalStagingStats {
         var confirmsInserted = 0
         var confirmsCancelled = 0
         var justChanged = 0
+        /// `follow_invited` lines whose `mode` is `staging_only` (a line without a mode counts as a full follow).
+        var stagingOnlyFollows = 0
         var malformedLines = 0
         var filesRead = 0
     }
@@ -84,6 +86,8 @@ enum TerminalStagingStats {
                 if by == "auto" { counts.archivedAuto += 1 } else { counts.archivedManual += 1 }
             }
             counts.unused += (object["unused"] as? Int) ?? 0
+        case "follow_invited":
+            if object["mode"] as? String == "staging_only" { counts.stagingOnlyFollows += 1 }
         case "staging_inserted":
             counts.inserts += 1
             if object["first"] as? Bool == true { counts.firstInserts += 1 }
@@ -121,6 +125,7 @@ enum TerminalStagingStats {
             "Refused: list_full \(c.listFull), rate_limited \(c.rateLimited) (undercounts: refusals are audited on a budget)",
             "Destructive confirms: \(c.confirmsInserted) inserted, \(c.confirmsCancelled) cancelled",
             "Just changed (refused within the reading delay): \(c.justChanged)",
+            "Staging-only follows granted: \(c.stagingOnlyFollows)",
             "Audit files read: \(c.filesRead); malformed lines skipped: \(c.malformedLines)",
         ].joined(separator: "\n")
     }

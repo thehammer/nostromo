@@ -1272,3 +1272,114 @@ final class TerminalFitnessTests: XCTestCase {
                        "an id is defined twice: \(Dictionary(grouping: definitions, by: { $0 }).filter { $1.count > 1 }.keys.sorted())")
     }
 }
+
+
+// MARK: - S3b: staging only, no output
+
+extension TerminalFitnessTests {
+
+    /// The standalone words `stagingOnly` and `isStagingOnly` (a case label, a property, an argument label).
+    /// Longer identifiers that merely contain the words (`followInviteStagingOnly`, `supportsStagingOnly`,
+    /// `offersStagingOnly`, `stagingOnlyFeature`, `stagingOnlyRadio`) are different names and do not match.
+    private static let stagingOnlyWord = #"(?<![A-Za-z0-9_])(?:is)?[sS]tagingOnly(?![A-Za-z0-9_])"#
+
+    /// The only production files that may name the staging-only mode: the drawer, the wire, and the follow popover
+    /// with its model. Everything else (the insert path above all) is mode-blind: where a command gets placed never
+    /// depends on how the agent follows.
+    private static let stagingOnlyAllowedFiles: Set<String> = [
+        "StagingDrawerModel.swift", "StagingDrawerView.swift", "TerminalStagingWire.swift",
+        "FollowModel.swift", "FollowControlView.swift", "TerminalWire.swift",
+    ]
+
+    func testTheStagingOnlyWordPatternMatchesTheModeNamesAndNotTheLongerIdentifiers() {
+        for hit in ["case stagingOnly(by: String)", "if follower.isStagingOnly { return }", "mode == .stagingOnly",
+                    "var stagingOnly: Bool = false", "stagingOnly = try c.decode(Bool.self, forKey: .stagingOnly)",
+                    "list.stagingOnly,", "(stagingOnly)", "isStagingOnly"] {
+            XCTAssertNotNil(Repo.firstMatch(Self.stagingOnlyWord, in: hit), "should match: \(hit)")
+        }
+        for miss in ["store.inviteFollowStagingOnly(terminalId: id)", ".followInviteStagingOnly(", "supportsStagingOnly(features:)",
+                     "offersStagingOnly: true", "NostromodClient.stagingOnlyFeature", "terminalStagingOnlyUICapability",
+                     "stagingOnlyRadio.state", "stagingOnlyFollows += 1", "let followStagingOnly = 1"] {
+            XCTAssertNil(Repo.firstMatch(Self.stagingOnlyWord, in: miss), "should not match: \(miss)")
+        }
+    }
+
+    func testOnlyTheDrawerTheWireAndTheFollowPopoverNameTheStagingOnlyMode() throws {
+        let files = Repo.swiftFiles(under: Repo.app)
+        XCTAssertGreaterThan(files.count, 100, "the app sources should be found")
+        let names = Set(files.map { $0.lastPathComponent })
+        for allowed in Self.stagingOnlyAllowedFiles {
+            XCTAssertTrue(names.contains(allowed), "\(allowed) should exist; the allowance list is stale")
+        }
+        for file in files where !Self.stagingOnlyAllowedFiles.contains(file.lastPathComponent) {
+            for line in Repo.codeLines(try Repo.read(file)) {
+                XCTAssertNil(Repo.firstMatch(Self.stagingOnlyWord, in: line),
+                             "\(file.lastPathComponent) names the staging-only mode: `\(line.trimmingCharacters(in: .whitespaces))`. Only \(Self.stagingOnlyAllowedFiles.sorted()) may.")
+            }
+        }
+    }
+
+    func testTheInsertPathNeverMentionsTheStagingOnlyMode() throws {
+        let files = Repo.swiftFiles(under: Repo.app).filter {
+            let name = $0.lastPathComponent
+            return name == "StagingInsertController.swift" || name.hasPrefix("StagingInsert")
+                || (name.contains("Staging") && name.contains("Decision"))
+        }
+        XCTAssertTrue(files.contains { $0.lastPathComponent == "StagingInsertController.swift" }, "StagingInsertController.swift should be found")
+        for file in files {
+            let code = Repo.codeLines(try Repo.read(file)).joined(separator: "\n")
+            XCTAssertNil(Repo.firstMatch(Self.stagingOnlyWord, in: code), "\(file.lastPathComponent): placing a command is the same whoever follows how")
+            XCTAssertNil(Repo.firstMatch(#"(?i)staging_?only"#, in: code), "\(file.lastPathComponent) must not read the mode in any spelling")
+        }
+    }
+
+    // The invitation: one call site, in the guarded Invite button
+
+    func testOnlyTheInviteButtonSendsAStagingOnlyInvitation() throws {
+        var sites: [String] = []
+        for file in Repo.swiftFiles(under: Repo.app) {
+            for line in Repo.codeLines(try Repo.read(file)) where line.contains(".inviteFollowStagingOnly(") {
+                sites.append(file.lastPathComponent)
+            }
+        }
+        XCTAssertEqual(sites, ["FollowControlView.swift"], "a staging-only follow may start only from Invite in the Follow popover; found \(sites)")
+        let owner = try funcBody("inviteTapped", in: "FollowControlView.swift")
+        XCTAssertTrue(owner.contains(".inviteFollowStagingOnly("), "the one call site is FollowControlView.inviteTapped")
+    }
+
+    func testTheStagingOnlyInviteIsSentOnlyAfterTheGuardAndAReportedRefusal() throws {
+        let body = try funcBody("inviteTapped", in: "FollowControlView.swift")
+        XCTAssertTrue(body.contains("TerminalInputGuard.allowsControl("), "inviteTapped must still ask the guard:\n\(body)")
+        try assertGuardedThenActs("inviteTapped", in: "FollowControlView.swift", refusedOp: "followInvite",
+                                  call: ".inviteFollowStagingOnly(")
+    }
+
+    // The radios that choose what the agent gets
+
+    func testTheFollowPopoverDeclaresNoKeyEquivalentAndNoDefaultButton() throws {
+        let url = Repo.app.appendingPathComponent("UI/Terminal/FollowControlView.swift")
+        let code = Repo.codeLines(try Repo.read(url)).joined(separator: "\n")
+        XCTAssertFalse(code.isEmpty)
+        for pattern in [#"\bkeyEquivalent\b"#, "keyEquivalentModifierMask", "performKeyEquivalent", "defaultButton", #"\bisDefault\b"#] {
+            XCTAssertNil(Repo.firstMatch(pattern, in: code), "FollowControlView matches `\(pattern)`: no choice here may answer to a key, Return included")
+        }
+    }
+
+    func testTheWhatTheAgentGetsRadiosChangeOnlyByAPersonAndReportARefusal() throws {
+        let body = try funcBody("inviteModeChanged", in: "FollowControlView.swift")
+        let guardAt = try XCTUnwrap(body.range(of: "TerminalInputGuard."), "inviteModeChanged must ask TerminalInputGuard:\n\(body)")
+        let refusal = try XCTUnwrap(body.range(of: "reportRefusal(", options: [], range: guardAt.upperBound..<body.endIndex),
+                                    "inviteModeChanged must report a refused change to the daemon")
+        XCTAssertTrue(body[refusal.lowerBound...].prefix(120).contains(".followInvite"), "it reports .followInvite:\n\(body)")
+        let returnAt = try XCTUnwrap(body.range(of: "return", options: [], range: refusal.upperBound..<body.endIndex),
+                                     "a refused change returns")
+        XCTAssertFalse(body[..<returnAt.lowerBound].contains("inviteMode = "), "the mode is not changed before the guard is satisfied:\n\(body)")
+        XCTAssertFalse(body.contains("store.inviteFollow"), "choosing a radio sends nothing; Invite does")
+    }
+
+    func testTheRadiosActionIsTheGatedInviteModeChanged() throws {
+        let view = try terminalViewSource("FollowControlView.swift")
+        XCTAssertTrue(view.lines.contains { $0.contains("#selector(inviteModeChanged(_:))") },
+                      "the radios' action must be the gated inviteModeChanged")
+    }
+}

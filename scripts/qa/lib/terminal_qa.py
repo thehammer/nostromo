@@ -3,7 +3,8 @@
     terminal_qa.py open-terminal QA_ROOT FOCUS_TAG
     terminal_qa.py request-remote-shell QA_ROOT FOCUS_TAG PROJECT ENVIRONMENT SERVICE SHELL_TYPE REASON [WAIT_SECS]
     terminal_qa.py list-terminals QA_ROOT FOCUS_TAG
-    terminal_qa.py request-follow QA_ROOT FOCUS_TAG TERMINAL_ID REASON [WAIT_SECS]
+    terminal_qa.py request-follow QA_ROOT FOCUS_TAG TERMINAL_ID REASON [WAIT_SECS] [--mode full|staging_only]
+    terminal_qa.py read-screen QA_ROOT FOCUS_TAG TERMINAL_ID
     terminal_qa.py stage QA_ROOT FOCUS_TAG TERMINAL_ID OP [ARGS_JSON]
 
 Acts as an agent in the focus FOCUS_TAG (the Hello `pty_id`, a built-in focus tag such as `mother`).
@@ -16,6 +17,10 @@ on `ok`. WAIT_SECS (default 330) is how long this client waits for the reply.
 `list-terminals` calls `nostromo.list_terminals` (the terminals of FOCUS_TAG's own focus, ids included).
 `request-follow` calls `nostromo.request_follow`: the person at the app answers a decision sheet; the outcome
 is {ok, outcome: "following"} or {error: denied | dismissed | timeout | no_operator | ...}.
+`--mode staging_only` asks to stage commands for the terminal WITHOUT receiving its output (the decision sheet says
+output will NOT be sent); the outcome is {ok, outcome: "staging_only"}. `--mode full` is the default's explicit form
+and, from a staging-only follower, shows a fresh sheet. `read-screen` calls `nostromo.read_terminal_screen`: a
+staging-only follower is refused `terminal_read_forbidden` (this prints the {error, ...} and exits 1).
 `stage` calls `nostromo.terminal_staging` for a terminal FOCUS_TAG follows: OP is list, stage, replace, remove or
 clear and ARGS_JSON holds its other arguments (`{"command": "ls -la"}`, `{"entry_id": "s-00000001", "command": "pwd"}`).
 It only fills the user's drawer: nothing it does can put a byte into the shell.
@@ -49,9 +54,15 @@ def list_terminals(qa_root, focus_tag, timeout=30):
     return call_tool(qa_root, focus_tag, "nostromo.list_terminals", {}, timeout)
 
 
-def request_follow(qa_root, focus_tag, terminal_id, reason, timeout=330):
-    return call_tool(qa_root, focus_tag, "nostromo.request_follow",
-                     {"terminal_id": terminal_id, "reason": reason}, timeout)
+def request_follow(qa_root, focus_tag, terminal_id, reason, timeout=330, mode=None):
+    arguments = {"terminal_id": terminal_id, "reason": reason}
+    if mode is not None:
+        arguments["mode"] = mode
+    return call_tool(qa_root, focus_tag, "nostromo.request_follow", arguments, timeout)
+
+
+def read_screen(qa_root, focus_tag, terminal_id, timeout=30):
+    return call_tool(qa_root, focus_tag, "nostromo.read_terminal_screen", {"terminal_id": terminal_id}, timeout)
 
 
 def stage(qa_root, focus_tag, terminal_id, op, args=None, timeout=30):
@@ -96,7 +107,18 @@ def call_tool(qa_root, focus_tag, tool, arguments, timeout):
 
 
 def main(argv):
+    argv, mode = list(argv), None
+    if "--mode" in argv:
+        at = argv.index("--mode")
+        if at + 1 >= len(argv):
+            print(__doc__, file=sys.stderr)
+            return 2
+        mode = argv[at + 1]
+        del argv[at:at + 2]
     command = argv[1] if len(argv) > 1 else ""
+    if mode is not None and command != "request-follow":
+        print(__doc__, file=sys.stderr)
+        return 2
     try:
         if command == "open-terminal" and len(argv) == 4:
             outcome = open_terminal(argv[2], argv[3])
@@ -107,7 +129,9 @@ def main(argv):
             outcome = list_terminals(argv[2], argv[3])
         elif command == "request-follow" and len(argv) in (6, 7):
             wait = float(argv[6]) if len(argv) == 7 else 330
-            outcome = request_follow(argv[2], argv[3], argv[4], argv[5], timeout=wait)
+            outcome = request_follow(argv[2], argv[3], argv[4], argv[5], timeout=wait, mode=mode)
+        elif command == "read-screen" and len(argv) == 5:
+            outcome = read_screen(argv[2], argv[3], argv[4])
         elif command == "stage" and len(argv) in (6, 7):
             outcome = stage(argv[2], argv[3], argv[4], argv[5], json.loads(argv[6]) if len(argv) == 7 else None)
         elif command == "set-pane-layout" and len(argv) == 5:
