@@ -948,6 +948,16 @@ class NostromodClient {
         features?.contains(approvalsFeature) == true
     }
 
+    /// The `welcome.features` entry that says the daemon knows the staging-only follow (its invite frame,
+    /// `TerminalFollower.mode`, `terminal_staging_list.staging_only`).
+    static let stagingOnlyFeature = "terminal_staging_only_v1"
+
+    /// Does a daemon that advertised `features` know the staging-only follow? The popover offers the mode only
+    /// then: an older daemon would not understand its invite frame.
+    static func supportsStagingOnly(features: [String]?) -> Bool {
+        features?.contains(stagingOnlyFeature) == true
+    }
+
     /// Topics every daemon this app can talk to understands.
     static let baseTopics = ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]
 
@@ -1001,8 +1011,12 @@ class NostromodClient {
     /// The client capability that says this app shows the staging drawer. Until an app declares it, every
     /// `nostromo.terminal_staging` call is refused `no_operator`.
     static let terminalStagingUICapability = "terminal_staging_ui"
+    /// The client capability that says this app can grant, show and revoke a staging-only follow (the Follow
+    /// badge, the popover's mode choice and the drawer's `NO OUTPUT` label). Until an app declares it, the
+    /// daemon answers every staging-only request `no_operator`.
+    static let terminalStagingOnlyUICapability = "terminal_staging_only_ui"
     static let operatorCapabilities = [terminalUICapability, remoteShellConfirmCapability, terminalFollowUICapability,
-                                       terminalStagingUICapability]
+                                       terminalStagingUICapability, terminalStagingOnlyUICapability]
 
     /// Clean, unambiguous round-trip probe: no side effects, no fan-out
     /// ambiguity (unlike `session_send`, which is answered by a broadcast
@@ -1236,6 +1250,12 @@ class NostromodClient {
     var daemonAdvertisesTasks: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         return advertisedFeatures.contains("tasks")
+    }
+
+    /// Whether the connection's last `welcome` advertised `terminal_staging_only_v1`.
+    var daemonAdvertisesStagingOnly: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsStagingOnly(features: advertisedFeatures)
     }
 
     /// Whether the connection's last `welcome` advertised `claude_login_v1`.

@@ -67,9 +67,10 @@ enum StagingFixtures {
 
     static func list(terminalId: String = StagingFixtures.terminalId, state: TerminalStagingState = .active,
                      agent: String = "Claudia", owner: String = "owner-tag", revision: Int, entries: [StagingEntry],
-                     enabled: Bool = true, foreground: String? = nil) -> TerminalStagingList {
+                     enabled: Bool = true, foreground: String? = nil, stagingOnly: Bool = false) -> TerminalStagingList {
         TerminalStagingList(terminalId: terminalId, paneId: "terminal-a", state: state, ownerTag: owner,
-                            agentName: agent, revision: revision, entries: entries, enabled: enabled, foreground: foreground)
+                            agentName: agent, revision: revision, entries: entries, enabled: enabled, foreground: foreground,
+                            stagingOnly: stagingOnly)
     }
 
     /// `PRODUCTION · admin-portal · scheduler · shell`.
@@ -298,10 +299,11 @@ final class StagingRig {
     /// A frame for the terminal with the next revision.
     @discardableResult
     func ingest(_ entries: [StagingEntry], state: TerminalStagingState = .active, agent: String = "Claudia",
-                owner: String = "owner-tag", enabled: Bool = true, foreground: String? = nil) -> TerminalStagingList {
+                owner: String = "owner-tag", enabled: Bool = true, foreground: String? = nil,
+                stagingOnly: Bool = false) -> TerminalStagingList {
         revision += 1
         let list = StagingFixtures.list(state: state, agent: agent, owner: owner, revision: revision, entries: entries,
-                                        enabled: enabled, foreground: foreground)
+                                        enabled: enabled, foreground: foreground, stagingOnly: stagingOnly)
         staging.ingest(list)
         return list
     }
@@ -1486,5 +1488,115 @@ extension StagingInsertControllerTests {
         XCTAssertEqual(rig.rowResults, [.refused(.justChanged)])
         XCTAssertTrue(rig.target.attempts.isEmpty)
         XCTAssertTrue(rig.insertedFrames.isEmpty)
+    }
+}
+
+
+// MARK: - S3b: a staging-only list is placed, copied, removed and confirmed exactly like a full one
+
+// The agent seeing no output changes nothing about how a person places its commands: every rule that keeps a
+// placement safe (the reading delay, the gate, the production confirm sheet) is the same whether the list is
+// `stagingOnly` or not. Each scenario is run once per value and the two transcripts must be identical.
+
+extension StagingInsertControllerTests {
+
+    /// What every controller action did, as plain strings, for a list whose `stagingOnly` is `stagingOnly`.
+    private func parityTranscript(stagingOnly: Bool) throws -> [String] {
+        var t: [String] = []
+        let id = StagingFixtures.terminalId
+
+        // Insert, and the reading delay it waits out (exactly 1.5 s).
+        do {
+            let rig = makeRig()
+            rig.ingest([StagingFixtures.entry("s-1", 1, "ls -la")], stagingOnly: stagingOnly)
+            t.append("fresh readable=\(rig.controller.isReadable(entryId: "s-1")) reason=\(String(describing: rig.controller.snapshot(entryId: "s-1")?.reason))")
+            rig.settle(1.0)
+            t.append("1.0s readable=\(rig.controller.isReadable(entryId: "s-1"))")
+            rig.settle(0.5)
+            t.append("1.5s readable=\(rig.controller.isReadable(entryId: "s-1"))")
+            let snapshot = try XCTUnwrap(rig.controller.snapshot(entryId: "s-1"))
+            let result = rig.controller.insert(snapshot, event: nil, control: NSView())
+            t.append("insert=\(result) sent=\(rig.target.sent) focus=\(rig.target.focusCount) log=\(rig.log.entries) frames=\(rig.stagingFrames)")
+        }
+
+        // Insert refused by the gate: a person's gesture is still required.
+        do {
+            let rig = makeRig(gate: StagingGates.real())
+            rig.ingest([StagingFixtures.entry("s-1", 1, "ls -la")], stagingOnly: stagingOnly)
+            rig.settle()
+            let snapshot = try XCTUnwrap(rig.controller.snapshot(entryId: "s-1"))
+            let result = rig.controller.insert(snapshot, event: nil, control: NSView())
+            t.append("gated insert=\(result) sent=\(rig.target.attempts) refusals=\(rig.refusals) frames=\(rig.stagingFrames)")
+        }
+
+        // Copy, before and after the delay.
+        do {
+            let rig = makeRig()
+            rig.ingest([StagingFixtures.entry("s-1", 1, "echo hi")], stagingOnly: stagingOnly)
+            let early = rig.controller.copy(entryId: "s-1", event: nil, control: NSView())
+            rig.settle()
+            let late = rig.controller.copy(entryId: "s-1", event: nil, control: NSView())
+            t.append("copy early=\(early) late=\(late) board=\(String(describing: rig.pasteboard.string(forType: .string))) placed=\(rig.target.attempts)")
+        }
+
+        // Remove, Archive and Clear all.
+        do {
+            let rig = makeRig()
+            let placed = StagingFixtures.entry("s-1", 1, "ls", insertedCount: 1, lastInsertedAt: StagingFixtures.baseDate)
+            rig.ingest([placed, StagingFixtures.entry("s-2", 2, "pwd"), StagingFixtures.entry("s-3", 3, "date")], stagingOnly: stagingOnly)
+            let archive = rig.controller.archive(entryIds: ["s-1"], event: nil, control: NSView(), fromMenu: false)
+            let remove = rig.controller.remove(entryId: "s-2", event: nil, control: NSView())
+            let clear = rig.controller.clearAll(event: nil, control: NSView())
+            t.append("archive=\(archive) remove=\(remove) clear=\(clear) frames=\(rig.stagingFrames) sent=\(rig.target.attempts)")
+        }
+        do {
+            let rig = makeRig(isMirror: true)
+            rig.ingest(StagingFixtures.entries(["ls", "pwd"]), stagingOnly: stagingOnly)
+            t.append("mirror remove=\(rig.controller.remove(entryId: "s-1", event: nil, control: NSView())) clear=\(rig.controller.clearAll(event: nil, control: NSView())) frames=\(rig.stagingFrames)")
+        }
+
+        // The production confirm sheet: a destructive command opens it, Cancel sends nothing, Insert places it once.
+        do {
+            let command = "php artisan queue:flush"
+            let rig = makeRig(kind: .ecs)
+            rig.context?.target = StagingFixtures.productionTarget
+            rig.typeEnter()
+            rig.ingest([StagingFixtures.entry("s-1", 1, command)], stagingOnly: stagingOnly)
+            rig.settle()
+            let window = rig.makeTitledWindow()
+            let row = rig.makeRow(in: window)
+            let typed = rig.inputFrames.count
+
+            rig.click(row, in: window)
+            let sheet = try XCTUnwrap(rig.controller.confirmSheet, "stagingOnly \(stagingOnly): no confirm sheet")
+            t.append("click1 results=\(rig.rowResults) sheet=\(sheet.titleText) attempts=\(rig.target.attempts) inputs=\(rig.inputFrames.count - typed)")
+            sheet.cancelButton.performClick(nil)
+            t.append("cancel sheetUp=\(rig.controller.confirmSheet != nil) attempts=\(rig.target.attempts) frames=\(rig.stagingFrames)")
+
+            rig.click(row, in: window)
+            let again = try XCTUnwrap(rig.controller.confirmSheet, "stagingOnly \(stagingOnly): no confirm sheet the second time")
+            again.insertButton.performClick(nil)
+            t.append("insert sheetUp=\(rig.controller.confirmSheet != nil) results=\(rig.rowResults) sent=\(rig.target.sent) frames=\(rig.stagingFrames)")
+            XCTAssertEqual(rig.target.sent, [Array(command.utf8)], "stagingOnly \(stagingOnly): the command is placed once")
+            XCTAssertEqual(rig.insertedFrames,
+                           [.stagingInserted(terminalId: id, entryId: "s-1", bytes: command.utf8.count, confirmed: true)])
+        }
+        return t
+    }
+
+    func testAStagingOnlyListIsPlacedCopiedRemovedAndConfirmedExactlyLikeAFullOne() throws {
+        let full = try parityTranscript(stagingOnly: false)
+        let staging = try parityTranscript(stagingOnly: true)
+
+        // The baseline is the behaviour the rest of this file pins, so an empty or broken transcript cannot pass.
+        XCTAssertEqual(full.count, 11, "\(full)")
+        XCTAssertTrue(full[0].hasPrefix("fresh readable=false"), full[0])
+        XCTAssertEqual(full[1], "1.0s readable=false")
+        XCTAssertEqual(full[2], "1.5s readable=true")
+        XCTAssertTrue(full[3].contains("insert=inserted(bytes: 6)"), full[3])
+        XCTAssertTrue(full[4].contains("gated insert=notAPerson"), full[4])
+        XCTAssertTrue(full[5].contains("copy early=false late=true board=Optional(\"echo hi\")"), full[5])
+
+        XCTAssertEqual(staging, full, "a staging-only list must behave exactly like a full one")
     }
 }

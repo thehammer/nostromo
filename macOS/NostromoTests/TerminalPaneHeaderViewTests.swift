@@ -346,6 +346,20 @@ final class TerminalPaneHeaderViewTests: XCTestCase {
         }
     }
 
+    func testAStagingOnlyBadgeIsReadAloudWithTheSentenceThatItsOutputIsNotSent() {
+        let stagingOnly = TerminalFollower(tag: "claudia-1", paused: false, pauseReason: nil, mode: "staging_only")
+        let sentence = "This terminal's output is not sent to Claudia's model."
+        for (kind, target) in [(TerminalKind.local, nil), (.ecs, longTarget)] as [(TerminalKind, TerminalTarget?)] {
+            for width in [100.0, 500] {
+                let header = makeFollowHeader(followInfo(kind: kind, target: target, follower: stagingOnly), width: width)
+                let spoken = header.followButton.accessibilityLabel() ?? ""
+                XCTAssertTrue(spoken.contains("Staging only: Claudia"), "\(kind) \(Int(width)): \(spoken)")
+                XCTAssertTrue(spoken.contains(sentence), "\(kind) \(Int(width)): \(spoken)")
+                XCTAssertTrue(header.followButton.toolTip?.contains(sentence) ?? false, "\(kind) \(Int(width)): \(header.followButton.toolTip ?? "")")
+            }
+        }
+    }
+
     func testTheBadgeHasItsAccessibilityIdentifier() {
         XCTAssertEqual(TerminalPaneHeaderView().followButton.accessibilityIdentifier(), "terminal-follow")
     }

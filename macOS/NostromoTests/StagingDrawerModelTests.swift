@@ -563,3 +563,213 @@ extension StagingDrawerModelTests {
         XCTAssertEqual(StagingDrawerModel.confirmTargetLine(.remote(token: "REMOTE"), target: nil), "REMOTE shell")
     }
 }
+
+
+// MARK: - S3b: a staging-only list (the agent sees no output)
+
+// The drawer says so wherever it says who staged: the header (it tells the person what to do and why the agent
+// cannot see the terminal), the collapsed strip (a fixed `NO OUTPUT` first), the spoken label. How a row behaves
+// does not change at all: the agent seeing no output has no bearing on whether a command may be placed.
+
+extension StagingDrawerModelTests {
+
+    private func stagingOnlyList(agent: String = "Claudia", state: TerminalStagingState = .active,
+                                 _ entries: [StagingEntry]) -> TerminalStagingList {
+        StagingFixtures.list(state: state, agent: agent, revision: 1, entries: entries, stagingOnly: true)
+    }
+
+    private var threeEntries: [StagingEntry] { StagingFixtures.entries(["ls", "pwd", "date"]) }
+
+    private var dot: String { "\u{00B7}" }
+
+    // MARK: Header
+
+    func testTheNoOutputLabelIsAFixedText() {
+        XCTAssertEqual(StagingDrawerModel.noOutputLabel, "NO OUTPUT")
+    }
+
+    func testAnEmptyStagingOnlyHeaderSaysTheAgentCannotSeeTheOutput() {
+        let parts = StagingDrawerModel.headerParts(stagingOnlyList([]))
+        XCTAssertEqual(parts.lead, "Staged by Claudia \(dot) nothing yet. Claudia can't see this terminal's output. Click a staged command to put it at the prompt; you press Enter.")
+        XCTAssertNil(parts.count)
+    }
+
+    func testAFrozenStagingOnlyHeaderSaysTheStagingAccessEndedAndWinsOverEmpty() {
+        let expected = "Claudia's staging access ended; this list won't change"
+        for entries in [threeEntries, []] {
+            let parts = StagingDrawerModel.headerParts(stagingOnlyList(state: .frozen, entries))
+            XCTAssertEqual(parts.lead, expected)
+            XCTAssertNil(parts.count)
+        }
+    }
+
+    func testANonEmptyActiveStagingOnlyHeaderIsTheOrdinaryOne() {
+        let parts = StagingDrawerModel.headerParts(stagingOnlyList(threeEntries))
+        XCTAssertEqual(parts.lead, "Staged by Claudia")
+        XCTAssertEqual(parts.count, "(3)")
+        XCTAssertEqual(StagingDrawerModel.headerText(stagingOnlyList(threeEntries)), "Staged by Claudia (3)")
+    }
+
+    func testAFullModeHeaderIsUnchangedByTheStagingOnlyTexts() {
+        let empty = list([])
+        XCTAssertEqual(StagingDrawerModel.headerParts(empty).lead,
+                       "Staged by Claudia \(dot) nothing yet. Click a staged command to put it at the prompt; you press Enter.")
+        XCTAssertEqual(StagingDrawerModel.headerParts(list(state: .frozen, [])).lead, "Claudia stopped following; this list won't change")
+    }
+
+    func testAStagingOnlyHeaderNamesTheAgentWithTheSameSanitisingAndCapAsEveryOtherText() {
+        let long = String(repeating: "a", count: 60)
+        let shown = StagingDrawerModel.agentName(stagingOnlyList(agent: long, []))
+        XCTAssertEqual(shown.count, 40)
+        XCTAssertEqual(StagingDrawerModel.headerParts(stagingOnlyList(agent: long, [])).lead,
+                       "Staged by \(shown) \(dot) nothing yet. \(shown) can't see this terminal's output. Click a staged command to put it at the prompt; you press Enter.")
+        XCTAssertEqual(StagingDrawerModel.headerParts(stagingOnlyList(agent: long, state: .frozen, [])).lead,
+                       "\(shown)'s staging access ended; this list won't change")
+        XCTAssertEqual(StagingDrawerModel.headerParts(stagingOnlyList(agent: "Cla\u{202E}udia", [])).lead,
+                       "Staged by Claudia \(dot) nothing yet. Claudia can't see this terminal's output. Click a staged command to put it at the prompt; you press Enter.")
+        XCTAssertTrue(StagingDrawerModel.headerParts(stagingOnlyList(agent: "", [])).lead.hasPrefix("Staged by The agent "))
+    }
+
+    func testTheProductionHeaderOfANonEmptyStagingOnlyListIsUnchanged() {
+        let two = StagingFixtures.entries(["ls", "pwd"])
+        let staging = stagingOnlyList(agent: "Triage", two)
+        let full = list(agent: "Triage", two)
+        for safety in [StagingPaneSafety.remote(token: "PRODUCTION"), .localRunning(program: "ssh")] {
+            XCTAssertEqual(StagingDrawerModel.productionHeaderText(staging, safety: safety),
+                           StagingDrawerModel.productionHeaderText(full, safety: safety))
+        }
+        XCTAssertEqual(StagingDrawerModel.productionHeaderText(staging, safety: .remote(token: "PRODUCTION")),
+                       "Staged by Triage (2) \(dot) you press Enter")
+    }
+
+    // MARK: Strip
+
+    func testTheStagingOnlyStripStartsWithNoOutput() {
+        XCTAssertEqual(StagingDrawerModel.stripText(stagingOnlyList(threeEntries)), "NO OUTPUT \(dot) 3 staged by Claudia \u{25B8}")
+        XCTAssertEqual(StagingDrawerModel.stripText(stagingOnlyList([])), "NO OUTPUT \(dot) Nothing staged by Claudia \u{25B8}")
+        XCTAssertEqual(StagingDrawerModel.stripText(stagingOnlyList(state: .frozen, threeEntries)),
+                       "NO OUTPUT \(dot) 3 staged by Claudia (stopped) \u{25B8}")
+    }
+
+    func testTheFullModeStripHasNoNoOutputWords() {
+        XCTAssertEqual(StagingDrawerModel.stripText(list(threeEntries)), "3 staged by Claudia \u{25B8}")
+        XCTAssertFalse(StagingDrawerModel.stripText(list([])).contains("NO OUTPUT"))
+        XCTAssertFalse(StagingDrawerModel.stripText(list(state: .frozen, threeEntries)).contains("NO OUTPUT"))
+    }
+
+    func testTheStagingOnlyStripCapsTheAgentNameAtFortyCharacters() {
+        let long = String(repeating: "a", count: 60)
+        let shown = StagingDrawerModel.agentName(stagingOnlyList(agent: long, threeEntries))
+        XCTAssertEqual(shown.count, 40)
+        XCTAssertEqual(StagingDrawerModel.stripText(stagingOnlyList(agent: long, threeEntries)),
+                       "NO OUTPUT \(dot) 3 staged by \(shown) \u{25B8}")
+    }
+
+    // MARK: Spoken label
+
+    func testTheStagingOnlySpokenLabelSaysTheAgentDoesNotSeeTheOutputInEveryPane() {
+        let l = stagingOnlyList(threeEntries)
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(l, safety: .local),
+                       "Staged commands \(dot) staging only, Claudia does not see this terminal's output")
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(l, safety: .remote(token: "PRODUCTION")),
+                       "Staged by Claudia \(dot) PRODUCTION \(dot) staging only, Claudia does not see this terminal's output \(dot) you press Enter")
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(l, safety: .localRunning(program: "ssh")),
+                       "Staged by Claudia \(dot) running ssh \(dot) staging only, Claudia does not see this terminal's output \(dot) you press Enter")
+    }
+
+    func testTheStagingOnlySpokenLabelIsTheSameForAnEmptyOrFrozenList() {
+        for l in [stagingOnlyList([]), stagingOnlyList(state: .frozen, threeEntries)] {
+            XCTAssertEqual(StagingDrawerModel.accessibilityText(l, safety: .local),
+                           "Staged commands \(dot) staging only, Claudia does not see this terminal's output")
+        }
+    }
+
+    func testTheStagingOnlySpokenLabelUsesTheCappedAgentName() {
+        let long = String(repeating: "a", count: 60)
+        let shown = StagingDrawerModel.agentName(stagingOnlyList(agent: long, []))
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(stagingOnlyList(agent: long, []), safety: .local),
+                       "Staged commands \(dot) staging only, \(shown) does not see this terminal's output")
+    }
+
+    func testTheFullModeSpokenLabelsAreUnchanged() {
+        let l = list(threeEntries)
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(l, safety: .local), "Staged commands")
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(l, safety: .remote(token: "PRODUCTION")),
+                       "Staged by Claudia \(dot) PRODUCTION \(dot) you press Enter")
+        XCTAssertEqual(StagingDrawerModel.accessibilityText(l, safety: .localRunning(program: "ssh")),
+                       "Staged by Claudia \(dot) running ssh \(dot) you press Enter")
+    }
+
+    // MARK: Rows behave identically
+
+    /// Commands that exercise every row rule: plain, placed, destructive, history, placeholder, hazards, a note, long, a text the app will not insert.
+    private func variedEntries() -> [StagingEntry] {
+        [StagingFixtures.entry("a", 1, "ls -la"),
+         StagingFixtures.entry("b", 2, "pwd", note: "where am I", insertedCount: 2, lastInsertedAt: StagingFixtures.baseDate),
+         StagingFixtures.entry("c", 3, "php artisan queue:flush"),
+         StagingFixtures.entry("d", 4, "!!"),
+         StagingFixtures.entry("e", 5, "scp <file> host:/tmp"),
+         StagingFixtures.entry("f", 6, "ls file{1,2}.txt"),
+         StagingFixtures.entry("g", 7, String(repeating: "x", count: 900)),
+         StagingFixtures.entry("h", 8, "ls\u{09}-la"),
+         StagingFixtures.entry("i", 9, "echo \u{0430}")]
+    }
+
+    private func parityEnvironments() -> [StagingEnvironment] {
+        var production = env(kind: .ecs)
+        production.target = StagingFixtures.productionTarget
+        var productionLine = production
+        productionLine.lineMayHaveText = true
+        var running = env(kind: .local)
+        running.foreground = "ssh"
+        return [env(), env(mirror: true), env(connected: false), env(status: .connecting), env(status: .ended),
+                env(alt: true), env(sending: true), production, productionLine, running]
+    }
+
+    func testRowsAreIdenticalForAStagingOnlyListAndTheSameListInFullMode() {
+        let entries = variedEntries()
+        // `b` was just shown (still inside the reading delay), `c` has no known time, the rest were read long ago.
+        let shownSince: (String) -> TimeInterval? = { id in
+            switch id {
+            case "b": return 99
+            case "c": return nil
+            default: return 0
+            }
+        }
+        for state in [TerminalStagingState.active, .frozen] {
+            for environment in parityEnvironments() {
+                let full = StagingFixtures.list(state: state, agent: "Claudia", revision: 1, entries: entries)
+                let staging = StagingFixtures.list(state: state, agent: "Claudia", revision: 1, entries: entries, stagingOnly: true)
+                XCTAssertEqual(StagingDrawerModel.rows(for: staging, env: environment, shownSince: shownSince, now: 100, date: now),
+                               StagingDrawerModel.rows(for: full, env: environment, shownSince: shownSince, now: 100, date: now),
+                               "\(state) \(environment)")
+            }
+        }
+    }
+
+    func testAStagingOnlyRowsReasonIsTheOneTheSnapshotCarriesForTheSameEnvironment() {
+        // `reason(for:)`, `snapshot`, `sharedReason` and `bytes` take no list, so they cannot depend on the mode;
+        // what a staging-only list's rows say must still be what those decide.
+        let staging = stagingOnlyList(variedEntries())
+        for environment in parityEnvironments() {
+            let rows = StagingDrawerModel.rows(for: staging, env: environment, shownSince: { $0 == "a" ? 0 : 99 }, now: 100, date: now)
+            XCTAssertEqual(rows.count, staging.entries.count)
+            for (row, entry) in zip(rows, staging.entries) {
+                let shownSince: TimeInterval = entry.id == "a" ? 0 : 99
+                let reason = StagingDrawerModel.reason(for: entry, env: environment, shownSince: shownSince, now: 100)
+                XCTAssertEqual(row.disabledReason, reason, "\(entry.command) \(environment)")
+                XCTAssertEqual(StagingDrawerModel.snapshot(terminalId: "t", entry: entry, env: environment,
+                                                           shownSince: shownSince, now: 100).reason, reason)
+            }
+        }
+    }
+
+    func testAStagingOnlyRowIsReadyInsertedAndLabelledByTheSameRulesAsAFullOne() {
+        let staging = stagingOnlyList(variedEntries())
+        let rows = StagingDrawerModel.rows(for: staging, env: env(), shownSince: { _ in 0 }, now: 100, date: now)
+        XCTAssertEqual(rows.first { $0.entryId == "a" }?.state, .ready)
+        XCTAssertEqual(rows.first { $0.entryId == "h" }?.disabledReason, .notInsertable)
+        XCTAssertEqual(rows.first { $0.entryId == "e" }?.labels.contains(StagingDrawerModel.placeholderLabel), true)
+        XCTAssertEqual(rows.first { $0.entryId == "b" }?.noteText, "Claudia's note (unverified): where am I")
+    }
+}

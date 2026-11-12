@@ -39,12 +39,16 @@ struct TerminalStagingList: Equatable {
     /// Set while a Local terminal's foreground is a program other than its shell (`ssh`, `kubectl`): the
     /// pane is treated like a remote one. Only for the app's own rules: never sent to the agent.
     var foreground: String? = nil
+    /// The agent follows in staging-only mode: it receives no output from this terminal. Also set on a
+    /// frozen list (the access ended, the mode it had does not change).
+    var stagingOnly: Bool = false
 }
 
 extension TerminalStagingList: Decodable {
     enum CodingKeys: String, CodingKey {
         case terminalId = "terminal_id", paneId = "pane_id", state, ownerTag = "owner_tag"
         case agentName = "agent_name", revision, entries, enabled, foreground
+        case stagingOnly = "staging_only"
     }
 
     init(from decoder: Decoder) throws {
@@ -59,6 +63,7 @@ extension TerminalStagingList: Decodable {
         entries = try c.decodeIfPresent([StagingEntry].self, forKey: .entries) ?? []
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         foreground = try c.decodeIfPresent(String.self, forKey: .foreground)
+        stagingOnly = try c.decodeIfPresent(Bool.self, forKey: .stagingOnly) ?? false
     }
 }
 

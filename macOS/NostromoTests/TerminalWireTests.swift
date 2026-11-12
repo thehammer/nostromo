@@ -320,6 +320,71 @@ final class TerminalWireTests: XCTestCase {
         XCTAssertEqual(t.follower, TerminalFollower(tag: "cody-1", paused: false, pauseReason: nil))
     }
 
+    // MARK: Staging only, no output (S3b)
+
+    func testAFollowerCarriesItsModeAndOnlyExactlyStagingOnlyIsStagingOnly() throws {
+        func follower(_ mode: String) throws -> TerminalFollower {
+            let t = try info("""
+            {"terminal_id":"t1","tag":"core-1","pane_id":"p","kind":"local","label":"Terminal","status":"running",
+             "cols":80,"rows":24,"requested_by":{"kind":"user"},
+             "follower":{"tag":"cody-1","paused":false\(mode)}}
+            """)
+            return try XCTUnwrap(t.follower)
+        }
+        XCTAssertTrue(try follower(#","mode":"staging_only""#).isStagingOnly)
+        XCTAssertFalse(try follower("").isStagingOnly, "an older daemon sends no mode: a full follow")
+        XCTAssertFalse(try follower(#","mode":"something_new""#).isStagingOnly, "an unknown mode counts as full")
+        XCTAssertFalse(try follower(#","mode":null"#).isStagingOnly)
+        XCTAssertFalse(try follower(#","mode":42"#).isStagingOnly, "a non-string mode decodes, as no mode")
+        XCTAssertNil(try follower(#","mode":{"a":1}"#).mode)
+    }
+
+    func testAFollowerInTheStagingOnlyModeIsNotEqualToTheSameFollowerInAFullFollow() {
+        XCTAssertNotEqual(TerminalFollower(tag: "cody-1", paused: false, pauseReason: nil, mode: "staging_only"),
+                          TerminalFollower(tag: "cody-1", paused: false, pauseReason: nil))
+    }
+
+    // The store: a staging-only invitation is its own frame, never a full invitation.
+
+    private func storeWithAKnownTerminal(sent: @escaping (TerminalClientMessage) -> Void) throws -> TerminalSessionStore {
+        let store = TerminalSessionStore(transport: sent)
+        store.connectionChanged(true)
+        store.ingest(.terminalState(try info(localInfoJSON)))
+        return store
+    }
+
+    func testInvitingAStagingOnlyFollowerSendsExactlyOneStagingOnlyInviteAndNeverAFullInvite() throws {
+        var recorded: [TerminalClientMessage] = []
+        let store = try storeWithAKnownTerminal { recorded.append($0) }
+        recorded.removeAll()
+
+        store.inviteFollowStagingOnly(terminalId: "t1", followerTag: "claudia-1")
+
+        XCTAssertEqual(recorded, [.followInviteStagingOnly(terminalId: "t1", followerTag: "claudia-1")])
+        XCTAssertFalse(recorded.contains { $0.wireType == "terminal_follow_invite" }, "a full invite starts a full follow")
+    }
+
+    func testInvitingAFullFollowerStillSendsTheFullInvite() throws {
+        var recorded: [TerminalClientMessage] = []
+        let store = try storeWithAKnownTerminal { recorded.append($0) }
+        recorded.removeAll()
+
+        store.inviteFollow(terminalId: "t1", followerTag: "claudia-1", includeScreen: true)
+
+        XCTAssertEqual(recorded, [.followInvite(terminalId: "t1", followerTag: "claudia-1", includeScreen: true)])
+    }
+
+    func testNoStagingOnlyInviteIsSentWhileTheDaemonIsUnavailable() throws {
+        var recorded: [TerminalClientMessage] = []
+        let store = try storeWithAKnownTerminal { recorded.append($0) }
+        store.connectionChanged(false)
+        recorded.removeAll()
+
+        store.inviteFollowStagingOnly(terminalId: "t1", followerTag: "claudia-1")
+
+        XCTAssertTrue(recorded.isEmpty, "sent: \(recorded)")
+    }
+
     func testAnUnknownKindOrStatusDecodesAsUnknownInsteadOfFailingTheFrame() throws {
         let t = try info("""
         {"terminal_id":"t1","tag":"core-1","pane_id":"p","kind":"quantum","label":"Terminal","status":"hibernating",

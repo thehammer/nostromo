@@ -365,6 +365,13 @@ final class TerminalSessionStore {
         transport(.followInvite(terminalId: terminalId, followerTag: followerTag, includeScreen: includeScreen))
     }
 
+    /// Invite focus `followerTag` to stage commands for `terminalId` with no output sent to it. Never a
+    /// `followInvite`: that frame starts a full follow.
+    func inviteFollowStagingOnly(terminalId: String, followerTag: String) {
+        guard !daemonUnavailable.contains(terminalId) else { return }
+        transport(.followInviteStagingOnly(terminalId: terminalId, followerTag: followerTag))
+    }
+
     /// Stop the following at once.
     func stopFollow(terminalId: String) {
         guard !daemonUnavailable.contains(terminalId) else { return }
@@ -782,10 +789,28 @@ extension TerminalRefusedFrame {
     /// could not take). Fixed text: nothing of what was typed or pasted is ever in it.
     static let inputNotice = "[input not delivered: the terminal refused it (too large, or the program is not reading)]"
 
-    /// `inputNotice` for a refused `terminal_input`, else nil.
+    /// A refused invite (`follow_invite`: the daemon sends the same op for a full and a staging-only invite).
+    /// Fixed text, so no code, terminal or focus is ever echoed. Nothing changed when one of these shows.
+    static let followInviteUnavailableNotice = "[invite not sent: following is not set up in this daemon. Nothing changed]"
+    static let followInviteNotAllowedNotice = "[invite not sent: this app is not allowed to start that kind of follow. Nothing changed]"
+    static let followInviteRefusedNotice = "[invite not sent: the daemon refused it. Nothing changed]"
+
+    /// The notice the pane's overlay shows for this refusal: `inputNotice` for a refused `terminal_input`,
+    /// one of the invite notices for a refused `follow_invite`, else nil.
     var overlayNotice: String? {
-        guard op == "input", code == "terminal_input_too_large" || code == "terminal_input_busy" else { return nil }
-        return Self.inputNotice
+        switch op {
+        case "input":
+            guard code == "terminal_input_too_large" || code == "terminal_input_busy" else { return nil }
+            return Self.inputNotice
+        case "follow_invite":
+            switch code {
+            case "follow_unavailable": return Self.followInviteUnavailableNotice
+            case "terminal_follow_ui_required", "terminal_staging_only_ui_required": return Self.followInviteNotAllowedNotice
+            default: return Self.followInviteRefusedNotice
+            }
+        default:
+            return nil
+        }
     }
 }
 

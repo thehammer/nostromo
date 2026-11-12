@@ -51,10 +51,33 @@ struct TerminalFollower: Codable, Equatable {
     let tag: String
     let paused: Bool
     let pauseReason: String?
+    /// `"staging_only"` for a follower that may stage commands but receives no output; omitted by the daemon
+    /// for a full follow. Any other value, or none, counts as a full follow (`isStagingOnly`).
+    var mode: String? = nil
+
+    /// Whether this follower gets no output. Anything but exactly `staging_only` is treated as a full follow:
+    /// overstating the exposure is the safe direction.
+    var isStagingOnly: Bool { mode == "staging_only" }
 
     enum CodingKeys: String, CodingKey {
-        case tag, paused
+        case tag, paused, mode
         case pauseReason = "pause_reason"
+    }
+
+    init(tag: String, paused: Bool, pauseReason: String?, mode: String? = nil) {
+        self.tag = tag
+        self.paused = paused
+        self.pauseReason = pauseReason
+        self.mode = mode
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tag = try c.decode(String.self, forKey: .tag)
+        paused = try c.decode(Bool.self, forKey: .paused)
+        pauseReason = try c.decodeIfPresent(String.self, forKey: .pauseReason)
+        // Lenient: a value of another type is no mode (a full follow), never a decode failure.
+        mode = (try? c.decodeIfPresent(String.self, forKey: .mode)) ?? nil
     }
 }
 
@@ -242,6 +265,9 @@ enum TerminalClientMessage: Equatable {
     /// Invite focus `followerTag` to follow a terminal (moves the invitation if another focus follows).
     /// `includeScreen` also delivers what is on the screen now.
     case followInvite(terminalId: String, followerTag: String, includeScreen: Bool)
+    /// Invite focus `followerTag` to stage commands for a terminal and receive **no output**. A frame of its
+    /// own, not a field on `followInvite`: a daemon that ignored an unknown field would start a full follow.
+    case followInviteStagingOnly(terminalId: String, followerTag: String)
     /// Stop following at once.
     case followStop(terminalId: String)
     /// Resume a following that paused itself.
@@ -275,6 +301,7 @@ enum TerminalClientMessage: Equatable {
         case .keepAlive:     return "terminal_keep_alive"
         case .refusalReport: return "terminal_refusal_report"
         case .followInvite:  return "terminal_follow_invite"
+        case .followInviteStagingOnly: return "terminal_follow_invite_staging_only"
         case .followStop:    return "terminal_follow_stop"
         case .followResume:  return "terminal_follow_resume"
         case .sendSelection: return "terminal_send_selection"
@@ -317,6 +344,9 @@ enum TerminalClientMessage: Equatable {
             o["terminal_id"] = id
             o["follower_tag"] = followerTag
             o["include_screen"] = includeScreen
+        case .followInviteStagingOnly(let id, let followerTag):
+            o["terminal_id"] = id
+            o["follower_tag"] = followerTag
         case .sendSelection(let id, let targetTag, let text):
             o["terminal_id"] = id
             o["target_tag"] = targetTag

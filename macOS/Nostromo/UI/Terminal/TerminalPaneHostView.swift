@@ -532,7 +532,10 @@ final class TerminalPaneHostView: NSView, TerminalByteSink, TerminalPaneLeaf, Te
 
     /// What the Follow badge and its popover say: nil until the daemon has described the pane.
     private func followModel() -> FollowModel? {
-        info.map { FollowModel(info: $0, focuses: FollowModel.options(from: FocusStore.shared.focuses)) }
+        info.map {
+            FollowModel(info: $0, focuses: FollowModel.options(from: FocusStore.shared.focuses),
+                        offersStagingOnly: AppStore.shared.client.daemonAdvertisesStagingOnly)
+        }
     }
 
     /// The popover is for the state (and the buttons) it was opened with: once the daemon changes them (an

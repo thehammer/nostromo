@@ -102,6 +102,9 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
     private let reasonLabel = NSTextField(labelWithString: "")
     /// `PRODUCTION`, `REMOTE` or `RUNNING`: separate from the text, fixed, never truncated.
     let tokenLabel = NSTextField(labelWithString: "")
+    /// `NO OUTPUT` on a staging-only list: separate from the text, fixed, never truncated. It hides, whole, only when
+    /// the room that is left cannot hold it with the token, the chevron, the menu and the close x.
+    let noOutputLabel = NSTextField(labelWithString: StagingDrawerModel.noOutputLabel)
     private let closeLabel = StagingClickableLabel()
     private let archivedToggle = StagingClickableLabel()
     private let scroll = NSScrollView()
@@ -160,6 +163,17 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         tokenLabel.textColor = Theme.hazardText
         tokenLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         tokenLabel.setAccessibilityIdentifier("staging-drawer-environment")
+        noOutputLabel.isSelectable = false
+        noOutputLabel.isHidden = true
+        noOutputLabel.lineBreakMode = .byClipping
+        noOutputLabel.alignment = .center
+        noOutputLabel.wantsLayer = true
+        noOutputLabel.layer?.backgroundColor = Theme.fgMuted.cgColor
+        noOutputLabel.layer?.cornerRadius = 3
+        noOutputLabel.textColor = Theme.bg
+        noOutputLabel.font = NSFont.systemFont(ofSize: 10, weight: .bold)
+        noOutputLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        noOutputLabel.setAccessibilityIdentifier("staging-drawer-no-output")
         closeLabel.title = "\u{00D7}"
         closeLabel.setAccessibilityLabel("Hide staged commands")
         closeLabel.onClick = { [weak self] in
@@ -175,7 +189,7 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         scroll.borderType = .noBorder
         divider.onDrag = { [weak self] height in self?.dragged(to: height) }
         divider.currentHeight = { [weak self] in self?.frame.height ?? 0 }
-        for view in [divider, scroll, reasonLabel, leadLabel, countLabel, chevron, menuButton, closeLabel, tokenLabel, stripButton] as [NSView] {
+        for view in [divider, scroll, reasonLabel, leadLabel, countLabel, chevron, menuButton, closeLabel, tokenLabel, noOutputLabel, stripButton] as [NSView] {
             addSubview(view)
         }
         bind()
@@ -508,7 +522,9 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
     private func headerHeight(width: CGFloat) -> CGFloat {
         guard let list, list.entries.isEmpty else { return Self.stripHeight }
         let text = leadLabel.attributedStringValue
-        let available = max(40, width - 30)
+        // The `NO OUTPUT` label takes room beside the wrapped text (the token's room was never counted here).
+        let label = leading(width: width).label.width
+        let available = max(40, width - 30 - (label > 0 ? label + 3 : 0))
         let h = ceil(text.boundingRect(with: NSSize(width: available, height: .greatestFiniteMagnitude),
                                        options: [.usesLineFragmentOrigin]).height)
         return max(Self.stripHeight, h + 8)
@@ -562,6 +578,7 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         stripButton.isHidden = expanded || !hasList
         let hasToken = hasList && !tokenLabel.stringValue.isEmpty
         tokenLabel.isHidden = !hasToken
+        noOutputLabel.isHidden = true
         for view in [leadLabel, countLabel, reasonLabel, scroll] as [NSView] { view.isHidden = !expanded || (view === reasonLabel && reasonLabel.stringValue.isEmpty) }
         if !expanded {
             chevron.isHidden = true
@@ -579,12 +596,18 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         let headerH = headerHeight(width: w)
         // From the left: the token (never clipped), then the chevron, then the menu, then the close x, each only
         // while it fits; the x goes first when the pane is narrow (its action stays in the menu).
-        var x: CGFloat = 6
+        // A staging-only drawer's `NO OUTPUT` follows the token (first, in a local pane). It shows while it fits with
+        // the chevron, the menu and the close x, so the agent's text has truncated before it hides.
+        let lead = leading(width: w)
         if hasToken {
-            let size = fitToken(width: max(0, w - 8))
-            tokenLabel.frame = NSRect(x: 4, y: y + (Self.stripHeight - size.height) / 2, width: size.width, height: size.height)
-            x = 4 + size.width + 3
+            tokenLabel.frame = NSRect(x: 4, y: y + (Self.stripHeight - lead.token.height) / 2, width: lead.token.width, height: lead.token.height)
         }
+        if lead.label.width > 0 {
+            noOutputLabel.isHidden = false
+            noOutputLabel.frame = NSRect(x: lead.labelX, y: y + (Self.stripHeight - lead.label.height) / 2,
+                                         width: lead.label.width, height: lead.label.height)
+        }
+        let x = lead.x
         var room = w - 4 - x
         let showChevron = room >= 14
         if showChevron { room -= 14 }
@@ -641,6 +664,32 @@ final class StagingDrawerView: NSView, TerminalPixelSource {
         }
         documentView.frame = NSRect(x: 0, y: 0, width: rowWidth, height: max(rowY, scrollHeight))
     }
+
+    /// Where the header's fixed labels sit at `width`: the environment token (never clipped), then `NO OUTPUT` when
+    /// the list is staging-only and the rest of the row still holds the chevron, the menu and the close x.
+    /// `x` is where the chevron starts. A label size of zero width means `NO OUTPUT` is not shown.
+    private func leading(width w: CGFloat) -> (token: NSSize, label: NSSize, labelX: CGFloat, x: CGFloat) {
+        var x: CGFloat = 6
+        var token = NSSize.zero
+        if hasList && !tokenLabel.stringValue.isEmpty {
+            token = fitToken(width: max(0, w - 8))
+            x = 4 + token.width + 3
+        }
+        var label = NSSize.zero
+        let labelX = x
+        if hasList && list?.stagingOnly == true {
+            let natural = noOutputLabel.intrinsicContentSize
+            let size = NSSize(width: ceil(natural.width) + 8, height: natural.height + 2)
+            if w - 4 - x >= size.width + 3 + Self.headerControlsWidth {
+                label = size
+                x += size.width + 3
+            }
+        }
+        return (token, label, labelX, x)
+    }
+
+    /// What the chevron (14), the menu (18) and the close x (16) take at the least.
+    private static let headerControlsWidth: CGFloat = 14 + 18 + 16
 
     /// The token at the largest bold size (10 pt down to 6 pt) that fits `width`: it is never clipped.
     private func fitToken(width: CGFloat) -> NSSize {

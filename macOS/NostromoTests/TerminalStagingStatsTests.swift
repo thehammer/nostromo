@@ -126,4 +126,88 @@ final class TerminalStagingStatsTests: XCTestCase {
         ])
         XCTAssertFalse(TerminalStagingStats.text(counts).contains("hunter2"))
     }
+
+    // MARK: Staging-only follows (S3b)
+
+    private func followInvited(mode: String?, terminal: String = "term-9f3a-secret", follower: String = "claudia-secret-tag") -> String {
+        let modeField = mode.map { #","mode":"\#($0)""# } ?? ""
+        return #"{"ts":"2026-10-31T10:00:00Z","event":"follow_invited","terminal_id":"\#(terminal)","follower_tag":"\#(follower)"\#(modeField)}"#
+    }
+
+    private var stagingOnlyTrail: [String] {
+        [
+            followInvited(mode: "staging_only"),
+            followInvited(mode: "full"),
+            followInvited(mode: nil),
+            followInvited(mode: "staging_only", terminal: "term-7c1d-secret", follower: "cody-secret-tag"),
+            #"{"event":"follow_invited","mode":"staging_only""#,
+            changed("term-9f3a-secret", "owner-secret", op: "stage"),
+        ]
+    }
+
+    func testOnlyFollowInvitedLinesInTheStagingOnlyModeCountAsStagingOnlyFollows() {
+        let counts = TerminalStagingStats.counts(lines: stagingOnlyTrail)
+
+        XCTAssertEqual(counts.stagingOnlyFollows, 2)
+        XCTAssertEqual(counts.malformedLines, 1, "a truncated line is malformed as before")
+        XCTAssertEqual(counts.entriesStaged, 1, "the stage line still counts")
+        XCTAssertEqual(counts.listsUsed, 1)
+    }
+
+    func testAFullAnUnmarkedAndAnUnknownModeNeverCountAsStagingOnly() {
+        XCTAssertEqual(TerminalStagingStats.counts(lines: [followInvited(mode: "full"), followInvited(mode: nil),
+                                                           followInvited(mode: "something_new"),
+                                                           followInvited(mode: "STAGING_ONLY")]).stagingOnlyFollows, 0)
+        XCTAssertEqual(TerminalStagingStats.counts(lines: [#"{"event":"follow_invited","mode":7}"#,
+                                                           #"{"event":"follow_invited","mode":null}"#]).stagingOnlyFollows, 0)
+    }
+
+    func testTheStagingOnlyModeOnAnyOtherEventDoesNotCount() {
+        let counts = TerminalStagingStats.counts(lines: [
+            #"{"event":"follow_stopped","mode":"staging_only"}"#,
+            #"{"event":"follow_resumed","mode":"staging_only"}"#,
+            #"{"event":"staging_changed","op":"stage","mode":"staging_only","terminal_id":"t","tag":"a"}"#,
+            #"{"event":"something_else","mode":"staging_only"}"#,
+        ])
+        XCTAssertEqual(counts.stagingOnlyFollows, 0)
+        XCTAssertEqual(counts.malformedLines, 0)
+    }
+
+    func testAnEmptyTrailHasNoStagingOnlyFollows() {
+        XCTAssertEqual(TerminalStagingStats.counts(lines: []).stagingOnlyFollows, 0)
+        XCTAssertTrue(TerminalStagingStats.summary(auditDirectory: directory).contains("Staging-only follows granted: 0"))
+    }
+
+    func testTheSummaryStatesTheStagingOnlyFollowsFromAnAuditFileAndNamesNoTerminalOrFollower() throws {
+        try write("terminal.jsonl", Array(stagingOnlyTrail.prefix(3)))
+        try write("terminal-20261031T101010.jsonl", Array(stagingOnlyTrail.dropFirst(3)))
+
+        let text = TerminalStagingStats.summary(auditDirectory: directory)
+
+        XCTAssertTrue(text.contains("Staging-only follows granted: 2"), text)
+        for secret in ["term-9f3a-secret", "term-7c1d-secret", "claudia-secret-tag", "cody-secret-tag", "owner-secret"] {
+            XCTAssertFalse(text.contains(secret), "counts only: `\(secret)` leaked into:\n\(text)")
+        }
+    }
+
+    func testTheStagingOnlyLineIsTheLastLineBeforeTheAuditFilesLine() throws {
+        var counts = TerminalStagingStats.Counts()
+        counts.stagingOnlyFollows = 4
+        counts.filesRead = 2
+        let lines = TerminalStagingStats.text(counts).split(separator: "\n").map(String.init)
+
+        XCTAssertEqual(lines.count, 11, "one new line, no others: \(lines)")
+        XCTAssertEqual(lines[lines.count - 2], "Staging-only follows granted: 4")
+        XCTAssertTrue(try XCTUnwrap(lines.last).hasPrefix("Audit files read: 2"), "\(lines)")
+        XCTAssertEqual(lines.filter { $0.contains("Staging-only follows granted") }.count, 1)
+    }
+
+    func testTheSummaryStillStatesTheOlderCountsWhenStagingOnlyFollowsAreInTheTrail() throws {
+        try write("terminal.jsonl", stagingOnlyTrail + [inserted(first: true), refused("list_full")])
+        let text = TerminalStagingStats.summary(auditDirectory: directory)
+
+        for expected in ["Lists used: 1", "Inserts: 1", "list_full 1", "malformed lines skipped: 1"] {
+            XCTAssertTrue(text.contains(expected), "missing `\(expected)` in:\n\(text)")
+        }
+    }
 }

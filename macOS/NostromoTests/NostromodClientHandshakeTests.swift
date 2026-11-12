@@ -499,6 +499,17 @@ final class NostromodClientHandshakeTests: XCTestCase {
         XCTAssertFalse(NostromodClient.claimsRendersApprovals(features: ["Approvals_V1"]))
     }
 
+    func testStagingOnlyIsSupportedOnlyWhenTheDaemonAdvertisesItsFeature() {
+        XCTAssertEqual(NostromodClient.stagingOnlyFeature, "terminal_staging_only_v1")
+        XCTAssertTrue(NostromodClient.supportsStagingOnly(features: ["terminal_staging_only_v1"]))
+        XCTAssertTrue(NostromodClient.supportsStagingOnly(features: ["x", "terminal_staging_only_v1"]))
+        XCTAssertFalse(NostromodClient.supportsStagingOnly(features: nil))
+        XCTAssertFalse(NostromodClient.supportsStagingOnly(features: []))
+        XCTAssertFalse(NostromodClient.supportsStagingOnly(features: ["approvals_v1", "terminal_staging_ui"]))
+        XCTAssertFalse(NostromodClient.supportsStagingOnly(features: ["terminal_staging_only_v2"]))
+        XCTAssertFalse(NostromodClient.supportsStagingOnly(features: ["Terminal_Staging_Only_V1"]))
+    }
+
     func testAWelcomeThatAdvertisesOtherFeaturesButNotWorkDoesNotGetWork() throws {
         let c = try connectClient(to: [.init(features: ["some_future_feature"], rejectsTopics: ["work"])])
 
@@ -794,7 +805,7 @@ final class NostromodClientHandshakeTests: XCTestCase {
 
         let later = subs[1]
         XCTAssertTrue(later.topics.contains("terminal"), "topics: \(later.topics)")
-        XCTAssertEqual(later.json["capabilities"] as? [String], ["terminal_ui", "remote_shell_confirm", "terminal_follow_ui", "terminal_staging_ui"], "\(later.json)")
+        XCTAssertEqual(later.json["capabilities"] as? [String], ["terminal_ui", "remote_shell_confirm", "terminal_follow_ui", "terminal_staging_ui", "terminal_staging_only_ui"], "\(later.json)")
         XCTAssertEqual(later.json["operator_nonce"] as? String, "nonce-term-1", "\(later.json)")
         XCTAssertEqual(subs.count, 2, "exactly one follow-up subscribe")
     }

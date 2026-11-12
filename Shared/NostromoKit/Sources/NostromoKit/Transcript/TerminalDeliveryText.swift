@@ -32,6 +32,8 @@ public enum TerminalDeliveryText {
     public static func noticeLine(for item: TerminalOriginItem) -> String {
         switch item.event {
         case "started":
+            // `isGenuine` accepts only no reason or exactly `staging_only` on a started notice.
+            if item.reason == stagingOnlyReason { return "Staging only started: \(item.pane)" }
             return "Following started: \(item.pane)"
         case "resumed":
             return "Following resumed: \(item.pane)"
@@ -207,12 +209,16 @@ public enum TerminalDeliveryText {
     /// one-line notice (a narrow notice line fits far fewer bytes, so keep this small).
     private static let maxPaneBytes = 48
     private static let maxTagBytes = 64
+    /// The one reason a `started` notice carries: the follow may stage commands and receives no output.
+    private static let stagingOnlyReason = "staging_only"
 
     /// The reasons the daemon writes (`EndReason::code`, `pause_code` in `follow/manager.rs`):
     /// only on `paused` and `stopped`; `moved_to ` takes a focus tag (`[A-Za-z0-9._-]`).
     private static func isDaemonReason(_ reason: String?, event: String) -> Bool {
         guard let reason else { return event == "started" || event == "resumed" }
         switch event {
+        case "started":
+            return reason == stagingOnlyReason
         case "staged_inserted":
             return stagedEntryNumber(reason) != nil
         case "paused":
@@ -277,6 +283,9 @@ public enum TerminalDeliveryText {
         let pane = item.pane
         let sentence: String
         switch item.event {
+        case "started" where item.reason == stagingOnlyReason:
+            // `StartedStagingOnly` in `follow/manager.rs`: no output, no screen reads, no wake-ups.
+            sentence = "You may now stage commands for \(pane) with nostromo.terminal_staging. You will not receive its output or read its screen, and you are not told when the user places an entry (call list). You cannot type into it."
         case "started":
             sentence = "You are now following \(pane). Output it produces from now on will be delivered to you; you cannot type into it."
         case "resumed":

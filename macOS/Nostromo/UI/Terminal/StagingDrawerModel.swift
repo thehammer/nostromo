@@ -173,6 +173,8 @@ enum StagingDrawerModel {
     static let staleAfter: TimeInterval = 30 * 60
     static let placeholderLabel = "Contains <\u{2026}>: edit it before pressing Enter (as written, < and > are redirects)"
     static let youPressEnter = "you press Enter"
+    /// The fixed, app-drawn label of a staging-only drawer: the agent receives no output from this terminal.
+    static let noOutputLabel = "NO OUTPUT"
 
     // MARK: Texts
 
@@ -184,7 +186,13 @@ enum StagingDrawerModel {
     /// (`(3)`) never does. The empty state carries the instruction in `lead` and wraps.
     static func headerParts(_ list: TerminalStagingList) -> (lead: String, count: String?) {
         let name = agentName(list)
-        if list.state == .frozen { return ("\(name) stopped following; this list won't change", nil) }
+        if list.state == .frozen {
+            if list.stagingOnly { return ("\(possessive(name)) staging access ended; this list won't change", nil) }
+            return ("\(name) stopped following; this list won't change", nil)
+        }
+        if list.entries.isEmpty && list.stagingOnly {
+            return ("Staged by \(name) \u{00B7} nothing yet. \(name) can't see this terminal's output. Click a staged command to put it at the prompt; you press Enter.", nil)
+        }
         if list.entries.isEmpty {
             return ("Staged by \(name) \u{00B7} nothing yet. Click a staged command to put it at the prompt; you press Enter.", nil)
         }
@@ -227,13 +235,20 @@ enum StagingDrawerModel {
 
     /// The drawer's spoken label: `Staged by Triage \u{00B7} PRODUCTION \u{00B7} you press Enter`
     /// (`\u{00B7} running ssh \u{00B7}` for a local pane with a program in the foreground).
+    /// A staging-only drawer says so in every form, even when the visual `NO OUTPUT` label is hidden for want of room.
     static func accessibilityText(_ list: TerminalStagingList, safety: StagingPaneSafety) -> String {
         let name = agentName(list)
+        let mode = list.stagingOnly ? " \u{00B7} \(stagingOnlySpokenPhrase(name))" : ""
         switch safety {
-        case .local: return "Staged commands"
-        case .remote(let token): return "Staged by \(name) \u{00B7} \(token) \u{00B7} \(youPressEnter)"
-        case .localRunning(let program): return "Staged by \(name) \u{00B7} running \(program) \u{00B7} \(youPressEnter)"
+        case .local: return "Staged commands" + mode
+        case .remote(let token): return "Staged by \(name) \u{00B7} \(token)\(mode) \u{00B7} \(youPressEnter)"
+        case .localRunning(let program): return "Staged by \(name) \u{00B7} running \(program)\(mode) \u{00B7} \(youPressEnter)"
         }
+    }
+
+    /// `staging only, Claudia does not see this terminal's output`.
+    static func stagingOnlySpokenPhrase(_ name: String) -> String {
+        "staging only, \(name) does not see this terminal's output"
     }
 
     /// The one-line collapsed strip: `3 staged by Claudia ▸`.
@@ -241,7 +256,8 @@ enum StagingDrawerModel {
         let name = agentName(list)
         let count = list.entries.isEmpty ? "Nothing" : "\(list.entries.count)"
         let stopped = list.state == .frozen ? " (stopped)" : ""
-        return "\(count) staged by \(name)\(stopped) \u{25B8}"
+        let label = list.stagingOnly ? "\(noOutputLabel) \u{00B7} " : ""
+        return "\(label)\(count) staged by \(name)\(stopped) \u{25B8}"
     }
 
     /// `10s`, `4m`, `1h`, `2d`.
