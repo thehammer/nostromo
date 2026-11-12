@@ -4,27 +4,46 @@ import Foundation
 
 /// What a sidebar row shows for a focus beyond its label: an optional count pill, an
 /// optional second-line summary, and whether the focus needs the operator right now.
+///
+/// `blocking` and `waiting` are the two "needs you" counts, drawn as their own pills on the row's
+/// second line (never in `pill`, which stays the built-in rows' own count on the title line):
+/// BLOCKING is an agent stopped until the operator acts (pending approvals), WAITING is something that
+/// wants the operator while nothing is stalled (tracker items, Mother holds).
 struct FocusBadge: Equatable {
-    /// `needsYouNow` outranks `attention` for the pill: something is blocked on the operator right
-    /// now (a pending approval). Any producer may publish it; see `FocusBadge.needsYouNow(count:)`.
+    /// `needsYouNow` outranks `attention`, which outranks `info`: the focus has something blocking on
+    /// the operator right now (`blocking > 0`).
     enum Level: Equatable { case info, attention, needsYouNow }
 
     var pill: String?
     var detail: String?
     var level: Level
     var accessibilityLabel: String
+    var blocking: Int
+    var waiting: Int
 
-    init(pill: String? = nil, detail: String? = nil, level: Level = .info, accessibilityLabel: String) {
+    init(pill: String? = nil, detail: String? = nil, level: Level = .info, accessibilityLabel: String,
+         blocking: Int = 0, waiting: Int = 0) {
         self.pill = pill
         self.detail = detail
         self.level = level
         self.accessibilityLabel = accessibilityLabel
+        self.blocking = blocking
+        self.waiting = waiting
     }
 
-    /// A red count pill for a focus something is blocked on right now. `noun` reads after the
-    /// count in the accessibility label (`2 waiting on you`).
-    static func needsYouNow(count: Int, noun: String = "waiting on you") -> FocusBadge {
-        FocusBadge(pill: "\(count)", level: .needsYouNow, accessibilityLabel: "\(count) \(noun)")
+    /// The "needs you" counts of a focus, as a badge with no pill of its own.
+    static func needsYou(blocking: Int, waiting: Int) -> FocusBadge {
+        FocusBadge(level: blocking > 0 ? .needsYouNow : .info,
+                   accessibilityLabel: needsYouPhrase(blocking: blocking, waiting: waiting) ?? "",
+                   blocking: blocking, waiting: waiting)
+    }
+
+    /// What the two counts read as to VoiceOver: `2 approvals blocking, 7 items waiting`.
+    static func needsYouPhrase(blocking: Int, waiting: Int) -> String? {
+        var parts: [String] = []
+        if blocking > 0 { parts.append("\(blocking) \(blocking == 1 ? "approval" : "approvals") blocking") }
+        if waiting > 0 { parts.append("\(waiting) \(waiting == 1 ? "item" : "items") waiting") }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 }
 
@@ -50,20 +69,28 @@ struct FocusBadgeRegistry {
         entries.removeValue(forKey: Key(tag: tag, source: sourceKey))
     }
 
-    /// The tag's projected badge. `needsYouNow` wins over attention, attention over info; the
-    /// pill, detail and accessibility label come from ONE source (the first, by source key, that
-    /// has a pill, else the first overall) so they never mix text from different sources. A
-    /// `needsYouNow` badge replaces the pill and label (the red count is what the operator must
-    /// see) and keeps the primary's second line.
+    /// The tag's projected badge. `needsYouNow` wins over attention, attention over info. The pill,
+    /// detail and accessibility label of the OWN badge (the sources that are not a "needs you" count)
+    /// come from ONE source (the first, by source key, that has a pill, else the first overall) so they
+    /// never mix text from different sources. The "needs you" counts are summed across sources and never
+    /// replace the own pill; their phrase is appended to the accessibility label.
     func badge(for tag: String) -> FocusBadge? {
         let mine = entries.filter { $0.key.tag == tag }.sorted { $0.key.source < $1.key.source }.map(\.value)
-        guard var primary = mine.first(where: { $0.pill != nil }) ?? mine.first else { return nil }
-        if let urgent = mine.first(where: { $0.level == .needsYouNow }) {
-            primary.pill = urgent.pill
-            primary.accessibilityLabel = urgent.accessibilityLabel
+        let own = mine.filter { $0.blocking == 0 && $0.waiting == 0 }
+        let blocking = mine.reduce(0) { $0 + $1.blocking }
+        let waiting = mine.reduce(0) { $0 + $1.waiting }
+        let phrase = FocusBadge.needsYouPhrase(blocking: blocking, waiting: waiting)
+
+        guard var primary = own.first(where: { $0.pill != nil }) ?? own.first ?? mine.first else { return nil }
+        if mine.contains(where: { $0.level == .needsYouNow }) {
             primary.level = .needsYouNow
         } else if mine.contains(where: { $0.level == .attention }) {
             primary.level = .attention
+        }
+        primary.blocking = blocking
+        primary.waiting = waiting
+        if let phrase {
+            primary.accessibilityLabel = own.isEmpty ? phrase : primary.accessibilityLabel + ", " + phrase
         }
         return primary
     }

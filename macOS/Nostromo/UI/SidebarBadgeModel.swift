@@ -15,36 +15,69 @@ struct BadgeInputs {
     var perriQueueLoading: Bool
 }
 
+/// Which pill a "needs you" item feeds (see `SidebarBadgeModel.needsYouClass(of:)`).
+enum NeedsYouClass: Equatable { case blocking, waiting, excluded }
+
+/// Per-focus-tag counts for the two pills.
+struct NeedsYouCounts: Equatable {
+    var blocking: [String: Int] = [:]
+    var waiting: [String: Int] = [:]
+}
+
 /// The badge logic behind `TabBarView`: computes each built-in row's badge from
 /// `BadgeInputs`, projects them per tag, and owns the click deep links and the
 /// refresh debounce. `TabBarView` only applies the results to its rows.
 struct SidebarBadgeModel {
     private var registry = FocusBadgeRegistry()
-    /// Tags the "needs you now" source last published a pill for.
-    private var needsYouNowTags: Set<String> = []
-    private static let needsYouNowSource = "needs-you-now"
+    /// Tags the needs-you source last published counts for.
+    private var needsYouTags: Set<String> = []
+    private static let needsYouSource = "needs-you"
 
-    /// Publish the red "needs you now" pill: `counts` is how many things are blocked on the operator
-    /// per focus tag. Tags missing from `counts` (or at zero) lose their pill. Any producer's count
-    /// may be fed here (approvals today; the tracker's "Waiting on you" strip later).
-    mutating func setNeedsYouNow(_ counts: [String: Int]) {
-        let live = counts.filter { $0.value > 0 }
-        for tag in needsYouNowTags.subtracting(live.keys) {
-            registry.clear(tag: tag, sourceKey: Self.needsYouNowSource)
+    /// Publish what is blocked on, or waiting for, the operator per focus tag (see `NeedsYouClass`).
+    /// Tags missing from both maps (or at zero) lose their pills. Any producer's items may feed the
+    /// snapshot these come from (approvals, the tracker's "Waiting on you" strip, Mother).
+    mutating func setNeedsYou(_ counts: NeedsYouCounts) {
+        let blocking = counts.blocking.filter { $0.value > 0 }
+        let waiting = counts.waiting.filter { $0.value > 0 }
+        let live = Set(blocking.keys).union(waiting.keys)
+        for tag in needsYouTags.subtracting(live) {
+            registry.clear(tag: tag, sourceKey: Self.needsYouSource)
         }
-        for (tag, count) in live {
-            registry.publish(tag: tag, sourceKey: Self.needsYouNowSource, badge: .needsYouNow(count: count))
+        for tag in live {
+            registry.publish(tag: tag, sourceKey: Self.needsYouSource,
+                             badge: .needsYou(blocking: blocking[tag] ?? 0, waiting: waiting[tag] ?? 0))
         }
-        needsYouNowTags = Set(live.keys)
+        needsYouTags = live
     }
 
-    /// Per-focus counts of what the app-wide "needs you" snapshot holds for the pill. Decisions are
-    /// left out: they already show the purple attention dot.
-    static func needsYouNowCounts(from snapshot: NeedsYouSnapshot) -> [String: Int] {
-        var counts: [String: Int] = [:]
+    /// Which pill an item feeds. Exhaustive on purpose: a new `NeedsYouReason` has to be classified here.
+    /// BLOCKING: an agent is stopped until the operator acts (a pending approval). WAITING: nothing is
+    /// stalled, but something wants the operator. EXCLUDED: open decisions already show the purple
+    /// attention dot.
+    static func needsYouClass(of reason: NeedsYouReason) -> NeedsYouClass {
+        switch reason {
+        case .approvalPending: return .blocking
+        case .decisionOpen: return .excluded
+        case .motherHold, .motherAwaiting, .motherAttention, .trackerWaiting, .other: return .waiting
+        }
+    }
+
+    /// Per-focus blocking and waiting counts from the app-wide "needs you" snapshot. Only items about a
+    /// focus count. `approvalPending(n)` counts as n (the approvals producer raises one `(1)` per request).
+    static func needsYouCounts(from snapshot: NeedsYouSnapshot) -> NeedsYouCounts {
+        var counts = NeedsYouCounts()
         for item in snapshot.items {
-            guard case .focus(let tag) = item.source, item.reason != .decisionOpen else { continue }
-            counts[tag, default: 0] += 1
+            guard case .focus(let tag) = item.source else { continue }
+            switch needsYouClass(of: item.reason) {
+            case .blocking:
+                var weight = 1
+                if case .approvalPending(let n) = item.reason { weight = max(1, n) }
+                counts.blocking[tag, default: 0] += weight
+            case .waiting:
+                counts.waiting[tag, default: 0] += 1
+            case .excluded:
+                break
+            }
         }
         return counts
     }

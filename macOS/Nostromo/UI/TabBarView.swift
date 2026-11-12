@@ -187,8 +187,9 @@ class TabBarView: NSView {
             .sink { [weak self] _ in self?.updateEnvironmentBadges() }
             .store(in: &cancellables)
 
-        // The red "needs you now" pill (pending approvals, today): applied in place, immediately.
-        // A row's pill and its height never depend on whether the focus is on screen.
+        // The red "blocking" pill (pending approvals) and the amber "waiting" pill (tracker items, Mother
+        // holds): applied in place, immediately. A row's pills and its height never depend on whether
+        // the focus is on screen.
         AppStore.shared.$needsYou
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateBadges() }
@@ -288,6 +289,10 @@ class TabBarView: NSView {
                     self?.onSwitch?(focus)
                     if let target = SidebarBadgeModel.deepLink(for: focus) { FocusDeepLink.post(target) }
                 }
+                // The waiting pill goes where the count pill always went (a built-in's deep link).
+                item.onWaitingPillTap = item.onBadgeTap
+                // A blocking pill on any focus selects that focus, where the approval card is.
+                item.onBlockingPillTap = { [weak self] in self?.onSwitch?(focus) }
 
                 if !focus.isBuiltIn {
                     let menu = NSMenu()
@@ -460,7 +465,7 @@ class TabBarView: NSView {
     /// Recompute the built-in rows' badges and apply them in place.
     private func updateBadges() {
         let store = AppStore.shared
-        badges.setNeedsYouNow(SidebarBadgeModel.needsYouNowCounts(from: store.needsYou))
+        badges.setNeedsYou(SidebarBadgeModel.needsYouCounts(from: store.needsYou))
         badges.update(BadgeInputs(
             fredMailbox: store.fredMailbox, fredCalendar: store.fredCalendar, teriTodos: store.teriTodos,
             motherStatus: store.motherStatus, perriQueueCount: store.perriQueue.count,

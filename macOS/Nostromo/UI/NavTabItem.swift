@@ -1,5 +1,136 @@
 import AppKit
 
+// MARK: - NavRowHighlight
+
+/// How a focus row is marked: the fill behind it and the 3 pt bars down its leading edge (left to right).
+/// Two independent inputs: the focus is the active one (cornflower), an agent is blocked on the operator
+/// (red). Active-and-blocked is its own look: the active cornflower bar stays first with the red bar
+/// beside it, and the red fill wins, so neither fact hides the other. Bars overlay the row's leading
+/// inset; they never move text or change the row's height.
+struct NavRowHighlight: Equatable {
+    var fill: NSColor?
+    var bars: [NSColor]
+
+    static func style(isActive: Bool, isBlocking: Bool) -> NavRowHighlight {
+        switch (isActive, isBlocking) {
+        case (false, false): return NavRowHighlight(fill: nil, bars: [])
+        case (true, false): return NavRowHighlight(fill: Theme.cornflower.withAlphaComponent(0.12), bars: [Theme.cornflower])
+        case (false, true): return NavRowHighlight(fill: Theme.blockingRowFill, bars: [Theme.needsYouNow])
+        case (true, true): return NavRowHighlight(fill: Theme.blockingRowFill, bars: [Theme.cornflower, Theme.needsYouNow])
+        }
+    }
+}
+
+// MARK: - NeedsYouPillView
+
+/// One of the two "needs you" pills on a row's second line: a glyph and a count. Blocking is red with a
+/// hand (stopped, needs your yes); waiting is outlined amber with a list. The glyph is what tells them
+/// apart without colour. The waiting pill can collapse to glyph and count with no padding or outline.
+private final class NeedsYouPillView: NSView {
+    enum Kind { case blocking, waiting }
+
+    static let height: CGFloat = 14
+    private static let padding: CGFloat = 5
+    private static let glyphWidth: CGFloat = 10
+    private static let glyphGap: CGFloat = 2
+    private static let font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+
+    let kind: Kind
+    private let glyph = NSImageView()
+    private let count = NSTextField(labelWithString: "")
+    private(set) var text = ""
+    private(set) var isCollapsed = false
+    private var configured = false
+
+    init(kind: Kind) {
+        self.kind = kind
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = Self.height / 2
+        let symbol = kind == .blocking ? "hand.raised.fill" : "list.bullet"
+        glyph.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 9, weight: .bold))
+        glyph.imageScaling = .scaleProportionallyDown
+        glyph.contentTintColor = kind == .blocking ? .white : Theme.waitingPillText
+        count.font = Self.font
+        count.textColor = kind == .blocking ? .white : Theme.waitingPillText
+        count.alignment = .left
+        addSubview(glyph)
+        addSubview(count)
+        setAccessibilityElement(false)
+        apply(text: "", collapsed: false)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Set the count and whether the pill is collapsed (waiting only). Does not resize the view.
+    func apply(text: String, collapsed: Bool) {
+        let collapsed = collapsed && kind == .waiting
+        guard !configured || text != self.text || collapsed != isCollapsed else { return }
+        configured = true
+        self.text = text
+        isCollapsed = collapsed
+        count.stringValue = text
+        if kind == .blocking {
+            layer?.backgroundColor = Theme.needsYouNow.cgColor
+            layer?.borderWidth = 0
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.borderWidth = isCollapsed ? 0 : 1
+            layer?.borderColor = Theme.waitingPillText.withAlphaComponent(0.6).cgColor
+        }
+        needsLayout = true
+    }
+
+    /// The width this pill takes for `text`, with padding (full) or without (collapsed).
+    static func width(of text: String, collapsed: Bool) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        let textWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        return glyphWidth + glyphGap + textWidth + (collapsed ? 0 : 2 * padding)
+    }
+
+    override func layout() {
+        super.layout()
+        let inset = isCollapsed ? 0 : Self.padding
+        let textWidth = ceil((text as NSString).size(withAttributes: [.font: Self.font]).width)
+        glyph.frame = NSRect(x: inset, y: (bounds.height - 10) / 2, width: Self.glyphWidth, height: 10)
+        let size = count.intrinsicContentSize
+        count.frame = NSRect(x: inset + Self.glyphWidth + Self.glyphGap, y: (bounds.height - size.height) / 2,
+                             width: textWidth, height: size.height)
+    }
+}
+
+// MARK: - NeedsYouPillFit
+
+/// What the second line gives up, in order, as the row narrows: first the branch text (to nothing),
+/// then the waiting pill's padding (glyph and count only), never the blocking pill.
+struct NeedsYouPillFit: Equatable {
+    var slotWidth: CGFloat
+    var branchVisible: Bool
+    var waitingCollapsed: Bool
+
+    static let pillGap: CGFloat = 3
+    static let branchGap: CGFloat = 4
+    static let minBranchWidth: CGFloat = 16
+
+    /// `blocking` and `waiting` are the pills' widths (0 when absent), `waitingCollapsed` the waiting
+    /// pill's width without padding; `available` is the row's width from the branch text's leading edge
+    /// to the pills' trailing edge.
+    static func make(blocking: CGFloat, waiting: CGFloat, waitingCollapsed: CGFloat, available: CGFloat) -> NeedsYouPillFit {
+        func total(_ w: CGFloat) -> CGFloat {
+            blocking + w + (blocking > 0 && w > 0 ? pillGap : 0)
+        }
+        let full = total(waiting)
+        guard full > 0 else { return NeedsYouPillFit(slotWidth: 0, branchVisible: true, waitingCollapsed: false) }
+        if full > available {
+            return NeedsYouPillFit(slotWidth: min(total(waitingCollapsed), max(available, blocking)),
+                                   branchVisible: false, waitingCollapsed: true)
+        }
+        return NeedsYouPillFit(slotWidth: full,
+                               branchVisible: available - full - branchGap >= minBranchWidth, waitingCollapsed: false)
+    }
+}
+
 // MARK: - NavTabItem
 
 /// One focus row in the sidebar. Internal (not private) only so a logic test can lay it out.
@@ -12,8 +143,31 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
 
     /// Pill text currently shown (nil when hidden). Exposed for tests.
     var pillText: String? { pillBox.isHidden ? nil : pillLabel.stringValue }
-    /// The pill shown is the red "needs you now" one. Exposed for tests and `approvals badges`.
-    private(set) var showsNeedsYouNow = false
+    /// The "needs you" counts on the second line: blocking (red, hand) and waiting (amber, list).
+    /// Exposed for tests and `approvals badges`.
+    private(set) var blocking = 0
+    private(set) var waiting = 0
+    var blockingPillText: String? { blocking > 0 ? Self.countText(blocking) : nil }
+    var waitingPillText: String? { waiting > 0 ? Self.countText(waiting) : nil }
+    /// An agent is blocked on the operator: the row carries the red highlight.
+    var showsBlockingHighlight: Bool { blocking > 0 }
+    var highlight: NavRowHighlight { .style(isActive: isActive, isBlocking: blocking > 0) }
+    /// Frames in this view's coordinates (nil when hidden), and what the second line has given up.
+    var blockingPillFrame: NSRect? { blocking > 0 && !pillSlot.isHidden ? pillSlot.convert(blockingPill.frame, to: self) : nil }
+    var waitingPillFrame: NSRect? { waiting > 0 && !pillSlot.isHidden ? pillSlot.convert(waitingPill.frame, to: self) : nil }
+    var secondaryFrame: NSRect? { secondaryLabel?.frame }
+    /// What `updateAppearance` actually drew: the row's layer fill, each leading bar (hidden, colour) and
+    /// the waiting pill's outline (nil when it has none). Exposed for tests.
+    var drawnFill: CGColor? { layer?.backgroundColor }
+    var drawnBars: [(isHidden: Bool, color: CGColor?)] { bars.map { ($0.isHidden, $0.layer?.backgroundColor) } }
+    var waitingPillOutline: CGColor? { (waitingPill.layer?.borderWidth ?? 0) > 0 ? waitingPill.layer?.borderColor : nil }
+    var secondaryVisible: Bool { secondaryLabel.map { !$0.isHidden } ?? false }
+    var waitingPillIsCollapsed: Bool { waiting > 0 && waitingPill.isCollapsed }
+    var blockingPillToolTip: String? { blockingPill.toolTip }
+    var waitingPillToolTip: String? { waitingPill.toolTip }
+    /// Clicks on the blocking and waiting pills; each falls back to `onTap` when unset.
+    var onBlockingPillTap: (() -> Void)?
+    var onWaitingPillTap: (() -> Void)?
     /// Second-line text currently shown. Exposed for tests.
     var secondaryText: String? { secondaryLabel?.stringValue }
 
@@ -24,6 +178,8 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     var labelFrame: NSRect { label.frame }
     func simulateRowClick() { tapped() }
     func simulatePillClick() { pillTapped() }
+    func simulateBlockingPillClick() { blockingPillTapped() }
+    func simulateWaitingPillClick() { waitingPillTapped() }
 
     var isActive: Bool = false {
         didSet { updateAppearance() }
@@ -75,9 +231,21 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     private var badgesWidth: CGFloat = 0
     private var labelYieldsToBadges: NSLayoutConstraint?
     private var labelKeepsItsName: NSLayoutConstraint?
+    private static let pillTrailing: CGFloat = 8
+    /// Between the second-line text and the pills.
+    private static let branchGap: CGFloat = NeedsYouPillFit.branchGap
     private static let badgeSpacing: CGFloat = 3
     private static let badgeHeight: CGFloat = 14
-    private let accentBar      = NSView()
+    /// The leading highlight bars (3 pt each, at x = 0 and 3): see `NavRowHighlight`.
+    private let bars           = [NSView(), NSView()]
+    /// The blocking and waiting pills sit in this slot, right-aligned on the second line. They are placed
+    /// by hand in `layout()`; only the second-line text yields to them (`secondaryClearsPills`).
+    private let pillSlot       = NSView()
+    private let blockingPill   = NeedsYouPillView(kind: .blocking)
+    private let waitingPill    = NeedsYouPillView(kind: .waiting)
+    private var secondaryClearsPills: NSLayoutConstraint?
+    private var pillSlotWidth: CGFloat = 0
+    private let secondaryLeading: CGFloat
     private let label          = NSTextField(labelWithString: "")
     private let dot            = NSView()
     private let attentionDot   = NSView()
@@ -107,6 +275,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
 
     init(focus: Focus, label displayLabel: String, secondary: String?, indented: Bool) {
         self.focus           = focus
+        self.secondaryLeading = 3 + (indented ? 6 + Theme.navChildIndent : 6)
         self.displayOverride = displayLabel
         self.baseSecondary   = secondary
         self.isTopLevel      = !indented
@@ -125,17 +294,20 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
 
         let leadingInset: CGFloat = indented ? 6 + Theme.navChildIndent : 6
 
-        // Left accent bar — 3px, full height
-        accentBar.wantsLayer = true
-        accentBar.layer?.backgroundColor = Theme.cornflower.cgColor
-        accentBar.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(accentBar)
-        NSLayoutConstraint.activate([
-            accentBar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            accentBar.topAnchor.constraint(equalTo: topAnchor),
-            accentBar.bottomAnchor.constraint(equalTo: bottomAnchor),
-            accentBar.widthAnchor.constraint(equalToConstant: 3),
-        ])
+        // Leading highlight bars — 3px, full height; the first is at the edge, the second beside it.
+        for (index, bar) in bars.enumerated() {
+            bar.wantsLayer = true
+            bar.isHidden = true
+            bar.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(bar)
+            NSLayoutConstraint.activate([
+                bar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: CGFloat(index) * 3),
+                bar.topAnchor.constraint(equalTo: topAnchor),
+                bar.bottomAnchor.constraint(equalTo: bottomAnchor),
+                bar.widthAnchor.constraint(equalToConstant: 3),
+            ])
+        }
+        let accentBar = bars[0]
 
         // Primary label — left-aligned
         label.stringValue    = displayLabel
@@ -193,6 +365,12 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
                 sl.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -4),
                 sl.topAnchor.constraint(equalTo: centerYAnchor, constant: 3),
             ])
+            // The second-line text yields to the pills; `layout()` sets how much (the slot's width).
+            let clearsPills = sl.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -Self.pillTrailing - Self.branchGap)
+            clearsPills.priority = NSLayoutConstraint.Priority(999)
+            clearsPills.isActive = true
+            sl.widthAnchor.constraint(greaterThanOrEqualToConstant: 0).isActive = true
+            secondaryClearsPills = clearsPills
         } else {
             NSLayoutConstraint.activate([
                 label.leadingAnchor.constraint(equalTo: accentBar.trailingAnchor, constant: leadingInset),
@@ -251,6 +429,18 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         addGestureRecognizer(rowClick)
         pillBox.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(pillTapped)))
 
+        // Blocking and waiting pills: on the second line only (rows always have one in the app).
+        pillSlot.wantsLayer = true
+        pillSlot.layer?.masksToBounds = true
+        pillSlot.isHidden = true
+        pillSlot.addSubview(blockingPill)
+        pillSlot.addSubview(waitingPill)
+        blockingPill.isHidden = true
+        waitingPill.isHidden = true
+        blockingPill.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(blockingPillTapped)))
+        waitingPill.addGestureRecognizer(NSClickGestureRecognizer(target: self, action: #selector(waitingPillTapped)))
+        addSubview(pillSlot)
+
         updateAppearance()
     }
 
@@ -282,7 +472,9 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     }
 
     override func layout() {
+        fitNeedsYouPills()
         super.layout()
+        placeNeedsYouPills()
         // The badges start after the label and end before the sweater dot, the pill and the attention
         // dot; what does not fit is cut off (the last badge first).
         guard !environments.isEmpty else { return }
@@ -316,40 +508,75 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
 
     @objc private func pillTapped() { (onBadgeTap ?? onTap)?() }
 
+    @objc private func blockingPillTapped() { (onBlockingPillTap ?? onTap)?() }
+
+    @objc private func waitingPillTapped() { (onWaitingPillTap ?? onTap)?() }
+
+    private static func countText(_ count: Int) -> String { count > 99 ? "99+" : "\(count)" }
+
+    /// Decide, from the row's width, how much room the pills take and what the second line gives up.
+    /// Only horizontal: it never touches the title line or the row's height.
+    private func fitNeedsYouPills() {
+        guard let clearsPills = secondaryClearsPills, let secondaryLabel else { return }
+        let blockingText = blockingPillText ?? "", waitingText = waitingPillText ?? ""
+        let fit = NeedsYouPillFit.make(
+            blocking: NeedsYouPillView.width(of: blockingText, collapsed: false),
+            waiting: NeedsYouPillView.width(of: waitingText, collapsed: false),
+            waitingCollapsed: NeedsYouPillView.width(of: waitingText, collapsed: true),
+            available: bounds.width - secondaryLeading - Self.pillTrailing)
+        let reserve = fit.slotWidth > 0 ? -(Self.pillTrailing + fit.slotWidth + Self.branchGap) : -(Self.pillTrailing + Self.branchGap)
+        if clearsPills.constant != reserve { clearsPills.constant = reserve }
+        if secondaryLabel.isHidden == fit.branchVisible { secondaryLabel.isHidden = !fit.branchVisible }
+        blockingPill.apply(text: blockingText, collapsed: false)
+        waitingPill.apply(text: waitingText, collapsed: fit.waitingCollapsed)
+        pillSlot.isHidden = fit.slotWidth == 0
+        pillSlotWidth = fit.slotWidth
+    }
+
+    /// Put the slot on the second line, right-aligned, and the pills in it (blocking first, waiting after).
+    private func placeNeedsYouPills() {
+        guard let secondaryLabel, !pillSlot.isHidden else { return }
+        let height = NeedsYouPillView.height
+        // One point below the second line's centre, clear of the sweater dot on the row's middle.
+        pillSlot.frame = NSRect(x: bounds.width - Self.pillTrailing - pillSlotWidth,
+                                y: secondaryLabel.frame.midY - height / 2 - 1, width: pillSlotWidth, height: height)
+        var x: CGFloat = 0
+        for pill in [blockingPill, waitingPill] where !pill.isHidden {
+            let width = NeedsYouPillView.width(of: pill.text, collapsed: pill.isCollapsed)
+            pill.frame = NSRect(x: x, y: 0, width: width, height: height)
+            x += width + NeedsYouPillFit.pillGap
+        }
+    }
+
     /// A click on the pill belongs to the pill's own recognizer, not the row's.
     func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
                            shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
-        pillBox.isHidden || !pillBox.frame.contains(convert(event.locationInWindow, from: nil))
+        let point = convert(event.locationInWindow, from: nil)
+        let pills = [pillBox.isHidden ? nil : pillBox.frame, blockingPillFrame, waitingPillFrame].compactMap { $0 }
+        return !pills.contains { $0.contains(point) }
     }
 
-    /// Apply a badge in place: pill text, second line (Fred/Mother/Teri built-ins only)
-    /// and accessibility label. `nil` clears them. Never changes the row's height.
+    /// Apply a badge in place: pill text, the blocking and waiting pills, second line (Fred/Mother/Teri
+    /// built-ins only) and accessibility label. `nil` clears them. Never changes the row's height.
     func setBadge(_ badge: FocusBadge?) {
-        showsNeedsYouNow = badge?.level == .needsYouNow && badge?.pill != nil
         if let pill = badge?.pill {
             pillLabel.stringValue = pill
             pillBox.isHidden = false
-            // The red "needs you now" variant is opaque; the rest keep the quiet cornflower.
-            pillBox.layer?.backgroundColor = badge?.level == .needsYouNow
-                ? Theme.needsYouNow.cgColor
-                : Theme.cornflower.withAlphaComponent(0.25).cgColor
+            pillBox.layer?.backgroundColor = Theme.cornflower.withAlphaComponent(0.25).cgColor
         } else {
             pillBox.isHidden = true
         }
         labelClearsPill?.isActive = !pillBox.isHidden
         updateBadgeReserve()
+        applyNeedsYou(blocking: badge?.blocking ?? 0, waiting: badge?.waiting ?? 0)
 
         if focus.isBuiltIn, ["fred", "mother", "teri"].contains(focus.agentTag.lowercased()) {
             secondaryLabel?.stringValue = badge?.detail ?? baseSecondary ?? ""
         }
 
         if let badge {
-            let suffix: String
-            switch badge.level {
-            case .needsYouNow: suffix = ", needs you now"
-            case .attention: suffix = ", needs your attention"
-            case .info: suffix = ""
-            }
+            // `needsYouNow` adds nothing here: the blocking phrase is already in the label.
+            let suffix = badge.level == .attention ? ", needs your attention" : ""
             setAccessibilityElement(true)
             setAccessibilityRole(.button)
             setAccessibilityLabel(badge.accessibilityLabel + suffix)
@@ -359,11 +586,27 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         }
     }
 
+    private func applyNeedsYou(blocking: Int, waiting: Int) {
+        let wasBlocking = self.blocking > 0
+        self.blocking = max(0, blocking)
+        self.waiting = max(0, waiting)
+        blockingPill.isHidden = self.blocking == 0
+        waitingPill.isHidden = self.waiting == 0
+        blockingPill.toolTip = self.blocking == 0 ? nil
+            : "\(self.blocking) \(self.blocking == 1 ? "approval" : "approvals") blocking: the agent is stopped until you decide"
+        waitingPill.toolTip = self.waiting == 0 ? nil
+            : "\(self.waiting) \(self.waiting == 1 ? "item" : "items") waiting for you: nothing is stalled"
+        if wasBlocking != (self.blocking > 0) { updateAppearance() }
+        needsLayout = true
+    }
+
     private func updateAppearance() {
-        accentBar.isHidden = !isActive
-        layer?.backgroundColor = isActive
-            ? Theme.cornflower.withAlphaComponent(0.12).cgColor
-            : NSColor.clear.cgColor
+        let style = highlight
+        for (index, bar) in bars.enumerated() {
+            bar.isHidden = index >= style.bars.count
+            if index < style.bars.count { bar.layer?.backgroundColor = style.bars[index].cgColor }
+        }
+        layer?.backgroundColor = (style.fill ?? .clear).cgColor
 
         // An attributed string overrides the label's lineBreakMode, so carry truncation here.
         let para = NSMutableParagraphStyle()

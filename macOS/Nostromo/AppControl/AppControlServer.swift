@@ -692,17 +692,19 @@ final class AppControlServer {
         return ["path": store.rulesPath, "quarantined": quarantined, "rules": store.persistedRules.map(json)]
     }
 
-    /// READ-ONLY: what the approvals surfaces outside the card show (`approvals badges`): the red "needs
-    /// you now" pill on each sidebar row that has one (`focuses: [{tag, pill}]`, from the rows' own views in
-    /// the first window that has any) and the Dock badge (`dock`, the label the one coordinator last wrote to the Dock tile, null
-    /// when clear). Sends no event, changes no focus.
+    /// READ-ONLY: what the approvals surfaces outside the card show (`approvals badges`): the red blocking
+    /// pill on each sidebar row that has one (`focuses: [{tag, pill, waiting}]`: `pill` is the blocking
+    /// count, `waiting` the amber waiting pill's count or null; from the rows' own views in the first
+    /// window that has any) and the Dock badge (`dock`, the label the one coordinator last wrote to the
+    /// Dock tile, null when clear). Sends no event, changes no focus.
     private func approvalBadges() -> Any {
         var focuses: [[String: Any]] = []
         for window in appDelegate?.windows ?? [] {
             var found: [[String: Any]] = []
             func walk(_ v: NSView) {
-                if let item = v as? NavTabItem, item.showsNeedsYouNow, let pill = item.pillText {
-                    found.append(["tag": item.focus.sessionTag, "pill": pill])
+                if let item = v as? NavTabItem, let pill = item.blockingPillText {
+                    found.append(["tag": item.focus.sessionTag, "pill": pill,
+                                  "waiting": item.waitingPillText.map { $0 as Any } ?? NSNull()])
                 }
                 v.subviews.forEach(walk)
             }
