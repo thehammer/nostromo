@@ -75,10 +75,11 @@ impl ApprovalsPaths {
     }
 }
 
-/// Is this process a cargo test binary (they live in `target/<profile>/deps`)?
+/// Is this process a cargo test binary? Cargo puts them in `target/<profile>/deps`,
+/// or (the build-dir layout, default since cargo 1.100) in
+/// `target/<profile>/build/<pkg>/<hash>/out`.
 fn is_test_binary() -> bool {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().and_then(Path::file_name).map(|n| n == "deps"))
-        .unwrap_or(false)
+        .is_some_and(|exe| crate::data::work::sent::is_test_binary_path(&exe))
 }
