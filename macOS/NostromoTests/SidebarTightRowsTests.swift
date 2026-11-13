@@ -162,9 +162,12 @@ final class SidebarTightRowsTests: XCTestCase {
                         // collapsed form it is cut off at the slot's edge instead, so only then is it exempt.
                         guard kind == "blocking" || pill.width <= rowWidth - requiredTrailingInset - leading else { continue }
                         XCTAssertGreaterThanOrEqual(pill.minX, -0.5, "inside the row on the left: \(at)")
+                        // Where the row has room for the pill and the inset, the inset is the full 12 pt (the
+                        // clamp to the row's left edge only applies when it has not).
+                        if rowWidth >= pill.width + requiredTrailingInset { XCTAssertLessThanOrEqual(pill.maxX, rowWidth - requiredTrailingInset + 0.5, "12 pt inset where it fits: \(at)") }
                         XCTAssertGreaterThanOrEqual(pill.minY, -0.5, "inside the row at the bottom: \(at)")
                         XCTAssertLessThanOrEqual(pill.maxY, item.bounds.height + 0.5, "inside the row at the top: \(at)")
-                        XCTAssertLessThanOrEqual(pill.maxX, rowWidth - requiredTrailingInset + 0.5,
+                        XCTAssertLessThanOrEqual(pill.maxX, max(rowWidth - requiredTrailingInset, pill.width) + 0.5,
                                                  "ends at least 12 pt from the right edge: \(at)")
                     }
                 }

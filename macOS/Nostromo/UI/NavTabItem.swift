@@ -672,7 +672,8 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         guard let secondaryLabel, !pillSlot.isHidden else { return }
         let height = NeedsYouPillView.height
         // One point below the second line's centre, clear of the sweater dot on the row's middle.
-        pillSlot.frame = NSRect(x: bounds.width - Self.pillTrailing - pillSlotWidth,
+        // In a row too narrow for the pill plus its inset, the pill keeps its size and stays inside the row.
+        pillSlot.frame = NSRect(x: max(0, bounds.width - Self.pillTrailing - pillSlotWidth),
                                 y: secondaryLabel.frame.midY - height / 2 - 1, width: pillSlotWidth, height: height)
         var x: CGFloat = 0
         for pill in [blockingPill, waitingPill] where !pill.isHidden {
