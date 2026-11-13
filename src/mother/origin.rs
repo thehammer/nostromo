@@ -640,15 +640,16 @@ impl OriginBook {
                         existing.sensitive = true;
                         changed = true;
                     }
-                    if !changed {
-                        return false;
-                    }
-                    true
+                    Some(changed)
                 }
-                _ => false,
+                _ => None,
             };
-            if notify_only {
-                state.persist();
+            if let Some(changed) = notify_only {
+                // Only the enqueue's extras were merged; nothing is stamped (or persisted when
+                // the merge changed nothing).
+                if changed {
+                    state.persist();
+                }
                 return false;
             }
             let event = MotherAuditEvent::JobOriginStamped {
