@@ -1199,12 +1199,15 @@ async fn a_later_matching_request_is_allowed_without_a_card_by_a_named_rule_and_
         vec![json!({ "behavior": "allow", "updatedInput": input_of(CACHES_B) })],
         "the agent's own input, unchanged"
     );
-    assert_eq!(rig.rules()[0].uses, 1);
+    // The outcome entry is logged (and the card's row resolved) before the use is counted: the
+    // count is bumped, then the list is broadcast. So wait for the frame that carries the count
+    // before reading it back.
     let frames = rig
         .frames_until("the use count", |m| {
             matches!(m, ServerMsg::ApprovalRules { rules, .. } if rules.first().is_some_and(|r| r.uses == 1))
         })
         .await;
+    assert_eq!(rig.rules()[0].uses, 1);
     assert!(frames.iter().any(|m| matches!(
         m,
         ServerMsg::ApprovalResolved { outcome, .. } if outcome == "allowed_by_your_rule"
@@ -1236,6 +1239,11 @@ async fn the_guard_comes_first_then_a_session_rule_then_a_persisted_rule_then_a_
         .await;
     rig.assert_allowed_by_your_rule("toolu_control", CACHES_B)
         .await;
+    // The use is counted just after the outcome is logged, not before it.
+    wait_until("the control request's use to be counted", || {
+        (rig.rules().iter().find(|r| r.id == rule.id)?.uses == 1).then_some(())
+    })
+    .await;
 
     // 1. Guard first: the same request with the guard forced to block is guard_blocked.
     nostromo::approvals::broker::force_guard_block_for_test("toolu_forced");
