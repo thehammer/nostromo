@@ -49,6 +49,11 @@ one shown does not count. With several windows, a focus is seen while it is key 
 * At the moment a focus becomes seen its marks clear: what it holds is what you are looking at.
 * While it stays seen, anything that arrives is absorbed too, so content that arrives while you look never
   flags. The same arrival while the window is not key (or the focus is not the one shown) does flag.
+* **Leaving:** when a focus stops being seen (its window loses key, is switched away, hidden, minimised or
+  closed) the app asks for a fresh list at once and records the counters it holds. The first list that names
+  the focus after that is taken as seen, so a message you watched arrive mid-turn is not flagged by the
+  refresh that follows. Anything counted after that list flags. (What arrives between the leave and that
+  reply, one round trip, is absorbed too.)
 * **Baseline:** the first time the app sees a focus, or when the daemon's `activity_epoch` for it differs
   from the saved one (a daemon restart, a new Claude session id), the counters are taken as the baseline
   silently. Launching the app, restarting the daemon and rebuilding a session never light up every focus.
@@ -61,6 +66,25 @@ silent baseline; a deleted focus's entry goes with it). It is the operator's own
 verb and no MCP tool reads or sets it, so an agent cannot mark itself seen (`FocusActivityWiringTests` scans
 for it).
 
+**Indirect exposure (accepted):** the marks are drawn into the row's accessibility label (`unread response`,
+`Problem: <what>`), so app-control's `tree`, `find` and `ax` can read them as text, as they already read the
+pill labels. That is a read-only, low-sensitivity exposure and a decision, not an oversight. The seen store and its
+keys stay unreachable: `FocusActivityWiringTests` pins that no app-control verb (the dispatch list is read from
+the source) and no MCP tool names or touches them.
+
+A deleted focus stays forgotten: `forget(tag:)` remembers the tag (memory only; tags are unique and never
+reused), so a later list that still names it does not re-baseline it or leave a stale entry.
+
+### Changes to existing tests
+
+* `NavTabItemEnvironmentBadgeTests`: the narrowest stress width went from 100 pt to 110 pt. In its worst case
+  the label keeps 34 pt at 100 pt instead of the 40 pt invariant, because the reserved 10 pt slot comes out of
+  every row. The real sidebar is 160 pt (`Theme.sidebarWidth`), so 100 pt is unreachable in practice; 110, 120
+  and 160 keep the invariant.
+* `NeedsYouPillsTests`: the narrow-width expectation adds `NavTabItem.activitySlotWidth` (10 pt).
+* `FocusActivityCoordinatorTests` (three) and the end-to-end row test: after a focus is left, the first list is
+  now the leave refresh, so they ingest it before the "arrival after leaving flags" step.
+
 ### How the counters get to the Mac
 
 The daemon sends the counters (`agent_turns`, `agent_messages`, `agent_problems`, `activity_epoch`,
@@ -69,7 +93,7 @@ does push is `session_state`. So the app asks again (`SessionListRefresher`, `Ap
 
 * when a `session_state` arrives that **changes** a tag's state (a turn started or finished), coalesced in a
   500 ms window, so a burst is one request;
-* at once when a focus becomes seen, when the app comes forward and when the connection comes up;
+* at once when a focus becomes seen or stops being seen, when the app comes forward and when the connection comes up;
 * every 30 s as a backstop **only while at least one window is visible** (it catches what changes no state:
   a message in the middle of a turn, a problem). No timer runs while the app is hidden or every window is
   minimised; there is no tight polling.
