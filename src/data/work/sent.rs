@@ -421,13 +421,25 @@ fn teri_dir_overridden() -> bool {
     std::env::var_os("NOSTROMO_TERI_DIR").is_some_and(|d| !d.is_empty())
 }
 
-/// Is this process a cargo test binary (they live in `target/<profile>/deps`)?
-/// Only used to catch a test reaching the real `~/.nostromo/teri`.
+/// Is this process a cargo test binary? Only used to catch a test reaching the
+/// real `~/.nostromo/teri`. Cargo puts them in `target/<profile>/deps`, or (the
+/// build-dir layout, default since cargo 1.100) in
+/// `target/<profile>/build/<pkg>/<hash>/out`.
 fn is_test_binary() -> bool {
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().and_then(Path::file_name).map(|n| n == "deps"))
-        .unwrap_or(false)
+        .is_some_and(|exe| is_test_binary_path(&exe))
+}
+
+pub(crate) fn is_test_binary_path(exe: &Path) -> bool {
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    match dir.file_name() {
+        Some(n) if n == "deps" => true,
+        Some(n) if n == "out" => dir.components().any(|c| c.as_os_str() == "build"),
+        _ => false,
+    }
 }
 
 /// Replace the process-wide ledger (tests point it at a temp dir).
@@ -496,6 +508,19 @@ mod tests {
             !reaches_real_teri_dir_from_a_test(true),
             "an override makes it safe"
         );
+    }
+
+    #[test]
+    fn test_binaries_are_recognised_in_both_cargo_layouts() {
+        for yes in [
+            "/w/target/debug/deps/nostromo-abc",
+            "/w/target/debug/build/nostromo/b6b1/out/nostromo-b6b1",
+        ] {
+            assert!(is_test_binary_path(Path::new(yes)), "{yes}");
+        }
+        for no in ["/w/target/debug/nostromd", "/w/target/release/nostromo"] {
+            assert!(!is_test_binary_path(Path::new(no)), "{no}");
+        }
     }
 
     #[test]
