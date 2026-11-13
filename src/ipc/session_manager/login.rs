@@ -29,7 +29,9 @@ use crate::ipc::claude_login::{
     CredentialStamp, LoginCoordinator, AUTO_RESEND_TTL, MAX_AUTO_RESENDS,
 };
 use crate::ipc::protocol::{ClaudeLoginPhase, ClaudeLoginSession, ClaudeLoginWatch, ServerMsg};
-use crate::ipc::stream_json::{strip_nostromo_note, SessionState, TASK_NOTIFICATION_OPEN};
+use crate::ipc::stream_json::{
+    local_command, strip_nostromo_note, SessionState, TASK_NOTIFICATION_OPEN,
+};
 
 /// What asked for a held message to be sent again.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,6 +319,43 @@ pub(super) fn on_wake_turn_started(shared: &Shared) -> TurnAuthor {
         cell.bound = None;
     }
     TurnAuthor::of(cell.bound.as_ref())
+}
+
+/// The text of the message the daemon last wrote, when it is a typed slash
+/// command (`/name …`) no turn has taken yet, as the user typed it (the
+/// daemon's `<nostromo-note>` prefix, if any, removed).
+fn written_command_text(cell: &LoginCell) -> Option<String> {
+    let text = strip_nostromo_note(cell.written.as_ref()?.text.trim_start()).trim();
+    local_command::split_typed_command(text).map(|_| text.to_owned())
+}
+
+/// Is a typed slash command the daemon wrote still unanswered?
+pub(super) fn has_unanswered_command(shared: &Shared) -> bool {
+    written_command_text(&lock_recover(&shared.login.cell)).is_some()
+}
+
+/// A local command's record started. It answers the typed `/…` message the
+/// daemon wrote, if one is waiting (that message is bound to it: its author is
+/// the turn's, its text the turn's `user_input`); otherwise the CLI ran the
+/// command itself and the turn binds to nothing. Returns the author and the
+/// bound text.
+pub(super) fn on_local_command_started(shared: &Shared) -> (TurnAuthor, Option<String>) {
+    let mut cell = lock_recover(&shared.login.cell);
+    let text = written_command_text(&cell);
+    cell.bound = if text.is_some() {
+        cell.written.take()
+    } else {
+        None
+    };
+    (TurnAuthor::of(cell.bound.as_ref()), text)
+}
+
+/// The message the running turn is bound to, as a typed slash command (the
+/// daemon's note prefix removed). `None` when it is not one.
+pub(super) fn bound_command_text(shared: &Shared) -> Option<String> {
+    let cell = lock_recover(&shared.login.cell);
+    let text = strip_nostromo_note(cell.bound.as_ref()?.text.trim_start()).trim();
+    local_command::split_typed_command(text).map(|_| text.to_owned())
 }
 
 /// A live user line without `isReplay` started a turn. Every echo of a stdin

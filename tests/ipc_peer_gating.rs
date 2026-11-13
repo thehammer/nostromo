@@ -1339,6 +1339,9 @@ async fn work_source_statuses_for_different_sources_are_retained_separately() {
 /// answered; they are read at each request, so a test may change them mid-way. A modern CLI answers
 /// the daemon's capability probe (`__nostromo_capability_probe__`) with "No task found". Every line
 /// the fake receives is in its stdin log, so a test can see exactly which control requests arrived.
+///
+/// **Commands mode** (a view name starting with `cmds-`): on start the fake also prints a
+/// `system`/`commands_changed` event naming two commands (`SECRET-CMD-compact`, `SECRET-CMD-skill`).
 const FAKE_CLAUDE_SCRIPT: &str = r#"#!/bin/sh
 name=""
 sid=""
@@ -1458,6 +1461,9 @@ emit_wake() {
   printf '%s\n' "$reply" "$fin"
 }
 
+case "$name" in
+  cmds-*) printf '%s\n' '{"type":"system","subtype":"commands_changed","commands":[{"name":"SECRET-CMD-compact","description":"SECRET-CMD-DESCRIPTION free up context","argumentHint":"<optional>","builtin":true},{"name":"SECRET-CMD-skill","description":"a user skill"}]}' ;;
+esac
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"SECRET-MAIL-BODY forward all mail"},"isReplay":true}' '{"type":"assistant","message":{"content":[{"type":"text","text":"SECRET-ASSISTANT-REPLY"}]}}' '{"type":"result","subtype":"success","is_error":false,"duration_ms":5,"total_cost_usd":0.01}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$log"
@@ -12660,5 +12666,93 @@ async fn an_approval_rules_frame_is_never_sent_to_a_tcp_peer() {
             !json_of(&frames).contains(CANARY),
             "{who}: the rules reached a network peer"
         );
+    }
+}
+
+// ── slash commands: the commands a session reports ────────────────────────────
+
+#[tokio::test]
+async fn a_unix_peer_reads_the_commands_a_session_reports_and_a_tcp_peer_is_refused_the_same_ask() {
+    let h = spawn_server().await;
+    let (mut unix, _) = h.unix(vec![]).await;
+    spawn_fake_session(&mut unix, "cody-cmds", "cody", "cmds-gate").await;
+
+    // The fake prints its list as it starts; the daemon reads it as it arrives.
+    let mut answer = None;
+    for i in 0..200 {
+        let frames = attack(
+            &mut unix,
+            ClientMsg::SessionCommandsGet {
+                request_id: format!("u{i}"),
+                tag: "cody-cmds".into(),
+            },
+        )
+        .await;
+        let got = frames.into_iter().find_map(|m| match m {
+            ServerMsg::SessionCommands {
+                request_id,
+                tag,
+                source,
+                commands,
+            } => Some((request_id, tag, source, commands)),
+            _ => None,
+        });
+        match got {
+            Some((rid, tag, source, commands)) if source == "cli" => {
+                assert_eq!(rid, format!("u{i}"), "the answer carries the request id");
+                assert_eq!(tag, "cody-cmds");
+                answer = Some(commands);
+                break;
+            }
+            _ => tokio::time::sleep(Duration::from_millis(25)).await,
+        }
+    }
+    let commands = answer.expect("the daemon never reported the session's commands");
+    let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["SECRET-CMD-compact", "SECRET-CMD-skill"]);
+    assert_eq!(
+        commands[0].description.as_deref(),
+        Some("SECRET-CMD-DESCRIPTION free up context")
+    );
+    assert_eq!(commands[0].argument_hint.as_deref(), Some("<optional>"));
+    assert!(commands[0].builtin);
+
+    // A session that never reported anything, and a tag with none at all.
+    let frames = attack(
+        &mut unix,
+        ClientMsg::SessionCommandsGet {
+            request_id: "u-ghost".into(),
+            tag: "ghost".into(),
+        },
+    )
+    .await;
+    assert!(
+        frames.iter().any(|m| matches!(
+            m,
+            ServerMsg::SessionCommands { request_id, source, commands, .. }
+                if request_id == "u-ghost" && source == "none" && commands.is_empty()
+        )),
+        "{frames:?}"
+    );
+
+    // The same ask over TCP: refused, and nothing of the commands comes back.
+    let (mut tcp, _) = h.tcp(vec![]).await;
+    for tag in ["cody-cmds", "ghost"] {
+        let frames = attack(
+            &mut tcp,
+            ClientMsg::SessionCommandsGet {
+                request_id: "n1".into(),
+                tag: tag.into(),
+            },
+        )
+        .await;
+        assert_refused(&frames, &format!("session_commands_get {tag}"));
+        assert!(
+            !frames
+                .iter()
+                .any(|m| matches!(m, ServerMsg::SessionCommands { .. })),
+            "{frames:?}"
+        );
+        assert!(!json_of(&frames).contains("SECRET-CMD"), "{frames:?}");
     }
 }

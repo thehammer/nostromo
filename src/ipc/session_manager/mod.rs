@@ -67,8 +67,9 @@ use super::peer::{
 };
 use super::protocol::{FocusMeta, ServerMsg, SessionInfo, TaskDetailMsg, TasksSnapshot};
 use super::stream_json::{
-    injected_line, load_scrollback, parse_line, ParsedLine, SessionState, SessionTranscript,
-    TurnDelta, TurnOrigin, NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN, SCROLLBACK_TURNS,
+    injected_line, load_scrollback, local_command, parse_line, ParsedLine, SessionState,
+    SessionTranscript, TurnDelta, TurnOrigin, NOSTROMO_NOTE_CLOSE, NOSTROMO_NOTE_OPEN,
+    SCROLLBACK_TURNS,
 };
 use crate::model::hub::ModelHub;
 use crate::model::notes::{self, NoteKind};
@@ -89,6 +90,9 @@ mod login;
 mod model_switch;
 #[cfg(test)]
 mod notice_inject_tests;
+#[cfg(test)]
+mod slash_command_tests;
+pub mod slash_commands;
 mod task_runtime;
 #[cfg(test)]
 mod wake_tests;
@@ -254,6 +258,9 @@ struct Shared {
     /// The focus's activity counters: shared by every process the focus runs
     /// (see `focus_activity`).
     activity: Arc<FocusActivity>,
+    /// The slash commands this focus's CLI reports (kept per tag by the manager,
+    /// so a restarted session's picker is not empty).
+    commands: Arc<slash_commands::CommandCatalog>,
 }
 
 /// Where the manager keeps its [`TurnHook`] for every session's reader.
@@ -670,9 +677,23 @@ pub struct SessionManager {
     /// Every focus's activity counters, for the daemon's lifetime: a restart of
     /// the focus's process reuses its entry (see `focus_activity`).
     activity: ActivityBook,
+    /// Every focus's slash commands, for the daemon's lifetime (memory only).
+    commands: slash_commands::CommandBook,
 }
 
 impl SessionManager {
+    /// The slash commands `tag`'s CLI last reported: from the running session,
+    /// or what this daemon kept after it. `None` source when it never reported.
+    pub fn session_commands(
+        &self,
+        tag: &str,
+    ) -> (
+        slash_commands::CatalogSource,
+        Vec<crate::ipc::protocol::SlashCommandEntry>,
+    ) {
+        self.commands.snapshot(tag)
+    }
+
     pub fn new() -> Self {
         let mut mgr = Self::with_store_path(default_store_path());
         mgr.guard_path = crate::approvals::guard::resolve_guard_path();
@@ -753,6 +774,7 @@ impl SessionManager {
             turn_hook: Arc::new(std::sync::RwLock::new(None)),
             notice_engine: None,
             activity: ActivityBook::default(),
+            commands: slash_commands::CommandBook::default(),
         }
     }
 
@@ -1372,6 +1394,7 @@ impl SessionManager {
             login: login::LoginLink::new(self.login.clone()),
             turn_hook: Arc::clone(&self.turn_hook),
             activity: self.activity.for_session(&tag, &session_id),
+            commands: self.commands.for_tag(&tag),
         };
         // Ends vanished tasks and flushes coalesced task snapshots; stops
         // when the CLI has exited.
@@ -2877,6 +2900,9 @@ fn run_reader(
         if line.trim().is_empty() {
             continue;
         }
+        if let Some(update) = slash_commands::observe(&line) {
+            shared.commands.apply(update);
+        }
         let parsed = parse_line(&line);
         auth.feed(classify_line(&line), parsed.as_ref());
         let Some(parsed) = parsed else {
@@ -2950,6 +2976,19 @@ fn run_reader(
                 }
                 continue;
             }
+            // A local command's answer replayed as a user line is a record only
+            // while a typed `/…` write waits for it; any other (an older CLI's
+            // model-switch line) is dropped, as it always was.
+            ParsedLine::LocalCommandOutput {
+                from_user_line: true,
+                ..
+            } if !login::has_unanswered_command(&shared) => continue,
+            // Likewise a command's harness echo: it is the user's own turn only while
+            // the typed `/…` write it answers is waiting (an older CLI's replayed
+            // model-switch entry opens none, and would never see a `result`).
+            ParsedLine::CommandEcho {
+                is_replay: true, ..
+            } if !login::has_unanswered_command(&shared) => continue,
             ParsedLine::Model { model, .. }
             | ParsedLine::Blocks {
                 model: Some(model), ..
@@ -2973,8 +3012,17 @@ fn run_reader(
             ParsedLine::UserPrompt {
                 text, is_replay, ..
             } => Some((text.clone(), *is_replay)),
+            // A prompt-type slash command's echo is the user's turn: handled as
+            // the replayed prompt it stands for.
+            ParsedLine::CommandEcho {
+                name,
+                args,
+                is_replay: true,
+                ..
+            } => Some((local_command::command_line(name, args), true)),
             _ => None,
         };
+        let command_echo = matches!(parsed, ParsedLine::CommandEcho { .. });
         tally.on_line(&line, &parsed);
         let (deltas, origin_update) = {
             let mut transcript = lock_recover(&shared.transcript);
@@ -2995,6 +3043,27 @@ fn run_reader(
                 tally.on_delta(&delta, None);
             }
             match &mut delta {
+                TurnDelta::TurnStarted { turn }
+                    if turn
+                        .origin
+                        .as_ref()
+                        .is_some_and(TurnOrigin::is_local_command) =>
+                {
+                    // A local command's record answers the typed `/…` message
+                    // the daemon wrote: it takes it (author and text). None of
+                    // the notice, wake or injected provenance applies.
+                    let (author, written) = login::on_local_command_started(&shared);
+                    if let Some(text) = written {
+                        let adopted =
+                            lock_recover(&shared.transcript).adopt_written_command(&turn.id, &text);
+                        if let Some(adopted) = adopted {
+                            *turn = adopted;
+                        }
+                    }
+                    auth.begin_turn();
+                    shared.set_state(SessionState::MidTurn);
+                    shared.turn_event(&tag, TurnEvent::Started { author });
+                }
                 TurnDelta::TurnStarted { turn } => {
                     let is_wake = matches!(turn.origin, Some(TurnOrigin::TaskWake { .. }));
                     let is_injected = turn
@@ -3029,6 +3098,16 @@ fn run_reader(
                         if let Some((turn_id, origin)) = merged {
                             shared.broadcast(SessionEvent::TurnOrigin { turn_id, origin });
                             continue;
+                        }
+                    }
+                    // A prompt-type command's turn is the text the daemon wrote.
+                    if command_echo && replayed {
+                        if let Some(text) = login::bound_command_text(&shared) {
+                            let adopted = lock_recover(&shared.transcript)
+                                .adopt_written_command(&turn.id, &text);
+                            if let Some(adopted) = adopted {
+                                *turn = adopted;
+                            }
                         }
                     }
                     auth.begin_turn();

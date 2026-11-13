@@ -790,6 +790,9 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         ServerMsg::SessionTaskStopResult { .. } | ServerMsg::SessionTaskOutputResult { .. } => {
             ServerClass::LocalOnly
         }
+        // The commands a session reports: user skill and plugin names. The
+        // operator's own; a network peer can never ask.
+        ServerMsg::SessionCommands { .. } => ServerClass::LocalOnly,
 
         // The tracker pane's content (title, item text, notes, owners, links,
         // commands, the file path) goes to local clients only. A network peer
@@ -1052,6 +1055,8 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         // ever available to a network peer.
         | ClientMsg::SessionTaskStop { .. }
         | ClientMsg::SessionTaskOutput { .. }
+        // The commands a session's CLI reports (user skills, plugin names).
+        | ClientMsg::SessionCommandsGet { .. }
         // Terminal panes: type into, read, resize, close or start a shell.
         // Operator app only; a network peer never reaches the terminal arms.
         | ClientMsg::TerminalOpenLocal { .. }
@@ -1122,6 +1127,7 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::ApprovalRevokeSessionRule { tag, .. }
         | ClientMsg::SessionTaskStop { tag, .. }
         | ClientMsg::SessionTaskOutput { tag, .. }
+        | ClientMsg::SessionCommandsGet { tag, .. }
         | ClientMsg::ClaudeLoginAction { tag, .. }
         | ClientMsg::PaneAction { tag, .. }
         | ClientMsg::TrackerOpenLink { tag, .. } => tags.tag_is_sensitive(tag),
@@ -2110,6 +2116,10 @@ mod tests {
                 offset: None,
                 max_bytes: 4096,
             },
+            ClientMsg::SessionCommandsGet {
+                request_id: "r".into(),
+                tag: "x1".into(),
+            },
             ClientMsg::TerminalOpenLocal {
                 tag: "x1".into(),
                 relative_to: None,
@@ -2249,7 +2259,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 77;
+    const CLIENT_MSG_VARIANTS: usize = 78;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2331,6 +2341,7 @@ mod tests {
             ClientMsg::ApprovalRulesDiscard { .. } => 74,
             ClientMsg::TrackerOpenLink { .. } => 75,
             ClientMsg::TerminalFollowInviteStagingOnly { .. } => 76,
+            ClientMsg::SessionCommandsGet { .. } => 77,
         }
     }
 
@@ -2372,9 +2383,9 @@ mod tests {
         // 69 with the S2 staging frames (set_enabled, set_global, ui_event); 70 with `ApprovalRevokeSessionRule`;
         // 72 with the two Approvals-log requests; 75 with the three persisted-rule verbs (AP6);
         // 76 with `TrackerOpenLink` (T6; expect a trivial conflict on this constant with T3a's tracker verbs);
-        // 77 with `TerminalFollowInviteStagingOnly` (S3a).
-        assert_eq!(CLIENT_MSG_VARIANTS, 77);
-        assert_eq!(every_client_msg().len(), 77);
+        // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`.
+        assert_eq!(CLIENT_MSG_VARIANTS, 78);
+        assert_eq!(every_client_msg().len(), 78);
     }
 
     #[test]
@@ -4420,6 +4431,83 @@ mod tests {
                 !targets_sensitive_session(&output(tag), &tags),
                 "output {tag}"
             );
+        }
+    }
+
+    // ── slash commands: the commands verb ─────────────────────────────────────
+
+    fn commands_get(tag: &str) -> ClientMsg {
+        ClientMsg::SessionCommandsGet {
+            request_id: "r".into(),
+            tag: tag.into(),
+        }
+    }
+
+    fn commands_answer(tag: &str) -> ServerMsg {
+        ServerMsg::SessionCommands {
+            request_id: "r".into(),
+            tag: tag.into(),
+            source: "cli".into(),
+            commands: vec![crate::ipc::protocol::SlashCommandEntry {
+                name: "SECRET-SKILL-NAME".into(),
+                description: Some("SECRET-SKILL-DESCRIPTION".into()),
+                argument_hint: None,
+                aliases: vec![],
+                builtin: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn the_commands_verb_is_refused_for_a_network_peer_whatever_the_tag() {
+        let tags = SensitiveTags::in_memory();
+        for tag in ["cody-ordinary", "x1", "", "ghost", "fred"] {
+            let msg = commands_get(tag);
+            assert_eq!(network_policy(&msg), NetworkPolicy::Refused, "{msg:?}");
+            assert!(refused_for_network(&msg), "{msg:?}");
+            assert!(refuse_for_network(&msg, &tags), "{msg:?}");
+        }
+        assert!(!NETWORK_ALLOWED.contains(&"SessionCommandsGet"));
+        let names: Vec<String> = every_client_msg().iter().map(variant_name).collect();
+        assert!(names.iter().any(|n| n == "SessionCommandsGet"));
+    }
+
+    #[test]
+    fn the_commands_verb_is_listed_as_targeting_a_sensitive_session_by_its_tag() {
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-sensitive", "fred", "teri", "FRED"] {
+            assert!(
+                targets_sensitive_session(&commands_get(tag), &tags),
+                "{tag}"
+            );
+        }
+        for tag in ["cody-ordinary", "x1"] {
+            assert!(
+                !targets_sensitive_session(&commands_get(tag), &tags),
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_commands_answer_never_reaches_a_network_peer_but_reaches_a_local_one_unchanged() {
+        let tags = tags_with("cody-sensitive");
+        for tag in ["cody-ordinary", "cody-sensitive", "fred"] {
+            let msg = commands_answer(tag);
+            assert!(
+                matches!(classify_server_msg(&msg), ServerClass::LocalOnly),
+                "{tag}"
+            );
+            assert!(!may_receive(PeerTrust::Tcp, &msg, &tags), "{tag}");
+            assert!(
+                outbound(PeerTrust::Tcp, msg.clone(), &tags).is_none(),
+                "{tag}"
+            );
+            for trust in [PeerTrust::LocalOther, PeerTrust::OperatorApp] {
+                assert!(may_receive(trust, &msg, &tags), "{trust:?} {tag}");
+                let sent = outbound(trust, msg.clone(), &tags).expect("delivered");
+                assert_eq!(wire(&sent), wire(&msg), "{trust:?} {tag}");
+            }
         }
     }
 
