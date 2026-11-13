@@ -316,6 +316,10 @@ class AppStore: ObservableObject {
         focusActivity.onAnyWindowVisibleChanged = { [weak self] visible in
             self?.sessionListRefresher.setWindowsVisible(visible)
         }
+        // Coming forward: the marks should be fresh by the time the operator looks.
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.sessionListRefresher.requestNow() }
+            .store(in: &cancellables)
     }
 
     // MARK: - Memory self-defense
@@ -610,11 +614,7 @@ class AppStore: ObservableObject {
         for (name, active) in [(NSApplication.didBecomeActiveNotification, true),
                                (NSApplication.didResignActiveNotification, false)] {
             NotificationCenter.default.publisher(for: name)
-                .sink { [weak self] _ in
-                    self?.resyncScheduler.setActive(active)
-                    // Coming forward: the marks should be fresh by the time the operator looks.
-                    if active { self?.sessionListRefresher.requestNow() }
-                }
+                .sink { [weak self] _ in self?.resyncScheduler.setActive(active) }
                 .store(in: &cancellables)
         }
         resyncScheduler.setActive(NSApp?.isActive ?? true)

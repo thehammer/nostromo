@@ -244,6 +244,9 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     var activityMarkFrame: NSRect? { activityMark.isHidden ? nil : activityMark.frame }
     var activityToolTip: String? { activityMark.isHidden ? nil : activityMark.toolTip }
     var activityMarkIsAccessibilityElement: Bool { activityMark.isAccessibilityElement() }
+    /// Where the name is laid out by its constraints (its alignment rect: the frame less the text field's own
+    /// 2 pt side padding). The mark's slot is measured from this edge, so the 4 pt gap is to the text itself.
+    var nameAlignmentFrame: NSRect { label.alignmentRect(forFrame: label.frame) }
 
     /// What the mark's layers actually draw; `nil` when no mark shows.
     struct DrawnActivityMark: Equatable {

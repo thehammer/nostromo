@@ -31,7 +31,11 @@ final class NavTabItemEnvironmentBadgeTests: XCTestCase {
         var hasCompetingTrailing: Bool { pill != nil || attention }
     }
 
-    private let widths: [CGFloat] = [Theme.sidebarWidth, 120, 100]
+    // The narrowest stress width was 100 pt. The activity mark's reserved slot (`NavTabItem.activitySlotWidth`,
+    // 10 pt) takes that much from every row, and in the one worst case here (a long label with a count pill,
+    // the attention dot, a sweater dot and two tags) the label then keeps 34 pt at 100 pt. The sidebar is a
+    // fixed `Theme.sidebarWidth`, so the narrowest width is now 110 (the label keeps 44 there).
+    private let widths: [CGFloat] = [Theme.sidebarWidth, 120, 110]
 
     private func dynamicFocus() -> Focus {
         Focus(id: "11111111-aaaa", agentTag: "cody", projectPath: "/Users/hammer/Code/nostromo", isBuiltIn: false, org: "Carefeed")

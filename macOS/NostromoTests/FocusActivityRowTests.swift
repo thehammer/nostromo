@@ -240,7 +240,7 @@ final class FocusActivityRowDrawingTests: XCTestCase {
                     seen.append(try XCTUnwrap(item.drawnActivityMark, "\(label), \(h.name), \(name.rawValue)"))
                 }
             }
-            XCTAssertEqual(Set(seen.map { "\($0)" }).count, 1, "\(label): the mark is a fixed colour, not tinted by the row")
+            XCTAssertTrue(seen.dropFirst().allSatisfy { $0 == seen[0] }, "\(label): the mark is a fixed colour, not tinted by the row")
         }
     }
 
@@ -293,13 +293,13 @@ final class FocusActivityRowDrawingTests: XCTestCase {
                 let baseline = item.activitySlotFrame
                 XCTAssertEqual(baseline.width, 8, at)
                 XCTAssertEqual(baseline.height, 8, at)
-                XCTAssertEqual(baseline.maxX, item.labelFrame.minX - 4, accuracy: 0.01, "4 pt left of the name: \(at)")
-                XCTAssertEqual(baseline.midY, item.labelFrame.midY, accuracy: 0.01, "centred on the name's line: \(at)")
+                XCTAssertEqual(baseline.maxX, item.nameAlignmentFrame.minX - 4, accuracy: 0.01, "4 pt left of the name: \(at)")
+                XCTAssertEqual(baseline.midY, item.nameAlignmentFrame.midY, accuracy: 0.01, "centred on the name's line: \(at)")
                 XCTAssertLessThan(baseline.maxX, item.labelFrame.minX, "left of the name, not on or right of it: \(at)")
                 for (label, state) in allStates {
                     show(item, state)
                     assertSameRect(item.activitySlotFrame, baseline, "the slot does not depend on the state (\(label)): \(at)")
-                    XCTAssertEqual(item.activitySlotFrame.maxX, item.labelFrame.minX - 4, accuracy: 0.01, "\(label): \(at)")
+                    XCTAssertEqual(item.activitySlotFrame.maxX, item.nameAlignmentFrame.minX - 4, accuracy: 0.01, "\(label): \(at)")
                 }
             }
         }
@@ -307,8 +307,9 @@ final class FocusActivityRowDrawingTests: XCTestCase {
 
     func testTheNameAndSecondLineMoveTenPointsRightAndStayThere() throws {
         XCTAssertEqual(NavTabItem.activitySlotWidth, 10)
-        // Before the mark existed the name sat at 3 (bar) + 6 (inset), 21 when indented under a repo header.
-        for (indented, was) in [(false, CGFloat(9)), (true, CGFloat(21))] {
+        // Before the mark existed the name's FRAME started at 7 (3 for the bar, 6 for the inset, less the text
+        // field's own 2 pt padding), 19 when indented under a repo header.
+        for (indented, was) in [(false, CGFloat(7)), (true, CGFloat(19))] {
             for (label, state) in allStates {
                 let item = makeItem(indented: indented)
                 show(item, state)
@@ -352,7 +353,7 @@ final class FocusActivityRowDrawingTests: XCTestCase {
                         assertSameOptionalRect(item.secondaryFrame, referenceSecond, "the second line did not move: \(at)")
                         assertSameRect(item.activitySlotFrame, referenceSlot, "the slot did not move: \(at)")
                         XCTAssertFalse(item.activitySlotFrame.intersects(item.labelFrame), "slot overlaps the name: \(at)")
-                        XCTAssertLessThanOrEqual(item.activitySlotFrame.maxX, item.labelFrame.minX - 4 + 0.01, at)
+                        XCTAssertLessThanOrEqual(item.activitySlotFrame.maxX, item.nameAlignmentFrame.minX - 4 + 0.01, at)
                         XCTAssertGreaterThanOrEqual(item.activitySlotFrame.minX, 0, "slot inside the row: \(at)")
                         if let second = item.secondaryFrame {
                             XCTAssertFalse(item.activitySlotFrame.intersects(second), "slot overlaps the second line: \(at)")
@@ -764,8 +765,8 @@ final class FocusActivityRowSidebarTests: XCTestCase {
         }
         XCTAssertGreaterThan(try documentHeight(sidebar), 8 * Theme.navItemHeight)
         let xs = Set(rows.map { $0.labelFrame.minX })
-        XCTAssertTrue(xs.isSubset(of: [19, 31]), "names start at 19 (31 when nested under a repo header): \(xs)")
-        XCTAssertTrue(xs.contains(31), "some rows are nested, so both indents are exercised")
+        XCTAssertTrue(xs.isSubset(of: [17, 29]), "name frames start at 17 (29 when nested under a repo header): \(xs)")
+        XCTAssertTrue(xs.contains(29), "some rows are nested, so both indents are exercised")
     }
 
     // MARK: Nothing moves
@@ -842,8 +843,8 @@ final class FocusActivityRowSidebarTests: XCTestCase {
                             XCTAssertEqual(item.activityMarkFrame, slot, "a shown mark is in the slot: \(at)")
                             XCTAssertTrue(item.bounds.insetBy(dx: -0.01, dy: -0.01).contains(slot), "inside the row: \(at)")
                             XCTAssertLessThan(slot.maxX, item.labelFrame.minX, "left of the name: \(at)")
-                            XCTAssertEqual(slot.maxX, item.labelFrame.minX - 4, accuracy: 0.01, "4 pt from the name: \(at)")
-                            XCTAssertEqual(slot.midY, item.labelFrame.midY, accuracy: 0.01, "centred on the name line: \(at)")
+                            XCTAssertEqual(slot.maxX, item.nameAlignmentFrame.minX - 4, accuracy: 0.01, "4 pt from the name: \(at)")
+                            XCTAssertEqual(slot.midY, item.nameAlignmentFrame.midY, accuracy: 0.01, "centred on the name line: \(at)")
                             XCTAssertFalse(slot.intersects(item.labelFrame), "overlaps the name: \(at)")
                             if let second = item.secondaryFrame { XCTAssertFalse(slot.intersects(second), "overlaps the second line: \(at)") }
                             if let dot = item.attentionDotFrame { XCTAssertFalse(slot.intersects(dot), "overlaps the attention dot: \(at)") }
@@ -865,7 +866,7 @@ final class FocusActivityRowSidebarTests: XCTestCase {
         for item in try items(sidebar) {
             XCTAssertNil(item.activityMarkFrame, item.focus.id)
             XCTAssertEqual(item.activitySlotFrame.size, CGSize(width: 8, height: 8), item.focus.id)
-            XCTAssertEqual(item.activitySlotFrame.maxX, item.labelFrame.minX - 4, accuracy: 0.01, item.focus.id)
+            XCTAssertEqual(item.activitySlotFrame.maxX, item.nameAlignmentFrame.minX - 4, accuracy: 0.01, item.focus.id)
         }
     }
 
