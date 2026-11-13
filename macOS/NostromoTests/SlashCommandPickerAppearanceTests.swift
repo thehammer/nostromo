@@ -108,6 +108,18 @@ final class SlashCommandPickerAppearanceTests: XCTestCase {
     /// selected row's own fill (about 0.014).
     private func isInk(_ c: NSColor) -> Bool { modelRelativeLuminance(c) > 0.025 }
 
+    /// Ink on a row whose own fill is `fill` (the picker's background, or a selected row's highlight): brighter
+    /// than that fill by more than the faintest ellipsis dot. The highlight is a fill, not ink.
+    private func inkOn(_ fill: NSColor) -> (NSColor) -> Bool {
+        let floor = max(0.025, modelRelativeLuminance(fill) + 0.02)
+        return { modelRelativeLuminance($0) > floor }
+    }
+
+    /// What a row's blank space is drawn as, 8 pt inside its right edge (inside the highlight when selected).
+    private func rowFill(_ shot: Snapshot, width: CGFloat, midY: CGFloat) throws -> NSColor {
+        try XCTUnwrap(shot.pixel(x: width - 8, y: midY), "row fill sample")
+    }
+
     private func brightest(_ pixels: [NSColor]) -> NSColor? {
         pixels.max { modelRelativeLuminance($0) < modelRelativeLuminance($1) }
     }
@@ -168,6 +180,7 @@ final class SlashCommandPickerAppearanceTests: XCTestCase {
                 let (_, shot) = try renderRow(longEntry, selected: selected, width: width)
                 let inset = SlashCommandRowView.horizontalInset
                 let strip = NSRect(x: width - inset + 1, y: 0, width: inset - 1, height: SlashCommandPickerView.rowHeight)
+                let isInk = inkOn(try rowFill(shot, width: width, midY: SlashCommandPickerView.rowHeight / 2))
 
                 let ink = try XCTUnwrap(shot.inkBounds(in: NSRect(origin: .zero, size: shot.size), isInk: isInk))
 
@@ -182,6 +195,7 @@ final class SlashCommandPickerAppearanceTests: XCTestCase {
             for selected in [false, true] {
                 let (row, shot) = try renderRow(longEntry, selected: selected, width: width)
                 XCTAssertGreaterThan(row.shownDescription.count, 500, "the fixture is a very long description")
+                let isInk = inkOn(try rowFill(shot, width: width, midY: SlashCommandPickerView.rowHeight / 2))
                 let column = row.descriptionFrame
                 let ink = try XCTUnwrap(shot.inkBounds(in: column, isInk: isInk), "width \(width): the description drew nothing")
 
@@ -290,6 +304,7 @@ final class SlashCommandPickerAppearanceTests: XCTestCase {
             XCTAssertEqual(view.visibleRows.count, SlashCommandPicker.maxVisibleRows, "a long list shows at most eight rows")
             let inset = SlashCommandRowView.horizontalInset
             for (i, row) in view.visibleRows.enumerated() {
+                let isInk = inkOn(try rowFill(shot, width: width, midY: row.frame.midY))
                 let strip = NSRect(x: width - inset + 1, y: row.frame.minY, width: inset - 3, height: row.frame.height)
                 XCTAssertNil(shot.inkBounds(in: strip, isInk: isInk), "width \(width), row \(i): ink in the trailing inset")
                 let column = row.descriptionFrame.offsetBy(dx: row.frame.minX, dy: row.frame.minY)
@@ -315,7 +330,8 @@ final class SlashCommandPickerAppearanceTests: XCTestCase {
             let ink = try XCTUnwrap(brightest(shot.pixels(in: footer.insetBy(dx: 2, dy: 2)).filter(isInk)), "width \(width): the footer drew nothing")
             XCTAssertTrue(isMuted(ink, swatch: muted), "width \(width): footer ink \(ink)")
             XCTAssertGreaterThanOrEqual(contrast(ink, background), 4.5, "width \(width): footer contrast")
-            let bounds = try XCTUnwrap(shot.inkBounds(in: footer.insetBy(dx: 2, dy: 2), isInk: isInk))
+            // Away from the picker's own rounded border, which curves in at the bottom corners.
+            let bounds = try XCTUnwrap(shot.inkBounds(in: NSRect(x: 4, y: footer.minY + 3, width: width - 8, height: 18), isInk: isInk))
             XCTAssertLessThanOrEqual(bounds.maxX, width - SlashCommandRowView.horizontalInset + 1, "width \(width): footer text stays out of the inset")
         }
     }
