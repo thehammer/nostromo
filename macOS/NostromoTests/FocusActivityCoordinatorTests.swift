@@ -298,6 +298,7 @@ final class FocusActivityCoordinatorTests: XCTestCase {
         rig.window(1, "a")
         rig.window(1, "a", key: false)
         XCTAssertEqual(rig.coordinator.seenTags, [])
+        rig.ingest("a", baseline)                       // the refresh that leaving asks for
         rig.ingest("a", c(6, 4, 1))
         XCTAssertEqual(rig.state("a"), .unread(count: 1))
     }
@@ -472,6 +473,7 @@ final class FocusActivityCoordinatorTests: XCTestCase {
         rig.window(2, "a", key: false)
         rig.closeWindow(1)
         XCTAssertEqual(rig.coordinator.seenTags, [], "the other window is not key")
+        rig.ingest("a", baseline)                       // the refresh that leaving asks for
         rig.ingest("a", c(6, 4, 1))
         XCTAssertEqual(rig.state("a"), .unread(count: 1))
     }
@@ -505,6 +507,7 @@ final class FocusActivityCoordinatorTests: XCTestCase {
         rig.window(2, "b", key: true)
         XCTAssertEqual(rig.coordinator.seenTags, ["b"])
         XCTAssertEqual(rig.state("b"), .none, "b is now looked at")
+        rig.ingest("a", c(6, 4, 1))                     // the refresh that leaving a asks for
         rig.ingest("a", c(7, 4, 1))
         XCTAssertEqual(rig.state("a"), .activity, "and a is not")
     }

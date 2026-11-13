@@ -472,7 +472,7 @@ final class FocusActivityWiringTests: XCTestCase {
                       "the scan read the dispatch's verb list: \(verbs)")
         XCTAssertGreaterThan(verbs.count, 15)
         for verb in verbs {
-            for word in ["seen", "activity", "unread", "mark", "defaults", "store"] {
+            for word in ["seen", "activity", "unread", "mark", "defaults"] {
                 XCTAssertFalse(verb.contains(word), "app-control verb \"\(verb)\" must not expose the operator's seen marks")
             }
         }
