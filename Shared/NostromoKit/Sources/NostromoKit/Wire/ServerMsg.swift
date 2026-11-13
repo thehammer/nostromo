@@ -139,6 +139,8 @@ public enum ServerMsg {
     case sessionTaskStopResult(SessionTaskStopResultWire)
     /// The answer to a `session_task_output`. Local clients only.
     case sessionTaskOutputResult(SessionTaskOutputResultWire)
+    /// The commands a session's CLI reports, the answer to a `session_commands_get`. Local only.
+    case sessionCommands(SessionCommandsWire)
 
     // ── agent tracker ─────────────────────────────────────────────────────────
 
@@ -463,8 +465,13 @@ public enum TurnOriginWire: Codable, Equatable {
     /// Text the CLI injected as a user message that the user did not type (`injected_context`): a
     /// loaded skill (`skill`), a conversation summary (`summary`) or other context (`other`).
     case injectedContext(kind: String, title: String, text: String, truncated: Bool)
+    /// A slash command the CLI answered itself, with no model turn (`/context`, `/model haiku`):
+    /// shown as a muted, collapsible record, never as a message from the user. `stream` is `stdout`
+    /// or `stderr`; `output` has the CLI's wrapper removed.
+    case localCommand(command: String, args: String, output: String, stream: String, truncated: Bool)
 
-    private enum K: String, CodingKey { case type, items, omitted, kind, title, text, truncated }
+    private enum K: String, CodingKey { case type, items, omitted, kind, title, text, truncated
+        case command, args, output, stream }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -507,6 +514,15 @@ public enum TurnOriginWire: Codable, Equatable {
                 title: (try? c.decodeIfPresent(String.self, forKey: .title)) ?? "",
                 text: (try? c.decodeIfPresent(String.self, forKey: .text)) ?? "",
                 truncated: (try? c.decodeIfPresent(Bool.self, forKey: .truncated)) ?? false)
+        case "local_command":
+            // Missing optional fields default; a missing `command` throws, so the turn falls back
+            // to the plain bubble of its `user_input`.
+            self = .localCommand(
+                command: try c.decode(String.self, forKey: .command),
+                args: (try? c.decodeIfPresent(String.self, forKey: .args)) ?? "",
+                output: (try? c.decodeIfPresent(String.self, forKey: .output)) ?? "",
+                stream: (try? c.decodeIfPresent(String.self, forKey: .stream)) ?? "stdout",
+                truncated: (try? c.decodeIfPresent(Bool.self, forKey: .truncated)) ?? false)
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c,
                 debugDescription: "unknown TurnOrigin type: \(other)")
@@ -539,6 +555,13 @@ public enum TurnOriginWire: Codable, Equatable {
             try c.encode(title, forKey: .title)
             try c.encode(text, forKey: .text)
             if truncated { try c.encode(true, forKey: .truncated) }
+        case .localCommand(let command, let args, let output, let stream, let truncated):
+            try c.encode("local_command", forKey: .type)
+            try c.encode(command, forKey: .command)
+            try c.encode(args, forKey: .args)
+            try c.encode(output, forKey: .output)
+            try c.encode(stream, forKey: .stream)
+            if truncated { try c.encode(true, forKey: .truncated) }
         }
     }
 
@@ -546,7 +569,7 @@ public enum TurnOriginWire: Codable, Equatable {
     public var items: [TerminalOriginItem] {
         switch self {
         case .terminalDelivery(let items), .terminalFollowNotice(let items): return items
-        case .motherJobNotice, .taskWake, .peerMessage, .injectedContext: return []
+        case .motherJobNotice, .taskWake, .peerMessage, .injectedContext, .localCommand: return []
         }
     }
 
@@ -1141,6 +1164,11 @@ extension ServerMsg {
         case "session_task_output_result":
             if let m = try? dec.decode(SessionTaskOutputResultWire.self, from: data) {
                 return .sessionTaskOutputResult(m)
+            }
+
+        case "session_commands":
+            if let m = try? dec.decode(SessionCommandsWire.self, from: data) {
+                return .sessionCommands(m)
             }
 
         case "tracker_board":

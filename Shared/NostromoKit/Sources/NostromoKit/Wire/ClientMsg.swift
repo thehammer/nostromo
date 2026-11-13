@@ -317,6 +317,25 @@ public struct ClientSessionTaskStop: Encodable, Equatable {
     }
 }
 
+/// Read the slash commands a session's CLI reports. Answered with
+/// `ServerMsg.sessionCommands`; refused over TCP; sent only to a daemon that advertised
+/// `slash_commands_v1`. Mirrors `ClientMsg::SessionCommandsGet` in `src/ipc/protocol.rs`.
+public struct ClientSessionCommandsGet: Encodable, Equatable {
+    let type_: String = "session_commands_get"
+    public let requestId: String
+    public let tag: String
+
+    public init(requestId: String, tag: String) {
+        self.requestId = requestId
+        self.tag = tag
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case type_ = "type", tag
+        case requestId = "request_id"
+    }
+}
+
 /// Read a shell or monitor task's output. `offset` is a raw byte offset into the
 /// output (`nil`: the tail); the daemon clamps `maxBytes` to 1 MiB. Answered with
 /// `ServerMsg.sessionTaskOutputResult`; refused over TCP.
