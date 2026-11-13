@@ -504,30 +504,28 @@ final class DynamicFocusView: NSView {
 
         // Restore saved ratios (from a previous session or operator drag) or
         // apply the agent-supplied defaults, then keep ratios in sync on drag.
-        let udKey = "nostromo.dynlayout.\(tag).\(path)"
+        let udKey = Self.ratioDefaultsKey(tag: tag, path: path, direction: direction)
         split.translatesAutoresizingMaskIntoConstraints = false
 
-        // A saved ratio set is trusted only after it passes
+        // A saved ratio set is trusted only when it was saved for a split of
+        // THIS direction (the key carries it, see `ratioDefaultsKey`), passes
         // `RatioPersistencePolicy.isWellFormed` — the same shape check that
-        // gates writing one — plus a count check against this split's actual
-        // child count (fix-collapsed-split-ratio-persistence D2). This is
-        // what heals an already-corrupt value like `[0.977, 0.022]` on the
-        // very next launch with no migration step, and closes the path-key
-        // reuse hazard: `udKey` is keyed by tag + tree path, so a
-        // structurally different split that lands at the same path would
-        // otherwise silently inherit its predecessor's ratios. There's no
-        // real size to check a `total` against yet at this point in
-        // `makeSplitView`, which is exactly why this asks `isWellFormed`
-        // (shape only) rather than the fuller `shouldPersist`.
-        let savedRatios = UserDefaults.standard.array(forKey: udKey) as? [Double]
-        let validatedRatios = savedRatios.flatMap { saved -> [Double]? in
-            guard saved.count == children.count, RatioPersistencePolicy.isWellFormed(ratios: saved)
-            else { return nil }
-            return saved
-        }
-        if savedRatios != nil && validatedRatios == nil {
-            UserDefaults.standard.removeObject(forKey: udKey)
-        }
+        // gates writing one — and matches this split's child count
+        // (fix-collapsed-split-ratio-persistence D2). The direction in the key
+        // closes the path-key reuse hazard: a tree path used to be the whole
+        // key, so a structurally different split that landed at the same path
+        // (Teri's root turning from side by side into top over bottom)
+        // inherited its predecessor's ratios: the old 0.58 / 0.42 width split
+        // became the height split of the chat. There's no real size to check a
+        // `total` against yet at this point in `makeSplitView`, which is
+        // exactly why this asks `isWellFormed` (shape only) rather than the
+        // fuller `shouldPersist`.
+        let validatedRatios = Self.savedRatios(
+            forKey: udKey,
+            legacyKey: Self.legacyRatioDefaultsKey(tag: tag, path: path),
+            direction: direction,
+            childCount: children.count
+        )
 
         // Applied on the first layout pass where `split` actually has a
         // size (see `RatioSplitView.layout()`) — not a one-shot
@@ -857,6 +855,52 @@ final class DynamicFocusView: NSView {
     /// has converged somewhere else. (`DynamicFocusViewWiringTests`'
     /// sequencing guard looks for the substring `private static func
     /// currentRatios`, which `fileprivate` still contains.)
+    /// Where a split's dragged ratios are saved: per focus, per tree path AND per split
+    /// direction. The direction is part of the key because a ratio set only means something
+    /// for the axis it was dragged on: when the daemon turns a split at the same path from
+    /// side by side into top over bottom (Teri's default did), ratios saved for the old axis
+    /// must not be applied to the new one. A drag in the new direction saves under the new
+    /// key and is restored from it; the old key is never read for it.
+    static func ratioDefaultsKey(tag: String, path: String, direction: SplitDirection) -> String {
+        "\(legacyRatioDefaultsKey(tag: tag, path: path))@\(direction.rawValue)"
+    }
+
+    /// The key ratios were saved under before the direction was part of it. Such a value has
+    /// no recorded direction; it is read only for a horizontal split (what almost every layout
+    /// the key was written for was, and the shape Teri's old default had), never for a
+    /// vertical one, and is dropped when a vertical split sits at its path.
+    static func legacyRatioDefaultsKey(tag: String, path: String) -> String {
+        "nostromo.dynlayout.\(tag).\(path)"
+    }
+
+    /// The saved ratios a split of `direction` may use, or nil when there are none it can trust.
+    /// A value that is malformed or has the wrong child count is removed so it heals on this
+    /// launch; a legacy value that a vertical split cannot use is removed too, because it was
+    /// saved for an unknown direction and must not come back if the layout turns horizontal
+    /// later.
+    static func savedRatios(
+        forKey key: String,
+        legacyKey: String,
+        direction: SplitDirection,
+        childCount: Int,
+        defaults: UserDefaults = .standard
+    ) -> [Double]? {
+        func trusted(_ key: String) -> [Double]? {
+            guard let saved = defaults.array(forKey: key) as? [Double] else { return nil }
+            guard saved.count == childCount, RatioPersistencePolicy.isWellFormed(ratios: saved) else {
+                defaults.removeObject(forKey: key)
+                return nil
+            }
+            return saved
+        }
+        if let directed = trusted(key) { return directed }
+        guard direction == .horizontal else {
+            defaults.removeObject(forKey: legacyKey)
+            return nil
+        }
+        return trusted(legacyKey)
+    }
+
     fileprivate static func currentRatios(for split: NSSplitView) -> [Double] {
         let subviews = split.subviews
         let sizes = subviews.map { extent(of: $0.frame.size, isVertical: split.isVertical) }

@@ -296,6 +296,16 @@ again on every fresh session spawn (`init_focus` seeds the native tree for
 already exists without its native pane is wrapped, native pane first, so nothing
 is lost.
 
+Teri's default layout is a vertical split: the surface above the chat (`repl`),
+each at full width, 0.68 / 0.32. The surface's own list and detail panes sit
+side by side inside it. Teri's default used to be the surface beside the chat
+(horizontal, 0.62 / 0.38). When the daemon loads a persisted store whose `teri`
+tree is exactly that old default (a horizontal split of the leaves
+`teri_surface` and `repl`, in that order, any ratios) it converts it to the new
+one, once: the store's `migrations` list records `teri-chat-at-bottom`, and a
+layout arranged afterwards (side by side again, say) is never converted back. Any
+other `teri` layout is left as it is.
+
 `teri_surface` and `fred_hud` can neither be closed nor dropped nor hidden:
 
 - **Closing** is a UI entry point, not an agent tool: the tab's x button sends
