@@ -677,6 +677,7 @@
 		TP000000000000000000T047 /* TerminalPaneHeaderViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F047 /* TerminalPaneHeaderViewTests.swift */; };
 		TP000000000000000000T048 /* IdleBannerViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F048 /* IdleBannerViewTests.swift */; };
 		TP000000000000000000T049 /* NeedsYouPillsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F049 /* NeedsYouPillsTests.swift */; };
+		TP000000000000000000T050 /* SidebarTightRowsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F050 /* SidebarTightRowsTests.swift */; };
 		TP000000000000000000A018 /* FollowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F018 /* FollowModel.swift */; };
 		TP000000000000000000T018 /* FollowModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F018 /* FollowModel.swift */; };
 		TS000000000000000000A001 /* TerminalStagingWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = TS000000000000000000F001 /* TerminalStagingWire.swift */; };
@@ -1236,6 +1237,7 @@
 		TP000000000000000000F047 /* TerminalPaneHeaderViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalPaneHeaderViewTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F048 /* IdleBannerViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdleBannerViewTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F049 /* NeedsYouPillsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NeedsYouPillsTests.swift; sourceTree = "<group>"; };
+		TP000000000000000000F050 /* SidebarTightRowsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarTightRowsTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalStoreMirrorTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F034 /* FollowModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FollowModelTests.swift; sourceTree = "<group>"; };
 		TP000000000000000000F035 /* TurnOriginTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TurnOriginTests.swift; sourceTree = "<group>"; };
@@ -1564,6 +1566,7 @@
 				TP000000000000000000F047 /* TerminalPaneHeaderViewTests.swift */,
 				TP000000000000000000F048 /* IdleBannerViewTests.swift */,
 				TP000000000000000000F049 /* NeedsYouPillsTests.swift */,
+				TP000000000000000000F050 /* SidebarTightRowsTests.swift */,
 				TP000000000000000000F033 /* TerminalStoreMirrorTests.swift */,
 				TP000000000000000000F034 /* FollowModelTests.swift */,
 				TS000000000000000000F008 /* TerminalStagingWireTests.swift */,
@@ -2299,6 +2302,7 @@
 				TP000000000000000000T047 /* TerminalPaneHeaderViewTests.swift in Sources */,
 				TP000000000000000000T048 /* IdleBannerViewTests.swift in Sources */,
 				TP000000000000000000T049 /* NeedsYouPillsTests.swift in Sources */,
+				TP000000000000000000T050 /* SidebarTightRowsTests.swift in Sources */,
 				TP000000000000000000T033 /* TerminalStoreMirrorTests.swift in Sources */,
 				TP000000000000000000T034 /* FollowModelTests.swift in Sources */,
 				TP000000000000000000T035 /* TurnOriginTests.swift in Sources */,

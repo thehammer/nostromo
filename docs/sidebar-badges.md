@@ -111,9 +111,12 @@ would remove the refresh timers; it is a candidate follow-up, not part of this s
 - **Second line:** a regular focus row shows only the blocking and the waiting pill here, right-aligned;
   there is no branch or last-message text. That text lives in the row's tooltip and its accessibility
   help (the visible accessibility label is unchanged). The line keeps its height with no pills
-  (`Theme.navItemSubtitleHeight`, 52 pt, same as before), so a row never jumps when a pill appears or
+  (`Theme.navItemSubtitleHeight`, 40 pt, down from 52, the same as `navItemHeight`; built-in rows use it too, so every row in the sidebar is one height), so a row never jumps when a pill appears or
   goes. A built-in's own subtitle (Fred, Mother, Teri, Perri's PR) stays on the left of the pills, and
   the pills take room from it only; the title and the row height never move.
+- **Roomy counts:** each full pill has 8 pt of padding either side of its glyph and count (was 5) and a
+  minimum width equal to a `99+` pill, so 9 to 10 never changes its width; the count is centred in it.
+  The pills end 12 pt from the row's right edge (was 8). The pill is still 14 pt tall; colours unchanged.
 - **Narrow rows give up, in order:** a built-in's subtitle (to nothing), then the waiting pill's padding
   and outline (glyph and count only). The blocking pill is never squeezed.
 - **Highlight when the row is also the active focus:** the cornflower active bar stays at the edge and
