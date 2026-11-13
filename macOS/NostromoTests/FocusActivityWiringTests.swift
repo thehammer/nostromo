@@ -477,9 +477,9 @@ final class FocusActivityWiringTests: XCTestCase {
             }
         }
         // The marks are readable only as accessibility text (tree / find / ax): the seen store and
-        // its keys are not, and no verb can write UserDefaults.
+        // its keys are not (the dispatch only reads its own enable flag from defaults).
         let server = try Self.sourceFile("Nostromo/AppControl/AppControlServer.swift")
-        for word in Self.forbidden + ["UserDefaults", "FocusSeen"] {
+        for word in Self.forbidden + ["FocusSeen", "focus.activity"] {
             XCTAssertFalse(server.contains(word), "AppControlServer mentions \(word)")
         }
     }
