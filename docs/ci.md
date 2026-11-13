@@ -228,6 +228,25 @@ needed. **`Launch smoke (advisory)` green does not mean the app built**: the
 smoke is path-filtered and advisory, and its INCONCLUSIVE verdict (including a
 failed build) stays green. The app-build step is the compile gate.
 
+### Bumping the Rust toolchain
+
+The Rust toolchain is **pinned to 1.100.0** so a new stable cannot turn main red.
+It is set in three places, kept in agreement by
+`tests/ci_policy/test_rust_toolchain_pin.py` (part of `make python-test`):
+`rust-toolchain.toml` (`channel`), every `dtolnay/rust-toolchain@X` ref in
+`.github/workflows/ci.yml`, and `RUST_VERSION` in `.rwx/sandbox.yml`.
+
+A bump is a deliberate PR:
+
+1. Change all three to the new version in one PR.
+2. Run `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check` and the full
+   `cargo test` (in the RWX sandbox, see `docs/rwx-sandbox.md`), and fix new lints.
+3. Merge once CI is green; the toolchain install step in the PR's CI log must report
+   the new version.
+
+Follow-up idea (not built): a nightly, non-blocking job on the newest stable that
+reports new lint failures before a deliberate bump.
+
 ### Making a check required
 
 Required status checks are a repo setting (Settings → Branches → branch

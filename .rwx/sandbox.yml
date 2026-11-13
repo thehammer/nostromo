@@ -1,6 +1,6 @@
 # RWX test sandbox: one persistent cloud sandbox per worktree + branch, so Rust and
 # Python checks run off the laptop. Same Linux toolchain as the CI `Build & Lint` job
-# (current Rust stable, clippy), plus rustfmt, Python 3 and shellcheck.
+# (pinned Rust, clippy), plus rustfmt, Python 3 and shellcheck.
 #
 #   rwx sandbox exec -- cargo test --lib some::module
 #
@@ -33,29 +33,18 @@ tasks:
       sudo apt-get install -y build-essential pkg-config python3 shellcheck curl ca-certificates
       sudo apt-get clean
 
-  # Never cached: asks static.rust-lang.org which version `stable` is today. The `rust`
-  # task keys its cache on this value, so a new stable release rebuilds the toolchain
-  # instead of freezing the first version this config ever saw.
-  - key: rust-stable-version
-    cache: false
-    run: |
-      curl -fsSL -o channel.toml https://static.rust-lang.org/dist/channel-rust-stable.toml
-      v="$(awk '/^\[pkg\.rust\]/ { f = 1; next } f && /^version/ { gsub(/"/, "", $3); print $3; exit }' channel.toml)"
-      [ -n "$v" ] || { echo "could not read the stable version" >&2; exit 1; }
-      printf '%s' "$v" > "$RWX_VALUES/version"
-      echo "rust stable: $v"
-
-  # Matches CI's `dtolnay/rust-toolchain@stable`. rust-toolchain.toml says
-  # `channel = "stable"`, which resolves to the toolchain installed here.
+  # Matches CI's `dtolnay/rust-toolchain@1.100.0` and rust-toolchain.toml. The version is
+  # pinned here as RUST_VERSION; tests/ci_policy/test_rust_toolchain_pin.py fails if it
+  # differs from rust-toolchain.toml or ci.yml. Bump all three in one PR (docs/ci.md).
   - key: rust
     use: system
     env:
-      RUST_STABLE_VERSION: ${{ tasks.rust-stable-version.values.version }}
+      RUST_VERSION: 1.100.0
     run: |
-      curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable -c clippy -c rustfmt
+      curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION" -c clippy -c rustfmt
       printf '%s' "$HOME/.cargo/bin:$PATH" > "$RWX_ENV/PATH"
       "$HOME/.cargo/bin/rustc" -V
-      test "$("$HOME/.cargo/bin/rustc" -V | cut -d' ' -f2)" = "${RUST_STABLE_VERSION%% *}"
+      test "$("$HOME/.cargo/bin/rustc" -V | cut -d' ' -f2)" = "$RUST_VERSION"
 
   # Compiles every dependency once, from the manifests only, so the layer is reused until
   # Cargo.toml, Cargo.lock or the toolchain change. Mother resets the sandbox at every job
