@@ -1775,6 +1775,11 @@ mod tests {
             state: SessionState::Idle,
             stop_reason: None,
             mcp_bridge_connected: None,
+            agent_turns: None,
+            agent_messages: None,
+            agent_problems: None,
+            activity_epoch: None,
+            last_problem: None,
         };
         let tags = tags_with("cody-core-1");
         let ServerMsg::SessionListResp { sessions } = redact_for_network(
@@ -4757,6 +4762,11 @@ mod huey_surface_tests {
             state: SessionState::Idle,
             stop_reason: None,
             mcp_bridge_connected: None,
+            agent_turns: None,
+            agent_messages: None,
+            agent_problems: None,
+            activity_epoch: None,
+            last_problem: None,
         };
         let tags = SensitiveTags::in_memory();
         let ServerMsg::SessionListResp { sessions } = redact_for_network(

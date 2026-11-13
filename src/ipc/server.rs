@@ -41,8 +41,8 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, FEATURE_LOGIN, FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN,
-        MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        SessionAction, Topic, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_TERMINAL_STAGING_ONLY,
+        MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -563,6 +563,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
             FEATURE_APPROVALS.to_string(),
             FEATURE_LOGIN.to_string(),
             FEATURE_TERMINAL_STAGING_ONLY.to_string(),
+            FEATURE_FOCUS_ACTIVITY.to_string(),
         ],
         operator_nonce,
         enabled_agents: Some(mgr.enabled_agents().wire_names()),

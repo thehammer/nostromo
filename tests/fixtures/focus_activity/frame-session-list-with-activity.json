@@ -1,0 +1,19 @@
+{
+  "type": "session_list_resp",
+  "sessions": [
+    {
+      "tag": "cody-fixture",
+      "agent_name": "cody",
+      "view_name": "Cody",
+      "session_id": "5f0a8f7e-2d4c-4a4e-9a55-0f1f3a9d7c11",
+      "alive": true,
+      "remote_control": false,
+      "state": "idle",
+      "agent_turns": 12,
+      "agent_messages": 7,
+      "agent_problems": 3,
+      "activity_epoch": "0b6c1c1e-3f0a-4d7e-8f21-6a1b2c3d4e5f",
+      "last_problem": "no_text"
+    }
+  ]
+}
