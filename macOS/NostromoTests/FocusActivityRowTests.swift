@@ -437,13 +437,20 @@ final class FocusActivityRowDrawingTests: XCTestCase {
         }
     }
 
-    func testARowWithNoBadgeAndNoActivityIsNotAnAccessibilityElement() {
+    func testARowWithNoBadgeAndNoActivityAddsNothingToItsAccessibility() {
+        // A regular focus row is always one element labelled with its name (#448); a built-in row with
+        // nothing to say is not an element. Neither says anything about activity.
         let item = makeItem()
-        XCTAssertFalse(item.isAccessibilityElement())
-        XCTAssertNil(item.accessibilityLabel())
+        XCTAssertTrue(item.isAccessibilityElement())
+        XCTAssertEqual(item.accessibilityLabel(), "Cody in Nostromo")
         show(item, .none)
-        XCTAssertFalse(item.isAccessibilityElement())
-        XCTAssertNil(item.accessibilityLabel())
+        XCTAssertTrue(item.isAccessibilityElement())
+        XCTAssertEqual(item.accessibilityLabel(), "Cody in Nostromo")
+
+        let builtIn = makeItem(focus: builtIn("mother"), label: "Mother")
+        show(builtIn, .none)
+        XCTAssertFalse(builtIn.isAccessibilityElement())
+        XCTAssertNil(builtIn.accessibilityLabel())
     }
 
     func testABadgeAloneKeepsItsLabelExactlyAsBefore() {
@@ -531,22 +538,26 @@ final class FocusActivityRowDrawingTests: XCTestCase {
         XCTAssertEqual(item.accessibilityLabel(), "Cody in Nostromo, 3 unread responses")
     }
 
-    func testClearingBothRestoresANonElementWithNoLabel() {
-        let item = makeItem()
-        item.setBadge(FocusBadge.needsYou(blocking: 2, waiting: 7))
-        show(item, .activity)
-        show(item, .none)
-        item.setBadge(nil)
-        XCTAssertFalse(item.isAccessibilityElement())
-        XCTAssertNil(item.accessibilityLabel())
+    func testClearingBothRestoresTheRowsPlainAccessibility() {
+        // Regular row: back to one element labelled with its name. Built-in row: back to a non-element.
+        for (focus, label, plainIsElement) in [(Optional<Focus>.none, "Cody in Nostromo", true),
+                                               (Optional(builtIn("mother")), "Mother", false)] {
+            let item = makeItem(focus: focus, label: label)
+            item.setBadge(FocusBadge.needsYou(blocking: 2, waiting: 7))
+            show(item, .activity)
+            show(item, .none)
+            item.setBadge(nil)
+            XCTAssertEqual(item.isAccessibilityElement(), plainIsElement, label)
+            XCTAssertEqual(item.accessibilityLabel(), plainIsElement ? label : nil, label)
 
-        let other = makeItem()
-        show(other, .activity)
-        other.setBadge(FocusBadge.needsYou(blocking: 1, waiting: 0))
-        other.setBadge(nil)
-        show(other, .none)
-        XCTAssertFalse(other.isAccessibilityElement())
-        XCTAssertNil(other.accessibilityLabel())
+            let other = makeItem(focus: focus, label: label)
+            show(other, .activity)
+            other.setBadge(FocusBadge.needsYou(blocking: 1, waiting: 0))
+            other.setBadge(nil)
+            show(other, .none)
+            XCTAssertEqual(other.isAccessibilityElement(), plainIsElement, label)
+            XCTAssertEqual(other.accessibilityLabel(), plainIsElement ? label : nil, label)
+        }
     }
 
     func testTheLabelFollowsTheStateAsItChanges() {
