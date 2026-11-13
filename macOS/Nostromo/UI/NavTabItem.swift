@@ -102,9 +102,13 @@ private final class NeedsYouPillView: NSView {
         let inset = isCollapsed ? 0 : max(Self.padding, (bounds.width - content) / 2)
         let textWidth = ceil((text as NSString).size(withAttributes: [.font: Self.font]).width)
         glyph.frame = NSRect(x: inset, y: (bounds.height - 10) / 2, width: Self.glyphWidth, height: 10)
-        let size = count.intrinsicContentSize
-        count.frame = NSRect(x: inset + Self.glyphWidth + Self.glyphGap, y: (bounds.height - size.height) / 2,
-                             width: textWidth, height: size.height)
+        // NSTextFieldCell draws its text inset horizontally, so a frame only as wide as the string clips the
+        // last glyph. Size the frame to the cell and shift it left by that inset: the text is drawn exactly
+        // where `naturalWidth` accounts for it, and nothing about the pill's width changes.
+        let cell = count.cell?.cellSize ?? count.intrinsicContentSize
+        let cellInset = max(0, (cell.width - textWidth) / 2)
+        count.frame = NSRect(x: inset + Self.glyphWidth + Self.glyphGap - cellInset, y: (bounds.height - cell.height) / 2,
+                             width: textWidth + 2 * cellInset, height: cell.height)
     }
 }
 
