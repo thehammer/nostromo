@@ -31,7 +31,9 @@ private final class NeedsYouPillView: NSView {
     enum Kind { case blocking, waiting }
 
     static let height: CGFloat = 14
-    private static let padding: CGFloat = 5
+    static let padding: CGFloat = 8
+    /// Every full pill is at least as wide as a `99+` pill, so a count going from 9 to 10 never resizes it.
+    static let minimumWidth: CGFloat = naturalWidth(of: "99+") + 2 * padding
     private static let glyphWidth: CGFloat = 10
     private static let glyphGap: CGFloat = 2
     private static let font = NSFont.systemFont(ofSize: 10, weight: .semibold)
@@ -86,13 +88,18 @@ private final class NeedsYouPillView: NSView {
     /// The width this pill takes for `text`, with padding (full) or without (collapsed).
     static func width(of text: String, collapsed: Bool) -> CGFloat {
         guard !text.isEmpty else { return 0 }
-        let textWidth = ceil((text as NSString).size(withAttributes: [.font: font]).width)
-        return glyphWidth + glyphGap + textWidth + (collapsed ? 0 : 2 * padding)
+        let natural = naturalWidth(of: text) + (collapsed ? 0 : 2 * padding)
+        return collapsed ? natural : max(natural, minimumWidth)
+    }
+
+    private static func naturalWidth(of text: String) -> CGFloat {
+        glyphWidth + glyphGap + ceil((text as NSString).size(withAttributes: [.font: font]).width)
     }
 
     override func layout() {
         super.layout()
-        let inset = isCollapsed ? 0 : Self.padding
+        let content = Self.naturalWidth(of: text)
+        let inset = isCollapsed ? 0 : max(Self.padding, (bounds.width - content) / 2)
         let textWidth = ceil((text as NSString).size(withAttributes: [.font: Self.font]).width)
         glyph.frame = NSRect(x: inset, y: (bounds.height - 10) / 2, width: Self.glyphWidth, height: 10)
         let size = count.intrinsicContentSize
@@ -328,7 +335,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     private var badgesWidth: CGFloat = 0
     private var labelYieldsToBadges: NSLayoutConstraint?
     private var labelKeepsItsName: NSLayoutConstraint?
-    private static let pillTrailing: CGFloat = 8
+    static let pillTrailing: CGFloat = 12
     /// Between the second-line text and the pills.
     private static let branchGap: CGFloat = NeedsYouPillFit.branchGap
     private static let badgeSpacing: CGFloat = 3
@@ -466,7 +473,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             attentionDot.widthAnchor.constraint(equalToConstant: 8),
             attentionDot.heightAnchor.constraint(equalToConstant: 8),
             attentionDot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
-            attentionDot.centerYAnchor.constraint(equalTo: topAnchor, constant: 13),
+            attentionDot.centerYAnchor.constraint(equalTo: label.centerYAnchor),
         ])
 
         // Label constraints — different depending on whether secondary is shown
@@ -528,7 +535,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         NSLayoutConstraint.activate([
             pillBox.heightAnchor.constraint(equalToConstant: 14),
             pillBox.widthAnchor.constraint(greaterThanOrEqualToConstant: 14),
-            pillBox.centerYAnchor.constraint(equalTo: topAnchor, constant: 13),
+            pillBox.centerYAnchor.constraint(equalTo: label.centerYAnchor),
             pillLabel.leadingAnchor.constraint(equalTo: pillBox.leadingAnchor, constant: 5),
             pillLabel.trailingAnchor.constraint(equalTo: pillBox.trailingAnchor, constant: -5),
             pillLabel.centerYAnchor.constraint(equalTo: pillBox.centerYAnchor),

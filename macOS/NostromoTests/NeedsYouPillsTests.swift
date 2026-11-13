@@ -1009,8 +1009,8 @@ final class NeedsYouPillsRowTests: XCTestCase {
             XCTAssertLessThan(pill.midY, item.labelFrame.minY, "\(name) pill is below the title line")
         }
         XCTAssertLessThan(blocking.maxX, waiting.minX)
-        XCTAssertLessThanOrEqual(waiting.maxX, item.bounds.width - 8 + 0.5, "right-aligned with the row's trailing inset")
-        XCTAssertGreaterThanOrEqual(waiting.maxX, item.bounds.width - 16, "and hugging that edge")
+        XCTAssertLessThanOrEqual(waiting.maxX, item.bounds.width - NavTabItem.pillTrailing + 0.5, "right-aligned with the row's trailing inset")
+        XCTAssertGreaterThanOrEqual(waiting.maxX, item.bounds.width - NavTabItem.pillTrailing - 8, "and hugging that edge")
     }
 
     func testABuiltInsSecondLineTextStaysAndStaysLeftOfThePills() throws {
@@ -1029,15 +1029,15 @@ final class NeedsYouPillsRowTests: XCTestCase {
         let blockingOnly = makeItem()
         apply(blockingOnly, blocking: 2)
         let blocking = try XCTUnwrap(blockingOnly.blockingPillFrame)
-        XCTAssertLessThanOrEqual(blocking.maxX, blockingOnly.bounds.width - 8 + 0.5)
-        XCTAssertGreaterThanOrEqual(blocking.maxX, blockingOnly.bounds.width - 16)
+        XCTAssertLessThanOrEqual(blocking.maxX, blockingOnly.bounds.width - NavTabItem.pillTrailing + 0.5)
+        XCTAssertGreaterThanOrEqual(blocking.maxX, blockingOnly.bounds.width - NavTabItem.pillTrailing - 8)
         XCTAssertLessThan(blocking.midY, blockingOnly.labelFrame.minY)
 
         let waitingOnly = makeItem()
         apply(waitingOnly, waiting: 7)
         let waiting = try XCTUnwrap(waitingOnly.waitingPillFrame)
-        XCTAssertLessThanOrEqual(waiting.maxX, waitingOnly.bounds.width - 8 + 0.5)
-        XCTAssertGreaterThanOrEqual(waiting.maxX, waitingOnly.bounds.width - 16)
+        XCTAssertLessThanOrEqual(waiting.maxX, waitingOnly.bounds.width - NavTabItem.pillTrailing + 0.5)
+        XCTAssertGreaterThanOrEqual(waiting.maxX, waitingOnly.bounds.width - NavTabItem.pillTrailing - 8)
         XCTAssertLessThan(waiting.midY, waitingOnly.labelFrame.minY)
     }
 
@@ -1159,12 +1159,12 @@ final class NeedsYouPillsRowTests: XCTestCase {
                         if waitingCount > 0 {
                             guard let w = s.waiting, let ref = reference.waiting else { XCTFail("no waiting pill: \(at)"); continue }
                             // Only while both pills physically fit between the row's leading inset and the trailing
-                            // 8 pt. In a row too narrow even for the collapsed pills the waiting pill is cut off at the
+                            // 12 pt. In a row too narrow even for the collapsed pills the waiting pill is cut off at the
                             // slot's edge (the blocking pill is never the one that is clipped), so it cannot be right-aligned.
                             let leading: CGFloat = (indented ? 21 : 9) + NavTabItem.activitySlotWidth   // the name starts after the activity mark's slot
                             let needed = (s.blocking.map { $0.width + 3 } ?? 0) + w.width
-                            if needed <= width - 8 - leading {
-                                XCTAssertLessThanOrEqual(w.maxX, width - 8 + 0.5, "waiting pill right-aligned: \(at)")
+                            if needed <= width - NavTabItem.pillTrailing - leading {
+                                XCTAssertLessThanOrEqual(w.maxX, width - NavTabItem.pillTrailing + 0.5, "waiting pill right-aligned: \(at)")
                             }
                             if s.collapsed {
                                 XCTAssertLessThan(w.width, ref.width, "a collapsed waiting pill is narrower: \(at)")
@@ -1492,7 +1492,7 @@ final class SidebarRowHeightThroughTabBarTests: XCTestCase {
         v.subviews.flatMap { ($0 as? NavTabItem).map { [$0] } ?? [] } + v.subviews.flatMap(navItems(in:))
     }
 
-    func testEveryFocusRowIs52PointsHighWithOrWithoutTextAndWhateverThePillsSay() {
+    func testEveryFocusRowIs40PointsHighWithOrWithoutTextAndWhateverThePillsSay() {
         _ = NSApplication.shared
         let withText = Focus(id: "11111111-aaaa", agentTag: "cody", projectPath: "/Users/hammer/Code/nostromo",
                              isBuiltIn: false, org: "Carefeed", sessionSummary: "Wiring the sidebar")
