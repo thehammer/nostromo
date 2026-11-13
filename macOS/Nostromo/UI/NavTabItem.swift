@@ -1,4 +1,5 @@
 import AppKit
+import NostromoKit
 
 // MARK: - NavRowHighlight
 
