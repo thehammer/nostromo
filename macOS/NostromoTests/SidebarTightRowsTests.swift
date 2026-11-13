@@ -125,7 +125,9 @@ final class SidebarTightRowsTests: XCTestCase {
                 for item in rows { show(s, on: item) }
                 relayout(tabBar)
                 for (item, before) in zip(rows, baseline) {
-                    XCTAssertEqual(item.labelFrame, before, "name frame: \(item.focus.id), \(s.name), \(Int(width)) pt")
+                    // The name's position and height never change; its width may follow the attention dot (as before).
+                    XCTAssertEqual(item.labelFrame.origin, before.origin, "name origin: \(item.focus.id), \(s.name), \(Int(width)) pt")
+                    XCTAssertEqual(item.labelFrame.height, before.height, "name height: \(item.focus.id), \(s.name), \(Int(width)) pt")
                 }
             }
         }
@@ -145,15 +147,15 @@ final class SidebarTightRowsTests: XCTestCase {
         for tabBarWidth in [Theme.sidebarWidth, 121, 61] {
             let (tabBar, rows) = makeSidebar(width: tabBarWidth, focuses: dynamicFocuses())
             for item in rows {
-                let rowWidth = item.bounds.width
                 let leading = item.labelFrame.minX + 2   // where the second line starts (the field's 2 pt padding)
                 for count in Self.sampleCounts {
                     for kind in ["blocking", "waiting"] {
                         item.setBadge(kind == "blocking" ? counts(count, 0) : counts(0, count))
                         relayout(tabBar)
-                        let at = "\(kind) \(count), \(item.focus.id), row \(Int(rowWidth)) pt"
+                        let at = "\(kind) \(count), \(item.focus.id), row \(Int(item.bounds.width)) pt"
                         XCTAssertEqual(kind == "blocking" ? item.blockingPillText : item.waitingPillText,
                                        count > 99 ? "99+" : "\(count)", at)
+                        let rowWidth = item.bounds.width   // after the relayout: the row's real width
                         let pill = try XCTUnwrap(kind == "blocking" ? item.blockingPillFrame : item.waitingPillFrame, at)
                         // The blocking pill is never squeezed, so it is always whole, inside the row, with the inset.
                         // The waiting pill is too wherever it physically fits; in a row too narrow even for its
