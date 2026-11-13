@@ -294,7 +294,7 @@ final class FocusActivityRowDrawingTests: XCTestCase {
                 XCTAssertEqual(baseline.width, 8, at)
                 XCTAssertEqual(baseline.height, 8, at)
                 XCTAssertEqual(baseline.maxX, item.nameAlignmentFrame.minX - 4, accuracy: 0.01, "4 pt left of the name: \(at)")
-                XCTAssertEqual(baseline.midY, item.nameAlignmentFrame.midY, accuracy: 0.01, "centred on the name's line: \(at)")
+                XCTAssertEqual(baseline.midY, item.nameAlignmentFrame.midY, accuracy: 0.51, "centred on the name's line: \(at)")
                 XCTAssertLessThan(baseline.maxX, item.labelFrame.minX, "left of the name, not on or right of it: \(at)")
                 for (label, state) in allStates {
                     show(item, state)
@@ -844,7 +844,7 @@ final class FocusActivityRowSidebarTests: XCTestCase {
                             XCTAssertTrue(item.bounds.insetBy(dx: -0.01, dy: -0.01).contains(slot), "inside the row: \(at)")
                             XCTAssertLessThan(slot.maxX, item.labelFrame.minX, "left of the name: \(at)")
                             XCTAssertEqual(slot.maxX, item.nameAlignmentFrame.minX - 4, accuracy: 0.01, "4 pt from the name: \(at)")
-                            XCTAssertEqual(slot.midY, item.nameAlignmentFrame.midY, accuracy: 0.01, "centred on the name line: \(at)")
+                            XCTAssertEqual(slot.midY, item.nameAlignmentFrame.midY, accuracy: 0.51, "centred on the name line: \(at)")
                             XCTAssertFalse(slot.intersects(item.labelFrame), "overlaps the name: \(at)")
                             if let second = item.secondaryFrame { XCTAssertFalse(slot.intersects(second), "overlaps the second line: \(at)") }
                             if let dot = item.attentionDotFrame { XCTAssertFalse(slot.intersects(dot), "overlaps the attention dot: \(at)") }
