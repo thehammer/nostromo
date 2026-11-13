@@ -1,4 +1,5 @@
 import AppKit
+import NostromoKit
 
 // MARK: - NavRowHighlight
 
@@ -131,6 +132,62 @@ struct NeedsYouPillFit: Equatable {
     }
 }
 
+// MARK: - FocusActivityMarkView
+
+/// The quiet mark at the leading edge of a focus row: a hollow ring (activity since the operator looked), a
+/// filled dot (unread responses), or a filled amber dot with a "!" cut out (a problem). Always the same 8 pt
+/// square in the same place, shown or hidden, so a mark appearing moves nothing. No animation. The shapes
+/// differ, so the state never rests on colour alone. Not an accessibility element: the row says it.
+private final class FocusActivityMarkView: NSView {
+    static let size: CGFloat = 8
+    private static let ringWidth: CGFloat = 1.5
+
+    /// The "!" of the problem dot, cut out in `Theme.focusMarkGlyph`.
+    let glyph = CAShapeLayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = Self.size / 2
+        layer?.addSublayer(glyph)
+        glyph.frame = CGRect(x: 0, y: 0, width: Self.size, height: Self.size)
+        let path = CGMutablePath()
+        path.addRoundedRect(in: CGRect(x: 3.25, y: 3.8, width: 1.5, height: 2.7), cornerWidth: 0.6, cornerHeight: 0.6)
+        path.addEllipse(in: CGRect(x: 3.25, y: 1.5, width: 1.5, height: 1.5))
+        glyph.path = path
+        glyph.fillColor = Theme.focusMarkGlyph.cgColor
+        glyph.isHidden = true
+        isHidden = true
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func apply(_ state: FocusActivityState) {
+        isHidden = state == .none
+        toolTip = state.toolTip
+        guard let layer else { return }
+        switch state {
+        case .none:
+            break
+        case .activity:
+            layer.backgroundColor = NSColor.clear.cgColor
+            layer.borderColor = Theme.focusMark.cgColor
+            layer.borderWidth = Self.ringWidth
+            glyph.isHidden = true
+        case .unread:
+            layer.backgroundColor = Theme.focusMark.cgColor
+            layer.borderWidth = 0
+            glyph.isHidden = true
+        case .problem:
+            layer.backgroundColor = Theme.focusMarkProblem.cgColor
+            layer.borderWidth = 0
+            glyph.fillColor = Theme.focusMarkGlyph.cgColor
+            glyph.isHidden = false
+        }
+    }
+}
+
 // MARK: - NavTabItem
 
 /// One focus row in the sidebar. Internal (not private) only so a logic test can lay it out.
@@ -170,6 +227,46 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     var onWaitingPillTap: (() -> Void)?
     /// Second-line text currently shown. Exposed for tests.
     var secondaryText: String? { secondaryLabel?.stringValue }
+
+    // MARK: Focus activity mark (exposed for tests)
+
+    /// How much further right the name and the second line sit than the leading bars' inset alone would
+    /// put them, to make room for the activity mark's reserved slot. Constant for every row.
+    static let activitySlotWidth: CGFloat = 10
+    /// Gap between the mark and the name.
+    private static let activityMarkGap: CGFloat = 4
+
+    /// What the mark says now.
+    private(set) var activityState: FocusActivityState = .none
+    /// The mark's fixed frame in this row's coordinates, whether or not a mark shows.
+    var activitySlotFrame: NSRect { activityMark.frame }
+    /// The mark's frame while one shows; `nil` when there is none.
+    var activityMarkFrame: NSRect? { activityMark.isHidden ? nil : activityMark.frame }
+    var activityToolTip: String? { activityMark.isHidden ? nil : activityMark.toolTip }
+    var activityMarkIsAccessibilityElement: Bool { activityMark.isAccessibilityElement() }
+    /// Where the name is laid out by its constraints (its alignment rect: the frame less the text field's own
+    /// 2 pt side padding). The mark's slot is measured from this edge, so the 4 pt gap is to the text itself.
+    var nameAlignmentFrame: NSRect { label.alignmentRect(forFrame: label.frame) }
+
+    /// What the mark's layers actually draw; `nil` when no mark shows.
+    struct DrawnActivityMark: Equatable {
+        enum Shape: Equatable { case ring, dot, warningDot }
+        var shape: Shape
+        var fill: CGColor?
+        var stroke: CGColor?
+        var strokeWidth: CGFloat
+        var glyph: CGColor?
+        var size: CGSize
+    }
+
+    var drawnActivityMark: DrawnActivityMark? {
+        guard !activityMark.isHidden, let layer = activityMark.layer else { return nil }
+        let hasGlyph = !activityMark.glyph.isHidden
+        let shape: DrawnActivityMark.Shape = hasGlyph ? .warningDot : (layer.borderWidth > 0 ? .ring : .dot)
+        return DrawnActivityMark(shape: shape, fill: layer.backgroundColor, stroke: layer.borderColor,
+                                 strokeWidth: layer.borderWidth, glyph: hasGlyph ? activityMark.glyph.fillColor : nil,
+                                 size: activityMark.bounds.size)
+    }
 
     // Test hooks (read-only geometry in this view's coordinates, and click simulation
     // that runs the same actions the gesture recognizers do). Used by logic tests only.
@@ -249,6 +346,9 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     private let label          = NSTextField(labelWithString: "")
     private let dot            = NSView()
     private let attentionDot   = NSView()
+    private let activityMark   = FocusActivityMarkView(frame: .zero)
+    /// The badge's spoken label (with its attention suffix), kept so the activity phrase can be composed on.
+    private var badgeAccessibilityText: String?
     /// Keeps the primary label's text out from under the attention dot. Active only
     /// while the dot is shown; it only narrows the label's trailing edge, so it never
     /// changes the row's height or the label's single-line truncation.
@@ -266,6 +366,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             guard displayOverride != oldValue else { return }
             updateKeptNameWidth()
             updateAppearance()
+            updateAccessibility()
         }
     }
     /// Top-level rows (not nested under a repo header) use the repo-header look.
@@ -275,7 +376,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
 
     init(focus: Focus, label displayLabel: String, secondary: String?, indented: Bool) {
         self.focus           = focus
-        self.secondaryLeading = 3 + (indented ? 6 + Theme.navChildIndent : 6)
+        self.secondaryLeading = 3 + (indented ? 6 + Theme.navChildIndent : 6) + NavTabItem.activitySlotWidth
         self.displayOverride = displayLabel
         self.baseSecondary   = secondary
         self.isTopLevel      = !indented
@@ -306,7 +407,8 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             setAccessibilityLabel(displayLabel)
         }
 
-        let leadingInset: CGFloat = indented ? 6 + Theme.navChildIndent : 6
+        // The name and the second line start after the bars' inset and the activity mark's reserved slot.
+        let leadingInset: CGFloat = (indented ? 6 + Theme.navChildIndent : 6) + NavTabItem.activitySlotWidth
 
         // Leading highlight bars — 3px, full height; the first is at the edge, the second beside it.
         for (index, bar) in bars.enumerated() {
@@ -395,6 +497,17 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
 
         labelClearsAttentionDot = label.trailingAnchor.constraint(lessThanOrEqualTo: attentionDot.leadingAnchor, constant: -4)
         labelClearsAttentionDot?.isActive = needsAttention
+
+        // Activity mark: a fixed 8 pt square in the slot just left of the name, on the name's line. It only
+        // ever shows or hides; its place and size never depend on the state, so nothing else moves.
+        activityMark.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(activityMark)
+        NSLayoutConstraint.activate([
+            activityMark.widthAnchor.constraint(equalToConstant: FocusActivityMarkView.size),
+            activityMark.heightAnchor.constraint(equalToConstant: FocusActivityMarkView.size),
+            activityMark.trailingAnchor.constraint(equalTo: label.leadingAnchor, constant: -Self.activityMarkGap),
+            activityMark.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+        ])
 
         // Count pill — text only, on the title line (same line as the attention dot, to its
         // left while that shows). Horizontal room only: it never changes the row's height.
@@ -591,9 +704,36 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         if let badge {
             // `needsYouNow` adds nothing here: the blocking phrase is already in the label.
             let suffix = badge.level == .attention ? ", needs your attention" : ""
+            badgeAccessibilityText = badge.accessibilityLabel + suffix
+        } else {
+            badgeAccessibilityText = nil
+        }
+        updateAccessibility()
+    }
+
+    /// Show `state` as the row's activity mark, in place. Never changes the row's size or what is where.
+    func setActivity(_ state: FocusActivityState) {
+        guard state != activityState else { return }
+        activityState = state
+        activityMark.apply(state)
+        updateAccessibility()
+    }
+
+    /// The row's spoken label: the badge's phrases, then the activity phrase. A row with neither is not an
+    /// accessibility element (its name is read from its label). The mark itself is never one.
+    private func updateAccessibility() {
+        let phrase = activityState.accessibilityPhrase
+        let text: String?
+        switch (badgeAccessibilityText, phrase) {
+        case (nil, nil): text = nil
+        case (let badge?, nil): text = badge
+        case (let badge?, let phrase?) where !badge.isEmpty: text = badge + ", " + phrase
+        case (_, let phrase?): text = displayOverride + ", " + phrase
+        }
+        if let text {
             setAccessibilityElement(true)
             setAccessibilityRole(.button)
-            setAccessibilityLabel(badge.accessibilityLabel + suffix)
+            setAccessibilityLabel(text)
         } else {
             if focus.isBuiltIn {
                 setAccessibilityElement(false)

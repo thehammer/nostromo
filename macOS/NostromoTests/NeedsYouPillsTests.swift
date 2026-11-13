@@ -1161,7 +1161,7 @@ final class NeedsYouPillsRowTests: XCTestCase {
                             // Only while both pills physically fit between the row's leading inset and the trailing
                             // 8 pt. In a row too narrow even for the collapsed pills the waiting pill is cut off at the
                             // slot's edge (the blocking pill is never the one that is clipped), so it cannot be right-aligned.
-                            let leading: CGFloat = indented ? 21 : 9
+                            let leading: CGFloat = (indented ? 21 : 9) + NavTabItem.activitySlotWidth   // the name starts after the activity mark's slot
                             let needed = (s.blocking.map { $0.width + 3 } ?? 0) + w.width
                             if needed <= width - 8 - leading {
                                 XCTAssertLessThanOrEqual(w.maxX, width - 8 + 0.5, "waiting pill right-aligned: \(at)")

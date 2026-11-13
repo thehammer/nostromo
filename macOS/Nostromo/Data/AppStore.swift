@@ -289,7 +289,50 @@ class AppStore: ObservableObject {
     /// next daemon reconnect (see `ChatSession.detach()`).
     private var sessionRegistry: [String: ChatSession] = [:]
 
-    private init() {}
+    // MARK: - Focus activity marks
+
+    /// Which focuses have something new since the operator last looked (the sidebar's quiet ring and dot).
+    /// Fed by `session_list_resp` and by the windows' reports of what is on screen; never readable or
+    /// settable from the app-control or MCP surfaces.
+    private(set) var focusActivity = FocusActivityCoordinator(store: FocusSeenStore())
+
+    /// Tests swap in a coordinator on a private defaults suite so nothing touches the standard domain.
+    func installFocusActivityForTesting(_ coordinator: FocusActivityCoordinator) {
+        focusActivity = coordinator
+        wireFocusActivity()
+    }
+
+    private func wireFocusActivity() {
+        // A focus becoming visible in a key window needs fresh counters for its "seen" baseline; one
+        // that stops being seen needs them so what arrived while it was watched is absorbed. The backstop timer
+        // runs only while some window is visible.
+        focusActivity.onFocusBecameSeen = { [weak self] _ in self?.sessionListRefresher.requestNow() }
+        focusActivity.onFocusStoppedBeingSeen = { [weak self] _ in self?.sessionListRefresher.requestNow() }
+        focusActivity.onAnyWindowVisibleChanged = { [weak self] visible in
+            self?.sessionListRefresher.setWindowsVisible(visible)
+        }
+    }
+
+    /// When to ask the daemon for the session list again (it sends the counters only in reply to a
+    /// request). A var so tests can give it a fake requester and a manual clock.
+    lazy var sessionListRefresher = SessionListRefresher(requester: client, schedule: AppStore.timerSchedule)
+
+    /// A real-time `SessionListRefresher.Schedule`: a main-run-loop timer, `.common` so it also fires while a
+    /// menu is open.
+    private static func timerSchedule(_ after: TimeInterval, _ repeating: Bool,
+                                      _ fire: @escaping () -> Void) -> () -> Void {
+        let timer = Timer(timeInterval: after, repeats: repeating) { _ in fire() }
+        RunLoop.main.add(timer, forMode: .common)
+        return { timer.invalidate() }
+    }
+
+    private init() {
+        wireFocusActivity()
+        // Coming forward: the marks should be fresh by the time the operator looks.
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.sessionListRefresher.requestNow() }
+            .store(in: &cancellables)
+    }
 
     // MARK: - Memory self-defense
 
@@ -642,6 +685,7 @@ class AppStore: ObservableObject {
                 // The Perri queue held from a dropped connection is stale until a fresh
                 // perri_state frame arrives; a new connection has not delivered one yet.
                 self?.perriHealth.connectionChanged(connected)
+                self?.sessionListRefresher.connectionChanged(connected)
                 if !connected { self?.daemonDisconnected() }
                 // Tells every chip whether the daemon is reachable, and on a new connection
                 // asks for the model catalogue and the per-agent defaults.
@@ -744,6 +788,7 @@ class AppStore: ObservableObject {
         TrackerStore.shared.forget(tag: tag)
         TrackerNeedsYouBadges.live?.refresh()
         BackgroundTaskStore.shared.forget(tag: tag)
+        focusActivity.forget(tag: tag)
         TaskWindowManager.shared.closeWindows(forFocus: tag)
     }
 
@@ -1579,7 +1624,13 @@ class AppStore: ObservableObject {
             // The daemon refused a resend/discard: the card's buttons come back with a notice.
             if isClaudeLoginRefusal(msg) { ClaudeLoginStore.shared.actionRefused() }
 
+        case .sessionListResp(let entries):
+            focusActivity.ingest(entries)
+
         case .sessionState(let tag, let state):
+            // A turn started or finished: the counters changed, and the daemon will not say so (it sends
+            // them only in reply to `session_list`), so ask again, coalesced.
+            sessionListRefresher.noteSessionState(tag: tag, state: state.rawValue)
             // Derive health for the sparse sidebar badge map (all focuses, not just
             // the one with an active ChatSession view).
             switch state {

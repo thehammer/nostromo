@@ -308,7 +308,12 @@ public final class DaemonStore: ObservableObject {
                 remoteControl: info.remoteControl,
                 state:         state,
                 stopReason:    info.stopReason,
-                mcpBridgeConnected: info.mcpBridgeConnected
+                mcpBridgeConnected: info.mcpBridgeConnected,
+                agentTurns:    info.agentTurns,
+                agentMessages: info.agentMessages,
+                agentProblems: info.agentProblems,
+                activityEpoch: info.activityEpoch,
+                lastProblem:   info.lastProblem
             )
             sessions[tag] = info
 
@@ -323,7 +328,12 @@ public final class DaemonStore: ObservableObject {
                 remoteControl: info.remoteControl,
                 state:         .idle,
                 stopReason:    reason,
-                mcpBridgeConnected: info.mcpBridgeConnected
+                mcpBridgeConnected: info.mcpBridgeConnected,
+                agentTurns:    info.agentTurns,
+                agentMessages: info.agentMessages,
+                agentProblems: info.agentProblems,
+                activityEpoch: info.activityEpoch,
+                lastProblem:   info.lastProblem
             )
             sessions[tag] = info
 
@@ -338,7 +348,12 @@ public final class DaemonStore: ObservableObject {
                 remoteControl: info.remoteControl,
                 state:         .idle,
                 stopReason:    info.stopReason,
-                mcpBridgeConnected: info.mcpBridgeConnected
+                mcpBridgeConnected: info.mcpBridgeConnected,
+                agentTurns:    info.agentTurns,
+                agentMessages: info.agentMessages,
+                agentProblems: info.agentProblems,
+                activityEpoch: info.activityEpoch,
+                lastProblem:   info.lastProblem
             )
             sessions[tag] = info
 
@@ -355,7 +370,12 @@ public final class DaemonStore: ObservableObject {
                 remoteControl: info.remoteControl,
                 state:         info.state,
                 stopReason:    info.stopReason,
-                mcpBridgeConnected: connected
+                mcpBridgeConnected: connected,
+                agentTurns:    info.agentTurns,
+                agentMessages: info.agentMessages,
+                agentProblems: info.agentProblems,
+                activityEpoch: info.activityEpoch,
+                lastProblem:   info.lastProblem
             )
             sessions[tag] = info
 
@@ -370,7 +390,12 @@ public final class DaemonStore: ObservableObject {
                     remoteControl: info.remoteControl,
                     state:         info.state,
                     stopReason:    nil,
-                    mcpBridgeConnected: info.mcpBridgeConnected
+                    mcpBridgeConnected: info.mcpBridgeConnected,
+                    agentTurns:    info.agentTurns,
+                    agentMessages: info.agentMessages,
+                    agentProblems: info.agentProblems,
+                    activityEpoch: info.activityEpoch,
+                    lastProblem:   info.lastProblem
                 )
                 sessions[tag] = info
             }

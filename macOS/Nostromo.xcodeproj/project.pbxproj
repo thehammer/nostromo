@@ -492,7 +492,11 @@
 		ZZ0000000000000000M20221 /* DecisionSheetDefaultChoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20220 /* DecisionSheetDefaultChoiceTests.swift */; };
 		ZZ0000000000000000M20231 /* AppControlModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000M20230 /* AppControlModelTests.swift */; };
 		ZZ0000000000000000BA0101 /* BackgroundTaskStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0100 /* BackgroundTaskStore.swift */; };
+		FU0000000000000000000105 /* FocusActivityCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FU0000000000000000000104 /* FocusActivityCoordinator.swift */; };
+		FU0000000000000000000102 /* FocusSeenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FU0000000000000000000101 /* FocusSeenStore.swift */; };
 		ZZ0000000000000000BA0102 /* BackgroundTaskStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0100 /* BackgroundTaskStore.swift */; };
+		FU0000000000000000000106 /* FocusActivityCoordinator.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FU0000000000000000000104 /* FocusActivityCoordinator.swift */; };
+		FU0000000000000000000103 /* FocusSeenStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = FU0000000000000000000101 /* FocusSeenStore.swift */; };
 		ZZ0000000000000000BA0201 /* TaskOutputModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0200 /* TaskOutputModel.swift */; };
 		ZZ0000000000000000BA0202 /* TaskOutputModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0200 /* TaskOutputModel.swift */; };
 		ZZ0000000000000000BA0301 /* TaskRequests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0300 /* TaskRequests.swift */; };
@@ -527,6 +531,10 @@
 		ZZ0000000000000000BA2201 /* TranscriptAnchorProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA2200 /* TranscriptAnchorProbeTests.swift */; };
 		ZZ0000000000000000BA2301 /* BackgroundTaskWireDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA2300 /* BackgroundTaskWireDecodeTests.swift */; };
 		ZZ0000000000000000BA2401 /* BackgroundTaskStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA2400 /* BackgroundTaskStoreTests.swift */; };
+		FU0000000000000000000111 /* FocusActivityRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FU0000000000000000000110 /* FocusActivityRowTests.swift */; };
+		FU000000000000000000010E /* FocusActivityWiringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FU000000000000000000010D /* FocusActivityWiringTests.swift */; };
+		FU000000000000000000010B /* FocusActivityCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FU000000000000000000010A /* FocusActivityCoordinatorTests.swift */; };
+		FU0000000000000000000108 /* FocusSeenStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FU0000000000000000000107 /* FocusSeenStoreTests.swift */; };
 		ZZ0000000000000000BA2501 /* BackgroundChipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA2500 /* BackgroundChipTests.swift */; };
 		ZZ0000000000000000BA2601 /* BackgroundChipAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA2600 /* BackgroundChipAppearanceTests.swift */; };
 		ZZ0000000000000000BA2701 /* BackgroundPopoverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA2700 /* BackgroundPopoverTests.swift */; };
@@ -1081,6 +1089,8 @@
 		ZZ0000000000000000M20220 /* DecisionSheetDefaultChoiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionSheetDefaultChoiceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000M20230 /* AppControlModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppControlModelTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA0100 /* BackgroundTaskStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundTaskStore.swift; sourceTree = "<group>"; };
+		FU0000000000000000000104 /* FocusActivityCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusActivityCoordinator.swift; sourceTree = "<group>"; };
+		FU0000000000000000000101 /* FocusSeenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusSeenStore.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA0200 /* TaskOutputModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskOutputModel.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA0300 /* TaskRequests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskRequests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA0400 /* BackgroundChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundChip.swift; sourceTree = "<group>"; };
@@ -1100,6 +1110,10 @@
 		ZZ0000000000000000BA2200 /* TranscriptAnchorProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptAnchorProbeTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA2300 /* BackgroundTaskWireDecodeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundTaskWireDecodeTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA2400 /* BackgroundTaskStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundTaskStoreTests.swift; sourceTree = "<group>"; };
+		FU0000000000000000000110 /* FocusActivityRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusActivityRowTests.swift; sourceTree = "<group>"; };
+		FU000000000000000000010D /* FocusActivityWiringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusActivityWiringTests.swift; sourceTree = "<group>"; };
+		FU000000000000000000010A /* FocusActivityCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusActivityCoordinatorTests.swift; sourceTree = "<group>"; };
+		FU0000000000000000000107 /* FocusSeenStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FocusSeenStoreTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA2500 /* BackgroundChipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundChipTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA2600 /* BackgroundChipAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundChipAppearanceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA2700 /* BackgroundPopoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundPopoverTests.swift; sourceTree = "<group>"; };
@@ -1345,6 +1359,8 @@
 				ZZ0000000000000000TF0300 /* TranscriptFoldStore.swift */,
 				ZZ0000000000000000FV0200 /* RollInPolicy.swift */,
 				ZZ0000000000000000BA0100 /* BackgroundTaskStore.swift */,
+				FU0000000000000000000104 /* FocusActivityCoordinator.swift */,
+				FU0000000000000000000101 /* FocusSeenStore.swift */,
 				ZZ0000000000000000BA0200 /* TaskOutputModel.swift */,
 				ZZ0000000000000000BA0300 /* TaskRequests.swift */,
 				ZZ0000000000000000TK0100 /* TrackerStore.swift */,
@@ -1751,6 +1767,10 @@
 				ZZ0000000000000000BA2200 /* TranscriptAnchorProbeTests.swift */,
 				ZZ0000000000000000BA2300 /* BackgroundTaskWireDecodeTests.swift */,
 				ZZ0000000000000000BA2400 /* BackgroundTaskStoreTests.swift */,
+				FU0000000000000000000110 /* FocusActivityRowTests.swift */,
+				FU000000000000000000010D /* FocusActivityWiringTests.swift */,
+				FU000000000000000000010A /* FocusActivityCoordinatorTests.swift */,
+				FU0000000000000000000107 /* FocusSeenStoreTests.swift */,
 				ZZ0000000000000000BA2500 /* BackgroundChipTests.swift */,
 				ZZ0000000000000000BA2600 /* BackgroundChipAppearanceTests.swift */,
 				ZZ0000000000000000BA2700 /* BackgroundPopoverTests.swift */,
@@ -2184,6 +2204,8 @@
 				RR0000000000000000000101 /* PRDetailCache.swift in Sources */,
 				WW0000000000000000000005 /* DiffPaneSummaryPolicy.swift in Sources */,
 				ZZ0000000000000000BA0101 /* BackgroundTaskStore.swift in Sources */,
+				FU0000000000000000000105 /* FocusActivityCoordinator.swift in Sources */,
+				FU0000000000000000000102 /* FocusSeenStore.swift in Sources */,
 				ZZ0000000000000000BA0201 /* TaskOutputModel.swift in Sources */,
 				ZZ0000000000000000BA0301 /* TaskRequests.swift in Sources */,
 				ZZ0000000000000000BA0401 /* BackgroundChip.swift in Sources */,
@@ -2606,6 +2628,8 @@
 				YZ0000000000000000000011 /* FocusTagRoundTripTests.swift in Sources */,
 
 				ZZ0000000000000000BA0102 /* BackgroundTaskStore.swift in TestSources */,
+				FU0000000000000000000106 /* FocusActivityCoordinator.swift in TestSources */,
+				FU0000000000000000000103 /* FocusSeenStore.swift in TestSources */,
 				ZZ0000000000000000BA0202 /* TaskOutputModel.swift in TestSources */,
 				ZZ0000000000000000BA0302 /* TaskRequests.swift in TestSources */,
 				ZZ0000000000000000BA0402 /* BackgroundChip.swift in TestSources */,
@@ -2655,6 +2679,10 @@
 				ZZ0000000000000000BA2201 /* TranscriptAnchorProbeTests.swift in Sources */,
 				ZZ0000000000000000BA2301 /* BackgroundTaskWireDecodeTests.swift in Sources */,
 				ZZ0000000000000000BA2401 /* BackgroundTaskStoreTests.swift in Sources */,
+				FU0000000000000000000111 /* FocusActivityRowTests.swift in Sources */,
+				FU000000000000000000010E /* FocusActivityWiringTests.swift in Sources */,
+				FU000000000000000000010B /* FocusActivityCoordinatorTests.swift in Sources */,
+				FU0000000000000000000108 /* FocusSeenStoreTests.swift in Sources */,
 				ZZ0000000000000000BA2501 /* BackgroundChipTests.swift in Sources */,
 				ZZ0000000000000000BA2601 /* BackgroundChipAppearanceTests.swift in Sources */,
 				ZZ0000000000000000BA2701 /* BackgroundPopoverTests.swift in Sources */,

@@ -179,6 +179,8 @@ enum ServerMsg {
     /// A turn's origin changed in place (a background wake merged another event).
     case sessionTurnOrigin(tag: String, turnId: String, origin: TurnOriginWire)
     case sessionState(tag: String, state: DaemonSessionState)
+    /// The reply to `session_list`: read for each session's activity counters only (the sidebar's marks).
+    case sessionListResp([SessionActivityEntry])
     /// The session's MCP bridge (the process carrying its `mcp__nostromo__*` tools to the daemon)
     /// connected to, or was lost from, the daemon. Absent from daemons that predate it.
     case sessionBridge(tag: String, connected: Bool)
@@ -1426,6 +1428,17 @@ class NostromodClient {
         enum CodingKeys: String, CodingKey { case type_ = "type", tag }
     }
 
+    private struct SessionListMsg: Encodable {
+        let type_ = "session_list"
+        enum CodingKeys: String, CodingKey { case type_ = "type" }
+    }
+
+    /// Ask the daemon for its session list. The reply (`ServerMsg.sessionListResp`) is the only place the
+    /// daemon sends the per-session activity counters: it does not push when one changes.
+    func requestSessionList() {
+        send(SessionListMsg(), type: "session_list")
+    }
+
     /// Request a full activity-stream snapshot for `tag`. The daemon replies
     /// with `ServerMsg.activitySnapshot` — used both for the gap-recovery
     /// path (a `seq` gap was observed) and for an on-demand refresh (e.g. the
@@ -1705,6 +1718,13 @@ class NostromodClient {
         case "session_state":
             if let m = try? decoder.decode(SessionStateResp.self, from: raw) {
                 return .sessionState(tag: m.tag, state: m.state)
+            }
+
+        case "session_list_resp":
+            if let m = try? decoder.decode(SessionListActivityResp.self, from: raw) {
+                return .sessionListResp(m.sessions)
+            } else {
+                log.error("failed to decode session_list_resp")
             }
 
         case "session_bridge":
@@ -2198,6 +2218,7 @@ private struct SessionTurnOriginResp: Decodable {
 }
 private struct SessionStateResp:   Decodable { let tag: String; let state: DaemonSessionState }
 private struct SessionBridgeResp:  Decodable { let tag: String; let connected: Bool }
+private struct SessionListActivityResp: Decodable { let sessions: [SessionActivityEntry] }
 private struct SessionPermResp:    Decodable { let tag: String; let request_id: String; let tool: String }
 private struct SessionExitedResp:  Decodable { let tag: String; let exit_code: Int? }
 private struct SessionDownResp:          Decodable { let tag: String; let reason: DaemonStopReason }
@@ -2263,3 +2284,5 @@ private struct PerriStateResp: Decodable {
 
 private struct FredStateResp: Decodable { let mailbox: MailboxSnapshot; let calendar: CalendarSnapshot }
 private struct TeriStateResp: Decodable { let todos: TeriTodosSnapshot }
+
+extension NostromodClient: SessionListRequesting {}
