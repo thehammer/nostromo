@@ -1371,6 +1371,76 @@ final class NeedsYouPillsRowTests: XCTestCase {
         XCTAssertEqual(item.pillText, "5")
         XCTAssertNil(item.blockingPillText)
     }
+
+    // MARK: What is drawn
+
+    /// The horizontal extent, in points, of the ink of `text` drawn alone and unclipped in the pill's font.
+    private func referenceInkWidth(_ text: String, scale: CGFloat) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        let str = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor.black])
+        let size = NSSize(width: ceil(str.size().width) + 8, height: 20)
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        str.draw(at: NSPoint(x: 4, y: 5))
+        NSGraphicsContext.restoreGraphicsState()
+        var first = Int.max, last = -1
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.7 {
+                first = min(first, x)
+                last = max(last, x)
+            }
+        }
+        return CGFloat(last - first + 1) / scale
+    }
+
+    /// Renders the row and measures what the count actually drew inside the pill. Frame checks cannot see this:
+    /// the label's cell draws its text inset, so a frame as narrow as the string clips the last glyph.
+    func testTheCountIsDrawnWholeAndInsideThePillForBothKinds() throws {
+        for kind in ["blocking", "waiting"] {
+            for count in [1, 6, 9, 10, 99, 100] {
+                let item = makeItem()
+                apply(item, blocking: kind == "blocking" ? count : 0, waiting: kind == "waiting" ? count : 0)
+                let pill = try XCTUnwrap(kind == "blocking" ? item.blockingPillFrame : item.waitingPillFrame)
+                let text = try XCTUnwrap(kind == "blocking" ? item.blockingPillText : item.waitingPillText)
+                let rep = try XCTUnwrap(item.bitmapImageRepForCachingDisplay(in: item.bounds))
+                item.cacheDisplay(in: item.bounds, to: rep)
+                let scale = CGFloat(rep.pixelsWide) / item.bounds.width
+                // Where the count sits: right of the 10 pt glyph, which is inset by max(8, (width - content) / 2), or 0 when collapsed.
+                let textWidth = ceil((text as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 10, weight: .semibold)]).width)
+                let inset = item.waitingPillIsCollapsed && kind == "waiting" ? 0 : max(8, (pill.width - (12 + textWidth)) / 2)
+                let from = pill.minX + inset + 10 + 1   // just right of the glyph
+                let to = pill.maxX - 1.5                 // keep the pill's own 1 pt outline out of the measurement
+                let fill = try rgba(Theme.needsYouNow)
+                var first = Int.max, last = -1
+                for py in 0..<rep.pixelsHigh {
+                    let fromTop = (CGFloat(py) + 0.5) / scale
+                    let y = item.isFlipped ? fromTop : item.bounds.height - fromTop   // bitmap rows run top-down
+                    // Middle rows only, clear of the pill's outline.
+                    guard abs(y - pill.midY) <= 4 else { continue }
+                    for px in Int(from * scale)..<Int(to * scale) {
+                        guard let c = rep.colorAt(x: px, y: py)?.usingColorSpace(.sRGB) else { continue }
+                        // Waiting: amber text on clear (its outline is 60% alpha, under the bar). Blocking: white on red.
+                        let coverage = kind == "waiting" ? Double(c.alphaComponent)
+                                                         : max(0, (Double(c.greenComponent) - fill.g) / (1 - fill.g))
+                        if coverage > 0.7 {
+                            first = min(first, px)
+                            last = max(last, px)
+                        }
+                    }
+                }
+                let name = "\(kind) pill, count \(text)\(item.waitingPillIsCollapsed ? ", collapsed" : "")"
+                XCTAssertGreaterThan(last, -1, "\(name): no count drawn at all")
+                let drawn = CGFloat(last - first + 1) / scale
+                let whole = referenceInkWidth(text, scale: scale)
+                XCTAssertGreaterThanOrEqual(drawn, whole - 0.5, "\(name): the count's last glyph is clipped (ink \(drawn) pt wide, whole is \(whole))")
+                XCTAssertLessThanOrEqual(CGFloat(last + 1) / scale, pill.maxX - 2, "\(name): the count's ink is within 2 pt of the pill's right edge")
+            }
+        }
+    }
 }
 
 // MARK: - Contrast
