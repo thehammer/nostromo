@@ -21,8 +21,8 @@ import NostromoKit
 //   FocusActivityColorTests       the colours and their WCAG non-text contrast on every row backdrop.
 //
 // Logic test (no host app, no `@testable import`): the app sources are compiled into this target directly.
-// Nothing touches the real defaults except the end-to-end test through `AppStore.shared`, which uses a
-// unique tag and removes it again.
+// Nothing touches the standard defaults: the end-to-end test through `AppStore.shared` swaps in a coordinator
+// on a private suite and restores the original in tearDown.
 //
 // Mutations caught here:
 //   (3) the mark in the wrong slot (right of the name, overlapping it, or its frame depending on the state)
@@ -601,6 +601,8 @@ final class FocusActivityRowSidebarTests: XCTestCase {
     private var box = StateBox()
     private var originalRefresher: SessionListRefresher!
     private var e2eTag: String?
+    private var originalCoordinator: FocusActivityCoordinator!
+    private var e2eSuite: String!
 
     override func setUp() {
         super.setUp()
@@ -609,12 +611,23 @@ final class FocusActivityRowSidebarTests: XCTestCase {
         // The end-to-end test reports a visible window to the shared store: keep any request it causes off the daemon.
         originalRefresher = AppStore.shared.sessionListRefresher
         AppStore.shared.sessionListRefresher = SessionListRefresher(requester: CountingRequester(), schedule: { _, _, _ in {} })
+        // A private defaults suite: the standard domain is never touched.
+        e2eSuite = "test.fa-row.\(UUID())"
+        let defaults = UserDefaults(suiteName: e2eSuite)!
+        defaults.removePersistentDomain(forName: e2eSuite)
+        originalCoordinator = AppStore.shared.focusActivity
+        AppStore.shared.installFocusActivityForTesting(FocusActivityCoordinator(store: FocusSeenStore(defaults: defaults)))
+        addTeardownBlock { [suite = self.e2eSuite!] in
+            UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
+            UserDefaults.standard.removeSuite(named: suite)
+        }
     }
 
     override func tearDown() {
         AppStore.shared.focusActivity.reportWindow(id: Self.e2eWindowID, sighting: nil)
-        if let e2eTag { AppStore.shared.focusActivity.forget(tag: e2eTag) }
         e2eTag = nil
+        AppStore.shared.installFocusActivityForTesting(originalCoordinator)
+        originalCoordinator = nil
         AppStore.shared.sessionListRefresher = originalRefresher
         originalRefresher = nil
         super.tearDown()
@@ -957,6 +970,7 @@ final class FocusActivityRowSidebarTests: XCTestCase {
         XCTAssertEqual(try row().activityState, FocusActivityState.none, "arrivals while it is seen never flag")
 
         AppStore.shared.focusActivity.reportWindow(id: Self.e2eWindowID, sighting: nil)
+        ingest(counters(9, 7))      // the refresh that leaving asks for: what was watched stays unflagged
         ingest(counters(10, 7))
         waitUntil { self.settle(sidebar.window, turns: 1); return (try? row().activityState) == .activity }
         XCTAssertEqual(try row().drawnActivityMark?.shape, .ring)

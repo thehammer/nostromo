@@ -294,7 +294,24 @@ class AppStore: ObservableObject {
     /// Which focuses have something new since the operator last looked (the sidebar's quiet ring and dot).
     /// Fed by `session_list_resp` and by the windows' reports of what is on screen; never readable or
     /// settable from the app-control or MCP surfaces.
-    let focusActivity = FocusActivityCoordinator(store: FocusSeenStore())
+    private(set) var focusActivity = FocusActivityCoordinator(store: FocusSeenStore())
+
+    /// Tests swap in a coordinator on a private defaults suite so nothing touches the standard domain.
+    func installFocusActivityForTesting(_ coordinator: FocusActivityCoordinator) {
+        focusActivity = coordinator
+        wireFocusActivity()
+    }
+
+    private func wireFocusActivity() {
+        // A focus becoming visible in a key window needs fresh counters for its "seen" baseline; one
+        // that stops being seen needs them so what arrived while it was watched is absorbed. The backstop timer
+        // runs only while some window is visible.
+        focusActivity.onFocusBecameSeen = { [weak self] _ in self?.sessionListRefresher.requestNow() }
+        focusActivity.onFocusStoppedBeingSeen = { [weak self] _ in self?.sessionListRefresher.requestNow() }
+        focusActivity.onAnyWindowVisibleChanged = { [weak self] visible in
+            self?.sessionListRefresher.setWindowsVisible(visible)
+        }
+    }
 
     /// When to ask the daemon for the session list again (it sends the counters only in reply to a
     /// request). A var so tests can give it a fake requester and a manual clock.
@@ -310,12 +327,7 @@ class AppStore: ObservableObject {
     }
 
     private init() {
-        // A focus becoming visible in a key window needs fresh counters for its "seen" baseline; the
-        // backstop timer runs only while some window is visible.
-        focusActivity.onFocusBecameSeen = { [weak self] _ in self?.sessionListRefresher.requestNow() }
-        focusActivity.onAnyWindowVisibleChanged = { [weak self] visible in
-            self?.sessionListRefresher.setWindowsVisible(visible)
-        }
+        wireFocusActivity()
         // Coming forward: the marks should be fresh by the time the operator looks.
         NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in self?.sessionListRefresher.requestNow() }

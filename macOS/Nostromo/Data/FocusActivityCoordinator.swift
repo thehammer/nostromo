@@ -27,6 +27,9 @@ final class FocusActivityCoordinator {
     let changes = PassthroughSubject<Void, Never>()
     /// A tag newly became seen: the focus of a key, visible window. `AppStore` asks for fresh counters.
     var onFocusBecameSeen: ((String) -> Void)?
+    /// A tag stopped being seen (its window lost key, switched focus, was hidden, minimised or closed).
+    /// `AppStore` asks for fresh counters, so what arrived while it was watched is absorbed, not flagged.
+    var onFocusStoppedBeingSeen: ((String) -> Void)?
     /// "At least one window is visible" flipped. `AppStore` starts or stops the backstop timer.
     var onAnyWindowVisibleChanged: ((Bool) -> Void)?
 
@@ -34,6 +37,13 @@ final class FocusActivityCoordinator {
     private var counters: [String: FocusActivityCounters] = [:]
     private var states: [String: FocusActivityState] = [:]
     private var windows: [Int: FocusWindowSighting] = [:]
+    /// Tags that just stopped being seen: the NEXT list that names them is the leave refresh, taken as
+    /// seen once, so content that arrived while watched (not yet in `counters`) is not flagged. What
+    /// arrives between the leave and that reply is absorbed too, a window of one round trip.
+    private var leavePending: Set<String> = []
+    /// Tags of deleted focuses: a later list that still names one is ignored, so `forget` sticks
+    /// (tags are unique per focus and never reused; the set is memory-only and bounded by deletions).
+    private var forgotten: Set<String> = []
 
     init(store: FocusSeenStore) {
         self.store = store
@@ -62,13 +72,14 @@ final class FocusActivityCoordinator {
         let before = states
         var newCounters: [String: FocusActivityCounters] = [:]
         var newStates: [String: FocusActivityState] = [:]
-        for entry in entries {
+        for entry in entries where !forgotten.contains(entry.tag) {
             if let activity = entry.activity { newCounters[entry.tag] = activity }
-            let state = evaluate(tag: entry.tag, current: entry.activity, isSeen: seen.contains(entry.tag))
+            let state = evaluate(tag: entry.tag, current: entry.activity, isSeen: seen.contains(entry.tag) || leavePending.contains(entry.tag))
             if state != .none { newStates[entry.tag] = state }
         }
         counters = newCounters
         states = newStates
+        leavePending.subtract(entries.map(\.tag))
         if states != before { changes.send() }
     }
 
@@ -81,7 +92,18 @@ final class FocusActivityCoordinator {
 
         // A focus that just became seen is looked at now: what it holds is seen (its marks clear).
         let newlySeen = seenNow.subtracting(seenBefore).sorted()
+        let nowLeft = seenBefore.subtracting(seenNow).sorted()
+        leavePending.subtract(seenNow)
         var changed = false
+        // A focus that just stopped being seen: record the counters known at this moment as seen.
+        for tag in nowLeft {
+            leavePending.insert(tag)
+            if forgotten.contains(tag) { continue }
+            let before = states[tag] ?? .none
+            let state = evaluate(tag: tag, current: counters[tag], isSeen: true)
+            if state == .none { states.removeValue(forKey: tag) } else { states[tag] = state }
+            if state != before { changed = true }
+        }
         for tag in newlySeen {
             let before = states[tag] ?? .none
             let state = evaluate(tag: tag, current: counters[tag], isSeen: true)
@@ -90,11 +112,14 @@ final class FocusActivityCoordinator {
         }
         if changed { changes.send() }
         for tag in newlySeen { onFocusBecameSeen?(tag) }
+        for tag in nowLeft { onFocusStoppedBeingSeen?(tag) }
         if anyWindowVisible != visibleBefore { onAnyWindowVisibleChanged?(anyWindowVisible) }
     }
 
     /// The focus was deleted: nothing about it is kept.
     func forget(tag: String) {
+        forgotten.insert(tag)
+        leavePending.remove(tag)
         let had = states.removeValue(forKey: tag) != nil
         counters.removeValue(forKey: tag)
         store.forget(tag: tag)

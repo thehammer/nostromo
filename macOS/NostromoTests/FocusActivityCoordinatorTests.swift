@@ -703,6 +703,47 @@ final class FocusActivityCoordinatorTests: XCTestCase {
         XCTAssertEqual(rig.state("never-seen"), .none)
     }
 
+    // MARK: - Leaving a focus
+
+    func testLeavingAsksForARefreshAndTheRefreshDoesNotFlagWhatWasWatched() {
+        let rig = makeRig()
+        var left: [String] = []
+        rig.coordinator.onFocusStoppedBeingSeen = { left.append($0) }
+        rig.ingest("a", baseline)
+        rig.window(1, "a")
+        rig.ingest("a", c(6, 4, 1))                     // arrives while seen
+        rig.window(1, "a", key: false)                  // the operator leaves
+        XCTAssertEqual(left, ["a"], "leaving requests a fresh list")
+        rig.ingest("a", c(7, 5, 1))                     // the leave refresh holds one more message, watched mid-turn
+        XCTAssertEqual(rig.state("a"), .none, "what he watched arrive is not flagged")
+        rig.ingest("a", c(8, 6, 1))                     // arrival after leaving
+        XCTAssertEqual(rig.state("a"), .unread(count: 1))
+    }
+
+    func testLeavingIsReportedForEverywayAFocusStopsBeingSeen() {
+        let rig = makeRig()
+        var left: [String] = []
+        rig.coordinator.onFocusStoppedBeingSeen = { left.append($0) }
+        rig.window(1, "a"); rig.window(1, "a", key: true, visible: false)     // hidden / minimised
+        rig.window(1, "a"); rig.window(1, "b")                                // switched away
+        rig.window(1, "b"); rig.closeWindow(1)                                // closed
+        XCTAssertEqual(left, ["a", "a", "b"])
+        rig.window(1, "a"); rig.window(2, "a", key: false)
+        rig.window(1, "a", key: false); rig.window(2, "a")
+        XCTAssertEqual(left, ["a", "a", "b", "a"], "a second window seeing it later is not a leave")
+    }
+
+    func testForgetSticksWhenALaterListStillNamesTheTag() {
+        let rig = makeRig()
+        rig.ingest("a", baseline)
+        rig.coordinator.forget(tag: "a")
+        rig.ingest("a", baseline)
+        rig.ingest("a", c(6, 4, 1))
+        XCTAssertNil(rig.store.marks(for: "a"), "a deleted focus is not re-baselined")
+        XCTAssertNil(rig.persisted().marks(for: "a"))
+        XCTAssertEqual(rig.state("a"), .none)
+    }
+
     // MARK: - The cap
 
     func testTheTwoHundredTagCapGoesThroughToTheStore() {

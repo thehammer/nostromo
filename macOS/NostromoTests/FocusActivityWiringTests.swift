@@ -14,9 +14,9 @@ import NostromoKit
 //     one going away stops it; a removed focus is forgotten;
 //   * surface: the operator's seen-marks are never on the app-control surface or the MCP/agent surface.
 //
-// Logic test (no host app, no `@testable import`). The shared `AppStore`'s coordinator saves into the real
-// defaults under the real key, so every test uses a unique tag and removes it again (`forget`); windows it
-// reports are closed and the refresher it replaced is restored in tearDown.
+// Logic test (no host app, no `@testable import`). The shared `AppStore` gets a coordinator on a private
+// defaults suite for each test (the standard domain is never touched; removed and restored in tearDown, which
+// runs when a test fails too); windows are closed and the refresher it replaced is restored.
 //
 // Mutation (7), the backstop running with no window visible, is caught here as well:
 // testALastWindowGoingAwayStopsTheBackstop and the wiring half of testAVisibleWindowStartsTheBackstop.
@@ -178,6 +178,8 @@ final class FocusActivityWiringTests: XCTestCase {
 
     private var store: AppStore { AppStore.shared }
     private var originalRefresher: SessionListRefresher!
+    private var originalCoordinator: FocusActivityCoordinator!
+    private var suite: String!
     private var scheduler: WiringScheduler!
     private var requester: WiringRequester!
     private var tag: String!
@@ -192,14 +194,25 @@ final class FocusActivityWiringTests: XCTestCase {
         otherTag = "fa-wire-\(UUID().uuidString.prefix(8))"
         originalRefresher = store.sessionListRefresher
         store.sessionListRefresher = SessionListRefresher(requester: requester, schedule: scheduler.schedule)
+        // A private defaults suite: the standard domain is never touched.
+        suite = "test.fa-wire.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        originalCoordinator = store.focusActivity
+        store.installFocusActivityForTesting(FocusActivityCoordinator(store: FocusSeenStore(defaults: defaults)))
+        // Runs even when the test fails or throws.
+        addTeardownBlock { [suite = self.suite!] in
+            UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
+            UserDefaults.standard.removeSuite(named: suite)
+        }
     }
 
     override func tearDown() {
         // Windows first, while the test refresher is still installed, then the tags, then put it back.
         store.focusActivity.reportWindow(id: Self.windowA, sighting: nil)
         store.focusActivity.reportWindow(id: Self.windowB, sighting: nil)
-        store.focusActivity.forget(tag: tag)
-        store.focusActivity.forget(tag: otherTag)
+        store.installFocusActivityForTesting(originalCoordinator)
+        originalCoordinator = nil
         store.sessionListRefresher = originalRefresher
         originalRefresher = nil
         scheduler = nil
@@ -301,6 +314,29 @@ final class FocusActivityWiringTests: XCTestCase {
         report(Self.windowA, tag, key: false, visible: true)
         report(Self.windowB, tag, key: true, visible: false)
         XCTAssertEqual(requester.requests, 0)
+    }
+
+    // MARK: Leaving a focus asks now
+
+    func testAFocusStoppingBeingSeenAsksForAFreshListAtOnce() {
+        report(Self.windowA, tag, key: true, visible: true)
+        let before = requester.requests
+        report(Self.windowA, tag, key: false, visible: true)      // lost key
+        XCTAssertEqual(requester.requests, before + 1, "leaving is a refresh now, not at the next turn end")
+        report(Self.windowA, tag, key: true, visible: true)
+        let again = requester.requests
+        report(Self.windowA, otherTag, key: true, visible: true)  // switched away (and the other became seen)
+        XCTAssertEqual(requester.requests, again + 2)
+    }
+
+    func testWhatArrivedWhileWatchedIsNotFlaggedByTheLeaveRefreshButWhatComesLaterIs() {
+        list(tag, counters(5, 3, 0))
+        report(Self.windowA, tag)
+        report(Self.windowA, tag, key: false)                      // leave: message arrived mid-turn, not yet listed
+        list(tag, counters(6, 4, 0))                               // the leave refresh
+        XCTAssertEqual(state(tag), .none, "he watched it arrive")
+        list(tag, counters(7, 5, 0))                               // arrival after leaving
+        XCTAssertEqual(state(tag), .unread(count: 1))
     }
 
     func testBecomingSeenAlsoClearsTheMarkThroughTheStore() {
@@ -412,6 +448,52 @@ final class FocusActivityWiringTests: XCTestCase {
                 XCTAssertFalse(text.contains(word),
                                "\(url.lastPathComponent) mentions \(word): an agent driving app-control must not be able to "
                                + "read what the operator has seen or mark a focus seen")
+            }
+        }
+    }
+
+    /// Every verb in `AppControlServer.run`'s dispatch switch, read from the source.
+    private func appControlVerbs() throws -> [String] {
+        let source = try Self.sourceFile("Nostromo/AppControl/AppControlServer.swift")
+        let start = try XCTUnwrap(source.range(of: "private func run(_ req: AppControlRequest)"))
+        let tail = source[start.upperBound...]
+        let end = try XCTUnwrap(tail.range(of: "default: throw AppControlError"))
+        let body = tail[..<end.lowerBound]
+        let regex = try NSRegularExpression(pattern: #"case "([a-z-]+)":"#)
+        let text = String(body)
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+            Range($0.range(at: 1), in: text).map { String(text[$0]) }
+        }
+    }
+
+    func testNoAppControlVerbIsAboutTheSeenMarksAndTheDispatchNeverReachesThem() throws {
+        let verbs = try appControlVerbs()
+        XCTAssertTrue(["tree", "find", "ax", "click", "key", "type"].allSatisfy(verbs.contains),
+                      "the scan read the dispatch's verb list: \(verbs)")
+        XCTAssertGreaterThan(verbs.count, 15)
+        for verb in verbs {
+            for word in ["seen", "activity", "unread", "mark", "defaults", "store"] {
+                XCTAssertFalse(verb.contains(word), "app-control verb \"\(verb)\" must not expose the operator's seen marks")
+            }
+        }
+        // The marks are readable only as accessibility text (tree / find / ax): the seen store and
+        // its keys are not, and no verb can write UserDefaults.
+        let server = try Self.sourceFile("Nostromo/AppControl/AppControlServer.swift")
+        for word in Self.forbidden + ["UserDefaults", "FocusSeen"] {
+            XCTAssertFalse(server.contains(word), "AppControlServer mentions \(word)")
+        }
+    }
+
+    func testNoMcpToolIsAboutTheSeenMarks() throws {
+        let tools = Self.repoRoot().appendingPathComponent("src/mcp")
+        let rustFiles = try files(under: tools, withExtension: "rs")
+        XCTAssertGreaterThan(rustFiles.count, 20, "the scan found the MCP tool sources")
+        for url in rustFiles {
+            let name = url.lastPathComponent
+            XCTAssertFalse(name.contains("seen") || name.contains("unread"), "\(name): a tool about the seen marks")
+            let text = try String(contentsOf: url, encoding: .utf8)
+            for word in [FocusSeenStore.defaultsKey, "FocusSeenStore", "focus.activity.seen"] {
+                XCTAssertFalse(text.contains(word), "\(name) mentions \(word)")
             }
         }
     }
