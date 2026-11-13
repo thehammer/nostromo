@@ -67,7 +67,7 @@ enum LocalCommandRecordMetrics {
         let (storage, layout, container) = makeBodyStack(text: text, width: width)
         let height = withExtendedLifetime(storage) { () -> CGFloat in
             layout.ensureLayout(for: container)
-            return ceil(layout.usedRect(for: container).height)
+            return max(0, ceil(layout.usedRect(for: container).height) - ceil(bodyFont.ascender - bodyFont.descender + bodyFont.leading))
         }
         if cache.count > 256 { cache.removeAll() }
         cache[key] = height

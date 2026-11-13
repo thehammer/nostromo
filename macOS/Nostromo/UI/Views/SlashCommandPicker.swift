@@ -268,7 +268,7 @@ final class SlashCommandRowView: NSView {
         descriptionLabel.font = .systemFont(ofSize: 11)
         descriptionLabel.textColor = Theme.fgMuted
         for label in [nameLabel, hintLabel, descriptionLabel] {
-            label.lineBreakMode = .byTruncatingTail
+            label.lineBreakMode = .byClipping
             label.maximumNumberOfLines = 1
             label.usesSingleLineMode = true
             label.isSelectable = false

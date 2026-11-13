@@ -26,6 +26,7 @@ public enum SlashCommandFilter {
     /// 0 exact, 1 name prefix, 2 prefix after `:`, 3 alias prefix, 4 subsequence; nil: no match.
     static func tier(of entry: SlashCommandEntryWire, query q: String) -> Int? {
         let name = entry.name.lowercased()
+        if isSubsequence(q, of: name) { return 0 }
         if name == q { return 0 }
         if name.hasPrefix(q) { return 1 }
         if let colon = name.firstIndex(of: ":"), name[name.index(after: colon)...].hasPrefix(q) { return 2 }
