@@ -7,6 +7,12 @@
 //! - no credentials          -> `not_configured` (names the variables)
 //! - invalid site name       -> `not_configured` (names `ATLASSIAN_SITE_NAME`, never its value)
 //! - HTTP 401 / 403          -> `unauthenticated` (names the variable, never a value)
+//! - a search with no issues
+//!   whose `GET /myself` is
+//!   401 / 403               -> `unauthenticated`: Jira answers an anonymous search with
+//!   200 and zero issues, so a rejected token would otherwise read as "nothing assigned".
+//!   If `/myself` itself fails (network, 5xx, bad body) the list is neither `empty` nor
+//!   `unauthenticated`: `error`, or `stale` with the last list; a 429 is `rate_limited`
 //! - HTTP 429                -> `rate_limited` with `retry_at`; the last items stay
 //! - network error / 5xx /
 //!   a body that is not an
@@ -32,6 +38,13 @@
 //! 403 is not always "bad token": it can be a missing permission or a CAPTCHA /
 //! login challenge, and the state's wording says so. A hold earned by `detail()`
 //! binds the poller too: the next poll publishes the matching state without a request.
+//!
+//! The identity check runs only when a search returns nothing, and a success is
+//! trusted for 10 minutes per set of credentials. (A search that returns issues does
+//! not vouch for later ones: a list that drops to zero is exactly what a revoked
+//! token looks like, so the next empty search is still checked.) A rejection is held like any 401 and ends on a changed
+//! `.env` or an explicit refresh. The `X-AACCOUNTID: unidentified` response header is
+//! not used: it cannot be confirmed here without a real Jira, and `/myself` is authoritative.
 //!
 //! Credentials are re-resolved on every fetch, and a change of the `.env`
 //! file's mtime triggers a fetch, so fixing a token recovers without a daemon
@@ -97,6 +110,8 @@ const MAX_HOLD: Duration = BACKOFF_CAP;
 /// Upper bound on any single sleep, so the deadline arithmetic cannot overflow.
 const MAX_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 const DETAIL_TTL: Duration = Duration::from_secs(60);
+/// How long a positive `GET /myself` vouches for the credentials.
+const IDENTITY_TTL: Duration = Duration::from_secs(10 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DESCRIPTION_CHARS: usize = 20_000;
 const MAX_COMMENT_CHARS: usize = 5_000;
@@ -252,9 +267,13 @@ pub struct JiraWorkSource {
     poll_interval: Duration,
     env_watch_interval: Duration,
     backoff_base: Duration,
+    identity_ttl: Duration,
     http: reqwest::Client,
     detail_cache: Mutex<DetailCache>,
     hold: Mutex<Option<Hold>>,
+    /// The credentials (fingerprint) last shown to be accepted, and when. Only a
+    /// positive result is kept; see [`JiraWorkSource::confirm_identity`].
+    verified: Mutex<Option<(u64, Instant)>>,
     /// What "now" is for `updated_at`, `retry_at` and a `Retry-After` date.
     clock: Clock,
 }
@@ -272,6 +291,7 @@ impl JiraWorkSource {
             poll_interval: POLL_INTERVAL,
             env_watch_interval: ENV_WATCH_INTERVAL,
             backoff_base: BACKOFF_BASE,
+            identity_ttl: IDENTITY_TTL,
             // Never follow a redirect: the credential must only reach the validated host.
             // (No `unwrap_or_default`: a default client would follow redirects.)
             http: reqwest::Client::builder()
@@ -281,6 +301,7 @@ impl JiraWorkSource {
                 .expect("build the Jira HTTP client"),
             detail_cache: Mutex::new(DetailCache::default()),
             hold: Mutex::new(None),
+            verified: Mutex::new(None),
             clock: Arc::new(Utc::now),
         }
     }
@@ -321,6 +342,13 @@ impl JiraWorkSource {
     /// First error back-off (doubles per failure, capped at 15 min; tests).
     pub fn with_backoff_base(mut self, base: Duration) -> Self {
         self.backoff_base = base;
+        self
+    }
+
+    /// How long a verified identity is trusted before `GET /myself` is asked again
+    /// (10 min; tests).
+    pub fn with_identity_ttl(mut self, ttl: Duration) -> Self {
+        self.identity_ttl = ttl;
         self
     }
 
@@ -446,7 +474,15 @@ impl JiraWorkSource {
         if let Some((kind, remaining)) = self.active_hold(creds.fingerprint()) {
             return self.held(st, kind, remaining);
         }
-        match self.fetch_all(&creds).await {
+        let fetched = match self.fetch_all(&creds).await {
+            // Jira answers an unauthenticated search with 200 and zero issues, so
+            // "no tickets" is only believable once the credentials are known good.
+            Ok(fetched) if fetched.items.is_empty() => {
+                self.confirm_identity(&creds).await.map(|()| fetched)
+            }
+            other => other,
+        };
+        match fetched {
             Ok(fetched) => {
                 st.failures = 0;
                 self.clear_hold();
@@ -474,6 +510,7 @@ impl JiraWorkSource {
                 st.failures += 1;
                 st.items.clear();
                 warn!("jira work source: credentials rejected ({code})");
+                self.forget_identity();
                 self.set_hold(creds.fingerprint(), HoldKind::Rejected(code), MAX_HOLD);
                 let update = (
                     status(
@@ -667,6 +704,45 @@ impl JiraWorkSource {
             }
             HoldKind::Rejected(code) => WorkError::new("unauthenticated", rejected_reason(code)),
         })
+    }
+
+    /// Ask Jira who these credentials are (`GET /myself`) unless that was shown
+    /// within the TTL. A 401/403 is `Rejected`, a 429 `RateLimited`, anything else
+    /// (network, 5xx, a body that is not JSON) `Failed`: never a guess either way.
+    /// Only success is remembered, so a rejection is asked again once the hold
+    /// ends (a refresh or a changed `.env`).
+    async fn confirm_identity(&self, creds: &Credentials) -> Result<(), FetchError> {
+        let fingerprint = creds.fingerprint();
+        let fresh = self
+            .verified
+            .lock()
+            .unwrap()
+            .is_some_and(|(f, at)| f == fingerprint && at.elapsed() < self.identity_ttl);
+        if fresh {
+            return Ok(());
+        }
+        let req = self
+            .http
+            .get(format!("{}/rest/api/3/myself", self.base(creds)))
+            .basic_auth(&creds.email, Some(&creds.token));
+        match self.send_json(req, false).await {
+            Ok(_) => {
+                self.vouch_for(fingerprint);
+                Ok(())
+            }
+            Err(FetchError::Failed(why)) => Err(FetchError::Failed(format!(
+                "{why} while checking the API token"
+            ))),
+            Err(other) => Err(other),
+        }
+    }
+
+    fn vouch_for(&self, credentials: u64) {
+        *self.verified.lock().unwrap() = Some((credentials, Instant::now()));
+    }
+
+    fn forget_identity(&self) {
+        *self.verified.lock().unwrap() = None;
     }
 
     fn backoff(&self, failures: u32) -> Duration {
@@ -963,8 +1039,9 @@ fn describe_transport_error(e: &reqwest::Error) -> String {
     }
 }
 
-/// What the tab says for a 401 / 403. A 403 is not always "bad token": it can be
-/// a missing permission or a CAPTCHA / login challenge. Names variables, never values.
+/// What the tab says for a 401 / 403 (from the search, or from `GET /myself` when the
+/// search found nothing). A 403 is not always "bad token": it can be a missing
+/// permission or a CAPTCHA / login challenge. Names variables, never values.
 fn rejected_reason(code: u16) -> String {
     if code == 403 {
         format!(
@@ -973,7 +1050,8 @@ fn rejected_reason(code: u16) -> String {
         )
     } else {
         format!(
-            "Jira rejected the credentials ({code}). Check {ENV_EMAIL} and {ENV_TOKEN} in ~/.claude/credentials/.env."
+            "Jira rejected the API token ({code}): create a new one and update {ENV_TOKEN} \
+             (check {ENV_EMAIL} too) in ~/.claude/credentials/.env."
         )
     }
 }

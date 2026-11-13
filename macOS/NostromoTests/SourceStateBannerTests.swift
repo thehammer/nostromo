@@ -53,6 +53,23 @@ final class SourceStateBannerNoteTests: XCTestCase {
             SourceStateBanner.Content(message: "Sentry: \(truncation)", showsRetry: false))
     }
 
+    /// What the daemon says when Jira answered the search with zero issues but rejected
+    /// the token on `GET /myself` (src/data/work/jira.rs `rejected_reason(401)`).
+    private let jiraRejectedToken = "Jira rejected the API token (401): create a new one and update "
+        + "ATLASSIAN_API_TOKEN (check ATLASSIAN_USER_EMAIL too) in ~/.claude/credentials/.env."
+
+    func testARejectedJiraTokenShowsAsUnauthenticatedWithWhatToDoNotAsEmpty() throws {
+        let content = try XCTUnwrap(SourceStateBanner.content(
+            state: .unauthenticated, updatedAt: nil, reason: jiraRejectedToken, retryAt: nil,
+            sourceName: "Jira", now: now))
+
+        XCTAssertEqual(content.message, "Jira: \(jiraRejectedToken)")
+        XCTAssertTrue(content.message.contains("rejected the API token"), content.message)
+        XCTAssertTrue(content.message.contains("create a new one"), content.message)
+        XCTAssertTrue(content.message.contains("ATLASSIAN_API_TOKEN"), content.message)
+        XCTAssertFalse(content.showsRetry, "a bad token is fixed in the credentials file, not by Retry")
+    }
+
     func testTheOtherStatesAreUnchanged() {
         func message(_ state: SourceState, reason: String?) -> String? {
             SourceStateBanner.content(state: state, updatedAt: nil, reason: reason, retryAt: nil,
