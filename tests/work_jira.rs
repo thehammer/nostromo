@@ -1549,6 +1549,7 @@ async fn a_legacy_search_with_zero_total_is_empty_not_an_error() {
     ))
     .mount(&server)
     .await;
+    myself(who_am_i()).mount(&server).await;
     let dir = tempfile::tempdir().unwrap();
     let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
     let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
@@ -1864,6 +1865,701 @@ async fn a_403_is_not_retried_on_its_own_but_a_refresh_or_a_new_token_retries() 
     assert_auth_failure_holds(403).await;
 }
 
+// ── a rejected token behind an empty answer ───────────────────────────────
+//
+// Jira answers an unauthenticated search with 200 and zero issues, so "no
+// issues" alone cannot be told from "your token is wrong". Before the source
+// says `empty` it asks `GET /rest/api/3/myself` (same credentials, same base
+// URL) who the token belongs to. A positive answer is trusted for a while.
+
+const MYSELF: &str = "/rest/api/3/myself";
+const SEARCH_JQL: &str = "/rest/api/3/search/jql";
+
+fn myself(resp: ResponseTemplate) -> Mock {
+    Mock::given(method("GET"))
+        .and(path(MYSELF))
+        .respond_with(resp)
+}
+
+/// `/myself` knows only the good token; any other Basic header is a 401 (mount a 401 fallback after it).
+fn myself_for_good_token_only() -> Mock {
+    Mock::given(method("GET"))
+        .and(path(MYSELF))
+        .and(header("authorization", basic(EMAIL, GOOD_TOKEN).as_str()))
+        .respond_with(who_am_i())
+}
+
+fn who_am_i() -> ResponseTemplate {
+    json_resp(json!({"accountId": "abc123", "emailAddress": EMAIL, "displayName": "Ada"}))
+}
+
+fn empty_search() -> Mock {
+    any_jql(ok(vec![]))
+}
+
+async fn calls(server: &MockServer, verb: &str, p: &str) -> Vec<Request> {
+    requests(server)
+        .await
+        .into_iter()
+        .filter(|r| r.method.as_str() == verb && r.url.path() == p)
+        .collect()
+}
+
+async fn myself_calls(server: &MockServer) -> Vec<Request> {
+    calls(server, "GET", MYSELF).await
+}
+
+async fn search_calls(server: &MockServer) -> usize {
+    calls(server, "POST", SEARCH_JQL).await.len()
+}
+
+/// Poll until the server has seen at least `n` such calls (positive wait: never a false fail).
+async fn wait_calls(server: &MockServer, verb: &str, p: &str, n: usize) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while calls(server, verb, p).await.len() < n {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never saw {n} {verb} {p} calls (saw {})",
+            calls(server, verb, p).await.len()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn authorization(r: &Request) -> String {
+    r.headers
+        .get("authorization")
+        .expect("an authorization header")
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Everything a status says, so a leak is caught in any field.
+fn everything(update: &SourceUpdate) -> String {
+    format!(
+        "{} {:?} {}",
+        status_json(&update.0),
+        update.0,
+        serde_json::to_string(&flat(update)).unwrap()
+    )
+}
+
+/// The reason owns up to not having been able to check, rather than claiming anything about the token.
+fn says_it_could_not_check(reason: &str) -> bool {
+    let r = reason.to_lowercase();
+    ["reach", "verify", "couldn't", "could not"]
+        .iter()
+        .any(|w| r.contains(w))
+}
+
+/// A fresh list (`PREV-1`), then every later search is empty (a poke fetches again);
+/// `GET /myself` answers `identity`. Returns once the fresh list is shown.
+async fn previous_list_then_empty_search(identity: ResponseTemplate, token: &str) -> Live {
+    let server = MockServer::start().await;
+    any_jql(ok(vec![simple("PREV-1")]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    empty_search().mount(&server).await;
+    myself(identity).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(token));
+    let poke = Arc::new(Notify::new());
+    let mut rx = source(&env, &server, LONG).spawn(poke.clone());
+    wait_state(&mut rx, SourceState::Fresh).await;
+    Live {
+        server,
+        _dir: dir,
+        env,
+        poke,
+        rx,
+    }
+}
+
+/// Poke a refresh and wait for the first state that is not the previous fresh list.
+async fn poke_and_wait_for_a_change(live: &mut Live) -> SourceUpdate {
+    live.poke.notify_one();
+    wait_for(&mut live.rx, "a state other than the previous list", |u| {
+        !matches!(u.0.state, SourceState::Fresh | SourceState::Loading)
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_empty_search_whose_token_is_rejected_by_myself_is_unauthenticated_naming_the_variable_and_code(
+) {
+    for code in [401u16, 403] {
+        let server = MockServer::start().await;
+        empty_search().mount(&server).await;
+        myself(ResponseTemplate::new(code).set_body_string(format!("bad credentials {SENTINEL}")))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let env = write_env(dir.path(), &env_text(SENTINEL));
+        let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+
+        let update = wait_settled(&mut rx).await;
+
+        assert_eq!(
+            update.0.state,
+            SourceState::Unauthenticated,
+            "{code}: an empty list from a rejected token is not 'empty': {:?}",
+            update.0
+        );
+        let reason = update.0.reason.clone().expect("a reason");
+        assert!(reason.contains("ATLASSIAN_API_TOKEN"), "{code}: {reason}");
+        assert!(
+            reason.contains(&code.to_string()),
+            "{code}: the status code is named: {reason}"
+        );
+        assert!(flat(&update).is_empty(), "{code}: no items");
+        assert_eq!(update.0.count, 0, "{code}");
+        let seen = everything(&update);
+        assert!(!seen.contains(SENTINEL), "{code}: the token leaked: {seen}");
+        assert!(
+            !seen.contains(EMAIL),
+            "{code}: the email leaked into the status: {seen}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn myself_is_asked_once_with_the_same_basic_credentials_on_the_same_server() {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    myself(who_am_i()).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+    let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+
+    wait_state(&mut rx, SourceState::Empty).await;
+
+    let asked = myself_calls(&server).await;
+    assert_eq!(asked.len(), 1, "one identity check for an empty answer");
+    assert_eq!(authorization(&asked[0]), basic(EMAIL, GOOD_TOKEN));
+}
+
+#[tokio::test]
+async fn a_rejected_identity_check_holds_like_a_rejected_search_until_a_refresh_or_a_new_token() {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    myself(ResponseTemplate::new(401)).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text("first-token"));
+    let poke = Arc::new(Notify::new());
+    // A 50 ms poll: without a hold Jira would be hit several times by now.
+    let mut rx = source(&env, &server, Duration::from_millis(50)).spawn(poke.clone());
+    let first = wait_settled(&mut rx).await;
+    assert_eq!(first.0.state, SourceState::Unauthenticated, "{:?}", first.0);
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        (
+            search_calls(&server).await,
+            myself_calls(&server).await.len()
+        ),
+        (1, 1),
+        "no retry of its own after a rejected identity check"
+    );
+
+    poke.notify_one();
+    wait_calls(&server, "GET", MYSELF, 2).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        (
+            search_calls(&server).await,
+            myself_calls(&server).await.len()
+        ),
+        (2, 2),
+        "an explicit refresh triggers exactly one more search and identity check"
+    );
+    assert_eq!(
+        rx.borrow().0.state,
+        SourceState::Unauthenticated,
+        "still unauthenticated"
+    );
+
+    rewrite_env(&env, &env_text("second-token"));
+    wait_calls(&server, "GET", MYSELF, 3).await;
+    let last = myself_calls(&server).await.pop().unwrap();
+    assert_eq!(
+        authorization(&last),
+        basic(EMAIL, "second-token"),
+        "a changed credentials file triggers a retry with the new token"
+    );
+}
+
+#[tokio::test]
+async fn an_empty_search_whose_token_myself_accepts_is_a_complete_empty_list() {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    myself(who_am_i()).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+    let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+
+    let update = wait_settled(&mut rx).await;
+
+    assert_eq!(update.0.state, SourceState::Empty, "{:?}", update.0);
+    assert!(update.0.complete, "a verified empty list is complete");
+    assert_eq!(update.0.count, 0);
+    assert!(flat(&update).is_empty());
+}
+
+#[tokio::test]
+async fn a_non_empty_search_never_asks_myself() {
+    let server = MockServer::start().await;
+    any_jql(ok(vec![simple("NE-1")])).mount(&server).await;
+    myself(who_am_i()).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+    // A 50 ms poll: several searches happen while we settle.
+    let mut rx = source(&env, &server, Duration::from_millis(50)).spawn(Arc::new(Notify::new()));
+    wait_state(&mut rx, SourceState::Fresh).await;
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert!(search_calls(&server).await >= 2, "the poller kept polling");
+    assert_eq!(
+        myself_calls(&server).await.len(),
+        0,
+        "a list with issues in it proves the token; no identity request"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_search_is_unauthenticated_without_asking_myself() {
+    for code in [401u16, 403] {
+        let server = MockServer::start().await;
+        any_jql(ResponseTemplate::new(code)).mount(&server).await;
+        myself(who_am_i()).mount(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+        let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+
+        let update = wait_state(&mut rx, SourceState::Unauthenticated).await;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let reason = update.0.reason.clone().expect("a reason");
+        assert!(reason.contains("ATLASSIAN_API_TOKEN") && reason.contains(&code.to_string()));
+        assert_eq!(
+            myself_calls(&server).await.len(),
+            0,
+            "{code}: the search already said no; nothing more to ask"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failing_identity_check_with_no_previous_list_is_an_error_not_empty_and_not_unauthenticated(
+) {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    myself(ResponseTemplate::new(500).set_body_string(format!("oops {SENTINEL}")))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(SENTINEL));
+    let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+
+    let update = wait_settled(&mut rx).await;
+
+    assert_eq!(update.0.state, SourceState::Error, "{:?}", update.0);
+    assert!(flat(&update).is_empty());
+    let reason = update.0.reason.clone().expect("a reason");
+    assert!(
+        says_it_could_not_check(&reason),
+        "the reason says it could not reach/verify: {reason}"
+    );
+    assert!(!everything(&update).contains(SENTINEL));
+}
+
+#[tokio::test]
+async fn a_failing_identity_check_after_a_good_list_is_stale_and_keeps_the_list() {
+    let mut live = previous_list_then_empty_search(
+        ResponseTemplate::new(500).set_body_string(format!("oops {SENTINEL}")),
+        SENTINEL,
+    )
+    .await;
+
+    let update = poke_and_wait_for_a_change(&mut live).await;
+
+    assert_eq!(update.0.state, SourceState::Stale, "{:?}", update.0);
+    assert_eq!(ids(&flat(&update)), vec!["jira:PREV-1"]);
+    assert_eq!(update.0.count, 1);
+    let reason = update.0.reason.clone().expect("a reason");
+    assert!(
+        says_it_could_not_check(&reason),
+        "the reason says it could not reach/verify: {reason}"
+    );
+    assert!(!everything(&update).contains(SENTINEL));
+}
+
+#[tokio::test]
+async fn an_identity_check_that_cannot_connect_is_an_error_not_empty_and_not_unauthenticated() {
+    // Our own listener: answers the (empty) search once, then closes every later connection.
+    let stub = Stub::start(Some(page(vec![])), Later::Drop);
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(SENTINEL));
+    let mut rx = source_at(&env, stub.url(), LONG).spawn(Arc::new(Notify::new()));
+
+    let update = wait_settled(&mut rx).await;
+
+    assert_eq!(update.0.state, SourceState::Error, "{:?}", update.0);
+    assert!(flat(&update).is_empty());
+    assert!(!everything(&update).contains(SENTINEL));
+}
+
+#[tokio::test]
+async fn an_identity_check_cut_off_mid_body_is_an_error_not_empty_and_not_unauthenticated() {
+    // The (empty) search is answered whole; the identity answer is a 200 whose body never finishes.
+    let stub = Stub::start(Some(page(vec![])), Later::CutMidBody);
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(SENTINEL));
+    let mut rx = source_at(&env, stub.url(), LONG).spawn(Arc::new(Notify::new()));
+
+    let update = wait_settled(&mut rx).await;
+
+    assert_eq!(update.0.state, SourceState::Error, "{:?}", update.0);
+    assert!(flat(&update).is_empty());
+    assert!(!everything(&update).contains(SENTINEL));
+}
+
+#[tokio::test]
+async fn an_identity_check_that_is_rate_limited_is_rate_limited_with_its_retry_at() {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    myself(
+        ResponseTemplate::new(429)
+            .insert_header("Retry-After", "120")
+            .set_body_string(SENTINEL),
+    )
+    .mount(&server)
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(SENTINEL));
+    let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+
+    let update = wait_settled(&mut rx).await;
+
+    assert_eq!(update.0.state, SourceState::RateLimited, "{:?}", update.0);
+    assert_eq!(
+        update.0.retry_at,
+        Some(fixed_now() + chrono::Duration::seconds(120)),
+        "Retry-After: 120"
+    );
+    assert!(!everything(&update).contains(SENTINEL));
+}
+
+#[tokio::test]
+async fn an_identity_check_that_is_rate_limited_after_a_good_list_keeps_the_list() {
+    let mut live = previous_list_then_empty_search(
+        ResponseTemplate::new(429).insert_header("Retry-After", "120"),
+        GOOD_TOKEN,
+    )
+    .await;
+
+    let update = poke_and_wait_for_a_change(&mut live).await;
+
+    assert_eq!(update.0.state, SourceState::RateLimited, "{:?}", update.0);
+    assert_eq!(
+        ids(&flat(&update)),
+        vec!["jira:PREV-1"],
+        "previous items stay"
+    );
+}
+
+#[tokio::test]
+async fn fixing_a_token_that_myself_rejected_recovers_to_empty_and_the_new_token_is_the_one_asked_with(
+) {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    myself_for_good_token_only().mount(&server).await;
+    myself(ResponseTemplate::new(401)).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text("bad-token"));
+    let mut rx = source(&env, &server, Duration::from_millis(50)).spawn(Arc::new(Notify::new()));
+    let first = wait_settled(&mut rx).await;
+    assert_eq!(first.0.state, SourceState::Unauthenticated, "{:?}", first.0);
+
+    rewrite_env(&env, &env_text(GOOD_TOKEN));
+
+    let update = wait_state(&mut rx, SourceState::Empty).await;
+    assert!(update.0.complete);
+    let asked = myself_calls(&server).await;
+    assert_eq!(authorization(&asked[0]), basic(EMAIL, "bad-token"));
+    assert_eq!(
+        authorization(asked.last().unwrap()),
+        basic(EMAIL, GOOD_TOKEN),
+        "the last identity check carries the new token"
+    );
+}
+
+#[tokio::test]
+async fn a_verified_identity_is_rechecked_at_once_when_the_token_changes() {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    myself_for_good_token_only().mount(&server).await;
+    myself(ResponseTemplate::new(401)).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+    // The default ten minute trust: only a change of credentials can cause a recheck.
+    let mut rx = source(&env, &server, Duration::from_millis(50)).spawn(Arc::new(Notify::new()));
+    wait_state(&mut rx, SourceState::Empty).await;
+
+    rewrite_env(&env, &env_text("revoked-token"));
+
+    let update = wait_state(&mut rx, SourceState::Unauthenticated).await;
+    assert!(flat(&update).is_empty());
+    let last = myself_calls(&server).await.pop().unwrap();
+    assert_eq!(authorization(&last), basic(EMAIL, "revoked-token"));
+}
+
+#[tokio::test]
+async fn a_verified_identity_is_not_asked_again_on_every_empty_poll() {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    myself(who_am_i()).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+    let mut rx = source(&env, &server, Duration::from_millis(50)).spawn(Arc::new(Notify::new()));
+    wait_state(&mut rx, SourceState::Empty).await;
+
+    wait_calls(&server, "POST", SEARCH_JQL, 4).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(search_calls(&server).await >= 4);
+    assert_eq!(
+        myself_calls(&server).await.len(),
+        1,
+        "several empty polls, one identity check"
+    );
+    assert_eq!(rx.borrow().0.state, SourceState::Empty);
+}
+
+#[tokio::test]
+async fn a_verified_identity_is_asked_again_once_its_time_to_live_has_passed() {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    myself(who_am_i()).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+    // Trusted for 100 ms; the poll interval (150 ms) outlasts it.
+    let src = tuned(
+        JiraWorkSource::new(&env).with_identity_ttl(Duration::from_millis(100)),
+        server.uri(),
+        Duration::from_millis(150),
+        Duration::from_millis(50),
+    );
+    let mut rx = src.spawn(Arc::new(Notify::new()));
+    wait_state(&mut rx, SourceState::Empty).await;
+
+    wait_calls(&server, "GET", MYSELF, 2).await;
+
+    assert_eq!(rx.borrow().0.state, SourceState::Empty);
+}
+
+#[tokio::test]
+async fn an_expired_identity_that_myself_now_rejects_becomes_unauthenticated() {
+    let server = MockServer::start().await;
+    empty_search().mount(&server).await;
+    // Accepted once, then the token is revoked on Jira's side.
+    myself(who_am_i()).up_to_n_times(1).mount(&server).await;
+    myself(ResponseTemplate::new(401)).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+    let src = tuned(
+        JiraWorkSource::new(&env).with_identity_ttl(Duration::from_millis(100)),
+        server.uri(),
+        Duration::from_millis(150),
+        Duration::from_millis(50),
+    );
+    let mut rx = src.spawn(Arc::new(Notify::new()));
+    wait_state(&mut rx, SourceState::Empty).await;
+
+    let update = wait_state(&mut rx, SourceState::Unauthenticated).await;
+
+    assert!(update.0.reason.unwrap().contains("401"));
+    assert!(myself_calls(&server).await.len() >= 2);
+}
+
+#[tokio::test]
+async fn a_list_that_drops_to_zero_is_checked_because_that_is_what_a_revoked_token_looks_like() {
+    // Issues were listed, then the token was revoked: Jira now answers the search with
+    // 200 and nothing. Having listed issues earlier does not excuse the next empty list.
+    let server = MockServer::start().await;
+    any_jql(ok(vec![simple("VCH-1")]))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    empty_search().mount(&server).await;
+    myself(ResponseTemplate::new(401)).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+    let poke = Arc::new(Notify::new());
+    let mut rx = source(&env, &server, LONG).spawn(poke.clone());
+    wait_state(&mut rx, SourceState::Fresh).await;
+
+    poke.notify_one();
+    let update = wait_state(&mut rx, SourceState::Unauthenticated).await;
+
+    assert!(flat(&update).is_empty());
+    assert_eq!(myself_calls(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn the_legacy_search_with_zero_total_and_a_rejected_token_is_unauthenticated() {
+    let server = MockServer::start().await;
+    any_jql(ResponseTemplate::new(404)).mount(&server).await;
+    legacy_get(json_resp(
+        json!({"startAt": 0, "maxResults": 100, "total": 0, "issues": []}),
+    ))
+    .mount(&server)
+    .await;
+    myself(ResponseTemplate::new(401)).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(SENTINEL));
+    let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+
+    let update = wait_settled(&mut rx).await;
+
+    assert_eq!(
+        update.0.state,
+        SourceState::Unauthenticated,
+        "{:?}",
+        update.0
+    );
+    let reason = update.0.reason.clone().expect("a reason");
+    assert!(reason.contains("ATLASSIAN_API_TOKEN") && reason.contains("401"));
+    assert!(flat(&update).is_empty());
+    assert!(!everything(&update).contains(SENTINEL));
+    assert_eq!(myself_calls(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn the_legacy_search_with_zero_total_and_an_accepted_token_is_empty() {
+    let server = MockServer::start().await;
+    any_jql(ResponseTemplate::new(404)).mount(&server).await;
+    legacy_get(json_resp(
+        json!({"startAt": 0, "maxResults": 100, "total": 0, "issues": []}),
+    ))
+    .mount(&server)
+    .await;
+    myself(who_am_i()).mount(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
+    let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+
+    let update = wait_settled(&mut rx).await;
+
+    assert_eq!(update.0.state, SourceState::Empty, "{:?}", update.0);
+    assert!(update.0.complete);
+}
+
+#[tokio::test]
+async fn the_token_and_email_never_appear_in_any_identity_check_outcome_or_log() {
+    let logs = LogBuf::default();
+    let sink = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let echo = format!("{SENTINEL} {} {EMAIL}", basic(EMAIL, SENTINEL));
+    let mut dump = String::new();
+    let dir = tempfile::tempdir().unwrap();
+    let env = write_env(dir.path(), &env_text(SENTINEL));
+
+    // Every answer /myself can give to an empty search, each echoing the secrets in its body.
+    let outcomes: Vec<(&str, ResponseTemplate, SourceState)> = vec![
+        (
+            "401",
+            ResponseTemplate::new(401).set_body_string(echo.clone()),
+            SourceState::Unauthenticated,
+        ),
+        (
+            "403",
+            ResponseTemplate::new(403).set_body_string(echo.clone()),
+            SourceState::Unauthenticated,
+        ),
+        (
+            "500",
+            ResponseTemplate::new(500).set_body_string(echo.clone()),
+            SourceState::Error,
+        ),
+        (
+            "429",
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "1")
+                .set_body_string(echo.clone()),
+            SourceState::RateLimited,
+        ),
+        (
+            "200",
+            json_resp(json!({"accountId": "abc123", "emailAddress": EMAIL, "echo": echo})),
+            SourceState::Empty,
+        ),
+    ];
+    for (label, answer, expected) in outcomes {
+        let server = MockServer::start().await;
+        empty_search().mount(&server).await;
+        myself(answer).mount(&server).await;
+        let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
+        let update = wait_settled(&mut rx).await;
+        assert_eq!(update.0.state, expected, "{label}: {:?}", update.0);
+        dump += &everything(&update);
+    }
+
+    // The same, with a previous list to keep (stale).
+    {
+        let mut live = previous_list_then_empty_search(
+            ResponseTemplate::new(500).set_body_string(echo.clone()),
+            SENTINEL,
+        )
+        .await;
+        let update = poke_and_wait_for_a_change(&mut live).await;
+        assert_eq!(update.0.state, SourceState::Stale, "{:?}", update.0);
+        dump += &everything(&update);
+    }
+
+    // Transport failures.
+    for later in [Later::Drop, Later::CutMidBody] {
+        let stub = Stub::start(Some(page(vec![])), later);
+        let mut rx = source_at(&env, stub.url(), LONG).spawn(Arc::new(Notify::new()));
+        let update = wait_settled(&mut rx).await;
+        assert_eq!(update.0.state, SourceState::Error, "{:?}", update.0);
+        dump += &everything(&update);
+    }
+
+    let logged = String::from_utf8_lossy(&logs.0.lock().unwrap()).to_string();
+    assert!(
+        !logged.is_empty(),
+        "the log capture should have seen something"
+    );
+    let (dump, logged) = (dump.to_lowercase(), logged.to_lowercase());
+    let sentinel = SENTINEL.to_lowercase();
+    let auth = b64(&format!("{EMAIL}:{SENTINEL}")).to_lowercase();
+    assert!(!dump.contains(&sentinel), "the token leaked into a status");
+    assert!(
+        !dump.contains(&auth),
+        "the auth header leaked into a status"
+    );
+    assert!(!dump.contains(EMAIL), "the email leaked into a status");
+    assert!(!logged.contains(&sentinel), "the token was logged");
+    assert!(
+        !logged.contains(&auth),
+        "the Authorization header value was logged"
+    );
+    assert!(
+        !logged.contains(&b64(&EMAIL[..12]).to_lowercase()),
+        "a prefix of the Authorization header was logged"
+    );
+    assert!(!logged.contains(EMAIL), "the account email was logged");
+}
+
 // ── rate limits, server errors and network failures ───────────────────────
 
 #[tokio::test]
@@ -2093,6 +2789,7 @@ async fn zero_issues_is_empty_not_an_error() {
         .respond_with(ok(vec![]))
         .mount(&server)
         .await;
+    myself(who_am_i()).mount(&server).await;
     let dir = tempfile::tempdir().unwrap();
     let env = write_env(dir.path(), &env_text(GOOD_TOKEN));
     let mut rx = source(&env, &server, LONG).spawn(Arc::new(Notify::new()));
@@ -3172,6 +3869,7 @@ async fn a_healthy_list_is_complete() {
 async fn a_healthy_empty_list_is_complete_too() {
     let server = MockServer::start().await;
     any_jql(ok(vec![])).mount(&server).await;
+    myself(who_am_i()).mount(&server).await;
 
     let update = settled_over(&server).await;
 
