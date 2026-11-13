@@ -48,6 +48,16 @@ enum Theme {
     static let idleBannerYellow = NSColor(srgbRed: 250/255, green: 204/255, blue: 21/255, alpha: 1)
     /// Cornflower — active tab / border highlight.
     static let cornflower  = NSColor(red: 100/255, green: 149/255, blue: 237/255, alpha: 1)
+    /// The quiet mark at the leading edge of a focus row (a ring: activity since the operator looked; a
+    /// filled dot: unread responses): a cornflower-grey, not the red or amber of the pills, not the
+    /// cornflower of the active-focus highlight, not the purple decision dot. Fixed sRGB, so it is the same
+    /// in every appearance; above 5:1 on the bar and on every row fill it can sit on (pinned in
+    /// `FocusActivityRowTests`).
+    static let focusMark = NSColor(srgbRed: 130/255, green: 150/255, blue: 190/255, alpha: 1)
+    /// The same mark when something went wrong: a quiet amber (not `amber`, the waiting pill's).
+    static let focusMarkProblem = NSColor(srgbRed: 204/255, green: 150/255, blue: 80/255, alpha: 1)
+    /// The "!" cut out of the problem dot.
+    static var focusMarkGlyph: NSColor { bg }
 
     static let fg               = NSColor(white: 220/255, alpha: 1)
     static let fgMuted          = NSColor(white: 140/255, alpha: 1)

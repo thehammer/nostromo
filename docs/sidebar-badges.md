@@ -1,4 +1,4 @@
-# Sidebar badges: blocking, waiting and the attention dot
+# Sidebar badges: blocking, waiting, the attention dot and the activity mark
 
 A focus row in the sidebar can say three different things about the operator. They are different
 on purpose: an agent that is **stopped until you act** must not look like a focus with a long to-do
@@ -12,6 +12,72 @@ list.
 
 A focus with both shows both pills (blocking first), and still gets the highlight. Each kind of mark
 is also shaped differently (hand vs list, filled vs outlined), so nothing relies on colour alone.
+
+## Activity mark: something happened since you looked
+
+A second, much quieter question: *has anything happened in this focus since I last looked at it?* It is
+answered by one small mark at the **leading edge** of the row, left of the focus name, in a slot that is
+reserved on every row (the name and the second line sit 10 pt further right than the bars alone would put
+them, `NavTabItem.activitySlotWidth`). A mark appearing or going moves nothing: the row's height, the name's
+frame and the pills are identical in every state. It never animates, never makes a sound, never notifies.
+
+| Mark | Meaning | Shape and colour |
+|---|---|---|
+| none | Nothing new since you last looked. | (empty slot) |
+| **Activity** | The agent completed turns, but wrote no message and had no problem. | Hollow ring, cornflower-grey (`Theme.focusMark`). |
+| **Unread** | The agent wrote messages you have not seen. Hover: `N new messages`. | Filled dot, the same cornflower-grey. |
+| **Problem** | Something went wrong: the session crashed or was stopped, a turn ended in an error, a message was held or could not be sent, a turn finished without a reply. Hover says which (from `last_problem`). | Filled quiet-amber dot with a "!" cut out (`Theme.focusMarkProblem`). |
+
+Precedence: **Problem > Unread > Activity > none**. The shapes differ (ring, dot, dot with a mark), so the
+state never rests on colour alone. The colours are not the red or amber of the pills, not the cornflower of
+the active-focus highlight and not the purple decision dot, and every one is at least 3:1 against the row
+fill in dark and light and in the selected and blocked states (pinned in `FocusActivityRowTests`). A focus
+that also has a blocking or waiting pill shows its mark as well: they answer different questions.
+
+VoiceOver: the row's label gains a phrase, composed after the badge's own (`2 approvals blocking, 7 items
+waiting, 3 unread responses`): `unread response` / `N unread responses`, `activity since you last looked`,
+or `problem: <what happened>`. A row with a mark and no badge reads `<name>, <phrase>`. The mark is not a
+separate accessibility element. Built-in rows (Fred, Mother, Perri, Teri, Huey) get the same mark beside
+their own badge.
+
+### When a focus counts as seen
+
+A focus is **seen** when it is the visible focus of a **key** window that is on screen. A window that is not
+key, a minimised window, a window covered by others, and a hidden app do not count; a focus that is not the
+one shown does not count. With several windows, a focus is seen while it is key and visible in any of them.
+
+* At the moment a focus becomes seen its marks clear: what it holds is what you are looking at.
+* While it stays seen, anything that arrives is absorbed too, so content that arrives while you look never
+  flags. The same arrival while the window is not key (or the focus is not the one shown) does flag.
+* **Baseline:** the first time the app sees a focus, or when the daemon's `activity_epoch` for it differs
+  from the saved one (a daemon restart, a new Claude session id), the counters are taken as the baseline
+  silently. Launching the app, restarting the daemon and rebuilding a session never light up every focus.
+  A counter that went *down* within an epoch (it never should) is treated the same way.
+* A daemon that sends no counters (older than `focus_activity_v1`) shows nothing.
+
+What was last seen is saved per focus tag in `UserDefaults` under `nostromo.focus.activity.seen` (epoch and
+the three counters; at most 200 tags, the least recently saved dropped first, which only means a later
+silent baseline; a deleted focus's entry goes with it). It is the operator's own bookkeeping: no app-control
+verb and no MCP tool reads or sets it, so an agent cannot mark itself seen (`FocusActivityWiringTests` scans
+for it).
+
+### How the counters get to the Mac
+
+The daemon sends the counters (`agent_turns`, `agent_messages`, `agent_problems`, `activity_epoch`,
+`last_problem` in `SessionInfo`) **only in reply to `session_list`**; it does not push when one changes. What it
+does push is `session_state`. So the app asks again (`SessionListRefresher`, `AppStore`):
+
+* when a `session_state` arrives that **changes** a tag's state (a turn started or finished), coalesced in a
+  500 ms window, so a burst is one request;
+* at once when a focus becomes seen, when the app comes forward and when the connection comes up;
+* every 30 s as a backstop **only while at least one window is visible** (it catches what changes no state:
+  a message in the middle of a turn, a problem). No timer runs while the app is hidden or every window is
+  minimised; there is no tight polling.
+
+Known limits (from the daemon side): assistant text that arrives with no turn open is not counted; counters
+are not persisted by the daemon, so a restart is a new epoch (the app re-baselines); a late line from a killed
+process could, rarely, add one count to a new epoch. A daemon push of the counters (instead of the request)
+would remove the refresh timers; it is a candidate follow-up, not part of this slice.
 
 ## Layout
 

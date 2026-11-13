@@ -34,6 +34,11 @@ class TabBarView: NSView {
     private var currentRows: [NavRow] = []
     private var badges = SidebarBadgeModel()
 
+    /// What each focus's quiet activity mark says (a ring, a dot, a dot with a "!": something happened since
+    /// the operator last looked). Read when the rows are built and whenever the app's marks change; a test
+    /// replaces it. Never an input to `buildNavRows`: a mark is applied in place and moves nothing.
+    var activityStateProvider: (String) -> FocusActivityState = { AppStore.shared.focusActivity.state(for: $0) }
+
     /// Set by MainLayout when the active focus changes. Drives highlight state.
     var activeFocus: Focus? {
         didSet {
@@ -193,6 +198,12 @@ class TabBarView: NSView {
         AppStore.shared.$needsYou
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateBadges() }
+            .store(in: &cancellables)
+
+        // The quiet activity marks: applied in place, immediately, to the rows that exist.
+        AppStore.shared.focusActivity.changes
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.refreshActivity() }
             .store(in: &cancellables)
 
         // Live counts / "needs you" signals on the built-in rows, computed from data the
@@ -378,6 +389,7 @@ class TabBarView: NSView {
         updateSweaters()
         updateBadges()
         updateEnvironmentBadges()
+        refreshActivity()
     }
 
     @objc private func renameTapped(_ sender: NSMenuItem) {
@@ -477,6 +489,15 @@ class TabBarView: NSView {
             items[focus.id]?.setBadge(badges.badge(for: focus.sessionTag))
         }
         updateAttention()
+    }
+
+    /// Apply each focus's activity mark to its row in place: no rebuild, and no change to any row's size or
+    /// what is where (the mark has a reserved slot).
+    func refreshActivity() {
+        for row in currentRows {
+            guard case .focus(let focus, _, _, _) = row else { continue }
+            items[focus.id]?.setActivity(activityStateProvider(focus.sessionTag))
+        }
     }
 
     private func updateEnvironmentBadges() {

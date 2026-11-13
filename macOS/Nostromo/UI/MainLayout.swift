@@ -41,6 +41,8 @@ class MainLayout: NSView {
     private var udKey: String { DisplayFocusKeys.activeTabKey(displayUUID: displayUUID) }
 
     private var cancellables = Set<AnyCancellable>()
+    /// Notification observers that report this window's sighting (see `observeWindowForSightings`).
+    private var windowObservers: [NSObjectProtocol] = []
     private var presentedSheet: CreateFocusSheet?  // retained for sheet lifetime
     private var presentedRenameSheet: RenameFocusSheet?
 
@@ -372,11 +374,75 @@ class MainLayout: NSView {
         AppStore.shared.setActiveFocusSessionTag(focus.sessionTag)
         showContent(for: focus)
         updateWindowTitle()
+        reportSighting()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         updateWindowTitle()
+        observeWindowForSightings()
+    }
+
+    deinit {
+        windowObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        // A layout is released on the main thread with its window. Removed at once, not later: the id is an
+        // address, and a later removal could take out a new layout that reused it.
+        let id = sightingId
+        if Thread.isMainThread {
+            AppStore.shared.focusActivity.reportWindow(id: id, sighting: nil)
+        } else {
+            DispatchQueue.main.async { AppStore.shared.focusActivity.reportWindow(id: id, sighting: nil) }
+        }
+    }
+
+    // MARK: - Focus activity: what this window is showing
+
+    /// Identifies this window to `AppStore.shared.focusActivity`.
+    private var sightingId: Int { ObjectIdentifier(self).hashValue }
+
+    /// Re-report what this window shows whenever it could change whether the operator is looking: key,
+    /// minimised, covered, closed, the app hidden. No polling.
+    private func observeWindowForSightings() {
+        windowObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        windowObservers = []
+        guard let window else {
+            AppStore.shared.focusActivity.reportWindow(id: sightingId, sighting: nil)
+            return
+        }
+        let center = NotificationCenter.default
+        let windowNames: [Notification.Name] = [
+            NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+            NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
+            NSWindow.didChangeOcclusionStateNotification,
+        ]
+        for name in windowNames {
+            windowObservers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                self?.reportSighting()
+            })
+        }
+        for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+            windowObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.reportSighting()
+            })
+        }
+        windowObservers.append(center.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) {
+            [weak self] _ in
+            guard let self else { return }
+            AppStore.shared.focusActivity.reportWindow(id: self.sightingId, sighting: nil)
+        })
+        reportSighting()
+    }
+
+    /// Tell the app's focus-activity marks which focus this window shows, and whether the operator can see
+    /// it: a focus counts as looked at only while it is in a key window that is on screen.
+    private func reportSighting() {
+        guard let window else { return }
+        let visible = FocusActivityCoordinator.isVisible(
+            windowVisible: window.isVisible, miniaturized: window.isMiniaturized,
+            occluded: !window.occlusionState.contains(.visible), appHidden: NSApp.isHidden)
+        AppStore.shared.focusActivity.reportWindow(
+            id: sightingId,
+            sighting: FocusWindowSighting(tag: activeFocus.sessionTag, isKey: window.isKeyWindow, isVisible: visible))
     }
 
     /// "PRODUCTION — <focus label>" while the focus has a remote shell open, else the plain label. Runs on

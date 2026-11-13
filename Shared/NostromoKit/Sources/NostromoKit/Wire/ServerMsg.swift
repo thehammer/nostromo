@@ -244,6 +244,41 @@ public struct SessionInfo: Decodable {
     /// `nil` when the daemon does not say (an older daemon, or a session that
     /// never had a bridge): absence is never read as "offline".
     public let mcpBridgeConnected: Bool?
+    /// Focus activity counters (`focus_activity_v1`): all `nil` from a daemon that does not send
+    /// them, which reads as "unknown", never as zero. A value of the wrong type is also `nil`: it
+    /// never costs the whole entry (or the whole list).
+    public let agentTurns:     UInt64?
+    public let agentMessages:  UInt64?
+    public let agentProblems:  UInt64?
+    /// Names the run the three counters belong to; when it changes they cannot be compared.
+    public let activityEpoch:  String?
+    public let lastProblem:    ProblemKind?
+
+    /// The counters as one value; `nil` unless the epoch and all three counters are present.
+    public var activity: FocusActivityCounters? {
+        FocusActivityCounters.make(epoch: activityEpoch, turns: agentTurns, messages: agentMessages,
+                                   problems: agentProblems, lastProblem: lastProblem)
+    }
+
+    init(tag: String, agentName: String, viewName: String, sessionId: String?, alive: Bool,
+         remoteControl: Bool, state: SessionState, stopReason: StopReason?, mcpBridgeConnected: Bool?,
+         agentTurns: UInt64? = nil, agentMessages: UInt64? = nil, agentProblems: UInt64? = nil,
+         activityEpoch: String? = nil, lastProblem: ProblemKind? = nil) {
+        self.tag = tag
+        self.agentName = agentName
+        self.viewName = viewName
+        self.sessionId = sessionId
+        self.alive = alive
+        self.remoteControl = remoteControl
+        self.state = state
+        self.stopReason = stopReason
+        self.mcpBridgeConnected = mcpBridgeConnected
+        self.agentTurns = agentTurns
+        self.agentMessages = agentMessages
+        self.agentProblems = agentProblems
+        self.activityEpoch = activityEpoch
+        self.lastProblem = lastProblem
+    }
 
     enum CodingKeys: String, CodingKey {
         case tag
@@ -255,6 +290,30 @@ public struct SessionInfo: Decodable {
         case state
         case stopReason    = "stop_reason"
         case mcpBridgeConnected = "mcp_bridge_connected"
+        case agentTurns    = "agent_turns"
+        case agentMessages = "agent_messages"
+        case agentProblems = "agent_problems"
+        case activityEpoch = "activity_epoch"
+        case lastProblem   = "last_problem"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tag           = try c.decode(String.self, forKey: .tag)
+        agentName     = try c.decode(String.self, forKey: .agentName)
+        viewName      = try c.decode(String.self, forKey: .viewName)
+        sessionId     = try c.decodeIfPresent(String.self, forKey: .sessionId)
+        alive         = try c.decode(Bool.self, forKey: .alive)
+        remoteControl = try c.decode(Bool.self, forKey: .remoteControl)
+        state         = try c.decode(SessionState.self, forKey: .state)
+        stopReason    = try c.decodeIfPresent(StopReason.self, forKey: .stopReason)
+        mcpBridgeConnected = try c.decodeIfPresent(Bool.self, forKey: .mcpBridgeConnected)
+        let activity  = FocusActivityWire(decoding: decoder)
+        agentTurns    = activity.turns
+        agentMessages = activity.messages
+        agentProblems = activity.problems
+        activityEpoch = activity.epoch
+        lastProblem   = activity.lastProblem
     }
 }
 
@@ -281,6 +340,45 @@ public enum StopReason: String, Decodable {
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = StopReason(rawValue: raw) ?? .user
+    }
+}
+
+// MARK: - ProblemKind
+
+/// What kind of problem a session had (`last_problem` on `SessionInfo`).
+/// Mirrors `ipc::focus_activity::ProblemKind` in Rust. A string this client does not know, or a
+/// value that is not a string, decodes as `.unknown`: a newer daemon never breaks the list.
+public enum ProblemKind: String, Decodable, Equatable {
+    case crashed
+    case stopped
+    case crashLoopGuard = "crash_loop_guard"
+    case turnError      = "turn_error"
+    case apiError       = "api_error"
+    case rateLimited    = "rate_limited"
+    case loginHold      = "login_hold"
+    case sendRefused    = "send_refused"
+    case noText         = "no_text"
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        let raw = try? decoder.singleValueContainer().decode(String.self)
+        self = raw.flatMap(ProblemKind.init(rawValue:)) ?? .unknown
+    }
+
+    /// What happened, as a fragment that reads after "problem:".
+    public var summary: String {
+        switch self {
+        case .crashed:        return "the session crashed"
+        case .stopped:        return "the session was stopped"
+        case .crashLoopGuard: return "the session stopped after repeated crashes"
+        case .turnError:      return "a turn ended in an error"
+        case .apiError:       return "a turn ended on an API error"
+        case .rateLimited:    return "a turn hit a usage limit"
+        case .loginHold:      return "a message is held until Claude signs in"
+        case .sendRefused:    return "a message could not be sent"
+        case .noText:         return "a turn finished without a reply"
+        case .unknown:        return "something went wrong"
+        }
     }
 }
 
