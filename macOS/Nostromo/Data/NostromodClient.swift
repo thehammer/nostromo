@@ -307,6 +307,8 @@ enum ServerMsg {
     case sessionTaskStopResult(SessionTaskStopResultWire)
     /// The answer to a `session_task_output` of this connection. Local only.
     case sessionTaskOutputResult(SessionTaskOutputResultWire)
+    /// The commands a session's CLI reports: the answer to a `session_commands_get`. Local only.
+    case sessionCommands(SessionCommandsWire)
 
     // ── document panes ────────────────────────────────────────────────────────
     /// The answer to a `pane_action` of this connection. Local only.
@@ -960,6 +962,17 @@ class NostromodClient {
         features?.contains(stagingOnlyFeature) == true
     }
 
+    /// The `welcome.features` entry that says the daemon takes `session_commands_get` and writes
+    /// `local_command` turn origins and slash-command echo turns.
+    static let slashCommandsFeature = "slash_commands_v1"
+
+    /// Does a daemon that advertised `features` know slash commands? The picker asks it for the session's
+    /// list, and a typed local command shows as a record, only then: an older daemon answers neither, so the
+    /// Mac keeps today's behaviour with it.
+    static func supportsSlashCommands(features: [String]?) -> Bool {
+        features?.contains(slashCommandsFeature) == true
+    }
+
     /// Topics every daemon this app can talk to understands.
     static let baseTopics = ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]
 
@@ -1137,6 +1150,13 @@ class NostromodClient {
              type: "session_task_output", tag: tag)
     }
 
+    /// Read a session's slash commands; answered with `ServerMsg.sessionCommands`. Nothing is written
+    /// unless the daemon advertised `slash_commands_v1`.
+    func sessionCommandsGet(tag: String, requestId: String) {
+        guard daemonAdvertisesSlashCommands else { return }
+        send(ClientSessionCommandsGet(requestId: requestId, tag: tag), type: "session_commands_get", tag: tag)
+    }
+
     // MARK: - Decision modal commands
 
     /// Answer a `decision_request` by `requestId`. `choiceId: nil` means
@@ -1258,6 +1278,19 @@ class NostromodClient {
     var daemonAdvertisesStagingOnly: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         return NostromodClient.supportsStagingOnly(features: advertisedFeatures)
+    }
+
+    /// Pretend the daemon's `welcome` advertised `features` (tests: there is no daemon behind a client
+    /// pointed at `/dev/null`).
+    func setAdvertisedFeaturesForTesting(_ features: [String]) {
+        sendLock.lock(); defer { sendLock.unlock() }
+        advertisedFeatures = features
+    }
+
+    /// Whether the connection's last `welcome` advertised `slash_commands_v1`.
+    var daemonAdvertisesSlashCommands: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsSlashCommands(features: advertisedFeatures)
     }
 
     /// Whether the connection's last `welcome` advertised `claude_login_v1`.
@@ -2010,6 +2043,13 @@ class NostromodClient {
                 return .sessionTaskOutputResult(m)
             } else {
                 log.error("failed to decode session_task_output_result")
+            }
+
+        case "session_commands":
+            if let m = try? decoder.decode(SessionCommandsWire.self, from: raw) {
+                return .sessionCommands(m)
+            } else {
+                log.error("failed to decode session_commands")
             }
 
         case "tracker_board":

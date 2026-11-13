@@ -109,7 +109,15 @@ enum TurnHeightEstimator {
         let blockWidth = paneWidth * blocksWidthFraction - 14
         var columns = 0
         let bubbleWidth = paneWidth * bubbleWidthFraction - 24
-        if turn.hasMarkerOrigin {
+        if let record = turn.localCommandRecord {
+            // A local command's record is one marker line collapsed; opened, the header plus the output
+            // measured at the slot's width (`LocalCommandRecordMetrics`, the very measure the view uses,
+            // so the two agree). The slot is the whole row, as the wake marker's is.
+            let expanded = folds.explicitResult(block: nil, index: LocalCommandRecordKey.blockIndex) ?? false
+            let slotWidth = max(paneWidth - ChatTurnView.blocksLeadingInset - ChatTurnView.bubbleTrailingInset, 1)
+            height += LocalCommandRecordMetrics.height(output: record.output, expanded: expanded, width: slotWidth)
+                + userSlotGap
+        } else if turn.hasMarkerOrigin {
             // A Mother job notice is one fixed-height marker in the user slot: the element's length
             // is never measured, because the marker never shows it.
             height += wakeMarkerHeight + userSlotGap

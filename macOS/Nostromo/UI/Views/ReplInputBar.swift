@@ -104,6 +104,11 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     private static let sessionRulesPriority = NSLayoutConstraint.Priority(720)
     private static let composerPriority = NSLayoutConstraint.Priority(740)
     private let spinner      = NSProgressIndicator()
+    /// The slash-command picker's state: it opens while the text starts with `/` and the caret is still in
+    /// that first token. `ReplView` draws it above the bar (`SlashCommandPickerView`); the keys reach it
+    /// through `textView.keyInterceptor`, so the text view keeps first responder throughout.
+    let slashPicker = SlashCommandPicker()
+    private var slashBinding: AnyCancellable?
     /// Horizontal strip of image thumbnails shown above the text field when images are attached.
     private let imageTray    = NSStackView()
 
@@ -145,6 +150,9 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
         textView.appearance = NSAppearance(named: .darkAqua)
         textView.delegate   = self
         textView.onSubmit   = { [weak self] in self?.submitAction() }
+        textView.keyInterceptor = { [weak self] event in self?.handleSlashKey(event) ?? false }
+        slashPicker.onChoose = { [weak self] entry in self?.completeSlash(with: entry) }
+        slashPicker.onAnnounce = { [weak self] text in self?.announce(text) }
 
         // Scroll wrapper — no border; we style the layer instead
         textScroll.documentView          = textView
@@ -585,6 +593,16 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
 
     // MARK: Actions
 
+    /// Bind the picker to `tag`'s commands in `store`: the list it shows, the refresh when it opens, and a
+    /// redraw when the daemon's list arrives while it is open.
+    func bindSlashCommands(tag: String, store: SlashCommandStore) {
+        slashPicker.catalog = { [weak store] in store?.catalog(for: tag) ?? .fallback }
+        slashPicker.onOpen = { [weak store] in store?.refresh(tag: tag) }
+        slashBinding = store.changes
+            .filter { $0 == tag }
+            .sink { [weak self] _ in self?.slashPicker.refresh() }
+    }
+
     @objc private func sendButtonAction() { submitAction() }
 
     @objc private func stopButtonAction() { onInterrupt?() }
@@ -636,6 +654,7 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
             text = ChatSession.imageOnlyText
         }
         guard !text.isEmpty else { return }
+        slashPicker.close()
         textView.string  = ""
         pendingImages    = []
         placeholder.isHidden = false
@@ -786,6 +805,65 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
     func textDidChange(_ notification: Notification) {
         placeholder.isHidden = !textView.string.isEmpty
         onHeightChange?(idealBarHeight())
+        updateSlashPicker()
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        updateSlashPicker()
+    }
+
+    /// Focus left the text: the picker closes.
+    func textDidEndEditing(_ notification: Notification) {
+        slashPicker.close()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { slashPicker.close() }
+    }
+
+    // MARK: Slash commands
+
+    private func updateSlashPicker() {
+        slashPicker.update(text: textView.string, caret: textView.selectedRange().location)
+    }
+
+    /// While the picker is open: Up and Down move, Tab and Return complete (Return never sends), Esc
+    /// closes and leaves the text alone. With nothing matching, Tab and Return close it, so a command
+    /// the list does not know (it goes to the model as an ordinary prompt) can still be sent.
+    private func handleSlashKey(_ event: NSEvent) -> Bool {
+        guard slashPicker.isOpen, !textView.hasMarkedText(),
+              event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else { return false }
+        switch event.keyCode {
+        case 125: slashPicker.move(by: 1); return true      // Down
+        case 126: slashPicker.move(by: -1); return true     // Up
+        case 48, 36, 76:                                     // Tab, Return, keypad Enter
+            if let entry = slashPicker.selectedEntry {
+                completeSlash(with: entry)
+            } else {
+                slashPicker.dismiss(text: textView.string)
+            }
+            return true
+        case 53:                                             // Esc
+            slashPicker.dismiss(text: textView.string)
+            return true
+        default: return false
+        }
+    }
+
+    /// Replace the first token with `/<name> ` and close the picker.
+    private func completeSlash(with entry: SlashCommandEntryWire) {
+        let result = SlashCommandPicker.complete(textView.string, with: entry)
+        slashPicker.close()
+        textView.string = result.text
+        textView.setSelectedRange(NSRange(location: result.caret, length: 0))
+        textDidChange(Notification(name: NSText.didChangeNotification, object: textView))
+    }
+
+    private func announce(_ text: String) {
+        NSAccessibility.post(element: textView, notification: .announcementRequested,
+                             userInfo: [.announcement: text,
+                                        .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
 
     // MARK: Height calculation
@@ -827,6 +905,9 @@ class ReplInputBar: NSView, NSTextViewDelegate, NSMenuItemValidation, ModelShort
 /// the macOS Photos permission prompt — image files come via drag-and-drop instead.
 class ChatTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    /// Asked first about every key: true means it was handled (the slash-command picker's Up, Down,
+    /// Tab, Return and Esc), so Return does not send and Tab does not insert.
+    var keyInterceptor: ((NSEvent) -> Bool)?
     /// Attach images from a drop/paste; returns false when the pasteboard had none.
     var onImageDrop: ((NSPasteboard) -> Bool)?
     var onDragHighlight: ((Bool) -> Void)?
@@ -860,6 +941,7 @@ class ChatTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        if keyInterceptor?(event) == true { return }
         // keyCode 36 = Return; Shift+Return inserts a newline normally
         if event.keyCode == 36, !event.modifierFlags.contains(.shift) {
             onSubmit?()

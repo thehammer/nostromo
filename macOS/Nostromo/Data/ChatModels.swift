@@ -63,6 +63,11 @@ struct ChatTurn: Identifiable {
     /// What opened this turn when the user did not type it: output from a terminal the agent
     /// follows, or a follow notice (`TurnOrigin.swift`). Such a turn shows blocks, not a bubble.
     var origin: TurnOriginWire? = nil
+    /// The optimistic echo of a typed slash command (`/context`), before the daemon says what it was.
+    /// Drawn as one muted line, never a bubble: a local command is not a message from the user. The
+    /// daemon's turn then adopts it as a record (`.localCommand` origin) or, for a prompt-type command,
+    /// as the ordinary bubble (`ChatSession.apply`). Only set when the daemon speaks `slash_commands_v1`.
+    var pendingCommand = false
 
     /// Character counts for a turn whose text has been compressed away.
     struct TruncatedLengths {

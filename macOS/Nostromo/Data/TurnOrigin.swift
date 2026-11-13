@@ -19,7 +19,7 @@ extension ChatTurn {
     var hasTerminalOrigin: Bool {
         switch origin {
         case .terminalDelivery?, .terminalFollowNotice?: return true
-        case .motherJobNotice?, .taskWake?, .peerMessage?, .injectedContext?, nil: return false
+        case .motherJobNotice?, .taskWake?, .peerMessage?, .injectedContext?, .localCommand?, nil: return false
         }
     }
 
@@ -44,9 +44,34 @@ extension ChatTurn {
         }
     }
 
+    /// Whether this turn is a local slash command's record (a muted, collapsible output, not a bubble).
+    var hasLocalCommandOrigin: Bool {
+        if case .localCommand? = origin { return true }
+        return false
+    }
+
+    /// What a local command's record shows: nil for any other turn.
+    var localCommandRecord: (command: String, args: String, output: String, stream: String)? {
+        guard case .localCommand(let command, let args, let output, let stream, _)? = origin else { return nil }
+        return (command, args, output, stream)
+    }
+
     /// Whether the user slot draws a muted marker for this turn: a Mother notice, a task wake or
-    /// injected text.
-    var hasMarkerOrigin: Bool { hasMotherNoticeOrigin || hasTaskWakeOrigin || hasInjectedOrigin }
+    /// injected text, or the sent line of a typed command the daemon has not yet answered.
+    var hasMarkerOrigin: Bool {
+        hasMotherNoticeOrigin || hasTaskWakeOrigin || hasInjectedOrigin || isPendingCommandEcho
+    }
+
+    /// The optimistic echo of a typed slash command, not yet adopted by a daemon turn.
+    var isPendingCommandEcho: Bool { pendingCommand && daemonId == nil && origin == nil }
+
+    /// The one muted line of a pending command echo: `/context · sent`.
+    var pendingCommandMarker: WakeMarkerContent? {
+        guard isPendingCommandEcho else { return nil }
+        let name = userInput.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? userInput
+        return WakeMarkerContent(line: "\(userInput) · sent", tooltipLines: [],
+                                 accessibilityLabel: "Command \(name), sent", target: .none)
+    }
 
     /// The marker this turn shows in the user slot; nil for a turn that has none. Only a turn whose
     /// daemon-sent origin says so draws one, never one whose text merely looks like it.
@@ -57,7 +82,8 @@ extension ChatTurn {
         case .peerMessage(let items, let omitted)?: return WakeMarkerText.peerMessage(items, omitted: omitted)
         case .injectedContext(let kind, let title, let text, let truncated)?:
             return WakeMarkerText.injectedContext(kind: kind, title: title, text: text, truncated: truncated)
-        case .terminalDelivery?, .terminalFollowNotice?, nil: return nil
+        case .localCommand?: return nil
+        case .terminalDelivery?, .terminalFollowNotice?, nil: return pendingCommandMarker
         }
     }
 
@@ -67,6 +93,7 @@ extension ChatTurn {
     /// never sends the raw event). One event is only its line: its tooltip says the same.
     var markerCopyText: String {
         if hasInjectedOrigin { return markerContent?.copyText ?? userInput }
+        if isPendingCommandEcho { return userInput }
         guard hasTaskWakeOrigin, let content = markerContent else { return userInput }
         guard content.tooltipLines.count > 1 else { return content.line }
         return ([content.line] + content.tooltipLines).joined(separator: "\n")
