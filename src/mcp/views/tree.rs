@@ -230,20 +230,26 @@ pub fn default_mother_tree() -> PaneTree {
     }
 }
 
+/// The focus tag of Teri's built-in focus.
+pub const TERI_TAG: &str = "teri";
 /// Pane id of Teri's native surface (the todo list), hosted by the Mac app.
 pub const TERI_SURFACE: &str = "teri_surface";
 /// Pane id of Fred's native HUD (inbox + calendar), hosted by the Mac app.
 pub const FRED_HUD: &str = "fred_hud";
 
-/// Ratio of the native pane in the Teri default layout (and in a wrap).
-pub const TERI_NATIVE_RATIO: f32 = 0.62;
+/// Ratio of the native pane in the Teri default layout (and in a wrap): the
+/// surface takes the top 68%, the chat the bottom 32%.
+pub const TERI_NATIVE_RATIO: f32 = 0.68;
+/// Ratio of the REPL (the chat) in the Teri default layout and in a wrap.
+pub const TERI_REPL_RATIO: f32 = 0.32;
 /// Ratio of the native pane in the Fred default layout (and in a wrap).
 pub const FRED_NATIVE_RATIO: f32 = 0.55;
 
-/// Teri's default layout: the native surface beside the REPL.
+/// Teri's default layout: the native surface (list and detail side by side)
+/// above the REPL, each at full width.
 pub fn default_teri_tree() -> PaneTree {
     PaneTree::Split {
-        direction: SplitDirection::Horizontal,
+        direction: SplitDirection::Vertical,
         children: vec![
             PaneTree::Leaf {
                 pane_id: TERI_SURFACE.to_string(),
@@ -252,8 +258,28 @@ pub fn default_teri_tree() -> PaneTree {
                 pane_id: "repl".to_string(),
             },
         ],
-        ratios: vec![TERI_NATIVE_RATIO, 0.38],
+        ratios: vec![TERI_NATIVE_RATIO, TERI_REPL_RATIO],
     }
+}
+
+/// True when `tree` is EXACTLY Teri's old default layout: a horizontal split
+/// of the two leaves `teri_surface` and `repl`, in that order, with any
+/// ratios. Anything else (extra panes, tabs, a swapped order, a vertical
+/// split) is a layout somebody arranged and is not the old default.
+pub fn is_legacy_teri_default(tree: &PaneTree) -> bool {
+    let PaneTree::Split {
+        direction: SplitDirection::Horizontal,
+        children,
+        ..
+    } = tree
+    else {
+        return false;
+    };
+    matches!(
+        children.as_slice(),
+        [PaneTree::Leaf { pane_id: first }, PaneTree::Leaf { pane_id: second }]
+            if first == TERI_SURFACE && second == "repl"
+    )
 }
 
 /// Fred's default layout: the native HUD above the REPL.
@@ -865,5 +891,85 @@ mod huey_tree_tests {
             default_huey_tree().pane_ids(),
             vec!["report", "context", "repl"]
         );
+    }
+}
+
+#[cfg(test)]
+mod teri_tree_tests {
+    use super::*;
+
+    fn leaf(id: &str) -> PaneTree {
+        PaneTree::Leaf {
+            pane_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_teri_default_is_the_surface_above_the_repl_at_full_width() {
+        let tree = default_teri_tree();
+        assert_eq!(
+            tree,
+            PaneTree::Split {
+                direction: SplitDirection::Vertical,
+                children: vec![leaf(TERI_SURFACE), leaf("repl")],
+                ratios: vec![0.68, 0.32],
+            }
+        );
+        assert!(is_top_level_leaf(&tree, TERI_SURFACE));
+        assert!(is_top_level_leaf(&tree, "repl"));
+    }
+
+    #[test]
+    fn the_teri_default_ratios_sum_to_one() {
+        assert!((TERI_NATIVE_RATIO + TERI_REPL_RATIO - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_other_defaults_are_unchanged() {
+        match default_fred_tree() {
+            PaneTree::Split {
+                direction, ratios, ..
+            } => {
+                assert_eq!(direction, SplitDirection::Vertical);
+                assert_eq!(ratios, vec![FRED_NATIVE_RATIO, 0.45]);
+            }
+            other => panic!("expected a split, got {other:?}"),
+        }
+        match default_mother_tree() {
+            PaneTree::Split {
+                direction, ratios, ..
+            } => {
+                assert_eq!(direction, SplitDirection::Vertical);
+                assert_eq!(ratios, vec![0.6, 0.4]);
+            }
+            other => panic!("expected a split, got {other:?}"),
+        }
+        match default_huey_tree() {
+            PaneTree::Split { ratios, .. } => assert_eq!(ratios, vec![HUEY_DOCUMENT_RATIO, 0.38]),
+            other => panic!("expected a split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_the_exact_old_default_is_the_legacy_teri_layout() {
+        let old = |ratios: Vec<f32>| PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![leaf(TERI_SURFACE), leaf("repl")],
+            ratios,
+        };
+        assert!(is_legacy_teri_default(&old(vec![0.62, 0.38])));
+        assert!(is_legacy_teri_default(&old(vec![0.1, 0.9])));
+        assert!(!is_legacy_teri_default(&default_teri_tree()));
+        assert!(!is_legacy_teri_default(&leaf("repl")));
+        assert!(!is_legacy_teri_default(&PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![leaf("repl"), leaf(TERI_SURFACE)],
+            ratios: vec![0.4, 0.6],
+        }));
+        assert!(!is_legacy_teri_default(&PaneTree::Split {
+            direction: SplitDirection::Horizontal,
+            children: vec![leaf(TERI_SURFACE), leaf("notes"), leaf("repl")],
+            ratios: vec![0.4, 0.3, 0.3],
+        }));
     }
 }

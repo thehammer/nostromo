@@ -8,7 +8,7 @@ Linux only: nothing that needs AppKit, CryptoKit or Xcode runs here (see §5).
 ## 1. What it is
 
 - One sandbox per **worktree + branch** (its identity is the branch plus the absolute config path). A detached HEAD counts as a different branch, so it gets its own sandbox.
-- Ubuntu 24.04 with Rust **stable** (the same channel CI's `dtolnay/rust-toolchain@stable` installs, with `clippy` and `rustfmt`), Python 3.12 and shellcheck 0.9. The toolchain version is read from `static.rust-lang.org` each time a sandbox is created, so it moves with stable. `rust-toolchain.toml` (`channel = "stable"`) resolves to it.
+- Ubuntu 24.04 with Rust **1.100.0**, pinned (the same version CI's `dtolnay/rust-toolchain@1.100.0` and `rust-toolchain.toml` use, with `clippy` and `rustfmt`), Python 3.12 and shellcheck 0.9. The version is `RUST_VERSION` in `.rwx/sandbox.yml`; the `rust` task fails if `rustc -V` differs. `tests/ci_policy/test_rust_toolchain_pin.py` fails if it drifts from `rust-toolchain.toml` or `ci.yml`. To bump it, see "Bumping the Rust toolchain" in [ci.md](ci.md).
 - Cargo dependencies are compiled once in a cached `deps` layer (keyed on `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and the Rust version). A new or restarted sandbox compiles only the `nostromo` crate, not its dependencies.
 - Before each exec, local changes (staged, unstaged, untracked) sync **up**; after it, the sandbox's changes sync **down**. Gitignored files (`target/`) never sync either way.
 - The repo is public, so the sandbox clones `https://github.com/thehammer/nostromo.git` anonymously. No token, no secrets.
@@ -58,7 +58,7 @@ Measured 2026-10-16 on 4 vCPU / 16 GB (about $1.01 per awake hour: 4 × $0.00007
 | `make python-test` | 43 s |
 | `target/` after the full run | 35 GB (2.3 GB in the `deps` layer, 3.2 GB after only lib tests) |
 
-The disk is 50 GB, so a full `cargo test` leaves about 19 GB free. `target/` is not synced and is discarded when the sandbox is reset or restarted from the layer.
+The disk is 50 GB, so a full `cargo test` leaves about 19 GB free. On Rust 1.100.0 a full run with default debuginfo filled the whole disk (linking failed with `No space left on device`); setting `CARGO_PROFILE_DEV_DEBUG=0` on it passes and leaves `target/` at about 7 GB. Run `cargo clean` first if the disk is full. `target/` is not synced and is discarded when the sandbox is reset or restarted from the layer.
 
 The edit loop is dominated by recompiling the single large `nostromo` lib crate. 8 vCPU was not tried: the first full build took under the 8-minute threshold for it.
 

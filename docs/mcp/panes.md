@@ -224,13 +224,23 @@ that with a real compact tab strip — see below.
 A `Split` node's `ratios` are the daemon's *default*, not the last word.
 `DynamicFocusView` treats a split's on-disk ratios as client-side operator
 state: once an operator drags a divider, that ratio is saved to
-`UserDefaults` under `nostromo.dynlayout.<tag>.<path>` (`tag` is the focus's
-session tag, `path` is the tree path — `"root"`, `"root.0"`, `"root.tab1"`,
-…) and wins over whatever the daemon broadcasts next, so the workspace looks
+`UserDefaults` under `nostromo.dynlayout.<tag>.<path>@<direction>` (`tag` is
+the focus's session tag, `path` is the tree path — `"root"`, `"root.0"`,
+`"root.tab1"`, … — and `direction` is the split's `horizontal` or `vertical`)
+and wins over whatever the daemon broadcasts next, so the workspace looks
 the same across a content refresh, a tab switch, or a relaunch. Only a
 genuine agent-authored structural change (`LayoutChangeClassifier`'s
 `.splitTopology`) clears it, and the operator can always clear it manually
 via a focus's "Reset Layout" quick action.
+
+The direction is part of the key because a ratio set only means something on
+the axis it was dragged on. When the daemon turns the split at a path from side
+by side into top over bottom (Teri's default did), ratios dragged for the old
+axis are not applied to the new one: the new split starts at the daemon's
+ratios, and a drag saves under its own key. A value saved before the direction
+was part of the key (no `@...` suffix) is read only for a horizontal split, and
+is deleted when a vertical split sits at its path, so a vertical split that had
+its divider dragged under an older app starts from the daemon's ratios once.
 
 Two things guard that state so it can't strand the operator:
 

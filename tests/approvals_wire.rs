@@ -4613,7 +4613,13 @@ impl Conn {
 fn tamper_with_rules_file(rig: &Rig) {
     let mut file: Value = serde_json::from_slice(&std::fs::read(rules_file(rig)).unwrap()).unwrap();
     file["rules"][0]["created_by_window"] = json!("edited-by-hand");
-    std::fs::write(rules_file(rig), serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    // Replaced in one step (write beside it, then rename over it). `std::fs::write` truncates
+    // first, and the daemon's directory watcher, which runs on its own thread, can read the empty
+    // file in between and quarantine *that*: a review of zero rules, not of the edited file.
+    let path = rules_file(rig);
+    let staging = path.with_file_name("rules.json.edited");
+    std::fs::write(&staging, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
+    std::fs::rename(&staging, &path).unwrap();
     rig.broker.rules_external_check();
 }
 
@@ -4988,7 +4994,17 @@ fn only_the_operator_app_with_its_nonce_keeps_or_discards_a_quarantined_rules_fi
         fake.wait_responses(1).await;
         let nonce = app.nonce.clone().unwrap();
         tamper_with_rules_file(&rig);
-        let reviewed = match app.next("the quarantine", is_quarantine_frame).await {
+        // The frame that carries the review. The answer that created the rule broadcasts the list
+        // after the CLI has its allow, so a frame built between the quarantine starting and its
+        // review being read (the daemon's watcher, or the check in tamper_with_rules_file,
+        // reads the file outside the store's lock) is a quarantine with no rules to review yet.
+        // The review frame always follows it.
+        let reviewed = match app
+            .next("the quarantine with its review", |m| {
+                matches!(m, ServerMsg::ApprovalRules { quarantined: Some(q), .. } if !q.rules_in_file.is_empty())
+            })
+            .await
+        {
             ServerMsg::ApprovalRules {
                 quarantined: Some(q),
                 rules,

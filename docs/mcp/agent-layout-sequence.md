@@ -148,7 +148,7 @@ On iOS: **Repl** tab (primary) + **inbox** tab + **calendar** tab. Both non-repl
 
 ## Built-in 4 — Teri
 
-**Layout**: todo list left · repl right
+**Layout**: the built-in `teri_surface` (list and detail side by side) above the repl, full width. The daemon seeds that tree itself (see "Native panes" in `agent-layout.md`); the agent-built todo pane below is the older design.
 
 ```javascript
 // ── Pane structure ──────────────────────────────────────────────────────────

@@ -1326,6 +1326,128 @@ final class TrackerPaneViewTests: MouseQueueTestCase {
         _ = window2
     }
 
+    // MARK: Saved ratios are per split direction (Teri's root turned from side by side to top over bottom)
+
+    private func topShare(of split: NSSplitView) -> Double {
+        let heights = split.arrangedSubviews.map { Double($0.frame.height) }
+        return heights[0] / max(heights.reduce(0, +), 1)
+    }
+
+    private func savedKeys(for tag: String) -> [String] {
+        let prefix = "nostromo.dynlayout.\(tag)."
+        return UserDefaults.standard.dictionaryRepresentation().keys.filter { $0.hasPrefix(prefix) }
+    }
+
+    private func makeVerticalFocus(_ name: String) -> Focus {
+        let focus = Focus(id: UUID().uuidString, agentTag: name, projectPath: "/tmp/\(name)", isBuiltIn: false)
+        let tag = focus.sessionTag
+        addTeardownBlock { [self] in for key in savedKeys(for: tag) { UserDefaults.standard.removeObject(forKey: key) } }
+        // The new Teri shape: one pane above the chat, 0.68 / 0.32.
+        AppStore.shared.applyForTesting(.focusLayout(
+            tag: tag,
+            tree: .split(direction: .vertical, children: [.leaf(paneId: "tracker"), .leaf(paneId: "repl")], ratios: [0.68, 0.32]),
+            focusedPane: nil))
+        return focus
+    }
+
+    func testRatiosSavedForTheOldSideBySideSplitDoNotDistortTheNewVerticalDefault() throws {
+        _ = NSApplication.shared
+        let focus = makeVerticalFocus("ratio-old-key")
+        let tag = focus.sessionTag
+        // What an older app saved for this focus's root when it was a horizontal (side by side) split.
+        let oldKey = "nostromo.dynlayout.\(tag).root"
+        UserDefaults.standard.set([0.5824, 0.4176], forKey: oldKey)
+
+        let (_, focusView) = makeDynamicFocusWindow(focus, size: NSSize(width: 1000, height: 1000))
+        let split = try XCTUnwrap(rigAllSubviews(of: focusView).compactMap { $0 as? RatioSplitView }.first)
+        layOut(focusView) { split.ratiosApplied }
+
+        XCTAssertTrue(split.ratiosApplied)
+        XCTAssertFalse(split.isVertical, "the new tree is top over bottom")
+        XCTAssertEqual(topShare(of: split), 0.68, accuracy: 0.03, "the new default wins, not the old 0.58 / 0.42")
+        XCTAssertNil(UserDefaults.standard.object(forKey: oldKey), "the old key is dropped, it cannot come back later")
+        XCTAssertEqual(savedKeys(for: tag), [], "rendering saved nothing")
+    }
+
+    func testADragOfTheNewVerticalSplitIsSavedForItsDirectionAndRestored() throws {
+        _ = NSApplication.shared
+        let focus = makeVerticalFocus("ratio-vertical-drag")
+        let tag = focus.sessionTag
+        UserDefaults.standard.set([0.5824, 0.4176], forKey: "nostromo.dynlayout.\(tag).root")
+
+        let size = NSSize(width: 1000, height: 1000)
+        let (window, focusView) = makeDynamicFocusWindow(focus, size: size)
+        let split = try XCTUnwrap(rigAllSubviews(of: focusView).compactMap { $0 as? RatioSplitView }.first)
+        layOut(focusView) { split.ratiosApplied }
+        XCTAssertEqual(topShare(of: split), 0.68, accuracy: 0.03)
+
+        let dividerY = split.arrangedSubviews[0].frame.maxY + split.dividerThickness / 2
+        let midX = split.bounds.midX
+        let from = split.convert(NSPoint(x: midX, y: dividerY), to: nil)
+        let to = split.convert(NSPoint(x: midX, y: split.bounds.height * 0.55), to: nil)
+        try drag(split, in: window, from: from, to: to)
+        layOut(focusView) { false }
+
+        let keys = savedKeys(for: tag)
+        XCTAssertEqual(keys, ["nostromo.dynlayout.\(tag).root@vertical"], "saved under the new direction's key only: \(keys)")
+        let saved = try XCTUnwrap(UserDefaults.standard.array(forKey: keys[0]) as? [Double])
+        XCTAssertEqual(saved[0], 0.55, accuracy: 0.06, "the saved ratio is where the divider was dropped: \(saved)")
+
+        // A new view for the same focus comes up with that ratio, not the agent's 0.68.
+        let (window2, focusView2) = makeDynamicFocusWindow(focus, size: size)
+        let split2 = try XCTUnwrap(rigAllSubviews(of: focusView2).compactMap { $0 as? RatioSplitView }.first)
+        layOut(focusView2) { split2.ratiosApplied }
+        XCTAssertEqual(topShare(of: split2), saved[0], accuracy: 0.03, "the dragged vertical divider is restored")
+        XCTAssertEqual(savedKeys(for: tag), keys, "restoring it wrote nothing new")
+        _ = window2
+    }
+
+    func testRenderingOneFocusLeavesAnotherFocusesSavedRatiosAlone() throws {
+        _ = NSApplication.shared
+        let other = makeVerticalFocus("ratio-bystander")
+        let otherTag = other.sessionTag
+        let ours = makeVerticalFocus("ratio-subject")
+        let tag = ours.sessionTag
+        let bystanderKeys = [
+            "nostromo.dynlayout.\(otherTag).root": [0.3, 0.7],
+            "nostromo.dynlayout.\(otherTag).root@vertical": [0.4, 0.6],
+            "nostromo.dynlayout.\(otherTag).root@horizontal": [0.45, 0.55],
+        ]
+        for (key, ratios) in bystanderKeys { UserDefaults.standard.set(ratios, forKey: key) }
+        UserDefaults.standard.set([0.5824, 0.4176], forKey: "nostromo.dynlayout.\(tag).root")
+
+        let (_, focusView) = makeDynamicFocusWindow(ours, size: NSSize(width: 1000, height: 1000))
+        let split = try XCTUnwrap(rigAllSubviews(of: focusView).compactMap { $0 as? RatioSplitView }.first)
+        layOut(focusView) { split.ratiosApplied }
+
+        for (key, ratios) in bystanderKeys {
+            XCTAssertEqual(UserDefaults.standard.array(forKey: key) as? [Double], ratios, "\(key) is untouched")
+        }
+    }
+
+    func testALegacyKeyStillRestoresAHorizontalSplitAndTheDirectionKeyWinsOverIt() throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "ratio-key-\(UUID().uuidString)"))
+        let legacy = "nostromo.dynlayout.t.root"
+        let directed = DynamicFocusView.ratioDefaultsKey(tag: "t", path: "root", direction: .horizontal)
+        XCTAssertEqual(directed, "nostromo.dynlayout.t.root@horizontal")
+        func read(_ direction: SplitDirection, count: Int = 2) -> [Double]? {
+            DynamicFocusView.savedRatios(
+                forKey: DynamicFocusView.ratioDefaultsKey(tag: "t", path: "root", direction: direction),
+                legacyKey: legacy, direction: direction, childCount: count, defaults: defaults)
+        }
+
+        defaults.set([0.7, 0.3], forKey: legacy)
+        XCTAssertNil(read(.vertical), "a legacy value is never used for a vertical split")
+        XCTAssertNil(defaults.object(forKey: legacy), "and it is dropped, not kept for later")
+
+        defaults.set([0.7, 0.3], forKey: legacy)
+        XCTAssertEqual(read(.horizontal), [0.7, 0.3], "a horizontal split still restores what the older app saved")
+        defaults.set([0.2, 0.8], forKey: directed)
+        XCTAssertEqual(read(.horizontal), [0.2, 0.8], "the direction's own key wins")
+        XCTAssertNil(read(.horizontal, count: 3), "a wrong child count is not trusted")
+        XCTAssertNil(defaults.object(forKey: directed), "and the bad value is removed")
+    }
+
     /// Press on the divider, drag in `steps` moves, release. The drags and the release are queued first:
     /// the split's own mouse tracking loop finds them (the same reason `AppControlMouse` queues its up).
     private func drag(_ split: NSSplitView, in window: NSWindow, from: NSPoint, to: NSPoint, steps: Int = 8) throws {

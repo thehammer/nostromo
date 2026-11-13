@@ -1,2 +1,6 @@
+# Pinned on purpose: a new stable must not turn main red. Bump deliberately; see
+# "Bumping the Rust toolchain" in docs/ci.md. tests/ci_policy/test_rust_toolchain_pin.py
+# keeps this, ci.yml and .rwx/sandbox.yml in agreement.
 [toolchain]
-channel = "stable"
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]

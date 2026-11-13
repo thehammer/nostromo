@@ -380,8 +380,11 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         self.displayOverride = displayLabel
         self.baseSecondary   = secondary
         self.isTopLevel      = !indented
+        // A regular focus row's second line is for the pills only: its branch / last-message text is moved
+        // to the tooltip and accessibility help. The (empty) label stays so the line keeps its height and
+        // the pills their place. Built-ins keep their own status text.
         self.secondaryLabel  = secondary.map { text in
-            let tf = NSTextField(labelWithString: text)
+            let tf = NSTextField(labelWithString: focus.isBuiltIn ? text : "")
             tf.font           = Theme.navSubFont
             tf.textColor      = Theme.fgMuted
             tf.alignment      = .left
@@ -392,6 +395,17 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         }
         super.init(frame: .zero)
         wantsLayer = true
+        if !focus.isBuiltIn, let secondary, !secondary.isEmpty {
+            toolTip = secondary
+            setAccessibilityHelp(secondary)
+        }
+        if !focus.isBuiltIn {
+            // A regular row is always one VoiceOver element (name, plus any badge phrase), so the
+            // branch / last-message help is reachable with or without a notification.
+            setAccessibilityElement(true)
+            setAccessibilityRole(.button)
+            setAccessibilityLabel(displayLabel)
+        }
 
         // The name and the second line start after the bars' inset and the activity mark's reserved slot.
         let leadingInset: CGFloat = (indented ? 6 + Theme.navChildIndent : 6) + NavTabItem.activitySlotWidth
@@ -721,8 +735,12 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             setAccessibilityRole(.button)
             setAccessibilityLabel(text)
         } else {
-            setAccessibilityElement(false)
-            setAccessibilityLabel(nil)
+            if focus.isBuiltIn {
+                setAccessibilityElement(false)
+                setAccessibilityLabel(nil)
+            } else {
+                setAccessibilityLabel(displayOverride)
+            }
         }
     }
 
