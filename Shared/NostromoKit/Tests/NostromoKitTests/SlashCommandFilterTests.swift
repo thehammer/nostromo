@@ -87,7 +87,9 @@ final class SlashCommandFilterTests: XCTestCase {
         let all = names("", entries)
         let elapsed = Date().timeIntervalSince(start)
 
-        XCTAssertEqual(prefixed, (490...499).map { "cmd-\($0)" })
+        // The ten prefix matches lead; `cmd-149`, `cmd-249`… follow as subsequence matches.
+        XCTAssertEqual(Array(prefixed.prefix(10)), (490...499).map { "cmd-\($0)" })
+        XCTAssertGreaterThan(prefixed.count, 10)
         XCTAssertEqual(all.count, 501)
         XCTAssertEqual(all, all.sorted())
         XCTAssertLessThan(elapsed, 5, "ranking 500 entries per keystroke must be cheap")
