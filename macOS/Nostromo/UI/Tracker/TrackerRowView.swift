@@ -510,6 +510,8 @@ final class TrackerRowView: NSView {
             button.action = #selector(toggleFold(_:))
             button.setAccessibilityLabel("Details: \(String(item.title.prefix(80)))")
             button.toolTip = item.isExpanded ? "Hide details" : "Show details"
+            button.setAccessibilityRole(.disclosureTriangle)
+            button.setAccessibilityValue(item.isExpanded ? 1 : 0)
             addSubview(button)
             disclosureButton = button
         }
