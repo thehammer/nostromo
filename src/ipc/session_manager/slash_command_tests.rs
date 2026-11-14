@@ -548,6 +548,36 @@ fn names_the_picker_cannot_insert_are_skipped() {
 }
 
 #[test]
+fn hostile_names_and_aliases_never_reach_the_list() {
+    let long = "x".repeat(5000);
+    let bad = [
+        "evil\u{202E}gnp".to_owned(),
+        "esc\u{1b}[31mred".to_owned(),
+        "zw\u{200B}sp".to_owned(),
+        "bom\u{FEFF}x".to_owned(),
+        "iso\u{2066}x".to_owned(),
+        "tab\tx".to_owned(),
+        long.clone(),
+    ];
+    let mut commands: Vec<Value> = bad.iter().map(|n| json!({"name": n})).collect();
+    commands.push(json!({
+        "name": "ns:name-with-dash",
+        "aliases": ["ok-alias", bad[0], bad[1], bad[2], bad[6]],
+    }));
+    let entries = observed(json!(commands));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "ns:name-with-dash");
+    assert_eq!(entries[0].aliases, vec!["ok-alias"]);
+
+    let init = observe(&init_line(&[&bad[0], &bad[1], &bad[6], "ns:name-with-dash"])).unwrap();
+    assert_eq!(init.entries.len(), 1);
+    assert_eq!(init.entries[0].name, "ns:name-with-dash");
+
+    let at_limit = "y".repeat(64);
+    assert_eq!(entry(&json!({"name": at_limit})).name, at_limit);
+}
+
+#[test]
 fn a_catalog_keeps_at_most_five_hundred_commands_and_the_first_ones() {
     let many: Vec<Value> = (0..600).map(|i| json!({"name": format!("c{i}")})).collect();
     let entries = observed(Value::Array(many));

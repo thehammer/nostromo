@@ -2170,6 +2170,15 @@ impl SessionTranscript {
                 ..
             } => {
                 let pending = self.pending_command.take();
+                // Older CLIs wrote the stored `/model` triple for the daemon's
+                // own model switch: no turn, no record (an operator never typed
+                // it, and the ledger's "Model changed" note covers it).
+                if !self.live
+                    && pending.as_ref().is_some_and(|p| p.name == "model")
+                    && output.starts_with("Set model to")
+                {
+                    return vec![];
+                }
                 let (command, args) = match (command, pending) {
                     (Some(command), _) => (command, args.unwrap_or_default()),
                     (None, Some(p)) => (p.name, p.args),

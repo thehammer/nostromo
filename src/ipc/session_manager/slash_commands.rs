@@ -155,10 +155,27 @@ pub fn observe(raw: &str) -> Option<CatalogUpdate> {
     }
 }
 
-/// A name the picker can insert reliably: non-empty, no whitespace (MCP prompts
-/// are named `server:prompt (MCP)`).
+/// Longest name or alias kept (the limit command records use).
+const NAME_CHARS: usize = 64;
+
+/// A name the picker can insert reliably and show faithfully: non-empty, at
+/// most [`NAME_CHARS`] long, with no whitespace, control character, ANSI escape
+/// or invisible/bidi formatting character. Such a name is dropped, never
+/// "cleaned" into a different command.
 fn insertable(name: &str) -> bool {
-    !name.is_empty() && !name.contains(char::is_whitespace) && !name.ends_with("(MCP)")
+    !name.is_empty()
+        && name.chars().count() <= NAME_CHARS
+        && !name.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(
+                    c,
+                    '\u{200B}'..='\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{FEFF}'
+                )
+        })
 }
 
 /// One `commands_changed` entry; `None` when malformed or not insertable.

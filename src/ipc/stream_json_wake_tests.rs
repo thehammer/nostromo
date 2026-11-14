@@ -1732,8 +1732,6 @@ fn the_fixture_makes_the_turns_it_describes() {
             "⟲ Monitor: new output \"CI for PR #251\"",
             "⟲ Shell: completed \"npm run lint\"",
             "⟲ 3 background events",
-            // The stored model-switch triple is a local command: a record.
-            "/model opus",
             "now deploy it",
             "⟲ Agent: finished \"review the diff\"",
             "run the nightly check",
@@ -1743,7 +1741,7 @@ fn the_fixture_makes_the_turns_it_describes() {
     let wakes: Vec<bool> = turns.iter().map(is_wake).collect();
     assert_eq!(
         wakes,
-        vec![false, true, true, true, false, false, true, false, true]
+        vec![false, true, true, true, false, true, false, true]
     );
 
     // The two events with no reply between: one turn, two items, the first's text.
@@ -1777,22 +1775,14 @@ fn the_fixture_makes_the_turns_it_describes() {
     );
 
     // The orphan summary id is skipped for the real one.
-    let (orphan, _) = wake_origin(&turns[8]);
+    let (orphan, _) = wake_origin(&turns[7]);
     assert_eq!(orphan[0].task_id.as_deref(), Some("b9f3k2m"));
 
-    // The model-switch triple is one record with the command's own output.
-    assert!(matches!(
-        &turns[4].origin,
-        Some(TurnOrigin::LocalCommand { command, args, output, stream, .. })
-            if command == "model" && args == "opus"
-                && output == "Set model to claude-opus-4-5" && stream == "stdout"
-    ));
-
-    // Prompts are counted; wakes and local-command records are not.
+    // Prompts are counted; wakes and the CLI's model-switch entries are not.
     assert_eq!(t.prompt_count(), 3);
     assert_eq!(t.first_user_input(), Some("check the build"));
     // The scheduled trigger is a prompt, not a wake.
-    assert_eq!(turns[7].origin, None);
+    assert_eq!(turns[6].origin, None);
     // Every turn was answered and closed.
     assert!(turns.iter().all(|t| t.is_complete));
 }

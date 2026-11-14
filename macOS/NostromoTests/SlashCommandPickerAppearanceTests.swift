@@ -305,7 +305,8 @@ final class SlashCommandPickerAppearanceTests: XCTestCase {
             let inset = SlashCommandRowView.horizontalInset
             for (i, row) in view.visibleRows.enumerated() {
                 let isInk = inkOn(try rowFill(shot, width: width, midY: row.frame.midY))
-                let strip = NSRect(x: width - inset + 1, y: row.frame.minY, width: inset - 3, height: row.frame.height)
+                // Inside the picker's 1 pt rounded border (first row's top, last row's bottom), at 1x and 2x alike.
+                let strip = NSRect(x: width - inset + 1, y: row.frame.minY + 3, width: inset - 4, height: row.frame.height - 6)
                 XCTAssertNil(shot.inkBounds(in: strip, isInk: isInk), "width \(width), row \(i): ink in the trailing inset")
                 let column = row.descriptionFrame.offsetBy(dx: row.frame.minX, dy: row.frame.minY)
                 let ink = try XCTUnwrap(shot.inkBounds(in: column, isInk: isInk), "width \(width), row \(i): no description")

@@ -120,3 +120,18 @@ shows the fallback picker and keeps today's echo.
   refresh until the next turn reports it (known gap).
 * A CLI release may change the shapes above; `<local-command-*>` and `<command-*>` tags are matched by
   tag, not wording, and `discard_orphan_prompt` remains the net for an unknown tag.
+
+## Known limitations
+
+* **Skill replies after a reload.** Live, a skill (prompt-type command) is one turn: the `/hi` bubble and
+  its reply. After a reload the stored lines split it: the reply sits in a skill marker after an empty
+  `/hi` bubble. The "one turn" acceptance (S1-4) holds live only.
+* **A typed command that never gets an answer** stays as `/x · sent` forever: there is no error state or
+  timeout yet (tracked as a follow-up in `.claude/todos/open/2026-11-10-t5-follow-ups.md`).
+* **A stopped session** answers the command-list request with the stored list under its original source
+  (`init` or `cli`), rather than `none` as the plan said; the picker is more useful that way.
+* **Stored `/model` triple.** The three lines older CLIs wrote for the daemon's own model switch (caveat,
+  `<command-name>/model`, `Set model to …` stdout) make no turn and no record on reload, as before this
+  feature: the operator never typed them. Every other stored local command becomes a record.
+* **Command names** from the CLI that are over 64 characters or contain whitespace, control characters,
+  ANSI escapes or bidi/invisible formatting characters are dropped (as are such aliases), not cleaned.

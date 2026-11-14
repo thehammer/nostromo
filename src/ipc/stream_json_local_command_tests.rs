@@ -455,6 +455,27 @@ fn a_stored_local_command_triple_is_exactly_one_complete_record_that_is_no_promp
 }
 
 #[test]
+fn the_stored_model_switch_triple_makes_no_turn_and_no_record() {
+    let t = stored(&[
+        user_text("first question"),
+        user_text("<local-command-caveat>Caveat: generated while running local commands.</local-command-caveat>"),
+        user_text("<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>opus</command-args>"),
+        user_stdout("Set model to opus (claude-opus-5-5)", false),
+    ]);
+    let turns = t.snapshot();
+    assert_eq!(turns.len(), 1, "{turns:?}");
+    assert_eq!(turns[0].user_input, "first question");
+    assert_eq!(t.prompt_count(), 1);
+
+    // Any other stored local command is still a record.
+    let t = stored(&[
+        user_text("<command-name>/model</command-name>\n<command-args></command-args>"),
+        user_stdout("Currently using opus", false),
+    ]);
+    assert_eq!(t.snapshot().len(), 1);
+}
+
+#[test]
 fn a_stored_local_command_whose_output_is_a_user_line_is_the_same_record() {
     let t = stored(&[
         user_text("<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args>keep the plan</command-args>"),
