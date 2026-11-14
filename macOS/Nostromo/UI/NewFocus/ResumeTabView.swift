@@ -270,6 +270,7 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
     static func isResumable(_ e: ConversationEntryWire) -> Bool {
         switch e.status {
         case .available, .running: return true
+        // Unknown statuses are not resumable: only a status this app understands is.
         default: return false
         }
     }
@@ -296,6 +297,11 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
         case #selector(NSResponder.moveUp(_:)): moveSelection(by: -1); return true
         case #selector(NSResponder.moveDown(_:)): moveSelection(by: 1); return true
         case #selector(NSResponder.insertNewline(_:)): resumeSelected(); return true
+        // With an empty search the caret has nothing to move through: → opens and ← closes Unavailable.
+        case #selector(NSResponder.moveRight(_:)) where model.query.isEmpty && !unavailableExpanded:
+            toggleUnavailable(); return true
+        case #selector(NSResponder.moveLeft(_:)) where model.query.isEmpty && unavailableExpanded:
+            toggleUnavailable(); return true
         case #selector(NSResponder.cancelOperation(_:)): onCancel?(); return true
         default: return false
         }
@@ -327,6 +333,12 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
             f.font = .systemFont(ofSize: 11, weight: .semibold)
             f.textColor = NSColor(white: 0.6, alpha: 1)
             f.setAccessibilityLabel(g.title)
+            if g.kind == .unavailable {
+                // VoiceOver can press it; the keyboard uses → / ← in the search field.
+                f.setAccessibilityRole(.button)
+                f.setAccessibilityLabel("\(g.title), \(collapsed ? "collapsed" : "expanded")")
+                f.setAccessibilityPerformPress { [weak self] in self?.toggleUnavailable(); return true }
+            }
             return f
         case .row(let e):
             let v = ResumeRowView(frame: NSRect(x: 0, y: 0, width: tableView.bounds.width, height: ResumeRowView.height))
@@ -338,12 +350,20 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
         }
     }
 
+    /// Open or close the Unavailable group (double-click, → / ←, or VoiceOver press).
+    func toggleUnavailable() {
+        unavailableExpanded.toggle()
+        reload()
+    }
+
+    var isUnavailableExpanded: Bool { unavailableExpanded }
+
     @objc private func doubleClicked() {
         let r = tableView.clickedRow
         guard items.indices.contains(r) else { return }
         switch items[r] {
         case .header(let g, _) where g.kind == .unavailable:
-            unavailableExpanded.toggle(); reload()
+            toggleUnavailable()
         case .row:
             select(row: r); resumeSelected()
         default: break

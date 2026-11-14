@@ -113,10 +113,37 @@ final class ResumeTabTests: XCTestCase {
     }
 
     func testNothingGlobalIsBound() {
-        // The sheet binds ⌘1/⌘2/⌘⌫ on its own window only; the main menu is not touched.
-        let before = NSApp.mainMenu?.items.count
-        _ = makeSheet()
-        XCTAssertEqual(NSApp.mainMenu?.items.count, before)
+        // The sheet's ⌘1/⌘2 act on its own window only: a second sheet's window does not react to the
+        // first one's keys, and the main menu's key equivalents are unchanged.
+        func equivalents() -> [String] {
+            var out: [String] = []
+            func walk(_ m: NSMenu) { for i in m.items { if !i.keyEquivalent.isEmpty { out.append(i.keyEquivalent) }; if let s = i.submenu { walk(s) } } }
+            if let m = NSApp.mainMenu { walk(m) }
+            return out
+        }
+        let before = equivalents()
+        let other = makeSheet()
+        XCTAssertTrue(sheet.window!.performKeyEquivalent(with: key("2", code: 19)))
+        XCTAssertEqual(sheet.currentTab, .resume)
+        XCTAssertEqual(other.currentTab, .new, "the other window is untouched")
+        XCTAssertEqual(equivalents(), before)
+    }
+
+    func testTheUnavailableGroupOpensFromTheKeyboardAndTheAccessibilityPress() {
+        show([F.entry("a"), F.entry("gone", status: .unavailableDeleted)])
+        XCTAssertFalse(sheet.resumeTab.isUnavailableExpanded)
+        XCTAssertFalse(sheet.resumeTab.visibleEntries.contains { $0.id == "gone" })
+        XCTAssertTrue(command(#selector(NSResponder.moveRight(_:))), "→ with an empty search opens it")
+        XCTAssertTrue(sheet.resumeTab.isUnavailableExpanded)
+        XCTAssertTrue(sheet.resumeTab.visibleEntries.contains { $0.id == "gone" })
+        XCTAssertTrue(command(#selector(NSResponder.moveLeft(_:))))
+        XCTAssertFalse(sheet.resumeTab.isUnavailableExpanded)
+        // The header row is a VoiceOver button that performs the same toggle.
+        let header = sheet.resumeTab.tableView.view(atColumn: 0, row: sheet.resumeTab.tableView.numberOfRows - 1,
+                                                    makeIfNecessary: true) as? NSTextField
+        XCTAssertEqual(header?.accessibilityRole(), .button)
+        XCTAssertTrue(header?.accessibilityPerformPress() ?? false)
+        XCTAssertTrue(sheet.resumeTab.isUnavailableExpanded)
     }
 
     func testRowAccessibilityLabelHasTitleAgentProjectTimeAndStatusInWords() {

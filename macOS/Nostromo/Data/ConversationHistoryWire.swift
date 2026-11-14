@@ -10,6 +10,8 @@ enum ConversationStatusWire: Equatable, Decodable {
     case unavailableUnreadable
     case folderGone(worktree: Bool)
     case available
+    /// A kind this app does not know: shown, never resumable.
+    case unknown
 
     private enum K: String, CodingKey { case kind, tag, open, worktree }
 
@@ -22,7 +24,8 @@ enum ConversationStatusWire: Equatable, Decodable {
         case "unavailable_deleted": self = .unavailableDeleted
         case "unavailable_unreadable": self = .unavailableUnreadable
         case "folder_gone": self = .folderGone(worktree: try c.decodeIfPresent(Bool.self, forKey: .worktree) ?? false)
-        default: self = .available
+        case "available": self = .available
+        default: self = .unknown
         }
     }
 }
@@ -103,6 +106,32 @@ struct ConversationHistoryWire: Equatable, Decodable {
     enum CodingKeys: String, CodingKey {
         case entries, revision
         case requestId = "request_id", firstPromptsEnabled = "first_prompts_enabled", degradedKept = "degraded_kept"
+    }
+
+    init(requestId: String, entries: [ConversationEntryWire], firstPromptsEnabled: Bool,
+         degradedKept: Int? = nil, revision: UInt64) {
+        self.requestId = requestId; self.entries = entries; self.firstPromptsEnabled = firstPromptsEnabled
+        self.degradedKept = degradedKept; self.revision = revision
+    }
+
+    /// Entries decode one by one: a bad entry is skipped, never blanks the whole list.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        requestId = try c.decode(String.self, forKey: .requestId)
+        firstPromptsEnabled = try c.decode(Bool.self, forKey: .firstPromptsEnabled)
+        degradedKept = try c.decodeIfPresent(Int.self, forKey: .degradedKept)
+        revision = try c.decode(UInt64.self, forKey: .revision)
+        var list = try c.nestedUnkeyedContainer(forKey: .entries)
+        var out: [ConversationEntryWire] = []
+        while !list.isAtEnd {
+            if let e = try? list.decode(ConversationEntryWire.self) { out.append(e) }
+            else { _ = try? list.decode(SkippedEntry.self) }   // advance past the bad one
+        }
+        entries = out
+    }
+
+    private struct SkippedEntry: Decodable {
+        init(from decoder: Decoder) throws {}
     }
 }
 

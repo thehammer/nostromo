@@ -174,9 +174,15 @@ enum FocusCreation {
     static func commit(_ focus: Focus, store: FocusStore, flushRegistry: () -> Void = {},
                        alwaysFlush: Bool = false, switch switchTo: (Focus) -> Void) {
         store.add(focus)
-        // A resumed conversation always flushes: the daemon reserved the tag and needs the registry
-        // entry before the spawn.
         if alwaysFlush || focus.initialModel != nil { flushRegistry() }
         switchTo(focus)
+    }
+
+    /// What the New Focus sheet's callback does for a focus it hands over. A resumed conversation always
+    /// flushes: the daemon reserved the tag and needs the registry entry before the spawn.
+    static func commitFromSheet(_ focus: Focus, store: FocusStore, flushRegistry: () -> Void,
+                                switch switchTo: (Focus) -> Void) {
+        commit(focus, store: store, flushRegistry: flushRegistry,
+               alwaysFlush: focus.resumedAt != nil, switch: switchTo)
     }
 }

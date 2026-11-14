@@ -42,7 +42,7 @@ struct ConversationHistoryModel {
 
     static func isUnavailable(_ status: ConversationStatusWire) -> Bool {
         switch status {
-        case .unavailableDeleted, .unavailableUnreadable: return true
+        case .unavailableDeleted, .unavailableUnreadable, .unknown: return true
         default: return false
         }
     }
@@ -136,6 +136,7 @@ struct ConversationHistoryModel {
         case .unavailableUnreadable: return "unavailable: Can't read this conversation"
         case .folderGone(let worktree): return worktree ? "worktree gone" : "project gone"
         case .available: return nil
+        case .unknown: return "unavailable: this version of Nostromo can't open it"
         }
     }
 

@@ -387,7 +387,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         resumeTab.onResume = { [weak self] e in self?.beginResume(e) }
         resumeTab.onRemove = { [weak self] e in self?.removeEntry(e) }
         resumeTab.onShowTranscript = { e in
-            if let path = e.transcriptPath, FileManager.default.fileExists(atPath: path) {
+            if let path = e.transcriptPath, ConversationHistoryStore.isShowableTranscript(path) {
                 ActivationAudit.note("resume:show-transcript-in-finder")
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
             }
@@ -489,8 +489,14 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     }
 
     private func finishResume(with focus: Focus) {
-        closeSheet()
-        onCreate(focus)
+        // A resumed focus is grouped under its org like any other: look it up, then open it.
+        orgResolver.resolve(focus.projectPath ?? "") { [weak self] org in
+            guard let self, !self.isCancelled else { return }
+            var focus = focus
+            focus.org = org
+            self.closeSheet()
+            self.onCreate(focus)
+        }
     }
 
     private func resumeFinished(id: String, result: ConversationHistoryStore.ResumeResult) {
@@ -529,6 +535,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     /// Close the sheet; what was removed is deleted now (the undo window is the sheet's lifetime).
     private func closeSheet() {
         history.purgeRemoved()
+        history.cancelResumes()
         history.commitFocus = nil
         history.switchToTag = nil
         if let window { window.sheetParent?.endSheet(window) }

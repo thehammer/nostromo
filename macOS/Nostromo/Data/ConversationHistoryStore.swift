@@ -75,6 +75,11 @@ final class ConversationHistoryStore {
         self.schedule = schedule
     }
 
+    /// The app is quitting: the in-memory listing, first prompts included, is dropped when prompts are off.
+    func appWillTerminate() {
+        if history?.firstPromptsEnabled == false { history = nil }
+    }
+
     var isSupported: Bool { sender?.daemonAdvertisesConversationHistory == true }
 
     // MARK: Requests
@@ -100,6 +105,14 @@ final class ConversationHistoryStore {
         guard let sender, sender.daemonAdvertisesConversationHistory, !inFlight.contains(sid) else { return }
         inFlight.insert(sid)
         send(sid: sid, startedAt: now())
+    }
+
+    /// The sheet closed (Cancel, or any way out): stop retrying and forget every request in flight. A
+    /// reply that arrives later matches nothing and is ignored; the daemon's reservation for its tag
+    /// lapses on its own (`RESERVED_TAG_TTL`), so no focus is made and nothing is left to clean up here.
+    func cancelResumes() {
+        pending.removeAll()
+        inFlight.removeAll()
     }
 
     private func send(sid: String, startedAt: Date) {
@@ -141,17 +154,20 @@ final class ConversationHistoryStore {
             resumeResults.send((p.sid, .switched))
         case .ready:
             inFlight.remove(p.sid)
-            let focus = Focus(id: p.focusId, agentTag: wire.agent ?? entry(p.sid)?.agent ?? "",
-                              projectPath: wire.projectPath, isBuiltIn: false, label: wire.label,
-                              resumedAt: now())
-            // The daemon reserved `p.tag`; the focus must derive the same one.
-            if focus.sessionTag == (wire.tag ?? p.tag) {
-                resumedSids[focus.sessionTag] = p.sid
-                commitFocus?(focus)
-                resumeResults.send((p.sid, .opened))
-            } else {
+            guard let commitFocus else {
                 resumeResults.send((p.sid, .refused("unavailable")))
+                return
             }
+            var focus = Focus(id: p.focusId, agentTag: wire.agent ?? entry(p.sid)?.agent ?? "",
+                              projectPath: wire.projectPath, isBuiltIn: false,
+                              label: Focus.normalizedLabel(wire.label), resumedAt: now())
+            // The daemon reserved a tag. When this focus would derive another (the agent differs from
+            // the one the request guessed), it adopts the daemon's, so the reservation is never orphaned.
+            let reserved = wire.tag ?? p.tag
+            if focus.sessionTag != reserved { focus.daemonTag = reserved }
+            resumedSids[focus.sessionTag] = p.sid
+            commitFocus(focus)
+            resumeResults.send((p.sid, .opened))
         case .refused:
             if wire.reason == "starting" {
                 if now().timeIntervalSince(p.startedAt) >= Self.startRetryWindow {
@@ -173,6 +189,18 @@ final class ConversationHistoryStore {
 }
 
 extension ConversationHistoryStore {
+    /// A regular `.jsonl` file that really lives under `~/.claude/projects` (symlinks resolved): the
+    /// only thing Show Transcript in Finder will reveal.
+    static func isShowableTranscript(_ path: String, home: URL = FileManager.default.homeDirectoryForCurrentUser) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        guard url.pathExtension == "jsonl" else { return false }
+        let projects = home.appendingPathComponent(".claude/projects").resolvingSymlinksInPath().path + "/"
+        let real = url.resolvingSymlinksInPath()
+        guard real.path.hasPrefix(projects), real.pathExtension == "jsonl" else { return false }
+        guard let values = try? real.resourceValues(forKeys: [.isRegularFileKey]) else { return false }
+        return values.isRegularFile == true
+    }
+
     /// What the app shows when a resumed focus could not open its conversation here.
     static let resumeFailureText = "Claude couldn\u{2019}t open this conversation here."
 
@@ -182,7 +210,7 @@ extension ConversationHistoryStore {
         let alert = NSAlert()
         alert.messageText = resumeFailureText
         alert.alertStyle = .warning
-        let canShow = transcriptPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+        let canShow = transcriptPath.map { isShowableTranscript($0) } ?? false
         if canShow { alert.addButton(withTitle: "Show Transcript in Finder") }
         alert.addButton(withTitle: "OK")
         let finish: (NSApplication.ModalResponse) -> Void = { response in

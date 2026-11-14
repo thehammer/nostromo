@@ -539,13 +539,18 @@ class MainLayout: NSView {
         guard let window else { return }
         let sheet = CreateFocusSheet(switchToTag: { [weak self] tag in
             guard let self, let focus = self.focusStore.focuses.first(where: { $0.sessionTag == tag }) else { return false }
+            // A window that already shows it comes to the front; otherwise this window switches.
+            let layouts = NSApp.windows.compactMap { $0.contentView as? MainLayout }
+            if let shown = layouts.first(where: { $0.activeFocusTag == tag }), shown !== self {
+                shown.window?.makeKeyAndOrderFront(nil)
+                return true
+            }
             self.switchFocus(focus)
             return true
         }) { [weak self] focus in
             guard let self else { return }
-            FocusCreation.commit(focus, store: self.focusStore,
-                                 flushRegistry: { AppStore.shared.pushFocusRegistry() },
-                                 alwaysFlush: focus.resumedAt != nil) { self.switchFocus($0) }
+            FocusCreation.commitFromSheet(focus, store: self.focusStore,
+                                          flushRegistry: { AppStore.shared.pushFocusRegistry() }) { self.switchFocus($0) }
             self.presentedSheet = nil
         }
         presentedSheet = sheet  // retain for the sheet's lifetime
