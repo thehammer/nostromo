@@ -22,6 +22,27 @@ struct QuickAction: Codable, Hashable {
         id: "clear-context", label: "Clear Context", prompt: "", clearFirst: true
     )
 
+    /// Summarize the conversation to free context. Sends the typed `/compact` (the same path as typing
+    /// it, so the daemon answers with one muted record), and keeps the session and its transcript.
+    static let compact = QuickAction(
+        id: "compact", label: "Compact", prompt: "/compact", clearFirst: false
+    )
+
+    /// The strip every REPL focus without quick actions of its own shows, in order.
+    static let replDefaults: [QuickAction] = [.clearContext, .compact]
+
+    /// The tooltip and VoiceOver help of an action that has one; nil for the rest.
+    var help: String? {
+        id == Self.compact.id ? Self.compactHelp : nil
+    }
+
+    static let compactHelp = "Compact: Claude summarizes the conversation to free context. The transcript stays on screen. Unavailable while a turn is running."
+
+    /// What VoiceOver reads for the button, when it differs from the visible label.
+    var accessibilityName: String {
+        id == Self.compact.id ? "Compact conversation" : label
+    }
+
     /// `id` of the built-in "Reset Layout" action (see `Focus.builtIns`).
     /// `ReplView.runQuickAction` matches on this to trigger the D5 client-side
     /// side effect (clear saved ratios, rebuild from the daemon's tree) in

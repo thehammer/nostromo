@@ -42,6 +42,48 @@ enum LocalCommandRecordMetrics {
         return stderr ? "\(chevron)\(name) · error · \(first)" : "\(chevron)\(name) · \(first)"
     }
 
+    /// Tokens as the context meter writes them: `45.1k` from a thousand up, the bare count below.
+    static func compactTokens(_ n: Int) -> String {
+        n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
+    }
+
+    /// The header of a `/compact` record. Success: `/compact · Compacted · 45.1k → 19.7k tokens`
+    /// (`/compact · Compacted` when a number is missing). Failure: `/compact · failed: <why>`.
+    static func compactHeaderLine(args: String, output: String, compact: CompactInfoWire) -> String {
+        let name = args.isEmpty ? "/compact" : "/compact \(args)"
+        if compact.failed {
+            let why = compact.error.flatMap { $0.isEmpty ? nil : $0 } ?? firstLine(of: output) ?? "no reason given"
+            return "\(name)\(failedSeparator)failed: \(why)"
+        }
+        if let pre = compact.preTokens, let post = compact.postTokens {
+            return "\(name) · Compacted · \(compactTokens(pre)) \u{2192} \(compactTokens(post)) tokens"
+        }
+        return "\(name) · Compacted"
+    }
+
+    /// What the failure header puts between the command (with its typed args) and the word `failed`.
+    static let failedSeparator = " · "
+
+    /// The range of the `failed` status word the failure header appended itself: right after the command
+    /// and args, whatever those contain (nil for a header that is not a failure).
+    static func compactFailedWordRange(args: String, compact: CompactInfoWire) -> NSRange? {
+        guard compact.failed else { return nil }
+        let name = args.isEmpty ? "/compact" : "/compact \(args)"
+        return NSRange(location: (name + failedSeparator).utf16.count, length: "failed".utf16.count)
+    }
+
+    /// What VoiceOver says for a `/compact` record, in words.
+    static func compactAccessibilityLabel(compact: CompactInfoWire, output: String) -> String {
+        if compact.failed {
+            let why = compact.error.flatMap { $0.isEmpty ? nil : $0 } ?? firstLine(of: output) ?? "no reason given"
+            return "Compact conversation failed: \(why)"
+        }
+        if let pre = compact.preTokens, let post = compact.postTokens {
+            return "Conversation compacted, from \(compactTokens(pre)) to \(compactTokens(post)) tokens"
+        }
+        return "Conversation compacted"
+    }
+
     /// The TextKit stack the body is drawn with (the view's text view uses this very one).
     static func makeBodyStack(text: String, width: CGFloat) -> (NSTextStorage, NSLayoutManager, NSTextContainer) {
         let style = NSMutableParagraphStyle()
@@ -97,6 +139,7 @@ final class LocalCommandRecordView: NSView, ArithmeticIsland {
     private let args: String
     private let output: String
     private let isError: Bool
+    private let compact: CompactInfoWire?
     private let pasteboard: NSPasteboard
     private let header = NSTextField(labelWithString: "")
     private var body: NSTextView?
@@ -110,12 +153,13 @@ final class LocalCommandRecordView: NSView, ArithmeticIsland {
 
     override var isFlipped: Bool { true }
 
-    init(command: String, args: String, output: String, stream: String, startExpanded: Bool,
-         pasteboard: NSPasteboard = .general) {
+    init(command: String, args: String, output: String, stream: String, compact: CompactInfoWire? = nil,
+         startExpanded: Bool, pasteboard: NSPasteboard = .general) {
         self.command = command
         self.args = args
         self.output = output
         self.isError = stream == "stderr"
+        self.compact = command == "compact" ? compact : nil
         self.pasteboard = pasteboard
         self.isExpanded = startExpanded && LocalCommandRecordMetrics.isExpandable(output)
         super.init(frame: .zero)
@@ -186,13 +230,21 @@ final class LocalCommandRecordView: NSView, ArithmeticIsland {
 
     // MARK: State
 
+    private func compactFailedWordRange(in line: String) -> NSRange? {
+        guard let compact else { return nil }
+        return LocalCommandRecordMetrics.compactFailedWordRange(args: args, compact: compact)
+    }
+
     private func applyState() {
-        let line = LocalCommandRecordMetrics.headerLine(command: command, args: args, output: output,
+        let compactLine = compact.map { LocalCommandRecordMetrics.compactHeaderLine(args: args, output: output, compact: $0) }
+        let line = compactLine ?? LocalCommandRecordMetrics.headerLine(command: command, args: args, output: output,
                                                          stderr: isError, expanded: isExpanded)
         let text = NSMutableAttributedString(string: line, attributes: [
             .font: LocalCommandRecordMetrics.headerFont, .foregroundColor: Theme.fgMuted,
         ])
-        if isError, let r = line.range(of: " · error · ") {
+        if let word = compactFailedWordRange(in: line) {
+            text.addAttribute(.foregroundColor, value: Theme.amber, range: word)
+        } else if isError, let r = line.range(of: " · error · ") {
             let word = (line as NSString).range(of: "error", range: NSRange(r, in: line))
             text.addAttribute(.foregroundColor, value: Theme.amber, range: word)
         }
@@ -222,7 +274,8 @@ final class LocalCommandRecordView: NSView, ArithmeticIsland {
     }
 
     private var accessibilityLabelText: String {
-        "Command /\(command), output \(isExpanded ? "expanded" : "collapsed")"
+        if let compact { return LocalCommandRecordMetrics.compactAccessibilityLabel(compact: compact, output: output) }
+        return "Command /\(command), output \(isExpanded ? "expanded" : "collapsed")"
     }
 
     // MARK: Mouse and keyboard

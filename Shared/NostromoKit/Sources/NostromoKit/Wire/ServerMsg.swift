@@ -468,10 +468,12 @@ public enum TurnOriginWire: Codable, Equatable {
     /// A slash command the CLI answered itself, with no model turn (`/context`, `/model haiku`):
     /// shown as a muted, collapsible record, never as a message from the user. `stream` is `stdout`
     /// or `stderr`; `output` has the CLI's wrapper removed.
-    case localCommand(command: String, args: String, output: String, stream: String, truncated: Bool)
+    /// `compact` is set only on a `/compact` record: the tokens before and after, or why it failed.
+    case localCommand(command: String, args: String, output: String, stream: String, truncated: Bool,
+                      compact: CompactInfoWire? = nil)
 
     private enum K: String, CodingKey { case type, items, omitted, kind, title, text, truncated
-        case command, args, output, stream }
+        case command, args, output, stream, compact }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -522,7 +524,9 @@ public enum TurnOriginWire: Codable, Equatable {
                 args: (try? c.decodeIfPresent(String.self, forKey: .args)) ?? "",
                 output: (try? c.decodeIfPresent(String.self, forKey: .output)) ?? "",
                 stream: (try? c.decodeIfPresent(String.self, forKey: .stream)) ?? "stdout",
-                truncated: (try? c.decodeIfPresent(Bool.self, forKey: .truncated)) ?? false)
+                truncated: (try? c.decodeIfPresent(Bool.self, forKey: .truncated)) ?? false,
+                // Absent or malformed means no compaction detail, never a failed turn.
+                compact: (try? c.decodeIfPresent(CompactInfoWire.self, forKey: .compact)) ?? nil)
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c,
                 debugDescription: "unknown TurnOrigin type: \(other)")
@@ -555,13 +559,14 @@ public enum TurnOriginWire: Codable, Equatable {
             try c.encode(title, forKey: .title)
             try c.encode(text, forKey: .text)
             if truncated { try c.encode(true, forKey: .truncated) }
-        case .localCommand(let command, let args, let output, let stream, let truncated):
+        case .localCommand(let command, let args, let output, let stream, let truncated, let compact):
             try c.encode("local_command", forKey: .type)
             try c.encode(command, forKey: .command)
             try c.encode(args, forKey: .args)
             try c.encode(output, forKey: .output)
             try c.encode(stream, forKey: .stream)
             if truncated { try c.encode(true, forKey: .truncated) }
+            if let compact { try c.encode(compact, forKey: .compact) }
         }
     }
 
@@ -1186,5 +1191,39 @@ extension ServerMsg {
         }
 
         return .unknown
+    }
+}
+
+/// What a `/compact` did, as the daemon reports it on the record's origin. Every field is optional on
+/// the wire: a number that is missing or not a number reads as nil, so one odd field never costs the record.
+public struct CompactInfoWire: Codable, Equatable {
+    public var preTokens: Int?
+    public var postTokens: Int?
+    public var failed: Bool
+    public var error: String?
+
+    public init(preTokens: Int? = nil, postTokens: Int? = nil, failed: Bool = false, error: String? = nil) {
+        self.preTokens = preTokens
+        self.postTokens = postTokens
+        self.failed = failed
+        self.error = error
+    }
+
+    private enum K: String, CodingKey { case preTokens = "pre_tokens", postTokens = "post_tokens", failed, error }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        preTokens = (try? c.decodeIfPresent(Int.self, forKey: .preTokens)) ?? nil
+        postTokens = (try? c.decodeIfPresent(Int.self, forKey: .postTokens)) ?? nil
+        failed = (try? c.decodeIfPresent(Bool.self, forKey: .failed)) ?? false
+        error = (try? c.decodeIfPresent(String.self, forKey: .error)) ?? nil
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: K.self)
+        try c.encodeIfPresent(preTokens, forKey: .preTokens)
+        try c.encodeIfPresent(postTokens, forKey: .postTokens)
+        if failed { try c.encode(true, forKey: .failed) }
+        try c.encodeIfPresent(error, forKey: .error)
     }
 }

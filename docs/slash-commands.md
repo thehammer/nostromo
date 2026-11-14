@@ -109,6 +109,41 @@ unknown-origin fallback: a Swift decode of an unknown `TurnOrigin` throws and `D
 origin; Rust reads one as `TurnOrigin::Unknown`). A newer Mac against an older daemon sees no feature flag,
 shows the fallback picker and keeps today's echo.
 
+## Compact
+
+A **Compact** button sits beside Clear Context in the quick-action strip of every REPL focus that has no quick
+actions of its own (`QuickAction.replDefaults`). Typed `/compact` does the same thing.
+
+**Path.** There is no compaction control request (Claude Code 2.1.318 answers `Unsupported control request
+subtype: compact`), so the button sends the typed text `/compact` through `ChatSession.send`, exactly what a
+user typing it does. Plan 1's pending-command echo and record apply: no operator bubble.
+
+**Events** (live, in order): `system/status` `compacting`; `system/status` with `compact_result`; `system/init`;
+`system/compact_boundary` (`compact_metadata`: `trigger`, `pre_tokens`, `post_tokens`); the summary user line
+(`isSynthetic`, the existing summary marker); the `<local-command-stdout>Compacted </local-command-stdout>` user
+line (form B, the record); a `result` with `num_turns: 0`. Stored: the same boundary in camelCase
+(`compactMetadata`), the summary (`isCompactSummary`), the caveat, `<command-name>/compact`, the stdout line.
+`ParsedLine::Compaction` reads both spellings. A boundary sets the context figure to `post_tokens`, whatever
+its trigger, so the context meter drops. A boundary with `trigger: "manual"`, or a failed `compact_result`, is
+held as `pending_compact` and is taken by the next `/compact` record as `origin.compact`
+(`pre_tokens`, `post_tokens`, `failed`, `error`); any other turn starting clears it. An **auto** boundary makes
+no record: it only updates the context figure, and the summary marker stays as it is. A `/compact` in an empty
+session gets no compaction status at all: the CLI prints `Error: No messages to compact` (form A, stderr), which is
+an ordinary error record.
+
+**The record** reads `/compact · Compacted · 45.1k → 19.7k tokens` (`/compact · Compacted` when a number is
+missing) or `/compact · failed: <why>` with "failed" in amber.
+
+**Disabled while busy.** The daemon queues a message sent mid-turn, so a click would do nothing visible for
+minutes. Compact is instead dimmed, with its reason in the tooltip and accessibility help, while a turn or a
+compaction runs, while the session is not alive, and from the click until the record or the turn's end.
+
+**No confirmation.** It loses nothing the user cannot get back: the on-screen transcript, the stored JSONL and
+the session's approval rules (the CLI process lives on) all stay; only the model's working context is
+summarized. That matches Clear Context's one-tap model; New Session confirms because it does lose Claude's memory.
+Not to be confused with the Mac's memory "compaction" of cold turn payloads (`ChatSession.compactColdTurns`), which
+is unrelated.
+
 ## Assumptions and what is NOT verified
 
 * **Assumption (decided):** prompt-type commands (skills, custom commands) are real prompts that run a

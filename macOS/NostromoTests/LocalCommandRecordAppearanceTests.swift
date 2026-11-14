@@ -307,4 +307,46 @@ final class LocalCommandRecordAppearanceTests: XCTestCase {
             }
         }
     }
+
+    // MARK: Compact header
+
+    func testTheCompactHeaderArrowAndFinalNumberAreDrawnInsideTheViewAtANarrowWidth() throws {
+        let width: CGFloat = 260
+        let view = LocalCommandRecordView(command: "compact", args: "", output: "Compacted", stream: "stdout",
+                                          compact: CompactInfoWire(preTokens: 45_123, postTokens: 19_700),
+                                          startExpanded: false)
+        XCTAssertEqual(view.headerText, "/compact \u{00B7} Compacted \u{00B7} 45.1k \u{2192} 19.7k tokens")
+        let height = view.arithmeticHeight(atWidth: width)
+        let window = makeWindow(NSSize(width: width, height: height))
+        let host = RecordHost(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        host.wantsLayer = true
+        host.layer?.backgroundColor = Theme.bg.cgColor
+        window.contentView = host
+        view.frame = host.bounds
+        host.addSubview(view)
+        host.layoutSubtreeIfNeeded()
+        view.layoutSubtreeIfNeeded()
+        host.displayIfNeeded()
+        let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+        host.cacheDisplay(in: host.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / width
+
+        // Ink columns of the header row: where the text is actually drawn, in points from the left.
+        var inkColumns: [Int] = []
+        let headerRows = Int((LocalCommandRecordMetrics.headerHeight * scale).rounded(.up))
+        for x in 0 ..< rep.pixelsWide {
+            for y in 0 ..< min(headerRows, rep.pixelsHigh) {
+                if let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), isInk(c) { inkColumns.append(x); break }
+            }
+        }
+        let lastInk = try XCTUnwrap(inkColumns.max(), "the compact header drew nothing")
+        // The label's own layout: the whole line must fit, with its last glyph's ink inside the bounds.
+        let label = view.headerFrame
+        XCTAssertLessThanOrEqual(label.maxX, width, "the header label ends inside the view")
+        XCTAssertLessThan(CGFloat(lastInk) / scale, width, "the last digit of 19.7k is drawn inside the view")
+        XCTAssertGreaterThan(CGFloat(lastInk) / scale, width * 0.5, "the line was drawn out to its end, not cut short")
+        let text = NSAttributedString(string: view.headerText, attributes: [.font: LocalCommandRecordMetrics.headerFont])
+        XCTAssertLessThanOrEqual(ceil(text.size().width) + label.minX, width,
+                                 "the whole compact header fits at \(width) pt, so neither the arrow nor the last digit is clipped")
+    }
 }

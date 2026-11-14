@@ -8722,6 +8722,7 @@ mod slash_commands_wire_tests {
             output: "Set model to Haiku".into(),
             stream: "stderr".into(),
             truncated: true,
+            compact: None,
         };
 
         let wire = value_of(&origin);
@@ -8747,6 +8748,7 @@ mod slash_commands_wire_tests {
                 output: String::new(),
                 stream: "stdout".into(),
                 truncated: false,
+                compact: None,
             }
         );
         // And it writes no more than it has to.
@@ -8779,6 +8781,7 @@ mod slash_commands_wire_tests {
                 output: "12k".into(),
                 stream: "stdout".into(),
                 truncated: false,
+                compact: None,
             }),
         };
         let msg = ServerMsg::SessionTurnDelta {
