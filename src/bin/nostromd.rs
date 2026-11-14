@@ -1094,16 +1094,21 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
         let (pr_rx, pr_refresh_tx) =
             PerriPrNativeSource::spawn(self.config.clone(), Some(live_focuses));
 
+        // The Jira site is resolved once here (it reads a file) and rides on
+        // every `PerriState` frame, for the Mac's host allowlist.
+        let jira_site =
+            nostromo::data::work::credentials::JiraSite::from_config(&self.config).lookup();
+
         // f1: attach-replay for `ServerMsg::PerriState` (see `PerriStateProvider`).
         // Registered here, not inside the `write_bridge_mcp_config()` success arm:
         // Perri replay has nothing to do with the MCP bridge.
         self.session_mgr
             .lock()
             .unwrap()
-            .configure_perri_state_provider(Arc::new(WatchPerriStateProvider::new(
-                queue_rx.clone(),
-                pr_rx.clone(),
-            )));
+            .configure_perri_state_provider(Arc::new(
+                WatchPerriStateProvider::new(queue_rx.clone(), pr_rx.clone())
+                    .with_jira_site(jira_site.clone()),
+            ));
         nostromo::agents::PerriSources {
             queue_rx,
             queue_refresh_tx,
@@ -1170,6 +1175,7 @@ impl nostromo::agents::AgentSpawner for RealAgentSpawner {
             Arc::clone(&self.session_mgr),
             queue_rx,
             pr_rx,
+            nostromo::data::work::credentials::JiraSite::from_config(&self.config).lookup(),
         ));
     }
 
@@ -1210,17 +1216,21 @@ async fn run_perri_broadcaster(
     session_mgr: Arc<Mutex<SessionManager>>,
     mut queue_rx: tokio::sync::watch::Receiver<Option<PrQueueSnapshot>>,
     mut pr_rx: tokio::sync::watch::Receiver<PrSnapshots>,
+    jira_site: Option<String>,
 ) {
-    fn broadcast(
-        tx: &broadcast::Sender<ServerMsg>,
-        tags: &[String],
-        queue: Option<&PrQueueSnapshot>,
-        prs: &PrSnapshots,
-    ) {
+    let broadcast = |tx: &broadcast::Sender<ServerMsg>,
+                     tags: &[String],
+                     queue: Option<&PrQueueSnapshot>,
+                     prs: &PrSnapshots| {
         for tag in tags {
-            let _ = tx.send(build_perri_state(tag, queue, prs.get(tag).map(|s| &**s)));
+            let _ = tx.send(build_perri_state(
+                tag,
+                queue,
+                prs.get(tag).map(|s| &**s),
+                jira_site.as_deref(),
+            ));
         }
-    }
+    };
 
     let mut previous: PrSnapshots = pr_rx.borrow().clone();
 

@@ -210,7 +210,10 @@ async fn load_pr_daemon(
     // way.
     let had_review_tabs = show::has_review_tabs(daemon, &tag);
     show::reset_for_pr_change(daemon, &tag, Some((repo, number)));
-    if had_review_tabs && !show::has_review_tabs(daemon, &tag) {
+    // In a Perri focus loading a PR opens nothing: the user opens its
+    // conversation, diff or ticket from the queue row.
+    let perri_focus = show::is_perri_focus(daemon, &tag);
+    if !perri_focus && had_review_tabs && !show::has_review_tabs(daemon, &tag) {
         show::recreate_detail_region_for_pr(daemon, &tag, repo, number);
     }
 
@@ -354,6 +357,10 @@ async fn load_pr_daemon(
     // no unresolvable-tag case left to report emptily for; that caller was
     // already refused.
     let mut result = json!({ "ok": true, "pane_ids": &targets });
+    if perri_focus {
+        result["views_opened"] = json!(false);
+        result["note"] = json!("Perri focus: loading a PR opens no view; the user opens Conversation, Diff or Ticket from the queue row.");
+    }
     if let Some(wait) = pending {
         // The machine-readable field has to carry the distinction, not just
         // the prose. `pending: true` for a `SourceGone` said "in flight,

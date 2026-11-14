@@ -37,7 +37,9 @@
 use serde_json::{json, Value};
 
 use crate::data::file_source::FileSourceError;
+use crate::data::perri_current_pr::BUILTIN_PERRI_TAG;
 use crate::ipc::pane_registry::{PaneError, SplitPosition};
+use crate::ipc::peer::is_perri_agent;
 use crate::ipc::protocol::{Anchor, Emphasis, PaneContentWire, ServerMsg};
 use crate::mcp::pane_sources::{broadcast_pane_content, broadcast_pane_content_with_address};
 use crate::mcp::state::{DaemonMcpBackend, McpSharedState};
@@ -51,8 +53,43 @@ use crate::mcp::views::{
     ShowRequest, ViewIdentity, ViewType,
 };
 
-/// Handle `nostromo.show`.
+/// Who is asking for a view. An agent's `nostromo.show` is refused in a Perri
+/// focus (the user opens PR views there); a user's click is not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Agent,
+    User,
+}
+
+/// Handle `nostromo.show` called by an agent (the MCP dispatch).
 pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) -> Value {
+    show_from(state, args, pty_id, Origin::Agent).await
+}
+
+/// A show the user asked for (a tracker-link click): never refused for being
+/// in a Perri focus.
+pub async fn show_for_user(state: &McpSharedState, args: &Value, tag: &str) -> Value {
+    show_from(state, args, Some(tag), Origin::User).await
+}
+
+/// Is `tag` a Perri focus: its registered agent is Perri, or, with no registry
+/// entry at all, it is the built-in `perri` tag.
+pub fn is_perri_focus(daemon: &DaemonMcpBackend, tag: &str) -> bool {
+    let Ok(mgr) = daemon.session_mgr.lock() else {
+        return tag == BUILTIN_PERRI_TAG;
+    };
+    match mgr.focus_registry().into_iter().find(|f| f.tag == tag) {
+        Some(f) => is_perri_agent(&f.agent_name),
+        None => tag == BUILTIN_PERRI_TAG,
+    }
+}
+
+async fn show_from(
+    state: &McpSharedState,
+    args: &Value,
+    pty_id: Option<&str>,
+    origin: Origin,
+) -> Value {
     let Some(daemon) = &state.daemon else {
         return json!({
             "error": "not_supported",
@@ -98,6 +135,18 @@ pub async fn show(state: &McpSharedState, args: &Value, pty_id: Option<&str>) ->
         return json!({ "error": "unidentified_caller" });
     };
     let tag = tag.to_string();
+
+    // In a Perri focus the user opens PR views from the queue row; an agent's
+    // show is a polite no-op, before any placement, fetch or mutation.
+    if origin == Origin::Agent && view_type != ViewType::ReviewQueue && is_perri_focus(daemon, &tag)
+    {
+        return json!({
+            "ok": true,
+            "shown": false,
+            "reason_code": "perri_focus_user_opens",
+            "detail": "This is a Perri focus: PR views open only when the user clicks Conversation, Diff or Ticket on a queue row. Nothing was opened and there is nothing to retry. Cite the location in your reply instead (repo, path:line, or the ticket key).",
+        });
+    }
 
     let cfg = match views_config::load() {
         Ok(c) => c,
@@ -935,7 +984,10 @@ pub fn descriptor() -> Value {
     ticket          — an issue-tracker ticket. target {provider, key}.\n\n\
     Showing the same (type, target) twice reuses one tab and re-anchors it — showing the \
     same file at a different line is the same view, not a second tab. `activity` is not \
-    showable: the ambient activity stream is populated only by what actually happened.",
+    showable: the ambient activity stream is populated only by what actually happened.\n\n\
+    In a Perri focus every type except `review_queue` returns `shown: false` \
+    (`reason_code: perri_focus_user_opens`) and opens nothing: the user opens PR views from \
+    the queue row. Cite the location in your reply instead.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1021,13 +1073,13 @@ mod tests {
             teri: true,
         };
         for ty in ["review_queue", "pr_diff", "pr_conversation"] {
-            let out = show(&state, &json!({ "type": ty }), Some("perri")).await;
+            let out = show(&state, &json!({ "type": ty }), Some("work")).await;
             assert_eq!(out["error"], "unknown_view_type", "for {ty}");
         }
         let out = show(
             &state,
             &json!({ "type": "file", "target": { "path": "" } }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
         assert_ne!(out["error"], "unknown_view_type");
@@ -1123,15 +1175,15 @@ mod tests {
     #[tokio::test]
     async fn a_type_outside_the_vocabulary_is_refused_and_names_the_valid_types() {
         let (state, mut rx) = make_state();
-        seed_curated(&state, "perri");
-        let before = tree_of(&state, "perri");
+        seed_curated(&state, "work");
+        let before = tree_of(&state, "work");
 
-        let out = show(&state, &json!({ "type": "terminal" }), Some("perri")).await;
+        let out = show(&state, &json!({ "type": "terminal" }), Some("work")).await;
         assert_eq!(out["error"], "unknown_view_type");
         for t in ViewType::ALL {
             assert!(out["detail"].as_str().unwrap().contains(t.as_str()));
         }
-        assert_eq!(tree_of(&state, "perri"), before, "layout untouched");
+        assert_eq!(tree_of(&state, "work"), before, "layout untouched");
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
                 .await
@@ -1143,8 +1195,8 @@ mod tests {
     #[tokio::test]
     async fn an_activity_show_is_refused_with_its_own_distinct_error() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
-        let out = show(&state, &json!({ "type": "activity" }), Some("perri")).await;
+        seed_curated(&state, "work");
+        let out = show(&state, &json!({ "type": "activity" }), Some("work")).await;
         assert_eq!(out["error"], "activity_not_pushable");
         assert_ne!(out["error"], "unknown_view_type");
     }
@@ -1152,9 +1204,9 @@ mod tests {
     #[tokio::test]
     async fn a_missing_type_is_refused_rather_than_defaulted() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
         assert_eq!(
-            show(&state, &json!({}), Some("perri")).await["error"],
+            show(&state, &json!({}), Some("work")).await["error"],
             "unknown_view_type"
         );
     }
@@ -1164,8 +1216,8 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_target_is_refused_and_leaves_the_layout_untouched() {
         let (state, mut rx) = make_state();
-        seed_curated(&state, "perri");
-        let before = tree_of(&state, "perri");
+        seed_curated(&state, "work");
+        let before = tree_of(&state, "work");
 
         for args in [
             json!({ "type": "pr_diff" }),
@@ -1175,11 +1227,11 @@ mod tests {
             json!({ "type": "file", "target": { "path": "" } }),
             json!({ "type": "ticket", "target": { "provider": "jira" } }),
         ] {
-            let out = show(&state, &args, Some("perri")).await;
+            let out = show(&state, &args, Some("work")).await;
             assert_eq!(out["error"], "invalid_target", "for {args}");
             assert!(!out["detail"].as_str().unwrap().is_empty());
         }
-        assert_eq!(tree_of(&state, "perri"), before);
+        assert_eq!(tree_of(&state, "work"), before);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
                 .await
@@ -1190,7 +1242,7 @@ mod tests {
     #[tokio::test]
     async fn an_anchor_of_the_wrong_kind_for_the_view_is_refused_rather_than_dropped() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
         let out = show(
             &state,
             &json!({
@@ -1198,7 +1250,7 @@ mod tests {
                 "target": { "path": "a.rs" },
                 "anchor": { "kind": "comment", "id": "c1" }
             }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
         assert_eq!(out["error"], "invalid_anchor");
@@ -1207,7 +1259,7 @@ mod tests {
     #[tokio::test]
     async fn an_emphasis_of_the_wrong_kind_for_the_view_is_refused() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
         let out = show(
             &state,
             &json!({
@@ -1215,7 +1267,7 @@ mod tests {
                 "target": { "path": "a.rs" },
                 "emphasis": [{ "kind": "section", "name": "x" }]
             }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
         assert_eq!(out["error"], "invalid_emphasis");
@@ -1235,9 +1287,9 @@ mod tests {
     #[tokio::test]
     async fn showing_the_review_queue_reports_where_it_landed_and_broadcasts_layout_then_content() {
         let (state, mut rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
 
-        let out = show(&state, &json!({ "type": "review_queue" }), Some("perri")).await;
+        let out = show(&state, &json!({ "type": "review_queue" }), Some("work")).await;
         assert_eq!(out["ok"], true);
         assert_eq!(
             out["region"], "detail",
@@ -1276,7 +1328,7 @@ mod tests {
     #[tokio::test]
     async fn a_review_queue_row_anchor_reaches_the_wire_as_the_panes_address() {
         let (state, mut rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
 
         show(
             &state,
@@ -1286,7 +1338,7 @@ mod tests {
                 "emphasis": [{ "kind": "queue_row", "repo": "o/r", "number": 94 }],
                 "reason": "this one next"
             }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
 
@@ -1319,11 +1371,11 @@ mod tests {
         // `source_params` is where the other four's `reason` is built, and it
         // is exercised directly below.
         let (state, mut rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
         show(
             &state,
             &json!({ "type": "review_queue", "reason": "unbounded retry loop" }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
         let _ = rx.recv().await.unwrap();
@@ -1526,7 +1578,7 @@ mod tests {
     /// is under review, so they exercise the whole place→apply→broadcast path
     /// without a network or a fixture.
     async fn show_ok(state: &McpSharedState, args: Value) -> Value {
-        let out = show(state, &args, Some("perri")).await;
+        let out = show(state, &args, Some("work")).await;
         assert_eq!(out["ok"], true, "expected a successful show, got {out}");
         out
     }
@@ -1542,8 +1594,8 @@ mod tests {
         // reset_panes, apply_layout, or refresh_pane_content". This test calls
         // none of them — the focus starts as a bare repl leaf.
         let (state, _rx) = make_state();
-        registry(&state).lock().unwrap().get_or_init("perri");
-        assert_eq!(tree_of(&state, "perri"), Some(PaneTree::repl_leaf()));
+        registry(&state).lock().unwrap().get_or_init("work");
+        assert_eq!(tree_of(&state, "work"), Some(PaneTree::repl_leaf()));
 
         let queue = show_ok(&state, json!({ "type": "review_queue" })).await;
         assert_eq!(
@@ -1560,7 +1612,7 @@ mod tests {
         .await;
         assert_eq!(diff["region"], "detail");
 
-        let tree = tree_of(&state, "perri").unwrap();
+        let tree = tree_of(&state, "work").unwrap();
         let ids = tree.pane_ids();
         assert!(ids.contains(&"queue".to_string()));
         assert!(ids.contains(&"repl".to_string()));
@@ -1586,8 +1638,8 @@ mod tests {
     #[tokio::test]
     async fn a_pr_show_adds_a_tab_beside_the_queue_in_the_same_region() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
-        let before = tree_of(&state, "perri").unwrap();
+        seed_curated(&state, "work");
+        let before = tree_of(&state, "work").unwrap();
         assert!(
             view_tree::tabs_region(&before, "detail").is_some(),
             "the region exists from the start"
@@ -1599,7 +1651,7 @@ mod tests {
         )
         .await;
 
-        let after = tree_of(&state, "perri").unwrap();
+        let after = tree_of(&state, "work").unwrap();
         let ids = after.pane_ids();
         assert_eq!(
             ids,
@@ -1614,8 +1666,8 @@ mod tests {
     #[tokio::test]
     async fn clearing_the_pr_closes_the_review_tabs_but_the_queue_tab_stays() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
-        let before = tree_of(&state, "perri").unwrap();
+        seed_curated(&state, "work");
+        let before = tree_of(&state, "work").unwrap();
 
         show_ok(
             &state,
@@ -1627,18 +1679,18 @@ mod tests {
             json!({ "type": "pr_conversation", "target": pr_target(94) }),
         )
         .await;
-        assert!(view_tree::tabs_region(&tree_of(&state, "perri").unwrap(), "detail").is_some());
+        assert!(view_tree::tabs_region(&tree_of(&state, "work").unwrap(), "detail").is_some());
 
         // Clearing the PR under review closes every review tab (R8). The queue
         // belongs to no PR: it stays, as the way back.
         let daemon = state.daemon.as_ref().unwrap();
-        let closed = reset_for_pr_change(daemon, "perri", None);
+        let closed = reset_for_pr_change(daemon, "work", None);
         assert!(
             !closed.contains(&"queue".to_string()),
             "closed the queue: {closed:?}"
         );
 
-        let after = tree_of(&state, "perri").unwrap();
+        let after = tree_of(&state, "work").unwrap();
         assert!(
             view_tree::tabs_region(&after, "detail").is_some(),
             "the region survives: it still holds the queue"
@@ -1659,13 +1711,13 @@ mod tests {
         // Showing anything must work on it (the queue's fixed pane id would
         // otherwise be refused as taken) and must leave the queue as the first tab.
         let (state, mut rx) = make_state();
-        seed_old_queue_beside_detail(&state, "perri");
+        seed_old_queue_beside_detail(&state, "work");
 
         let out = show_ok(&state, json!({ "type": "review_queue" })).await;
 
         assert_eq!(out["region"], "detail");
         assert_eq!(out["pane_id"], "queue");
-        let tree = tree_of(&state, "perri").unwrap();
+        let tree = tree_of(&state, "work").unwrap();
         assert!(
             !view_tree::has_bare_queue(&tree),
             "the queue is a tab now: {tree:?}"
@@ -1686,7 +1738,7 @@ mod tests {
     #[tokio::test]
     async fn changing_the_pr_under_review_closes_the_previous_prs_tabs() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
         show_ok(
             &state,
             json!({ "type": "pr_diff", "target": pr_target(94) }),
@@ -1697,12 +1749,12 @@ mod tests {
             json!({ "type": "pr_conversation", "target": pr_target(94) }),
         )
         .await;
-        let old_ids: Vec<String> = tree_of(&state, "perri").unwrap().pane_ids();
+        let old_ids: Vec<String> = tree_of(&state, "work").unwrap().pane_ids();
 
         let daemon = state.daemon.as_ref().unwrap();
-        reset_for_pr_change(daemon, "perri", Some(("thehammer/nostromo", 95)));
+        reset_for_pr_change(daemon, "work", Some(("thehammer/nostromo", 95)));
 
-        let after = tree_of(&state, "perri").unwrap();
+        let after = tree_of(&state, "work").unwrap();
         for gone in old_ids.iter().filter(|id| id.starts_with("detail.")) {
             assert!(
                 !after.pane_ids().contains(gone),
@@ -1715,7 +1767,7 @@ mod tests {
         let reg = reg.lock().unwrap();
         for gone in old_ids.iter().filter(|id| id.starts_with("detail.")) {
             assert!(
-                reg.binding_for("perri", gone).is_none(),
+                reg.binding_for("work", gone).is_none(),
                 "{gone} still bound"
             );
         }
@@ -1729,9 +1781,9 @@ mod tests {
         {
             let reg = registry(&state);
             let mut reg = reg.lock().unwrap();
-            reg.get_or_init("perri");
+            reg.get_or_init("work");
             reg.set_layout(
-                "perri",
+                "work",
                 &json!({ "tree": PaneTree::Split {
                     direction: SplitDirection::Vertical,
                     children: vec![
@@ -1749,24 +1801,24 @@ mod tests {
                 }}),
             )
             .unwrap();
-            reg.bind_source("perri", "queue", SOURCE_PR_QUEUE);
-            reg.bind_source("perri", "diff", "perri.get_current_pr");
+            reg.bind_source("work", "queue", SOURCE_PR_QUEUE);
+            reg.bind_source("work", "diff", "perri.get_current_pr");
         }
-        let before = tree_of(&state, "perri");
+        let before = tree_of(&state, "work");
 
         let daemon = state.daemon.as_ref().unwrap();
-        reset_for_pr_change(daemon, "perri", Some(("thehammer/nostromo", 95)));
-        reset_for_pr_change(daemon, "perri", None);
+        reset_for_pr_change(daemon, "work", Some(("thehammer/nostromo", 95)));
+        reset_for_pr_change(daemon, "work", None);
 
-        assert_eq!(tree_of(&state, "perri"), before);
+        assert_eq!(tree_of(&state, "work"), before);
         {
             let reg = registry(&state);
             let reg = reg.lock().unwrap();
             assert!(
-                reg.binding_for("perri", "diff").is_some(),
+                reg.binding_for("work", "diff").is_some(),
                 "the diff pane keeps its binding"
             );
-            assert!(reg.binding_for("perri", "queue").is_some());
+            assert!(reg.binding_for("work", "queue").is_some());
         }
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
@@ -1779,7 +1831,7 @@ mod tests {
     #[tokio::test]
     async fn showing_the_same_view_twice_reuses_one_tab_and_re_addresses_it() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
         let first = show_ok(
             &state,
             json!({ "type": "pr_diff", "target": pr_target(94) }),
@@ -1798,7 +1850,7 @@ mod tests {
         assert_eq!(second["pane_id"], first["pane_id"]);
         assert_eq!(second["reused"], true);
         assert_eq!(
-            tree_of(&state, "perri")
+            tree_of(&state, "work")
                 .unwrap()
                 .pane_ids()
                 .iter()
@@ -1812,7 +1864,7 @@ mod tests {
     #[tokio::test]
     async fn a_reused_show_re_binds_the_pane_with_the_new_address_params() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
         show_ok(
             &state,
             json!({ "type": "pr_diff", "target": pr_target(94) }),
@@ -1830,7 +1882,7 @@ mod tests {
         let pane_id = out["pane_id"].as_str().unwrap().to_string();
         let reg = registry(&state);
         let reg = reg.lock().unwrap();
-        let binding = reg.binding_for("perri", &pane_id).unwrap();
+        let binding = reg.binding_for("work", &pane_id).unwrap();
         assert_eq!(binding.source, SOURCE_PR_DIFF);
         assert_eq!(
             binding.params.as_ref().unwrap()["reason"],
@@ -1984,13 +2036,13 @@ mod tests {
     async fn a_failing_file_show_with_an_implicit_revision_carries_the_current_pin_when_one_exists()
     {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
-        seed_pin(&state, "perri", "acme/web", 42);
+        seed_curated(&state, "work");
+        seed_pin(&state, "work", "acme/web", 42);
 
         let out = show(
             &state,
             &json!({ "type": "file", "target": { "path": "does/not/exist.rs" } }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
 
@@ -2005,13 +2057,13 @@ mod tests {
     #[tokio::test]
     async fn a_failing_file_show_with_no_pr_pinned_carries_no_current_pin_key_at_all() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
         // Default state: perri_pr_rx is None — no PR pinned.
 
         let out = show(
             &state,
             &json!({ "type": "file", "target": { "path": "does/not/exist.rs" } }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
 
@@ -2026,8 +2078,8 @@ mod tests {
     async fn a_failing_file_show_with_an_explicit_revision_carries_no_current_pin_even_when_one_is_pinned(
     ) {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
-        seed_pin(&state, "perri", "acme/web", 42);
+        seed_curated(&state, "work");
+        seed_pin(&state, "work", "acme/web", 42);
 
         // "HEAD" resolves locally (this test runs inside a real git checkout),
         // so the missing path fails with a plain `UnknownPath` — never
@@ -2041,7 +2093,7 @@ mod tests {
                 "type": "file",
                 "target": { "path": "does/not/exist.rs", "revision": "HEAD" }
             }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
 
@@ -2063,13 +2115,13 @@ mod tests {
     async fn a_revision_repo_mismatch_refusal_carries_the_current_pin_even_with_an_explicit_revision(
     ) {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
+        seed_curated(&state, "work");
         // Pinned repo can't possibly match this checkout's own remote, and
         // "deadbeef" isn't a resolvable revision here — so the local read
         // fails as `UnresolvableRevision`, `resolve_via_github_fallback` sees
         // a pin whose repo doesn't match this checkout, and refuses with
         // `RevisionRepoMismatch` instead of fetching foreign content.
-        seed_pin(&state, "perri", "acme/web", 42);
+        seed_pin(&state, "work", "acme/web", 42);
 
         let out = show(
             &state,
@@ -2077,7 +2129,7 @@ mod tests {
                 "type": "file",
                 "target": { "path": "does/not/exist.rs", "revision": "deadbeef" }
             }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
 
@@ -2098,8 +2150,8 @@ mod tests {
     #[tokio::test]
     async fn a_failing_non_file_show_never_carries_current_pin_even_when_a_pr_is_pinned() {
         let (state, _rx) = make_state();
-        seed_curated(&state, "perri");
-        seed_pin(&state, "perri", "acme/web", 42);
+        seed_curated(&state, "work");
+        seed_pin(&state, "work", "acme/web", 42);
 
         // `TicketRegistryState::default()` registers no providers, so this
         // fetch fails with `unsupported_provider` — a real, non-file fetch
@@ -2107,7 +2159,7 @@ mod tests {
         let out = show(
             &state,
             &json!({ "type": "ticket", "target": { "provider": "jira", "key": "X-1" } }),
-            Some("perri"),
+            Some("work"),
         )
         .await;
 

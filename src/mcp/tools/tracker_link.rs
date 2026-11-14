@@ -33,7 +33,7 @@ pub async fn open_link(
         .link_of(tag, item_id, link_index)
         .ok_or_else(|| "unknown_link".to_string())?;
     let args = show_args(&link, binding.as_ref())?;
-    let reply = show::show(state, &args, Some(tag)).await;
+    let reply = show::show_for_user(state, &args, tag).await;
     match reply.get("error").and_then(Value::as_str) {
         Some(error) => Err(error.to_string()),
         None => Ok(()),

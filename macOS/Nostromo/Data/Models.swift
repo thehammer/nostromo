@@ -77,6 +77,14 @@ struct Focus: Codable, Hashable, Identifiable {
     /// Longest label the UI accepts.
     static let maxLabelLength = 60
 
+    /// Is this a Perri focus: its agent's bare name (through a plugin qualifier,
+    /// case-insensitive) is `perri`. The daemon's `is_perri_agent` rule.
+    var isPerriFocus: Bool {
+        let bare = agentTag.trimmingCharacters(in: .whitespaces)
+            .split(separator: ":", omittingEmptySubsequences: false).last.map(String.init) ?? ""
+        return bare.trimmingCharacters(in: .whitespaces).lowercased() == "perri"
+    }
+
     /// Trims whitespace/newlines, caps at `maxLabelLength` characters, and maps
     /// blank to nil. Trim happens before the cap so leading spaces never eat
     /// the budget; a cut can leave trailing whitespace, so trim again.

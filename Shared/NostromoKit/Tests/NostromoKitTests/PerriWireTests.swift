@@ -49,6 +49,18 @@ final class PerriWireTests: XCTestCase {
         XCTAssertEqual(dict.keys.count, 4, "Expected type, action, pr_number, repo")
     }
 
+    func testPerriActionWithTagEncodesIt() throws {
+        let msg = ClientPerriAction(action: "load_pr", prNumber: 42, repo: "acme/web", tag: "perri-1a2b3c4d")
+        let dict = try encode(msg)
+        XCTAssertEqual(dict["tag"] as? String, "perri-1a2b3c4d")
+        XCTAssertEqual(dict.keys.count, 5)
+    }
+
+    func testPerriActionWithoutTagHasNoTagKey() throws {
+        let dict = try encode(ClientPerriAction(action: "load_pr", prNumber: 42, repo: "acme/web"))
+        XCTAssertNil(dict["tag"], "iOS sends no tag; the daemon reads that as the built-in focus")
+    }
+
     func testPerriActionApproveEncoding() throws {
         let msg = ClientPerriAction(action: "approve", prNumber: 7, repo: "acme/web")
         let dict = try encode(msg)

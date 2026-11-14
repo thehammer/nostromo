@@ -3266,6 +3266,7 @@ fn perri_state(tag: &str) -> ServerMsg {
         tag: tag.into(),
         queue: vec![],
         current: None,
+        jira_site: None,
     }
 }
 

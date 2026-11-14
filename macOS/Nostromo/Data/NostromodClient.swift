@@ -195,7 +195,7 @@ enum ServerMsg {
     /// Broadcast snapshot of one focus's PR review state (W7/W8). `queue` is
     /// fleet-wide (identical regardless of `tag`); `current` is per-focus —
     /// the PR `tag`'s focus has under review, or `nil` when it has none.
-    case perriState(tag: String, queue: [PRQueueItem], current: PRDetail?)
+    case perriState(tag: String, queue: [PRQueueItem], current: PRDetail?, jiraSite: String? = nil)
     /// Broadcast snapshot of Fred's mailbox + calendar state.
     case fredState(mailbox: MailboxSnapshot, calendar: CalendarSnapshot)
     /// Broadcast snapshot of Teri's active todos.
@@ -1529,6 +1529,13 @@ class NostromodClient {
         send(msg, type: msg.wireType)
     }
 
+    /// Send a per-focus `perri_action` (`load_pr` pins the PR for `tag`'s focus
+    /// and opens nothing).
+    func sendPerriAction(action: String, prNumber: Int?, repo: String?, tag: String?) {
+        send(ClientPerriAction(action: action, prNumber: prNumber, repo: repo, tag: tag),
+             type: "perri_action", tag: tag)
+    }
+
     /// Encode and send `msg`. `type`/`tag` identify the frame for
     /// `IPCLatencyStats` correlation — they must match the wire `type` field
     /// (and, where present, the `tag` field) the `Encodable` struct itself
@@ -1787,7 +1794,7 @@ class NostromodClient {
 
         case "perri_state":
             if let m = try? decoder.decode(PerriStateResp.self, from: raw) {
-                return .perriState(tag: m.tag, queue: m.queue.map(\.asPRQueueItem), current: m.current)
+                return .perriState(tag: m.tag, queue: m.queue.map(\.asPRQueueItem), current: m.current, jiraSite: m.jiraSite)
             }
 
         case "fred_state":
@@ -2273,6 +2280,12 @@ private struct PerriStateResp: Decodable {
     let tag:     String
     let queue:   [PRQueueItemWire]
     let current: PRDetail?
+    let jiraSite: String?
+
+    enum CodingKeys: String, CodingKey {
+        case tag, queue, current
+        case jiraSite = "jira_site"
+    }
 
     /// Wire form of a queue item (decodes directly from daemon JSON).
     struct PRQueueItemWire: Decodable {

@@ -332,7 +332,7 @@ async fn nostromo_show_is_listed_with_exactly_the_five_v1_types_and_no_activity(
         .await
         .unwrap();
 
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
     let tools = list_tools(&mut reader, &mut writer, 2).await;
     let show = tools
         .as_array()
@@ -441,7 +441,7 @@ async fn showing_the_same_file_at_a_different_line_reuses_one_tab_and_re_anchors
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
 
     let root = temp_file_root();
     let path = write_rel_file(root.path(), "a.rs", "one\ntwo\nthree\nfour\nfive\n");
@@ -511,7 +511,7 @@ async fn a_type_outside_the_vocabulary_is_refused_and_leaves_the_tree_untouched(
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
 
     let before = pane_ids(&get_self(&mut reader, &mut writer, 2).await);
 
@@ -587,7 +587,7 @@ async fn review_queue_pr_conversation_pr_diff_and_file_all_open_through_show_alo
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
 
     // review_queue.
     let res = call_tool(
@@ -646,7 +646,7 @@ async fn a_ticket_show_refuses_with_a_fetch_level_error_not_a_placement_or_vocab
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
 
     let before = pane_ids(&get_self(&mut reader, &mut writer, 2).await);
 
@@ -714,7 +714,7 @@ async fn a_single_show_into_an_empty_curated_focus_materializes_the_detail_regio
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
 
     let root = temp_file_root();
     let path = write_rel_file(root.path(), "solo.rs", "fn main() {}\n");
@@ -764,7 +764,7 @@ async fn the_seventh_tab_in_the_detail_region_evicts_the_least_recently_focused_
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
 
     let root = temp_file_root();
     let mut pane_id_of = Vec::new();
@@ -845,7 +845,7 @@ async fn showing_a_pr_conversation_for_a_different_pr_closes_the_previous_review
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
 
     let old_conversation = call_tool(
         &mut reader,
@@ -935,7 +935,7 @@ async fn a_show_for_the_pr_already_under_review_does_not_reset_anything() {
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
 
     let conversation = call_tool(
         &mut reader,
@@ -1217,7 +1217,7 @@ async fn the_tracker_tab_survives_the_cap_keeps_its_label_and_is_never_reused() 
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
     let root = temp_file_root();
 
     // queue + four files, through show alone...
@@ -1248,14 +1248,21 @@ async fn the_tracker_tab_survives_the_cap_keeps_its_label_and_is_never_reused() 
     // region is now at its cap of six.
     {
         let mut panes = harness.panes.lock().unwrap();
-        let tree = panes.get("perri").cloned().expect("perri has a tree");
+        let tree = panes.get("reviewer").cloned().expect("perri has a tree");
         let placed = nostromo::tracker::placement::place_tracker(&tree).expect("tracker placed");
         panes
-            .set_layout("perri", &json!({ "tree": placed }))
+            .set_layout("reviewer", &json!({ "tree": placed }))
             .unwrap();
     }
-    let (order, labels) =
-        tracker_label_and_position(&harness.panes.lock().unwrap().get("perri").cloned().unwrap());
+    let (order, labels) = tracker_label_and_position(
+        &harness
+            .panes
+            .lock()
+            .unwrap()
+            .get("reviewer")
+            .cloned()
+            .unwrap(),
+    );
     assert_eq!(order.len(), 6, "{order:?}");
     assert_eq!(order[1], "tracker", "right after the queue: {order:?}");
     assert_eq!(labels[1], "Tracker");
@@ -1304,7 +1311,13 @@ async fn the_tracker_tab_survives_the_cap_keeps_its_label_and_is_never_reused() 
             "the cap is full, something leaves: {res}"
         );
 
-        let tree: PaneTree = harness.panes.lock().unwrap().get("perri").cloned().unwrap();
+        let tree: PaneTree = harness
+            .panes
+            .lock()
+            .unwrap()
+            .get("reviewer")
+            .cloned()
+            .unwrap();
         let (order, labels) = tracker_label_and_position(&tree);
         let at = order
             .iter()
@@ -1328,10 +1341,10 @@ async fn a_show_beside_a_repl_tracker_split_creates_the_detail_region_above_the_
     let _server = McpServer::bind(socket_path.clone(), harness.state.clone())
         .await
         .unwrap();
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
 
     // Give `perri` the layout `repl | tracker`.
-    harness.panes.lock().unwrap().get_or_init("perri");
+    harness.panes.lock().unwrap().get_or_init("reviewer");
     let split = PaneTree::Split {
         direction: SplitDirection::Horizontal,
         children: vec![
@@ -1348,7 +1361,7 @@ async fn a_show_beside_a_repl_tracker_split_creates_the_detail_region_above_the_
         .panes
         .lock()
         .unwrap()
-        .set_layout("perri", &json!({ "tree": split }))
+        .set_layout("reviewer", &json!({ "tree": split }))
         .unwrap();
 
     let root = temp_file_root();
@@ -1363,7 +1376,13 @@ async fn a_show_beside_a_repl_tracker_split_creates_the_detail_region_above_the_
     .await;
     assert_eq!(res["ok"], true, "{res}");
 
-    let tree = harness.panes.lock().unwrap().get("perri").cloned().unwrap();
+    let tree = harness
+        .panes
+        .lock()
+        .unwrap()
+        .get("reviewer")
+        .cloned()
+        .unwrap();
     // The tracker is still a direct sibling at the top, at its original ratios;
     // the REPL's side now holds a vertical [detail, repl] group.
     let PaneTree::Split {
@@ -1714,7 +1733,7 @@ fn on_the_wire(frames: &[ServerMsg]) -> Vec<Value> {
 async fn show_on_a_fresh_focus(args: &Value) -> (Value, Vec<ServerMsg>) {
     let fresh = make_daemon_state();
     let mut rx = fresh.broadcast_tx.subscribe();
-    let reply = show_tool::show(&fresh.state, args, Some(LINK_TAG)).await;
+    let reply = show_tool::show_for_user(&fresh.state, args, LINK_TAG).await;
     (reply, drain(&mut rx))
 }
 
@@ -1818,10 +1837,10 @@ async fn clicking_a_second_pr_chip_replaces_the_review_the_way_a_second_show_doe
         let fresh = make_daemon_state();
         let mut rx = fresh.broadcast_tx.subscribe();
         for number in [253, 254] {
-            let reply = show_tool::show(
+            let reply = show_tool::show_for_user(
                 &fresh.state,
                 &json!({ "type": "pr_conversation", "target": { "repo": "acme/web", "number": number } }),
-                Some(LINK_TAG),
+                LINK_TAG,
             )
             .await;
             assert_eq!(reply["ok"], true, "{reply}");
@@ -1951,4 +1970,213 @@ async fn a_link_that_is_not_on_the_daemons_board_opens_nothing() {
         );
     }
     assert!(drain(&mut rx).is_empty(), "nothing was opened");
+}
+
+// ── Perri side pane 1: an agent's show opens nothing in a Perri focus ────────
+
+fn register_focus_with_agent(harness: &Harness, tag: &str, agent: &str) {
+    let meta = FocusMeta {
+        initial_model: None,
+        initial_effort: None,
+        tag: tag.to_string(),
+        display_name: tag.to_string(),
+        agent_name: agent.to_string(),
+        project_name: None,
+        org: None,
+        is_built_in: false,
+        session_summary: None,
+        label: None,
+        project_path: None,
+        select_for_client: None,
+    };
+    harness
+        .session_mgr
+        .lock()
+        .unwrap()
+        .set_focus_registry(vec![meta]);
+}
+
+fn tree_bytes(harness: &Harness, tag: &str) -> String {
+    let reg = harness.panes.lock().unwrap();
+    serde_json::to_string(&reg.get(tag).cloned()).unwrap()
+}
+
+fn is_noop_reply(reply: &Value) -> bool {
+    reply["ok"] == true
+        && reply["shown"] == false
+        && reply["reason_code"] == "perri_focus_user_opens"
+}
+
+fn pr_view_shows() -> Vec<Value> {
+    vec![
+        json!({ "type": "pr_conversation", "target": { "repo": "acme/web", "number": 7 } }),
+        json!({ "type": "pr_diff", "target": { "repo": "acme/web", "number": 7 } }),
+        json!({ "type": "file", "target": { "path": "Cargo.toml" } }),
+        json!({ "type": "ticket", "target": { "provider": "jira", "key": "CORE-1" } }),
+        // A re-anchored diff.
+        json!({ "type": "pr_diff", "target": { "repo": "acme/web", "number": 7 },
+                "anchor": { "kind": "line", "path": "src/a.rs", "line": 3 } }),
+    ]
+}
+
+/// Every PR view, shown by an agent into the given Perri focus, is a no-op:
+/// the tree is byte-identical and nothing is broadcast.
+async fn assert_perri_focus_shows_are_noops(harness: &Harness, tag: &str) {
+    harness.panes.lock().unwrap().get_or_init(tag);
+    let mut rx = harness.broadcast_tx.subscribe();
+    let before = tree_bytes(harness, tag);
+    for args in pr_view_shows() {
+        let reply = show_tool::show(&harness.state, &args, Some(tag)).await;
+        assert!(is_noop_reply(&reply), "{tag} {args}: {reply}");
+    }
+    assert_eq!(tree_bytes(harness, tag), before, "{tag}: tree changed");
+    let frames = drain(&mut rx);
+    assert!(frames.is_empty(), "{tag}: broadcast {frames:?}");
+}
+
+#[tokio::test]
+async fn show_in_a_registered_perri_focus_opens_nothing() {
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    register_focuses(&harness, &["perri"]);
+    assert_perri_focus_shows_are_noops(&harness, "perri").await;
+}
+
+#[tokio::test]
+async fn show_in_a_second_perri_focus_opens_nothing() {
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    register_focus_with_agent(&harness, "perri-1a2b3c4d", "perri");
+    assert_perri_focus_shows_are_noops(&harness, "perri-1a2b3c4d").await;
+}
+
+#[tokio::test]
+async fn show_in_an_unregistered_builtin_perri_tag_opens_nothing() {
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    assert_perri_focus_shows_are_noops(&harness, "perri").await;
+}
+
+#[tokio::test]
+async fn a_perri_focus_show_does_not_fetch() {
+    // The ticket provider is not configured, so a fetch would refuse with an
+    // error: the no-op reply proves the fetch never ran.
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    register_focus_with_agent(&harness, "perri-1a2b3c4d", "perri");
+    let reply = show_tool::show(
+        &harness.state,
+        &json!({ "type": "ticket", "target": { "provider": "jira", "key": "NOPE-1" } }),
+        Some("perri-1a2b3c4d"),
+    )
+    .await;
+    assert!(is_noop_reply(&reply), "{reply}");
+    assert!(reply.get("error").is_none());
+}
+
+#[tokio::test]
+async fn review_queue_still_lands_in_a_perri_focus() {
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    register_focuses(&harness, &["perri"]);
+    let reply = show_tool::show(
+        &harness.state,
+        &json!({ "type": "review_queue" }),
+        Some("perri"),
+    )
+    .await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("shown").is_none(), "{reply}");
+    assert!(reply["pane_id"].is_string(), "{reply}");
+}
+
+#[tokio::test]
+async fn a_malformed_target_in_a_perri_focus_still_gets_invalid_target() {
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    register_focuses(&harness, &["perri"]);
+    let reply = show_tool::show(
+        &harness.state,
+        &json!({ "type": "pr_diff", "target": { "repo": "acme/web" } }),
+        Some("perri"),
+    )
+    .await;
+    assert!(reply.get("error").is_some(), "{reply}");
+    assert!(reply.get("shown").is_none(), "{reply}");
+}
+
+#[tokio::test]
+async fn a_show_into_a_non_perri_focus_places_as_before() {
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    register_focuses(&harness, &["cody"]);
+    let reply = show_tool::show(
+        &harness.state,
+        &json!({ "type": "pr_conversation", "target": { "repo": "acme/web", "number": 7 } }),
+        Some("cody"),
+    )
+    .await;
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(reply.get("shown").is_none(), "{reply}");
+    assert!(reply["pane_id"].is_string(), "{reply}");
+}
+
+#[tokio::test]
+async fn a_show_aimed_at_a_perri_focus_from_a_non_perri_caller_is_a_noop() {
+    let _home = HomeOverride::new();
+    let harness = make_daemon_state();
+    harness.session_mgr.lock().unwrap().set_focus_registry(
+        ["cody", "perri-1a2b3c4d"]
+            .iter()
+            .map(|t| FocusMeta {
+                initial_model: None,
+                initial_effort: None,
+                tag: t.to_string(),
+                display_name: t.to_string(),
+                agent_name: if *t == "cody" { "cody" } else { "perri" }.to_string(),
+                project_name: None,
+                org: None,
+                is_built_in: false,
+                session_summary: None,
+                label: None,
+                project_path: None,
+                select_for_client: None,
+            })
+            .collect(),
+    );
+    harness.panes.lock().unwrap().get_or_init("perri-1a2b3c4d");
+    let before = tree_bytes(&harness, "perri-1a2b3c4d");
+    let reply = show_tool::show(
+        &harness.state,
+        &json!({ "type": "pr_diff", "target": { "repo": "acme/web", "number": 7 },
+                 "view_id": "perri-1a2b3c4d" }),
+        Some("cody"),
+    )
+    .await;
+    assert!(is_noop_reply(&reply), "{reply}");
+    assert_eq!(tree_bytes(&harness, "perri-1a2b3c4d"), before);
+}
+
+#[tokio::test]
+async fn a_tracker_link_click_in_a_perri_focus_still_opens_the_native_view() {
+    let _home = HomeOverride::new();
+    let focus = focus_with_item(
+        json!([{ "text": "PR #253", "url": "https://github.com/acme/web/pull/253" }]),
+        None,
+    );
+    register_focuses(&focus.harness, &[LINK_TAG]);
+    let mut rx = focus.harness.broadcast_tx.subscribe();
+    let opened = tracker_link::open_link(&focus.harness.state, LINK_TAG, "it", 0).await;
+    assert_eq!(opened, Ok(()));
+    let frames = drain(&mut rx);
+    assert!(
+        frames.iter().any(|f| matches!(
+            f,
+            ServerMsg::FocusLayout {
+                focused_pane: Some(_),
+                ..
+            }
+        )),
+        "the user's click opens the view: {frames:?}"
+    );
 }
