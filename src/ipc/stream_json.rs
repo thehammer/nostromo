@@ -2945,9 +2945,9 @@ impl SessionTranscript {
             TurnBlock::ToolCall {
                 tool_use_id: Some(id),
                 ..
-            } => !last.blocks.iter().any(|r| {
-                matches!(r, TurnBlock::ToolResult { tool_use_id: Some(rid), .. } if rid == id)
-            }),
+            } => !last.blocks.iter().any(
+                |r| matches!(r, TurnBlock::ToolResult { tool_use_id: Some(rid), .. } if rid == id),
+            ),
             _ => false,
         });
         if !has_result && unanswered {
@@ -3251,8 +3251,47 @@ pub fn load_scrollback(session_id: &str, max_turns: usize) -> SessionTranscript 
     let Some(home) = dirs_next::home_dir() else {
         return SessionTranscript::new();
     };
-    let projects = home.join(".claude").join("projects");
-    let Ok(entries) = std::fs::read_dir(&projects) else {
+    load_scrollback_from(
+        &home.join(".claude").join("projects"),
+        session_id,
+        max_turns,
+    )
+}
+
+/// Most bytes of a session file read for scrollback: the end of the file, where
+/// the last turns are. Longer files lose only their oldest turns.
+pub const SCROLLBACK_MAX_BYTES: u64 = 32 << 20;
+
+/// The text of the last [`SCROLLBACK_MAX_BYTES`] of `path`, starting on a line
+/// boundary. A regular file only.
+fn read_scrollback_text(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = crate::conversations::transcript::open_regular(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(SCROLLBACK_MAX_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(SCROLLBACK_MAX_BYTES)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if start > 0 {
+        // Cut mid-file: drop the partial first line.
+        let skip = bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |i| i + 1);
+        bytes.drain(..skip);
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// [`load_scrollback`] over the project folders under `projects`.
+pub fn load_scrollback_from(
+    projects: &std::path::Path,
+    session_id: &str,
+    max_turns: usize,
+) -> SessionTranscript {
+    let Ok(entries) = std::fs::read_dir(projects) else {
         return SessionTranscript::new();
     };
     for entry in entries.flatten() {
@@ -3261,7 +3300,7 @@ pub fn load_scrollback(session_id: &str, max_turns: usize) -> SessionTranscript 
         }
         let candidate = entry.path().join(format!("{session_id}.jsonl"));
         if candidate.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&candidate) {
+            if let Some(content) = read_scrollback_text(&candidate) {
                 return transcript_from_jsonl(&content, max_turns);
             }
         }
@@ -3809,6 +3848,95 @@ mod tests {
             .blocks
             .iter()
             .any(|b| matches!(b, TurnBlock::ToolCall { .. })));
+    }
+
+    fn has_interrupted_result(turn: &Turn) -> bool {
+        turn.blocks.iter().any(|b| {
+            matches!(
+                b,
+                TurnBlock::ResultSummary {
+                    interrupted: true,
+                    ..
+                }
+            )
+        })
+    }
+
+    const UNANSWERED_TAIL: &str = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"run it"},"timestamp":"2026-05-30T20:00:00.000Z"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"toolu_x","input":{"command":"ls"}}]},"timestamp":"2026-05-30T20:00:01.000Z"}"#,
+        "\n",
+    );
+
+    #[test]
+    fn a_stored_transcript_ending_on_an_unanswered_tool_call_loads_interrupted_and_finished() {
+        let t = transcript_from_jsonl(UNANSWERED_TAIL, 30);
+        let turns = t.snapshot();
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].is_complete, "never reads as running");
+        assert!(has_interrupted_result(&turns[0]), "{:?}", turns[0].blocks);
+        assert!(!t.is_mid_turn());
+    }
+
+    #[test]
+    fn an_answered_tool_call_at_the_end_of_a_stored_transcript_is_not_marked_interrupted() {
+        let t = transcript_from_jsonl(SCROLLBACK, 30);
+        assert!(t
+            .snapshot()
+            .iter()
+            .all(|turn| !has_interrupted_result(turn)));
+    }
+
+    #[test]
+    fn scrollback_reads_only_the_end_of_a_huge_file() {
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("proj");
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("big-sid.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // 256 MiB of hole, then two complete lines.
+        let hole: u64 = 256 << 20;
+        f.set_len(hole).unwrap();
+        f.seek(SeekFrom::Start(hole)).unwrap();
+        f.write_all(b"\n").unwrap();
+        f.write_all(
+            br#"{"type":"user","message":{"role":"user","content":"the latest question"},"timestamp":"2026-05-30T20:00:00.000Z"}"#,
+        )
+        .unwrap();
+        f.write_all(b"\n").unwrap();
+        f.write_all(
+            br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"the answer"}]},"timestamp":"2026-05-30T20:00:01.000Z"}"#,
+        )
+        .unwrap();
+        f.write_all(b"\n").unwrap();
+        drop(f);
+
+        let text = read_scrollback_text(&path).unwrap();
+        assert!(
+            text.len() as u64 <= SCROLLBACK_MAX_BYTES,
+            "{} bytes read",
+            text.len()
+        );
+        let t = load_scrollback_from(dir.path(), "big-sid", 30);
+        let turns = t.snapshot();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].user_input, "the latest question");
+
+        // A file under the bound is read whole.
+        let small = folder.join("small.jsonl");
+        std::fs::write(&small, SCROLLBACK).unwrap();
+        assert_eq!(
+            load_scrollback_from(dir.path(), "small", 30)
+                .snapshot()
+                .len(),
+            2
+        );
+        // A FIFO or a symlink is not a transcript.
+        let link = folder.join("link.jsonl");
+        std::os::unix::fs::symlink(&small, &link).unwrap();
+        assert!(read_scrollback_text(&link).is_none());
     }
 
     #[test]

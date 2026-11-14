@@ -23,17 +23,9 @@ const NUDGE_MIN_GAP: Duration = Duration::from_millis(500);
 /// Mac pushes the new focus a moment after the reply).
 const RESERVATION_WINDOW: Duration = Duration::from_secs(15);
 
-/// Bookkeeping for a conversation resumed into a new tag.
-pub(super) struct ResumedTag {
-    pub sid: String,
-    pub old_tag: String,
-}
-
 /// Resume bookkeeping and the nudge debounce, kept in one place.
 #[derive(Default)]
 pub(super) struct ConversationState {
-    /// New tags a resume handed a conversation to, until their first send.
-    pub resumed: HashMap<String, ResumedTag>,
     /// sid → (tag, when) of the latest resume.
     pub reserved: HashMap<String, (String, Instant)>,
     pub nudged_revision: u64,
@@ -113,9 +105,6 @@ impl SessionManager {
 
     /// A user message was written into `tag`'s session.
     pub(super) fn note_conversation_send(&mut self, tag: &str, text: &str, has_images: bool) {
-        // A first send ends a resumed tag's stale-id protection: the
-        // conversation exists in Claude's eyes now.
-        self.conv.resumed.remove(tag);
         let Some(session) = self.sessions.get(tag) else {
             return;
         };
@@ -172,6 +161,11 @@ impl SessionManager {
 
     /// The answer to `ConversationHistoryGet`.
     pub fn conversation_history_msg(&mut self, request_id: String) -> ServerMsg {
+        // A tag that became sensitive since its last send: purged before it is listed.
+        self.conversations.sweep_sensitive(
+            |tag, agent| self.sensitive.focus_is_sensitive(tag, agent),
+            now_ms(),
+        );
         let snap = self.conversations.snapshot();
         let live = self.live_conversations();
         let listing = list::build(&snap, &self.conversations, &live);
@@ -201,7 +195,11 @@ impl SessionManager {
         if revision == self.conv.nudged_revision {
             return;
         }
-        if self.conv.nudged_at.is_some_and(|t| t.elapsed() < NUDGE_MIN_GAP) {
+        if self
+            .conv
+            .nudged_at
+            .is_some_and(|t| t.elapsed() < NUDGE_MIN_GAP)
+        {
             return;
         }
         self.conv.nudged_at = Some(Instant::now());
@@ -232,21 +230,25 @@ impl SessionManager {
     /// conversation here: leave no empty focus pretending. Stops the child,
     /// keeps the stored id, restores the entry's previous owner and tells the app.
     pub(super) fn fail_resumed_tag(&mut self, tag: &str) {
-        let Some(info) = self.conv.resumed.remove(tag) else {
+        let Some((sid, old_tag)) = self.conversations.pending_resume_for_tag(tag) else {
             return;
         };
         self.stop_session(tag);
         self.sessions.remove(tag);
-        self.session_history.undo_move(&info.sid, &info.old_tag, tag);
-        self.conversations.restore_tag(&info.sid, &info.old_tag, now_ms());
-        self.conv.reserved.remove(&info.sid);
+        // The new tag keeps no stored id: a later respawn must not start a
+        // conversation of its own under it.
+        save_id(&self.store_path, tag, None);
+        self.session_history.undo_move(&sid, &old_tag, tag);
+        self.conversations.restore_tag(&sid, &old_tag, now_ms());
+        self.conv.reserved.remove(&sid);
         self.notify_resume_failed(tag);
         tracing::warn!(tag, "a resumed conversation could not be opened");
     }
 
-    /// Is `tag` a focus handed a conversation by a resume that has not spoken yet?
+    /// Is `tag` a focus handed a conversation by a resume whose first turn has
+    /// not succeeded yet? (Kept in the history file: a daemon restart keeps it.)
     pub(super) fn is_resumed_tag(&self, tag: &str) -> bool {
-        self.conv.resumed.contains_key(tag)
+        self.conversations.pending_resume_for_tag(tag).is_some()
     }
 
     /// Resume conversation `sid` as focus `new_tag`. Everything under the
@@ -292,6 +294,18 @@ impl SessionManager {
             ConversationStatus::FolderGone { .. } => return refuse("folder_gone"),
             ConversationStatus::Running { open: false, .. } | ConversationStatus::Available => {}
         }
+        // The conversation's own focus is still open and still owns its stored
+        // id (the daemon restarted, or the crash-loop guard gave up on it): that
+        // focus is the answer. A second tag would be a second writer, and
+        // opening the first later a second `--resume`.
+        if self.focus_registry.iter().any(|f| f.tag == entry.tag)
+            && load_id_store(&self.store_path)
+                .get(&entry.tag)
+                .map(String::as_str)
+                == Some(sid)
+        {
+            return switch(&entry.tag);
+        }
         // A resume already reserved a tag for it: that is the answer, live or not.
         if let Some((tag, at)) = self.conv.reserved.get(sid) {
             let in_registry = self.focus_registry.iter().any(|f| &f.tag == tag);
@@ -336,13 +350,6 @@ impl SessionManager {
         }
         self.session_history.move_session(sid, &entry.tag, new_tag);
         self.conversations.move_to_tag(sid, new_tag, now_ms());
-        self.conv.resumed.insert(
-            new_tag.to_owned(),
-            ResumedTag {
-                sid: sid.to_owned(),
-                old_tag: entry.tag.clone(),
-            },
-        );
         self.conv
             .reserved
             .insert(sid.to_owned(), (new_tag.to_owned(), Instant::now()));
@@ -359,15 +366,23 @@ impl SessionManager {
     }
 }
 
-/// A turn completed in session `sid`: bump the entry's time and read what was
-/// appended to its transcript on a thread of its own (never under a lock).
-/// A conversation the history does not hold (a restricted session) costs nothing.
-pub(super) fn turn_completed(history: &ConversationHistory, sid: &str) {
+/// A turn completed in the session `shared` belongs to: bump the entry's time,
+/// commit a first message that was delivered, purge an entry whose focus is
+/// sensitive now, and read what was appended to the transcript on a thread of
+/// its own (never under a lock). `delivered` is false for a turn that failed to
+/// sign in: its message is held, not delivered. A conversation the history does
+/// not hold (a restricted session) costs nothing.
+pub(super) fn turn_completed(shared: &super::Shared, delivered: bool) {
+    let sid = &shared.ctx.session_id;
+    let history = &shared.conversations;
     if history.get(sid).is_none() {
         return;
     }
-    history.turn_completed(sid, now_ms());
+    let sensitive = shared
+        .sensitive
+        .focus_is_sensitive(&shared.ctx.tag, &shared.ctx.agent_name);
+    history.turn_completed(sid, delivered, sensitive, now_ms());
     let history = history.clone();
-    let sid = sid.to_owned();
+    let sid = sid.clone();
     std::thread::spawn(move || crate::conversations::transcript::refresh_tail(&history, &sid));
 }

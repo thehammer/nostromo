@@ -1195,13 +1195,18 @@ pub const FEATURE_CONVERSATION_HISTORY: &str = "conversation_history_v1";
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConversationStatus {
     /// Live in a focus; `open` when that focus is in the pushed registry.
-    Running { tag: String, open: bool },
+    Running {
+        tag: String,
+        open: bool,
+    },
     /// Claude no longer has the file.
     UnavailableDeleted,
     /// The file is empty or is not a transcript.
     UnavailableUnreadable,
     /// The working directory no longer exists (`worktree`: it was a linked worktree).
-    FolderGone { worktree: bool },
+    FolderGone {
+        worktree: bool,
+    },
     Available,
 }
 
@@ -8975,12 +8980,21 @@ mod slash_commands_wire_tests {
             revision: 9,
         };
         let json = serde_json::to_string(&reply).unwrap();
-        assert!(json.contains(r#""status":{"kind":"folder_gone","worktree":true}"#), "{json}");
+        assert!(
+            json.contains(r#""status":{"kind":"folder_gone","worktree":true}"#),
+            "{json}"
+        );
         let back: ServerMsg = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, ServerMsg::ConversationHistory { revision: 9, .. }));
+        assert!(matches!(
+            back,
+            ServerMsg::ConversationHistory { revision: 9, .. }
+        ));
         for m in [
             ServerMsg::ConversationHistoryChanged { revision: 3 },
-            ServerMsg::ConversationResumeFailed { tag: "t".into(), reason: "not_found_here".into() },
+            ServerMsg::ConversationResumeFailed {
+                tag: "t".into(),
+                reason: "not_found_here".into(),
+            },
             ServerMsg::ConversationResumeResult {
                 request_id: "r".into(),
                 outcome: ConversationResumeOutcome::Ready,

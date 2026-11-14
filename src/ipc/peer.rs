@@ -4534,8 +4534,15 @@ mod tests {
             },
         ];
         for frame in frames {
-            assert_eq!(classify_server_msg(&frame), ServerClass::LocalOnly, "{frame:?}");
-            assert!(outbound(PeerTrust::Tcp, frame.clone(), &tags).is_none(), "{frame:?}");
+            assert_eq!(
+                classify_server_msg(&frame),
+                ServerClass::LocalOnly,
+                "{frame:?}"
+            );
+            assert!(
+                outbound(PeerTrust::Tcp, frame.clone(), &tags).is_none(),
+                "{frame:?}"
+            );
         }
     }
 

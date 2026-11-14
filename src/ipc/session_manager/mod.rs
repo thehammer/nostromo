@@ -264,6 +264,8 @@ struct Shared {
     /// The conversation history, told when a turn completes (see
     /// `conversation_history`). A shared handle.
     conversations: crate::conversations::ConversationHistory,
+    /// Asked at every completed turn whether the focus is sensitive now.
+    sensitive: SensitiveTags,
     /// The focus's activity counters: shared by every process the focus runs
     /// (see `focus_activity`).
     activity: Arc<FocusActivity>,
@@ -1419,6 +1421,7 @@ impl SessionManager {
             login: login::LoginLink::new(self.login.clone()),
             turn_hook: Arc::clone(&self.turn_hook),
             conversations: self.conversations.clone(),
+            sensitive: self.sensitive.clone(),
             activity: self.activity.for_session(&tag, &session_id),
             commands: self.commands.for_tag(&tag),
         };
@@ -1669,6 +1672,8 @@ impl SessionManager {
         };
         if discarded {
             info!(tag, "held message discarded: stopped by the user");
+            self.conversations
+                .discard_candidate(&session.shared.ctx.session_id);
             session.shared.login.notify();
         }
         if !running {
@@ -3215,7 +3220,7 @@ fn run_reader(
                     login::on_turn_end(&shared, &tag, auth_outcome);
                     advance(&shared);
                     shared.turn_event(&tag, TurnEvent::Completed);
-                    conversation_history::turn_completed(&shared.conversations, &shared.ctx.session_id);
+                    conversation_history::turn_completed(&shared, auth_outcome.is_none());
                     continue;
                 }
                 _ => {}

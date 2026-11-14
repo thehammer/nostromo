@@ -43,7 +43,10 @@ impl Reason {
             "off" => Reason::Off,
             "image" => Reason::Image,
             other => match other.strip_prefix("command:") {
-                Some(name) => Reason::Command(name.to_owned()),
+                Some(name) if slash_command(name).as_deref() == Some(name) => {
+                    Reason::Command(name.to_owned())
+                }
+                Some(_) => Reason::LookedSensitive,
                 // Anything unknown is the safest withheld reason.
                 None => Reason::LookedSensitive,
             },
@@ -74,17 +77,23 @@ pub enum FirstPrompt {
     Withheld(Reason),
 }
 
+/// Longest slash command name kept.
+const MAX_COMMAND_CHARS: usize = 32;
+
 /// The slash command name (`/name`) `text` starts with, if any: a `/`, then a
-/// name with no `/` or whitespace (`/compact`, `/model haiku`; not `/usr/bin`).
+/// name of `[A-Za-z0-9:_-]{1,32}` followed by whitespace or the end (`/compact`,
+/// `/model haiku`; not `/usr/bin`, and not a long or odd token, which might be
+/// a secret and takes the normal path).
 pub fn slash_command(text: &str) -> Option<String> {
     let t = text.trim();
     let rest = t.strip_prefix('/')?;
     let name: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
-    if name.is_empty() || name.contains('/') {
-        None
-    } else {
-        Some(format!("/{name}"))
-    }
+    let valid = !name.is_empty()
+        && name.chars().count() <= MAX_COMMAND_CHARS
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'));
+    valid.then(|| format!("/{name}"))
 }
 
 /// The first prompt for a message that opens a conversation.
@@ -104,9 +113,7 @@ pub fn derive(text: &str, has_images: bool, sensitive: bool, enabled: bool) -> F
     let Some(line) = text.lines().find(|l| !l.trim().is_empty()) else {
         return FirstPrompt::None;
     };
-    if line.len() > MAX_SCAN_BYTES
-        || first_class(line, &GuardConfig::default()).is_some()
-    {
+    if line.len() > MAX_SCAN_BYTES || first_class(line, &GuardConfig::default()).is_some() {
         return FirstPrompt::Withheld(Reason::LookedSensitive);
     }
     let shown = one_line(line, MAX_CHARS);
@@ -141,7 +148,12 @@ mod tests {
 
     #[test]
     fn skips_blank_lines_and_drops_invisible_characters() {
-        let p = derive("\n  \n\u{200B}Hel\u{202E}lo\u{0007} there", false, false, true);
+        let p = derive(
+            "\n  \n\u{200B}Hel\u{202E}lo\u{0007} there",
+            false,
+            false,
+            true,
+        );
         assert_eq!(text(&p), "Hello there");
     }
 
@@ -168,6 +180,38 @@ mod tests {
             derive("/usr/bin/env is odd", false, false, true),
             FirstPrompt::Text(_)
         ));
+    }
+
+    #[test]
+    fn an_odd_long_or_flagged_slash_token_takes_the_normal_path() {
+        // A synthetic token the guard flags: never stored as a command name.
+        let token = format!("/ghp_{}", "a1B2c3D4e5".repeat(4));
+        assert_eq!(
+            derive(&token, false, false, true),
+            FirstPrompt::Withheld(Reason::LookedSensitive)
+        );
+        // 5,000 characters: over the scan cap, withheld, nothing stored.
+        let huge = format!("/{}", "a".repeat(5000));
+        assert_eq!(
+            derive(&huge, false, false, true),
+            FirstPrompt::Withheld(Reason::LookedSensitive)
+        );
+        // Control and bidi characters make it no command; it is cleaned.
+        let p = derive("/we\u{202E}ird\u{0007}name rest", false, false, true);
+        assert_eq!(text(&p), "/weirdname rest");
+        // A 33-character name is not a command; 32 is.
+        assert!(matches!(
+            derive(&format!("/{}", "a".repeat(33)), false, false, true),
+            FirstPrompt::Text(_)
+        ));
+        assert_eq!(
+            derive(&format!("/{}", "a".repeat(32)), false, false, true),
+            FirstPrompt::Withheld(Reason::Command(format!("/{}", "a".repeat(32))))
+        );
+        assert_eq!(
+            derive("/plugin:do_it-2 now", false, false, true),
+            FirstPrompt::Withheld(Reason::Command("/plugin:do_it-2".into()))
+        );
     }
 
     #[test]

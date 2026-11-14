@@ -2,7 +2,7 @@
 //! exists, on a background thread. Never blocks start-up or the list.
 
 use super::first_prompt::{self, FirstPrompt, Reason};
-use super::store::{main_checkout_of, ConversationEntry, ConversationHistory};
+use super::store::{main_checkout_of, ConversationEntry, ConversationHistory, MAX_PRS};
 use super::transcript;
 use crate::ipc::peer::SensitiveTags;
 
@@ -74,8 +74,10 @@ fn fill_from(e: &mut ConversationEntry, path: &std::path::Path, enabled: bool) {
     }
     e.branch = tail.branch.or(head.branch);
     e.model = tail.model.or(head.model);
+    // The newest few: later `pr-link` records come last.
     e.pr_numbers = tail.pr_numbers;
-    e.pr_numbers.truncate(8);
+    let excess = e.pr_numbers.len().saturating_sub(MAX_PRS);
+    e.pr_numbers.drain(..excess);
     if let Some(ts) = tail.last_ts_ms.or(head.last_ts_ms) {
         e.last_active_ms = ts;
     }
@@ -87,6 +89,21 @@ fn fill_from(e: &mut ConversationEntry, path: &std::path::Path, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backfill_keeps_the_newest_eight_pr_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut body =
+            String::from("{\"type\":\"user\",\"cwd\":\"/w/x\",\"message\":{\"content\":\"hi\"}}\n");
+        for n in 1..=12 {
+            body += &format!("{{\"type\":\"pr-link\",\"prNumber\":{n}}}\n");
+        }
+        std::fs::write(&path, body).unwrap();
+        let mut e = ConversationEntry::new("s", "cody-aaaa1111", "cody", "cody", 0);
+        fill_from(&mut e, &path, true);
+        assert_eq!(e.pr_numbers, vec![5, 6, 7, 8, 9, 10, 11, 12]);
+    }
 
     #[test]
     fn agent_comes_off_the_tag() {

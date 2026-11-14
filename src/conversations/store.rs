@@ -17,7 +17,7 @@ pub const REMOVED_GRACE_MS: i64 = 10 * 60 * 1000;
 /// An entry that never had a turn (spawned, never typed into) is dropped after this.
 const HIDDEN_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Most PR numbers kept per entry (newest kept).
-const MAX_PRS: usize = 8;
+pub const MAX_PRS: usize = 8;
 
 /// One conversation, keyed by Claude session id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +60,10 @@ pub struct ConversationEntry {
     pub tail_offset: u64,
     #[serde(default)]
     pub resumed_from_tag: Option<String>,
+    /// Set by a resume, cleared when the first turn on the new tag succeeds:
+    /// until then a stale session id must fail the resume, never start fresh.
+    #[serde(default)]
+    pub resume_pending: bool,
     #[serde(default)]
     pub removed_at_ms: Option<i64>,
     /// Plan 2's rename; unused here.
@@ -90,6 +94,7 @@ impl ConversationEntry {
             transcript_path: None,
             tail_offset: 0,
             resumed_from_tag: None,
+            resume_pending: false,
             removed_at_ms: None,
             user_title: None,
         }
@@ -114,7 +119,7 @@ impl ConversationEntry {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct FileData {
     #[serde(default)]
     backfilled: bool,
@@ -183,6 +188,29 @@ struct State {
     verdicts: HashMap<String, FileVerdict>,
     /// Entries a background locate already failed for this run.
     not_found: HashSet<String>,
+    /// The first message of a conversation not yet delivered: `sid` → (text,
+    /// has images), or `None` once that message was held for a sign-in (it,
+    /// and any message queued behind it, is then never a first prompt).
+    /// Memory only, never written: a held or discarded message must leave no
+    /// trace in the file.
+    candidates: HashMap<String, Option<(String, bool)>>,
+    /// Changes waiting for the next debounced write.
+    dirty: bool,
+    flush_scheduled: bool,
+    /// The revision last written; guards against an older write landing late.
+    written: Arc<Mutex<u64>>,
+}
+
+/// Changes that are not a privacy matter are written at most this often.
+const FLUSH_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How a change reaches the file.
+#[derive(Clone, Copy, PartialEq)]
+enum Write {
+    /// Now (a purge, a new entry, a first prompt: rare, and a privacy matter).
+    Now,
+    /// Within [`FLUSH_GAP`] (activity times, titles, branches).
+    Later,
 }
 
 /// The conversation history; cheap to clone, clones share it.
@@ -225,6 +253,10 @@ impl ConversationHistory {
                 revision: 0,
                 verdicts: HashMap::new(),
                 not_found: HashSet::new(),
+                candidates: HashMap::new(),
+                dirty: false,
+                flush_scheduled: false,
+                written: Arc::new(Mutex::new(0)),
             })),
         }
     }
@@ -269,35 +301,124 @@ impl ConversationHistory {
             entry.effort = n.model.and_then(|(_, e)| e.map(str::to_owned));
             s.data.entries.push(entry);
         }
-        s.persist(now);
+        self.commit(s, now, Write::Now);
     }
 
-    /// A user message was sent into `sid`: the first one makes the entry
-    /// visible and derives the first prompt; later ones only bump the time.
-    pub fn note_user_send(&self, sid: &str, text: &str, has_images: bool, sensitive: bool, now: i64) {
+    /// A user message was written into `sid`. The first one of a conversation
+    /// is only a candidate (memory only): the entry becomes visible, and the
+    /// first prompt is stored, when a turn completes with it delivered
+    /// ([`Self::turn_completed`]). A held message never counts; a discarded one
+    /// ([`Self::discard_candidate`]) never reaches the file.
+    pub fn note_user_send(
+        &self,
+        sid: &str,
+        text: &str,
+        has_images: bool,
+        sensitive: bool,
+        now: i64,
+    ) {
         let mut s = lock(&self.inner);
-        let enabled = s.data.first_prompts_enabled;
         let Some(e) = s.data.entries.iter_mut().find(|e| e.sid == sid) else {
             return;
         };
-        if sensitive && !e.sensitive {
+        let newly_sensitive = sensitive && !e.sensitive;
+        if newly_sensitive {
             e.mark_sensitive();
         }
         e.last_active_ms = now;
-        if !e.has_turn {
-            e.has_turn = true;
-            e.first_prompt = first_prompt::derive(text, has_images, e.sensitive, enabled);
+        let first = !e.has_turn;
+        if first {
+            s.candidates
+                .entry(sid.to_owned())
+                .or_insert_with(|| Some((text.to_owned(), has_images)));
         }
-        s.persist(now);
+        let how = if newly_sensitive {
+            Write::Now
+        } else {
+            Write::Later
+        };
+        self.commit(s, now, how);
     }
 
-    /// A turn completed in `sid`.
-    pub fn turn_completed(&self, sid: &str, now: i64) {
+    /// The message that was to open `sid` was discarded (Stop on a held
+    /// message): it never becomes the first prompt.
+    pub fn discard_candidate(&self, sid: &str) {
+        lock(&self.inner).candidates.remove(sid);
+    }
+
+    /// A turn completed in `sid`. `delivered`: the turn was not a failed sign-in
+    /// (the message reached the model). A failed sign-in holds the message: it
+    /// stops being a candidate for good, so a conversation opened by a held
+    /// message shows no first prompt. `sensitive`: the focus is sensitive now,
+    /// whatever the entry says; it purges the stored prompt and branch.
+    pub fn turn_completed(&self, sid: &str, delivered: bool, sensitive: bool, now: i64) {
         let mut s = lock(&self.inner);
-        if let Some(e) = s.data.entries.iter_mut().find(|e| e.sid == sid) {
-            e.last_active_ms = now;
-            s.persist(now);
+        let enabled = s.data.first_prompts_enabled;
+        if !delivered {
+            if let Some(c) = s.candidates.get_mut(sid) {
+                *c = None;
+            }
         }
+        let candidate = if delivered {
+            s.candidates.remove(sid)
+        } else {
+            None
+        };
+        let Some(e) = s.data.entries.iter_mut().find(|e| e.sid == sid) else {
+            return;
+        };
+        let mut urgent = false;
+        if sensitive && !e.sensitive {
+            e.mark_sensitive();
+            urgent = true;
+        }
+        e.last_active_ms = now;
+        if delivered {
+            if e.resume_pending {
+                e.resume_pending = false;
+                urgent = true;
+            }
+            if let (false, Some(candidate)) = (e.has_turn, candidate) {
+                e.has_turn = true;
+                if let Some((text, has_images)) = candidate {
+                    e.first_prompt = first_prompt::derive(&text, has_images, e.sensitive, enabled);
+                }
+                urgent = true;
+            }
+        }
+        self.commit(s, now, if urgent { Write::Now } else { Write::Later });
+    }
+
+    /// Mark every entry whose focus is sensitive now (`is_sensitive(tag, agent)`),
+    /// purging its stored prompt and branch. Run before every listing.
+    pub fn sweep_sensitive(&self, is_sensitive: impl Fn(&str, &str) -> bool, now: i64) {
+        let mut s = lock(&self.inner);
+        let mut changed = false;
+        for e in &mut s.data.entries {
+            if !e.sensitive && is_sensitive(&e.tag, &e.agent) {
+                e.mark_sensitive();
+                changed = true;
+            }
+        }
+        if changed {
+            self.commit(s, now, Write::Now);
+        }
+    }
+
+    /// The conversation a resume handed to `tag` that has not yet had a
+    /// successful turn: `(sid, previous tag)`.
+    pub fn pending_resume_for_tag(&self, tag: &str) -> Option<(String, String)> {
+        lock(&self.inner)
+            .data
+            .entries
+            .iter()
+            .find(|e| e.tag == tag && e.resume_pending)
+            .map(|e| {
+                (
+                    e.sid.clone(),
+                    e.resumed_from_tag.clone().unwrap_or_default(),
+                )
+            })
     }
 
     /// Refresh title, label, model and sensitivity from the live focus.
@@ -321,7 +442,12 @@ impl ConversationHistory {
             e.mark_sensitive();
         }
         if *e != before {
-            s.persist(now);
+            let how = if e.sensitive && !before.sensitive {
+                Write::Now
+            } else {
+                Write::Later
+            };
+            self.commit(s, now, how);
         }
     }
 
@@ -353,7 +479,7 @@ impl ConversationHistory {
             let excess = e.pr_numbers.len().saturating_sub(MAX_PRS);
             e.pr_numbers.drain(..excess);
         }
-        s.persist(now);
+        self.commit(s, now, Write::Later);
     }
 
     /// Cache where the transcript was found.
@@ -362,7 +488,7 @@ impl ConversationHistory {
         if let Some(e) = s.data.entries.iter_mut().find(|e| e.sid == sid) {
             e.transcript_path = Some(path.to_path_buf());
             s.not_found.remove(sid);
-            s.persist(now_ms());
+            self.commit(s, now_ms(), Write::Later);
         }
     }
 
@@ -387,18 +513,34 @@ impl ConversationHistory {
     }
 
     pub fn get(&self, sid: &str) -> Option<ConversationEntry> {
-        lock(&self.inner).data.entries.iter().find(|e| e.sid == sid).cloned()
+        lock(&self.inner)
+            .data
+            .entries
+            .iter()
+            .find(|e| e.sid == sid)
+            .cloned()
     }
 
     /// Every entry the user can see (typed into, not removed), plus the flags.
     pub fn snapshot(&self) -> Snapshot {
         let s = lock(&self.inner);
         Snapshot {
-            entries: s.data.entries.iter().filter(|e| e.visible()).cloned().collect(),
+            entries: s
+                .data
+                .entries
+                .iter()
+                .filter(|e| e.visible())
+                .cloned()
+                .collect(),
             first_prompts_enabled: s.data.first_prompts_enabled,
             degraded_kept: s.degraded,
             revision: s.revision,
-            removed_pending: s.data.entries.iter().filter(|e| e.removed_at_ms.is_some()).count(),
+            removed_pending: s
+                .data
+                .entries
+                .iter()
+                .filter(|e| e.removed_at_ms.is_some())
+                .count(),
         }
     }
 
@@ -418,7 +560,7 @@ impl ConversationHistory {
         let before = s.data.entries.len();
         s.data.entries.retain(|e| e.removed_at_ms.is_none());
         if s.data.entries.len() != before {
-            s.persist(now);
+            self.commit(s, now, Write::Now);
         }
     }
 
@@ -432,8 +574,14 @@ impl ConversationHistory {
                     e.first_prompt = FirstPrompt::Withheld(Reason::Off);
                 }
             }
+            s.candidates.clear();
+            // A degraded history writes nothing, but the `.bak` it keeps must
+            // not hold the prompts the user just turned off.
+            if let Some(path) = s.path.clone().filter(|_| s.degraded.is_some()) {
+                scrub_backups(&path);
+            }
         }
-        s.persist(now);
+        self.commit(s, now, Write::Now);
     }
 
     /// Hand the conversation to `new_tag` (a resume). Returns the old tag.
@@ -442,7 +590,8 @@ impl ConversationHistory {
         let e = s.data.entries.iter_mut().find(|e| e.sid == sid)?;
         let old = std::mem::replace(&mut e.tag, new_tag.to_owned());
         e.resumed_from_tag = Some(old.clone());
-        s.persist(now);
+        e.resume_pending = true;
+        self.commit(s, now, Write::Now);
         Some(old)
     }
 
@@ -451,6 +600,7 @@ impl ConversationHistory {
         self.mutate_one(sid, now, |e| {
             e.tag = old_tag.to_owned();
             e.resumed_from_tag = None;
+            e.resume_pending = false;
         });
     }
 
@@ -464,7 +614,7 @@ impl ConversationHistory {
             }
         }
         s.data.backfilled = true;
-        s.persist(now);
+        self.commit(s, now, Write::Now);
     }
 
     /// Counts only, for "Copy daemon diagnostics".
@@ -472,7 +622,11 @@ impl ConversationHistory {
         let s = lock(&self.inner);
         (
             s.data.entries.iter().filter(|e| e.visible()).count(),
-            s.data.entries.iter().filter(|e| e.removed_at_ms.is_some()).count(),
+            s.data
+                .entries
+                .iter()
+                .filter(|e| e.removed_at_ms.is_some())
+                .count(),
             s.degraded.is_some(),
         )
     }
@@ -483,23 +637,115 @@ impl ConversationHistory {
             return false;
         };
         f(e);
-        s.persist(now);
+        self.commit(s, now, Write::Now);
         true
+    }
+
+    /// Write any change still waiting for the debounce (shutdown, tests).
+    pub fn flush(&self) {
+        flush_inner(&self.inner);
+    }
+
+    /// Apply retention, bump the revision, and write the file (unless
+    /// degraded): now, or within [`FLUSH_GAP`].
+    fn commit(&self, mut s: MutexGuard<'_, State>, now: i64, how: Write) {
+        s.revision += 1;
+        prune(&mut s.data.entries, now);
+        if s.degraded.is_some() || s.path.is_none() {
+            return;
+        }
+        match how {
+            Write::Now => {
+                s.dirty = false;
+                let (seq, data) = (s.revision, s.data.clone());
+                let (path, written) = (s.path.clone(), Arc::clone(&s.written));
+                // Taken in the order state → written, as `flush_inner` never
+                // holds `state` while it takes `written`.
+                write_versioned(path.as_deref(), &written, seq, &data);
+            }
+            Write::Later => {
+                s.dirty = true;
+                if !s.flush_scheduled {
+                    s.flush_scheduled = true;
+                    let inner = Arc::clone(&self.inner);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(FLUSH_GAP);
+                        flush_inner(&inner);
+                    });
+                }
+            }
+        }
     }
 }
 
-impl State {
-    /// Apply retention, bump the revision and write the file (unless degraded).
-    fn persist(&mut self, now: i64) {
-        self.revision += 1;
-        prune(&mut self.data.entries, now);
-        if self.degraded.is_some() {
+/// Write the pending change, with `state` released for the disk write.
+fn flush_inner(inner: &Mutex<State>) {
+    let (path, written, seq, data) = {
+        let mut s = lock(inner);
+        s.flush_scheduled = false;
+        if !s.dirty || s.degraded.is_some() {
             return;
         }
-        if let Some(path) = &self.path {
-            if write_private(path, &self.data).is_err() {
-                tracing::warn!("conversation history could not be written");
-            }
+        s.dirty = false;
+        (
+            s.path.clone(),
+            Arc::clone(&s.written),
+            s.revision,
+            s.data.clone(),
+        )
+    };
+    write_versioned(path.as_deref(), &written, seq, &data);
+}
+
+/// Write `data` atomically unless a newer revision was already written.
+fn write_versioned(path: Option<&Path>, written: &Mutex<u64>, seq: u64, data: &FileData) {
+    let Some(path) = path else { return };
+    let mut last = written.lock().unwrap_or_else(|e| e.into_inner());
+    if seq < *last {
+        return;
+    }
+    if write_private(path, data).is_ok() {
+        *last = seq;
+    } else {
+        tracing::warn!("conversation history could not be written");
+    }
+}
+
+/// Rewrite every `.bak` (and numbered `.bak.<ms>`) beside `path` without
+/// first-prompt text; one that is not JSON cannot be cleaned and is removed.
+fn scrub_backups(path: &Path) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let name = name.to_string_lossy().into_owned();
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        if file != format!("{name}.bak") && !file.starts_with(&format!("{name}.bak.")) {
+            continue;
+        }
+        let bak = entry.path();
+        let cleaned = std::fs::read(&bak)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .map(|mut v| {
+                for e in v
+                    .get_mut("entries")
+                    .and_then(|e| e.as_array_mut())
+                    .into_iter()
+                    .flatten()
+                {
+                    if e.pointer("/first_prompt/kind").and_then(|k| k.as_str()) == Some("text") {
+                        e["first_prompt"] = serde_json::json!({"kind": "withheld", "value": "off"});
+                    }
+                }
+                v
+            });
+        let ok = cleaned.is_some_and(|v| write_private(&bak, &v).is_ok());
+        if !ok {
+            let _ = std::fs::remove_file(&bak);
         }
     }
 }
@@ -512,7 +758,8 @@ fn prune(entries: &mut Vec<ConversationEntry>, now: i64) {
         if !e.has_turn && now - e.last_active_ms > HIDDEN_MAX_AGE_MS {
             return false;
         }
-        e.removed_at_ms.is_none_or(|at| now - at <= REMOVED_GRACE_MS)
+        e.removed_at_ms
+            .is_none_or(|at| now - at <= REMOVED_GRACE_MS)
     });
     let mut visible: Vec<(i64, usize)> = entries
         .iter()
@@ -554,5 +801,10 @@ pub fn main_checkout_of(cwd: &str) -> Option<String> {
     let text = std::fs::read_to_string(Path::new(cwd).join(".git")).ok()?;
     let gitdir = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
     let main_git = Path::new(gitdir).parent()?.parent()?;
-    (main_git.file_name()? == ".git").then(|| main_git.parent().map(|p| p.to_string_lossy().into_owned()))?
+    (main_git.file_name()? == ".git")
+        .then(|| main_git.parent().map(|p| p.to_string_lossy().into_owned()))?
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

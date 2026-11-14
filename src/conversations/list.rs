@@ -67,10 +67,11 @@ fn status_of(
     live: Option<&(String, bool)>,
     q: &mut Listing,
 ) -> (ConversationStatus, Option<PathBuf>) {
-    let path = e
-        .transcript_path
-        .clone()
-        .or_else(|| e.project_path.as_deref().and_then(|c| transcript::expected_path(&e.sid, c)));
+    let path = e.transcript_path.clone().or_else(|| {
+        e.project_path
+            .as_deref()
+            .and_then(|c| transcript::expected_path(&e.sid, c))
+    });
     let meta = path.as_deref().and_then(|p| std::fs::metadata(p).ok());
     if let Some((tag, open)) = live {
         return (
@@ -119,7 +120,11 @@ fn status_of(
     (ConversationStatus::Available, path)
 }
 
-fn to_wire(e: &ConversationEntry, status: ConversationStatus, path: Option<PathBuf>) -> ConversationEntryWire {
+fn to_wire(
+    e: &ConversationEntry,
+    status: ConversationStatus,
+    path: Option<PathBuf>,
+) -> ConversationEntryWire {
     let title = e.user_title.clone().unwrap_or_else(|| e.title.clone());
     let mut w = ConversationEntryWire {
         id: e.sid.clone(),
@@ -169,7 +174,8 @@ fn to_wire(e: &ConversationEntry, status: ConversationStatus, path: Option<PathB
 /// transcript starts with `{`.
 pub fn check_unreadable(path: &Path) -> bool {
     CONTENT_CHECKS.fetch_add(1, Ordering::Relaxed);
-    let Ok(mut f) = std::fs::File::open(path) else {
+    // A FIFO, a symlink or a device is no transcript, and never blocks this.
+    let Ok(mut f) = transcript::open_regular(path) else {
         return true;
     };
     let mut head = [0u8; 64];
@@ -182,7 +188,11 @@ pub fn check_unreadable(path: &Path) -> bool {
 /// The background pass a list queues: content checks and scans for moved
 /// files. Blocking; run it on a blocking thread, never under a lock.
 /// Returns whether anything changed.
-pub fn run_background(history: &ConversationHistory, to_check: &[String], to_locate: &[String]) -> bool {
+pub fn run_background(
+    history: &ConversationHistory,
+    to_check: &[String],
+    to_locate: &[String],
+) -> bool {
     let mut changed = false;
     for sid in to_locate {
         match transcript::locate(sid) {
@@ -192,9 +202,13 @@ pub fn run_background(history: &ConversationHistory, to_check: &[String], to_loc
         changed = true;
     }
     for sid in to_check {
-        let Some(path) = history.get(sid).and_then(|e| e.transcript_path.or_else(|| {
-            e.project_path.as_deref().and_then(|c| transcript::expected_path(sid, c))
-        })) else {
+        let Some(path) = history.get(sid).and_then(|e| {
+            e.transcript_path.or_else(|| {
+                e.project_path
+                    .as_deref()
+                    .and_then(|c| transcript::expected_path(sid, c))
+            })
+        }) else {
             continue;
         };
         let Ok(meta) = std::fs::metadata(&path) else {
