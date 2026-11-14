@@ -51,6 +51,9 @@ final class TrackerRowView: NSView {
     static let hPad: CGFloat = 12
     static let vPad: CGFloat = 4
     static let markWidth: CGFloat = 18
+    /// Reserved on every item row (foldable or not) so titles align.
+    static let foldColumnWidth: CGFloat = 16
+    static let foldButtonSize = NSSize(width: 24, height: 20)
     static let timeWidth: CGFloat = 44
     static let gap: CGFloat = 6
     /// The owner chip never grows past this (a 32-character owner is ~190 pt at 11 pt); longer owners
@@ -91,7 +94,8 @@ final class TrackerRowView: NSView {
     private(set) var badges: [NSTextField] = []
     private var ownerChip: NSTextField?
     private var mainText: TrackerTextView?
-    private var noteText: TrackerTextView?
+    /// The text after the title, shown under the fold.
+    private var leadText: TrackerTextView?
     /// The row's prose (a prose row, or an expanded note).
     private(set) var proseView: TrackerProseView?
     /// The item's link chips, in order.
@@ -102,6 +106,8 @@ final class TrackerRowView: NSView {
     /// footnote shows, so a source going stale never shifts a row.
     private var hasChipLine = false
     private var disclosure: NSButton?
+    /// The item's fold control (nil on a row with nothing under the fold).
+    private(set) var disclosureButton: NSButton?
     private var hazardEdge: NSView?
     private let highlightLayer = CALayer()
 
@@ -224,7 +230,7 @@ final class TrackerRowView: NSView {
         }
     }
 
-    @objc private func toggleNote(_ sender: Any?) {
+    @objc private func toggleFold(_ sender: Any?) {
         if let item = row.item { onToggleNote?(item.id) }
     }
 
@@ -298,7 +304,7 @@ final class TrackerRowView: NSView {
 
     private func layoutItem(_ item: TrackerItemRow, width: CGFloat) -> CGFloat {
         let h = Self.hPad, v = Self.vPad
-        let textX = h + Self.markWidth
+        let textX = h + Self.markWidth + Self.foldColumnWidth
         // Right column: the fixed-width time, then the badges if they leave the text its minimum
         // width; otherwise the badges take a line below the text.
         var right = width - h
@@ -336,26 +342,19 @@ final class TrackerRowView: NSView {
         }
 
         let blockWidth = max(width - h - textX, 1)
+        if let leadText {
+            y += 2
+            let lh = leadText.height(forWidth: blockWidth)
+            leadText.frame = NSRect(x: textX, y: y, width: blockWidth, height: lh)
+            y += lh
+        }
+        disclosureButton?.frame = NSRect(x: h + Self.markWidth - 4, y: v - 1,
+                                         width: Self.foldButtonSize.width, height: Self.foldButtonSize.height)
         if let proseView {
             y += 2
             let ph = proseView.layout(width: blockWidth)
             proseView.frame = NSRect(x: textX, y: y, width: blockWidth, height: ph)
             y += ph
-        } else if let noteText {
-            y += 2
-            let discWidth = disclosure.map { ceil($0.intrinsicContentSize.width) + Self.gap } ?? 0
-            let nh = noteText.height(forWidth: max(blockWidth - discWidth, 1))
-            noteText.frame = NSRect(x: textX, y: y, width: max(blockWidth - discWidth, 1), height: nh)
-            if let disclosure {
-                let size = disclosure.intrinsicContentSize
-                disclosure.frame = NSRect(x: textX + blockWidth - size.width, y: y, width: size.width, height: max(nh, size.height))
-            }
-            y += nh
-        }
-        if proseView != nil, let disclosure {
-            let size = disclosure.intrinsicContentSize
-            disclosure.frame = NSRect(x: textX, y: y, width: size.width, height: size.height)
-            y += size.height
         }
         if hasChipLine {
             y += 2
@@ -395,7 +394,8 @@ final class TrackerRowView: NSView {
         markLabel = nil
         timeLabel = nil
         mainText = nil
-        noteText = nil
+        leadText = nil
+        disclosureButton = nil
         proseView = nil
         linkChips = []
         staleFootnote = nil
@@ -460,12 +460,18 @@ final class TrackerRowView: NSView {
         }
         markLabel = addLabel(item.mark, color: TrackerTheme.markColor(item.status), font: TrackerTheme.textFont)
 
-        let text = NSMutableAttributedString(attributedString: MarkdownBlockDocument.render(spans: TrackerMdAdapter.spans(item.textSpans)))
+        // The title is plain, single-line text (no markdown or link styling of agent text).
+        let title = NSMutableAttributedString(string: item.title, attributes: [
+            .font: TrackerTheme.textFont, .foregroundColor: TrackerTheme.text])
         if item.isDone {
-            text.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue,
-                              range: NSRange(location: 0, length: text.length))
+            title.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue,
+                               range: NSRange(location: 0, length: title.length))
         }
-        mainText = addText(text)
+        let titleView = TrackerTextView.make(singleLine: true)
+        titleView.set(title)
+        addSubview(titleView)
+        textViews.append(titleView)
+        mainText = titleView
 
         if let env = item.envBadge {
             let badge = addLabel(env, color: item.isHazard ? TrackerTheme.hazard : muted,
@@ -493,21 +499,33 @@ final class TrackerRowView: NSView {
         time.alignment = .right
         timeLabel = time
 
-        if !item.noteBlocks.isEmpty {
-            if item.noteExpanded {
+        if item.isFoldable {
+            let button = NSButton(frame: .zero)
+            button.bezelStyle = .disclosure
+            button.setButtonType(.pushOnPushOff)
+            button.title = ""
+            button.state = item.isExpanded ? .on : .off
+            button.refusesFirstResponder = false
+            button.target = self
+            button.action = #selector(toggleFold(_:))
+            button.setAccessibilityLabel("Details: \(String(item.title.prefix(80)))")
+            button.toolTip = item.isExpanded ? "Hide details" : "Show details"
+            addSubview(button)
+            disclosureButton = button
+        }
+        if item.isExpanded {
+            if let lead = item.bodyLead {
+                let view = TrackerTextView.make()
+                view.set(NSAttributedString(string: lead, attributes: [
+                    .font: TrackerTheme.textFont, .foregroundColor: TrackerTheme.text]))
+                addSubview(view)
+                textViews.append(view)
+                leadText = view
+            }
+            if !item.noteBlocks.isEmpty {
                 let prose = TrackerProseView(blocks: TrackerMdAdapter.blocks(item.noteBlocks))
                 addSubview(prose)
                 proseView = prose
-            } else if let first = item.noteFirstLine {
-                let view = TrackerTextView.make(singleLine: true)
-                view.set(NSAttributedString(string: first, attributes: [
-                    .font: TrackerTheme.metaFont, .foregroundColor: muted]))
-                addSubview(view)
-                textViews.append(view)
-                noteText = view
-            }
-            if item.noteIsCollapsible {
-                disclosure = addButton(item.noteExpanded ? "less" : "more", action: #selector(toggleNote(_:)))
             }
         }
         hasChipLine = !item.links.isEmpty || item.bound != nil

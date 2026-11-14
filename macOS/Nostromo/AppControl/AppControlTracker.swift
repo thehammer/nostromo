@@ -38,7 +38,7 @@ enum AppControlTracker {
             if case .section(let section) = row.content { heading = section.id }
             guard !row.key.hasPrefix(TrackerDeferral.movingPrefix), let item = row.item else { continue }
             if let heading { shownSection[item.id] = heading }
-            shownExpanded[item.id] = item.noteIsCollapsible && item.noteExpanded
+            shownExpanded[item.id] = item.isExpanded
         }
         func fields(_ item: TrackerItemRow, _ hold: TrackerHold?, moving: Bool = false) -> [String: Any] {
             let section = modelSection[item.id]
@@ -48,7 +48,7 @@ enum AppControlTracker {
             let shown = moving ? section : (shownSection[item.id] ?? section)
             return ["held": state, "held_reason": reason, "model_section": section.map { $0 as Any } ?? NSNull(),
                     "shown_section": shown.map { $0 as Any } ?? NSNull(),
-                    "shown_expanded": shownExpanded[item.id] ?? (item.noteIsCollapsible && item.noteExpanded)]
+                    "shown_expanded": shownExpanded[item.id] ?? (item.isExpanded)]
         }
 
         var sections: [[String: Any]] = []
@@ -144,6 +144,10 @@ enum AppControlTracker {
         [
             "id": item.id,
             "text": item.text,
+            "title": item.title,
+            "body_lead": item.bodyLead.map { $0 as Any } ?? NSNull(),
+            "foldable": item.isFoldable,
+            "expanded": item.isExpanded,
             "status": item.status.wireName,
             "owner": item.owner.map { $0 as Any } ?? NSNull(),
             "updated": item.relativeTime,
@@ -156,7 +160,7 @@ enum AppControlTracker {
             "held_reason": state["held_reason"] ?? NSNull(),
             "model_section": state["model_section"] ?? NSNull(),
             "shown_section": state["shown_section"] ?? NSNull(),
-            "shown_expanded": state["shown_expanded"] ?? (item.noteIsCollapsible && item.noteExpanded),
+            "shown_expanded": state["shown_expanded"] ?? (item.isExpanded),
             "stub": stub.map { $0 as Any } ?? NSNull(),
             "conflict": NSNull(),
             "badge": NSNull(),

@@ -336,12 +336,19 @@ final class TrackerPaneView: NSView {
     /// whatever the board moved while the reader was looking folds away now.
     func toggleNote(item id: String) {
         clearSelection(inItem: id)
-        if folds.expandedNotes.remove(id) == nil {
-            folds.expandedNotes.insert(id)
+        // The rebuild recreates the row's subviews: a focused disclosure button must stay focused.
+        let button = rowViews.first { $0.value.row.item?.id == id }?.value.disclosureButton
+        let hadFocus = button != nil && window?.firstResponder === button
+        if folds.expandedItems.remove(id) == nil {
+            folds.expandedItems.insert(id)
         } else {
             deferral.releaseAll()
         }
         render()
+        if hadFocus,
+           let fresh = rowViews.first(where: { $0.value.row.item?.id == id })?.value.disclosureButton {
+            window?.makeFirstResponder(fresh)
+        }
     }
 
     func toggleLog() {

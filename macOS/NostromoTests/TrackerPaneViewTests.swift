@@ -634,18 +634,19 @@ final class TrackerPaneViewTests: MouseQueueTestCase {
         XCTAssertEqual(rig.pane.documentView.frame.width, clipWidth, accuracy: 0.5, "the document is exactly as wide as the viewport")
     }
 
-    func testCollapsedNoteShowsFirstLineAndOpensToTheRest() throws {
+    func testCollapsedItemShowsOnlyTheTitleAndOpensToTheNote() throws {
         let (rig, script) = try goldenRig()
         var edited = script
         try edited.setNote("verif-1037", paragraphs: ["First line of the note", "Second line", "Third line"])
         rig.push(edited)
         let collapsed = rig.rowView("item:verif-1037")?.visibleText ?? ""
-        XCTAssertTrue(collapsed.contains("First line of the note"), collapsed)
+        XCTAssertFalse(collapsed.contains("First line of the note"), collapsed)
         XCTAssertFalse(collapsed.contains("Third line"), collapsed)
 
         rig.pane.toggleNote(item: "verif-1037")
         rig.settle()
         let expanded = rig.rowView("item:verif-1037")?.visibleText ?? ""
+        XCTAssertTrue(expanded.contains("First line of the note"), expanded)
         XCTAssertTrue(expanded.contains("Third line"), expanded)
     }
 

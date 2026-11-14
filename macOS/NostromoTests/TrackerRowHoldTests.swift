@@ -194,10 +194,14 @@ enum TrackerHoldFx {
         pane.displayedRows.compactMap { pane.rowViews[$0.key]?.visibleText }.joined(separator: "\n")
     }
 
-    /// The row's "more" / "less" button, if it has one.
+    /// The row's disclosure button, if it has one.
     static func disclosure(in row: TrackerRowView) -> NSButton? {
-        rigAllSubviews(of: row).compactMap { $0 as? NSButton }
-            .first { ["more", "less"].contains($0.attributedTitle.string) }
+        row.disclosureButton
+    }
+
+    /// What the disclosure offers: "less" while the details are open, "more" while they are folded.
+    static func label(of button: NSButton) -> String {
+        button.state == .on ? "less" : "more"
     }
 
     static func textView(_ target: Selecting, in row: TrackerRowView) -> TrackerTextView? {
@@ -241,8 +245,8 @@ final class TrackerRowHoldTests: XCTestCase {
         guard let row = rig.pane.rowViews[key] else {
             return XCTFail("no row \(key) to click \"\(title)\" on; rows: \(rig.pane.displayedRows.map(\.key))", file: file, line: line)
         }
-        guard let button = Fx.disclosure(in: row), button.attributedTitle.string == title else {
-            let offered = Fx.disclosure(in: row)?.attributedTitle.string ?? "no disclosure at all"
+        guard let button = Fx.disclosure(in: row), Fx.label(of: button) == title else {
+            let offered = Fx.disclosure(in: row).map { Fx.label(of: $0) } ?? "no disclosure at all"
             return XCTFail("row \(key) offers \"\(offered)\", not \"\(title)\"", file: file, line: line)
         }
         button.performClick(nil)
@@ -317,11 +321,11 @@ final class TrackerRowHoldTests: XCTestCase {
         guard let row = Fx.itemRow(Hold.target, in: rig.pane) else {
             return XCTFail("\(message): the item has no row; rows: \(rig.pane.displayedRows.map(\.key))", file: file, line: line)
         }
-        XCTAssertEqual(row.row.item?.noteExpanded, true, "\(message): the row's note is expanded", file: file, line: line)
+        XCTAssertEqual(row.row.item?.isExpanded, true, "\(message): the row's note is expanded", file: file, line: line)
         XCTAssertNotNil(row.proseView, "\(message): the whole note is laid out", file: file, line: line)
         XCTAssertTrue(row.visibleText.contains(Hold.lastNoteMarker),
                       "\(message): the note's last line is shown: \(row.visibleText)", file: file, line: line)
-        XCTAssertEqual(Fx.disclosure(in: row)?.attributedTitle.string, "less", "\(message): the disclosure offers less",
+        XCTAssertEqual(Fx.disclosure(in: row).map { Fx.label(of: $0) }, "less", "\(message): the disclosure offers less",
                        file: file, line: line)
     }
 
@@ -338,12 +342,12 @@ final class TrackerRowHoldTests: XCTestCase {
             if rowMustShow { XCTFail("\(message): the item has no row; rows: \(pane.displayedRows.map(\.key))", file: file, line: line) }
             return
         }
-        XCTAssertEqual(row.row.item?.noteExpanded, false, "\(message): the row's note is collapsed", file: file, line: line)
-        XCTAssertEqual(row.row.item?.noteIsCollapsible, true, "\(message): the note still collapses", file: file, line: line)
+        XCTAssertEqual(row.row.item?.isExpanded, false, "\(message): the row's note is collapsed", file: file, line: line)
+        XCTAssertEqual(row.row.item?.isFoldable, true, "\(message): the note still collapses", file: file, line: line)
         XCTAssertNil(row.proseView, "\(message): no prose is laid out for a collapsed note", file: file, line: line)
         XCTAssertTrue(row.visibleText.contains(Hold.firstNoteMarker), "\(message): the first line shows: \(row.visibleText)",
                       file: file, line: line)
-        XCTAssertEqual(Fx.disclosure(in: row)?.attributedTitle.string, "more", "\(message): the disclosure offers more",
+        XCTAssertEqual(Fx.disclosure(in: row).map { Fx.label(of: $0) }, "more", "\(message): the disclosure offers more",
                        file: file, line: line)
     }
 
