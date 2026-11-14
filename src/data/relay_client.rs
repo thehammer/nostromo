@@ -209,6 +209,8 @@ pub const DEFAULT_ORG: &str = "Carefeed";
 pub struct RelayStatus {
     connected: std::sync::atomic::AtomicBool,
     org: std::sync::Mutex<Option<String>>,
+    /// When `connected` last changed (set on each connected/disconnected transition).
+    since: std::sync::Mutex<Option<DateTime<Utc>>>,
 }
 
 impl RelayStatus {
@@ -223,8 +225,21 @@ impl RelayStatus {
     }
 
     pub fn set_connected(&self, connected: bool) {
-        self.connected
-            .store(connected, std::sync::atomic::Ordering::SeqCst);
+        let before = self
+            .connected
+            .swap(connected, std::sync::atomic::Ordering::SeqCst);
+        let mut since = self.since.lock().unwrap_or_else(|e| e.into_inner());
+        // A transition stamps the time; the first call also does (the relay
+        // was "disconnected" from the start, so a first `false` is not news,
+        // but it is the earliest honest time we have).
+        if before != connected || since.is_none() {
+            *since = Some(Utc::now());
+        }
+    }
+
+    /// When the connection last came up or went down; `None` before the first report.
+    pub fn since(&self) -> Option<DateTime<Utc>> {
+        *self.since.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The organisation whose events the relay sends: the ack's effective
@@ -280,10 +295,14 @@ impl RelayHub {
     }
 }
 
-/// Is the subscriber wanted at all? Perri's queue and Mother's notices are
-/// its only consumers: with both off nothing is spawned.
-pub fn relay_wanted(perri_enabled: bool, notices_enabled: bool) -> bool {
-    perri_enabled || notices_enabled
+/// Is the subscriber wanted at all? Perri's queue, Mother's notices and the
+/// authored-PR list are its consumers: with all off nothing is spawned.
+pub fn relay_wanted(
+    perri_enabled: bool,
+    notices_enabled: bool,
+    authored_prs_enabled: bool,
+) -> bool {
+    perri_enabled || notices_enabled || authored_prs_enabled
 }
 
 /// Like [`spawn`], publishing to every subscriber of `hub` and keeping its
@@ -421,15 +440,9 @@ async fn connect_and_subscribe(url: &str, token: &str, hub: &RelayHub) -> Result
                         url,
                         name,
                     }) => {
-                        let repo_label = repo.as_deref().unwrap_or("?");
-                        // PR events carry `number`; ci.completed carries `name`
-                        // (the check/suite name) instead — show whichever applies.
-                        let detail = match (number, name.clone()) {
-                            (Some(n), _) => format!("#{n}"),
-                            (None, Some(n)) => n,
-                            (None, None) => "?".to_string(),
-                        };
-                        info!("github-relay: event {event_type} {repo_label} {detail}");
+                        // Only the event type is logged: the repo, PR number
+                        // and check name are not (SP2).
+                        info!("github-relay: event {event_type}");
                         // Every parsed event is forwarded.  Deciding what an
                         // event *means* — including that an unrecognised type
                         // means nothing — belongs to the queue's classifier
@@ -789,10 +802,11 @@ mod tests {
 
     #[test]
     fn the_subscriber_is_wanted_when_perri_or_notices_use_it() {
-        assert!(relay_wanted(true, true));
-        assert!(relay_wanted(true, false));
-        assert!(relay_wanted(false, true));
-        assert!(!relay_wanted(false, false));
+        assert!(relay_wanted(true, true, false));
+        assert!(relay_wanted(true, false, false));
+        assert!(relay_wanted(false, true, false));
+        assert!(relay_wanted(false, false, true));
+        assert!(!relay_wanted(false, false, false));
     }
 
     // ── the token never reaches the log ──
@@ -837,5 +851,99 @@ mod tests {
         let logged = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
         assert!(logged.contains("relay-canary-capture-check"), "{logged}");
         assert!(!logged.contains("SECRET-TOKEN"), "{logged}");
+    }
+
+    // ── what the event log line carries (SP2) ──
+
+    const CANARY_PR: &str = r#"{"type":"event","event_type":"pr.synchronize","repo":"Carefeed/canary-repo-Zq81","number":424242,"head_sha":"canarysha-Zq81","author":"canary-author-Zq81","reviewer":"canary-reviewer-Zq81","title":"CANARY-TITLE-Zq81","url":"https://github.com/Carefeed/canary-repo-Zq81/pull/424242"}"#;
+    const CANARY_CI: &str = r#"{"type":"event","event_type":"ci.completed","repo":"Carefeed/canary-repo-Zq81","head_sha":"canarysha-Zq81","name":"canary-check-Zq81"}"#;
+
+    #[tokio::test]
+    async fn the_event_log_line_names_only_the_event_type() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::trace!("relay-canary-capture-check");
+
+        let mut relay = fake_relay().await;
+        let mut hub = RelayHub::new();
+        let mut rx = hub.channel();
+        let task = spawn_with(relay.url.clone(), "tok".into(), hub);
+        relay.subscribes.recv().await.expect("a subscribe frame");
+        relay.send(ACK);
+        relay.send(CANARY_PR);
+        relay.send(CANARY_CI);
+        expect_reconnected(&mut rx).await;
+        // The events still reach the consumers in full.
+        match rx.recv().await {
+            Some(QueueSignal::Event(e)) => {
+                assert_eq!(e.event_type, "pr.synchronize");
+                assert_eq!(e.repo.as_deref(), Some("Carefeed/canary-repo-Zq81"));
+                assert_eq!(e.number, Some(424242));
+                assert_eq!(e.title.as_deref(), Some("CANARY-TITLE-Zq81"));
+            }
+            other => panic!("expected the first event, got {other:?}"),
+        }
+        match rx.recv().await {
+            Some(QueueSignal::Event(e)) => assert_eq!(e.name.as_deref(), Some("canary-check-Zq81")),
+            other => panic!("expected the second event, got {other:?}"),
+        }
+        relay.close_with(4001);
+        task.await.expect("ends");
+
+        let logged = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
+        assert!(logged.contains("relay-canary-capture-check"), "{logged}");
+        assert!(
+            logged.contains("github-relay: event pr.synchronize"),
+            "{logged}"
+        );
+        assert!(
+            logged.contains("github-relay: event ci.completed"),
+            "{logged}"
+        );
+        for line in logged.lines().filter(|l| l.contains("github-relay: event")) {
+            let tail = line.rsplit("github-relay: event ").next().unwrap().trim();
+            assert!(
+                tail == "pr.synchronize" || tail == "ci.completed",
+                "the event line carries the type and nothing else: {line}"
+            );
+        }
+        for never in ["Zq81", "424242", "github.com/Carefeed"] {
+            assert!(!logged.contains(never), "`{never}` was logged:\n{logged}");
+        }
+    }
+
+    // ── when the connection last changed ──
+
+    #[test]
+    fn the_status_remembers_when_the_connection_last_came_up_or_went_down() {
+        let status = RelayStatus::new();
+        assert_eq!(status.since(), None, "nothing reported yet");
+
+        status.set_connected(true);
+        let up = status.since().expect("stamped on the first report");
+        std::thread::sleep(Duration::from_millis(5));
+        status.set_connected(true);
+        assert_eq!(status.since(), Some(up), "no change, no new time");
+
+        std::thread::sleep(Duration::from_millis(5));
+        status.set_connected(false);
+        let down = status.since().expect("stamped on a transition");
+        assert!(down > up, "{down} vs {up}");
+        std::thread::sleep(Duration::from_millis(5));
+        status.set_connected(false);
+        assert_eq!(status.since(), Some(down));
+    }
+
+    #[test]
+    fn a_first_report_of_down_still_gives_the_earliest_honest_time() {
+        let status = RelayStatus::new();
+        status.set_connected(false);
+        assert!(status.since().is_some());
     }
 }

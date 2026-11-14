@@ -41,8 +41,9 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SLASH_COMMANDS,
-        FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        SessionAction, Topic, FEATURE_AUTHORED_PRS, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN,
+        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION,
+        PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -553,19 +554,23 @@ async fn accept_loop_tcp(
 /// features, the operator nonce (when the peer was verified) and the built-in
 /// agents this daemon runs.
 fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMsg {
+    let mut features = vec![
+        FEATURE_WORK.to_string(),
+        FEATURE_MODEL.to_string(),
+        FEATURE_TASKS.to_string(),
+        FEATURE_APPROVALS.to_string(),
+        FEATURE_LOGIN.to_string(),
+        FEATURE_TERMINAL_STAGING_ONLY.to_string(),
+        FEATURE_FOCUS_ACTIVITY.to_string(),
+        FEATURE_SLASH_COMMANDS.to_string(),
+    ];
+    if mgr.authored_prs().is_some() {
+        features.push(FEATURE_AUTHORED_PRS.to_string());
+    }
     ServerMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
         daemon_pid: std::process::id(),
-        features: vec![
-            FEATURE_WORK.to_string(),
-            FEATURE_MODEL.to_string(),
-            FEATURE_TASKS.to_string(),
-            FEATURE_APPROVALS.to_string(),
-            FEATURE_LOGIN.to_string(),
-            FEATURE_TERMINAL_STAGING_ONLY.to_string(),
-            FEATURE_FOCUS_ACTIVITY.to_string(),
-            FEATURE_SLASH_COMMANDS.to_string(),
-        ],
+        features,
         operator_nonce,
         enabled_agents: Some(mgr.enabled_agents().wire_names()),
         disabled_agents: Some(mgr.enabled_agents().disabled_names()),
@@ -689,7 +694,7 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let (mut topics, renders_decisions, renders_approvals, capabilities, sub_nonce): (
+    let (topics, renders_decisions, renders_approvals, capabilities, sub_nonce): (
         Vec<Topic>,
         bool,
         bool,
@@ -718,6 +723,10 @@ where
             anyhow::bail!("expected Subscribe, got a {} frame", frame_type(&sub_bytes));
         }
     };
+
+    // The author's PR list is for the verified app: another local client that
+    // names the topic is subscribed to everything else, but not to it.
+    let mut topics = deliverable_topics(topics, trust);
 
     info!(
         claimed_id,
@@ -1114,6 +1123,7 @@ where
                         // that learned from `Welcome.features` that the daemon
                         // serves `work` adds it this way.
                         if let ClientMsg::Subscribe { topics: new_topics, renders_decisions, renders_approvals, capabilities, operator_nonce: sent } = msg {
+                            let new_topics = deliverable_topics(new_topics, trust);
                             if let Some(cap) = &cap {
                                 lock_terminals(&terminals).set_capabilities(cap, &conn_key, capabilities);
                             } else if pending_cap.is_some() {
@@ -1248,6 +1258,10 @@ where
     }
     if is_operator {
         decisions.lock().unwrap().remove_operator(&conn_key);
+    }
+    // A closed connection's demand for the author's PR list goes with it.
+    if let Some(board) = session_mgr.lock().unwrap().authored_prs() {
+        board.remove(&conn_key);
     }
     if let Some(broker) = &broker {
         broker.app_disconnected(&conn_key);
@@ -2628,6 +2642,28 @@ fn handle_client_msg(
             }
         }
 
+        // ── The author's PR list: who is looking, and a reconcile (the verified
+        // app only; a network peer was refused above).
+        ClientMsg::AuthoredPrsDemand { .. } | ClientMsg::AuthoredPrsRefresh {}
+            if trust != PeerTrust::OperatorApp =>
+        {
+            debug!(conn_key, ?trust, "authored-prs verb ignored: not the verified app");
+        }
+
+        ClientMsg::AuthoredPrsDemand { level } => {
+            let board = session_mgr.lock().unwrap().authored_prs();
+            if let Some(board) = board {
+                board.set(conn_key, &level);
+            }
+        }
+
+        ClientMsg::AuthoredPrsRefresh {} => {
+            let board = session_mgr.lock().unwrap().authored_prs();
+            if let Some(board) = board {
+                board.refresh();
+            }
+        }
+
         ClientMsg::ModelDefaultsRequest {} => {
             let msg = session_mgr.lock().unwrap().model_defaults_msg();
             let _ = targeted_tx.send(msg);
@@ -3227,6 +3263,23 @@ fn wants_model(topics: &[Topic]) -> bool {
     topics.contains(&Topic::Model)
 }
 
+/// Does this client take the author's PR list? Only by naming
+/// `Topic::AuthoredPrs`: an older client that subscribes to everything must
+/// not be sent a frame it does not know.
+/// The topics a connection is actually subscribed to: the author's PR list
+/// (repos, titles, who owns what) is delivered to the verified Nostromo app
+/// only, as its verbs are. Another local client that names it gets nothing.
+fn deliverable_topics(mut topics: Vec<Topic>, trust: PeerTrust) -> Vec<Topic> {
+    if trust != PeerTrust::OperatorApp {
+        topics.retain(|t| *t != Topic::AuthoredPrs);
+    }
+    topics
+}
+
+fn wants_authored_prs(topics: &[Topic]) -> bool {
+    topics.contains(&Topic::AuthoredPrs)
+}
+
 /// A session frame as a client that has not asked for model frames gets it:
 /// without transcript notes (see [`wants_model`]).
 fn without_notes_unless_model(msg: ServerMsg, topics: &[Topic]) -> Option<ServerMsg> {
@@ -3742,6 +3795,7 @@ fn retain_key(msg: &ServerMsg) -> Option<String> {
         ServerMsg::TeriPicks { .. } => Some("picks".to_string()),
         // Replayed to a local client that subscribes after the last change.
         ServerMsg::MotherNoticeState { .. } => Some("mother_notice_state".to_string()),
+        ServerMsg::AuthoredPrs { .. } => Some("authored_prs".to_string()),
         _ => None,
     }
 }
@@ -3961,6 +4015,8 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherStatusline(_) => subscribed(topics, Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => subscribed(topics, Topic::MotherJobs),
         ServerMsg::MotherNoticeState { .. } => subscribed(topics, Topic::MotherJobs),
+        // Only to a client that names the topic: the empty list does not include it.
+        ServerMsg::AuthoredPrs { .. } => wants_authored_prs(topics),
         ServerMsg::MotherPeek { .. } => subscribed(topics, Topic::MotherPeek),
         ServerMsg::TeriState { .. } => subscribed(topics, Topic::Teri),
         ServerMsg::WorkSourceStatus { .. }
@@ -4617,5 +4673,242 @@ mod tests {
     fn the_tasks_capability_is_advertised_under_its_documented_name() {
         // `Welcome.features` carries this string; the Swift clients look for it.
         assert_eq!(FEATURE_TASKS, "tasks");
+    }
+}
+
+#[cfg(test)]
+mod authored_prs_tests {
+    //! The server's side of the author's PR list: the capability in the
+    //! Welcome, and which subscriptions are sent the frame.
+
+    use super::*;
+    use crate::data::authored_prs::snapshot::*;
+    use crate::data::authored_prs::DemandBoard;
+
+    fn snapshot_frame() -> ServerMsg {
+        let counts = UsageCounts::default();
+        ServerMsg::AuthoredPrs {
+            snapshot: AuthoredPrsSnapshot {
+                generated_at: chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+                token: TokenState::Connected,
+                relay: RelayInfo {
+                    state: RelayState::Live,
+                    since: None,
+                    org: "Carefeed".into(),
+                },
+                poll: PollInfo {
+                    state: PollState::Ok,
+                    checked_at: None,
+                    interval_secs: 60,
+                    resumes_at: None,
+                    retry_at: None,
+                },
+                refresh_blocked: None,
+                hidden_orgs: vec![],
+                total_open: 0,
+                shown: 0,
+                prs: vec![],
+                usage: UsageView {
+                    window_secs: 3600,
+                    window: counts,
+                    since_start: counts,
+                },
+            },
+        }
+    }
+
+    fn features_of(mgr: &SessionManager) -> Vec<String> {
+        match welcome_msg(mgr, None) {
+            ServerMsg::Welcome { features, .. } => features,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_welcome_lists_authored_prs_v1_only_once_the_feature_is_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager::with_store_path(tmp.path().join("sessions.json"));
+        let before = features_of(&mgr);
+        assert!(
+            !before.iter().any(|f| f == FEATURE_AUTHORED_PRS),
+            "{before:?}"
+        );
+
+        let (board, _inputs) = DemandBoard::new();
+        mgr.configure_authored_prs(board);
+        let after = features_of(&mgr);
+        assert!(after.iter().any(|f| f == "authored_prs_v1"), "{after:?}");
+        // Everything advertised before is still advertised.
+        for f in &before {
+            assert!(after.contains(f), "{f} went missing");
+        }
+        assert_eq!(after.len(), before.len() + 1);
+    }
+
+    #[test]
+    fn the_frame_goes_only_to_a_subscription_that_names_the_topic() {
+        let frame = snapshot_frame();
+        assert!(
+            !message_matches_topics(&frame, &[]),
+            "the empty everything-list does not include it (an older client cannot decode it)"
+        );
+        assert!(message_matches_topics(&frame, &[Topic::AuthoredPrs]));
+        assert!(message_matches_topics(
+            &frame,
+            &[Topic::Perri, Topic::AuthoredPrs]
+        ));
+        assert!(!message_matches_topics(&frame, &[Topic::Perri]));
+        assert!(
+            !message_matches_topics(&frame, &[Topic::Unknown]),
+            "an unknown topic is not it"
+        );
+        assert!(!message_matches_topics(
+            &frame,
+            &[Topic::Terminal, Topic::Model]
+        ));
+    }
+
+    #[test]
+    fn the_latest_frame_is_the_one_kept_for_a_late_subscriber() {
+        assert_eq!(
+            retain_key(&snapshot_frame()).as_deref(),
+            Some("authored_prs")
+        );
+    }
+
+    // ── who may say what is being looked at, and who is sent the list ─────
+
+    /// Dispatch `msgs` in order as a connection of `trust`; what the demand
+    /// board ended up with, how many refreshes reached it, and what was
+    /// replied. Called straight, so nothing is racing: when this returns every
+    /// message has been fully handled.
+    fn authored_verbs_as(
+        trust: PeerTrust,
+        msgs: Vec<ClientMsg>,
+    ) -> (crate::data::authored_prs::Demand, usize, Vec<ServerMsg>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager::with_store_path(dir.path().join("s.json"));
+        let (board, mut inputs) = DemandBoard::new();
+        mgr.configure_authored_prs(Arc::clone(&board));
+        let mgr = Arc::new(Mutex::new(mgr));
+        let (ttx, mut trx) = mpsc::unbounded_channel();
+        let (btx, _brx) = broadcast::channel(8);
+        for msg in msgs {
+            handle_client_msg(
+                msg,
+                trust,
+                None,
+                None,
+                &SensitiveTags::in_memory(),
+                "conn",
+                "client",
+                &mgr,
+                &ttx,
+                &btx,
+                dir.path(),
+                &Arc::new(Mutex::new(DecisionRegistry::new())),
+                &Arc::new(Mutex::new(HashSet::new())),
+                None,
+                &TerminalManager::in_memory(),
+            );
+        }
+        let mut refreshes = 0;
+        while inputs.refresh_rx.try_recv().is_ok() {
+            refreshes += 1;
+        }
+        let demand = *inputs.demand_rx.borrow();
+        let mut out = Vec::new();
+        while let Ok(m) = trx.try_recv() {
+            out.push(m);
+        }
+        (demand, refreshes, out)
+    }
+
+    fn demand_msg(level: &str) -> ClientMsg {
+        ClientMsg::AuthoredPrsDemand {
+            level: level.into(),
+        }
+    }
+
+    #[test]
+    fn the_operator_app_sets_the_demand_and_asks_for_a_refresh() {
+        use crate::data::authored_prs::Demand;
+        let (demand, refreshes, out) = authored_verbs_as(
+            PeerTrust::OperatorApp,
+            vec![demand_msg("visible"), ClientMsg::AuthoredPrsRefresh {}],
+        );
+        assert_eq!(demand, Demand::Visible);
+        assert_eq!(refreshes, 1);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_local_client_that_is_not_the_operator_app_can_neither_set_the_demand_nor_ask_for_a_refresh(
+    ) {
+        use crate::data::authored_prs::Demand;
+        // Each verb on its own, so one being refused cannot hide the other
+        // getting through.
+        let (demand, refreshes, _) =
+            authored_verbs_as(PeerTrust::LocalOther, vec![demand_msg("visible")]);
+        assert_eq!(demand, Demand::Idle, "the demand verb was acted on");
+        assert_eq!(refreshes, 0);
+
+        let (demand, refreshes, _) = authored_verbs_as(
+            PeerTrust::LocalOther,
+            vec![ClientMsg::AuthoredPrsRefresh {}],
+        );
+        assert_eq!(demand, Demand::Idle);
+        assert_eq!(refreshes, 0, "the refresh verb was acted on");
+
+        // Many of them, in any order, still change nothing.
+        let (demand, refreshes, _) = authored_verbs_as(
+            PeerTrust::LocalOther,
+            vec![
+                ClientMsg::AuthoredPrsRefresh {},
+                demand_msg("hidden"),
+                demand_msg("visible"),
+                ClientMsg::AuthoredPrsRefresh {},
+            ],
+        );
+        assert_eq!((demand, refreshes), (Demand::Idle, 0));
+    }
+
+    #[test]
+    fn a_network_peer_can_neither_set_the_demand_nor_ask_for_a_refresh() {
+        use crate::data::authored_prs::Demand;
+        let (demand, refreshes, out) = authored_verbs_as(
+            PeerTrust::Tcp,
+            vec![demand_msg("visible"), ClientMsg::AuthoredPrsRefresh {}],
+        );
+        assert_eq!((demand, refreshes), (Demand::Idle, 0));
+        assert_eq!(
+            out.iter()
+                .filter(|m| matches!(m, ServerMsg::Error { .. }))
+                .count(),
+            2,
+            "each is refused out loud: {out:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_operator_app_is_subscribed_to_the_authored_prs_topic() {
+        let asked = || vec![Topic::Perri, Topic::AuthoredPrs, Topic::Model];
+        assert_eq!(
+            deliverable_topics(asked(), PeerTrust::OperatorApp),
+            asked(),
+            "the app keeps every topic it asked for"
+        );
+        for trust in [PeerTrust::LocalOther, PeerTrust::Tcp] {
+            assert_eq!(
+                deliverable_topics(asked(), trust),
+                vec![Topic::Perri, Topic::Model],
+                "{trust:?}: everything but the author's PR list"
+            );
+            assert!(
+                deliverable_topics(vec![Topic::AuthoredPrs], trust).is_empty(),
+                "{trust:?}"
+            );
+            assert!(deliverable_topics(vec![], trust).is_empty());
+        }
     }
 }

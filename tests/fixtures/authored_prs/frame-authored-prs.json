@@ -1,0 +1,261 @@
+{
+  "type": "authored_prs",
+  "snapshot": {
+    "generated_at": "2026-11-14T12:00:00Z",
+    "token": "connected",
+    "relay": {
+      "state": "catching_up",
+      "org": "Carefeed"
+    },
+    "poll": {
+      "state": "rate_limited",
+      "checked_at": "2026-11-14T11:58:00Z",
+      "interval_secs": 300
+    },
+    "refresh_blocked": "running",
+    "hidden_orgs": [
+      "Secret-Org",
+      "an organization"
+    ],
+    "total_open": 9,
+    "shown": 7,
+    "prs": [
+      {
+        "repo": "Carefeed/admin-portal",
+        "number": 101,
+        "url": "https://github.com/Carefeed/admin-portal/pull/101",
+        "title": "Fix the visitor export",
+        "draft": false,
+        "updated_at": "2026-11-14T11:55:00Z",
+        "group": "needs_you",
+        "lifecycle": "open",
+        "base_ref": "release/2026-11",
+        "checks": {
+          "state": "failing",
+          "passed": 3,
+          "failed": 2,
+          "pending": 0,
+          "failing_names": [
+            "unit tests",
+            "lint"
+          ]
+        },
+        "review": {
+          "state": "changes_requested",
+          "logins": [
+            "alice"
+          ]
+        },
+        "new_comments": 3,
+        "unresolved_threads": 2,
+        "threads_truncated": true,
+        "owner": {
+          "kind": "mother_job",
+          "tag": "focus-portal",
+          "name": "Portal export",
+          "job_id": "job-17",
+          "via": "mother_job"
+        }
+      },
+      {
+        "repo": "thehammer/nostromo",
+        "number": 202,
+        "url": "https://github.com/thehammer/nostromo/pull/202",
+        "title": "Add the authored PR list",
+        "draft": false,
+        "updated_at": "2026-11-14T10:30:00Z",
+        "group": "ready",
+        "lifecycle": "open",
+        "checks": {
+          "state": "passing",
+          "passed": 6,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "approved",
+          "logins": [
+            "bob",
+            "carefeed-bot[bot]"
+          ]
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "linked",
+          "tag": "focus-nostromo",
+          "name": "Nostromo daemon",
+          "via": "linked"
+        }
+      },
+      {
+        "repo": "third-org/widgets",
+        "number": 303,
+        "url": "https://github.com/third-org/widgets/pull/303",
+        "title": "Widget polish",
+        "draft": false,
+        "updated_at": "2026-11-14T09:00:00Z",
+        "group": "waiting",
+        "lifecycle": "open",
+        "checks": {
+          "state": "pending",
+          "passed": 4,
+          "failed": 0,
+          "pending": 1
+        },
+        "review": {
+          "state": "review_requested",
+          "logins": [
+            "carol"
+          ]
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "on_branch",
+          "tag": "focus-widgets",
+          "name": "Widgets",
+          "via": "on_branch"
+        }
+      },
+      {
+        "repo": "Carefeed/app",
+        "number": 404,
+        "url": "https://github.com/Carefeed/app/pull/404",
+        "title": "WIP: new onboarding",
+        "draft": true,
+        "updated_at": "2026-11-14T08:15:00Z",
+        "group": "draft",
+        "lifecycle": "open",
+        "checks": {
+          "state": "none",
+          "passed": 0,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "none"
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "ambiguous",
+          "candidates": [
+            {
+              "tag": "focus-alpha",
+              "name": "Alpha",
+              "via": "mother_job",
+              "job_id": "job-3"
+            },
+            {
+              "tag": "focus-beta",
+              "name": "Beta",
+              "via": "on_branch"
+            }
+          ]
+        }
+      },
+      {
+        "repo": "Carefeed/app",
+        "number": 505,
+        "url": "https://github.com/Carefeed/app/pull/505",
+        "title": "Tidy the settings page",
+        "draft": false,
+        "updated_at": "2026-11-13T17:45:00Z",
+        "group": "waiting",
+        "lifecycle": "open",
+        "details_unavailable": true,
+        "checks": {
+          "state": "none",
+          "passed": 0,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "none"
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "closed",
+          "tag": "focus-gone",
+          "name": "A focus that closed",
+          "job_id": "job-9",
+          "via": "mother_job"
+        }
+      },
+      {
+        "repo": "thehammer/nostromo",
+        "number": 606,
+        "url": "https://github.com/thehammer/nostromo/pull/606",
+        "title": "Release 1.4",
+        "draft": false,
+        "updated_at": "2026-11-14T11:58:00Z",
+        "group": "ready",
+        "lifecycle": "merged",
+        "ended_at": "2026-11-14T11:58:00Z",
+        "checks": {
+          "state": "passing",
+          "passed": 6,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "approved",
+          "logins": [
+            "bob"
+          ]
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "unknown"
+        }
+      },
+      {
+        "repo": "Carefeed/app",
+        "number": 707,
+        "url": "https://github.com/Carefeed/app/pull/707",
+        "title": "Abandoned experiment",
+        "draft": false,
+        "updated_at": "2026-11-14T11:59:00Z",
+        "group": "waiting",
+        "lifecycle": "closed",
+        "ended_at": "2026-11-14T11:59:00Z",
+        "checks": {
+          "state": "none",
+          "passed": 0,
+          "failed": 0,
+          "pending": 0
+        },
+        "review": {
+          "state": "none"
+        },
+        "new_comments": 0,
+        "unresolved_threads": 0,
+        "owner": {
+          "kind": "unknown"
+        }
+      }
+    ],
+    "usage": {
+      "window_secs": 3600,
+      "charged": 41,
+      "not_modified": 17,
+      "search": 22,
+      "graphql_points": 19,
+      "relay_charged": 4,
+      "visible_charged": 36,
+      "hidden_charged": 5,
+      "since_start": {
+        "charged": 120,
+        "not_modified": 80,
+        "search": 100,
+        "graphql_points": 70,
+        "relay_charged": 12,
+        "visible_charged": 100,
+        "hidden_charged": 20
+      }
+    }
+  }
+}
