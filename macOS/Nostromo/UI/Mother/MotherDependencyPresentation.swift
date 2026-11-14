@@ -1,4 +1,5 @@
 import Foundation
+import NostromoKit
 
 /// One line of the Overview's DEPENDS ON section.
 struct MotherDependencyRow: Equatable {
@@ -37,9 +38,10 @@ enum MotherDependencyPresentation {
         return String(id.prefix(16))
     }
 
-    /// Plain single line: newlines and tabs become spaces, bounded with an ellipsis.
+    /// Plain single line: control, bidi and zero-width characters dropped, newlines and tabs become
+    /// spaces, bounded with an ellipsis.
     static func boundedTitle(_ raw: String) -> String {
-        let flat = String(raw.map { $0 == "\n" || $0 == "\r" || $0 == "\t" ? " " : $0 })
+        let flat = FoldTextSanitizer.sanitizeInline(raw)
         return flat.count > titleLimit ? String(flat.prefix(titleLimit)) + "…" : flat
     }
 

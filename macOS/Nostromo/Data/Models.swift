@@ -613,7 +613,7 @@ struct MotherJobSlim: Decodable {
         state           = try c.decode(String.self, forKey: .state)
         repo            = try c.decode(String.self, forKey: .repo)
         isolation       = try c.decode(String.self, forKey: .isolation)
-        title           = try c.decode(String.self, forKey: .title)
+        title           = FoldTextSanitizer.sanitizeInline(try c.decode(String.self, forKey: .title))
         createdAt       = try c.decodeIfPresent(String.self, forKey: .createdAt)
         startedAt       = try c.decodeIfPresent(String.self, forKey: .startedAt)
         finishedAt      = try c.decodeIfPresent(String.self, forKey: .finishedAt)

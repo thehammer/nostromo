@@ -257,6 +257,20 @@ final class MotherDependencySectionTests: XCTestCase {
         XCTAssertEqual(s.toggleButton.attributedTitle.string, "Show all 12")
     }
 
+    func testTheToggleKeepsKeyboardFocusWhenPressed() throws {
+        let (job, queue) = twelve()
+        let s = makeSection(F.rows(job, in: queue))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600), styleMask: [.titled], backing: .buffered, defer: true)
+        window.contentView?.addSubview(s)
+        s.frame = NSRect(x: 0, y: 0, width: 400, height: 400)
+        s.layoutSubtreeIfNeeded()
+        XCTAssertTrue(window.makeFirstResponder(s.toggleButton), "the toggle can take focus")
+        s.toggleButton.performClick(nil)
+        XCTAssertTrue(window.firstResponder === s.toggleButton, "focus stays on the toggle after Show all")
+        s.toggleButton.performClick(nil)
+        XCTAssertTrue(window.firstResponder === s.toggleButton, "focus stays on the toggle after Show fewer")
+    }
+
     func testAnExpandedSectionStaysExpandedWhenARowChanges() {
         let (job, queue) = twelve()
         let s = makeSection(F.rows(job, in: queue))
@@ -501,21 +515,20 @@ final class MotherDependencySectionTests: XCTestCase {
     }
 
     func testClickingADependencyWorksWhileAFromFilterIsRequested() throws {
-        // The filter's own state is private to the list; what a reader sees is that the click still lands
-        // on the dependency (a filter that hides it is reset to All rather than leaving nothing selected).
+        // A filter that hides the dependency is reset to All, so the click lands on a row that is listed.
         let view = makeMotherView()
         let upstream = F.job(dep, state: "running", title: "Upstream work")
         let dependent = F.job("j-dependent", deps: [dep], wait: F.wait(dep, "dep_not_finished"))
         publish([dependent, upstream])
-        view.window?.makeKeyAndOrderFront(nil)
-        MotherView.requestShowJobs(tag: "claudia-ABCDEF12") {}
-        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        view.setOriginFilter(.focus(tag: "claudia-ABCDEF12"))
         view.listDidSelect(dependent)
         let detail = try XCTUnwrap(view.shownDetail)
         waitUntil("the dependency never showed as in the queue") { detail.dependencySection.rows.first?.inQueue == true }
+        XCTAssertFalse(view.listedJobIds.contains(dep), "the From: filter should hide the dependency before the click")
 
         detail.dependencySection.visibleRowViews.first?.button?.performClick(nil)
 
+        XCTAssertTrue(view.listedJobIds.contains(dep), "the click should reset the From: filter so the dependency is listed")
         XCTAssertEqual(view.selectedJobId, dep)
         XCTAssertEqual(view.shownDetail?.currentJobId, dep)
     }

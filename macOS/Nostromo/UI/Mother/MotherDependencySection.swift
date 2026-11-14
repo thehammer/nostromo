@@ -106,8 +106,11 @@ final class MotherDependencySectionView: NSView {
     }
 
     @objc private func toggle() {
+        // rebuild() takes the button out of the window, which drops keyboard focus: give it back.
+        let hadFocus = window?.firstResponder === toggleButton
         isExpanded.toggle()
         rebuild()
+        if hadFocus { window?.makeFirstResponder(toggleButton) }
     }
 
     private func rebuild() {

@@ -350,6 +350,12 @@ class MotherView: NSView {
         showJob(job)
     }
 
+    /// Sets the `From:` filter directly (a seam for tests: the request path needs a key window).
+    func setOriginFilter(_ selection: MotherOriginSelection) { jobList.setFilter(selection) }
+
+    /// The ids the list currently shows (what the `From:` filter lets through).
+    var listedJobIds: Set<String> { jobList.visibleJobIds }
+
     /// A dependency row was pressed: select that job in the list and show it, resetting a `From:` filter that hides it.
     func openDependency(_ id: String) {
         guard let job = latestJobs.first(where: { $0.id == id }) else { return }
@@ -855,7 +861,7 @@ final class MotherJobListViewModel: ObservableObject {
         return MotherJobRowModel(
             id: job.id,
             state: job.state,
-            title: job.title.isEmpty ? job.id : job.title,
+            title: FoldTextSanitizer.sanitizeInline(job.title.isEmpty ? job.id : job.title),
             repo: job.repo.isEmpty ? nil : job.repo,
             branch: nil,                     // macOS MotherJob has no branch field
             question: job.question,
@@ -1048,6 +1054,7 @@ private final class MotherJobList: NSView {
 
     func select(jobId: String) { viewModel.requestedSelection = jobId }
     func showAll() { viewModel.filter = .all }
+    func setFilter(_ selection: MotherOriginSelection) { viewModel.filter = selection }
     var visibleJobIds: Set<String> { Set(viewModel.filtered.groups.flatMap { $0.jobs.map(\.id) }) }
 
     /// Clear the highlight. `requestedSelection` is usually already nil, which
