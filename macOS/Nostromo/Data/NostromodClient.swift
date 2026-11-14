@@ -310,6 +310,14 @@ enum ServerMsg {
     /// The commands a session's CLI reports: the answer to a `session_commands_get`. Local only.
     case sessionCommands(SessionCommandsWire)
 
+    // ── conversation history (`conversation_history_v1`; operator app only) ──
+    case conversationHistory(ConversationHistoryWire)
+    case conversationResumeResult(ConversationResumeResultWire)
+    /// The history changed; ask again. Payload-free.
+    case conversationHistoryChanged(revision: UInt64)
+    /// A resumed focus's conversation could not be opened (`not_found_here`).
+    case conversationResumeFailed(tag: String, reason: String)
+
     // ── document panes ────────────────────────────────────────────────────────
     /// The answer to a `pane_action` of this connection. Local only.
     case paneActionResult(PaneActionResultWire)
@@ -973,6 +981,13 @@ class NostromodClient {
         features?.contains(slashCommandsFeature) == true
     }
 
+    /// The `welcome.features` entry that says the daemon keeps the private conversation history.
+    static let conversationHistoryFeature = "conversation_history_v1"
+
+    static func supportsConversationHistory(features: [String]?) -> Bool {
+        features?.contains(conversationHistoryFeature) == true
+    }
+
     /// Topics every daemon this app can talk to understands.
     static let baseTopics = ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]
 
@@ -1155,6 +1170,48 @@ class NostromodClient {
     func sessionCommandsGet(tag: String, requestId: String) {
         guard daemonAdvertisesSlashCommands else { return }
         send(ClientSessionCommandsGet(requestId: requestId, tag: tag), type: "session_commands_get", tag: tag)
+    }
+
+    // MARK: - Conversation history (Resume tab)
+
+    /// Each is written only to a daemon that advertised `conversation_history_v1`.
+    func conversationHistoryGet(requestId: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistoryGet(requestId: requestId), type: "conversation_history_get")
+    }
+
+    func conversationResume(requestId: String, id: String, newTag: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationResume(requestId: requestId, id: id, newTag: newTag), type: "conversation_resume")
+    }
+
+    func conversationHistoryRemove(requestId: String, id: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistoryEdit(type: "conversation_history_remove", requestId: requestId, id: id),
+             type: "conversation_history_remove")
+    }
+
+    func conversationHistoryRestore(requestId: String, id: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistoryEdit(type: "conversation_history_restore", requestId: requestId, id: id),
+             type: "conversation_history_restore")
+    }
+
+    func conversationHistoryPurgeRemoved(requestId: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistoryPurgeRemoved(requestId: requestId), type: "conversation_history_purge_removed")
+    }
+
+    func conversationHistorySettingsSet(requestId: String, firstPromptsEnabled: Bool) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistorySettingsSet(requestId: requestId, firstPromptsEnabled: firstPromptsEnabled),
+             type: "conversation_history_settings_set")
+    }
+
+    /// Whether the connection's last `welcome` advertised `conversation_history_v1`.
+    var daemonAdvertisesConversationHistory: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsConversationHistory(features: advertisedFeatures)
     }
 
     // MARK: - Decision modal commands
@@ -2043,6 +2100,28 @@ class NostromodClient {
                 return .sessionTaskOutputResult(m)
             } else {
                 log.error("failed to decode session_task_output_result")
+            }
+
+        case "conversation_history":
+            if let m = try? decoder.decode(ConversationHistoryWire.self, from: raw) {
+                return .conversationHistory(m)
+            } else {
+                log.error("failed to decode conversation_history")
+            }
+
+        case "conversation_resume_result":
+            if let m = try? decoder.decode(ConversationResumeResultWire.self, from: raw) {
+                return .conversationResumeResult(m)
+            } else {
+                log.error("failed to decode conversation_resume_result")
+            }
+
+        case "conversation_history_changed":
+            return .conversationHistoryChanged(revision: (json["revision"] as? NSNumber)?.uint64Value ?? 0)
+
+        case "conversation_resume_failed":
+            if let tag = json["tag"] as? String {
+                return .conversationResumeFailed(tag: tag, reason: json["reason"] as? String ?? "")
             }
 
         case "session_commands":

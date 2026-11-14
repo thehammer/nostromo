@@ -77,6 +77,14 @@ final class FocusStore {
         save()
     }
 
+    /// The focus with this session tag sent its first new message: it no longer says "resumed".
+    func clearResumed(tag: String) {
+        guard let idx = focuses.firstIndex(where: { $0.sessionTag == tag }),
+              focuses[idx].resumedAt != nil else { return }
+        focuses[idx].resumedAt = nil
+        save()
+    }
+
     /// Apply an auto-generated session summary to the focus whose `sessionTag`
     /// matches `tag`.  Idempotent: no-ops when the summary is already equal.
     func updateSummary(tag: String, summary: String) {
@@ -164,9 +172,11 @@ enum FocusCreation {
     /// to (which starts its session): the registry carries the model chosen in the create sheet,
     /// and the daemon must have it before the spawn reads it. The usual push is debounced.
     static func commit(_ focus: Focus, store: FocusStore, flushRegistry: () -> Void = {},
-                       switch switchTo: (Focus) -> Void) {
+                       alwaysFlush: Bool = false, switch switchTo: (Focus) -> Void) {
         store.add(focus)
-        if focus.initialModel != nil { flushRegistry() }
+        // A resumed conversation always flushes: the daemon reserved the tag and needs the registry
+        // entry before the spawn.
+        if alwaysFlush || focus.initialModel != nil { flushRegistry() }
         switchTo(focus)
     }
 }

@@ -73,6 +73,15 @@ struct Focus: Codable, Hashable, Identifiable {
     var initialModel: String? = nil
     /// The effort chosen in the create sheet. Nil: the model's default.
     var initialEffort: String? = nil
+    /// Set when this focus was made by resuming a conversation from History; the sidebar says
+    /// "resumed · date" until the first new message is sent.
+    var resumedAt: Date? = nil
+
+    /// "resumed · <date>" while a focus made from History has not been written to yet.
+    var resumedLabel: String? {
+        guard let at = resumedAt else { return nil }
+        return "resumed \u{00B7} " + at.formatted(date: .abbreviated, time: .omitted)
+    }
 
     /// Longest label the UI accepts.
     static let maxLabelLength = 60
@@ -196,6 +205,8 @@ extension Focus {
         label          = try c.decodeIfPresent(String.self, forKey: .label)
         initialModel   = try c.decodeIfPresent(String.self, forKey: .initialModel)
         initialEffort  = try c.decodeIfPresent(String.self, forKey: .initialEffort)
+        // Additive and optional: absent in every `focuses.json` written before History.
+        resumedAt      = try c.decodeIfPresent(Date.self, forKey: .resumedAt)
 
         // Self-heal a daemon-created focus persisted before `daemonTag` existed.
         //
