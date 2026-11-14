@@ -1,5 +1,4 @@
 import XCTest
-@testable import Nostromo
 
 final class ConversationHistoryModelTests: XCTestCase {
     private typealias F = HistoryFixtures

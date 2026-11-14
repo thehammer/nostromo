@@ -1,5 +1,4 @@
 import Foundation
-@testable import Nostromo
 
 /// Records what the history store sends; `advertises` stands in for the welcome feature.
 final class RecordingHistorySender: ConversationHistorySending {

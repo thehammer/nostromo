@@ -1,6 +1,5 @@
 import XCTest
 import AppKit
-@testable import Nostromo
 
 /// What the Resume row and the sidebar's "resumed" line actually draw, measured in a bitmap (the #457
 /// technique): every line has ink, the ink stays inside the row, and short texts are not cut.

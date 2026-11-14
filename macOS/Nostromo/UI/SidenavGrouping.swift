@@ -104,10 +104,8 @@ func buildNavRows(
            let detail = badgeDetailFor(f.sessionTag) {
             return detail
         }
-        return [resumedLine(f), branchOf(f), summaryOf(f), idSuffix].compactMap { $0 }.joined(separator: " · ")
+        return [f.resumedLabel, branchOf(f), summaryOf(f), idSuffix].compactMap { $0 }.joined(separator: " · ")
     }
-
-    private func resumedLine(_ f: Focus) -> String? { f.resumedLabel }
 
     /// A focus row: the user's label when set, else `defaultLabel`.
     func focusRow(_ f: Focus, defaultLabel: String, idSuffix: String? = nil, indented: Bool) -> NavRow {

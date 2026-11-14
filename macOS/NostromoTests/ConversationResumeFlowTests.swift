@@ -1,5 +1,4 @@
 import XCTest
-@testable import Nostromo
 
 /// The resume rules' Mac side: the store, a recording sender and a temp focus store.
 final class ConversationResumeFlowTests: XCTestCase {

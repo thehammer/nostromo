@@ -1,6 +1,5 @@
 import XCTest
 import AppKit
-@testable import Nostromo
 
 /// The Resume tab driven from the keyboard, through a real sheet and a recording sender (no daemon).
 final class ResumeTabTests: XCTestCase {
