@@ -551,6 +551,8 @@
 		ZZ0000000000000000BA3201 /* SubagentTaskViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3200 /* SubagentTaskViewTests.swift */; };
 		ZZ0000000000000000BA3301 /* TaskStopTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3300 /* TaskStopTests.swift */; };
 		ZZ0000000000000000BA3401 /* WakeMarkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */; };
+		ZZ0000000000000000SC1501 /* CompactButtonTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC1500 /* CompactButtonTests.swift */; };
+		ZZ0000000000000000SC1601 /* QuickActionStripAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC1600 /* QuickActionStripAppearanceTests.swift */; };
 		ZZ0000000000000000SC1401 /* LocalCommandRecordAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC1400 /* LocalCommandRecordAppearanceTests.swift */; };
 		ZZ0000000000000000SC1301 /* LocalCommandRecordTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC1300 /* LocalCommandRecordTests.swift */; };
 		ZZ0000000000000000SC1201 /* SlashCommandEchoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC1200 /* SlashCommandEchoTests.swift */; };
@@ -1139,6 +1141,8 @@
 		ZZ0000000000000000BA3200 /* SubagentTaskViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubagentTaskViewTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3300 /* TaskStopTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskStopTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeMarkerTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000SC1500 /* CompactButtonTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactButtonTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000SC1600 /* QuickActionStripAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickActionStripAppearanceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC1400 /* LocalCommandRecordAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalCommandRecordAppearanceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC1300 /* LocalCommandRecordTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalCommandRecordTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC1200 /* SlashCommandEchoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandEchoTests.swift; sourceTree = "<group>"; };
@@ -1806,6 +1810,8 @@
 				ZZ0000000000000000BA3200 /* SubagentTaskViewTests.swift */,
 				ZZ0000000000000000BA3300 /* TaskStopTests.swift */,
 				ZZ0000000000000000BA3400 /* WakeMarkerTests.swift */,
+				ZZ0000000000000000SC1500 /* CompactButtonTests.swift */,
+				ZZ0000000000000000SC1600 /* QuickActionStripAppearanceTests.swift */,
 				ZZ0000000000000000SC1400 /* LocalCommandRecordAppearanceTests.swift */,
 				ZZ0000000000000000SC1300 /* LocalCommandRecordTests.swift */,
 				ZZ0000000000000000SC1200 /* SlashCommandEchoTests.swift */,
@@ -2730,6 +2736,8 @@
 				ZZ0000000000000000BA3201 /* SubagentTaskViewTests.swift in Sources */,
 				ZZ0000000000000000BA3301 /* TaskStopTests.swift in Sources */,
 				ZZ0000000000000000BA3401 /* WakeMarkerTests.swift in Sources */,
+				ZZ0000000000000000SC1501 /* CompactButtonTests.swift in Sources */,
+				ZZ0000000000000000SC1601 /* QuickActionStripAppearanceTests.swift in Sources */,
 				ZZ0000000000000000SC1401 /* LocalCommandRecordAppearanceTests.swift in Sources */,
 				ZZ0000000000000000SC1301 /* LocalCommandRecordTests.swift in Sources */,
 				ZZ0000000000000000SC1201 /* SlashCommandEchoTests.swift in Sources */,

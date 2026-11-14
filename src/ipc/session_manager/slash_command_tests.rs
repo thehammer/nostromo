@@ -224,7 +224,7 @@ fn assert_model_record(turn: &Turn) {
     assert!(
         matches!(
             &turn.origin,
-            Some(TurnOrigin::LocalCommand { command, args, output, stream, truncated })
+            Some(TurnOrigin::LocalCommand { command, args, output, stream, truncated, .. })
                 if command == "model" && args == "haiku"
                     && output == "Set model to `Haiku 5.5` for this session only"
                     && stream == "stdout" && !truncated

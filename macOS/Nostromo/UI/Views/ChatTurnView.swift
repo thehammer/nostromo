@@ -429,6 +429,7 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
             // (`folds`), like a tool result's fold.
             let view = LocalCommandRecordView(
                 command: record.command, args: record.args, output: record.output, stream: record.stream,
+                compact: record.compact,
                 startExpanded: self.folds.explicitResult(block: nil, index: LocalCommandRecordKey.blockIndex) ?? false)
             view.onExpansionChange = { [weak self] isExpanded in
                 guard let self else { return }

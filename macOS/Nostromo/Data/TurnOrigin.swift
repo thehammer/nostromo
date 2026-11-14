@@ -51,9 +51,10 @@ extension ChatTurn {
     }
 
     /// What a local command's record shows: nil for any other turn.
-    var localCommandRecord: (command: String, args: String, output: String, stream: String)? {
-        guard case .localCommand(let command, let args, let output, let stream, _)? = origin else { return nil }
-        return (command, args, output, stream)
+    var localCommandRecord: (command: String, args: String, output: String, stream: String,
+                             compact: CompactInfoWire?)? {
+        guard case .localCommand(let command, let args, let output, let stream, _, let compact)? = origin else { return nil }
+        return (command, args, output, stream, compact)
     }
 
     /// Whether the user slot draws a muted marker for this turn: a Mother notice, a task wake or

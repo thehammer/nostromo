@@ -91,6 +91,8 @@ mod model_switch;
 #[cfg(test)]
 mod notice_inject_tests;
 #[cfg(test)]
+mod compact_tests;
+#[cfg(test)]
 mod slash_command_tests;
 pub mod slash_commands;
 mod task_runtime;

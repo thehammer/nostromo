@@ -387,4 +387,96 @@ final class LocalCommandRecordTests: MouseQueueTestCase {
         XCTAssertEqual(TurnHeightEstimator.estimate(record, width: 700, folds: openFolds()),
                        TurnHeightEstimator.estimate(record, width: 700), accuracy: 0.001)
     }
+
+    // MARK: Compact record
+
+    private func compactRecord(_ info: CompactInfoWire?, output: String = "Compacted", args: String = "",
+                               stream: String = "stdout") -> LocalCommandRecordView {
+        LocalCommandRecordView(command: "compact", args: args, output: output, stream: stream, compact: info,
+                               startExpanded: false)
+    }
+
+    func testASuccessfulCompactHeaderSaysCompactedWithTheTokensBeforeAndAfter() {
+        let view = compactRecord(CompactInfoWire(preTokens: 45_123, postTokens: 19_700))
+
+        XCTAssertEqual(view.headerText, "/compact \u{00B7} Compacted \u{00B7} 45.1k \u{2192} 19.7k tokens")
+        XCTAssertFalse(view.hasChevron)
+    }
+
+    func testCompactTokenCountsBelowAThousandAreWrittenBare() {
+        XCTAssertEqual(compactRecord(CompactInfoWire(preTokens: 999, postTokens: 120)).headerText,
+                       "/compact \u{00B7} Compacted \u{00B7} 999 \u{2192} 120 tokens")
+        XCTAssertEqual(compactRecord(CompactInfoWire(preTokens: 1000, postTokens: 0)).headerText,
+                       "/compact \u{00B7} Compacted \u{00B7} 1.0k \u{2192} 0 tokens")
+    }
+
+    func testACompactWithAMissingNumberSaysOnlyCompacted() {
+        for info in [CompactInfoWire(), CompactInfoWire(preTokens: 45_123), CompactInfoWire(postTokens: 19_700)] {
+            XCTAssertEqual(compactRecord(info).headerText, "/compact \u{00B7} Compacted", "\(info)")
+        }
+    }
+
+    func testACompactRecordWithNoDetailStillReadsAsAnOrdinaryRecord() {
+        XCTAssertEqual(compactRecord(nil, output: "Compacted").headerText, "/compact \u{00B7} Compacted")
+    }
+
+    func testAFailedCompactHeaderNamesTheReason() {
+        let view = compactRecord(CompactInfoWire(failed: true, error: "Not enough messages to compact."),
+                                 output: "Not enough messages to compact.", stream: "stderr")
+
+        XCTAssertEqual(view.headerText, "/compact \u{00B7} failed: Not enough messages to compact.")
+    }
+
+    func testAFailedCompactWithNoReasonStillSaysItFailed() {
+        let text = compactRecord(CompactInfoWire(failed: true)).headerText
+
+        XCTAssertTrue(text.hasPrefix("/compact \u{00B7} failed: "), text)
+        XCTAssertFalse(text.hasSuffix("failed: "), "something follows the colon: \(text)")
+    }
+
+    func testOnlyTheWordFailedIsAmberInAFailedCompactHeader() throws {
+        let view = compactRecord(CompactInfoWire(failed: true, error: "Not enough messages to compact."), stream: "stderr")
+        let line = try headerLabel(view).attributedStringValue
+        let word = (line.string as NSString).range(of: "failed")
+        XCTAssertNotEqual(word.location, NSNotFound)
+
+        for i in 0..<line.length {
+            let color = line.attribute(.foregroundColor, at: i, effectiveRange: nil)
+            if NSLocationInRange(i, word) {
+                XCTAssertTrue(isColor(color, Theme.amber), "character \(i) of `failed` is amber")
+            } else {
+                XCTAssertTrue(isColor(color, Theme.fgMuted), "character \(i) (\(line.string.debugDescription)) is muted")
+            }
+        }
+    }
+
+    func testASuccessfulCompactHeaderIsMutedThroughout() throws {
+        let line = try headerLabel(compactRecord(CompactInfoWire(preTokens: 45_123, postTokens: 19_700))).attributedStringValue
+
+        for i in 0..<line.length {
+            XCTAssertTrue(isColor(line.attribute(.foregroundColor, at: i, effectiveRange: nil), Theme.fgMuted), "character \(i)")
+        }
+    }
+
+    func testVoiceOverReadsACompactRecordInWordsNotSymbols() {
+        XCTAssertEqual(compactRecord(CompactInfoWire(preTokens: 45_123, postTokens: 19_700)).accessibilityLabel(),
+                       "Conversation compacted, from 45.1k to 19.7k tokens")
+        XCTAssertEqual(compactRecord(CompactInfoWire()).accessibilityLabel(), "Conversation compacted")
+        XCTAssertEqual(compactRecord(CompactInfoWire(failed: true, error: "Not enough messages to compact.")).accessibilityLabel(),
+                       "Compact conversation failed: Not enough messages to compact.")
+        for info in [CompactInfoWire(preTokens: 1, postTokens: 2), CompactInfoWire(failed: true, error: "x")] {
+            let label = compactRecord(info).accessibilityLabel() ?? ""
+            XCTAssertFalse(label.contains("\u{2192}") || label.contains("\u{00B7}"), label)
+        }
+    }
+
+    func testACompactRecordInATranscriptTurnShowsTheCompactHeader() {
+        let record = OriginFixtures.turn(
+            userInput: "/compact",
+            origin: .localCommand(command: "compact", args: "", output: "Compacted", stream: "stdout", truncated: false,
+                                  compact: CompactInfoWire(preTokens: 45_123, postTokens: 19_700)))
+
+        XCTAssertEqual(turnView(record).localCommandRecordView?.headerText,
+                       "/compact \u{00B7} Compacted \u{00B7} 45.1k \u{2192} 19.7k tokens")
+    }
 }
