@@ -1576,6 +1576,14 @@ class AppStore: ObservableObject {
         if supported { authoredPrsDemand.connectionStarted() }
     }
 
+    /// Test seam: forget the open-PR list, the feature flag and the link state (a test leaves the shared store as it found it).
+    func resetAuthoredPrsForTesting() {
+        authoredPrs = nil
+        authoredPrsSupported = false
+        authoredPrsConnection = .connected
+        authoredPrsRefreshSender = {}
+    }
+
     /// Test seam: the Overview's snapshot, as `handle(.authoredPrs)` stores it.
     func applyAuthoredPrsForTesting(_ snapshot: AuthoredPrsSnapshot) { handle(.authoredPrs(snapshot)) }
 
