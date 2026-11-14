@@ -82,7 +82,12 @@ fn base_row(repo: &str, number: u64, title: &str, group: Group) -> AuthoredPr {
 /// Every owner kind, every group, a merged and a closed row, a hidden
 /// organisation and a rate-limited poll.
 fn snapshot() -> AuthoredPrsSnapshot {
-    let mut needs = base_row("Carefeed/admin-portal", 101, "Fix the visitor export", Group::NeedsYou);
+    let mut needs = base_row(
+        "Carefeed/admin-portal",
+        101,
+        "Fix the visitor export",
+        Group::NeedsYou,
+    );
     needs.updated_at = at(14, 11, 55);
     needs.base_ref = Some("release/2026-11".into());
     needs.checks = checks(ChecksState::Failing, 3, 2, 0, &["unit tests", "lint"]);
@@ -90,19 +95,42 @@ fn snapshot() -> AuthoredPrsSnapshot {
     needs.new_comments = 3;
     needs.unresolved_threads = 2;
     needs.threads_truncated = true;
-    needs.owner = owner(OwnerKind::MotherJob, "focus-portal", "Portal export", Via::MotherJob, Some("job-17"));
+    needs.owner = owner(
+        OwnerKind::MotherJob,
+        "focus-portal",
+        "Portal export",
+        Via::MotherJob,
+        Some("job-17"),
+    );
 
-    let mut ready = base_row("thehammer/nostromo", 202, "Add the authored PR list", Group::Ready);
+    let mut ready = base_row(
+        "thehammer/nostromo",
+        202,
+        "Add the authored PR list",
+        Group::Ready,
+    );
     ready.updated_at = at(14, 10, 30);
     ready.checks = checks(ChecksState::Passing, 6, 0, 0, &[]);
     ready.review = review(ReviewState::Approved, &["bob", "carefeed-bot[bot]"]);
-    ready.owner = owner(OwnerKind::Linked, "focus-nostromo", "Nostromo daemon", Via::Linked, None);
+    ready.owner = owner(
+        OwnerKind::Linked,
+        "focus-nostromo",
+        "Nostromo daemon",
+        Via::Linked,
+        None,
+    );
 
     let mut waiting = base_row("third-org/widgets", 303, "Widget polish", Group::Waiting);
     waiting.updated_at = at(14, 9, 0);
     waiting.checks = checks(ChecksState::Pending, 4, 0, 1, &[]);
     waiting.review = review(ReviewState::ReviewRequested, &["carol"]);
-    waiting.owner = owner(OwnerKind::OnBranch, "focus-widgets", "Widgets", Via::OnBranch, None);
+    waiting.owner = owner(
+        OwnerKind::OnBranch,
+        "focus-widgets",
+        "Widgets",
+        Via::OnBranch,
+        None,
+    );
 
     let mut draft = base_row("Carefeed/app", 404, "WIP: new onboarding", Group::Draft);
     draft.draft = true;
@@ -129,10 +157,21 @@ fn snapshot() -> AuthoredPrsSnapshot {
         ],
     };
 
-    let mut closed_owner = base_row("Carefeed/app", 505, "Tidy the settings page", Group::Waiting);
+    let mut closed_owner = base_row(
+        "Carefeed/app",
+        505,
+        "Tidy the settings page",
+        Group::Waiting,
+    );
     closed_owner.updated_at = at(13, 17, 45);
     closed_owner.details_unavailable = true;
-    closed_owner.owner = owner(OwnerKind::Closed, "focus-gone", "A focus that closed", Via::MotherJob, Some("job-9"));
+    closed_owner.owner = owner(
+        OwnerKind::Closed,
+        "focus-gone",
+        "A focus that closed",
+        Via::MotherJob,
+        Some("job-9"),
+    );
 
     let mut merged = base_row("thehammer/nostromo", 606, "Release 1.4", Group::Ready);
     merged.lifecycle = Lifecycle::Merged;
@@ -233,14 +272,19 @@ fn the_authored_prs_frame_matches_the_committed_golden_file_byte_for_byte() {
 #[test]
 fn the_golden_frame_decodes_back_to_the_same_snapshot_and_reencodes_identically() {
     let text = golden_text();
-    let msg: ServerMsg = serde_json::from_str(&text).expect("the golden frame decodes as a ServerMsg");
+    let msg: ServerMsg =
+        serde_json::from_str(&text).expect("the golden frame decodes as a ServerMsg");
     match &msg {
         ServerMsg::AuthoredPrs { snapshot: decoded } => {
             assert_eq!(decoded, &snapshot(), "round trip");
         }
         other => panic!("expected an authored_prs frame, got {other:?}"),
     }
-    assert_eq!(rendered(&msg), text, "decode then encode reproduces the file");
+    assert_eq!(
+        rendered(&msg),
+        text,
+        "decode then encode reproduces the file"
+    );
 }
 
 #[test]
@@ -257,8 +301,18 @@ fn the_golden_frame_shows_every_kind_the_clients_must_decode() {
             .collect()
     };
     let owners = strings(&|p| p["owner"]["kind"].as_str().map(str::to_owned));
-    for kind in ["mother_job", "linked", "on_branch", "ambiguous", "closed", "unknown"] {
-        assert!(owners.contains(kind), "no `{kind}` owner in the golden: {owners:?}");
+    for kind in [
+        "mother_job",
+        "linked",
+        "on_branch",
+        "ambiguous",
+        "closed",
+        "unknown",
+    ] {
+        assert!(
+            owners.contains(kind),
+            "no `{kind}` owner in the golden: {owners:?}"
+        );
     }
     let groups = strings(&|p| p["group"].as_str().map(str::to_owned));
     for g in ["needs_you", "ready", "waiting", "draft"] {
@@ -276,12 +330,27 @@ fn the_golden_frame_shows_every_kind_the_clients_must_decode() {
     for c in ["passing", "failing", "pending", "none"] {
         assert!(checks.contains(c), "no `{c}` checks: {checks:?}");
     }
-    assert!(!snap["hidden_orgs"].as_array().unwrap().is_empty(), "a hidden organisation");
+    assert!(
+        !snap["hidden_orgs"].as_array().unwrap().is_empty(),
+        "a hidden organisation"
+    );
     assert_eq!(snap["poll"]["state"], "rate_limited");
     assert_eq!(snap["refresh_blocked"], "running");
-    assert!(snap["prs"].as_array().unwrap().iter().any(|p| p["base_ref"].is_string()));
-    assert!(snap["prs"].as_array().unwrap().iter().any(|p| p["details_unavailable"] == true));
-    assert!(snap["prs"].as_array().unwrap().iter().any(|p| p["threads_truncated"] == true));
+    assert!(snap["prs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["base_ref"].is_string()));
+    assert!(snap["prs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["details_unavailable"] == true));
+    assert!(snap["prs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["threads_truncated"] == true));
     // Merged and closed rows say when they ended.
     for p in snap["prs"].as_array().unwrap() {
         let ended = p["lifecycle"] != "open";
@@ -317,7 +386,10 @@ fn every_login_in_the_golden_is_a_login_and_every_string_is_bounded() {
         assert!(pr.owner.name.as_deref().unwrap_or("").chars().count() <= MAX_NAME);
         assert!(pr.new_comments <= MAX_NEW_COMMENTS);
         assert!(valid_repo(&pr.repo), "{}", pr.repo);
-        assert_eq!(pr.url, format!("https://github.com/{}/pull/{}", pr.repo, pr.number));
+        assert_eq!(
+            pr.url,
+            format!("https://github.com/{}/pull/{}", pr.repo, pr.number)
+        );
     }
     assert!(snap.hidden_orgs.len() <= MAX_HIDDEN_ORGS);
     for o in &snap.hidden_orgs {
@@ -333,11 +405,17 @@ fn a_client_may_omit_every_optional_key_and_the_frame_still_decodes() {
     snap.remove("hidden_orgs");
     for pr in snap["prs"].as_array_mut().unwrap() {
         let pr = pr.as_object_mut().unwrap();
-        for k in ["ended_at", "base_ref", "details_unavailable", "threads_truncated"] {
+        for k in [
+            "ended_at",
+            "base_ref",
+            "details_unavailable",
+            "threads_truncated",
+        ] {
             pr.remove(k);
         }
     }
-    let msg: ServerMsg = serde_json::from_value(v).expect("a frame without the optional keys decodes");
+    let msg: ServerMsg =
+        serde_json::from_value(v).expect("a frame without the optional keys decodes");
     match msg {
         ServerMsg::AuthoredPrs { snapshot } => {
             assert_eq!(snapshot.refresh_blocked, None);

@@ -51,9 +51,18 @@ async fn mount_perri(server: &MockServer) {
         "updated_at": "2026-06-07T12:00:00Z",
     });
     for (q, items) in [
-        ("is:open is:pr review-requested:@me org:Carefeed archived:false", vec![]),
-        ("is:open is:pr review:required org:Carefeed archived:false", vec![item]),
-        ("is:open is:pr reviewed-by:@me org:Carefeed archived:false", vec![]),
+        (
+            "is:open is:pr review-requested:@me org:Carefeed archived:false",
+            vec![],
+        ),
+        (
+            "is:open is:pr review:required org:Carefeed archived:false",
+            vec![item],
+        ),
+        (
+            "is:open is:pr reviewed-by:@me org:Carefeed archived:false",
+            vec![],
+        ),
     ] {
         Mock::given(method("GET"))
             .and(path("/search/issues"))
@@ -64,9 +73,11 @@ async fn mount_perri(server: &MockServer) {
     }
     Mock::given(method("GET"))
         .and(path(format!("/repos/{PERRI_REPO}/pulls/42")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"head": {"sha": "sha-42"}, "state": "open", "merged_at": null}),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"head": {"sha": "sha-42"}, "state": "open", "merged_at": null}),
+            ),
+        )
         .mount(server)
         .await;
     Mock::given(method("GET"))
@@ -152,7 +163,10 @@ async fn requests(server: &MockServer, authored: bool) -> Vec<String> {
 async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !cond() {
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -183,7 +197,8 @@ async fn feature_finished(rig: &Rig) {
 // ── Perri ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn perris_queue_fetch_makes_the_same_requests_and_gets_the_same_answer_with_the_feature_off_and_on() {
+async fn perris_queue_fetch_makes_the_same_requests_and_gets_the_same_answer_with_the_feature_off_and_on(
+) {
     // Off: no authored-PR engine at all.
     let off_server = MockServer::start().await;
     mount_perri(&off_server).await;
@@ -191,7 +206,10 @@ async fn perris_queue_fetch_makes_the_same_requests_and_gets_the_same_answer_wit
     let off_items = perri.fetch().await;
     let off_requests = requests(&off_server, false).await;
     assert!(requests(&off_server, true).await.is_empty());
-    assert!(!off_requests.is_empty(), "Perri did fetch: {off_requests:?}");
+    assert!(
+        !off_requests.is_empty(),
+        "Perri did fetch: {off_requests:?}"
+    );
     assert_eq!(off_items.iter().map(|i| i.0).collect::<Vec<_>>(), vec![42]);
 
     // On: the engine runs its reconcile on the same server while Perri fetches.
@@ -222,7 +240,10 @@ async fn perris_queue_fetch_makes_the_same_requests_and_gets_the_same_answer_wit
         );
     }
     // And none of Perri's requests is one of the feature's.
-    assert!(on_requests.iter().all(|r| !r.contains("author:@me")), "{on_requests:?}");
+    assert!(
+        on_requests.iter().all(|r| !r.contains("author:@me")),
+        "{on_requests:?}"
+    );
 }
 
 #[tokio::test]

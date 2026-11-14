@@ -5005,7 +5005,10 @@ mod authored_prs_policy_tests {
     #[test]
     fn the_authored_pr_frame_is_for_local_peers_only() {
         assert!(
-            matches!(classify_server_msg(&snapshot_frame()), ServerClass::LocalOnly),
+            matches!(
+                classify_server_msg(&snapshot_frame()),
+                ServerClass::LocalOnly
+            ),
             "repos, titles, check names and who owns each PR are not for the network"
         );
     }
@@ -5013,20 +5016,35 @@ mod authored_prs_policy_tests {
     #[test]
     fn the_demand_and_refresh_verbs_are_refused_to_a_network_peer() {
         for msg in [
-            ClientMsg::AuthoredPrsDemand { level: "visible".into() },
-            ClientMsg::AuthoredPrsDemand { level: "idle".into() },
+            ClientMsg::AuthoredPrsDemand {
+                level: "visible".into(),
+            },
+            ClientMsg::AuthoredPrsDemand {
+                level: "idle".into(),
+            },
             ClientMsg::AuthoredPrsRefresh {},
         ] {
             assert_eq!(network_policy(&msg), NetworkPolicy::Refused, "{msg:?}");
             assert!(refused_for_network(&msg), "{msg:?}");
-            assert!(refuse_for_network(&msg, &SensitiveTags::in_memory()), "{msg:?}");
+            assert!(
+                refuse_for_network(&msg, &SensitiveTags::in_memory()),
+                "{msg:?}"
+            );
         }
     }
 
     #[test]
     fn the_verbs_name_no_session_so_they_are_never_about_a_sensitive_one() {
         let tags = SensitiveTags::in_memory();
-        assert!(!targets_sensitive_session(&ClientMsg::AuthoredPrsDemand { level: "visible".into() }, &tags));
-        assert!(!targets_sensitive_session(&ClientMsg::AuthoredPrsRefresh {}, &tags));
+        assert!(!targets_sensitive_session(
+            &ClientMsg::AuthoredPrsDemand {
+                level: "visible".into()
+            },
+            &tags
+        ));
+        assert!(!targets_sensitive_session(
+            &ClientMsg::AuthoredPrsRefresh {},
+            &tags
+        ));
     }
 }

@@ -354,8 +354,16 @@ pub fn count_new_comments(pr: &RawPr, told: Option<DateTime<Utc>>) -> u32 {
 
 /// Unresolved review threads among the first 100, and whether there were more.
 pub fn count_unresolved(pr: &RawPr) -> (u32, bool) {
-    let n = pr.review_threads.nodes.iter().filter(|t| !t.is_resolved).count() as u32;
-    (n, pr.review_threads.total_count as usize > pr.review_threads.nodes.len())
+    let n = pr
+        .review_threads
+        .nodes
+        .iter()
+        .filter(|t| !t.is_resolved)
+        .count() as u32;
+    (
+        n,
+        pr.review_threads.total_count as usize > pr.review_threads.nodes.len(),
+    )
 }
 
 /// The base branch, only when it is neither `main` nor the repo's default.
@@ -581,17 +589,32 @@ mod tests {
         let mut contexts = vec![
             check_run("unit tests", "COMPLETED", Some("FAILURE")),
             status_ctx("ci/legacy", "FAILURE"),
-            check_run(&format!("long-{}", "n".repeat(500)), "COMPLETED", Some("FAILURE")),
+            check_run(
+                &format!("long-{}", "n".repeat(500)),
+                "COMPLETED",
+                Some("FAILURE"),
+            ),
             check_run("multi\nline\u{1b}[31mname", "COMPLETED", Some("FAILURE")),
         ];
         for i in 0..40 {
-            contexts.push(check_run(&format!("extra-{i}"), "COMPLETED", Some("FAILURE")));
+            contexts.push(check_run(
+                &format!("extra-{i}"),
+                "COMPLETED",
+                Some("FAILURE"),
+            ));
         }
         let c = checks_of(contexts);
         assert_eq!(c.failed, 44, "every failure is counted");
-        assert!(c.failing_names.len() <= MAX_FAILING_NAMES, "{}", c.failing_names.len());
+        assert!(
+            c.failing_names.len() <= MAX_FAILING_NAMES,
+            "{}",
+            c.failing_names.len()
+        );
         assert_eq!(c.failing_names[0], "unit tests");
-        assert_eq!(c.failing_names[1], "ci/legacy", "a status context is named by its context");
+        assert_eq!(
+            c.failing_names[1], "ci/legacy",
+            "a status context is named by its context"
+        );
         for n in &c.failing_names {
             assert!(n.chars().count() <= MAX_CHECK_NAME, "{n}");
             assert!(!n.chars().any(|ch| ch.is_control()), "{n:?}");
@@ -628,17 +651,28 @@ mod tests {
     #[test]
     fn review_state_is_exactly_one_of_changes_requested_approved_review_requested_none() {
         let both = review_of(
-            vec![review_node("APPROVED", "alice"), review_node("CHANGES_REQUESTED", "bob")],
+            vec![
+                review_node("APPROVED", "alice"),
+                review_node("CHANGES_REQUESTED", "bob"),
+            ],
             vec![requested_user("carol")],
         );
-        assert_eq!(both.state, ReviewState::ChangesRequested, "changes outranks approval");
+        assert_eq!(
+            both.state,
+            ReviewState::ChangesRequested,
+            "changes outranks approval"
+        );
         assert_eq!(both.logins, vec!["bob".to_string()]);
 
         let approved = review_of(
             vec![review_node("APPROVED", "alice")],
             vec![requested_user("carol")],
         );
-        assert_eq!(approved.state, ReviewState::Approved, "approval outranks a pending request");
+        assert_eq!(
+            approved.state,
+            ReviewState::Approved,
+            "approval outranks a pending request"
+        );
         assert_eq!(approved.logins, vec!["alice".to_string()]);
 
         let requested = review_of(vec![], vec![requested_user("carol")]);
@@ -663,7 +697,11 @@ mod tests {
         assert_eq!(r.logins, vec!["Carefeed/backend".to_string()]);
 
         let only_bad = review_of(vec![], vec![requested_team("Carefeed", "bad slug")]);
-        assert_eq!(only_bad, Review::none(), "nothing safe to show is no request");
+        assert_eq!(
+            only_bad,
+            Review::none(),
+            "nothing safe to show is no request"
+        );
     }
 
     #[test]
@@ -709,10 +747,16 @@ mod tests {
 
     #[test]
     fn a_comment_by_someone_else_after_the_last_push_is_new() {
-        assert_eq!(new_comments(vec![comment("alice", "User", at(11, 0))], vec![]), 1);
+        assert_eq!(
+            new_comments(vec![comment("alice", "User", at(11, 0))], vec![]),
+            1
+        );
         assert_eq!(
             new_comments(
-                vec![comment("alice", "User", at(11, 0)), comment("bob", "User", at(11, 5))],
+                vec![
+                    comment("alice", "User", at(11, 0)),
+                    comment("bob", "User", at(11, 5))
+                ],
                 vec![review_event("carol", "User", at(11, 10), 3)],
             ),
             5,
@@ -722,7 +766,10 @@ mod tests {
 
     #[test]
     fn the_authors_own_comments_do_not_count() {
-        assert_eq!(new_comments(vec![comment(ME, "User", at(11, 0))], vec![]), 0);
+        assert_eq!(
+            new_comments(vec![comment(ME, "User", at(11, 0))], vec![]),
+            0
+        );
         assert_eq!(
             new_comments(vec![], vec![review_event(ME, "User", at(11, 0), 4)]),
             0
@@ -736,14 +783,23 @@ mod tests {
 
     #[test]
     fn bots_do_not_count_whether_by_typename_by_suffix_or_by_name() {
-        assert_eq!(new_comments(vec![comment("some-app", "Bot", at(11, 0))], vec![]), 0);
+        assert_eq!(
+            new_comments(vec![comment("some-app", "Bot", at(11, 0))], vec![]),
+            0
+        );
         assert_eq!(
             new_comments(vec![comment("renovate[bot]", "User", at(11, 0))], vec![]),
             0,
             "a [bot] suffix is a bot whatever the typename says"
         );
-        assert_eq!(new_comments(vec![comment("dependabot", "User", at(11, 0))], vec![]), 0);
-        assert_eq!(new_comments(vec![comment("carefeed-ci", "User", at(11, 0))], vec![]), 0);
+        assert_eq!(
+            new_comments(vec![comment("dependabot", "User", at(11, 0))], vec![]),
+            0
+        );
+        assert_eq!(
+            new_comments(vec![comment("carefeed-ci", "User", at(11, 0))], vec![]),
+            0
+        );
         assert_eq!(
             new_comments(vec![], vec![review_event("ci[bot]", "Bot", at(11, 0), 9)]),
             0
@@ -752,7 +808,10 @@ mod tests {
 
     #[test]
     fn a_comment_older_than_the_last_push_or_at_the_same_moment_is_not_new() {
-        assert_eq!(new_comments(vec![comment("alice", "User", at(9, 0))], vec![]), 0);
+        assert_eq!(
+            new_comments(vec![comment("alice", "User", at(9, 0))], vec![]),
+            0
+        );
         assert_eq!(
             new_comments(vec![comment("alice", "User", at(10, 0))], vec![]),
             0,
@@ -762,7 +821,10 @@ mod tests {
             new_comments(vec![], vec![review_event("alice", "User", at(9, 59), 6)]),
             0
         );
-        assert_eq!(new_comments(vec![comment("alice", "User", at(10, 1))], vec![]), 1);
+        assert_eq!(
+            new_comments(vec![comment("alice", "User", at(10, 1))], vec![]),
+            1
+        );
     }
 
     #[test]
@@ -789,15 +851,24 @@ mod tests {
         let pr = raw(v);
         assert_eq!(count_new_comments(&pr, None), 2);
         assert_eq!(count_new_comments(&pr, Some(at(12, 0))), 1);
-        assert_eq!(count_new_comments(&pr, Some(at(8, 0))), 2, "an older told time changes nothing");
+        assert_eq!(
+            count_new_comments(&pr, Some(at(8, 0))),
+            2,
+            "an older told time changes nothing"
+        );
     }
 
     #[test]
     fn the_new_comment_count_is_capped_at_999() {
-        let many: Vec<Value> = (0..1200).map(|_| comment("alice", "User", at(11, 0))).collect();
+        let many: Vec<Value> = (0..1200)
+            .map(|_| comment("alice", "User", at(11, 0)))
+            .collect();
         assert_eq!(new_comments(many, vec![]), 999);
         assert_eq!(
-            new_comments(vec![], vec![review_event("alice", "User", at(11, 0), 4_000_000_000)]),
+            new_comments(
+                vec![],
+                vec![review_event("alice", "User", at(11, 0), 4_000_000_000)]
+            ),
             999,
             "a huge review comment count cannot overflow or exceed the cap"
         );
@@ -808,7 +879,9 @@ mod tests {
     #[test]
     fn unresolved_threads_are_counted_and_truncation_is_flagged_past_one_hundred() {
         let mut v = pr_json();
-        let nodes: Vec<Value> = (0..100).map(|i| json!({"isResolved": i % 4 == 0})).collect();
+        let nodes: Vec<Value> = (0..100)
+            .map(|i| json!({"isResolved": i % 4 == 0}))
+            .collect();
         v["reviewThreads"] = json!({"totalCount": 100, "nodes": nodes});
         let c = classify(&raw(v.clone()), None);
         assert_eq!(c.unresolved_threads, 75);
@@ -820,7 +893,10 @@ mod tests {
         assert!(c.threads_truncated, "101 threads: one was not read");
 
         let none = classify(&raw(pr_json()), None);
-        assert_eq!((none.unresolved_threads, none.threads_truncated), (0, false));
+        assert_eq!(
+            (none.unresolved_threads, none.threads_truncated),
+            (0, false)
+        );
     }
 
     // ── base branch ───────────────────────────────────────────────────────
@@ -828,21 +904,39 @@ mod tests {
     #[test]
     fn the_base_branch_is_shown_only_when_it_is_neither_main_nor_the_repos_default() {
         assert_eq!(base_ref_to_show("main", Some("main")), None);
-        assert_eq!(base_ref_to_show("main", Some("develop")), None, "main is never shown");
-        assert_eq!(base_ref_to_show("develop", Some("develop")), None, "the default is not shown");
+        assert_eq!(
+            base_ref_to_show("main", Some("develop")),
+            None,
+            "main is never shown"
+        );
+        assert_eq!(
+            base_ref_to_show("develop", Some("develop")),
+            None,
+            "the default is not shown"
+        );
         assert_eq!(
             base_ref_to_show("release/2026-11", Some("main")),
             Some("release/2026-11".to_string())
         );
-        assert_eq!(base_ref_to_show("feature/base", None), Some("feature/base".to_string()));
+        assert_eq!(
+            base_ref_to_show("feature/base", None),
+            Some("feature/base".to_string())
+        );
         assert_eq!(base_ref_to_show("", Some("main")), None);
 
         let long = base_ref_to_show(&format!("b-{}", "x".repeat(400)), Some("main")).unwrap();
-        assert!(long.chars().count() <= MAX_BASE_REF, "{}", long.chars().count());
+        assert!(
+            long.chars().count() <= MAX_BASE_REF,
+            "{}",
+            long.chars().count()
+        );
 
         let mut v = pr_json();
         v["baseRefName"] = json!("stack/base");
-        assert_eq!(classify(&raw(v), None).base_ref.as_deref(), Some("stack/base"));
+        assert_eq!(
+            classify(&raw(v), None).base_ref.as_deref(),
+            Some("stack/base")
+        );
         assert_eq!(classify(&raw(pr_json()), None).base_ref, None);
     }
 
@@ -858,7 +952,11 @@ mod tests {
         assert_eq!(classify(&raw(v.clone()), None).lifecycle, Lifecycle::Merged);
         v["state"] = json!("CLOSED");
         v["merged"] = json!(true);
-        assert_eq!(classify(&raw(v), None).lifecycle, Lifecycle::Merged, "merged wins over closed");
+        assert_eq!(
+            classify(&raw(v), None).lifecycle,
+            Lifecycle::Merged,
+            "merged wins over closed"
+        );
     }
 
     // ── groups ────────────────────────────────────────────────────────────
@@ -902,19 +1000,39 @@ mod tests {
             "a failing check"
         );
         assert_eq!(
-            group_of(false, &ok, &review_with(ReviewState::ChangesRequested), 0, 0),
+            group_of(
+                false,
+                &ok,
+                &review_with(ReviewState::ChangesRequested),
+                0,
+                0
+            ),
             Group::NeedsYou,
             "changes requested"
         );
-        assert_eq!(group_of(false, &ok, &none, 1, 0), Group::NeedsYou, "a new comment");
-        assert_eq!(group_of(false, &ok, &none, 0, 1), Group::NeedsYou, "an unresolved thread");
+        assert_eq!(
+            group_of(false, &ok, &none, 1, 0),
+            Group::NeedsYou,
+            "a new comment"
+        );
+        assert_eq!(
+            group_of(false, &ok, &none, 0, 1),
+            Group::NeedsYou,
+            "an unresolved thread"
+        );
         assert_eq!(
             group_of(false, &ok, &review_with(ReviewState::Approved), 0, 1),
             Group::NeedsYou,
             "approval does not outrank an open thread"
         );
         assert_eq!(
-            group_of(false, &checks_with(ChecksState::Failing, 1), &review_with(ReviewState::Approved), 0, 0),
+            group_of(
+                false,
+                &checks_with(ChecksState::Failing, 1),
+                &review_with(ReviewState::Approved),
+                0,
+                0
+            ),
             Group::NeedsYou,
             "approved but red"
         );
@@ -924,7 +1042,13 @@ mod tests {
     fn approved_with_passing_or_no_checks_is_ready_and_everything_else_waits() {
         let approved = review_with(ReviewState::Approved);
         assert_eq!(
-            group_of(false, &checks_with(ChecksState::Passing, 0), &approved, 0, 0),
+            group_of(
+                false,
+                &checks_with(ChecksState::Passing, 0),
+                &approved,
+                0,
+                0
+            ),
             Group::Ready
         );
         assert_eq!(
@@ -932,12 +1056,22 @@ mod tests {
             Group::Ready
         );
         assert_eq!(
-            group_of(false, &checks_with(ChecksState::Pending, 0), &approved, 0, 0),
+            group_of(
+                false,
+                &checks_with(ChecksState::Pending, 0),
+                &approved,
+                0,
+                0
+            ),
             Group::Waiting,
             "approved while checks still run"
         );
         for r in [ReviewState::ReviewRequested, ReviewState::None] {
-            for c in [ChecksState::Passing, ChecksState::Pending, ChecksState::None] {
+            for c in [
+                ChecksState::Passing,
+                ChecksState::Pending,
+                ChecksState::None,
+            ] {
                 assert_eq!(
                     group_of(false, &checks_with(c, 0), &review_with(r), 0, 0),
                     Group::Waiting,

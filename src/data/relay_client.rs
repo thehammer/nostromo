@@ -297,7 +297,11 @@ impl RelayHub {
 
 /// Is the subscriber wanted at all? Perri's queue, Mother's notices and the
 /// authored-PR list are its consumers: with all off nothing is spawned.
-pub fn relay_wanted(perri_enabled: bool, notices_enabled: bool, authored_prs_enabled: bool) -> bool {
+pub fn relay_wanted(
+    perri_enabled: bool,
+    notices_enabled: bool,
+    authored_prs_enabled: bool,
+) -> bool {
     perri_enabled || notices_enabled || authored_prs_enabled
 }
 
@@ -894,8 +898,14 @@ mod tests {
 
         let logged = String::from_utf8_lossy(&captured.0.lock().unwrap()).into_owned();
         assert!(logged.contains("relay-canary-capture-check"), "{logged}");
-        assert!(logged.contains("github-relay: event pr.synchronize"), "{logged}");
-        assert!(logged.contains("github-relay: event ci.completed"), "{logged}");
+        assert!(
+            logged.contains("github-relay: event pr.synchronize"),
+            "{logged}"
+        );
+        assert!(
+            logged.contains("github-relay: event ci.completed"),
+            "{logged}"
+        );
         for line in logged.lines().filter(|l| l.contains("github-relay: event")) {
             let tail = line.rsplit("github-relay: event ").next().unwrap().trim();
             assert!(

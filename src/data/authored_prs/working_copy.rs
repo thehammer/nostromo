@@ -105,7 +105,9 @@ fn origin_url(config: &str) -> Option<String> {
     for line in config.lines() {
         let l = line.trim();
         if l.starts_with('[') {
-            in_origin = l.replace(' ', "").eq_ignore_ascii_case("[remote\"origin\"]");
+            in_origin = l
+                .replace(' ', "")
+                .eq_ignore_ascii_case("[remote\"origin\"]");
         } else if in_origin {
             if let Some((k, v)) = l.split_once('=') {
                 if k.trim().eq_ignore_ascii_case("url") {
@@ -327,7 +329,9 @@ mod tests {
         }
 
         fn transcript_path(&self) -> PathBuf {
-            self.projects.join("-encoded-cwd").join(format!("{SID}.jsonl"))
+            self.projects
+                .join("-encoded-cwd")
+                .join(format!("{SID}.jsonl"))
         }
 
         fn write_transcript(&self, lines: &[String]) {
@@ -375,13 +379,21 @@ mod tests {
         w.write_transcript(&[entry(&co)]);
         let copy = w.copy_of(w.session(None, None));
         assert_eq!(copy.branch.as_deref(), Some("feat-x"));
-        assert_eq!(copy.repo.as_deref(), Some("carefeed/app"), "lowercased, no .git");
+        assert_eq!(
+            copy.repo.as_deref(),
+            Some("carefeed/app"),
+            "lowercased, no .git"
+        );
     }
 
     #[test]
     fn a_subdirectory_of_the_checkout_finds_the_checkout() {
         let w = world();
-        let co = w.checkout("checkout", "ref: refs/heads/feat-x\n", Some("https://github.com/o/n"));
+        let co = w.checkout(
+            "checkout",
+            "ref: refs/heads/feat-x\n",
+            Some("https://github.com/o/n"),
+        );
         let sub = co.join("src").join("deep");
         fs::create_dir_all(&sub).unwrap();
         w.write_transcript(&[entry(&sub)]);
@@ -401,8 +413,16 @@ mod tests {
         let wt = w.linked_worktree(&main, "feature", "ref: refs/heads/feat-y\n");
         w.write_transcript(&[entry(&wt)]);
         let copy = w.copy_of(w.session(None, None));
-        assert_eq!(copy.branch.as_deref(), Some("feat-y"), "the worktree's own branch, not main");
-        assert_eq!(copy.repo.as_deref(), Some("thehammer/nostromo"), "ssh origin from the common dir");
+        assert_eq!(
+            copy.branch.as_deref(),
+            Some("feat-y"),
+            "the worktree's own branch, not main"
+        );
+        assert_eq!(
+            copy.repo.as_deref(),
+            Some("thehammer/nostromo"),
+            "ssh origin from the common dir"
+        );
     }
 
     #[test]
@@ -435,7 +455,11 @@ mod tests {
             w.write_transcript(&[entry(&co)]);
             let copy = w.copy_of(w.session(None, None));
             assert_eq!(copy.repo, None, "{url}");
-            assert_eq!(copy.branch.as_deref(), Some("feat"), "{url}: the branch is still read");
+            assert_eq!(
+                copy.branch.as_deref(),
+                Some("feat"),
+                "{url}: the branch is still read"
+            );
         }
     }
 
@@ -454,7 +478,10 @@ mod tests {
             ("https://github.com/Carefeed/App.git", Some("carefeed/app")),
             ("https://github.com/Carefeed/App/", Some("carefeed/app")),
             ("git@github.com:Carefeed/App.git", Some("carefeed/app")),
-            ("ssh://git@github.com/Carefeed/App.git", Some("carefeed/app")),
+            (
+                "ssh://git@github.com/Carefeed/App.git",
+                Some("carefeed/app"),
+            ),
             ("  https://github.com/o/n.git  ", Some("o/n")),
             ("http://github.com/o/n", None),
             ("git@gitlab.com:o/n.git", None),
@@ -471,8 +498,16 @@ mod tests {
     #[test]
     fn the_last_cwd_in_the_transcript_wins() {
         let w = world();
-        let first = w.checkout("first", "ref: refs/heads/one\n", Some("https://github.com/o/first"));
-        let second = w.checkout("second", "ref: refs/heads/two\n", Some("https://github.com/o/second"));
+        let first = w.checkout(
+            "first",
+            "ref: refs/heads/one\n",
+            Some("https://github.com/o/first"),
+        );
+        let second = w.checkout(
+            "second",
+            "ref: refs/heads/two\n",
+            Some("https://github.com/o/second"),
+        );
         w.write_transcript(&[entry(&first), entry(&second), entry_without_cwd()]);
         let copy = w.copy_of(w.session(Some(&first), None));
         assert_eq!(copy.branch.as_deref(), Some("two"));
@@ -482,7 +517,11 @@ mod tests {
     #[test]
     fn a_transcript_without_a_cwd_falls_back_to_the_spawn_cwd() {
         let w = world();
-        let spawn = w.checkout("spawned", "ref: refs/heads/spawned-branch\n", Some("https://github.com/o/spawned"));
+        let spawn = w.checkout(
+            "spawned",
+            "ref: refs/heads/spawned-branch\n",
+            Some("https://github.com/o/spawned"),
+        );
         w.write_transcript(&[entry_without_cwd(), entry_without_cwd()]);
         let copy = w.copy_of(w.session(Some(&spawn), None));
         assert_eq!(copy.branch.as_deref(), Some("spawned-branch"));
@@ -492,16 +531,28 @@ mod tests {
     #[test]
     fn no_transcript_at_all_falls_back_to_the_spawn_cwd_and_then_the_project_path() {
         let w = world();
-        let spawn = w.checkout("spawned", "ref: refs/heads/from-spawn\n", Some("https://github.com/o/spawned"));
-        let project = w.checkout("project", "ref: refs/heads/from-project\n", Some("https://github.com/o/project"));
+        let spawn = w.checkout(
+            "spawned",
+            "ref: refs/heads/from-spawn\n",
+            Some("https://github.com/o/spawned"),
+        );
+        let project = w.checkout(
+            "project",
+            "ref: refs/heads/from-project\n",
+            Some("https://github.com/o/project"),
+        );
         // No transcript file was written.
         assert_eq!(
-            w.copy_of(w.session(Some(&spawn), Some(&project))).branch.as_deref(),
+            w.copy_of(w.session(Some(&spawn), Some(&project)))
+                .branch
+                .as_deref(),
             Some("from-spawn")
         );
         let missing = w.root.join("does-not-exist");
         assert_eq!(
-            w.copy_of(w.session(Some(&missing), Some(&project))).branch.as_deref(),
+            w.copy_of(w.session(Some(&missing), Some(&project)))
+                .branch
+                .as_deref(),
             Some("from-project"),
             "a spawn cwd that is gone is skipped"
         );
@@ -511,10 +562,17 @@ mod tests {
     #[test]
     fn a_cwd_that_no_longer_exists_is_skipped_for_the_one_before_it() {
         let w = world();
-        let co = w.checkout("checkout", "ref: refs/heads/feat\n", Some("https://github.com/o/n"));
+        let co = w.checkout(
+            "checkout",
+            "ref: refs/heads/feat\n",
+            Some("https://github.com/o/n"),
+        );
         let gone = w.root.join("deleted-worktree");
         w.write_transcript(&[entry(&co), entry(&gone)]);
-        assert_eq!(w.copy_of(w.session(None, None)).branch.as_deref(), Some("feat"));
+        assert_eq!(
+            w.copy_of(w.session(None, None)).branch.as_deref(),
+            Some("feat")
+        );
     }
 
     #[test]
@@ -543,8 +601,16 @@ mod tests {
     #[test]
     fn a_ten_megabyte_transcript_is_read_only_at_its_tail() {
         let w = world();
-        let head_only = w.checkout("head-only", "ref: refs/heads/old\n", Some("https://github.com/o/old"));
-        let tail = w.checkout("tail", "ref: refs/heads/new\n", Some("https://github.com/o/new"));
+        let head_only = w.checkout(
+            "head-only",
+            "ref: refs/heads/old\n",
+            Some("https://github.com/o/old"),
+        );
+        let tail = w.checkout(
+            "tail",
+            "ref: refs/heads/new\n",
+            Some("https://github.com/o/new"),
+        );
 
         // The only `cwd` before the tail is in the first line; then ten
         // megabytes of lines without one; then the tail's own `cwd`.
@@ -568,7 +634,10 @@ mod tests {
             "so the head's checkout is not found"
         );
 
-        let mut f = fs::OpenOptions::new().append(true).open(w.transcript_path()).unwrap();
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(w.transcript_path())
+            .unwrap();
         writeln!(f, "{}", entry(&tail)).unwrap();
         drop(f);
         assert_eq!(last_cwd(&w.transcript_path()), Some(tail));
@@ -577,7 +646,11 @@ mod tests {
     #[test]
     fn a_cwd_inside_the_final_64_kib_is_found_even_in_a_huge_file() {
         let w = world();
-        let co = w.checkout("checkout", "ref: refs/heads/feat\n", Some("https://github.com/o/n"));
+        let co = w.checkout(
+            "checkout",
+            "ref: refs/heads/feat\n",
+            Some("https://github.com/o/n"),
+        );
         let filler = serde_json::json!({"type": "assistant", "text": "y".repeat(2000)}).to_string();
         let mut f = fs::File::create(w.transcript_path()).unwrap();
         for _ in 0..(3 * 1024 * 1024 / (filler.len() + 1)) {
@@ -588,13 +661,20 @@ mod tests {
             writeln!(f, "{filler}").unwrap();
         }
         drop(f);
-        assert_eq!(w.copy_of(w.session(None, None)).branch.as_deref(), Some("feat"));
+        assert_eq!(
+            w.copy_of(w.session(None, None)).branch.as_deref(),
+            Some("feat")
+        );
     }
 
     #[test]
     fn a_truncated_first_line_in_the_tail_is_ignored_not_misread() {
         let w = world();
-        let co = w.checkout("checkout", "ref: refs/heads/feat\n", Some("https://github.com/o/n"));
+        let co = w.checkout(
+            "checkout",
+            "ref: refs/heads/feat\n",
+            Some("https://github.com/o/n"),
+        );
         // One line that straddles the 64 KiB boundary and is itself valid JSON
         // once cut (a bare number), then a real entry.
         let pad = "z".repeat(TAIL_BYTES as usize + 100);
@@ -608,7 +688,11 @@ mod tests {
     #[test]
     fn a_focus_is_looked_at_most_every_thirty_seconds() {
         let w = world();
-        let co = w.checkout("checkout", "ref: refs/heads/before\n", Some("https://github.com/o/n"));
+        let co = w.checkout(
+            "checkout",
+            "ref: refs/heads/before\n",
+            Some("https://github.com/o/n"),
+        );
         w.write_transcript(&[entry(&co)]);
         let session = w.session(None, None);
         let mut copies = WorkingCopies::default();
@@ -617,8 +701,16 @@ mod tests {
         assert_eq!(first["alpha"].branch.as_deref(), Some("before"));
 
         fs::write(co.join(".git").join("HEAD"), "ref: refs/heads/after\n").unwrap();
-        let soon = copies.refresh(t0 + Duration::from_secs(29), &w.projects, std::slice::from_ref(&session));
-        assert_eq!(soon["alpha"].branch.as_deref(), Some("before"), "not looked at again yet");
+        let soon = copies.refresh(
+            t0 + Duration::from_secs(29),
+            &w.projects,
+            std::slice::from_ref(&session),
+        );
+        assert_eq!(
+            soon["alpha"].branch.as_deref(),
+            Some("before"),
+            "not looked at again yet"
+        );
         let later = copies.refresh(t0 + Duration::from_secs(30), &w.projects, &[session]);
         assert_eq!(later["alpha"].branch.as_deref(), Some("after"));
     }
@@ -626,11 +718,17 @@ mod tests {
     #[test]
     fn a_focus_that_is_no_longer_open_is_forgotten() {
         let w = world();
-        let co = w.checkout("checkout", "ref: refs/heads/feat\n", Some("https://github.com/o/n"));
+        let co = w.checkout(
+            "checkout",
+            "ref: refs/heads/feat\n",
+            Some("https://github.com/o/n"),
+        );
         w.write_transcript(&[entry(&co)]);
         let mut copies = WorkingCopies::default();
         let t0 = Instant::now();
-        assert!(copies.refresh(t0, &w.projects, &[w.session(None, None)]).contains_key("alpha"));
+        assert!(copies
+            .refresh(t0, &w.projects, &[w.session(None, None)])
+            .contains_key("alpha"));
         assert!(copies.refresh(t0, &w.projects, &[]).is_empty());
     }
 

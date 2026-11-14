@@ -41,8 +41,9 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, FEATURE_AUTHORED_PRS, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SLASH_COMMANDS,
-        FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        SessionAction, Topic, FEATURE_AUTHORED_PRS, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN,
+        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION,
+        PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -554,14 +555,14 @@ async fn accept_loop_tcp(
 /// agents this daemon runs.
 fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMsg {
     let mut features = vec![
-            FEATURE_WORK.to_string(),
-            FEATURE_MODEL.to_string(),
-            FEATURE_TASKS.to_string(),
-            FEATURE_APPROVALS.to_string(),
-            FEATURE_LOGIN.to_string(),
-            FEATURE_TERMINAL_STAGING_ONLY.to_string(),
-            FEATURE_FOCUS_ACTIVITY.to_string(),
-            FEATURE_SLASH_COMMANDS.to_string(),
+        FEATURE_WORK.to_string(),
+        FEATURE_MODEL.to_string(),
+        FEATURE_TASKS.to_string(),
+        FEATURE_APPROVALS.to_string(),
+        FEATURE_LOGIN.to_string(),
+        FEATURE_TERMINAL_STAGING_ONLY.to_string(),
+        FEATURE_FOCUS_ACTIVITY.to_string(),
+        FEATURE_SLASH_COMMANDS.to_string(),
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
@@ -4713,7 +4714,10 @@ mod authored_prs_tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut mgr = SessionManager::with_store_path(tmp.path().join("sessions.json"));
         let before = features_of(&mgr);
-        assert!(!before.iter().any(|f| f == FEATURE_AUTHORED_PRS), "{before:?}");
+        assert!(
+            !before.iter().any(|f| f == FEATURE_AUTHORED_PRS),
+            "{before:?}"
+        );
 
         let (board, _inputs) = DemandBoard::new();
         mgr.configure_authored_prs(board);
@@ -4734,14 +4738,26 @@ mod authored_prs_tests {
             "the empty everything-list does not include it (an older client cannot decode it)"
         );
         assert!(message_matches_topics(&frame, &[Topic::AuthoredPrs]));
-        assert!(message_matches_topics(&frame, &[Topic::Perri, Topic::AuthoredPrs]));
+        assert!(message_matches_topics(
+            &frame,
+            &[Topic::Perri, Topic::AuthoredPrs]
+        ));
         assert!(!message_matches_topics(&frame, &[Topic::Perri]));
-        assert!(!message_matches_topics(&frame, &[Topic::Unknown]), "an unknown topic is not it");
-        assert!(!message_matches_topics(&frame, &[Topic::Terminal, Topic::Model]));
+        assert!(
+            !message_matches_topics(&frame, &[Topic::Unknown]),
+            "an unknown topic is not it"
+        );
+        assert!(!message_matches_topics(
+            &frame,
+            &[Topic::Terminal, Topic::Model]
+        ));
     }
 
     #[test]
     fn the_latest_frame_is_the_one_kept_for_a_late_subscriber() {
-        assert_eq!(retain_key(&snapshot_frame()).as_deref(), Some("authored_prs"));
+        assert_eq!(
+            retain_key(&snapshot_frame()).as_deref(),
+            Some("authored_prs")
+        );
     }
 }

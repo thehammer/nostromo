@@ -20,7 +20,7 @@ use super::ownership::{self, Link, OpenFocus, PrKey};
 use super::snapshot::*;
 use super::usage::{Record, UsageLog};
 use super::working_copy::{SessionRef, WorkingCopies};
-use super::{Clock, Deps, DemandInputs, FocusProvider};
+use super::{Clock, DemandInputs, Deps, FocusProvider};
 use crate::data::relay_client::{QueueSignal, RelayEvent, RelayStatus};
 use crate::data::work::untrusted::one_line;
 use crate::mother::MotherJob;
@@ -147,7 +147,11 @@ impl Engine {
     ) -> Self {
         let (api, token) = match deps.github {
             Some(c) => (
-                Some(Api::new(c.http.clone(), c.token().to_owned(), deps.api_base)),
+                Some(Api::new(
+                    c.http.clone(),
+                    c.token().to_owned(),
+                    deps.api_base,
+                )),
                 TokenState::Connected,
             ),
             None => (None, TokenState::Missing),
@@ -248,7 +252,8 @@ impl Engine {
         let now = Instant::now();
         match self.posture {
             Posture::Paused => {
-                self.refresh_blocked = Some((RefreshBlocked::RateLimited, now + REFRESH_BLOCK_SHOWN));
+                self.refresh_blocked =
+                    Some((RefreshBlocked::RateLimited, now + REFRESH_BLOCK_SHOWN));
             }
             Posture::Idle => {}
             _ if self.stage != Stage::None => {
@@ -285,7 +290,11 @@ impl Engine {
                 if let Some(pr) = self.prs.get_mut(&key) {
                     if pr.lifecycle == Lifecycle::Open {
                         let merged = ev.merged == Some(true) || ty == "pr.merged";
-                        pr.lifecycle = if merged { Lifecycle::Merged } else { Lifecycle::Closed };
+                        pr.lifecycle = if merged {
+                            Lifecycle::Merged
+                        } else {
+                            Lifecycle::Closed
+                        };
                         pr.ended = Some((wall, now));
                         self.relay_reads.remove(&key);
                         self.dirty.remove(&key);
@@ -293,8 +302,12 @@ impl Engine {
                     }
                 }
             }
-            "pr.opened" | "pr.reopened" | "pr.synchronize" | "pr.review_submitted"
-            | "pr.review_requested" | "pr.review_request_removed" => {
+            "pr.opened"
+            | "pr.reopened"
+            | "pr.synchronize"
+            | "pr.review_submitted"
+            | "pr.review_requested"
+            | "pr.review_request_removed" => {
                 let Some(n) = ev.number else { return };
                 let key = key_of(repo, n);
                 let known = self.prs.get(&key);
@@ -315,7 +328,9 @@ impl Engine {
                 }
             }
             "ci.completed" => {
-                let Some(sha) = ev.head_sha.as_deref() else { return };
+                let Some(sha) = ev.head_sha.as_deref() else {
+                    return;
+                };
                 let lc = repo.to_ascii_lowercase();
                 let hit = self
                     .prs
@@ -406,8 +421,10 @@ impl Engine {
         }
         // Merged and closed PRs linger for a minute, then go.
         let before = self.prs.len();
-        self.prs
-            .retain(|_, p| p.ended.is_none_or(|(_, at)| now.saturating_duration_since(at) < LINGER));
+        self.prs.retain(|_, p| {
+            p.ended
+                .is_none_or(|(_, at)| now.saturating_duration_since(at) < LINGER)
+        });
         if self.prs.len() != before {
             self.mark_publish(now);
         }
@@ -511,7 +528,9 @@ impl Engine {
     }
 
     async fn work(&mut self, now: Instant) {
-        let Some(cad) = self.posture.cadence() else { return };
+        let Some(cad) = self.posture.cadence() else {
+            return;
+        };
         let mut guard = 0;
         while guard < 64 {
             guard += 1;
@@ -667,12 +686,16 @@ impl Engine {
                         .map(|(_, o)| o.reset)
                         .unwrap_or(wall + chrono::Duration::seconds(60)),
                 };
-                self.rate.pause_until(until.min(wall + chrono::Duration::hours(1)));
+                self.rate
+                    .pause_until(until.min(wall + chrono::Duration::hours(1)));
             }
             _ => {
                 self.error_count += 1;
                 let d = error_backoff(self.error_count);
-                self.retry_at = Some((now + d, wall + chrono::Duration::from_std(d).unwrap_or_default()));
+                self.retry_at = Some((
+                    now + d,
+                    wall + chrono::Duration::from_std(d).unwrap_or_default(),
+                ));
                 self.last_error = true;
             }
         }
@@ -684,7 +707,9 @@ impl Engine {
         if self.me.is_some() {
             return true;
         }
-        let Some(api) = self.api.clone() else { return false };
+        let Some(api) = self.api.clone() else {
+            return false;
+        };
         match api.user().await {
             Ok((login, meta)) => {
                 let now = Instant::now();
@@ -720,10 +745,14 @@ impl Engine {
             Some(c) => c,
             None => return false,
         };
-        if self.org_lookups.len() >= ORG_LOOKUPS_PER_DAY || !self.poll_bucket.has_room(now, cad.poll_cap) {
+        if self.org_lookups.len() >= ORG_LOOKUPS_PER_DAY
+            || !self.poll_bucket.has_room(now, cad.poll_cap)
+        {
             return false;
         }
-        let Some(api) = self.api.clone() else { return false };
+        let Some(api) = self.api.clone() else {
+            return false;
+        };
         self.org_lookups.push(now);
         match api.org_name(id).await {
             Ok((login, meta)) => {
@@ -742,7 +771,9 @@ impl Engine {
     }
 
     async fn do_search(&mut self) -> bool {
-        let Some(api) = self.api.clone() else { return false };
+        let Some(api) = self.api.clone() else {
+            return false;
+        };
         let started = Instant::now();
         self.last_search = Some(started);
         let full = self.stage == Stage::NeedSearch;
@@ -864,7 +895,9 @@ impl Engine {
     }
 
     async fn do_detail(&mut self, keys: Vec<PrKey>, source: Source) -> bool {
-        let Some(api) = self.api.clone() else { return false };
+        let Some(api) = self.api.clone() else {
+            return false;
+        };
         let targets: Vec<Target> = keys
             .iter()
             .map(|k| Target {
@@ -934,7 +967,11 @@ impl Engine {
             }
             let classified = classify(&raw, None);
             if classified.lifecycle != Lifecycle::Open {
-                if let Some(p) = self.prs.get_mut(key).filter(|p| p.lifecycle == Lifecycle::Open) {
+                if let Some(p) = self
+                    .prs
+                    .get_mut(key)
+                    .filter(|p| p.lifecycle == Lifecycle::Open)
+                {
                     p.lifecycle = classified.lifecycle;
                     p.ended = Some((wall, now));
                 }
@@ -1088,7 +1125,10 @@ impl Engine {
     fn poll_info(&self, wall: DateTime<Utc>) -> PollInfo {
         let cad = self.posture.cadence();
         let interval_secs = cad.map_or(0, |c| c.search.as_secs());
-        let retry_at = self.retry_at.filter(|(t, _)| Instant::now() < *t).map(|(_, w)| w);
+        let retry_at = self
+            .retry_at
+            .filter(|(t, _)| Instant::now() < *t)
+            .map(|(_, w)| w);
         let state = match self.posture {
             Posture::Idle => PollState::Idle,
             Posture::Paused => PollState::Paused,
@@ -1124,12 +1164,20 @@ impl Engine {
             })
             .collect();
         let links: HashMap<PrKey, Link> = HashMap::new();
-        let resolve_all = |copies: &HashMap<String, ownership::WorkingCopy>, prs: &BTreeMap<PrKey, Pr>| {
+        let resolve_all = |copies: &HashMap<String, ownership::WorkingCopy>,
+                           prs: &BTreeMap<PrKey, Pr>| {
             prs.iter()
                 .map(|(k, p)| {
                     (
                         k.clone(),
-                        ownership::resolve(k, p.head_ref.as_deref(), &jobs, &focuses, copies, &links),
+                        ownership::resolve(
+                            k,
+                            p.head_ref.as_deref(),
+                            &jobs,
+                            &focuses,
+                            copies,
+                            &links,
+                        ),
                     )
                 })
                 .collect::<HashMap<_, _>>()
@@ -1138,9 +1186,9 @@ impl Engine {
         // Working copies are read only while some open PR has no Mother owner.
         let needs_copies = self.prs.iter().any(|(k, p)| {
             p.lifecycle == Lifecycle::Open
-                && owners.get(k).is_some_and(|o| {
-                    matches!(o.kind, OwnerKind::Unknown | OwnerKind::Ambiguous)
-                })
+                && owners
+                    .get(k)
+                    .is_some_and(|o| matches!(o.kind, OwnerKind::Unknown | OwnerKind::Ambiguous))
         });
         if needs_copies && !infos.is_empty() {
             let sessions: Vec<SessionRef> = infos
@@ -1199,7 +1247,10 @@ impl Engine {
                 .then(a.repo.cmp(&b.repo))
                 .then(a.number.cmp(&b.number))
         });
-        let open = rows.iter().filter(|r| r.lifecycle == Lifecycle::Open).count() as u32;
+        let open = rows
+            .iter()
+            .filter(|r| r.lifecycle == Lifecycle::Open)
+            .count() as u32;
         rows.truncate(MAX_PRS);
         let hidden_orgs = self
             .hidden_orgs

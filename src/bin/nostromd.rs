@@ -1393,15 +1393,17 @@ fn start_authored_prs(
     mut republish: tokio::sync::watch::Receiver<u64>,
 ) {
     use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo, TokioClock};
-    let github = match nostromo::data::github_client::GithubClient::new(
-        config.github_token_path.as_deref(),
-    ) {
-        Ok(c) => Some(c),
-        Err(_) => {
-            tracing::warn!("authored-prs: no GitHub token; the list stays off (token: missing)");
-            None
-        }
-    };
+    let github =
+        match nostromo::data::github_client::GithubClient::new(config.github_token_path.as_deref())
+        {
+            Ok(c) => Some(c),
+            Err(_) => {
+                tracing::warn!(
+                    "authored-prs: no GitHub token; the list stays off (token: missing)"
+                );
+                None
+            }
+        };
     let focuses: nostromo::data::authored_prs::FocusProvider = {
         let mgr = Arc::clone(session_mgr);
         Arc::new(move || {

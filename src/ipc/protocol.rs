@@ -2007,7 +2007,9 @@ pub enum ClientMsg {
     /// operator app; refused for a network peer. The daemon's demand is the
     /// highest level over its live operator connections; with none it is idle
     /// and the feature makes no request.
-    AuthoredPrsDemand { level: String },
+    AuthoredPrsDemand {
+        level: String,
+    },
     /// Ask for a full reconcile now. Same gate. Refused (shown as
     /// `refresh_blocked` in the snapshot) while one runs or while paused.
     AuthoredPrsRefresh {},
@@ -8844,12 +8846,18 @@ mod authored_prs_wire_tests {
     #[test]
     fn the_capability_and_the_topic_are_spelled_as_documented() {
         assert_eq!(FEATURE_AUTHORED_PRS, "authored_prs_v1");
-        assert_eq!(serde_json::to_value(Topic::AuthoredPrs).unwrap(), json!("authored_prs"));
+        assert_eq!(
+            serde_json::to_value(Topic::AuthoredPrs).unwrap(),
+            json!("authored_prs")
+        );
         assert_eq!(
             serde_json::from_value::<Topic>(json!("authored_prs")).unwrap(),
             Topic::AuthoredPrs
         );
-        assert_eq!(PROTOCOL_VERSION, 4, "additive: the protocol version does not move");
+        assert_eq!(
+            PROTOCOL_VERSION, 4,
+            "additive: the protocol version does not move"
+        );
     }
 
     #[test]
@@ -8863,7 +8871,12 @@ mod authored_prs_wire_tests {
             ClientMsg::Subscribe { topics, .. } => {
                 assert_eq!(
                     topics,
-                    vec![Topic::Activity, Topic::AuthoredPrs, Topic::Unknown, Topic::Unknown]
+                    vec![
+                        Topic::Activity,
+                        Topic::AuthoredPrs,
+                        Topic::Unknown,
+                        Topic::Unknown
+                    ]
                 );
             }
             other => panic!("{other:?}"),
@@ -8873,14 +8886,21 @@ mod authored_prs_wire_tests {
     #[test]
     fn the_two_verbs_have_their_documented_wire_shapes() {
         assert_eq!(
-            serde_json::to_value(ClientMsg::AuthoredPrsDemand { level: "visible".into() }).unwrap(),
+            serde_json::to_value(ClientMsg::AuthoredPrsDemand {
+                level: "visible".into()
+            })
+            .unwrap(),
             json!({"type": "authored_prs_demand", "level": "visible"})
         );
         assert_eq!(
             serde_json::to_value(ClientMsg::AuthoredPrsRefresh {}).unwrap(),
             json!({"type": "authored_prs_refresh"})
         );
-        match serde_json::from_value::<ClientMsg>(json!({"type": "authored_prs_demand", "level": "idle"})).unwrap() {
+        match serde_json::from_value::<ClientMsg>(
+            json!({"type": "authored_prs_demand", "level": "idle"}),
+        )
+        .unwrap()
+        {
             ClientMsg::AuthoredPrsDemand { level } => assert_eq!(level, "idle"),
             other => panic!("{other:?}"),
         }
@@ -8888,7 +8908,9 @@ mod authored_prs_wire_tests {
             serde_json::from_value::<ClientMsg>(json!({"type": "authored_prs_refresh"})).unwrap(),
             ClientMsg::AuthoredPrsRefresh {}
         ));
-        round_trip(ClientMsg::AuthoredPrsDemand { level: "hidden".into() });
+        round_trip(ClientMsg::AuthoredPrsDemand {
+            level: "hidden".into(),
+        });
         round_trip(ClientMsg::AuthoredPrsRefresh {});
     }
 
@@ -8900,30 +8922,34 @@ mod authored_prs_wire_tests {
 
     #[test]
     fn the_frame_is_tagged_authored_prs_with_the_snapshot_under_snapshot() {
-        let snapshot: crate::data::authored_prs::AuthoredPrsSnapshot = serde_json::from_value(json!({
-            "generated_at": "2026-11-14T12:00:00Z",
-            "token": "connected",
-            "relay": {"state": "live", "org": "Carefeed"},
-            "poll": {"state": "ok", "interval_secs": 60},
-            "total_open": 0,
-            "shown": 0,
-            "prs": [],
-            "usage": {
-                "window_secs": 3600,
-                "charged": 0, "not_modified": 0, "search": 0, "graphql_points": 0,
-                "relay_charged": 0, "visible_charged": 0, "hidden_charged": 0,
-                "since_start": {
+        let snapshot: crate::data::authored_prs::AuthoredPrsSnapshot =
+            serde_json::from_value(json!({
+                "generated_at": "2026-11-14T12:00:00Z",
+                "token": "connected",
+                "relay": {"state": "live", "org": "Carefeed"},
+                "poll": {"state": "ok", "interval_secs": 60},
+                "total_open": 0,
+                "shown": 0,
+                "prs": [],
+                "usage": {
+                    "window_secs": 3600,
                     "charged": 0, "not_modified": 0, "search": 0, "graphql_points": 0,
-                    "relay_charged": 0, "visible_charged": 0, "hidden_charged": 0
+                    "relay_charged": 0, "visible_charged": 0, "hidden_charged": 0,
+                    "since_start": {
+                        "charged": 0, "not_modified": 0, "search": 0, "graphql_points": 0,
+                        "relay_charged": 0, "visible_charged": 0, "hidden_charged": 0
+                    }
                 }
-            }
-        }))
-        .expect("the minimal snapshot decodes");
+            }))
+            .expect("the minimal snapshot decodes");
         let v = serde_json::to_value(ServerMsg::AuthoredPrs { snapshot }).unwrap();
         assert_eq!(v["type"], "authored_prs");
         assert_eq!(v["snapshot"]["relay"]["state"], "live");
         assert_eq!(v["snapshot"]["usage"]["window_secs"], 3600);
-        assert_eq!(v["snapshot"]["usage"]["charged"], 0, "the window counts sit beside window_secs");
+        assert_eq!(
+            v["snapshot"]["usage"]["charged"], 0,
+            "the window counts sit beside window_secs"
+        );
         assert!(v["snapshot"]["usage"]["since_start"].is_object());
     }
 

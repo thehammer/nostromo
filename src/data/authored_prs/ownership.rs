@@ -272,7 +272,11 @@ mod tests {
     }
 
     fn focus_job(id: &str, tag: &str) -> MotherJob {
-        job_with(id, Some(URL), Some(origin(OriginKind::Focus, Some(tag), None)))
+        job_with(
+            id,
+            Some(URL),
+            Some(origin(OriginKind::Focus, Some(tag), None)),
+        )
     }
 
     fn focuses(tags: &[&str]) -> Vec<OpenFocus> {
@@ -314,10 +318,19 @@ mod tests {
 
     #[test]
     fn a_vouched_mother_job_for_this_pr_makes_its_focus_the_owner() {
-        let o = resolve_with(&[focus_job("job-1", "alpha")], &["alpha"], &[], Some("feat"));
+        let o = resolve_with(
+            &[focus_job("job-1", "alpha")],
+            &["alpha"],
+            &[],
+            Some("feat"),
+        );
         assert_eq!(o.kind, OwnerKind::MotherJob);
         assert_eq!(o.tag.as_deref(), Some("alpha"));
-        assert_eq!(o.name.as_deref(), Some("alpha now"), "the focus's current name");
+        assert_eq!(
+            o.name.as_deref(),
+            Some("alpha now"),
+            "the focus's current name"
+        );
         assert_eq!(o.job_id.as_deref(), Some("job-1"));
         assert_eq!(o.via, Some(Via::MotherJob));
         assert!(o.candidates.is_empty());
@@ -330,7 +343,11 @@ mod tests {
             "https://github.com/Carefeed/app/pull/7/files",
             "https://github.com/Carefeed/app/pull/7?x=1#frag",
         ] {
-            let j = job_with("j", Some(url), Some(origin(OriginKind::Focus, Some("alpha"), None)));
+            let j = job_with(
+                "j",
+                Some(url),
+                Some(origin(OriginKind::Focus, Some("alpha"), None)),
+            );
             assert_eq!(
                 resolve_with(&[j], &["alpha"], &[], None).kind,
                 OwnerKind::MotherJob,
@@ -348,7 +365,11 @@ mod tests {
             Some("not a url"),
             None,
         ] {
-            let j = job_with("j", url, Some(origin(OriginKind::Focus, Some("alpha"), None)));
+            let j = job_with(
+                "j",
+                url,
+                Some(origin(OriginKind::Focus, Some("alpha"), None)),
+            );
             assert_eq!(
                 resolve_with(&[j], &["alpha"], &[], None).kind,
                 OwnerKind::Unknown,
@@ -403,22 +424,40 @@ mod tests {
             let j = job_with("j", Some(URL), Some(origin(kind, Some("alpha"), None)));
             let o = resolve_with(&[j], &["alpha"], &[], None);
             assert_eq!(o.kind, OwnerKind::Unknown, "{kind:?}");
-            assert!(o.tag.is_none() && o.candidates.is_empty(), "{kind:?}: {o:?}");
+            assert!(
+                o.tag.is_none() && o.candidates.is_empty(),
+                "{kind:?}: {o:?}"
+            );
         }
     }
 
     #[test]
     fn a_job_with_no_daemon_annotation_or_no_tag_is_not_an_owner() {
         let none = job_with("j", Some(URL), None);
-        assert_eq!(resolve_with(&[none], &["alpha"], &[], None).kind, OwnerKind::Unknown);
+        assert_eq!(
+            resolve_with(&[none], &["alpha"], &[], None).kind,
+            OwnerKind::Unknown
+        );
         let no_tag = job_with("j", Some(URL), Some(origin(OriginKind::Focus, None, None)));
-        assert_eq!(resolve_with(&[no_tag], &["alpha"], &[], None).kind, OwnerKind::Unknown);
+        assert_eq!(
+            resolve_with(&[no_tag], &["alpha"], &[], None).kind,
+            OwnerKind::Unknown
+        );
     }
 
     #[test]
     fn an_unvouched_job_does_not_stop_a_focus_on_the_branch_from_being_the_owner() {
-        let j = job_with("j", Some(URL), Some(origin(OriginKind::Unverified, Some("alpha"), None)));
-        let o = resolve_with(&[j], &["beta"], &[("beta", copy(REPO, "feat"))], Some("feat"));
+        let j = job_with(
+            "j",
+            Some(URL),
+            Some(origin(OriginKind::Unverified, Some("alpha"), None)),
+        );
+        let o = resolve_with(
+            &[j],
+            &["beta"],
+            &[("beta", copy(REPO, "feat"))],
+            Some("feat"),
+        );
         assert_eq!(o.kind, OwnerKind::OnBranch);
         assert_eq!(o.tag.as_deref(), Some("beta"));
     }
@@ -452,8 +491,17 @@ mod tests {
 
     #[test]
     fn a_closed_owner_with_an_open_focus_on_the_branch_is_ambiguous() {
-        let j = job_with("j", Some(URL), Some(origin(OriginKind::Focus, Some("gone"), Some(true))));
-        let o = resolve_with(&[j], &["beta"], &[("beta", copy(REPO, "feat"))], Some("feat"));
+        let j = job_with(
+            "j",
+            Some(URL),
+            Some(origin(OriginKind::Focus, Some("gone"), Some(true))),
+        );
+        let o = resolve_with(
+            &[j],
+            &["beta"],
+            &[("beta", copy(REPO, "feat"))],
+            Some("feat"),
+        );
         assert_eq!(o.kind, OwnerKind::Ambiguous);
         assert_eq!(tags(&o), vec!["beta", "gone"]);
     }
@@ -513,12 +561,18 @@ mod tests {
         );
         assert_eq!(o.kind, OwnerKind::Ambiguous);
         assert_eq!(tags(&o), vec!["alpha", "beta", "gamma"]);
-        assert!(o.candidates.iter().all(|c| c.via == Via::OnBranch && c.job_id.is_none()));
+        assert!(o
+            .candidates
+            .iter()
+            .all(|c| c.via == Via::OnBranch && c.job_id.is_none()));
     }
 
     #[test]
     fn nothing_to_go_on_is_unknown() {
-        assert_eq!(resolve_with(&[], &["alpha"], &[], Some("feat")).kind, OwnerKind::Unknown);
+        assert_eq!(
+            resolve_with(&[], &["alpha"], &[], Some("feat")).kind,
+            OwnerKind::Unknown
+        );
         assert_eq!(resolve_with(&[], &[], &[], None).kind, OwnerKind::Unknown);
     }
 
@@ -527,8 +581,14 @@ mod tests {
         for c in [
             copy("carefeed/other", "feat"),
             copy(REPO, "other-branch"),
-            WorkingCopy { repo: Some(REPO.into()), branch: None },
-            WorkingCopy { repo: None, branch: Some("feat".into()) },
+            WorkingCopy {
+                repo: Some(REPO.into()),
+                branch: None,
+            },
+            WorkingCopy {
+                repo: None,
+                branch: Some("feat".into()),
+            },
             WorkingCopy::default(),
         ] {
             let o = resolve_with(&[], &["alpha"], &[("alpha", c.clone())], Some("feat"));
@@ -561,7 +621,14 @@ mod tests {
                 open: true,
             },
         );
-        let o = resolve(&key(), None, &[], &focuses(&["alpha"]), &HashMap::new(), &links);
+        let o = resolve(
+            &key(),
+            None,
+            &[],
+            &focuses(&["alpha"]),
+            &HashMap::new(),
+            &links,
+        );
         assert_eq!((o.kind, o.via), (OwnerKind::Linked, Some(Via::Linked)));
         assert_eq!(o.tag.as_deref(), Some("alpha"));
 
@@ -583,7 +650,11 @@ mod tests {
             &HashMap::new(),
             &links,
         );
-        assert_eq!(o.kind, OwnerKind::Ambiguous, "a job and a link to different focuses");
+        assert_eq!(
+            o.kind,
+            OwnerKind::Ambiguous,
+            "a job and a link to different focuses"
+        );
         assert_eq!(tags(&o), vec!["alpha", "beta"]);
     }
 

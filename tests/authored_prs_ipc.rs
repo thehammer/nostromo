@@ -18,9 +18,7 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use nostromo::data::authored_prs::snapshot::*;
-use nostromo::data::authored_prs::{
-    AuthoredPrsSource, Demand, DemandBoard, Deps, TokioClock,
-};
+use nostromo::data::authored_prs::{AuthoredPrsSource, Demand, DemandBoard, Deps, TokioClock};
 use nostromo::data::relay_client::RelayStatus;
 use nostromo::ipc::{
     codec::{read_frame, write_frame},
@@ -97,7 +95,9 @@ async fn env(feature_on: bool) -> Env {
 }
 
 async fn send<S: AsyncWrite + Unpin>(s: &mut S, msg: &ClientMsg) {
-    write_frame(s, &serde_json::to_vec(msg).unwrap()).await.expect("write");
+    write_frame(s, &serde_json::to_vec(msg).unwrap())
+        .await
+        .expect("write");
 }
 
 async fn recv<S: AsyncRead + Unpin>(s: &mut S) -> ServerMsg {
@@ -140,8 +140,14 @@ fn subscribe(topics: Vec<Topic>) -> ClientMsg {
 
 /// Hello, Welcome, Subscribe, synced: the Welcome's features and every frame
 /// that arrived before the Pong.
-async fn connect_unix(env: &Env, kind: Option<&str>, topics: Vec<Topic>) -> (UnixStream, Vec<String>, Vec<ServerMsg>) {
-    let mut s = UnixStream::connect(&env.socket_path).await.expect("unix connect");
+async fn connect_unix(
+    env: &Env,
+    kind: Option<&str>,
+    topics: Vec<Topic>,
+) -> (UnixStream, Vec<String>, Vec<ServerMsg>) {
+    let mut s = UnixStream::connect(&env.socket_path)
+        .await
+        .expect("unix connect");
     send(&mut s, &hello(kind)).await;
     let features = match recv(&mut s).await {
         ServerMsg::Welcome { features, .. } => features,
@@ -153,7 +159,9 @@ async fn connect_unix(env: &Env, kind: Option<&str>, topics: Vec<Topic>) -> (Uni
 }
 
 async fn connect_tcp(env: &Env, topics: Vec<Topic>) -> (TcpStream, Vec<String>, Vec<ServerMsg>) {
-    let mut s = TcpStream::connect(("127.0.0.1", env.tcp_port)).await.expect("tcp connect");
+    let mut s = TcpStream::connect(("127.0.0.1", env.tcp_port))
+        .await
+        .expect("tcp connect");
     send(&mut s, &hello(None)).await;
     let features = match recv(&mut s).await {
         ServerMsg::Welcome { features, .. } => features,
@@ -201,7 +209,10 @@ fn is_authored(m: &ServerMsg) -> bool {
 async fn until(what: &str, mut cond: impl FnMut() -> bool) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !cond() {
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -212,15 +223,27 @@ async fn until(what: &str, mut cond: impl FnMut() -> bool) {
 async fn welcome_lists_authored_prs_v1_only_when_the_feature_is_enabled() {
     let on = env(true).await;
     let (_s, features, _) = connect_unix(&on, None, vec![]).await;
-    assert!(features.contains(&"authored_prs_v1".to_string()), "{features:?}");
+    assert!(
+        features.contains(&"authored_prs_v1".to_string()),
+        "{features:?}"
+    );
     let (_t, features, _) = connect_tcp(&on, vec![]).await;
-    assert!(features.contains(&"authored_prs_v1".to_string()), "{features:?}");
+    assert!(
+        features.contains(&"authored_prs_v1".to_string()),
+        "{features:?}"
+    );
 
     let off = env(false).await;
     let (_s, features, _) = connect_unix(&off, None, vec![]).await;
-    assert!(!features.iter().any(|f| f.contains("authored_prs")), "{features:?}");
+    assert!(
+        !features.iter().any(|f| f.contains("authored_prs")),
+        "{features:?}"
+    );
     // The other capabilities are still advertised.
-    assert!(features.contains(&"slash_commands_v1".to_string()), "{features:?}");
+    assert!(
+        features.contains(&"slash_commands_v1".to_string()),
+        "{features:?}"
+    );
 }
 
 // ── who may say what is being looked at ───────────────────────────────────────
@@ -232,19 +255,40 @@ async fn the_operator_app_sets_the_demand_and_closing_its_connection_withdraws_i
     assert_eq!(board.current(), Demand::Idle, "nobody has said anything");
 
     let (mut app, _, _) = connect_unix(&env, Some("mac_app"), vec![Topic::AuthoredPrs]).await;
-    send(&mut app, &ClientMsg::AuthoredPrsDemand { level: "visible".into() }).await;
+    send(
+        &mut app,
+        &ClientMsg::AuthoredPrsDemand {
+            level: "visible".into(),
+        },
+    )
+    .await;
     let frames = sync(&mut app).await;
-    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })), "accepted: {frames:?}");
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })),
+        "accepted: {frames:?}"
+    );
     assert_eq!(board.current(), Demand::Visible);
-    send(&mut app, &ClientMsg::AuthoredPrsDemand { level: "hidden".into() }).await;
+    send(
+        &mut app,
+        &ClientMsg::AuthoredPrsDemand {
+            level: "hidden".into(),
+        },
+    )
+    .await;
     sync(&mut app).await;
     assert_eq!(board.current(), Demand::Hidden);
     send(&mut app, &ClientMsg::AuthoredPrsRefresh {}).await;
     let frames = sync(&mut app).await;
-    assert!(!frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })), "accepted: {frames:?}");
+    assert!(
+        !frames.iter().any(|m| matches!(m, ServerMsg::Error { .. })),
+        "accepted: {frames:?}"
+    );
 
     drop(app);
-    until("the closed connection's demand to go", || board.current() == Demand::Idle).await;
+    until("the closed connection's demand to go", || {
+        board.current() == Demand::Idle
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -253,9 +297,21 @@ async fn two_operator_connections_take_the_higher_demand_and_each_withdraws_its_
     let board = env.board.clone().unwrap();
     let (mut a, _, _) = connect_unix(&env, Some("mac_app"), vec![]).await;
     let (mut b, _, _) = connect_unix(&env, Some("mac_app"), vec![]).await;
-    send(&mut a, &ClientMsg::AuthoredPrsDemand { level: "hidden".into() }).await;
+    send(
+        &mut a,
+        &ClientMsg::AuthoredPrsDemand {
+            level: "hidden".into(),
+        },
+    )
+    .await;
     sync(&mut a).await;
-    send(&mut b, &ClientMsg::AuthoredPrsDemand { level: "visible".into() }).await;
+    send(
+        &mut b,
+        &ClientMsg::AuthoredPrsDemand {
+            level: "visible".into(),
+        },
+    )
+    .await;
     sync(&mut b).await;
     assert_eq!(board.current(), Demand::Visible);
     drop(b);
@@ -270,13 +326,25 @@ async fn a_local_client_that_is_not_the_operator_app_cannot_set_the_demand() {
     let board = env.board.clone().unwrap();
     // Not claiming to be the app.
     let (mut plain, _, _) = connect_unix(&env, None, vec![]).await;
-    send(&mut plain, &ClientMsg::AuthoredPrsDemand { level: "visible".into() }).await;
+    send(
+        &mut plain,
+        &ClientMsg::AuthoredPrsDemand {
+            level: "visible".into(),
+        },
+    )
+    .await;
     sync(&mut plain).await;
     assert_eq!(board.current(), Demand::Idle);
     // Claiming to be the app is not enough on its own (here the verifier says
     // yes, so use a claim of another kind).
     let (mut other, _, _) = connect_unix(&env, Some("cli"), vec![]).await;
-    send(&mut other, &ClientMsg::AuthoredPrsDemand { level: "visible".into() }).await;
+    send(
+        &mut other,
+        &ClientMsg::AuthoredPrsDemand {
+            level: "visible".into(),
+        },
+    )
+    .await;
     sync(&mut other).await;
     assert_eq!(board.current(), Demand::Idle);
 }
@@ -286,7 +354,13 @@ async fn a_tcp_peer_cannot_set_the_demand_or_ask_for_a_refresh_and_is_refused() 
     let env = env(true).await;
     let board = env.board.clone().unwrap();
     let (mut tcp, _, _) = connect_tcp(&env, vec![]).await;
-    send(&mut tcp, &ClientMsg::AuthoredPrsDemand { level: "visible".into() }).await;
+    send(
+        &mut tcp,
+        &ClientMsg::AuthoredPrsDemand {
+            level: "visible".into(),
+        },
+    )
+    .await;
     let first = sync(&mut tcp).await;
     send(&mut tcp, &ClientMsg::AuthoredPrsRefresh {}).await;
     let second = sync(&mut tcp).await;
@@ -310,17 +384,28 @@ async fn the_list_goes_only_to_a_client_that_names_the_topic_and_never_to_a_tcp_
     let (mut tcp_names_it, _, _) = connect_tcp(&env, vec![Topic::AuthoredPrs]).await;
     let (mut tcp_everything, _, _) = connect_tcp(&env, vec![]).await;
 
-    env.server.broadcast(ServerMsg::AuthoredPrs { snapshot: snapshot() });
+    env.server.broadcast(ServerMsg::AuthoredPrs {
+        snapshot: snapshot(),
+    });
 
     let got = sync(&mut names_it).await;
     assert_eq!(got.iter().filter(|m| is_authored(m)).count(), 1, "{got:?}");
     for (who, frames) in [
-        ("a subscribe-to-everything client", sync(&mut everything).await),
+        (
+            "a subscribe-to-everything client",
+            sync(&mut everything).await,
+        ),
         ("a client of another topic", sync(&mut other_topic).await),
         ("a TCP peer naming the topic", sync(&mut tcp_names_it).await),
-        ("a TCP peer subscribing to everything", sync(&mut tcp_everything).await),
+        (
+            "a TCP peer subscribing to everything",
+            sync(&mut tcp_everything).await,
+        ),
     ] {
-        assert!(!frames.iter().any(is_authored), "{who} was sent the list: {frames:?}");
+        assert!(
+            !frames.iter().any(is_authored),
+            "{who} was sent the list: {frames:?}"
+        );
     }
 }
 
@@ -332,15 +417,18 @@ async fn the_latest_list_is_replayed_to_a_client_that_subscribes_later_and_names
     first.total_open = 1;
     let mut latest = snapshot();
     latest.total_open = 2;
-    env.server.broadcast(ServerMsg::AuthoredPrs { snapshot: first });
-    env.server.broadcast(ServerMsg::AuthoredPrs { snapshot: latest });
+    env.server
+        .broadcast(ServerMsg::AuthoredPrs { snapshot: first });
+    env.server
+        .broadcast(ServerMsg::AuthoredPrs { snapshot: latest });
     let seen = sync(&mut early).await;
     assert_eq!(seen.iter().filter(|m| is_authored(m)).count(), 2);
 
     // The retained copy is updated by the server's own task; give it a moment.
     let mut replayed = None;
     for _ in 0..50 {
-        let (_late, _, frames) = connect_unix(&env, Some("mac_app"), vec![Topic::AuthoredPrs]).await;
+        let (_late, _, frames) =
+            connect_unix(&env, Some("mac_app"), vec![Topic::AuthoredPrs]).await;
         if let Some(ServerMsg::AuthoredPrs { snapshot }) = frames.into_iter().find(is_authored) {
             replayed = Some(snapshot);
             break;

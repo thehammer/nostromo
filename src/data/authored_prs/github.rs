@@ -9,7 +9,9 @@
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, ETAG, IF_NONE_MATCH, USER_AGENT as UA};
+use reqwest::header::{
+    HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, ETAG, IF_NONE_MATCH, USER_AGENT as UA,
+};
 use serde::Deserialize;
 
 use super::budget::{parse_retry_after, RateObs, Resource};
@@ -34,7 +36,9 @@ pub enum ApiError {
     /// 429, or 403 with a `Retry-After` or an exhausted limit: stop until then.
     /// `wait` is the server's `Retry-After`; `None` means until the reset in `Meta::rate`
     /// (or a minute when there is none).
-    RateLimited { wait: Option<Duration> },
+    RateLimited {
+        wait: Option<Duration>,
+    },
     /// Any other non-success status, or a body that could not be read.
     Status(u16),
     Transport,
@@ -130,7 +134,10 @@ impl Api {
 
     fn headers(&self) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+        h.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github+json"),
+        );
         h.insert(
             "X-GitHub-Api-Version",
             HeaderValue::from_static("2022-11-28"),
@@ -198,7 +205,10 @@ impl Api {
     }
 
     async fn get(&self, path: &str, etag: Option<&str>) -> Result<Reply, Failure> {
-        let mut req = self.http.get(format!("{}{}", self.base, path)).headers(self.headers());
+        let mut req = self
+            .http
+            .get(format!("{}{}", self.base, path))
+            .headers(self.headers());
         if let Some(e) = etag {
             if let Ok(v) = HeaderValue::from_str(e) {
                 req = req.header(IF_NONE_MATCH, v);
@@ -400,7 +410,8 @@ fn repo_from_url(url: &str) -> Option<String> {
 /// logins only: never `body`, `bodyText`, `bodyHTML`, or a check's `output`,
 /// `summary` or `text`.
 pub fn detail_query(targets: &[Target]) -> String {
-    let mut q = String::from("query AuthoredPrDetail {\n  rateLimit { cost remaining limit resetAt }\n");
+    let mut q =
+        String::from("query AuthoredPrDetail {\n  rateLimit { cost remaining limit resetAt }\n");
     for (i, t) in targets.iter().take(MAX_ALIASES).enumerate() {
         if let Some((owner, name)) = t.repo.split_once('/') {
             if safe_segment(owner) && safe_segment(name) {

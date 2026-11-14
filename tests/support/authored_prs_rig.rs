@@ -365,7 +365,10 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
                 .insert_header("x-ratelimit-resource", resource)
                 .insert_header("x-ratelimit-remaining", r.remaining.to_string().as_str())
                 .insert_header("x-ratelimit-limit", r.limit.to_string().as_str())
-                .insert_header("x-ratelimit-reset", r.reset.timestamp().to_string().as_str());
+                .insert_header(
+                    "x-ratelimit-reset",
+                    r.reset.timestamp().to_string().as_str(),
+                );
         }
         t
     };
@@ -390,7 +393,11 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
         }
         "search" => {
             let mut items: Vec<&FakePr> = st.prs.iter().filter(|p| p.in_search).collect();
-            items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.number.cmp(&b.number)));
+            items.sort_by(|a, b| {
+                b.updated_at
+                    .cmp(&a.updated_at)
+                    .then(a.number.cmp(&b.number))
+            });
             let list: Vec<Value> = items
                 .iter()
                 .map(|p| {
@@ -447,10 +454,9 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
             for c in re.captures_iter(&query) {
                 let repo = format!("{}/{}", &c[2], &c[3]);
                 let number: u64 = c[4].parse().unwrap();
-                let found = st
-                    .prs
-                    .iter()
-                    .find(|p| p.repo.eq_ignore_ascii_case(&repo) && p.number == number && p.accessible);
+                let found = st.prs.iter().find(|p| {
+                    p.repo.eq_ignore_ascii_case(&repo) && p.number == number && p.accessible
+                });
                 let value = match found {
                     Some(p) => json!({"pullRequest": pr_graphql(p)}),
                     None => json!({"pullRequest": null}),
@@ -461,7 +467,11 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
             ResponseTemplate::new(200).set_body_json(json!({"data": Value::Object(data)}))
         }
         _ if path.starts_with("/organizations/") => {
-            let id: u64 = path.rsplit('/').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let id: u64 = path
+                .rsplit('/')
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
             match st.orgs.get(&id) {
                 Some(Some(name)) => {
                     entry.status = 200;
@@ -504,7 +514,8 @@ impl Fake {
 
     pub fn put(&self, pr: FakePr) {
         let mut st = self.lock();
-        st.prs.retain(|p| !(p.repo == pr.repo && p.number == pr.number));
+        st.prs
+            .retain(|p| !(p.repo == pr.repo && p.number == pr.number));
         st.prs.push(pr);
     }
 
@@ -526,7 +537,10 @@ impl Fake {
         let respond_with = move |req: &Request| respond(&state, req);
         match only_ua {
             None => {
-                Mock::given(any()).respond_with(respond_with).mount(server).await;
+                Mock::given(any())
+                    .respond_with(respond_with)
+                    .mount(server)
+                    .await;
             }
             Some(ua) => {
                 Mock::given(wiremock::matchers::header("user-agent", ua))
@@ -800,14 +814,18 @@ impl Rig {
     }
 
     pub async fn relay_event(&mut self, ev: RelayEvent) {
-        self.relay_tx.send(QueueSignal::Event(ev)).expect("engine listening");
+        self.relay_tx
+            .send(QueueSignal::Event(ev))
+            .expect("engine listening");
         self.settle().await;
     }
 
     /// The relay connects: the status flips and `Reconnected` is sent.
     pub async fn relay_up(&mut self) {
         self.relay_status.set_connected(true);
-        self.relay_tx.send(QueueSignal::Reconnected).expect("engine listening");
+        self.relay_tx
+            .send(QueueSignal::Reconnected)
+            .expect("engine listening");
         self.settle().await;
     }
 
@@ -868,7 +886,11 @@ impl Rig {
     }
 
     /// The row for `repo#number` in the latest snapshot.
-    pub fn row(&self, repo: &str, number: u64) -> Option<nostromo::data::authored_prs::snapshot::AuthoredPr> {
+    pub fn row(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> Option<nostromo::data::authored_prs::snapshot::AuthoredPr> {
         self.snapshot()?
             .prs
             .into_iter()

@@ -30,7 +30,14 @@ fn pending_fake() -> Fake {
 
 /// The relay is up, demand is `level` and the first reconcile is done.
 async fn live_at(fake: Fake, level: &str) -> Rig {
-    let mut rig = Rig::start(fake, RigOpts { relay: true, token: true }).await;
+    let mut rig = Rig::start(
+        fake,
+        RigOpts {
+            relay: true,
+            token: true,
+        },
+    )
+    .await;
     rig.relay_up().await;
     rig.set_demand(level).await;
     rig.run(secs(10), secs(1)).await;
@@ -97,7 +104,8 @@ async fn ci_completed_for_a_known_head_costs_one_graphql_read_and_no_search() {
 async fn ci_completed_matches_the_repo_without_regard_to_case() {
     let mut rig = live(pending_fake()).await;
     let mark = rig.fake.log_len();
-    rig.relay_event(ci_completed("carefeed/APP", &sha_of(REPO, 1))).await;
+    rig.relay_event(ci_completed("carefeed/APP", &sha_of(REPO, 1)))
+        .await;
     rig.run(secs(4), STEP).await;
     assert_eq!(rig.count_since(mark, Kind::Graphql), 1);
 }
@@ -107,7 +115,8 @@ async fn ci_completed_for_a_head_nobody_knows_costs_nothing() {
     let mut rig = live(pending_fake()).await;
     let mark = rig.fake.log_len();
     rig.relay_event(ci_completed(REPO, "some-other-sha")).await;
-    rig.relay_event(ci_completed("Carefeed/elsewhere", &sha_of(REPO, 1))).await;
+    rig.relay_event(ci_completed("Carefeed/elsewhere", &sha_of(REPO, 1)))
+        .await;
     rig.relay_event(relay_ev("ci.completed", REPO)).await; // no sha at all
     rig.run(secs(10), STEP).await;
     assert_eq!(rig.fake.log_len(), mark, "{:?}", rig.since(mark));
@@ -134,13 +143,23 @@ async fn pr_merged_costs_nothing_and_the_row_is_merged_at_once() {
         .await
         .expect("merged");
     assert!(seen - event_at <= DEBOUNCE + STEP, "{:?}", seen - event_at);
-    assert_eq!(rig.fake.log_len(), mark, "a merge costs no request: {:?}", rig.since(mark));
+    assert_eq!(
+        rig.fake.log_len(),
+        mark,
+        "a merge costs no request: {:?}",
+        rig.since(mark)
+    );
     assert!(rig.row(REPO, 1).unwrap().ended_at.is_some());
-    assert_eq!(rig.row(REPO, 2).unwrap().lifecycle, Lifecycle::Open, "the other is untouched");
+    assert_eq!(
+        rig.row(REPO, 2).unwrap().lifecycle,
+        Lifecycle::Open,
+        "the other is untouched"
+    );
 }
 
 #[tokio::test]
-async fn pr_closed_without_a_merge_marks_the_row_closed_for_free_and_it_is_dropped_after_a_minute() {
+async fn pr_closed_without_a_merge_marks_the_row_closed_for_free_and_it_is_dropped_after_a_minute()
+{
     let fake = pending_fake();
     let mut rig = live(fake.clone()).await;
     fake.edit(REPO, 1, |p| {
@@ -157,10 +176,16 @@ async fn pr_closed_without_a_merge_marks_the_row_closed_for_free_and_it_is_dropp
 
     let before = rig.elapsed;
     let gone = rig
-        .run_until(secs(90), Duration::from_millis(500), |r| r.row(REPO, 1).is_none())
+        .run_until(secs(90), Duration::from_millis(500), |r| {
+            r.row(REPO, 1).is_none()
+        })
         .await
         .expect("dropped");
-    assert!(gone - before >= secs(55) && gone - before <= secs(62), "{:?}", gone - before);
+    assert!(
+        gone - before >= secs(55) && gone - before <= secs(62),
+        "{:?}",
+        gone - before
+    );
     assert!(rig.row(REPO, 2).is_some());
 }
 
@@ -213,8 +238,10 @@ async fn a_new_pr_by_someone_else_or_an_event_about_an_unknown_pr_costs_nothing(
     let mut theirs = relay_pr_ev("pr.opened", REPO, 8);
     theirs.author = Some("someone-else".into());
     rig.relay_event(theirs).await;
-    rig.relay_event(relay_pr_ev("pr.synchronize", REPO, 8)).await; // unknown PR
-    rig.relay_event(relay_pr_ev("pr.review_submitted", REPO, 77)).await;
+    rig.relay_event(relay_pr_ev("pr.synchronize", REPO, 8))
+        .await; // unknown PR
+    rig.relay_event(relay_pr_ev("pr.review_submitted", REPO, 77))
+        .await;
     rig.relay_event(relay_pr_ev("pr.opened", REPO, 78)).await; // no author hint at all
     rig.run(secs(8), STEP).await;
     assert_eq!(rig.fake.log_len(), mark, "{:?}", rig.since(mark));
@@ -225,7 +252,14 @@ async fn a_new_pr_by_someone_else_or_an_event_about_an_unknown_pr_costs_nothing(
 async fn events_with_no_usable_repo_or_a_hostile_one_are_ignored() {
     let mut rig = live(pending_fake()).await;
     let mark = rig.fake.log_len();
-    for repo in [None, Some(""), Some("no-slash"), Some("a/b/c"), Some("o/n\"){ x"), Some("../x")] {
+    for repo in [
+        None,
+        Some(""),
+        Some("no-slash"),
+        Some("a/b/c"),
+        Some("o/n\"){ x"),
+        Some("../x"),
+    ] {
         rig.relay_event(RelayEvent {
             event_type: "pr.synchronize".into(),
             repo: repo.map(str::to_owned),
@@ -243,7 +277,8 @@ async fn after_a_push_the_new_head_is_the_one_ci_events_match() {
     let fake = pending_fake();
     let mut rig = live(fake.clone()).await;
     fake.edit(REPO, 1, |p| p.head_sha = "brand-new-head".into());
-    rig.relay_event(relay_pr_ev("pr.synchronize", REPO, 1)).await;
+    rig.relay_event(relay_pr_ev("pr.synchronize", REPO, 1))
+        .await;
     rig.run(secs(5), STEP).await;
 
     let mark = rig.fake.log_len();
@@ -262,7 +297,12 @@ async fn relay_events_never_trigger_a_search_or_a_full_reconcile() {
     // gap is no excuse.
     let mut rig = live_at(pending_fake(), "hidden").await;
     let mark = rig.fake.log_len();
-    let kinds = ["pr.synchronize", "pr.review_submitted", "pr.review_requested", "pr.opened"];
+    let kinds = [
+        "pr.synchronize",
+        "pr.review_submitted",
+        "pr.review_requested",
+        "pr.opened",
+    ];
     for i in 0..40usize {
         let mut ev = relay_pr_ev(kinds[i % kinds.len()], REPO, 1 + (i as u64 % 2));
         ev.author = Some(ME.into());
@@ -293,12 +333,17 @@ async fn relay_events_leave_the_search_cadence_alone_over_ten_minutes() {
     let mut rig = live(pending_fake()).await;
     let mark = rig.fake.log_len();
     for i in 0..40usize {
-        rig.relay_event(relay_pr_ev("pr.synchronize", REPO, 1 + (i as u64 % 2))).await;
+        rig.relay_event(relay_pr_ev("pr.synchronize", REPO, 1 + (i as u64 % 2)))
+            .await;
         rig.run(secs(15), secs(1)).await;
     }
     let n = rig.count_since(mark, Kind::Search);
     assert!(n <= 10, "ten minutes of cadence is ten searches: {n}");
-    let times: Vec<Duration> = rig.of_kind(Kind::Search).into_iter().map(|(t, _)| t).collect();
+    let times: Vec<Duration> = rig
+        .of_kind(Kind::Search)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
     for w in times.windows(2) {
         assert!(w[1] - w[0] >= secs(60), "{times:?}");
     }
@@ -357,7 +402,12 @@ async fn a_relay_organisations_pending_prs_are_polled_only_while_the_relay_is_no
     rig.run(secs(150), secs(5)).await;
     let mark = rig.fake.log_len();
     rig.run(mins(5), secs(5)).await;
-    assert_eq!(rig.count_since(mark, Kind::Graphql), 0, "{:?}", rig.since(mark));
+    assert_eq!(
+        rig.count_since(mark, Kind::Graphql),
+        0,
+        "{:?}",
+        rig.since(mark)
+    );
 }
 
 #[tokio::test]
@@ -368,7 +418,13 @@ async fn after_a_reconnect_the_relay_is_catching_up_until_a_reconcile_succeeds_a
     rig.run(mins(2), secs(5)).await;
 
     // The reconcile after the reconnect is going to fail.
-    fake.force("search", Some(Forced { status: 500, retry_after: None }));
+    fake.force(
+        "search",
+        Some(Forced {
+            status: 500,
+            retry_after: None,
+        }),
+    );
     let reconnected_at = rig.elapsed;
     rig.relay_up().await;
     rig.run(secs(10), secs(1)).await;
@@ -393,7 +449,9 @@ async fn after_a_reconnect_the_relay_is_catching_up_until_a_reconcile_succeeds_a
         }
     }
     assert!(
-        rig.of_kind(Kind::Search).iter().any(|(_, r)| r.status == 500),
+        rig.of_kind(Kind::Search)
+            .iter()
+            .any(|(_, r)| r.status == 500),
         "the reconcile really was failing"
     );
 
@@ -428,7 +486,10 @@ async fn a_reconnect_reconciles_once_and_goes_live() {
     rig.relay_up().await;
     rig.run(secs(70), secs(1)).await;
     assert!(rig.count_since(mark, Kind::Search) >= 1);
-    assert!(rig.count_since(mark, Kind::Graphql) >= 1, "everything is read again");
+    assert!(
+        rig.count_since(mark, Kind::Graphql) >= 1,
+        "everything is read again"
+    );
     assert_eq!(rig.snapshot().unwrap().relay.state, RelayState::Live);
 }
 

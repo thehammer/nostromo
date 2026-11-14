@@ -354,7 +354,10 @@ mod tests {
         assert!(safe_segment("my-repo_2.0"));
         assert!(safe_segment(&"a".repeat(100)));
         assert!(!safe_segment(&"a".repeat(101)));
-        for bad in ["", ".", "..", "a b", "a/b", "a\\b", "a?b", "a#b", "a%2fb", "a\n", "é", "a:b", "a\"b", "a{b}"] {
+        for bad in [
+            "", ".", "..", "a b", "a/b", "a\\b", "a?b", "a#b", "a%2fb", "a\n", "é", "a:b", "a\"b",
+            "a{b}",
+        ] {
             assert!(!safe_segment(bad), "{bad:?}");
         }
         assert!(safe_segment("..a"), "only exactly `..` is a climb");
@@ -364,7 +367,9 @@ mod tests {
     fn a_repo_is_owner_slash_name_with_both_parts_safe() {
         assert!(valid_repo("Carefeed/admin-portal"));
         assert!(valid_repo("thehammer/nostromo"));
-        for bad in ["", "owner", "owner/", "/name", "a/b/c", "a b/c", "o/..", "../n", "o/n\"){", "o/n\n"] {
+        for bad in [
+            "", "owner", "owner/", "/name", "a/b/c", "a b/c", "o/..", "../n", "o/n\"){", "o/n\n",
+        ] {
             assert!(!valid_repo(bad), "{bad:?}");
         }
     }
@@ -382,7 +387,11 @@ mod tests {
     #[test]
     fn states_are_spelled_in_snake_case_on_the_wire() {
         fn word<T: Serialize>(v: T) -> String {
-            serde_json::to_value(v).unwrap().as_str().unwrap().to_owned()
+            serde_json::to_value(v)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
         }
         assert_eq!(word(Group::NeedsYou), "needs_you");
         assert_eq!(word(Group::Draft), "draft");
@@ -423,10 +432,18 @@ mod tests {
         };
         let v = serde_json::to_value(&pr).unwrap();
         let obj = v.as_object().unwrap();
-        for absent in ["ended_at", "base_ref", "details_unavailable", "threads_truncated"] {
+        for absent in [
+            "ended_at",
+            "base_ref",
+            "details_unavailable",
+            "threads_truncated",
+        ] {
             assert!(!obj.contains_key(absent), "{absent} should be absent: {v}");
         }
-        assert!(!obj["checks"].as_object().unwrap().contains_key("failing_names"));
+        assert!(!obj["checks"]
+            .as_object()
+            .unwrap()
+            .contains_key("failing_names"));
         assert!(!obj["review"].as_object().unwrap().contains_key("logins"));
         assert_eq!(obj["owner"], serde_json::json!({"kind": "unknown"}));
         // The head branch and SHA are not a field of the row at all.
