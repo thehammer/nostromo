@@ -307,7 +307,15 @@ fn the_clis_other_injected_user_events_still_make_no_turn() {
         "<command-message>model</command-message>",
         "<command-args>opus</command-args>",
     ] {
-        assert_eq!(parse_line(&stored_user(content)), None, "{content}");
+        // Never a prompt (the command lines are `CommandEcho`s and the output a
+        // `LocalCommandOutput`, which a lone line makes no turn of).
+        assert!(
+            !matches!(
+                parse_line(&stored_user(content)),
+                Some(ParsedLine::UserPrompt { .. })
+            ),
+            "{content}"
+        );
         let mut t = SessionTranscript::new();
         assert!(t.ingest_line(&stored_user(content)).is_empty());
         assert_eq!(t.turn_count(), 0);

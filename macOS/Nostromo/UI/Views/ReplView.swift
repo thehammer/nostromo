@@ -43,6 +43,9 @@ class ReplView: NSView {
     private let scrollView = NSScrollView()
     private let documentView = TranscriptDocumentView()
     private let inputBar   = ReplInputBar()
+    /// The slash-command picker, over the transcript just above the input bar.
+    private lazy var slashPickerView = SlashCommandPickerView(picker: inputBar.slashPicker)
+    private var slashPickerHeight: NSLayoutConstraint!
 
     /// What a click on a wake marker opens: the task's window on this pane's tag, or the pane's
     /// background list when the store does not know the task (or several events woke the agent).
@@ -385,6 +388,7 @@ class ReplView: NSView {
         inputBar.bindMode(tag: session.tag, store: foldSync.store,
                           harnessMode: foldsExpandedByDefault ? .allActivity : nil)
         inputBar.onSetMode = { [weak self] mode in self?.setTranscriptViewMode(mode) }
+        inputBar.bindSlashCommands(tag: session.tag, store: SlashCommandStore.shared)
         addSubview(inputBar)
 
         // "Jump to latest" — covers exactly the transcript area (so it sits above
@@ -475,6 +479,23 @@ class ReplView: NSView {
         }
 
         NSLayoutConstraint.activate(constraints)
+
+        // The slash-command picker: topmost, aligned to the input bar and just above it. It is an overlay,
+        // not a popover, so the composer keeps first responder while it is open.
+        slashPickerView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(slashPickerView)
+        slashPickerHeight = slashPickerView.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            slashPickerView.leadingAnchor.constraint(equalTo: inputBar.leadingAnchor, constant: 12),
+            slashPickerView.trailingAnchor.constraint(equalTo: inputBar.trailingAnchor, constant: -12),
+            slashPickerView.bottomAnchor.constraint(equalTo: inputBar.topAnchor, constant: -4),
+            slashPickerHeight,
+        ])
+        inputBar.slashPicker.onChange = { [weak self] in
+            guard let self else { return }
+            self.slashPickerView.reload()
+            self.slashPickerHeight.constant = self.slashPickerView.preferredHeight
+        }
 
         inputBar.onHeightChange = { [weak self] ideal in
             guard let self else { return }

@@ -200,9 +200,9 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     /// Gap between the bubble and the first block.
     private static let bubbleGap: CGFloat = TurnHeightEstimator.userSlotGap
     /// Leading inset of the block column.
-    private static let blocksLeadingInset: CGFloat = 14
+    static let blocksLeadingInset: CGFloat = 14
     /// Trailing inset of the user bubble.
-    private static let bubbleTrailingInset: CGFloat = 12
+    static let bubbleTrailingInset: CGFloat = 12
 
     /// `TurnHeightEstimator` reproduces this layout arithmetically to estimate a
     /// turn's height before it is built, and reads the shared fractions and
@@ -240,6 +240,8 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     private var bubble: UserBubbleView?
     /// The muted marker a Mother job notice turn shows in the user slot, in place of `bubble`.
     private var wakeMarker: WakeMarkerView?
+    /// A local slash command's record, in the user slot in place of `bubble`.
+    private var localRecord: LocalCommandRecordView?
     /// Height of whichever fills the user slot (the bubble, or the fixed-height marker).
     private var bubbleHeight: CGFloat = 0
 
@@ -421,15 +423,30 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
         // Unless it holds text the blocks do not show, or attachments: then an "also sent" bubble
         // keeps what the agent received visible.
         let bubbleText = turn.hasTerminalOrigin ? turn.terminalOriginBubbleText : turn.userInput
-        if let content = turn.markerContent {
+        if let record = turn.localCommandRecord {
+            // A local slash command's answer is a muted, collapsible record in the user slot: the user
+            // ran a command, they did not send the CLI a message. Opened or closed survives a rebuild
+            // (`folds`), like a tool result's fold.
+            let view = LocalCommandRecordView(
+                command: record.command, args: record.args, output: record.output, stream: record.stream,
+                startExpanded: self.folds.explicitResult(block: nil, index: LocalCommandRecordKey.blockIndex) ?? false)
+            view.onExpansionChange = { [weak self] isExpanded in
+                guard let self else { return }
+                self.noteBlockExpansion(LocalCommandRecordKey.blockIndex, isExpanded)
+                self.userSlotChangedHeight()
+            }
+            localRecord = view
+            bubbleWidthConstraint = attachIsland(view, width: slotWidth())
+        } else if let content = turn.markerContent {
             // A Mother job notice or a background wake is one muted marker in the user slot, never the
             // raw element and never a bubble. Its Copy menu keeps the agent's text reachable. The
             // confirm sentinel does not apply: this turn is not a confirm-card reply.
             let marker = WakeMarkerView(content: content, noticeText: turn.markerCopyText,
                                         router: markerRouter ?? WakeMarkerView.defaultRouter,
                                         copyMenuTitle: turn.hasTaskWakeOrigin ? WakeMarkerView.copyEventMenuTitle
-                                                          : turn.hasInjectedOrigin ? WakeMarkerView.copyTextMenuTitle
-                                                                                   : WakeMarkerView.copyMenuTitle)
+                                                          : (turn.hasInjectedOrigin || turn.isPendingCommandEcho)
+                                                              ? WakeMarkerView.copyTextMenuTitle
+                                                              : WakeMarkerView.copyMenuTitle)
             wakeMarker = marker
             bubbleWidthConstraint = attachIsland(marker, width: slotWidth())
         // The sentinel only ever marks a confirm-card reply, which has no terminal origin: on a
@@ -484,12 +501,17 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     var wakeMarkerView: WakeMarkerView? { wakeMarker }
 
     /// What fills the user slot: the bubble, or a notice turn's marker.
-    private var userSlot: NSView? { bubble ?? wakeMarker }
+    private var userSlot: NSView? { bubble ?? wakeMarker ?? localRecord }
+
+    /// A local command's record in the user slot (nil for any other turn).
+    var localCommandRecordView: LocalCommandRecordView? { localRecord }
 
     /// Width of the user slot: the bubble's fraction of the pane, or the whole row for the marker
     /// (one line, tail-truncated, trailing like the bubble).
     private func slotWidth() -> CGFloat {
-        if wakeMarker != nil { return max(islandWidth - Self.blocksLeadingInset - Self.bubbleTrailingInset, 1) }
+        if wakeMarker != nil || localRecord != nil {
+            return max(islandWidth - Self.blocksLeadingInset - Self.bubbleTrailingInset, 1)
+        }
         return Self.bubbleWidth(paneWidth: islandWidth, imageOnly: bubbleIsImageOnly)
     }
 
@@ -940,6 +962,16 @@ class ChatTurnView: NSView, TurnIsland, ElapsedTicking {
     private func noteBlockExpansion(_ index: Int, _ isExpanded: Bool) {
         folds.resultStates[index] = isExpanded
         onBlockExpansion?(index, isExpanded)
+    }
+
+    /// The user slot's height changed by itself (a local command's record opened or closed): only the
+    /// slot is re-measured, and the owner is told.
+    private func userSlotChangedHeight() {
+        guard let slot = userSlot else { return }
+        bubbleHeight = Self.measureIsland(slot, width: slotWidth())
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+        onIntrinsicHeightChange?()
     }
 
     /// A column's height changed by itself (a toggle, a member fold, a batch of rows): only that

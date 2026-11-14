@@ -1180,6 +1180,26 @@ pub const FEATURE_TERMINAL_STAGING_ONLY: &str = "terminal_staging_only_v1";
 /// `agent_messages`, `agent_problems`, `activity_epoch`, `last_problem`).
 pub const FEATURE_FOCUS_ACTIVITY: &str = "focus_activity_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon takes
+/// `session_commands_get` (answered with `session_commands`), and writes
+/// `local_command` turn origins and slash-command echo turns.
+pub const FEATURE_SLASH_COMMANDS: &str = "slash_commands_v1";
+
+/// One slash command a session's CLI reports (`ServerMsg::SessionCommands`).
+/// `description` is one sanitised line of at most 200 characters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommandEntry {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub builtin: bool,
+}
+
 /// What a session waiting for a Claude sign-in is doing (`ClaudeLoginSession`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1745,6 +1765,13 @@ pub enum ClientMsg {
         request_id: String,
         tag: String,
         task_id: String,
+    },
+    /// Read the slash commands a session's CLI reports (refused over TCP).
+    /// Answered with `ServerMsg::SessionCommands` to the asking client; a tag
+    /// with no running session gets the last list this daemon kept for it.
+    SessionCommandsGet {
+        request_id: String,
+        tag: String,
     },
     /// Read a shell or monitor task's output (refused over TCP). `offset` is a
     /// raw byte offset into the output (`None`: the tail); `max_bytes` is
@@ -2899,6 +2926,15 @@ pub enum ServerMsg {
         completion_summary: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+    },
+    /// Answer to `SessionCommandsGet`, to the asking client only. `LocalOnly`.
+    /// `source` is `cli` (the CLI's own described list), `init` (names only,
+    /// before the first description arrived) or `none` (nothing reported).
+    SessionCommands {
+        request_id: String,
+        tag: String,
+        source: String,
+        commands: Vec<SlashCommandEntry>,
     },
     /// Answer to `SessionTaskStop`, to the asking client only. `LocalOnly`.
     SessionTaskStopResult {
@@ -8555,5 +8591,216 @@ mod huey_document_wire_tests {
             }
             other => panic!("expected PaneActionResult, got {other:?}"),
         }
+    }
+}
+
+/// Slash commands on the wire: the commands request and answer, the
+/// `local_command` turn origin, and the capability that advertises them.
+#[cfg(test)]
+mod slash_commands_wire_tests {
+    use super::*;
+    use crate::ipc::stream_json::{Turn, TurnDelta, TurnOrigin};
+    use serde_json::{json, Value};
+
+    fn value_of<T: Serialize>(msg: &T) -> Value {
+        serde_json::to_value(msg).unwrap()
+    }
+
+    #[test]
+    fn the_commands_request_has_this_wire_form_and_round_trips() {
+        let msg = ClientMsg::SessionCommandsGet {
+            request_id: "r1".into(),
+            tag: "cody-1".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&msg).unwrap(),
+            r#"{"type":"session_commands_get","request_id":"r1","tag":"cody-1"}"#
+        );
+        let back: ClientMsg = serde_json::from_str(
+            r#"{"type":"session_commands_get","request_id":"r1","tag":"cody-1"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            back,
+            ClientMsg::SessionCommandsGet { request_id, tag } if request_id == "r1" && tag == "cody-1"
+        ));
+    }
+
+    #[test]
+    fn the_commands_answer_round_trips_with_and_without_the_optional_fields() {
+        let full = SlashCommandEntry {
+            name: "usage".into(),
+            description: Some("Show plan usage".into()),
+            argument_hint: Some("<optional>".into()),
+            aliases: vec!["cost".into(), "stats".into()],
+            builtin: true,
+        };
+        let bare = SlashCommandEntry {
+            name: "hookify:list".into(),
+            description: None,
+            argument_hint: None,
+            aliases: vec![],
+            builtin: false,
+        };
+        let msg = ServerMsg::SessionCommands {
+            request_id: "r1".into(),
+            tag: "cody-1".into(),
+            source: "cli".into(),
+            commands: vec![full.clone(), bare.clone()],
+        };
+
+        let wire = value_of(&msg);
+
+        assert_eq!(
+            wire,
+            json!({
+                "type": "session_commands",
+                "request_id": "r1",
+                "tag": "cody-1",
+                "source": "cli",
+                "commands": [
+                    {"name": "usage", "description": "Show plan usage",
+                     "argument_hint": "<optional>", "aliases": ["cost", "stats"], "builtin": true},
+                    // Nothing optional: only the name.
+                    {"name": "hookify:list"}
+                ]
+            })
+        );
+        match serde_json::from_value::<ServerMsg>(wire).unwrap() {
+            ServerMsg::SessionCommands {
+                request_id,
+                tag,
+                source,
+                commands,
+            } => {
+                assert_eq!(
+                    (request_id.as_str(), tag.as_str(), source.as_str()),
+                    ("r1", "cody-1", "cli")
+                );
+                assert_eq!(commands, vec![full, bare]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_answer_for_a_tag_with_nothing_reported_round_trips() {
+        let msg = ServerMsg::SessionCommands {
+            request_id: "r".into(),
+            tag: "ghost".into(),
+            source: "none".into(),
+            commands: vec![],
+        };
+        let back: ServerMsg = serde_json::from_value(value_of(&msg)).unwrap();
+        assert_eq!(value_of(&back), value_of(&msg));
+        assert_eq!(value_of(&msg)["commands"], json!([]));
+    }
+
+    #[test]
+    fn a_command_entry_from_a_build_that_sends_less_or_more_decodes() {
+        let e: SlashCommandEntry = serde_json::from_value(json!({"name": "x"})).unwrap();
+        assert_eq!(
+            e,
+            SlashCommandEntry {
+                name: "x".into(),
+                description: None,
+                argument_hint: None,
+                aliases: vec![],
+                builtin: false
+            }
+        );
+        let e: SlashCommandEntry =
+            serde_json::from_value(json!({"name": "x", "from_the_future": [1, 2]})).unwrap();
+        assert_eq!(e.name, "x");
+    }
+
+    #[test]
+    fn a_local_command_origin_round_trips_in_full() {
+        let origin = TurnOrigin::LocalCommand {
+            command: "model".into(),
+            args: "haiku".into(),
+            output: "Set model to Haiku".into(),
+            stream: "stderr".into(),
+            truncated: true,
+        };
+
+        let wire = value_of(&origin);
+
+        assert_eq!(
+            wire,
+            json!({"type": "local_command", "command": "model", "args": "haiku",
+                   "output": "Set model to Haiku", "stream": "stderr", "truncated": true})
+        );
+        assert_eq!(serde_json::from_value::<TurnOrigin>(wire).unwrap(), origin);
+    }
+
+    #[test]
+    fn a_local_command_origin_with_only_its_command_decodes_with_defaults() {
+        let origin: TurnOrigin =
+            serde_json::from_str(r#"{"type":"local_command","command":"context"}"#).unwrap();
+
+        assert_eq!(
+            origin,
+            TurnOrigin::LocalCommand {
+                command: "context".into(),
+                args: String::new(),
+                output: String::new(),
+                stream: "stdout".into(),
+                truncated: false,
+            }
+        );
+        // And it writes no more than it has to.
+        assert_eq!(
+            value_of(&origin),
+            json!({"type": "local_command", "command": "context", "args": "", "output": "", "stream": "stdout"})
+        );
+    }
+
+    #[test]
+    fn an_origin_this_build_does_not_know_decodes_as_unknown() {
+        let origin: TurnOrigin = serde_json::from_str(r#"{"type":"some_future_origin"}"#).unwrap();
+        assert_eq!(origin, TurnOrigin::Unknown);
+        let origin: TurnOrigin =
+            serde_json::from_str(r#"{"type":"some_future_origin","extra":{"a":1}}"#).unwrap();
+        assert_eq!(origin, TurnOrigin::Unknown);
+    }
+
+    #[test]
+    fn a_turn_with_a_local_command_origin_travels_in_a_turn_frame() {
+        let turn = Turn {
+            id: "t1".into(),
+            user_input: "/context".into(),
+            timestamp: None,
+            blocks: vec![],
+            is_complete: true,
+            origin: Some(TurnOrigin::LocalCommand {
+                command: "context".into(),
+                args: String::new(),
+                output: "12k".into(),
+                stream: "stdout".into(),
+                truncated: false,
+            }),
+        };
+        let msg = ServerMsg::SessionTurnDelta {
+            tag: "cody-1".into(),
+            delta: TurnDelta::TurnStarted { turn: turn.clone() },
+        };
+
+        let back: ServerMsg = serde_json::from_value(value_of(&msg)).unwrap();
+
+        match back {
+            ServerMsg::SessionTurnDelta {
+                delta: TurnDelta::TurnStarted { turn: got },
+                ..
+            } => assert_eq!(got, turn),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_capability_is_named_slash_commands_v1() {
+        assert_eq!(FEATURE_SLASH_COMMANDS, "slash_commands_v1");
+        // Additive: the protocol version does not move.
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 }

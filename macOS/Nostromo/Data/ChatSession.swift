@@ -239,9 +239,23 @@ class ChatSession: ObservableObject {
         // subsequent block deltas attach to it.
         var echo = ChatTurn(userInput: trimmed, timestamp: Date(), epoch: currentEpoch)
         echo.imageURLs = images
+        // A typed slash command is not yet known to be a local command (a record) or a prompt-type one
+        // (a bubble): the echo is one muted line until the daemon's turn says which. Only a daemon that
+        // speaks `slash_commands_v1` makes that turn; an older one keeps today's bubble.
+        echo.pendingCommand = images.isEmpty && Self.isTypedSlashCommand(trimmed)
+            && client.daemonAdvertisesSlashCommands
         turns.append(echo)
         changes.send(.appended(index: turns.count - 1))
         client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path })
+    }
+
+    /// Text that starts with a slash command: `/` and a name with no `/` or whitespace, then whitespace
+    /// or the end (`/context`, `/model haiku`; not `/usr/bin/env` or `//`).
+    static func isTypedSlashCommand(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.first == "/" else { return false }
+        let name = t.dropFirst().prefix { !$0.isWhitespace }
+        return !name.isEmpty && !name.contains("/")
     }
 
     // MARK: - Recovery
@@ -482,10 +496,23 @@ class ChatSession: ObservableObject {
                 default: return false
                 }
             }()
+            // (A `.localCommand` turn is the opposite: it adopts the command's echo by its text.)
             let echoIndex = injected ? nil : turns[searchFloor...].lastIndex {
                 $0.daemonId == nil && $0.marker == nil && $0.userInput == turn.userInput
             }
             if let i = echoIndex {
+                // A pending command echo becomes what the daemon says it was: a local command's record
+                // (the origin is taken over) or, for a prompt-type command, the ordinary bubble.
+                let wasPendingCommand = turns[i].pendingCommand
+                var rebuild = false
+                if wasPendingCommand {
+                    turns[i].pendingCommand = false
+                    rebuild = true
+                }
+                if case .localCommand? = turn.origin {
+                    turns[i].origin = turn.origin
+                    rebuild = true
+                }
                 turns[i].daemonId   = turn.id
                 turns[i].epoch      = currentEpoch
                 turns[i].isComplete = turn.isComplete
@@ -503,8 +530,10 @@ class ChatSession: ObservableObject {
                     dropLeadingNotesShownStandalone(from: &adopted)
                     turns[i].blocks = adopted.blocks
                     turns[i].subagentTextParents = adopted.subagentTextParents
-                    changes.send(.updatedBlocks(index: i, addedCount: turns[i].blocks.count))
+                    if !rebuild { changes.send(.updatedBlocks(index: i, addedCount: turns[i].blocks.count)) }
                 }
+                // The turn's user slot changes kind (marker to record or bubble): rebuild its view.
+                if rebuild { changes.send(.spliced(replacedFrom: i)) }
             } else {
                 var mapped = Self.mapTurn(turn, epoch: currentEpoch)
                 dropLeadingNotesShownStandalone(from: &mapped)

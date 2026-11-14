@@ -248,13 +248,39 @@ pub enum TurnOrigin {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         truncated: bool,
     },
+    /// A slash command the CLI answered itself, with no model turn (`/context`,
+    /// `/model haiku`): drawn as a muted, collapsible record, never as a message
+    /// from the user. `output` has the `<local-command-*>` wrapper removed and
+    /// is sanitised, redacted and capped; `stream` is `stdout` or `stderr`.
+    /// Never the session's title and never counted as a prompt (see
+    /// [`local_command`]).
+    LocalCommand {
+        command: String,
+        #[serde(default)]
+        args: String,
+        #[serde(default)]
+        output: String,
+        #[serde(default = "default_local_stream")]
+        stream: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+    },
     /// An origin this build does not know (a newer daemon wrote it): read as
     /// such rather than failing the whole turn.
     #[serde(other)]
     Unknown,
 }
 
+fn default_local_stream() -> String {
+    "stdout".to_owned()
+}
+
 impl TurnOrigin {
+    /// A local slash command's record: not a prompt, not a title.
+    pub fn is_local_command(&self) -> bool {
+        matches!(self, Self::LocalCommand { .. })
+    }
+
     /// An origin the CLI created: a message the user did not type, whose
     /// provenance the session manager checks against what the daemon wrote.
     pub fn is_cli_injected(&self) -> bool {
@@ -435,6 +461,32 @@ pub enum ParsedLine {
         /// session records this: the live stream carries none of these fields.
         injected: bool,
     },
+    /// What a local slash command printed (see [`local_command`] for the rule):
+    /// a live assistant line with `local_command_run`, a user line holding
+    /// `<local-command-stdout|stderr>`, or a stored `system`/`local_command`
+    /// line. `command`/`args` are known only from `local_command_run`; the
+    /// others get them from context. Opens a record turn.
+    LocalCommandOutput {
+        command: Option<String>,
+        args: Option<String>,
+        output: String,
+        stream: String,
+        truncated: bool,
+        timestamp: Option<String>,
+        /// It arrived as a user line (the CLI's replay of a local command's
+        /// answer): live, only meaningful while a typed `/` write is unanswered.
+        from_user_line: bool,
+    },
+    /// The CLI's harness line for a typed slash command (`<command-name>`,
+    /// `<command-message>`, `<command-args>`). By itself it opens no turn: a
+    /// local command's output claims it, a prompt-type command is the user's
+    /// own turn (live: at once; stored: unless output follows).
+    CommandEcho {
+        name: String,
+        args: String,
+        is_replay: bool,
+        timestamp: Option<String>,
+    },
     /// A `<task-notification>` user event: the CLI woke the agent for a
     /// finished background task or a Monitor event. Opens a turn of its own.
     TaskWake {
@@ -574,6 +626,9 @@ fn parse_value(v: &Value) -> Option<ParsedLine> {
         }),
 
         "assistant" => {
+            if let Some(local) = parse_local_command_assistant(obj) {
+                return Some(local);
+            }
             let msg = obj.get("message")?;
             // A subagent's messages arrive on the parent's stdout too, carrying
             // the subagent's model: that is not what the session runs on.
@@ -689,6 +744,20 @@ fn parse_system_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine
             }),
             None => session_id.map(ParsedLine::SessionId),
         },
+        Some("local_command") => {
+            let text = str_field("content")?;
+            let (stream, body) = split_local_output(&text)?;
+            let (output, truncated) = record_output(body);
+            Some(ParsedLine::LocalCommandOutput {
+                command: None,
+                args: None,
+                output,
+                stream: stream.to_owned(),
+                truncated,
+                timestamp: line_timestamp(obj),
+                from_user_line: false,
+            })
+        }
         Some("model_fallback")
         | Some("model_refusal_fallback")
         | Some("model_consent_fallback") => Some(ParsedLine::ModelFallback {
@@ -774,6 +843,9 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
         if s.trim_start().starts_with(TASK_NOTIFICATION_OPEN) {
             return Some(task_wake_line_of(s, obj));
         }
+        if let Some(line) = command_line_of(s, obj) {
+            return Some(line);
+        }
         if s.trim().is_empty() || is_harness_notification(s) {
             return None;
         }
@@ -831,6 +903,9 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
     if text.starts_with(TASK_NOTIFICATION_OPEN) {
         return Some(task_wake_line_of(&text, obj));
     }
+    if let Some(line) = command_line_of(&text, obj) {
+        return Some(line);
+    }
     if text.is_empty() || is_harness_notification(&text) {
         return None;
     }
@@ -848,6 +923,67 @@ fn parse_user_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> 
         human: line_is_human(obj),
         compact_summary: obj.get("isCompactSummary").and_then(|x| x.as_bool()) == Some(true),
         injected: line_is_injected(obj),
+    })
+}
+
+/// The line `text` is when it is a slash command's harness line or a local
+/// command's output (see [`local_command`]); `None` for any other text.
+fn command_line_of(text: &str, obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
+    if let Some((stream, body)) = split_local_output(text) {
+        let (output, truncated) = record_output(body);
+        return Some(ParsedLine::LocalCommandOutput {
+            command: None,
+            args: None,
+            output,
+            stream: stream.to_owned(),
+            truncated,
+            timestamp: line_timestamp(obj),
+            from_user_line: true,
+        });
+    }
+    let (name, args) = parse_command_echo(text)?;
+    Some(ParsedLine::CommandEcho {
+        name,
+        args,
+        is_replay: obj.get("isReplay").and_then(|x| x.as_bool()) == Some(true),
+        timestamp: line_timestamp(obj),
+    })
+}
+
+/// A live assistant line the CLI wrote for a local command: it names the
+/// command (`local_command_run`) or its raw output (`local_command_source`),
+/// and its text is the output. Never blocks for the previous turn.
+fn parse_local_command_assistant(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine> {
+    let run = obj.get("local_command_run").filter(|r| r.is_object());
+    let source = obj.get("local_command_source").and_then(|x| x.as_str());
+    if run.is_none() && source.is_none() {
+        return None;
+    }
+    let text = source.map(str::to_owned).or_else(|| {
+        let content = obj.get("message")?.get("content")?.as_array()?;
+        Some(
+            content
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    })?;
+    let (stream, body) = split_local_output(&text).unwrap_or(("stdout", text.as_str()));
+    let (output, truncated) = record_output(body);
+    let run_field = |k: &str| {
+        run.and_then(|r| r.get(k))
+            .and_then(|x| x.as_str())
+            .map(str::to_owned)
+    };
+    Some(ParsedLine::LocalCommandOutput {
+        command: run_field("command").and_then(|c| clean_name(c.trim_start_matches('/'))),
+        args: run_field("args").map(|a| clean_args(&a)),
+        output,
+        stream: stream.to_owned(),
+        truncated,
+        timestamp: line_timestamp(obj),
+        from_user_line: false,
     })
 }
 
@@ -964,12 +1100,16 @@ fn is_only_tool_results(content: &Value) -> bool {
 /// Checked as a prefix after trimming leading whitespace/newlines, since the
 /// harness sometimes leads with blank lines before the tag.
 ///
-/// A model switch (`set_model`) makes the CLI write three user entries of its
-/// own, replayed live and stored in the session JSONL (contract F1): the
-/// `<local-command-caveat>` meta entry, the `<command-name>/model</command-name>`
-/// entry and the `<local-command-stdout>Set model to …` entry. The daemon
-/// records the switch as a note instead, so these are dropped too. Matched by
-/// their tags alone, not their wording: a CLI release that rewords the message
+/// Older CLIs wrote three user entries of their own for a model switch
+/// (`set_model`): the `<local-command-caveat>` meta entry, the
+/// `<command-name>/model</command-name>` entry and the
+/// `<local-command-stdout>Set model to …` entry. Claude Code 2.1.318 writes NONE
+/// for `set_model`, live or stored. The `<local-command-caveat>` is still
+/// dropped here, with any other `<local-command-*>` kind. The command tags and
+/// the stdout/stderr tags are read BEFORE this check
+/// ([`command_line_of`]): a typed slash command's echo and a local command's
+/// output are what the slash-command records are made of (see [`local_command`]).
+/// Matched by tags alone, not wording: a CLI release that rewords a message
 /// must not turn it into a prompt. (Should the tags change too,
 /// `SessionTranscript::discard_orphan_prompt` is the net.)
 ///
@@ -1790,6 +1930,18 @@ pub struct SessionTranscript {
     /// just ingested followed: the reader may fold that line back into it
     /// ([`Self::merge_into_previous_peer`]).
     peer_merge_candidate: Option<String>,
+    /// A stored replay's `<command-name>` harness line, waiting to see what
+    /// follows: local output claims it (a record), anything else makes it the
+    /// user's own `/<name> <args>` turn first. Never set on a live transcript.
+    pending_command: Option<PendingCommand>,
+}
+
+/// A harness line of a typed slash command, held by [`SessionTranscript`].
+#[derive(Debug, Clone)]
+struct PendingCommand {
+    name: String,
+    args: String,
+    timestamp: Option<String>,
 }
 
 impl SessionTranscript {
@@ -1923,6 +2075,7 @@ impl SessionTranscript {
         let is_counted = |t: &Turn| {
             !matches!(t.origin, Some(TurnOrigin::TaskWake { .. }))
                 && !t.origin.as_ref().is_some_and(TurnOrigin::is_cli_injected)
+                && !t.origin.as_ref().is_some_and(TurnOrigin::is_local_command)
         };
         let counted_retained = self.turns.iter().filter(|t| is_counted(t)).count() as u64;
         let first_retained = self.prompt_count.saturating_sub(counted_retained) + 1;
@@ -1987,7 +2140,87 @@ impl SessionTranscript {
     /// [`Self::ingest_line`] for an already-parsed line. Model reports and
     /// control responses only contribute their session id here.
     pub fn ingest_parsed(&mut self, parsed: ParsedLine) -> Vec<TurnDelta> {
+        // A stored harness line waits for the line after it: anything that is
+        // not local output (or bookkeeping) makes it the user's own turn.
+        let mut lead = match &parsed {
+            ParsedLine::UserPrompt { .. }
+            | ParsedLine::TaskWake { .. }
+            | ParsedLine::Blocks { .. }
+            | ParsedLine::Result(_)
+            | ParsedLine::CommandEcho { .. }
+            | ParsedLine::LocalCommandOutput {
+                command: Some(_), ..
+            } => self.open_pending_command(),
+            _ => vec![],
+        };
+        let deltas = self.ingest_parsed_line(parsed);
+        lead.extend(deltas);
+        lead
+    }
+
+    fn ingest_parsed_line(&mut self, parsed: ParsedLine) -> Vec<TurnDelta> {
         match parsed {
+            ParsedLine::LocalCommandOutput {
+                command,
+                args,
+                output,
+                stream,
+                truncated,
+                timestamp,
+                ..
+            } => {
+                let pending = self.pending_command.take();
+                // Older CLIs wrote the stored `/model` triple for the daemon's
+                // own model switch: no turn, no record (an operator never typed
+                // it, and the ledger's "Model changed" note covers it).
+                if !self.live
+                    && pending.as_ref().is_some_and(|p| p.name == "model")
+                    && output.starts_with("Set model to")
+                {
+                    return vec![];
+                }
+                let (command, args) = match (command, pending) {
+                    (Some(command), _) => (command, args.unwrap_or_default()),
+                    (None, Some(p)) => (p.name, p.args),
+                    // A replay's output with no command line before it: nothing
+                    // to name. (A live one is named by the written message.)
+                    (None, None) if !self.live => return vec![],
+                    (None, None) => (String::new(), String::new()),
+                };
+                self.ingest_local_command(
+                    TurnOrigin::LocalCommand {
+                        command,
+                        args,
+                        output,
+                        stream,
+                        truncated,
+                    },
+                    timestamp,
+                )
+            }
+
+            ParsedLine::CommandEcho {
+                name,
+                args,
+                is_replay,
+                timestamp,
+            } => {
+                if !self.live {
+                    self.pending_command = Some(PendingCommand {
+                        name,
+                        args,
+                        timestamp,
+                    });
+                    return vec![];
+                }
+                // Live: only the echo of a write (`isReplay`) is a turn: the
+                // user's own, a prompt-type command.
+                if !is_replay {
+                    return vec![];
+                }
+                self.ingest_command_turn(&name, &args, timestamp, true)
+            }
+
             ParsedLine::SessionId(sid)
             | ParsedLine::Model {
                 session_id: Some(sid),
@@ -2148,6 +2381,101 @@ impl SessionTranscript {
                 deltas
             }
         }
+    }
+
+    /// A stored harness line that nothing claimed is the user's own typed
+    /// command (a prompt-type one): open its `/<name> <args>` turn.
+    fn open_pending_command(&mut self) -> Vec<TurnDelta> {
+        match self.pending_command.take() {
+            Some(p) => self.ingest_command_turn(&p.name, &p.args, p.timestamp, false),
+            None => vec![],
+        }
+    }
+
+    /// The user's own turn for a typed slash command the CLI echoed as a harness
+    /// line: an ordinary prompt of `/<name> <args>`.
+    fn ingest_command_turn(
+        &mut self,
+        name: &str,
+        args: &str,
+        timestamp: Option<String>,
+        is_replay: bool,
+    ) -> Vec<TurnDelta> {
+        self.ingest_parsed_line(ParsedLine::UserPrompt {
+            text: local_command::command_line(name, args),
+            is_replay,
+            timestamp,
+            host_sent: false,
+            human: false,
+            compact_summary: false,
+            injected: false,
+        })
+    }
+
+    /// What a local slash command printed: a record turn of its own. Not a
+    /// prompt: not counted in `prompt_count`, never the session's title, and
+    /// the answer is never appended to the previous turn.
+    fn ingest_local_command(
+        &mut self,
+        origin: TurnOrigin,
+        timestamp: Option<String>,
+    ) -> Vec<TurnDelta> {
+        let mut deltas: Vec<TurnDelta> = self.discard_orphan_prompt().into_iter().collect();
+        if let Some(last) = self.turns.last_mut() {
+            last.is_complete = true;
+        }
+        let user_input = match &origin {
+            TurnOrigin::LocalCommand { command, args, .. } => {
+                local_command::command_line(command, args)
+            }
+            _ => String::new(),
+        };
+        let id = self.alloc_id();
+        let turn = Turn {
+            id,
+            user_input,
+            timestamp,
+            blocks: std::mem::take(&mut self.orphan_notes),
+            is_complete: false,
+            origin: Some(origin),
+        };
+        self.retained_bytes += turn_bytes(&turn);
+        self.turns.push(turn.clone());
+        deltas.push(TurnDelta::TurnStarted { turn });
+        self.enforce_limits();
+        deltas
+    }
+
+    /// Turn `turn_id`, a record or a command echo's turn, answers the message
+    /// the daemon wrote (`written`, a typed `/…` line): it takes that text as
+    /// its `user_input` (so a client's optimistic echo adopts it by text), a
+    /// record fills a command or arguments it lacks from it, and a user turn's
+    /// title follows. Returns the turn as it now is, or `None` if it is gone.
+    pub fn adopt_written_command(&mut self, turn_id: &str, written: &str) -> Option<Turn> {
+        let (name, args) = local_command::split_typed_command(written)?;
+        let idx = self.turns.iter().position(|t| t.id == turn_id)?;
+        let turn = &mut self.turns[idx];
+        let old_input = std::mem::replace(&mut turn.user_input, written.trim().to_owned());
+        self.retained_bytes = self
+            .retained_bytes
+            .saturating_sub(old_input.len())
+            .saturating_add(turn.user_input.len());
+        if let Some(TurnOrigin::LocalCommand {
+            command, args: a, ..
+        }) = turn.origin.as_mut()
+        {
+            if command.is_empty() {
+                *command = name;
+            }
+            if a.is_empty() {
+                *a = args;
+            }
+        } else if turn.origin.is_none()
+            && self.first_user_input.as_deref() == Some(old_input.as_str())
+        {
+            self.first_user_input = Some(turn.user_input.clone());
+        }
+        Some(turn.clone())
     }
 
     /// A `<task-notification>` event. Two in a row with no reply between
@@ -2472,6 +2800,7 @@ impl SessionTranscript {
     /// Complete any trailing open turn without a delta (used after replaying a
     /// stored-session transcript that has no final `result` line).
     pub fn flush(&mut self) {
+        let _ = self.open_pending_command();
         if let Some(last) = self.turns.last_mut() {
             last.is_complete = true;
         }
@@ -2750,7 +3079,7 @@ pub fn transcript_from_jsonl(content: &str, max_turns: usize) -> SessionTranscri
             ) && !turn
                 .origin
                 .as_ref()
-                .is_some_and(TurnOrigin::is_cli_injected)
+                .is_some_and(|o| o.is_cli_injected() || o.is_local_command())
         })
         .map(|turn| turn.user_input.clone());
     t
@@ -2784,6 +3113,12 @@ pub fn load_scrollback(session_id: &str, max_turns: usize) -> SessionTranscript 
     SessionTranscript::new()
 }
 
+#[path = "stream_json_local_command.rs"]
+pub mod local_command;
+use local_command::{
+    clean_args, clean_name, parse_command_echo, record_output, split_local_output,
+};
+
 #[path = "stream_json_injected.rs"]
 mod injected;
 pub use injected::{
@@ -2806,6 +3141,10 @@ mod mother_tests;
 #[cfg(test)]
 #[path = "stream_json_wake_tests.rs"]
 mod wake_tests;
+
+#[cfg(test)]
+#[path = "stream_json_local_command_tests.rs"]
+mod local_command_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3959,12 +4298,23 @@ mod tests {
             "<command-message>effort</command-message>",
             "<command-args>high</command-args>",
         ] {
-            assert_eq!(parse_line(&user_event(serde_json::json!(text))), None, "string content: {text:?}");
-            assert_eq!(
-                parse_line(&user_event(serde_json::json!([{"type": "text", "text": text}]))),
-                None,
-                "text-array content: {text:?}"
-            );
+            // Never a prompt, whatever shape the content has; and a lone line
+            // makes no turn (a command line waits for output, output with no
+            // command line or written message names nothing).
+            for content in [
+                serde_json::json!(text),
+                serde_json::json!([{"type": "text", "text": text}]),
+            ] {
+                let line = user_event(content);
+                assert!(
+                    !matches!(parse_line(&line), Some(ParsedLine::UserPrompt { .. })),
+                    "{text:?}"
+                );
+                let mut t = SessionTranscript::new();
+                t.set_live(false);
+                assert!(t.ingest_line(&line).is_empty(), "{text:?}");
+                assert_eq!(t.turn_count(), 0, "{text:?}");
+            }
         }
     }
 

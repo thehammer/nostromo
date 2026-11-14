@@ -279,6 +279,14 @@ impl ActivityTally {
     /// turn's sign-in verdict at a turn end (`TurnAuthTracker::finish`).
     pub fn on_delta(&mut self, delta: &TurnDelta, auth_failed: Option<AuthSignal>) {
         match delta {
+            // A local slash command's record (`/context`) is no agent turn: no
+            // model ran, so it is neither counted nor a `NoText` problem. Its
+            // `result` then meets no open turn here and is nothing.
+            TurnDelta::TurnStarted { turn }
+                if turn.origin.as_ref().is_some_and(|o| o.is_local_command()) =>
+            {
+                self.open = false;
+            }
             TurnDelta::TurnStarted { .. } => {
                 self.open = true;
                 self.messages = 0;

@@ -564,6 +564,7 @@ class AppStore: ObservableObject {
         log.info("AppStore starting")
         ModelStore.shared.sender = client
         TaskRequests.shared.sender = client
+        SlashCommandStore.shared.sender = client
         ApprovalsLogStore.shared.sender = client
 
         // IPC messages (session, activity)
@@ -1861,6 +1862,10 @@ class AppStore: ObservableObject {
         // The answers to the output reads (the task window, `tasks output`) and, with BA5, to Stop.
         case .sessionTaskStopResult, .sessionTaskOutputResult:
             TaskRequests.shared.ingest(msg)
+
+        // The slash commands a session's CLI reports: every window's picker reads them from the store.
+        case .sessionCommands:
+            SlashCommandStore.shared.ingest(msg)
 
         // The tracker pane's board and the focus's counts: every window's pane reads them from the store.
         case .trackerBoard, .trackerSummary:

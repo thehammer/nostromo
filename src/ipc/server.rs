@@ -41,8 +41,8 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_TERMINAL_STAGING_ONLY,
-        MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
+        SessionAction, Topic, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SLASH_COMMANDS,
+        FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -564,6 +564,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
             FEATURE_LOGIN.to_string(),
             FEATURE_TERMINAL_STAGING_ONLY.to_string(),
             FEATURE_FOCUS_ACTIVITY.to_string(),
+            FEATURE_SLASH_COMMANDS.to_string(),
         ],
         operator_nonce,
         enabled_agents: Some(mgr.enabled_agents().wire_names()),
@@ -2716,6 +2717,18 @@ fn handle_client_msg(
             });
         }
 
+        // The commands a session's CLI reports: a local answer to the asking
+        // client, from what the daemon already read. Network refused earlier.
+        ClientMsg::SessionCommandsGet { request_id, tag } => {
+            let (source, commands) = session_mgr.lock().unwrap().session_commands(&tag);
+            let _ = targeted_tx.send(ServerMsg::SessionCommands {
+                request_id,
+                tag,
+                source: source.as_str().to_owned(),
+                commands,
+            });
+        }
+
         ClientMsg::SessionTaskOutput {
             request_id,
             tag,
@@ -4088,6 +4101,92 @@ mod tests {
 
     use super::*;
     use crate::ipc::protocol::DecisionChoice;
+
+    // ── slash commands ────────────────────────────────────────────────────────
+
+    #[test]
+    fn welcome_advertises_slash_commands_and_the_features_it_already_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_store_path(dir.path().join("s.json"));
+        match welcome_msg(&mgr, None) {
+            ServerMsg::Welcome { features, .. } => {
+                assert!(
+                    features.iter().any(|f| f == "slash_commands_v1"),
+                    "{features:?}"
+                );
+                assert!(
+                    features.iter().any(|f| f == "focus_activity_v1"),
+                    "{features:?}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn commands_get_as(trust: PeerTrust, tag: &str) -> Vec<ServerMsg> {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = Arc::new(Mutex::new(SessionManager::with_store_path(
+            dir.path().join("s.json"),
+        )));
+        let (ttx, mut trx) = mpsc::unbounded_channel();
+        let (btx, _brx) = broadcast::channel(8);
+        handle_client_msg(
+            ClientMsg::SessionCommandsGet {
+                request_id: "rq-1".into(),
+                tag: tag.into(),
+            },
+            trust,
+            None,
+            None,
+            &SensitiveTags::in_memory(),
+            "conn",
+            "client",
+            &mgr,
+            &ttx,
+            &btx,
+            dir.path(),
+            &Arc::new(Mutex::new(DecisionRegistry::new())),
+            &Arc::new(Mutex::new(HashSet::new())),
+            None,
+            &TerminalManager::in_memory(),
+        );
+        let mut out = Vec::new();
+        while let Ok(m) = trx.try_recv() {
+            out.push(m);
+        }
+        out
+    }
+
+    #[test]
+    fn a_local_peer_asking_for_a_tag_with_no_session_is_told_none_and_its_request_id_comes_back() {
+        for trust in [PeerTrust::OperatorApp, PeerTrust::LocalOther] {
+            let out = commands_get_as(trust, "ghost");
+            assert!(
+                matches!(
+                    out.as_slice(),
+                    [ServerMsg::SessionCommands { request_id, tag, source, commands }]
+                        if request_id == "rq-1" && tag == "ghost" && source == "none" && commands.is_empty()
+                ),
+                "{trust:?}: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_network_peer_asking_for_commands_is_refused_and_told_nothing_of_them() {
+        let out = commands_get_as(PeerTrust::Tcp, "ghost");
+        assert!(
+            !out.iter()
+                .any(|m| matches!(m, ServerMsg::SessionCommands { .. })),
+            "{out:?}"
+        );
+        assert!(
+            out.iter().any(
+                |m| matches!(m, ServerMsg::Error { message } if message.contains("requires_secure_connection"))
+            ),
+            "{out:?}"
+        );
+    }
 
     fn perri_action_with(enabled: crate::agents::EnabledAgents, dir: &Path) -> Vec<ServerMsg> {
         let mut mgr = SessionManager::new();

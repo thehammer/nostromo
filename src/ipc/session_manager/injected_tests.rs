@@ -16,13 +16,13 @@ use super::*;
 use crate::ipc::stream_json::Turn;
 use std::time::{Duration, Instant};
 
-fn tmp_store() -> PathBuf {
+pub(super) fn tmp_store() -> PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!("nostromo-injected-test-{}.json", Uuid::new_v4()));
     p
 }
 
-fn spawn_stub(mgr: &mut SessionManager, tag: &str, script: &str) {
+pub(super) fn spawn_stub(mgr: &mut SessionManager, tag: &str, script: &str) {
     let program = PathBuf::from("/bin/sh");
     let args = vec!["-c".to_string(), script.to_string()];
     let managed = mgr
@@ -42,7 +42,7 @@ fn spawn_stub(mgr: &mut SessionManager, tag: &str, script: &str) {
     mgr.sessions.insert(tag.to_string(), managed);
 }
 
-async fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+pub(super) async fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(v) = probe() {
@@ -53,8 +53,8 @@ async fn eventually<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-const ASSISTANT_LINE: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
-const RESULT_LINE: &str = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}"#;
+pub(super) const ASSISTANT_LINE: &str = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#;
+pub(super) const RESULT_LINE: &str = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"total_cost_usd":0.0}"#;
 
 /// Echoes each user frame as the CLI does (`isReplay`, no provenance fields), answers it.
 fn echo_stub() -> String {
@@ -71,7 +71,7 @@ done"#
     )
 }
 
-fn user_line(content: &str, extra: serde_json::Value) -> String {
+pub(super) fn user_line(content: &str, extra: serde_json::Value) -> String {
     let mut line =
         serde_json::json!({"type": "user", "message": {"role": "user", "content": content}});
     for (k, v) in extra.as_object().unwrap() {
@@ -86,11 +86,11 @@ fn peer_text(body: &str) -> String {
     )
 }
 
-fn turns_of(mgr: &SessionManager, tag: &str) -> Vec<Turn> {
+pub(super) fn turns_of(mgr: &SessionManager, tag: &str) -> Vec<Turn> {
     lock_recover(&mgr.sessions[tag].shared.transcript).snapshot()
 }
 
-async fn wait_turns(mgr: &SessionManager, tag: &str, n: usize) -> Vec<Turn> {
+pub(super) async fn wait_turns(mgr: &SessionManager, tag: &str, n: usize) -> Vec<Turn> {
     eventually(&format!("{n} turns"), || {
         let t = turns_of(mgr, tag);
         (t.len() >= n).then_some(t)
@@ -300,9 +300,10 @@ fn assert_other_marker_turn(t: &Turn) {
 
 #[tokio::test]
 async fn a_cli_line_after_a_typed_slash_commands_harness_echo_is_a_marker_not_a_bubble() {
-    // The human's `/cmd` is echoed only as a harness line (dropped by the
-    // parser). A later CLI-started line of no known shape must not inherit the
-    // human's message.
+    // The human's `/cmd` is echoed as a harness line: a prompt-type command,
+    // the human's own `/cmd` turn (a normal bubble, a prompt, the title). A
+    // later CLI-started line of no known shape must not inherit the human's
+    // message: it stays a marker.
     let mut mgr = SessionManager::with_store_path(tmp_store());
     let dir = tempfile::tempdir().unwrap();
     let f = dir.path().join("out.jsonl");
@@ -333,17 +334,23 @@ async fn a_cli_line_after_a_typed_slash_commands_harness_echo_is_a_marker_not_a_
     })
     .await;
 
+    // The human's turn is the typed command: a plain user turn, first.
+    assert_eq!(turns.len(), 2, "{turns:?}");
+    assert_eq!(turns[0].user_input, "/cmd");
+    assert_eq!(turns[0].origin, None);
+    // The CLI's later line is a marker, and never took the human's `/cmd`
+    // (nor does the marker show the scheduled text).
+    assert_other_marker_turn(&turns[1]);
     for t in &turns {
         assert_ne!(t.user_input, "scheduled: check the build");
-        assert_ne!(
-            t.user_input, "/cmd",
-            "the CLI line took the human's message"
-        );
     }
-    assert_other_marker_turn(turns.last().unwrap());
+    assert_ne!(
+        turns[1].user_input, "/cmd",
+        "the CLI line took the human's message"
+    );
     let t = lock_recover(&mgr.sessions["cmd"].shared.transcript);
-    assert_eq!(t.prompt_count(), 0);
-    assert_eq!(t.first_user_input(), None);
+    assert_eq!(t.prompt_count(), 1);
+    assert_eq!(t.first_user_input(), Some("/cmd"));
     drop(t);
     mgr.stop("cmd");
 }
