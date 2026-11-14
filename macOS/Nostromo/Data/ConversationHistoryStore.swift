@@ -191,10 +191,8 @@ extension ConversationHistoryStore {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: transcriptPath)])
             }
         }
-        if let window = NSApp.keyWindow {
-            alert.beginSheetModal(for: window, completionHandler: finish)
-        } else {
-            finish(alert.runModal())
-        }
+        // Always a sheet on a window: a free-floating modal can strand the app.
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) else { return }
+        alert.beginSheetModal(for: window, completionHandler: finish)
     }
 }
