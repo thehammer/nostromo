@@ -23,6 +23,20 @@ enum AppControlAX {
     /// read views: the same rule as a terminal's screen (SR7).
     static let stagedHiddenText = "staged commands hidden from app-control"
 
+    /// What app-control reads in place of the Perri review side pane (SR7): tab titles, the host and path
+    /// and the notices are never read from a view.
+    static let reviewPaneHiddenText = "review pane hidden from app-control"
+
+    /// Whether `view` itself is the root of a withheld region (not merely inside one).
+    static func isWithheldRoot(_ view: NSView) -> Bool {
+        view is StagingDrawerView || view is StagingConfirmContentView || view is ReviewSidePaneView
+    }
+
+    /// The one fixed entry a withheld region reads as.
+    static func withheldText(for view: NSView) -> String {
+        view is ReviewSidePaneView ? reviewPaneHiddenText : stagedHiddenText
+    }
+
     /// Whether `view` is a staging drawer or a confirm sheet's content (the sheet is its own window), or inside
     /// one, and app-control must not read it: the real app
     /// (`allowsSynthetic` false). A QA build keeps the rows readable for the live QA script.
@@ -30,7 +44,7 @@ enum AppControlAX {
         guard !allowsSynthetic else { return false }
         var current: NSView? = view
         while let candidate = current {
-            if candidate is StagingDrawerView || candidate is StagingConfirmContentView { return true }
+            if isWithheldRoot(candidate) { return true }
             current = candidate.superview
         }
         return false
@@ -66,10 +80,11 @@ enum AppControlAX {
             guard depth < 14 else { return }
             let frame = (value(element, "accessibilityFrame") as? NSValue)?.rectValue ?? .zero
             if let drawer = element as? NSView, isWithheld(drawer, allowsSynthetic: allowsSynthetic) {
+                let fixed = withheldText(for: drawer)
                 // One fixed entry; nothing below it is read.
                 let winFrame = w.convertFromScreen(frame)
                 if winFrame.width > 0, winFrame.height > 0 {
-                    out.append(AppControlHit(cls: "ax:AXGroup", text: stagedHiddenText, rectInWindow: winFrame))
+                    out.append(AppControlHit(cls: "ax:AXGroup", text: fixed, rectInWindow: winFrame))
                 }
                 return
             }
@@ -85,7 +100,7 @@ enum AppControlAX {
         if isWithheld(view, allowsSynthetic: allowsSynthetic) {
             let frame = w.convertFromScreen(view.accessibilityFrame())
             return frame.width > 0 && frame.height > 0
-                ? [AppControlHit(cls: "ax:AXGroup", text: stagedHiddenText, rectInWindow: frame)] : []
+                ? [AppControlHit(cls: "ax:AXGroup", text: withheldText(for: view), rectInWindow: frame)] : []
         }
         for child in view.accessibilityChildren() ?? [] { if let c = child as AnyObject? { walk(c, depth: 0) } }
         return out
@@ -94,8 +109,8 @@ enum AppControlAX {
     /// The raw accessibility tree under `element` (type, role, label, value, children), as `ax` prints it.
     static func dump(_ e: Any, _ d: Int, allowsSynthetic: Bool = SyntheticInputGate.allowsSynthetic) -> [String: Any] {
         if let view = e as? NSView, isWithheld(view, allowsSynthetic: allowsSynthetic) {
-            return ["type": view is StagingDrawerView ? "StagingDrawerView" : "StagingConfirmContentView",
-                    "role": NSAccessibility.Role.group.rawValue, "label": stagedHiddenText]
+            return ["type": String(describing: Swift.type(of: view)),
+                    "role": NSAccessibility.Role.group.rawValue, "label": withheldText(for: view)]
         }
         guard let ax = e as? NSAccessibilityProtocol else { return ["raw": "\(e)"] }
         var n: [String: Any] = ["type": "\(Swift.type(of: ax))", "role": ax.accessibilityRole()?.rawValue ?? ""]

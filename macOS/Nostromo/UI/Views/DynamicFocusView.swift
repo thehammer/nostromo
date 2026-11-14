@@ -464,6 +464,13 @@ final class DynamicFocusView: NSView {
             // The click pins the PR for this focus only and opens nothing.
             let focusTag = focus.sessionTag
             wrapper.isPerriFocus = focus.isPerriFocus
+            if focus.isPerriFocus {
+                // Side-pane controls: tabs open in this focus's own pane; nothing goes to the daemon.
+                let pane = ReviewPaneRegistry.shared.model(for: focusTag)
+                wrapper.rowActions = PerriRowActions(
+                    openConversation: { repo, number in pane.open(pr: ReviewPR(repo: repo, number: number), target: .conversation) },
+                    openDiff: { repo, number in pane.open(pr: ReviewPR(repo: repo, number: number), target: .diff) })
+            }
             wrapper.onLoadPR    = { repo, number in
                 AppStore.shared.loadPR(repo: repo, number: number, tag: focusTag)
             }
@@ -1298,13 +1305,16 @@ final class PaneContentNSView: NSView {
         let tag = focusTag
         guard !tag.isEmpty else { pinCancellable = nil; return }
         pinCancellable = AppStore.shared.$perriDetailByTag
-            .map { details -> PRRef? in
+            .map { details -> ReviewingPR? in
                 guard let d = details[tag], let number = d.prNumber else { return nil }
-                return PRRef(repo: d.repo, number: number)
+                return ReviewingPR(repo: d.repo, number: number, title: d.title)
             }
             .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] ref in self?.model.selectedPR = ref }
+            .sink { [weak self] pin in
+                self?.model.selectedPR = pin.map { PRRef(repo: $0.repo, number: $0.number) }
+                self?.model.reviewing = pin
+            }
     }
 
     /// The line-addressable renderer for the `code`/`diff` kinds (W2 —
@@ -1343,6 +1353,10 @@ final class PaneContentNSView: NSView {
     /// Injected by `DynamicFocusView.makeLeafView`: the pane belongs to a Perri focus.
     var isPerriFocus: Bool = false {
         didSet { model.isPerriFocus = isPerriFocus }
+    }
+    /// Injected by `DynamicFocusView.makeLeafView` for a Perri focus: the side-pane controls on queue rows.
+    var rowActions: PerriRowActions? {
+        didSet { model.rowActions = rowActions }
     }
     /// Injected by `DynamicFocusView.makeLeafView` — called when a `pr_list` row is approved.
     var onApprovePR: (String, Int) -> Void = { _, _ in } {
