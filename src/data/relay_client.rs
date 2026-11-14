@@ -209,6 +209,8 @@ pub const DEFAULT_ORG: &str = "Carefeed";
 pub struct RelayStatus {
     connected: std::sync::atomic::AtomicBool,
     org: std::sync::Mutex<Option<String>>,
+    /// When `connected` last changed (set on each connected/disconnected transition).
+    since: std::sync::Mutex<Option<DateTime<Utc>>>,
 }
 
 impl RelayStatus {
@@ -223,8 +225,21 @@ impl RelayStatus {
     }
 
     pub fn set_connected(&self, connected: bool) {
-        self.connected
-            .store(connected, std::sync::atomic::Ordering::SeqCst);
+        let before = self
+            .connected
+            .swap(connected, std::sync::atomic::Ordering::SeqCst);
+        let mut since = self.since.lock().unwrap_or_else(|e| e.into_inner());
+        // A transition stamps the time; the first call also does (the relay
+        // was "disconnected" from the start, so a first `false` is not news,
+        // but it is the earliest honest time we have).
+        if before != connected || since.is_none() {
+            *since = Some(Utc::now());
+        }
+    }
+
+    /// When the connection last came up or went down; `None` before the first report.
+    pub fn since(&self) -> Option<DateTime<Utc>> {
+        *self.since.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The organisation whose events the relay sends: the ack's effective
@@ -280,10 +295,10 @@ impl RelayHub {
     }
 }
 
-/// Is the subscriber wanted at all? Perri's queue and Mother's notices are
-/// its only consumers: with both off nothing is spawned.
-pub fn relay_wanted(perri_enabled: bool, notices_enabled: bool) -> bool {
-    perri_enabled || notices_enabled
+/// Is the subscriber wanted at all? Perri's queue, Mother's notices and the
+/// authored-PR list are its consumers: with all off nothing is spawned.
+pub fn relay_wanted(perri_enabled: bool, notices_enabled: bool, authored_prs_enabled: bool) -> bool {
+    perri_enabled || notices_enabled || authored_prs_enabled
 }
 
 /// Like [`spawn`], publishing to every subscriber of `hub` and keeping its
@@ -421,15 +436,9 @@ async fn connect_and_subscribe(url: &str, token: &str, hub: &RelayHub) -> Result
                         url,
                         name,
                     }) => {
-                        let repo_label = repo.as_deref().unwrap_or("?");
-                        // PR events carry `number`; ci.completed carries `name`
-                        // (the check/suite name) instead — show whichever applies.
-                        let detail = match (number, name.clone()) {
-                            (Some(n), _) => format!("#{n}"),
-                            (None, Some(n)) => n,
-                            (None, None) => "?".to_string(),
-                        };
-                        info!("github-relay: event {event_type} {repo_label} {detail}");
+                        // Only the event type is logged: the repo, PR number
+                        // and check name are not (SP2).
+                        info!("github-relay: event {event_type}");
                         // Every parsed event is forwarded.  Deciding what an
                         // event *means* — including that an unrecognised type
                         // means nothing — belongs to the queue's classifier
@@ -789,10 +798,11 @@ mod tests {
 
     #[test]
     fn the_subscriber_is_wanted_when_perri_or_notices_use_it() {
-        assert!(relay_wanted(true, true));
-        assert!(relay_wanted(true, false));
-        assert!(relay_wanted(false, true));
-        assert!(!relay_wanted(false, false));
+        assert!(relay_wanted(true, true, false));
+        assert!(relay_wanted(true, false, false));
+        assert!(relay_wanted(false, true, false));
+        assert!(relay_wanted(false, false, true));
+        assert!(!relay_wanted(false, false, false));
     }
 
     // ── the token never reaches the log ──

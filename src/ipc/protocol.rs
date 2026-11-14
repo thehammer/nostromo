@@ -110,6 +110,11 @@ pub enum Topic {
     /// topic list still includes it for a local peer; FND-1 keeps every
     /// terminal frame off TCP (`ServerClass::LocalOnly`).
     Terminal,
+    /// The author's open PRs: `ServerMsg::AuthoredPrs`, replayed (the latest
+    /// snapshot) on subscribe. Advertised as `authored_prs_v1`. Delivered only
+    /// to a client that names it (the empty "everything" list does not include
+    /// it) and never to a network peer.
+    AuthoredPrs,
     /// A topic this build does not know (a newer client's). Decoded rather
     /// than rejected so a future topic never makes an older daemon drop the
     /// whole `Subscribe`; it matches no message, and, because it keeps the
@@ -1185,6 +1190,12 @@ pub const FEATURE_FOCUS_ACTIVITY: &str = "focus_activity_v1";
 /// `local_command` turn origins and slash-command echo turns.
 pub const FEATURE_SLASH_COMMANDS: &str = "slash_commands_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon keeps
+/// the author's open-PR list, takes `authored_prs_demand` and
+/// `authored_prs_refresh`, and sends `authored_prs` to a client that names
+/// `Topic::AuthoredPrs`.
+pub const FEATURE_AUTHORED_PRS: &str = "authored_prs_v1";
+
 /// One slash command a session's CLI reports (`ServerMsg::SessionCommands`).
 /// `description` is one sanitised line of at most 200 characters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1991,6 +2002,15 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
     },
+    /// Who is looking at the author's PR list: `visible`, `hidden` or `idle`
+    /// (an unknown value counts as `hidden`). Honoured only from the verified
+    /// operator app; refused for a network peer. The daemon's demand is the
+    /// highest level over its live operator connections; with none it is idle
+    /// and the feature makes no request.
+    AuthoredPrsDemand { level: String },
+    /// Ask for a full reconcile now. Same gate. Refused (shown as
+    /// `refresh_blocked` in the snapshot) while one runs or while paused.
+    AuthoredPrsRefresh {},
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -3130,6 +3150,11 @@ pub enum ServerMsg {
     MotherNoticeState {
         enabled: bool,
         focuses: Vec<crate::mother::notices::FocusNoticeState>,
+    },
+    /// The author's open PRs (`Topic::AuthoredPrs`, local peers only, and only
+    /// to a client that names the topic). Sent on change and after Subscribe.
+    AuthoredPrs {
+        snapshot: crate::data::authored_prs::AuthoredPrsSnapshot,
     },
 }
 

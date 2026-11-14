@@ -41,7 +41,7 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SLASH_COMMANDS,
+        SessionAction, Topic, FEATURE_AUTHORED_PRS, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SLASH_COMMANDS,
         FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
@@ -553,10 +553,7 @@ async fn accept_loop_tcp(
 /// features, the operator nonce (when the peer was verified) and the built-in
 /// agents this daemon runs.
 fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMsg {
-    ServerMsg::Welcome {
-        protocol_version: PROTOCOL_VERSION,
-        daemon_pid: std::process::id(),
-        features: vec![
+    let mut features = vec![
             FEATURE_WORK.to_string(),
             FEATURE_MODEL.to_string(),
             FEATURE_TASKS.to_string(),
@@ -565,7 +562,14 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
             FEATURE_TERMINAL_STAGING_ONLY.to_string(),
             FEATURE_FOCUS_ACTIVITY.to_string(),
             FEATURE_SLASH_COMMANDS.to_string(),
-        ],
+    ];
+    if mgr.authored_prs().is_some() {
+        features.push(FEATURE_AUTHORED_PRS.to_string());
+    }
+    ServerMsg::Welcome {
+        protocol_version: PROTOCOL_VERSION,
+        daemon_pid: std::process::id(),
+        features,
         operator_nonce,
         enabled_agents: Some(mgr.enabled_agents().wire_names()),
         disabled_agents: Some(mgr.enabled_agents().disabled_names()),
@@ -1248,6 +1252,10 @@ where
     }
     if is_operator {
         decisions.lock().unwrap().remove_operator(&conn_key);
+    }
+    // A closed connection's demand for the author's PR list goes with it.
+    if let Some(board) = session_mgr.lock().unwrap().authored_prs() {
+        board.remove(&conn_key);
     }
     if let Some(broker) = &broker {
         broker.app_disconnected(&conn_key);
@@ -2628,6 +2636,28 @@ fn handle_client_msg(
             }
         }
 
+        // ── The author's PR list: who is looking, and a reconcile (the verified
+        // app only; a network peer was refused above).
+        ClientMsg::AuthoredPrsDemand { .. } | ClientMsg::AuthoredPrsRefresh {}
+            if trust != PeerTrust::OperatorApp =>
+        {
+            debug!(conn_key, ?trust, "authored-prs verb ignored: not the verified app");
+        }
+
+        ClientMsg::AuthoredPrsDemand { level } => {
+            let board = session_mgr.lock().unwrap().authored_prs();
+            if let Some(board) = board {
+                board.set(conn_key, &level);
+            }
+        }
+
+        ClientMsg::AuthoredPrsRefresh {} => {
+            let board = session_mgr.lock().unwrap().authored_prs();
+            if let Some(board) = board {
+                board.refresh();
+            }
+        }
+
         ClientMsg::ModelDefaultsRequest {} => {
             let msg = session_mgr.lock().unwrap().model_defaults_msg();
             let _ = targeted_tx.send(msg);
@@ -3227,6 +3257,13 @@ fn wants_model(topics: &[Topic]) -> bool {
     topics.contains(&Topic::Model)
 }
 
+/// Does this client take the author's PR list? Only by naming
+/// `Topic::AuthoredPrs`: an older client that subscribes to everything must
+/// not be sent a frame it does not know.
+fn wants_authored_prs(topics: &[Topic]) -> bool {
+    topics.contains(&Topic::AuthoredPrs)
+}
+
 /// A session frame as a client that has not asked for model frames gets it:
 /// without transcript notes (see [`wants_model`]).
 fn without_notes_unless_model(msg: ServerMsg, topics: &[Topic]) -> Option<ServerMsg> {
@@ -3742,6 +3779,7 @@ fn retain_key(msg: &ServerMsg) -> Option<String> {
         ServerMsg::TeriPicks { .. } => Some("picks".to_string()),
         // Replayed to a local client that subscribes after the last change.
         ServerMsg::MotherNoticeState { .. } => Some("mother_notice_state".to_string()),
+        ServerMsg::AuthoredPrs { .. } => Some("authored_prs".to_string()),
         _ => None,
     }
 }
@@ -3961,6 +3999,8 @@ fn message_matches_topics(msg: &ServerMsg, topics: &[Topic]) -> bool {
         ServerMsg::MotherStatusline(_) => subscribed(topics, Topic::MotherStatusline),
         ServerMsg::MotherAwaitDetected(_) => subscribed(topics, Topic::MotherJobs),
         ServerMsg::MotherNoticeState { .. } => subscribed(topics, Topic::MotherJobs),
+        // Only to a client that names the topic: the empty list does not include it.
+        ServerMsg::AuthoredPrs { .. } => wants_authored_prs(topics),
         ServerMsg::MotherPeek { .. } => subscribed(topics, Topic::MotherPeek),
         ServerMsg::TeriState { .. } => subscribed(topics, Topic::Teri),
         ServerMsg::WorkSourceStatus { .. }
