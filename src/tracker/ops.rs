@@ -22,7 +22,10 @@ pub const MAX_ITEMS: usize = 500;
 pub const MAX_BATCH_OPS: usize = 200;
 /// Longest item text, link text and Log line, in characters.
 pub const MAX_LINE_CHARS: usize = 500;
-/// Longest note, in characters.
+/// Longest `title`, in characters. Equals `TrackerTitle.maxChars` in NostromoKit;
+/// a title this short is never split for display.
+pub const MAX_TITLE_CHARS: usize = 80;
+/// Longest note (`body`), in characters.
 pub const MAX_NOTE_CHARS: usize = 8_000;
 /// Longest command, in characters.
 pub const MAX_COMMAND_CHARS: usize = 4_000;
@@ -53,12 +56,18 @@ pub struct Upsert {
     pub section: Option<String>,
     #[serde(default)]
     pub text: Option<String>,
+    /// One line, at most `MAX_TITLE_CHARS`; stored as the item text. Exclusive with `text`.
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
     pub owner: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
+    /// Details under the fold; stored as the note. Exclusive with `note`.
+    #[serde(default)]
+    pub body: Option<String>,
     #[serde(default)]
     pub links: Option<Vec<LinkInput>>,
     /// `item` or `command`.
@@ -269,7 +278,7 @@ impl Apply<'_> {
             },
         };
         let Some(text) = &fields.text else {
-            return Err(self.invalid("text is required to create an item".to_string()));
+            return Err(self.invalid("text or title is required to create an item".to_string()));
         };
         let id = match &u.id {
             Some(id) => id.clone(),
@@ -444,12 +453,19 @@ impl Apply<'_> {
 
     /// Validates every given upsert field up front.
     fn fields(&self, u: &Upsert) -> Result<Fields, OpError> {
+        if u.text.is_some() && u.title.is_some() {
+            return Err(self.invalid("give text or title, not both".to_string()));
+        }
+        if u.note.is_some() && u.body.is_some() {
+            return Err(self.invalid("give note or body, not both".to_string()));
+        }
+        let text = match (&u.text, &u.title) {
+            (Some(t), _) => Some(self.single_line("text", t, MAX_LINE_CHARS)?),
+            (None, Some(t)) => Some(self.single_line("title", t, MAX_TITLE_CHARS)?),
+            (None, None) => None,
+        };
         let mut f = Fields {
-            text: u
-                .text
-                .as_deref()
-                .map(|t| self.single_line("text", t, MAX_LINE_CHARS))
-                .transpose()?,
+            text,
             status: u.status.as_deref().map(|s| self.status(s)).transpose()?,
             ..Fields::default()
         };
@@ -457,7 +473,10 @@ impl Apply<'_> {
             f.owner = Some(self.owner(owner)?);
         }
         if let Some(note) = &u.note {
-            f.note = Some(self.note(note)?);
+            f.note = Some(self.note("note", note)?);
+        }
+        if let Some(body) = &u.body {
+            f.note = Some(self.note("body", body)?);
         }
         if let Some(links) = &u.links {
             f.links = Some(
@@ -518,12 +537,12 @@ impl Apply<'_> {
         Ok(Some(owner))
     }
 
-    fn note(&self, note: &str) -> Result<Option<String>, OpError> {
+    fn note(&self, field: &str, note: &str) -> Result<Option<String>, OpError> {
         if note
             .chars()
             .any(|c| c.is_control() && c != '\n' && c != '\t')
         {
-            return Err(self.invalid("note has control characters".to_string()));
+            return Err(self.invalid(format!("{field} has control characters")));
         }
         // As the file stores it: no trailing whitespace, no blank edges.
         let lines: Vec<&str> = note.split('\n').map(str::trim_end).collect();
@@ -532,9 +551,9 @@ impl Apply<'_> {
         if note.is_empty() {
             return Ok(None);
         }
-        self.within("note", note, MAX_NOTE_CHARS)?;
+        self.within(field, note, MAX_NOTE_CHARS)?;
         if note.lines().any(|l| l.starts_with(LINKS_PREFIX)) {
-            return Err(self.invalid("a note line can't start with \"Links: \"".to_string()));
+            return Err(self.invalid(format!("a {field} line can't start with \"Links: \"")));
         }
         Ok(Some(note.to_string()))
     }

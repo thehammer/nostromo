@@ -22,7 +22,7 @@ caller's focus, so item calls need no topic.
 | op | fields | notes |
 |---|---|---|
 | `open` | `topic`, `title?`, `sections?[]`, `path?`, `show?` | idempotent. Creates the board from the template if absent, adopts a hand-written file (only id markers are added to task lines), recreates a deleted one from its last good copy. `show:true` re-adds a pane the user closed. Not allowed inside `ops`. |
-| `upsert` | `id?`, `section?`, `text?`, `status?`, `owner?`, `note?`, `links?[]`, `kind?`, `command?`, `env?`, `bind?` | only the given fields change; omit `id` to create (the id is generated). An empty string clears `owner`, `note`, `command`, `env`, `bind`; `links:[]` clears links. `bind` makes the item live (see Live items). |
+| `upsert` | `id?`, `section?`, `title?` \| `text?`, `status?`, `owner?`, `body?` \| `note?`, `links?[]`, `kind?`, `command?`, `env?`, `bind?` | only the given fields change; omit `id` to create (the id is generated). `title` (one line, ≤80) is stored as the item text and `body` as the note; give `title` or `text`, `body` or `note`, not both. An empty string clears `owner`, `note`, `body`, `command`, `env`, `bind`; `links:[]` clears links. `bind` makes the item live (see Live items). |
 | `status` | `id`, `status` | the commonest call. |
 | `remove` | `id` | |
 | `move` | `id`, `section`, `before?` or `after?` | |
@@ -37,8 +37,33 @@ On the Mac a needs-you item raises the sidebar's amber **waiting** pill for its 
 never raises the red **blocking** pill, which is only for a pending approval. See
 `docs/sidebar-badges.md`.
 
-Field caps (characters): item text, link text and Log line 500; owner 32; note
-8,000; command 4,000. Over a cap is `invalid_args` naming the field.
+Field caps (characters): item text, link text and Log line 500; title 80; owner 32;
+note (`body`) 8,000; command 4,000. Over a cap is `invalid_args` naming the field.
+
+### Titles and the fold
+
+The pane shows each item as a one-line **title**; everything else sits under a
+fold that is collapsed by default and opens by click or from the keyboard.
+
+**Storage, no format change.** The title is the item's task-line text (what
+`text` always was); the body is its indented note (what `note` always was).
+`title` and `body` are the preferred names for those same fields on the tool: a
+`title`/`body` write produces byte-identical file output to the equivalent
+`text`/`note` write. A hand-editor writes a short first line and indents the
+details under it. Older daemons, editors and every existing board read and
+round-trip it unchanged; there is no migration.
+
+**Display rule** (pane only; it never rewrites the file, the wire or the stored
+text). Counts are characters, on the item's plain text trimmed of outer whitespace.
+
+1. **whole**: at most 80 characters → the title is the text, nothing is under the fold from it.
+2. **separator**: otherwise scan offsets `i` from 0 through 80, tracking bracket depth over the characters before `i` (`(`, `[`, `{` add 1; `)`, `]`, `}` subtract 1, floored at 0). At the first `i ≥ 3` with depth 0 where the text at `i` starts with `": "`, `"; "`, two spaces, `" — "` or `". "`: the title is the text before `i` (trailing whitespace trimmed) and the rest after the separator (trimmed) goes under the fold.
+3. **cut**: otherwise cut at the last space before offset 80 with offset ≥ 3, else at 79. The title is the text before the cut + `"…"`; the fold starts with `"…"` + the rest.
+
+A title written through `title` is at most 80 characters, so it is always whole.
+
+**For agents:** write `title` + `body`. To restructure a long legacy item, send
+both in one upsert (`{id, title, body}`).
 
 ### Responses
 
@@ -84,7 +109,7 @@ characters), never instructions.
 | `board_unreadable` (`line`, `reason`) | the file doesn't parse (`invalid_utf8`, `duplicate_id`, `garbled_marker`); no tracker op touches it. The pane keeps the last good view under a banner. Fix the file; the next ingest clears the banner. |
 | `board_missing` | the file was deleted or renamed; `open` recreates it from the last good copy (`recreated:true`) |
 | `board_too_large` | a write would grow the board past 256 KiB or 500 items; shrinking writes and reads still work |
-| `possible_sensitive_data` (`field`, `class`) | the guard (`src/sensitive_text.rs`, `docs/tracker-guard.md`) found PHI-shaped text or a secret in `field` (`text`, `note`, `owner`, `links`, `command`, `log`, …). Nothing was written; the response never repeats the matched text. |
+| `possible_sensitive_data` (`field`, `class`) | the guard (`src/sensitive_text.rs`, `docs/tracker-guard.md`) found PHI-shaped text or a secret in `field` (`text`, `title`, `note`, `body`, `owner`, `links`, `command`, `log`, …). Nothing was written; the response never repeats the matched text. |
 | `path_not_allowed` | the board path isn't allowed (see [Where a board may live](#where-a-board-may-live)): not a `.md` file under the repo root or `~/.claude/wip/` once symlinks and `..` are resolved, an instruction file, or outside the no-git allowance. Also returned by a later write or `read` when the path no longer resolves to itself (say its directory became a symlink). Nothing is created or written, and the response never says which rule applied. |
 | `invalid_command_text` (`reason`) | a `command` holds `\r`, escape sequences, control characters, or zero-width or bidi characters |
 | `not_permitted` (`id`) | an agent tried to mark a `kind:"command"` item `done`, or to change the `command` of one that is `done`; "Ran it" is the user's and is about that exact text. Reopen the item (status `todo`) to change its command. |

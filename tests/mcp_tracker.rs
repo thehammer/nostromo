@@ -1284,6 +1284,10 @@ fn request_with(field: &str, text: &str) -> Value {
         "note" => {
             json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "note": text})
         }
+        "title" => json!({"op": "upsert", "id": "guard-1", "section": "now", "title": text}),
+        "body" => {
+            json!({"op": "upsert", "id": "guard-1", "section": "now", "title": "Plain", "body": text})
+        }
         "owner" => {
             json!({"op": "upsert", "id": "guard-1", "section": "now", "text": "Plain", "owner": text})
         }
@@ -1342,7 +1346,9 @@ async fn every_sensitive_corpus_line_is_refused_in_every_text_field_naming_the_f
     let mut failures: Vec<String> = Vec::new();
     for (class, text) in &lines {
         let windows = matched_windows(text);
-        for field in ["text", "note", "owner", "links", "command", "log"] {
+        for field in [
+            "text", "title", "note", "body", "owner", "links", "command", "log",
+        ] {
             let res = fx.call(TAG_A, request_with(field, text)).await;
             let label = format!("[{class}] in `{field}`");
             if res["ok"] != json!(false)
@@ -1381,6 +1387,52 @@ async fn every_sensitive_corpus_line_is_refused_in_every_text_field_naming_the_f
             .iter()
             .any(|m| matches!(m, ServerMsg::TrackerBoard { .. })),
         "a refused call must not broadcast a tracker_board frame"
+    );
+}
+
+#[tokio::test]
+async fn a_sensitive_title_or_body_is_refused_naming_the_field_and_writes_nothing() {
+    let fx = Fx::new();
+    fx.seat(TAG_A, "sess-a");
+    fx.open(TAG_A, "t33t").await;
+    fx.add_item(TAG_A, "keep-1", "now", "Existing").await;
+    let before = fx.file("t33t");
+    fx.drain();
+
+    let cases = [
+        (
+            "title",
+            json!({"op": "upsert", "id": "keep-1", "title": "Resident SSN was 219-09-9999"}),
+        ),
+        (
+            "body",
+            json!({"op": "upsert", "id": "keep-1", "body": "Resident SSN was 219-09-9999"}),
+        ),
+        (
+            "title",
+            json!({"op": "upsert", "id": "fresh-1", "section": "now", "title": "Resident SSN was 219-09-9999"}),
+        ),
+        (
+            "body",
+            json!({"ops": [
+                {"op": "status", "id": "keep-1", "status": "done"},
+                {"op": "upsert", "id": "keep-1", "body": "Resident SSN was 219-09-9999"},
+            ]}),
+        ),
+    ];
+    for (field, req) in cases {
+        let res = fx.call(TAG_A, req.clone()).await;
+        is_err(&res, "possible_sensitive_data");
+        assert_eq!(res["field"], json!(field), "{req}: {res}");
+        assert_eq!(res["class"], json!("ssn"), "{req}: {res}");
+        assert!(!res.to_string().contains("9999"), "{res}");
+    }
+    assert_eq!(fx.file("t33t"), before, "nothing was written");
+    assert!(
+        !fx.drain()
+            .iter()
+            .any(|m| matches!(m, ServerMsg::TrackerBoard { .. })),
+        "a refused call must not broadcast"
     );
 }
 
