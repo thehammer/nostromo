@@ -24,6 +24,7 @@ final class ResumeTabAppearanceTests: XCTestCase {
     /// Ink columns (in points, left to right inclusive) with alpha, within `region` (view coordinates).
     private func inkColumns(_ rep: NSBitmapImageRep, region: NSRect, bounds: NSRect, flipped: Bool = false) -> ClosedRange<CGFloat>? {
         var first: Int?, last: Int?
+        let scale = CGFloat(rep.pixelsWide) / bounds.width   // 1x or 2x, whatever the machine gave
         let x0 = max(0, Int(region.minX * scale)), x1 = min(rep.pixelsWide - 1, Int(region.maxX * scale))
         let fromTop = flipped ? region.minY : bounds.height - region.maxY
         let y0 = max(0, Int(fromTop * scale)), y1 = min(rep.pixelsHigh - 1, Int((fromTop + region.height) * scale))

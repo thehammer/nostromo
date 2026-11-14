@@ -41,6 +41,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
                                                 target: nil, action: nil)
     private let resumeBtn = NSButton()
     private var newTabViews: [NSView] = []
+    private var resumeConstraints: [NSLayoutConstraint] = []
     let resumeTab = ResumeTabView()
     private let history: ConversationHistoryStore
     private let sheetUndo = UndoManager()
@@ -377,28 +378,17 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         resumeBtn.target = self
         resumeBtn.action = #selector(resumeTapped)
         resumeBtn.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(resumeBtn)
-
         resumeTab.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(resumeTab)
         NSLayoutConstraint.activate([
             tabControl.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 14),
             tabControl.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            resumeTab.topAnchor.constraint(equalTo: tabControl.bottomAnchor, constant: 10),
-            resumeTab.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            resumeTab.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            resumeTab.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            resumeBtn.trailingAnchor.constraint(equalTo: (cancel ?? createBtn).leadingAnchor, constant: -8),
-            resumeBtn.centerYAnchor.constraint(equalTo: (cancel ?? createBtn).centerYAnchor),
         ])
-        // Cancel stays above the Resume tab so it is always clickable.
-        if let cancel { contentView.addSubview(cancel, positioned: .above, relativeTo: resumeTab) }
-        contentView.addSubview(resumeBtn, positioned: .above, relativeTo: resumeTab)
 
         resumeTab.onResume = { [weak self] e in self?.beginResume(e) }
         resumeTab.onRemove = { [weak self] e in self?.removeEntry(e) }
         resumeTab.onShowTranscript = { e in
             if let path = e.transcriptPath, FileManager.default.fileExists(atPath: path) {
+                ActivationAudit.note("resume:show-transcript-in-finder")
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
             }
         }
@@ -406,11 +396,10 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         resumeTab.onSelectionChange = { [weak self] in self?.refreshResumeButton() }
         resumeTab.onFirstPromptsToggled = { [weak history] on in history?.setFirstPrompts(enabled: on) }
 
-        history.changes.receive(on: DispatchQueue.main).sink { [weak self] in self?.reloadHistory() }
+        // The store speaks on the main thread, so these are synchronous.
+        history.changes.sink { [weak self] in self?.reloadHistory() }.store(in: &cancellables)
+        history.resumeResults.sink { [weak self] id, result in self?.resumeFinished(id: id, result: result) }
             .store(in: &cancellables)
-        history.resumeResults.receive(on: DispatchQueue.main).sink { [weak self] id, result in
-            self?.resumeFinished(id: id, result: result)
-        }.store(in: &cancellables)
         reloadHistory()
         history.refresh()
     }
@@ -427,19 +416,46 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         tabControl.selectedSegment = tab.rawValue
         let onNew = tab == .new
         newTabViews.forEach { $0.isHidden = !onNew }
-        resumeTab.isHidden = onNew
         createBtn.isHidden = !onNew
-        resumeBtn.isHidden = onNew
+        setResumeViewsAttached(!onNew)
         createBtn.keyEquivalent = onNew ? "\r" : ""
         resumeBtn.keyEquivalent = onNew ? "" : "\r"
         window?.setContentSize(onNew ? Self.newSize : Self.resumeSize)
         if onNew {
             window?.makeFirstResponder(nil)
         } else {
+            reloadHistory()
             history.refresh()
             window?.makeFirstResponder(resumeTab.searchField)
         }
         refreshResumeButton()
+    }
+
+    /// The Resume views live in the window only while that tab shows, so the New form is exactly as it was.
+    private func setResumeViewsAttached(_ attached: Bool) {
+        guard let contentView = window?.contentView else { return }
+        if !attached {
+            NSLayoutConstraint.deactivate(resumeConstraints)
+            resumeConstraints = []
+            resumeTab.removeFromSuperview()
+            resumeBtn.removeFromSuperview()
+            return
+        }
+        guard resumeTab.superview == nil else { return }
+        let cancel = contentView.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Cancel" }
+        contentView.addSubview(resumeTab)
+        contentView.addSubview(resumeBtn)
+        if let cancel { contentView.addSubview(cancel, positioned: .above, relativeTo: resumeTab) }
+        let anchor = cancel ?? createBtn
+        resumeConstraints = [
+            resumeTab.topAnchor.constraint(equalTo: tabControl.bottomAnchor, constant: 10),
+            resumeTab.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            resumeTab.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            resumeTab.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            resumeBtn.trailingAnchor.constraint(equalTo: anchor.leadingAnchor, constant: -8),
+            resumeBtn.centerYAnchor.constraint(equalTo: anchor.centerYAnchor),
+        ]
+        NSLayoutConstraint.activate(resumeConstraints)
     }
 
     private func refreshResumeButton() {

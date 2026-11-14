@@ -187,6 +187,7 @@ extension ConversationHistoryStore {
         alert.addButton(withTitle: "OK")
         let finish: (NSApplication.ModalResponse) -> Void = { response in
             if canShow, response == .alertFirstButtonReturn, let transcriptPath {
+                ActivationAudit.note("resume:show-transcript-in-finder")
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: transcriptPath)])
             }
         }
