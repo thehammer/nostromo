@@ -55,5 +55,18 @@ pub fn handle(state: &McpSharedState) -> Value {
         json!(state.tool_stats.started_at_rfc3339()),
     );
 
+    // Counts only: never an entry, title, path or prompt.
+    if let Some(daemon) = &state.daemon {
+        let (entries, removed_pending, degraded) = daemon
+            .session_mgr
+            .lock()
+            .map(|m| m.conversation_counts())
+            .unwrap_or((0, 0, false));
+        obj.insert(
+            "conversation_history".to_string(),
+            json!({ "entries": entries, "removed_pending": removed_pending, "degraded": degraded }),
+        );
+    }
+
     snapshot
 }

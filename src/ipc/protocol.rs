@@ -1185,6 +1185,73 @@ pub const FEATURE_FOCUS_ACTIVITY: &str = "focus_activity_v1";
 /// `local_command` turn origins and slash-command echo turns.
 pub const FEATURE_SLASH_COMMANDS: &str = "slash_commands_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon keeps a
+/// private conversation history and takes the `conversation_*` verbs (operator
+/// app only; never offered to a network or non-operator peer).
+pub const FEATURE_CONVERSATION_HISTORY: &str = "conversation_history_v1";
+
+/// Where a conversation stands, computed at list time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConversationStatus {
+    /// Live in a focus; `open` when that focus is in the pushed registry.
+    Running { tag: String, open: bool },
+    /// Claude no longer has the file.
+    UnavailableDeleted,
+    /// The file is empty or is not a transcript.
+    UnavailableUnreadable,
+    /// The working directory no longer exists (`worktree`: it was a linked worktree).
+    FolderGone { worktree: bool },
+    Available,
+}
+
+/// One row of the history, as sent to the operator app. A sensitive entry
+/// carries no branch, path, project name, PR numbers or first prompt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationEntryWire {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pr_numbers: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt: Option<String>,
+    /// The fixed reason word when no first prompt is shown (`command:/name` names only the command).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt_withheld: Option<String>,
+    pub sensitive: bool,
+    pub last_active_ms: i64,
+    pub status: ConversationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from_tag: Option<String>,
+    /// The path of Claude's file, for "Show Transcript in Finder" (never shown as text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+}
+
+/// The outcome of `conversation_resume`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationResumeOutcome {
+    /// It is running in an open focus: switch to `tag`; nothing started.
+    Switch,
+    /// `tag` is reserved; create the focus and attach (the daemon spawns with `--resume`).
+    Ready,
+    Refused,
+}
+
 /// One slash command a session's CLI reports (`ServerMsg::SessionCommands`).
 /// `description` is one sanitised line of at most 200 characters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1990,6 +2057,37 @@ pub enum ClientMsg {
         mode: Option<crate::mother::origin::NotifyLevel>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
+    },
+    // ── conversation history (operator app only; refused for every other peer) ──
+    /// List the history. Answered with `ServerMsg::ConversationHistory`.
+    ConversationHistoryGet {
+        request_id: String,
+    },
+    /// Resume conversation `id` as focus `new_tag`. Answered with
+    /// `ServerMsg::ConversationResumeResult`.
+    ConversationResume {
+        request_id: String,
+        id: String,
+        new_tag: String,
+    },
+    /// Hide an entry (undoable until `ConversationHistoryPurgeRemoved`).
+    ConversationHistoryRemove {
+        request_id: String,
+        id: String,
+    },
+    /// Undo a removal.
+    ConversationHistoryRestore {
+        request_id: String,
+        id: String,
+    },
+    /// The sheet closed: delete soft-removed entries now.
+    ConversationHistoryPurgeRemoved {
+        request_id: String,
+    },
+    /// Turn stored first prompts on or off (off purges the stored ones at once).
+    ConversationHistorySettingsSet {
+        request_id: String,
+        first_prompts_enabled: bool,
     },
 }
 
@@ -2935,6 +3033,43 @@ pub enum ServerMsg {
         tag: String,
         source: String,
         commands: Vec<SlashCommandEntry>,
+    },
+    /// Answer to `ConversationHistoryGet`, to the asking client only. `LocalOnly`.
+    ConversationHistory {
+        request_id: String,
+        entries: Vec<ConversationEntryWire>,
+        first_prompts_enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        degraded_kept: Option<u32>,
+        revision: u64,
+    },
+    /// Answer to `ConversationResume`, to the asking client only. `LocalOnly`.
+    ConversationResumeResult {
+        request_id: String,
+        outcome: ConversationResumeOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// The history changed; ask again. Payload-free. Operator-app connections
+    /// only, never the broadcast channel. `LocalOnly`.
+    ConversationHistoryChanged {
+        revision: u64,
+    },
+    /// A resumed focus's conversation could not be opened (`reason`: `not_found_here`).
+    /// Operator-app connections only. `LocalOnly`.
+    ConversationResumeFailed {
+        tag: String,
+        reason: String,
     },
     /// Answer to `SessionTaskStop`, to the asking client only. `LocalOnly`.
     SessionTaskStopResult {
@@ -8798,6 +8933,69 @@ mod slash_commands_wire_tests {
             } => assert_eq!(got, turn),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn conversation_history_messages_round_trip() {
+        let msgs = [
+            r#"{"type":"conversation_history_get","request_id":"r"}"#,
+            r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1"}"#,
+            r#"{"type":"conversation_history_remove","request_id":"r","id":"s1"}"#,
+            r#"{"type":"conversation_history_restore","request_id":"r","id":"s1"}"#,
+            r#"{"type":"conversation_history_purge_removed","request_id":"r"}"#,
+            r#"{"type":"conversation_history_settings_set","request_id":"r","first_prompts_enabled":false}"#,
+        ];
+        for m in msgs {
+            let parsed: ClientMsg = serde_json::from_str(m).unwrap();
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), m);
+        }
+        let reply = ServerMsg::ConversationHistory {
+            request_id: "r".into(),
+            entries: vec![ConversationEntryWire {
+                id: "s1".into(),
+                title: "T".into(),
+                label: None,
+                agent: "cody".into(),
+                project_name: None,
+                project_path: None,
+                branch: None,
+                model: None,
+                effort: None,
+                pr_numbers: vec![],
+                first_prompt: None,
+                first_prompt_withheld: Some("image".into()),
+                sensitive: false,
+                last_active_ms: 5,
+                status: ConversationStatus::FolderGone { worktree: true },
+                resumed_from_tag: None,
+                transcript_path: None,
+            }],
+            first_prompts_enabled: true,
+            degraded_kept: Some(3),
+            revision: 9,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(json.contains(r#""status":{"kind":"folder_gone","worktree":true}"#), "{json}");
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ServerMsg::ConversationHistory { revision: 9, .. }));
+        for m in [
+            ServerMsg::ConversationHistoryChanged { revision: 3 },
+            ServerMsg::ConversationResumeFailed { tag: "t".into(), reason: "not_found_here".into() },
+            ServerMsg::ConversationResumeResult {
+                request_id: "r".into(),
+                outcome: ConversationResumeOutcome::Ready,
+                tag: Some("t".into()),
+                reason: None,
+                agent: Some("cody".into()),
+                project_path: None,
+                label: None,
+                title: None,
+            },
+        ] {
+            let j = serde_json::to_string(&m).unwrap();
+            let _: ServerMsg = serde_json::from_str(&j).unwrap();
+        }
+        assert_eq!(FEATURE_CONVERSATION_HISTORY, "conversation_history_v1");
     }
 
     #[test]

@@ -186,6 +186,10 @@ struct SessionSeen {
     /// so a long-lived focus's current session is never aged out.
     #[serde(default)]
     last_seen_ms: i64,
+    /// The conversation was resumed under another tag: this record still
+    /// vouches for claims made before, but no longer names the owner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    moved: bool,
 }
 
 impl SessionSeen {
@@ -253,12 +257,14 @@ impl SessionHistory {
             Some(i) => {
                 let mut existing = seen.remove(i);
                 existing.last_seen_ms = now_ms;
+                existing.moved = false;
                 seen.push(existing);
             }
             None => seen.push(SessionSeen {
                 sid: sid.to_owned(),
                 first_seen_ms: now_ms,
                 last_seen_ms: now_ms,
+                moved: false,
             }),
         }
         if seen.len() > HISTORY_PER_TAG {
@@ -285,6 +291,57 @@ impl SessionHistory {
                 .is_some_and(|seen| seen.iter().any(|s| s.sid == sid))
     }
 
+    /// Every `(tag, sid, last_seen_ms)` recorded: the source of the one-time
+    /// conversation-history backfill. Ids and times only.
+    pub fn entries(&self) -> Vec<(String, String, i64)> {
+        lock(&self.inner)
+            .tags
+            .iter()
+            .flat_map(|(tag, seen)| {
+                seen.iter()
+                    .map(move |s| (tag.clone(), s.sid.clone(), s.last_seen()))
+            })
+            .collect()
+    }
+
+    /// Undo [`Self::move_session`] (the resume could not open the conversation).
+    pub fn undo_move(&self, sid: &str, from_tag: &str, to_tag: &str) {
+        let mut state = lock(&self.inner);
+        if let Some(seen) = state.tags.get_mut(to_tag) {
+            seen.retain(|s| s.sid != sid);
+        }
+        state.tags.retain(|_, seen| !seen.is_empty());
+        if let Some(seen) = state.tags.get_mut(from_tag) {
+            for s in seen.iter_mut().filter(|s| s.sid == sid) {
+                s.moved = false;
+            }
+        }
+        if let Some(path) = &state.path {
+            let _ = write_private(path, &state.tags);
+        }
+    }
+
+    /// A resumed conversation moves from `from_tag` to `to_tag`. The old
+    /// record stays (flagged `moved`) so a shell claim `{from_tag, sid}` made
+    /// before the resume still verifies via [`Self::contains`]; the id is
+    /// recorded under `to_tag`; and [`Self::tag_of`] ignores moved records, so
+    /// the resumed conversation's own `mother add` is vouched for as the new
+    /// tag instead of going ambiguous.
+    pub fn move_session(&self, sid: &str, from_tag: &str, to_tag: &str) {
+        if sid.is_empty() || from_tag == to_tag {
+            return;
+        }
+        {
+            let mut state = lock(&self.inner);
+            if let Some(seen) = state.tags.get_mut(from_tag) {
+                for s in seen.iter_mut().filter(|s| s.sid == sid) {
+                    s.moved = true;
+                }
+            }
+        }
+        self.record(to_tag, sid);
+    }
+
     /// The one tag the daemon spawned session `sid` for. `None` when no tag
     /// has it, or when more than one does (a session id belongs to one focus;
     /// an ambiguous one vouches for nobody).
@@ -296,7 +353,7 @@ impl SessionHistory {
         let mut owners = state
             .tags
             .iter()
-            .filter(|(_, seen)| seen.iter().any(|s| s.sid == sid))
+            .filter(|(_, seen)| seen.iter().any(|s| s.sid == sid && !s.moved))
             .map(|(tag, _)| tag);
         match (owners.next(), owners.next()) {
             (Some(tag), None) => Some(tag.clone()),

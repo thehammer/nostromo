@@ -2928,6 +2928,39 @@ impl SessionTranscript {
         }
     }
 
+    /// A replayed transcript whose last turn called a tool that never got an
+    /// answer ended with its process (it died mid-turn, or an approval was
+    /// pending): finish that turn as interrupted so it never reads as running,
+    /// and nothing is offered to answer. Only for stored history; a live turn
+    /// is never touched.
+    fn mark_unanswered_tail_interrupted(&mut self) {
+        let Some(last) = self.turns.last_mut() else {
+            return;
+        };
+        let has_result = last
+            .blocks
+            .iter()
+            .any(|b| matches!(b, TurnBlock::ResultSummary { .. }));
+        let unanswered = last.blocks.iter().any(|b| match b {
+            TurnBlock::ToolCall {
+                tool_use_id: Some(id),
+                ..
+            } => !last.blocks.iter().any(|r| {
+                matches!(r, TurnBlock::ToolResult { tool_use_id: Some(rid), .. } if rid == id)
+            }),
+            _ => false,
+        });
+        if !has_result && unanswered {
+            last.blocks.push(TurnBlock::ResultSummary {
+                duration_ms: 0,
+                cost_usd: 0.0,
+                is_error: true,
+                interrupted: true,
+            });
+            last.is_complete = true;
+        }
+    }
+
     /// Keep only the last `max_turns` turns (scrollback trimming).
     pub fn truncate_to_last(&mut self, max_turns: usize) {
         while self.turns.len() > max_turns {
@@ -3183,6 +3216,7 @@ pub fn transcript_from_jsonl(content: &str, max_turns: usize) -> SessionTranscri
         let _ = t.ingest_line(line);
     }
     t.flush();
+    t.mark_unanswered_tail_interrupted();
     t.truncate_to_last(max_turns);
     // A wake merged while replaying is history, not news: no origin frame.
     t.origin_update = None;
