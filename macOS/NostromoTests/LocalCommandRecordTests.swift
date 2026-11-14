@@ -479,4 +479,16 @@ final class LocalCommandRecordTests: MouseQueueTestCase {
         XCTAssertEqual(turnView(record).localCommandRecordView?.headerText,
                        "/compact \u{00B7} Compacted \u{00B7} 45.1k \u{2192} 19.7k tokens")
     }
+
+    func testOnlyTheStatusWordTheHeaderAppendedIsMarkedAsFailedNotTypedArgs() throws {
+        let info = CompactInfoWire(failed: true, error: "boom")
+        for args in ["", "failed", "failed failed", "keep failed"] {
+            let line = LocalCommandRecordMetrics.compactHeaderLine(args: args, output: "", compact: info)
+            let range = try XCTUnwrap(LocalCommandRecordMetrics.compactFailedWordRange(args: args, compact: info))
+            let ns = line as NSString
+            XCTAssertEqual(ns.substring(with: range), "failed", "args \(args.debugDescription): \(line)")
+            XCTAssertEqual(ns.substring(from: range.location), "failed: boom", "the marked word is the status, not the args")
+        }
+        XCTAssertNil(LocalCommandRecordMetrics.compactFailedWordRange(args: "failed", compact: CompactInfoWire()))
+    }
 }

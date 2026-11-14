@@ -816,7 +816,8 @@ fn parse_system_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine
                 pre_tokens: None,
                 post_tokens: None,
                 succeeded: Some(result == "success"),
-                error: str_field("compact_error").map(|e| crate::data::work::untrusted::one_line(&e, 512)),
+                error: str_field("compact_error")
+                    .map(|e| crate::data::work::untrusted::one_line(&e, 512)),
             }),
             None => session_id.map(ParsedLine::SessionId),
         },

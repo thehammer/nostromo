@@ -30,6 +30,7 @@ final class CompactButtonTests: XCTestCase {
     override func setUp() {
         super.setUp()
         tag = "compact-\(UUID().uuidString)"
+        client.setAdvertisedFeaturesForTesting(["slash_commands_v1"])
         let world = FV4StoreWorld(self)
         repl = ReplView(tag: tag, quickActions: QuickAction.replDefaults, foldStore: world.store)
         session = AppStore.shared.session(for: tag)
@@ -49,6 +50,7 @@ final class CompactButtonTests: XCTestCase {
         window.orderOut(nil)
         window.contentView = nil
         session.detach()
+        client.setAdvertisedFeaturesForTesting([])
         strip = nil
         repl = nil
         session = nil
@@ -169,6 +171,46 @@ final class CompactButtonTests: XCTestCase {
         state(.idle)
 
         XCTAssertTrue(compactEnabled)
+    }
+
+    func testCompactIsDisabledWithAReasonUntilTheDaemonAdvertisesSlashCommands() {
+        client.setAdvertisedFeaturesForTesting(["work"])
+        state(.midTurn)   // also running: the capability reason comes first
+        client.connected.send(true)
+        modelFlushMain()
+        XCTAssertFalse(compactEnabled)
+        XCTAssertTrue(tip.contains("Needs a newer Nostromo daemon: run make install-daemon"), tip)
+        XCTAssertFalse(tip.contains("A turn is running"), "capability first: \(tip)")
+        XCTAssertEqual(pillHelp(compactID), tip)
+        let before = anythingSent
+        click()
+        XCTAssertEqual(anythingSent, before, "a click sends nothing")
+
+        client.setAdvertisedFeaturesForTesting(["work", "slash_commands_v1"])
+        client.connected.send(true)
+        state(.idle)
+
+        XCTAssertTrue(compactEnabled)
+        XCTAssertFalse(tip.contains("newer Nostromo daemon"), tip)
+    }
+
+    func testSuccessfulCompactionDropsTheContextMeterToThePostFigure() {
+        state(.idle)
+        feed(.sessionTurnDelta(tag: tag, delta: .turnStarted(DaemonTurn(
+            id: "big", userInput: "work", timestamp: nil, blocks: [], isComplete: false))))
+        feed(.sessionTurnDelta(tag: tag, delta: .turnCompleted(
+            turnId: "big", summary: DaemonResultSummary(durationMs: 1, costUsd: 0, isError: false),
+            contextTokens: 45_123)))
+        let before = session.contextFraction
+        XCTAssertEqual(before ?? 0, 45_123 / 200_000.0, accuracy: 0.0001)
+
+        deliverCompactRecord()
+        feed(.sessionTurnDelta(tag: tag, delta: .turnCompleted(
+            turnId: "c1", summary: DaemonResultSummary(durationMs: 1, costUsd: 0, isError: false),
+            contextTokens: 19_700)))
+
+        XCTAssertEqual(session.contextFraction ?? 0, 19_700 / 200_000.0, accuracy: 0.0001)
+        XCTAssertLessThan(session.contextFraction ?? 1, before ?? 0)
     }
 
     func testCompactIsDisabledWhileATurnIsRunningAndAClickSendsNothing() {

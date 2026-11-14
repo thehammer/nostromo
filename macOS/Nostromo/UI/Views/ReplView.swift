@@ -542,6 +542,12 @@ class ReplView: NSView {
             .sink { [weak self] _ in self?.refreshCompactButton() }
             .store(in: &cancellables)
 
+        // The capability arrives with the daemon's welcome, which can be after this pane is built.
+        session.daemonConnectionChanges
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshCompactButton() }
+            .store(in: &cancellables)
+
         // A "Model changed" note that arrives in the transcript being looked at is read out by
         // VoiceOver. The two windows of one focus each get the note; only the key one speaks.
         session.noteArrived
@@ -1388,7 +1394,9 @@ class ReplView: NSView {
     private func refreshCompactButton(running: Bool? = nil) {
         guard let strip = quickActionStrip else { return }
         let reason: String?
-        if session.health != .healthy {
+        if !session.daemonAdvertisesSlashCommands {
+            reason = "Needs a newer Nostromo daemon: run make install-daemon."
+        } else if session.health != .healthy {
             reason = "The session is not running."
         } else if running ?? session.isRunning {
             reason = "A turn is running."
@@ -1411,7 +1419,8 @@ class ReplView: NSView {
     private func runQuickAction(_ action: QuickAction) {
         if action.id == QuickAction.compact.id {
             // A click while disabled (a stale one) does nothing.
-            guard session.health == .healthy, !session.isRunning, !compactPending else { return }
+            guard session.daemonAdvertisesSlashCommands, session.health == .healthy, !session.isRunning,
+                  !compactPending else { return }
             compactPending = true
             compactSawRunning = false
             refreshCompactButton(running: true)

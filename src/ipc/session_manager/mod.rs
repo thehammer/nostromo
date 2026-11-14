@@ -80,6 +80,8 @@ use crate::mother::{OriginBook, SessionHistory};
 
 #[cfg(test)]
 mod activity_tests;
+#[cfg(test)]
+mod compact_tests;
 mod control;
 mod inject;
 #[cfg(test)]
@@ -90,8 +92,6 @@ mod login;
 mod model_switch;
 #[cfg(test)]
 mod notice_inject_tests;
-#[cfg(test)]
-mod compact_tests;
 #[cfg(test)]
 mod slash_command_tests;
 pub mod slash_commands;

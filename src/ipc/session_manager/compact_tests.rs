@@ -9,7 +9,9 @@
 //! compaction is written and answered, and nothing counts as an agent turn or a
 //! `NoText` problem. All text is fake.
 
-use super::injected_tests::{eventually, spawn_stub, tmp_store, turns_of, wait_turns, ASSISTANT_LINE, RESULT_LINE};
+use super::injected_tests::{
+    eventually, spawn_stub, tmp_store, turns_of, wait_turns, ASSISTANT_LINE, RESULT_LINE,
+};
 use super::*;
 use crate::ipc::stream_json::{CompactInfo, Turn, TurnBlock};
 use std::time::Duration;
@@ -170,7 +172,8 @@ async fn a_message_queued_behind_a_compaction_is_written_and_answered_when_its_r
     spawn_stub(&mut mgr, "q", &script);
 
     mgr.send_user_message("q", "/compact", &[]).unwrap();
-    mgr.send_user_message("q", "after the compaction", &[]).unwrap();
+    mgr.send_user_message("q", "after the compaction", &[])
+        .unwrap();
     let turns = settled(&mgr, "q", 3).await;
 
     assert_eq!(turns.len(), 3, "{turns:?}");

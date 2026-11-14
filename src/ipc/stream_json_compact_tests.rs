@@ -98,7 +98,13 @@ fn reply_with_context(text: &str, input_tokens: u64) -> String {
 const RESULT: &str = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"num_turns":1,"total_cost_usd":0.0}"#;
 const RESULT_LOCAL: &str = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":0,"num_turns":0,"total_cost_usd":0.0}"#;
 
-type CompactionFields = (Option<String>, Option<u64>, Option<u64>, Option<bool>, Option<String>);
+type CompactionFields = (
+    Option<String>,
+    Option<u64>,
+    Option<u64>,
+    Option<bool>,
+    Option<String>,
+);
 
 fn compaction_of(line: &str) -> CompactionFields {
     match parse_line(line) {
@@ -288,13 +294,16 @@ fn a_status_of_compacting_is_not_a_compaction_outcome() {
                             "session_id": "s"})
     .to_string();
     assert!(
-        matches!(parse_line(&compacting), Some(ParsedLine::SessionId(_)) | None),
+        matches!(
+            parse_line(&compacting),
+            Some(ParsedLine::SessionId(_)) | None
+        ),
         "{:?}",
         parse_line(&compacting)
     );
 
-    let anonymous = json!({"type": "system", "subtype": "status", "status": "compacting"})
-        .to_string();
+    let anonymous =
+        json!({"type": "system", "subtype": "status", "status": "compacting"}).to_string();
     assert!(
         !matches!(parse_line(&anonymous), Some(ParsedLine::Compaction { .. })),
         "{:?}",
@@ -305,9 +314,11 @@ fn a_status_of_compacting_is_not_a_compaction_outcome() {
 #[test]
 fn a_status_of_compacting_opens_no_turn_and_changes_nothing() {
     let mut run = Run::new();
-    run.feed(&json!({"type": "system", "subtype": "status", "status": "compacting",
+    run.feed(
+        &json!({"type": "system", "subtype": "status", "status": "compacting",
                      "session_id": "s"})
-    .to_string());
+        .to_string(),
+    );
     assert_eq!(run.t.turn_count(), 0);
 }
 
@@ -330,7 +341,11 @@ fn a_live_manual_compaction_is_a_summary_marker_then_one_compact_record_with_the
         Some(TurnOrigin::LocalCommand { command, .. }) if command == "compact"
     ));
     assert_eq!(compact_of(&turns[2]), Some(info(Some(3429), Some(643))));
-    assert_eq!(run.t.prompt_count(), 1, "neither marker nor record is a prompt");
+    assert_eq!(
+        run.t.prompt_count(),
+        1,
+        "neither marker nor record is a prompt"
+    );
     assert_eq!(run.t.first_user_input(), Some("Say only: hi"));
 }
 
@@ -419,7 +434,10 @@ fn a_stored_compaction_replays_as_the_same_summary_marker_and_compact_record() {
     assert!(record.is_complete);
     assert_eq!(compact_of(record), Some(info(Some(3429), Some(643))));
     assert_eq!(turns.iter().filter(|t| is_record(t)).count(), 1);
-    let marker = turns.iter().position(is_summary_marker).expect("summary marker");
+    let marker = turns
+        .iter()
+        .position(is_summary_marker)
+        .expect("summary marker");
     let rec = turns.iter().position(is_record).unwrap();
     assert!(marker < rec, "the summary precedes the record: {turns:?}");
     assert!(turns.iter().all(|t| t.is_complete));
@@ -496,7 +514,8 @@ fn a_waiting_manual_compaction_is_not_inherited_by_a_different_local_command() {
 }
 
 #[test]
-fn a_waiting_failure_or_manual_boundary_is_cleared_when_another_turn_starts_before_the_compact_record() {
+fn a_waiting_failure_or_manual_boundary_is_cleared_when_another_turn_starts_before_the_compact_record(
+) {
     let mut run = Run::new();
     run.feed_all(&[
         status_result("failed", Some("boom")),
@@ -535,7 +554,10 @@ fn compact_is_left_out_of_the_wire_form_when_there_is_none() {
 fn a_successful_compaction_is_sent_with_snake_case_token_fields_only() {
     let wire: Value =
         serde_json::to_value(record_origin(Some(info(Some(3429), Some(643))))).unwrap();
-    assert_eq!(wire["compact"], json!({"pre_tokens": 3429, "post_tokens": 643}));
+    assert_eq!(
+        wire["compact"],
+        json!({"pre_tokens": 3429, "post_tokens": 643})
+    );
 }
 
 #[test]

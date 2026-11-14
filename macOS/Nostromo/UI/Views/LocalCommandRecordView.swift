@@ -53,12 +53,23 @@ enum LocalCommandRecordMetrics {
         let name = args.isEmpty ? "/compact" : "/compact \(args)"
         if compact.failed {
             let why = compact.error.flatMap { $0.isEmpty ? nil : $0 } ?? firstLine(of: output) ?? "no reason given"
-            return "\(name) · failed: \(why)"
+            return "\(name)\(failedSeparator)failed: \(why)"
         }
         if let pre = compact.preTokens, let post = compact.postTokens {
             return "\(name) · Compacted · \(compactTokens(pre)) \u{2192} \(compactTokens(post)) tokens"
         }
         return "\(name) · Compacted"
+    }
+
+    /// What the failure header puts between the command (with its typed args) and the word `failed`.
+    static let failedSeparator = " · "
+
+    /// The range of the `failed` status word the failure header appended itself: right after the command
+    /// and args, whatever those contain (nil for a header that is not a failure).
+    static func compactFailedWordRange(args: String, compact: CompactInfoWire) -> NSRange? {
+        guard compact.failed else { return nil }
+        let name = args.isEmpty ? "/compact" : "/compact \(args)"
+        return NSRange(location: (name + failedSeparator).utf16.count, length: "failed".utf16.count)
     }
 
     /// What VoiceOver says for a `/compact` record, in words.
@@ -219,6 +230,11 @@ final class LocalCommandRecordView: NSView, ArithmeticIsland {
 
     // MARK: State
 
+    private func compactFailedWordRange(in line: String) -> NSRange? {
+        guard let compact else { return nil }
+        return LocalCommandRecordMetrics.compactFailedWordRange(args: args, compact: compact)
+    }
+
     private func applyState() {
         let compactLine = compact.map { LocalCommandRecordMetrics.compactHeaderLine(args: args, output: output, compact: $0) }
         let line = compactLine ?? LocalCommandRecordMetrics.headerLine(command: command, args: args, output: output,
@@ -226,7 +242,7 @@ final class LocalCommandRecordView: NSView, ArithmeticIsland {
         let text = NSMutableAttributedString(string: line, attributes: [
             .font: LocalCommandRecordMetrics.headerFont, .foregroundColor: Theme.fgMuted,
         ])
-        if compact?.failed == true, let word = Optional(( line as NSString).range(of: "failed")), word.location != NSNotFound {
+        if let word = compactFailedWordRange(in: line) {
             text.addAttribute(.foregroundColor, value: Theme.amber, range: word)
         } else if isError, let r = line.range(of: " · error · ") {
             let word = (line as NSString).range(of: "error", range: NSRange(r, in: line))
