@@ -30,6 +30,12 @@ final class PaneContentModel: ObservableObject {
     /// `PaneContentNSView` (which follows the pin) and, optimistically, by the
     /// host on a click so the highlight doesn't wait for the daemon round trip.
     @Published var selectedPR: PRRef?
+    /// Whether this pane belongs to a Perri focus. Set once by
+    /// `DynamicFocusView.makeLeafView`; gates the browser items on a PR row's
+    /// context menu.
+    @Published var isPerriFocus: Bool = false
+    /// Opens a URL in the default browser. Injected so tests can see the call.
+    var openExternalURL: (URL) -> Void = PaneContentView.openInDefaultBrowser
 }
 
 /// Thin SwiftUI wrapper that renders `PaneContentModel`'s current state
@@ -50,7 +56,9 @@ struct PaneContentHost: View {
                 model.selectedPR = PRRef(repo: repo, number: number)
                 model.onLoadPR(repo, number)
             },
-            onApprovePR: model.onApprovePR
+            onApprovePR: model.onApprovePR,
+            isPerriFocus: model.isPerriFocus,
+            openExternalURL: model.openExternalURL
         )
     }
 }
@@ -80,6 +88,42 @@ struct PaneContentView: View {
     var onLoadPR:   (String, Int) -> Void = { _, _ in }
     /// Called when the user approves a PR from a `pr_list` row. `(repo, number)`
     var onApprovePR: (String, Int) -> Void = { _, _ in }
+    /// Whether the pane belongs to a Perri focus (adds the browser items).
+    var isPerriFocus: Bool = false
+    /// Opens a URL in the default browser.
+    var openExternalURL: (URL) -> Void = PaneContentView.openInDefaultBrowser
+
+    /// The extra context-menu items for a queue row: in a Perri focus only,
+    /// GitHub's Conversation and Files views. Until the in-app side pane lands.
+    /// Uses the item's own `url` when it is an `https://github.com/` URL.
+    static func browserMenuItems(
+        repo: String, number: Int, itemURL: String, isPerriFocus: Bool
+    ) -> [(title: String, url: URL)] {
+        guard isPerriFocus else { return [] }
+        let base = itemURL.hasPrefix("https://github.com/")
+            ? itemURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            : "https://github.com/\(repo)/pull/\(number)"
+        return [("Open Conversation in Browser", base), ("Open Diff in Browser", base + "/files")]
+            .compactMap { title, link in URL(string: link).map { (title, $0) } }
+    }
+
+    /// The production opener.
+    static func openInDefaultBrowser(_ url: URL) {
+        ActivationAudit.note("perri-row:open-external-url")
+        NSWorkspace.shared.open(url)
+    }
+
+    @ViewBuilder
+    private func contextMenuItems(for item: PRQueueItem) -> some View {
+        Button("Approve") { onApprovePR(item.repo, item.number) }
+        ForEach(
+            Self.browserMenuItems(repo: item.repo, number: item.number,
+                                  itemURL: item.url, isPerriFocus: isPerriFocus),
+            id: \.title
+        ) { entry in
+            Button(entry.title) { openExternalURL(entry.url) }
+        }
+    }
 
     private let bucketOrder: [(label: String, key: String)] = [
         ("REVIEW REQUESTED", "requested"),
@@ -164,9 +208,7 @@ struct PaneContentView: View {
                                     onLoad: { onLoadPR(item.repo, item.number) },
                                     onClear: {}
                                 )
-                                .contextMenu {
-                                    Button("Approve") { onApprovePR(item.repo, item.number) }
-                                }
+                                .contextMenu { contextMenuItems(for: item) }
                                 .padding(.horizontal, 8)
                             }
                         }
@@ -185,9 +227,7 @@ struct PaneContentView: View {
                                 onLoad: { onLoadPR(item.repo, item.number) },
                                 onClear: {}
                             )
-                            .contextMenu {
-                                Button("Approve") { onApprovePR(item.repo, item.number) }
-                            }
+                            .contextMenu { contextMenuItems(for: item) }
                             .padding(.horizontal, 8)
                         }
                     }

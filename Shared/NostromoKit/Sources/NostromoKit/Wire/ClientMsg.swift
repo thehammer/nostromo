@@ -220,11 +220,16 @@ public struct ClientPerriAction: Encodable {
     public let action: String
     public let prNumber: Int?
     public let repo:     String?
+    /// The focus the action is for (`load_pr` pins the PR for that focus).
+    /// Omitted from the JSON when nil, which the daemon reads as "the built-in
+    /// Perri focus" — what iOS sends.
+    public let tag:      String?
 
-    public init(action: String, prNumber: Int?, repo: String?) {
+    public init(action: String, prNumber: Int?, repo: String?, tag: String? = nil) {
         self.action   = action
         self.prNumber = prNumber
         self.repo     = repo
+        self.tag      = tag
     }
 
     enum CodingKeys: String, CodingKey {
@@ -232,6 +237,7 @@ public struct ClientPerriAction: Encodable {
         case action
         case prNumber = "pr_number"
         case repo
+        case tag
     }
 }
 

@@ -561,7 +561,7 @@ async fn clear_current_pr_over_the_real_socket_closes_a_curated_pr_diff_tab() {
         .await
         .expect("server should bind");
 
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
     let bound = Duration::from_millis(1500);
 
     let res = call_tool_bounded(
@@ -627,7 +627,7 @@ async fn load_pr_over_the_real_socket_on_a_curated_focus_with_an_open_pr_diff_ta
         .await
         .expect("server should bind");
 
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
     let bound = Duration::from_millis(1500);
 
     let res = call_tool_bounded(
@@ -2020,7 +2020,7 @@ async fn load_pr_on_a_curated_focus_rebuilds_the_detail_region_for_the_new_pr_wi
         .await
         .expect("server should bind");
 
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
     let bound = Duration::from_millis(1500);
 
     let res = call_tool_bounded(
@@ -2197,7 +2197,7 @@ async fn load_pr_does_not_conjure_a_detail_region_that_never_existed() {
         .await
         .expect("server should bind");
 
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
     let bound = Duration::from_millis(1500);
 
     let res = call_tool_bounded(
@@ -2254,7 +2254,7 @@ async fn load_pr_recreated_tabs_are_reused_not_duplicated_by_a_following_show() 
         .await
         .expect("server should bind");
 
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
     let bound = Duration::from_millis(1500);
 
     let res = call_tool_bounded(
@@ -2367,7 +2367,7 @@ async fn load_pr_paints_loading_for_the_recreated_tabs_without_waiting_on_a_fetc
         .broadcast_tx
         .subscribe();
 
-    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let (mut reader, mut writer) = connect(&socket_path, "reviewer").await;
     let bound = Duration::from_millis(1500);
 
     let res = call_tool_bounded(
@@ -2588,4 +2588,149 @@ async fn load_pr_in_one_focus_rebuilds_only_that_focus_s_detail_region() {
         touched_a.is_empty(),
         "nothing about focus B's pickup may be pushed to focus A: {touched_a:?}"
     );
+}
+
+// ── Perri side pane 1: loading a PR in a Perri focus opens nothing ───────────
+
+async fn perri_focus_with_curated_layout(
+    harness: &Harness,
+    sock: &str,
+) -> (
+    McpServer,
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+) {
+    let socket_path = harness._dir.path().join(sock);
+    let server = McpServer::bind(socket_path.clone(), harness.state.clone())
+        .await
+        .expect("server should bind");
+    let (mut reader, mut writer) = connect(&socket_path, "perri").await;
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        2,
+        "nostromo.apply_layout",
+        json!({ "name": "perri-curated" }),
+        Duration::from_secs(1),
+    )
+    .await;
+    assert_eq!(res["ok"], true);
+    (server, reader, writer)
+}
+
+fn any_focused_pane(frames: &[ServerMsg]) -> bool {
+    frames.iter().any(|m| {
+        matches!(
+            m,
+            ServerMsg::FocusLayout {
+                focused_pane: Some(_),
+                ..
+            }
+        )
+    })
+}
+
+#[tokio::test]
+async fn load_pr_in_a_perri_focus_with_only_queue_and_repl_leaves_the_tree_identical() {
+    let harness = make_daemon_state();
+    let (_server, mut reader, mut writer) =
+        perri_focus_with_curated_layout(&harness, "p1a.sock").await;
+    let before = tree_json(&harness, "perri");
+    let mut bcast = harness.broadcast_tx.subscribe();
+
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        3,
+        "perri.load_pr",
+        json!({ "number": 99, "repo": "acme/web" }),
+        Duration::from_millis(1500),
+    )
+    .await;
+    assert_eq!(res["ok"], true, "{res}");
+    assert_eq!(res["views_opened"], false, "{res}");
+    assert!(res["note"].is_string(), "{res}");
+    assert_eq!(tree_json(&harness, "perri"), before);
+    assert!(!any_focused_pane(&drain_broadcasts(&mut bcast)));
+}
+
+#[tokio::test]
+async fn load_pr_in_a_perri_focus_creates_no_tab_for_the_new_pr_over_old_tabs() {
+    let harness = make_daemon_state();
+    let (_server, mut reader, mut writer) =
+        perri_focus_with_curated_layout(&harness, "p1b.sock").await;
+    // Seed the previous PR's tabs the way a user click would.
+    for args in [
+        json!({ "type": "pr_conversation", "target": { "repo": "acme/web", "number": 42 } }),
+        json!({ "type": "pr_diff", "target": { "repo": "acme/web", "number": 42 } }),
+    ] {
+        let r = nostromo::mcp::tools::show::show_for_user(&harness.state, &args, "perri").await;
+        assert_eq!(r["ok"], true, "{r}");
+    }
+    assert_eq!(
+        detail_pane_ids(&get_self(&mut reader, &mut writer, 5).await).len(),
+        2
+    );
+    let mut bcast = harness.broadcast_tx.subscribe();
+
+    let res = call_tool_bounded(
+        &mut reader,
+        &mut writer,
+        6,
+        "perri.load_pr",
+        json!({ "number": 99, "repo": "acme/web" }),
+        Duration::from_millis(1500),
+    )
+    .await;
+    assert_eq!(res["ok"], true, "{res}");
+    assert_eq!(res["views_opened"], false, "{res}");
+
+    let after = get_self(&mut reader, &mut writer, 7).await;
+    assert!(
+        detail_pane_ids(&after).is_empty(),
+        "no tab for the new PR: {after}"
+    );
+    assert!(!any_focused_pane(&drain_broadcasts(&mut bcast)));
+}
+
+#[tokio::test]
+async fn the_old_prescribed_pickup_flow_in_a_perri_focus_opens_nothing_over_the_socket() {
+    let harness = make_daemon_state();
+    let (_server, mut reader, mut writer) =
+        perri_focus_with_curated_layout(&harness, "p1c.sock").await;
+    let before = tree_json(&harness, "perri");
+    let mut bcast = harness.broadcast_tx.subscribe();
+    let bound = Duration::from_millis(1500);
+
+    let mut id = 10;
+    for number in [11, 12, 13] {
+        let res = call_tool_bounded(
+            &mut reader,
+            &mut writer,
+            id,
+            "perri.load_pr",
+            json!({ "number": number, "repo": "acme/web" }),
+            bound,
+        )
+        .await;
+        assert_eq!(res["ok"], true, "{res}");
+        for ty in ["pr_conversation", "pr_diff"] {
+            id += 1;
+            let res = call_tool_bounded(
+                &mut reader,
+                &mut writer,
+                id,
+                "nostromo.show",
+                json!({ "type": ty, "target": { "repo": "acme/web", "number": number } }),
+                bound,
+            )
+            .await;
+            assert_eq!(res["ok"], true, "{res}");
+            assert_eq!(res["shown"], false, "{res}");
+            assert_eq!(res["reason_code"], "perri_focus_user_opens", "{res}");
+        }
+        id += 1;
+    }
+    assert_eq!(tree_json(&harness, "perri"), before);
+    assert!(!any_focused_pane(&drain_broadcasts(&mut bcast)));
 }

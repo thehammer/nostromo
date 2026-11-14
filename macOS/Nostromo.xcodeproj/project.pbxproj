@@ -318,6 +318,7 @@
 		HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = HH000000000000000000150 /* MemoryWatchdogTests.swift */; };
 		ZZRLC00000000000000000B1 /* ReadLoopChurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */; };
 		ZZSBRCH000000000000000B1 /* SidebarRebuildChurnTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZSBRCH000000000000000R1 /* SidebarRebuildChurnTests.swift */; };
+		ZZPSP10000000000000000B1 /* PerriSidePaneOneTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZPSP10000000000000000R1 /* PerriSidePaneOneTests.swift */; };
 		ZZMSCST000000000000000B1 /* MemorySummaryCostTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZMSCST000000000000000R1 /* MemorySummaryCostTests.swift */; };
 		ZZQLORD000000000000000B1 /* QueryListOrderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZQLORD000000000000000R1 /* QueryListOrderingTests.swift */; };
 		ZZTAE10000000000000000B1 /* ShedKeepsVisibleViewsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */; };
@@ -974,6 +975,7 @@
 		HH000000000000000000150 /* MemoryWatchdogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryWatchdogTests.swift; sourceTree = "<group>"; };
 		ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReadLoopChurnTests.swift; sourceTree = "<group>"; };
 		ZZSBRCH000000000000000R1 /* SidebarRebuildChurnTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarRebuildChurnTests.swift; sourceTree = "<group>"; };
+		ZZPSP10000000000000000R1 /* PerriSidePaneOneTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriSidePaneOneTests.swift; sourceTree = "<group>"; };
 		ZZMSCST000000000000000R1 /* MemorySummaryCostTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemorySummaryCostTests.swift; sourceTree = "<group>"; };
 		ZZQLORD000000000000000R1 /* QueryListOrderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryListOrderingTests.swift; sourceTree = "<group>"; };
 		ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShedKeepsVisibleViewsTests.swift; sourceTree = "<group>"; };
@@ -1686,6 +1688,7 @@
 				HH000000000000000000150 /* MemoryWatchdogTests.swift */,
 				ZZRLC00000000000000000R1 /* ReadLoopChurnTests.swift */,
 				ZZSBRCH000000000000000R1 /* SidebarRebuildChurnTests.swift */,
+				ZZPSP10000000000000000R1 /* PerriSidePaneOneTests.swift */,
 				ZZMSCST000000000000000R1 /* MemorySummaryCostTests.swift */,
 				ZZQLORD000000000000000R1 /* QueryListOrderingTests.swift */,
 				ZZTAE10000000000000000R1 /* ShedKeepsVisibleViewsTests.swift */,
@@ -2478,6 +2481,7 @@
 				HH000000000000000000152 /* MemoryWatchdogTests.swift in Sources */,
 				ZZRLC00000000000000000B1 /* ReadLoopChurnTests.swift in Sources */,
 				ZZSBRCH000000000000000B1 /* SidebarRebuildChurnTests.swift in Sources */,
+				ZZPSP10000000000000000B1 /* PerriSidePaneOneTests.swift in Sources */,
 				ZZMSCST000000000000000B1 /* MemorySummaryCostTests.swift in Sources */,
 				ZZQLORD000000000000000B1 /* QueryListOrderingTests.swift in Sources */,
 				ZZTAE10000000000000000B1 /* ShedKeepsVisibleViewsTests.swift in Sources */,

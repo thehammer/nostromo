@@ -95,6 +95,12 @@ pub fn is_huey_agent(name: &str) -> bool {
     bare.eq_ignore_ascii_case("huey")
 }
 
+/// Is `name` the Perri agent? Case-insensitive, through a plugin qualifier.
+pub fn is_perri_agent(name: &str) -> bool {
+    let bare = name.trim().rsplit(':').next().unwrap_or("").trim();
+    bare.eq_ignore_ascii_case("perri")
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Registered {
     /// Each registered tag with the random opaque id shown to network peers in
@@ -1322,6 +1328,16 @@ pub fn withheld_msg() -> ServerMsg {
 mod tests {
     use super::*;
     use crate::data::work::{PicksSnapshot, SourceState, SourceStatus, WorkResult, WorkSource};
+
+    #[test]
+    fn is_perri_agent_matches_the_bare_name_only() {
+        for yes in ["perri", "Perri", "mother:perri", " perri "] {
+            assert!(is_perri_agent(yes), "{yes}");
+        }
+        for no in ["perri-lens", "cody", "", "perri:cody"] {
+            assert!(!is_perri_agent(no), "{no}");
+        }
+    }
 
     #[test]
     fn unix_peers_are_local_and_tcp_peers_are_network() {

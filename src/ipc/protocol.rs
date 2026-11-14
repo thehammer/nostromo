@@ -2463,6 +2463,10 @@ pub enum ServerMsg {
         tag: String,
         queue: Vec<PrQueueItem>,
         current: Option<Box<PrSnapshot>>,
+        /// The daemon's Jira site as a bare host (`example.atlassian.net`),
+        /// for the Mac's host allowlist. Absent when none is configured.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        jira_site: Option<String>,
     },
 
     /// Broadcast snapshot of Fred's mailbox + calendar state. Re-sent whenever
@@ -4293,6 +4297,7 @@ mod tests {
             tag: "perri".into(),
             queue: vec![],
             current: None,
+            jira_site: None,
         });
     }
 
@@ -4342,6 +4347,7 @@ mod tests {
             tag: "perri".into(),
             queue: vec![item],
             current: Some(Box::new(snap)),
+            jira_site: Some("carefeed.atlassian.net".into()),
         });
     }
 
@@ -4351,9 +4357,32 @@ mod tests {
             tag: "perri".into(),
             queue: vec![],
             current: None,
+            jira_site: None,
         })
         .unwrap();
         assert_eq!(v["type"], "perri_state");
+        assert!(v.get("jira_site").is_none(), "None is omitted");
+    }
+
+    #[test]
+    fn perri_state_without_jira_site_decodes_to_none() {
+        let frame = r#"{"type":"perri_state","tag":"perri","queue":[],"current":null}"#;
+        match serde_json::from_str::<ServerMsg>(frame).unwrap() {
+            ServerMsg::PerriState { jira_site, .. } => assert_eq!(jira_site, None),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn perri_state_with_jira_site_serializes_it() {
+        let v = serde_json::to_value(ServerMsg::PerriState {
+            tag: "perri".into(),
+            queue: vec![],
+            current: None,
+            jira_site: Some("carefeed.atlassian.net".into()),
+        })
+        .unwrap();
+        assert_eq!(v["jira_site"], "carefeed.atlassian.net");
     }
 
     #[test]
