@@ -608,42 +608,46 @@ final class TrackerPresentationTests: XCTestCase {
 
     // MARK: Notes
 
-    func testNoteCollapsesOnlyWhenLongerThanTwoLines() throws {
-        let cases: [(name: String, blocks: [TFx.Obj], collapsible: Bool)] = [
-            ("one paragraph", [TFx.paragraph("a")], false),
-            ("two paragraphs", [TFx.paragraph("a"), TFx.paragraph("b")], false),
-            ("three paragraphs", [TFx.paragraph("a"), TFx.paragraph("b"), TFx.paragraph("c")], true),
-            ("one paragraph of three lines", [TFx.paragraph("a\nb\nc")], true),
-            ("a code block of three lines", [["kind": "code_block", "text": "a\nb\nc\n"]], true),
-            ("a code block of two lines", [["kind": "code_block", "text": "a\nb\n"]], false),
+    func testAnyNoteMakesAnItemFoldableAndCollapsedByDefault() throws {
+        let cases: [(name: String, blocks: [TFx.Obj])] = [
+            ("one paragraph", [TFx.paragraph("a")]),
+            ("three paragraphs", [TFx.paragraph("a"), TFx.paragraph("b"), TFx.paragraph("c")]),
+            ("a code block of two lines", [["kind": "code_block", "text": "a\nb\n"]]),
         ]
         for c in cases {
             let board = try TFx.edited { try $0.setNoteBlocks("verif-1037", c.blocks) }
             let item = try XCTUnwrap(TFx.itemRow("verif-1037", in: TFx.present(board)), c.name)
-            XCTAssertEqual(item.noteIsCollapsible, c.collapsible, c.name)
-            XCTAssertEqual(item.noteExpanded, !c.collapsible, "\(c.name): a long note starts collapsed, a short one is shown whole")
+            XCTAssertTrue(item.isFoldable, c.name)
+            XCTAssertFalse(item.isExpanded, "\(c.name): collapsed by default, short notes included")
         }
     }
 
-    func testALongNoteExpandsOnlyForTheItemsTheUserExpanded() throws {
+    func testAnItemWithoutANoteOrALongTextIsNotFoldable() throws {
+        let item = try XCTUnwrap(TFx.itemRow("verif-1037", in: TFx.present(try TFx.golden())))
+        XCTAssertFalse(item.isFoldable)
+        XCTAssertFalse(item.isExpanded)
+        XCTAssertNil(item.bodyLead)
+    }
+
+    func testOnlyTheItemsTheUserExpandedAreExpanded() throws {
         let board = try TFx.edited { edit in
             try edit.setNote("verif-1037", paragraphs: ["first", "second", "third"])
             try edit.setNote("retry-1518", paragraphs: ["first", "second", "third"])
         }
-        let folds = TrackerFoldState(expandedNotes: ["verif-1037"])
+        let folds = TrackerFoldState(expandedItems: ["verif-1037"])
         let p = TFx.present(board, folds: folds)
         let opened = try XCTUnwrap(TFx.itemRow("verif-1037", in: p))
         let closed = try XCTUnwrap(TFx.itemRow("retry-1518", in: p))
-        XCTAssertTrue(opened.noteIsCollapsible)
-        XCTAssertTrue(opened.noteExpanded)
-        XCTAssertTrue(closed.noteIsCollapsible)
-        XCTAssertFalse(closed.noteExpanded)
+        XCTAssertTrue(opened.isFoldable)
+        XCTAssertTrue(opened.isExpanded)
+        XCTAssertTrue(closed.isFoldable)
+        XCTAssertFalse(closed.isExpanded)
     }
 
-    func testExpandingAShortNoteChangesNothing() throws {
+    func testExpandingANonFoldableItemChangesNothing() throws {
         let board = try TFx.golden()
         let plain = TFx.present(board)
-        let expanded = TFx.present(board, folds: TrackerFoldState(expandedNotes: ["check-1000"]))
+        let expanded = TFx.present(board, folds: TrackerFoldState(expandedItems: ["verif-1037"]))
         XCTAssertEqual(plain.rows, expanded.rows)
     }
 
@@ -660,8 +664,105 @@ final class TrackerPresentationTests: XCTestCase {
         let item = try XCTUnwrap(TFx.itemRow("repro-1222", in: TFx.present(board)))
         XCTAssertEqual(item.status, .blocked)
         XCTAssertEqual(item.noteFirstLine, "Waiting on the vendor")
-        XCTAssertTrue(item.noteIsCollapsible)
-        XCTAssertFalse(item.noteExpanded)
+        XCTAssertTrue(item.isFoldable)
+        XCTAssertFalse(item.isExpanded)
+    }
+
+    // MARK: Titles and the fold
+
+    private static let longText = "Deploy pipeline: waiting on the vendor to confirm the window, then roll out to every region"
+    private static let longTitle = "Deploy pipeline"
+    private static let longRest = "waiting on the vendor to confirm the window, then roll out to every region"
+
+    func testExistingBoardsLoadIdenticallyEveryTitleIsTheWholeText() throws {
+        let p = TFx.present(try TFx.golden())
+        let all = TFx.allItems(p)
+        XCTAssertEqual(all.count, 60)
+        for item in all {
+            XCTAssertEqual(item.title, item.text, item.id)
+            XCTAssertNil(item.bodyLead, item.id)
+        }
+    }
+
+    func testOnTheGoldenBoardEveryItemWithANoteIsFoldableAndCollapsedAndNoOtherIs() throws {
+        let board = try TFx.golden()
+        let p = TFx.present(board)
+        let withNote = TFx.wireItems(board).filter { !$0.noteBlocks.isEmpty }
+        XCTAssertFalse(withNote.isEmpty, "the golden board has notes to check")
+        for wire in TFx.wireItems(board) {
+            let item = try XCTUnwrap(TFx.itemRow(wire.id, in: p), wire.id)
+            XCTAssertEqual(item.isFoldable, !wire.noteBlocks.isEmpty, wire.id)
+            XCTAssertFalse(item.isExpanded, "\(wire.id): everything starts collapsed")
+        }
+    }
+
+    func testALongTextWithASeparatorIsFoldableWithItsTailAsTheBodyLead() throws {
+        let board = try TFx.edited { try $0.setText("verif-1037", Self.longText) }
+        let item = try XCTUnwrap(TFx.itemRow("verif-1037", in: TFx.present(board)))
+        XCTAssertEqual(item.title, Self.longTitle)
+        XCTAssertEqual(item.bodyLead, Self.longRest)
+        XCTAssertEqual(item.text, Self.longText, "the full text is still there")
+        XCTAssertNil(item.noteFirstLine, "no note, yet there is something to unfold")
+        XCTAssertTrue(item.isFoldable)
+        XCTAssertFalse(item.isExpanded)
+    }
+
+    func testALongTextWithNoSeparatorIsFoldableAndItsBodyLeadPicksUpWhereTheTitleStopped() throws {
+        let words = (1...30).map { "word\($0)" }.joined(separator: " ")
+        let board = try TFx.edited { try $0.setText("verif-1037", words) }
+        let item = try XCTUnwrap(TFx.itemRow("verif-1037", in: TFx.present(board)))
+        XCTAssertTrue(item.title.hasSuffix("…"))
+        XCTAssertLessThanOrEqual(item.title.count, TrackerTitle.maxChars + 1)
+        XCTAssertTrue(try XCTUnwrap(item.bodyLead).hasPrefix("…"))
+        XCTAssertTrue(item.isFoldable)
+    }
+
+    func testExpandingAnItemByIdSurvivesTheNextPresentOfANewerBoard() throws {
+        let folds = TrackerFoldState(expandedItems: ["verif-1037"])
+        let first = try TFx.edited { try $0.setText("verif-1037", Self.longText) }
+        let opened = try XCTUnwrap(TFx.itemRow("verif-1037", in: TFx.present(first, folds: folds)))
+        XCTAssertTrue(opened.isExpanded)
+
+        let later = TFx.now.addingTimeInterval(600)
+        let newer = try TFx.edited { edit in
+            try edit.setText("verif-1037", Self.longText)
+            try edit.moveItem("verif-1037", toSection: "now")
+            try edit.setUpdatedAt("verif-1037", epoch: later.timeIntervalSince1970 - 30)
+            try edit.insertItem(id: "fresh-0001", section: "now", text: "Something new arrived")
+            edit.setBoardUpdatedAt(epoch: later.timeIntervalSince1970 - 30)
+        }
+        let again = TFx.present(newer, now: later, folds: folds)
+        let item = try XCTUnwrap(TFx.itemRow("verif-1037", in: again))
+        XCTAssertTrue(item.isExpanded, "the choice is the user's, kept by id")
+        XCTAssertEqual(item.bodyLead, Self.longRest)
+        XCTAssertFalse(try XCTUnwrap(TFx.itemRow("fresh-0001", in: again)).isExpanded)
+    }
+
+    func testTheWaitingStripShowsOnlyTheTitleOfALongNeedsYouItem() throws {
+        let board = try TFx.edited { edit in
+            try edit.setStatus("verif-1037", "needs-you")
+            try edit.setText("verif-1037", Self.longText)
+        }
+        let p = TFx.present(board)
+        let entry = try XCTUnwrap(p.strip.entries.first { $0.key == "item:verif-1037" })
+        XCTAssertEqual(entry.text, Self.longTitle)
+        XCTAssertFalse(entry.text.contains("vendor"), "nothing under the fold leaks into the strip")
+    }
+
+    func testTheWaitingStripShowsOnlyTheTitleOfALongUnrunCommand() throws {
+        let board = try TFx.edited { edit in
+            try edit.updateItem("retry-1518") { item in
+                item["kind"] = "command"
+                item["ran"] = false
+                item["status"] = "todo"
+            }
+            try edit.setText("retry-1518", Self.longText)
+        }
+        let p = TrackerPresenter.present(board: board, now: TFx.now, sources: [TrackerUnrunCommandSource()],
+                                         timeZone: TFx.utc)
+        let entry = try XCTUnwrap(p.strip.entries.first { $0.key == "item:retry-1518" })
+        XCTAssertEqual(entry.text, Self.longTitle)
+        XCTAssertFalse(entry.text.contains("vendor"), "nothing under the fold leaks into the strip")
     }
 
     func testLinkTextsAreCarriedAsPlainText() throws {
@@ -853,7 +954,7 @@ final class TrackerPresentationTests: XCTestCase {
 
     func testRowKeysAreUniqueUnderEveryFilterAndFoldState() throws {
         let board = try TFx.golden()
-        let allExpanded = TrackerFoldState(expandedNotes: ["check-1000"], expandedDoneGroups: ["done", "findings"],
+        let allExpanded = TrackerFoldState(expandedItems: ["check-1000"], expandedDoneGroups: ["done", "findings"],
                                            logExpanded: true)
         for filter in TrackerFilter.allCases {
             for folds in [TrackerFoldState(), allExpanded] {
