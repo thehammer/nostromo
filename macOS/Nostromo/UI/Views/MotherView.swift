@@ -334,6 +334,8 @@ class MotherView: NSView {
         // Keep every viewed detail current, shown or not. A job that left the queue (archived,
         // pruned) keeps showing its ended state rather than vanishing under the reader.
         // `update` applies only what changed: it never clears the reader's draft or moves their log.
+        // It also refreshes the DEPENDS ON rows, so a dependency's state change reaches a dependent
+        // whose own JSON did not change.
         for (id, detail) in jobDetails {
             detail.update(jobs.first { $0.id == id })
         }
@@ -345,6 +347,14 @@ class MotherView: NSView {
         guard let id = Self.requestedJobId, let job = jobs.first(where: { $0.id == id }) else { return }
         Self.requestedJobId = nil
         jobList.select(jobId: job.id)
+        showJob(job)
+    }
+
+    /// A dependency row was pressed: select that job in the list and show it, resetting a `From:` filter that hides it.
+    func openDependency(_ id: String) {
+        guard let job = latestJobs.first(where: { $0.id == id }) else { return }
+        if !jobList.visibleJobIds.contains(id) { jobList.showAll() }
+        jobList.select(jobId: id)
         showJob(job)
     }
 
@@ -382,6 +392,8 @@ class MotherView: NSView {
             detail.update(job)
         } else {
             detail = MotherJobDetail(host: AppStore.shared)
+            detail.dependencyLookup = { [weak self] id in self?.latestJobs.first { $0.id == id } }
+            detail.onOpenDependency = { [weak self] id in self?.openDependency(id) }
             detail.select(job)
             applyOrigin(to: detail, jobId: job.id)
             jobDetails[job.id] = detail
@@ -830,6 +842,7 @@ final class MotherJobListViewModel: ObservableObject {
 
     /// `Waiting: <reason>` for a ready or queued job the limiter lists; nil otherwise.
     static func waitText(for job: MotherJob) -> String? {
+        if job.state == "queued", let dep = job.depWait { return MotherDependencyPresentation.listLine(for: dep) }
         guard job.state == "ready" || job.state == "queued", let wait = job.limiterWait else { return nil }
         return MotherLimiterPresentation.waitText(wait)
     }
@@ -1034,6 +1047,8 @@ struct MotherFromHeader: View {
 private final class MotherJobList: NSView {
 
     func select(jobId: String) { viewModel.requestedSelection = jobId }
+    func showAll() { viewModel.filter = .all }
+    var visibleJobIds: Set<String> { Set(viewModel.filtered.groups.flatMap { $0.jobs.map(\.id) }) }
 
     /// Clear the highlight. `requestedSelection` is usually already nil, which
     /// SwiftUI would not report as a change, so go via a non-matching value.

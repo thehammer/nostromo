@@ -964,7 +964,9 @@ class AppStore: ObservableObject {
             cycles: job.cycles,
             crew:   job.crew,
             originLabel: job.originLabel,
-            limiterWait: (state == "ready" || state == "queued") ? job.limiterWait : nil
+            limiterWait: (state == "ready" || state == "queued") ? job.limiterWait : nil,
+            dependsOn: job.dependsOn,
+            depWait: state == "queued" ? job.depWait : nil
         )
     }
 

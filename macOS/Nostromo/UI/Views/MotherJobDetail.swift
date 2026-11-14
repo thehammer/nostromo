@@ -597,6 +597,13 @@ final class MotherJobDetail: NSView {
     private let todoStack       = NSStackView()
     private var todoHeight:     NSLayoutConstraint!
     private let metaStack       = NSStackView()
+    /// What the job depends on and why it waits; hidden at zero height without dependencies.
+    let dependencySection = MotherDependencySectionView()
+    private var dependencyTopGap: NSLayoutConstraint!
+    /// Looks a dependency up among the pane's jobs; nil for one outside the queue.
+    var dependencyLookup: (String) -> MotherJob? = { _ in nil }
+    /// Called with a dependency's id when its row is pressed.
+    var onOpenDependency: ((String) -> Void)?
     let actionsContainer = NSView()  // rebuilt only when `actionIdentity` changes
     /// The stack currently inside `actionsContainer`; a stable object while the identity holds.
     private(set) var actionStack: NSStackView?
@@ -680,7 +687,7 @@ final class MotherJobDetail: NSView {
 
         // Safety net: nothing inside the detail may demand more width than the pane gives it.
         setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        for v in [todoStack, metaStack, planChecklistView, actionsContainer, phaseRibbonView, crewSection] as [NSView] {
+        for v in [todoStack, metaStack, planChecklistView, actionsContainer, phaseRibbonView, crewSection, dependencySection] as [NSView] {
             v.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
 
@@ -792,7 +799,7 @@ final class MotherJobDetail: NSView {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
-        for v in [noticeSection, phaseRibbonView, crewSection, actionsContainer, todoStack, metaStack,
+        for v in [noticeSection, phaseRibbonView, crewSection, actionsContainer, todoStack, dependencySection, metaStack,
                   planSectionLabel, planChecklistView] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
@@ -808,6 +815,11 @@ final class MotherJobDetail: NSView {
         crewTopGap.isActive = true
         crewSection.onDetails = { [weak self] in self?.showDetails() }
         crewSection.onAcknowledge = { [weak self] reason in self?.acknowledge(reason: reason) }
+
+        // The gap above the dependency section is 0 while it is empty (a job without dependencies lays out as before).
+        dependencyTopGap = dependencySection.topAnchor.constraint(equalTo: todoStack.bottomAnchor, constant: 0)
+        dependencyTopGap.isActive = true
+        dependencySection.onOpen = { [weak self] id in self?.onOpenDependency?(id) }
 
         // Todo stack height: 0 when empty, constrained by content otherwise
         todoHeight = todoStack.heightAnchor.constraint(equalToConstant: 0)
@@ -873,7 +885,10 @@ final class MotherJobDetail: NSView {
             todoStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             todoStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
-            metaStack.topAnchor.constraint(equalTo: todoStack.bottomAnchor, constant: 8),
+            dependencySection.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            dependencySection.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+
+            metaStack.topAnchor.constraint(equalTo: dependencySection.bottomAnchor, constant: 8),
             metaStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             metaStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
 
@@ -1083,7 +1098,7 @@ final class MotherJobDetail: NSView {
             return
         }
 
-        [titleLabel, originLine, stateLabel, segmentControl, todoStack, metaStack, actionsContainer,
+        [titleLabel, originLine, stateLabel, segmentControl, todoStack, dependencySection, metaStack, actionsContainer,
          planSectionLabel, planChecklistView].forEach { $0.isHidden = false }
         emptyLabel.isHidden = true
         planView?.show(planPath: job.planPath)
@@ -1099,6 +1114,7 @@ final class MotherJobDetail: NSView {
         updateRibbon(job)
         updateCrewSection(job)
         updateTodoList(host.peek(for: job.id))
+        refreshDependencies()
         shownMeta = metaPairs(for: job)
         rebuildMeta(shownMeta)
         rebuildActions(job)
@@ -1392,8 +1408,10 @@ final class MotherJobDetail: NSView {
     }
 
     private func showEmpty() {
-        [titleLabel, stateLabel, segmentControl, phaseRibbonView, crewSection, todoStack, metaStack, actionsContainer,
+        [titleLabel, stateLabel, segmentControl, phaseRibbonView, crewSection, todoStack, dependencySection, metaStack, actionsContainer,
          planSectionLabel, planChecklistView, contentScrollView, logScrollView].forEach { $0.isHidden = true }
+        dependencySection.update(rows: [])
+        dependencyTopGap.constant = 0
         planView?.clear()
         planView?.isHidden = true
         emptyLabel.isHidden = false
@@ -1438,6 +1456,17 @@ final class MotherJobDetail: NSView {
         crewSection.update(model: model, detailsAvailable: model.hasDetails && host.usesDefaultBroker,
                            acknowledgeAvailable: host.supportsAck)
         crewTopGap.constant = model.isEmpty ? 0 : 8
+    }
+
+    /// Recomputes the DEPENDS ON rows and rebuilds only if they differ: a dependency's state can
+    /// change while this job's own data does not.
+    func refreshDependencies() {
+        guard let job = currentJob else { return }
+        let rows = MotherDependencyPresentation.rows(for: job, lookup: dependencyLookup)
+        guard rows != dependencySection.rows else { return }
+        holdReaderPlace()
+        dependencySection.update(rows: rows)
+        dependencyTopGap.constant = rows.isEmpty ? 0 : 8
     }
 
     /// The open decision whose options are offered as buttons: the broker answers by option id
@@ -1979,7 +2008,9 @@ final class MotherJobDetail: NSView {
         if let f = job.finishedAt   { pairs.append(("Finished",  relativeTime(f))) }
         if let p = job.planPath     { pairs.append(("Plan",      (p as NSString).lastPathComponent)) }
         if let q = job.question     { pairs.append(("Question",  q)) }
-        if let w = Self.waitingLine(for: job) { pairs.append(("Waiting", w)) }
+        if let w = Self.waitingLine(for: job) {
+            pairs.append((MotherJobListViewModel.waitText(for: job)?.hasPrefix("Blocked: ") == true ? "Blocked" : "Waiting", w))
+        }
         if let a = job.adherenceStatus { pairs.append(("Adherence", a)) }
         return pairs.map { MetaPair(key: $0.0, value: $0.1) }
     }
@@ -1987,7 +2018,8 @@ final class MotherJobDetail: NSView {
     /// The reason a ready or queued job waits (`<reason>`, plus `(would: <reason>)` when the limiter's view differs).
     static func waitingLine(for job: MotherJob) -> String? {
         guard let text = MotherJobListViewModel.waitText(for: job) else { return nil }
-        return String(text.dropFirst("Waiting: ".count))
+        let prefix = text.hasPrefix("Blocked: ") ? "Blocked: " : "Waiting: "
+        return String(text.dropFirst(prefix.count))
     }
 
     private func rebuildMeta(_ pairs: [MetaPair]) {
