@@ -330,7 +330,8 @@ impl SessionManager {
             );
         }
         // Sensitive before anything of it can exist under the new tag.
-        if entry.sensitive {
+        // The live registry is asked too: the entry's flag can lag it.
+        if entry.sensitive || self.sensitive.focus_is_sensitive(&entry.tag, &entry.agent) {
             self.sensitive.mark_tag(new_tag);
         }
         self.session_history.move_session(sid, &entry.tag, new_tag);
