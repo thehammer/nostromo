@@ -456,11 +456,11 @@ impl Engine {
     }
 
     fn mark_publish_if_relay_changed(&mut self, now: Instant) {
-        let state = self.relay_info().state;
-        let since = self.relay_status.since();
-        let changed = self.last_published.as_ref().is_none_or(|p| {
-            p.relay.state != state || p.relay.since != since
-        });
+        let info = self.relay_info();
+        let changed = self
+            .last_published
+            .as_ref()
+            .is_none_or(|p| p.relay.state != info.state || p.relay.since != info.since);
         if changed {
             self.mark_publish(now);
         }
@@ -1207,7 +1207,10 @@ impl Engine {
             .take(MAX_HIDDEN_ORGS)
             .map(|id| {
                 one_line(
-                    self.org_names.get(id).map_or("an organization", String::as_str),
+                    self.org_names
+                        .get(id)
+                        .filter(|name| !name.is_empty())
+                        .map_or("an organization", String::as_str),
                     MAX_ORG_NAME,
                 )
             })

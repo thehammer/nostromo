@@ -1380,6 +1380,84 @@ fn daemon_log_dir() -> PathBuf {
         .join("log")
 }
 
+/// Start the author's PR list: its engine, the demand board the session
+/// manager routes the Mac's verbs to, and the task that broadcasts each
+/// snapshot on the local-only `authored_prs` topic.
+fn start_authored_prs(
+    config: &nostromo::config::Config,
+    relay_rx: tokio::sync::mpsc::UnboundedReceiver<nostromo::data::relay_client::QueueSignal>,
+    relay_status: Arc<nostromo::data::relay_client::RelayStatus>,
+    jobs_rx: tokio::sync::watch::Receiver<Vec<nostromo::mother::MotherJob>>,
+    session_mgr: &Arc<std::sync::Mutex<nostromo::ipc::session_manager::SessionManager>>,
+    broadcast_tx: tokio::sync::broadcast::Sender<ServerMsg>,
+    mut republish: tokio::sync::watch::Receiver<u64>,
+) {
+    use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo, TokioClock};
+    let github = match nostromo::data::github_client::GithubClient::new(
+        config.github_token_path.as_deref(),
+    ) {
+        Ok(c) => Some(c),
+        Err(_) => {
+            tracing::warn!("authored-prs: no GitHub token; the list stays off (token: missing)");
+            None
+        }
+    };
+    let focuses: nostromo::data::authored_prs::FocusProvider = {
+        let mgr = Arc::clone(session_mgr);
+        Arc::new(move || {
+            let mgr = mgr.lock().unwrap();
+            mgr.focus_registry()
+                .into_iter()
+                .map(|f| FocusInfo {
+                    session_id: mgr.current_session_id(&f.tag),
+                    spawn_cwd: mgr.cwd_for(&f.tag),
+                    project_path: f.project_path.as_ref().map(std::path::PathBuf::from),
+                    name: f.display_name,
+                    tag: f.tag,
+                })
+                .collect()
+        })
+    };
+    let projects_root = dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".claude")
+        .join("projects");
+    let handle = AuthoredPrsSource::spawn(Deps {
+        api_base: nostromo::data::github_client::GITHUB_API_BASE.to_string(),
+        github,
+        relay_status,
+        relay_configured: config.relay_url.is_some() && config.relay_token.is_some(),
+        relay_rx: Some(relay_rx),
+        jobs_rx,
+        focuses,
+        projects_root,
+        clock: Arc::new(TokioClock::new(chrono::Utc::now())),
+    });
+    session_mgr
+        .lock()
+        .unwrap()
+        .configure_authored_prs(Arc::clone(&handle.demand));
+    let mut snapshot_rx = handle.snapshot;
+    tokio::spawn(async move {
+        let _keep_alive = handle.task;
+        loop {
+            let latest = snapshot_rx.borrow_and_update().clone();
+            if let Some(snapshot) = latest {
+                let _ = broadcast_tx.send(ServerMsg::AuthoredPrs { snapshot });
+            }
+            tokio::select! {
+                changed = snapshot_rx.changed() => {
+                    if changed.is_err() { return; }
+                }
+                // The retained cache lagged: send the current snapshot again.
+                changed = republish.changed() => {
+                    if changed.is_err() { return; }
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1505,82 +1583,4 @@ mod tests {
             "the watch value keeps the full body"
         );
     }
-}
-
-/// Start the author's PR list: its engine, the demand board the session
-/// manager routes the Mac's verbs to, and the task that broadcasts each
-/// snapshot on the local-only `authored_prs` topic.
-fn start_authored_prs(
-    config: &nostromo::config::Config,
-    relay_rx: tokio::sync::mpsc::UnboundedReceiver<nostromo::data::relay_client::QueueSignal>,
-    relay_status: Arc<nostromo::data::relay_client::RelayStatus>,
-    jobs_rx: tokio::sync::watch::Receiver<Vec<nostromo::mother::MotherJob>>,
-    session_mgr: &Arc<std::sync::Mutex<nostromo::ipc::session_manager::SessionManager>>,
-    broadcast_tx: tokio::sync::broadcast::Sender<ServerMsg>,
-    mut republish: tokio::sync::watch::Receiver<u64>,
-) {
-    use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo, TokioClock};
-    let github = match nostromo::data::github_client::GithubClient::new(
-        config.github_token_path.as_deref(),
-    ) {
-        Ok(c) => Some(c),
-        Err(_) => {
-            tracing::warn!("authored-prs: no GitHub token; the list stays off (token: missing)");
-            None
-        }
-    };
-    let focuses: nostromo::data::authored_prs::FocusProvider = {
-        let mgr = Arc::clone(session_mgr);
-        Arc::new(move || {
-            let mgr = mgr.lock().unwrap();
-            mgr.focus_registry()
-                .into_iter()
-                .map(|f| FocusInfo {
-                    session_id: mgr.current_session_id(&f.tag),
-                    spawn_cwd: mgr.cwd_for(&f.tag),
-                    project_path: f.project_path.as_ref().map(std::path::PathBuf::from),
-                    name: f.display_name,
-                    tag: f.tag,
-                })
-                .collect()
-        })
-    };
-    let projects_root = dirs_next::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join(".claude")
-        .join("projects");
-    let handle = AuthoredPrsSource::spawn(Deps {
-        api_base: nostromo::data::github_client::GITHUB_API_BASE.to_string(),
-        github,
-        relay_status,
-        relay_configured: config.relay_url.is_some() && config.relay_token.is_some(),
-        relay_rx: Some(relay_rx),
-        jobs_rx,
-        focuses,
-        projects_root,
-        clock: Arc::new(TokioClock::new(chrono::Utc::now())),
-    });
-    session_mgr
-        .lock()
-        .unwrap()
-        .configure_authored_prs(Arc::clone(&handle.demand));
-    let mut snapshot_rx = handle.snapshot;
-    tokio::spawn(async move {
-        let _keep_alive = handle.task;
-        loop {
-            let latest = snapshot_rx.borrow_and_update().clone();
-            if let Some(snapshot) = latest {
-                let _ = broadcast_tx.send(ServerMsg::AuthoredPrs { snapshot });
-            }
-            tokio::select! {
-                changed = snapshot_rx.changed() => {
-                    if changed.is_err() { return; }
-                }
-                // The retained cache lagged: send the current snapshot again.
-                changed = republish.changed() => {
-                    if changed.is_err() { return; }
-                }
-            }
-        }
-    });
 }

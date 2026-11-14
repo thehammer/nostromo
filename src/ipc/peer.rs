@@ -4962,3 +4962,71 @@ mod huey_document_delivery_tests {
         assert!(outbound(PeerTrust::Tcp, msg, &tags).is_some());
     }
 }
+
+#[cfg(test)]
+mod authored_prs_policy_tests {
+    //! Who may send and who may receive the author's PR list.
+
+    use super::*;
+    use crate::data::authored_prs::snapshot::*;
+
+    fn snapshot_frame() -> ServerMsg {
+        let counts = UsageCounts::default();
+        ServerMsg::AuthoredPrs {
+            snapshot: AuthoredPrsSnapshot {
+                generated_at: chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+                token: TokenState::Connected,
+                relay: RelayInfo {
+                    state: RelayState::Live,
+                    since: None,
+                    org: "Carefeed".into(),
+                },
+                poll: PollInfo {
+                    state: PollState::Ok,
+                    checked_at: None,
+                    interval_secs: 60,
+                    resumes_at: None,
+                    retry_at: None,
+                },
+                refresh_blocked: None,
+                hidden_orgs: vec![],
+                total_open: 0,
+                shown: 0,
+                prs: vec![],
+                usage: UsageView {
+                    window_secs: 3600,
+                    window: counts,
+                    since_start: counts,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn the_authored_pr_frame_is_for_local_peers_only() {
+        assert!(
+            matches!(classify_server_msg(&snapshot_frame()), ServerClass::LocalOnly),
+            "repos, titles, check names and who owns each PR are not for the network"
+        );
+    }
+
+    #[test]
+    fn the_demand_and_refresh_verbs_are_refused_to_a_network_peer() {
+        for msg in [
+            ClientMsg::AuthoredPrsDemand { level: "visible".into() },
+            ClientMsg::AuthoredPrsDemand { level: "idle".into() },
+            ClientMsg::AuthoredPrsRefresh {},
+        ] {
+            assert_eq!(network_policy(&msg), NetworkPolicy::Refused, "{msg:?}");
+            assert!(refused_for_network(&msg), "{msg:?}");
+            assert!(refuse_for_network(&msg, &SensitiveTags::in_memory()), "{msg:?}");
+        }
+    }
+
+    #[test]
+    fn the_verbs_name_no_session_so_they_are_never_about_a_sensitive_one() {
+        let tags = SensitiveTags::in_memory();
+        assert!(!targets_sensitive_session(&ClientMsg::AuthoredPrsDemand { level: "visible".into() }, &tags));
+        assert!(!targets_sensitive_session(&ClientMsg::AuthoredPrsRefresh {}, &tags));
+    }
+}

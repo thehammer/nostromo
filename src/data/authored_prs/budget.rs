@@ -239,3 +239,282 @@ pub fn parse_retry_after(value: &str) -> Option<Duration> {
         .ok()
         .map(|s| Duration::from_secs(s).min(MAX_RETRY_AFTER))
 }
+
+#[cfg(test)]
+mod tests {
+    //! What the feature may ask GitHub, and when: postures, cadences, the
+    //! rolling hourly buckets and the rate-limit reading. Pure, so every clock
+    //! is a parameter.
+
+    use super::*;
+    use chrono::TimeZone;
+
+    fn wall(secs: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_800_000_000 + secs, 0).unwrap()
+    }
+
+    fn obs(remaining: u64, limit: u64, reset_in: i64) -> RateObs {
+        RateObs {
+            remaining,
+            limit,
+            reset: wall(reset_in),
+        }
+    }
+
+    // ── demand ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn demand_levels_decode_and_anything_unknown_counts_as_hidden() {
+        assert_eq!(Demand::from_wire("visible"), Demand::Visible);
+        assert_eq!(Demand::from_wire("hidden"), Demand::Hidden);
+        assert_eq!(Demand::from_wire("idle"), Demand::Idle);
+        assert_eq!(Demand::from_wire("somethingnew"), Demand::Hidden);
+        assert_eq!(Demand::from_wire(""), Demand::Hidden);
+        assert_eq!(Demand::from_wire("VISIBLE"), Demand::Hidden, "the wire is case-sensitive");
+    }
+
+    #[test]
+    fn visible_outranks_hidden_outranks_idle() {
+        assert!(Demand::Visible > Demand::Hidden);
+        assert!(Demand::Hidden > Demand::Idle);
+        assert_eq!(Demand::default(), Demand::Idle);
+    }
+
+    // ── cadences ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_documented_cadences_and_caps_per_posture() {
+        let v = Posture::Visible.cadence().unwrap();
+        assert_eq!(v.search, Duration::from_secs(60));
+        assert_eq!(v.pending_ci, Duration::from_secs(60));
+        assert_eq!(v.full, Duration::from_secs(600));
+        assert_eq!((v.poll_cap, v.relay_cap), (120, 60));
+
+        let h = Posture::Hidden.cadence().unwrap();
+        assert_eq!(h.search, Duration::from_secs(300));
+        assert_eq!(h.pending_ci, Duration::from_secs(300));
+        assert_eq!(h.full, Duration::from_secs(1800));
+        assert_eq!((h.poll_cap, h.relay_cap), (20, 20));
+
+        assert!(Posture::Idle.cadence().is_none(), "idle does no scheduled work");
+        assert!(Posture::Paused.cadence().is_none(), "paused does no scheduled work");
+        assert!(Posture::Visible.active() && Posture::Hidden.active());
+        assert!(!Posture::Idle.active() && !Posture::Paused.active());
+    }
+
+    // ── posture from demand and GitHub's headers ──────────────────────────
+
+    #[test]
+    fn with_no_readings_the_posture_is_the_demand() {
+        let mut r = RateState::default();
+        assert_eq!(r.apply(Demand::Visible, wall(0)), (Posture::Visible, None, false));
+        assert_eq!(r.apply(Demand::Hidden, wall(0)), (Posture::Hidden, None, false));
+        assert_eq!(r.apply(Demand::Idle, wall(0)), (Posture::Idle, None, false));
+    }
+
+    #[test]
+    fn under_twenty_percent_remaining_visible_acts_as_hidden_and_says_so() {
+        let mut r = RateState::default();
+        r.observe(Resource::Search, obs(19, 100, 600));
+        assert_eq!(r.apply(Demand::Visible, wall(0)), (Posture::Hidden, None, true));
+        assert_eq!(
+            r.apply(Demand::Hidden, wall(0)),
+            (Posture::Hidden, None, true),
+            "hidden stays hidden but is still reported as limited"
+        );
+    }
+
+    #[test]
+    fn exactly_twenty_percent_is_not_yet_low() {
+        let mut r = RateState::default();
+        r.observe(Resource::Core, obs(20, 100, 600));
+        assert_eq!(r.apply(Demand::Visible, wall(0)), (Posture::Visible, None, false));
+    }
+
+    #[test]
+    fn under_five_percent_pauses_until_the_reset() {
+        let mut r = RateState::default();
+        r.observe(Resource::Graphql, obs(4, 100, 900));
+        let (posture, resumes, limited) = r.apply(Demand::Visible, wall(0));
+        assert_eq!(posture, Posture::Paused);
+        assert_eq!(resumes, Some(wall(900)), "resumes at the reset");
+        assert!(limited);
+        // Hidden is paused too.
+        assert_eq!(r.apply(Demand::Hidden, wall(0)).0, Posture::Paused);
+    }
+
+    #[test]
+    fn exactly_five_percent_lowers_but_does_not_pause() {
+        let mut r = RateState::default();
+        r.observe(Resource::Core, obs(5, 100, 600));
+        assert_eq!(r.apply(Demand::Visible, wall(0)), (Posture::Hidden, None, true));
+    }
+
+    #[test]
+    fn the_worst_resource_decides_and_the_latest_reset_ends_the_pause() {
+        let mut r = RateState::default();
+        r.observe(Resource::Core, obs(3, 100, 300));
+        r.observe(Resource::Search, obs(1, 100, 700));
+        r.observe(Resource::Graphql, obs(90, 100, 100));
+        let (posture, resumes, _) = r.apply(Demand::Visible, wall(0));
+        assert_eq!(posture, Posture::Paused);
+        assert_eq!(resumes, Some(wall(700)));
+    }
+
+    #[test]
+    fn after_the_reset_the_reading_is_forgotten_and_the_posture_returns() {
+        let mut r = RateState::default();
+        r.observe(Resource::Core, obs(0, 100, 300));
+        assert_eq!(r.apply(Demand::Visible, wall(299)).0, Posture::Paused);
+        assert_eq!(r.apply(Demand::Visible, wall(300)), (Posture::Visible, None, false));
+    }
+
+    #[test]
+    fn idle_stays_idle_and_is_not_reported_as_limited() {
+        let mut r = RateState::default();
+        r.observe(Resource::Core, obs(0, 100, 300));
+        assert_eq!(r.apply(Demand::Idle, wall(0)), (Posture::Idle, None, false));
+    }
+
+    #[test]
+    fn a_retry_after_pauses_until_it_ends_whatever_the_readings_say() {
+        let mut r = RateState::default();
+        r.pause_until(wall(120));
+        let (posture, resumes, limited) = r.apply(Demand::Visible, wall(0));
+        assert_eq!((posture, resumes, limited), (Posture::Paused, Some(wall(120)), true));
+        assert_eq!(r.apply(Demand::Visible, wall(119)).0, Posture::Paused);
+        assert_eq!(r.apply(Demand::Visible, wall(120)), (Posture::Visible, None, false));
+    }
+
+    #[test]
+    fn a_second_pause_never_shortens_the_first() {
+        let mut r = RateState::default();
+        r.pause_until(wall(500));
+        r.pause_until(wall(100));
+        assert_eq!(r.apply(Demand::Visible, wall(200)).1, Some(wall(500)));
+    }
+
+    #[test]
+    fn next_change_is_the_earliest_reset_or_pause_end() {
+        let mut r = RateState::default();
+        assert_eq!(r.next_change(), None);
+        r.observe(Resource::Core, obs(50, 100, 900));
+        assert_eq!(r.next_change(), Some(wall(900)));
+        r.pause_until(wall(120));
+        assert_eq!(r.next_change(), Some(wall(120)));
+    }
+
+    #[test]
+    fn a_reading_with_a_zero_limit_is_ignored() {
+        let mut r = RateState::default();
+        r.observe(Resource::Core, obs(0, 0, 600));
+        assert_eq!(r.apply(Demand::Visible, wall(0)), (Posture::Visible, None, false));
+    }
+
+    #[test]
+    fn resources_are_read_from_the_header_names() {
+        assert_eq!(Resource::from_header("core"), Some(Resource::Core));
+        assert_eq!(Resource::from_header("search"), Some(Resource::Search));
+        assert_eq!(Resource::from_header("graphql"), Some(Resource::Graphql));
+        assert_eq!(Resource::from_header("integration_manifest"), None);
+        assert_eq!(Resource::from_header(""), None);
+    }
+
+    // ── the rolling hourly bucket ─────────────────────────────────────────
+
+    #[test]
+    fn a_bucket_has_room_until_the_cap_is_charged() {
+        let t0 = Instant::now();
+        let mut b = Bucket::default();
+        for i in 0..3 {
+            assert!(b.has_room(t0, 3), "charge {i}");
+            b.charge(t0);
+        }
+        assert!(!b.has_room(t0, 3));
+        assert_eq!(b.used(t0), 3);
+        assert!(b.has_room(t0, 4));
+        assert!(!b.has_room(t0, 0), "a zero cap never has room");
+    }
+
+    #[test]
+    fn a_charge_leaves_the_bucket_exactly_one_hour_later() {
+        let t0 = Instant::now();
+        let mut b = Bucket::default();
+        b.charge(t0);
+        b.charge(t0 + Duration::from_secs(1800));
+        assert_eq!(b.used(t0 + HOUR - Duration::from_secs(1)), 2, "59m59s later: both held");
+        assert_eq!(b.used(t0 + HOUR), 1, "an hour later: the first is out");
+        assert_eq!(b.used(t0 + HOUR + Duration::from_secs(1800)), 0, "and the second");
+    }
+
+    #[test]
+    fn the_next_slot_is_now_with_room_and_when_the_oldest_leaves_without() {
+        let t0 = Instant::now();
+        let mut b = Bucket::default();
+        assert_eq!(b.next_slot(t0, 2), Some(t0));
+        b.charge(t0);
+        assert_eq!(b.next_slot(t0, 2), Some(t0));
+        b.charge(t0 + Duration::from_secs(10));
+        assert_eq!(
+            b.next_slot(t0 + Duration::from_secs(20), 2),
+            Some(t0 + HOUR),
+            "full: a slot opens when the oldest charge is an hour old"
+        );
+        assert_eq!(b.next_slot(t0, 0), None, "a zero cap never opens");
+    }
+
+    #[test]
+    fn the_cap_holds_over_any_rolling_hour_when_a_caller_waits_for_the_next_slot() {
+        let t0 = Instant::now();
+        let mut b = Bucket::default();
+        let mut now = t0;
+        let mut charged_at = Vec::new();
+        // Ask for a request every minute for three hours against a cap of 20.
+        for _ in 0..180 {
+            if b.has_room(now, 20) {
+                b.charge(now);
+                charged_at.push(now);
+            }
+            now += Duration::from_secs(60);
+        }
+        for (i, start) in charged_at.iter().enumerate() {
+            let in_window = charged_at[i..]
+                .iter()
+                .take_while(|t| t.duration_since(*start) < HOUR)
+                .count();
+            assert!(in_window <= 20, "{in_window} charges inside the hour after #{i}");
+        }
+    }
+
+    // ── errors ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_error_backoff_doubles_from_two_minutes_and_stops_at_thirty() {
+        let mins: Vec<u64> = (1..=8).map(|n| error_backoff(n).as_secs() / 60).collect();
+        assert_eq!(mins, vec![2, 4, 8, 16, 30, 30, 30, 30]);
+        assert_eq!(error_backoff(0), error_backoff(1), "a zero count is the first error");
+        assert_eq!(error_backoff(u32::MAX), MAX_ERROR_BACKOFF, "no overflow");
+    }
+
+    #[test]
+    fn retry_after_is_whole_seconds_capped_at_an_hour() {
+        assert_eq!(parse_retry_after("120"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_retry_after(" 7 "), Some(Duration::from_secs(7)));
+        assert_eq!(parse_retry_after("0"), Some(Duration::ZERO));
+        assert_eq!(parse_retry_after("7200"), Some(MAX_RETRY_AFTER));
+        assert_eq!(parse_retry_after("99999999999"), Some(MAX_RETRY_AFTER));
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(parse_retry_after("-5"), None);
+        assert_eq!(parse_retry_after(""), None);
+        assert_eq!(parse_retry_after("1.5"), None);
+    }
+
+    #[test]
+    fn the_documented_constants_hold() {
+        assert_eq!(MIN_SEARCH_GAP, Duration::from_secs(60));
+        assert_eq!(RELAY_COALESCE, Duration::from_secs(2));
+        assert_eq!(LINGER, Duration::from_secs(60));
+        assert_eq!(TOKEN_RETRY, Duration::from_secs(1800));
+        assert_eq!(HOUR, Duration::from_secs(3600));
+    }
+}

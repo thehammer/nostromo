@@ -4659,3 +4659,89 @@ mod tests {
         assert_eq!(FEATURE_TASKS, "tasks");
     }
 }
+
+#[cfg(test)]
+mod authored_prs_tests {
+    //! The server's side of the author's PR list: the capability in the
+    //! Welcome, and which subscriptions are sent the frame.
+
+    use super::*;
+    use crate::data::authored_prs::snapshot::*;
+    use crate::data::authored_prs::DemandBoard;
+
+    fn snapshot_frame() -> ServerMsg {
+        let counts = UsageCounts::default();
+        ServerMsg::AuthoredPrs {
+            snapshot: AuthoredPrsSnapshot {
+                generated_at: chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+                token: TokenState::Connected,
+                relay: RelayInfo {
+                    state: RelayState::Live,
+                    since: None,
+                    org: "Carefeed".into(),
+                },
+                poll: PollInfo {
+                    state: PollState::Ok,
+                    checked_at: None,
+                    interval_secs: 60,
+                    resumes_at: None,
+                    retry_at: None,
+                },
+                refresh_blocked: None,
+                hidden_orgs: vec![],
+                total_open: 0,
+                shown: 0,
+                prs: vec![],
+                usage: UsageView {
+                    window_secs: 3600,
+                    window: counts,
+                    since_start: counts,
+                },
+            },
+        }
+    }
+
+    fn features_of(mgr: &SessionManager) -> Vec<String> {
+        match welcome_msg(mgr, None) {
+            ServerMsg::Welcome { features, .. } => features,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_welcome_lists_authored_prs_v1_only_once_the_feature_is_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager::with_store_path(tmp.path().join("sessions.json"));
+        let before = features_of(&mgr);
+        assert!(!before.iter().any(|f| f == FEATURE_AUTHORED_PRS), "{before:?}");
+
+        let (board, _inputs) = DemandBoard::new();
+        mgr.configure_authored_prs(board);
+        let after = features_of(&mgr);
+        assert!(after.iter().any(|f| f == "authored_prs_v1"), "{after:?}");
+        // Everything advertised before is still advertised.
+        for f in &before {
+            assert!(after.contains(f), "{f} went missing");
+        }
+        assert_eq!(after.len(), before.len() + 1);
+    }
+
+    #[test]
+    fn the_frame_goes_only_to_a_subscription_that_names_the_topic() {
+        let frame = snapshot_frame();
+        assert!(
+            !message_matches_topics(&frame, &[]),
+            "the empty everything-list does not include it (an older client cannot decode it)"
+        );
+        assert!(message_matches_topics(&frame, &[Topic::AuthoredPrs]));
+        assert!(message_matches_topics(&frame, &[Topic::Perri, Topic::AuthoredPrs]));
+        assert!(!message_matches_topics(&frame, &[Topic::Perri]));
+        assert!(!message_matches_topics(&frame, &[Topic::Unknown]), "an unknown topic is not it");
+        assert!(!message_matches_topics(&frame, &[Topic::Terminal, Topic::Model]));
+    }
+
+    #[test]
+    fn the_latest_frame_is_the_one_kept_for_a_late_subscriber() {
+        assert_eq!(retain_key(&snapshot_frame()).as_deref(), Some("authored_prs"));
+    }
+}

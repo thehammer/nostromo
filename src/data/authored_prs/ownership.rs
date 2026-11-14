@@ -228,3 +228,393 @@ pub fn resolve(
         _ => ambiguous(on_branch.iter().map(candidate).collect()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Which focus owns a PR: facts in, an owner out. The table is the contract:
+    //! a vouched Mother job is an owner, an unvouched one never is, two
+    //! plausible owners are ambiguous, and nothing is ever guessed.
+
+    use super::*;
+    use crate::mother::origin::{JobAnnotation, OriginView};
+
+    const REPO: &str = "carefeed/app";
+    const URL: &str = "https://github.com/Carefeed/app/pull/7";
+
+    fn key() -> PrKey {
+        PrKey {
+            repo: REPO.into(),
+            number: 7,
+        }
+    }
+
+    fn origin(kind: OriginKind, tag: Option<&str>, closed: Option<bool>) -> OriginView {
+        OriginView {
+            kind,
+            focus_tag: tag.map(str::to_owned),
+            name_snapshot: tag.map(|t| format!("{t} (then)")),
+            focus_name: tag.map(|t| format!("{t} now")),
+            closed,
+            session_prefix: None,
+        }
+    }
+
+    fn job_with(id: &str, pr_url: Option<&str>, origin: Option<OriginView>) -> MotherJob {
+        MotherJob {
+            id: id.into(),
+            pr_url: pr_url.map(str::to_owned),
+            nostromo: origin.map(|origin| JobAnnotation {
+                origin,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn focus_job(id: &str, tag: &str) -> MotherJob {
+        job_with(id, Some(URL), Some(origin(OriginKind::Focus, Some(tag), None)))
+    }
+
+    fn focuses(tags: &[&str]) -> Vec<OpenFocus> {
+        tags.iter()
+            .map(|t| OpenFocus {
+                tag: (*t).into(),
+                name: format!("{t} now"),
+            })
+            .collect()
+    }
+
+    fn copy(repo: &str, branch: &str) -> WorkingCopy {
+        WorkingCopy {
+            repo: Some(repo.into()),
+            branch: Some(branch.into()),
+        }
+    }
+
+    fn resolve_with(
+        jobs: &[MotherJob],
+        open: &[&str],
+        copies: &[(&str, WorkingCopy)],
+        head: Option<&str>,
+    ) -> Owner {
+        let copies: HashMap<String, WorkingCopy> = copies
+            .iter()
+            .map(|(t, c)| ((*t).to_owned(), c.clone()))
+            .collect();
+        resolve(&key(), head, jobs, &focuses(open), &copies, &HashMap::new())
+    }
+
+    fn tags(o: &Owner) -> Vec<&str> {
+        let mut t: Vec<&str> = o.candidates.iter().map(|c| c.tag.as_str()).collect();
+        t.sort();
+        t
+    }
+
+    // ── a Mother job ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_vouched_mother_job_for_this_pr_makes_its_focus_the_owner() {
+        let o = resolve_with(&[focus_job("job-1", "alpha")], &["alpha"], &[], Some("feat"));
+        assert_eq!(o.kind, OwnerKind::MotherJob);
+        assert_eq!(o.tag.as_deref(), Some("alpha"));
+        assert_eq!(o.name.as_deref(), Some("alpha now"), "the focus's current name");
+        assert_eq!(o.job_id.as_deref(), Some("job-1"));
+        assert_eq!(o.via, Some(Via::MotherJob));
+        assert!(o.candidates.is_empty());
+    }
+
+    #[test]
+    fn the_pr_url_is_matched_by_repo_and_number_without_regard_to_case_or_sub_page() {
+        for url in [
+            "https://github.com/carefeed/APP/pull/7",
+            "https://github.com/Carefeed/app/pull/7/files",
+            "https://github.com/Carefeed/app/pull/7?x=1#frag",
+        ] {
+            let j = job_with("j", Some(url), Some(origin(OriginKind::Focus, Some("alpha"), None)));
+            assert_eq!(
+                resolve_with(&[j], &["alpha"], &[], None).kind,
+                OwnerKind::MotherJob,
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_job_for_another_pr_or_with_no_pr_is_no_evidence() {
+        for url in [
+            Some("https://github.com/Carefeed/app/pull/8"),
+            Some("https://github.com/Carefeed/other/pull/7"),
+            Some("https://github.com/thehammer/app/pull/7"),
+            Some("not a url"),
+            None,
+        ] {
+            let j = job_with("j", url, Some(origin(OriginKind::Focus, Some("alpha"), None)));
+            assert_eq!(
+                resolve_with(&[j], &["alpha"], &[], None).kind,
+                OwnerKind::Unknown,
+                "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_jobs_from_two_focuses_make_the_pr_ambiguous_naming_both() {
+        let o = resolve_with(
+            &[focus_job("j1", "alpha"), focus_job("j2", "beta")],
+            &["alpha", "beta"],
+            &[],
+            None,
+        );
+        assert_eq!(o.kind, OwnerKind::Ambiguous);
+        assert_eq!(tags(&o), vec!["alpha", "beta"]);
+        assert!(o.tag.is_none() && o.name.is_none() && o.job_id.is_none() && o.via.is_none());
+    }
+
+    #[test]
+    fn two_jobs_from_one_focus_are_one_owner() {
+        let o = resolve_with(
+            &[focus_job("j1", "alpha"), focus_job("j2", "alpha")],
+            &["alpha"],
+            &[],
+            None,
+        );
+        assert_eq!(o.kind, OwnerKind::MotherJob);
+        assert_eq!(o.tag.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn the_newest_job_of_a_focus_is_the_one_named() {
+        use chrono::TimeZone;
+        let mut old = focus_job("old", "alpha");
+        old.created_at = Some(chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
+        let mut new = focus_job("new", "alpha");
+        new.created_at = Some(chrono::Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap());
+        for jobs in [[old.clone(), new.clone()], [new.clone(), old.clone()]] {
+            let o = resolve_with(&jobs, &["alpha"], &[], None);
+            assert_eq!(o.job_id.as_deref(), Some("new"));
+        }
+    }
+
+    // ── origins that are not owners ───────────────────────────────────────
+
+    #[test]
+    fn unverified_you_and_unknown_origins_are_never_owners() {
+        for kind in [OriginKind::Unverified, OriginKind::You, OriginKind::Unknown] {
+            let j = job_with("j", Some(URL), Some(origin(kind, Some("alpha"), None)));
+            let o = resolve_with(&[j], &["alpha"], &[], None);
+            assert_eq!(o.kind, OwnerKind::Unknown, "{kind:?}");
+            assert!(o.tag.is_none() && o.candidates.is_empty(), "{kind:?}: {o:?}");
+        }
+    }
+
+    #[test]
+    fn a_job_with_no_daemon_annotation_or_no_tag_is_not_an_owner() {
+        let none = job_with("j", Some(URL), None);
+        assert_eq!(resolve_with(&[none], &["alpha"], &[], None).kind, OwnerKind::Unknown);
+        let no_tag = job_with("j", Some(URL), Some(origin(OriginKind::Focus, None, None)));
+        assert_eq!(resolve_with(&[no_tag], &["alpha"], &[], None).kind, OwnerKind::Unknown);
+    }
+
+    #[test]
+    fn an_unvouched_job_does_not_stop_a_focus_on_the_branch_from_being_the_owner() {
+        let j = job_with("j", Some(URL), Some(origin(OriginKind::Unverified, Some("alpha"), None)));
+        let o = resolve_with(&[j], &["beta"], &[("beta", copy(REPO, "feat"))], Some("feat"));
+        assert_eq!(o.kind, OwnerKind::OnBranch);
+        assert_eq!(o.tag.as_deref(), Some("beta"));
+    }
+
+    // ── an owner that has closed ──────────────────────────────────────────
+
+    #[test]
+    fn a_closed_owner_with_no_open_candidate_is_closed_naming_via_tag_and_name() {
+        let j = job_with(
+            "job-9",
+            Some(URL),
+            Some(origin(OriginKind::Focus, Some("gone"), Some(true))),
+        );
+        let o = resolve_with(&[j], &["alpha"], &[], Some("feat"));
+        assert_eq!(o.kind, OwnerKind::Closed);
+        assert_eq!(o.via, Some(Via::MotherJob));
+        assert_eq!(o.tag.as_deref(), Some("gone"));
+        assert_eq!(o.name.as_deref(), Some("gone now"));
+        assert_eq!(o.job_id.as_deref(), Some("job-9"));
+        assert!(o.candidates.is_empty());
+    }
+
+    #[test]
+    fn a_closed_owner_falls_back_to_the_name_it_had_when_the_job_was_queued() {
+        let mut ov = origin(OriginKind::Focus, Some("gone"), Some(true));
+        ov.focus_name = None;
+        let o = resolve_with(&[job_with("j", Some(URL), Some(ov))], &[], &[], None);
+        assert_eq!(o.kind, OwnerKind::Closed);
+        assert_eq!(o.name.as_deref(), Some("gone (then)"));
+    }
+
+    #[test]
+    fn a_closed_owner_with_an_open_focus_on_the_branch_is_ambiguous() {
+        let j = job_with("j", Some(URL), Some(origin(OriginKind::Focus, Some("gone"), Some(true))));
+        let o = resolve_with(&[j], &["beta"], &[("beta", copy(REPO, "feat"))], Some("feat"));
+        assert_eq!(o.kind, OwnerKind::Ambiguous);
+        assert_eq!(tags(&o), vec!["beta", "gone"]);
+    }
+
+    // ── on the branch ─────────────────────────────────────────────────────
+
+    #[test]
+    fn an_open_owner_and_a_different_focus_on_the_branch_are_ambiguous() {
+        let o = resolve_with(
+            &[focus_job("j", "alpha")],
+            &["alpha", "beta"],
+            &[("beta", copy(REPO, "feat"))],
+            Some("feat"),
+        );
+        assert_eq!(o.kind, OwnerKind::Ambiguous);
+        assert_eq!(tags(&o), vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn the_owner_itself_being_on_the_branch_is_still_one_owner() {
+        let o = resolve_with(
+            &[focus_job("j", "alpha")],
+            &["alpha"],
+            &[("alpha", copy(REPO, "feat"))],
+            Some("feat"),
+        );
+        assert_eq!(o.kind, OwnerKind::MotherJob);
+        assert_eq!(o.tag.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn with_no_mother_owner_one_focus_on_the_branch_is_on_branch() {
+        let o = resolve_with(
+            &[],
+            &["alpha", "beta"],
+            &[("alpha", copy(REPO, "feat")), ("beta", copy(REPO, "other"))],
+            Some("feat"),
+        );
+        assert_eq!(o.kind, OwnerKind::OnBranch);
+        assert_eq!(o.tag.as_deref(), Some("alpha"));
+        assert_eq!(o.name.as_deref(), Some("alpha now"));
+        assert_eq!(o.via, Some(Via::OnBranch));
+        assert!(o.job_id.is_none() && o.candidates.is_empty());
+    }
+
+    #[test]
+    fn two_or_more_focuses_on_the_branch_are_ambiguous() {
+        let o = resolve_with(
+            &[],
+            &["alpha", "beta", "gamma"],
+            &[
+                ("alpha", copy(REPO, "feat")),
+                ("beta", copy(REPO, "feat")),
+                ("gamma", copy(REPO, "feat")),
+            ],
+            Some("feat"),
+        );
+        assert_eq!(o.kind, OwnerKind::Ambiguous);
+        assert_eq!(tags(&o), vec!["alpha", "beta", "gamma"]);
+        assert!(o.candidates.iter().all(|c| c.via == Via::OnBranch && c.job_id.is_none()));
+    }
+
+    #[test]
+    fn nothing_to_go_on_is_unknown() {
+        assert_eq!(resolve_with(&[], &["alpha"], &[], Some("feat")).kind, OwnerKind::Unknown);
+        assert_eq!(resolve_with(&[], &[], &[], None).kind, OwnerKind::Unknown);
+    }
+
+    #[test]
+    fn a_working_copy_must_match_both_the_repo_and_the_branch() {
+        for c in [
+            copy("carefeed/other", "feat"),
+            copy(REPO, "other-branch"),
+            WorkingCopy { repo: Some(REPO.into()), branch: None },
+            WorkingCopy { repo: None, branch: Some("feat".into()) },
+            WorkingCopy::default(),
+        ] {
+            let o = resolve_with(&[], &["alpha"], &[("alpha", c.clone())], Some("feat"));
+            assert_eq!(o.kind, OwnerKind::Unknown, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn a_focus_that_is_not_open_is_not_on_any_branch() {
+        let o = resolve_with(&[], &[], &[("alpha", copy(REPO, "feat"))], Some("feat"));
+        assert_eq!(o.kind, OwnerKind::Unknown);
+    }
+
+    #[test]
+    fn without_a_known_head_branch_no_focus_is_on_it() {
+        let o = resolve_with(&[], &["alpha"], &[("alpha", copy(REPO, "feat"))], None);
+        assert_eq!(o.kind, OwnerKind::Unknown);
+    }
+
+    // ── a user's link (slice 3) ───────────────────────────────────────────
+
+    #[test]
+    fn a_link_owns_the_pr_when_no_job_does_and_a_job_outranks_a_link_to_the_same_focus() {
+        let mut links = HashMap::new();
+        links.insert(
+            key(),
+            Link {
+                tag: "alpha".into(),
+                name: "Alpha".into(),
+                open: true,
+            },
+        );
+        let o = resolve(&key(), None, &[], &focuses(&["alpha"]), &HashMap::new(), &links);
+        assert_eq!((o.kind, o.via), (OwnerKind::Linked, Some(Via::Linked)));
+        assert_eq!(o.tag.as_deref(), Some("alpha"));
+
+        let o = resolve(
+            &key(),
+            None,
+            &[focus_job("j", "alpha")],
+            &focuses(&["alpha"]),
+            &HashMap::new(),
+            &links,
+        );
+        assert_eq!(o.kind, OwnerKind::MotherJob);
+
+        let o = resolve(
+            &key(),
+            None,
+            &[focus_job("j", "beta")],
+            &focuses(&["alpha", "beta"]),
+            &HashMap::new(),
+            &links,
+        );
+        assert_eq!(o.kind, OwnerKind::Ambiguous, "a job and a link to different focuses");
+        assert_eq!(tags(&o), vec!["alpha", "beta"]);
+    }
+
+    // ── bounds ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn candidates_are_capped_at_eight() {
+        let names: Vec<String> = (0..20).map(|i| format!("f{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let copies: Vec<(&str, WorkingCopy)> =
+            refs.iter().map(|t| (*t, copy(REPO, "feat"))).collect();
+        let o = resolve_with(&[], &refs, &copies, Some("feat"));
+        assert_eq!(o.kind, OwnerKind::Ambiguous);
+        assert_eq!(o.candidates.len(), MAX_CANDIDATES);
+
+        let jobs: Vec<MotherJob> = refs
+            .iter()
+            .map(|t| focus_job(&format!("job-{t}"), t))
+            .collect();
+        let o = resolve_with(&jobs, &refs, &[], None);
+        assert_eq!(o.kind, OwnerKind::Ambiguous);
+        assert_eq!(o.candidates.len(), MAX_CANDIDATES);
+    }
+
+    #[test]
+    fn a_focus_name_is_one_line_and_bounded() {
+        let mut ov = origin(OriginKind::Focus, Some("alpha"), None);
+        ov.focus_name = Some(format!("line one\nline two\u{1b}[31m {}", "n".repeat(500)));
+        let o = resolve_with(&[job_with("j", Some(URL), Some(ov))], &["alpha"], &[], None);
+        let name = o.name.expect("a name");
+        assert!(name.chars().count() <= MAX_NAME, "{}", name.chars().count());
+        assert!(!name.chars().any(|c| c.is_control()), "{name:?}");
+    }
+}

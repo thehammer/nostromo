@@ -305,3 +305,141 @@ pub fn valid_repo(s: &str) -> bool {
         None => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The wire vocabulary: what a login or a repo may look like, the display
+    //! order of groups, and the words each state is spelled with.
+
+    use super::*;
+
+    #[test]
+    fn a_login_is_one_to_thirty_nine_alphanumerics_or_hyphens_with_an_optional_bot_suffix() {
+        let re = regex::Regex::new(r"^[A-Za-z0-9-]{1,39}(\[bot\])?$").unwrap();
+        let long_ok = "a".repeat(39);
+        let too_long = "a".repeat(40);
+        let corpus = [
+            "alice",
+            "Alice-Bob-9",
+            "-",
+            "a",
+            long_ok.as_str(),
+            too_long.as_str(),
+            "dependabot[bot]",
+            "[bot]",
+            "x[bot][bot]",
+            "bot[bot]x",
+            "",
+            " alice",
+            "alice ",
+            "ali ce",
+            "alice\n",
+            "ali_ce",
+            "ali.ce",
+            "alicé",
+            "../etc",
+            "a/b",
+            "<script>",
+            "alice[BOT]",
+            "alice[bot",
+        ];
+        for s in corpus {
+            assert_eq!(valid_login(s), re.is_match(s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn a_segment_is_a_safe_owner_or_repo_name() {
+        assert!(safe_segment("app"));
+        assert!(safe_segment("my-repo_2.0"));
+        assert!(safe_segment(&"a".repeat(100)));
+        assert!(!safe_segment(&"a".repeat(101)));
+        for bad in ["", ".", "..", "a b", "a/b", "a\\b", "a?b", "a#b", "a%2fb", "a\n", "é", "a:b", "a\"b", "a{b}"] {
+            assert!(!safe_segment(bad), "{bad:?}");
+        }
+        assert!(safe_segment("..a"), "only exactly `..` is a climb");
+    }
+
+    #[test]
+    fn a_repo_is_owner_slash_name_with_both_parts_safe() {
+        assert!(valid_repo("Carefeed/admin-portal"));
+        assert!(valid_repo("thehammer/nostromo"));
+        for bad in ["", "owner", "owner/", "/name", "a/b/c", "a b/c", "o/..", "../n", "o/n\"){", "o/n\n"] {
+            assert!(!valid_repo(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn groups_display_as_needs_you_then_ready_then_waiting_then_drafts() {
+        let mut groups = vec![Group::Draft, Group::Waiting, Group::Ready, Group::NeedsYou];
+        groups.sort_by_key(|g| g.rank());
+        assert_eq!(
+            groups,
+            vec![Group::NeedsYou, Group::Ready, Group::Waiting, Group::Draft]
+        );
+    }
+
+    #[test]
+    fn states_are_spelled_in_snake_case_on_the_wire() {
+        fn word<T: Serialize>(v: T) -> String {
+            serde_json::to_value(v).unwrap().as_str().unwrap().to_owned()
+        }
+        assert_eq!(word(Group::NeedsYou), "needs_you");
+        assert_eq!(word(Group::Draft), "draft");
+        assert_eq!(word(Lifecycle::Merged), "merged");
+        assert_eq!(word(ChecksState::Failing), "failing");
+        assert_eq!(word(ReviewState::ChangesRequested), "changes_requested");
+        assert_eq!(word(ReviewState::ReviewRequested), "review_requested");
+        assert_eq!(word(OwnerKind::MotherJob), "mother_job");
+        assert_eq!(word(OwnerKind::OnBranch), "on_branch");
+        assert_eq!(word(Via::MotherJob), "mother_job");
+        assert_eq!(word(RelayState::CatchingUp), "catching_up");
+        assert_eq!(word(RelayState::NotConfigured), "not_configured");
+        assert_eq!(word(PollState::RateLimited), "rate_limited");
+        assert_eq!(word(TokenState::Rejected), "rejected");
+        assert_eq!(word(RefreshBlocked::RateLimited), "rate_limited");
+    }
+
+    #[test]
+    fn optional_fields_are_absent_not_null_when_empty() {
+        let pr = AuthoredPr {
+            repo: "o/n".into(),
+            number: 1,
+            url: "https://github.com/o/n/pull/1".into(),
+            title: "t".into(),
+            draft: false,
+            updated_at: chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+            group: Group::Waiting,
+            lifecycle: Lifecycle::Open,
+            ended_at: None,
+            base_ref: None,
+            details_unavailable: false,
+            checks: Checks::none(),
+            review: Review::none(),
+            new_comments: 0,
+            unresolved_threads: 0,
+            threads_truncated: false,
+            owner: Owner::unknown(),
+        };
+        let v = serde_json::to_value(&pr).unwrap();
+        let obj = v.as_object().unwrap();
+        for absent in ["ended_at", "base_ref", "details_unavailable", "threads_truncated"] {
+            assert!(!obj.contains_key(absent), "{absent} should be absent: {v}");
+        }
+        assert!(!obj["checks"].as_object().unwrap().contains_key("failing_names"));
+        assert!(!obj["review"].as_object().unwrap().contains_key("logins"));
+        assert_eq!(obj["owner"], serde_json::json!({"kind": "unknown"}));
+        // The head branch and SHA are not a field of the row at all.
+        assert!(!v.to_string().contains("head"), "{v}");
+    }
+
+    #[test]
+    fn the_limits_are_the_documented_ones() {
+        assert_eq!(MAX_PRS, 100);
+        assert_eq!(MAX_TITLE, 300);
+        assert_eq!(MAX_CANDIDATES, 8);
+        assert_eq!(MAX_LOGINS, 10);
+        assert_eq!(MAX_NEW_COMMENTS, 999);
+        assert_eq!(MAX_FAILING_NAMES, 20);
+    }
+}
