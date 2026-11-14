@@ -18,9 +18,7 @@ use serde_json::{json, Value};
 
 use nostromo::tracker::changelog::{MAX_CURSOR_SESSIONS, MAX_ENTRIES};
 use nostromo::tracker::format::serialise_item;
-use nostromo::tracker::ops::{
-    LinkInput, MAX_BOARD_BYTES, MAX_ITEMS, MAX_TITLE_CHARS,
-};
+use nostromo::tracker::ops::{LinkInput, MAX_BOARD_BYTES, MAX_ITEMS, MAX_TITLE_CHARS};
 use nostromo::tracker::view::{self, ViewNode};
 use nostromo::tracker::{
     apply_batch, apply_to_file, compact_full, delta_entries, diff, merge_external, parse,

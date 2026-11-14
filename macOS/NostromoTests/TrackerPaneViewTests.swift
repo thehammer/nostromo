@@ -622,11 +622,17 @@ final class TrackerPaneViewTests: MouseQueueTestCase {
 
         let clipWidth = rig.pane.clipView.bounds.width
         XCTAssertGreaterThan(clipWidth, 100)
-        let longView = try XCTUnwrap(rig.rowView("item:check-1000"))
         let shortView = try XCTUnwrap(rig.rowView("item:verif-1037"))
-        let textView = try XCTUnwrap(longView.textViews.first)
         let oneLine = try XCTUnwrap(shortView.textViews.first).frame.height
         XCTAssertGreaterThan(oneLine, 0)
+        // Collapsed, the title is one line; the rest of the text wraps once the item is opened.
+        let collapsedTitle = try XCTUnwrap(rig.rowView("item:check-1000")?.textViews.first)
+        XCTAssertEqual(collapsedTitle.frame.height, oneLine, accuracy: 0.5, "the title is a single line")
+        rig.pane.toggleNote(item: "check-1000")
+        rig.settle()
+        let longView = try XCTUnwrap(rig.rowView("item:check-1000"))
+        XCTAssertEqual(longView.textViews.count, 2, "the title and the rest of the text")
+        let textView = try XCTUnwrap(longView.textViews.last)
         XCTAssertGreaterThanOrEqual(textView.frame.height, oneLine * 4, "500 characters wrap to several lines")
         XCTAssertLessThanOrEqual(textView.frame.maxX, clipWidth + 0.5, "the text stays inside the pane's width")
         XCTAssertLessThanOrEqual(longView.frame.width, clipWidth + 0.5)
@@ -1547,7 +1553,7 @@ final class TrackerRowLayoutTests: MouseQueueTestCase {
                                     file: file, line: line)
 
         // (b) the row stays about as tall as the same text without chips.
-        XCTAssertGreaterThan(s.plain.frame.height, 2 * 17, "\(label): setup: the 100 characters wrap", file: file, line: line)
+        XCTAssertLessThanOrEqual(s.plain.frame.height, 2 * 17, "\(label): setup: the 100 characters show as a one-line title", file: file, line: line)
         // Beside the text a chip narrows it to its minimum column, which wraps a few more lines; below
         // it the chip line is one more line. Either way a bounded amount (the 1 pt collapse was > 1,000 pt).
         XCTAssertLessThanOrEqual(row.frame.height, s.plain.frame.height + 60,
@@ -1912,16 +1918,22 @@ final class TrackerHostileTextTests: MouseQueueTestCase {
         rig.push(script)
 
         for (id, hostile) in zip(ids, cases) {
+            // A long text is cut into a title and the rest: open it to see the whole.
+            if hostile.payload.count > TrackerTitle.maxChars {
+                rig.pane.toggleNote(item: id)
+                rig.settle()
+            }
             let row = try XCTUnwrap(rig.rowView("item:\(id)"))
-            let text = try XCTUnwrap(row.textViews.first)
+            let text = try XCTUnwrap(row.textViews.last)
+            let shown = row.textViews.map(\.string).joined(separator: " ")
             // Never print the payload (long_10k is 10 kB): names and counts only.
-            XCTAssertTrue(letters(text.string) == letters(hostile.payload), "\(hostile.name): every visible letter is shown, in order")
+            XCTAssertTrue(letters(shown) == letters(hostile.payload), "\(hostile.name): every visible letter is shown, in order")
             assertNoLinks(in: row, hostile.name)
             XCTAssertFalse(rig.pane.scrollView.hasHorizontalScroller, "\(hostile.name): no horizontal scroller")
             XCTAssertEqual(row.frame.width, rig.pane.clipView.bounds.width, accuracy: 0.5, "\(hostile.name): the row is the pane's width")
             XCTAssertLessThanOrEqual(text.frame.maxX, row.bounds.width + 0.5, "\(hostile.name): the text stays inside the row")
             if hostile.name == "long_10k" {
-                XCTAssertEqual(text.string.count, hostile.payload.count, "long_10k: shown whole, wrapped")
+                XCTAssertEqual(row.textViews.count, 2, "long_10k: a one-line title and the rest")
                 XCTAssertGreaterThan(text.frame.height, 17 * 20, "long_10k: it wraps over many lines")
             }
         }
@@ -1988,8 +2000,10 @@ final class TrackerHostileTextTests: MouseQueueTestCase {
         }
         rig.push(script)
 
+        rig.pane.toggleNote(item: "verif-1037")
+        rig.settle()
         let row = try XCTUnwrap(rig.rowView("item:verif-1037"))
-        XCTAssertNotNil(row.proseView, "setup: the short note is shown, with its own text views")
+        XCTAssertNotNil(row.proseView, "setup: the note, opened, is shown with its own text views")
         XCTAssertGreaterThanOrEqual(row.allTextViews.count, 1, "setup: the item text is a text view")
         // T6: link texts are chips. A chip is a click target, so what it opens is checked here: a plain
         // https URL opens in the browser (the app's injected opener, never run in this test), and a

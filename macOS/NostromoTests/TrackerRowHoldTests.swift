@@ -345,7 +345,9 @@ final class TrackerRowHoldTests: XCTestCase {
         XCTAssertEqual(row.row.item?.isExpanded, false, "\(message): the row's note is collapsed", file: file, line: line)
         XCTAssertEqual(row.row.item?.isFoldable, true, "\(message): the note still collapses", file: file, line: line)
         XCTAssertNil(row.proseView, "\(message): no prose is laid out for a collapsed note", file: file, line: line)
-        XCTAssertTrue(row.visibleText.contains(Hold.firstNoteMarker), "\(message): the first line shows: \(row.visibleText)",
+        XCTAssertFalse(row.visibleText.contains(Hold.firstNoteMarker), "\(message): the note is under the fold: \(row.visibleText)",
+                       file: file, line: line)
+        XCTAssertTrue(row.visibleText.contains(Hold.targetText), "\(message): the title shows: \(row.visibleText)",
                       file: file, line: line)
         XCTAssertEqual(Fx.disclosure(in: row).map { Fx.label(of: $0) }, "more", "\(message): the disclosure offers more",
                        file: file, line: line)
@@ -482,13 +484,14 @@ final class TrackerRowHoldTests: XCTestCase {
         assertExpanded(rig, "more with the item's text selected")
     }
 
-    func testMoreExpandsTheNoteWhileTheCollapsedNotesFirstLineIsSelected() throws {
+    func testACollapsedRowHasNoNoteTextToSelectAndMoreStillExpandsIt() throws {
         let rig = makeScene().rig
-        try select(.noteText, rig)
+        let row = try XCTUnwrap(Fx.itemRow(Hold.target, in: rig.pane))
+        XCTAssertNil(Fx.textView(.noteText, in: row), "the note is under the fold: nothing of it is selectable")
 
         click("more", onRow: Fx.targetKey, rig)
 
-        assertExpanded(rig, "more with the note's first line selected")
+        assertExpanded(rig, "more on a collapsed row")
     }
 
     func testLessCollapsesTheNoteOfARowHeldForASelectionAfterTheBoardMovedTheItemToDoneToday() throws {

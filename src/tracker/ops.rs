@@ -87,6 +87,7 @@ pub struct Upsert {
 /// One operation. Deserialises from the tool's `{"op": "status", ...}` shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // Upsert carries every optional field; ops are short-lived
 pub enum Op {
     Upsert(Upsert),
     Status {
