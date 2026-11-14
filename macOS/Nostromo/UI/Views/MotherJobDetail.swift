@@ -1153,6 +1153,7 @@ final class MotherJobDetail: NSView {
             replyTextView.string = ""
         }
         updateCrewSection(job)
+        refreshDependencies()
 
         let pairs = metaPairs(for: job)
         if pairs != shownMeta {
