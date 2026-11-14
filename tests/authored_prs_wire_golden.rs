@@ -147,12 +147,14 @@ fn snapshot() -> AuthoredPrsSnapshot {
                 name: "Alpha".into(),
                 via: Via::MotherJob,
                 job_id: Some("job-3".into()),
+                closed: false,
             },
             Candidate {
                 tag: "focus-beta".into(),
                 name: "Beta".into(),
                 via: Via::OnBranch,
                 job_id: None,
+                closed: false,
             },
         ],
     };

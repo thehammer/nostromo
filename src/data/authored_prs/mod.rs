@@ -16,6 +16,7 @@ pub mod classify;
 mod engine;
 pub mod github;
 pub mod ownership;
+mod safe_read;
 pub mod snapshot;
 pub mod usage;
 pub mod working_copy;
@@ -41,8 +42,21 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
+/// The real wall clock. Production uses this one: unlike [`TokioClock`] it keeps
+/// up when the Mac sleeps (a monotonic clock stops), so `generated_at`,
+/// `checked_at`, `retry_at`, `resumes_at` and the rate-limit reset comparison
+/// stay true.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 /// Wall time anchored at construction and advanced by tokio's clock, so it
-/// follows `tokio::time::pause` and `advance` in a test and is real time otherwise.
+/// follows `tokio::time::pause` and `advance` in a test. Tests only: it stops
+/// while the Mac sleeps.
 pub struct TokioClock {
     wall: DateTime<Utc>,
     mono: Instant,
@@ -145,6 +159,9 @@ pub struct FocusInfo {
 /// Lists the open focuses. Built from the session manager in `nostromd`.
 pub type FocusProvider = Arc<dyn Fn() -> Vec<FocusInfo> + Send + Sync>;
 
+/// Looks for a GitHub token again (reads files); `None` when there is still none.
+pub type TokenResolver = Arc<dyn Fn() -> Option<GithubClient> + Send + Sync>;
+
 /// Everything the engine reads, all injectable: no network, no home directory.
 pub struct Deps {
     /// `https://api.github.com` in production; a local mock in a test. A
@@ -153,6 +170,10 @@ pub struct Deps {
     /// `None` when no token could be resolved: the feature then runs in
     /// `token: missing` and makes no request.
     pub github: Option<GithubClient>,
+    /// Re-checked (at most every five minutes, only while someone watches) when
+    /// `github` is `None`, so a token that appears later is picked up without
+    /// a restart.
+    pub token_resolver: Option<TokenResolver>,
     pub relay_status: Arc<RelayStatus>,
     /// `relay_url` and `relay_token` are both configured.
     pub relay_configured: bool,

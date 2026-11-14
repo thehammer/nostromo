@@ -696,6 +696,7 @@ impl Rig {
         let handle = AuthoredPrsSource::spawn(Deps {
             api_base: server.uri(),
             github,
+            token_resolver: None,
             relay_status: Arc::clone(&relay_status),
             relay_configured: opts.relay,
             relay_rx: Some(relay_rx),

@@ -2548,7 +2548,6 @@ impl SessionManager {
         self.notice_engine = Some(engine);
     }
 
-    /// The Mother notice engine, when the daemon wired one in.
     /// Switch the authored-PR list on: advertise it, and route its verbs here.
     pub fn configure_authored_prs(&mut self, board: Arc<crate::data::authored_prs::DemandBoard>) {
         self.authored_prs = Some(board);
@@ -2559,6 +2558,7 @@ impl SessionManager {
         self.authored_prs.clone()
     }
 
+    /// The Mother notice engine, when the daemon wired one in.
     pub fn notice_engine(&self) -> Option<Arc<crate::mother::notices::NoticeEngine>> {
         self.notice_engine.clone()
     }

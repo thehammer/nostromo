@@ -109,6 +109,7 @@ fn candidate(c: &Claim) -> Candidate {
         name: c.name.clone(),
         via: c.via,
         job_id: c.job_id.clone(),
+        closed: !c.open,
     }
 }
 
@@ -148,7 +149,10 @@ pub fn resolve(
         }
     }
 
-    // Open focuses working on this repo and branch.
+    // Open focuses working on this repo and branch. `on_branch` compares the
+    // PR's head *branch name* only: a PR from a fork never matches, because its
+    // branch is not in any checkout of the base repo (a fork's `feat` is not
+    // the base repo's `feat`, and a branch named alike must not claim it).
     let on_branch: Vec<Claim> = match head_ref {
         Some(branch) => focuses
             .iter()

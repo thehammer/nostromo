@@ -12,15 +12,16 @@ use tracing::{debug, info, warn};
 
 use super::budget::{
     error_backoff, Bucket, Demand, Posture, RateState, LINGER, MIN_SEARCH_GAP, RELAY_COALESCE,
-    TOKEN_RETRY,
+    TOKEN_EARLY_RETRY, TOKEN_RETRY,
 };
 use super::classify::{classify, group_of, Classified, RawPr};
 use super::github::{Api, ApiError, Failure, Meta, SearchItem, SearchPage, Target, MAX_ALIASES};
-use super::ownership::{self, Link, OpenFocus, PrKey};
+use super::ownership::{self, Link, OpenFocus, PrKey, WorkingCopy};
 use super::snapshot::*;
 use super::usage::{Record, UsageLog};
 use super::working_copy::{SessionRef, WorkingCopies};
-use super::{Clock, DemandInputs, Deps, FocusProvider};
+use super::{Clock, DemandInputs, Deps, FocusInfo, FocusProvider, TokenResolver};
+use crate::data::github_client::GithubClient;
 use crate::data::relay_client::{QueueSignal, RelayEvent, RelayStatus};
 use crate::data::work::untrusted::one_line;
 use crate::mother::MotherJob;
@@ -33,6 +34,9 @@ const DEBOUNCE: Duration = Duration::from_millis(250);
 const REFRESH_BLOCK_SHOWN: Duration = Duration::from_secs(10);
 /// Ownership (working copies) is looked at this often while someone watches.
 const OWNERSHIP_EVERY: Duration = Duration::from_secs(30);
+/// The usage line (counts only) is logged this long after start, so a
+/// post-install check sees it, and then every [`USAGE_LOG_EVERY`].
+const USAGE_LOG_FIRST: Duration = Duration::from_secs(60);
 const USAGE_LOG_EVERY: Duration = Duration::from_secs(3600);
 const ORG_LOOKUPS_PER_DAY: usize = 5;
 const DAY: Duration = Duration::from_secs(24 * 3600);
@@ -76,6 +80,7 @@ enum Source {
 
 pub(super) struct Engine {
     api: Option<Api>,
+    api_base: String,
     clock: Arc<dyn Clock>,
     relay_status: Arc<RelayStatus>,
     relay_configured: bool,
@@ -113,11 +118,19 @@ pub(super) struct Engine {
 
     token: TokenState,
     token_retry: Option<Instant>,
+    /// When the token was last rejected (a 401), for the early-retry bound.
+    token_rejected_at: Option<Instant>,
+    /// Looks for a token again while there is none.
+    resolver: Option<TokenResolver>,
+    last_token_check: Instant,
     error_count: u32,
     last_error: bool,
     retry_at: Option<(Instant, DateTime<Utc>)>,
 
     catching_up: bool,
+    /// A reconnect arrived while a reconcile was running: that reconcile began
+    /// before it, so it must not end the catch-up; run another.
+    reconcile_again: bool,
     refresh_blocked: Option<(RefreshBlocked, Instant)>,
 
     hidden_orgs: BTreeSet<u64>,
@@ -130,6 +143,10 @@ pub(super) struct Engine {
     publish_at: Option<Instant>,
     last_published: Option<AuthoredPrsSnapshot>,
     next_usage_log: Instant,
+}
+
+fn make_api(c: &GithubClient, base: &str) -> Api {
+    Api::new(c.http.clone(), c.token().to_owned(), base.to_owned())
 }
 
 fn key_of(repo: &str, number: u64) -> PrKey {
@@ -145,19 +162,13 @@ impl Engine {
         inputs: DemandInputs,
         out: watch::Sender<Option<AuthoredPrsSnapshot>>,
     ) -> Self {
-        let (api, token) = match deps.github {
-            Some(c) => (
-                Some(Api::new(
-                    c.http.clone(),
-                    c.token().to_owned(),
-                    deps.api_base,
-                )),
-                TokenState::Connected,
-            ),
+        let (api, token) = match &deps.github {
+            Some(c) => (Some(make_api(c, &deps.api_base)), TokenState::Connected),
             None => (None, TokenState::Missing),
         };
         Engine {
             api,
+            api_base: deps.api_base,
             clock: deps.clock,
             relay_status: deps.relay_status,
             relay_configured: deps.relay_configured,
@@ -191,11 +202,15 @@ impl Engine {
             checked_at: None,
             token,
             token_retry: None,
+            token_rejected_at: None,
+            resolver: deps.token_resolver,
+            last_token_check: Instant::now(),
             error_count: 0,
             last_error: false,
             retry_at: None,
             // A relay that is configured has not been reconciled with yet.
             catching_up: deps.relay_configured,
+            reconcile_again: false,
             refresh_blocked: None,
             hidden_orgs: BTreeSet::new(),
             org_names: HashMap::new(),
@@ -205,13 +220,15 @@ impl Engine {
             last_status_poll: None,
             publish_at: None,
             last_published: None,
-            next_usage_log: Instant::now() + USAGE_LOG_EVERY,
+            next_usage_log: Instant::now() + USAGE_LOG_FIRST,
         }
     }
 
     pub(super) async fn run(mut self) {
         self.mark_publish(Instant::now());
         let mut relay_connected = self.relay_status.connected();
+        // A dropped sender makes `changed()` fail at once, every time: stop watching.
+        let mut jobs_open = true;
         loop {
             self.tick().await;
             let wake = self.next_wake();
@@ -226,7 +243,12 @@ impl Engine {
                     Some(QueueSignal::Event(ev)) => self.on_relay_event(&ev),
                     None => self.relay_rx = None,
                 },
-                _ = self.jobs_rx.changed() => self.mark_publish(Instant::now()),
+                changed = self.jobs_rx.changed(), if jobs_open => {
+                    if changed.is_err() {
+                        jobs_open = false;
+                    }
+                    self.mark_publish(Instant::now());
+                }
                 _ = tokio::time::sleep_until(wake) => {}
             }
             let connected = self.relay_status.connected();
@@ -240,8 +262,13 @@ impl Engine {
     // ── inputs ────────────────────────────────────────────────────────────────
 
     fn on_demand_changed(&mut self) {
-        // A change of demand is the one thing that retries a rejected token early.
-        if self.token == TokenState::Rejected {
+        // A change of demand retries a rejected token early, but at most once per
+        // TOKEN_EARLY_RETRY: each retry is a 401 that is never charged.
+        if self.token == TokenState::Rejected
+            && self
+                .token_rejected_at
+                .is_none_or(|t| t.elapsed() >= TOKEN_EARLY_RETRY)
+        {
             self.token = TokenState::Connected;
             self.token_retry = None;
         }
@@ -272,6 +299,9 @@ impl Engine {
         if self.posture.active() && self.stage == Stage::None {
             self.stage = Stage::NeedSearch;
             self.last_full = Some(Instant::now());
+        } else if self.stage == Stage::Draining {
+            // Its search ran before this reconnect.
+            self.reconcile_again = true;
         }
         self.mark_publish(Instant::now());
     }
@@ -395,6 +425,7 @@ impl Engine {
         if posture.active() && !was_active {
             // Leaving idle (or a pause) costs exactly one full reconcile.
             self.stage = Stage::NeedSearch;
+            self.reconcile_again = false;
             self.last_full = Some(now);
             self.last_pending = Some(now);
         }
@@ -414,6 +445,7 @@ impl Engine {
         let now = Instant::now();
         let wall = self.clock.now();
         self.update_posture(now, wall);
+        self.recheck_token(now).await;
 
         if self.refresh_blocked.is_some_and(|(_, until)| now >= until) {
             self.refresh_blocked = None;
@@ -431,7 +463,7 @@ impl Engine {
         if now >= self.next_usage_log {
             self.next_usage_log = now + USAGE_LOG_EVERY;
             let u = self.usage.view(now);
-            debug!(
+            info!(
                 "authored-prs usage: charged={} not_modified={} search={} graphql_points={} relay={} posture={:?}",
                 u.window.charged,
                 u.window.not_modified,
@@ -468,7 +500,34 @@ impl Engine {
 
         if self.publish_at.is_some_and(|t| now >= t) {
             self.publish_at = None;
-            self.publish(now, wall);
+            let (infos, copies) = self.owner_inputs(now).await;
+            self.publish(now, wall, &infos, &copies);
+        }
+    }
+
+    /// With no token, look for one again (at most once per [`TOKEN_EARLY_RETRY`],
+    /// and only while someone watches), on a blocking thread: it reads files.
+    async fn recheck_token(&mut self, now: Instant) {
+        if self.api.is_some()
+            || self.token != TokenState::Missing
+            || *self.demand_rx.borrow() == Demand::Idle
+            || now.saturating_duration_since(self.last_token_check) < TOKEN_EARLY_RETRY
+        {
+            return;
+        }
+        let Some(resolver) = self.resolver.clone() else {
+            return;
+        };
+        self.last_token_check = now;
+        let found = tokio::task::spawn_blocking(move || resolver())
+            .await
+            .ok()
+            .flatten();
+        if let Some(c) = found {
+            info!("authored-prs: a GitHub token is available now");
+            self.api = Some(make_api(&c, &self.api_base));
+            self.token = TokenState::Connected;
+            self.mark_publish(now);
         }
     }
 
@@ -610,6 +669,11 @@ impl Engine {
             return;
         }
         match self.stage {
+            Stage::Draining if self.reconcile_again => {
+                self.reconcile_again = false;
+                self.stage = Stage::NeedSearch;
+                self.last_full = Some(Instant::now());
+            }
             Stage::Draining => {
                 self.stage = Stage::None;
                 self.catching_up = false;
@@ -651,7 +715,9 @@ impl Engine {
     }
 
     fn observe(&mut self, meta: &Meta) {
-        if let Some((res, obs)) = meta.rate {
+        if let Some((res, mut obs)) = meta.rate {
+            // A header's reset is never trusted past an hour from now.
+            obs.reset = obs.reset.min(self.clock.now() + chrono::Duration::hours(1));
             self.rate.observe(res, obs);
         }
         for id in &meta.sso_orgs {
@@ -676,6 +742,7 @@ impl Engine {
             ApiError::Unauthorized => {
                 self.token = TokenState::Rejected;
                 self.token_retry = Some(now + TOKEN_RETRY);
+                self.token_rejected_at = Some(now);
             }
             ApiError::RateLimited { wait } => {
                 let until = match wait {
@@ -1002,7 +1069,9 @@ impl Engine {
             pr.updated_at = updated;
             pr.lifecycle = Lifecycle::Open;
             pr.ended = None;
-            pr.head_ref = Some(raw.head_ref_name.clone()).filter(|s| !s.is_empty());
+            // A fork's branch name never matches a checkout (`on_branch`).
+            pr.head_ref = Some(raw.head_ref_name.clone())
+                .filter(|s| !s.is_empty() && !raw.is_cross_repository);
             pr.head_sha = Some(raw.head_ref_oid.clone()).filter(|s| !s.is_empty());
             pr.detail = Some(classified);
             pr.details_unavailable = false;
@@ -1036,6 +1105,13 @@ impl Engine {
             }
         }
         consider(self.next_usage_log);
+        if self.api.is_none()
+            && self.token == TokenState::Missing
+            && self.resolver.is_some()
+            && *self.demand_rx.borrow() != Demand::Idle
+        {
+            consider(self.last_token_check + TOKEN_EARLY_RETRY);
+        }
         for p in self.prs.values() {
             if let Some((_, at)) = p.ended {
                 consider(at + LINGER);
@@ -1096,7 +1172,8 @@ impl Engine {
     // ── the snapshot ──────────────────────────────────────────────────────────
 
     fn relay_info(&self) -> RelayInfo {
-        let org = self.relay_status.org();
+        // The relay's ack names the org: one line and bounded before it is sent on.
+        let org = one_line(&self.relay_status.org(), MAX_ORG_NAME);
         if !self.relay_configured {
             return RelayInfo {
                 state: RelayState::NotConfigured,
@@ -1149,65 +1226,91 @@ impl Engine {
         }
     }
 
-    fn open_focuses(&self) -> Vec<crate::data::authored_prs::FocusInfo> {
-        (self.focuses)()
-    }
-
-    fn owners(&mut self, now: Instant) -> HashMap<PrKey, Owner> {
-        let jobs = self.jobs_rx.borrow().clone();
-        let infos = self.open_focuses();
-        let focuses: Vec<OpenFocus> = infos
-            .iter()
-            .map(|f| OpenFocus {
-                tag: f.tag.clone(),
-                name: f.name.clone(),
-            })
-            .collect();
+    /// The open focuses and, when some open PR has no Mother owner, their
+    /// working copies. The file reads run on a blocking thread, never on the
+    /// runtime, and with no lock held: the focus provider returns an owned list.
+    async fn owner_inputs(
+        &mut self,
+        now: Instant,
+    ) -> (Vec<FocusInfo>, HashMap<String, WorkingCopy>) {
+        let infos = (self.focuses)();
+        if infos.is_empty() {
+            return (infos, HashMap::new());
+        }
+        let focuses = open_focuses_of(&infos);
         let links: HashMap<PrKey, Link> = HashMap::new();
-        let resolve_all = |copies: &HashMap<String, ownership::WorkingCopy>,
-                           prs: &BTreeMap<PrKey, Pr>| {
-            prs.iter()
-                .map(|(k, p)| {
-                    (
-                        k.clone(),
-                        ownership::resolve(
-                            k,
-                            p.head_ref.as_deref(),
-                            &jobs,
-                            &focuses,
-                            copies,
-                            &links,
-                        ),
-                    )
-                })
-                .collect::<HashMap<_, _>>()
-        };
-        let mut owners = resolve_all(&HashMap::new(), &self.prs);
-        // Working copies are read only while some open PR has no Mother owner.
+        let jobs = self.jobs_rx.borrow().clone();
         let needs_copies = self.prs.iter().any(|(k, p)| {
             p.lifecycle == Lifecycle::Open
-                && owners
-                    .get(k)
-                    .is_some_and(|o| matches!(o.kind, OwnerKind::Unknown | OwnerKind::Ambiguous))
+                && matches!(
+                    ownership::resolve(
+                        k,
+                        p.head_ref.as_deref(),
+                        &jobs,
+                        &focuses,
+                        &HashMap::new(),
+                        &links
+                    )
+                    .kind,
+                    OwnerKind::Unknown | OwnerKind::Ambiguous
+                )
         });
-        if needs_copies && !infos.is_empty() {
-            let sessions: Vec<SessionRef> = infos
-                .iter()
-                .map(|f| SessionRef {
-                    tag: f.tag.clone(),
-                    session_id: f.session_id.clone(),
-                    spawn_cwd: f.spawn_cwd.clone(),
-                    project_path: f.project_path.clone(),
-                })
-                .collect();
-            let copies = self.copies.refresh(now, &self.projects_root, &sessions);
-            owners = resolve_all(&copies, &self.prs);
+        if !needs_copies {
+            return (infos, HashMap::new());
         }
-        owners
+        let sessions: Vec<SessionRef> = infos
+            .iter()
+            .map(|f| SessionRef {
+                tag: f.tag.clone(),
+                session_id: f.session_id.clone(),
+                spawn_cwd: f.spawn_cwd.clone(),
+                project_path: f.project_path.clone(),
+            })
+            .collect();
+        let mut copies = std::mem::take(&mut self.copies);
+        let root = self.projects_root.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            let map = copies.refresh(now, &root, &sessions);
+            (copies, map)
+        })
+        .await;
+        match read {
+            Ok((copies, map)) => {
+                self.copies = copies;
+                (infos, map)
+            }
+            // The reader panicked: the cache is gone, the answer is "unknown".
+            Err(_) => (infos, HashMap::new()),
+        }
     }
 
-    fn build(&mut self, now: Instant, wall: DateTime<Utc>) -> AuthoredPrsSnapshot {
-        let owners = self.owners(now);
+    fn owners(
+        &self,
+        infos: &[FocusInfo],
+        copies: &HashMap<String, WorkingCopy>,
+    ) -> HashMap<PrKey, Owner> {
+        let jobs = self.jobs_rx.borrow().clone();
+        let focuses = open_focuses_of(infos);
+        let links: HashMap<PrKey, Link> = HashMap::new();
+        self.prs
+            .iter()
+            .map(|(k, p)| {
+                (
+                    k.clone(),
+                    ownership::resolve(k, p.head_ref.as_deref(), &jobs, &focuses, copies, &links),
+                )
+            })
+            .collect()
+    }
+
+    fn build(
+        &mut self,
+        now: Instant,
+        wall: DateTime<Utc>,
+        infos: &[FocusInfo],
+        copies: &HashMap<String, WorkingCopy>,
+    ) -> AuthoredPrsSnapshot {
+        let owners = self.owners(infos, copies);
         let mut rows: Vec<AuthoredPr> = self
             .prs
             .iter()
@@ -1280,8 +1383,14 @@ impl Engine {
         }
     }
 
-    fn publish(&mut self, now: Instant, wall: DateTime<Utc>) {
-        let snap = self.build(now, wall);
+    fn publish(
+        &mut self,
+        now: Instant,
+        wall: DateTime<Utc>,
+        infos: &[FocusInfo],
+        copies: &HashMap<String, WorkingCopy>,
+    ) {
+        let snap = self.build(now, wall, infos, copies);
         if let Some(last) = &self.last_published {
             let mut same = last.clone();
             same.generated_at = snap.generated_at;
@@ -1292,6 +1401,16 @@ impl Engine {
         self.last_published = Some(snap.clone());
         let _ = self.out.send(Some(snap));
     }
+}
+
+fn open_focuses_of(infos: &[FocusInfo]) -> Vec<OpenFocus> {
+    infos
+        .iter()
+        .map(|f| OpenFocus {
+            tag: f.tag.clone(),
+            name: f.name.clone(),
+        })
+        .collect()
 }
 
 async fn recv_signal(rx: &mut Option<mpsc::UnboundedReceiver<QueueSignal>>) -> Option<QueueSignal> {

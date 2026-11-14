@@ -46,6 +46,10 @@ pub struct RawContext {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RawRollup {
+    /// The rollup's own verdict over *every* check (`SUCCESS`, `FAILURE`,
+    /// `ERROR`, `PENDING`, `EXPECTED`), not just the first page of contexts.
+    #[serde(default)]
+    pub state: Option<String>,
     #[serde(default)]
     pub contexts: Nodes<RawContext>,
 }
@@ -154,6 +158,10 @@ pub struct RawPr {
     pub head_ref_name: String,
     #[serde(default, rename = "headRefOid")]
     pub head_ref_oid: String,
+    /// The head branch lives in a fork. Its name says nothing about the base
+    /// repo's checkouts, so it is never used to find an owner.
+    #[serde(default, rename = "isCrossRepository")]
+    pub is_cross_repository: bool,
     #[serde(default)]
     pub repository: RawRepository,
     #[serde(default)]
@@ -202,6 +210,41 @@ pub fn context_state(c: &RawContext) -> CiState {
     let status = c.status.as_deref().map(str::to_ascii_lowercase);
     let conclusion = c.conclusion.as_deref().map(str::to_ascii_lowercase);
     CiState::from_check(status.as_deref(), conclusion.as_deref())
+}
+
+/// The rollup's own state as a [`ChecksState`] (`None` when it says nothing usable).
+fn rollup_state(state: &str) -> Option<ChecksState> {
+    match state.to_ascii_uppercase().as_str() {
+        "FAILURE" | "ERROR" => Some(ChecksState::Failing),
+        "PENDING" | "EXPECTED" => Some(ChecksState::Pending),
+        "SUCCESS" => Some(ChecksState::Passing),
+        _ => None,
+    }
+}
+
+fn severity(s: ChecksState) -> u8 {
+    match s {
+        ChecksState::Failing => 3,
+        ChecksState::Pending => 2,
+        ChecksState::Passing => 1,
+        _ => 0,
+    }
+}
+
+/// Classify the checks of a rollup. The query reads the first 100 contexts; a
+/// rollup with more (`totalCount` past what came back) is also judged by its own
+/// `state`, so a failing check past the 100th never shows as passing.
+fn classify_rollup(rollup: &RawRollup) -> Checks {
+    let mut checks = classify_checks(&rollup.contexts.nodes);
+    let truncated = rollup.contexts.total_count as usize > rollup.contexts.nodes.len();
+    if truncated {
+        if let Some(rolled) = rollup.state.as_deref().and_then(rollup_state) {
+            if severity(rolled) > severity(checks.state) {
+                checks.state = rolled;
+            }
+        }
+    }
+    checks
 }
 
 pub fn classify_checks(contexts: &[RawContext]) -> Checks {
@@ -386,16 +429,15 @@ pub fn lifecycle_of(pr: &RawPr) -> Lifecycle {
 }
 
 pub fn classify(pr: &RawPr, told: Option<DateTime<Utc>>) -> Classified {
-    let contexts: Vec<RawContext> = pr
+    let checks = pr
         .commits
         .nodes
         .last()
         .and_then(|n| n.commit.status_check_rollup.as_ref())
-        .map(|r| r.contexts.nodes.clone())
-        .unwrap_or_default();
+        .map_or_else(Checks::none, classify_rollup);
     let (unresolved_threads, threads_truncated) = count_unresolved(pr);
     Classified {
-        checks: classify_checks(&contexts),
+        checks,
         review: classify_review(pr),
         new_comments: count_new_comments(pr, told),
         unresolved_threads,

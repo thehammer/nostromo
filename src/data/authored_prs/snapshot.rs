@@ -1,7 +1,7 @@
 //! The wire types of the authored-PR list (`ServerMsg::AuthoredPrs`).
 //!
 //! Every string that came from GitHub is sanitised with `one_line` and bounded
-//! when a row is built ([`crate::data::authored_prs::build_snapshot`]); the
+//! when a row is built (in the engine's `build`); the
 //! types here only carry the result. Kit decodes leniently, so every optional
 //! field is skipped when absent. The in-memory head branch and SHA are not
 //! fields of anything in this file, on purpose: they never reach the wire.
@@ -188,6 +188,10 @@ pub struct Candidate {
     pub via: Via,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
+    /// This candidate's focus has been closed (sent only when true), so the
+    /// list can say which of the candidates can no longer be switched to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

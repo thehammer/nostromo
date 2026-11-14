@@ -6,6 +6,11 @@
 //! process is ever run** (no hooks, no fsmonitor, no spawned process): this
 //! module reads files and nothing else.
 //!
+//! Every `.git` file read is bounded (256 KiB), must be a regular file and is
+//! not followed through a final symlink, so a FIFO named `HEAD` or a `gitdir:`
+//! pointing at a device cannot hang or flood the daemon; the engine also runs the
+//! whole read on a blocking thread.
+//!
 //! Limits, stated plainly because the answer is only ever a hint labelled
 //! `on_branch`: a session that works in another checkout with `git -C` or
 //! absolute paths and never `cd`s there is not seen, and two focuses on one
@@ -19,6 +24,7 @@ use std::time::{Duration, SystemTime};
 use tokio::time::Instant;
 
 use super::ownership::WorkingCopy;
+use super::safe_read::read_small_file;
 use super::snapshot::safe_segment;
 
 /// How much of a transcript's end is read.
@@ -28,7 +34,6 @@ pub const REFRESH_EVERY: Duration = Duration::from_secs(30);
 /// At most this many focuses are looked at per round.
 pub const MAX_FOCUSES: usize = 64;
 const MAX_WALK: usize = 64;
-
 /// Find `<projects_root>/*/<session_id>.jsonl`.
 pub fn find_transcript(projects_root: &Path, session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty()
@@ -129,7 +134,7 @@ fn find_git(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
             return Some((dotgit.clone(), dotgit));
         }
         if dotgit.is_file() {
-            let text = std::fs::read_to_string(&dotgit).ok()?;
+            let text = read_small_file(&dotgit)?;
             let target = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
             let gitdir = {
                 let p = PathBuf::from(target);
@@ -139,8 +144,8 @@ fn find_git(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
                     dir.join(p)
                 }
             };
-            let common = match std::fs::read_to_string(gitdir.join("commondir")) {
-                Ok(c) => {
+            let common = match read_small_file(&gitdir.join("commondir")) {
+                Some(c) => {
                     let p = PathBuf::from(c.trim());
                     if p.is_absolute() {
                         p
@@ -148,7 +153,7 @@ fn find_git(cwd: &Path) -> Option<(PathBuf, PathBuf)> {
                         gitdir.join(p)
                     }
                 }
-                Err(_) => gitdir.clone(),
+                None => gitdir.clone(),
             };
             return Some((gitdir, common));
         }
@@ -164,16 +169,14 @@ pub fn working_copy_at(cwd: &Path) -> WorkingCopy {
     let Some((gitdir, common)) = find_git(cwd) else {
         return WorkingCopy::default();
     };
-    let branch = std::fs::read_to_string(gitdir.join("HEAD"))
-        .ok()
+    let branch = read_small_file(&gitdir.join("HEAD"))
         .and_then(|h| {
             h.trim()
                 .strip_prefix("ref: refs/heads/")
                 .map(|b| b.trim().to_owned())
         })
         .filter(|b| !b.is_empty());
-    let repo = std::fs::read_to_string(common.join("config"))
-        .ok()
+    let repo = read_small_file(&common.join("config"))
         .and_then(|c| origin_url(&c))
         .and_then(|u| parse_remote_url(&u));
     WorkingCopy { repo, branch }

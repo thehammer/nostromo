@@ -694,7 +694,7 @@ where
     let sub_bytes = read_frame(&mut reader).await?;
     let sub: ClientMsg = serde_json::from_slice(&sub_bytes)?;
 
-    let (mut topics, renders_decisions, renders_approvals, capabilities, sub_nonce): (
+    let (topics, renders_decisions, renders_approvals, capabilities, sub_nonce): (
         Vec<Topic>,
         bool,
         bool,
@@ -723,6 +723,10 @@ where
             anyhow::bail!("expected Subscribe, got a {} frame", frame_type(&sub_bytes));
         }
     };
+
+    // The author's PR list is for the verified app: another local client that
+    // names the topic is subscribed to everything else, but not to it.
+    let mut topics = deliverable_topics(topics, trust);
 
     info!(
         claimed_id,
@@ -1119,6 +1123,7 @@ where
                         // that learned from `Welcome.features` that the daemon
                         // serves `work` adds it this way.
                         if let ClientMsg::Subscribe { topics: new_topics, renders_decisions, renders_approvals, capabilities, operator_nonce: sent } = msg {
+                            let new_topics = deliverable_topics(new_topics, trust);
                             if let Some(cap) = &cap {
                                 lock_terminals(&terminals).set_capabilities(cap, &conn_key, capabilities);
                             } else if pending_cap.is_some() {
@@ -3261,6 +3266,16 @@ fn wants_model(topics: &[Topic]) -> bool {
 /// Does this client take the author's PR list? Only by naming
 /// `Topic::AuthoredPrs`: an older client that subscribes to everything must
 /// not be sent a frame it does not know.
+/// The topics a connection is actually subscribed to: the author's PR list
+/// (repos, titles, who owns what) is delivered to the verified Nostromo app
+/// only, as its verbs are. Another local client that names it gets nothing.
+fn deliverable_topics(mut topics: Vec<Topic>, trust: PeerTrust) -> Vec<Topic> {
+    if trust != PeerTrust::OperatorApp {
+        topics.retain(|t| *t != Topic::AuthoredPrs);
+    }
+    topics
+}
+
 fn wants_authored_prs(topics: &[Topic]) -> bool {
     topics.contains(&Topic::AuthoredPrs)
 }

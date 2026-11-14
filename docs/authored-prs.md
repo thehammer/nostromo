@@ -53,10 +53,18 @@ refused (and the snapshot says `refresh_blocked`) while one runs or while paused
   `graphql`, visible acts as hidden (`poll: rate_limited`); under 5%, or on a
   `Retry-After` (capped at 1 h) or secondary limit, `paused` until the reset.
 - Errors: 5xx, timeout and transport errors back off 2, 4, 8 ... 30 min (`retry_at`).
-  A 401 sets `token: rejected` and stops until demand changes or 30 min pass.
-  No token: `token: missing`, no requests.
-- Usage counters (`usage` in the snapshot, and an hourly debug log line
-  `authored-prs usage: charged=N not_modified=N search=N graphql_points=N relay=N posture=...`)
+  A 401 sets `token: rejected` and stops for 30 min; a change of demand retries
+  sooner, but at most once per 5 min (each retry is an uncharged 401).
+  No token: `token: missing`, no requests; while someone watches it is looked for
+  again at most every 5 min, so a token that appears later needs no restart.
+- A secondary limit is `paused` too: a 403 or 429 without `Retry-After` and with
+  `remaining` above 0 pauses for a minute, as does a GraphQL 200 whose
+  `errors[].type` is `RATE_LIMITED`. A pause from a header's reset time is capped at
+  1 h from now. Wall time is the real clock, so it stays true across Mac sleep.
+- Usage counters (`usage` in the snapshot, and an **info** log line, first about a
+  minute after start and then hourly:
+  `authored-prs usage: charged=N not_modified=N search=N graphql_points=N relay=N posture=...`;
+  counts only)
   count this feature's own requests only. Every request carries
   `User-Agent: nostromd authored-prs`.
 
@@ -77,7 +85,10 @@ At most every 30 s per focus, 64 focuses, and only while an open PR lacks a Moth
 
 Limits: a session that works in another checkout with `git -C` or absolute paths
 without `cd` is not seen; two focuses on one checkout and branch are ambiguous; the
-result is always labelled `on_branch`, never stated as fact.
+result is always labelled `on_branch`, never stated as fact. A PR from a fork never
+matches `on_branch` (its head branch is in another repo). Every `.git` file is read
+bounded (256 KiB), regular files only, a final symlink not followed, on a blocking
+thread. Ambiguous candidates say which of them is `closed`.
 
 ## What is logged
 
@@ -88,8 +99,10 @@ check name, login, repo, PR number, URL or token. The relay client's event line 
 ## Wire
 
 - Feature `authored_prs_v1` in `Welcome.features` (only when enabled).
-- `Topic::AuthoredPrs` (`"authored_prs"`): delivered only to a client that names it
-  (the empty list does not include it) and replayed (latest snapshot) on subscribe.
+- `Topic::AuthoredPrs` (`"authored_prs"`): delivered only to the verified Nostromo
+  app, and only if it names the topic (the empty list does not include it), and
+  replayed (latest snapshot) on subscribe. Another local client naming it receives
+  nothing, as it cannot send the verbs; agents do not read this list.
 - `ServerMsg::AuthoredPrs { snapshot }`: `ServerClass::LocalOnly`; a TCP peer gets nothing.
 - `ClientMsg::AuthoredPrsDemand`, `ClientMsg::AuthoredPrsRefresh`: refused for network peers.
 - Published on change only, debounced 250 ms.

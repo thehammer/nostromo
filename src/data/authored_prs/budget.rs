@@ -23,6 +23,10 @@ pub const RELAY_COALESCE: Duration = Duration::from_secs(2);
 pub const LINGER: Duration = Duration::from_secs(60);
 /// A rejected token is retried after this long, or sooner if demand changes.
 pub const TOKEN_RETRY: Duration = Duration::from_secs(30 * 60);
+/// A demand change retries a rejected token early, but at most once per this
+/// long, so flipping the window cannot cost a 401 each time. The same interval
+/// bounds how often a missing token is looked for again.
+pub const TOKEN_EARLY_RETRY: Duration = Duration::from_secs(5 * 60);
 /// Back-off after an error: 2, 4, 8 ... minutes, capped.
 pub const MAX_ERROR_BACKOFF: Duration = Duration::from_secs(30 * 60);
 

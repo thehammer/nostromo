@@ -54,6 +54,7 @@ async fn env(feature_on: bool) -> Env {
         let handle = AuthoredPrsSource::spawn(Deps {
             api_base: "http://127.0.0.1:1".into(),
             github: None,
+            token_resolver: None,
             relay_status: Arc::new(RelayStatus::new()),
             relay_configured: false,
             relay_rx: None,

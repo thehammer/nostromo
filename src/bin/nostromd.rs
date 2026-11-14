@@ -1392,7 +1392,7 @@ fn start_authored_prs(
     broadcast_tx: tokio::sync::broadcast::Sender<ServerMsg>,
     mut republish: tokio::sync::watch::Receiver<u64>,
 ) {
-    use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo, TokioClock};
+    use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo, SystemClock};
     let github =
         match nostromo::data::github_client::GithubClient::new(config.github_token_path.as_deref())
         {
@@ -1427,13 +1427,17 @@ fn start_authored_prs(
     let handle = AuthoredPrsSource::spawn(Deps {
         api_base: nostromo::data::github_client::GITHUB_API_BASE.to_string(),
         github,
+        token_resolver: Some({
+            let path = config.github_token_path.clone();
+            Arc::new(move || nostromo::data::github_client::GithubClient::new(path.as_deref()).ok())
+        }),
         relay_status,
         relay_configured: config.relay_url.is_some() && config.relay_token.is_some(),
         relay_rx: Some(relay_rx),
         jobs_rx,
         focuses,
         projects_root,
-        clock: Arc::new(TokioClock::new(chrono::Utc::now())),
+        clock: Arc::new(SystemClock),
     });
     session_mgr
         .lock()

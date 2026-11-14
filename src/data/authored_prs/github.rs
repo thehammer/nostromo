@@ -26,6 +26,9 @@ pub const SEARCH_PATH: &str =
     "/search/issues?q=is:pr+is:open+author:@me+archived:false&sort=updated&order=desc&per_page=100";
 
 pub const MAX_ALIASES: usize = 20;
+/// GitHub's own advice for a secondary rate limit that names no `Retry-After`:
+/// wait at least a minute.
+pub const SECONDARY_WAIT: Duration = Duration::from_secs(60);
 const MAX_BODY: usize = 16 * 1024 * 1024;
 
 /// Why a request failed. No variant carries a URL or any response text.
@@ -33,7 +36,7 @@ const MAX_BODY: usize = 16 * 1024 * 1024;
 pub enum ApiError {
     /// 401.
     Unauthorized,
-    /// 429, or 403 with a `Retry-After` or an exhausted limit: stop until then.
+    /// 429 or 403: stop until `Retry-After`, the reset of an exhausted limit, or a minute.
     /// `wait` is the server's `Retry-After`; `None` means until the reset in `Meta::rate`
     /// (or a minute when there is none).
     RateLimited {
@@ -162,17 +165,18 @@ impl Api {
             });
         }
         if status == 429 || status == 403 {
+            // A 403 or 429 that is not a primary limit (`remaining` above zero, no
+            // `Retry-After`) is a secondary limit: pause for a bounded minute.
             let error = if let Some(wait) = retry_after {
-                Some(ApiError::RateLimited { wait: Some(wait) })
-            } else if remaining_zero || status == 429 {
-                Some(ApiError::RateLimited { wait: None })
+                ApiError::RateLimited { wait: Some(wait) }
+            } else if remaining_zero {
+                ApiError::RateLimited { wait: None }
             } else {
-                None
+                ApiError::RateLimited {
+                    wait: Some(SECONDARY_WAIT),
+                }
             };
-            return Err(Failure {
-                error: error.unwrap_or(ApiError::Status(status)),
-                meta,
-            });
+            return Err(Failure { error, meta });
         }
         if status == 304 {
             return Ok(Reply {
@@ -335,6 +339,24 @@ impl Api {
             error: ApiError::Malformed,
             meta: reply.meta.clone(),
         })?;
+        // A secondary limit arrives as a 200 with `errors[].type == RATE_LIMITED`
+        // and `data: null`.
+        let rate_limited = v
+            .get("errors")
+            .and_then(|e| e.as_array())
+            .is_some_and(|errs| {
+                errs.iter()
+                    .any(|e| e.get("type").and_then(|t| t.as_str()) == Some("RATE_LIMITED"))
+            });
+        if rate_limited {
+            let exhausted = reply.meta.rate.is_some_and(|(_, o)| o.remaining == 0);
+            return Err(Failure {
+                error: ApiError::RateLimited {
+                    wait: (!exhausted).then_some(SECONDARY_WAIT),
+                },
+                meta: reply.meta,
+            });
+        }
         let data = v.get("data").filter(|d| d.is_object());
         let Some(data) = data else {
             return Err(Failure {
@@ -427,9 +449,9 @@ pub fn detail_query(targets: &[Target]) -> String {
         "fragment AuthoredPr on PullRequest {
   number title isDraft state merged updatedAt
   author { __typename login }
-  baseRefName headRefName headRefOid
+  baseRefName headRefName headRefOid isCrossRepository
   repository { nameWithOwner defaultBranchRef { name } }
-  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
+  commits(last: 1) { nodes { commit { committedDate statusCheckRollup { state contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } } }
   latestOpinionatedReviews(first: 20) { nodes { state author { __typename login } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { slug organization { login } } ... on Bot { login } } } }
   reviewThreads(first: 100) { totalCount nodes { isResolved } }
