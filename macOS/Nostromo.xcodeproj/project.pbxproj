@@ -399,6 +399,12 @@
 		MM0000000000000000000201 /* MarkdownBlockDocument.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MM0000000000000000000001 /* MarkdownBlockDocument.swift */; };
 		MF000000000000000000A101 /* PlanDocumentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A001 /* PlanDocumentView.swift */; };
 		MF000000000000000000A201 /* PlanDocumentView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A001 /* PlanDocumentView.swift */; };
+		AQDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = APDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift */; };
+		ARDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = APDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift */; };
+		AQF971A11284C43B0D41BE5F /* AuthoredPrsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = APF971A11284C43B0D41BE5F /* AuthoredPrsViews.swift */; };
+		ARF971A11284C43B0D41BE5F /* AuthoredPrsViews.swift in TestSources */ = {isa = PBXBuildFile; fileRef = APF971A11284C43B0D41BE5F /* AuthoredPrsViews.swift */; };
+		AQ490C0E254D7F44AD6C4E6A /* AuthoredPrsOverviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP490C0E254D7F44AD6C4E6A /* AuthoredPrsOverviewView.swift */; };
+		AR490C0E254D7F44AD6C4E6A /* AuthoredPrsOverviewView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AP490C0E254D7F44AD6C4E6A /* AuthoredPrsOverviewView.swift */; };
 		MF000000000000000000A103 /* MotherJobFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A003 /* MotherJobFilter.swift */; };
 		MF000000000000000000A203 /* MotherJobFilter.swift in TestSources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A003 /* MotherJobFilter.swift */; };
 		MF000000000000000000A104 /* MotherListDivider.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000A004 /* MotherListDivider.swift */; };
@@ -1041,6 +1047,9 @@
 		OO000000000000000000100 /* DecisionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecisionStoreTests.swift; sourceTree = "<group>"; };
 		MM0000000000000000000001 /* MarkdownBlockDocument.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownBlockDocument.swift; sourceTree = "<group>"; };
 		MF000000000000000000A001 /* PlanDocumentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanDocumentView.swift; sourceTree = "<group>"; };
+		APDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsDemandReporter.swift; sourceTree = "<group>"; };
+		APF971A11284C43B0D41BE5F /* AuthoredPrsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsViews.swift; sourceTree = "<group>"; };
+		AP490C0E254D7F44AD6C4E6A /* AuthoredPrsOverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsOverviewView.swift; sourceTree = "<group>"; };
 		MF000000000000000000A003 /* MotherJobFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobFilter.swift; sourceTree = "<group>"; };
 		MF000000000000000000A004 /* MotherListDivider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherListDivider.swift; sourceTree = "<group>"; };
 		MF000000000000000000A600 /* MotherDependencySection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDependencySection.swift; sourceTree = "<group>"; };
@@ -1952,6 +1961,9 @@
 				MF000000000000000000A001 /* PlanDocumentView.swift */,
 				MF000000000000000000A002 /* PlanFileLoader.swift */,
 				MF000000000000000000A003 /* MotherJobFilter.swift */,
+				AP490C0E254D7F44AD6C4E6A /* AuthoredPrsOverviewView.swift */,
+				APF971A11284C43B0D41BE5F /* AuthoredPrsViews.swift */,
+				APDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift */,
 				MF000000000000000000A004 /* MotherListDivider.swift */,
 				MF000000000000000000A600 /* MotherDependencySection.swift */,
 				MF000000000000000000A500 /* MotherDependencyPresentation.swift */,
@@ -2213,6 +2225,9 @@
 				MF000000000000000000A101 /* PlanDocumentView.swift in Sources */,
 				MF000000000000000000A102 /* PlanFileLoader.swift in Sources */,
 				MF000000000000000000A103 /* MotherJobFilter.swift in Sources */,
+				AQ490C0E254D7F44AD6C4E6A /* AuthoredPrsOverviewView.swift in Sources */,
+				AQF971A11284C43B0D41BE5F /* AuthoredPrsViews.swift in Sources */,
+				AQDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift in Sources */,
 				MF000000000000000000A104 /* MotherListDivider.swift in Sources */,
 				MF000000000000000000A601 /* MotherDependencySection.swift in Sources */,
 				MF000000000000000000A501 /* MotherDependencyPresentation.swift in Sources */,
@@ -2533,6 +2548,9 @@
 				MF000000000000000000A201 /* PlanDocumentView.swift in TestSources */,
 				MF000000000000000000A202 /* PlanFileLoader.swift in TestSources */,
 				MF000000000000000000A203 /* MotherJobFilter.swift in TestSources */,
+				AR490C0E254D7F44AD6C4E6A /* AuthoredPrsOverviewView.swift in TestSources */,
+				ARF971A11284C43B0D41BE5F /* AuthoredPrsViews.swift in TestSources */,
+				ARDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift in TestSources */,
 				MF000000000000000000A204 /* MotherListDivider.swift in TestSources */,
 				MF000000000000000000A602 /* MotherDependencySection.swift in TestSources */,
 				MF000000000000000000A502 /* MotherDependencyPresentation.swift in TestSources */,

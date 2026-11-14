@@ -43,6 +43,19 @@ class AppStore: ObservableObject {
     /// `mother_notice_state` frame; published only when it changes. The UI reflects this alone: a
     /// switch is never shown as changed before the daemon says so.
     @Published private(set) var motherNoticeState: MotherNoticeStateWire?
+    /// The author's open PRs, as the daemon last sent them. Kept through a disconnect (shown dimmed, marked
+    /// reconnecting); nil until the first `authored_prs` frame of this launch.
+    @Published private(set) var authoredPrs: AuthoredPrsSnapshot?
+    /// Whether the last `welcome` advertised `authored_prs_v1`. False means the Mother pane is unchanged.
+    @Published private(set) var authoredPrsSupported = false
+    /// Whether the daemon link is up. While `.reconnecting` the last snapshot stays on screen, dimmed.
+    @Published private(set) var authoredPrsConnection: AuthoredPrsConnection = .connected
+    /// Reports whether the Overview is visible, hidden or the user idle. Sends only on change.
+    lazy var authoredPrsDemand = AuthoredPrsDemandReporter(
+        supported: { [weak self] in self?.authoredPrsSupported == true },
+        send: { [weak self] level in self?.client.sendAuthoredPrsDemand(level: level) })
+    /// Where the Overview's refresh goes. Tests replace it.
+    var authoredPrsRefreshSender: () -> Void = {}
     /// The daemon's last refusal of a notice switch, as one line; cleared by the next state frame or a disconnect.
     @Published private(set) var motherNoticeRefusal: String?
     /// Mother's quota block as the broker last reported it; nil when it sent none (an older Mother) or the
@@ -688,6 +701,8 @@ class AppStore: ObservableObject {
         // The global staging switch goes to the daemon right after every Subscribe that declares `terminal_staging_ui`.
         client.onStagingUISubscribed = { TerminalStagingStore.shared.resendGlobal() }
         RemoteShellStore.shared.transport = { [client] in client.sendRemoteShell($0) }
+        authoredPrsRefreshSender = { [client] in client.sendAuthoredPrsRefresh() }
+        authoredPrsDemand.start()
 
         // The work store holds what one connection pushed. When it drops, requests
         // still waiting for an answer can never get one; when a connection comes
@@ -701,6 +716,7 @@ class AppStore: ObservableObject {
                 self?.perriHealth.connectionChanged(connected)
                 self?.sessionListRefresher.connectionChanged(connected)
                 if !connected { self?.daemonDisconnected() }
+                if connected, let self { self.authoredPrsConnectionStarted(supported: self.client.daemonAdvertisesAuthoredPrs) }
                 // Tells every chip whether the daemon is reachable, and on a new connection
                 // asks for the model catalogue and the per-agent defaults.
                 ModelStore.shared.connectionChanged(connected)
@@ -1548,9 +1564,26 @@ class AppStore: ObservableObject {
     /// Test seam: the nostromod connection dropped.
     func daemonDisconnectedForTesting() { daemonDisconnected() }
 
+    /// Test seam: a connection came up whose `welcome` did or did not advertise `authored_prs_v1`.
+    func daemonConnectedForTesting(authoredPrs supported: Bool) { authoredPrsConnectionStarted(supported: supported) }
+
+    /// Ask the daemon for a full reconcile of the author's PRs now (⟳, ⌘R in the Overview).
+    func requestAuthoredPrsRefresh() { authoredPrsRefreshSender() }
+
+    private func authoredPrsConnectionStarted(supported: Bool) {
+        if authoredPrsSupported != supported { authoredPrsSupported = supported }
+        if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
+        if supported { authoredPrsDemand.connectionStarted() }
+    }
+
+    /// Test seam: the Overview's snapshot, as `handle(.authoredPrs)` stores it.
+    func applyAuthoredPrsForTesting(_ snapshot: AuthoredPrsSnapshot) { handle(.authoredPrs(snapshot)) }
+
     /// A dropped daemon connection cannot take a notice switch, so the bell and the held bars must not
     /// look live: the state goes, and the reconnect replay brings it back.
     private func daemonDisconnected() {
+        if authoredPrsConnection != .reconnecting { authoredPrsConnection = .reconnecting }
+        authoredPrsDemand.connectionLost()
         if motherNoticeState != nil { motherNoticeState = nil }
         if motherNoticeRefusal != nil { motherNoticeRefusal = nil }
     }
@@ -1875,6 +1908,11 @@ class AppStore: ObservableObject {
         // The slash commands a session's CLI reports: every window's picker reads them from the store.
         case .sessionCommands:
             SlashCommandStore.shared.ingest(msg)
+
+        // The author's open PRs: the Mother pane's Overview reads them from here.
+        case .authoredPrs(let snapshot):
+            if snapshot != authoredPrs { authoredPrs = snapshot }
+            if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
 
         // The tracker pane's board and the focus's counts: every window's pane reads them from the store.
         case .trackerBoard, .trackerSummary:
@@ -2267,4 +2305,10 @@ struct MotherNoticeSwitches {
         }
         return true
     }
+}
+
+/// Whether the daemon link behind the Overview's snapshot is up.
+enum AuthoredPrsConnection: Equatable {
+    case connected
+    case reconnecting
 }

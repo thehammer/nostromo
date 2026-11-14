@@ -309,6 +309,8 @@ enum ServerMsg {
     case sessionTaskOutputResult(SessionTaskOutputResultWire)
     /// The commands a session's CLI reports: the answer to a `session_commands_get`. Local only.
     case sessionCommands(SessionCommandsWire)
+    /// The author's open PRs (`authored_prs_v1`). Local only.
+    case authoredPrs(AuthoredPrsSnapshot)
 
     // ── document panes ────────────────────────────────────────────────────────
     /// The answer to a `pane_action` of this connection. Local only.
@@ -973,6 +975,16 @@ class NostromodClient {
         features?.contains(slashCommandsFeature) == true
     }
 
+    /// The `welcome.features` entry that says the daemon publishes the author's open PRs (topic `authored_prs`)
+    /// and takes `authored_prs_demand` and `authored_prs_refresh`.
+    static let authoredPrsFeature = "authored_prs_v1"
+
+    /// Does a daemon that advertised `features` know the open-PR list? The Mother pane shows the Overview's
+    /// pinned row and content, and the app reports demand, only then; an older daemon keeps today's pane.
+    static func supportsAuthoredPrs(features: [String]?) -> Bool {
+        features?.contains(authoredPrsFeature) == true
+    }
+
     /// Topics every daemon this app can talk to understands.
     static let baseTopics = ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]
 
@@ -983,7 +995,8 @@ class NostromodClient {
     /// `session_model_state`, `model_defaults`) and the transcript `note` blocks. The
     /// daemon delivers them only to a client that names the topic, so a reconnect to
     /// a daemon that advertises the feature subscribes again (this runs per `welcome`).
-    static let featureTopics: [String: String] = ["work": "work", "model": "model"]
+    static let featureTopics: [String: String] = ["work": "work", "model": "model",
+                                                  "authored_prs_v1": "authored_prs"]
 
     /// Re-subscribe with the base topics plus the topic of every feature this
     /// connection's daemon advertised. Evaluated per connection (a daemon that is
@@ -1155,6 +1168,25 @@ class NostromodClient {
     func sessionCommandsGet(tag: String, requestId: String) {
         guard daemonAdvertisesSlashCommands else { return }
         send(ClientSessionCommandsGet(requestId: requestId, tag: tag), type: "session_commands_get", tag: tag)
+    }
+
+    /// Whether the connection's last `welcome` advertised `authored_prs_v1`.
+    var daemonAdvertisesAuthoredPrs: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsAuthoredPrs(features: advertisedFeatures)
+    }
+
+    /// Tell the daemon whether the PR list is visible, hidden or the user is idle. Nothing is written
+    /// unless the daemon advertised `authored_prs_v1` (an older daemon cannot decode the message).
+    func sendAuthoredPrsDemand(level: String) {
+        guard daemonAdvertisesAuthoredPrs else { return }
+        send(ClientAuthoredPrsDemand(level: level), type: "authored_prs_demand")
+    }
+
+    /// Ask for a full reconcile now. The daemon refuses it while one runs or while paused.
+    func sendAuthoredPrsRefresh() {
+        guard daemonAdvertisesAuthoredPrs else { return }
+        send(ClientAuthoredPrsRefresh(), type: "authored_prs_refresh")
     }
 
     // MARK: - Decision modal commands
@@ -2057,6 +2089,13 @@ class NostromodClient {
                 return .sessionCommands(m)
             } else {
                 log.error("failed to decode session_commands")
+            }
+
+        case "authored_prs":
+            if let m = try? decoder.decode(AuthoredPrsFrame.self, from: raw) {
+                return .authoredPrs(m.snapshot)
+            } else {
+                log.error("failed to decode authored_prs")
             }
 
         case "tracker_board":

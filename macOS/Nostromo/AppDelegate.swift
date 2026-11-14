@@ -223,6 +223,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MainMe
         TranscriptDiagnostics.copyReportToPasteboard()
     }
 
+    /// Debug ▸ Copy GitHub usage: the daemon's charged-request counts for the open-PR list, counts only.
+    @objc func copyGitHubUsage() {
+        AuthoredPrsDiagnostics.copyReportToPasteboard()
+    }
+
+    /// View ▸ Show My PRs (⌘0): switch the key window to the Mother focus and show the Overview. Beeps
+    /// with a daemon that predates `authored_prs_v1`: there is no Overview then.
+    @objc func showMyPrs(_ sender: Any?) {
+        guard AppStore.shared.authoredPrsSupported else { NSSound.beep(); return }
+        let mother = FocusStore.shared.focuses.first { $0.id == Focus.mother.id } ?? Focus.mother
+        MotherView.requestShowOverview { AppStore.shared.focusSelectionRequests.send(mother) }
+    }
+
     @objc func copyDaemonDiagnostics() {
         DaemonDiagnostics.copyReportToPasteboard()
     }

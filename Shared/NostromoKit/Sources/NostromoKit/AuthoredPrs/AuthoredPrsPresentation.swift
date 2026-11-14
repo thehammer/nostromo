@@ -1,0 +1,380 @@
+import Foundation
+
+// What the My open PRs Overview says, as pure functions of a snapshot, a clock and a time zone.
+// Grouping and order are the daemon's: nothing here re-derives them, it only words, limits and labels them.
+
+/// The header: the count, each source's freshness in words, and what refresh may do.
+public struct AuthoredPrsHeaderModel: Equatable, Sendable {
+    /// `My open PRs · 14`.
+    public var countText: String
+    /// The number in `countText`.
+    public var count: Int
+    /// `live`, `catching up…`, …
+    public var carefeed: String
+    /// `checked 40s ago`, `paused: GitHub rate limit low, resumes 3:40 pm`, …
+    public var otherRepos: String
+    /// `Carefeed: live · Other repos: checked 40s ago`.
+    public var freshness: String
+    /// `Showing the 100 most recently updated of 134`, only when the daemon capped the list.
+    public var showing: String?
+    /// `as of 3:12 pm` while the daemon is limited, paused or cannot reach GitHub: the rows are older than they look.
+    public var asOf: String?
+    /// Why ⟳ and ⌘R are off; nil when a refresh may be asked for.
+    public var refreshDisabledReason: String?
+    public var refreshEnabled: Bool { refreshDisabledReason == nil }
+}
+
+public enum AuthoredPrsBody: Equatable, Sendable {
+    /// GitHub is not connected: no list.
+    case notConnected(rejected: Bool)
+    case empty
+    case list
+}
+
+public struct AuthoredPrRowModel: Equatable, Sendable, Identifiable {
+    public var id: String
+    public var number: Int
+    public var repo: String
+    public var url: String
+    /// `✓`, `✗`, `●`, `–` (and `◆` / `○` for merged and closed).
+    public var statusGlyph: String
+    /// `passing`, `failing`, `pending`, `no checks`, `Merged`, `Closed`.
+    public var statusWord: String
+    public var statusKind: StatusKind
+    public var numberText: String
+    public var title: String
+    public var repoChip: String
+    public var age: String
+    public var checksLine: String
+    public var checksTooltip: String?
+    public var reviewLine: String
+    public var base: String?
+    public var isDraft: Bool
+    public var ownerPrefix: String
+    /// The Mother job id the owner text links to (selects that job in the list).
+    public var ownerJobId: String?
+    public var ownerSuffix: String
+    public var detailsUnavailable: Bool
+    public var lifecycle: AuthoredPrLifecycle
+    public var accessibilityLabel: String
+
+    public enum StatusKind: Equatable, Sendable { case passing, failing, pending, none, merged, closed }
+
+    /// The owner text as one string, `Mother job a1b2c3 · Cody`, with `details unavailable` when flagged.
+    public var ownerText: String {
+        var text = ownerPrefix + (ownerJobId ?? "") + ownerSuffix
+        if detailsUnavailable { text += " · details unavailable" }
+        return text
+    }
+}
+
+public struct AuthoredPrsGroupModel: Equatable, Sendable, Identifiable {
+    public var group: AuthoredPrGroup
+    /// `NEEDS YOU`.
+    public var title: String
+    /// Every row in the group, shown or not.
+    public var count: Int
+    public var rows: [AuthoredPrRowModel]
+    /// Rows past the cap, behind `Show N more`.
+    public var hiddenCount: Int
+    public var id: AuthoredPrGroup { group }
+    public var showMoreTitle: String? { hiddenCount > 0 ? "Show \(hiddenCount) more" : nil }
+    /// `Needs you, 3`, as VoiceOver reads the heading.
+    public var accessibilityLabel: String { "\(title.prefix(1))\(title.dropFirst().lowercased()), \(count)" }
+}
+
+public enum AuthoredPrsPresentation {
+    /// How long a merged or closed row stays after the daemon says it ended.
+    public static let lingerSeconds: TimeInterval = 60
+    /// Rows a group shows before `Show N more`.
+    public static let groupRowLimit = 25
+
+    // MARK: Times
+
+    public static func clock(_ date: Date, timeZone: TimeZone) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        f.dateFormat = "h:mm a"
+        return f.string(from: date).lowercased()
+    }
+
+    /// `40s`, `5m`, `2h`, `3d`.
+    public static func age(from date: Date, now: Date) -> String {
+        let secs = max(0, Int(now.timeIntervalSince(date)))
+        if secs < 60 { return "\(secs)s" }
+        if secs < 3600 { return "\(secs / 60)m" }
+        if secs < 86400 { return "\(secs / 3600)h" }
+        return "\(secs / 86400)d"
+    }
+
+    private static func interval(_ secs: Int) -> String {
+        if secs < 60 { return "\(max(secs, 1))s" }
+        if secs < 3600 { return "\(secs / 60)m" }
+        return "\(secs / 3600)h"
+    }
+
+    // MARK: Header
+
+    public static func header(_ snapshot: AuthoredPrsSnapshot, now: Date, timeZone: TimeZone) -> AuthoredPrsHeaderModel {
+        let count = snapshot.prs.filter { $0.lifecycle == .open }.count
+        let carefeed = carefeedWords(snapshot, timeZone: timeZone)
+        let others = otherReposWords(snapshot.poll, now: now, timeZone: timeZone)
+        var showing: String?
+        if snapshot.totalOpen > snapshot.shown, snapshot.shown > 0 {
+            showing = "Showing the \(snapshot.shown) most recently updated of \(snapshot.totalOpen)"
+        }
+        var asOf: String?
+        switch snapshot.poll.state {
+        case .rateLimited, .paused, .error:
+            if let at = snapshot.poll.checkedAt ?? snapshot.generatedAt { asOf = "as of \(clock(at, timeZone: timeZone))" }
+        default: break
+        }
+        var blocked: String?
+        switch snapshot.refreshBlocked {
+        case .running: blocked = "A refresh is already running"
+        case .rateLimited: blocked = "Paused: GitHub rate limit low"
+        case .unknown: blocked = "Refresh is not available right now"
+        case nil: break
+        }
+        return AuthoredPrsHeaderModel(
+            countText: "My open PRs · \(count)", count: count, carefeed: carefeed, otherRepos: others,
+            freshness: "Carefeed: \(carefeed) · Other repos: \(others)",
+            showing: showing, asOf: asOf, refreshDisabledReason: blocked)
+    }
+
+    /// `live` only ever for a relay the daemon reports `live`.
+    static func carefeedWords(_ s: AuthoredPrsSnapshot, timeZone: TimeZone) -> String {
+        let every = interval(s.poll.intervalSecs)
+        switch s.relay.state {
+        case .live: return "live"
+        case .catchingUp: return "catching up…"
+        case .offline:
+            if let since = s.relay.since { return "relay offline since \(clock(since, timeZone: timeZone)) · polling every \(every)" }
+            return "relay offline · polling every \(every)"
+        case .notConfigured: return "polling every \(every)"
+        case .unknown: return "status unknown"
+        }
+    }
+
+    /// Ages come from the daemon's `checked_at`, never from when the frame arrived.
+    static func otherReposWords(_ poll: AuthoredPrsPoll, now: Date, timeZone: TimeZone) -> String {
+        switch poll.state {
+        case .checking: return "checking…"
+        case .ok, .idle:
+            guard let at = poll.checkedAt else { return "not checked yet" }
+            return "checked \(age(from: at, now: now)) ago"
+        case .rateLimited, .paused:
+            if let resumes = poll.resumesAt { return "paused: GitHub rate limit low, resumes \(clock(resumes, timeZone: timeZone))" }
+            if poll.state == .paused { return "paused: GitHub rate limit low" }
+            return "rate limit low · checking every \(interval(poll.intervalSecs))"
+        case .error:
+            if let retry = poll.retryAt { return "couldn't reach GitHub, retrying in \(interval(max(0, Int(retry.timeIntervalSince(now)))))" }
+            return "couldn't reach GitHub, retrying"
+        case .unknown: return "status unknown"
+        }
+    }
+
+    // MARK: Body states
+
+    public static func body(_ snapshot: AuthoredPrsSnapshot) -> AuthoredPrsBody {
+        switch snapshot.token {
+        case .missing: return .notConnected(rejected: false)
+        case .rejected: return .notConnected(rejected: true)
+        case .connected, .unknown: break
+        }
+        return snapshot.prs.isEmpty ? .empty : .list
+    }
+
+    public static let emptyText = "No open PRs authored by you. PRs you open in any repo show up here."
+    public static let notConnectedTitle = "Connect GitHub to see your PRs"
+    public static let notConnectedDetail = "Run `gh auth login` in a terminal, then wait a minute."
+    public static let reconnectingText = "reconnecting to Nostromo…"
+
+    public static func hiddenOrgsNote(_ snapshot: AuthoredPrsSnapshot) -> String? {
+        guard !snapshot.hiddenOrgs.isEmpty else { return nil }
+        return "Some repos hidden: GitHub denied access to org \(snapshot.hiddenOrgs.joined(separator: ", "))."
+    }
+
+    // MARK: Lifecycle
+
+    /// A merged or closed row goes this long after the daemon says it ended.
+    public static func isExpired(_ pr: AuthoredPr, now: Date) -> Bool {
+        guard pr.lifecycle != .open, let ended = pr.endedAt else { return false }
+        return now >= ended.addingTimeInterval(lingerSeconds)
+    }
+
+    // MARK: Groups and rows
+
+    public static func groups(_ prs: [AuthoredPr], showAll: Set<AuthoredPrGroup> = [],
+                              now: Date, timeZone: TimeZone) -> [AuthoredPrsGroupModel] {
+        let chips = repoChips(prs)
+        return AuthoredPrGroup.displayOrder.compactMap { group in
+            let members = prs.filter { $0.group == group }
+            guard !members.isEmpty else { return nil }
+            let limit = showAll.contains(group) ? members.count : groupRowLimit
+            let shown = members.prefix(limit)
+            return AuthoredPrsGroupModel(
+                group: group, title: groupTitle(group), count: members.count,
+                rows: shown.map { row($0, chip: chips[$0.repo] ?? $0.repo, now: now) },
+                hiddenCount: members.count - shown.count)
+        }
+    }
+
+    public static func groupTitle(_ group: AuthoredPrGroup) -> String {
+        switch group {
+        case .needsYou: return "NEEDS YOU"
+        case .ready: return "READY"
+        case .waiting: return "WAITING ON OTHERS"
+        case .draft: return "DRAFTS"
+        case .unknown: return "OTHER"
+        }
+    }
+
+    /// The repo name without its owner, unless two shown repos share a name: then `owner/name`.
+    public static func repoChips(_ prs: [AuthoredPr]) -> [String: String] {
+        let repos = Set(prs.map(\.repo))
+        func name(_ r: String) -> String { r.split(separator: "/", maxSplits: 1).last.map(String.init) ?? r }
+        var counts: [String: Int] = [:]
+        for r in repos { counts[name(r), default: 0] += 1 }
+        var chips: [String: String] = [:]
+        for r in repos { chips[r] = (counts[name(r)] ?? 0) > 1 ? r : name(r) }
+        return chips
+    }
+
+    public static func row(_ pr: AuthoredPr, chip: String? = nil, now: Date) -> AuthoredPrRowModel {
+        let chipText = chip ?? repoChips([pr])[pr.repo] ?? pr.repo
+        let (kind, glyph, word) = status(pr)
+        let checks = checksLine(pr.checks)
+        let owner = ownerParts(pr.owner)
+        var model = AuthoredPrRowModel(
+            id: pr.id, number: pr.number, repo: pr.repo, url: pr.url,
+            statusGlyph: glyph, statusWord: word, statusKind: kind,
+            numberText: "#\(pr.number)", title: pr.title, repoChip: chipText,
+            age: pr.updatedAt.map { age(from: $0, now: now) } ?? "",
+            checksLine: checks.line, checksTooltip: checks.tooltip, reviewLine: reviewLine(pr),
+            base: pr.baseRef, isDraft: pr.draft,
+            ownerPrefix: owner.prefix, ownerJobId: owner.jobId, ownerSuffix: owner.suffix,
+            detailsUnavailable: pr.detailsUnavailable, lifecycle: pr.lifecycle, accessibilityLabel: "")
+        model.accessibilityLabel = accessibilityLabel(pr, chip: chipText)
+        return model
+    }
+
+    static func status(_ pr: AuthoredPr) -> (AuthoredPrRowModel.StatusKind, String, String) {
+        switch pr.lifecycle {
+        case .merged: return (.merged, "◆", "Merged")
+        case .closed: return (.closed, "○", "Closed")
+        case .open, .unknown: break
+        }
+        switch pr.checks.state {
+        case .passing: return (.passing, "✓", "passing")
+        case .failing: return (.failing, "✗", "failing")
+        case .pending: return (.pending, "●", "pending")
+        case .none, .unknown: return (.none, "–", "no checks")
+        }
+    }
+
+    /// `Checks: 1 failed (swift-tests) · 9 passed`; up to 3 failing names, then `+2 more`.
+    static func checksLine(_ c: AuthoredPrChecks) -> (line: String, tooltip: String?) {
+        var parts: [String] = []
+        if c.failed > 0 {
+            var text = "\(c.failed) failed"
+            if !c.failingNames.isEmpty {
+                var names = Array(c.failingNames.prefix(3))
+                let more = c.failed - names.count
+                if more > 0 { names.append("+\(more) more") }
+                text += " (\(names.joined(separator: ", ")))"
+            }
+            parts.append(text)
+        }
+        if c.pending > 0 { parts.append("\(c.pending) pending") }
+        if c.passed > 0 { parts.append("\(c.passed) passed") }
+        let line = parts.isEmpty ? "Checks: none" : "Checks: " + parts.joined(separator: " · ")
+        let tooltip = c.failingNames.isEmpty ? nil : "Failing checks:\n" + c.failingNames.joined(separator: "\n")
+        return (line, tooltip)
+    }
+
+    /// Exactly one review state, then the counts when non-zero.
+    static func reviewLine(_ pr: AuthoredPr) -> String {
+        let who = pr.review.logins.joined(separator: ", ")
+        var text: String
+        switch pr.review.state {
+        case .approved: text = who.isEmpty ? "Approved" : "Approved by \(who)"
+        case .changesRequested: text = who.isEmpty ? "Changes requested" : "Changes requested by \(who)"
+        case .reviewRequested: text = who.isEmpty ? "Review requested" : "Review requested from \(who)"
+        case .none, .unknown: text = "No review yet"
+        }
+        if pr.newComments > 0 { text += " · \(pr.newComments) new comment\(pr.newComments == 1 ? "" : "s")" }
+        if pr.unresolvedThreads > 0 { text += " · \(pr.unresolvedThreads)\(pr.threadsTruncated ? "+" : "") unresolved" }
+        return text
+    }
+
+    static func ownerParts(_ o: AuthoredPrOwner) -> (prefix: String, jobId: String?, suffix: String) {
+        let name = o.name ?? ""
+        switch o.kind {
+        case .motherJob:
+            if let job = o.jobId, !job.isEmpty { return ("Mother job ", job, name.isEmpty ? "" : " · \(name)") }
+            return (name.isEmpty ? "Mother job" : "Mother job · \(name)", nil, "")
+        case .onBranch: return (name.isEmpty ? "On branch" : "On branch in \(name)", nil, "")
+        case .linked: return (name.isEmpty ? "Linked" : "Linked to \(name)", nil, "")
+        case .ambiguous: return ("\(o.candidates.count) possible focuses", nil, "")
+        case .closed: return (name.isEmpty ? "Closed" : "\(name) · closed", nil, "")
+        case .unknown: return ("Owner unknown", nil, "")
+        }
+    }
+
+    /// One string per row: "PR 458, Slash commands 1, nostromo, checks failing: swift-tests, …".
+    static func accessibilityLabel(_ pr: AuthoredPr, chip: String) -> String {
+        var parts = ["PR \(pr.number)", pr.title, chip]
+        switch pr.lifecycle {
+        case .merged: parts.append("merged")
+        case .closed: parts.append("closed")
+        case .open, .unknown: break
+        }
+        if pr.draft { parts.append("draft") }
+        switch pr.checks.state {
+        case .failing:
+            let names = pr.checks.failingNames
+            var spoken = Array(names.prefix(3))
+            if names.count > 3 { spoken.append("and \(names.count - 3) more") }
+            parts.append(spoken.isEmpty ? "checks failing" : "checks failing: \(spoken.joined(separator: ", "))")
+        case .passing: parts.append("checks passing")
+        case .pending: parts.append("checks pending")
+        case .none, .unknown: parts.append("no checks")
+        }
+        let who = pr.review.logins.joined(separator: ", ")
+        switch pr.review.state {
+        case .approved: parts.append(who.isEmpty ? "approved" : "approved by \(who)")
+        case .changesRequested: parts.append(who.isEmpty ? "changes requested" : "changes requested by \(who)")
+        case .reviewRequested: parts.append(who.isEmpty ? "review requested" : "review requested from \(who)")
+        case .none, .unknown: parts.append("no review yet")
+        }
+        if pr.newComments > 0 { parts.append("\(pr.newComments) new comment\(pr.newComments == 1 ? "" : "s")") }
+        if pr.unresolvedThreads > 0 { parts.append("\(pr.unresolvedThreads) unresolved thread\(pr.unresolvedThreads == 1 ? "" : "s")") }
+        if let base = pr.baseRef { parts.append("base \(base)") }
+        let name = pr.owner.name ?? ""
+        switch pr.owner.kind {
+        case .motherJob: parts.append(name.isEmpty ? "owner Mother job" : "owner \(name), Mother job")
+        case .onBranch: parts.append(name.isEmpty ? "owner on branch" : "owner \(name), on branch")
+        case .linked: parts.append(name.isEmpty ? "owner linked" : "owner \(name), linked")
+        case .ambiguous: parts.append("\(pr.owner.candidates.count) possible owners")
+        case .closed: parts.append(name.isEmpty ? "owner closed" : "owner \(name), closed")
+        case .unknown: parts.append("owner unknown")
+        }
+        if pr.detailsUnavailable { parts.append("details unavailable") }
+        return parts.joined(separator: ", ")
+    }
+
+    // MARK: Debug
+
+    /// Counts only: no titles, repos or logins.
+    public static func usageReport(_ u: AuthoredPrsUsage) -> String {
+        func block(_ c: AuthoredPrsUsageCounts) -> [String] {
+            ["charged: \(c.charged)", "not modified: \(c.notModified)", "search: \(c.search)",
+             "graphql points: \(c.graphqlPoints)", "relay charged: \(c.relayCharged)",
+             "visible charged: \(c.visibleCharged)", "hidden charged: \(c.hiddenCharged)"]
+        }
+        return (["GitHub usage, last \(max(u.windowSecs / 60, 0)) min"] + block(u.window)
+                + ["GitHub usage, since the daemon started"] + block(u.sinceStart)).joined(separator: "\n")
+    }
+}
