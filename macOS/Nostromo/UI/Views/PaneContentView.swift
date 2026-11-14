@@ -114,7 +114,7 @@ struct PaneContentView: View {
     }
 
     @ViewBuilder
-    private func contextMenuItems(for item: PRQueueItem) -> some View {
+    private func contextMenuItems(for item: PrListItemModel) -> some View {
         Button("Approve") { onApprovePR(item.repo, item.number) }
         ForEach(
             Self.browserMenuItems(repo: item.repo, number: item.number,
