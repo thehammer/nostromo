@@ -569,7 +569,13 @@ fn hostile_names_and_aliases_never_reach_the_list() {
     assert_eq!(entries[0].name, "ns:name-with-dash");
     assert_eq!(entries[0].aliases, vec!["ok-alias"]);
 
-    let init = observe(&init_line(&[&bad[0], &bad[1], &bad[6], "ns:name-with-dash"])).unwrap();
+    let init = observe(&init_line(&[
+        &bad[0],
+        &bad[1],
+        &bad[6],
+        "ns:name-with-dash",
+    ]))
+    .unwrap();
     assert_eq!(init.entries.len(), 1);
     assert_eq!(init.entries[0].name, "ns:name-with-dash");
 
