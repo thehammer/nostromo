@@ -19,6 +19,14 @@ class QuickActionStripView: NSView {
 
     private let onTap: (QuickAction) -> Void
     private var actions: [QuickAction] = []
+    private var buttons: [String: NSButton] = [:]
+    private var disabledReasons: [String: String] = [:]
+
+    /// Padding either side of a pill's label.
+    static let pillHorizontalPadding: CGFloat = 10
+    static let enabledLabelColor = Theme.fg
+    /// A disabled pill's label: dimmer than the enabled one, still readable (3:1 on the strip).
+    static let disabledLabelColor = Theme.fg.withAlphaComponent(0.55)
 
     init(actions: [QuickAction], onTap: @escaping (QuickAction) -> Void) {
         self.actions = actions
@@ -62,8 +70,49 @@ class QuickActionStripView: NSView {
 
         for (index, action) in actions.enumerated() {
             let btn = makePillButton(action: action, tag: index)
+            buttons[action.id] = btn
             stack.addArrangedSubview(btn)
+            applyAppearance(of: action)
         }
+    }
+
+    // MARK: Per-action enabling
+
+    /// Enables or disables one action's pill. A disabled pill is drawn dimmed, not hidden, ignores
+    /// clicks, and says why (`reason`) in its tooltip and accessibility help, before the action's own help.
+    func setEnabled(_ enabled: Bool, forActionID id: String, reason: String? = nil) {
+        guard buttons[id] != nil, let action = actions.first(where: { $0.id == id }) else { return }
+        if enabled { disabledReasons[id] = nil } else { disabledReasons[id] = reason ?? "Unavailable right now." }
+        applyAppearance(of: action)
+    }
+
+    func isEnabled(actionID id: String) -> Bool { buttons[id]?.isEnabled ?? false }
+
+    /// The tooltip of an action's pill (also its accessibility help).
+    func tooltip(forActionID id: String) -> String? { buttons[id]?.toolTip }
+
+    /// The pill for an action, for tests that measure or click it.
+    func pill(forActionID id: String) -> NSButton? { buttons[id] }
+
+    /// Press an action's pill the way a click does: nothing happens when it is disabled.
+    func tap(actionID id: String) {
+        buttons[id]?.performClick(nil)
+    }
+
+    private func applyAppearance(of action: QuickAction) {
+        guard let btn = buttons[action.id] else { return }
+        let reason = disabledReasons[action.id]
+        let enabled = reason == nil
+        btn.isEnabled = enabled
+        btn.layer?.backgroundColor = Theme.cornflower.withAlphaComponent(enabled ? 0.20 : 0.08).cgColor
+        btn.attributedTitle = NSAttributedString(string: action.label, attributes: [
+            .font:            NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: enabled ? Self.enabledLabelColor : Self.disabledLabelColor,
+        ])
+        let help = [reason, action.help].compactMap { $0 }.joined(separator: " ")
+        btn.toolTip = help.isEmpty ? nil : help
+        btn.setAccessibilityLabel(action.accessibilityName)
+        btn.setAccessibilityHelp(help.isEmpty ? nil : help)
     }
 
     private func makePillButton(action: QuickAction, tag index: Int) -> NSButton {
@@ -83,16 +132,19 @@ class QuickActionStripView: NSView {
         ]
         btn.attributedTitle = NSAttributedString(string: action.label, attributes: attrs)
 
-        // Fixed height; horizontal padding via contentEdgeInsets equivalent
+        // Fixed height; the width is the label plus padding on both sides, so no label's last glyph
+        // can sit against the pill's edge.
         btn.translatesAutoresizingMaskIntoConstraints = false
         btn.heightAnchor.constraint(equalToConstant: Self.buttonHeight).isActive = true
+        let labelWidth = ceil(btn.attributedTitle.size().width)
+        btn.widthAnchor.constraint(equalToConstant: labelWidth + 2 * Self.pillHorizontalPadding).isActive = true
 
         return btn
     }
 
     @objc private func pillTapped(_ sender: NSButton) {
         let index = sender.tag
-        guard actions.indices.contains(index) else { return }
+        guard actions.indices.contains(index), sender.isEnabled else { return }
         onTap(actions[index])
     }
 }

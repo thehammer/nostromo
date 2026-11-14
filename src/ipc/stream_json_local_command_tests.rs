@@ -446,7 +446,7 @@ fn a_stored_local_command_triple_is_exactly_one_complete_record_that_is_no_promp
     assert_eq!(turns[0].user_input, "/context");
     assert!(matches!(
         &turns[0].origin,
-        Some(TurnOrigin::LocalCommand { command, args, output, stream, truncated })
+        Some(TurnOrigin::LocalCommand { command, args, output, stream, truncated, .. })
             if command == "context" && args.is_empty()
                 && output == "Context Usage\n12k / 200k" && stream == "stdout" && !truncated
     ));
@@ -662,7 +662,7 @@ fn a_live_local_command_is_one_record_turn_and_never_touches_the_turn_before_it(
     assert!(turns[1].is_complete);
     assert!(matches!(
         &turns[1].origin,
-        Some(TurnOrigin::LocalCommand { command, args, output, stream, truncated })
+        Some(TurnOrigin::LocalCommand { command, args, output, stream, truncated, .. })
             if command == "model" && args == "haiku"
                 && output == "Set model to `Haiku 5.5` for this session only"
                 && stream == "stdout" && !truncated

@@ -112,6 +112,10 @@ class ReplView: NSView {
     }
     private let quickActions: [QuickAction]
     private var quickActionStrip: QuickActionStripView?
+    /// Compact was clicked and neither its `/compact` record nor the end of the turn has come yet.
+    private var compactPending = false
+    /// A turn was seen running since the Compact click (so a later idle is that turn's end).
+    private var compactSawRunning = false
     private let contextMeter = ContextMeterView()
 
     /// Geometry for *every* turn; views for only a window of them.
@@ -525,7 +529,17 @@ class ReplView: NSView {
 
         session.$isRunning
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] r in self?.inputBar.setRunning(r) }
+            .sink { [weak self] r in
+                guard let self else { return }
+                self.inputBar.setRunning(r)
+                if r { self.compactSawRunning = true } else if self.compactSawRunning { self.compactPending = false }
+                self.refreshCompactButton(running: r)
+            }
+            .store(in: &cancellables)
+
+        session.$health
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshCompactButton() }
             .store(in: &cancellables)
 
         // A "Model changed" note that arrives in the transcript being looked at is read out by
@@ -556,6 +570,7 @@ class ReplView: NSView {
 
     private func apply(_ change: TurnChange) {
         let turns = session.turns
+        noteCompactRecord()
         // Name the reading position before anything changes under it (a no-op while following
         // the tail, or when a position is already waiting for the next pass).
         if case .cleared = change {} else { viewport.noteProgrammaticChange() }
@@ -1366,7 +1381,41 @@ class ReplView: NSView {
         }
     }
 
+    /// Compact is available only while the session is alive and idle: a click that did nothing visible
+    /// for minutes (queued behind a turn, or a compaction in flight) is worse than a disabled button
+    /// that says why. `running` is the value a `$isRunning` emission carries (it fires before the
+    /// property changes), else the session's own.
+    private func refreshCompactButton(running: Bool? = nil) {
+        guard let strip = quickActionStrip else { return }
+        let reason: String?
+        if session.health != .healthy {
+            reason = "The session is not running."
+        } else if running ?? session.isRunning {
+            reason = "A turn is running."
+        } else if compactPending {
+            reason = "Compacting."
+        } else {
+            reason = nil
+        }
+        strip.setEnabled(reason == nil, forActionID: QuickAction.compact.id, reason: reason)
+    }
+
+    /// The `/compact` record has arrived: Compact may be pressed again once the turn is over.
+    private func noteCompactRecord() {
+        guard compactPending, let last = session.turns.last,
+              case .localCommand(let command, _, _, _, _, _)? = last.origin, command == "compact" else { return }
+        compactPending = false
+        refreshCompactButton()
+    }
+
     private func runQuickAction(_ action: QuickAction) {
+        if action.id == QuickAction.compact.id {
+            // A click while disabled (a stale one) does nothing.
+            guard session.health == .healthy, !session.isRunning, !compactPending else { return }
+            compactPending = true
+            compactSawRunning = false
+            refreshCompactButton(running: true)
+        }
         // D5: in addition to whatever prompt this action sends, a "Reset
         // Layout" quick action also clears this focus's saved split ratios
         // and forces its `DynamicFocusView` to rebuild from the daemon's
@@ -1475,6 +1524,9 @@ extension ReplView: PaneRenderSubject {
             "contentDirty": contentDirty ? 1 : 0, "followingTail": isPinnedToBottom ? 1 : 0,
         ]
     }
+
+    /// Test seam: the quick-action strip, if the pane has one.
+    var quickActionStripForTesting: QuickActionStripView? { quickActionStrip }
 
     /// Test seam: releases every turn view and schedules nothing, which is what the blank looks like.
     func evictAllTurnViewsForTesting() {

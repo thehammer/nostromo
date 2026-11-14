@@ -420,7 +420,7 @@ final class DynamicFocusView: NSView {
                 displayName:      focus.displayName,
                 workingDirectory: focus.projectPath,
                 quickActions:     focus.quickActions.isEmpty
-                                      ? [QuickAction.clearContext]
+                                      ? QuickAction.replDefaults
                                       : focus.quickActions
             )
             leafViews[paneId] = repl

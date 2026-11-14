@@ -264,11 +264,29 @@ pub enum TurnOrigin {
         stream: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         truncated: bool,
+        /// What a `/compact` did (tokens before and after, or why it failed):
+        /// set only on a `compact` record, from the CLI's own compaction
+        /// lines (see [`ParsedLine::Compaction`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compact: Option<CompactInfo>,
     },
     /// An origin this build does not know (a newer daemon wrote it): read as
     /// such rather than failing the whole turn.
     #[serde(other)]
     Unknown,
+}
+
+/// The outcome of one `/compact`, carried by its record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 fn default_local_stream() -> String {
@@ -476,6 +494,20 @@ pub enum ParsedLine {
         /// It arrived as a user line (the CLI's replay of a local command's
         /// answer): live, only meaningful while a typed `/` write is unanswered.
         from_user_line: bool,
+    },
+    /// A conversation compaction, from a `compact_boundary` line (live
+    /// `compact_metadata` in snake_case, stored `compactMetadata` in camelCase:
+    /// `trigger`, token counts) or a `system/status` line carrying
+    /// `compact_result`. Opens no turn: a boundary sets the context figure and
+    /// a manual one (or a failure) waits for its `/compact` record.
+    Compaction {
+        trigger: Option<String>,
+        pre_tokens: Option<u64>,
+        post_tokens: Option<u64>,
+        /// `Some(true)` for `compact_result: "success"`, `Some(false)` for any
+        /// other result; `None` on a boundary.
+        succeeded: Option<bool>,
+        error: Option<String>,
     },
     /// The CLI's harness line for a typed slash command (`<command-name>`,
     /// `<command-message>`, `<command-args>`). By itself it opens no turn: a
@@ -758,6 +790,36 @@ fn parse_system_event(obj: &serde_json::Map<String, Value>) -> Option<ParsedLine
                 from_user_line: false,
             })
         }
+        Some("compact_boundary") => {
+            let meta = obj
+                .get("compact_metadata")
+                .or_else(|| obj.get("compactMetadata"))
+                .and_then(|m| m.as_object());
+            let num = |snake: &str, camel: &str| {
+                meta.and_then(|m| m.get(snake).or_else(|| m.get(camel)))
+                    .and_then(|x| x.as_u64())
+            };
+            Some(ParsedLine::Compaction {
+                trigger: meta
+                    .and_then(|m| m.get("trigger"))
+                    .and_then(|x| x.as_str())
+                    .map(str::to_owned),
+                pre_tokens: num("pre_tokens", "preTokens"),
+                post_tokens: num("post_tokens", "postTokens"),
+                succeeded: None,
+                error: None,
+            })
+        }
+        Some("status") => match str_field("compact_result") {
+            Some(result) => Some(ParsedLine::Compaction {
+                trigger: None,
+                pre_tokens: None,
+                post_tokens: None,
+                succeeded: Some(result == "success"),
+                error: str_field("compact_error").map(|e| crate::data::work::untrusted::one_line(&e, 512)),
+            }),
+            None => session_id.map(ParsedLine::SessionId),
+        },
         Some("model_fallback")
         | Some("model_refusal_fallback")
         | Some("model_consent_fallback") => Some(ParsedLine::ModelFallback {
@@ -1934,6 +1996,9 @@ pub struct SessionTranscript {
     /// follows: local output claims it (a record), anything else makes it the
     /// user's own `/<name> <args>` turn first. Never set on a live transcript.
     pending_command: Option<PendingCommand>,
+    /// A manual compaction (or a failed one) the CLI reported, waiting for the
+    /// `/compact` record that shows it. Any other turn starting clears it.
+    pending_compact: Option<CompactInfo>,
 }
 
 /// A harness line of a typed slash command, held by [`SessionTranscript`].
@@ -2194,9 +2259,45 @@ impl SessionTranscript {
                         output,
                         stream,
                         truncated,
+                        compact: None,
                     },
                     timestamp,
                 )
+            }
+
+            ParsedLine::Compaction {
+                trigger,
+                pre_tokens,
+                post_tokens,
+                succeeded,
+                error,
+            } => {
+                match succeeded {
+                    // The boundary: the context is now `post_tokens`, whoever
+                    // asked. Only a manual one gets a record.
+                    None => {
+                        if post_tokens.is_some() {
+                            self.last_context_tokens = post_tokens;
+                        }
+                        if trigger.as_deref() == Some("manual") {
+                            self.pending_compact = Some(CompactInfo {
+                                pre_tokens,
+                                post_tokens,
+                                failed: false,
+                                error: None,
+                            });
+                        }
+                    }
+                    Some(false) => {
+                        self.pending_compact = Some(CompactInfo {
+                            failed: true,
+                            error,
+                            ..CompactInfo::default()
+                        });
+                    }
+                    Some(true) => {}
+                }
+                vec![]
             }
 
             ParsedLine::CommandEcho {
@@ -2286,6 +2387,7 @@ impl SessionTranscript {
                 if let Some(origin) = origin.as_ref().filter(|o| o.is_cli_injected()) {
                     return self.ingest_injected(origin.clone(), timestamp, deltas);
                 }
+                self.pending_compact = None;
                 // Flush any still-open turn (defensive; stored JSONL has no
                 // `result` lines and delimits turns by the next user prompt).
                 if let Some(last) = self.turns.last_mut() {
@@ -2417,9 +2519,21 @@ impl SessionTranscript {
     /// the answer is never appended to the previous turn.
     fn ingest_local_command(
         &mut self,
-        origin: TurnOrigin,
+        mut origin: TurnOrigin,
         timestamp: Option<String>,
     ) -> Vec<TurnDelta> {
+        let pending = self.pending_compact.take();
+        if let TurnOrigin::LocalCommand {
+            command, compact, ..
+        } = &mut origin
+        {
+            // A live form-B line names no command until the daemon adopts the
+            // message it wrote ([`Self::adopt_written_command`]): keep the
+            // detail for it, which drops it again unless that was `/compact`.
+            if command == "compact" || command.is_empty() {
+                *compact = pending;
+            }
+        }
         let mut deltas: Vec<TurnDelta> = self.discard_orphan_prompt().into_iter().collect();
         if let Some(last) = self.turns.last_mut() {
             last.is_complete = true;
@@ -2461,11 +2575,17 @@ impl SessionTranscript {
             .saturating_sub(old_input.len())
             .saturating_add(turn.user_input.len());
         if let Some(TurnOrigin::LocalCommand {
-            command, args: a, ..
+            command,
+            args: a,
+            compact,
+            ..
         }) = turn.origin.as_mut()
         {
             if command.is_empty() {
                 *command = name;
+            }
+            if command != "compact" {
+                *compact = None;
             }
             if a.is_empty() {
                 *a = args;
@@ -2489,6 +2609,7 @@ impl SessionTranscript {
         omitted: u32,
         timestamp: Option<String>,
     ) -> Vec<TurnDelta> {
+        self.pending_compact = None;
         if let Some(turn) = self.turns.last_mut() {
             let bare = turn
                 .blocks
@@ -3145,6 +3266,10 @@ mod wake_tests;
 #[cfg(test)]
 #[path = "stream_json_local_command_tests.rs"]
 mod local_command_tests;
+
+#[cfg(test)]
+#[path = "stream_json_compact_tests.rs"]
+mod compact_tests;
 
 #[cfg(test)]
 mod tests {
