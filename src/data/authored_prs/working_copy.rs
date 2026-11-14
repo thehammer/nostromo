@@ -791,4 +791,145 @@ mod tests {
             );
         }
     }
+
+    // ── files that something else controls ────────────────────────────────
+
+    /// A FIFO (named pipe) at `path`: opening it for reading blocks until a
+    /// writer opens it. Tests only; the production code never calls libc.
+    fn mkfifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated path for the whole call.
+        let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
+
+    /// `working_copy_at(cwd)` on its own thread, so a read that blocks forever
+    /// fails this test instead of hanging the run.
+    fn working_copy_within_a_few_seconds(cwd: &Path) -> WorkingCopy {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cwd = cwd.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(working_copy_at(&cwd));
+        });
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the read returned: a FIFO or other odd file must not block it")
+    }
+
+    #[test]
+    fn a_fifo_named_head_reads_as_no_branch_and_returns_promptly() {
+        let w = world();
+        let co = w.checkout(
+            "checkout",
+            "ref: refs/heads/feat\n",
+            Some("https://github.com/o/n"),
+        );
+        fs::remove_file(co.join(".git").join("HEAD")).unwrap();
+        mkfifo(&co.join(".git").join("HEAD"));
+        let copy = working_copy_within_a_few_seconds(&co);
+        assert_eq!(copy.branch, None);
+        assert_eq!(
+            copy.repo.as_deref(),
+            Some("o/n"),
+            "the rest of the checkout is still read"
+        );
+    }
+
+    #[test]
+    fn a_fifo_named_config_reads_as_no_repo_and_returns_promptly() {
+        let w = world();
+        let co = w.checkout("checkout", "ref: refs/heads/feat\n", None);
+        fs::remove_file(co.join(".git").join("config")).unwrap();
+        mkfifo(&co.join(".git").join("config"));
+        let copy = working_copy_within_a_few_seconds(&co);
+        assert_eq!(copy.repo, None);
+        assert_eq!(copy.branch.as_deref(), Some("feat"));
+    }
+
+    #[test]
+    fn a_git_file_pointing_at_a_directory_whose_head_is_a_fifo_returns_promptly_with_no_branch() {
+        let w = world();
+        let main = w.checkout(
+            "main-repo",
+            "ref: refs/heads/main\n",
+            Some("https://github.com/o/n"),
+        );
+        let wt = w.linked_worktree(&main, "feature", "ref: refs/heads/feat-y\n");
+        let admin = main.join(".git").join("worktrees").join("feature");
+        fs::remove_file(admin.join("HEAD")).unwrap();
+        mkfifo(&admin.join("HEAD"));
+        // The worktree's `commondir` is a pipe too.
+        fs::remove_file(admin.join("commondir")).unwrap();
+        mkfifo(&admin.join("commondir"));
+        let copy = working_copy_within_a_few_seconds(&wt);
+        assert_eq!(copy.branch, None);
+        assert_eq!(
+            copy.repo, None,
+            "no commondir, so no config was found either"
+        );
+    }
+
+    #[test]
+    fn a_head_or_config_over_256_kib_is_not_read() {
+        let padding = " ".repeat(300 * 1024);
+
+        let w = world();
+        let co = w.checkout(
+            "big-head",
+            &format!("ref: refs/heads/feat\n{padding}"),
+            Some("https://github.com/o/n"),
+        );
+        let copy = working_copy_within_a_few_seconds(&co);
+        assert_eq!(copy.branch, None, "an oversized HEAD is not read");
+        assert_eq!(copy.repo.as_deref(), Some("o/n"));
+
+        let co = w.checkout("big-config", "ref: refs/heads/feat\n", None);
+        let mut config = String::from("[remote \"origin\"]\n\turl = https://github.com/o/n\n");
+        config.push_str(&format!("# {padding}\n"));
+        fs::write(co.join(".git").join("config"), config).unwrap();
+        let copy = working_copy_within_a_few_seconds(&co);
+        assert_eq!(copy.repo, None, "an oversized config is not read");
+        assert_eq!(copy.branch.as_deref(), Some("feat"));
+
+        // Control: just under the limit is still read.
+        let co = w.checkout(
+            "ok-head",
+            &format!("ref: refs/heads/feat\n{}", " ".repeat(200 * 1024)),
+            Some("https://github.com/o/n"),
+        );
+        let copy = working_copy_within_a_few_seconds(&co);
+        assert_eq!(copy.branch.as_deref(), Some("feat"));
+    }
+
+    #[test]
+    fn a_head_that_is_a_symlink_is_not_followed() {
+        let w = world();
+        let co = w.checkout(
+            "checkout",
+            "ref: refs/heads/feat\n",
+            Some("https://github.com/o/n"),
+        );
+        let elsewhere = w.root.join("elsewhere");
+        fs::write(&elsewhere, "ref: refs/heads/from-the-symlink\n").unwrap();
+        let head = co.join(".git").join("HEAD");
+        fs::remove_file(&head).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &head).unwrap();
+        let copy = working_copy_within_a_few_seconds(&co);
+        assert_eq!(copy.branch, None, "{copy:?}");
+
+        // Nor is a symlinked config.
+        let co = w.checkout("checkout2", "ref: refs/heads/feat\n", None);
+        let real = w.root.join("real-config");
+        fs::write(
+            &real,
+            "[remote \"origin\"]\n\turl = https://github.com/o/n\n",
+        )
+        .unwrap();
+        let config = co.join(".git").join("config");
+        fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(&real, &config).unwrap();
+        let copy = working_copy_within_a_few_seconds(&co);
+        assert_eq!(copy.repo, None, "{copy:?}");
+        assert_eq!(copy.branch.as_deref(), Some("feat"));
+    }
 }

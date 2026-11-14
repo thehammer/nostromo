@@ -19,12 +19,19 @@
 //! `Retry-After`. It deliberately returns body text, bodies of comments and
 //! check output the real query never asks for, so a test can prove none of it
 //! reaches the snapshot.
+//!
+//! Beyond the paused clock, a test can jump the engine's *wall* clock (a Mac
+//! waking from sleep, an NTP step) without moving tokio's monotonic clock
+//! (`RigOpts::wall_jump`), hand the engine a token resolver
+//! (`RigOpts::token_resolver`), and make the fake's GraphQL answer a canned
+//! body (`Fake::force_graphql_body`).
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,7 +42,8 @@ use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use nostromo::data::authored_prs::{
-    AuthoredPrsSnapshot, AuthoredPrsSource, DemandBoard, Deps, FocusInfo, TokioClock,
+    AuthoredPrsSnapshot, AuthoredPrsSource, Clock, DemandBoard, Deps, FocusInfo, TokenResolver,
+    TokioClock,
 };
 use nostromo::data::github_client::GithubClient;
 use nostromo::data::relay_client::{QueueSignal, RelayEvent, RelayStatus};
@@ -95,6 +103,14 @@ pub struct FakePr {
     pub in_search: bool,
     /// `false`: GraphQL answers `pullRequest: null` (no access, or gone).
     pub accessible: bool,
+    /// The head branch lives in a fork (`isCrossRepository`).
+    pub cross_repo: bool,
+    /// The rollup's own `state` (`SUCCESS`, `FAILURE`, `PENDING` ...), sent
+    /// only when the query asks for it.
+    pub rollup_state: Option<String>,
+    /// Overrides the rollup's `contexts.totalCount` (GitHub's count is of every
+    /// check, the nodes are only the first page).
+    pub contexts_total: Option<u32>,
 }
 
 impl FakePr {
@@ -124,6 +140,9 @@ impl FakePr {
             committed: t0() - chrono::Duration::hours(3),
             in_search: true,
             accessible: true,
+            cross_repo: false,
+            rollup_state: None,
+            contexts_total: None,
         }
     }
 
@@ -187,6 +206,16 @@ impl FakePr {
     }
     pub fn out_of_search(mut self) -> Self {
         self.in_search = false;
+        self
+    }
+    pub fn in_a_fork(mut self) -> Self {
+        self.cross_repo = true;
+        self
+    }
+    /// The rollup says `state` over `total` checks, whatever the nodes show.
+    pub fn rollup(mut self, state: &str, total: u32) -> Self {
+        self.rollup_state = Some(state.to_owned());
+        self.contexts_total = Some(total);
         self
     }
 }
@@ -259,6 +288,11 @@ pub struct State {
     /// `None`: the lookup answers 404.
     pub orgs: HashMap<u64, Option<String>>,
     pub etags: bool,
+    /// When set, every GraphQL request is answered `200` with this body.
+    pub graphql_body: Option<Value>,
+    /// Statuses for the next GraphQL requests, one each, in order (`200` is a
+    /// normal answer); once used up GraphQL answers normally again.
+    pub graphql_script: std::collections::VecDeque<u16>,
 }
 
 #[derive(Clone)]
@@ -279,7 +313,13 @@ fn iso(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn pr_graphql(pr: &FakePr) -> Value {
+fn pr_graphql(pr: &FakePr, query: &str) -> Value {
+    // Only the fields the query asks for are sent, so a test fails if the
+    // daemon stops asking for one it needs.
+    let asks_rollup_state = regex::Regex::new(r"statusCheckRollup\s*\{\s*state\b")
+        .unwrap()
+        .is_match(query);
+    let asks_cross_repo = query.contains("isCrossRepository");
     let mut nodes: Vec<Value> = pr
         .checks
         .iter()
@@ -298,10 +338,15 @@ fn pr_graphql(pr: &FakePr) -> Value {
     let rollup = if nodes.is_empty() {
         Value::Null
     } else {
-        json!({"contexts": {"totalCount": nodes.len(), "nodes": nodes}})
+        let total = pr.contexts_total.unwrap_or(nodes.len() as u32);
+        let mut r = json!({"contexts": {"totalCount": total, "nodes": nodes}});
+        if let (true, Some(state)) = (asks_rollup_state, &pr.rollup_state) {
+            r["state"] = json!(state);
+        }
+        r
     };
     let actor = |login: &str, ty: &str| json!({"__typename": ty, "login": login});
-    json!({
+    let mut out = json!({
         "number": pr.number,
         "title": pr.title,
         "isDraft": pr.draft,
@@ -329,7 +374,11 @@ fn pr_graphql(pr: &FakePr) -> Value {
             "createdAt": iso(*at), "author": actor(l, t), "body": format!("{CANARY_BODY} {INJECTION}")
         })).collect::<Vec<_>>()},
         "reviews": {"nodes": []},
-    })
+    });
+    if asks_cross_repo {
+        out["isCrossRepository"] = json!(pr.cross_repo);
+    }
+    out
 }
 
 fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
@@ -437,7 +486,17 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
             }
             t
         }
+        "graphql" if st.graphql_script.front().is_some_and(|c| *c != 200) => {
+            let code = st.graphql_script.pop_front().unwrap_or(500);
+            entry.status = code;
+            ResponseTemplate::new(code).set_body_json(json!({"message": "scripted failure"}))
+        }
+        "graphql" if st.graphql_body.is_some() => {
+            entry.status = 200;
+            ResponseTemplate::new(200).set_body_json(st.graphql_body.clone().unwrap())
+        }
         "graphql" => {
+            st.graphql_script.pop_front();
             let query = serde_json::from_str::<Value>(&body)
                 .ok()
                 .and_then(|v| v["query"].as_str().map(str::to_owned))
@@ -458,7 +517,7 @@ fn respond(state: &Arc<Mutex<State>>, req: &Request) -> ResponseTemplate {
                     p.repo.eq_ignore_ascii_case(&repo) && p.number == number && p.accessible
                 });
                 let value = match found {
-                    Some(p) => json!({"pullRequest": pr_graphql(p)}),
+                    Some(p) => json!({"pullRequest": pr_graphql(p, &query)}),
                     None => json!({"pullRequest": null}),
                 };
                 data.insert(format!("p{}", &c[1]), value);
@@ -504,6 +563,8 @@ impl Fake {
                 sso: None,
                 orgs: HashMap::new(),
                 etags: true,
+                graphql_body: None,
+                graphql_script: std::collections::VecDeque::new(),
             })),
         }
     }
@@ -568,6 +629,17 @@ impl Fake {
         }
     }
 
+    /// The next GraphQL requests answer with these statuses, one each, in order
+    /// (`200` is a normal answer); after that GraphQL is normal again.
+    pub fn script_graphql(&self, statuses: &[u16]) {
+        self.lock().graphql_script = statuses.iter().copied().collect();
+    }
+
+    /// Answer every GraphQL request `200` with `body` (`None`: back to normal).
+    pub fn force_graphql_body(&self, body: Option<Value>) {
+        self.lock().graphql_body = body;
+    }
+
     pub fn set_sso(&self, header: Option<&str>) {
         self.lock().sso = header.map(str::to_owned);
     }
@@ -614,6 +686,10 @@ pub struct RigOpts {
     pub relay: bool,
     /// A GitHub token is available.
     pub token: bool,
+    /// The engine's wall clock can be jumped by the test.
+    pub wall_jump: Option<WallJump>,
+    /// How the engine looks for a token again when it started without one.
+    pub token_resolver: Option<TokenResolver>,
 }
 
 impl Default for RigOpts {
@@ -621,7 +697,95 @@ impl Default for RigOpts {
         RigOpts {
             relay: false,
             token: true,
+            wall_jump: None,
+            token_resolver: None,
         }
+    }
+}
+
+/// A handle on the engine's wall clock: `jump` moves it forward without any
+/// monotonic time passing, the way a Mac waking from sleep or a clock
+/// correction does.
+#[derive(Clone, Default)]
+pub struct WallJump(Arc<Mutex<chrono::Duration>>);
+
+impl WallJump {
+    pub fn new() -> WallJump {
+        WallJump::default()
+    }
+
+    pub fn jump(&self, by: Duration) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) +=
+            chrono::Duration::from_std(by).expect("a sane jump");
+    }
+
+    fn offset(&self) -> chrono::Duration {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// [`TokioClock`] plus whatever the test has jumped.
+struct JumpClock {
+    base: TokioClock,
+    jump: WallJump,
+}
+
+impl Clock for JumpClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.base.now() + self.jump.offset()
+    }
+}
+
+fn clear_token_env() {
+    static ENV: std::sync::Once = std::sync::Once::new();
+    ENV.call_once(|| std::env::remove_var("GITHUB_TOKEN"));
+}
+
+/// A token resolver the test controls: it finds nothing until `available` is
+/// set, then a client built from a `hosts.yml` (as the rig builds its own), and
+/// it counts how often it was asked.
+pub struct FlaggedResolver {
+    pub resolver: TokenResolver,
+    pub available: Arc<AtomicBool>,
+    pub calls: Arc<AtomicUsize>,
+}
+
+impl FlaggedResolver {
+    pub fn new() -> FlaggedResolver {
+        clear_token_env();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hosts = dir.path().join("hosts.yml");
+        std::fs::write(
+            &hosts,
+            format!("github.com:\n  oauth_token: {TOKEN}\n  user: {ME}\n  git_protocol: https\n"),
+        )
+        .unwrap();
+        // Built now: building a client reads the system's certificates, and
+        // doing that inside the engine's look would take real time that the
+        // paused clock cannot account for.
+        let client = GithubClient::new(Some(&hosts)).expect("a client from the test token");
+        let available = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (flag, count) = (Arc::clone(&available), Arc::clone(&calls));
+        let resolver: TokenResolver = Arc::new(move || {
+            // The directory lives as long as the resolver does.
+            let _keep = &dir;
+            count.fetch_add(1, Ordering::SeqCst);
+            flag.load(Ordering::SeqCst).then(|| client.clone())
+        });
+        FlaggedResolver {
+            resolver,
+            available,
+            calls,
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    pub fn make_available(&self) {
+        self.available.store(true, Ordering::SeqCst);
     }
 }
 
@@ -671,8 +835,7 @@ impl Rig {
             format!("github.com:\n  oauth_token: {TOKEN}\n  user: {ME}\n  git_protocol: https\n"),
         )
         .unwrap();
-        static ENV: std::sync::Once = std::sync::Once::new();
-        ENV.call_once(|| std::env::remove_var("GITHUB_TOKEN"));
+        clear_token_env();
         let github = opts
             .token
             .then(|| GithubClient::new(Some(&hosts)).expect("a client from the test token"));
@@ -696,14 +859,20 @@ impl Rig {
         let handle = AuthoredPrsSource::spawn(Deps {
             api_base: server.uri(),
             github,
-            token_resolver: None,
+            token_resolver: opts.token_resolver.clone(),
             relay_status: Arc::clone(&relay_status),
             relay_configured: opts.relay,
             relay_rx: Some(relay_rx),
             jobs_rx,
             focuses: provider,
             projects_root: projects.clone(),
-            clock: Arc::new(TokioClock::new(t0())),
+            clock: match &opts.wall_jump {
+                Some(jump) => Arc::new(JumpClock {
+                    base: TokioClock::new(t0()),
+                    jump: jump.clone(),
+                }),
+                None => Arc::new(TokioClock::new(t0())),
+            },
         });
         let mut rig = Rig {
             fake,
@@ -800,6 +969,42 @@ impl Rig {
             }
             self.advance(step.min(end - self.elapsed)).await;
         }
+    }
+
+    /// The Mother jobs feed goes away (its sender is dropped), as when the
+    /// daemon's job poller stops.
+    pub fn drop_jobs_feed(&mut self) {
+        let (stub, _rx) = watch::channel(Vec::<MotherJob>::new());
+        drop(std::mem::replace(&mut self.jobs_tx, stub));
+    }
+
+    /// A checkout under the rig's directory: `.git/HEAD` says `head`
+    /// (`ref: refs/heads/<branch>`) and `origin` is `url`.
+    pub fn checkout(&self, name: &str, head: &str, url: &str) -> PathBuf {
+        let dir = self.dir.path().join(name);
+        let git = dir.join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(git.join("HEAD"), head).unwrap();
+        std::fs::write(
+            git.join("config"),
+            format!("[remote \"origin\"]\n\turl = {url}\n"),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// An open focus whose session was spawned in `cwd`.
+    pub fn add_focus(&self, tag: &str, name: &str, cwd: PathBuf) {
+        self.focuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(FocusInfo {
+                tag: tag.to_owned(),
+                name: name.to_owned(),
+                session_id: None,
+                spawn_cwd: Some(cwd),
+                project_path: None,
+            });
     }
 
     // ── inputs ────────────────────────────────────────────────────────────
@@ -904,6 +1109,16 @@ impl Rig {
         self.set_demand("visible").await;
         self.run(secs(2), Duration::from_millis(250)).await;
     }
+}
+
+/// Make a FIFO (named pipe) at `path`: opening it for reading blocks until a
+/// writer shows up.
+pub fn mkfifo(path: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `c` is a valid NUL-terminated path for the duration of the call.
+    let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
+    assert_eq!(rc, 0, "mkfifo: {}", std::io::Error::last_os_error());
 }
 
 // ── relay events ──────────────────────────────────────────────────────────────

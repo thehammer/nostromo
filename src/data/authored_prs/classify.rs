@@ -1138,4 +1138,107 @@ mod tests {
         assert_eq!(c.base_ref.as_deref(), Some("release"));
         assert_eq!(c.lifecycle, Lifecycle::Open);
     }
+
+    // ── more checks than the query reads ──────────────────────────────────
+
+    /// A rollup over `total` checks of which only `nodes` came back, whose own
+    /// verdict is `state`.
+    fn rollup_of(state: Option<&str>, total: usize, nodes: Vec<Value>) -> Checks {
+        let mut v = pr_json();
+        let mut rollup = json!({"contexts": {"totalCount": total, "nodes": nodes}});
+        if let Some(state) = state {
+            rollup["state"] = json!(state);
+        }
+        v["commits"]["nodes"][0]["commit"]["statusCheckRollup"] = rollup;
+        classify(&raw(v), None).checks
+    }
+
+    fn hundred_passing() -> Vec<Value> {
+        (0..100)
+            .map(|i| check_run(&format!("job-{i}"), "COMPLETED", Some("SUCCESS")))
+            .collect()
+    }
+
+    #[test]
+    fn a_failure_past_the_first_hundred_checks_is_not_shown_as_passing() {
+        for state in ["FAILURE", "ERROR", "failure"] {
+            let c = rollup_of(Some(state), 150, hundred_passing());
+            assert_eq!(c.state, ChecksState::Failing, "{state}");
+        }
+    }
+
+    #[test]
+    fn a_check_still_running_past_the_first_hundred_is_not_shown_as_passing() {
+        for state in ["PENDING", "EXPECTED"] {
+            let c = rollup_of(Some(state), 150, hundred_passing());
+            assert_eq!(c.state, ChecksState::Pending, "{state}");
+        }
+    }
+
+    #[test]
+    fn a_rollup_that_says_success_over_more_checks_than_were_read_is_passing() {
+        let c = rollup_of(Some("SUCCESS"), 150, hundred_passing());
+        assert_eq!(c.state, ChecksState::Passing);
+    }
+
+    #[test]
+    fn the_rollup_never_makes_what_was_read_look_better() {
+        let mut nodes = hundred_passing();
+        nodes[3] = check_run("broken", "COMPLETED", Some("FAILURE"));
+        let c = rollup_of(Some("SUCCESS"), 150, nodes);
+        assert_eq!(
+            c.state,
+            ChecksState::Failing,
+            "a failure that was read stays"
+        );
+
+        let mut nodes = hundred_passing();
+        nodes[3] = check_run("slow", "IN_PROGRESS", None);
+        let c = rollup_of(Some("SUCCESS"), 150, nodes);
+        assert_eq!(c.state, ChecksState::Pending);
+    }
+
+    #[test]
+    fn a_rollup_state_that_is_missing_or_unknown_changes_nothing_when_truncated() {
+        for state in [None, Some("SOMETHING_NEW"), Some("")] {
+            let c = rollup_of(state, 150, hundred_passing());
+            assert_eq!(c.state, ChecksState::Passing, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn when_every_check_was_read_the_rollups_own_state_is_ignored() {
+        // Three checks, all read, all passing: the rollup's word adds nothing.
+        let three = || {
+            vec![
+                check_run("a", "COMPLETED", Some("SUCCESS")),
+                check_run("b", "COMPLETED", Some("SUCCESS")),
+                check_run("c", "COMPLETED", Some("SKIPPED")),
+            ]
+        };
+        for state in ["FAILURE", "PENDING", "ERROR"] {
+            let c = rollup_of(Some(state), 3, three());
+            assert_eq!(c.state, ChecksState::Passing, "{state}");
+        }
+        // Exactly a hundred read of a hundred: not truncated either.
+        let c = rollup_of(Some("FAILURE"), 100, hundred_passing());
+        assert_eq!(c.state, ChecksState::Passing);
+    }
+
+    #[test]
+    fn a_rollup_with_no_checks_read_and_a_truncated_count_still_takes_the_rollups_word() {
+        let c = rollup_of(Some("FAILURE"), 150, Vec::new());
+        assert_eq!(c.state, ChecksState::Failing);
+    }
+
+    #[test]
+    fn a_fork_pr_is_decoded_as_cross_repository_and_the_field_is_optional() {
+        let mut v = pr_json();
+        assert!(
+            !raw(v.clone()).is_cross_repository,
+            "absent means not a fork"
+        );
+        v["isCrossRepository"] = json!(true);
+        assert!(raw(v).is_cross_repository);
+    }
 }

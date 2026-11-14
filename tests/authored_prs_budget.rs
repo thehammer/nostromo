@@ -202,6 +202,7 @@ async fn relay_reads_are_capped_at_twenty_an_hour_when_hidden() {
         RigOpts {
             relay: true,
             token: true,
+            ..Default::default()
         },
     )
     .await;
@@ -246,6 +247,7 @@ async fn with_no_operator_connection_the_feature_makes_no_request_for_an_hour_an
         RigOpts {
             relay: true,
             token: true,
+            ..Default::default()
         },
     )
     .await;
@@ -287,6 +289,7 @@ async fn an_explicit_idle_stops_all_requests_and_returning_to_visible_costs_exac
         RigOpts {
             relay: true,
             token: true,
+            ..Default::default()
         },
     )
     .await;
@@ -425,6 +428,7 @@ async fn a_relay_event_costs_at_most_two_requests_and_never_a_search_and_a_merge
         RigOpts {
             relay: true,
             token: true,
+            ..Default::default()
         },
     )
     .await;
@@ -693,6 +697,7 @@ async fn the_relay_state_is_unaffected_by_a_pause() {
         RigOpts {
             relay: true,
             token: true,
+            ..Default::default()
         },
     )
     .await;
@@ -713,4 +718,182 @@ async fn the_relay_state_is_unaffected_by_a_pause() {
         RelayState::Live,
         "the relay is still delivering; only polling is paused"
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The wall clock moves under the engine
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn now_of(rig: &Rig) -> chrono::DateTime<chrono::Utc> {
+    t0() + Chrono::from_std(rig.elapsed).unwrap()
+}
+
+#[tokio::test]
+async fn a_rate_limit_that_resets_ten_hours_from_now_pauses_for_an_hour_at_most_and_requests_resume(
+) {
+    let fake = Fake::new();
+    twenty(&fake);
+    // GitHub says nothing is left and the window resets ten hours from now.
+    fake.set_rate(Some(Rate {
+        remaining: 0,
+        limit: 5000,
+        reset: t0() + Chrono::hours(10),
+    }));
+    let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+    rig.set_demand("visible").await;
+    rig.run_until(mins(2), secs(1), |r| {
+        r.snapshot().map(|s| s.poll.state) == Some(PollState::Paused)
+    })
+    .await
+    .expect("paused after the empty reading");
+    let resumes = rig.snapshot().unwrap().poll.resumes_at.unwrap();
+    assert!(
+        resumes <= now_of(&rig) + Chrono::hours(1),
+        "a reset is never trusted past an hour: resumes at {resumes}, it is {}",
+        now_of(&rig)
+    );
+
+    // The limit really does lift sooner than that header said.
+    fake.set_rate(None);
+    let mark = rig.fake.log_len();
+    rig.run(mins(55), secs(10)).await;
+    assert_eq!(rig.fake.log_len(), mark, "paused until the hour is up");
+    rig.run_until(mins(10), secs(10), |r| r.fake.log_len() > mark)
+        .await
+        .expect("requests resume about an hour after the pause began, not ten");
+    assert!(rig.elapsed <= mins(70), "{:?}", rig.elapsed);
+}
+
+#[tokio::test]
+async fn a_pause_ends_when_the_wall_clock_jumps_past_it_without_waiting_out_the_jump() {
+    // The Mac slept: the wall clock is hours ahead, little monotonic time passed.
+    let jump = WallJump::new();
+    let fake = Fake::new();
+    twenty(&fake);
+    let mut rig = Rig::start(
+        fake.clone(),
+        RigOpts {
+            // A relay makes the engine look up every two seconds, so "the
+            // next wake" is not an accident of the pause's own length.
+            relay: true,
+            wall_jump: Some(jump.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    fake.force(
+        "search",
+        Some(Forced {
+            status: 429,
+            retry_after: Some(3600),
+        }),
+    );
+    rig.run_until(mins(3), secs(1), |r| {
+        r.snapshot().map(|s| s.poll.state) == Some(PollState::Paused)
+    })
+    .await
+    .expect("paused for the Retry-After");
+
+    // Still paused five minutes on: the pause is real.
+    fake.force("search", None);
+    let mark = rig.fake.log_len();
+    rig.run(mins(5), secs(5)).await;
+    assert_eq!(rig.fake.log_len(), mark, "no request while paused");
+
+    // Five hours pass on the wall clock in an instant.
+    jump.jump(Duration::from_secs(5 * 3600));
+    let jumped_at = rig.elapsed;
+    rig.run_until(secs(30), secs(1), |r| r.fake.log_len() > mark)
+        .await
+        .expect("the pause is over once the wall clock is past it");
+    assert!(rig.elapsed - jumped_at <= secs(30));
+    assert_ne!(rig.snapshot().unwrap().poll.state, PollState::Paused);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A secondary limit: a 403 or a GraphQL error with no Retry-After
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The list is paused for roughly a minute (never an error), asks for nothing
+/// meanwhile, and goes back to work afterwards.
+async fn assert_pauses_about_a_minute_then_resumes(rig: &mut Rig, lift: impl FnOnce()) {
+    rig.run_until(mins(3), secs(1), |r| {
+        r.snapshot().map(|s| s.poll.state) == Some(PollState::Paused)
+    })
+    .await
+    .expect("a secondary limit pauses polling; it is not an error");
+    let snap = rig.snapshot().unwrap();
+    let resumes = snap.poll.resumes_at.expect("a pause says when it ends");
+    let left = resumes - now_of(rig);
+    assert!(
+        left > Chrono::seconds(20) && left <= Chrono::hours(1),
+        "paused for {left}"
+    );
+    assert_eq!(snap.poll.retry_at, None, "this is a pause, not a retry");
+    assert!(
+        !rig.published
+            .iter()
+            .any(|(_, s)| s.poll.state == PollState::Error),
+        "the failure was never shown as `poll: error`"
+    );
+
+    // Nothing at all until the pause is over.
+    let mark = rig.fake.log_len();
+    let quiet_for = (resumes - now_of(rig)).to_std().unwrap() - secs(3);
+    rig.run(quiet_for, secs(1)).await;
+    assert_eq!(rig.fake.log_len(), mark, "paused: {:?}", rig.since(mark));
+
+    lift();
+    rig.run(secs(15), secs(1)).await;
+    assert!(
+        rig.fake.log_len() > mark,
+        "polling resumed after the pause: {:?}",
+        rig.since(mark)
+    );
+    assert_ne!(rig.snapshot().unwrap().poll.state, PollState::Paused);
+    assert_ne!(rig.snapshot().unwrap().poll.state, PollState::Error);
+}
+
+#[tokio::test]
+async fn a_403_with_no_retry_after_and_requests_remaining_is_a_pause_of_about_a_minute() {
+    let fake = Fake::new();
+    twenty(&fake);
+    // Plenty left in the primary limit: this is GitHub's abuse protection.
+    fake.set_rate(Some(Rate {
+        remaining: 4000,
+        limit: 5000,
+        reset: t0() + Chrono::minutes(50),
+    }));
+    let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    fake.force(
+        "search",
+        Some(Forced {
+            status: 403,
+            retry_after: None,
+        }),
+    );
+    let lifted = fake.clone();
+    assert_pauses_about_a_minute_then_resumes(&mut rig, move || lifted.force("search", None)).await;
+}
+
+#[tokio::test]
+async fn a_graphql_rate_limited_error_in_a_200_is_a_pause_of_about_a_minute() {
+    let fake = Fake::new();
+    twenty(&fake);
+    fake.force_graphql_body(Some(serde_json::json!({
+        "errors": [{"type": "RATE_LIMITED", "message": "x"}],
+        "data": null
+    })));
+    let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+    rig.set_demand("visible").await;
+    let lifted = fake.clone();
+    assert_pauses_about_a_minute_then_resumes(&mut rig, move || lifted.force_graphql_body(None))
+        .await;
+    // Once the limit lifts the reconcile completes: the PRs are read.
+    rig.run(secs(30), secs(1)).await;
+    assert!(rig.row("thehammer/proj", 2).is_some(), "the list fills in");
 }

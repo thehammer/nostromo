@@ -328,6 +328,15 @@ impl Engine {
                         pr.ended = Some((wall, now));
                         self.relay_reads.remove(&key);
                         self.dirty.remove(&key);
+                        // The last PR an earlier failed read was for is gone: no
+                        // request is left that could succeed and clear the error.
+                        if self.last_error
+                            && self.dirty.is_empty()
+                            && self.relay_reads.is_empty()
+                            && !self.want_search
+                        {
+                            self.last_error = false;
+                        }
                         self.mark_publish(now);
                     }
                 }

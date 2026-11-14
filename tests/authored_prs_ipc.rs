@@ -445,3 +445,122 @@ async fn the_latest_list_is_replayed_to_a_client_that_subscribes_later_and_names
     let (_tcp, _, frames) = connect_tcp(&env, vec![Topic::AuthoredPrs]).await;
     assert!(!frames.iter().any(is_authored), "{frames:?}");
 }
+
+// ── only the operator app is sent the list ────────────────────────────────────
+
+/// Wait until the server has kept a copy of the latest list to replay.
+async fn until_a_list_is_retained(env: &Env) {
+    for _ in 0..100 {
+        let (_probe, _, frames) =
+            connect_unix(env, Some("mac_app"), vec![Topic::AuthoredPrs]).await;
+        if frames.iter().any(is_authored) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the server never kept a copy of the list to replay");
+}
+
+/// Everything that reaches `s` over a short while, then a Pong behind it.
+async fn quiet_then_sync<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S) -> Vec<ServerMsg> {
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    sync(s).await
+}
+
+#[tokio::test]
+async fn a_local_client_that_is_not_the_operator_app_is_never_sent_the_list_even_when_it_names_the_topic(
+) {
+    let env = env(true).await;
+    let (mut app, _, _) = connect_unix(&env, Some("mac_app"), vec![Topic::AuthoredPrs]).await;
+    env.server.broadcast(ServerMsg::AuthoredPrs {
+        snapshot: snapshot(),
+    });
+    assert_eq!(
+        sync(&mut app)
+            .await
+            .iter()
+            .filter(|m| is_authored(m))
+            .count(),
+        1,
+        "control: the operator app is sent it"
+    );
+    until_a_list_is_retained(&env).await;
+
+    // A client with no kind, one that says it is the CLI, and one that
+    // claims to be something else: none of them may be sent the list.
+    for kind in [None, Some("cli"), Some("some-agent-script")] {
+        let who = format!("a `{kind:?}` client");
+
+        // Naming the topic on subscribe: no replay of the retained list.
+        let (mut client, _, frames) = connect_unix(&env, kind, vec![Topic::AuthoredPrs]).await;
+        assert!(
+            !frames.iter().any(is_authored),
+            "{who} was replayed the list: {frames:?}"
+        );
+
+        // A live broadcast does not reach it either.
+        env.server.broadcast(ServerMsg::AuthoredPrs {
+            snapshot: snapshot(),
+        });
+        let frames = quiet_then_sync(&mut client).await;
+        assert!(
+            !frames.iter().any(is_authored),
+            "{who} was sent a live list: {frames:?}"
+        );
+
+        // Subscribing again and naming it (with another topic beside it) is
+        // no different: no replay, and no live frame.
+        send(
+            &mut client,
+            &subscribe(vec![Topic::Perri, Topic::AuthoredPrs]),
+        )
+        .await;
+        let frames = sync(&mut client).await;
+        assert!(
+            !frames.iter().any(is_authored),
+            "{who} was replayed the list on a re-subscribe: {frames:?}"
+        );
+        env.server.broadcast(ServerMsg::AuthoredPrs {
+            snapshot: snapshot(),
+        });
+        let frames = quiet_then_sync(&mut client).await;
+        assert!(
+            !frames.iter().any(is_authored),
+            "{who} was sent a live list after a re-subscribe: {frames:?}"
+        );
+    }
+
+    // And the operator app still is, live.
+    let frames = quiet_then_sync(&mut app).await;
+    assert!(
+        frames.iter().filter(|m| is_authored(m)).count() >= 1,
+        "the operator app kept receiving the list: {frames:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_operator_app_that_subscribes_first_and_names_the_topic_later_is_sent_the_list() {
+    let env = env(true).await;
+    let (mut app, _, _) = connect_unix(&env, Some("mac_app"), vec![Topic::Perri]).await;
+    env.server.broadcast(ServerMsg::AuthoredPrs {
+        snapshot: snapshot(),
+    });
+    assert!(
+        !quiet_then_sync(&mut app).await.iter().any(is_authored),
+        "not named yet: not sent"
+    );
+    until_a_list_is_retained(&env).await;
+
+    send(&mut app, &subscribe(vec![Topic::Perri, Topic::AuthoredPrs])).await;
+    let frames = sync(&mut app).await;
+    assert_eq!(
+        frames.iter().filter(|m| is_authored(m)).count(),
+        1,
+        "the retained list is replayed to the topic it just added: {frames:?}"
+    );
+    env.server.broadcast(ServerMsg::AuthoredPrs {
+        snapshot: snapshot(),
+    });
+    let frames = quiet_then_sync(&mut app).await;
+    assert_eq!(frames.iter().filter(|m| is_authored(m)).count(), 1);
+}

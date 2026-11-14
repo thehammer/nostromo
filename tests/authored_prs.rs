@@ -567,6 +567,7 @@ async fn a_full_cycle_a_relay_event_and_failures_log_no_title_branch_check_login
         RigOpts {
             relay: true,
             token: true,
+            ..Default::default()
         },
     )
     .await;
@@ -798,6 +799,7 @@ async fn with_no_token_the_feature_says_so_and_makes_no_request() {
         RigOpts {
             relay: false,
             token: false,
+            ..Default::default()
         },
     )
     .await;
@@ -953,4 +955,533 @@ async fn at_most_five_organisation_names_are_looked_up_a_day() {
     assert_eq!(orgs.len(), 7, "all seven are listed: {orgs:?}");
     assert_eq!(orgs.iter().filter(|o| o.starts_with("Org-")).count(), 5);
     assert!(orgs.iter().all(|o| !o.trim().is_empty()));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A revoked token is not retried on every flip of the window
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn count_401s(rig: &Rig) -> usize {
+    rig.fake.log().iter().filter(|q| q.status == 401).count()
+}
+
+async fn flip_demand_for(rig: &mut Rig, total: Duration) {
+    let levels = ["idle", "hidden", "visible", "idle", "visible", "hidden"];
+    let end = rig.elapsed + total;
+    let mut i = 0;
+    while rig.elapsed < end {
+        rig.set_demand(levels[i % levels.len()]).await;
+        rig.run(secs(20), secs(5)).await;
+        i += 1;
+    }
+}
+
+#[tokio::test]
+async fn flipping_the_demand_costs_a_rejected_token_at_most_one_more_401_every_five_minutes() {
+    let fake = one_pr_fake();
+    fake.force(
+        "user",
+        Some(Forced {
+            status: 401,
+            retry_after: None,
+        }),
+    );
+    let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    assert_eq!(count_401s(&rig), 1);
+    assert_eq!(rig.snapshot().unwrap().token, TokenState::Rejected);
+
+    // Window shown, hidden, minimised, shown ... for four minutes.
+    flip_demand_for(&mut rig, mins(4)).await;
+    assert_eq!(
+        count_401s(&rig),
+        1,
+        "a dozen changes of demand inside five minutes made {} 401s: {:?}",
+        count_401s(&rig),
+        rig.requests()
+    );
+
+    // Five minutes after the rejection a change of demand retries it, once.
+    rig.run(secs(70), secs(5)).await;
+    rig.set_demand("idle").await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    assert_eq!(count_401s(&rig), 2, "one retry: {:?}", rig.requests());
+
+    // ... and the five minutes start again from that rejection.
+    flip_demand_for(&mut rig, mins(4)).await;
+    assert_eq!(count_401s(&rig), 2, "{:?}", rig.requests());
+    assert_eq!(rig.snapshot().unwrap().token, TokenState::Rejected);
+
+    // The ordinary thirty-minute retry is untouched by all of that.
+    rig.set_demand("visible").await;
+    rig.run(mins(31), secs(10)).await;
+    assert!(
+        count_401s(&rig) >= 3,
+        "tried again by itself after thirty minutes: {:?}",
+        rig.requests()
+    );
+}
+
+#[tokio::test]
+async fn a_token_fixed_while_the_window_is_flipped_is_picked_up_on_the_first_change_after_five_minutes(
+) {
+    let fake = one_pr_fake();
+    fake.force(
+        "user",
+        Some(Forced {
+            status: 401,
+            retry_after: None,
+        }),
+    );
+    let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    fake.force("user", None);
+    flip_demand_for(&mut rig, mins(4)).await;
+    assert_eq!(
+        rig.snapshot().unwrap().token,
+        TokenState::Rejected,
+        "not before five minutes"
+    );
+    rig.run(secs(70), secs(5)).await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+    assert_eq!(rig.snapshot().unwrap().token, TokenState::Connected);
+    assert!(rig.row("Carefeed/app", 1).is_some());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A token that turns up after the daemon started
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn no_token_with(resolver: &FlaggedResolver) -> RigOpts {
+    RigOpts {
+        token: false,
+        token_resolver: Some(resolver.resolver.clone()),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_token_that_appears_later_is_picked_up_without_a_restart_within_five_minutes() {
+    let resolver = FlaggedResolver::new();
+    let mut rig = Rig::start(one_pr_fake(), no_token_with(&resolver)).await;
+    rig.set_demand("visible").await;
+
+    // Nothing to connect with: no request, and the list says why.
+    rig.run(mins(2), secs(10)).await;
+    assert_eq!(rig.fake.log_len(), 0);
+    assert_eq!(rig.snapshot().unwrap().token, TokenState::Missing);
+
+    // Wait for a look that finds nothing, then the token appears: the worst
+    // moment, right after a look.
+    let calls = resolver.calls();
+    rig.run_until(mins(6), secs(5), |_| resolver.calls() > calls)
+        .await
+        .expect("the engine looks again");
+    assert_eq!(rig.fake.log_len(), 0, "still no token, still no request");
+    resolver.make_available();
+    let appeared = rig.elapsed;
+    rig.run_until(mins(6), secs(5), |r| {
+        r.snapshot().map(|s| s.token) == Some(TokenState::Connected)
+    })
+    .await
+    .expect("connected without a restart");
+    assert!(
+        rig.elapsed - appeared <= mins(5) + secs(10),
+        "{:?}",
+        rig.elapsed - appeared
+    );
+
+    // And it works: the list fills in.
+    rig.run(secs(20), secs(1)).await;
+    assert!(rig.row("Carefeed/app", 1).is_some());
+    assert_eq!(rig.snapshot().unwrap().token, TokenState::Connected);
+    assert!(rig.count_since(0, Kind::Search) >= 1);
+
+    // Once it has a token it stops looking.
+    let asked = resolver.calls();
+    rig.run(mins(12), secs(30)).await;
+    assert_eq!(resolver.calls(), asked);
+}
+
+#[tokio::test]
+async fn the_engine_looks_for_a_missing_token_at_most_once_every_five_minutes() {
+    let resolver = FlaggedResolver::new();
+    let mut rig = Rig::start(one_pr_fake(), no_token_with(&resolver)).await;
+    rig.set_demand("visible").await;
+    let mut asked_at = Vec::new();
+    let mut seen = 0;
+    while rig.elapsed < mins(26) {
+        rig.advance(secs(10)).await;
+        while seen < resolver.calls() {
+            asked_at.push(rig.elapsed);
+            seen += 1;
+        }
+    }
+    assert!(
+        (4..=6).contains(&asked_at.len()),
+        "about one look every five minutes for 26: {asked_at:?}"
+    );
+    for w in asked_at.windows(2) {
+        assert!(
+            w[1] - w[0] >= mins(5) - secs(10),
+            "two looks {:?} apart: {asked_at:?}",
+            w[1] - w[0]
+        );
+    }
+    assert_eq!(rig.fake.log_len(), 0);
+}
+
+#[tokio::test]
+async fn nobody_looking_means_nobody_looks_for_the_token() {
+    let resolver = FlaggedResolver::new();
+    let mut rig = Rig::start(one_pr_fake(), no_token_with(&resolver)).await;
+    rig.run(mins(30), secs(30)).await;
+    assert_eq!(resolver.calls(), 0, "idle: no file is read");
+    rig.set_demand("idle").await;
+    rig.run(mins(30), secs(30)).await;
+    assert_eq!(resolver.calls(), 0);
+
+    // Someone looks: now it does, at once (it has been more than five minutes).
+    resolver.make_available();
+    rig.set_demand("visible").await;
+    rig.run(secs(15), secs(1)).await;
+    assert_eq!(resolver.calls(), 1);
+    assert_eq!(rig.snapshot().unwrap().token, TokenState::Connected);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The usage line
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn usage_lines(log: &Captured) -> Vec<String> {
+    log.text()
+        .lines()
+        .filter(|l| l.contains("authored-prs usage:"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn the_usage_line_is_logged_at_info_within_a_minute_of_starting_then_hourly_with_counts_only()
+{
+    let (log, _guard) = capture_logs();
+    tracing::info!("capture-check");
+    assert!(
+        log.text().contains("INFO") && log.text().contains("capture-check"),
+        "the capture sees INFO: {}",
+        log.text()
+    );
+
+    let fake = Fake::new();
+    fake.state.lock().unwrap().me = "canary-me-Zq81".into();
+    fake.put(
+        FakePr::new("canary-org/canary-repo", 424242)
+            .author("canary-me-Zq81")
+            .title("CANARY-TITLE-Zq81")
+            .head("canary/branch-Zq81", "canarysha-Zq81")
+            .passing("canary-check-Zq81"),
+    );
+    // Nobody is looking: even so, the first line comes.
+    let mut rig = Rig::start(fake, RigOpts::default()).await;
+    rig.run(secs(40), secs(5)).await;
+    assert!(usage_lines(&log).is_empty(), "not before it is due");
+    rig.run(secs(50), secs(5)).await;
+    let lines = usage_lines(&log);
+    assert_eq!(lines.len(), 1, "one line by 90 s, though idle: {lines:?}");
+    assert_eq!(rig.fake.log_len(), 0);
+
+    // Then once an hour, whatever happens in between.
+    rig.set_demand("visible").await;
+    rig.run(mins(55) - rig.elapsed, secs(20)).await;
+    assert_eq!(usage_lines(&log).len(), 1, "not more often than hourly");
+    rig.run(mins(70) - rig.elapsed, secs(20)).await;
+    assert_eq!(usage_lines(&log).len(), 2, "{:?}", usage_lines(&log));
+    rig.run(mins(130) - rig.elapsed, secs(20)).await;
+    let lines = usage_lines(&log);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+
+    // Each is an INFO line carrying the counters and the posture, and nothing else.
+    let shape = regex::Regex::new(
+        r"^authored-prs usage: charged=\d+ not_modified=\d+ search=\d+ graphql_points=\d+ relay=\d+ posture=(Visible|Hidden|Idle|Paused)$",
+    )
+    .unwrap();
+    for line in &lines {
+        assert!(line.contains(" INFO "), "logged at INFO: {line}");
+        let at = line.find("authored-prs usage:").unwrap();
+        let message = &line[at..];
+        assert!(shape.is_match(message), "unexpected shape: {message:?}");
+        for never in ["Zq81", "canary", "424242", "github.com", TOKEN] {
+            assert!(!line.contains(never), "`{never}` in {line}");
+        }
+    }
+    assert!(
+        lines[0]
+            .contains("charged=0 not_modified=0 search=0 graphql_points=0 relay=0 posture=Idle"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[1].contains("posture=Visible"), "{}", lines[1]);
+    assert!(
+        !lines[1].contains("charged=0 ") && !lines[1].contains("search=0 "),
+        "an hour of visible polling shows up in the counts: {}",
+        lines[1]
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The Mother jobs feed goes away
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Fails the whole test binary if the test body stops making progress for
+/// two minutes of real time: a spinning engine starves a current-thread
+/// runtime, so it cannot be caught from inside.
+struct Watchdog(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Watchdog {
+    fn start(what: &'static str) -> Watchdog {
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&done);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while std::time::Instant::now() < deadline {
+                if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            eprintln!("WATCHDOG: {what} made no progress for 120 s: the engine is spinning");
+            std::process::exit(101);
+        });
+        Watchdog(done)
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn an_idle_engine_whose_jobs_feed_is_gone_does_not_spin_and_still_answers_demand() {
+    let _watchdog = Watchdog::start("the jobs-feed test");
+    let mut rig = Rig::start(one_pr_fake(), RigOpts::default()).await;
+    rig.drop_jobs_feed();
+    rig.settle().await;
+
+    // Nothing to do for an hour. With the runtime otherwise idle, tokio's
+    // paused clock jumps straight over it, which can only happen if the engine
+    // is parked and not spinning on a feed that fails at once.
+    tokio::time::sleep(Duration::from_secs(3600)).await;
+    assert_eq!(rig.fake.log_len(), 0, "idle makes no request");
+
+    // Still alive: a change of demand is seen and a list is published.
+    rig.set_demand("visible").await;
+    rig.run(secs(20), secs(1)).await;
+    assert!(rig.row("Carefeed/app", 1).is_some());
+    assert_eq!(rig.snapshot().unwrap().poll.interval_secs, 60);
+    rig.set_demand("hidden").await;
+    rig.run(secs(5), secs(1)).await;
+    assert_eq!(
+        rig.snapshot().unwrap().poll.interval_secs,
+        300,
+        "the hidden cadence is published after the feed went away"
+    );
+}
+
+#[tokio::test]
+async fn a_visible_engine_whose_jobs_feed_is_gone_keeps_polling_at_the_normal_cadence() {
+    let _watchdog = Watchdog::start("the jobs-feed polling test");
+    let fake = one_pr_fake();
+    let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+    rig.set_demand("visible").await;
+    rig.run(secs(30), secs(5)).await;
+    rig.drop_jobs_feed();
+    let mark = rig.fake.log_len();
+    rig.run(mins(10), secs(10)).await;
+
+    let searches = rig.count_since(mark, Kind::Search);
+    assert!(
+        (8..=11).contains(&searches),
+        "about a search a minute, as with the feed there: {searches}"
+    );
+    assert!(
+        rig.fake.log_len() - mark <= 20,
+        "no flood of requests: {:?}",
+        rig.since(mark)
+    );
+
+    // A change on GitHub still reaches the list within two minutes.
+    fake.edit("Carefeed/app", 1, |p| {
+        p.title = "Retitled after the feed went".into();
+        p.updated_at = t0() + Chrono::minutes(20);
+    });
+    rig.run_until(mins(2), secs(5), |r| {
+        r.row("Carefeed/app", 1)
+            .is_some_and(|p| p.title.starts_with("Retitled"))
+    })
+    .await
+    .expect("the change is shown");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A hostile relay organisation name, a fork, and a long list of checks
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn kind_of(rig: &Rig, repo: &str, n: u64) -> nostromo::data::authored_prs::snapshot::OwnerKind {
+    rig.row(repo, n).expect("the row is listed").owner.kind
+}
+
+#[tokio::test]
+async fn a_pr_from_a_fork_is_not_owned_by_a_focus_on_a_branch_of_the_same_name() {
+    use nostromo::data::authored_prs::snapshot::OwnerKind;
+    let fake = Fake::new();
+    // Two PRs whose head branch is the very branch a focus has checked out;
+    // one of them is a branch of the repo, the other lives in a fork.
+    fake.put(
+        FakePr::new("Carefeed/app", 1)
+            .head("feat/shared", "sha-1")
+            .passing("build"),
+    );
+    fake.put(
+        FakePr::new("Carefeed/app", 2)
+            .head("feat/shared", "sha-2")
+            .in_a_fork()
+            .passing("build"),
+    );
+    let mut rig = Rig::start(fake.clone(), RigOpts::default()).await;
+    let checkout = rig.checkout(
+        "work",
+        "ref: refs/heads/feat/shared\n",
+        "https://github.com/Carefeed/app.git",
+    );
+    rig.add_focus("alpha", "Alpha", checkout);
+    rig.visible_and_settled().await;
+    rig.run(secs(40), secs(2)).await;
+
+    assert_eq!(kind_of(&rig, "Carefeed/app", 1), OwnerKind::OnBranch);
+    assert_eq!(
+        rig.row("Carefeed/app", 1).unwrap().owner.tag.as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(
+        kind_of(&rig, "Carefeed/app", 2),
+        OwnerKind::Unknown,
+        "a fork's branch is not the checkout's branch, whatever it is called"
+    );
+    assert!(rig.row("Carefeed/app", 2).unwrap().owner.tag.is_none());
+    // The daemon asks GitHub whether the branch is in a fork.
+    assert!(
+        rig.of_kind(Kind::Graphql)
+            .iter()
+            .all(|(_, r)| r.graphql_query().contains("isCrossRepository")),
+        "the detail query reads isCrossRepository"
+    );
+}
+
+/// One PR with 150 checks of which the query reads the first hundred, all
+/// passing, whose rollup says `state`: what the list shows for its checks.
+async fn checks_of_a_hundred_and_fifty(state: &str) -> ChecksState {
+    let fake = Fake::new();
+    let mut pr = FakePr::new("Carefeed/app", 1).rollup(state, 150);
+    for i in 0..100 {
+        pr = pr.passing(&format!("job-{i}"));
+    }
+    fake.put(pr);
+    let mut rig = Rig::start(fake, RigOpts::default()).await;
+    rig.visible_and_settled().await;
+    rig.run(secs(5), secs(1)).await;
+    rig.row("Carefeed/app", 1).unwrap().checks.state
+}
+
+#[tokio::test]
+async fn a_hundred_and_fifty_checks_whose_rollup_says_failure_show_as_failing() {
+    assert_eq!(
+        checks_of_a_hundred_and_fifty("FAILURE").await,
+        ChecksState::Failing
+    );
+}
+
+#[tokio::test]
+async fn a_hundred_and_fifty_checks_whose_rollup_says_pending_show_as_pending() {
+    assert_eq!(
+        checks_of_a_hundred_and_fifty("PENDING").await,
+        ChecksState::Pending
+    );
+}
+
+#[tokio::test]
+async fn a_hundred_and_fifty_checks_whose_rollup_says_success_show_as_passing() {
+    assert_eq!(
+        checks_of_a_hundred_and_fifty("SUCCESS").await,
+        ChecksState::Passing
+    );
+}
+
+#[tokio::test]
+async fn a_failing_check_among_a_hundred_and_fifty_never_shows_as_passing() {
+    // The same, as a user would hit it: the list must not say "ready".
+    let fake = Fake::new();
+    let mut pr = FakePr::new("Carefeed/app", 1)
+        .approved_by("bob")
+        .rollup("FAILURE", 150);
+    for i in 0..100 {
+        pr = pr.passing(&format!("job-{i}"));
+    }
+    fake.put(pr);
+    let mut rig = Rig::start(fake, RigOpts::default()).await;
+    rig.visible_and_settled().await;
+    rig.run(secs(5), secs(1)).await;
+    assert_ne!(rig.row("Carefeed/app", 1).unwrap().group, Group::Ready);
+}
+
+/// Opens the write end of a FIFO without blocking when dropped, which lets any
+/// reader still waiting in `open` go (it then reads end of file).
+struct ReleaseFifo(std::path::PathBuf);
+
+impl Drop for ReleaseFifo {
+    fn drop(&mut self) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn an_engine_publishes_while_a_fifo_named_head_sits_in_a_focus_checkout() {
+    use nostromo::data::authored_prs::snapshot::OwnerKind;
+    let mut rig = Rig::start(one_pr_fake(), RigOpts::default()).await;
+    let checkout = rig.checkout(
+        "work",
+        "ref: refs/heads/feat/1\n",
+        "https://github.com/Carefeed/app.git",
+    );
+    // `HEAD` is a pipe nobody writes to: a blocking read would never return.
+    let head = checkout.join(".git").join("HEAD");
+    std::fs::remove_file(&head).unwrap();
+    mkfifo(&head);
+    // If a read of it ever does block, this lets it go at the end so the
+    // failure is an assertion and not a hang at shutdown.
+    let _release = ReleaseFifo(head.clone());
+    rig.add_focus("alpha", "Alpha", checkout);
+
+    rig.visible_and_settled().await;
+    rig.run(secs(40), secs(2)).await;
+    let row = rig
+        .row("Carefeed/app", 1)
+        .expect("the list is published, not blocked on the pipe");
+    assert_eq!(row.owner.kind, OwnerKind::Unknown);
+
+    // And it keeps going: a new PR shows up.
+    rig.fake
+        .put(FakePr::new("Carefeed/app", 2).passing("build"));
+    rig.refresh().await;
+    rig.run(secs(70), secs(2)).await;
+    assert!(rig.row("Carefeed/app", 2).is_some(), "still publishing");
 }

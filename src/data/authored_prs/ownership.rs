@@ -692,4 +692,90 @@ mod tests {
         assert!(name.chars().count() <= MAX_NAME, "{}", name.chars().count());
         assert!(!name.chars().any(|c| c.is_control()), "{name:?}");
     }
+
+    // ── which candidates have closed ──────────────────────────────────────
+
+    fn closed_of(o: &Owner) -> Vec<(&str, bool)> {
+        let mut v: Vec<(&str, bool)> = o
+            .candidates
+            .iter()
+            .map(|c| (c.tag.as_str(), c.closed))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn an_ambiguous_owner_marks_the_candidate_whose_focus_is_closed() {
+        let closed_job = job_with(
+            "j-gone",
+            Some(URL),
+            Some(origin(OriginKind::Focus, Some("gone"), Some(true))),
+        );
+        let o = resolve_with(
+            &[closed_job, focus_job("j-open", "alpha")],
+            &["alpha", "beta"],
+            &[("beta", copy(REPO, "feat"))],
+            Some("feat"),
+        );
+        assert_eq!(o.kind, OwnerKind::Ambiguous);
+        assert_eq!(
+            closed_of(&o),
+            vec![("alpha", false), ("beta", false), ("gone", true)],
+            "only the focus that was closed is marked"
+        );
+    }
+
+    #[test]
+    fn a_closed_owner_beside_a_focus_on_the_branch_is_the_one_marked_closed() {
+        let closed_job = job_with(
+            "j-gone",
+            Some(URL),
+            Some(origin(OriginKind::Focus, Some("gone"), Some(true))),
+        );
+        let o = resolve_with(
+            &[closed_job],
+            &["beta"],
+            &[("beta", copy(REPO, "feat"))],
+            Some("feat"),
+        );
+        assert_eq!(o.kind, OwnerKind::Ambiguous);
+        assert_eq!(closed_of(&o), vec![("beta", false), ("gone", true)]);
+    }
+
+    #[test]
+    fn candidates_that_are_all_open_are_none_marked_closed() {
+        let o = resolve_with(
+            &[focus_job("j1", "alpha"), focus_job("j2", "beta")],
+            &["alpha", "beta"],
+            &[],
+            None,
+        );
+        assert_eq!(closed_of(&o), vec![("alpha", false), ("beta", false)]);
+    }
+
+    #[test]
+    fn closed_is_on_the_wire_only_when_true() {
+        let open = Candidate {
+            tag: "a".into(),
+            name: "A".into(),
+            via: Via::OnBranch,
+            job_id: None,
+            closed: false,
+        };
+        let closed = Candidate {
+            closed: true,
+            ..open.clone()
+        };
+        let open_json = serde_json::to_value(&open).unwrap();
+        let closed_json = serde_json::to_value(&closed).unwrap();
+        assert!(open_json.get("closed").is_none(), "{open_json}");
+        assert_eq!(closed_json["closed"], serde_json::json!(true));
+        // A client that never heard of the field decodes the old shape.
+        let old: Candidate = serde_json::from_value(
+            serde_json::json!({"tag": "a", "name": "A", "via": "on_branch"}),
+        )
+        .unwrap();
+        assert!(!old.closed);
+    }
 }

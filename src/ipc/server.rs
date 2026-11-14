@@ -4775,4 +4775,140 @@ mod authored_prs_tests {
             Some("authored_prs")
         );
     }
+
+    // ── who may say what is being looked at, and who is sent the list ─────
+
+    /// Dispatch `msgs` in order as a connection of `trust`; what the demand
+    /// board ended up with, how many refreshes reached it, and what was
+    /// replied. Called straight, so nothing is racing: when this returns every
+    /// message has been fully handled.
+    fn authored_verbs_as(
+        trust: PeerTrust,
+        msgs: Vec<ClientMsg>,
+    ) -> (crate::data::authored_prs::Demand, usize, Vec<ServerMsg>) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut mgr = SessionManager::with_store_path(dir.path().join("s.json"));
+        let (board, mut inputs) = DemandBoard::new();
+        mgr.configure_authored_prs(Arc::clone(&board));
+        let mgr = Arc::new(Mutex::new(mgr));
+        let (ttx, mut trx) = mpsc::unbounded_channel();
+        let (btx, _brx) = broadcast::channel(8);
+        for msg in msgs {
+            handle_client_msg(
+                msg,
+                trust,
+                None,
+                None,
+                &SensitiveTags::in_memory(),
+                "conn",
+                "client",
+                &mgr,
+                &ttx,
+                &btx,
+                dir.path(),
+                &Arc::new(Mutex::new(DecisionRegistry::new())),
+                &Arc::new(Mutex::new(HashSet::new())),
+                None,
+                &TerminalManager::in_memory(),
+            );
+        }
+        let mut refreshes = 0;
+        while inputs.refresh_rx.try_recv().is_ok() {
+            refreshes += 1;
+        }
+        let demand = *inputs.demand_rx.borrow();
+        let mut out = Vec::new();
+        while let Ok(m) = trx.try_recv() {
+            out.push(m);
+        }
+        (demand, refreshes, out)
+    }
+
+    fn demand_msg(level: &str) -> ClientMsg {
+        ClientMsg::AuthoredPrsDemand {
+            level: level.into(),
+        }
+    }
+
+    #[test]
+    fn the_operator_app_sets_the_demand_and_asks_for_a_refresh() {
+        use crate::data::authored_prs::Demand;
+        let (demand, refreshes, out) = authored_verbs_as(
+            PeerTrust::OperatorApp,
+            vec![demand_msg("visible"), ClientMsg::AuthoredPrsRefresh {}],
+        );
+        assert_eq!(demand, Demand::Visible);
+        assert_eq!(refreshes, 1);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_local_client_that_is_not_the_operator_app_can_neither_set_the_demand_nor_ask_for_a_refresh(
+    ) {
+        use crate::data::authored_prs::Demand;
+        // Each verb on its own, so one being refused cannot hide the other
+        // getting through.
+        let (demand, refreshes, _) =
+            authored_verbs_as(PeerTrust::LocalOther, vec![demand_msg("visible")]);
+        assert_eq!(demand, Demand::Idle, "the demand verb was acted on");
+        assert_eq!(refreshes, 0);
+
+        let (demand, refreshes, _) = authored_verbs_as(
+            PeerTrust::LocalOther,
+            vec![ClientMsg::AuthoredPrsRefresh {}],
+        );
+        assert_eq!(demand, Demand::Idle);
+        assert_eq!(refreshes, 0, "the refresh verb was acted on");
+
+        // Many of them, in any order, still change nothing.
+        let (demand, refreshes, _) = authored_verbs_as(
+            PeerTrust::LocalOther,
+            vec![
+                ClientMsg::AuthoredPrsRefresh {},
+                demand_msg("hidden"),
+                demand_msg("visible"),
+                ClientMsg::AuthoredPrsRefresh {},
+            ],
+        );
+        assert_eq!((demand, refreshes), (Demand::Idle, 0));
+    }
+
+    #[test]
+    fn a_network_peer_can_neither_set_the_demand_nor_ask_for_a_refresh() {
+        use crate::data::authored_prs::Demand;
+        let (demand, refreshes, out) = authored_verbs_as(
+            PeerTrust::Tcp,
+            vec![demand_msg("visible"), ClientMsg::AuthoredPrsRefresh {}],
+        );
+        assert_eq!((demand, refreshes), (Demand::Idle, 0));
+        assert_eq!(
+            out.iter()
+                .filter(|m| matches!(m, ServerMsg::Error { .. }))
+                .count(),
+            2,
+            "each is refused out loud: {out:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_operator_app_is_subscribed_to_the_authored_prs_topic() {
+        let asked = || vec![Topic::Perri, Topic::AuthoredPrs, Topic::Model];
+        assert_eq!(
+            deliverable_topics(asked(), PeerTrust::OperatorApp),
+            asked(),
+            "the app keeps every topic it asked for"
+        );
+        for trust in [PeerTrust::LocalOther, PeerTrust::Tcp] {
+            assert_eq!(
+                deliverable_topics(asked(), trust),
+                vec![Topic::Perri, Topic::Model],
+                "{trust:?}: everything but the author's PR list"
+            );
+            assert!(
+                deliverable_topics(vec![Topic::AuthoredPrs], trust).is_empty(),
+                "{trust:?}"
+            );
+            assert!(deliverable_topics(vec![], trust).is_empty());
+        }
+    }
 }
