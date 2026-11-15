@@ -1926,20 +1926,26 @@ async fn the_place_file_is_bounded() {
     assert_eq!(places.len(), 64);
     assert!(!places.contains_key("cody-0000"), "the oldest went first");
     assert!(places.contains_key("cody-0069"));
-    // An old one is dropped whatever the count.
-    rig.mgr.insert_place(
-        "cody-old",
-        conversation_history::ResumePlace {
-            path: "/m".into(),
-            notice: "n".into(),
-            shown: false,
-            sid: "sid-old".into(),
-            old_path: None,
-            old_main: None,
-            at_ms: 1,
-        },
-    );
-    assert!(!rig.mgr.load_places().contains_key("cody-old"));
+}
+
+#[tokio::test]
+async fn an_old_place_is_dropped_whatever_the_count() {
+    let rig = Rig::new();
+    let place = |sid: &str, at_ms: i64| conversation_history::ResumePlace {
+        path: "/m".into(),
+        notice: "n".into(),
+        shown: false,
+        sid: sid.into(),
+        old_path: None,
+        old_main: None,
+        at_ms,
+    };
+    rig.mgr.insert_place("cody-old", place("sid-old", 1));
+    rig.mgr
+        .insert_place("cody-new", place("sid-new", crate::conversations::now_ms()));
+    let places = rig.mgr.load_places();
+    assert!(!places.contains_key("cody-old"), "older than 90 days");
+    assert!(places.contains_key("cody-new"));
 }
 
 // ── a sensitive conversation can still be resumed in its main checkout ────────
