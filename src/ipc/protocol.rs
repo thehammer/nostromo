@@ -3165,6 +3165,11 @@ pub enum ServerMsg {
         /// omits it, and the app then trashes nothing.
         #[serde(default)]
         referenced_space_folders: Vec<String>,
+        /// The daemon's spaces root (canonical when it exists). The app sweeps
+        /// only when this is the root it computed itself; absent (an older
+        /// daemon): no sweep.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spaces_root: Option<String>,
     },
     /// Answer to `ConversationResume`, to the asking client only. `LocalOnly`.
     ConversationResumeResult {
@@ -9167,6 +9172,7 @@ mod slash_commands_wire_tests {
             degraded_kept: Some(3),
             revision: 9,
             referenced_space_folders: vec![],
+            spaces_root: None,
         };
         let json = serde_json::to_string(&reply).unwrap();
         assert!(
@@ -9489,6 +9495,7 @@ mod no_codebase_wire_tests {
             degraded_kept: None,
             revision: 1,
             referenced_space_folders: folders,
+            spaces_root: None,
         };
         let some = serde_json::to_value(reply(vec!["/spaces/a".into()])).unwrap();
         assert_eq!(some["referenced_space_folders"], json!(["/spaces/a"]));
@@ -9505,5 +9512,34 @@ mod no_codebase_wire_tests {
         // Present even when empty: that is how the app tells "none" from an older daemon.
         let none = serde_json::to_value(reply(vec![])).unwrap();
         assert_eq!(none["referenced_space_folders"], json!([]), "{none}");
+    }
+
+    #[test]
+    fn the_history_carries_the_daemons_spaces_root_and_an_older_daemon_omits_it() {
+        let with = ServerMsg::ConversationHistory {
+            request_id: "r".into(),
+            entries: vec![],
+            first_prompts_enabled: true,
+            degraded_kept: None,
+            revision: 1,
+            referenced_space_folders: vec![],
+            spaces_root: Some("/spaces".into()),
+        };
+        let v = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["spaces_root"], json!("/spaces"));
+        let back: ServerMsg = serde_json::from_value(v).unwrap();
+        let ServerMsg::ConversationHistory { spaces_root, .. } = back else {
+            panic!()
+        };
+        assert_eq!(spaces_root.as_deref(), Some("/spaces"));
+
+        let old = json!({"type":"conversation_history","request_id":"r","entries":[],
+            "first_prompts_enabled":true,"revision":1});
+        let ServerMsg::ConversationHistory { spaces_root, .. } =
+            serde_json::from_value(old).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(spaces_root, None);
     }
 }

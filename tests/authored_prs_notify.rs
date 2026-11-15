@@ -196,6 +196,7 @@ fn snapshot(prs: Vec<AuthoredPr>) -> AuthoredPrsSnapshot {
 
 fn focus_meta(tag: &str, name: &str, project: &Path) -> FocusMeta {
     FocusMeta {
+        no_codebase: None,
         tag: tag.into(),
         display_name: name.into(),
         agent_name: "cody".into(),

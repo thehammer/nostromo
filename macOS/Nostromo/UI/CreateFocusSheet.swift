@@ -60,6 +60,8 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     }
     /// Menu tag of the No codebase item; a repo's tag is its index in `projects`.
     private static let noCodebaseTag = -1
+    /// An NSMenuItem's tag defaults to 0, which is also the first repo's: the separator gets its own.
+    private static let separatorTag = -2
     private static let projectErrorHeight: CGFloat = 30
     private let projectError = NSTextField(wrappingLabelWithString: "")
     private var projectErrorHeightConstraint: NSLayoutConstraint?
@@ -79,7 +81,9 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         let none = NSMenuItem(title: "No codebase", action: nil, keyEquivalent: "")
         none.tag = Self.noCodebaseTag
         menu.addItem(none)
-        menu.addItem(.separator())
+        let separator = NSMenuItem.separator()
+        separator.tag = Self.separatorTag
+        menu.addItem(separator)
         for (index, path) in projects.enumerated() {
             let item = NSMenuItem(title: URL(fileURLWithPath: path).lastPathComponent, action: nil, keyEquivalent: "")
             item.tag = index
@@ -771,7 +775,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     func selectAgent(at index: Int) { agentPopup.selectItem(at: index); pickerChanged() }
     /// Select the repo at `index` in the discovered projects (not a menu position).
     func selectProject(at index: Int) {
-        guard let item = projectPopup.menu?.items.first(where: { $0.tag == index }) else { return }
+        guard let item = projectPopup.menu?.items.first(where: { !$0.isSeparatorItem && $0.tag == index }) else { return }
         projectPopup.select(item); updatePreview()
     }
     func selectNoCodebase() { projectPopup.selectItem(withTag: Self.noCodebaseTag); updatePreview() }

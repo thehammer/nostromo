@@ -89,7 +89,9 @@ fn no_codebase_notice(old_path: Option<&str>) -> String {
         Some(old) => format!(
             "This conversation ran in {old}, which no longer exists. Now in a no-codebase folder."
         ),
-        None => "This conversation's folder no longer exists. Now in a no-codebase folder.".to_owned(),
+        None => {
+            "This conversation's folder no longer exists. Now in a no-codebase folder.".to_owned()
+        }
     }
 }
 
@@ -199,8 +201,13 @@ impl SessionManager {
         let mut places = self.load_places();
         if let Some(p) = places.remove(tag) {
             if p.sid == sid {
-                self.conversations
-                    .restore_place(sid, p.old_path, p.old_main, p.old_no_codebase, now_ms());
+                self.conversations.restore_place(
+                    sid,
+                    p.old_path,
+                    p.old_main,
+                    p.old_no_codebase,
+                    now_ms(),
+                );
             }
             self.save_places(&places);
         }
@@ -377,7 +384,10 @@ impl SessionManager {
             first_prompts_enabled: snap.first_prompts_enabled,
             degraded_kept: snap.degraded_kept,
             revision: snap.revision,
-            referenced_space_folders: referenced_space_folders(self.conversations.all_project_paths()),
+            referenced_space_folders: referenced_space_folders(
+                self.conversations.all_project_paths(),
+            ),
+            spaces_root: crate::conversations::spaces_root_for_wire(),
         }
     }
 

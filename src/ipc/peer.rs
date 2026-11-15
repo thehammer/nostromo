@@ -4630,6 +4630,7 @@ mod tests {
                 degraded_kept: None,
                 revision: 1,
                 referenced_space_folders: vec![],
+                spaces_root: None,
             },
             ServerMsg::ConversationResumeResult {
                 request_id: "r".into(),

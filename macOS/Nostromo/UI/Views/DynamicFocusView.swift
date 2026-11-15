@@ -419,6 +419,7 @@ final class DynamicFocusView: NSView {
                 agentName:        focus.agentTag,
                 displayName:      focus.displayName,
                 workingDirectory: focus.sessionWorkingDirectory,
+                requiresWorkingDirectory: focus.noCodebase,
                 quickActions:     focus.quickActions.isEmpty
                                       ? QuickAction.replDefaults
                                       : focus.quickActions

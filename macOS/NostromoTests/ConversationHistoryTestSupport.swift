@@ -57,12 +57,13 @@ enum HistoryFixtures {
 
     /// `referenced` is the daemon's `referenced_space_folders` (nil: a daemon that does not say).
     static func history(_ entries: [ConversationEntryWire], prompts: Bool = true, degraded: Int? = nil,
-                        referenced: [String]? = nil) -> ConversationHistoryWire {
+                        referenced: [String]? = nil, spacesRoot: String? = nil) -> ConversationHistoryWire {
         let json: [String: Any] = ["request_id": "r", "entries": [], "first_prompts_enabled": prompts, "revision": 1]
         var wire = try! JSONDecoder().decode(ConversationHistoryWire.self, from: JSONSerialization.data(withJSONObject: json))
         wire.entries = entries
         wire.degradedKept = degraded
         wire.referencedSpaceFolders = referenced
+        wire.spacesRoot = spacesRoot
         return wire
     }
 }

@@ -18,7 +18,8 @@ final class NoCodebaseCleanupTests: XCTestCase {
         try super.setUpWithError()
         base = fm.temporaryDirectory.appendingPathComponent("nocodebase-cleanup-\(UUID().uuidString)", isDirectory: true)
         root = base.appendingPathComponent("spaces", isDirectory: true)
-        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
         let baseURL = self.base!
         addTeardownBlock { try? FileManager.default.removeItem(at: baseURL) }
     }
@@ -28,7 +29,8 @@ final class NoCodebaseCleanupTests: XCTestCase {
     @discardableResult
     private func makeFolder(_ name: String = UUID().uuidString, in dir: URL? = nil, withFile: Bool = true) throws -> URL {
         let folder = (dir ?? root).appendingPathComponent(name, isDirectory: true)
-        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
         if withFile { try "x".write(to: folder.appendingPathComponent("work.txt"), atomically: true, encoding: .utf8) }
         return folder
     }
@@ -36,8 +38,8 @@ final class NoCodebaseCleanupTests: XCTestCase {
     private func exists(_ url: URL) -> Bool { fm.fileExists(atPath: url.path) }
 
     /// A listing that is complete (not degraded) and says these folders are still named by an entry.
-    private func reply(referencing referenced: [String]? = []) -> ConversationHistoryWire {
-        F.history([], referenced: referenced)
+    private func reply(referencing referenced: [String]? = [], daemonRoot: String? = nil) -> ConversationHistoryWire {
+        F.history([], referenced: referenced, spacesRoot: daemonRoot ?? root.path)
     }
 
     private struct Outcome {
@@ -189,7 +191,7 @@ final class NoCodebaseCleanupTests: XCTestCase {
     func testADegradedListingTrashesNothing() throws {
         // A listing the daemon could only partly read may be missing entries that still name folders.
         try makeFolder()
-        let wire = F.history([], degraded: 3, referenced: [])
+        let wire = F.history([], degraded: 3, referenced: [], spacesRoot: root.path)
         let out = run(wire)
         XCTAssertEqual(out.trashed, [])
         XCTAssertEqual(out.count, 0)
@@ -197,7 +199,7 @@ final class NoCodebaseCleanupTests: XCTestCase {
 
     func testADegradedListingWithNothingKeptTrashesNothingEither() throws {
         try makeFolder()
-        XCTAssertEqual(run(F.history([], degraded: 0, referenced: [])).trashed, [])
+        XCTAssertEqual(run(F.history([], degraded: 0, referenced: [], spacesRoot: root.path)).trashed, [])
     }
 
     func testADaemonThatDoesNotSayWhichFoldersAreInUseTrashesNothing() throws {
@@ -206,6 +208,99 @@ final class NoCodebaseCleanupTests: XCTestCase {
         let out = run(reply(referencing: nil))
         XCTAssertEqual(out.trashed, [])
         XCTAssertEqual(out.count, 0)
+    }
+
+    // MARK: The root the daemon means must be the root this app computed
+
+    func testADaemonOnAnotherRootTrashesNothing() throws {
+        // A QA daemon (its own home) against an app whose root is the real one, or the other way round.
+        let orphan = try makeFolder()
+        let otherRoot = base.appendingPathComponent("other-spaces", isDirectory: true)
+        try fm.createDirectory(at: otherRoot, withIntermediateDirectories: true)
+        let out = run(reply(daemonRoot: otherRoot.path))
+        XCTAssertEqual(out.trashed, [])
+        XCTAssertEqual(out.count, 0)
+        XCTAssertTrue(exists(orphan))
+    }
+
+    func testADaemonThatDoesNotReportItsRootTrashesNothing() throws {
+        // An older daemon: the reply has the folder list but no root.
+        let orphan = try makeFolder()
+        let wire = F.history([], referenced: [], spacesRoot: nil)
+        XCTAssertEqual(run(wire).count, 0)
+        XCTAssertTrue(exists(orphan))
+    }
+
+    func testAnEmptyReportedRootIsADisagreement() throws {
+        try makeFolder()
+        XCTAssertEqual(run(reply(daemonRoot: "")).count, 0)
+    }
+
+    func testTheSameRootSpelledDifferentlyStillAgrees() throws {
+        let orphan = try makeFolder()
+        let kept = try makeFolder()
+        let spelled = root.path + "/./../spaces"
+        let out = run(reply(referencing: [kept.path], daemonRoot: spelled))
+        XCTAssertEqual(out.trashed, [orphan.lastPathComponent])
+    }
+
+    func testAnAgreeingRootThroughASymlinkedAncestorStillKeepsWhatTheDaemonNames() throws {
+        // The daemon reports the canonical root and names the folders under it; the app's root goes through a
+        // symlink (as /var is /private/var). The named folder must still be recognised.
+        let real = base.appendingPathComponent("real-parent", isDirectory: true)
+        try fm.createDirectory(at: real, withIntermediateDirectories: true)
+        let realRoot = real.appendingPathComponent("spaces", isDirectory: true)
+        try fm.createDirectory(at: realRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let kept = try makeFolder(in: realRoot), orphan = try makeFolder(in: realRoot)
+        let link = base.appendingPathComponent("link-parent")
+        try fm.createSymbolicLink(at: link, withDestinationURL: real)
+        let viaLink = link.appendingPathComponent("spaces", isDirectory: true)
+        let canonicalRoot = realRoot.resolvingSymlinksInPath().path
+        let wire = F.history([], referenced: [canonicalRoot + "/" + kept.lastPathComponent], spacesRoot: canonicalRoot)
+        let out = run(wire, root: viaLink)
+        XCTAssertEqual(out.trashed, [orphan.lastPathComponent], "the named folder survives")
+    }
+
+    // MARK: The root and each folder must be private to this user
+
+    func testARootThatIsASymbolicLinkTrashesNothing() throws {
+        // A root symlinked to a folder that holds UUID-named folders (think ~/Documents).
+        let target = base.appendingPathComponent("documents", isDirectory: true)
+        try fm.createDirectory(at: target, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let victim = try makeFolder(in: target)
+        let link = base.appendingPathComponent("linked-spaces")
+        try fm.createSymbolicLink(at: link, withDestinationURL: target)
+        let out = run(reply(daemonRoot: link.path), root: link)
+        XCTAssertEqual(out.trashed, [])
+        XCTAssertTrue(exists(victim))
+    }
+
+    func testARootThatIsNotMode0700TrashesNothing() throws {
+        let orphan = try makeFolder()
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        XCTAssertEqual(run(reply()).count, 0)
+        XCTAssertTrue(exists(orphan))
+    }
+
+    func testARootAndFoldersOwnedBySomeoneElseTrashNothing() throws {
+        // A stand-in for another user: the clean-up is told the current user is not whoever made these.
+        let orphan = try makeFolder()
+        var trashed: [String] = []
+        let count = NoCodebaseCleanup.run(reply: reply(), openWorkingDirectories: [], root: root, now: later,
+                                          trash: { trashed.append($0.lastPathComponent) },
+                                          currentUser: UInt(getuid()) + 1)
+        XCTAssertEqual(count, 0)
+        XCTAssertEqual(trashed, [])
+        XCTAssertTrue(exists(orphan))
+    }
+
+    func testAFolderThatIsNotMode0700IsLeftAloneAndItsSiblingIsNot() throws {
+        let loose = try makeFolder()
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: loose.path)
+        let private0700 = try makeFolder()
+        let out = run(reply())
+        XCTAssertEqual(out.trashed, [private0700.lastPathComponent])
+        XCTAssertTrue(exists(loose))
     }
 
     // MARK: When trashing fails

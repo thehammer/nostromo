@@ -5,10 +5,13 @@ import NostromoKit
 /// that no repo's instructions, settings, hooks or MCP config can reach (Claude Code reads `CLAUDE.md` by
 /// walking up from the working directory and project settings from the project root).
 ///
-/// The root is `~/.nostromo-spaces` (mode 0700), overridable by `NOSTROMO_SPACES_ROOT` (tests, the QA
-/// instance). The daemon resolves it the same way (`conversations::spaces_root`); a test on each side pins
-/// the default so the two cannot drift. It is deliberately NOT under `~/.nostromo`, the daemon's private
-/// state: an agent must never work next to the approvals and history files.
+/// The root is `.nostromo-spaces` (mode 0700) under `NostromoHome.current` (the QA clone's home, never the
+/// real one, when it is the QA clone), overridable by `NOSTROMO_SPACES_ROOT` in the QA clone only: the
+/// real app ignores a stray variable, as `NostromoHome` does for its own. The daemon resolves it the same
+/// way (`conversations::spaces_root`) and says which root it means with every history reply; the clean-up
+/// runs only when the two agree. A test on each side pins the default name so the two cannot drift. It is
+/// deliberately NOT under `~/.nostromo`, the daemon's private state: an agent must never work next to the
+/// approvals and history files.
 ///
 /// Pure helpers plus `create()`. Nothing here logs a path.
 enum NoCodebaseFolder {
@@ -46,24 +49,31 @@ enum NoCodebaseFolder {
     /// Files whose presence in an ancestor of the root would colour a conversation there.
     static let instructionNames = ["CLAUDE.md", "CLAUDE.local.md", ".mcp.json"]
     /// Project settings (read from the project root); the user's own `~/.claude` is the one allowed exception.
-    static let settingsNames = [".claude/settings.json", ".claude/settings.local.json"]
+    /// `.claude/CLAUDE.md` is project memory; `hooks` and `commands` are project hooks and slash commands.
+    static let settingsNames = [".claude/settings.json", ".claude/settings.local.json", ".claude/CLAUDE.md",
+                                ".claude/hooks", ".claude/commands"]
 
     /// The default root under `home`.
     static func defaultRoot(home: URL) -> URL {
         home.appendingPathComponent(defaultDirectoryName, isDirectory: true)
     }
 
-    /// The root in force: `NOSTROMO_SPACES_ROOT` when set and non-empty, else `~/.nostromo-spaces`.
+    /// The root in force: `NOSTROMO_SPACES_ROOT` when set and non-empty AND this is the QA clone, else
+    /// `.nostromo-spaces` under the process's home (`NostromoHome.current`, not `NSHomeDirectory()`, which
+    /// ignores the QA launcher's `HOME`).
     static func root(env: [String: String] = ProcessInfo.processInfo.environment,
-                     home: URL = URL(fileURLWithPath: NSHomeDirectory())) -> URL {
-        if let v = env[environmentKey], !v.isEmpty { return URL(fileURLWithPath: v, isDirectory: true) }
-        return defaultRoot(home: home)
+                     bundleID: String? = Bundle.main.bundleIdentifier,
+                     realHome: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
+        if NostromoHome.isQAInstance(bundleID: bundleID), let v = env[environmentKey], !v.isEmpty {
+            return URL(fileURLWithPath: v, isDirectory: true)
+        }
+        return defaultRoot(home: NostromoHome.url(env: env, bundleID: bundleID, realHome: realHome))
     }
 
     /// Make one new, empty folder (mode 0700) under the root, named by a fresh UUID. Every check runs before
     /// anything is created except the root itself (made 0700 when missing); a failure leaves no folder behind.
     static func create(root: URL = NoCodebaseFolder.root(),
-                       home: URL = URL(fileURLWithPath: NSHomeDirectory()),
+                       home: URL = NostromoHome.current,
                        codeRoot: URL = CodeRoot.resolve(),
                        makeID: () -> String = { UUID().uuidString }) -> Result<URL, Failure> {
         let fm = FileManager.default

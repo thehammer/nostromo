@@ -127,18 +127,22 @@ struct ConversationHistoryWire: Equatable, Decodable {
     /// the spaces root is the clean-up's to trash.
     /// Nil from a daemon that does not say (it predates No codebase): then nothing is trashed.
     var referencedSpaceFolders: [String]?
+    /// The spaces root the daemon means (canonical when it exists). The clean-up runs only when it is the
+    /// root this app computed. Nil from a daemon that does not say: then nothing is trashed.
+    var spacesRoot: String?
 
     enum CodingKeys: String, CodingKey {
         case entries, revision
-        case referencedSpaceFolders = "referenced_space_folders"
+        case referencedSpaceFolders = "referenced_space_folders", spacesRoot = "spaces_root"
         case requestId = "request_id", firstPromptsEnabled = "first_prompts_enabled", degradedKept = "degraded_kept"
     }
 
     init(requestId: String, entries: [ConversationEntryWire], firstPromptsEnabled: Bool,
-         degradedKept: Int? = nil, revision: UInt64, referencedSpaceFolders: [String]? = nil) {
+         degradedKept: Int? = nil, revision: UInt64, referencedSpaceFolders: [String]? = nil,
+         spacesRoot: String? = nil) {
         self.requestId = requestId; self.entries = entries; self.firstPromptsEnabled = firstPromptsEnabled
         self.degradedKept = degradedKept; self.revision = revision
-        self.referencedSpaceFolders = referencedSpaceFolders
+        self.referencedSpaceFolders = referencedSpaceFolders; self.spacesRoot = spacesRoot
     }
 
     /// Entries decode one by one: a bad entry is skipped, never blanks the whole list.
@@ -149,6 +153,7 @@ struct ConversationHistoryWire: Equatable, Decodable {
         degradedKept = try c.decodeIfPresent(Int.self, forKey: .degradedKept)
         revision = try c.decode(UInt64.self, forKey: .revision)
         referencedSpaceFolders = try c.decodeIfPresent([String].self, forKey: .referencedSpaceFolders)
+        spacesRoot = try c.decodeIfPresent(String.self, forKey: .spacesRoot)
         var list = try c.nestedUnkeyedContainer(forKey: .entries)
         var out: [ConversationEntryWire] = []
         while !list.isAtEnd {

@@ -113,20 +113,48 @@ final class NoCodebaseFolderTests: XCTestCase {
 
     // MARK: Where the root is
 
+    private let realBundle = "com.hammer.nostromo"
+    private let qaBundle = "com.hammer.nostromo.qa"
+
     func testTheDefaultRootIsNostromoSpacesUnderHome() {
         XCTAssertEqual(NoCodebaseFolder.defaultDirectoryName, ".nostromo-spaces",
                        "pins parity with the daemon's SPACES_DIR_NAME; change both together")
         XCTAssertEqual(NoCodebaseFolder.defaultRoot(home: URL(fileURLWithPath: "/Users/x", isDirectory: true)).path,
                        "/Users/x/.nostromo-spaces")
-        XCTAssertEqual(NoCodebaseFolder.root(env: [:], home: URL(fileURLWithPath: "/Users/x", isDirectory: true)).path,
+        XCTAssertEqual(NoCodebaseFolder.root(env: [:], bundleID: realBundle,
+                                             realHome: URL(fileURLWithPath: "/Users/x", isDirectory: true)).path,
                        "/Users/x/.nostromo-spaces")
     }
 
-    func testTheEnvironmentMovesTheRootAndAnEmptyValueDoesNot() {
+    func testTheEnvironmentMovesTheRootInTheQACloneAndAnEmptyValueDoesNot() {
         let h = URL(fileURLWithPath: "/Users/x", isDirectory: true)
         XCTAssertEqual(NoCodebaseFolder.environmentKey, "NOSTROMO_SPACES_ROOT", "the daemon reads the same variable")
-        XCTAssertEqual(NoCodebaseFolder.root(env: ["NOSTROMO_SPACES_ROOT": "/tmp/spaces"], home: h).path, "/tmp/spaces")
-        XCTAssertEqual(NoCodebaseFolder.root(env: ["NOSTROMO_SPACES_ROOT": ""], home: h).path, "/Users/x/.nostromo-spaces")
+        XCTAssertEqual(NoCodebaseFolder.root(env: ["NOSTROMO_SPACES_ROOT": "/tmp/spaces"], bundleID: qaBundle,
+                                             realHome: h).path, "/tmp/spaces")
+        XCTAssertEqual(NoCodebaseFolder.root(env: ["NOSTROMO_SPACES_ROOT": ""], bundleID: qaBundle,
+                                             realHome: h).path, "/Users/x/.nostromo-spaces")
+    }
+
+    func testAStrayEnvironmentVariableNeverMovesTheRealAppsRoot() {
+        let h = URL(fileURLWithPath: "/Users/x", isDirectory: true)
+        for bundle in [realBundle, nil, "com.hammer.nostromo.qa.evil"] as [String?] {
+            XCTAssertEqual(NoCodebaseFolder.root(env: ["NOSTROMO_SPACES_ROOT": "/tmp/spaces"], bundleID: bundle,
+                                                 realHome: h).path,
+                           "/Users/x/.nostromo-spaces", "bundle \(bundle ?? "nil")")
+        }
+    }
+
+    func testTheQAClonesRootFollowsItsHomeNotTheRealOne() throws {
+        // The QA launcher sets NOSTROMO_QA_HOME; NSHomeDirectory() would still say the real home.
+        let qaHome = fm.temporaryDirectory.appendingPathComponent("qa-home-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: qaHome, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: qaHome) }
+        let real = URL(fileURLWithPath: "/Users/x", isDirectory: true)
+        let env = [NostromoHome.qaHomeEnvKey: qaHome.path]
+        XCTAssertEqual(NoCodebaseFolder.root(env: env, bundleID: qaBundle, realHome: real).path,
+                       qaHome.appendingPathComponent(".nostromo-spaces").path)
+        XCTAssertEqual(NoCodebaseFolder.root(env: env, bundleID: realBundle, realHome: real).path,
+                       "/Users/x/.nostromo-spaces", "the real app ignores the QA home variable")
     }
 
     func testTheRootIsNotUnderTheDaemonsPrivateState() {
@@ -227,6 +255,16 @@ final class NoCodebaseFolderTests: XCTestCase {
     }
     func testLocalProjectSettingsInAnAncestorRefuse() throws {
         try assertAncestorFileRefuses(".claude/settings.local.json", named: ".claude/settings.local.json")
+    }
+
+    func testProjectMemoryInADotClaudeFolderOfAnAncestorRefuses() throws {
+        try assertAncestorFileRefuses(".claude/CLAUDE.md", named: ".claude/CLAUDE.md")
+    }
+    func testProjectHooksInADotClaudeFolderOfAnAncestorRefuse() throws {
+        try assertAncestorFileRefuses(".claude/hooks/pre-tool.sh", named: ".claude/hooks")
+    }
+    func testProjectCommandsInADotClaudeFolderOfAnAncestorRefuse() throws {
+        try assertAncestorFileRefuses(".claude/commands/deploy.md", named: ".claude/commands")
     }
 
     func testTheWholeWalkIsCheckedNotJustTheParent() throws {

@@ -26,3 +26,8 @@
 - The hidden-polling budget (at most 20 requests/hour while the Overview is hidden) was not measured by the reviewer: measure it with a real token.
 - VoiceOver on the preview, picker and sheet, and a real notify-and-switch (a focus created by Start a session, the window coming forward, the keyboard landing in the input), are Hammer's to verify.
 - `MainMenuKeyEquivalentsUnchangedTests` lives in `ReviewPaneAccessibilityTests.swift` (PR #466), not in a file of its own; find it there when touching main-menu key equivalents.
+
+## From Perri's review of PR #471 (Session history 3: No codebase)
+
+- Criterion 32, the live half: a model working in a no-codebase folder does not see a repo's instructions or hooks. The tests prove the folder, the root and the ancestor walk; whether Claude Code really loads nothing from a repo needs a real run (user-level `~/.claude` config still applies there by design). Hammer's to verify with a real session.
+- The owner mismatch of a root folder is ignored without a message: the clean-up leaves a folder not owned by the current user (or not mode 0700) alone, and Create/resume refuse it, but nothing tells the user why a folder stays. Decide whether to surface it (a log line is all there is today).

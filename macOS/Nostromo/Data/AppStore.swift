@@ -505,14 +505,15 @@ class AppStore: ObservableObject {
     /// view holding a reference to its old session has let go would silently
     /// recreate — and re-spawn — the session eviction just removed.
     func session(for tag: String, agentName: String? = nil, displayName: String? = nil,
-                 workingDirectory: String? = nil) -> ChatSession {
+                 workingDirectory: String? = nil, requiresWorkingDirectory: Bool = false) -> ChatSession {
         if let s = sessionRegistry[tag] {
             // Re-attach after a rename: carry the current label so the next spawn uses it.
             if let displayName, s.displayName != displayName { s.displayName = displayName }
             return s
         }
         let s = ChatSession(tag: tag, agentName: agentName, displayName: displayName,
-                            workingDirectory: workingDirectory, client: client)
+                            workingDirectory: workingDirectory,
+                            requiresWorkingDirectory: requiresWorkingDirectory, client: client)
         sessionRegistry[tag] = s
         return s
     }

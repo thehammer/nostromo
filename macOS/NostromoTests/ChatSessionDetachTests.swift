@@ -219,4 +219,28 @@ final class ChatSessionDetachTests: XCTestCase {
         XCTFail("could not find a matching closing brace for \(signature)", file: file, line: line)
         return ""
     }
+
+    // MARK: - A no-codebase focus never starts without its folder
+
+    /// With no folder the daemon would run the session in `$HOME`. The focus must not start at all.
+    func testANoCodebaseSessionWithoutAFolderNeverSpawns() {
+        let bare = ChatSession(tag: "nc", agentName: "cody", displayName: "Cody", workingDirectory: nil,
+                               requiresWorkingDirectory: true, client: client)
+        client.connected.send(true)
+        pump()
+        XCTAssertEqual(bare.attachCount, 0, "refused: no spawn, no attach")
+        client.connected.send(false)
+        client.connected.send(true)
+        pump()
+        XCTAssertEqual(bare.attachCount, 0, "and again after a reconnect")
+    }
+
+    func testANoCodebaseSessionWithItsFolderSpawnsAndARepoSessionNeedsNone() {
+        let withFolder = ChatSession(tag: "nc2", agentName: "cody", displayName: "Cody",
+                                     workingDirectory: "/spaces/A", requiresWorkingDirectory: true, client: client)
+        client.connected.send(true)
+        waitUntil { withFolder.attachCount == 1 }
+        XCTAssertEqual(withFolder.attachCount, 1)
+        XCTAssertEqual(session.attachCount, 1, "a session that does not require a folder is unaffected")
+    }
 }
