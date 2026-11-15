@@ -395,7 +395,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         // to the tooltip and accessibility help. The (empty) label stays so the line keeps its height and
         // the pills their place. Built-ins keep their own status text.
         self.secondaryLabel  = secondary.map { text in
-            let tf = NSTextField(labelWithString: focus.isBuiltIn ? text : "")
+            let tf = NSTextField(labelWithString: focus.isBuiltIn ? text : (focus.resumedLabel ?? ""))
             tf.font           = Theme.navSubFont
             tf.textColor      = Theme.fgMuted
             tf.alignment      = .left

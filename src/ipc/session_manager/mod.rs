@@ -83,6 +83,10 @@ mod activity_tests;
 #[cfg(test)]
 mod compact_tests;
 mod control;
+mod conversation_history;
+#[cfg(test)]
+#[path = "conversation_history_tests.rs"]
+mod conversation_history_tests;
 mod inject;
 #[cfg(test)]
 mod inject_tests;
@@ -257,6 +261,11 @@ struct Shared {
     /// one set later reaches sessions already running. A leaf lock: the hook is
     /// cloned out and called with nothing held.
     turn_hook: TurnHookCell,
+    /// The conversation history, told when a turn completes (see
+    /// `conversation_history`). A shared handle.
+    conversations: crate::conversations::ConversationHistory,
+    /// Asked at every completed turn whether the focus is sensitive now.
+    sensitive: SensitiveTags,
     /// The focus's activity counters: shared by every process the focus runs
     /// (see `focus_activity`).
     activity: Arc<FocusActivity>,
@@ -530,6 +539,10 @@ pub struct SessionManager {
     /// Every session id this daemon has spawned for each tag (beside the
     /// store): what a Mother job's claimed session is checked against.
     session_history: SessionHistory,
+    /// The private history the Resume tab lists (see `crate::conversations`).
+    conversations: crate::conversations::ConversationHistory,
+    /// Resume bookkeeping, the nudge debounce, the operator connections.
+    conv: conversation_history::ConversationState,
     /// Who queued each Mother job, when the daemon wires one in. Fed the
     /// focus registry here so a focus's current name and `closed` follow it.
     origin_book: Option<OriginBook>,
@@ -676,6 +689,8 @@ pub struct SessionManager {
     /// Mother job notices, when the daemon wires them in: told about focus
     /// registry pushes and reachable by the IPC server.
     notice_engine: Option<Arc<crate::mother::notices::NoticeEngine>>,
+    /// Who is looking at the author's PR list; `None` when the feature is off.
+    authored_prs: Option<Arc<crate::data::authored_prs::DemandBoard>>,
     /// Every focus's activity counters, for the daemon's lifetime: a restart of
     /// the focus's process reuses its entry (see `focus_activity`).
     activity: ActivityBook,
@@ -725,6 +740,10 @@ impl SessionManager {
             client_senders: Arc::new(Mutex::new(HashMap::new())),
             ledger: Arc::new(ChildLedger::new(ledger_path_beside(&store_path))),
             session_history: SessionHistory::open(SessionHistory::path_beside(&store_path)),
+            conversations: crate::conversations::ConversationHistory::open(
+                crate::conversations::ConversationHistory::path_beside(&store_path),
+            ),
+            conv: conversation_history::ConversationState::default(),
             origin_book: None,
             store_path,
             focus_registry: Vec::new(),
@@ -775,6 +794,7 @@ impl SessionManager {
             session_end_hook: None,
             turn_hook: Arc::new(std::sync::RwLock::new(None)),
             notice_engine: None,
+            authored_prs: None,
             activity: ActivityBook::default(),
             commands: slash_commands::CommandBook::default(),
         }
@@ -1203,6 +1223,14 @@ impl SessionManager {
             }
         };
         args.extend(model_args(model.as_ref()));
+        self.note_conversation_spawn(
+            &tag,
+            &effective_id,
+            &agent_name,
+            &view_name,
+            cwd.as_deref(),
+            model.as_ref(),
+        );
 
         let managed = self.spawn_managed(
             tag.clone(),
@@ -1395,6 +1423,8 @@ impl SessionManager {
             tasks,
             login: login::LoginLink::new(self.login.clone()),
             turn_hook: Arc::clone(&self.turn_hook),
+            conversations: self.conversations.clone(),
+            sensitive: self.sensitive.clone(),
             activity: self.activity.for_session(&tag, &session_id),
             commands: self.commands.for_tag(&tag),
         };
@@ -1505,6 +1535,12 @@ impl SessionManager {
     /// Enqueue a user message. Writes immediately to stdin if the session is
     /// idle, otherwise queues it to drain after the current turn completes.
     pub fn send_user_message(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
+        self.write_user_message_to(tag, text, images)?;
+        self.note_conversation_send(tag, text, !images.is_empty());
+        Ok(())
+    }
+
+    fn write_user_message_to(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
         // Text sent during a work-item send is that item's content: the
         // session it lands in is sensitive before the text is written.
         if in_work_send() {
@@ -1639,6 +1675,8 @@ impl SessionManager {
         };
         if discarded {
             info!(tag, "held message discarded: stopped by the user");
+            self.conversations
+                .discard_candidate(&session.shared.ctx.session_id);
             session.shared.login.notify();
         }
         if !running {
@@ -2136,7 +2174,11 @@ impl SessionManager {
                 is_stale = s.stale_session_id.load(Ordering::SeqCst);
             }
 
-            if wants_recovery && is_stale {
+            if wants_recovery && is_stale && self.is_resumed_tag(&tag) {
+                // A resumed conversation Claude cannot open here: never a
+                // fresh restart pretending to be it.
+                self.fail_resumed_tag(&tag);
+            } else if wants_recovery && is_stale {
                 // Permanent configuration error: the persisted session id is no
                 // longer valid. Clear it and spawn a fresh conversation. Bypass
                 // the crash-loop guard and backoff — this is not a misbehaving
@@ -2394,6 +2436,7 @@ impl SessionManager {
         }
         self.focus_registry = focuses;
         self.note_origin_registry(true);
+        self.refresh_conversation_titles();
         if let Some(engine) = &self.notice_engine {
             // The engine's lock is a leaf: it only records the departures here.
             let present: Vec<String> = new_tags.iter().cloned().collect();
@@ -2543,6 +2586,16 @@ impl SessionManager {
     /// Tell `engine` about focus registry pushes from now on.
     pub fn configure_notice_engine(&mut self, engine: Arc<crate::mother::notices::NoticeEngine>) {
         self.notice_engine = Some(engine);
+    }
+
+    /// Switch the authored-PR list on: advertise it, and route its verbs here.
+    pub fn configure_authored_prs(&mut self, board: Arc<crate::data::authored_prs::DemandBoard>) {
+        self.authored_prs = Some(board);
+    }
+
+    /// The authored-PR demand board, when the feature is enabled.
+    pub fn authored_prs(&self) -> Option<Arc<crate::data::authored_prs::DemandBoard>> {
+        self.authored_prs.clone()
     }
 
     /// The Mother notice engine, when the daemon wired one in.
@@ -2739,6 +2792,13 @@ impl SessionManager {
 
     /// [`Self::kill_all_on_shutdown`] with an explicit grace.
     pub fn kill_all_on_shutdown_with_grace(&mut self, grace: Duration) {
+        self.stop_sessions_on_shutdown(grace);
+        // A conversation-history change still inside its debounce window must
+        // reach disk before the daemon exits.
+        self.conversations.flush();
+    }
+
+    fn stop_sessions_on_shutdown(&mut self, grace: Duration) {
         if self.sessions.is_empty() {
             // Nothing running; tidy up what `stop` left in the ledger.
             self.ledger.clear();
@@ -2802,6 +2862,7 @@ impl SessionManager {
         }
         self.network_clients.remove(client_id);
         self.client_senders.lock().unwrap().remove(client_id);
+        self.conv.operator_conns.remove(client_id);
 
         // Drop any rendered-shape reports this connection contributed (W1 —
         // render-state-visibility) — a closed window's report must not
@@ -3179,6 +3240,7 @@ fn run_reader(
                     login::on_turn_end(&shared, &tag, auth_outcome);
                     advance(&shared);
                     shared.turn_event(&tag, TurnEvent::Completed);
+                    conversation_history::turn_completed(&shared, auth_outcome.is_none());
                     continue;
                 }
                 _ => {}
@@ -4412,7 +4474,7 @@ mod tests {
     /// The tests that point `CLAUDE_BIN_ENV` somewhere take this: the
     /// variable is process-wide, and one test removing it while another is
     /// about to spawn made that spawn start the real `claude`.
-    static CLAUDE_BIN_ENV_LOCK: Mutex<()> = Mutex::new(());
+    pub(super) static CLAUDE_BIN_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn resolve_claude_honours_env_override() {

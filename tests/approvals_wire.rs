@@ -287,7 +287,8 @@ impl Rig {
         std::env::set_var(CLAUDE_BIN_ENV, &wrapper);
         let work = self.tmp.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
-        self.session_mgr
+        let sid = self
+            .session_mgr
             .lock()
             .unwrap()
             .spawn_session(
@@ -298,8 +299,9 @@ impl Rig {
                 None,
                 false,
             )
-            .expect("the session starts");
-        Fake { dir, work }
+            .expect("the session starts")
+            .unwrap_or_default();
+        Fake { dir, work, sid }
     }
 
     fn say(&self, tag: &str, text: &str) {
@@ -844,6 +846,8 @@ fn pending_counts(frames: &[ServerMsg], tag: &str) -> Vec<u32> {
 struct Fake {
     dir: PathBuf,
     work: PathBuf,
+    /// The Claude session id the spawn was given.
+    sid: String,
 }
 
 impl Fake {
@@ -5433,4 +5437,233 @@ fn the_new_refusal_codes_and_their_reason_have_these_exact_wire_forms() {
         },
         r#"{"type":"approval_answer_refused","request_id":"r1","code":"already_resolved","outcome":"allowed_once"}"#,
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Conversation history (session history 1): the operator gate and the welcome
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn every_conversation_verb() -> Vec<ClientMsg> {
+    vec![
+        ClientMsg::ConversationHistoryGet {
+            request_id: "r".into(),
+        },
+        ClientMsg::ConversationResume {
+            request_id: "r".into(),
+            id: "sid-conv".into(),
+            new_tag: "cody-resumed".into(),
+        },
+        ClientMsg::ConversationResumeRelease {
+            tag: "cody-resumed".into(),
+        },
+        ClientMsg::ConversationHistoryRemove {
+            request_id: "r".into(),
+            id: "sid-conv".into(),
+        },
+        ClientMsg::ConversationHistoryRestore {
+            request_id: "r".into(),
+            id: "sid-removed".into(),
+        },
+        ClientMsg::ConversationHistoryPurgeRemoved {
+            request_id: "r".into(),
+        },
+        ClientMsg::ConversationHistorySettingsSet {
+            request_id: "r".into(),
+            first_prompts_enabled: false,
+        },
+    ]
+}
+
+/// Two conversations in the history: `sid-conv` (visible) and `sid-removed`
+/// (soft-removed, waiting to be purged).
+fn seed_conversations(rig: &Rig) -> nostromo::conversations::ConversationHistory {
+    use nostromo::conversations::store::SpawnNote;
+    let history = rig.session_mgr.lock().unwrap().conversations();
+    let now = nostromo::conversations::now_ms();
+    for (sid, tag) in [("sid-conv", "cody-orig"), ("sid-removed", "cody-gone")] {
+        history.note_spawn(
+            SpawnNote {
+                tag,
+                sid,
+                agent: "cody",
+                cwd: None,
+                title: "A title",
+                label: None,
+                model: None,
+            },
+            now,
+        );
+        history.note_user_send(sid, "SEEDPROMPT hello", false, false, now);
+        history.turn_completed(sid, true, false, now);
+    }
+    assert!(history.remove("sid-removed", now));
+    history
+}
+
+fn is_conversation_frame(m: &ServerMsg) -> bool {
+    matches!(
+        m,
+        ServerMsg::ConversationHistory { .. }
+            | ServerMsg::ConversationResumeResult { .. }
+            | ServerMsg::ConversationHistoryChanged { .. }
+            | ServerMsg::ConversationResumeFailed { .. }
+    )
+}
+
+#[test]
+fn the_welcome_advertises_conversation_history_v1_to_the_verified_app() {
+    run(GUARDED, |rig| async move {
+        let app = rig.app(true).await;
+        assert!(
+            app.features.iter().any(|f| f == "conversation_history_v1"),
+            "{:?}",
+            app.features
+        );
+    });
+}
+
+#[test]
+fn every_conversation_verb_from_a_local_process_that_is_not_the_app_is_refused_and_changes_nothing()
+{
+    run(GUARDED, |rig| async move {
+        let history = seed_conversations(&rig);
+        let mut agent = rig.agent(vec![]).await;
+        for verb in every_conversation_verb() {
+            agent.send(&verb).await;
+            let refused = agent
+                .next("the refusal", |m| {
+                    matches!(m, ServerMsg::Error { message } if message.contains("Nostromo app only"))
+                })
+                .await;
+            assert!(matches!(refused, ServerMsg::Error { .. }), "{verb:?}");
+        }
+        settle().await;
+        agent.sync().await;
+        assert!(
+            !agent.saw(is_conversation_frame),
+            "a conversation frame reached a local process that is not the app"
+        );
+        // Nothing the verbs ask for happened.
+        let kept = history.get("sid-conv").expect("not removed");
+        assert!(kept.removed_at_ms.is_none(), "Remove ran");
+        assert_eq!(kept.tag, "cody-orig", "Resume ran");
+        assert!(history.first_prompts_enabled(), "Settings ran");
+        let removed = history.get("sid-removed").expect("Purge ran");
+        assert!(removed.removed_at_ms.is_some(), "Restore ran");
+    });
+}
+
+/// A local process that is not the app cannot cancel a resume still inside its
+/// reservation window; the app's own release still can.
+#[test]
+fn a_pending_resume_reservation_survives_a_release_from_a_local_process_that_is_not_the_app() {
+    run(GUARDED, |rig| async move {
+        let history = seed_conversations(&rig);
+        let reply = rig
+            .session_mgr
+            .lock()
+            .unwrap()
+            .resume_conversation("sid-conv", "cody-resumed");
+        assert!(
+            matches!(reply, ServerMsg::ConversationResumeResult { ref tag, .. } if tag.as_deref() == Some("cody-resumed")),
+            "{reply:?}"
+        );
+        let reserved = || history.pending_resume_for_tag("cody-resumed");
+        assert_eq!(
+            reserved(),
+            Some(("sid-conv".to_string(), "cody-orig".to_string()))
+        );
+
+        let mut agent = rig.agent(vec![]).await;
+        agent
+            .send(&ClientMsg::ConversationResumeRelease {
+                tag: "cody-resumed".into(),
+            })
+            .await;
+        agent
+            .next("the refusal", |m| {
+                matches!(m, ServerMsg::Error { message } if message.contains("Nostromo app only"))
+            })
+            .await;
+        settle().await;
+        agent.sync().await;
+        assert!(
+            reserved().is_some(),
+            "a release from a non-app process cancelled the reservation"
+        );
+        assert_eq!(history.get("sid-conv").unwrap().tag, "cody-resumed");
+
+        // Control: the verified app's release gives the tag back.
+        let mut app = rig.app(true).await;
+        app.send(&ClientMsg::ConversationResumeRelease {
+            tag: "cody-resumed".into(),
+        })
+        .await;
+        for _ in 0..50 {
+            if reserved().is_none() {
+                break;
+            }
+            settle().await;
+        }
+        assert!(reserved().is_none(), "the app's release did not apply");
+        assert_eq!(history.get("sid-conv").unwrap().tag, "cody-orig");
+    });
+}
+
+#[test]
+fn the_verified_app_is_answered_by_the_same_verbs_a_positive_control() {
+    run(GUARDED, |rig| async move {
+        seed_conversations(&rig);
+        let mut app = rig.app(true).await;
+        app.send(&ClientMsg::ConversationHistoryGet {
+            request_id: "r1".into(),
+        })
+        .await;
+        match app
+            .next("the history", |m| {
+                matches!(m, ServerMsg::ConversationHistory { .. })
+            })
+            .await
+        {
+            ServerMsg::ConversationHistory { entries, .. } => {
+                assert_eq!(entries.len(), 1, "the removed entry is not listed");
+                assert_eq!(entries[0].id, "sid-conv");
+            }
+            _ => unreachable!(),
+        }
+    });
+}
+
+#[test]
+fn an_approval_pending_before_a_resume_can_never_be_answered_for_the_resumed_focus() {
+    run(GUARDED, |mut rig| async move {
+        let mut app = rig.app(true).await;
+        let (old, wire) = rig.held(&mut app, "cody-1", "FIXTURE:simple_rm").await;
+        app.wait_pending("cody-1", 1).await;
+        // The conversation counts once a turn of it completed.
+        let history = rig.session_mgr.lock().unwrap().conversations();
+        history.turn_completed(&old.sid, true, false, nostromo::conversations::now_ms());
+        assert!(history.get(&old.sid).unwrap().has_turn);
+
+        // Resume it as a new focus (the old focus was removed; its child is stopped).
+        let reply = rig
+            .session_mgr
+            .lock()
+            .unwrap()
+            .resume_conversation(&old.sid, "cody-2");
+        assert!(
+            matches!(reply, ServerMsg::ConversationResumeResult { ref tag, .. } if tag.as_deref() == Some("cody-2")),
+            "{reply:?}"
+        );
+        let resumed = rig.spawn("cody-2");
+
+        // The request from before is gone; an answer is refused and reaches no process.
+        app.allow(&wire.request_id, "win-late").await;
+        let (id, _code, _outcome) = app.next_refused().await;
+        assert_eq!(id, wire.request_id);
+        settle().await;
+        old.assert_never_allowed();
+        resumed.assert_no_control_responses();
+        assert!(rig.broker.snapshot().is_empty());
+    });
 }

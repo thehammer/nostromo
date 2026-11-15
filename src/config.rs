@@ -121,6 +121,11 @@ pub struct Config {
     /// event.  Present so the engine can be disabled in the field without a
     /// rebuild if its per-PR verdicts turn out to disagree with the poll's.
     pub perri_targeted_relay: bool,
+    /// The author's-side PR list (default: `true`). `authored_prs = false`
+    /// in `config.toml` switches it off entirely: no feature advertised, no
+    /// task, no relay interest. See `docs/authored-prs.md`.
+    #[serde(rename = "authored_prs")]
+    pub authored_prs_enabled: bool,
 
     /// VIP sender addresses (lowercase); emails from these addresses are
     /// highlighted in the mailbox panel.
@@ -211,6 +216,7 @@ impl Default for Config {
             relay_url: None,
             relay_token: None,
             perri_targeted_relay: true,
+            authored_prs_enabled: true,
             vip_senders: Vec::new(),
             jira_site: None,
             jira_email: None,

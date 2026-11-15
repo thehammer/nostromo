@@ -104,7 +104,7 @@ func buildNavRows(
            let detail = badgeDetailFor(f.sessionTag) {
             return detail
         }
-        return [branchOf(f), summaryOf(f), idSuffix].compactMap { $0 }.joined(separator: " · ")
+        return [f.resumedLabel, branchOf(f), summaryOf(f), idSuffix].compactMap { $0 }.joined(separator: " · ")
     }
 
     /// A focus row: the user's label when set, else `defaultLabel`.

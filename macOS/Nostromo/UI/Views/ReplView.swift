@@ -1364,11 +1364,15 @@ class ReplView: NSView {
         }
     }
 
+    /// What the New Session confirmation says: the conversation is kept, not lost.
+    static let newSessionInformativeText =
+        "The current conversation moves to History. You can resume it from New Focus \u{203A} Resume."
+
     @objc private func newSessionTapped() {
         // Confirm before wiping history
         let alert = NSAlert()
         alert.messageText     = "Start new session?"
-        alert.informativeText = "This clears the local display and disconnects from the current Claude session. Claude's memory of this conversation will be lost."
+        alert.informativeText = Self.newSessionInformativeText
         alert.alertStyle      = .warning
         alert.addButton(withTitle: "New Session")
         alert.addButton(withTitle: "Cancel")

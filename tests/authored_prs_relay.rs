@@ -1,0 +1,835 @@
+//! The author's PR list with the github relay: what a relay event costs and
+//! changes, what the list says when the relay is down, and how it catches up
+//! after a reconnect. The real engine runs against a fake GitHub and a hand-fed
+//! relay channel (see `support/authored_prs_rig.rs`) on paused time.
+//!
+//! The delay between a relay event and the read it causes is the documented
+//! 2 s coalescing window; the snapshot follows the read within the 250 ms
+//! publish debounce. The tests state both separately.
+
+#[path = "support/authored_prs_rig.rs"]
+mod rig;
+
+use std::time::Duration;
+
+use nostromo::data::authored_prs::snapshot::{
+    ChecksState, Lifecycle, PollState, RelayState, MAX_ORG_NAME,
+};
+use nostromo::data::relay_client::RelayEvent;
+use rig::*;
+
+const REPO: &str = "Carefeed/app";
+const COALESCE: Duration = Duration::from_secs(2);
+const DEBOUNCE: Duration = Duration::from_millis(250);
+const STEP: Duration = Duration::from_millis(50);
+
+/// Run until a GraphQL read has failed since `mark`.
+async fn until_a_read_fails(rig: &mut Rig, mark: usize) {
+    rig.run_until(mins(3), secs(1), |r| {
+        r.since(mark)
+            .iter()
+            .any(|q| q.kind() == Kind::Graphql && q.status == 500)
+    })
+    .await
+    .expect("a detail read fails");
+    rig.run(secs(2), secs(1)).await;
+}
+
+/// Two PRs with nothing pending, so no check polling adds requests of its own.
+fn passing_fake() -> Fake {
+    let fake = Fake::new();
+    fake.put(FakePr::new(REPO, 1).passing("build"));
+    fake.put(FakePr::new(REPO, 2).passing("build").approved_by("bob"));
+    fake
+}
+
+fn pending_fake() -> Fake {
+    let fake = Fake::new();
+    fake.put(FakePr::new(REPO, 1).pending("build"));
+    fake.put(FakePr::new(REPO, 2).passing("build").approved_by("bob"));
+    fake
+}
+
+/// The relay is up, demand is `level` and the first reconcile is done.
+async fn live_at(fake: Fake, level: &str) -> Rig {
+    let mut rig = Rig::start(
+        fake,
+        RigOpts {
+            relay: true,
+            token: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    rig.relay_up().await;
+    rig.set_demand(level).await;
+    rig.run(secs(10), secs(1)).await;
+    assert_eq!(rig.snapshot().unwrap().relay.state, RelayState::Live);
+    rig
+}
+
+/// The relay is up, demand is visible and the first reconcile is done.
+async fn live(fake: Fake) -> Rig {
+    live_at(fake, "visible").await
+}
+
+fn sha_of(repo: &str, n: u64) -> String {
+    format!("sha-{}-{n}", repo.replace('/', "-").to_lowercase())
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// What an event costs
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn ci_completed_for_a_known_head_costs_one_graphql_read_and_no_search() {
+    let fake = pending_fake();
+    let mut rig = live(fake.clone()).await;
+    assert_eq!(rig.row(REPO, 1).unwrap().checks.state, ChecksState::Pending);
+
+    fake.edit(REPO, 1, |p| {
+        p.checks = vec![("build".into(), "COMPLETED".into(), Some("SUCCESS".into()))];
+    });
+    let mark = rig.fake.log_len();
+    let event_at = rig.elapsed;
+    rig.relay_event(ci_completed(REPO, &sha_of(REPO, 1))).await;
+    let seen = rig
+        .run_until(secs(6), STEP, |r| {
+            r.row(REPO, 1).map(|p| p.checks.state) == Some(ChecksState::Passing)
+        })
+        .await
+        .expect("the snapshot shows the finished check");
+
+    let since = rig.since(mark);
+    assert_eq!(
+        since.iter().filter(|r| r.kind() == Kind::Graphql).count(),
+        1,
+        "exactly one GraphQL read: {since:?}"
+    );
+    assert!(
+        since.iter().all(|r| r.kind() == Kind::Graphql),
+        "no search, no /user: {since:?}"
+    );
+    let read_at = rig.requests()[mark].0;
+    assert!(
+        read_at - event_at <= COALESCE + STEP,
+        "the read follows the event by the coalescing window at most: {:?}",
+        read_at - event_at
+    );
+    assert!(
+        seen - read_at <= DEBOUNCE + STEP,
+        "the snapshot follows the read within the 250 ms debounce: {:?}",
+        seen - read_at
+    );
+}
+
+#[tokio::test]
+async fn ci_completed_matches_the_repo_without_regard_to_case() {
+    let mut rig = live(pending_fake()).await;
+    let mark = rig.fake.log_len();
+    rig.relay_event(ci_completed("carefeed/APP", &sha_of(REPO, 1)))
+        .await;
+    rig.run(secs(4), STEP).await;
+    assert_eq!(rig.count_since(mark, Kind::Graphql), 1);
+}
+
+#[tokio::test]
+async fn ci_completed_for_a_head_nobody_knows_costs_nothing() {
+    let mut rig = live(pending_fake()).await;
+    let mark = rig.fake.log_len();
+    rig.relay_event(ci_completed(REPO, "some-other-sha")).await;
+    rig.relay_event(ci_completed("Carefeed/elsewhere", &sha_of(REPO, 1)))
+        .await;
+    rig.relay_event(relay_ev("ci.completed", REPO)).await; // no sha at all
+    rig.run(secs(10), STEP).await;
+    assert_eq!(rig.fake.log_len(), mark, "{:?}", rig.since(mark));
+}
+
+#[tokio::test]
+async fn pr_merged_costs_nothing_and_the_row_is_merged_at_once() {
+    let fake = pending_fake();
+    let mut rig = live(fake.clone()).await;
+    fake.edit(REPO, 1, |p| {
+        p.in_search = false;
+        p.state = "MERGED".into();
+        p.merged = true;
+    });
+    let mark = rig.fake.log_len();
+    let event_at = rig.elapsed;
+    let mut ev = relay_pr_ev("pr.merged", REPO, 1);
+    ev.merged = Some(true);
+    rig.relay_event(ev).await;
+    let seen = rig
+        .run_until(secs(3), STEP, |r| {
+            r.row(REPO, 1).map(|p| p.lifecycle) == Some(Lifecycle::Merged)
+        })
+        .await
+        .expect("merged");
+    assert!(seen - event_at <= DEBOUNCE + STEP, "{:?}", seen - event_at);
+    assert_eq!(
+        rig.fake.log_len(),
+        mark,
+        "a merge costs no request: {:?}",
+        rig.since(mark)
+    );
+    assert!(rig.row(REPO, 1).unwrap().ended_at.is_some());
+    assert_eq!(
+        rig.row(REPO, 2).unwrap().lifecycle,
+        Lifecycle::Open,
+        "the other is untouched"
+    );
+}
+
+#[tokio::test]
+async fn pr_closed_without_a_merge_marks_the_row_closed_for_free_and_it_is_dropped_after_a_minute()
+{
+    let fake = pending_fake();
+    let mut rig = live(fake.clone()).await;
+    fake.edit(REPO, 1, |p| {
+        p.in_search = false;
+        p.state = "CLOSED".into();
+    });
+    let mark = rig.fake.log_len();
+    let mut ev = relay_pr_ev("pr.closed", REPO, 1);
+    ev.merged = Some(false);
+    rig.relay_event(ev).await;
+    rig.run(secs(3), STEP).await;
+    assert_eq!(rig.row(REPO, 1).unwrap().lifecycle, Lifecycle::Closed);
+    assert_eq!(rig.count_since(mark, Kind::Graphql), 0);
+
+    let before = rig.elapsed;
+    let gone = rig
+        .run_until(secs(90), Duration::from_millis(500), |r| {
+            r.row(REPO, 1).is_none()
+        })
+        .await
+        .expect("dropped");
+    assert!(
+        gone - before >= secs(55) && gone - before <= secs(62),
+        "{:?}",
+        gone - before
+    );
+    assert!(rig.row(REPO, 2).is_some());
+}
+
+#[tokio::test]
+async fn pr_events_for_a_known_pr_cost_one_read_however_many_arrive_inside_the_window() {
+    let mut rig = live(pending_fake()).await;
+    let mark = rig.fake.log_len();
+    for ty in [
+        "pr.synchronize",
+        "pr.review_submitted",
+        "pr.review_requested",
+        "pr.review_request_removed",
+        "pr.synchronize",
+    ] {
+        rig.relay_event(relay_pr_ev(ty, REPO, 2)).await;
+        rig.run(Duration::from_millis(200), STEP).await;
+    }
+    rig.run(secs(5), STEP).await;
+    let since = rig.since(mark);
+    assert_eq!(
+        since.iter().filter(|r| r.kind() == Kind::Graphql).count(),
+        1,
+        "five events inside one window are one read: {since:?}"
+    );
+    assert!(since.iter().all(|r| r.kind() == Kind::Graphql), "{since:?}");
+}
+
+#[tokio::test]
+async fn a_new_pr_the_relay_says_is_mine_is_read_and_listed_without_a_search() {
+    let fake = pending_fake();
+    let mut rig = live(fake.clone()).await;
+    // It exists on GitHub but the engine has not seen it.
+    fake.put(FakePr::new(REPO, 9).passing("build"));
+    let mark = rig.fake.log_len();
+    let mut ev = relay_pr_ev("pr.opened", REPO, 9);
+    ev.author = Some(ME.to_owned());
+    rig.relay_event(ev).await;
+    rig.run(secs(5), STEP).await;
+    assert!(rig.row(REPO, 9).is_some(), "listed");
+    assert_eq!(rig.count_since(mark, Kind::Graphql), 1);
+    assert_eq!(rig.count_since(mark, Kind::Search), 0);
+}
+
+#[tokio::test]
+async fn a_new_pr_by_someone_else_or_an_event_about_an_unknown_pr_costs_nothing() {
+    let fake = pending_fake();
+    fake.put(FakePr::new(REPO, 8).author("someone-else").out_of_search());
+    let mut rig = live(fake).await;
+    let mark = rig.fake.log_len();
+    let mut theirs = relay_pr_ev("pr.opened", REPO, 8);
+    theirs.author = Some("someone-else".into());
+    rig.relay_event(theirs).await;
+    rig.relay_event(relay_pr_ev("pr.synchronize", REPO, 8))
+        .await; // unknown PR
+    rig.relay_event(relay_pr_ev("pr.review_submitted", REPO, 77))
+        .await;
+    rig.relay_event(relay_pr_ev("pr.opened", REPO, 78)).await; // no author hint at all
+    rig.run(secs(8), STEP).await;
+    assert_eq!(rig.fake.log_len(), mark, "{:?}", rig.since(mark));
+    assert!(rig.row(REPO, 8).is_none());
+}
+
+#[tokio::test]
+async fn events_with_no_usable_repo_or_a_hostile_one_are_ignored() {
+    let mut rig = live(pending_fake()).await;
+    let mark = rig.fake.log_len();
+    for repo in [
+        None,
+        Some(""),
+        Some("no-slash"),
+        Some("a/b/c"),
+        Some("o/n\"){ x"),
+        Some("../x"),
+    ] {
+        rig.relay_event(RelayEvent {
+            event_type: "pr.synchronize".into(),
+            repo: repo.map(str::to_owned),
+            number: Some(1),
+            ..Default::default()
+        })
+        .await;
+    }
+    rig.run(secs(6), STEP).await;
+    assert_eq!(rig.fake.log_len(), mark, "{:?}", rig.since(mark));
+}
+
+#[tokio::test]
+async fn after_a_push_the_new_head_is_the_one_ci_events_match() {
+    let fake = pending_fake();
+    let mut rig = live(fake.clone()).await;
+    fake.edit(REPO, 1, |p| p.head_sha = "brand-new-head".into());
+    rig.relay_event(relay_pr_ev("pr.synchronize", REPO, 1))
+        .await;
+    rig.run(secs(5), STEP).await;
+
+    let mark = rig.fake.log_len();
+    rig.relay_event(ci_completed(REPO, &sha_of(REPO, 1))).await; // the old head
+    rig.run(secs(4), STEP).await;
+    assert_eq!(rig.fake.log_len(), mark, "the old head no longer matches");
+    rig.relay_event(ci_completed(REPO, "brand-new-head")).await;
+    rig.run(secs(4), STEP).await;
+    assert_eq!(rig.count_since(mark, Kind::Graphql), 1);
+}
+
+#[tokio::test]
+async fn relay_events_never_trigger_a_search_or_a_full_reconcile() {
+    // Hidden: search runs every five minutes, so a search any sooner than that
+    // can only have been caused by something else, and the one-a-minute search
+    // gap is no excuse.
+    let mut rig = live_at(pending_fake(), "hidden").await;
+    let mark = rig.fake.log_len();
+    let kinds = [
+        "pr.synchronize",
+        "pr.review_submitted",
+        "pr.review_requested",
+        "pr.opened",
+    ];
+    for i in 0..40usize {
+        let mut ev = relay_pr_ev(kinds[i % kinds.len()], REPO, 1 + (i as u64 % 2));
+        ev.author = Some(ME.into());
+        rig.relay_event(ev).await;
+        rig.relay_event(ci_completed(REPO, &sha_of(REPO, 1))).await;
+        rig.run(secs(7), secs(1)).await;
+    }
+    // 40 * 7 s = 280 s: inside one five-minute search interval.
+    assert!(rig.elapsed < secs(10 + 300));
+    let since = rig.since(mark);
+    assert_eq!(
+        since.iter().filter(|r| r.kind() == Kind::Search).count(),
+        0,
+        "{} events and not one search: {since:?}",
+        40 * 2
+    );
+    assert_eq!(since.iter().filter(|r| r.kind() == Kind::User).count(), 0);
+    // Not a full reconcile either: one graphql read never covers both PRs
+    // because of an event for one (a reconcile reads every PR at once).
+    assert!(
+        since.iter().filter(|r| r.kind() == Kind::Graphql).count() >= 1,
+        "the events were read"
+    );
+}
+
+#[tokio::test]
+async fn relay_events_leave_the_search_cadence_alone_over_ten_minutes() {
+    let mut rig = live(pending_fake()).await;
+    let mark = rig.fake.log_len();
+    for i in 0..40usize {
+        rig.relay_event(relay_pr_ev("pr.synchronize", REPO, 1 + (i as u64 % 2)))
+            .await;
+        rig.run(secs(15), secs(1)).await;
+    }
+    let n = rig.count_since(mark, Kind::Search);
+    assert!(n <= 10, "ten minutes of cadence is ten searches: {n}");
+    let times: Vec<Duration> = rig
+        .of_kind(Kind::Search)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+    for w in times.windows(2) {
+        assert!(w[1] - w[0] >= secs(60), "{times:?}");
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The relay's own state
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn without_a_relay_the_list_says_not_configured() {
+    let mut rig = Rig::start(pending_fake(), RigOpts::default()).await;
+    rig.visible_and_settled().await;
+    let snap = rig.snapshot().unwrap();
+    assert_eq!(snap.relay.state, RelayState::NotConfigured);
+    assert_eq!(snap.relay.since, None);
+}
+
+#[tokio::test]
+async fn when_the_relay_goes_down_the_list_says_offline_since_when() {
+    let mut rig = live(pending_fake()).await;
+    rig.relay_down().await;
+    rig.run_until(secs(6), Duration::from_millis(250), |r| {
+        r.snapshot().map(|s| s.relay.state) == Some(RelayState::Offline)
+    })
+    .await
+    .expect("noticed within a few seconds");
+    let relay = rig.snapshot().unwrap().relay;
+    assert!(relay.since.is_some(), "offline says since when: {relay:?}");
+    assert_eq!(relay.org, "Carefeed");
+}
+
+#[tokio::test]
+async fn a_relay_organisations_pending_prs_are_polled_only_while_the_relay_is_not_covering_them() {
+    let mut rig = live(pending_fake()).await;
+
+    // Live: the relay covers Carefeed, so a pending check is not polled.
+    let mark = rig.fake.log_len();
+    rig.run(mins(5), secs(5)).await;
+    assert_eq!(
+        rig.count_since(mark, Kind::Graphql),
+        0,
+        "no polling of a PR the relay covers: {:?}",
+        rig.since(mark)
+    );
+
+    // Down: the PR joins the pending-CI refresh, once a minute.
+    rig.relay_down().await;
+    let mark = rig.fake.log_len();
+    rig.run(mins(5), secs(5)).await;
+    let polled = rig.count_since(mark, Kind::Graphql);
+    assert!(polled >= 4, "polled while the relay is down: {polled}");
+
+    // Back: the reconcile runs, and then the polling stops again.
+    rig.relay_up().await;
+    rig.run(secs(150), secs(5)).await;
+    let mark = rig.fake.log_len();
+    rig.run(mins(5), secs(5)).await;
+    assert_eq!(
+        rig.count_since(mark, Kind::Graphql),
+        0,
+        "{:?}",
+        rig.since(mark)
+    );
+}
+
+#[tokio::test]
+async fn after_a_reconnect_the_relay_is_catching_up_until_a_reconcile_succeeds_and_then_live() {
+    let fake = pending_fake();
+    let mut rig = live(fake.clone()).await;
+    rig.relay_down().await;
+    rig.run(mins(2), secs(5)).await;
+
+    // The reconcile after the reconnect is going to fail.
+    fake.force(
+        "search",
+        Some(Forced {
+            status: 500,
+            retry_after: None,
+        }),
+    );
+    let reconnected_at = rig.elapsed;
+    rig.relay_up().await;
+    rig.run(secs(10), secs(1)).await;
+    assert_eq!(
+        rig.snapshot().unwrap().relay.state,
+        RelayState::CatchingUp,
+        "connected, but not yet reconciled"
+    );
+    assert_eq!(rig.snapshot().unwrap().relay.since, None);
+
+    // Ten minutes of failing reconciles: it never claims to be live.
+    rig.run(mins(10), secs(5)).await;
+    let healed_from = rig.elapsed;
+    for (at, snap) in &rig.published {
+        if *at > reconnected_at + secs(1) && *at <= healed_from {
+            assert_eq!(
+                snap.relay.state,
+                RelayState::CatchingUp,
+                "snapshot at {at:?} claims {:?} before any reconcile succeeded",
+                snap.relay.state
+            );
+        }
+    }
+    assert!(
+        rig.of_kind(Kind::Search)
+            .iter()
+            .any(|(_, r)| r.status == 500),
+        "the reconcile really was failing"
+    );
+
+    // The service recovers; the next reconcile succeeds and the relay is live.
+    fake.force("search", None);
+    let live_at = rig
+        .run_until(mins(15), secs(5), |r| {
+            r.snapshot().map(|s| s.relay.state) == Some(RelayState::Live)
+        })
+        .await
+        .expect("live once a reconcile has succeeded");
+    assert!(live_at > healed_from);
+    let first_ok_search = rig
+        .of_kind(Kind::Search)
+        .into_iter()
+        .filter(|(t, r)| *t > reconnected_at && r.status != 500)
+        .map(|(t, _)| t)
+        .min()
+        .expect("a search succeeded after the reconnect");
+    assert!(
+        first_ok_search <= live_at,
+        "live only after a search succeeded: ok at {first_ok_search:?}, live at {live_at:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_reconnect_reconciles_once_and_goes_live() {
+    let mut rig = live(pending_fake()).await;
+    rig.relay_down().await;
+    rig.run(mins(3), secs(5)).await;
+    let mark = rig.fake.log_len();
+    rig.relay_up().await;
+    rig.run(secs(70), secs(1)).await;
+    assert!(rig.count_since(mark, Kind::Search) >= 1);
+    assert!(
+        rig.count_since(mark, Kind::Graphql) >= 1,
+        "everything is read again"
+    );
+    assert_eq!(rig.snapshot().unwrap().relay.state, RelayState::Live);
+}
+
+#[tokio::test]
+async fn a_pr_that_merged_while_the_relay_was_down_becomes_merged_without_any_event() {
+    let fake = pending_fake();
+    let mut rig = live(fake.clone()).await;
+    rig.relay_down().await;
+    // It merges while we cannot hear: gone from the search, merged in the detail.
+    fake.edit(REPO, 2, |p| {
+        p.in_search = false;
+        p.state = "MERGED".into();
+        p.merged = true;
+    });
+    rig.run(secs(30), secs(5)).await;
+    rig.relay_up().await;
+    rig.run_until(mins(3), secs(1), |r| {
+        r.row(REPO, 2).map(|p| p.lifecycle) == Some(Lifecycle::Merged)
+    })
+    .await
+    .expect("the reconcile learns it merged");
+    assert_eq!(rig.row(REPO, 1).unwrap().lifecycle, Lifecycle::Open);
+    assert!(rig.row(REPO, 2).unwrap().ended_at.is_some());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A reconnect while a reconcile is already running
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn a_reconnect_during_a_running_reconcile_keeps_catching_up_until_a_later_reconcile_finishes()
+{
+    let fake = passing_fake();
+    let mut rig = live(fake.clone()).await;
+
+    // The reconcile after a reconnect gets as far as its search; its detail
+    // reads fail, so it is still running (draining) when the relay drops and
+    // comes back again.
+    rig.relay_down().await;
+    rig.run(secs(5), secs(1)).await;
+    fake.force(
+        "graphql",
+        Some(Forced {
+            status: 500,
+            retry_after: None,
+        }),
+    );
+    let mark = rig.fake.log_len();
+    rig.relay_up().await;
+    until_a_read_fails(&mut rig, mark).await;
+    assert_eq!(rig.snapshot().unwrap().poll.state, PollState::Error);
+    assert_eq!(rig.snapshot().unwrap().relay.state, RelayState::CatchingUp);
+
+    rig.relay_down().await;
+    rig.run(secs(3), secs(1)).await;
+    rig.relay_up().await;
+    let reconnected_at = rig.elapsed;
+    let at_reconnect = rig.fake.log_len();
+    fake.force("graphql", None);
+
+    let live_at = rig
+        .run_until(mins(8), secs(1), |r| {
+            r.snapshot().map(|s| s.relay.state) == Some(RelayState::Live)
+        })
+        .await
+        .expect("live once a reconcile that began after the reconnect has finished");
+
+    // Until then it only said it was catching up.
+    for (at, snap) in &rig.published {
+        if *at > reconnected_at && *at < live_at {
+            assert_eq!(snap.relay.state, RelayState::CatchingUp, "at {at:?}");
+        }
+    }
+
+    // The reconcile that ended the catch-up began after the reconnect: a
+    // search that ran after it, and then every PR read again, all before the
+    // list said live. (The reads that were still failing when the relay came
+    // back belong to the earlier reconcile; a cadence search that finds nothing
+    // new reads nothing.)
+    let after: Vec<(Duration, Req)> = rig.requests().into_iter().skip(at_reconnect).collect();
+    let a_search_then_a_full_read = after.iter().enumerate().any(|(i, (_, r))| {
+        r.kind() == Kind::Search
+            && after[i + 1..]
+                .iter()
+                .any(|(t, q)| q.kind() == Kind::Graphql && q.status == 200 && *t <= live_at)
+    });
+    assert!(
+        a_search_then_a_full_read,
+        "no search-then-read after the reconnect before it went live at {live_at:?}: {after:?}"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// A reconcile that hit an error is not finished
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn a_reconcile_whose_detail_read_fails_does_not_end_the_catch_up_or_move_checked_at_until_it_recovers(
+) {
+    let fake = passing_fake();
+    let mut rig = live(fake.clone()).await;
+    let checked_before = rig.snapshot().unwrap().poll.checked_at;
+    assert!(checked_before.is_some());
+
+    rig.relay_down().await;
+    rig.run(secs(5), secs(1)).await;
+    fake.force(
+        "graphql",
+        Some(Forced {
+            status: 500,
+            retry_after: None,
+        }),
+    );
+    rig.relay_up().await;
+    let reconnected_at = rig.elapsed;
+    rig.run(mins(8), secs(5)).await;
+    assert!(
+        rig.of_kind(Kind::Graphql)
+            .iter()
+            .any(|(_, r)| r.status == 500),
+        "the detail reads really were failing"
+    );
+    for (at, snap) in &rig.published {
+        if *at > reconnected_at + secs(1) {
+            assert_eq!(snap.relay.state, RelayState::CatchingUp, "at {at:?}");
+            assert_eq!(snap.poll.checked_at, checked_before, "at {at:?}");
+        }
+    }
+    assert_eq!(rig.snapshot().unwrap().poll.state, PollState::Error);
+
+    fake.force("graphql", None);
+    rig.run_until(mins(8), secs(5), |r| {
+        r.snapshot().map(|s| s.relay.state) == Some(RelayState::Live)
+    })
+    .await
+    .expect("live once the reads work again");
+    assert!(rig.snapshot().unwrap().poll.checked_at > checked_before);
+    assert_eq!(rig.snapshot().unwrap().poll.state, PollState::Ok);
+}
+
+#[tokio::test]
+async fn a_failed_reconcile_whose_remaining_prs_all_merge_still_ends_the_catch_up_and_the_error() {
+    // The reconcile's detail read fails; before the back-off ends the relay says
+    // every PR it was reading merged. Nothing is left to read, so nothing could
+    // ever succeed to clear the error: the cycle must end on its own.
+    let fake = passing_fake();
+    let mut rig = live(fake.clone()).await;
+
+    rig.relay_down().await;
+    rig.run(secs(5), secs(1)).await;
+    fake.force(
+        "graphql",
+        Some(Forced {
+            status: 500,
+            retry_after: None,
+        }),
+    );
+    let first = rig.fake.log_len();
+    rig.relay_up().await;
+    until_a_read_fails(&mut rig, first).await;
+    assert_eq!(rig.snapshot().unwrap().relay.state, RelayState::CatchingUp);
+    assert_eq!(rig.snapshot().unwrap().poll.state, PollState::Error);
+
+    for n in [1, 2] {
+        fake.edit(REPO, n, |p| {
+            p.state = "MERGED".to_owned();
+            p.merged = true;
+            p.in_search = false;
+        });
+        rig.relay_event(relay_pr_ev("pr.merged", REPO, n)).await;
+    }
+    fake.force("graphql", None);
+    rig.run_until(mins(10), secs(5), |r| {
+        r.snapshot().map(|s| s.relay.state) == Some(RelayState::Live)
+    })
+    .await
+    .expect("live: no PR is left for the reconcile to read");
+    assert_ne!(rig.snapshot().unwrap().poll.state, PollState::Error);
+}
+
+#[tokio::test]
+async fn a_relay_read_that_fails_in_the_same_cycle_as_the_reconciles_last_reads_keeps_the_catch_up_going(
+) {
+    let fake = passing_fake();
+    let mut rig = live(fake.clone()).await;
+    let checked_before = rig.snapshot().unwrap().poll.checked_at;
+
+    // A reconnect; its reconcile's detail reads fail, so the engine backs off.
+    rig.relay_down().await;
+    rig.run(secs(5), secs(1)).await;
+    fake.force(
+        "graphql",
+        Some(Forced {
+            status: 500,
+            retry_after: None,
+        }),
+    );
+    let first = rig.fake.log_len();
+    rig.relay_up().await;
+    until_a_read_fails(&mut rig, first).await;
+    assert_eq!(rig.snapshot().unwrap().relay.state, RelayState::CatchingUp);
+
+    // While it backs off the relay says I opened a new PR: a read of a PR the
+    // reconcile is not reading, due as soon as the back-off ends.
+    fake.put(FakePr::new(REPO, 3).passing("build"));
+    let mut opened = relay_pr_ev("pr.opened", REPO, 3);
+    opened.author = Some(ME.to_owned());
+    rig.relay_event(opened).await;
+    rig.run(secs(5), secs(1)).await;
+
+    // The back-off ends. The reconcile's own reads succeed, and the relay
+    // read, in that same cycle, fails.
+    fake.force("graphql", None);
+    fake.script_graphql(&[200, 500]);
+    let mark = rig.fake.log_len();
+    rig.run_until(mins(4), secs(1), |r| {
+        r.since(mark)
+            .iter()
+            .any(|q| q.kind() == Kind::Graphql && q.status == 500)
+    })
+    .await
+    .expect("the relay read is attempted, and fails");
+    rig.run(secs(3), secs(1)).await;
+    let ok_then_failed: Vec<u16> = rig
+        .since(mark)
+        .iter()
+        .filter(|q| q.kind() == Kind::Graphql)
+        .map(|q| q.status)
+        .take(2)
+        .collect();
+    assert_eq!(ok_then_failed, vec![200, 500], "{:?}", rig.since(mark));
+
+    // A cycle that met an error is not complete, whatever else it did.
+    let snap = rig.snapshot().unwrap();
+    assert_eq!(
+        snap.relay.state,
+        RelayState::CatchingUp,
+        "not live while a read in the cycle has just failed"
+    );
+    assert_eq!(
+        snap.poll.checked_at, checked_before,
+        "checked_at has not moved"
+    );
+
+    // The relay read is retried after the back-off, works, and the cycle ends.
+    rig.run_until(mins(6), secs(1), |r| {
+        r.snapshot().map(|s| s.relay.state) == Some(RelayState::Live)
+    })
+    .await
+    .expect("live once nothing in the cycle is failing");
+    assert!(rig.snapshot().unwrap().poll.checked_at > checked_before);
+    assert!(
+        rig.row(REPO, 3).is_some(),
+        "the relay's PR is listed in the end"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// What the relay's ack says about itself
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn a_relay_organisation_with_newlines_controls_or_great_length_is_shown_as_one_short_line() {
+    let hostile = format!(
+        "Evil\n## Injected heading\r\n\u{1b}[31mred\u{0}\u{202E}tail {}",
+        "x".repeat(500)
+    );
+    let mut rig = Rig::start(
+        passing_fake(),
+        RigOpts {
+            relay: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let before = rig.published.len();
+    rig.relay_status.set_org(Some(hostile));
+    rig.relay_up().await;
+    rig.set_demand("visible").await;
+    rig.run(secs(10), secs(1)).await;
+
+    assert!(rig.published.len() > before);
+    for (at, snap) in rig.published.iter().skip(before) {
+        let org = &snap.relay.org;
+        assert!(
+            !org.chars().any(|c| c.is_control() || c == '\u{202E}'),
+            "at {at:?}: one clean line, not {org:?}"
+        );
+        assert!(
+            org.chars().count() <= MAX_ORG_NAME,
+            "at {at:?}: {} characters",
+            org.chars().count()
+        );
+        assert!(
+            org.starts_with("Evil"),
+            "the name is otherwise kept: {org:?}"
+        );
+    }
+    let wire = rig.wire_text();
+    assert!(
+        !wire.contains("\\n##"),
+        "no heading smuggled through the org: {wire}"
+    );
+}
+
+#[tokio::test]
+async fn an_ordinary_relay_organisation_name_is_shown_as_it_is() {
+    let mut rig = Rig::start(
+        passing_fake(),
+        RigOpts {
+            relay: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    rig.relay_status.set_org(Some("Acme Robotics".into()));
+    rig.relay_up().await;
+    rig.run(secs(3), secs(1)).await;
+    assert_eq!(rig.snapshot().unwrap().relay.org, "Acme Robotics");
+}

@@ -110,6 +110,11 @@ pub enum Topic {
     /// topic list still includes it for a local peer; FND-1 keeps every
     /// terminal frame off TCP (`ServerClass::LocalOnly`).
     Terminal,
+    /// The author's open PRs: `ServerMsg::AuthoredPrs`, replayed (the latest
+    /// snapshot) on subscribe. Advertised as `authored_prs_v1`. Delivered only
+    /// to a client that names it (the empty "everything" list does not include
+    /// it) and never to a network peer.
+    AuthoredPrs,
     /// A topic this build does not know (a newer client's). Decoded rather
     /// than rejected so a future topic never makes an older daemon drop the
     /// whole `Subscribe`; it matches no message, and, because it keeps the
@@ -1185,6 +1190,83 @@ pub const FEATURE_FOCUS_ACTIVITY: &str = "focus_activity_v1";
 /// `local_command` turn origins and slash-command echo turns.
 pub const FEATURE_SLASH_COMMANDS: &str = "slash_commands_v1";
 
+/// The optional capability advertised in `Welcome.features`: this daemon keeps a
+/// private conversation history and takes the `conversation_*` verbs (operator
+/// app only; never offered to a network or non-operator peer).
+pub const FEATURE_CONVERSATION_HISTORY: &str = "conversation_history_v1";
+
+/// Where a conversation stands, computed at list time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConversationStatus {
+    /// Live in a focus; `open` when that focus is in the pushed registry.
+    Running {
+        tag: String,
+        open: bool,
+    },
+    /// Claude no longer has the file.
+    UnavailableDeleted,
+    /// The file is empty or is not a transcript.
+    UnavailableUnreadable,
+    /// The working directory no longer exists (`worktree`: it was a linked worktree).
+    FolderGone {
+        worktree: bool,
+    },
+    Available,
+}
+
+/// One row of the history, as sent to the operator app. A sensitive entry
+/// carries no branch, path, project name, PR numbers or first prompt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConversationEntryWire {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pr_numbers: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt: Option<String>,
+    /// The fixed reason word when no first prompt is shown (`command:/name` names only the command).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt_withheld: Option<String>,
+    pub sensitive: bool,
+    pub last_active_ms: i64,
+    pub status: ConversationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from_tag: Option<String>,
+    /// The path of Claude's file, for "Show Transcript in Finder" (never shown as text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+}
+
+/// The outcome of `conversation_resume`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationResumeOutcome {
+    /// It is running in an open focus: switch to `tag`; nothing started.
+    Switch,
+    /// `tag` is reserved; create the focus and attach (the daemon spawns with `--resume`).
+    Ready,
+    Refused,
+}
+/// The optional capability advertised in `Welcome.features`: this daemon keeps
+/// the author's open-PR list, takes `authored_prs_demand` and
+/// `authored_prs_refresh`, and sends `authored_prs` to a client that names
+/// `Topic::AuthoredPrs`.
+pub const FEATURE_AUTHORED_PRS: &str = "authored_prs_v1";
+
 /// One slash command a session's CLI reports (`ServerMsg::SessionCommands`).
 /// `description` is one sanitised line of at most 200 characters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1991,6 +2073,53 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enabled: Option<bool>,
     },
+    // ── conversation history (operator app only; refused for every other peer) ──
+    /// List the history. Answered with `ServerMsg::ConversationHistory`.
+    ConversationHistoryGet {
+        request_id: String,
+    },
+    /// Resume conversation `id` as focus `new_tag`. Answered with
+    /// `ServerMsg::ConversationResumeResult`.
+    ConversationResume {
+        request_id: String,
+        id: String,
+        new_tag: String,
+    },
+    /// The resume the app asked for was cancelled before its focus existed:
+    /// give the reserved `tag` back. Ignored once a focus or session holds it.
+    ConversationResumeRelease {
+        tag: String,
+    },
+    /// Hide an entry (undoable until `ConversationHistoryPurgeRemoved`).
+    ConversationHistoryRemove {
+        request_id: String,
+        id: String,
+    },
+    /// Undo a removal.
+    ConversationHistoryRestore {
+        request_id: String,
+        id: String,
+    },
+    /// The sheet closed: delete soft-removed entries now.
+    ConversationHistoryPurgeRemoved {
+        request_id: String,
+    },
+    /// Turn stored first prompts on or off (off purges the stored ones at once).
+    ConversationHistorySettingsSet {
+        request_id: String,
+        first_prompts_enabled: bool,
+    },
+    /// Who is looking at the author's PR list: `visible`, `hidden` or `idle`
+    /// (an unknown value counts as `hidden`). Honoured only from the verified
+    /// operator app; refused for a network peer. The daemon's demand is the
+    /// highest level over its live operator connections; with none it is idle
+    /// and the feature makes no request.
+    AuthoredPrsDemand {
+        level: String,
+    },
+    /// Ask for a full reconcile now. Same gate. Refused (shown as
+    /// `refresh_blocked` in the snapshot) while one runs or while paused.
+    AuthoredPrsRefresh {},
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -2940,6 +3069,43 @@ pub enum ServerMsg {
         source: String,
         commands: Vec<SlashCommandEntry>,
     },
+    /// Answer to `ConversationHistoryGet`, to the asking client only. `LocalOnly`.
+    ConversationHistory {
+        request_id: String,
+        entries: Vec<ConversationEntryWire>,
+        first_prompts_enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        degraded_kept: Option<u32>,
+        revision: u64,
+    },
+    /// Answer to `ConversationResume`, to the asking client only. `LocalOnly`.
+    ConversationResumeResult {
+        request_id: String,
+        outcome: ConversationResumeOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// The history changed; ask again. Payload-free. Operator-app connections
+    /// only, never the broadcast channel. `LocalOnly`.
+    ConversationHistoryChanged {
+        revision: u64,
+    },
+    /// A resumed focus's conversation could not be opened (`reason`: `not_found_here`).
+    /// Operator-app connections only. `LocalOnly`.
+    ConversationResumeFailed {
+        tag: String,
+        reason: String,
+    },
     /// Answer to `SessionTaskStop`, to the asking client only. `LocalOnly`.
     SessionTaskStopResult {
         request_id: String,
@@ -3134,6 +3300,11 @@ pub enum ServerMsg {
     MotherNoticeState {
         enabled: bool,
         focuses: Vec<crate::mother::notices::FocusNoticeState>,
+    },
+    /// The author's open PRs (`Topic::AuthoredPrs`, local peers only, and only
+    /// to a client that names the topic). Sent on change and after Subscribe.
+    AuthoredPrs {
+        snapshot: crate::data::authored_prs::AuthoredPrsSnapshot,
     },
 }
 
@@ -8830,9 +9001,245 @@ mod slash_commands_wire_tests {
     }
 
     #[test]
+    fn conversation_history_messages_round_trip() {
+        let msgs = [
+            r#"{"type":"conversation_history_get","request_id":"r"}"#,
+            r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1"}"#,
+            r#"{"type":"conversation_resume_release","tag":"t1"}"#,
+            r#"{"type":"conversation_history_remove","request_id":"r","id":"s1"}"#,
+            r#"{"type":"conversation_history_restore","request_id":"r","id":"s1"}"#,
+            r#"{"type":"conversation_history_purge_removed","request_id":"r"}"#,
+            r#"{"type":"conversation_history_settings_set","request_id":"r","first_prompts_enabled":false}"#,
+        ];
+        for m in msgs {
+            let parsed: ClientMsg = serde_json::from_str(m).unwrap();
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), m);
+        }
+        let reply = ServerMsg::ConversationHistory {
+            request_id: "r".into(),
+            entries: vec![ConversationEntryWire {
+                id: "s1".into(),
+                title: "T".into(),
+                label: None,
+                agent: "cody".into(),
+                project_name: None,
+                project_path: None,
+                branch: None,
+                model: None,
+                effort: None,
+                pr_numbers: vec![],
+                first_prompt: None,
+                first_prompt_withheld: Some("image".into()),
+                sensitive: false,
+                last_active_ms: 5,
+                status: ConversationStatus::FolderGone { worktree: true },
+                resumed_from_tag: None,
+                transcript_path: None,
+            }],
+            first_prompts_enabled: true,
+            degraded_kept: Some(3),
+            revision: 9,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert!(
+            json.contains(r#""status":{"kind":"folder_gone","worktree":true}"#),
+            "{json}"
+        );
+        let back: ServerMsg = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            ServerMsg::ConversationHistory { revision: 9, .. }
+        ));
+        for m in [
+            ServerMsg::ConversationHistoryChanged { revision: 3 },
+            ServerMsg::ConversationResumeFailed {
+                tag: "t".into(),
+                reason: "not_found_here".into(),
+            },
+            ServerMsg::ConversationResumeResult {
+                request_id: "r".into(),
+                outcome: ConversationResumeOutcome::Ready,
+                tag: Some("t".into()),
+                reason: None,
+                agent: Some("cody".into()),
+                project_path: None,
+                label: None,
+                title: None,
+            },
+        ] {
+            let j = serde_json::to_string(&m).unwrap();
+            let _: ServerMsg = serde_json::from_str(&j).unwrap();
+        }
+        assert_eq!(FEATURE_CONVERSATION_HISTORY, "conversation_history_v1");
+    }
+
+    #[test]
     fn the_capability_is_named_slash_commands_v1() {
         assert_eq!(FEATURE_SLASH_COMMANDS, "slash_commands_v1");
         // Additive: the protocol version does not move.
         assert_eq!(PROTOCOL_VERSION, 4);
+    }
+}
+
+#[cfg(test)]
+mod authored_prs_wire_tests {
+    //! The author's-PR-list additions to the wire: the topic, the capability,
+    //! the two verbs and the frame, and that nothing older changed shape.
+
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_capability_and_the_topic_are_spelled_as_documented() {
+        assert_eq!(FEATURE_AUTHORED_PRS, "authored_prs_v1");
+        assert_eq!(
+            serde_json::to_value(Topic::AuthoredPrs).unwrap(),
+            json!("authored_prs")
+        );
+        assert_eq!(
+            serde_json::from_value::<Topic>(json!("authored_prs")).unwrap(),
+            Topic::AuthoredPrs
+        );
+        assert_eq!(
+            PROTOCOL_VERSION, 4,
+            "additive: the protocol version does not move"
+        );
+    }
+
+    #[test]
+    fn a_subscribe_naming_the_topic_keeps_it_and_an_unknown_topic_is_still_only_unknown() {
+        let msg: ClientMsg = serde_json::from_value(json!({
+            "type": "subscribe",
+            "topics": ["activity", "authored_prs", "a_topic_from_the_future", 7]
+        }))
+        .unwrap();
+        match msg {
+            ClientMsg::Subscribe { topics, .. } => {
+                assert_eq!(
+                    topics,
+                    vec![
+                        Topic::Activity,
+                        Topic::AuthoredPrs,
+                        Topic::Unknown,
+                        Topic::Unknown
+                    ]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_two_verbs_have_their_documented_wire_shapes() {
+        assert_eq!(
+            serde_json::to_value(ClientMsg::AuthoredPrsDemand {
+                level: "visible".into()
+            })
+            .unwrap(),
+            json!({"type": "authored_prs_demand", "level": "visible"})
+        );
+        assert_eq!(
+            serde_json::to_value(ClientMsg::AuthoredPrsRefresh {}).unwrap(),
+            json!({"type": "authored_prs_refresh"})
+        );
+        match serde_json::from_value::<ClientMsg>(
+            json!({"type": "authored_prs_demand", "level": "idle"}),
+        )
+        .unwrap()
+        {
+            ClientMsg::AuthoredPrsDemand { level } => assert_eq!(level, "idle"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            serde_json::from_value::<ClientMsg>(json!({"type": "authored_prs_refresh"})).unwrap(),
+            ClientMsg::AuthoredPrsRefresh {}
+        ));
+        round_trip(ClientMsg::AuthoredPrsDemand {
+            level: "hidden".into(),
+        });
+        round_trip(ClientMsg::AuthoredPrsRefresh {});
+    }
+
+    fn round_trip(msg: ClientMsg) {
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: ClientMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+    }
+
+    #[test]
+    fn the_frame_is_tagged_authored_prs_with_the_snapshot_under_snapshot() {
+        let snapshot: crate::data::authored_prs::AuthoredPrsSnapshot =
+            serde_json::from_value(json!({
+                "generated_at": "2026-11-14T12:00:00Z",
+                "token": "connected",
+                "relay": {"state": "live", "org": "Carefeed"},
+                "poll": {"state": "ok", "interval_secs": 60},
+                "total_open": 0,
+                "shown": 0,
+                "prs": [],
+                "usage": {
+                    "window_secs": 3600,
+                    "charged": 0, "not_modified": 0, "search": 0, "graphql_points": 0,
+                    "relay_charged": 0, "visible_charged": 0, "hidden_charged": 0,
+                    "since_start": {
+                        "charged": 0, "not_modified": 0, "search": 0, "graphql_points": 0,
+                        "relay_charged": 0, "visible_charged": 0, "hidden_charged": 0
+                    }
+                }
+            }))
+            .expect("the minimal snapshot decodes");
+        let v = serde_json::to_value(ServerMsg::AuthoredPrs { snapshot }).unwrap();
+        assert_eq!(v["type"], "authored_prs");
+        assert_eq!(v["snapshot"]["relay"]["state"], "live");
+        assert_eq!(v["snapshot"]["usage"]["window_secs"], 3600);
+        assert_eq!(
+            v["snapshot"]["usage"]["charged"], 0,
+            "the window counts sit beside window_secs"
+        );
+        assert!(v["snapshot"]["usage"]["since_start"].is_object());
+    }
+
+    #[test]
+    fn frames_from_an_older_client_decode_unchanged() {
+        // Frames as clients sent them before the author's PR list existed.
+        let old = [
+            json!({"type": "hello", "client_id": "mac-1", "protocol_version": 4}),
+            json!({"type": "hello", "client_id": "mac-1", "protocol_version": 4, "client_kind": "mac_app"}),
+            json!({"type": "subscribe", "topics": []}),
+            json!({"type": "subscribe", "topics": ["activity", "mother_jobs", "focuses", "perri", "terminal"]}),
+            json!({"type": "subscribe", "topics": ["model", "decision"], "renders_decisions": true, "capabilities": ["terminal_ui"]}),
+            json!({"type": "ping"}),
+            json!({"type": "session_list"}),
+        ];
+        for frame in old {
+            let msg: ClientMsg = serde_json::from_value(frame.clone())
+                .unwrap_or_else(|e| panic!("{frame} no longer decodes: {e}"));
+            let again = serde_json::to_value(&msg).unwrap();
+            // Optional keys the old frame left out stay out, and what it sent is kept.
+            for (k, v) in frame.as_object().unwrap() {
+                assert_eq!(&again[k], v, "{k} changed in {frame}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_earlier_topics_keep_their_names() {
+        for (topic, name) in [
+            (Topic::Activity, "activity"),
+            (Topic::MotherJobs, "mother_jobs"),
+            (Topic::MotherStatusline, "mother_statusline"),
+            (Topic::Focuses, "focuses"),
+            (Topic::MotherPeek, "mother_peek"),
+            (Topic::Perri, "perri"),
+            (Topic::Fred, "fred"),
+            (Topic::Teri, "teri"),
+            (Topic::Work, "work"),
+            (Topic::Layout, "layout"),
+            (Topic::Decision, "decision"),
+            (Topic::Model, "model"),
+            (Topic::Terminal, "terminal"),
+        ] {
+            assert_eq!(serde_json::to_value(&topic).unwrap(), json!(name));
+        }
     }
 }

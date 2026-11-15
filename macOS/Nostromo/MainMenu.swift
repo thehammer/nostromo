@@ -21,6 +21,8 @@ import AppKit
     func terminalFind(_ sender: Any?)
     func copyTerminalLatencyStats()
     func copyMotherNoticeStats()
+    func copyGitHubUsage()
+    func showMyPrs(_ sender: Any?)
     func copyTerminalStagingStats()
     func openSecondWindowQA(_ sender: Any?)
     func showApprovalsLog(_ sender: Any?)
@@ -75,6 +77,13 @@ enum MainMenu {
         // View menu (between Edit and Terminal): Focus ⌥⌘← / Show All Activity ⌥⌘→ for the focused pane's
         // transcript, and the default mode for focuses with no choice of their own.
         TranscriptViewMenu.install(in: mainMenu)
+        // ⌘0: the Mother pane's Overview of my open PRs, with the keyboard on the list.
+        if let viewMenu = mainMenu.items.first(where: { $0.submenu?.title == TranscriptViewMenu.menuTitle })?.submenu {
+            viewMenu.addItem(.separator())
+            let showPrs = NSMenuItem(title: "Show My PRs", action: #selector(MainMenuActions.showMyPrs(_:)), keyEquivalent: "0")
+            showPrs.target = target
+            viewMenu.addItem(showPrs)
+        }
 
         // Terminal menu: ⌘T opens a shell in the key window's focus; ⇧⌘W closes the terminal pane that
         // holds the keyboard (only for a person: the item does nothing for a synthetic key or click).
@@ -173,6 +182,12 @@ enum MainMenu {
                                          keyEquivalent: "")
         noticeStatsItem.target = target
         debugMenu.addItem(noticeStatsItem)
+        // Counts only, never a title, repo or login. No key equivalent.
+        let githubUsageItem = NSMenuItem(title: "Copy GitHub usage",
+                                         action: #selector(MainMenuActions.copyGitHubUsage),
+                                         keyEquivalent: "")
+        githubUsageItem.target = target
+        debugMenu.addItem(githubUsageItem)
         // Counts only, never a command or a note. No key equivalent.
         let stagingStatsItem = NSMenuItem(title: "Copy Terminal Staging Stats",
                                           action: #selector(MainMenuActions.copyTerminalStagingStats),

@@ -73,6 +73,15 @@ struct Focus: Codable, Hashable, Identifiable {
     var initialModel: String? = nil
     /// The effort chosen in the create sheet. Nil: the model's default.
     var initialEffort: String? = nil
+    /// Set when this focus was made by resuming a conversation from History; the sidebar says
+    /// "resumed · date" until the first new message is sent.
+    var resumedAt: Date? = nil
+
+    /// "resumed · <date>" while a focus made from History has not been written to yet.
+    var resumedLabel: String? {
+        guard let at = resumedAt else { return nil }
+        return "resumed \u{00B7} " + at.formatted(date: .abbreviated, time: .omitted)
+    }
 
     /// Longest label the UI accepts.
     static let maxLabelLength = 60
@@ -204,6 +213,8 @@ extension Focus {
         label          = try c.decodeIfPresent(String.self, forKey: .label)
         initialModel   = try c.decodeIfPresent(String.self, forKey: .initialModel)
         initialEffort  = try c.decodeIfPresent(String.self, forKey: .initialEffort)
+        // Additive and optional: absent in every `focuses.json` written before History.
+        resumedAt      = try c.decodeIfPresent(Date.self, forKey: .resumedAt)
 
         // Self-heal a daemon-created focus persisted before `daemonTag` existed.
         //
@@ -380,6 +391,14 @@ struct MotherStatus: Equatable {
     }
 }
 
+/// Mother's `dep_wait` object: which dependency a queued job waits on, and why.
+struct MotherDepWait: Equatable {
+    let depId: String
+    let blocked: Bool
+    let reason: String
+    let prURL: String?
+}
+
 struct MotherJob: Identifiable, Equatable {
     let id:              String
     let state:           String
@@ -407,6 +426,10 @@ struct MotherJob: Identifiable, Equatable {
     var costUsd: Double? = nil
     /// Why a `ready`/`queued` job is waiting, from the job's `limiter.wait` (Mother's backpressure limiter).
     var limiterWait: MotherLimiter.Waiting? = nil
+    /// Job ids this job depends on (`depends_on`), bounded and cleaned at decode.
+    var dependsOn: [String] = []
+    /// Mother's `dep_wait`: the first unsatisfied dependency, present only while `queued`.
+    var depWait: MotherDepWait? = nil
 
     /// Apply a `progress_updated` overlay. A strictly older `updated_at` is ignored (events can
     /// arrive out of order, or after a `query.get` that already has a later one); a tie goes to
@@ -524,6 +547,8 @@ struct MotherJobSlim: Decodable {
     let failureReason:   String?
     let costUsd:         Double?
     let limiterWait:     MotherLimiter.Waiting?
+    let dependsOn:       [String]
+    let depWait:         MotherDepWait?
 
     private struct Origin: Decodable { let label: String? }
 
@@ -536,6 +561,36 @@ struct MotherJobSlim: Decodable {
             let raw = try? c.decodeIfPresent(WireValue.self, forKey: .wait)
             wait = MotherLimiter.decodeWait(raw?.value)
         }
+    }
+
+    /// Removes control characters, trims, and bounds to `limit` characters.
+    private static func clean(_ s: String, limit: Int) -> String {
+        let scalars = s.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        var out = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if out.count > limit { out = String(out.prefix(limit)) }
+        return out
+    }
+
+    static func decodeDependsOn(_ raw: Any?) -> [String] {
+        guard let arr = raw as? [Any] else { return [] }
+        var out: [String] = []
+        for case let s as String in arr {
+            let id = clean(s, limit: 64)
+            if id.isEmpty || out.contains(id) { continue }
+            out.append(id)
+            if out.count >= 50 { break }
+        }
+        return out
+    }
+
+    static func decodeDepWait(_ raw: Any?) -> MotherDepWait? {
+        guard let o = raw as? [String: Any], let idRaw = o["dep_id"] as? String else { return nil }
+        let id = clean(idRaw, limit: 64)
+        if id.isEmpty { return nil }
+        let reason = (o["reason"] as? String).map { clean($0, limit: 64) } ?? ""
+        let url = (o["pr_url"] as? String).map { clean($0, limit: 300) } ?? ""
+        return MotherDepWait(depId: id, blocked: (o["status"] as? String) == "blocked",
+                             reason: reason, prURL: url.isEmpty ? nil : url)
     }
 
     /// Any JSON value, as `JSONSerialization` would have given it.
@@ -555,6 +610,8 @@ struct MotherJobSlim: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case id, state, repo, isolation, title, question, kind, phases, cycles, origin, limiter
+        case dependsOn       = "depends_on"
+        case depWait         = "dep_wait"
         case createdAt       = "created_at"
         case startedAt       = "started_at"
         case finishedAt      = "finished_at"
@@ -575,7 +632,7 @@ struct MotherJobSlim: Decodable {
         state           = try c.decode(String.self, forKey: .state)
         repo            = try c.decode(String.self, forKey: .repo)
         isolation       = try c.decode(String.self, forKey: .isolation)
-        title           = try c.decode(String.self, forKey: .title)
+        title           = FoldTextSanitizer.sanitizeInline(try c.decode(String.self, forKey: .title))
         createdAt       = try c.decodeIfPresent(String.self, forKey: .createdAt)
         startedAt       = try c.decodeIfPresent(String.self, forKey: .startedAt)
         finishedAt      = try c.decodeIfPresent(String.self, forKey: .finishedAt)
@@ -593,6 +650,8 @@ struct MotherJobSlim: Decodable {
         failureReason   = (try? c.decodeIfPresent(String.self, forKey: .failureReason)) ?? nil
         costUsd         = (try? c.decodeIfPresent(Double.self, forKey: .costUsd)) ?? nil
         limiterWait     = ((try? c.decodeIfPresent(LimiterField.self, forKey: .limiter)) ?? nil)?.wait
+        dependsOn       = Self.decodeDependsOn((try? c.decodeIfPresent(WireValue.self, forKey: .dependsOn))??.value)
+        depWait         = Self.decodeDepWait((try? c.decodeIfPresent(WireValue.self, forKey: .depWait))??.value)
     }
 
     private static let fmtFrac: ISO8601DateFormatter = {
@@ -628,7 +687,9 @@ struct MotherJobSlim: Decodable {
                   originLabel:     originLabel,
                   failureReason:   failureReason,
                   costUsd:         costUsd,
-                  limiterWait:     limiterWait)
+                  limiterWait:     limiterWait,
+                  dependsOn:       dependsOn,
+                  depWait:         depWait)
     }
 }
 

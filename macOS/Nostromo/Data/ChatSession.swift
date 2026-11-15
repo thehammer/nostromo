@@ -255,6 +255,7 @@ class ChatSession: ObservableObject {
         turns.append(echo)
         changes.send(.appended(index: turns.count - 1))
         client.sessionSend(tag: tag, text: trimmed, imagePaths: images.map { $0.path })
+        FocusStore.shared.clearResumed(tag: tag)
     }
 
     /// Text that starts with a slash command: `/` and a name with no `/` or whitespace, then whitespace

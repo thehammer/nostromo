@@ -809,6 +809,7 @@ impl SessionManager {
             return false;
         }
         if discarded {
+            self.conversations.discard_candidate(&shared.ctx.session_id);
             info!(tag, "held message discarded");
         } else {
             info!(tag, "paused queue released after the credential changed");

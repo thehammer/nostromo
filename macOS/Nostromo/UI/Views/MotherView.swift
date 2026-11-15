@@ -83,6 +83,8 @@ class MotherView: NSView {
     /// The job list is the navigation; there are no tabs.
     let detailContainer = MotherDetailContainer()
     private let emptyDetail = MotherEmptyDetailView()
+    /// My open PRs: what the right side shows with no job selected, when the daemon publishes them.
+    let overviewView = AuthoredPrsOverviewView()
     /// A detail per job the reader has viewed, so each keeps its draft, segment, scroll and log position
     /// while another job is on show. Only the selected one is in the view hierarchy and running.
     private var jobDetails: [String: MotherJobDetail] = [:]
@@ -131,6 +133,25 @@ class MotherView: NSView {
         let generation = requestGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + requestLifetime) {
             if generation == requestGeneration { requestedFilterTag = nil }
+        }
+    }
+
+    /// Posted after a "Show My PRs" request is recorded, for the Mother view in the key window.
+    static let showOverviewNotification = Notification.Name("nostromo.mother.showOverview")
+    private static var overviewRequested = false
+    private static var overviewRequestGeneration = 0
+
+    /// "Show My PRs" (⌘0): record the request, let the caller switch the window to the Mother focus (so a
+    /// Mother view created by the switch finds it), then tell the Mother views to look. Same shape as
+    /// `requestShowJobs`.
+    static func requestShowOverview(afterRequest switchToMother: () -> Void) {
+        overviewRequested = true
+        switchToMother()
+        NotificationCenter.default.post(name: showOverviewNotification, object: nil)
+        overviewRequestGeneration += 1
+        let generation = overviewRequestGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestLifetime) {
+            if generation == overviewRequestGeneration { overviewRequested = false }
         }
     }
 
@@ -218,7 +239,23 @@ class MotherView: NSView {
             detailContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         detailContainer.install(emptyDetail)
+        detailContainer.install(overviewView)
+        overviewView.isHidden = true
         detailContainer.setAccessibilityLabel(Self.emptyAccessibilityLabel)
+        overviewView.onOpenJob = { [weak self] id in self?.openJobFromOverview(id) }
+        jobList.onSelectOverview = { [weak self] in self?.showOverview() }
+
+        // The pinned Overview row and the right side follow whether the daemon publishes the list.
+        Publishers.CombineLatest(AppStore.shared.$authoredPrsSupported, AppStore.shared.$authoredPrs)
+            .sink { [weak self] supported, snapshot in
+                self?.overviewAvailabilityChanged(supported: supported, openCount: snapshot.map { $0.prs.filter { $0.lifecycle == .open }.count } ?? 0)
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: Self.showOverviewNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.applyRequestedOverview() }
+            .store(in: &cancellables)
 
         // Wire selection. A nil (the selected row left the list) changes nothing: the detail stays.
         jobList.onSelect = { [weak self] job in
@@ -255,6 +292,7 @@ class MotherView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         applyRequestedFilter()
+        applyRequestedOverview()
         restoreListWidth()
     }
 
@@ -334,6 +372,8 @@ class MotherView: NSView {
         // Keep every viewed detail current, shown or not. A job that left the queue (archived,
         // pruned) keeps showing its ended state rather than vanishing under the reader.
         // `update` applies only what changed: it never clears the reader's draft or moves their log.
+        // It also refreshes the DEPENDS ON rows, so a dependency's state change reaches a dependent
+        // whose own JSON did not change.
         for (id, detail) in jobDetails {
             detail.update(jobs.first { $0.id == id })
         }
@@ -345,6 +385,20 @@ class MotherView: NSView {
         guard let id = Self.requestedJobId, let job = jobs.first(where: { $0.id == id }) else { return }
         Self.requestedJobId = nil
         jobList.select(jobId: job.id)
+        showJob(job)
+    }
+
+    /// Sets the `From:` filter directly (a seam for tests: the request path needs a key window).
+    func setOriginFilter(_ selection: MotherOriginSelection) { jobList.setFilter(selection) }
+
+    /// The ids the list currently shows (what the `From:` filter lets through).
+    var listedJobIds: Set<String> { jobList.visibleJobIds }
+
+    /// A dependency row was pressed: select that job in the list and show it, resetting a `From:` filter that hides it.
+    func openDependency(_ id: String) {
+        guard let job = latestJobs.first(where: { $0.id == id }) else { return }
+        if !jobList.visibleJobIds.contains(id) { jobList.showAll() }
+        jobList.select(jobId: id)
         showJob(job)
     }
 
@@ -382,12 +436,15 @@ class MotherView: NSView {
             detail.update(job)
         } else {
             detail = MotherJobDetail(host: AppStore.shared)
+            detail.dependencyLookup = { [weak self] id in self?.latestJobs.first { $0.id == id } }
+            detail.onOpenDependency = { [weak self] id in self?.openDependency(id) }
             detail.select(job)
             applyOrigin(to: detail, jobId: job.id)
             jobDetails[job.id] = detail
         }
         detailContainer.install(detail)
         emptyDetail.isHidden = true
+        overviewView.isHidden = true
         detail.setShown(true)
 
         viewOrder.removeAll { $0 == job.id }
@@ -395,6 +452,62 @@ class MotherView: NSView {
         evictOldDetails()
         refreshAccessibilityLabel(for: job)
     }
+
+    // MARK: - My open PRs
+
+    /// Whether the right side shows the Overview: no job selected and the daemon publishes the list.
+    var isShowingOverview: Bool { selectedJobId == nil && overviewSupported }
+    /// Whether the daemon publishes the list, as of the last publish (a sink runs before the store holds the value).
+    private var overviewSupported = false
+    /// Whether the job list has its pinned Overview row.
+    var hasPinnedOverviewRow: Bool { jobList.hasOverviewRow }
+
+    /// The Overview row was selected (or ⌘0 asked for it): no job is selected any more.
+    func showOverview() {
+        pendingSelection?.cancel()
+        pendingSelection = nil
+        guard overviewSupported else { return }
+        if let old = shownDetail {
+            old.setShown(false)
+            old.removeFromSuperview()
+        }
+        selectedJobId = nil
+        jobList.select(jobId: MotherJobListViewModel.overviewId)
+        updateRightSide()
+    }
+
+    private func overviewAvailabilityChanged(supported: Bool, openCount: Int) {
+        overviewSupported = supported
+        jobList.setOverview(openCount: supported ? openCount : nil)
+        updateRightSide()
+    }
+
+    /// Exactly one of the job detail, the Overview and "Select a job" shows.
+    private func updateRightSide() {
+        let showOverview = isShowingOverview
+        overviewView.isHidden = !showOverview
+        emptyDetail.isHidden = selectedJobId != nil || showOverview
+        if selectedJobId == nil {
+            detailContainer.setAccessibilityLabel(showOverview ? Self.overviewAccessibilityLabel : Self.emptyAccessibilityLabel)
+        }
+    }
+
+    /// A Mother job id in a PR row was pressed: select that job, as a "queued as Mother job" marker does.
+    private func openJobFromOverview(_ id: String) {
+        MotherView.requestedJobId = id
+        openRequestedJob(in: latestJobs.isEmpty ? AppStore.shared.motherJobs : latestJobs)
+    }
+
+    /// Applies a pending "Show My PRs" request, only in the key window (each window keeps its own view).
+    func applyRequestedOverview(isKeyWindow: Bool? = nil) {
+        guard Self.overviewRequested, isKeyWindow ?? (window?.isKeyWindow == true) else { return }
+        Self.overviewRequested = false
+        showOverview()
+        // The switch to this focus may still be settling: put the keyboard on the list once it has.
+        DispatchQueue.main.async { [weak self] in self?.overviewView.focusList() }
+    }
+
+    static let overviewAccessibilityLabel = "My open PRs"
 
     /// Keep the most recently viewed details; one with an unsent draft is never dropped.
     private func evictOldDetails() {
@@ -755,6 +868,12 @@ final class MotherJobListViewModel: ObservableObject {
     /// The `From:` selection. Belongs to this list (one per window); never persisted.
     @Published var filter: MotherOriginSelection = .all
     var onSelect: ((MotherJob?) -> Void)?
+    /// The pinned Overview row's selection id: it is never a job id.
+    static let overviewId = "__authored_prs_overview__"
+    /// The open-PR count on the pinned Overview row; nil when the daemon does not publish the list (no row).
+    @Published var overviewCount: Int?
+    /// The pinned Overview row was selected.
+    var onSelectOverview: (() -> Void)?
     /// Called after a change that can alter an origin line (annotations, a rename, a removal).
     var onOriginsChanged: (() -> Void)?
     /// Jump to the focus with this tag. Default: select it in the key window.
@@ -830,6 +949,7 @@ final class MotherJobListViewModel: ObservableObject {
 
     /// `Waiting: <reason>` for a ready or queued job the limiter lists; nil otherwise.
     static func waitText(for job: MotherJob) -> String? {
+        if job.state == "queued", let dep = job.depWait { return MotherDependencyPresentation.listLine(for: dep) }
         guard job.state == "ready" || job.state == "queued", let wait = job.limiterWait else { return nil }
         return MotherLimiterPresentation.waitText(wait)
     }
@@ -842,7 +962,7 @@ final class MotherJobListViewModel: ObservableObject {
         return MotherJobRowModel(
             id: job.id,
             state: job.state,
-            title: job.title.isEmpty ? job.id : job.title,
+            title: FoldTextSanitizer.sanitizeInline(job.title.isEmpty ? job.id : job.title),
             repo: job.repo.isEmpty ? nil : job.repo,
             branch: nil,                     // macOS MotherJob has no branch field
             question: job.question,
@@ -906,6 +1026,13 @@ struct MotherJobListSwiftUI: View {
 
     private func list(_ result: MotherJobFilterResult) -> some View {
         List(selection: $selectedId) {
+            if let count = vm.overviewCount {
+                Section {
+                    MotherOverviewRow(count: count)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+                        .tag(MotherJobListViewModel.overviewId)
+                }
+            }
             ForEach(result.groups) { group in
                 Section {
                     ForEach(group.jobs, id: \.id) { job in
@@ -967,10 +1094,25 @@ struct MotherJobListSwiftUI: View {
             }
         }
         .onChange(of: selectedId) { _, newId in
-            vm.onSelect?(vm.jobs.first { $0.id == newId })
+            // The request mirrors what is highlighted, so asking for the same row again (the Overview after a
+            // job was clicked) is a change SwiftUI reports.
+            if vm.requestedSelection != newId { vm.requestedSelection = newId }
+            if newId == MotherJobListViewModel.overviewId {
+                vm.onSelectOverview?()
+            } else {
+                vm.onSelect?(vm.jobs.first { $0.id == newId })
+            }
         }
         .onChange(of: vm.requestedSelection) { _, id in
             if selectedId != id { selectedId = id }
+        }
+        // With nothing selected the right side shows the Overview, so its row is the highlighted one.
+        .onChange(of: vm.overviewCount != nil) { _, present in
+            if present, selectedId == nil { selectedId = MotherJobListViewModel.overviewId }
+            if !present, selectedId == MotherJobListViewModel.overviewId { selectedId = nil }
+        }
+        .onAppear {
+            if vm.overviewCount != nil, selectedId == nil { selectedId = MotherJobListViewModel.overviewId }
         }
     }
 
@@ -979,6 +1121,40 @@ struct MotherJobListSwiftUI: View {
         let origin = vm.originDisplay(forJobId: job.id)
         guard origin.isClickable, let tag = origin.focusTag else { return nil }
         return { vm.openFocus(tag) }
+    }
+}
+
+/// The pinned first row of the job list: Overview, with the number of open PRs in a pill.
+struct MotherOverviewRow: View {
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "list.bullet")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text("Overview")
+                .font(.system(size: 13, weight: .medium))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            AuthoredPrsCountPill(count: count)
+        }
+        .frame(height: 28)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Overview, \(count) open PR\(count == 1 ? "" : "s")")
+    }
+}
+
+/// `AuthoredPrsChipView` for SwiftUI: the same pill, drawn the same way, wherever a count is shown.
+struct AuthoredPrsCountPill: NSViewRepresentable {
+    let count: Int
+
+    func makeNSView(context: Context) -> AuthoredPrsChipView { AuthoredPrsChipView(text: "\(count)") }
+    func updateNSView(_ view: AuthoredPrsChipView, context: Context) { view.text = "\(count)" }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: AuthoredPrsChipView, context: Context) -> CGSize? {
+        nsView.intrinsicContentSize
     }
 }
 
@@ -1034,6 +1210,16 @@ struct MotherFromHeader: View {
 private final class MotherJobList: NSView {
 
     func select(jobId: String) { viewModel.requestedSelection = jobId }
+    func showAll() { viewModel.filter = .all }
+    var onSelectOverview: (() -> Void)? {
+        didSet { viewModel.onSelectOverview = onSelectOverview }
+    }
+    var hasOverviewRow: Bool { viewModel.overviewCount != nil }
+    func setOverview(openCount: Int?) {
+        if viewModel.overviewCount != openCount { viewModel.overviewCount = openCount }
+    }
+    func setFilter(_ selection: MotherOriginSelection) { viewModel.filter = selection }
+    var visibleJobIds: Set<String> { Set(viewModel.filtered.groups.flatMap { $0.jobs.map(\.id) }) }
 
     /// Clear the highlight. `requestedSelection` is usually already nil, which
     /// SwiftUI would not report as a change, so go via a non-matching value.

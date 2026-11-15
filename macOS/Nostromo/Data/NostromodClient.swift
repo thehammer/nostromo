@@ -309,6 +309,16 @@ enum ServerMsg {
     case sessionTaskOutputResult(SessionTaskOutputResultWire)
     /// The commands a session's CLI reports: the answer to a `session_commands_get`. Local only.
     case sessionCommands(SessionCommandsWire)
+    /// The author's open PRs (`authored_prs_v1`). Local only.
+    case authoredPrs(AuthoredPrsSnapshot)
+
+    // ── conversation history (`conversation_history_v1`; operator app only) ──
+    case conversationHistory(ConversationHistoryWire)
+    case conversationResumeResult(ConversationResumeResultWire)
+    /// The history changed; ask again. Payload-free.
+    case conversationHistoryChanged(revision: UInt64)
+    /// A resumed focus's conversation could not be opened (`not_found_here`).
+    case conversationResumeFailed(tag: String, reason: String)
 
     // ── document panes ────────────────────────────────────────────────────────
     /// The answer to a `pane_action` of this connection. Local only.
@@ -973,6 +983,23 @@ class NostromodClient {
         features?.contains(slashCommandsFeature) == true
     }
 
+    /// The `welcome.features` entry that says the daemon publishes the author's open PRs (topic `authored_prs`)
+    /// and takes `authored_prs_demand` and `authored_prs_refresh`.
+    static let authoredPrsFeature = "authored_prs_v1"
+
+    /// Does a daemon that advertised `features` know the open-PR list? The Mother pane shows the Overview's
+    /// pinned row and content, and the app reports demand, only then; an older daemon keeps today's pane.
+    static func supportsAuthoredPrs(features: [String]?) -> Bool {
+        features?.contains(authoredPrsFeature) == true
+    }
+
+    /// The `welcome.features` entry that says the daemon keeps the private conversation history.
+    static let conversationHistoryFeature = "conversation_history_v1"
+
+    static func supportsConversationHistory(features: [String]?) -> Bool {
+        features?.contains(conversationHistoryFeature) == true
+    }
+
     /// Topics every daemon this app can talk to understands.
     static let baseTopics = ["activity", "mother_jobs", "mother_statusline", "mother_peek", "perri", "fred", "teri", "layout", "decision"]
 
@@ -983,7 +1010,8 @@ class NostromodClient {
     /// `session_model_state`, `model_defaults`) and the transcript `note` blocks. The
     /// daemon delivers them only to a client that names the topic, so a reconnect to
     /// a daemon that advertises the feature subscribes again (this runs per `welcome`).
-    static let featureTopics: [String: String] = ["work": "work", "model": "model"]
+    static let featureTopics: [String: String] = ["work": "work", "model": "model",
+                                                  "authored_prs_v1": "authored_prs"]
 
     /// Re-subscribe with the base topics plus the topic of every feature this
     /// connection's daemon advertised. Evaluated per connection (a daemon that is
@@ -1155,6 +1183,72 @@ class NostromodClient {
     func sessionCommandsGet(tag: String, requestId: String) {
         guard daemonAdvertisesSlashCommands else { return }
         send(ClientSessionCommandsGet(requestId: requestId, tag: tag), type: "session_commands_get", tag: tag)
+    }
+
+    /// Whether the connection's last `welcome` advertised `authored_prs_v1`.
+    var daemonAdvertisesAuthoredPrs: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsAuthoredPrs(features: advertisedFeatures)
+    }
+
+    /// Tell the daemon whether the PR list is visible, hidden or the user is idle. Nothing is written
+    /// unless the daemon advertised `authored_prs_v1` (an older daemon cannot decode the message).
+    func sendAuthoredPrsDemand(level: String) {
+        guard daemonAdvertisesAuthoredPrs else { return }
+        send(ClientAuthoredPrsDemand(level: level), type: "authored_prs_demand")
+    }
+
+    /// Ask for a full reconcile now. The daemon refuses it while one runs or while paused.
+    func sendAuthoredPrsRefresh() {
+        guard daemonAdvertisesAuthoredPrs else { return }
+        send(ClientAuthoredPrsRefresh(), type: "authored_prs_refresh")
+    }
+
+    // MARK: - Conversation history (Resume tab)
+
+    /// Each is written only to a daemon that advertised `conversation_history_v1`.
+    func conversationHistoryGet(requestId: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistoryGet(requestId: requestId), type: "conversation_history_get")
+    }
+
+    func conversationResume(requestId: String, id: String, newTag: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationResume(requestId: requestId, id: id, newTag: newTag), type: "conversation_resume")
+    }
+
+    func conversationResumeRelease(tag: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationResumeRelease(tag: tag), type: "conversation_resume_release")
+    }
+
+    func conversationHistoryRemove(requestId: String, id: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistoryEdit(type: "conversation_history_remove", requestId: requestId, id: id),
+             type: "conversation_history_remove")
+    }
+
+    func conversationHistoryRestore(requestId: String, id: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistoryEdit(type: "conversation_history_restore", requestId: requestId, id: id),
+             type: "conversation_history_restore")
+    }
+
+    func conversationHistoryPurgeRemoved(requestId: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistoryPurgeRemoved(requestId: requestId), type: "conversation_history_purge_removed")
+    }
+
+    func conversationHistorySettingsSet(requestId: String, firstPromptsEnabled: Bool) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistorySettingsSet(requestId: requestId, firstPromptsEnabled: firstPromptsEnabled),
+             type: "conversation_history_settings_set")
+    }
+
+    /// Whether the connection's last `welcome` advertised `conversation_history_v1`.
+    var daemonAdvertisesConversationHistory: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsConversationHistory(features: advertisedFeatures)
     }
 
     // MARK: - Decision modal commands
@@ -2052,11 +2146,40 @@ class NostromodClient {
                 log.error("failed to decode session_task_output_result")
             }
 
+        case "conversation_history":
+            if let m = try? decoder.decode(ConversationHistoryWire.self, from: raw) {
+                return .conversationHistory(m)
+            } else {
+                log.error("failed to decode conversation_history")
+            }
+
+        case "conversation_resume_result":
+            if let m = try? decoder.decode(ConversationResumeResultWire.self, from: raw) {
+                return .conversationResumeResult(m)
+            } else {
+                log.error("failed to decode conversation_resume_result")
+            }
+
+        case "conversation_history_changed":
+            return .conversationHistoryChanged(revision: (json["revision"] as? NSNumber)?.uint64Value ?? 0)
+
+        case "conversation_resume_failed":
+            if let tag = json["tag"] as? String {
+                return .conversationResumeFailed(tag: tag, reason: json["reason"] as? String ?? "")
+            }
+
         case "session_commands":
             if let m = try? decoder.decode(SessionCommandsWire.self, from: raw) {
                 return .sessionCommands(m)
             } else {
                 log.error("failed to decode session_commands")
+            }
+
+        case "authored_prs":
+            if let m = try? decoder.decode(AuthoredPrsFrame.self, from: raw) {
+                return .authoredPrs(m.snapshot)
+            } else {
+                log.error("failed to decode authored_prs")
             }
 
         case "tracker_board":
