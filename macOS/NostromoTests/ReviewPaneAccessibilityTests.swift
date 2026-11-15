@@ -474,10 +474,12 @@ final class MainMenuKeyEquivalentsUnchangedTests: XCTestCase {
         }
     }
 
-    /// The side pane adds no shortcut anywhere (criterion 41): the main menu's set is the one main had.
+    /// The side pane adds no shortcut anywhere (criterion 41): the main menu's set is the one main had,
+    /// plus ⌘0 Show My PRs, which came from main (#465), not from the pane.
     func testTheMainMenuHasExactlyTheKeyEquivalentsItHadBeforeTheSidePane() {
         let actual = equivalents(MainMenu.make(target: nil)).sorted()
         XCTAssertEqual(actual, [
+            "1048576|0|Show My PRs",
             "1048576|Z|Redo",
             "1048576|a|Select All",
             "1048576|c|Copy",

@@ -259,6 +259,8 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
             .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
         if !navigationResponse.canShowMIMEType || disposition.hasPrefix("attachment") {
             showDownloadNotice(url: navigationResponse.response.url)
+            // Nothing commits, so a "Loading…" cover would stay over the notice.
+            dismissLoadingCover(ifMainFrame: navigationResponse.isForMainFrame)
             decisionHandler(.cancel)
         } else {
             decisionHandler(.allow)
@@ -355,7 +357,7 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
     // MARK: User gesture
 
     /// SR3: a link or form to a host off the list goes to the default browser only when a person clicked
-    /// THAT link (mouse-up on it) or pressed Return/Space with it focused. The page cannot tell us; the
+    /// THAT link (mouse-up on it) or pressed Return/Space with it focused, or a person used a submit control of THAT form. The page cannot tell us; the
     /// check runs after the navigation was cancelled. When a gesture is plausible the answer arrives
     /// later (returns true: the caller cancels now); with none, the caller blocks at once (returns false).
     private func resolveWithGesture(_ request: ReviewNavigationRequest) -> Bool {
@@ -364,8 +366,10 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let isMain = request.isMainFrame
         Task { @MainActor [weak self] in
             guard let self else { return }
-            // A form is submitted by a click or Return anywhere in the form; only a link is tied to one element.
-            let confirmed = request.kind == .form ? true : await self.webView.gestureConfirms(link: url)
+            // The gesture must be on THIS link, or on a control of THIS form.
+            let confirmed = request.kind == .form
+                ? await self.webView.gestureConfirms(form: url)
+                : await self.webView.gestureConfirms(link: url)
             if confirmed {
                 Self.log.info("review-pane event=open-external host=\(url.host ?? "", privacy: .public)")
                 self.env.openExternal(url)

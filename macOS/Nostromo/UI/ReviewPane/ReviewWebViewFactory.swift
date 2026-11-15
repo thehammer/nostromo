@@ -12,8 +12,8 @@ final class ReviewWebView: WKWebView {
     private enum Gesture {
         /// A mouse-up at a point in this view's (flipped, top-left origin) coordinates.
         case click(CGPoint)
-        /// Return or Space: acts on the focused element.
-        case key
+        /// Return or Space (by key code): acts on the focused element.
+        case key(UInt16)
     }
 
     private var lastGesture: (gesture: Gesture, at: TimeInterval)?
@@ -40,7 +40,7 @@ final class ReviewWebView: WKWebView {
     override func keyDown(with event: NSEvent) {
         // Return, keypad Enter, Space. Any other key (typing) is not a gesture and forgets an earlier one.
         if !SyntheticInputGate.isSynthetic(event), [36, 76, 49].contains(event.keyCode) {
-            lastGesture = (.key, ProcessInfo.processInfo.systemUptime)
+            lastGesture = (.key(event.keyCode), ProcessInfo.processInfo.systemUptime)
         } else {
             lastGesture = nil
         }
@@ -63,6 +63,47 @@ final class ReviewWebView: WKWebView {
             script = "(function(){const el=document.activeElement;const a=el&&el.closest&&el.closest('a[href]');"
                 + "return !!a && new URL(a.href).href===new URL(\(target)).href;})();"
         }
+        return await UnsentInputProbe.boundedBool(timeout: 0.5, onTimeout: false) { [weak self] in
+            guard let self else { return false }
+            return (try? await self.evaluateJavaScript(script, in: nil, contentWorld: UnsentInputProbe.world)) as? Bool ?? false
+        }
+    }
+
+    /// Whether the recent human gesture was on the FORM being submitted to `url`: the mouse-up was over
+    /// one of its submit controls, or the focused element is one (Return or Space), or Return was pressed
+    /// in one of its single-line fields (implicit submission). A click on empty page, or in a textarea or
+    /// a different form, is not a gesture on this form, so a script's `form.submit()` that follows it is not
+    /// the person's. The form is matched by its (or the control's `formaction`) target, resolved in the page.
+    @MainActor
+    func gestureConfirms(form url: URL) async -> Bool {
+        guard let gesture = recentGesture else { return false }
+        let target = Self.jsString(url.absoluteString)
+        let pick: String
+        var returnKey = "false"
+        switch gesture {
+        case .click(let p):
+            pick = "document.elementFromPoint(\(p.x),\(p.y))"
+        case .key(let code):
+            pick = "document.activeElement"
+            returnKey = code == 49 ? "false" : "true"
+        }
+        let script = """
+        (function(){
+          const t=new URL(\(target));
+          const same=function(a){try{const u=new URL(a,document.baseURI);return u.protocol===t.protocol&&u.host===t.host&&u.pathname===t.pathname;}catch(e){return false;}};
+          const el=\(pick);
+          if(!el||!el.closest){return false;}
+          let c=el.closest('button,input');
+          if(!c||!c.form){return false;}
+          const submit=(c.type==='submit'||c.type==='image');
+          const field=\(returnKey)&&c.tagName==='INPUT'&&c.type!=='button'&&c.type!=='reset'&&c.type!=='file';
+          if(!submit&&!field){return false;}
+          const ga=function(n,k){return Element.prototype.getAttribute.call(n,k);};
+          const fa=submit?ga(c,'formaction'):null;
+          const attr=fa!==null?fa:ga(c.form,'action');
+          return same(attr===null||attr===''?document.URL:attr);
+        })();
+        """
         return await UnsentInputProbe.boundedBool(timeout: 0.5, onTimeout: false) { [weak self] in
             guard let self else { return false }
             return (try? await self.evaluateJavaScript(script, in: nil, contentWorld: UnsentInputProbe.world)) as? Bool ?? false

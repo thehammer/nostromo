@@ -970,6 +970,164 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         await assertBlockedWithNotice(tab)
     }
 
+    // MARK: A form's submit is the person's only when the gesture was on THAT form
+
+    private let formGesturePage = """
+        <textarea id="t" style="position:absolute;left:20px;top:20px;width:400px;height:80px"></textarea>
+        <div id="blank" style="position:absolute;left:20px;top:120px;width:300px;height:60px;background:#eee"></div>
+        <form id="f" method="post" action="nostromo-fixture://evil.example/submit" style="position:absolute;left:20px;top:200px;width:400px;height:200px">
+          <textarea id="ft" name="ft" style="width:300px;height:50px"></textarea>
+          <input id="fi" name="fi" style="display:block;width:200px">
+          <button id="go" type="submit" style="display:block;width:200px;height:40px">go</button>
+        </form>
+        <form id="g" method="post" action="nostromo-fixture://evil.example/other" style="position:absolute;left:20px;top:420px;width:400px;height:100px">
+          <button id="gogo" type="submit" style="display:block;width:200px;height:40px">go</button>
+        </form>
+        """
+
+    private func openFormGestureTab() async throws -> ReviewTab {
+        serve(mainPath, ReviewFixtureHandler.html(formGesturePage))
+        let tab = openTab()
+        try await waitForLoaded(tab)
+        return tab
+    }
+
+    private func scriptSubmit(_ id: String, in tab: ReviewTab) async {
+        _ = await js(tab, "document.getElementById('\(id)').submit(); true")
+    }
+
+    private func focus(_ id: String, in tab: ReviewTab) async throws {
+        let c = try controller(tab)
+        _ = await js(tab, "document.getElementById('\(id)').focus(); true")
+        window.makeFirstResponder(c.webView)
+    }
+
+    func testSpaceTypedInATextareaThenAScriptFormSubmitDoesNotOpenTheBrowser() async throws {
+        let tab = try await openFormGestureTab()
+        try await focus("t", in: tab)
+
+        ReviewEvents.key(49, characters: " ", in: window)
+        await scriptSubmit("f", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    func testSpaceTypedInATextareaInsideTheFormThenAScriptSubmitDoesNotOpenTheBrowser() async throws {
+        let tab = try await openFormGestureTab()
+        try await focus("ft", in: tab)
+
+        ReviewEvents.key(49, characters: " ", in: window)
+        await scriptSubmit("f", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    func testAClickOnEmptyPageThenAScriptFormSubmitDoesNotOpenTheBrowser() async throws {
+        let tab = try await openFormGestureTab()
+
+        ReviewEvents.click(at: try await centre(of: "blank", in: tab), in: window)
+        await scriptSubmit("f", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    func testAClickOnAnotherFormsSubmitButtonDoesNotAuthoriseAScriptSubmitOfThisOne() async throws {
+        let tab = try await openFormGestureTab()
+        // The page swallows the click so the real submit of form g does not happen by itself.
+        _ = await js(tab, "document.getElementById('g').addEventListener('submit',function(e){e.preventDefault();}); true")
+
+        ReviewEvents.click(at: try await centre(of: "gogo", in: tab), in: window)
+        await scriptSubmit("f", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    func testARealClickOnTheFormsSubmitButtonOpensTheBrowserOnce() async throws {
+        let tab = try await openFormGestureTab()
+
+        ReviewEvents.click(at: try await centre(of: "go", in: tab), in: window)
+
+        await assertTrueA(await spinUntilA(10) { !self.world.openedExternally.isEmpty }, "the submit button opened the form's target")
+        await spinA(0.4)
+        XCTAssertEqual(world.openedExternally, [reviewFixtureURL("evil.example/submit")])
+        assertTabStayedPut(tab)
+        assertNoRequestReachedEvil()
+    }
+
+    func testReturnInTheFormsOwnFieldOpensTheBrowserOnce() async throws {
+        let tab = try await openFormGestureTab()
+        try await focus("fi", in: tab)
+
+        ReviewEvents.key(36, characters: "\r", in: window)
+
+        await assertTrueA(await spinUntilA(10) { !self.world.openedExternally.isEmpty }, "Return in the form's field submits it")
+        await spinA(0.4)
+        XCTAssertEqual(world.openedExternally, [reviewFixtureURL("evil.example/submit")])
+        assertNoRequestReachedEvil()
+    }
+
+    // MARK: The gesture window and which keys count
+
+    func testTheGestureWindowIsOneSecond() {
+        XCTAssertEqual(ReviewWebView.gestureWindow, 1, "widening the window widens what a page can ride on")
+    }
+
+    func testReturnOnTheLinkThenAScriptClickAfterTheWindowDoesNotOpenTheBrowser() async throws {
+        let tab = try await openGestureTab()
+        let c = try controller(tab)
+        _ = await js(tab, "var l=document.getElementById('out'); l.addEventListener('keydown',function(e){e.preventDefault();}); l.focus(); true")
+        window.makeFirstResponder(c.webView)
+
+        ReviewEvents.key(36, characters: "\r", in: window)   // a real gesture on that very link
+        await spinA(ReviewWebView.gestureWindow + 0.4)
+        await scriptClick("out", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    func testTabKeyWithTheLinkFocusedIsNotAGesture() async throws {
+        let tab = try await openGestureTab()
+        let c = try controller(tab)
+        _ = await js(tab, "var l=document.getElementById('out'); l.addEventListener('keydown',function(e){e.preventDefault();}); l.focus(); true")
+        window.makeFirstResponder(c.webView)
+
+        ReviewEvents.key(48, characters: "\t", in: window)
+        await scriptClick("out", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    func testTabKeyWithTheFormsSubmitButtonFocusedIsNotAGesture() async throws {
+        let tab = try await openFormGestureTab()
+        _ = await js(tab, "var b=document.getElementById('go'); b.addEventListener('keydown',function(e){e.preventDefault();}); true")
+        try await focus("go", in: tab)
+
+        ReviewEvents.key(48, characters: "\t", in: window)
+        await scriptSubmit("f", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    // MARK: A first load whose response is an attachment
+
+    func testAFirstLoadThatIsAnAttachmentShowsTheNoticeWithoutALoadingCover() async throws {
+        let base = world.handler.respond
+        world.handler.respond = { url in
+            if url.path == self.mainPath {
+                return ReviewFixtureHandler.Response(body: "PK", mime: "application/octet-stream",
+                                                     headers: ["Content-Disposition": "attachment; filename=pr.zip"])
+            }
+            return base(url)
+        }
+        let tab = openTab()
+
+        await assertTrueA(await spinUntilA(15) { self.notice(tab)?.isHidden == false }, "the download notice appears")
+        XCTAssertEqual(notice(tab)?.message, "Downloads open in your browser.")
+        let c = try controller(tab)
+        await assertTrueA(await spinUntilA(5) { c.contentView.cover.isHidden }, "the Loading… cover is gone: \"\(c.contentView.cover.message)\"")
+        XCTAssertFalse(c.contentView.cover.isLoading)
+    }
+
     // MARK: Unsent-text probe is bounded even when the page is busy
 
     func testTheUnsentProbeReturnsPromptlyAndReportsUnsentWhileThePageIsBusy() async throws {
