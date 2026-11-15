@@ -377,7 +377,7 @@ final class NoCodebaseResumeTests: XCTestCase {
         open(goneRepoEntry(main: nil))
         XCTAssertEqual(sender.resumes.count, 1)
 
-        store.ingest(reply("refused", reason: "active_elsewhere"))
+        store.ingest(reply("refused", requestId: sender.resumes.last!.requestId, reason: "active_elsewhere"))
         XCTAssertEqual(asked().count, 2, "it asked, rather than showing an error")
         XCTAssertEqual(sender.resumes.count, 2)
         XCTAssertEqual(sender.resumeNoCodebaseFolders, ["/spaces/NEW-1", "/spaces/NEW-1"], "the folder already made, not another")
@@ -394,7 +394,7 @@ final class NoCodebaseResumeTests: XCTestCase {
         self.sheet = sheet
         _ = answering([.resumeWithNoCodebase])
         open(goneRepoEntry(main: nil))
-        store.ingest(reply(project: "/spaces/NEW"))
+        store.ingest(reply(requestId: sender.resumes.last!.requestId, project: "/spaces/NEW"))
 
         let focus = try XCTUnwrap(opened.first, "it opens at once, not after a lookup")
         XCTAssertEqual(opened.count, 1)

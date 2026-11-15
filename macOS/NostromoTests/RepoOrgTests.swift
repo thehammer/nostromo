@@ -367,7 +367,7 @@ final class RepoOrgTests: XCTestCase {
 
         let project = try XCTUnwrap(labels.first { $0.stringValue == "Project:" })
         // Preview is the grey 11pt label; it must be anchored below the Project row.
-        let preview = try XCTUnwrap(labels.first { $0.font?.pointSize == 11 })
+        let preview = try XCTUnwrap(labels.first { $0.font?.pointSize == 11 && $0.accessibilityLabel() != "Project error" })
         XCTAssertLessThanOrEqual(preview.frame.maxY, project.frame.minY + 0.5)
     }
 
