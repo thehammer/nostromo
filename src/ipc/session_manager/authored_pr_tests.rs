@@ -730,6 +730,46 @@ async fn a_tag_that_is_not_an_open_focus_answers_owner_closed_and_nothing_is_tol
 }
 
 #[tokio::test]
+async fn a_built_in_or_sensitive_focus_is_never_a_target_of_the_hand_off() {
+    let mut env = Env::new(vec![failing_pr()]);
+    let mut built_in = focus("mother", "Mother", "mother", None);
+    built_in.is_built_in = true;
+    env.registry(vec![
+        focus("alpha", "Alpha", "cody", None),
+        focus("fred-1", "Fred in mail", "fred", None),
+        focus("huey-1", "Huey", "huey", None),
+        built_in,
+    ]);
+    env.spawn("alpha", &echo_stub());
+    let digest = env.preview_for("alpha").digest;
+
+    for tag in ["fred-1", "huey-1", "mother"] {
+        assert_eq!(
+            env.notify(tag, &digest),
+            AuthoredPrResult::err("owner_closed"),
+            "{tag}"
+        );
+        assert_eq!(
+            verbs::link(&env.actions, &env.mgr, REPO, NUMBER, Some(tag)),
+            AuthoredPrResult::err("unknown_focus"),
+            "{tag}"
+        );
+        assert_eq!(
+            verbs::preview(
+                &env.actions,
+                &env.mgr,
+                REPO,
+                NUMBER,
+                &PreviewTarget::Focus { tag: tag.into() }
+            ),
+            AuthoredPrResult::err("unknown_focus"),
+            "{tag}"
+        );
+    }
+    env.assert_not_told();
+}
+
+#[tokio::test]
 async fn a_notify_for_a_pr_that_is_gone_or_has_nothing_to_fix_is_refused_and_nothing_is_told() {
     let mut env = Env::new(vec![failing_pr()]);
     env.registry(vec![focus("alpha", "Alpha", "cody", None)]);

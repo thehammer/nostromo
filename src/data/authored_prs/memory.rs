@@ -2,7 +2,9 @@
 //! agent and name can be offered again by "Start a session…".
 //!
 //! `<state_root>/focus-memory.json`: `tag -> { agent_name, project_path, name,
-//! last_seen }`, at most 200 tags, forgotten after 90 days. No PR data.
+//! last_seen }`, at most 200 tags, forgotten after 90 days. No PR facts (a focus the hand-off started is
+//! named after its PR, and that name is kept like any other). Focuses of the built-in or sensitive agents
+//! (Fred, Teri, Huey, Mother, Perri) are not remembered: their names can carry mail or notes.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -25,6 +27,17 @@ pub struct Remembered {
     #[serde(default)]
     pub name: String,
     pub last_seen: DateTime<Utc>,
+}
+
+/// Agents whose focuses are never written to the memory.
+fn is_private_agent(agent: &str) -> bool {
+    let bare = agent
+        .trim()
+        .rsplit(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(bare.as_str(), "fred" | "teri" | "huey" | "mother" | "perri")
 }
 
 pub struct FocusMemory {
@@ -58,7 +71,10 @@ impl FocusMemory {
     pub fn observe(&self, open: &[FocusInfo], now: DateTime<Utc>) {
         let mut g = self.lock();
         let mut dirty = false;
-        for f in open.iter().filter(|f| !f.agent_name.is_empty()) {
+        for f in open
+            .iter()
+            .filter(|f| !f.agent_name.is_empty() && !is_private_agent(&f.agent_name))
+        {
             let project_path = f
                 .project_path
                 .as_ref()
@@ -143,6 +159,21 @@ mod tests {
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, ["agent_name", "last_seen", "name", "project_path"]);
+    }
+
+    #[test]
+    fn private_agents_are_not_remembered() {
+        let m = FocusMemory::in_memory();
+        let now = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        m.observe(
+            &[
+                focus("f", "fred"),
+                focus("t", "teri:teri"),
+                focus("c", "cody"),
+            ],
+            now,
+        );
+        assert!(m.get("f").is_none() && m.get("t").is_none() && m.get("c").is_some());
     }
 
     #[test]

@@ -1606,6 +1606,8 @@ class AppStore: ObservableObject {
     private func authoredPrsConnectionStarted(supported: Bool, notify: Bool) {
         if authoredPrsSupported != supported { authoredPrsSupported = supported }
         if authoredPrsNotifySupported != (supported && notify) { authoredPrsNotifySupported = supported && notify }
+        // A daemon that no longer lists PRs cannot clear what it raised: the pills go with the list.
+        if !supported { needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name, items: []) }
         if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
         if supported { authoredPrsDemand.connectionStarted() }
     }

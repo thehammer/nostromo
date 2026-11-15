@@ -40,10 +40,10 @@ final class FocusPresenter {
     /// The window is switched directly rather than through `focusSelectionRequests`, which picks the key
     /// window and can race the popover that was just closed.
     func show(tag: String, from origin: NSWindow?) {
-        attempt(tag: tag, origin: origin, remaining: attempts)
+        attempt(tag: tag, origin: origin, remaining: attempts, activated: false)
     }
 
-    private func attempt(tag: String, origin: NSWindow?, remaining: Int) {
+    private func attempt(tag: String, origin: NSWindow?, remaining: Int, activated: Bool) {
         let all = hosts()
         let target: FocusHostWindow?
         if let shown = all.first(where: { $0.shownFocusTag == tag }) {
@@ -60,12 +60,16 @@ final class FocusPresenter {
                 target = nil
             }
         }
+        var activatedNow = activated
         if let target {
-            activateApp()
+            // Once: a retry must not pull the app forward again after the person moved away.
+            if !activated { activateApp(); activatedNow = true }
             if target.focusInput() { return }
         }
         guard remaining > 1 else { return }
-        later(0.1) { [weak self] in self?.attempt(tag: tag, origin: origin, remaining: remaining - 1) }
+        later(0.1) { [weak self] in
+            self?.attempt(tag: tag, origin: origin, remaining: remaining - 1, activated: activatedNow)
+        }
     }
 
     static func liveHosts() -> [FocusHostWindow] {

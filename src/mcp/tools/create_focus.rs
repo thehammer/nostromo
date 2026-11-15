@@ -94,6 +94,10 @@ pub struct CreateFocusRequest {
     /// whose title names something that must not reach a log line (a tag is logged). Absent from the MCP
     /// tool: an agent never chooses a tag.
     pub tag_override: Option<String>,
+    /// A message written to the new session exactly as given, before the focus is announced (so a failed
+    /// write leaves no focus). Unframed and unfenced: only a caller whose text is already the user's own and
+    /// verified (the PR hand-off, which sends what the person previewed). Absent from the MCP tool.
+    pub first_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,6 +418,7 @@ async fn create_focus_session(
         select_for_client,
         caller,
         tag_override,
+        first_message,
         ..
     } = req;
 
@@ -482,6 +487,17 @@ async fn create_focus_session(
         let mut mgr = daemon.session_mgr.lock().unwrap();
         if let Err(e) = mgr.send_user_message(&tag, &message, &[]) {
             tracing::warn!(tag = %tag, "create_focus: failed to seed the first message: {e}");
+            mgr.stop(&tag);
+            return Err(CreateFocusError::SeedFailed(format!(
+                "the agent started but its first message could not be delivered ({e}); nothing was sent"
+            )));
+        }
+    }
+
+    if let Some(first) = first_message {
+        let mut mgr = daemon.session_mgr.lock().unwrap();
+        if let Err(e) = mgr.send_user_message(&tag, &first, &[]) {
+            tracing::warn!("create_focus: failed to write the first message: {e}");
             mgr.stop(&tag);
             return Err(CreateFocusError::SeedFailed(format!(
                 "the agent started but its first message could not be delivered ({e}); nothing was sent"
@@ -1092,8 +1108,9 @@ fn parse_request(
         queued_by_app: false,
         model: string("model")?.filter(|s| !s.is_empty()),
         effort: string("effort")?.filter(|s| !s.is_empty()),
-        // Deliberately not an argument: an agent never chooses a tag.
+        // Deliberately not arguments: an agent never chooses a tag or writes a raw first message.
         tag_override: None,
+        first_message: None,
     })
 }
 

@@ -21,12 +21,25 @@ enum AuthoredPrGesture {
     typealias Permit = (NSEvent?, NSView, String) -> Bool
 
     static let live: Permit = { event, control, action in
-        verdict(HumanGesture.permit(event, control: control), action)
+        if isRepeat(event) { return refuseRepeat(action) }
+        return verdict(HumanGesture.permit(event, control: control), action)
     }
 
     /// A context-menu item: AppKit hands it the mouse event that tracked the menu.
     static let liveMenu: Permit = { event, control, action in
-        verdict(HumanGesture.permit(event, control: control, menuSelection: true), action)
+        if isRepeat(event) { return refuseRepeat(action) }
+        return verdict(HumanGesture.permit(event, control: control, menuSelection: true), action)
+    }
+
+    /// A key held down repeats: Return held on a row must not walk through the preview and send.
+    private static func isRepeat(_ event: NSEvent?) -> Bool {
+        guard let event, event.type == .keyDown else { return false }
+        return event.isARepeat
+    }
+
+    private static func refuseRepeat(_ action: String) -> Bool {
+        handoffLog.notice("authored-pr \(action, privacy: .public) refused: keyRepeat")
+        return false
     }
 
     private static func verdict(_ v: HumanGestureVerdict, _ action: String) -> Bool {
@@ -257,7 +270,8 @@ final class AuthoredPrPreviewSession {
 
     /// The open focuses changed: if the owner went, Send becomes Start a session….
     func openFocusesChanged(_ tags: Set<String>) {
-        guard !finished, phase != .ownerClosed, !tags.contains(tag) else { return }
+        // An empty list is a store that is reloading, not every focus closing at once.
+        guard !finished, phase != .ownerClosed, !tags.isEmpty, !tags.contains(tag) else { return }
         phase = .ownerClosed
         onChange?()
     }
@@ -544,7 +558,8 @@ final class AuthoredPrHandoff {
         let entries = AuthoredPrsPicker.entries(for: pr, openFocuses: openFocuses())
         let session = AuthoredPrPickerSession(row: model, entries: entries, transport: transport, permit: permit)
         session.onFinish = { [weak self, weak anchor] outcome in
-            guard let self, let anchor else { return }
+            guard let self else { return }
+            guard let anchor else { self.close(); return }
             self.close()
             switch outcome {
             case .linked(let tag):

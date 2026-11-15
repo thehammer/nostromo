@@ -13,6 +13,7 @@ use crate::data::authored_prs::actions::AuthoredPrActions;
 use crate::data::authored_prs::snapshot::{AuthoredPr, MAX_NAME};
 use crate::data::authored_prs::wire::{AuthoredPrResult, Done, PreviewOk, PreviewTarget, StartOk};
 use crate::data::work::untrusted::one_line;
+use crate::ipc::peer::{is_huey_agent, is_teri_or_fred_agent};
 use crate::ipc::protocol::FocusMeta;
 use crate::ipc::SessionManager;
 use crate::mcp::tools::create_focus::{
@@ -21,12 +22,17 @@ use crate::mcp::tools::create_focus::{
 
 type Mgr = Arc<Mutex<SessionManager>>;
 
+/// An open focus the hand-off may write to. Never a built-in (Fred, Teri, Huey, Mother, Perri) or a focus
+/// running a sensitive agent: those hold mail, calendar or notes, and a PR notice has no business there.
 fn open_focus(mgr: &Mgr, tag: &str) -> Option<FocusMeta> {
     mgr.lock()
         .unwrap()
         .focus_registry()
         .into_iter()
         .find(|f| f.tag == tag)
+        .filter(|f| {
+            !f.is_built_in && !is_teri_or_fred_agent(&f.agent_name) && !is_huey_agent(&f.agent_name)
+        })
 }
 
 fn names_tag(row: &AuthoredPr, tag: &str) -> bool {
@@ -166,22 +172,25 @@ async fn start_once(
         return AuthoredPrResult::err("unknown_agent");
     }
     // No instruction: the create path would wrap it in its own framing, and the
-    // first message must be byte-identical to the preview. The message goes in
-    // below, through the same send as a notify.
+    // first message must be byte-identical to the preview, so it goes in as
+    // `first_message`, which is sent as it is.
     let outcome = match create_focus_on(
         host.clone(),
         CreateFocusRequest {
             agent: agent.to_owned(),
             title: format!("PR {}#{}", composed.row.repo, composed.row.number),
+            working_directory: Some(dir),
+            select_for_client: Some(client_id.to_owned()),
+            queued_by_app: true,
+            // Delivered as the first message, unframed, before the focus is announced: a send that fails
+            // leaves no focus behind.
+            first_message: Some(composed.text.clone()),
             // The title names the PR, and a tag is logged: give the focus a tag that does not.
             tag_override: Some(format!(
                 "{}-pr-{}",
                 agent.to_ascii_lowercase(),
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
             )),
-            working_directory: Some(dir),
-            select_for_client: Some(client_id.to_owned()),
-            queued_by_app: true,
             ..Default::default()
         },
     )
@@ -196,13 +205,6 @@ async fn start_once(
     else {
         return AuthoredPrResult::err("already_open");
     };
-    {
-        let mut g = host.session_mgr.lock().unwrap();
-        if g.send_user_message(&tag, &composed.text, &[]).is_err() {
-            g.stop(&tag);
-            return AuthoredPrResult::err("not_running");
-        }
-    }
     actions.set_link(&composed.row.repo, composed.row.number, Some(&tag));
     actions.record_told(&composed.row, &tag);
     AuthoredPrResult::Ok(StartOk { tag })
