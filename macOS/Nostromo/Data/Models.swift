@@ -748,9 +748,12 @@ struct PRQueueItem: Identifiable, Encodable, Equatable {
     let ciState:     CiState
     /// HEAD commit SHA — used by the GUI to validate its detail cache.
     let headSha:     String
+    /// Jira ticket keys the daemon detected for this PR (title, branch, body);
+    /// empty when none or when no Jira site is configured.
+    var tickets:     [String] = []
 
     enum CodingKeys: String, CodingKey {
-        case repo, number, title, author, bucket, url
+        case repo, number, title, author, bucket, url, tickets
         case newActivity = "new_activity"
         case ciState     = "ci_state"
         case headSha     = "head_sha"

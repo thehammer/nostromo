@@ -846,6 +846,9 @@
 		TP000000000000000000T037 /* TerminalScreenAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TP000000000000000000F037 /* TerminalScreenAccessTests.swift */; };
 		SR0000000000000000000A03 /* ScreenshotRedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SR0000000000000000000F02 /* ScreenshotRedactionTests.swift */; };
 		TP000000000000000000B001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = TP000000000000000000P002 /* SwiftTerm */; };
+		RT000000000000000000061 /* PerriTicketControlTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT000000000000000000060 /* PerriTicketControlTests.swift */; };
+		RT000000000000000000063 /* PerriTicketControlRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT000000000000000000062 /* PerriTicketControlRenderTests.swift */; };
+		RT000000000000000000065 /* GitHubSignedOut404HintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT000000000000000000064 /* GitHubSignedOut404HintTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -1431,6 +1434,9 @@
 		SR0000000000000000000F01 /* ScreenshotRedaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotRedaction.swift; sourceTree = "<group>"; };
 		TP000000000000000000F037 /* TerminalScreenAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreenAccessTests.swift; sourceTree = "<group>"; };
 		SR0000000000000000000F02 /* ScreenshotRedactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotRedactionTests.swift; sourceTree = "<group>"; };
+		RT000000000000000000060 /* PerriTicketControlTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriTicketControlTests.swift; sourceTree = "<group>"; };
+		RT000000000000000000062 /* PerriTicketControlRenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriTicketControlRenderTests.swift; sourceTree = "<group>"; };
+		RT000000000000000000064 /* GitHubSignedOut404HintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSignedOut404HintTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -1888,6 +1894,9 @@
 				RT0000000000000000000009 /* ReviewPaneTestSupport.swift */,
 				RT0000000000000000000011 /* ReviewWebViewIntegrationTests.swift */,
 				RT0000000000000000000013 /* PerriRowControlsRenderTests.swift */,
+				RT000000000000000000064 /* GitHubSignedOut404HintTests.swift */,
+				RT000000000000000000062 /* PerriTicketControlRenderTests.swift */,
+				RT000000000000000000060 /* PerriTicketControlTests.swift */,
 				RT0000000000000000000015 /* PerriRowControlsHitTests.swift */,
 				RT0000000000000000000017 /* PerriFocusContainerLayoutTests.swift */,
 				RT0000000000000000000019 /* ReviewPaneRedactionTests.swift */,
@@ -2876,6 +2885,9 @@
 				RT0000000000000000000010 /* ReviewPaneTestSupport.swift in Sources */,
 				RT0000000000000000000012 /* ReviewWebViewIntegrationTests.swift in Sources */,
 				RT0000000000000000000014 /* PerriRowControlsRenderTests.swift in Sources */,
+				RT000000000000000000065 /* GitHubSignedOut404HintTests.swift in Sources */,
+				RT000000000000000000063 /* PerriTicketControlRenderTests.swift in Sources */,
+				RT000000000000000000061 /* PerriTicketControlTests.swift in Sources */,
 				RT0000000000000000000016 /* PerriRowControlsHitTests.swift in Sources */,
 				RT0000000000000000000018 /* PerriFocusContainerLayoutTests.swift in Sources */,
 				RT0000000000000000000020 /* ReviewPaneRedactionTests.swift in Sources */,

@@ -40,6 +40,7 @@ use nostromo::data::perri_queue_targeted::{
 };
 use nostromo::data::perri_suppress::{unix_now_secs, SuppressStore};
 use nostromo::data::relay_client::{QueueSignal, RelayEvent};
+use nostromo::data::ticket_keys::{ProjectFilter, TicketScope};
 
 const ME: &str = "tester";
 const REPO: &str = "Carefeed/admin-portal";
@@ -236,6 +237,8 @@ fn candidate(number: u64, head_sha: &str) -> Candidate {
         in_needs_review: true,
         my_review: None,
         targeted_seen_at: None,
+        head_ref: String::new(),
+        body_keys: Vec::new(),
     }
 }
 
@@ -356,6 +359,8 @@ async fn mount_reviews(server: &MockServer, number: u64, reviews: serde_json::Va
 struct Probe {
     number: u64,
     head_sha: String,
+    head_ref: String,
+    body: String,
     author: (String, String),
     draft: bool,
     state: String,
@@ -371,6 +376,8 @@ impl Probe {
         Probe {
             number,
             head_sha: head_sha.to_owned(),
+            head_ref: "main".to_owned(),
+            body: String::new(),
             author: ("alice".to_owned(), "User".to_owned()),
             draft: false,
             state: "OPEN".to_owned(),
@@ -392,6 +399,8 @@ impl Probe {
             "merged": self.merged,
             "updatedAt": self.updated_at,
             "headRefOid": self.head_sha,
+            "headRefName": self.head_ref,
+            "body": self.body,
             "reviewDecision": self.review_decision,
             "author": {"login": self.author.0, "__typename": self.author.1},
             "reviewRequests": {"nodes": self.requested_reviewers.iter().map(|(login, ty)| json!({
@@ -674,6 +683,7 @@ fn item(number: u64, bucket: &str, ci: CiState, sha: &str, new_activity: bool) -
         ci_state: ci,
         head_sha: sha.to_owned(),
         is_bot: false,
+        tickets: vec![],
     }
 }
 
@@ -1170,6 +1180,44 @@ async fn review_requested_for_me_adds_pr_with_no_search_call() {
         c.check_runs <= 1,
         "at most one check-runs read, got {}",
         c.check_runs
+    );
+}
+
+/// The probe selects the branch and body in the same query and its result fills
+/// `tickets`, with no extra request.
+#[tokio::test]
+async fn probe_fills_tickets_from_branch_and_body_in_the_same_query() {
+    let server = MockServer::start().await;
+    let mut h = Harness::new(&server);
+    h.caches.ticket_scope = TicketScope::fixed(
+        Some("carefeed.atlassian.net".into()),
+        ProjectFilter::Known(["PAYM", "INT"].map(String::from).into()),
+    );
+
+    let mut probe = Probe::new(42, "sha-42");
+    probe.review_decision = None;
+    probe.requested_reviewers = vec![(ME.to_owned(), "User".to_owned())];
+    probe.head_ref = "feature/PAYM-77-refunds".to_owned();
+    probe.body = "see https://carefeed.atlassian.net/browse/INT-9 and SHA-256".to_owned();
+    mount_probe(&server, &probe).await;
+    mount_check_runs_for(&server, "sha-42", "success").await;
+
+    h.apply(&ev("pr.review_requested").num(42).reviewer(ME))
+        .await;
+
+    assert_eq!(h.items()[0].tickets, ["PAYM-77", "INT-9"]);
+    let graphql: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/graphql")
+        .collect();
+    assert_eq!(graphql.len(), 1, "one probe, no extra request");
+    let sent = String::from_utf8_lossy(&graphql[0].body).into_owned();
+    assert!(
+        sent.contains("headRefName") && sent.contains("body"),
+        "{sent}"
     );
 }
 

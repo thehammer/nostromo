@@ -128,6 +128,10 @@ pub struct PrQueueItem {
     /// truth; clients must not infer bot status from the `author` string.
     #[serde(default)]
     pub is_bot: bool,
+    /// Jira ticket keys detected daemon-side (title, branch, body), at most 5.
+    /// Absent on the wire when empty; old clients ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tickets: Vec<String>,
 }
 
 fn default_bucket() -> String {
@@ -233,12 +237,30 @@ mod tests {
             ci_state: CiState::Success,
             head_sha: "abc123def456".to_owned(),
             is_bot: false,
+            tickets: vec![],
         };
 
         let json = serde_json::to_string(&item).expect("serialize");
         let decoded: PrQueueItem = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.head_sha, "abc123def456");
         assert_eq!(decoded.ci_state, CiState::Success);
+    }
+
+    #[test]
+    fn pr_queue_item_tickets_round_trip_and_empty_is_not_serialized() {
+        let with = PrQueueItem {
+            tickets: vec!["CORE-1".into(), "PAYM-2".into()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        let back: PrQueueItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tickets, ["CORE-1", "PAYM-2"]);
+
+        let without = serde_json::to_value(PrQueueItem::default()).unwrap();
+        assert!(without.get("tickets").is_none(), "empty must be omitted");
+        let legacy = r#"{"repo":"a/b","number":1,"title":"t","author":"x","url":"u"}"#;
+        let item: PrQueueItem = serde_json::from_str(legacy).unwrap();
+        assert!(item.tickets.is_empty(), "absent key decodes to none");
     }
 
     #[test]
@@ -272,6 +294,7 @@ mod tests {
             ci_state: CiState::Success,
             head_sha: "deadbeef".to_owned(),
             is_bot: true,
+            tickets: vec![],
         };
         let json = serde_json::to_string(&item).expect("serialize");
         let decoded: PrQueueItem = serde_json::from_str(&json).expect("deserialize");

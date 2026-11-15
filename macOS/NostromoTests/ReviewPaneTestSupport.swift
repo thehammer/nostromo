@@ -87,11 +87,14 @@ final class ReviewFixtureHandler: NSObject, WKURLSchemeHandler {
         var body = "<html><head><title>fixture</title></head><body>fixture</body></html>"
         var mime = "text/html"
         var headers: [String: String] = [:]
+        var status = 200
         var failure: Error?
     }
 
     /// Every URL WebKit asked this handler for, in order.
     private(set) var requested: [URL] = []
+    /// The status each URL was answered with (the last one).
+    private(set) var statuses: [URL: Int] = [:]
     /// Decides the response for a URL. Replace it per test.
     var respond: (URL) -> Response = { _ in Response() }
     /// URLs for which the handler records the request and then never answers (a page that is slow to start:
@@ -116,14 +119,15 @@ final class ReviewFixtureHandler: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didFailWithError(failure)
             return
         }
+        statuses[url] = r.status
         let data = Data(r.body.utf8)
         let response: URLResponse
-        if r.headers.isEmpty {
+        if r.headers.isEmpty && r.status == 200 {
             response = URLResponse(url: url, mimeType: r.mime, expectedContentLength: data.count, textEncodingName: "utf-8")
         } else {
             var headers = r.headers
             headers["Content-Type"] = r.mime
-            response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)!
+            response = HTTPURLResponse(url: url, statusCode: r.status, httpVersion: "HTTP/1.1", headerFields: headers)!
         }
         urlSchemeTask.didReceive(response)
         urlSchemeTask.didReceive(data)
@@ -157,6 +161,7 @@ final class ReviewFixtureWorld {
             ReviewPaneHosts(jiraSite: self.jiraSite, fixtureScheme: reviewFixtureScheme)
         }
         env.openExternal = { [unowned self] url in self.openedExternally.append(url) }
+        env.statusCode = { [unowned self] response in response.response.url.flatMap { self.handler.statuses[$0] } }
         env.makeConfiguration = { [unowned self] in
             let config = ReviewWebViewFactory.makeConfiguration(dataStore: self.dataStore)
             config.setURLSchemeHandler(self.handler, forURLScheme: reviewFixtureScheme)
@@ -322,22 +327,30 @@ final class PerriRowsRig {
     let width: CGFloat
     let height: CGFloat
 
+    /// `tickets`: detected keys per PR number. `jiraSite`: the configured site (nil draws no ticket control).
+    struct OpenedTicket: Equatable { var number: Int; var key: String; var order: Int }
+
     /// `selected`: the pinned PR (its row is marked). `withActions`: a Perri focus's row controls; false is
     /// the plain queue every other pane shows.
     init(width: CGFloat, height: CGFloat = 480, selected: Int? = 4520, withActions: Bool = true,
-         reviewing: ReviewingPR? = nil) {
+         reviewing: ReviewingPR? = nil, tickets: [Int: [String]] = [:], jiraSite: String? = nil) {
         self.width = width
         self.height = height
         let items = Self.numbers.map { n in
             PrListItemModel(repo: Self.repo, number: n, title: "Row title \(n - 4518)", author: "dev",
                             bucket: "needs_review", ciState: .success, newActivity: false,
-                            url: "https://github.com/\(Self.repo)/pull/\(n)", headSha: "abc")
+                            url: "https://github.com/\(Self.repo)/pull/\(n)", headSha: "abc",
+                            tickets: tickets[n] ?? [])
         }
         // Built before `self` is usable by the closures: they reach the spies through this box.
         let box = SpyBox()
         let makeRoot: (Int?) -> PaneContentView = { hovered in
             var actions = PerriRowActions(openConversation: { _, n in box.conversations.append(n) },
-                                          openDiff: { _, n in box.diffs.append(n) })
+                                          openDiff: { _, n in box.diffs.append(n) },
+                                          openTicket: { _, n, key, order in
+                                              box.tickets.append(OpenedTicket(number: n, key: key, order: order))
+                                          },
+                                          jiraSite: { jiraSite })
             actions.hoverOverride = hovered
             return PaneContentView(
                 content: .prList(items), selectedPR: selected.map { PRRef(repo: Self.repo, number: $0) },
@@ -361,6 +374,7 @@ final class PerriRowsRig {
         var loads: [Int] = []
         var conversations: [Int] = []
         var diffs: [Int] = []
+        var tickets: [OpenedTicket] = []
     }
     private let box: SpyBox
     private let makeRoot: (Int?) -> PaneContentView
@@ -368,6 +382,7 @@ final class PerriRowsRig {
     var recordedLoads: [Int] { box.loads }
     var recordedConversations: [Int] { box.conversations }
     var recordedDiffs: [Int] { box.diffs }
+    var recordedTickets: [OpenedTicket] { box.tickets }
 
     func settle(_ seconds: TimeInterval = 0.4) {
         hosting.layoutSubtreeIfNeeded()
