@@ -113,23 +113,27 @@ struct PerriRowControls: View {
                    accessibility: "Open ticket \(first)") { actions.openTicket(repo, number, first, 0) }
             let rest = Array(ticketKeys.dropFirst())
             if !rest.isEmpty {
-                Menu {
-                    ForEach(Array(rest.enumerated()), id: \.element) { offset, key in
-                        Button("Open ticket \(key)") { actions.openTicket(repo, number, key, offset + 1) }
+                // The chip is drawn here (a menu style may restyle its label); an invisible menu sits over it.
+                Text("+\(rest.count)")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Color(white: 0.92))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color(white: 0.24)))
+                    .accessibilityHidden(true)
+                    .overlay {
+                        Menu {
+                            ForEach(Array(rest.enumerated()), id: \.element) { offset, key in
+                                Button("Open ticket \(key)") { actions.openTicket(repo, number, key, offset + 1) }
+                            }
+                        } label: {
+                            Color.clear
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .accessibilityLabel(Self.moreLabel(rest.count))
                     }
-                } label: {
-                    Text("+\(rest.count)")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color(white: 0.92))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(RoundedRectangle(cornerRadius: 4).fill(Color(white: 0.24)))
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help(Self.moreLabel(rest.count))
-                .accessibilityLabel(Self.moreLabel(rest.count))
+                    .help(Self.moreLabel(rest.count))
             }
         }
     }

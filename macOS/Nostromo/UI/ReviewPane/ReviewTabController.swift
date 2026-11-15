@@ -6,6 +6,9 @@ import os
 /// What a tab needs from the outside. Tests replace the pieces (fixture scheme, a spy opener).
 struct ReviewPaneEnvironment {
     var hosts: () -> ReviewPaneHosts = { ReviewPaneHosts(jiraSite: AppStore.shared.perriJiraSite) }
+    /// The HTTP status of a main-frame response. WebKit hands a plain `URLResponse` (no status) to the
+    /// policy for a custom URL scheme, so the offline test fixtures replace this.
+    var statusCode: (WKNavigationResponse) -> Int? = { ($0.response as? HTTPURLResponse)?.statusCode }
     var openExternal: (URL) -> Void = ReviewPaneEnvironment.openInDefaultBrowser
     var makeConfiguration: () -> WKWebViewConfiguration = {
         ReviewWebViewFactory.makeConfiguration(dataStore: BrowserProfile.work())
@@ -264,9 +267,9 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         if navigationResponse.isForMainFrame {
-            let http = navigationResponse.response as? HTTPURLResponse
-            let isGitHub = http?.url?.host?.lowercased() == "github.com"
-            githubNotFoundURL = (isGitHub && http?.statusCode == 404) ? http?.url : nil
+            let url = navigationResponse.response.url
+            let isGitHub = url?.host?.lowercased() == "github.com"
+            githubNotFoundURL = (isGitHub && env.statusCode(navigationResponse) == 404) ? url : nil
         }
         let disposition = (navigationResponse.response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
@@ -411,7 +414,7 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// empty). Read in the isolated world; only a boolean leaves the page. No answer counts as "not known",
     /// so no hint.
     @MainActor
-    private func isSignedOutOfGitHub() async -> Bool {
+    func isSignedOutOfGitHub() async -> Bool {
         let script = "(function(){const m=document.querySelector('meta[name=\"user-login\"]');"
             + "return !(m && m.content && m.content.trim().length>0);})();"
         return await UnsentInputProbe.boundedBool(timeout: 0.5, onTimeout: false) { [weak self] in

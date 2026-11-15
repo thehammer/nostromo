@@ -93,6 +93,8 @@ final class ReviewFixtureHandler: NSObject, WKURLSchemeHandler {
 
     /// Every URL WebKit asked this handler for, in order.
     private(set) var requested: [URL] = []
+    /// The status each URL was answered with (the last one).
+    private(set) var statuses: [URL: Int] = [:]
     /// Decides the response for a URL. Replace it per test.
     var respond: (URL) -> Response = { _ in Response() }
     /// URLs for which the handler records the request and then never answers (a page that is slow to start:
@@ -117,6 +119,7 @@ final class ReviewFixtureHandler: NSObject, WKURLSchemeHandler {
             urlSchemeTask.didFailWithError(failure)
             return
         }
+        statuses[url] = r.status
         let data = Data(r.body.utf8)
         let response: URLResponse
         if r.headers.isEmpty && r.status == 200 {
@@ -158,6 +161,7 @@ final class ReviewFixtureWorld {
             ReviewPaneHosts(jiraSite: self.jiraSite, fixtureScheme: reviewFixtureScheme)
         }
         env.openExternal = { [unowned self] url in self.openedExternally.append(url) }
+        env.statusCode = { [unowned self] response in response.response.url.flatMap { self.handler.statuses[$0] } }
         env.makeConfiguration = { [unowned self] in
             let config = ReviewWebViewFactory.makeConfiguration(dataStore: self.dataStore)
             config.setURLSchemeHandler(self.handler, forURLScheme: reviewFixtureScheme)

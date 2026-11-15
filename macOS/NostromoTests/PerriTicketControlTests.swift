@@ -95,7 +95,34 @@ final class PerriTicketControlTests: XCTestCase {
         reviewAXNodes(under: r.hosting).compactMap(reviewAXLabel)
     }
 
-    func testTheTicketButtonAndTheDisclosureAreLabelled() {
+    /// SwiftUI builds its accessibility tree only when something is listening; some test processes get none
+    /// (see `ReviewPaneAccessibilityTests`). Those skip, and the source test below guards the wording.
+    private func swiftUIAccessibilityIsAvailable() -> Bool {
+        let host = NSHostingView(rootView: Text("control").accessibilityLabel("accessibility control label"))
+        host.frame = NSRect(x: 0, y: 0, width: 200, height: 40)
+        let window = ReviewTestWindow.make(size: NSSize(width: 200, height: 40))
+        defer { window.contentView = NSView(); window.close() }
+        window.contentView = host
+        NSApp.accessibilitySetOverrideValue(true, forAttribute: NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface"))
+        spin(0.4)
+        return reviewAXNodes(under: host).contains { reviewAXLabel($0) == "accessibility control label" }
+    }
+
+    /// The wording, read from the source: the button label, the disclosure label and the row action.
+    func testTheTicketLabelsAreWrittenAsSpecified() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Nostromo/UI/ReviewPane/PerriRowControls.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("accessibility: \"Open ticket \\(first)\""), "the button's label")
+        XCTAssertTrue(source.contains("Self.moreLabel(rest.count)"), "the disclosure's label")
+        XCTAssertTrue(source.contains("\"\\(count) more ticket\\(count == 1 ? \"\" : \"s\")\""), "its wording")
+        XCTAssertGreaterThanOrEqual(source.components(separatedBy: "Button(\"Open ticket \\(key)\")").count - 1, 3,
+                                    "the menu items, and the row actions on queue and reviewing rows")
+    }
+
+    func testTheTicketButtonAndTheDisclosureAreLabelled() throws {
+        try XCTSkipUnless(swiftUIAccessibilityIsAvailable(), "no SwiftUI accessibility tree in this process")
         let r = makeRig(tickets: [4520: ["CORE-2841", "PAYM-77", "INT-9"]], jiraSite: site)
         let all = labels(r)
         XCTAssertTrue(all.contains("Open ticket CORE-2841"), "labels: \(all)")
@@ -108,7 +135,8 @@ final class PerriTicketControlTests: XCTestCase {
         XCTAssertEqual(PerriRowControls.ticketLabel("CORE-2841"), "Ticket CORE-2841")
     }
 
-    func testEveryKeyOnEveryRowIsAnAccessibilityAction() {
+    func testEveryKeyOnEveryRowIsAnAccessibilityAction() throws {
+        try XCTSkipUnless(swiftUIAccessibilityIsAvailable(), "no SwiftUI accessibility tree in this process")
         // Whether or not its controls are drawn: rows 1 and 3 here are neither selected nor hovered.
         let r = makeRig(tickets: [4519: ["CORE-1", "CORE-2"], 4521: ["APP-3"]], jiraSite: site)
         let names = reviewAXNodes(under: r.hosting).flatMap { node -> [String] in

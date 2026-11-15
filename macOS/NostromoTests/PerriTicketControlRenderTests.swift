@@ -32,10 +32,10 @@ final class PerriTicketControlRenderTests: XCTestCase {
             let without = rig(width, keys: [], site: site)
             let one = rig(width, keys: ["CORE-2841"], site: site)
             let three = rig(width, keys: ["CORE-2841", "PAYM-77", "INT-9"], site: site)
-            let bands = without.titleBands(try without.render().pixels)
+            let bands = without.titleBands(try without.render().pixels, regionWidthFraction: 0.15)
             XCTAssertEqual(bands.count, 5, "five rows at \(Int(width)) pt: \(bands)")
-            XCTAssertEqual(one.titleBands(try one.render().pixels), bands, "one key: rows unmoved at \(Int(width)) pt")
-            XCTAssertEqual(three.titleBands(try three.render().pixels), bands, "three keys: rows unmoved at \(Int(width)) pt")
+            XCTAssertEqual(one.titleBands(try one.render().pixels, regionWidthFraction: 0.15), bands, "one key: rows unmoved at \(Int(width)) pt")
+            XCTAssertEqual(three.titleBands(try three.render().pixels, regionWidthFraction: 0.15), bands, "three keys: rows unmoved at \(Int(width)) pt")
         }
     }
 

@@ -83,6 +83,24 @@ final class GitHubSignedOut404HintTests: XCTestCase {
         return !n.isHidden && n.message == ReviewTabController.signedOutHint
     }
 
+    func testThePageProbeReadsSignedOutAndSignedInFromTheMeta() async throws {
+        notFound[filesPath] = .some(nil)
+        let out = openDiff()
+        let c = try XCTUnwrap(out.controller)
+        await assertTrueA(await eventually(15) { !c.webView.isLoading && c.webView.url?.path == self.filesPath
+            && c.contentView.cover.isHidden }, "the 404 page loaded")
+        await assertTrueA(await c.isSignedOutOfGitHub(), "no meta: signed out")
+        XCTAssertEqual(world.handler.statuses[reviewFixtureURL("github.com\(filesPath)?w=1")], 404)
+
+        let signedIn = model.open(pr: ReviewPR(repo: "acme/secret", number: 8), target: .diff,
+                                  url: reviewFixtureURL("github.com/acme/secret/pull/8/files"))
+        let c2 = try XCTUnwrap(signedIn.controller)
+        await assertTrueA(await eventually(15) { !c2.webView.isLoading && c2.webView.url?.path == "/acme/secret/pull/8/files"
+            && c2.contentView.cover.isHidden }, "a found page loaded (it carries user-login=hammer)")
+        let signedOut = await c2.isSignedOutOfGitHub()
+        XCTAssertFalse(signedOut, "user-login=hammer: signed in")
+    }
+
     func testASignedOut404ShowsTheHintWithSignIn() async throws {
         notFound[filesPath] = .some(nil)        // 404, no user-login meta
         let tab = openDiff()
