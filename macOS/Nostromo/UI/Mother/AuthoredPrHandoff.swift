@@ -533,8 +533,9 @@ final class AuthoredPrHandoff {
             case .startSession: if let anchor { self.openStart(model, anchor: anchor) }
             }
         }
-        focusWatch = openFocusTags.sink { [weak session] tags in session?.openFocusesChanged(tags) }
         show(.preview(session), anchor: anchor)
+        // After `show`, which takes down whatever was up (and its watch) first.
+        focusWatch = openFocusTags.sink { [weak session] tags in session?.openFocusesChanged(tags) }
         session.start()
     }
 
