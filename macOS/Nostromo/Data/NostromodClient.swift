@@ -2472,9 +2472,10 @@ private struct PerriStateResp: Decodable {
         let url:         String
         let ciState:     String?
         let headSha:     String?
+        let tickets:     [String]
 
         enum CodingKeys: String, CodingKey {
-            case repo, number, title, author, bucket, url
+            case repo, number, title, author, bucket, url, tickets
             case newActivity = "new_activity"
             case ciState     = "ci_state"
             case headSha     = "head_sha"
@@ -2491,6 +2492,7 @@ private struct PerriStateResp: Decodable {
             url         = try c.decode(String.self, forKey: .url)
             ciState     = try? c.decodeIfPresent(String.self, forKey: .ciState)
             headSha     = try? c.decodeIfPresent(String.self, forKey: .headSha)
+            tickets     = (try? c.decode([String].self, forKey: .tickets)) ?? []
         }
 
         var asPRQueueItem: PRQueueItem {
@@ -2503,7 +2505,8 @@ private struct PerriStateResp: Decodable {
                 newActivity: newActivity,
                 url:         url,
                 ciState:     CiState.from(ciStateString: ciState),
-                headSha:     headSha ?? ""
+                headSha:     headSha ?? "",
+                tickets:     tickets
             )
         }
     }

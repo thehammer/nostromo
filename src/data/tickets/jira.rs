@@ -191,6 +191,68 @@ impl JiraProvider {
         }
     }
 
+    /// Whether credentials resolved (the project list needs them).
+    pub fn is_configured(&self) -> bool {
+        self.credentials.is_some()
+    }
+
+    /// Every project key on the site: `GET /rest/api/3/project/search`, paged
+    /// 50 at a time until `isLast`. Only keys are kept; the token never leaves
+    /// this provider.
+    pub async fn project_keys(&self) -> Result<Vec<String>, super::TicketError> {
+        let creds =
+            self.credentials
+                .as_ref()
+                .ok_or_else(|| super::TicketError::ProviderUnconfigured {
+                    message: self.unconfigured_message.clone(),
+                })?;
+        let url = format!("{}/rest/api/3/project/search", self.base_url);
+        let mut keys: Vec<String> = Vec::new();
+        let mut start_at = 0usize;
+        // A bound, not a limit anyone should reach: 200 pages is 10,000 projects.
+        for _ in 0..200 {
+            let resp = self
+                .http
+                .get(&url)
+                .basic_auth(&creds.email, Some(&creds.token))
+                .query(&[
+                    ("startAt", start_at.to_string()),
+                    ("maxResults", "50".to_owned()),
+                ])
+                .send()
+                .await
+                .map_err(|e| {
+                    super::TicketError::FetchFailed(format!("jira request failed: {e}"))
+                })?;
+            if !resp.status().is_success() {
+                return Err(super::TicketError::FetchFailed(format!(
+                    "jira project list responded {}",
+                    resp.status()
+                )));
+            }
+            let page: Value = resp.json().await.map_err(|e| {
+                super::TicketError::FetchFailed(format!("parsing jira project list: {e}"))
+            })?;
+            let values = page
+                .get("values")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            keys.extend(
+                values
+                    .iter()
+                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()))
+                    .map(str::to_owned),
+            );
+            let is_last = page.get("isLast").and_then(|v| v.as_bool()).unwrap_or(true);
+            if is_last || values.is_empty() {
+                return Ok(keys);
+            }
+            start_at += values.len();
+        }
+        Ok(keys)
+    }
+
     fn ticket_from_json(&self, key: &str, body: &Value) -> Ticket {
         let fields = body.get("fields").cloned().unwrap_or(Value::Null);
         let summary = fields

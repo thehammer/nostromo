@@ -513,3 +513,34 @@ final class PerriWireTests: XCTestCase {
         )
     }
 }
+
+// MARK: - Ticket keys on queue items
+
+final class PerriTicketsWireTests: XCTestCase {
+    private let base = """
+    "repo":"acme/web","number":1,"title":"t","author":"a","bucket":"requested",
+    "new_activity":false,"url":"https://github.com/acme/web/pull/1"
+    """
+
+    private func decode<T: Decodable>(_ type: T.Type, _ extra: String) throws -> T {
+        try JSONDecoder().decode(type, from: Data("{\(base)\(extra)}".utf8))
+    }
+
+    func testPrQueueItemDecodesTickets() throws {
+        let item = try decode(PrQueueItem.self, #","tickets":["CORE-1","PAYM-2"]"#)
+        XCTAssertEqual(item.tickets, ["CORE-1", "PAYM-2"])
+    }
+
+    func testPrQueueItemDefaultsTicketsToEmptyWhenAbsent() throws {
+        XCTAssertEqual(try decode(PrQueueItem.self, "").tickets, [])
+    }
+
+    func testPrListItemModelDecodesTickets() throws {
+        let item = try decode(PrListItemModel.self, #","tickets":["INT-9"]"#)
+        XCTAssertEqual(item.tickets, ["INT-9"])
+    }
+
+    func testPrListItemModelDefaultsTicketsToEmptyWhenAbsent() throws {
+        XCTAssertEqual(try decode(PrListItemModel.self, "").tickets, [])
+    }
+}

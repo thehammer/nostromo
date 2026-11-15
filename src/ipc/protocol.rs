@@ -684,6 +684,9 @@ pub struct PrListItem {
     /// HEAD commit SHA.
     #[serde(default)]
     pub head_sha: String,
+    /// Jira ticket keys detected daemon-side; absent on the wire when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tickets: Vec<String>,
 }
 
 /// Content payload pushed to a single pane, decoupled from layout geometry.
@@ -4588,6 +4591,7 @@ mod tests {
             ci_state: CiState::Success,
             head_sha: "abc123".into(),
             is_bot: false,
+            tickets: vec![],
         };
         let snap = PrSnapshot {
             pr_number: Some(42),
@@ -4753,11 +4757,38 @@ mod tests {
                     new_activity: false,
                     url: "https://github.com/acme/web/pull/42".into(),
                     head_sha: "abc123".into(),
+                    tickets: vec![],
                 }],
             },
             freshness: None,
             address: None,
         });
+    }
+
+    #[test]
+    fn pr_list_item_tickets_round_trip_and_empty_is_not_serialized() {
+        let mk = |tickets: Vec<String>| PrListItem {
+            repo: "acme/web".into(),
+            number: 1,
+            title: "t".into(),
+            author: "a".into(),
+            bucket: "requested".into(),
+            ci_state: crate::data::perri_queue::CiState::Success,
+            new_activity: false,
+            url: String::new(),
+            head_sha: String::new(),
+            tickets,
+        };
+        let v = serde_json::to_value(mk(vec!["CORE-1".into()])).unwrap();
+        assert_eq!(v["tickets"], serde_json::json!(["CORE-1"]));
+        let back: PrListItem = serde_json::from_value(v).unwrap();
+        assert_eq!(back.tickets, ["CORE-1"]);
+
+        let mut v = serde_json::to_value(mk(vec![])).unwrap();
+        assert!(v.get("tickets").is_none(), "empty must be omitted");
+        v.as_object_mut().unwrap().remove("tickets");
+        let back: PrListItem = serde_json::from_value(v).unwrap();
+        assert!(back.tickets.is_empty());
     }
 
     #[test]

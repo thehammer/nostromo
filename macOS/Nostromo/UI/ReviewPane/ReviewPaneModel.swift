@@ -20,6 +20,17 @@ struct ReviewPR: Hashable, Comparable {
     var diffURL: URL? { hasValidRepo ? URL(string: "https://github.com/\(repo)/pull/\(number)/files") : nil }
 }
 
+extension ReviewPR {
+    /// `https://<site>/browse/<KEY>`; nil unless `site` is a valid Jira Cloud host and `key` a valid
+    /// Jira issue key (so nothing else can ride in the URL).
+    static func ticketURL(site: String, key: String) -> URL? {
+        guard ReviewPaneHosts.isValidJiraSite(site),
+              key.range(of: #"^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$"#, options: .regularExpression) != nil
+        else { return nil }
+        return URL(string: "https://\(site)/browse/\(key)")
+    }
+}
+
 /// What a tab shows. One tab per (PR, target) except `page` tabs, which a link or popup opened.
 enum ReviewTarget: Hashable {
     case conversation

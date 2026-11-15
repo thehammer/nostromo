@@ -51,6 +51,9 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
     /// `true` when this PR was authored by a known bot (dependabot, carefeed-ci).
     /// The daemon is the single source of truth — do not infer from `author`.
     public let isBot: Bool
+    /// Jira ticket keys the daemon detected (title, branch, body), at most 5.
+    /// Empty when none, or when no Jira site is configured.
+    public let tickets: [String]
 
     // MARK: Identifiable
 
@@ -79,6 +82,7 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         case ciState     = "ci_state"
         case headSha     = "head_sha"
         case isBot       = "is_bot"
+        case tickets
     }
 
     // MARK: Init
@@ -93,7 +97,8 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         url: String,
         ciState: CiState,
         headSha: String,
-        isBot: Bool = false
+        isBot: Bool = false,
+        tickets: [String] = []
     ) {
         self.repo        = repo
         self.number      = number
@@ -105,6 +110,7 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         self.ciState     = ciState
         self.headSha     = headSha
         self.isBot       = isBot
+        self.tickets     = tickets
     }
 
     // MARK: Decode with defaults
@@ -121,5 +127,6 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         ciState     = (try? c.decode(CiState.self, forKey: .ciState)) ?? .unknown
         headSha     = (try? c.decode(String.self, forKey: .headSha)) ?? ""
         isBot       = (try? c.decode(Bool.self,   forKey: .isBot))   ?? false
+        tickets     = (try? c.decode([String].self, forKey: .tickets)) ?? []
     }
 }

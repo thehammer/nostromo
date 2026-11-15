@@ -467,15 +467,7 @@ final class DynamicFocusView: NSView {
             if focus.isPerriFocus {
                 // Side-pane controls: tabs open in this focus's own pane; nothing goes to the daemon.
                 let pane = ReviewPaneRegistry.shared.model(for: focusTag)
-                wrapper.rowActions = PerriRowActions(
-                    openConversation: { repo, number in
-                        let pr = ReviewPR(repo: repo, number: number)
-                        if pr.conversationURL != nil { pane.open(pr: pr, target: .conversation) }
-                    },
-                    openDiff: { repo, number in
-                        let pr = ReviewPR(repo: repo, number: number)
-                        if pr.diffURL != nil { pane.open(pr: pr, target: .diff) }
-                    })
+                wrapper.rowActions = PerriRowActions.opening(in: pane)
             }
             wrapper.onLoadPR    = { repo, number in
                 AppStore.shared.loadPR(repo: repo, number: number, tag: focusTag)
