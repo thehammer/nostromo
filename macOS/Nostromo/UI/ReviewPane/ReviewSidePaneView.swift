@@ -11,6 +11,7 @@ final class ReviewTabItemView: NSView {
     var onSelect: ((ReviewTab) -> Void)?
     var onClose: ((ReviewTab) -> Void)?
     var onCloseOthers: ((ReviewTab) -> Void)?
+    var onMoveFocus: ((ReviewTab, Int) -> Void)?
 
     init(tab: ReviewTab, position: Int, count: Int, selected: Bool) {
         self.tab = tab
@@ -54,7 +55,27 @@ final class ReviewTabItemView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    override func mouseDown(with event: NSEvent) { onSelect?(tab) }
+    // Full Keyboard Access: the item takes focus (Tab / arrow keys move between items), Space or Return selects.
+    override var acceptsFirstResponder: Bool { true }
+    override var canBecomeKeyView: Bool { true }
+    override var focusRingType: NSFocusRingType { get { .exterior } set {} }
+    override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill() }
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 49, 36, 76: onSelect?(tab)                                   // Space, Return, Enter
+        case 123: onMoveFocus?(tab, -1)                                    // Left arrow
+        case 124: onMoveFocus?(tab, 1)                                     // Right arrow
+        case 51, 117: onClose?(tab)                                        // Delete, forward delete
+        default: super.keyDown(with: event)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(nil)    // a click hands focus to the page, as before
+        onSelect?(tab)
+    }
     override func accessibilityPerformPress() -> Bool { onSelect?(tab); return true }
     @objc private func closePressed() { onClose?(tab) }
     @objc private func closeOthersPressed() { onCloseOthers?(tab) }
@@ -92,11 +113,26 @@ final class ReviewTabStripView: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func apply(tabs: [ReviewTab], activeID: ReviewTab.ID?, make: (ReviewTab, Int, Int, Bool) -> ReviewTabItemView) {
+        // The strip is rebuilt on every change; keyboard focus on an item must survive that.
+        let focusedTab = (window?.firstResponder as? ReviewTabItemView)?.tab.id
+        let hadFocus = window?.firstResponder is ReviewTabItemView
         stack.arrangedSubviews.forEach { stack.removeArrangedSubview($0); $0.removeFromSuperview() }
         items = tabs.enumerated().map { make($1, $0 + 1, tabs.count, $1.id == activeID) }
         items.forEach { stack.addArrangedSubview($0) }
+        for (a, b) in zip(items, items.dropFirst()) { a.nextKeyView = b }
         setAccessibilityTabs(items)
         setAccessibilityChildren(items)
+        if hadFocus {
+            // The same tab if it is still there, else a neighbour-ish item (the active one).
+            let target = items.first { $0.tab.id == focusedTab } ?? items.first { $0.tab.id == activeID } ?? items.first
+            if let target { window?.makeFirstResponder(target) }
+        }
+    }
+
+    /// Moves keyboard focus `offset` items along from `tab`'s item.
+    func moveFocus(from tab: ReviewTab, by offset: Int) {
+        guard let i = items.firstIndex(where: { $0.tab.id == tab.id }), items.indices.contains(i + offset) else { return }
+        window?.makeFirstResponder(items[i + offset])
     }
 }
 
@@ -143,6 +179,8 @@ final class ReviewSidePaneView: NSView, TerminalPixelSource {
         model.$presenterID
             .sink { [weak self] id in
                 guard let self else { return }
+                // `@Published` publishes before the property changes: judge by the value delivered.
+                self.presenter = id
                 self.otherWindowCover.isHidden = id == nil || id == ObjectIdentifier(self)
                 if !self.otherWindowCover.isHidden { self.detachShown() }
                 else { self.apply(tabs: self.model.tabs, activeID: self.model.activeID) }
@@ -159,15 +197,20 @@ final class ReviewSidePaneView: NSView, TerminalPixelSource {
         if window != nil {
             model.claimPresenter(ObjectIdentifier(self))
             apply(tabs: model.tabs, activeID: model.activeID)
+        } else {
+            model.releasePresenter(ObjectIdentifier(self))
         }
     }
 
     /// Whether this view owns the web views (the most recently shown window's pane does).
-    private var isPresenter: Bool { model.presenterID == nil || model.presenterID == ObjectIdentifier(self) }
+    private var isPresenter: Bool { presenter == nil || presenter == ObjectIdentifier(self) }
+    private var presenter: ObjectIdentifier?
 
     // MARK: Tabs
 
     func focusActiveWebView() {
+        // A person driving the tabs from the keyboard keeps focus on the strip.
+        guard !(window?.firstResponder is ReviewTabItemView) else { return }
         guard isPresenter, let controller = shownController else { return }
         controller.focusWebView()
     }
@@ -186,6 +229,7 @@ final class ReviewSidePaneView: NSView, TerminalPixelSource {
             item.onSelect = { self?.model.focus($0) }
             item.onClose = { tab in Task { @MainActor in await self?.requestClose(tab) } }
             item.onCloseOthers = { tab in self?.model.closeOthers(than: tab) }
+            item.onMoveFocus = { tab, offset in self?.strip.moveFocus(from: tab, by: offset) }
             return item
         }
         guard isPresenter, window != nil else { return }
@@ -211,7 +255,8 @@ final class ReviewSidePaneView: NSView, TerminalPixelSource {
     }
 
     private func detachShown() {
-        shownController?.contentView.removeFromSuperview()
+        // Only if it is still ours: another window's pane may have taken the web view already.
+        if let view = shownController?.contentView, view.superview === contentArea { view.removeFromSuperview() }
         shownController = nil
         navObservers.removeAll()
     }

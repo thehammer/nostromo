@@ -233,6 +233,84 @@ final class ReviewPaneStoreTests: XCTestCase {
         for tab in tabs { XCTAssertTrue(Set(tab.keys).isSubset(of: allowed), "\(tab.keys.sorted())") }
     }
 
+    // MARK: SR4: what a tab's start URL may be
+
+    /// Everything the store wrote for a focus, as one string: what is on disk, whatever its shape.
+    private func rawSaved(tag: String) -> String {
+        "\(defaults.dictionary(forKey: ReviewPaneStore.key(tag)) ?? [:])"
+    }
+
+    private func savedStartStrings(tag: String) -> [String] {
+        let tabs = (defaults.dictionary(forKey: ReviewPaneStore.key(tag))?["tabs"] as? [[String: Any]]) ?? []
+        return tabs.compactMap { $0["start"] as? String }
+    }
+
+    /// A sign-in popup can be opened straight to an identity provider's URL: its START url carries the one-time
+    /// code and a fragment token. Neither may reach the disk; the tab comes back on the PR's conversation page.
+    func testAPageTabOpenedStraightToASignInURLIsSavedWithoutItsCodeOrToken() {
+        let secrets = ["ONE-TIME", "SECRET", "access_token", "code="]
+        for (n, start) in ["https://login.microsoftonline.com/x?code=ONE-TIME#access_token=SECRET",
+                           "https://evil.example/cb?code=ONE-TIME#access_token=SECRET",
+                           "http://github.com/login/oauth/authorize?code=ONE-TIME#access_token=SECRET"].enumerated() {
+            let tag = "perri-start-\(n)"
+            let first = model(tag: tag)
+            let opener = first.open(pr: pr(7), target: .conversation)
+            let popup = first.openPage(from: opener, url: url(start))
+            XCTAssertEqual(popup.startURL, url(start), "precondition: the tab itself holds the URL")
+            first.persist()
+
+            let raw = rawSaved(tag: tag)
+            for secret in secrets { XCTAssertFalse(raw.contains(secret), "SR4: \(secret) reached the disk for \(start): \(raw)") }
+
+            let restored = model(tag: tag)
+            let page = restored.tabs.first { if case .page = $0.target { return true } else { return false } }
+            XCTAssertNotNil(page, "the tab itself is still restored: \(start)")
+            XCTAssertEqual(page?.startURL, url("https://github.com/acme/web/pull/7"), "falls back to the PR's conversation page: \(start)")
+            XCTAssertEqual(page?.currentURL, url("https://github.com/acme/web/pull/7"), "and so does its last URL: \(start)")
+        }
+    }
+
+    func testADiffTabWithAnOffListStartURLFallsBackToTheConversationPageOfItsPR() {
+        let first = model(tag: "perri-start-diff")
+        first.open(pr: pr(7), target: .diff, url: url("https://evil.example/files?code=ONE-TIME"))
+        first.persist()
+
+        XCTAssertFalse(rawSaved(tag: "perri-start-diff").contains("ONE-TIME"))
+        let restored = model(tag: "perri-start-diff")
+        XCTAssertEqual(restored.tabs.first?.target, .diff, "it is still the diff tab")
+        XCTAssertEqual(restored.tabs.first?.startURL, url("https://github.com/acme/web/pull/7"))
+    }
+
+    func testAJiraStartURLOnASiteThatIsNotConfiguredIsNotSaved() {
+        jiraSite = nil
+        let first = model(tag: "perri-start-jira")
+        first.open(pr: pr(7), target: .ticket("CORE-1"), url: url("https://carefeed.atlassian.net/browse/CORE-1?token=ONE-TIME"))
+        first.persist()
+        XCTAssertFalse(rawSaved(tag: "perri-start-jira").contains("ONE-TIME"))
+        XCTAssertFalse(rawSaved(tag: "perri-start-jira").contains("atlassian.net"), "the host was not on the list either")
+    }
+
+    func testAnAllowedGitHubStartURLIsSavedWithoutItsQueryAndWithoutItsFragment() {
+        let first = model(tag: "perri-start-gh")
+        first.open(pr: pr(7), target: .diff, url: url("https://github.com/acme/web/pull/7/files?code=X#diff-1"))
+        first.persist()
+
+        XCTAssertEqual(savedStartStrings(tag: "perri-start-gh"), ["https://github.com/acme/web/pull/7/files"],
+                       "neither the query nor the fragment of a START url is kept")
+        XCTAssertFalse(rawSaved(tag: "perri-start-gh").contains("code=X"), "the last URL lost its query too: \(rawSaved(tag: "perri-start-gh"))")
+        XCTAssertEqual(model(tag: "perri-start-gh").tabs.first?.startURL, url("https://github.com/acme/web/pull/7/files"))
+    }
+
+    func testAnAllowedJiraStartURLIsSavedWithoutItsQueryAndWithoutItsFragment() {
+        jiraSite = "carefeed.atlassian.net"
+        let first = model(tag: "perri-start-jira-ok")
+        first.open(pr: pr(7), target: .ticket("CORE-1"), url: url("https://carefeed.atlassian.net/browse/CORE-1?token=ONE-TIME#comment-9"))
+        first.persist()
+
+        XCTAssertEqual(savedStartStrings(tag: "perri-start-jira-ok"), ["https://carefeed.atlassian.net/browse/CORE-1"])
+        XCTAssertFalse(rawSaved(tag: "perri-start-jira-ok").contains("ONE-TIME"))
+    }
+
     // MARK: Popups
 
     func testAnAboutBlankPopupTabIsNotSaved() {

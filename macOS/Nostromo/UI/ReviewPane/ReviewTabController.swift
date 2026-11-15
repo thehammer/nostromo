@@ -25,6 +25,8 @@ final class ReviewMessageView: NSView {
     private let button = NSButton(title: "", target: nil, action: nil)
     private var action: (() -> Void)?
     let spinner = NSProgressIndicator()
+    /// Whether the message is a "Loading…" cover (as opposed to an error or crash message).
+    private(set) var isLoading = false
 
     init(opaque: Bool) {
         super.init(frame: .zero)
@@ -74,11 +76,12 @@ final class ReviewMessageView: NSView {
         button.isHidden = title == nil
         button.title = title ?? ""
         if spinning { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        isLoading = spinning
         isHidden = false
         setAccessibilityLabel(text)
     }
 
-    func dismiss() { isHidden = true; spinner.stopAnimation(nil) }
+    func dismiss() { isHidden = true; isLoading = false; spinner.stopAnimation(nil) }
 
     func press() { action?() }
     @objc private func pressed() { action?() }
@@ -154,6 +157,13 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func loadInitial() {
         guard !isPopup, !loadStarted, webView.url == nil else { return }
         loadStarted = true
+        // WebKit never consults the policy for a `javascript:` load and never commits it: a start URL
+        // that is not https gets its notice here instead of a "Loading…" cover that nothing would dismiss.
+        guard env.hosts().isSecureScheme(tab.currentURL) else {
+            Self.log.info("review-pane event=blocked-scheme")
+            showInsecureNotice(url: tab.currentURL)
+            return
+        }
         contentView.cover.show("Loading…", spinning: true)
         // Handing the request to WebKit takes tens of milliseconds: after the pane has appeared, not before.
         let request = URLRequest(url: tab.currentURL)
@@ -172,7 +182,17 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func focusWebView() { webView.window?.makeFirstResponder(webView) }
 
-    func openCurrentInBrowser() { env.openExternal(webView.url ?? tab.currentURL) }
+    /// Only an http(s) page goes to the browser (a `javascript:` or `data:` start URL never does).
+    func openCurrentInBrowser() {
+        let url = webView.url ?? tab.currentURL
+        guard Self.isWebURL(url) else { return }
+        env.openExternal(url)
+    }
+
+    private static func isWebURL(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "https" || scheme == "http"
+    }
 
     private func observe() {
         observers.append(webView.observe(\.url, options: [.new]) { [weak self] web, _ in
@@ -199,9 +219,13 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let request = ReviewNavigationRequest(
             url: url, isMainFrame: isMain, opensNewWindow: navigationAction.targetFrame == nil,
             kind: Self.kind(of: navigationAction.navigationType),
-            recentHumanInput: self.webView.recentHumanInput,
+            recentHumanInput: false,
             isDownload: navigationAction.shouldPerformDownload)
         let decision = ReviewNavigationPolicy(hosts: env.hosts()).decide(request)
+        if case .block = decision, resolveWithGesture(request) {
+            decisionHandler(.cancel)
+            return
+        }
         switch decision {
         case .allow, .openInPane:
             if !isMain && !request.isDownload { decisionHandler(.allow); return }
@@ -210,16 +234,21 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
         case .openInDefaultBrowser(let external):
             Self.log.info("review-pane event=open-external host=\(external.host ?? "", privacy: .public)")
             env.openExternal(external)
+            dismissLoadingCover(ifMainFrame: isMain)
             decisionHandler(.cancel)
         case .block(let host):
             Self.log.info("review-pane event=blocked host=\(host, privacy: .public)")
             showBlockedNotice(host: host, url: url)
+            dismissLoadingCover(ifMainFrame: isMain)
             decisionHandler(.cancel)
         case .blockSilently:
             Self.log.info("review-pane event=blocked-scheme")
+            if isMain { showInsecureNotice(url: url) }
+            dismissLoadingCover(ifMainFrame: isMain)
             decisionHandler(.cancel)
         case .blockDownload(let download):
             showDownloadNotice(url: download)
+            dismissLoadingCover(ifMainFrame: isMain)
             decisionHandler(.cancel)
         }
     }
@@ -273,9 +302,11 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let request = ReviewNavigationRequest(
             url: url ?? URL(string: "about:blank")!, isMainFrame: true, opensNewWindow: true,
             kind: Self.kind(of: navigationAction.navigationType),
-            recentHumanInput: self.webView.recentHumanInput,
+            recentHumanInput: false,
             isDownload: navigationAction.shouldPerformDownload, isInitialBlank: blank)
-        switch ReviewNavigationPolicy(hosts: env.hosts()).decide(request) {
+        let decision = ReviewNavigationPolicy(hosts: env.hosts()).decide(request)
+        if case .block = decision, resolveWithGesture(request) { return nil }
+        switch decision {
         case .openInPane, .allow:
             return onNewWindow?(configuration, blank ? nil : url)?.webView
         case .openInDefaultBrowser(let external):
@@ -321,12 +352,52 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
         completionHandler(nil)
     }
 
+    // MARK: User gesture
+
+    /// SR3: a link or form to a host off the list goes to the default browser only when a person clicked
+    /// THAT link (mouse-up on it) or pressed Return/Space with it focused. The page cannot tell us; the
+    /// check runs after the navigation was cancelled. When a gesture is plausible the answer arrives
+    /// later (returns true: the caller cancels now); with none, the caller blocks at once (returns false).
+    private func resolveWithGesture(_ request: ReviewNavigationRequest) -> Bool {
+        guard request.kind == .link || request.kind == .form, webView.recentHumanInput else { return false }
+        let url = request.url
+        let isMain = request.isMainFrame
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // A form is submitted by a click or Return anywhere in the form; only a link is tied to one element.
+            let confirmed = request.kind == .form ? true : await self.webView.gestureConfirms(link: url)
+            if confirmed {
+                Self.log.info("review-pane event=open-external host=\(url.host ?? "", privacy: .public)")
+                self.env.openExternal(url)
+            } else {
+                Self.log.info("review-pane event=blocked host=\(url.host ?? "", privacy: .public)")
+                self.showBlockedNotice(host: url.host?.lowercased() ?? "unknown host", url: url)
+            }
+            self.dismissLoadingCover(ifMainFrame: isMain)
+        }
+        return true
+    }
+
     // MARK: Overlays
 
     private func showBlockedNotice(host: String, url: URL) {
         contentView.notice.show("Blocked a redirect to \(host).", button: "Open in Browser") { [weak self] in
             self?.env.openExternal(url)
         }
+    }
+
+    /// A blocked main-frame navigation that is not https: the notice replaces the cover, so the person is
+    /// never left looking at a spinner. The button is only offered for a web URL.
+    private func showInsecureNotice(url: URL) {
+        let host = url.host
+        let text = host.map { "Blocked a page on \($0) that isn't secure (https)." } ?? "Blocked a page that isn't secure (https)."
+        let button: String? = Self.isWebURL(url) ? "Open in Browser" : nil
+        contentView.notice.show(text, button: button, action: button == nil ? nil : { [weak self] in self?.env.openExternal(url) })
+    }
+
+    /// A blocked navigation produces no `didCommit`, so a "Loading…" cover would stay over the notice.
+    private func dismissLoadingCover(ifMainFrame isMain: Bool) {
+        if isMain, contentView.cover.isLoading { contentView.cover.dismiss() }
     }
 
     private func showDownloadNotice(url: URL?) {

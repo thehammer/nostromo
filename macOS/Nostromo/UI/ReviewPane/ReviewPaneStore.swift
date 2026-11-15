@@ -26,14 +26,28 @@ struct ReviewPaneStore {
                 || path.hasPrefix("/authorize")
             let persistable = hosts.isAllowed(tab.currentURL)
                 && (host == "github.com" || host == hosts.jiraHost) && !isSignInPath
-            self.init(repo: tab.pr.repo, number: tab.pr.number, target: tab.target, startURL: tab.startURL,
-                      lastURL: persistable ? Self.withoutQuery(tab.currentURL) : tab.startURL, title: tab.title)
+            // A start URL is judged the same way: a sign-in popup opened straight to an IdP URL carrying
+            // a one-time code must not reach the disk. Off-list start URLs fall back to the PR page.
+            let startOK = hosts.isAllowed(tab.startURL)
+                && (tab.startURL.host?.lowercased() == "github.com" || tab.startURL.host?.lowercased() == hosts.jiraHost)
+            let fallback = ReviewPaneModel.defaultURL(pr: tab.pr, target: .conversation)
+            let start = startOK ? Self.withoutQueryAndFragment(tab.startURL) : fallback
+            self.init(repo: tab.pr.repo, number: tab.pr.number, target: tab.target, startURL: start,
+                      lastURL: persistable ? Self.withoutQuery(tab.currentURL) : start, title: tab.title)
         }
 
         /// Query strings can carry one-time codes (SR4); the fragment (diff anchors) is kept.
         private static func withoutQuery(_ url: URL) -> URL {
             guard var c = URLComponents(url: url, resolvingAgainstBaseURL: false), c.query != nil else { return url }
             c.query = nil
+            return c.url ?? url
+        }
+
+        /// A start URL keeps neither query nor fragment (`#access_token=` is as secret as `?code=`).
+        private static func withoutQueryAndFragment(_ url: URL) -> URL {
+            guard var c = URLComponents(url: url, resolvingAgainstBaseURL: false), c.query != nil || c.fragment != nil else { return url }
+            c.query = nil
+            c.fragment = nil
             return c.url ?? url
         }
     }

@@ -10,8 +10,14 @@ struct ReviewPR: Hashable, Comparable {
         a.repo == b.repo ? a.number < b.number : a.repo < b.repo
     }
 
-    var conversationURL: URL { URL(string: "https://github.com/\(repo)/pull/\(number)")! }
-    var diffURL: URL { URL(string: "https://github.com/\(repo)/pull/\(number)/files")! }
+    /// `owner/name` made of the characters GitHub allows; anything else cannot be a PR we open.
+    private var hasValidRepo: Bool {
+        repo.range(of: #"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil
+    }
+
+    /// nil for a malformed repo string (no control is offered for it).
+    var conversationURL: URL? { hasValidRepo ? URL(string: "https://github.com/\(repo)/pull/\(number)") : nil }
+    var diffURL: URL? { hasValidRepo ? URL(string: "https://github.com/\(repo)/pull/\(number)/files") : nil }
 }
 
 /// What a tab shows. One tab per (PR, target) except `page` tabs, which a link or popup opened.
@@ -110,6 +116,7 @@ final class ReviewPaneModel: ObservableObject {
     @Published private(set) var presenterID: ObjectIdentifier?
 
     private let store: ReviewPaneStore?
+    private var presenterOrder: [ObjectIdentifier] = []
     private var lastNonNilPin: ReviewPR?
     private var pageCounter = 0
     private var pinCancellable: AnyCancellable?
@@ -174,7 +181,16 @@ final class ReviewPaneModel: ObservableObject {
 
     /// The most recently shown window's pane takes the web views.
     func claimPresenter(_ id: ObjectIdentifier) {
+        presenterOrder.removeAll { $0 == id }
+        presenterOrder.append(id)
         if presenterID != id { presenterID = id }
+    }
+
+    /// A pane left its window: it no longer holds the web views, and the previous window's pane (if any)
+    /// takes them back instead of showing "open in another window" forever.
+    func releasePresenter(_ id: ObjectIdentifier) {
+        presenterOrder.removeAll { $0 == id }
+        if presenterID == id { presenterID = presenterOrder.last }
     }
 
     /// Closes without asking. Moves focus to the neighbouring tab.
@@ -217,7 +233,11 @@ final class ReviewPaneModel: ObservableObject {
         sortTabs()
         guard let previous, previous != pin else { return }
         for tab in tabs where tab.pr != pin {
-            if await unsentCheck(tab) { tab.unsent = true } else { close(tab) }
+            let unsent = await unsentCheck(tab)
+            // The pin moved on while the probe ran: a newer change owns the tabs now (A -> B -> C must not
+            // let B's task close C's new tabs).
+            guard currentPin == pin else { return }
+            if unsent { tab.unsent = true } else { close(tab) }
         }
     }
 
@@ -242,11 +262,14 @@ final class ReviewPaneModel: ObservableObject {
 
     // MARK: Helpers
 
+    /// The default start page; `about:blank` (which the pane never loads) for a malformed repo.
     static func defaultURL(pr: ReviewPR, target: ReviewTarget) -> URL {
+        let url: URL?
         switch target {
-        case .conversation, .ticket, .page: return pr.conversationURL
-        case .diff: return pr.diffURL
+        case .conversation, .ticket, .page: url = pr.conversationURL
+        case .diff: url = pr.diffURL
         }
+        return url ?? URL(string: "about:blank") ?? URL(fileURLWithPath: "/")
     }
 
     private func insert(_ tab: ReviewTab) {

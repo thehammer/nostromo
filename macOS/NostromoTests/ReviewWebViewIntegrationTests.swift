@@ -444,8 +444,9 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         await assertTrueA(await spinUntilA(15) { self.notice(tab)?.isHidden == false }, "the notice appears")
         XCTAssertEqual(notice(tab)?.message, "Downloads open in your browser.")
         XCTAssertEqual(notice(tab)?.buttonTitle, "Open in Browser")
-        XCTAssertEqual(tab.controller?.webView.url, tab.startURL, "the tab stayed on its page")
-        XCTAssertEqual(tab.currentURL, tab.startURL)
+        // WebKit reports the provisional URL until the cancelled load settles: wait for it to go back.
+        await assertTrueA(await spinUntilA(5) { tab.controller?.webView.url == tab.startURL && tab.currentURL == tab.startURL },
+                          "the tab stayed on its page")
         XCTAssertEqual(world.openedExternally, [], "nothing opened by itself")
 
         notice(tab)?.press()
@@ -710,5 +711,340 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         c.contentView.cover.press()
         await assertTrueA(await spinUntilA(15) { c.contentView.cover.isHidden && !c.webView.isLoading }, "Reload brings the page back")
         XCTAssertGreaterThan(world.handler.requestCount(host: "github.com", pathPrefix: mainPath), before)
+    }
+
+    // MARK: A blocked first load never leaves a "Loading…" cover behind
+
+    /// A tab that comes back from a relaunch with `start` as its URL, shown in the window. The saved entry is
+    /// written the way an older build, or a hand-edited preference, could have written it: unsanitised.
+    private func showRestoredTab(startingAt start: URL, target: ReviewTarget = .conversation) throws -> ReviewTab {
+        let suite = "ReviewWebViewIntegrationTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let store = ReviewPaneStore(defaults: defaults, jiraSite: { nil })
+        store.save(tag: "perri-restored", ReviewPaneStore.Saved(
+            widthFraction: 0.5,
+            tabs: [ReviewPaneStore.SavedTab(repo: pr.repo, number: pr.number, target: target, startURL: start,
+                                            lastURL: start, title: "restored")],
+            activeIndex: 0))
+        let restored = ReviewPaneModel(tag: "perri-restored", store: store)
+        restored.environment = world.environment
+        restored.unsentCheck = { _ in false }
+        model = restored
+        pane = ReviewSidePaneView(model: restored)
+        window.contentView = pane
+        window.contentView?.layoutSubtreeIfNeeded()
+        return try XCTUnwrap(restored.tabs.first, "the restored tab")
+    }
+
+    /// The end state of a first load that was refused: the cover is gone, a notice says why, no spinner.
+    private func assertFirstLoadEndedInANotice(_ tab: ReviewTab, mentioning host: String?, button: String?, opens: URL?,
+                                               file: StaticString = #filePath, line: UInt = #line) async throws {
+        let c = try controller(tab, file: file, line: line)
+        await assertTrueA(await spinUntilA(15) { c.contentView.notice.isHidden == false },
+                          "a notice appears: cover \"\(c.contentView.cover.message)\" hidden \(c.contentView.cover.isHidden)",
+                          file: file, line: line)
+        await spinA(0.3)
+        XCTAssertTrue(c.contentView.cover.isHidden, "the Loading cover is gone: \"\(c.contentView.cover.message)\"", file: file, line: line)
+        XCTAssertFalse(c.contentView.cover.isLoading, "nothing is still spinning", file: file, line: line)
+        XCTAssertFalse(c.contentView.notice.message.isEmpty, "the notice says something", file: file, line: line)
+        if let host {
+            XCTAssertTrue(c.contentView.notice.message.contains(host), "the notice names the host: \(c.contentView.notice.message)",
+                          file: file, line: line)
+        }
+        XCTAssertEqual(c.contentView.notice.buttonTitle, button, file: file, line: line)
+        XCTAssertEqual(world.openedExternally, [], "nothing opens the browser by itself", file: file, line: line)
+        if let opens {
+            c.contentView.notice.press()
+            XCTAssertEqual(world.openedExternally, [opens], "the person's press hands the URL to the browser", file: file, line: line)
+        }
+    }
+
+    /// A first load that has not answered yet: the "Loading…" cover is up.
+    private func openStalledTab() async throws -> ReviewTabController {
+        world.handler.stalls = { [unowned self] url in url.host == "github.com" && url.path == self.mainPath }
+        let tab = openTab()
+        let c = try controller(tab)
+        await assertTrueA(await spinUntilA(15) { self.world.handler.requestCount(host: "github.com", pathPrefix: self.mainPath) >= 1 },
+                          "the start page was asked for")
+        XCTAssertFalse(c.contentView.cover.isHidden, "precondition: still covered")
+        XCTAssertTrue(c.contentView.cover.isLoading, "precondition: the cover is the Loading cover")
+        return c
+    }
+
+    func testARestoredJiraTabWhoseSiteIsNoLongerConfiguredEndsInANoticeNotASpinner() async throws {
+        world.jiraSite = nil
+        let jira = reviewFixtureURL("carefeed.atlassian.net/browse/CORE-1")
+        let tab = try showRestoredTab(startingAt: jira, target: .ticket("CORE-1"))
+
+        try await assertFirstLoadEndedInANotice(tab, mentioning: "carefeed.atlassian.net", button: "Open in Browser", opens: jira)
+        XCTAssertEqual(world.handler.requests(toHost: "carefeed.atlassian.net"), [], "the blocked page was never requested")
+    }
+
+    func testARestoredJiraTabOnTheConfiguredSiteLoadsNormally() async throws {
+        world.jiraSite = "carefeed.atlassian.net"
+        let tab = try showRestoredTab(startingAt: reviewFixtureURL("carefeed.atlassian.net/browse/CORE-1"), target: .ticket("CORE-1"))
+        try await waitForLoaded(tab)
+        let c = try controller(tab)
+        XCTAssertTrue(c.contentView.notice.isHidden)
+        XCTAssertEqual(world.openedExternally, [])
+    }
+
+    func testAHopToAnOffListHostDuringTheFirstLoadEndsInANoticeNotASpinner() async throws {
+        // The fixture scheme cannot answer with a 3xx, so the hop is the navigation WebKit would report for a
+        // redirect: a main-frame request to another host, arriving while the start page has not committed.
+        let c = try await openStalledTab()
+        let idp = reviewFixtureURL("login.idp.example/authorize?code=ONE-TIME")
+
+        c.webView.load(URLRequest(url: idp))
+
+        try await assertFirstLoadEndedInANotice(c.tab, mentioning: "login.idp.example", button: "Open in Browser", opens: idp)
+        XCTAssertEqual(world.handler.requests(toHost: "login.idp.example"), [], "the IdP was never requested")
+    }
+
+    func testAnHTTPStartURLEndsInANoticeNamingTheHostAndOffersTheBrowser() async throws {
+        let http = URL(string: "http://github.com/acme/web/pull/7")!
+        let tab = try showRestoredTab(startingAt: http)
+
+        try await assertFirstLoadEndedInANotice(tab, mentioning: "github.com", button: "Open in Browser", opens: http)
+    }
+
+    func testAnHTTPHopDuringTheFirstLoadEndsInANoticeNotASpinner() async throws {
+        let c = try await openStalledTab()
+        let http = URL(string: "http://github.com/acme/web/pull/7/files")!
+
+        c.webView.load(URLRequest(url: http))
+
+        try await assertFirstLoadEndedInANotice(c.tab, mentioning: "github.com", button: "Open in Browser", opens: http)
+    }
+
+    func testAJavaScriptStartURLEndsInANoticeWithNoSpinnerAndNeverReachesTheBrowser() async throws {
+        let script = try XCTUnwrap(URL(string: "javascript:alert(1)"))
+        let tab = try showRestoredTab(startingAt: script)
+
+        try await assertFirstLoadEndedInANotice(tab, mentioning: nil, button: nil, opens: nil)
+        let c = try controller(tab)
+        c.openCurrentInBrowser()
+        c.contentView.notice.press()
+        XCTAssertEqual(world.openedExternally, [], "a javascript: URL is never handed to the browser")
+    }
+
+    func testOpenInBrowserNeverHandsOverAScriptOrDataURL() async throws {
+        for text in ["javascript:alert(1)", "data:text/html,hi", "file:///etc/hosts"] {
+            let tab = try showRestoredTab(startingAt: try XCTUnwrap(URL(string: text)))
+            let c = try controller(tab)
+            c.openCurrentInBrowser()
+            XCTAssertEqual(world.openedExternally, [], text)
+        }
+    }
+
+    // MARK: The gesture is on THAT link (SR3)
+
+    private let gesturePage = """
+        <textarea id="t" style="position:absolute;left:20px;top:20px;width:400px;height:100px"></textarea>
+        <a id="out" href="nostromo-fixture://evil.example/landing" style="position:absolute;left:20px;top:200px;width:300px;height:80px;display:block;background:#ccc">outside</a>
+        <a id="other" href="nostromo-fixture://evil.example/other" style="position:absolute;left:20px;top:300px;width:300px;height:80px;display:block;background:#ddd">other</a>
+        <div id="blank" style="position:absolute;left:20px;top:420px;width:300px;height:80px;background:#eee"></div>
+        """
+
+    private func openGestureTab() async throws -> ReviewTab {
+        serve(mainPath, ReviewFixtureHandler.html(gesturePage))
+        let tab = openTab()
+        try await waitForLoaded(tab)
+        return tab
+    }
+
+    private func centre(of id: String, in tab: ReviewTab) async throws -> NSPoint {
+        let box = await js(tab, "(function(){var b=document.getElementById('\(id)').getBoundingClientRect();return [b.left+b.width/2,b.top+b.height/2];})()") as? [Double]
+        let xy = try XCTUnwrap(box, "#\(id) has a box")
+        return try clickPoint(tab, x: CGFloat(xy[0]), y: CGFloat(xy[1]))
+    }
+
+    private func scriptClick(_ id: String, in tab: ReviewTab) async {
+        _ = await js(tab, "document.getElementById('\(id)').click(); true")
+    }
+
+    private func assertBlockedWithNotice(_ tab: ReviewTab, file: StaticString = #filePath, line: UInt = #line) async {
+        await assertTrueA(await spinUntilA(10) { self.notice(tab)?.isHidden == false }, "blocked with a notice", file: file, line: line)
+        XCTAssertTrue(notice(tab)?.message.contains("evil.example") == true, "the notice names the host: \(notice(tab)?.message ?? "nil")",
+                      file: file, line: line)
+        await spinA(0.4)
+        XCTAssertEqual(world.openedExternally, [], "SR3: not a person's gesture on that link", file: file, line: line)
+        assertTabStayedPut(tab, file: file, line: line)
+        assertNoRequestReachedEvil(file: file, line: line)
+    }
+
+    func testTypingInATextareaThenAScriptClickOnAnOutsideLinkDoesNotOpenTheBrowser() async throws {
+        let tab = try await openGestureTab()
+        try await typeInto("t", "hello", tab: tab)
+
+        await scriptClick("out", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    func testARealClickOnTheOutsideLinkOpensTheBrowserOnce() async throws {
+        let tab = try await openGestureTab()
+        let point = try await centre(of: "out", in: tab)
+
+        ReviewEvents.click(at: point, in: window)
+
+        await assertTrueA(await spinUntilA(10) { !self.world.openedExternally.isEmpty }, "the click opened the link")
+        await spinA(0.4)
+        XCTAssertEqual(world.openedExternally, [reviewFixtureURL("evil.example/landing")])
+        assertTabStayedPut(tab)
+        assertNoRequestReachedEvil()
+    }
+
+    func testARealClickElsewhereThenAScriptClickOnTheLinkDoesNotOpenTheBrowser() async throws {
+        let tab = try await openGestureTab()
+        let elsewhere = try await centre(of: "blank", in: tab)
+
+        ReviewEvents.click(at: elsewhere, in: window)
+        await scriptClick("out", in: tab)          // well inside the one-second window
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    func testARealClickInTheTextareaThenAScriptClickOnTheLinkDoesNotOpenTheBrowser() async throws {
+        let tab = try await openGestureTab()
+        let inside = try await centre(of: "t", in: tab)
+
+        ReviewEvents.click(at: inside, in: window)
+        await scriptClick("out", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    func testARealClickOnOneLinkDoesNotAuthoriseAScriptClickOnAnother() async throws {
+        let tab = try await openGestureTab()
+        let first = try await centre(of: "out", in: tab)
+
+        ReviewEvents.click(at: first, in: window)
+        await assertTrueA(await spinUntilA(10) { !self.world.openedExternally.isEmpty }, "the first link opened")
+        await scriptClick("other", in: tab)
+
+        await assertTrueA(await spinUntilA(10) { self.notice(tab)?.isHidden == false }, "the second was blocked")
+        await spinA(0.4)
+        XCTAssertEqual(world.openedExternally, [reviewFixtureURL("evil.example/landing")], "only the link that was clicked")
+    }
+
+    func testReturnOnAFocusedOutsideLinkThenAScriptClickOpensTheBrowser() async throws {
+        let tab = try await openGestureTab()
+        let c = try controller(tab)
+        // The page ignores Return itself, so only the person's key press can account for the click that follows.
+        _ = await js(tab, "var l=document.getElementById('out'); l.addEventListener('keydown',function(e){e.preventDefault();}); l.focus(); true")
+        window.makeFirstResponder(c.webView)
+
+        ReviewEvents.key(36, characters: "\r", in: window)
+        await scriptClick("out", in: tab)
+
+        await assertTrueA(await spinUntilA(10) { !self.world.openedExternally.isEmpty }, "Return with the link focused is a gesture on it")
+        await spinA(0.3)
+        XCTAssertEqual(world.openedExternally, [reviewFixtureURL("evil.example/landing")])
+        assertNoRequestReachedEvil()
+    }
+
+    func testReturnOnAFocusedOutsideLinkActivatesItAndOpensTheBrowser() async throws {
+        let tab = try await openGestureTab()
+        let c = try controller(tab)
+        _ = await js(tab, "document.getElementById('out').focus(); true")
+        window.makeFirstResponder(c.webView)
+
+        ReviewEvents.key(36, characters: "\r", in: window)
+
+        await assertTrueA(await spinUntilA(10) { !self.world.openedExternally.isEmpty }, "Return on the focused link follows it")
+        XCTAssertEqual(world.openedExternally.first, reviewFixtureURL("evil.example/landing"))
+        assertTabStayedPut(tab)
+    }
+
+    func testReturnInATextareaThenAScriptClickOnTheLinkDoesNotOpenTheBrowser() async throws {
+        let tab = try await openGestureTab()
+        let c = try controller(tab)
+        _ = await js(tab, "document.getElementById('t').focus(); true")
+        window.makeFirstResponder(c.webView)
+
+        ReviewEvents.key(36, characters: "\r", in: window)
+        await scriptClick("out", in: tab)
+
+        await assertBlockedWithNotice(tab)
+    }
+
+    // MARK: Unsent-text probe is bounded even when the page is busy
+
+    func testTheUnsentProbeReturnsPromptlyAndReportsUnsentWhileThePageIsBusy() async throws {
+        let tab = try await openFormTab()
+        let c = try controller(tab)
+        // The page is stuck in a three second loop when the probe asks.
+        _ = await js(tab, "setTimeout(function(){var t=Date.now();while(Date.now()-t<3000);},0); true")
+        await spinA(0.15)
+
+        let started = Date()
+        let unsent = await c.hasUnsentInput()
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertTrue(unsent, "no answer in time counts as unsent: the tab is kept")
+        XCTAssertLessThan(elapsed, 1.5, "a busy page does not hold the caller up (took \(elapsed) s)")
+        XCTAssertGreaterThanOrEqual(elapsed, 0.4, "it did wait for the page for its bound (took \(elapsed) s)")
+        _ = try? await c.webView.evaluateJavaScript("1")       // let the page finish its loop before teardown
+    }
+
+    func testTheUnsentProbeOnAQuietPageWithNoTextAnswersFalseQuickly() async throws {
+        let tab = try await openFormTab()
+        let c = try controller(tab)
+
+        let started = Date()
+        let unsent = await c.hasUnsentInput()
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertFalse(unsent)
+        XCTAssertLessThan(elapsed, 0.4, "took \(elapsed) s")
+    }
+
+    // MARK: Two windows, one pane
+
+    private let otherWindowText = "Side pane is open in another window."
+
+    private func openElsewhereCover(in root: NSView) -> ReviewMessageView? {
+        func walk(_ view: NSView) -> [ReviewMessageView] {
+            view.subviews.flatMap { sub -> [ReviewMessageView] in
+                var found = walk(sub)
+                if let cover = sub as? ReviewMessageView { found.append(cover) }
+                return found
+            }
+        }
+        return walk(root).first { $0.message == otherWindowText }
+    }
+
+    func testASecondWindowTakesThePaneAndHandsItBackWhenItLeaves() async throws {
+        let tab = openTab()
+        try await waitForLoaded(tab)
+        let c = try controller(tab)
+        let first = try XCTUnwrap(pane)
+        let firstID = ObjectIdentifier(first)
+        XCTAssertEqual(model.presenterID, firstID, "precondition: the only window presents")
+        XCTAssertEqual(openElsewhereCover(in: first)?.isHidden, true, "and shows no 'other window' cover")
+
+        let secondWindow = ReviewTestWindow.make(size: NSSize(width: 900, height: 700))
+        defer { secondWindow.contentView = NSView(); secondWindow.close() }
+        let second = ReviewSidePaneView(model: model)
+        let secondID = ObjectIdentifier(second)
+        secondWindow.contentView = second
+        secondWindow.contentView?.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(model.presenterID, secondID, "the window shown last presents")
+        XCTAssertEqual(openElsewhereCover(in: first)?.isHidden, false, "the first window says the pane is open in another window")
+        XCTAssertEqual(openElsewhereCover(in: second)?.isHidden, true)
+        XCTAssertTrue(c.contentView.isDescendant(of: second), "the web view is in the second window")
+        XCTAssertFalse(c.contentView.isDescendant(of: first))
+
+        secondWindow.contentView = NSView()         // the second window's pane leaves its window
+
+        XCTAssertEqual(model.presenterID, firstID, "the first window presents again")
+        XCTAssertEqual(openElsewhereCover(in: first)?.isHidden, true, "its cover is gone")
+        XCTAssertTrue(c.contentView.isDescendant(of: first), "and it shows the web view again")
+
+        window.contentView = NSView()               // the only presenter leaves
+        XCTAssertNil(model.presenterID, "nothing presents")
     }
 }

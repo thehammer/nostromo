@@ -94,6 +94,9 @@ final class ReviewFixtureHandler: NSObject, WKURLSchemeHandler {
     private(set) var requested: [URL] = []
     /// Decides the response for a URL. Replace it per test.
     var respond: (URL) -> Response = { _ in Response() }
+    /// URLs for which the handler records the request and then never answers (a page that is slow to start:
+    /// the tab's "Loading..." cover stays up).
+    var stalls: (URL) -> Bool = { _ in false }
 
     func requestCount(host: String, pathPrefix: String = "") -> Int {
         requested.filter { $0.host == host && $0.path.hasPrefix(pathPrefix) }.count
@@ -107,6 +110,7 @@ final class ReviewFixtureHandler: NSObject, WKURLSchemeHandler {
             return
         }
         requested.append(url)
+        if stalls(url) { return }
         let r = respond(url)
         if let failure = r.failure {
             urlSchemeTask.didFailWithError(failure)
@@ -194,6 +198,19 @@ enum ReviewEvents {
         "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37, "j": 38,
         "k": 40, "n": 45, "m": 46,
     ]
+
+    /// A key press (down and up) for a key that is not a character key: Return is 36 / "\r", Space is 49 / " ",
+    /// Left arrow is 123, Right arrow is 124.
+    @MainActor
+    static func key(_ keyCode: UInt16, characters: String = "", in window: NSWindow) {
+        for kind in [NSEvent.EventType.keyDown, .keyUp] {
+            let event = NSEvent.keyEvent(with: kind, location: .zero, modifierFlags: [],
+                                         timestamp: ProcessInfo.processInfo.systemUptime,
+                                         windowNumber: window.windowNumber, context: nil, characters: characters,
+                                         charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)!
+            window.sendEvent(event)
+        }
+    }
 
     @MainActor
     static func backspace(_ count: Int, in window: NSWindow) {

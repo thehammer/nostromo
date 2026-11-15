@@ -420,6 +420,34 @@ final class ReviewPaneModelTests: XCTestCase {
         XCTAssertEqual(model.tabs.count, 0, "a different PR closes both")
     }
 
+    /// A -> B -> C while B's tabs are still being checked. B's pass must notice the pin moved on and leave
+    /// everything to C's pass: it must not close tabs that belong to C (here: a C tab the person opened earlier).
+    func testAPinThatMovesOnWhileTabsAreBeingCheckedLeavesTheNewPRsTabsAlone() async {
+        let model = makeModel()
+        model.unsentCheck = { _ in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            return false
+        }
+        await model.pinChanged(to: pr(1))                                   // A
+        let a = model.open(pr: pr(1), target: .conversation)
+        let b = model.open(pr: pr(2), target: .conversation)
+        let c = model.open(pr: pr(3), target: .conversation)
+        let c2 = model.open(pr: pr(3), target: .diff)
+
+        let toB = Task { @MainActor in await model.pinChanged(to: self.pr(2)) }      // B's pass is mid-probe...
+        try? await Task.sleep(nanoseconds: 30_000_000)
+        let toC = Task { @MainActor in await model.pinChanged(to: self.pr(3)) }      // ...when the pin moves to C
+        await toB.value
+        await toC.value
+
+        XCTAssertEqual(model.currentPin, pr(3))
+        XCTAssertTrue(model.tabs.contains { $0.id == c.id }, "C's conversation tab survived B's pass")
+        XCTAssertTrue(model.tabs.contains { $0.id == c2.id }, "C's diff tab survived B's pass")
+        XCTAssertFalse(model.tabs.contains { $0.id == a.id }, "A's tab is closed")
+        XCTAssertFalse(model.tabs.contains { $0.id == b.id }, "B's tab is closed")
+        XCTAssertEqual(model.tabs.count, 2)
+    }
+
     // MARK: One pane per focus
 
     func testEachFocusTagHasItsOwnIndependentPane() throws {
@@ -471,5 +499,95 @@ final class ReviewPaneModelTests: XCTestCase {
         XCTAssertFalse(fresh === model)
         XCTAssertFalse(fresh.isVisible, "no tabs come back")
         XCTAssertEqual(fresh.widthFraction, ReviewPaneModel.defaultWidthFraction, "nor the width")
+    }
+
+    // MARK: Two windows, one pane
+
+    func testTheMostRecentWindowHoldsThePaneAndHandsItBackWhenItLeaves() {
+        let model = makeModel()
+        let first = NSObject(), second = NSObject()
+        let firstID = ObjectIdentifier(first), secondID = ObjectIdentifier(second)
+        XCTAssertNil(model.presenterID)
+
+        model.claimPresenter(firstID)
+        XCTAssertEqual(model.presenterID, firstID)
+        model.claimPresenter(secondID)
+        XCTAssertEqual(model.presenterID, secondID, "the most recently shown window takes the pane")
+
+        model.releasePresenter(secondID)
+        XCTAssertEqual(model.presenterID, firstID, "the earlier window takes it back")
+
+        model.releasePresenter(secondID)
+        XCTAssertEqual(model.presenterID, firstID, "releasing a window that no longer holds it changes nothing")
+
+        model.releasePresenter(firstID)
+        XCTAssertNil(model.presenterID, "no window shows the pane")
+    }
+
+    func testAWindowThatLeavesWithoutHoldingThePaneIsForgotten() {
+        let model = makeModel()
+        let first = NSObject(), second = NSObject()
+        let firstID = ObjectIdentifier(first), secondID = ObjectIdentifier(second)
+        model.claimPresenter(firstID)
+        model.claimPresenter(secondID)
+
+        model.releasePresenter(firstID)          // the older window goes away while the newer holds the pane
+        XCTAssertEqual(model.presenterID, secondID)
+
+        model.releasePresenter(secondID)
+        XCTAssertNil(model.presenterID, "the gone window is not handed the pane")
+    }
+
+    func testReclaimingMovesAWindowToTheFront() {
+        let model = makeModel()
+        let first = NSObject(), second = NSObject()
+        let firstID = ObjectIdentifier(first), secondID = ObjectIdentifier(second)
+        model.claimPresenter(firstID)
+        model.claimPresenter(secondID)
+        model.claimPresenter(firstID)          // the first window was shown again
+        XCTAssertEqual(model.presenterID, firstID)
+
+        model.releasePresenter(firstID)
+        XCTAssertEqual(model.presenterID, secondID)
+    }
+
+    // MARK: A PR whose repo is not owner/name
+
+    func testAMalformedRepoHasNoPullRequestPageURLs() {
+        for repo in ["bad repo/../x", "", "owner", "a/b/c", "a b/c", "a/b?x=y", "a/b#frag", "owner/", "/name", "a/b c",
+                     "a/b%2Fc", "a\\b/c", "ow@ner/name", "ow:ner/name", "https://evil.example/x"] {
+            let bad = ReviewPR(repo: repo, number: 1)
+            XCTAssertNil(bad.conversationURL, "conversation: \(repo.debugDescription)")
+            XCTAssertNil(bad.diffURL, "diff: \(repo.debugDescription)")
+        }
+    }
+
+    func testAWellFormedRepoHasItsPullRequestPageURLs() {
+        let good = ReviewPR(repo: "acme/web", number: 7)
+        XCTAssertEqual(good.conversationURL, url("https://github.com/acme/web/pull/7"))
+        XCTAssertEqual(good.diffURL, url("https://github.com/acme/web/pull/7/files"))
+        let dotted = ReviewPR(repo: "Acme-Inc/web_app.v2", number: 12)
+        XCTAssertEqual(dotted.conversationURL, url("https://github.com/Acme-Inc/web_app.v2/pull/12"))
+    }
+
+    func testAMalformedRepoDefaultsToABlankPageWithoutCrashing() {
+        let bad = ReviewPR(repo: "bad repo/../x", number: 1)
+        for target: ReviewTarget in [.conversation, .diff, .ticket("CORE-1"), .page(1)] {
+            XCTAssertEqual(ReviewPaneModel.defaultURL(pr: bad, target: target), url("about:blank"), "\(target)")
+        }
+        XCTAssertEqual(ReviewPaneModel.defaultURL(pr: pr(7), target: .diff), url("https://github.com/acme/web/pull/7/files"))
+
+        let model = makeModel()
+        let tab = model.open(pr: bad, target: .conversation)
+        XCTAssertEqual(tab.startURL, url("about:blank"), "opening it anyway does not crash and loads nothing")
+    }
+
+    /// `$` in an ICU pattern also matches before a trailing line break.
+    func testARepoWithALineBreakInItHasNoPullRequestPageURLs() {
+        for repo in ["acme/web\n", "acme/web\r\n", "acme\n/web", "\nacme/web"] {
+            let bad = ReviewPR(repo: repo, number: 1)
+            XCTAssertNil(bad.conversationURL, "conversation: \(repo.debugDescription)")
+            XCTAssertNil(bad.diffURL, "diff: \(repo.debugDescription)")
+        }
     }
 }

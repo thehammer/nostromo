@@ -312,6 +312,150 @@ final class ReviewPaneAccessibilityTests: XCTestCase {
         rig.model.close(tab)
         XCTAssertTrue(spinUntil(2) { rig.window.firstResponder === rig.focus }, "\(String(describing: rig.window.firstResponder))")
     }
+
+    // MARK: Tab items take keyboard focus (Full Keyboard Access)
+
+    private func strip(_ rig: Rig) -> ReviewTabStripView { rig.container.pane.strip }
+
+    private func focusedItem(_ rig: Rig) -> ReviewTabItemView? { rig.window.firstResponder as? ReviewTabItemView }
+
+    private func otherPR(_ number: Int) -> ReviewPR { ReviewPR(repo: "acme/web", number: number) }
+
+    func testATabItemCanTakeKeyboardFocusAndIsInTheKeyViewLoop() {
+        let tab = ReviewTab(pr: pr, target: .conversation, startURL: URL(string: "https://github.com/acme/web/pull/4520")!)
+        let item = ReviewTabItemView(tab: tab, position: 1, count: 1, selected: true)
+        XCTAssertTrue(item.acceptsFirstResponder)
+        XCTAssertTrue(item.canBecomeKeyView)
+    }
+
+    func testTheTabItemsAreChainedIntoTheKeyViewLoopInOrder() {
+        let rig = makeRig()
+        openTab(rig)
+        openTab(rig, .diff, path: "/acme/web/pull/4520/files")
+        openTab(rig, .ticket("CORE-1"), path: "/browse/CORE-1")
+        let items = strip(rig).items
+        XCTAssertEqual(items.count, 3)
+        XCTAssertTrue(items[0].nextKeyView === items[1])
+        XCTAssertTrue(items[1].nextKeyView === items[2])
+    }
+
+    func testAnItemTakesFocusWhenAskedAndAClickOnItSelectsItsTab() throws {
+        let rig = makeRig()
+        openTab(rig)
+        openTab(rig, .diff, path: "/acme/web/pull/4520/files")
+        let items = strip(rig).items
+
+        XCTAssertTrue(rig.window.makeFirstResponder(items[0]))
+        XCTAssertTrue(focusedItem(rig) === items[0])
+
+        rig.container.layoutSubtreeIfNeeded()
+        let centre = items[1].convert(NSPoint(x: 3, y: items[1].bounds.midY), to: nil)
+        ReviewEvents.click(at: centre, in: rig.window)
+        XCTAssertEqual(rig.model.activeID, items[1].tab.id, "the click selected it")
+    }
+
+    /// A strip rebuild that is not a selection (the pinned PR changes the tab order) used to drop keyboard
+    /// focus: the focused item was removed from the window and the new items started unfocused.
+    func testKeyboardFocusOnATabSurvivesTheStripBeingRebuilt() async throws {
+        let rig = makeRig()
+        let later = rig.model.open(pr: otherPR(4521), target: .conversation, url: reviewFixtureURL("github.com/acme/web/pull/4521"))
+        let earlier = rig.model.open(pr: otherPR(4520), target: .conversation, url: reviewFixtureURL("github.com/acme/web/pull/4520"))
+        XCTAssertEqual(strip(rig).items.map(\.tab.id), [earlier.id, later.id], "precondition: ordered by PR number")
+        let before = strip(rig).items
+        XCTAssertTrue(rig.window.makeFirstResponder(before[1]))
+
+        await rig.model.pinChanged(to: otherPR(4521))        // the pinned PR's tab moves to the front
+
+        let after = strip(rig).items
+        XCTAssertEqual(after.map(\.tab.id), [later.id, earlier.id], "the strip was rebuilt in the new order")
+        XCTAssertFalse(after[0] === before[1], "with new item views")
+        let focused = try XCTUnwrap(focusedItem(rig), "still on an item: \(String(describing: rig.window.firstResponder))")
+        XCTAssertEqual(focused.tab.id, later.id, "the same tab")
+        XCTAssertTrue(focused === after[0])
+    }
+
+    func testKeyboardFocusStaysInTheStripWhenTheModelChangesAroundIt() throws {
+        let rig = makeRig()
+        let first = openTab(rig)
+        openTab(rig, .diff, path: "/acme/web/pull/4520/files")
+        XCTAssertTrue(rig.window.makeFirstResponder(strip(rig).items[0]))
+
+        // Another tab opens.
+        openTab(rig, .ticket("CORE-1"), path: "/browse/CORE-1")
+        XCTAssertEqual(focusedItem(rig)?.tab.id, first.id, "after another tab opened: \(String(describing: rig.window.firstResponder))")
+
+        // A different tab is focused through the model.
+        let diff = try XCTUnwrap(rig.model.tabs.first { $0.target == .diff })
+        rig.model.focus(diff)
+        XCTAssertNotNil(focusedItem(rig), "after another tab was focused: \(String(describing: rig.window.firstResponder))")
+    }
+
+    func testClosingTheFocusedTabMovesKeyboardFocusToTheActiveTabsItem() throws {
+        let rig = makeRig()
+        let first = openTab(rig)
+        let second = openTab(rig, .diff, path: "/acme/web/pull/4520/files")
+        XCTAssertTrue(rig.window.makeFirstResponder(strip(rig).items[0]))
+        XCTAssertEqual(focusedItem(rig)?.tab.id, first.id)
+
+        rig.model.close(first)
+
+        XCTAssertEqual(rig.model.activeID, second.id)
+        let focused = try XCTUnwrap(focusedItem(rig), "still on an item: \(String(describing: rig.window.firstResponder))")
+        XCTAssertEqual(focused.tab.id, second.id, "the tab that is active now")
+    }
+
+    func testSpaceAndReturnOnAFocusedItemSelectItsTab() throws {
+        for (code, characters) in [(UInt16(49), " "), (UInt16(36), "\r"), (UInt16(76), "\u{3}")] {
+            let rig = makeRig()
+            let first = openTab(rig)
+            let second = openTab(rig, .diff, path: "/acme/web/pull/4520/files")
+            XCTAssertEqual(rig.model.activeID, second.id, "precondition")
+            XCTAssertTrue(rig.window.makeFirstResponder(strip(rig).items[0]))
+
+            ReviewEvents.key(code, characters: characters, in: rig.window)
+
+            XCTAssertEqual(rig.model.activeID, first.id, "key \(code) selected the focused item's tab")
+            XCTAssertNotNil(rig.model.activeTab)
+            rig.model.close(first); rig.model.close(second)
+        }
+    }
+
+    /// Selecting with the keyboard must not throw the person out of the strip: they chose a tab with Space
+    /// and may want to arrow on to the next one.
+    func testKeyboardFocusStaysOnTheNewItemAfterSpaceSelectsATab() throws {
+        let rig = makeRig()
+        let first = openTab(rig)
+        openTab(rig, .diff, path: "/acme/web/pull/4520/files")
+        XCTAssertTrue(rig.window.makeFirstResponder(strip(rig).items[0]))
+
+        ReviewEvents.key(49, characters: " ", in: rig.window)
+
+        XCTAssertEqual(rig.model.activeID, first.id, "precondition: Space selected the focused tab")
+        let focused = try XCTUnwrap(focusedItem(rig), "still on an item: \(String(describing: rig.window.firstResponder))")
+        XCTAssertEqual(focused.tab.id, first.id, "the item of the tab just selected")
+    }
+
+    func testLeftAndRightArrowsMoveFocusBetweenTheItems() throws {
+        let rig = makeRig()
+        openTab(rig)
+        openTab(rig, .diff, path: "/acme/web/pull/4520/files")
+        openTab(rig, .ticket("CORE-1"), path: "/browse/CORE-1")
+        let items = strip(rig).items
+        XCTAssertTrue(rig.window.makeFirstResponder(items[0]))
+
+        ReviewEvents.key(124, in: rig.window)       // right
+        XCTAssertTrue(focusedItem(rig) === items[1], "right moved to the second")
+        ReviewEvents.key(124, in: rig.window)
+        XCTAssertTrue(focusedItem(rig) === items[2], "and the third")
+        ReviewEvents.key(124, in: rig.window)
+        XCTAssertTrue(focusedItem(rig) === items[2], "the last item has nothing to its right")
+        ReviewEvents.key(123, in: rig.window)       // left
+        XCTAssertTrue(focusedItem(rig) === items[1], "left moved back")
+        ReviewEvents.key(123, in: rig.window)
+        ReviewEvents.key(123, in: rig.window)
+        XCTAssertTrue(focusedItem(rig) === items[0], "the first item has nothing to its left")
+        XCTAssertEqual(rig.model.tabs.count, 3, "moving focus selects and closes nothing")
+    }
 }
 
 // MARK: - Criterion 41: no new key equivalents

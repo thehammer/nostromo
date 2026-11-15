@@ -24,9 +24,15 @@ struct ReviewPaneHosts: Equatable {
     /// Fixture scheme counted as `https` (tests only; see `init(jiraSite:fixtureScheme:)`).
     private var fixtureScheme: String?
 
+    /// A Jira Cloud site: exactly one lowercase label before `.atlassian.net`. Anything else (another
+    /// domain, a deeper subdomain, a port, a path, userinfo, a trailing dot, punycode) is no site at all.
+    static func isValidJiraSite(_ site: String) -> Bool {
+        guard site.range(of: #"^[a-z0-9-]+\.atlassian\.net$"#, options: .regularExpression) != nil else { return false }
+        return !site.hasPrefix("xn--")
+    }
+
     init(jiraSite: String?) {
-        let trimmed = jiraSite?.trimmingCharacters(in: .whitespaces).lowercased()
-        jiraHost = (trimmed?.isEmpty == false) ? trimmed : nil
+        jiraHost = jiraSite.flatMap { Self.isValidJiraSite($0) ? $0 : nil }
         fixtureScheme = nil
     }
 

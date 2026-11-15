@@ -1,31 +1,78 @@
 import AppKit
 import WebKit
 
-/// A `WKWebView` that records when a **person** last clicked or typed in it. The navigation policy
-/// treats a link click as a user gesture only when a human event reached the view within
-/// `gestureWindow`; page script cannot fake that (SR3). Events app-control synthesised
-/// (`SyntheticInputGate`) never count.
+/// A `WKWebView` that records the last gesture a **person** made in it. The navigation policy treats a
+/// link click as a user gesture only when a human mouse-up landed ON that link, or Return/Space was
+/// pressed with that link focused, within `gestureWindow` (checked by `gestureConfirms(link:)`); page
+/// script cannot fake either (SR3). Events app-control synthesised (`SyntheticInputGate`) never count.
 final class ReviewWebView: WKWebView {
 
     static let gestureWindow: TimeInterval = 1
 
-    private var lastHumanInput: TimeInterval?
+    private enum Gesture {
+        /// A mouse-up at a point in this view's (flipped, top-left origin) coordinates.
+        case click(CGPoint)
+        /// Return or Space: acts on the focused element.
+        case key
+    }
 
-    var recentHumanInput: Bool {
-        guard let last = lastHumanInput else { return false }
-        return ProcessInfo.processInfo.systemUptime - last <= Self.gestureWindow
+    private var lastGesture: (gesture: Gesture, at: TimeInterval)?
+
+    /// A person clicked or pressed Return/Space in the view within `gestureWindow`. Necessary, not
+    /// sufficient: `gestureConfirms(link:)` decides whether it was on the link.
+    var recentHumanInput: Bool { recentGesture != nil }
+
+    private var recentGesture: Gesture? {
+        guard let last = lastGesture, ProcessInfo.processInfo.systemUptime - last.at <= Self.gestureWindow else { return nil }
+        return last.gesture
     }
 
     /// The first click on a link in an inactive window follows the link, as in a browser.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func mouseDown(with event: NSEvent) { note(event); super.mouseDown(with: event) }
-    override func rightMouseDown(with event: NSEvent) { note(event); super.rightMouseDown(with: event) }
-    override func keyDown(with event: NSEvent) { note(event); super.keyDown(with: event) }
+    override func mouseUp(with event: NSEvent) {
+        if !SyntheticInputGate.isSynthetic(event) {
+            lastGesture = (.click(convert(event.locationInWindow, from: nil)), ProcessInfo.processInfo.systemUptime)
+        }
+        super.mouseUp(with: event)
+    }
 
-    private func note(_ event: NSEvent) {
-        guard !SyntheticInputGate.isSynthetic(event) else { return }
-        lastHumanInput = ProcessInfo.processInfo.systemUptime
+    override func keyDown(with event: NSEvent) {
+        // Return, keypad Enter, Space. Any other key (typing) is not a gesture and forgets an earlier one.
+        if !SyntheticInputGate.isSynthetic(event), [36, 76, 49].contains(event.keyCode) {
+            lastGesture = (.key, ProcessInfo.processInfo.systemUptime)
+        } else {
+            lastGesture = nil
+        }
+        super.keyDown(with: event)
+    }
+
+    /// Whether the recent human gesture was on the link to `url`: the mouse-up was over an `<a href>` for
+    /// it, or the focused element is one. False when there was no recent gesture, or the page did not
+    /// answer in time.
+    @MainActor
+    func gestureConfirms(link url: URL) async -> Bool {
+        guard let gesture = recentGesture else { return false }
+        let target = Self.jsString(url.absoluteString)
+        let script: String
+        switch gesture {
+        case .click(let p):
+            script = "(function(){const el=document.elementFromPoint(\(p.x),\(p.y));const a=el&&el.closest('a[href]');"
+                + "return !!a && new URL(a.href).href===new URL(\(target)).href;})();"
+        case .key:
+            script = "(function(){const el=document.activeElement;const a=el&&el.closest&&el.closest('a[href]');"
+                + "return !!a && new URL(a.href).href===new URL(\(target)).href;})();"
+        }
+        return await UnsentInputProbe.boundedBool(timeout: 0.5, onTimeout: false) { [weak self] in
+            guard let self else { return false }
+            return (try? await self.evaluateJavaScript(script, in: nil, contentWorld: UnsentInputProbe.world)) as? Bool ?? false
+        }
+    }
+
+    private static func jsString(_ s: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [s]),
+              let text = String(data: data, encoding: .utf8) else { return "\"\"" }
+        return String(text.dropFirst().dropLast())
     }
 }
 
@@ -95,24 +142,37 @@ enum UnsentInputProbe {
     }
 
     /// True when text is unsent. A probe that errors or takes over 500 ms counts as unsent (fail safe:
-    /// the tab is kept).
+    /// the tab is kept). Returns on the first answer: a page busy for seconds does not hold it up.
     static func hasUnsentInput(in webView: WKWebView) async -> Bool {
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask { @MainActor in
-                do {
-                    let result = try await webView.evaluateJavaScript(query, in: nil, contentWorld: world)
-                    return (result as? Bool) ?? true
-                } catch {
-                    return true
-                }
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 500_000_000)
+        await boundedBool(timeout: 0.5, onTimeout: true) {
+            do {
+                let result = try await webView.evaluateJavaScript(query, in: nil, contentWorld: world)
+                return (result as? Bool) ?? true
+            } catch {
                 return true
             }
-            let first = await group.next() ?? true
-            group.cancelAll()
-            return first
+        }
+    }
+
+    /// Runs `work` and a timer against each other and returns whichever answers first. Not a task group:
+    /// a group waits for every child, and `evaluateJavaScript` cannot be cancelled, so a busy page would
+    /// hold the group (and the caller) until the page answered.
+    @MainActor
+    static func boundedBool(timeout: TimeInterval, onTimeout: Bool, _ work: @escaping @MainActor () async -> Bool) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let gate = OnceGate(continuation)
+            Task { @MainActor in gate.resume(await work()) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { gate.resume(onTimeout) }
+        }
+    }
+
+    /// Resumes a continuation the first time it is asked to, and ignores later answers.
+    private final class OnceGate {
+        private var continuation: CheckedContinuation<Bool, Never>?
+        init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
+        func resume(_ value: Bool) {
+            continuation?.resume(returning: value)
+            continuation = nil
         }
     }
 }
