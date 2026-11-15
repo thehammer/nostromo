@@ -1208,10 +1208,17 @@ pub enum ConversationStatus {
     UnavailableDeleted,
     /// The file is empty or is not a transcript.
     UnavailableUnreadable,
-    /// The working directory no longer exists (`worktree`: it was a linked worktree).
+    /// The working directory no longer exists (`worktree`: it was a linked
+    /// worktree; `active_elsewhere`: the transcript was also written to in the
+    /// last two minutes, so a resume needs that confirmation too).
     FolderGone {
         worktree: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        active_elsewhere: bool,
     },
+    /// The transcript was written to in the last two minutes and no Nostromo
+    /// session runs it: it may be open in another Claude window.
+    ActiveElsewhere,
     Available,
 }
 
@@ -1249,6 +1256,10 @@ pub struct ConversationEntryWire {
     /// The path of Claude's file, for "Show Transcript in Finder" (never shown as text).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_path: Option<String>,
+    /// For a conversation whose worktree is gone: its main checkout, when that
+    /// still exists. What "Resume in <main repo>" resumes in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_checkout: Option<String>,
 }
 
 /// The outcome of `conversation_resume`.
@@ -2084,6 +2095,21 @@ pub enum ClientMsg {
         request_id: String,
         id: String,
         new_tag: String,
+        /// Resume in this folder instead of the original: the conversation's
+        /// main checkout, when its worktree is gone. Absent: the original.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        place: Option<String>,
+        /// The user chose "Resume anyway" for a conversation that may be open
+        /// in another Claude window.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        confirm_active_elsewhere: bool,
+    },
+    /// Give conversation `id` a title of the user's own (`None` clears it).
+    ConversationHistoryRename {
+        request_id: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     /// The resume the app asked for was cancelled before its focus existed:
     /// give the reserved `tag` back. Ignored once a focus or session holds it.
@@ -9005,6 +9031,8 @@ mod slash_commands_wire_tests {
         let msgs = [
             r#"{"type":"conversation_history_get","request_id":"r"}"#,
             r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1"}"#,
+            r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1","place":"/m","confirm_active_elsewhere":true}"#,
+            r#"{"type":"conversation_history_rename","request_id":"r","id":"s1","title":"New"}"#,
             r#"{"type":"conversation_resume_release","tag":"t1"}"#,
             r#"{"type":"conversation_history_remove","request_id":"r","id":"s1"}"#,
             r#"{"type":"conversation_history_restore","request_id":"r","id":"s1"}"#,
@@ -9032,9 +9060,13 @@ mod slash_commands_wire_tests {
                 first_prompt_withheld: Some("image".into()),
                 sensitive: false,
                 last_active_ms: 5,
-                status: ConversationStatus::FolderGone { worktree: true },
+                status: ConversationStatus::FolderGone {
+                    worktree: true,
+                    active_elsewhere: false,
+                },
                 resumed_from_tag: None,
                 transcript_path: None,
+                main_checkout: Some("/m".into()),
             }],
             first_prompts_enabled: true,
             degraded_kept: Some(3),

@@ -75,6 +75,23 @@ final class FocusLabelTests: XCTestCase {
         XCTAssertEqual(Focus.normalizedLabel("  Login  Flow v2 "), "Login  Flow v2")
     }
 
+    func testNormalizedLabelDropsControlBidiZeroWidthAndSeparatorCharacters() {
+        // One class at a time, so a rule that misses a class fails by name.
+        let classes: [(String, String)] = [
+            ("control", "A\u{01}B\u{7F}C"),
+            ("bidi override", "A\u{202E}B\u{202A}C\u{202D}"),
+            ("bidi isolate", "A\u{2066}B\u{2069}C"),
+            ("direction mark", "A\u{200E}B\u{200F}C"),
+            ("zero width", "A\u{200B}B\u{200C}C\u{200D}\u{FEFF}"),
+        ]
+        for (name, raw) in classes {
+            XCTAssertEqual(Focus.normalizedLabel(raw), "ABC", name)
+        }
+        XCTAssertEqual(Focus.normalizedLabel("A\u{2028}B\u{2029}C"), "A B C", "separators become spaces")
+        XCTAssertEqual(Focus.normalizedLabel("A\nB\r\nC\tD"), "A B  C D", "line breaks and tabs become spaces")
+        XCTAssertNil(Focus.normalizedLabel("\u{200B}\u{202E}"), "nothing visible left means no label")
+    }
+
     func testNormalizedLabelAtExactlyTheLimitIsKeptWhole() {
         let sixty = String(repeating: "a", count: 60)
         XCTAssertEqual(Focus.normalizedLabel(sixty), sixty)

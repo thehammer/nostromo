@@ -66,9 +66,12 @@ pub struct ConversationEntry {
     pub resume_pending: bool,
     #[serde(default)]
     pub removed_at_ms: Option<i64>,
-    /// Plan 2's rename; unused here.
+    /// The title the user gave it (Rename); shown instead of `title`.
     #[serde(default)]
     pub user_title: Option<String>,
+    /// The tracker board file bound to the conversation's focus, last seen.
+    #[serde(default)]
+    pub tracker_board: Option<String>,
 }
 
 impl ConversationEntry {
@@ -97,6 +100,7 @@ impl ConversationEntry {
             resume_pending: false,
             removed_at_ms: None,
             user_title: None,
+            tracker_board: None,
         }
     }
 
@@ -161,6 +165,8 @@ pub struct MetaUpdate {
     pub label: Option<String>,
     pub model: Option<(String, Option<String>)>,
     pub sensitive: bool,
+    /// The focus's bound tracker board file, when it has one.
+    pub tracker_board: Option<String>,
 }
 
 /// A cached look at a transcript file (never a read on the list path).
@@ -188,6 +194,10 @@ struct State {
     verdicts: HashMap<String, FileVerdict>,
     /// Entries a background locate already failed for this run.
     not_found: HashSet<String>,
+    /// Conversation → when (ms) Nostromo itself last stopped its session. A
+    /// transcript last written at that moment was written by us, not by
+    /// another Claude window. Memory only.
+    stopped_at: HashMap<String, i64>,
     /// The first message of a conversation not yet delivered: `sid` → (text,
     /// has images), or `None` once that message was held for a sign-in (it,
     /// and any message queued behind it, is then never a first prompt).
@@ -253,6 +263,7 @@ impl ConversationHistory {
                 revision: 0,
                 verdicts: HashMap::new(),
                 not_found: HashSet::new(),
+                stopped_at: HashMap::new(),
                 candidates: HashMap::new(),
                 dirty: false,
                 flush_scheduled: false,
@@ -438,6 +449,9 @@ impl ConversationHistory {
             e.model = Some(model);
             e.effort = effort;
         }
+        if m.tracker_board.is_some() {
+            e.tracker_board = m.tracker_board;
+        }
         if m.sensitive && !e.sensitive {
             e.mark_sensitive();
         }
@@ -496,6 +510,22 @@ impl ConversationHistory {
         let mut s = lock(&self.inner);
         s.not_found.insert(sid.to_owned());
         s.revision += 1;
+    }
+
+    /// Nostromo stopped the session running conversation `sid`, at `now`.
+    pub fn note_stopped(&self, sid: &str, now: i64) {
+        lock(&self.inner).stopped_at.insert(sid.to_owned(), now);
+    }
+
+    /// Forget that Nostromo stopped `sid`'s session (tests modelling an earlier run).
+    #[cfg(test)]
+    pub fn clear_stopped(&self, sid: &str) {
+        lock(&self.inner).stopped_at.remove(sid);
+    }
+
+    /// When Nostromo itself last stopped a session running `sid` (this run).
+    pub fn stopped_at(&self, sid: &str) -> Option<i64> {
+        lock(&self.inner).stopped_at.get(sid).copied()
     }
 
     pub fn was_not_found(&self, sid: &str) -> bool {
@@ -593,6 +623,48 @@ impl ConversationHistory {
         e.resume_pending = true;
         self.commit(s, now, Write::Now);
         Some(old)
+    }
+
+    /// Set the title the user gave the conversation; `None` clears it. False if unknown.
+    pub fn rename(&self, sid: &str, title: Option<String>, now: i64) -> bool {
+        self.mutate_one(sid, now, |e| e.user_title = title)
+    }
+
+    /// The conversation now runs in `path` (a resume into the main checkout):
+    /// it is no longer a linked worktree.
+    pub fn set_place(&self, sid: &str, path: &str, now: i64) {
+        self.mutate_one(sid, now, |e| {
+            e.project_path = Some(path.to_owned());
+            e.main_checkout = None;
+        });
+    }
+
+    /// Put back the folder a resume into another place replaced (the resume
+    /// was cancelled or could not open the conversation).
+    pub fn restore_place(
+        &self,
+        sid: &str,
+        project_path: Option<String>,
+        main_checkout: Option<String>,
+        now: i64,
+    ) {
+        self.mutate_one(sid, now, |e| {
+            e.project_path = project_path;
+            e.main_checkout = main_checkout;
+        });
+    }
+
+    /// Sticky sensitivity, from outside a refresh (a resume from a sensitive tag).
+    pub fn mark_sensitive(&self, sid: &str, now: i64) {
+        let mut s = lock(&self.inner);
+        let Some(e) = s.data.entries.iter_mut().find(|e| e.sid == sid) else {
+            return;
+        };
+        if e.sensitive {
+            return;
+        }
+        e.mark_sensitive();
+        self.commit(s, now, Write::Now);
     }
 
     /// Undo [`Self::move_to_tag`] (the resume could not open the conversation).

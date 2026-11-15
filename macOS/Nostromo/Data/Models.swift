@@ -94,12 +94,22 @@ struct Focus: Codable, Hashable, Identifiable {
         return bare.trimmingCharacters(in: .whitespaces).lowercased() == "perri"
     }
 
-    /// Trims whitespace/newlines, caps at `maxLabelLength` characters, and maps
-    /// blank to nil. Trim happens before the cap so leading spaces never eat
-    /// the budget; a cut can leave trailing whitespace, so trim again.
+    /// Cleans, trims, caps at `maxLabelLength` characters, and maps blank to nil.
+    /// Cleaning: line breaks and tabs become spaces; other control, bidi, zero-width and
+    /// line-separator characters are dropped (a label is one visible line). Trim happens
+    /// before the cap so leading spaces never eat the budget; a cut can leave trailing
+    /// whitespace, so trim again.
     static func normalizedLabel(_ raw: String?) -> String? {
         guard let raw else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var cleaned = String.UnicodeScalarView()
+        for scalar in raw.unicodeScalars {
+            switch scalar.value {
+            case 0x0A, 0x0D, 0x09, 0x2028, 0x2029: cleaned.append(" ")
+            case 0x00...0x1F, 0x7F...0x9F, 0x200B...0x200F, 0x202A...0x202E, 0x2060...0x206F, 0xFEFF: continue
+            default: cleaned.append(scalar)
+            }
+        }
+        let trimmed = String(cleaned).trimmingCharacters(in: .whitespacesAndNewlines)
         let capped = String(trimmed.prefix(maxLabelLength))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return capped.isEmpty ? nil : capped
