@@ -685,8 +685,22 @@ pub struct PrListItem {
     #[serde(default)]
     pub head_sha: String,
     /// Jira ticket keys detected daemon-side; absent on the wire when empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_ticket_keys"
+    )]
     pub tickets: Vec<String>,
+}
+
+/// Decode `tickets` keeping only well-formed keys, at most five: an agent can
+/// push a `pr_list` with arbitrary strings.
+fn deserialize_ticket_keys<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<String> = Vec::deserialize(d)?;
+    Ok(crate::data::ticket_keys::sanitize_keys(raw))
 }
 
 /// Content payload pushed to a single pane, decoupled from layout geometry.
@@ -4763,6 +4777,32 @@ mod tests {
             freshness: None,
             address: None,
         });
+    }
+
+    #[test]
+    fn pr_list_item_tickets_decode_drops_malformed_keys_and_keeps_five() {
+        let junk = format!("CORE-{}", "9".repeat(60_000));
+        let mut raw = serde_json::to_value(PrListItem {
+            repo: "acme/web".into(),
+            number: 1,
+            title: "t".into(),
+            author: "a".into(),
+            bucket: "requested".into(),
+            ci_state: crate::data::perri_queue::CiState::Success,
+            new_activity: false,
+            url: String::new(),
+            head_sha: String::new(),
+            tickets: vec![],
+        })
+        .unwrap();
+        raw["tickets"] = serde_json::json!([
+            "core-1", junk, "<x>", "CORE-1", "CORE-2", "CORE-3", "CORE-4", "CORE-5", "CORE-6"
+        ]);
+        let item: PrListItem = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            item.tickets,
+            ["CORE-1", "CORE-2", "CORE-3", "CORE-4", "CORE-5"]
+        );
     }
 
     #[test]

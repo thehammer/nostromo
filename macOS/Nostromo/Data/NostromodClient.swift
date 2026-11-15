@@ -2492,7 +2492,7 @@ private struct PerriStateResp: Decodable {
             url         = try c.decode(String.self, forKey: .url)
             ciState     = try? c.decodeIfPresent(String.self, forKey: .ciState)
             headSha     = try? c.decodeIfPresent(String.self, forKey: .headSha)
-            tickets     = (try? c.decode([String].self, forKey: .tickets)) ?? []
+            tickets     = TicketKeys.sanitize((try? c.decode([String].self, forKey: .tickets)) ?? [])
         }
 
         var asPRQueueItem: PRQueueItem {

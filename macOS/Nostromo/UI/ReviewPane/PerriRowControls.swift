@@ -48,7 +48,7 @@ struct ReviewingPR: Equatable {
 
 /// The ticket keys a row may offer: none unless a Jira site is configured.
 func perriTicketKeys(_ tickets: [String], actions: PerriRowActions) -> [String] {
-    actions.jiraSite() == nil ? [] : tickets
+    actions.jiraSite() == nil ? [] : TicketKeys.sanitize(tickets)
 }
 
 /// The Conversation and Diff buttons for one PR. Sibling views above the row's own button: pressing one

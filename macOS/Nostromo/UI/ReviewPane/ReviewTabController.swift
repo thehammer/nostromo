@@ -9,6 +9,9 @@ struct ReviewPaneEnvironment {
     /// The HTTP status of a main-frame response. WebKit hands a plain `URLResponse` (no status) to the
     /// policy for a custom URL scheme, so the offline test fixtures replace this.
     var statusCode: (WKNavigationResponse) -> Int? = { ($0.response as? HTTPURLResponse)?.statusCode }
+    /// Answers "is no one signed in to GitHub on this page?". Nil: ask the page. Tests replace it with a
+    /// slow answer to cover a navigation that happens while the answer is on its way.
+    var signedOutProbe: ((ReviewTabController) async -> Bool)? = nil
     var openExternal: (URL) -> Void = ReviewPaneEnvironment.openInDefaultBrowser
     var makeConfiguration: () -> WKWebViewConfiguration = {
         ReviewWebViewFactory.makeConfiguration(dataStore: BrowserProfile.work())
@@ -136,6 +139,9 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var githubNotFoundURL: URL?
     /// Whether the notice bar currently shows the signed-out hint.
     private var signedOutHintShown = false
+    /// Bumped whenever a main-frame navigation starts or commits, so an answer that arrives after the
+    /// person moved on can tell it is stale.
+    private var navigationSerial = 0
 
     static let signedOutHint = "GitHub shows 404 for private repos when you're signed out."
     static let signInButton = "Sign in"
@@ -283,7 +289,12 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
     }
 
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        navigationSerial += 1
+    }
+
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        navigationSerial += 1
         contentView.cover.dismiss()
         failedURL = nil
         if signedOutHintShown { contentView.notice.dismiss(); signedOutHintShown = false }
@@ -292,8 +303,16 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let notFound = githubNotFoundURL else { return }
         githubNotFoundURL = nil
+        let serial = navigationSerial
         Task { @MainActor [weak self] in
-            guard let self, await self.isSignedOutOfGitHub() else { return }
+            guard let self else { return }
+            let signedOut: Bool
+            if let probe = self.env.signedOutProbe { signedOut = await probe(self) }
+            else { signedOut = await self.isSignedOutOfGitHub() }
+            // The answer takes up to half a second: show the hint only if this tab is still on the very
+            // page that answered 404 (no navigation started or committed since).
+            guard signedOut, serial == self.navigationSerial, !self.webView.isLoading,
+                  Self.sameDocument(self.webView.url, notFound) else { return }
             self.showSignedOutHint(for: notFound)
         }
     }
@@ -434,6 +453,14 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
         comps.percentEncodedQuery = "return_to=" + encoded
         comps.fragment = nil
         return comps.url
+    }
+
+    /// Whether `a` and `b` are the same page, ignoring a `#fragment` (a response URL has none).
+    static func sameDocument(_ a: URL?, _ b: URL) -> Bool {
+        guard let a, var x = URLComponents(url: a, resolvingAgainstBaseURL: false),
+              var y = URLComponents(url: b, resolvingAgainstBaseURL: false) else { return false }
+        x.fragment = nil; y.fragment = nil
+        return x.url == y.url
     }
 
     private func showSignedOutHint(for notFound: URL) {

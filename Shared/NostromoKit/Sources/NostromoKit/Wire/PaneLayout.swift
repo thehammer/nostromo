@@ -160,7 +160,7 @@ public struct PrListItemModel: Decodable, Identifiable, Equatable {
         self.newActivity = newActivity
         self.url         = url
         self.headSha     = headSha
-        self.tickets     = tickets
+        self.tickets     = TicketKeys.sanitize(tickets)
     }
 
     public init(from decoder: Decoder) throws {
@@ -174,7 +174,7 @@ public struct PrListItemModel: Decodable, Identifiable, Equatable {
         newActivity = (try? c.decode(Bool.self,    forKey: .newActivity))  ?? false
         url         = (try? c.decode(String.self,  forKey: .url))          ?? ""
         headSha     = (try? c.decode(String.self,  forKey: .headSha))      ?? ""
-        tickets     = (try? c.decode([String].self, forKey: .tickets))     ?? []
+        tickets     = TicketKeys.sanitize((try? c.decode([String].self, forKey: .tickets)) ?? [])
     }
 
     /// Map to the shared `PerriPRRowModel` used by `PerriPRRow`.

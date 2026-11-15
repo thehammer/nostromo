@@ -210,6 +210,38 @@ final class PerriTicketControlTests: XCTestCase {
         XCTAssertTrue(model.tabs.isEmpty, "a site that is not a Jira Cloud host")
     }
 
+    func testAKeyOfMoreThanTenDigitsIsNotAKeyAndNeverReachesAURL() {
+        let ten = "CORE-" + String(repeating: "1", count: 10)
+        let eleven = "CORE-" + String(repeating: "1", count: 11)
+        let huge = "CORE-" + String(repeating: "9", count: 60_000)
+        XCTAssertNotNil(ReviewPR.ticketURL(site: site, key: ten))
+        XCTAssertNil(ReviewPR.ticketURL(site: site, key: eleven))
+        XCTAssertNil(ReviewPR.ticketURL(site: site, key: huge))
+        let model = pane()
+        PerriRowActions.opening(in: model, jiraSite: { self.site }).openTicket("acme/web", 4520, huge, 0)
+        XCTAssertTrue(model.tabs.isEmpty)
+    }
+
+    func testTheMacDropsMalformedKeysAndKeepsAtMostFiveBeforeDrawing() {
+        let actions = PerriRowActions(openConversation: { _, _ in }, openDiff: { _, _ in },
+                                      jiraSite: { self.site })
+        let huge = "CORE-" + String(repeating: "9", count: 60_000)
+        let shown = perriTicketKeys(["core-1", huge, "<b>x</b>", "CORE-1", "CORE-1", "CORE-2", "CORE-3",
+                                     "CORE-4", "CORE-5", "CORE-6", "CORE-7"], actions: actions)
+        XCTAssertEqual(shown, ["CORE-1", "CORE-2", "CORE-3", "CORE-4", "CORE-5"])
+    }
+
+    func testAnAgentPushedPrListWithJunkKeysIsCleanedWhenDecoded() throws {
+        let huge = "CORE-" + String(repeating: "9", count: 60_000)
+        let json = """
+        {"repo":"acme/web","number":1,"title":"t","author":"a","bucket":"requested","new_activity":false,
+         "url":"https://github.com/acme/web/pull/1","tickets":["x", "\(huge)", "CORE-1", "CORE-2", "CORE-3",
+         "CORE-4", "CORE-5", "CORE-6"]}
+        """
+        let item = try JSONDecoder().decode(PrListItemModel.self, from: Data(json.utf8))
+        XCTAssertEqual(item.tickets, ["CORE-1", "CORE-2", "CORE-3", "CORE-4", "CORE-5"])
+    }
+
     func testTicketURLNeedsAValidSiteAndKey() {
         XCTAssertEqual(ReviewPR.ticketURL(site: site, key: "CORE-2841")?.absoluteString,
                        "https://carefeed.atlassian.net/browse/CORE-2841")

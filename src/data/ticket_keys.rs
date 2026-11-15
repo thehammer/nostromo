@@ -5,8 +5,8 @@
 //! is scanned (first [`BODY_SCAN_LIMIT`] bytes only) and dropped, never stored,
 //! logged or sent.
 //!
-//! A key is a whole-word `[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*` (prefix of 2-10
-//! characters), case-sensitive, found in the title, then the branch, then the
+//! A key is a whole-word `[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,9}` (prefix of 2-10
+//! characters, at most [`MAX_DIGITS`] digits), case-sensitive, found in the title, then the branch, then the
 //! body, first appearance wins the order, at most [`MAX_KEYS`] returned.
 //! Prefixes that are never tickets (`UTF-8`, `SHA-256`, `CVE-2025-1234` ...) are
 //! always dropped; a [`ProjectFilter::Known`] list further keeps only the
@@ -21,14 +21,57 @@ pub const MAX_KEYS: usize = 5;
 /// How much of a PR body is scanned.
 pub const BODY_SCAN_LIMIT: usize = 64 * 1024;
 
-/// Cap on pre-scanned body keys kept per PR (before project filtering).
-const MAX_BODY_KEYS: usize = 32;
+/// The most digits a key's number has (a longer one is not a key).
+pub const MAX_DIGITS: usize = 10;
 
 /// Prefixes that look like project keys but never are.
 const NEVER_A_TICKET: &[&str] = &[
     "UTF", "SHA", "ISO", "CVE", "GPT", "RFC", "HTTP", "TLS", "SSL", "AES", "RSA", "MD", "PEP",
-    "ECMA", "IEEE", "WCAG", "CWE", "GHSA", "LTS", "UTC", "GMT", "ARM",
+    "ECMA", "IEEE", "WCAG", "CWE", "GHSA", "LTS", "UTC", "GMT", "ARM", "COVID", "SARS", "HTTPS",
+    "TCP", "UDP", "IPV", "WPA", "BCP",
 ];
+
+/// Whether `prefix` is a deny-listed word, alone or with digits after it
+/// (`SHA3`, `MD5`, `UTF16`, `HTTP2`).
+fn never_a_ticket(prefix: &str) -> bool {
+    let word = prefix.trim_end_matches(|c: char| c.is_ascii_digit());
+    NEVER_A_TICKET.contains(&word)
+}
+
+/// Whether `key` is shaped like a ticket key: `[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,9}`.
+pub fn is_valid_key(key: &str) -> bool {
+    let Some((prefix, number)) = key.split_once('-') else {
+        return false;
+    };
+    let p = prefix.as_bytes();
+    (2..=10).contains(&p.len())
+        && p[0].is_ascii_uppercase()
+        && p.iter()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        && (1..=MAX_DIGITS).contains(&number.len())
+        && number.as_bytes()[0] != b'0'
+        && number.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Untrusted keys (from the wire): well-formed ones only, first appearance
+/// wins, at most [`MAX_KEYS`].
+pub fn sanitize_keys<I, S>(keys: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out: Vec<String> = Vec::new();
+    for k in keys {
+        let k = k.as_ref();
+        if is_valid_key(k) && !out.iter().any(|o| o == k) {
+            out.push(k.to_owned());
+            if out.len() == MAX_KEYS {
+                break;
+            }
+        }
+    }
+    out
+}
 
 /// What is known about the Jira site's project list.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -108,11 +151,11 @@ pub fn resolve(
         }
     };
 
-    for (key, _) in scan(title) {
+    for (key, _) in scan(title, false) {
         push(&key);
     }
     if let Some(branch) = branch {
-        for (key, _) in scan(branch) {
+        for (key, _) in scan(branch, true) {
             push(&key);
         }
     }
@@ -135,15 +178,20 @@ pub fn scan_body(body: &str) -> Vec<BodyKey> {
         end -= 1;
     }
     let text = &body[..end];
+    // Every distinct key is kept (the 64 KB limit bounds how many there can
+    // be): the project filter runs later, and the cap applies after it, so junk
+    // keys cannot crowd real ones out.
     let mut out: Vec<BodyKey> = Vec::new();
-    for (key, start) in scan(text) {
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (key, start) in scan(text, false) {
         let link_host = link_host_before(text, start);
-        if let Some(existing) = out.iter_mut().find(|b| b.key == key) {
+        if let Some(&at) = index.get(&key) {
             // A later link occurrence upgrades a plain one.
-            if existing.link_host.is_none() {
-                existing.link_host = link_host;
+            if out[at].link_host.is_none() {
+                out[at].link_host = link_host;
             }
-        } else if out.len() < MAX_BODY_KEYS {
+        } else {
+            index.insert(key.clone(), out.len());
             out.push(BodyKey { key, link_host });
         }
     }
@@ -154,18 +202,19 @@ fn prefix_of(key: &str) -> &str {
     key.split_once('-').map_or(key, |(p, _)| p)
 }
 
-fn is_word(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+/// A word byte. In a branch name `_` separates words (`feature/CORE-12_fix`).
+fn is_word(b: u8, underscore_separates: bool) -> bool {
+    b.is_ascii_alphanumeric() || (b == b'_' && !underscore_separates)
 }
 
 /// Every whole-word key in `text` with its byte offset, deny-listed prefixes
 /// removed, duplicates kept (callers dedupe).
-fn scan(text: &str) -> Vec<(String, usize)> {
+fn scan(text: &str, branch: bool) -> Vec<(String, usize)> {
     let b = text.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        if !b[i].is_ascii_uppercase() || (i > 0 && is_word(b[i - 1])) {
+        if !b[i].is_ascii_uppercase() || (i > 0 && is_word(b[i - 1], branch)) {
             i += 1;
             continue;
         }
@@ -184,9 +233,9 @@ fn scan(text: &str) -> Vec<(String, usize)> {
             while k < b.len() && b[k].is_ascii_digit() {
                 k += 1;
             }
-            if !b.get(k).is_some_and(|c| is_word(*c)) {
+            if !b.get(k).is_some_and(|c| is_word(*c, branch)) {
                 let prefix = &text[i..j];
-                if !NEVER_A_TICKET.contains(&prefix) {
+                if k - digits_start <= MAX_DIGITS && !never_a_ticket(prefix) {
                     out.push((text[i..k].to_owned(), i));
                 }
                 i = k;
@@ -318,6 +367,60 @@ mod tests {
             d("CORE-1", Some("x/PAYM-2"), None, &u),
             ["CORE-1", "PAYM-2"]
         );
+    }
+
+    #[test]
+    fn a_key_with_more_than_ten_digits_is_not_a_key() {
+        let ten = format!("CORE-{}", "1".repeat(10));
+        assert_eq!(d(&ten, None, None, &all()), std::slice::from_ref(&ten));
+        let eleven = format!("CORE-{}", "1".repeat(11));
+        assert!(d(&eleven, None, None, &all()).is_empty());
+        let huge = format!("CORE-{}", "1".repeat(60_000));
+        assert!(d(&huge, Some(&huge), Some(&huge), &all()).is_empty());
+        assert!(!is_valid_key(&huge));
+        assert!(!is_valid_key(&eleven));
+        assert!(is_valid_key(&ten));
+    }
+
+    #[test]
+    fn sanitize_keys_drops_malformed_dedupes_and_caps_at_five() {
+        let junk = format!("CORE-{}", "9".repeat(60_000));
+        let got = sanitize_keys([
+            "core-1", "CORE-0", "CORE-1", "CORE-1", "<b>", &junk, "A-1", "CORE-2", "CORE-3",
+            "CORE-4", "CORE-5", "CORE-6", "CORE-7",
+        ]);
+        assert_eq!(got, ["CORE-1", "CORE-2", "CORE-3", "CORE-4", "CORE-5"]);
+    }
+
+    #[test]
+    fn deny_list_variants_are_dropped_before_the_list_loads() {
+        let unknown = ProjectFilter::Unknown;
+        for t in [
+            "SHA3-256", "MD5-1", "UTF16-2", "HTTP2-3", "COVID-19", "SHA-3", "UTF-16", "TLS13-1",
+        ] {
+            assert!(d(t, None, None, &unknown).is_empty(), "{t}");
+            assert!(d(t, None, None, &all()).is_empty(), "{t}");
+        }
+        // A real project that merely starts like a deny word is kept.
+        assert_eq!(d("SHAPE-3", None, None, &unknown), ["SHAPE-3"]);
+    }
+
+    #[test]
+    fn underscore_separates_words_in_branch_names_only() {
+        assert_eq!(
+            d("t", Some("feature/CORE-12_fix"), None, &all()),
+            ["CORE-12"]
+        );
+        assert_eq!(d("t", Some("fix_CORE-12"), None, &all()), ["CORE-12"]);
+        // Titles keep the whole-word rule.
+        assert!(d("CORE-12_fix", None, None, &all()).is_empty());
+    }
+
+    #[test]
+    fn junk_body_keys_cannot_crowd_out_a_real_project_key() {
+        let mut body: String = (1..=1000).map(|n| format!("ZZ-{n} ")).collect();
+        body.push_str("CORE-1");
+        assert_eq!(d("t", None, Some(&body), &known(&["CORE"])), ["CORE-1"]);
     }
 
     #[test]

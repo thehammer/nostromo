@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import NostromoKit
 
 /// A pull request a side-pane tab belongs to. Ordered by repo then number.
 struct ReviewPR: Hashable, Comparable {
@@ -25,7 +26,7 @@ extension ReviewPR {
     /// Jira issue key (so nothing else can ride in the URL).
     static func ticketURL(site: String, key: String) -> URL? {
         guard ReviewPaneHosts.isValidJiraSite(site),
-              key.range(of: #"^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*$"#, options: .regularExpression) != nil
+              TicketKeys.isValid(key)
         else { return nil }
         return URL(string: "https://\(site)/browse/\(key)")
     }

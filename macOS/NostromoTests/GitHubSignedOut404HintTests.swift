@@ -153,6 +153,46 @@ final class GitHubSignedOut404HintTests: XCTestCase {
         XCTAssertFalse(hintShown(tab))
     }
 
+    func testA404OnAnotherHostGetsNoHint() async throws {
+        // A Jira ticket that 404s (no user-login meta, like a signed-out page) is not GitHub's private-repo 404.
+        world.jiraSite = "carefeed.atlassian.net"
+        notFound["/browse/CORE-1"] = .some(nil)
+        let tab = model.open(pr: pr, target: .ticket("CORE-1"),
+                             url: reviewFixtureURL("carefeed.atlassian.net/browse/CORE-1"))
+        let c = try XCTUnwrap(tab.controller)
+        await assertTrueA(await eventually(15) { !c.webView.isLoading && c.webView.url?.path == "/browse/CORE-1"
+            && c.contentView.cover.isHidden }, "the Jira 404 page loaded")
+        XCTAssertEqual(world.handler.statuses[reviewFixtureURL("carefeed.atlassian.net/browse/CORE-1")], 404)
+        await spinA(1.0)
+        XCTAssertFalse(hintShown(tab), "only a github.com 404 can mean a private repo")
+    }
+
+    func testNavigatingAwayWhileTheAnswerIsOnItsWayShowsNoHintOnTheNextPage() async throws {
+        // The signed-out answer takes a while; the person opens another page in that time.
+        model.environment.signedOutProbe = { _ in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            return true
+        }
+        notFound[filesPath] = .some(nil)
+        let tab = openDiff()
+        let c = try XCTUnwrap(tab.controller)
+        await assertTrueA(await eventually(15) { !c.webView.isLoading && c.webView.url?.path == self.filesPath
+            && c.contentView.cover.isHidden }, "the 404 page loaded")
+        let next = reviewFixtureURL("github.com/acme/secret/pull/9/files")
+        c.webView.load(URLRequest(url: next))
+        await assertTrueA(await eventually(15) { !c.webView.isLoading && c.webView.url?.path == "/acme/secret/pull/9/files" },
+                          "moved on to another page")
+        await spinA(1.5)
+        XCTAssertFalse(hintShown(tab), "the hint belongs to the 404 page, which is gone")
+    }
+
+    func testTheSameDocumentCheckIgnoresOnlyTheFragment() throws {
+        let a = try XCTUnwrap(URL(string: "https://github.com/a/b/pull/1/files?w=1"))
+        XCTAssertTrue(ReviewTabController.sameDocument(URL(string: "https://github.com/a/b/pull/1/files?w=1#diff-x"), a))
+        XCTAssertFalse(ReviewTabController.sameDocument(URL(string: "https://github.com/a/b/pull/2/files?w=1"), a))
+        XCTAssertFalse(ReviewTabController.sameDocument(nil, a))
+    }
+
     func testTheSignInURLKeepsOnlyPathAndQueryOfTheNotFoundPage() throws {
         let url = try XCTUnwrap(URL(string: "https://github.com/acme/secret/pull/7/files?w=1&x=a b#frag"))
         let signIn = try XCTUnwrap(ReviewTabController.signInURL(for: url))

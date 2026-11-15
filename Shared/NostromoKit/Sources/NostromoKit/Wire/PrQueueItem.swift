@@ -110,7 +110,7 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         self.ciState     = ciState
         self.headSha     = headSha
         self.isBot       = isBot
-        self.tickets     = tickets
+        self.tickets     = TicketKeys.sanitize(tickets)
     }
 
     // MARK: Decode with defaults
@@ -127,6 +127,6 @@ public struct PrQueueItem: Codable, Identifiable, Equatable {
         ciState     = (try? c.decode(CiState.self, forKey: .ciState)) ?? .unknown
         headSha     = (try? c.decode(String.self, forKey: .headSha)) ?? ""
         isBot       = (try? c.decode(Bool.self,   forKey: .isBot))   ?? false
-        tickets     = (try? c.decode([String].self, forKey: .tickets)) ?? []
+        tickets     = TicketKeys.sanitize((try? c.decode([String].self, forKey: .tickets)) ?? [])
     }
 }
