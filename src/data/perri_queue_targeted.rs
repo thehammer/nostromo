@@ -60,6 +60,7 @@ use crate::data::{
     },
     perri_suppress::{unix_now_secs, SuppressStore},
     relay_client::RelayEvent,
+    ticket_keys::{scan_body, BodyKey},
 };
 
 // ── Classification ────────────────────────────────────────────────────────────
@@ -761,6 +762,8 @@ pub(crate) fn upsert_from_probe(
             in_needs_review: probed.in_needs_review,
             my_review: probed.my_review.clone(),
             targeted_seen_at: Some(unix_now_secs()),
+            head_ref: probed.head_ref.clone(),
+            body_keys: probed.body_keys.clone(),
         },
     );
 
@@ -798,6 +801,10 @@ pub struct ProbedPr {
     pub draft: bool,
     pub updated_at: String,
     pub head_sha: String,
+    /// Head branch name.
+    pub head_ref: String,
+    /// Keys scanned from the PR body; the body itself is dropped in `probe_pr`.
+    pub body_keys: Vec<BodyKey>,
     /// `review-requested:@me` — bucket 1.
     pub in_requested: bool,
     /// `review:required` — bucket 2, from `reviewDecision`.
@@ -855,6 +862,8 @@ const PR_PROBE_QUERY: &str = r#"query PrProbe($owner: String!, $name: String!, $
       merged
       updatedAt
       headRefOid
+      headRefName
+      body
       reviewDecision
       author { login __typename }
       reviewRequests(first: 100) {
@@ -1006,6 +1015,8 @@ pub async fn probe_pr(client: &GithubClient, repo: &str, number: u64, me: &str) 
         draft: pr.is_draft,
         updated_at: pr.updated_at,
         head_sha: pr.head_ref_oid,
+        head_ref: pr.head_ref_name,
+        body_keys: scan_body(pr.body.as_deref().unwrap_or_default()),
         in_requested,
         // The per-PR equivalent of the `review:required` search qualifier.
         in_needs_review: pr.review_decision.as_deref() == Some("REVIEW_REQUIRED"),
@@ -1071,6 +1082,11 @@ struct GqlPullRequest {
     updated_at: String,
     #[serde(default)]
     head_ref_oid: String,
+    #[serde(default)]
+    head_ref_name: String,
+    /// Only scanned for ticket keys; never stored or logged.
+    #[serde(default)]
+    body: Option<String>,
     #[serde(default)]
     review_decision: Option<String>,
     #[serde(default)]

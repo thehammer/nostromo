@@ -513,3 +513,52 @@ final class PerriWireTests: XCTestCase {
         )
     }
 }
+
+// MARK: - Ticket keys on queue items
+
+final class PerriTicketsWireTests: XCTestCase {
+    private let base = """
+    "repo":"acme/web","number":1,"title":"t","author":"a","bucket":"requested",
+    "new_activity":false,"url":"https://github.com/acme/web/pull/1"
+    """
+
+    private func decode<T: Decodable>(_ type: T.Type, _ extra: String) throws -> T {
+        try JSONDecoder().decode(type, from: Data("{\(base)\(extra)}".utf8))
+    }
+
+    func testPrQueueItemDecodesTickets() throws {
+        let item = try decode(PrQueueItem.self, #","tickets":["CORE-1","PAYM-2"]"#)
+        XCTAssertEqual(item.tickets, ["CORE-1", "PAYM-2"])
+    }
+
+    func testPrQueueItemDefaultsTicketsToEmptyWhenAbsent() throws {
+        XCTAssertEqual(try decode(PrQueueItem.self, "").tickets, [])
+    }
+
+    func testPrListItemModelDecodesTickets() throws {
+        let item = try decode(PrListItemModel.self, #","tickets":["INT-9"]"#)
+        XCTAssertEqual(item.tickets, ["INT-9"])
+    }
+
+    func testMalformedKeysAreDroppedAndAtMostFiveKept() throws {
+        let huge = "CORE-" + String(repeating: "9", count: 60_000)
+        let extra = #","tickets":["core-1","\#(huge)","<x>","CORE-0","CORE-1","CORE-1","CORE-2","CORE-3","CORE-4","CORE-5","CORE-6"]"#
+        let expected = ["CORE-1", "CORE-2", "CORE-3", "CORE-4", "CORE-5"]
+        XCTAssertEqual(try decode(PrQueueItem.self, extra).tickets, expected)
+        XCTAssertEqual(try decode(PrListItemModel.self, extra).tickets, expected)
+    }
+
+    func testTicketKeyShape() {
+        for ok in ["CORE-1", "AB-12", "A1B2C3D4E5-9", "CORE-1234567890"] {
+            XCTAssertTrue(TicketKeys.isValid(ok), ok)
+        }
+        for bad in ["", "core-1", "A-1", "CORE-0", "CORE-01", "CORE-", "-1", "CORE-12345678901", "CORE-1-2",
+                    "CORE-1 ", "CORE-١", "ABCDEFGHIJK-1", "1CORE-1"] {
+            XCTAssertFalse(TicketKeys.isValid(bad), bad)
+        }
+    }
+
+    func testPrListItemModelDefaultsTicketsToEmptyWhenAbsent() throws {
+        XCTAssertEqual(try decode(PrListItemModel.self, "").tickets, [])
+    }
+}

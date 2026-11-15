@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import NostromoKit
 
 /// A pull request a side-pane tab belongs to. Ordered by repo then number.
 struct ReviewPR: Hashable, Comparable {
@@ -18,6 +19,17 @@ struct ReviewPR: Hashable, Comparable {
     /// nil for a malformed repo string (no control is offered for it).
     var conversationURL: URL? { hasValidRepo ? URL(string: "https://github.com/\(repo)/pull/\(number)") : nil }
     var diffURL: URL? { hasValidRepo ? URL(string: "https://github.com/\(repo)/pull/\(number)/files") : nil }
+}
+
+extension ReviewPR {
+    /// `https://<site>/browse/<KEY>`; nil unless `site` is a valid Jira Cloud host and `key` a valid
+    /// Jira issue key (so nothing else can ride in the URL).
+    static func ticketURL(site: String, key: String) -> URL? {
+        guard ReviewPaneHosts.isValidJiraSite(site),
+              TicketKeys.isValid(key)
+        else { return nil }
+        return URL(string: "https://\(site)/browse/\(key)")
+    }
 }
 
 /// What a tab shows. One tab per (PR, target) except `page` tabs, which a link or popup opened.

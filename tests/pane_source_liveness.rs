@@ -44,6 +44,7 @@ fn seeded_queue_snapshot() -> PrQueueSnapshot {
             ci_state: Default::default(),
             head_sha: "abc123".into(),
             is_bot: false,
+            tickets: vec![],
         }],
         stale: false,
         error: None,

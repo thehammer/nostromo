@@ -129,6 +129,11 @@ struct PaneContentView: View {
         if let rowActions {
             Button("Open Conversation in Side Pane") { rowActions.openConversation(item.repo, item.number) }
             Button("Open Diff in Side Pane") { rowActions.openDiff(item.repo, item.number) }
+            ForEach(Array(perriTicketKeys(item.tickets, actions: rowActions).enumerated()), id: \.element) { offset, key in
+                Button("Open Ticket \(key) in Side Pane") {
+                    rowActions.openTicket(item.repo, item.number, key, offset)
+                }
+            }
         } else {
         ForEach(
             Self.browserMenuItems(repo: item.repo, number: item.number,
@@ -149,6 +154,7 @@ struct PaneContentView: View {
             selected: selectedPR))
         if let rowActions {
             PerriQueueRow(model: model, repo: item.repo, number: item.number, actions: rowActions,
+                          tickets: item.tickets,
                           onLoad: { onLoadPR(item.repo, item.number) })
         } else {
             NostromoKit.PerriPRRow(model: model, onLoad: { onLoadPR(item.repo, item.number) }, onClear: {})
@@ -227,7 +233,11 @@ struct PaneContentView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if let rowActions, let reviewing,
                        !items.contains(where: { $0.repo == reviewing.repo && $0.number == reviewing.number }) {
-                        PerriReviewingRow(reviewing: reviewing, actions: rowActions)
+                        PerriReviewingRow(
+                            reviewing: reviewing, actions: rowActions,
+                            tickets: AppStore.shared.perriQueue
+                                .first { $0.repo == reviewing.repo && $0.number == reviewing.number }?
+                                .tickets ?? [])
                             .padding(.horizontal, 8)
                     }
                     ForEach(bucketOrder, id: \.key) { bucket in
