@@ -82,6 +82,16 @@ final class ResumeRowView: NSView {
 }
 
 /// The Resume tab: search, grouped rows, the first-prompts switch. Backed by `ConversationHistoryModel`.
+/// A group header; the Unavailable one is a VoiceOver button.
+private final class HeaderField: NSTextField {
+    var onPress: (() -> Void)?
+    override func accessibilityPerformPress() -> Bool {
+        guard let onPress else { return false }
+        onPress()
+        return true
+    }
+}
+
 final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private enum Item { case header(ConversationHistoryModel.Group, collapsed: Bool), row(ConversationEntryWire) }
 
@@ -329,7 +339,7 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         switch items[row] {
         case .header(let g, let collapsed):
-            let f = NSTextField(labelWithString: g.kind == .unavailable ? (collapsed ? "\u{25B8} " : "\u{25BE} ") + g.title : g.title)
+            let f = HeaderField(labelWithString: g.kind == .unavailable ? (collapsed ? "\u{25B8} " : "\u{25BE} ") + g.title : g.title)
             f.font = .systemFont(ofSize: 11, weight: .semibold)
             f.textColor = NSColor(white: 0.6, alpha: 1)
             f.setAccessibilityLabel(g.title)
@@ -337,7 +347,7 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
                 // VoiceOver can press it; the keyboard uses → / ← in the search field.
                 f.setAccessibilityRole(.button)
                 f.setAccessibilityLabel("\(g.title), \(collapsed ? "collapsed" : "expanded")")
-                f.setAccessibilityPerformPress { [weak self] in self?.toggleUnavailable(); return true }
+                f.onPress = { [weak self] in self?.toggleUnavailable() }
             }
             return f
         case .row(let e):
