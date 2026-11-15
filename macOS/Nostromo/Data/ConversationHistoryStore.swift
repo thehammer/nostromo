@@ -6,7 +6,8 @@ import Foundation
 protocol ConversationHistorySending: AnyObject {
     var daemonAdvertisesConversationHistory: Bool { get }
     func conversationHistoryGet(requestId: String)
-    func conversationResume(requestId: String, id: String, newTag: String)
+    func conversationResume(requestId: String, id: String, newTag: String, place: String?, confirmActiveElsewhere: Bool)
+    func conversationHistoryRename(requestId: String, id: String, title: String?)
     func conversationResumeRelease(tag: String)
     func conversationHistoryRemove(requestId: String, id: String)
     func conversationHistoryRestore(requestId: String, id: String)
@@ -51,7 +52,7 @@ final class ConversationHistoryStore {
     private let now: () -> Date
 
     /// request id → what it was for.
-    private var pending: [String: (sid: String, focusId: String, tag: String, startedAt: Date)] = [:]
+    private var pending: [String: (sid: String, focusId: String, tag: String, startedAt: Date, place: String?, confirm: Bool)] = [:]
     /// Rows with a resume awaiting its reply: further gestures on them are ignored.
     private var inFlight: Set<String> = []
     /// Tags a `ready` reply reserved → the conversation they hold (for a later failure).
@@ -97,15 +98,23 @@ final class ConversationHistoryStore {
         sender?.conversationHistorySettingsSet(requestId: makeRequestId(), firstPromptsEnabled: enabled)
     }
 
+    /// Give a conversation a name of the user's own (the same 60-character rule as a focus label); nil or
+    /// blank clears it. The row shows it when the daemon's next listing arrives.
+    func rename(_ id: String, to title: String?) {
+        sender?.conversationHistoryRename(requestId: makeRequestId(), id: id, title: Focus.normalizedLabel(title))
+    }
+
     func entry(_ id: String) -> ConversationEntryWire? { history?.entries.first { $0.id == id } }
 
     // MARK: Resume
 
     /// Resume conversation `sid`. A second gesture on the same row before the reply is ignored.
-    func resume(_ sid: String) {
+    /// `place` is the main checkout to resume in when the worktree is gone; `confirmActiveElsewhere` is
+    /// the user's "Resume anyway".
+    func resume(_ sid: String, place: String? = nil, confirmActiveElsewhere: Bool = false) {
         guard let sender, sender.daemonAdvertisesConversationHistory, !inFlight.contains(sid) else { return }
         inFlight.insert(sid)
-        send(sid: sid, startedAt: now())
+        send(sid: sid, startedAt: now(), place: place, confirm: confirmActiveElsewhere)
     }
 
     /// The sheet closed (Cancel, or any way out): stop retrying and forget every request in flight, and
@@ -125,13 +134,14 @@ final class ConversationHistoryStore {
         sender?.conversationResumeRelease(tag: tag)
     }
 
-    private func send(sid: String, startedAt: Date) {
+    private func send(sid: String, startedAt: Date, place: String?, confirm: Bool) {
         let focusId = makeFocusId()
         // Exactly as `Focus.sessionTag` derives it for a focus this app mints.
         let tag = "\(entry(sid)?.agent ?? "")-\(focusId.prefix(8))"
         let requestId = makeRequestId()
-        pending[requestId] = (sid, focusId, tag, startedAt)
-        sender?.conversationResume(requestId: requestId, id: sid, newTag: tag)
+        pending[requestId] = (sid, focusId, tag, startedAt, place, confirm)
+        sender?.conversationResume(requestId: requestId, id: sid, newTag: tag, place: place,
+                                   confirmActiveElsewhere: confirm)
     }
 
     // MARK: Frames
@@ -187,7 +197,7 @@ final class ConversationHistoryStore {
                     resumeResults.send((p.sid, .waitingToStart))
                     schedule(Self.startRetryInterval) { [weak self] in
                         guard let self, self.inFlight.contains(p.sid) else { return }
-                        self.send(sid: p.sid, startedAt: p.startedAt)
+                        self.send(sid: p.sid, startedAt: p.startedAt, place: p.place, confirm: p.confirm)
                     }
                 }
             } else {

@@ -9,6 +9,8 @@ enum ConversationStatusWire: Equatable, Decodable {
     case unavailableDeleted
     case unavailableUnreadable
     case folderGone(worktree: Bool)
+    /// Written to in the last two minutes by something that is not a Nostromo session.
+    case activeElsewhere
     case available
     /// A kind this app does not know: shown, never resumable.
     case unknown
@@ -24,6 +26,7 @@ enum ConversationStatusWire: Equatable, Decodable {
         case "unavailable_deleted": self = .unavailableDeleted
         case "unavailable_unreadable": self = .unavailableUnreadable
         case "folder_gone": self = .folderGone(worktree: try c.decodeIfPresent(Bool.self, forKey: .worktree) ?? false)
+        case "active_elsewhere": self = .activeElsewhere
         case "available": self = .available
         default: self = .unknown
         }
@@ -49,6 +52,8 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
     var status: ConversationStatusWire
     var resumedFromTag: String?
     var transcriptPath: String?
+    /// For a conversation whose worktree is gone: its main checkout, when it still exists.
+    var mainCheckout: String?
 
     var lastActive: Date { Date(timeIntervalSince1970: TimeInterval(lastActiveMs) / 1000) }
 
@@ -57,7 +62,7 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
         case projectName = "project_name", projectPath = "project_path", prNumbers = "pr_numbers"
         case firstPrompt = "first_prompt", firstPromptWithheld = "first_prompt_withheld"
         case lastActiveMs = "last_active_ms", resumedFromTag = "resumed_from_tag"
-        case transcriptPath = "transcript_path"
+        case transcriptPath = "transcript_path", mainCheckout = "main_checkout"
     }
 
     init(from decoder: Decoder) throws {
@@ -79,6 +84,7 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
         status = try c.decode(ConversationStatusWire.self, forKey: .status)
         resumedFromTag = try c.decodeIfPresent(String.self, forKey: .resumedFromTag)
         transcriptPath = try c.decodeIfPresent(String.self, forKey: .transcriptPath)
+        mainCheckout = try c.decodeIfPresent(String.self, forKey: .mainCheckout)
     }
 
     /// Memberwise init for tests and the model.
@@ -86,13 +92,14 @@ struct ConversationEntryWire: Equatable, Decodable, Identifiable {
          label: String? = nil, projectName: String? = nil, projectPath: String? = nil, branch: String? = nil,
          model: String? = nil, effort: String? = nil, prNumbers: [Int] = [], firstPrompt: String? = nil,
          firstPromptWithheld: String? = nil, sensitive: Bool = false, resumedFromTag: String? = nil,
-         transcriptPath: String? = nil) {
+         transcriptPath: String? = nil, mainCheckout: String? = nil) {
         self.id = id; self.title = title; self.label = label; self.agent = agent
         self.projectName = projectName; self.projectPath = projectPath; self.branch = branch
         self.model = model; self.effort = effort; self.prNumbers = prNumbers
         self.firstPrompt = firstPrompt; self.firstPromptWithheld = firstPromptWithheld
         self.sensitive = sensitive; self.lastActiveMs = lastActiveMs; self.status = status
         self.resumedFromTag = resumedFromTag; self.transcriptPath = transcriptPath
+        self.mainCheckout = mainCheckout
     }
 }
 
@@ -165,7 +172,41 @@ struct ClientConversationResume: Encodable {
     let requestId: String
     let id: String
     let newTag: String
-    enum CodingKeys: String, CodingKey { case type, id, requestId = "request_id", newTag = "new_tag" }
+    /// Resume in this folder instead of the original (the main checkout of a gone worktree).
+    var place: String?
+    /// The user chose "Resume anyway" for a conversation that may be open in another Claude window.
+    var confirmActiveElsewhere = false
+    enum CodingKeys: String, CodingKey {
+        case type, id, place, requestId = "request_id", newTag = "new_tag",
+             confirmActiveElsewhere = "confirm_active_elsewhere"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type, forKey: .type)
+        try c.encode(requestId, forKey: .requestId)
+        try c.encode(id, forKey: .id)
+        try c.encode(newTag, forKey: .newTag)
+        try c.encodeIfPresent(place, forKey: .place)
+        if confirmActiveElsewhere { try c.encode(true, forKey: .confirmActiveElsewhere) }
+    }
+}
+
+/// `conversation_history_rename`: `title` nil clears the user's title.
+struct ClientConversationHistoryRename: Encodable {
+    let type = "conversation_history_rename"
+    let requestId: String
+    let id: String
+    let title: String?
+    enum CodingKeys: String, CodingKey { case type, id, title, requestId = "request_id" }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(type, forKey: .type)
+        try c.encode(requestId, forKey: .requestId)
+        try c.encode(id, forKey: .id)
+        try c.encodeIfPresent(title, forKey: .title)
+    }
 }
 
 struct ClientConversationResumeRelease: Encodable {

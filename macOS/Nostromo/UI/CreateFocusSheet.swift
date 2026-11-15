@@ -386,6 +386,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
 
         resumeTab.onResume = { [weak self] e in self?.beginResume(e) }
         resumeTab.onRemove = { [weak self] e in self?.removeEntry(e) }
+        resumeTab.onRename = { [weak self] e in self?.beginRename(e) }
         resumeTab.onShowTranscript = { e in
             if let path = e.transcriptPath, ConversationHistoryStore.isShowableTranscript(path) {
                 ActivationAudit.note("resume:show-transcript-in-finder")
@@ -470,6 +471,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         switch event.charactersIgnoringModifiers {
         case "1": selectTab(.new); return true
         case "2": selectTab(.resume); return true
+        case "r" where currentTab == .resume: resumeTab.renameSelected(); return true
         default: break
         }
         if event.keyCode == 51, currentTab == .resume { resumeTab.removeSelected(); return true }
@@ -483,9 +485,37 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
 
     @objc private func resumeTapped() { resumeTab.resumeSelected() }
 
+    /// How a `ResumeChoice` is shown; tests replace it to answer without a window.
+    var choicePresenter: (ResumeChoice, @escaping (ResumeChoice.Outcome) -> Void) -> Void = { [weak self] choice, done in
+        guard let window = self?.window else { done(.cancel); return }
+        choice.present(on: window, completion: done)
+    }
+
     private func beginResume(_ e: ConversationEntryWire) {
         resumeTab.showMessage(nil)
-        history.resume(e.id)
+        guard let choice = ResumeChoice.make(for: e) else { history.resume(e.id); return }
+        // Nothing is sent until the user chooses; Cancel (the default for "open elsewhere") sends nothing.
+        choicePresenter(choice) { [weak self] outcome in
+            switch outcome {
+            case .resumeInMain(let place): self?.history.resume(e.id, place: place)
+            case .resumeAnyway: self?.history.resume(e.id, confirmActiveElsewhere: true)
+            case .showTranscript: self?.resumeTab.onShowTranscript?(e)
+            case .cancel: break
+            }
+        }
+    }
+
+    /// The Rename sheet: one field, the same 60-character rule as a focus label.
+    var renameTitleProvider: ((ConversationEntryWire, @escaping (String?) -> Void) -> Void)?
+
+    private func beginRename(_ e: ConversationEntryWire) {
+        let apply: (String?) -> Void = { [weak self] title in self?.history.rename(e.id, to: title) }
+        if let provider = renameTitleProvider { provider(e, apply); return }
+        guard let window else { return }
+        let (alert, field) = RenameEntryAlert.make(currentTitle: e.title)
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn { apply(field.stringValue) }
+        }
     }
 
     /// The daemon holds the resumed tag for only its reservation window (15 s), so the org lookup
@@ -525,6 +555,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     static func refusalText(_ reason: String) -> String {
         switch reason {
         case "not_found": return "This conversation is no longer in History."
+        case "active_elsewhere": return "This conversation may be open in another Claude window."
         case "folder_gone": return "The project folder is gone, so this can\u{2019}t be resumed here."
         default: return "Claude can\u{2019}t open this conversation."
         }

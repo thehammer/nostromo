@@ -135,6 +135,7 @@ struct ConversationHistoryModel {
         case .unavailableDeleted: return "unavailable: Claude no longer has this conversation"
         case .unavailableUnreadable: return "unavailable: Can't read this conversation"
         case .folderGone(let worktree): return worktree ? "worktree gone" : "project gone"
+        case .activeElsewhere: return "active elsewhere?"
         case .available: return nil
         case .unknown: return "unavailable: this version of Nostromo can't open it"
         }
