@@ -605,6 +605,8 @@
 		ZZ0000000000000000CH0901 /* ConversationResumeFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0900 /* ConversationResumeFlowTests.swift */; };
 		ZZ0000000000000000CH0801 /* ResumeTabAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0800 /* ResumeTabAppearanceTests.swift */; };
 		ZZ0000000000000000CH0701 /* ResumeTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0700 /* ResumeTabTests.swift */; };
+		ZZ0000000000000000CH0711 /* FolderGoneChoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0710 /* FolderGoneChoiceTests.swift */; };
+		ZZ0000000000000000CH0721 /* RenameEntryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0720 /* RenameEntryTests.swift */; };
 		ZZ0000000000000000CH0601 /* ConversationHistoryModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0600 /* ConversationHistoryModelTests.swift */; };
 		ZZ0000000000000000CH0501 /* ConversationHistoryTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0500 /* ConversationHistoryTestSupport.swift */; };
 		ZZ0000000000000000SC1001 /* SlashCommandPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC1000 /* SlashCommandPickerTests.swift */; };
@@ -1233,6 +1235,8 @@
 		ZZ0000000000000000CH0900 /* ConversationResumeFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationResumeFlowTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0800 /* ResumeTabAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeTabAppearanceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0700 /* ResumeTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeTabTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000CH0710 /* FolderGoneChoiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderGoneChoiceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000CH0720 /* RenameEntryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenameEntryTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0600 /* ConversationHistoryModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHistoryModelTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0500 /* ConversationHistoryTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHistoryTestSupport.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC1000 /* SlashCommandPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandPickerTests.swift; sourceTree = "<group>"; };
@@ -1932,6 +1936,8 @@
 				ZZ0000000000000000CH0900 /* ConversationResumeFlowTests.swift */,
 				ZZ0000000000000000CH0800 /* ResumeTabAppearanceTests.swift */,
 				ZZ0000000000000000CH0700 /* ResumeTabTests.swift */,
+				ZZ0000000000000000CH0710 /* FolderGoneChoiceTests.swift */,
+				ZZ0000000000000000CH0720 /* RenameEntryTests.swift */,
 				ZZ0000000000000000CH0600 /* ConversationHistoryModelTests.swift */,
 				ZZ0000000000000000CH0500 /* ConversationHistoryTestSupport.swift */,
 				ZZ0000000000000000SC1000 /* SlashCommandPickerTests.swift */,
@@ -2916,6 +2922,8 @@
 				ZZ0000000000000000CH0901 /* ConversationResumeFlowTests.swift in Sources */,
 				ZZ0000000000000000CH0801 /* ResumeTabAppearanceTests.swift in Sources */,
 				ZZ0000000000000000CH0701 /* ResumeTabTests.swift in Sources */,
+				ZZ0000000000000000CH0711 /* FolderGoneChoiceTests.swift in Sources */,
+				ZZ0000000000000000CH0721 /* RenameEntryTests.swift in Sources */,
 				ZZ0000000000000000CH0601 /* ConversationHistoryModelTests.swift in Sources */,
 				ZZ0000000000000000CH0501 /* ConversationHistoryTestSupport.swift in Sources */,
 				ZZ0000000000000000SC1001 /* SlashCommandPickerTests.swift in Sources */,

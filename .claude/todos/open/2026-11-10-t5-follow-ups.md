@@ -9,6 +9,9 @@
 - A visible window of an inactive app counts as `visible` for the PR-list demand level. This matches the plan text, not its prose ("someone is looking").
 - The demand reporter's 60 s re-evaluation timer and the 1 s debounce timer run while the Overview is hidden (local only, no daemon traffic unless the level changes).
 
+- [ ] Session history 2: the VoiceOver and keyboard flow of the resume choice sheets (worktree gone, open elsewhere, Return = Cancel, Esc) is verified only by unit tests, not with VoiceOver or a real key press. Check it by hand.
+- [ ] Session history 2: resuming a conversation from another folder relies on the spike's outcome A (Claude's `--resume` finds the transcript from a different directory); nothing in the tests exercises the real CLI. Re-check after a Claude CLI upgrade.
+
 ## From Perri's review of PR #469 (My open PRs 3/3)
 
 - The hidden-polling budget (at most 20 requests/hour while the Overview is hidden) was not measured by the reviewer: measure it with a real token.

@@ -5,6 +5,9 @@ final class RecordingHistorySender: ConversationHistorySending {
     var daemonAdvertisesConversationHistory = true
     private(set) var gets = 0
     private(set) var resumes: [(requestId: String, id: String, newTag: String)] = []
+    private(set) var resumePlaces: [String?] = []
+    private(set) var resumeConfirms: [Bool] = []
+    private(set) var renames: [(id: String, title: String?)] = []
     private(set) var releases: [String] = []
     private(set) var removes: [String] = []
     private(set) var restores: [String] = []
@@ -12,7 +15,10 @@ final class RecordingHistorySender: ConversationHistorySending {
     private(set) var settings: [Bool] = []
 
     func conversationHistoryGet(requestId: String) { gets += 1 }
-    func conversationResume(requestId: String, id: String, newTag: String) { resumes.append((requestId, id, newTag)) }
+    func conversationResume(requestId: String, id: String, newTag: String, place: String?, confirmActiveElsewhere: Bool) {
+        resumes.append((requestId, id, newTag)); resumePlaces.append(place); resumeConfirms.append(confirmActiveElsewhere)
+    }
+    func conversationHistoryRename(requestId: String, id: String, title: String?) { renames.append((id, title)) }
     func conversationResumeRelease(tag: String) { releases.append(tag) }
     func conversationHistoryRemove(requestId: String, id: String) { removes.append(id) }
     func conversationHistoryRestore(requestId: String, id: String) { restores.append(id) }
@@ -38,11 +44,11 @@ enum HistoryFixtures {
     static func entry(_ id: String, title: String = "Title", agent: String = "cody", daysAgo: Double = 0,
                       project: String? = "nostromo", branch: String? = nil, prs: [Int] = [],
                       prompt: String? = nil, status: ConversationStatusWire = .available,
-                      sensitive: Bool = false) -> ConversationEntryWire {
+                      sensitive: Bool = false, mainCheckout: String? = nil) -> ConversationEntryWire {
         ConversationEntryWire(id: id, title: title, agent: agent, lastActiveMs: ms(daysAgo: daysAgo), status: status,
                               projectName: project, projectPath: project.map { "/tmp/\($0)" }, branch: branch,
                               prNumbers: prs, firstPrompt: prompt, sensitive: sensitive,
-                              transcriptPath: "/tmp/\(id).jsonl")
+                              transcriptPath: "/tmp/\(id).jsonl", mainCheckout: mainCheckout)
     }
 
     static func history(_ entries: [ConversationEntryWire], prompts: Bool = true, degraded: Int? = nil) -> ConversationHistoryWire {

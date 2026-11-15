@@ -457,6 +457,29 @@ impl TrackerRegistry {
         })
     }
 
+    /// Binds `tag` to the board file already at `path`, through the same
+    /// adopt-and-bind path as [`TrackerRegistry::open`]. Creates nothing: a
+    /// missing file, or one that is not a board, binds nothing and returns false.
+    pub fn bind_existing(&self, tag: &str, path: &Path) -> bool {
+        if !path.is_file() {
+            return false;
+        }
+        let args = OpenArgs {
+            path: Some(path.to_string_lossy().into_owned()),
+            cwd: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            ..OpenArgs::default()
+        };
+        self.open(tag, "conversation-resume", &args).is_ok()
+    }
+
+    /// Drops `tag`'s binding (the board file stays). No-op when unbound.
+    pub fn unbind(&self, tag: &str) {
+        let mut inner = self.lock();
+        if inner.bindings.remove(tag).is_some() {
+            self.persist(&inner);
+        }
+    }
+
     /// Applies `ops` atomically to the board bound to `tag`, attributed to
     /// `author`: re-reads the file first, ingesting any external edit, then
     /// writes the result. `session` is the writer's session (the cursor the
@@ -1411,6 +1434,18 @@ impl TrackerFrameProvider for TrackerRegistry {
     fn has_bound_board(&self, tag: &str) -> bool {
         TrackerRegistry::has_bound_board(self, tag)
     }
+
+    fn bound_board_path(&self, tag: &str) -> Option<PathBuf> {
+        self.bound_path(tag)
+    }
+
+    fn bind_existing_board(&self, tag: &str, path: &Path) -> bool {
+        self.bind_existing(tag, path)
+    }
+
+    fn unbind_board(&self, tag: &str) {
+        self.unbind(tag)
+    }
 }
 
 /// What an application of a source report changed.
@@ -1666,3 +1701,7 @@ fn topic_from_path(path: &Path) -> Option<String> {
     let stem: String = stem.chars().take(48).collect();
     is_valid_topic(&stem).then_some(stem)
 }
+
+#[cfg(test)]
+#[path = "bind_existing_tests.rs"]
+mod bind_existing_tests;

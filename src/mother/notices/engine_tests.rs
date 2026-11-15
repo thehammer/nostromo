@@ -1713,3 +1713,50 @@ fn a_wake_turn_releases_a_held_notice_without_touching_the_chain_or_the_cap() {
     assert_eq!(r.wakes(F), 0);
     assert!(!r.focus(F).expect("F").chain_held);
 }
+
+// ── a resumed conversation: its jobs' notices follow it ──────────────────────
+
+#[test]
+fn a_job_queued_before_the_conversation_was_resumed_notifies_the_resumed_focus() {
+    use crate::mother::origin::{OriginBook, SessionHistory};
+    use crate::mother::MotherJobOrigin;
+    let sid = "sid-aaaaaaaa-1";
+    let history = SessionHistory::in_memory();
+    history.record("old-tag", sid);
+    let book = OriginBook::in_memory(history.clone(), MotherAudit::disabled());
+    let queued = |state: &str| {
+        let mut j = MotherJob {
+            id: "j1".into(),
+            state: state.into(),
+            title: "Job j1".into(),
+            origin: Some(MotherJobOrigin {
+                focus: Some("old-tag".into()),
+                session: Some(sid.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        book.annotate(std::slice::from_mut(&mut j));
+        j
+    };
+
+    let r = Rig::new();
+    r.jobs(&[queued("running")]);
+    // The conversation is resumed under a new focus tag while the job runs.
+    history.move_session(sid, "old-tag", "new-tag");
+    r.advance(SEC);
+    r.jobs(&[queued("succeeded")]);
+    r.after(30 * SEC);
+
+    assert_eq!(
+        r.deliveries_to("new-tag").len(),
+        1,
+        "the resumed focus is told"
+    );
+    assert!(r.deliveries_to("old-tag").is_empty(), "the old tag is not");
+    assert_eq!(
+        book.entry("j1").unwrap().focus_tag.as_deref(),
+        Some("old-tag"),
+        "the stamp is never rewritten"
+    );
+}

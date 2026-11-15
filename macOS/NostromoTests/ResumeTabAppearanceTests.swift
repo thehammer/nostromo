@@ -110,4 +110,39 @@ final class ResumeTabAppearanceTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(ink.upperBound - ink.lowerBound, min(whole, frame.width) - 1, "the line is clipped")
         XCTAssertLessThanOrEqual(ink.upperBound, item.bounds.width - 2)
     }
+
+    func testWorktreeGoneAndActiveElsewhereStatusesAreDrawnWholeInsideTheRow() throws {
+        let cases: [(ConversationStatusWire, String)] = [(.folderGone(worktree: true), "worktree gone"),
+                                                         (.activeElsewhere, "active elsewhere?")]
+        for (status, words) in cases {
+            let v = row(F.entry("a", status: status))
+            XCTAssertTrue(v.bounds.contains(v.statusField.frame), "\(words): field inside the row")
+            let rep = try render(v)
+            let ink = try XCTUnwrap(inkColumns(rep, region: v.statusField.frame, bounds: v.bounds), "\(words) drew nothing")
+            XCTAssertGreaterThanOrEqual(ink.upperBound - ink.lowerBound,
+                                        wholeInkWidth(words, font: v.statusField.font!) - 0.5, "\(words) is cut")
+            XCTAssertLessThanOrEqual(ink.upperBound, v.bounds.width - ResumeRowView.margin + 0.5)
+        }
+    }
+
+    func testTheMovedHereNoticeDrawsInATranscriptNoteAndIsNotClipped() throws {
+        let text = "This conversation ran in /Users/x/Code/nostromo-feature-session-history, which no longer exists. "
+            + "Now in /Users/x/Code/nostromo. It was on feature/old; main is checked out here."
+        let note = NoteBlockView(text: text)
+        note.appearance = NSAppearance(named: .darkAqua)
+        let width: CGFloat = 480
+        note.frame = NSRect(x: 0, y: 0, width: width, height: 10)
+        note.layoutSubtreeIfNeeded()
+        let height = max(note.fittingSize.height, 30)
+        note.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        note.layoutSubtreeIfNeeded()
+        let rep = try render(note)
+        let full = NSRect(x: 0, y: 0, width: width, height: height)
+        let ink = try XCTUnwrap(inkColumns(rep, region: full, bounds: full), "the note drew nothing")
+        XCTAssertGreaterThanOrEqual(ink.lowerBound, NoteBlockView.horizontalInset - 1, "clipped on the left")
+        XCTAssertLessThanOrEqual(ink.upperBound, width - NoteBlockView.horizontalInset + 1, "clipped on the right")
+        // The last line (bottom of the note) has ink too: the text wrapped, it was not cut off.
+        let bottom = NSRect(x: 0, y: 0, width: width, height: height * 0.4)
+        XCTAssertNotNil(inkColumns(rep, region: bottom, bounds: full), "the last line of the note is missing")
+    }
 }
