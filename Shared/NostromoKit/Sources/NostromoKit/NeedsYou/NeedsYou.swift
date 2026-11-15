@@ -58,7 +58,7 @@ public enum AuthoredPrNeedsYouProducer {
 
     public static func items(from snapshot: AuthoredPrsSnapshot?) -> [NeedsYouItem] {
         guard let snapshot else { return [] }
-        return snapshot.prs.compactMap { pr in
+        return snapshot.prs.compactMap { pr -> NeedsYouItem? in
             guard pr.pill, pr.lifecycle == .open, !pr.draft, let tag = pr.owner.tag, !tag.isEmpty else { return nil }
             switch pr.owner.kind {
             case .motherJob, .linked, .onBranch: break

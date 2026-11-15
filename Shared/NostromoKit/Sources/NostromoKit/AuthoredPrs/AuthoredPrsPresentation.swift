@@ -60,6 +60,7 @@ public struct AuthoredPrRowModel: Equatable, Sendable, Identifiable {
     public var ownerKind: AuthoredPrOwnerKind = .unknown
     public var ownerTag: String?
     public var ownerName: String?
+    public var ownerCandidates: [AuthoredPrCandidate] = []
     /// The hand-off button, only on a fixable row and only when the daemon can hand off.
     public var tellButton: AuthoredPrTellButton?
     /// `Told Cody 1m ago`, when someone was told and the daemon can hand off.
@@ -282,6 +283,7 @@ public enum AuthoredPrsPresentation {
         model.ownerKind = pr.owner.kind
         model.ownerTag = pr.owner.tag
         model.ownerName = pr.owner.name
+        model.ownerCandidates = pr.owner.candidates
         if handoff {
             model.tellButton = tellButton(pr)
             model.toldText = toldText(pr.told, now: now)

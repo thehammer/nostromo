@@ -282,10 +282,19 @@ final class AuthoredPrRowView: NSView {
     let ownerPrefixLabel = plainLabel(font: .systemFont(ofSize: 11), color: AuthoredPrsPalette.muted)
     let jobButton = NSButton()
     let ownerSuffixLabel = plainLabel(font: .systemFont(ofSize: 11), color: AuthoredPrsPalette.muted)
+    /// `Told Cody 1m ago`: never truncates, so the age is always readable.
+    let toldLabel = plainLabel(font: .systemFont(ofSize: 11), color: AuthoredPrsPalette.muted, truncates: false)
+    /// Tell <focus>, Choose focus… or Start a session…: only on a fixable row, and only when the daemon can hand off.
+    let tellButton = NSButton()
+    /// The detail lines end at the row's edge, or at the button when there is one.
+    private var detailEdge: [NSLayoutConstraint] = []
+    private var detailBesideButton: [NSLayoutConstraint] = []
 
     private(set) var model: AuthoredPrRowModel?
     /// Called with the Mother job id when its link is pressed.
     var onOpenJob: ((String) -> Void)?
+    /// Called when the row's button is pressed (the current event is the click).
+    var onTell: ((AuthoredPrRowModel) -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -306,7 +315,19 @@ final class AuthoredPrRowView: NSView {
         jobButton.setAccessibilityElement(false)
 
         let first = NSStackView(views: [statusLabel, numberLabel, titleLabel, draftBadge, repoChip, ageLabel])
-        let last = NSStackView(views: [baseLabel, ownerPrefixLabel, jobButton, ownerSuffixLabel])
+        toldLabel.setContentCompressionResistancePriority(.init(999), for: .horizontal)
+        toldLabel.setContentHuggingPriority(.required, for: .horizontal)
+        tellButton.bezelStyle = .rounded
+        tellButton.controlSize = .small
+        tellButton.font = .systemFont(ofSize: 11)
+        tellButton.lineBreakMode = .byClipping
+        tellButton.target = self
+        tellButton.action = #selector(tellPressed)
+        tellButton.translatesAutoresizingMaskIntoConstraints = false
+        tellButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        tellButton.setContentHuggingPriority(.required, for: .horizontal)
+        tellButton.isHidden = true
+        let last = NSStackView(views: [baseLabel, ownerPrefixLabel, jobButton, ownerSuffixLabel, toldLabel])
         for stack in [first, last] {
             stack.orientation = .horizontal
             stack.alignment = .centerY
@@ -319,8 +340,19 @@ final class AuthoredPrRowView: NSView {
         last.detachesHiddenViews = true
         addSubview(checksLabel)
         addSubview(reviewLabel)
+        addSubview(tellButton)
 
         let side = Self.sidePadding, indent = side + Self.detailIndent
+        detailEdge = [
+            checksLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
+            reviewLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
+            last.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
+        ]
+        detailBesideButton = [
+            checksLabel.trailingAnchor.constraint(equalTo: tellButton.leadingAnchor, constant: -8),
+            reviewLabel.trailingAnchor.constraint(equalTo: tellButton.leadingAnchor, constant: -8),
+            last.trailingAnchor.constraint(equalTo: tellButton.leadingAnchor, constant: -8),
+        ]
         NSLayoutConstraint.activate([
             first.topAnchor.constraint(equalTo: topAnchor, constant: Self.topPadding),
             first.leadingAnchor.constraint(equalTo: leadingAnchor, constant: side),
@@ -329,19 +361,19 @@ final class AuthoredPrRowView: NSView {
 
             checksLabel.topAnchor.constraint(equalTo: first.bottomAnchor, constant: Self.lineGap),
             checksLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: indent),
-            checksLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
             checksLabel.heightAnchor.constraint(equalToConstant: Self.lineHeight),
 
             reviewLabel.topAnchor.constraint(equalTo: checksLabel.bottomAnchor),
             reviewLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: indent),
-            reviewLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
             reviewLabel.heightAnchor.constraint(equalToConstant: Self.lineHeight),
 
             last.topAnchor.constraint(equalTo: reviewLabel.bottomAnchor),
             last.leadingAnchor.constraint(equalTo: leadingAnchor, constant: indent),
-            last.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
             last.heightAnchor.constraint(equalToConstant: Self.lineHeight),
             last.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.bottomPadding),
+
+            tellButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -side),
+            tellButton.centerYAnchor.constraint(equalTo: reviewLabel.centerYAnchor),
 
             // A repo chip never truncates, except a pathological owner/name past half the row.
             repoChip.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, multiplier: 0.5),
@@ -389,10 +421,28 @@ final class AuthoredPrRowView: NSView {
         ownerSuffixLabel.stringValue = suffix
         ownerSuffixLabel.isHidden = suffix.isEmpty
 
+        let told = model.toldText.map { " · " + $0 } ?? ""
+        toldLabel.stringValue = told
+        toldLabel.isHidden = told.isEmpty
+
+        if let tell = model.tellButton {
+            tellButton.isHidden = false
+            tellButton.title = tell.title
+            tellButton.toolTip = tell.title
+            tellButton.setAccessibilityLabel(tell.accessibilityLabel)
+            tellButton.setAccessibilityIdentifier("authored-pr-tell")
+        } else {
+            tellButton.isHidden = true
+        }
+        NSLayoutConstraint.deactivate(tellButton.isHidden ? detailBesideButton : detailEdge)
+        NSLayoutConstraint.activate(tellButton.isHidden ? detailEdge : detailBesideButton)
+
         setAccessibilityElement(true)
         setAccessibilityRole(.row)
         setAccessibilityLabel(model.accessibilityLabel)
-        setAccessibilityChildren([])
+        // The row is one element; its button is the one child that is an element of its own.
+        let children: [Any] = tellButton.isHidden ? [] : [tellButton]
+        setAccessibilityChildren(children)
         if let job = model.ownerJobId {
             setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Show Mother job \(job)") { [weak self] in
                 self?.jobPressed()
@@ -406,6 +456,10 @@ final class AuthoredPrRowView: NSView {
 
     @objc private func jobPressed() {
         if let id = model?.ownerJobId { onOpenJob?(id) }
+    }
+
+    @objc private func tellPressed() {
+        if let model { onTell?(model) }
     }
 }
 

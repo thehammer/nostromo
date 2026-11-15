@@ -311,6 +311,8 @@ enum ServerMsg {
     case sessionCommands(SessionCommandsWire)
     /// The author's open PRs (`authored_prs_v1`). Local only.
     case authoredPrs(AuthoredPrsSnapshot)
+    /// The answer to a hand-off verb of this connection (`authored_prs_notify_v1`). Local only.
+    case authoredPrAnswer(AuthoredPrAnswerFrame)
 
     // ── conversation history (`conversation_history_v1`; operator app only) ──
     case conversationHistory(ConversationHistoryWire)
@@ -993,6 +995,12 @@ class NostromodClient {
         features?.contains(authoredPrsFeature) == true
     }
 
+    /// Does a daemon that advertised `features` hand a PR to a focus (`authored_prs_notify_v1`)? The Overview's
+    /// buttons, picker and pills appear only then; with just `authored_prs_v1` it stays read-only.
+    static func supportsAuthoredPrsNotify(features: [String]?) -> Bool {
+        features?.contains(authoredPrsNotifyFeature) == true
+    }
+
     /// The `welcome.features` entry that says the daemon keeps the private conversation history.
     static let conversationHistoryFeature = "conversation_history_v1"
 
@@ -1189,6 +1197,33 @@ class NostromodClient {
     var daemonAdvertisesAuthoredPrs: Bool {
         sendLock.lock(); defer { sendLock.unlock() }
         return NostromodClient.supportsAuthoredPrs(features: advertisedFeatures)
+    }
+
+    /// Whether the connection's last `welcome` advertised `authored_prs_notify_v1`.
+    var daemonAdvertisesAuthoredPrsNotify: Bool {
+        sendLock.lock(); defer { sendLock.unlock() }
+        return NostromodClient.supportsAuthoredPrsNotify(features: advertisedFeatures)
+    }
+
+    /// The hand-off verbs. Each is written only to a daemon that advertised `authored_prs_notify_v1`.
+    func sendAuthoredPrPreview(_ msg: ClientAuthoredPrPreviewRequest) {
+        guard daemonAdvertisesAuthoredPrsNotify else { return }
+        send(msg, type: "authored_pr_preview_request")
+    }
+
+    func sendAuthoredPrNotify(_ msg: ClientAuthoredPrNotify) {
+        guard daemonAdvertisesAuthoredPrsNotify else { return }
+        send(msg, type: "authored_pr_notify")
+    }
+
+    func sendAuthoredPrStartSession(_ msg: ClientAuthoredPrStartSession) {
+        guard daemonAdvertisesAuthoredPrsNotify else { return }
+        send(msg, type: "authored_pr_start_session")
+    }
+
+    func sendAuthoredPrLink(_ msg: ClientAuthoredPrLink) {
+        guard daemonAdvertisesAuthoredPrsNotify else { return }
+        send(msg, type: "authored_pr_link")
     }
 
     /// Tell the daemon whether the PR list is visible, hidden or the user is idle. Nothing is written
@@ -2180,6 +2215,14 @@ class NostromodClient {
                 return .authoredPrs(m.snapshot)
             } else {
                 log.error("failed to decode authored_prs")
+            }
+
+        case "authored_pr_preview", "authored_pr_notify_result", "authored_pr_start_session_result",
+             "authored_pr_link_result":
+            if let frame = AuthoredPrAnswerFrame.decode(raw) {
+                return .authoredPrAnswer(frame)
+            } else {
+                log.error("failed to decode an authored_pr answer")
             }
 
         case "tracker_board":

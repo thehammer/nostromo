@@ -64,6 +64,13 @@ class ReplView: NSView {
     /// Open this focus's Background activity popover from its input bar (the tracker's summary row).
     func showBackgroundList() { inputBar.showBackgroundPopover(nil) }
 
+    /// Put the keyboard in the input (the PR Overview's hand-off). False when this view is not in a window.
+    @discardableResult
+    func focusInput() -> Bool {
+        guard let window else { return false }
+        return window.makeFirstResponder(inputBar.textView)
+    }
+
     /// The router a pane with `tag` installs on its wake markers. `openTask` says whether the task's
     /// window opened (`TaskWindowManager` by default); if not, `showList` runs. Tests pass recorders.
     static func wakeMarkerRouter(

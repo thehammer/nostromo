@@ -48,8 +48,34 @@ class AppStore: ObservableObject {
     @Published private(set) var authoredPrs: AuthoredPrsSnapshot?
     /// Whether the last `welcome` advertised `authored_prs_v1`. False means the Mother pane is unchanged.
     @Published private(set) var authoredPrsSupported = false
+    /// Whether the last `welcome` advertised `authored_prs_notify_v1`: the Overview's buttons, picker and
+    /// pills appear only then. False leaves the read-only Overview.
+    @Published private(set) var authoredPrsNotifySupported = false
     /// Whether the daemon link is up. While `.reconnecting` the last snapshot stays on screen, dimmed.
     @Published private(set) var authoredPrsConnection: AuthoredPrsConnection = .connected
+    /// The hand-off verbs on the daemon connection. Available only while the link is up.
+    private(set) lazy var authoredPrHandoffTransport = AuthoredPrHandoffTransportLive(
+        supported: { [weak self] in
+            self?.authoredPrsNotifySupported == true && self?.authoredPrsConnection == .connected
+        },
+        sendPreview: { [weak self] in self?.client.sendAuthoredPrPreview($0) },
+        sendNotify: { [weak self] in self?.client.sendAuthoredPrNotify($0) },
+        sendStart: { [weak self] in self?.client.sendAuthoredPrStartSession($0) },
+        sendLink: { [weak self] in self?.client.sendAuthoredPrLink($0) })
+    /// Opens the preview, picker or sheet for a PR row and carries a send through to its focus.
+    private(set) lazy var authoredPrHandoff = AuthoredPrHandoff(
+        transport: authoredPrHandoffTransport,
+        presenter: FocusPresenter(),
+        openFocuses: {
+            FocusStore.shared.focuses.filter { !$0.isBuiltIn }.map {
+                AuthoredPrPickerFocus(tag: $0.sessionTag, name: $0.displayName,
+                                      repoName: $0.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent })
+            }
+        },
+        openFocusTags: FocusStore.shared.$focuses
+            .map { Set($0.map(\.sessionTag)) }
+            .removeDuplicates()
+            .eraseToAnyPublisher())
     /// Reports whether the Overview is visible, hidden or the user idle. Sends only on change.
     lazy var authoredPrsDemand = AuthoredPrsDemandReporter(
         supported: { [weak self] in self?.authoredPrsSupported == true },
@@ -718,7 +744,10 @@ class AppStore: ObservableObject {
                 self?.perriHealth.connectionChanged(connected)
                 self?.sessionListRefresher.connectionChanged(connected)
                 if !connected { self?.daemonDisconnected() }
-                if connected, let self { self.authoredPrsConnectionStarted(supported: self.client.daemonAdvertisesAuthoredPrs) }
+                if connected, let self {
+                    self.authoredPrsConnectionStarted(supported: self.client.daemonAdvertisesAuthoredPrs,
+                                                      notify: self.client.daemonAdvertisesAuthoredPrsNotify)
+                }
                 // Tells every chip whether the daemon is reachable, and on a new connection
                 // asks for the model catalogue and the per-agent defaults.
                 ModelStore.shared.connectionChanged(connected)
@@ -1567,13 +1596,16 @@ class AppStore: ObservableObject {
     func daemonDisconnectedForTesting() { daemonDisconnected() }
 
     /// Test seam: a connection came up whose `welcome` did or did not advertise `authored_prs_v1`.
-    func daemonConnectedForTesting(authoredPrs supported: Bool) { authoredPrsConnectionStarted(supported: supported) }
+    func daemonConnectedForTesting(authoredPrs supported: Bool, notify: Bool = false) {
+        authoredPrsConnectionStarted(supported: supported, notify: notify)
+    }
 
     /// Ask the daemon for a full reconcile of the author's PRs now (⟳, ⌘R in the Overview).
     func requestAuthoredPrsRefresh() { authoredPrsRefreshSender() }
 
-    private func authoredPrsConnectionStarted(supported: Bool) {
+    private func authoredPrsConnectionStarted(supported: Bool, notify: Bool) {
         if authoredPrsSupported != supported { authoredPrsSupported = supported }
+        if authoredPrsNotifySupported != (supported && notify) { authoredPrsNotifySupported = supported && notify }
         if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
         if supported { authoredPrsDemand.connectionStarted() }
     }
@@ -1582,6 +1614,8 @@ class AppStore: ObservableObject {
     func resetAuthoredPrsForTesting() {
         authoredPrs = nil
         authoredPrsSupported = false
+        authoredPrsNotifySupported = false
+        needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name, items: [])
         authoredPrsConnection = .connected
         authoredPrsRefreshSender = {}
     }
@@ -1593,6 +1627,7 @@ class AppStore: ObservableObject {
     /// look live: the state goes, and the reconnect replay brings it back.
     private func daemonDisconnected() {
         if authoredPrsConnection != .reconnecting { authoredPrsConnection = .reconnecting }
+        authoredPrHandoffTransport.connectionLost()
         authoredPrsDemand.connectionLost()
         if motherNoticeState != nil { motherNoticeState = nil }
         if motherNoticeRefusal != nil { motherNoticeRefusal = nil }
@@ -1923,6 +1958,13 @@ class AppStore: ObservableObject {
         case .authoredPrs(let snapshot):
             if snapshot != authoredPrs { authoredPrs = snapshot }
             if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
+            // A PR that needs the user, whose open owner has not been told, is one waiting item on that focus.
+            needsYouCoordinator.setProducer(AuthoredPrNeedsYouProducer.name,
+                                            items: AuthoredPrNeedsYouProducer.items(from: snapshot))
+
+        // The answer to a preview, send, start or link this connection asked for.
+        case .authoredPrAnswer(let frame):
+            authoredPrHandoffTransport.deliver(frame)
 
         // The conversation history and the resume rules' answers: the Resume tab reads the store.
         case .conversationHistory, .conversationResumeResult, .conversationHistoryChanged, .conversationResumeFailed:
