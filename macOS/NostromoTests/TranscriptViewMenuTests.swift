@@ -130,7 +130,7 @@ final class TranscriptViewMenuTests: XCTestCase {
     func testTheViewMenuHoldsFocusShowAllActivityAndTheDefaultSubmenu() throws {
         let view = try viewMenu(of: MainMenu.make(target: nil))
 
-        XCTAssertEqual(view.items.map(\.title), ["Focus", "Show All Activity", "", "Default for New Focuses"])
+        XCTAssertEqual(view.items.map(\.title), ["Focus", "Show All Activity", "", "Default for New Focuses", "", "Show My PRs"])
         XCTAssertTrue(view.items[2].isSeparatorItem)
         let defaults = try XCTUnwrap(view.items[3].submenu)
         XCTAssertEqual(defaults.items.map(\.title), ["Focus", "All Activity"])
