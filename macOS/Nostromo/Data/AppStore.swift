@@ -221,6 +221,19 @@ class AppStore: ObservableObject {
     let focusSelectionRequests = PassthroughSubject<Focus, Never>()
     private let orgResolver = RepoOrgResolver()
 
+    /// Test seam: receives `(action, prNumber, repo, tag)` instead of the daemon
+    /// connection when set.
+    var perriActionSender: ((String, Int?, String?, String?) -> Void)?
+
+    /// The Perri state directory (sentinels and the PR cache). Settable so
+    /// tests can point it away from the real home.
+    var perriStateDirectory: String =
+        "\(FileManager.default.homeDirectoryForCurrentUser.path)/.claude/state/perri"
+
+    /// The Jira site (bare host) the daemon reported on its last `perri_state`
+    /// frame; nil when none is configured. Nothing reads it yet.
+    @Published private(set) var perriJiraSite: String?
+
     // MARK: - Internals
 
     /// Exposed so `TranscriptLoadHarness` can inject synthetic daemon traffic
@@ -966,7 +979,9 @@ class AppStore: ObservableObject {
             cycles: job.cycles,
             crew:   job.crew,
             originLabel: job.originLabel,
-            limiterWait: (state == "ready" || state == "queued") ? job.limiterWait : nil
+            limiterWait: (state == "ready" || state == "queued") ? job.limiterWait : nil,
+            dependsOn: job.dependsOn,
+            depWait: state == "queued" ? job.depWait : nil
         )
     }
 
@@ -1319,10 +1334,10 @@ class AppStore: ObservableObject {
 
     /// Ask the Rust daemon for an immediate queue re-fetch by writing the dirty sentinel.
     func refreshPerriQueue() {
-        let home    = FileManager.default.homeDirectoryForCurrentUser.path
-        let dirty   = "\(home)/.claude/state/perri/queue.dirty"
+        let stateDir = perriStateDirectory
+        let dirty    = "\(stateDir)/queue.dirty"
         DispatchQueue.global(qos: .userInitiated).async {
-            try? FileManager.default.createDirectory(atPath: "\(home)/.claude/state/perri",
+            try? FileManager.default.createDirectory(atPath: stateDir,
                                                      withIntermediateDirectories: true)
             FileManager.default.createFile(atPath: dirty, contents: nil)
             log.debug("wrote queue.dirty sentinel")
@@ -1351,34 +1366,17 @@ class AppStore: ObservableObject {
         // Cache miss: show loading state and ask the daemon.
         perriDetail        = nil
         perriDetailLoading = true
-
-        let home    = FileManager.default.homeDirectoryForCurrentUser.path
-        let stateDir = "\(home)/.claude/state/perri"
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                try FileManager.default.createDirectory(atPath: stateDir,
-                                                        withIntermediateDirectories: true)
-                // Write current-pr.json (single-slot signal to the daemon).
-                let pointer: [String: Any] = ["number": item.number, "repo": item.repo]
-                let data = try JSONSerialization.data(withJSONObject: pointer,
-                                                      options: [.prettyPrinted])
-                try data.write(to: URL(fileURLWithPath: "\(stateDir)/current-pr.json"),
-                               options: .atomic)
-                // Write the dirty sentinel so the daemon fetches immediately.
-                FileManager.default.createFile(atPath: "\(stateDir)/current-pr.dirty",
-                                               contents: nil)
-            } catch {
-                log.warning("selectPR signal write failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
+        // The daemon is told through `loadPR(repo:number:tag:)`, which sends the
+        // focus's own pin; the old machine-wide `current-pr.json` write is gone
+        // (the daemon stopped reading it when the pin became per focus).
     }
 
     // MARK: - Thin helpers for typed-content action dispatch
 
     /// Load a PR by identity only — used by `pr_list` pane rows where we have
-    /// `repo` + `number` but no full `PRQueueItem`. Writes the same sentinels as
-    /// `selectPR(_:)` so the daemon fetches and broadcasts the diff/CI detail.
-    func loadPR(repo: String, number: Int) {
+    /// `repo` + `number` but no full `PRQueueItem`. Pins the PR for `tag`'s own
+    /// focus through the daemon (`perri_action` `load_pr`), which opens no view.
+    func loadPR(repo: String, number: Int, tag: String) {
         // Build a minimal PRQueueItem shell so we can reuse selectPR's cache key logic.
         let shell = PRQueueItem(
             repo:        repo,
@@ -1392,14 +1390,24 @@ class AppStore: ObservableObject {
             headSha:     ""
         )
         selectPR(shell)
+        sendPerriAction("load_pr", number, repo, tag)
+    }
+
+    /// Sends a `perri_action` frame: through the injected sender when a test
+    /// set one, else over the daemon connection.
+    private func sendPerriAction(_ action: String, _ prNumber: Int?, _ repo: String?, _ tag: String?) {
+        if let sender = perriActionSender {
+            sender(action, prNumber, repo, tag)
+        } else {
+            client.sendPerriAction(action: action, prNumber: prNumber, repo: repo, tag: tag)
+        }
     }
 
     /// Called when the pr-cache/ directory changes — re-check if pending selection is warm.
     private func checkPrCacheForPendingSelection() {
         guard let pending = pendingSelection, perriDetailLoading else { return }
         let key  = prDetailCacheKey(pending)
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let path = "\(home)/.claude/state/perri/pr-cache/\(key).json"
+        let path = "\(perriStateDirectory)/pr-cache/\(key).json"
 
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let data   = try? Data(contentsOf: URL(fileURLWithPath: path)),
@@ -1659,7 +1667,8 @@ class AppStore: ObservableObject {
         case .sessionSummaryUpdate(let tag, let summary):
             FocusStore.shared.updateSummary(tag: tag, summary: summary)
 
-        case .perriState(let tag, let queue, let current):
+        case .perriState(let tag, let queue, let current, let jiraSite):
+            if perriJiraSite != jiraSite { perriJiraSite = jiraSite }
             // Daemon push is an additive, lower-latency source feeding the same
             // publishers the file-watchers already drive.  The file-watcher path
             // is preserved (not removed) in this wedge.

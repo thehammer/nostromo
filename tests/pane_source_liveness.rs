@@ -690,6 +690,7 @@ async fn attaching_client_gets_one_perri_state_per_focus_each_with_its_own_pr() 
             tag,
             queue,
             current,
+            ..
         } = msg
         {
             assert!(

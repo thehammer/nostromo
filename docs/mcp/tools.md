@@ -568,7 +568,11 @@ Source: `src/mcp/tools/set_pane.rs`
 
 ### `perri.load_pr`
 
-Load a pull request into Perri's current-PR pane(s). Requires `nostromd`
+Pin a pull request as one focus's PR under review (the queue marks its row) and
+refresh Perri's current-PR pane(s). **In a Perri focus it opens no view**: no tab
+and no pane is created, and the reply carries `"views_opened": false` plus a
+`note`; the user opens Conversation, Diff or Ticket from the queue row. The
+rebuild described below applies to non-Perri focuses only. Requires `nostromd`
 (without one it returns `{"error":"not_supported","detail":"requires nostromd"}`).
 
 It writes `<perri_state_dir>/current-pr/<tag>.json` +
@@ -620,7 +624,7 @@ It writes `<perri_state_dir>/current-pr/<tag>.json` +
   `pr_diff` tabs and any `file`/`ticket` tabs. On a curated focus this can
   empty the tabbed detail region entirely, and an emptied region is removed
   from the tree rather than left lingering. If the region existed a moment
-  before that happened, `load_pr` immediately rebuilds it for the *new* PR —
+  before that happened, `load_pr` (outside a Perri focus) immediately rebuilds it for the *new* PR —
   the same outcome `nostromo.show(pr_conversation)` followed by
   `show(pr_diff)` would produce, so a caller that never calls `nostromo.show`
   at all (the macOS GUI's "click a PR row" action, notably) still ends up
@@ -1026,6 +1030,17 @@ rules" section for the engine's rules (R1–R8) and `docs/mcp/agent-layout.md`
 for the curated flow this replaces.
 
 ### `nostromo.show`
+
+**In a Perri focus, an agent's show opens nothing.** For every type except
+`review_queue` the reply is `{ "ok": true, "shown": false, "reason_code":
+"perri_focus_user_opens", "detail": … }`, returned before placement, fetch or any
+broadcast, so there is nothing to retry: cite the location (repo, `path:line`, the
+ticket key) in the reply instead. The key is the *target* focus (`view_id` or the
+caller's own), so a show aimed at a Perri focus from another agent is a no-op too,
+and a show into any other focus behaves as below. Malformed calls are still refused
+as before. A user's click on a tracker link is not an agent show and still opens the
+native view, Perri focus or not. The queue row's Conversation/Diff/Ticket opens are
+the user's way to open PR views there.
 
 **Input**:
 

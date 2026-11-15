@@ -689,6 +689,8 @@ pub struct SessionManager {
     /// Mother job notices, when the daemon wires them in: told about focus
     /// registry pushes and reachable by the IPC server.
     notice_engine: Option<Arc<crate::mother::notices::NoticeEngine>>,
+    /// Who is looking at the author's PR list; `None` when the feature is off.
+    authored_prs: Option<Arc<crate::data::authored_prs::DemandBoard>>,
     /// Every focus's activity counters, for the daemon's lifetime: a restart of
     /// the focus's process reuses its entry (see `focus_activity`).
     activity: ActivityBook,
@@ -792,6 +794,7 @@ impl SessionManager {
             session_end_hook: None,
             turn_hook: Arc::new(std::sync::RwLock::new(None)),
             notice_engine: None,
+            authored_prs: None,
             activity: ActivityBook::default(),
             commands: slash_commands::CommandBook::default(),
         }
@@ -2583,6 +2586,16 @@ impl SessionManager {
     /// Tell `engine` about focus registry pushes from now on.
     pub fn configure_notice_engine(&mut self, engine: Arc<crate::mother::notices::NoticeEngine>) {
         self.notice_engine = Some(engine);
+    }
+
+    /// Switch the authored-PR list on: advertise it, and route its verbs here.
+    pub fn configure_authored_prs(&mut self, board: Arc<crate::data::authored_prs::DemandBoard>) {
+        self.authored_prs = Some(board);
+    }
+
+    /// The authored-PR demand board, when the feature is enabled.
+    pub fn authored_prs(&self) -> Option<Arc<crate::data::authored_prs::DemandBoard>> {
+        self.authored_prs.clone()
     }
 
     /// The Mother notice engine, when the daemon wired one in.
