@@ -25,3 +25,14 @@ pub fn now_ms() -> i64 {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
+
+/// The longest title a user may give a conversation (the same as a focus label).
+pub const MAX_TITLE_CHARS: usize = 60;
+
+/// A user's title as stored: trimmed, cut at [`MAX_TITLE_CHARS`] and trimmed
+/// again; `None` when nothing is left (which clears the title).
+pub fn normalized_title(raw: Option<&str>) -> Option<String> {
+    let capped: String = raw?.trim().chars().take(MAX_TITLE_CHARS).collect();
+    let capped = capped.trim();
+    (!capped.is_empty()).then(|| capped.to_owned())
+}

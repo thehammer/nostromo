@@ -84,6 +84,7 @@ mod activity_tests;
 mod compact_tests;
 mod control;
 mod conversation_history;
+pub use conversation_history::ResumeOptions;
 #[cfg(test)]
 #[path = "conversation_history_tests.rs"]
 mod conversation_history_tests;
@@ -1223,6 +1224,17 @@ impl SessionManager {
             }
         };
         args.extend(model_args(model.as_ref()));
+        // A tag resumed into another place (its worktree is gone) runs there and
+        // tells the agent so through the spawn: every spawn of the tag, never
+        // a user turn (that would wake the agent).
+        let place = resume.then(|| self.resume_place_for(&tag)).flatten();
+        let cwd = match &place {
+            Some(p) if Path::new(&p.path).is_dir() => Some(PathBuf::from(&p.path)),
+            _ => cwd,
+        };
+        if let Some(p) = &place {
+            conversation_history::append_system_prompt_extra(&mut args, &p.notice);
+        }
         self.note_conversation_spawn(
             &tag,
             &effective_id,
@@ -1247,6 +1259,10 @@ impl SessionManager {
 
         if let Some(text) = spawn_note {
             emit_note(&managed.shared, NoteKind::ModelUnavailable, text);
+        }
+        if let Some(p) = place.filter(|p| !p.shown) {
+            emit_note(&managed.shared, NoteKind::MovedHere, p.notice);
+            self.mark_place_shown(&tag);
         }
         self.sessions.insert(tag.clone(), managed);
 

@@ -2657,6 +2657,7 @@ fn handle_client_msg(
         | ClientMsg::ConversationResume { .. }
         | ClientMsg::ConversationResumeRelease { .. }
         | ClientMsg::ConversationHistoryRemove { .. }
+        | ClientMsg::ConversationHistoryRename { .. }
         | ClientMsg::ConversationHistoryRestore { .. }
         | ClientMsg::ConversationHistoryPurgeRemoved { .. }
         | ClientMsg::ConversationHistorySettingsSet { .. }
@@ -2685,8 +2686,17 @@ fn handle_client_msg(
             request_id,
             id,
             new_tag,
+            place,
+            confirm_active_elsewhere,
         } => {
-            let mut reply = session_mgr.lock().unwrap().resume_conversation(&id, &new_tag);
+            let mut reply = session_mgr.lock().unwrap().resume_conversation_with(
+                &id,
+                &new_tag,
+                crate::ipc::session_manager::ResumeOptions {
+                    place: place.as_deref(),
+                    confirm_active_elsewhere,
+                },
+            );
             if let ServerMsg::ConversationResumeResult { request_id: r, .. } = &mut reply {
                 *r = request_id;
             }
@@ -2700,6 +2710,15 @@ fn handle_client_msg(
         ClientMsg::ConversationHistoryRemove { id, .. } => {
             let history = session_mgr.lock().unwrap().conversations();
             history.remove(&id, crate::conversations::now_ms());
+        }
+
+        ClientMsg::ConversationHistoryRename { id, title, .. } => {
+            let history = session_mgr.lock().unwrap().conversations();
+            history.rename(
+                &id,
+                crate::conversations::normalized_title(title.as_deref()),
+                crate::conversations::now_ms(),
+            );
         }
 
         ClientMsg::ConversationHistoryRestore { id, .. } => {

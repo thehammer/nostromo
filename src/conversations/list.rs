@@ -17,6 +17,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Transcript files opened for a content check (a test seam: the list path must not move it).
 pub static CONTENT_CHECKS: AtomicUsize = AtomicUsize::new(0);
 
+/// A transcript written to this recently, with no Nostromo session running it,
+/// may be open in another Claude window.
+pub const ACTIVE_ELSEWHERE_MS: i64 = 2 * 60 * 1000;
+
 /// The list, and the work it queued for the background pass.
 pub struct Listing {
     pub entries: Vec<ConversationEntryWire>,
@@ -117,6 +121,11 @@ fn status_of(
             );
         }
     }
+    // Written to a moment ago by something that is not a Nostromo session: it
+    // may be open in another Claude window.
+    if mtime_ms > 0 && super::now_ms() - mtime_ms < ACTIVE_ELSEWHERE_MS {
+        return (ConversationStatus::ActiveElsewhere, path);
+    }
     (ConversationStatus::Available, path)
 }
 
@@ -144,10 +153,17 @@ fn to_wire(
         status,
         resumed_from_tag: None,
         transcript_path: None,
+        main_checkout: None,
     };
     if e.sensitive {
         // Title, agent, time and "Sensitive" only.
         return w;
+    }
+    if matches!(w.status, ConversationStatus::FolderGone { worktree: true }) {
+        w.main_checkout = e
+            .main_checkout
+            .clone()
+            .filter(|m| Path::new(m).join(".git").exists());
     }
     w.label = e.label.clone();
     w.project_path = e.project_path.clone();

@@ -96,6 +96,17 @@ pub trait TrackerFrameProvider: Send + Sync {
     /// Whether `tag` has a bound board: a fresh session of it keeps the
     /// tracker pane where it was ([`PaneRegistry::init_focus_with_tracker`]).
     fn has_bound_board(&self, tag: &str) -> bool;
+
+    /// The board file `tag` is bound to, if any.
+    fn bound_board_path(&self, _tag: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Bind `tag` to the existing board file `path`; nothing is created.
+    /// False when the file is not there or cannot be used as a board.
+    fn bind_existing_board(&self, _tag: &str, _path: &std::path::Path) -> bool {
+        false
+    }
 }
 
 /// Told, after a layout mutation of `tag` that changed which panes exist,

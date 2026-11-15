@@ -21,6 +21,8 @@ pub enum NoteKind {
     ModelMismatch,
     ModelUnavailable,
     ModelRequest,
+    /// A resumed conversation now runs in another folder (its worktree is gone).
+    MovedHere,
 }
 
 /// One ledger line.

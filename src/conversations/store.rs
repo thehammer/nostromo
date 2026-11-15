@@ -66,9 +66,12 @@ pub struct ConversationEntry {
     pub resume_pending: bool,
     #[serde(default)]
     pub removed_at_ms: Option<i64>,
-    /// Plan 2's rename; unused here.
+    /// The title the user gave it (Rename); shown instead of `title`.
     #[serde(default)]
     pub user_title: Option<String>,
+    /// The tracker board file bound to the conversation's focus, last seen.
+    #[serde(default)]
+    pub tracker_board: Option<String>,
 }
 
 impl ConversationEntry {
@@ -97,6 +100,7 @@ impl ConversationEntry {
             resume_pending: false,
             removed_at_ms: None,
             user_title: None,
+            tracker_board: None,
         }
     }
 
@@ -161,6 +165,8 @@ pub struct MetaUpdate {
     pub label: Option<String>,
     pub model: Option<(String, Option<String>)>,
     pub sensitive: bool,
+    /// The focus's bound tracker board file, when it has one.
+    pub tracker_board: Option<String>,
 }
 
 /// A cached look at a transcript file (never a read on the list path).
@@ -438,6 +444,9 @@ impl ConversationHistory {
             e.model = Some(model);
             e.effort = effort;
         }
+        if m.tracker_board.is_some() {
+            e.tracker_board = m.tracker_board;
+        }
         if m.sensitive && !e.sensitive {
             e.mark_sensitive();
         }
@@ -593,6 +602,33 @@ impl ConversationHistory {
         e.resume_pending = true;
         self.commit(s, now, Write::Now);
         Some(old)
+    }
+
+    /// Set the title the user gave the conversation; `None` clears it. False if unknown.
+    pub fn rename(&self, sid: &str, title: Option<String>, now: i64) -> bool {
+        self.mutate_one(sid, now, |e| e.user_title = title)
+    }
+
+    /// The conversation now runs in `path` (a resume into the main checkout):
+    /// it is no longer a linked worktree.
+    pub fn set_place(&self, sid: &str, path: &str, now: i64) {
+        self.mutate_one(sid, now, |e| {
+            e.project_path = Some(path.to_owned());
+            e.main_checkout = None;
+        });
+    }
+
+    /// Sticky sensitivity, from outside a refresh (a resume from a sensitive tag).
+    pub fn mark_sensitive(&self, sid: &str, now: i64) {
+        let mut s = lock(&self.inner);
+        let Some(e) = s.data.entries.iter_mut().find(|e| e.sid == sid) else {
+            return;
+        };
+        if e.sensitive {
+            return;
+        }
+        e.mark_sensitive();
+        self.commit(s, now, Write::Now);
     }
 
     /// Undo [`Self::move_to_tag`] (the resume could not open the conversation).

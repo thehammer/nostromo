@@ -5452,6 +5452,13 @@ fn every_conversation_verb() -> Vec<ClientMsg> {
             request_id: "r".into(),
             id: "sid-conv".into(),
             new_tag: "cody-resumed".into(),
+            place: Some("/elsewhere".into()),
+            confirm_active_elsewhere: true,
+        },
+        ClientMsg::ConversationHistoryRename {
+            request_id: "r".into(),
+            id: "sid-conv".into(),
+            title: Some("A new title".into()),
         },
         ClientMsg::ConversationHistoryRemove {
             request_id: "r".into(),

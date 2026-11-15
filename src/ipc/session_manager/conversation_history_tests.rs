@@ -6,7 +6,7 @@ use super::*;
 use crate::conversations::list;
 use crate::conversations::transcript::PROJECTS_DIR_ENV;
 use crate::conversations::{ConversationHistory, FirstPrompt, Reason};
-use crate::ipc::protocol::ConversationResumeOutcome;
+use crate::ipc::protocol::{ConversationResumeOutcome, ConversationStatus};
 use crate::model::store::{FocusModelRecord, ModelSource};
 use std::sync::MutexGuard;
 
@@ -42,8 +42,9 @@ impl Rig {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\necho \"$@\" >> '{argv}'\ncat >> '{stdin}'\n",
+                "#!/bin/sh\necho \"$@\" >> '{argv}'\npwd -P >> '{cwdlog}'\ncat >> '{stdin}'\n",
                 argv = dir.path().join("argv.log").display(),
+                cwdlog = dir.path().join("cwd.log").display(),
                 stdin = dir.path().join("stdin.log").display(),
             ),
         )
@@ -95,6 +96,61 @@ impl Rig {
             .collect()
     }
 
+    /// The directory each spawn of the stub ran in, in order.
+    fn cwd_lines(&self) -> Vec<PathBuf> {
+        std::fs::read_to_string(self.dir.path().join("cwd.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(PathBuf::from)
+            .collect()
+    }
+
+    fn stdin_log(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join("stdin.log")).unwrap_or_default()
+    }
+
+    /// A main checkout (a `.git` folder on `main_branch`) and a linked worktree
+    /// of it (a `.git` file naming it).
+    fn linked_worktree(&self, main_branch: &str) -> (PathBuf, PathBuf) {
+        let main = self.dir.path().join("main-repo");
+        let wt = self.dir.path().join("wt-gone");
+        let admin = main.join(".git").join("worktrees").join("wt-gone");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::write(
+            main.join(".git").join("HEAD"),
+            format!("ref: refs/heads/{main_branch}\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        (main, wt)
+    }
+
+    /// A conversation `cody-aaaa1111` that ran on branch `old_branch` in a
+    /// linked worktree that is gone now. Returns `(sid, main, worktree)`.
+    async fn gone_worktree_conversation(
+        &mut self,
+        main_branch: &str,
+        old_branch: &str,
+    ) -> (String, PathBuf, PathBuf) {
+        let (main, wt) = self.linked_worktree(main_branch);
+        self.cwd = wt.clone();
+        let sid = self.spawn("cody-aaaa1111", "cody");
+        self.send("cody-aaaa1111", "hello");
+        self.transcript(
+            &sid,
+            &format!(
+                "{{\"type\":\"user\",\"cwd\":\"/w\",\"gitBranch\":\"{old_branch}\",\"message\":{{\"content\":\"hi\"}}}}\n"
+            ),
+        );
+        crate::conversations::transcript::refresh_tail(&self.mgr.conversations(), &sid);
+        self.wait_spawns(1).await;
+        self.mgr.stop_session("cody-aaaa1111");
+        self.mgr.sessions.remove("cody-aaaa1111");
+        std::fs::remove_dir_all(&wt).unwrap();
+        (sid, main, wt)
+    }
+
     /// Wait until the stub has logged `n` spawns.
     async fn wait_spawns(&self, n: usize) -> Vec<String> {
         injected_tests::eventually("the stub's argv", || {
@@ -116,6 +172,7 @@ impl Rig {
         std::fs::create_dir_all(&folder).unwrap();
         let path = folder.join(format!("{sid}.jsonl"));
         std::fs::write(&path, body).unwrap();
+        age(&path, 3600);
         path
     }
 
@@ -124,6 +181,18 @@ impl Rig {
         meta.agent_name = "cody".into();
         self.mgr.set_focus_registry(vec![meta]);
     }
+}
+
+/// Make `path` look last written `secs_ago` seconds ago (a transcript written a
+/// moment ago reads as "open in another Claude window").
+fn age(path: &Path, secs_ago: u64) {
+    let when = std::time::SystemTime::now() - Duration::from_secs(secs_ago);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
 }
 
 fn test_focus(tag: &str) -> FocusMeta {
@@ -701,6 +770,7 @@ fn bad_files_get_their_status_and_do_not_stop_the_good_ones() {
     for i in 0..50 {
         let sid = format!("good-{i}");
         std::fs::write(folder.join(format!("{sid}.jsonl")), USER_LINE).unwrap();
+        age(&folder.join(format!("{sid}.jsonl")), 3600);
         visible_entry(&history, &sid, &cwd, now);
     }
     std::fs::write(folder.join("binary.jsonl"), [0u8, 159, 146, 150]).unwrap();
@@ -1220,4 +1290,408 @@ fn a_symlinked_project_folder_never_leads_a_read_out_of_the_projects_folder() {
     );
     assert!(!safe);
     assert!(found.is_some());
+}
+
+// ── resume when the worktree is gone ─────────────────────────────────────────
+
+fn place(path: &Path) -> ResumeOptions<'_> {
+    ResumeOptions {
+        place: path.to_str(),
+        confirm_active_elsewhere: false,
+    }
+}
+
+#[tokio::test]
+async fn a_conversation_whose_worktree_is_gone_resumes_in_the_main_checkout() {
+    let mut rig = Rig::new();
+    let (sid, main, wt) = rig.gone_worktree_conversation("trunk", "feature/old").await;
+    let entry = rig.mgr.conversations().get(&sid).unwrap();
+    assert_eq!(
+        list::status_now(&entry, &rig.mgr.conversations(), None),
+        ConversationStatus::FolderGone { worktree: true }
+    );
+    let before = rig.stdin_log();
+
+    let reply = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+    let ServerMsg::ConversationResumeResult { project_path, .. } = &reply else {
+        panic!()
+    };
+    assert_eq!(project_path.as_deref(), main.to_str());
+    assert_eq!(
+        rig.mgr
+            .conversations()
+            .get(&sid)
+            .unwrap()
+            .project_path
+            .as_deref(),
+        main.to_str()
+    );
+
+    // The app's focus still names the old folder: the spawn goes to the main checkout.
+    rig.spawn("cody-bbbb2222", "cody");
+    let lines = rig.wait_spawns(2).await;
+    assert_eq!(rig.cwd_lines()[1], main.canonicalize().unwrap());
+    let argv = &lines[1];
+    assert_eq!(
+        argv.matches("--append-system-prompt").count(),
+        1,
+        "exactly one flag: {argv}"
+    );
+    for needle in [
+        wt.to_str().unwrap(),
+        main.to_str().unwrap(),
+        "feature/old",
+        "trunk",
+    ] {
+        assert!(argv.contains(needle), "the notice names {needle}: {argv}");
+    }
+    assert!(argv.contains(&format!("--resume {sid}")), "{argv}");
+
+    // A restart of the tag tells the agent again, in the same place.
+    rig.mgr.stop_session("cody-bbbb2222");
+    rig.mgr.sessions.remove("cody-bbbb2222");
+    rig.spawn("cody-bbbb2222", "cody");
+    let lines = rig.wait_spawns(3).await;
+    assert_eq!(
+        lines[2].matches("--append-system-prompt").count(),
+        1,
+        "{}",
+        lines[2]
+    );
+    assert!(lines[2].contains("feature/old"), "{}", lines[2]);
+    assert_eq!(rig.cwd_lines()[2], main.canonicalize().unwrap());
+
+    // Nothing was typed into the conversation: the notice rides the spawn.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.stdin_log(), before, "no user turn was written");
+    assert!(rig.mgr.resume_place_for("cody-bbbb2222").unwrap().shown);
+}
+
+#[tokio::test]
+async fn the_notice_names_one_branch_when_both_places_are_on_it() {
+    let mut rig = Rig::new();
+    let (sid, main, _wt) = rig.gone_worktree_conversation("same", "same").await;
+    rig.mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    let notice = rig.mgr.resume_place_for("cody-bbbb2222").unwrap().notice;
+    assert!(!notice.contains("It was on"), "{notice}");
+}
+
+#[tokio::test]
+async fn a_resume_into_another_place_adds_to_hueys_system_prompt_not_a_second_flag() {
+    let mut args = vec![
+        "--append-system-prompt".to_owned(),
+        "PERSONA".to_owned(),
+        "-n".to_owned(),
+        "v".to_owned(),
+    ];
+    conversation_history::append_system_prompt_extra(&mut args, "NOTICE");
+    assert_eq!(
+        args.iter()
+            .filter(|a| *a == "--append-system-prompt")
+            .count(),
+        1
+    );
+    assert_eq!(args[1], "PERSONA\n\nNOTICE");
+    let mut bare = vec!["-n".to_owned()];
+    conversation_history::append_system_prompt_extra(&mut bare, "NOTICE");
+    assert_eq!(bare, ["-n", "--append-system-prompt", "NOTICE"]);
+}
+
+#[tokio::test]
+async fn a_gone_folder_without_a_matching_main_checkout_is_refused() {
+    let mut rig = Rig::new();
+    let (sid, main, _wt) = rig.gone_worktree_conversation("trunk", "b").await;
+    // No place asked for.
+    let none = rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    assert_eq!(outcome(&none).2.as_deref(), Some("folder_gone"));
+    // A place that is not the conversation's own main checkout.
+    let other = rig.dir.path().join("other-repo");
+    std::fs::create_dir_all(other.join(".git")).unwrap();
+    let wrong = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&other));
+    assert_eq!(outcome(&wrong).2.as_deref(), Some("folder_gone"));
+    // Its main checkout is gone too.
+    std::fs::remove_dir_all(&main).unwrap();
+    let gone = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    assert_eq!(outcome(&gone).2.as_deref(), Some("folder_gone"));
+    assert!(!load_id_store(&rig.mgr.store_path).contains_key("cody-bbbb2222"));
+    assert_eq!(rig.argv_lines().len(), 1, "nothing was started");
+}
+
+#[tokio::test]
+async fn a_plain_folder_that_is_gone_has_no_main_checkout_to_resume_in() {
+    let mut rig = Rig::new();
+    let sid = rig.spawn("cody-aaaa1111", "cody");
+    rig.send("cody-aaaa1111", "hello");
+    rig.transcript(&sid, USER_LINE);
+    rig.wait_spawns(1).await;
+    rig.mgr.stop_session("cody-aaaa1111");
+    rig.mgr.sessions.remove("cody-aaaa1111");
+    std::fs::remove_dir_all(&rig.cwd).unwrap();
+    let elsewhere = rig.dir.path().to_path_buf();
+    let reply = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&elsewhere));
+    assert_eq!(outcome(&reply).2.as_deref(), Some("folder_gone"));
+}
+
+// ── active elsewhere ──────────────────────────────────────────────────────────
+
+/// A conversation whose child is stopped, its transcript last written `secs_ago`.
+async fn stopped_conversation(rig: &mut Rig, secs_ago: u64) -> (String, PathBuf) {
+    let sid = rig.spawn("cody-aaaa1111", "cody");
+    rig.send("cody-aaaa1111", "hello");
+    let path = rig.transcript(&sid, USER_LINE);
+    rig.wait_spawns(1).await;
+    rig.mgr.stop_session("cody-aaaa1111");
+    rig.mgr.sessions.remove("cody-aaaa1111");
+    age(&path, secs_ago);
+    (sid, path)
+}
+
+#[tokio::test]
+async fn a_transcript_written_in_the_last_two_minutes_is_active_elsewhere_unless_running() {
+    let mut rig = Rig::new();
+    let (sid, path) = stopped_conversation(&mut rig, 30).await;
+    let history = rig.mgr.conversations();
+    let entry = history.get(&sid).unwrap();
+    assert_eq!(
+        list::status_now(&entry, &history, None),
+        ConversationStatus::ActiveElsewhere
+    );
+    // A Nostromo session running it is not "elsewhere".
+    let live = ("cody-aaaa1111".to_owned(), true);
+    assert_eq!(
+        list::status_now(&entry, &history, Some(&live)),
+        ConversationStatus::Running {
+            tag: "cody-aaaa1111".into(),
+            open: true
+        }
+    );
+    age(&path, 180);
+    assert_eq!(
+        list::status_now(&entry, &history, None),
+        ConversationStatus::Available
+    );
+}
+
+#[tokio::test]
+async fn an_unconfirmed_resume_of_an_active_elsewhere_conversation_is_refused_and_starts_nothing() {
+    let mut rig = Rig::new();
+    let (sid, _path) = stopped_conversation(&mut rig, 30).await;
+    let refused = rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    assert_eq!(outcome(&refused).2.as_deref(), Some("active_elsewhere"));
+    assert!(!load_id_store(&rig.mgr.store_path).contains_key("cody-bbbb2222"));
+    assert_eq!(
+        rig.mgr.conversations().get(&sid).unwrap().tag,
+        "cody-aaaa1111",
+        "the conversation stays with its owner"
+    );
+    assert_eq!(rig.argv_lines().len(), 1, "nothing was spawned");
+
+    let confirmed = rig.mgr.resume_conversation_with(
+        &sid,
+        "cody-bbbb2222",
+        ResumeOptions {
+            place: None,
+            confirm_active_elsewhere: true,
+        },
+    );
+    assert_eq!(outcome(&confirmed).0, ConversationResumeOutcome::Ready);
+}
+
+// ── rename ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_renamed_conversation_lists_and_resumes_under_the_new_name_and_claudes_file_is_untouched()
+{
+    let mut rig = Rig::new();
+    let (sid, path) = stopped_conversation(&mut rig, 3600).await;
+    let before = std::fs::read(&path).unwrap();
+    let history = rig.mgr.conversations();
+    let long = "x".repeat(80);
+    assert_eq!(
+        crate::conversations::normalized_title(Some(&format!("  {long}  ")))
+            .unwrap()
+            .chars()
+            .count(),
+        60
+    );
+    assert!(history.rename(
+        &sid,
+        crate::conversations::normalized_title(Some("  Picker rewrite  ")),
+        crate::conversations::now_ms()
+    ));
+    let ServerMsg::ConversationHistory { entries, .. } =
+        rig.mgr.conversation_history_msg("r".into())
+    else {
+        panic!()
+    };
+    assert_eq!(entries[0].title, "Picker rewrite");
+
+    let reply = rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    let ServerMsg::ConversationResumeResult { label, title, .. } = &reply else {
+        panic!()
+    };
+    assert_eq!(label.as_deref(), Some("Picker rewrite"));
+    assert_eq!(title.as_deref(), Some("Picker rewrite"));
+    assert_eq!(std::fs::read(&path).unwrap(), before, "byte-identical");
+
+    // An empty name clears it.
+    history.rename(&sid, crate::conversations::normalized_title(Some("   ")), 0);
+    assert!(history.get(&sid).unwrap().user_title.is_none());
+}
+
+// ── the tracker board follows ─────────────────────────────────────────────────
+
+fn tracker_rig(rig: &Rig) -> (Arc<crate::tracker::TrackerRegistry>, PathBuf) {
+    use crate::tracker::registry::{OpenArgs, RegistryParts};
+    let base = rig.dir.path().canonicalize().unwrap();
+    let repo = base.join("board-repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let reg = Arc::new(crate::tracker::TrackerRegistry::new(
+        RegistryParts::hermetic(
+            base.join("tracker-state"),
+            home,
+            Arc::new(crate::tracker::FakeClock::at_secs(1_760_540_000)),
+        ),
+    ));
+    let args = OpenArgs {
+        topic: Some("work".into()),
+        cwd: repo,
+        ..Default::default()
+    };
+    let path = reg.open("cody-aaaa1111", "s", &args).unwrap().path;
+    (reg, path)
+}
+
+#[tokio::test]
+async fn the_resumed_focus_is_bound_to_the_board_the_conversation_had() {
+    let mut rig = Rig::new();
+    let (reg, board) = tracker_rig(&rig);
+    rig.mgr.configure_tracker_frame_provider(reg.clone());
+    let (sid, _) = stopped_conversation(&mut rig, 3600).await;
+    assert_eq!(
+        rig.mgr
+            .conversations()
+            .get(&sid)
+            .unwrap()
+            .tracker_board
+            .as_deref(),
+        board.to_str(),
+        "each send records the bound board"
+    );
+    let reply = rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+    assert_eq!(
+        reg.bound_path("cody-bbbb2222").as_deref(),
+        Some(board.as_path())
+    );
+}
+
+#[tokio::test]
+async fn a_board_that_is_gone_binds_nothing_and_creates_nothing_on_resume() {
+    let mut rig = Rig::new();
+    let (reg, board) = tracker_rig(&rig);
+    rig.mgr.configure_tracker_frame_provider(reg.clone());
+    let (sid, _) = stopped_conversation(&mut rig, 3600).await;
+    std::fs::remove_file(&board).unwrap();
+    let reply = rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+    assert!(reg.bound_path("cody-bbbb2222").is_none());
+    assert!(!board.exists(), "a missing board is never created");
+}
+
+// ── Mother and sensitivity follow ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_resume_moves_the_conversation_for_mother_and_removing_the_entry_does_not_undo_it() {
+    let mut rig = Rig::new();
+    let (sid, _) = stopped_conversation(&mut rig, 3600).await;
+    let history = rig.mgr.session_history();
+    assert_eq!(
+        history.current_tag(Some(&sid), None, "cody-aaaa1111"),
+        "cody-aaaa1111"
+    );
+    rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    assert_eq!(
+        history.current_tag(Some(&sid), None, "cody-aaaa1111"),
+        "cody-bbbb2222"
+    );
+    let now = crate::conversations::now_ms();
+    rig.mgr.conversations().remove(&sid, now);
+    rig.mgr.conversations().purge_removed(now);
+    assert!(rig.mgr.conversations().get(&sid).is_none());
+    assert_eq!(
+        history.current_tag(Some(&sid), None, "cody-aaaa1111"),
+        "cody-bbbb2222",
+        "the job still shows its origin"
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_sensitive_conversation_is_sensitive_to_a_network_peer_from_its_first_frame() {
+    use crate::ipc::peer::redact_for_network;
+    use crate::ipc::protocol::SessionInfo;
+    use crate::ipc::stream_json::SessionState;
+    let mut rig = Rig::new();
+    let (sid, _) = stopped_conversation(&mut rig, 3600).await;
+    // The tag became sensitive after its last send: the entry never heard.
+    rig.mgr.sensitive.mark_tag("cody-aaaa1111");
+    assert!(!rig.mgr.conversations().get(&sid).unwrap().sensitive);
+
+    let reply = rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+    // No spawn has happened yet: the frames the Mac's new focus causes are
+    // already redacted.
+    let mut meta = test_focus("cody-bbbb2222");
+    meta.display_name = "SECRET TITLE".into();
+    let ServerMsg::FocusRegistryUpdated { focuses } = redact_for_network(
+        ServerMsg::FocusRegistryUpdated {
+            focuses: vec![meta],
+        },
+        &rig.mgr.sensitive,
+    ) else {
+        panic!()
+    };
+    assert_eq!(focuses[0].display_name, "cody", "{focuses:?}");
+    assert_ne!(focuses[0].tag, "cody-bbbb2222", "the tag is opaque");
+    let info = SessionInfo {
+        tag: "cody-bbbb2222".into(),
+        agent_name: "cody".into(),
+        view_name: "v".into(),
+        session_id: None,
+        alive: true,
+        remote_control: false,
+        state: SessionState::Idle,
+        stop_reason: None,
+        mcp_bridge_connected: None,
+        agent_turns: None,
+        agent_messages: None,
+        agent_problems: None,
+        activity_epoch: None,
+        last_problem: None,
+    };
+    let ServerMsg::SessionListResp { sessions } = redact_for_network(
+        ServerMsg::SessionListResp {
+            sessions: vec![info],
+        },
+        &rig.mgr.sensitive,
+    ) else {
+        panic!()
+    };
+    assert!(sessions.is_empty(), "a sensitive session is not listed");
+    assert!(
+        rig.mgr.conversations().get(&sid).unwrap().sensitive,
+        "the entry is marked at resume time too"
+    );
 }
