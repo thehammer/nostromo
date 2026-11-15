@@ -270,8 +270,7 @@ final class AuthoredPrPreviewSession {
 
     /// The open focuses changed: if the owner went, Send becomes Start a session….
     func openFocusesChanged(_ tags: Set<String>) {
-        // An empty list is a store that is reloading, not every focus closing at once.
-        guard !finished, phase != .ownerClosed, !tags.isEmpty, !tags.contains(tag) else { return }
+        guard !finished, phase != .ownerClosed, !tags.contains(tag) else { return }
         phase = .ownerClosed
         onChange?()
     }
