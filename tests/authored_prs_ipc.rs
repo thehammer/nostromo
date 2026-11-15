@@ -52,6 +52,7 @@ async fn env(feature_on: bool) -> Env {
     let (jobs_tx, jobs_rx) = tokio::sync::watch::channel(Vec::new());
     if feature_on {
         let handle = AuthoredPrsSource::spawn(Deps {
+            state_root: None,
             api_base: "http://127.0.0.1:1".into(),
             github: None,
             token_resolver: None,

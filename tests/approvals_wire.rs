@@ -5481,6 +5481,73 @@ fn every_conversation_verb() -> Vec<ClientMsg> {
     ]
 }
 
+/// The four authored-PR hand-off verbs (Tell a focus, Start a session, Link).
+fn every_authored_pr_verb() -> Vec<ClientMsg> {
+    vec![
+        ClientMsg::AuthoredPrPreviewRequest {
+            request_id: "r".into(),
+            repo: "o/r".into(),
+            number: 1,
+            target: nostromo::data::authored_prs::wire::PreviewTarget::Focus { tag: "x1".into() },
+        },
+        ClientMsg::AuthoredPrNotify {
+            request_id: "r".into(),
+            repo: "o/r".into(),
+            number: 1,
+            tag: "x1".into(),
+            digest: "d".into(),
+        },
+        ClientMsg::AuthoredPrStartSession {
+            request_id: "r".into(),
+            repo: "o/r".into(),
+            number: 1,
+            folder: "/tmp".into(),
+            agent: "claude".into(),
+            digest: "d".into(),
+        },
+        ClientMsg::AuthoredPrLink {
+            request_id: "r".into(),
+            repo: "o/r".into(),
+            number: 1,
+            tag: Some("x1".into()),
+        },
+    ]
+}
+
+#[test]
+fn every_authored_pr_hand_off_verb_from_a_local_process_that_is_not_the_app_is_refused_not_operator_app(
+) {
+    run(GUARDED, |rig| async move {
+        let mut agent = rig.agent(vec![]).await;
+        let verbs = every_authored_pr_verb();
+        assert_eq!(verbs.len(), 4, "the fixture list names every hand-off verb");
+        for verb in verbs {
+            agent.send(&verb).await;
+            let refused = agent
+                .next("the not_operator_app refusal", |m| {
+                    let result_err = |code: &str| code == "not_operator_app";
+                    match m {
+                        ServerMsg::AuthoredPrPreview { result, .. } => {
+                            matches!(result, nostromo::data::authored_prs::wire::AuthoredPrResult::Err(e) if result_err(&e.code))
+                        }
+                        ServerMsg::AuthoredPrNotifyResult { result, .. } => {
+                            matches!(result, nostromo::data::authored_prs::wire::AuthoredPrResult::Err(e) if result_err(&e.code))
+                        }
+                        ServerMsg::AuthoredPrStartSessionResult { result, .. } => {
+                            matches!(result, nostromo::data::authored_prs::wire::AuthoredPrResult::Err(e) if result_err(&e.code))
+                        }
+                        ServerMsg::AuthoredPrLinkResult { result, .. } => {
+                            matches!(result, nostromo::data::authored_prs::wire::AuthoredPrResult::Err(e) if result_err(&e.code))
+                        }
+                        _ => false,
+                    }
+                })
+                .await;
+            assert!(!matches!(refused, ServerMsg::Error { .. }), "{verb:?}");
+        }
+    });
+}
+
 /// Two conversations in the history: `sid-conv` (visible) and `sid-removed`
 /// (soft-removed, waiting to be purged).
 fn seed_conversations(rig: &Rig) -> nostromo::conversations::ConversationHistory {

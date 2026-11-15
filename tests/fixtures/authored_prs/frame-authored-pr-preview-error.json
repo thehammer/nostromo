@@ -1,0 +1,10 @@
+{
+  "type": "authored_pr_preview",
+  "request_id": "r1",
+  "result": {
+    "status": "err",
+    "value": {
+      "code": "owner_closed"
+    }
+  }
+}

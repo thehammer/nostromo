@@ -20,3 +20,9 @@
 - [ ] Perri side pane (PR #466): two local-only flakes, each seen once in three full-class runs of `ReviewWebViewIntegrationTests`: `testARealClickOnATargetBlankLinkToAnAllowedHostOpensAPaneTab` and `testAPRChangeKeepsTheTabWithTypedTextAndMarksIt`. Not reproduced since; watch CI.
 - [ ] Perri side pane (PR #466): the Rust test `huey_run.rs::the_overall_deadline_fails_the_run_and_frees_the_lock` (`AlreadyRunning`) flaked once on CI. Unrelated to the pane; look at the lock release timing.
 - [ ] Perri side pane (PR #466): a real server 3xx redirect to an IdP during the first load could not be tested (the `nostromo-fixture:` scheme cannot answer with a redirect), so the IdP case is simulated by loading the IdP URL as a main-frame navigation. Check a real redirect in the signed-in run.
+
+## From Perri's review of PR #469 (My open PRs 3/3)
+
+- The hidden-polling budget (at most 20 requests/hour while the Overview is hidden) was not measured by the reviewer: measure it with a real token.
+- VoiceOver on the preview, picker and sheet, and a real notify-and-switch (a focus created by Start a session, the window coming forward, the keyboard landing in the input), are Hammer's to verify.
+- `MainMenuKeyEquivalentsUnchangedTests` lives in `ReviewPaneAccessibilityTests.swift` (PR #466), not in a file of its own; find it there when touching main-menu key equivalents.

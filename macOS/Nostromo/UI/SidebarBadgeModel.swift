@@ -58,7 +58,7 @@ struct SidebarBadgeModel {
         switch reason {
         case .approvalPending: return .blocking
         case .decisionOpen: return .excluded
-        case .motherHold, .motherAwaiting, .motherAttention, .trackerWaiting, .other: return .waiting
+        case .motherHold, .motherAwaiting, .motherAttention, .trackerWaiting, .prAttention, .other: return .waiting
         }
     }
 

@@ -1,0 +1,9 @@
+{
+  "type": "authored_pr_start_session",
+  "request_id": "r4",
+  "repo": "thehammer/nostromo",
+  "number": 458,
+  "folder": "/Users/me/Code/nostromo",
+  "agent": "cody",
+  "digest": "ab12"
+}

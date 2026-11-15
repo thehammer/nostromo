@@ -57,6 +57,14 @@ public struct AuthoredPrRowModel: Equatable, Sendable, Identifiable {
     public var detailsUnavailable: Bool
     public var lifecycle: AuthoredPrLifecycle
     public var accessibilityLabel: String
+    public var ownerKind: AuthoredPrOwnerKind = .unknown
+    public var ownerTag: String?
+    public var ownerName: String?
+    public var ownerCandidates: [AuthoredPrCandidate] = []
+    /// The hand-off button, only on a fixable row and only when the daemon can hand off.
+    public var tellButton: AuthoredPrTellButton?
+    /// `Told Cody 1m ago`, when someone was told and the daemon can hand off.
+    public var toldText: String?
 
     public enum StatusKind: Equatable, Sendable { case passing, failing, pending, none, merged, closed }
 
@@ -66,6 +74,21 @@ public struct AuthoredPrRowModel: Equatable, Sendable, Identifiable {
         if detailsUnavailable { text += " · details unavailable" }
         return text
     }
+}
+
+/// The button on a fixable row: what it says, how VoiceOver names it, and what it leads to.
+public struct AuthoredPrTellButton: Equatable, Sendable {
+    public enum Action: Equatable, Sendable {
+        /// Preview the message for the owner focus `tag`.
+        case tell(tag: String)
+        /// The owner is unknown or ambiguous: pick a focus.
+        case choose
+        /// The owner is closed: start a session.
+        case start
+    }
+    public var action: Action
+    public var title: String
+    public var accessibilityLabel: String
 }
 
 public struct AuthoredPrsGroupModel: Equatable, Sendable, Identifiable {
@@ -207,7 +230,8 @@ public enum AuthoredPrsPresentation {
     // MARK: Groups and rows
 
     public static func groups(_ prs: [AuthoredPr], showAll: Set<AuthoredPrGroup> = [],
-                              now: Date, timeZone: TimeZone) -> [AuthoredPrsGroupModel] {
+                              now: Date, timeZone: TimeZone, handoff: Bool = false,
+                              tellable: Set<String>? = nil) -> [AuthoredPrsGroupModel] {
         let chips = repoChips(prs)
         return AuthoredPrGroup.displayOrder.compactMap { group in
             let members = prs.filter { $0.group == group }
@@ -216,7 +240,7 @@ public enum AuthoredPrsPresentation {
             let shown = members.prefix(limit)
             return AuthoredPrsGroupModel(
                 group: group, title: groupTitle(group), count: members.count,
-                rows: shown.map { row($0, chip: chips[$0.repo] ?? $0.repo, now: now) },
+                rows: shown.map { row($0, chip: chips[$0.repo] ?? $0.repo, now: now, handoff: handoff, tellable: tellable) },
                 hiddenCount: members.count - shown.count)
         }
     }
@@ -242,7 +266,10 @@ public enum AuthoredPrsPresentation {
         return chips
     }
 
-    public static func row(_ pr: AuthoredPr, chip: String? = nil, now: Date) -> AuthoredPrRowModel {
+    /// `tellable` is the tags of the open focuses the daemon would let a notice go to (nil: not restricted). A
+    /// row whose owner is not among them gets no Tell button: the daemon would refuse it.
+    public static func row(_ pr: AuthoredPr, chip: String? = nil, now: Date, handoff: Bool = false,
+                           tellable: Set<String>? = nil) -> AuthoredPrRowModel {
         let chipText = chip ?? repoChips([pr])[pr.repo] ?? pr.repo
         let (kind, glyph, word) = status(pr)
         let checks = checksLine(pr.checks)
@@ -257,7 +284,65 @@ public enum AuthoredPrsPresentation {
             ownerPrefix: owner.prefix, ownerJobId: owner.jobId, ownerSuffix: owner.suffix,
             detailsUnavailable: pr.detailsUnavailable, lifecycle: pr.lifecycle, accessibilityLabel: "")
         model.accessibilityLabel = accessibilityLabel(pr, chip: chipText)
+        model.ownerKind = pr.owner.kind
+        model.ownerTag = pr.owner.tag
+        model.ownerName = pr.owner.name
+        model.ownerCandidates = pr.owner.candidates
+        if handoff {
+            model.tellButton = tellButton(pr, tellable: tellable)
+            model.toldText = toldText(pr.told, now: now)
+            if let told = model.toldText { model.accessibilityLabel += ", \(told)" }
+        }
         return model
+    }
+
+    // MARK: Hand-off
+
+    /// A PR the user can hand to an agent: open, not a draft, in Needs you, and something to fix.
+    public static func isFixable(_ pr: AuthoredPr) -> Bool {
+        pr.lifecycle == .open && !pr.draft && pr.group == .needsYou
+            && (pr.checks.failed > 0 || pr.review.state == .changesRequested
+                || pr.newComments > 0 || pr.unresolvedThreads > 0)
+    }
+
+    /// The first word of a focus name: `Cody in Nostromo` is `Cody`.
+    public static func firstWord(_ name: String) -> String {
+        name.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? name
+    }
+
+    /// The button for a fixable row, worded from its owner; nil when there is nothing to fix.
+    public static func tellButton(_ pr: AuthoredPr, tellable: Set<String>? = nil) -> AuthoredPrTellButton? {
+        guard isFixable(pr) else { return nil }
+        let n = pr.number
+        switch pr.owner.kind {
+        case .motherJob, .linked, .onBranch:
+            if let tag = pr.owner.tag, !tag.isEmpty {
+                if let tellable, !tellable.contains(tag) { return nil }
+                let first = firstWord(pr.owner.name ?? "")
+                let who = first.isEmpty ? "focus" : first
+                return AuthoredPrTellButton(action: .tell(tag: tag), title: "Tell \(who)",
+                                            accessibilityLabel: "Tell \(who) about PR \(n)")
+            }
+            return AuthoredPrTellButton(action: .choose, title: "Choose focus…", accessibilityLabel: "Choose focus for PR \(n)")
+        case .ambiguous, .unknown:
+            return AuthoredPrTellButton(action: .choose, title: "Choose focus…", accessibilityLabel: "Choose focus for PR \(n)")
+        case .closed:
+            return AuthoredPrTellButton(action: .start, title: "Start a session…", accessibilityLabel: "Start a session for PR \(n)")
+        }
+    }
+
+    /// `Told Cody 1m ago`; nil when nobody was told.
+    public static func toldText(_ told: AuthoredPrTold?, now: Date) -> String? {
+        guard let told, let at = told.at else { return nil }
+        let first = firstWord(told.name)
+        return "Told \(first.isEmpty ? "a focus" : first) \(age(from: at, now: now)) ago"
+    }
+
+    /// `1m ago`, `never`: the line in the preview.
+    public static func lastToldLine(_ last: AuthoredPrLastTold?, now: Date) -> String {
+        guard let last, let at = last.at else { return "Last told: never" }
+        let first = firstWord(last.name)
+        return "Last told: \(age(from: at, now: now)) ago" + (first.isEmpty ? "" : " (\(first))")
     }
 
     static func status(_ pr: AuthoredPr) -> (AuthoredPrRowModel.StatusKind, String, String) {

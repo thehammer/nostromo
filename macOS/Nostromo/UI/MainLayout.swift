@@ -465,6 +465,26 @@ class MainLayout: NSView {
     /// `DecisionPresenter` targets popups by it but never changes it.
     var activeFocusTag: String { activeFocus.sessionTag }
 
+    /// Switch this window to the open focus with `tag` (the PR Overview's hand-off). False when there is none.
+    func showFocus(tag: String) -> Bool {
+        guard let focus = focusStore.focuses.first(where: { $0.sessionTag == tag }) else { return false }
+        if activeFocus.id != focus.id { switchFocus(focus) }
+        return true
+    }
+
+    /// Put the keyboard in the input of the focus this window shows. False when its conversation is not on
+    /// screen (yet).
+    func focusInputBar() -> Bool {
+        guard let content = currentContentView, let repl = Self.firstReplView(in: content) else { return false }
+        return repl.focusInput()
+    }
+
+    private static func firstReplView(in view: NSView) -> ReplView? {
+        if let repl = view as? ReplView { return repl }
+        for sub in view.subviews { if let found = firstReplView(in: sub) { return found } }
+        return nil
+    }
+
     /// The window id `DynamicFocusView` was built with (and a pending terminal-focus token names).
     var terminalWindowId: String { String(windowIndex) }
 

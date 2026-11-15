@@ -16,6 +16,9 @@ use super::budget::{
 };
 use super::classify::{classify, group_of, Classified, RawPr};
 use super::github::{Api, ApiError, Failure, Meta, SearchItem, SearchPage, Target, MAX_ALIASES};
+use super::links::{key_string, AuthoredPrStore};
+use super::memory::FocusMemory;
+use super::notice::attention_key;
 use super::ownership::{self, Link, OpenFocus, PrKey, WorkingCopy};
 use super::snapshot::*;
 use super::usage::{Record, UsageLog};
@@ -90,7 +93,10 @@ pub(super) struct Engine {
     projects_root: std::path::PathBuf,
     demand_rx: watch::Receiver<Demand>,
     refresh_rx: mpsc::UnboundedReceiver<()>,
+    told_rx: mpsc::UnboundedReceiver<PrKey>,
     out: watch::Sender<Option<AuthoredPrsSnapshot>>,
+    store: Arc<AuthoredPrStore>,
+    memory: Arc<FocusMemory>,
 
     me: Option<String>,
     prs: BTreeMap<PrKey, Pr>,
@@ -161,6 +167,8 @@ impl Engine {
         deps: Deps,
         inputs: DemandInputs,
         out: watch::Sender<Option<AuthoredPrsSnapshot>>,
+        store: Arc<AuthoredPrStore>,
+        memory: Arc<FocusMemory>,
     ) -> Self {
         let (api, token) = match &deps.github {
             Some(c) => (Some(make_api(c, &deps.api_base)), TokenState::Connected),
@@ -178,7 +186,10 @@ impl Engine {
             projects_root: deps.projects_root,
             demand_rx: inputs.demand_rx,
             refresh_rx: inputs.refresh_rx,
+            told_rx: inputs.told_rx,
             out,
+            store,
+            memory,
             me: None,
             prs: BTreeMap::new(),
             total_open: 0,
@@ -238,6 +249,7 @@ impl Engine {
                     self.on_demand_changed();
                 }
                 Some(()) = self.refresh_rx.recv() => self.on_refresh(),
+                Some(key) = self.told_rx.recv() => self.on_told(key),
                 sig = recv_signal(&mut self.relay_rx) => match sig {
                     Some(QueueSignal::Reconnected) => self.on_reconnected(),
                     Some(QueueSignal::Event(ev)) => self.on_relay_event(&ev),
@@ -290,6 +302,16 @@ impl Engine {
                 self.stage = Stage::NeedSearch;
                 self.last_full = Some(now);
             }
+        }
+        self.mark_publish(now);
+    }
+
+    /// The user told a focus about this PR: read it again so the new-comment
+    /// cutoff (the told time) applies, and publish the told record now.
+    fn on_told(&mut self, key: PrKey) {
+        let now = Instant::now();
+        if self.prs.contains_key(&key) {
+            self.dirty.insert(key);
         }
         self.mark_publish(now);
     }
@@ -1041,7 +1063,12 @@ impl Engine {
                 self.prs.remove(key);
                 continue;
             }
-            let classified = classify(&raw, None);
+            let told_at = self
+                .store
+                .get(&key_string(&key.repo, key.number))
+                .and_then(|e| e.told)
+                .map(|t| t.at);
+            let classified = classify(&raw, told_at);
             if classified.lifecycle != Lifecycle::Open {
                 if let Some(p) = self
                     .prs
@@ -1247,7 +1274,7 @@ impl Engine {
             return (infos, HashMap::new());
         }
         let focuses = open_focuses_of(&infos);
-        let links: HashMap<PrKey, Link> = HashMap::new();
+        let links = self.links(&infos);
         let jobs = self.jobs_rx.borrow().clone();
         let needs_copies = self.prs.iter().any(|(k, p)| {
             p.lifecycle == Lifecycle::Open
@@ -1293,6 +1320,30 @@ impl Engine {
         }
     }
 
+    /// The links the user made, for the PRs listed: open when the tag is in the
+    /// registry, and named from it (or from the focus memory once closed).
+    fn links(&self, infos: &[FocusInfo]) -> HashMap<PrKey, Link> {
+        self.prs
+            .keys()
+            .filter_map(|k| {
+                let link = self.store.get(&key_string(&k.repo, k.number))?.link?;
+                let open = infos.iter().find(|f| f.tag == link.tag);
+                let name = open
+                    .map(|f| f.name.clone())
+                    .or_else(|| self.memory.get(&link.tag).map(|m| m.name))
+                    .unwrap_or_default();
+                Some((
+                    k.clone(),
+                    Link {
+                        tag: link.tag,
+                        name,
+                        open: open.is_some(),
+                    },
+                ))
+            })
+            .collect()
+    }
+
     fn owners(
         &self,
         infos: &[FocusInfo],
@@ -1300,7 +1351,7 @@ impl Engine {
     ) -> HashMap<PrKey, Owner> {
         let jobs = self.jobs_rx.borrow().clone();
         let focuses = open_focuses_of(infos);
-        let links: HashMap<PrKey, Link> = HashMap::new();
+        let links = self.links(infos);
         self.prs
             .iter()
             .map(|(k, p)| {
@@ -1319,6 +1370,19 @@ impl Engine {
         infos: &[FocusInfo],
         copies: &HashMap<String, WorkingCopy>,
     ) -> AuthoredPrsSnapshot {
+        self.memory.observe(infos, wall);
+        if self.checked_at.is_some() {
+            let prs = &self.prs;
+            let find = |key: &str| {
+                prs.iter()
+                    .find(|(k, _)| key_string(&k.repo, k.number) == key)
+            };
+            self.store.prune(
+                wall,
+                |key| find(key).is_some_and(|(_, p)| p.lifecycle != Lifecycle::Open),
+                |key| find(key).is_some(),
+            );
+        }
         let owners = self.owners(infos, copies);
         let mut rows: Vec<AuthoredPr> = self
             .prs
@@ -1330,6 +1394,50 @@ impl Engine {
                 let review = c.map_or_else(Review::none, |c| c.review.clone());
                 let new_comments = c.map_or(0, |c| c.new_comments);
                 let unresolved = c.map_or(0, |c| c.unresolved_threads);
+                let group = group_of(p.draft, &checks, &review, new_comments, unresolved);
+                let owner = owners.get(k).cloned().unwrap_or_else(Owner::unknown);
+                let requesters: &[String] = if review.state == ReviewState::ChangesRequested {
+                    &review.logins
+                } else {
+                    &[]
+                };
+                let key_hash = attention_key(
+                    &checks.failing_names,
+                    requesters,
+                    c.and_then(|c| c.newest_comment),
+                    unresolved,
+                );
+                let told_rec = self
+                    .store
+                    .get(&key_string(&k.repo, k.number))
+                    .and_then(|e| e.told);
+                let told = told_rec.as_ref().map(|t| Told {
+                    tag: t.tag.clone(),
+                    name: infos
+                        .iter()
+                        .find(|f| f.tag == t.tag)
+                        .map(|f| f.name.clone())
+                        .or_else(|| self.memory.get(&t.tag).map(|m| m.name))
+                        .filter(|n| !n.is_empty())
+                        .map_or_else(|| "a closed focus".to_owned(), |n| one_line(&n, MAX_NAME)),
+                    at: t.at,
+                });
+                // A pill is a promise that Tell works: never raised for an owner
+                // the verbs would refuse (a built-in or a sensitive focus).
+                let known_open_owner = matches!(
+                    owner.kind,
+                    OwnerKind::MotherJob | OwnerKind::Linked | OwnerKind::OnBranch
+                ) && owner
+                    .tag
+                    .as_deref()
+                    .is_some_and(|tag| infos.iter().any(|f| f.tag == tag && f.tellable()));
+                let pill = group == Group::NeedsYou
+                    && !p.draft
+                    && p.lifecycle == Lifecycle::Open
+                    && known_open_owner
+                    && told_rec
+                        .as_ref()
+                        .is_none_or(|t| t.attention_key != key_hash);
                 AuthoredPr {
                     repo: p.repo.clone(),
                     number: p.number,
@@ -1337,7 +1445,7 @@ impl Engine {
                     title: one_line(&p.title, MAX_TITLE),
                     draft: p.draft,
                     updated_at: p.updated_at,
-                    group: group_of(p.draft, &checks, &review, new_comments, unresolved),
+                    group,
                     lifecycle: p.lifecycle,
                     ended_at: p.ended.map(|(w, _)| w),
                     base_ref: c.and_then(|c| c.base_ref.clone()),
@@ -1347,7 +1455,10 @@ impl Engine {
                     new_comments,
                     unresolved_threads: unresolved,
                     threads_truncated: c.is_some_and(|c| c.threads_truncated),
-                    owner: owners.get(k).cloned().unwrap_or_else(Owner::unknown),
+                    owner,
+                    told,
+                    pill,
+                    attention_key: key_hash,
                 }
             })
             .collect();

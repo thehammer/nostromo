@@ -51,6 +51,12 @@ public enum AuthoredPrOwnerKind: String, LenientWireEnum, Sendable {
     static var unknownCase: Self { .unknown }
 }
 
+/// How a focus came to be a candidate owner.
+public enum AuthoredPrVia: String, LenientWireEnum, Sendable {
+    case motherJob = "mother_job", linked, onBranch = "on_branch", unknown
+    static var unknownCase: Self { .unknown }
+}
+
 /// The bounds the daemon applies; Kit applies them again.
 public enum AuthoredPrsBounds {
     public static let title = 300
@@ -202,20 +208,39 @@ extension AuthoredPrReview: Decodable {
 public struct AuthoredPrCandidate: Equatable, Sendable {
     public var tag: String
     public var name: String
+    public var via: AuthoredPrVia
     public var jobId: String?
     public var closed: Bool
-    public init(tag: String, name: String, jobId: String? = nil, closed: Bool = false) {
-        self.tag = tag; self.name = name; self.jobId = jobId; self.closed = closed
+    public init(tag: String, name: String, via: AuthoredPrVia = .unknown, jobId: String? = nil, closed: Bool = false) {
+        self.tag = tag; self.name = name; self.via = via; self.jobId = jobId; self.closed = closed
     }
 }
 extension AuthoredPrCandidate: Decodable {
-    private enum K: String, CodingKey { case tag, name, jobId = "job_id", closed }
+    private enum K: String, CodingKey { case tag, name, via, jobId = "job_id", closed }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
         tag = c.string(.tag, max: AuthoredPrsBounds.name) ?? ""
         name = c.string(.name, max: AuthoredPrsBounds.name) ?? ""
+        via = c.lenient(.via, AuthoredPrVia.self)
         jobId = c.string(.jobId, max: AuthoredPrsBounds.name)
         closed = c.flag(.closed)
+    }
+}
+
+/// The focus last told about a PR (the user's own notify), and when.
+public struct AuthoredPrTold: Equatable, Sendable {
+    public var tag: String
+    public var name: String
+    public var at: Date?
+    public init(tag: String, name: String, at: Date?) { self.tag = tag; self.name = name; self.at = at }
+}
+extension AuthoredPrTold: Decodable {
+    private enum K: String, CodingKey { case tag, name, at }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: K.self)
+        tag = c.string(.tag, max: AuthoredPrsBounds.name) ?? ""
+        name = c.string(.name, max: AuthoredPrsBounds.name) ?? ""
+        at = c.date(.at)
     }
 }
 
@@ -262,6 +287,10 @@ public struct AuthoredPr: Equatable, Sendable, Identifiable {
     public var unresolvedThreads: Int
     public var threadsTruncated: Bool
     public var owner: AuthoredPrOwner
+    /// Who was last told about this PR (`authored_prs_notify_v1`); nil when nobody was or the daemon is older.
+    public var told: AuthoredPrTold?
+    /// The daemon says this PR needs the user and its known, open owner has not been told: one waiting pill.
+    public var pill: Bool
 
     public var id: String { "\(repo)#\(number)" }
 
@@ -271,7 +300,8 @@ public struct AuthoredPr: Equatable, Sendable, Identifiable {
                 checks: AuthoredPrChecks = AuthoredPrChecks(state: .none),
                 review: AuthoredPrReview = AuthoredPrReview(state: .none),
                 newComments: Int = 0, unresolvedThreads: Int = 0, threadsTruncated: Bool = false,
-                owner: AuthoredPrOwner = .unknown) {
+                owner: AuthoredPrOwner = .unknown, told: AuthoredPrTold? = nil, pill: Bool = false) {
+        self.told = told; self.pill = pill
         self.repo = repo; self.number = number; self.url = url; self.title = title; self.draft = draft
         self.updatedAt = updatedAt; self.group = group; self.lifecycle = lifecycle; self.endedAt = endedAt
         self.baseRef = baseRef; self.detailsUnavailable = detailsUnavailable; self.checks = checks
@@ -284,6 +314,7 @@ extension AuthoredPr: Decodable {
         case repo, number, url, title, draft, updatedAt = "updated_at", group, lifecycle, endedAt = "ended_at"
         case baseRef = "base_ref", detailsUnavailable = "details_unavailable", checks, review
         case newComments = "new_comments", unresolvedThreads = "unresolved_threads", threadsTruncated = "threads_truncated", owner
+        case told, pill
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -305,6 +336,8 @@ extension AuthoredPr: Decodable {
         unresolvedThreads = c.int(.unresolvedThreads)
         threadsTruncated = c.flag(.threadsTruncated)
         owner = (try? c.decodeIfPresent(AuthoredPrOwner.self, forKey: .owner)).flatMap { $0 } ?? .unknown
+        told = (try? c.decodeIfPresent(AuthoredPrTold.self, forKey: .told)).flatMap { $0 }
+        pill = c.flag(.pill)
     }
 }
 

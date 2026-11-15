@@ -1,0 +1,10 @@
+{
+  "type": "authored_pr_notify_result",
+  "request_id": "r3",
+  "result": {
+    "status": "err",
+    "value": {
+      "code": "changed"
+    }
+  }
+}
