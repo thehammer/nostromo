@@ -28,6 +28,7 @@ use tracing::warn;
 use super::protocol::{
     ClientMsg, FocusMeta, PaneContentWire, ServerMsg, TaskOutputOutcome, TaskStopOutcome, Topic,
 };
+use crate::data::authored_prs::wire::AuthoredPrResult;
 use crate::data::work::WorkResult;
 
 /// Wire transport a connection arrived on.
@@ -784,7 +785,11 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         ServerMsg::MotherNoticeState { .. } => ServerClass::LocalOnly,
         // The author's open PRs: repos, titles, check names and the focuses
         // that own them. Local peers only (SP3), and only on request.
-        ServerMsg::AuthoredPrs { .. } => ServerClass::LocalOnly,
+        ServerMsg::AuthoredPrs { .. }
+        | ServerMsg::AuthoredPrPreview { .. }
+        | ServerMsg::AuthoredPrNotifyResult { .. }
+        | ServerMsg::AuthoredPrStartSessionResult { .. }
+        | ServerMsg::AuthoredPrLinkResult { .. } => ServerClass::LocalOnly,
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
@@ -898,6 +903,23 @@ pub fn is_refusal(msg: &ServerMsg) -> bool {
         }
         | ServerMsg::WorkSendResult {
             result: WorkResult::Err(e),
+            ..
+        } => is_secure_refusal(&e.code),
+        // The refusals of the four PR hand-off verbs, which carry a code and no text.
+        ServerMsg::AuthoredPrPreview {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrNotifyResult {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrStartSessionResult {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrLinkResult {
+            result: AuthoredPrResult::Err(e),
             ..
         } => is_secure_refusal(&e.code),
         ServerMsg::Error { message } => message.starts_with("requires_secure_connection"),
@@ -1118,7 +1140,13 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::MotherNoticeSettingsSet { .. }
         // What the operator is looking at, and a reconcile: the verified app only.
         | ClientMsg::AuthoredPrsDemand { .. }
-        | ClientMsg::AuthoredPrsRefresh { .. } => NetworkPolicy::Refused,
+        | ClientMsg::AuthoredPrsRefresh { .. }
+        // Telling a focus about a PR, starting one, linking one: the verified
+        // app only (SP4).
+        | ClientMsg::AuthoredPrPreviewRequest { .. }
+        | ClientMsg::AuthoredPrNotify { .. }
+        | ClientMsg::AuthoredPrStartSession { .. }
+        | ClientMsg::AuthoredPrLink { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -1235,7 +1263,11 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::ConversationHistorySettingsSet { .. }
         // Name no session; refused for a network peer anyway.
         | ClientMsg::AuthoredPrsDemand { .. }
-        | ClientMsg::AuthoredPrsRefresh { .. } => false,
+        | ClientMsg::AuthoredPrsRefresh { .. }
+        | ClientMsg::AuthoredPrPreviewRequest { .. }
+        | ClientMsg::AuthoredPrNotify { .. }
+        | ClientMsg::AuthoredPrStartSession { .. }
+        | ClientMsg::AuthoredPrLink { .. } => false,
     }
 }
 
@@ -2177,6 +2209,33 @@ mod tests {
                 level: "visible".into(),
             },
             ClientMsg::AuthoredPrsRefresh {},
+            ClientMsg::AuthoredPrPreviewRequest {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                target: crate::data::authored_prs::wire::PreviewTarget::Focus { tag: "x1".into() },
+            },
+            ClientMsg::AuthoredPrNotify {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                tag: "x1".into(),
+                digest: "d".into(),
+            },
+            ClientMsg::AuthoredPrStartSession {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                folder: "/tmp".into(),
+                agent: "claude".into(),
+                digest: "d".into(),
+            },
+            ClientMsg::AuthoredPrLink {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                tag: Some("x1".into()),
+            },
             ClientMsg::ConversationHistoryGet {
                 request_id: "r".into(),
             },
@@ -2348,7 +2407,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 88;
+    const CLIENT_MSG_VARIANTS: usize = 92;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2441,6 +2500,10 @@ mod tests {
             ClientMsg::ConversationHistorySettingsSet { .. } => 85,
             ClientMsg::ConversationResumeRelease { .. } => 86,
             ClientMsg::ConversationHistoryRename { .. } => 87,
+            ClientMsg::AuthoredPrPreviewRequest { .. } => 88,
+            ClientMsg::AuthoredPrNotify { .. } => 89,
+            ClientMsg::AuthoredPrStartSession { .. } => 90,
+            ClientMsg::AuthoredPrLink { .. } => 91,
         }
     }
 
@@ -2483,9 +2546,10 @@ mod tests {
         // 72 with the two Approvals-log requests; 75 with the three persisted-rule verbs (AP6);
         // 76 with `TrackerOpenLink` (T6; expect a trivial conflict on this constant with T3a's tracker verbs);
         // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`;
-        // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs; 88 with the rename.
-        assert_eq!(CLIENT_MSG_VARIANTS, 88);
-        assert_eq!(every_client_msg().len(), 88);
+        // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs; 88 with the rename;
+        // 92 with the four authored-PR hand-off verbs (preview, notify, start session, link).
+        assert_eq!(CLIENT_MSG_VARIANTS, 92);
+        assert_eq!(every_client_msg().len(), 92);
     }
 
     #[test]

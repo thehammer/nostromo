@@ -212,6 +212,7 @@ impl PendingMessage {
             text: text.to_string(),
             images: images.to_vec(),
             origin: PendingOrigin::User,
+            on_delivered: None,
         }
     }
 
@@ -221,6 +222,7 @@ impl PendingMessage {
             text: injected.render(),
             images: Vec::new(),
             origin: PendingOrigin::Injected(injected),
+            on_delivered: None,
         }
     }
 }

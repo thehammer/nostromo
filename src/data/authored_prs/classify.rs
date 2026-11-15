@@ -185,6 +185,10 @@ pub struct Classified {
     pub checks: Checks,
     pub review: Review,
     pub new_comments: u32,
+    /// The newest comment time after the last push, whether or not the user
+    /// has been told since (the notify's cutoff must not move this, or telling
+    /// would change what "the same state" hashes to).
+    pub newest_comment: Option<DateTime<Utc>>,
     pub unresolved_threads: u32,
     pub threads_truncated: bool,
     pub base_ref: Option<String>,
@@ -360,6 +364,16 @@ pub fn classify_review(pr: &RawPr) -> Review {
 /// last push" (a force-push of an old commit does not move it), later the max
 /// with the time the user said they had dealt with the PR (slice 3's `told`).
 pub fn count_new_comments(pr: &RawPr, told: Option<DateTime<Utc>>) -> u32 {
+    new_comment_stats(pr, told).0
+}
+
+/// The newest time of a comment by a human other than the author after the
+/// last push (ignoring `told`).
+pub fn newest_new_comment(pr: &RawPr) -> Option<DateTime<Utc>> {
+    new_comment_stats(pr, None).1
+}
+
+fn new_comment_stats(pr: &RawPr, told: Option<DateTime<Utc>>) -> (u32, Option<DateTime<Utc>>) {
     let last_push = pr
         .commits
         .nodes
@@ -382,17 +396,22 @@ pub fn count_new_comments(pr: &RawPr, told: Option<DateTime<Utc>>) -> u32 {
         }
     };
     let mut n: u64 = 0;
+    let mut newest: Option<DateTime<Utc>> = None;
     for c in &pr.comments.nodes {
         if counts(&c.author, c.created_at) {
             n += 1;
+            newest = newest.max(c.created_at);
         }
     }
     for r in &pr.reviews.nodes {
         if counts(&r.author, r.submitted_at) {
             n += u64::from(r.comments.total_count);
+            if r.comments.total_count > 0 {
+                newest = newest.max(r.submitted_at);
+            }
         }
     }
-    n.min(u64::from(MAX_NEW_COMMENTS)) as u32
+    (n.min(u64::from(MAX_NEW_COMMENTS)) as u32, newest)
 }
 
 /// Unresolved review threads among the first 100, and whether there were more.
@@ -440,6 +459,7 @@ pub fn classify(pr: &RawPr, told: Option<DateTime<Utc>>) -> Classified {
         checks,
         review: classify_review(pr),
         new_comments: count_new_comments(pr, told),
+        newest_comment: newest_new_comment(pr),
         unresolved_threads,
         threads_truncated,
         base_ref: base_ref_to_show(

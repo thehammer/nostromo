@@ -173,6 +173,30 @@ pub fn resolve(
         None => Vec::new(),
     };
 
+    // The user's own choice outranks every other claim, when its focus is
+    // open: the picker only offers a choice for a PR that has no single owner
+    // (ambiguous, closed or unknown), so honouring it is the only way a pick
+    // resolves anything, and "Start a session" for a closed Mother owner
+    // would otherwise leave the row ambiguous (PRD 26/36: the operator's
+    // decision is final until they unlink). A link to a closed focus is no
+    // decision about who works on it now, so it stays an ordinary claim. When
+    // a Mother job names the same focus, that job is the named evidence.
+    if let Some(link) = links.get(key).filter(|l| l.open) {
+        if let Some(c) = claims.iter().find(|c| c.tag == link.tag) {
+            return Owner {
+                kind: match c.via {
+                    Via::Linked => OwnerKind::Linked,
+                    _ => OwnerKind::MotherJob,
+                },
+                tag: Some(c.tag.clone()),
+                name: Some(c.name.clone()),
+                job_id: c.job_id.clone(),
+                via: Some(c.via),
+                candidates: Vec::new(),
+            };
+        }
+    }
+
     if claims.len() >= 2 {
         let mut all: Vec<Candidate> = claims.iter().map(candidate).collect();
         all.extend(
@@ -655,11 +679,90 @@ mod tests {
             &links,
         );
         assert_eq!(
-            o.kind,
-            OwnerKind::Ambiguous,
-            "a job and a link to different focuses"
+            (o.kind, o.tag.as_deref()),
+            (OwnerKind::Linked, Some("alpha")),
+            "the user's link to an open focus outranks an open job on another"
         );
-        assert_eq!(tags(&o), vec!["alpha", "beta"]);
+    }
+
+    fn link_to(tag: &str, open: bool) -> HashMap<PrKey, Link> {
+        HashMap::from([(
+            key(),
+            Link {
+                tag: tag.into(),
+                name: tag.into(),
+                open,
+            },
+        )])
+    }
+
+    #[test]
+    fn a_link_to_an_open_focus_outranks_a_closed_mother_owner() {
+        // Start a session for a PR whose Mother job's focus is gone.
+        let o = resolve(
+            &key(),
+            None,
+            &[job_with(
+                "j",
+                Some(URL),
+                Some(origin(OriginKind::Focus, Some("gone"), Some(true))),
+            )],
+            &focuses(&["fresh"]),
+            &HashMap::new(),
+            &link_to("fresh", true),
+        );
+        assert_eq!(
+            (o.kind, o.tag.as_deref()),
+            (OwnerKind::Linked, Some("fresh"))
+        );
+        assert!(o.candidates.is_empty());
+    }
+
+    #[test]
+    fn a_picker_choice_on_an_ambiguous_pr_resolves_it() {
+        // Two Mother owners, and a third focus on the branch.
+        let copies = HashMap::from([("gamma".to_owned(), copy(REPO, "feat"))]);
+        let jobs = [focus_job("j1", "alpha"), focus_job("j2", "beta")];
+        let open = focuses(&["alpha", "beta", "gamma"]);
+        let none = resolve(&key(), Some("feat"), &jobs, &open, &copies, &HashMap::new());
+        assert_eq!(none.kind, OwnerKind::Ambiguous);
+        let o = resolve(
+            &key(),
+            Some("feat"),
+            &jobs,
+            &open,
+            &copies,
+            &link_to("alpha", true),
+        );
+        assert_eq!(
+            (o.kind, o.tag.as_deref()),
+            (OwnerKind::MotherJob, Some("alpha"))
+        );
+        let o = resolve(
+            &key(),
+            Some("feat"),
+            &jobs,
+            &open,
+            &copies,
+            &link_to("gamma", true),
+        );
+        assert_eq!(
+            (o.kind, o.tag.as_deref()),
+            (OwnerKind::Linked, Some("gamma"))
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_closed_focus_is_not_a_decision_and_does_not_override() {
+        let o = resolve(
+            &key(),
+            None,
+            &[focus_job("j", "alpha")],
+            &focuses(&["alpha"]),
+            &HashMap::new(),
+            &link_to("gone", false),
+        );
+        assert_eq!(o.kind, OwnerKind::Ambiguous, "an open job and a dead link");
     }
 
     // ── bounds ────────────────────────────────────────────────────────────

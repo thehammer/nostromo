@@ -2360,13 +2360,21 @@ impl SessionTranscript {
                 human,
                 compact_summary,
                 injected,
-                ..
+                is_replay,
             } => {
                 // The live stream carries no provenance fields: a live line's
                 // provenance is the daemon's `written` queue, judged by the
                 // session reader. Stored fields apply to a replay only.
+                //
+                // A live `isReplay` line is the echo of a write: the user's or
+                // the daemon's turn, whatever its shape (the reader never
+                // takes it for the CLI's own). It is judged so here, as the
+                // turn is made, not taken back by the reader afterwards: a
+                // snapshot taken in between would show a typed message as an
+                // injected marker.
+                let live_echo = self.live && is_replay;
                 let (host_sent, human, injected) = (
-                    host_sent && !self.live,
+                    (host_sent && !self.live) || live_echo,
                     human && !self.live,
                     injected && !self.live,
                 );
@@ -5496,6 +5504,52 @@ mod tests {
             parent_tool_use_id: None,
         };
         assert!(block_bytes(&call(Some("/a/long/path/to/a.rs"))) > block_bytes(&call(None)));
+    }
+
+    #[test]
+    fn a_live_echo_is_the_users_turn_the_moment_it_is_ingested_whatever_its_shape() {
+        // The reader used to take an injected-context origin back after the
+        // turn was made, so a snapshot in between showed a typed message as a
+        // marker. An `isReplay` line is judged as the turn is made.
+        let shapes = [
+            "This session is being continued from a previous conversation that ran out of context.",
+            "Base directory for this skill: /x/.claude/skills/demo\n\nbody",
+            "Another Claude session sent a message:\n<cross-session-message from=\"uds:/tmp/x.sock\" from-name=\"Claudia\" from-mode=\"bypass\">\nhi\n</cross-session-message>",
+        ];
+        for text in shapes {
+            let mut t = SessionTranscript::new();
+            t.set_live(true);
+            let line = serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": text},
+                "isReplay": true,
+            })
+            .to_string();
+            ingest_all(&mut t, &line);
+            let turns = t.snapshot();
+            assert_eq!(turns.len(), 1, "{text}");
+            assert_eq!(turns[0].origin, None, "{text}");
+            assert_eq!(turns[0].user_input, text);
+            assert_eq!(t.prompt_count(), 1, "{text}");
+            assert_eq!(t.first_user_input(), Some(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_live_line_that_is_not_an_echo_keeps_the_shape_it_reads_as() {
+        let mut t = SessionTranscript::new();
+        t.set_live(true);
+        let line = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "This session is being continued from a previous conversation that ran out of context."},
+        })
+        .to_string();
+        ingest_all(&mut t, &line);
+        let turns = t.snapshot();
+        assert!(matches!(
+            turns[0].origin,
+            Some(TurnOrigin::InjectedContext { .. })
+        ));
     }
 
     #[test]

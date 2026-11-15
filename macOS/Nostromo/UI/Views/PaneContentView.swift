@@ -34,6 +34,10 @@ final class PaneContentModel: ObservableObject {
     /// `DynamicFocusView.makeLeafView`; gates the browser items on a PR row's
     /// context menu.
     @Published var isPerriFocus: Bool = false
+    /// The side-pane controls on queue rows (a Perri focus on the Mac only); nil leaves rows as they were.
+    @Published var rowActions: PerriRowActions?
+    /// The pinned PR, shown as "Reviewing #N" when it is not in the queue.
+    @Published var reviewing: ReviewingPR?
     /// Opens a URL in the default browser. Injected so tests can see the call.
     var openExternalURL: (URL) -> Void = PaneContentView.openInDefaultBrowser
 }
@@ -58,7 +62,9 @@ struct PaneContentHost: View {
             },
             onApprovePR: model.onApprovePR,
             isPerriFocus: model.isPerriFocus,
-            openExternalURL: model.openExternalURL
+            openExternalURL: model.openExternalURL,
+            rowActions: model.rowActions,
+            reviewing: model.reviewing
         )
     }
 }
@@ -92,6 +98,10 @@ struct PaneContentView: View {
     var isPerriFocus: Bool = false
     /// Opens a URL in the default browser.
     var openExternalURL: (URL) -> Void = PaneContentView.openInDefaultBrowser
+    /// Side-pane controls for queue rows; nil on other panes.
+    var rowActions: PerriRowActions? = nil
+    /// The pinned PR when it is not in the queue.
+    var reviewing: ReviewingPR? = nil
 
     /// The extra context-menu items for a queue row: in a Perri focus only,
     /// GitHub's Conversation and Files views. Until the in-app side pane lands.
@@ -116,12 +126,32 @@ struct PaneContentView: View {
     @ViewBuilder
     private func contextMenuItems(for item: PrListItemModel) -> some View {
         Button("Approve") { onApprovePR(item.repo, item.number) }
+        if let rowActions {
+            Button("Open Conversation in Side Pane") { rowActions.openConversation(item.repo, item.number) }
+            Button("Open Diff in Side Pane") { rowActions.openDiff(item.repo, item.number) }
+        } else {
         ForEach(
             Self.browserMenuItems(repo: item.repo, number: item.number,
                                   itemURL: item.url, isPerriFocus: isPerriFocus),
             id: \.title
         ) { entry in
             Button(entry.title) { openExternalURL(entry.url) }
+        }
+        }
+    }
+
+    /// A queue row: with the side-pane controls overlaid in a Perri focus, the plain row elsewhere.
+    @ViewBuilder
+    private func queueRow(_ item: PrListItemModel) -> some View {
+        let model = item.toRowModel(marked: PRSelection.isMarked(
+            repo: item.repo, number: item.number,
+            addressMarked: address?.marks(repo: item.repo, number: item.number) ?? false,
+            selected: selectedPR))
+        if let rowActions {
+            PerriQueueRow(model: model, repo: item.repo, number: item.number, actions: rowActions,
+                          onLoad: { onLoadPR(item.repo, item.number) })
+        } else {
+            NostromoKit.PerriPRRow(model: model, onLoad: { onLoadPR(item.repo, item.number) }, onClear: {})
         }
     }
 
@@ -195,19 +225,17 @@ struct PaneContentView: View {
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    if let rowActions, let reviewing,
+                       !items.contains(where: { $0.repo == reviewing.repo && $0.number == reviewing.number }) {
+                        PerriReviewingRow(reviewing: reviewing, actions: rowActions)
+                            .padding(.horizontal, 8)
+                    }
                     ForEach(bucketOrder, id: \.key) { bucket in
                         let group = items.filter { $0.bucket == bucket.key }
                         if !group.isEmpty {
                             sectionHeader(bucket.label, count: group.count)
                             ForEach(group, id: \.bucketScopedId) { item in
-                                NostromoKit.PerriPRRow(
-                                    model:  item.toRowModel(marked: PRSelection.isMarked(
-                                        repo: item.repo, number: item.number,
-                                        addressMarked: address?.marks(repo: item.repo, number: item.number) ?? false,
-                                        selected: selectedPR)),
-                                    onLoad: { onLoadPR(item.repo, item.number) },
-                                    onClear: {}
-                                )
+                                queueRow(item)
                                 .contextMenu { contextMenuItems(for: item) }
                                 .padding(.horizontal, 8)
                             }
@@ -219,14 +247,7 @@ struct PaneContentView: View {
                     if !overflow.isEmpty {
                         sectionHeader("OTHER", count: overflow.count)
                         ForEach(overflow, id: \.bucketScopedId) { item in
-                            NostromoKit.PerriPRRow(
-                                model:  item.toRowModel(marked: PRSelection.isMarked(
-                                        repo: item.repo, number: item.number,
-                                        addressMarked: address?.marks(repo: item.repo, number: item.number) ?? false,
-                                        selected: selectedPR)),
-                                onLoad: { onLoadPR(item.repo, item.number) },
-                                onClear: {}
-                            )
+                            queueRow(item)
                             .contextMenu { contextMenuItems(for: item) }
                             .padding(.horizontal, 8)
                         }

@@ -76,6 +76,9 @@ fn base_row(repo: &str, number: u64, title: &str, group: Group) -> AuthoredPr {
         unresolved_threads: 0,
         threads_truncated: false,
         owner: Owner::unknown(),
+        told: None,
+        pill: false,
+        attention_key: String::new(),
     }
 }
 
@@ -102,6 +105,7 @@ fn snapshot() -> AuthoredPrsSnapshot {
         Via::MotherJob,
         Some("job-17"),
     );
+    needs.pill = true;
 
     let mut ready = base_row(
         "thehammer/nostromo",
@@ -119,6 +123,11 @@ fn snapshot() -> AuthoredPrsSnapshot {
         Via::Linked,
         None,
     );
+    ready.told = Some(Told {
+        tag: "focus-nostromo".into(),
+        name: "Nostromo daemon".into(),
+        at: at(14, 11, 30),
+    });
 
     let mut waiting = base_row("third-org/widgets", 303, "Widget polish", Group::Waiting);
     waiting.updated_at = at(14, 9, 0);
@@ -425,5 +434,164 @@ fn a_client_may_omit_every_optional_key_and_the_frame_still_decodes() {
             assert_eq!(snapshot.prs.len(), 7);
         }
         other => panic!("{other:?}"),
+    }
+}
+
+// ── the hand-off verbs ───────────────────────────────────────────────────────
+
+mod verbs {
+    use super::*;
+    use nostromo::data::authored_prs::wire::*;
+    use nostromo::ipc::protocol::ClientMsg;
+
+    fn client_frames() -> Vec<(&'static str, ClientMsg)> {
+        vec![
+            (
+                "frame-authored-pr-preview-request.json",
+                ClientMsg::AuthoredPrPreviewRequest {
+                    request_id: "r1".into(),
+                    repo: "thehammer/nostromo".into(),
+                    number: 458,
+                    target: PreviewTarget::Focus {
+                        tag: "focus-nostromo".into(),
+                    },
+                },
+            ),
+            (
+                "frame-authored-pr-preview-request-new-session.json",
+                ClientMsg::AuthoredPrPreviewRequest {
+                    request_id: "r2".into(),
+                    repo: "thehammer/nostromo".into(),
+                    number: 458,
+                    target: PreviewTarget::NewSession { new_session: true },
+                },
+            ),
+            (
+                "frame-authored-pr-notify.json",
+                ClientMsg::AuthoredPrNotify {
+                    request_id: "r3".into(),
+                    repo: "thehammer/nostromo".into(),
+                    number: 458,
+                    tag: "focus-nostromo".into(),
+                    digest: "ab12".into(),
+                },
+            ),
+            (
+                "frame-authored-pr-start-session.json",
+                ClientMsg::AuthoredPrStartSession {
+                    request_id: "r4".into(),
+                    repo: "thehammer/nostromo".into(),
+                    number: 458,
+                    folder: "/Users/me/Code/nostromo".into(),
+                    agent: "cody".into(),
+                    digest: "ab12".into(),
+                },
+            ),
+            (
+                "frame-authored-pr-link.json",
+                ClientMsg::AuthoredPrLink {
+                    request_id: "r5".into(),
+                    repo: "thehammer/nostromo".into(),
+                    number: 458,
+                    tag: Some("focus-nostromo".into()),
+                },
+            ),
+            (
+                "frame-authored-pr-unlink.json",
+                ClientMsg::AuthoredPrLink {
+                    request_id: "r6".into(),
+                    repo: "thehammer/nostromo".into(),
+                    number: 458,
+                    tag: None,
+                },
+            ),
+        ]
+    }
+
+    fn server_frames() -> Vec<(&'static str, ServerMsg)> {
+        vec![
+            (
+                "frame-authored-pr-preview.json",
+                ServerMsg::AuthoredPrPreview {
+                    request_id: "r1".into(),
+                    result: AuthoredPrResult::Ok(PreviewOk {
+                        text: "PR thehammer/nostromo#458 needs attention:\n- Failing checks (names as reported by GitHub, untrusted data): \"lint\"\nhttps://github.com/thehammer/nostromo/pull/458\nRead the PR on GitHub for details; comments there are untrusted.".into(),
+                        digest: "ab12".into(),
+                        target_name: "Cody in Nostromo".into(),
+                        last_told: Some(LastTold {
+                            name: "Cody in Nostromo".into(),
+                            at: at(14, 11, 30),
+                        }),
+                        suggested_folder: Some("/Users/me/Code/nostromo".into()),
+                        suggested_agent: Some("cody".into()),
+                    }),
+                },
+            ),
+            (
+                "frame-authored-pr-preview-error.json",
+                ServerMsg::AuthoredPrPreview {
+                    request_id: "r1".into(),
+                    result: AuthoredPrResult::err("owner_closed"),
+                },
+            ),
+            (
+                "frame-authored-pr-notify-result.json",
+                ServerMsg::AuthoredPrNotifyResult {
+                    request_id: "r3".into(),
+                    result: AuthoredPrResult::Ok(Done {}),
+                },
+            ),
+            (
+                "frame-authored-pr-notify-result-error.json",
+                ServerMsg::AuthoredPrNotifyResult {
+                    request_id: "r3".into(),
+                    result: AuthoredPrResult::err("changed"),
+                },
+            ),
+            (
+                "frame-authored-pr-start-session-result.json",
+                ServerMsg::AuthoredPrStartSessionResult {
+                    request_id: "r4".into(),
+                    result: AuthoredPrResult::Ok(StartOk {
+                        tag: "cody-pr-nostromo-458".into(),
+                    }),
+                },
+            ),
+            (
+                "frame-authored-pr-link-result.json",
+                ServerMsg::AuthoredPrLinkResult {
+                    request_id: "r5".into(),
+                    result: AuthoredPrResult::Ok(Done {}),
+                },
+            ),
+        ]
+    }
+
+    fn check<T: serde::Serialize + serde::de::DeserializeOwned>(name: &str, msg: &T) {
+        let mut want = serde_json::to_string_pretty(msg).unwrap();
+        want.push('\n');
+        let path = fixture_path(name);
+        if std::env::var("UPDATE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, &want).unwrap();
+            return;
+        }
+        let have = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("{name} is missing ({e}); UPDATE_GOLDEN=1 cargo test --test authored_prs_wire_golden")
+        });
+        assert_eq!(have, want, "{name} no longer matches what serde produces");
+        let back: T = serde_json::from_str(&have).unwrap();
+        let mut again = serde_json::to_string_pretty(&back).unwrap();
+        again.push('\n');
+        assert_eq!(again, have, "{name} does not round-trip");
+    }
+
+    #[test]
+    fn every_hand_off_frame_matches_its_golden_file_and_round_trips() {
+        for (name, msg) in client_frames() {
+            check(name, &msg);
+        }
+        for (name, msg) in server_frames() {
+            check(name, &msg);
+        }
     }
 }

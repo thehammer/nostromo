@@ -1,0 +1,8 @@
+{
+  "type": "authored_pr_notify_result",
+  "request_id": "r3",
+  "result": {
+    "status": "ok",
+    "value": {}
+  }
+}

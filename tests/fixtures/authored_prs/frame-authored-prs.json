@@ -55,7 +55,8 @@
           "name": "Portal export",
           "job_id": "job-17",
           "via": "mother_job"
-        }
+        },
+        "pill": true
       },
       {
         "repo": "thehammer/nostromo",
@@ -86,6 +87,11 @@
           "tag": "focus-nostromo",
           "name": "Nostromo daemon",
           "via": "linked"
+        },
+        "told": {
+          "tag": "focus-nostromo",
+          "name": "Nostromo daemon",
+          "at": "2026-11-14T11:30:00Z"
         }
       },
       {

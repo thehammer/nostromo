@@ -4,8 +4,9 @@ import NostromoKit
 
 // The Mother pane's Overview: the author's open PRs, grouped by what each is waiting on.
 //
-// Read-only in this slice. The daemon computes grouping and order; this view words, collapses and caps
-// them, and holds still the row the reader is on. Return on a row sends nothing.
+// The daemon computes grouping and order; this view words, collapses and caps them, and holds still the row
+// the reader is on. A fixable row has one button (Tell <focus>, Choose focus…, Start a session…) when the
+// daemon can hand off; it and Return on the row open a preview, a picker or a sheet, and never send.
 
 // MARK: - Outline
 
@@ -16,14 +17,19 @@ final class AuthoredPrsOutlineView: NSOutlineView {
     var onCommandClick: ((Int) -> Void)?
     var onHover: ((Int?) -> Void)?
     var onContextMenu: ((Int) -> NSMenu?)?
+    /// Return on the selected row (the keyboard way to the row's button). It never sends anything.
+    var onReturn: ((NSEvent) -> Void)?
 
     private var trackingArea: NSTrackingArea?
 
     override var acceptsFirstResponder: Bool { true }
 
-    /// Return on a row is for the preview (a later slice); it never sends anything here.
+    /// Return on a row opens its preview (or picker, or sheet) when it has a button; it never sends anything.
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 36 || event.keyCode == 76 { return }
+        if event.keyCode == 36 || event.keyCode == 76 {
+            onReturn?(event)
+            return
+        }
         super.keyDown(with: event)
     }
 
@@ -177,6 +183,8 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         NotificationCenter.default.post(name: MotherView.openJobNotification, object: nil)
     }
     var demand: AuthoredPrsDemandReporter?
+    /// The hand-off behind the row buttons; nil leaves the Overview read-only.
+    var handoff: AuthoredPrHandoff?
 
     // MARK: State
 
@@ -185,6 +193,8 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     /// The rows on screen: the snapshot, except that a selected or hovered row stays where it is.
     private(set) var displayed: [AuthoredPr] = []
     private(set) var hoveredId: String?
+    /// The daemon advertised `authored_prs_notify_v1`: rows get their button and told line.
+    private(set) var handoffAvailable = false
     private var showAll: Set<AuthoredPrGroup> = []
     private var collapsed: Set<AuthoredPrGroup> = []
     private var skeletonDeadline: Date
@@ -250,6 +260,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         outline.onCommandClick = { [weak self] row in self?.openOnGitHub(row: row) }
         outline.onHover = { [weak self] row in self?.setHovered(rowId: row.flatMap { self?.rowId(atOutlineRow: $0) }) }
         outline.onContextMenu = { [weak self] row in self?.contextMenu(forOutlineRow: row) }
+        outline.onReturn = { [weak self] event in self?.activateSelected(event: event) }
 
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
@@ -285,6 +296,19 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
             .sink { [weak self] conn in guard let self else { return }; self.apply(snapshot: self.snapshot, connection: conn) }
             .store(in: &cancellables)
         demand = store.authoredPrsDemand
+        handoff = store.authoredPrHandoff
+        setHandoffAvailable(store.authoredPrsNotifySupported)
+        store.$authoredPrsNotifySupported
+            .dropFirst()
+            .sink { [weak self] supported in self?.setHandoffAvailable(supported) }
+            .store(in: &cancellables)
+    }
+
+    /// The daemon can (or can no longer) hand a PR to a focus: rows are rebuilt with or without their button.
+    func setHandoffAvailable(_ available: Bool) {
+        guard available != handoffAvailable else { return }
+        handoffAvailable = available
+        rebuildRows()
     }
 
     // MARK: Window lifecycle
@@ -413,7 +437,9 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     // MARK: Outline contents
 
     private var groupModels: [AuthoredPrsGroupModel] {
-        AuthoredPrsPresentation.groups(displayed, showAll: showAll, now: clock(), timeZone: timeZone)
+        AuthoredPrsPresentation.groups(displayed, showAll: showAll, now: clock(), timeZone: timeZone,
+                                       handoff: handoffAvailable,
+                                       tellable: handoff.map { Set($0.openFocuses().map(\.tag)) })
     }
 
     private func rebuildRows() {
@@ -505,6 +531,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
                 let v = AuthoredPrRowView(); v.identifier = id; return v
             }()
             view.onOpenJob = { [weak self] in self?.onOpenJob($0) }
+            view.onTell = { [weak self] model in self?.tell(model) }
             view.configure(model)
             return view
         case .more(let group, let title):
@@ -655,6 +682,19 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
         opener(url)
     }
 
+    /// The row's button was pressed: open its preview, picker or sheet (after the human-gesture check).
+    private func tell(_ model: AuthoredPrRowModel) {
+        guard let handoff, let rowView = rowView(forRowId: model.id) else { return }
+        handoff.activate(model, anchor: rowView, event: NSApp.currentEvent, control: rowView.tellButton)
+    }
+
+    /// Return on the selected row: the same as its button, when it has one.
+    func activateSelected(event: NSEvent?) {
+        guard let handoff, let id = selectedRowId, let model = model(forRowId: id), model.tellButton != nil,
+              let rowView = rowView(forRowId: id) else { return }
+        handoff.activate(model, anchor: rowView, event: event, control: outline)
+    }
+
     private func model(forRowId id: String) -> AuthoredPrRowModel? {
         guard let node = rowNodes[id], case .row(let model) = node.kind else { return nil }
         return model
@@ -674,7 +714,18 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
             item.target = self
             menu.addItem(item)
         }
+        if handoffAvailable, model.ownerKind == .linked {
+            let item = NSMenuItem(title: "Unlink", action: #selector(unlinkFromMenu(_:)), keyEquivalent: "")
+            item.representedObject = model.id
+            item.target = self
+            menu.addItem(item)
+        }
         return menu
+    }
+
+    @objc private func unlinkFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, let model = model(forRowId: id), let handoff else { return }
+        handoff.unlink(model, event: NSApp.currentEvent, control: outline)
     }
 
     @objc private func openFromMenu(_ sender: NSMenuItem) {

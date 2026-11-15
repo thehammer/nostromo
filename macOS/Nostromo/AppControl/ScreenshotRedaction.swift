@@ -11,10 +11,14 @@ protocol TerminalPixelSource: NSView {
     /// whatever is scrolled or clipped inside it and whatever is laid over it (the connecting message, the
     /// ended overlay). For a plain terminal view that is the view itself.
     var terminalPixelArea: NSView { get }
+    /// The text drawn on the painted-over block. A terminal says `terminal hidden from app-control`; the
+    /// Perri review side pane (a web view showing signed-in pages) says its own.
+    var pixelAreaLabel: String { get }
 }
 
 extension TerminalPixelSource {
     var terminalPixelArea: NSView { self }
+    var pixelAreaLabel: String { ScreenshotRedaction.label }
 }
 
 /// Why a screenshot was refused instead of risking a terminal's pixels.
@@ -69,6 +73,7 @@ enum ScreenshotRedaction {
     struct Target {
         let rect: NSRect
         let isHidden: Bool
+        var label: String = ScreenshotRedaction.label
     }
 
     static func terminalTargets(in window: NSWindow) throws -> [Target] {
@@ -80,7 +85,8 @@ enum ScreenshotRedaction {
             if let source = view as? TerminalPixelSource {
                 let area = source.terminalPixelArea
                 areas.append(Target(rect: try self.area(of: area, in: window),
-                                    isHidden: source.isHiddenOrHasHiddenAncestor || area.isHiddenOrHasHiddenAncestor))
+                                    isHidden: source.isHiddenOrHasHiddenAncestor || area.isHiddenOrHasHiddenAncestor,
+                                    label: source.pixelAreaLabel))
                 // Everything inside its area is covered by it. Its other parts (a pane's staged-commands
                 // drawer, which sits beside the terminal) are walked for sources of their own.
                 if area !== view {
@@ -160,7 +166,7 @@ enum ScreenshotRedaction {
             context.setShouldAntialias(false)
             context.setFillColor(red: fill.redComponent, green: fill.greenComponent, blue: fill.blueComponent, alpha: 1)
             context.fill(block)
-            drawLabel(in: block, scale: scale, context: context)
+            drawLabel(target.label, in: block, scale: scale, context: context)
         }
         guard let image = context.makeImage() else {
             throw ScreenshotRedactionError(description: "the redacted capture can't be made")
@@ -169,7 +175,7 @@ enum ScreenshotRedaction {
     }
 
     /// The label, centred, when it fits; a block too small for it stays plain.
-    private static func drawLabel(in block: CGRect, scale: CGFloat, context: CGContext) {
+    private static func drawLabel(_ label: String, in block: CGRect, scale: CGFloat, context: CGContext) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byTruncatingTail

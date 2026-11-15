@@ -83,6 +83,29 @@ pub fn last_cwd(transcript: &Path) -> Option<PathBuf> {
     found
 }
 
+/// The first line of `transcript`'s first 64 KiB whose JSON has a string `cwd`
+/// that is an absolute, existing directory: where the session was started.
+pub fn first_cwd(transcript: &Path) -> Option<PathBuf> {
+    let mut buf = Vec::new();
+    std::fs::File::open(transcript)
+        .ok()?
+        .take(TAIL_BYTES)
+        .read_to_end(&mut buf)
+        .ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(cwd) = v.get("cwd").and_then(|c| c.as_str()) {
+            let p = PathBuf::from(cwd);
+            // The first entry that names a folder decides, even if it is gone.
+            return (p.is_absolute() && p.is_dir()).then_some(p);
+        }
+    }
+    None
+}
+
 /// `owner/name` (lowercased) from a GitHub remote URL: `https://github.com/o/n(.git)`,
 /// `git@github.com:o/n(.git)` or `ssh://git@github.com/o/n(.git)`. Anything else is `None`.
 pub fn parse_remote_url(url: &str) -> Option<String> {

@@ -1286,6 +1286,10 @@ pub enum ConversationResumeOutcome {
 /// `Topic::AuthoredPrs`.
 pub const FEATURE_AUTHORED_PRS: &str = "authored_prs_v1";
 
+/// The hand-off half of the author's PR list: preview, notify, start a session
+/// and link, plus the additive `told` and `pill` fields on each row.
+pub const FEATURE_AUTHORED_PRS_NOTIFY: &str = "authored_prs_notify_v1";
+
 /// One slash command a session's CLI reports (`ServerMsg::SessionCommands`).
 /// `description` is one sanitised line of at most 200 characters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2158,6 +2162,46 @@ pub enum ClientMsg {
     /// Ask for a full reconcile now. Same gate. Refused (shown as
     /// `refresh_blocked` in the snapshot) while one runs or while paused.
     AuthoredPrsRefresh {},
+    /// Compose the message "Tell <focus>" would send for this PR, from facts
+    /// only. Answered with `ServerMsg::AuthoredPrPreview`. Verified app only.
+    AuthoredPrPreviewRequest {
+        request_id: String,
+        repo: String,
+        number: u64,
+        target: crate::data::authored_prs::wire::PreviewTarget,
+    },
+    /// Send the previewed message to the open focus `tag` as the operator's own
+    /// message. The daemon recomposes from current facts and sends only when
+    /// `digest` still matches. Answered with `ServerMsg::AuthoredPrNotifyResult`.
+    /// Verified app only.
+    AuthoredPrNotify {
+        request_id: String,
+        repo: String,
+        number: u64,
+        tag: String,
+        digest: String,
+    },
+    /// Start a new focus in `folder` running `agent`, deliver the previewed
+    /// message as its first message, and link the PR to it. One focus per
+    /// `request_id`. Answered with `ServerMsg::AuthoredPrStartSessionResult`.
+    /// Verified app only.
+    AuthoredPrStartSession {
+        request_id: String,
+        repo: String,
+        number: u64,
+        folder: String,
+        agent: String,
+        digest: String,
+    },
+    /// Link the PR to the focus `tag` (a picker choice), or unlink it (`tag`
+    /// absent). Answered with `ServerMsg::AuthoredPrLinkResult`. Verified app only.
+    AuthoredPrLink {
+        request_id: String,
+        repo: String,
+        number: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+    },
 }
 
 // ── background tasks ──────────────────────────────────────────────────────────
@@ -3344,6 +3388,34 @@ pub enum ServerMsg {
     MotherNoticeState {
         enabled: bool,
         focuses: Vec<crate::mother::notices::FocusNoticeState>,
+    },
+    /// Targeted answer to `AuthoredPrPreviewRequest`. Local peers only.
+    AuthoredPrPreview {
+        request_id: String,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::PreviewOk,
+        >,
+    },
+    /// Targeted answer to `AuthoredPrNotify`.
+    AuthoredPrNotifyResult {
+        request_id: String,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::Done,
+        >,
+    },
+    /// Targeted answer to `AuthoredPrStartSession`.
+    AuthoredPrStartSessionResult {
+        request_id: String,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::StartOk,
+        >,
+    },
+    /// Targeted answer to `AuthoredPrLink`.
+    AuthoredPrLinkResult {
+        request_id: String,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::Done,
+        >,
     },
     /// The author's open PRs (`Topic::AuthoredPrs`, local peers only, and only
     /// to a client that names the topic). Sent on change and after Subscribe.

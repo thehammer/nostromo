@@ -68,8 +68,15 @@ impl Rig {
         }
     }
 
+    /// Spawns the stub and returns once it has logged its argv. A test that
+    /// stops the session straight after spawning would otherwise race the
+    /// stub's first line: on a loaded machine the SIGKILL lands before the
+    /// script has run, the line never comes, and a later `wait_spawns(n)`
+    /// waits for it in vain.
     fn spawn(&mut self, tag: &str, agent: &str) -> String {
-        self.mgr
+        let logged = self.argv_lines().len();
+        let sid = self
+            .mgr
             .spawn_session(
                 tag.into(),
                 agent.into(),
@@ -79,7 +86,13 @@ impl Rig {
                 false,
             )
             .unwrap()
-            .expect("a session id")
+            .expect("a session id");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.argv_lines().len() <= logged {
+            assert!(Instant::now() < deadline, "the stub never logged its argv");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        sid
     }
 
     /// A message sent and answered: the turn completed with it delivered.

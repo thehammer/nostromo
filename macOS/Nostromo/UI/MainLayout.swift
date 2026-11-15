@@ -299,6 +299,12 @@ class MainLayout: NSView {
                 // the other half of what makes eviction in AppStore actually
                 // free memory rather than just unlink a dictionary entry.
                 let liveIds = Set(focuses.map { $0.id })
+                for (id, view) in self.viewCache where !liveIds.contains(id) {
+                    // A removed Perri focus takes its side pane's tabs and saved state with it.
+                    if let container = view as? PerriFocusContainerView {
+                        ReviewPaneRegistry.shared.remove(tag: container.model.tag)
+                    }
+                }
                 self.viewCache = self.viewCache.filter { liveIds.contains($0.key) }
             }
             .store(in: &cancellables)
@@ -459,6 +465,26 @@ class MainLayout: NSView {
     /// `DecisionPresenter` targets popups by it but never changes it.
     var activeFocusTag: String { activeFocus.sessionTag }
 
+    /// Switch this window to the open focus with `tag` (the PR Overview's hand-off). False when there is none.
+    func showFocus(tag: String) -> Bool {
+        guard let focus = focusStore.focuses.first(where: { $0.sessionTag == tag }) else { return false }
+        if activeFocus.id != focus.id { switchFocus(focus) }
+        return true
+    }
+
+    /// Put the keyboard in the input of the focus this window shows. False when its conversation is not on
+    /// screen (yet).
+    func focusInputBar() -> Bool {
+        guard let content = currentContentView, let repl = Self.firstReplView(in: content) else { return false }
+        return repl.focusInput()
+    }
+
+    private static func firstReplView(in view: NSView) -> ReplView? {
+        if let repl = view as? ReplView { return repl }
+        for sub in view.subviews { if let found = firstReplView(in: sub) { return found } }
+        return nil
+    }
+
     /// The window id `DynamicFocusView` was built with (and a pending terminal-focus token names).
     var terminalWindowId: String { String(windowIndex) }
 
@@ -467,7 +493,8 @@ class MainLayout: NSView {
 
     /// The pane of the active focus that holds `responder`, if any.
     func activePaneId(containing responder: NSResponder?) -> String? {
-        (currentContentView as? DynamicFocusView)?.paneId(containing: responder)
+        ((currentContentView as? PerriFocusContainerView)?.focusView as? DynamicFocusView ?? currentContentView as? DynamicFocusView)?
+            .paneId(containing: responder)
     }
 
     private func forceStart(_ focus: Focus) {
@@ -504,8 +531,23 @@ class MainLayout: NSView {
         // dedicated TeriView is gone; MotherView/PerriView remain in
         // the project, unused, until their follow-up removals.
         let v = DynamicFocusView(focus: focus, windowId: String(windowIndex))
-        viewCache[focus.id] = v
-        return v
+        guard focus.isPerriFocus else {
+            viewCache[focus.id] = v
+            return v
+        }
+        // A Perri focus gets the review side pane beside it: Mac-only, outside the daemon's pane tree,
+        // so the focus's `DynamicFocusView` (and everything it reports) is unchanged.
+        let model = ReviewPaneRegistry.shared.model(for: focus.sessionTag)
+        model.follow(pins: AppStore.shared.$perriDetailByTag
+            .map { details -> ReviewPR? in
+                guard let d = details[focus.sessionTag], let number = d.prNumber else { return nil }
+                return ReviewPR(repo: d.repo, number: number)
+            }
+            .removeDuplicates()
+            .eraseToAnyPublisher())
+        let container = PerriFocusContainerView(focusView: v, model: model)
+        viewCache[focus.id] = container
+        return container
     }
 
     private func showContent(for focus: Focus) {

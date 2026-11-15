@@ -81,6 +81,8 @@ use crate::mother::{OriginBook, SessionHistory};
 #[cfg(test)]
 mod activity_tests;
 #[cfg(test)]
+mod authored_pr_tests;
+#[cfg(test)]
 mod compact_tests;
 mod control;
 mod conversation_history;
@@ -197,6 +199,20 @@ struct PendingMessage {
     images: Vec<String>,
     /// The user's, or the daemon's (combinable; see `inject`).
     origin: PendingOrigin,
+    /// Run once the message has been written to the session's stdin; never run
+    /// for a message an interrupt dropped from the queue.
+    on_delivered: Option<DeliveredHook>,
+}
+
+/// What to do when a queued message is actually delivered (see
+/// [`SessionManager::send_user_message_then`]).
+#[derive(Clone)]
+struct DeliveredHook(Arc<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for DeliveredHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeliveredHook")
+    }
 }
 
 // ── shared, reader-thread-visible session state ───────────────────────────────
@@ -413,6 +429,17 @@ struct ManagedSession {
     /// The supervisor has counted this process's crash as a problem. It sees a
     /// crashed session every tick until the session is respawned or given up on.
     crash_counted: bool,
+}
+
+/// A manager's session dropped with its CLI still running (a panicking test, an
+/// error path) must not leave the process holding the reader's pipes: the
+/// reader and stderr drain are blocking tasks that end only at EOF, and a
+/// runtime's drop waits for them, forever. `stop` and shutdown have already
+/// signalled the child by then, and a reaped child is never signalled.
+impl Drop for ManagedSession {
+    fn drop(&mut self) {
+        self.signal_kill();
+    }
 }
 
 impl ManagedSession {
@@ -692,6 +719,8 @@ pub struct SessionManager {
     notice_engine: Option<Arc<crate::mother::notices::NoticeEngine>>,
     /// Who is looking at the author's PR list; `None` when the feature is off.
     authored_prs: Option<Arc<crate::data::authored_prs::DemandBoard>>,
+    /// The hand-off verbs of that list (tell, start, link); `None` until wired.
+    authored_pr_actions: Option<Arc<crate::data::authored_prs::AuthoredPrActions>>,
     /// Every focus's activity counters, for the daemon's lifetime: a restart of
     /// the focus's process reuses its entry (see `focus_activity`).
     activity: ActivityBook,
@@ -796,6 +825,7 @@ impl SessionManager {
             turn_hook: Arc::new(std::sync::RwLock::new(None)),
             notice_engine: None,
             authored_prs: None,
+            authored_pr_actions: None,
             activity: ActivityBook::default(),
             commands: slash_commands::CommandBook::default(),
         }
@@ -1553,12 +1583,33 @@ impl SessionManager {
     /// Enqueue a user message. Writes immediately to stdin if the session is
     /// idle, otherwise queues it to drain after the current turn completes.
     pub fn send_user_message(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
-        self.write_user_message_to(tag, text, images)?;
+        self.write_user_message_to(tag, text, images, None)?;
         self.note_conversation_send(tag, text, !images.is_empty());
         Ok(())
     }
 
-    fn write_user_message_to(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
+    /// [`send_user_message`](Self::send_user_message), running `on_delivered`
+    /// once the text has actually been written to the session: at once for an
+    /// idle session, after the turn for a queued one, and never if the user's
+    /// Stop drops it from the queue first.
+    pub fn send_user_message_then(
+        &mut self,
+        tag: &str,
+        text: &str,
+        on_delivered: impl Fn() + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.write_user_message_to(tag, text, &[], Some(DeliveredHook(Arc::new(on_delivered))))?;
+        self.note_conversation_send(tag, text, false);
+        Ok(())
+    }
+
+    fn write_user_message_to(
+        &mut self,
+        tag: &str,
+        text: &str,
+        images: &[String],
+        on_delivered: Option<DeliveredHook>,
+    ) -> Result<()> {
         // Text sent during a work-item send is that item's content: the
         // session it lands in is sensitive before the text is written.
         if in_work_send() {
@@ -1578,7 +1629,8 @@ impl SessionManager {
         // message is queued, not written, while a turn runs or a model switch
         // is being applied; queueing happens under the same lock so a turn end
         // draining the queue can't miss it.
-        let message = PendingMessage::user(text, images);
+        let mut message = PendingMessage::user(text, images);
+        message.on_delivered = on_delivered;
         let should_write = {
             let mut state = lock_recover(&session.shared.state);
             let applying = lock_recover(&session.shared.model).applying.is_some();
@@ -2617,6 +2669,19 @@ impl SessionManager {
         self.authored_prs = Some(board);
     }
 
+    /// Switch the hand-off verbs on (advertised as `authored_prs_notify_v1`).
+    pub fn configure_authored_pr_actions(
+        &mut self,
+        actions: Arc<crate::data::authored_prs::AuthoredPrActions>,
+    ) {
+        self.authored_pr_actions = Some(actions);
+    }
+
+    /// The hand-off verbs, when wired.
+    pub fn authored_pr_actions(&self) -> Option<Arc<crate::data::authored_prs::AuthoredPrActions>> {
+        self.authored_pr_actions.clone()
+    }
+
     /// The authored-PR demand board, when the feature is enabled.
     pub fn authored_prs(&self) -> Option<Arc<crate::data::authored_prs::DemandBoard>> {
         self.authored_prs.clone()
@@ -2684,6 +2749,35 @@ impl SessionManager {
             .get(tag)
             .and_then(|s| s.session_id.clone())
             .or_else(|| load_id_store(&self.store_path).remove(tag))
+    }
+
+    /// Make sure the open focus `tag` has a running session: a live one is left
+    /// alone, a dead one is restarted, and one the daemon has not started yet is
+    /// spawned from the registry (its agent and folder, resuming its last
+    /// session id). Errors when the tag is not in the registry or the spawn fails.
+    pub fn ensure_session(&mut self, tag: &str) -> Result<()> {
+        if self.has_live_session(tag) {
+            return Ok(());
+        }
+        if self.sessions.contains_key(tag) {
+            return self.restart(tag);
+        }
+        let meta = self
+            .focus_registry
+            .iter()
+            .find(|f| f.tag == tag)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown focus: {tag}"))?;
+        let sid = self.current_session_id(tag);
+        self.spawn_session(
+            tag.to_owned(),
+            meta.agent_name,
+            meta.display_name,
+            meta.project_path.map(PathBuf::from),
+            sid,
+            false,
+        )?;
+        Ok(())
     }
 
     pub fn has_live_session(&self, tag: &str) -> bool {
@@ -3782,6 +3876,16 @@ fn write_frame(stdin: &Arc<Mutex<Option<ChildStdin>>>, frame: &serde_json::Value
 /// any) in front of it. The exact frame is remembered (see `login::write_recorded`)
 /// so a turn that fails to authenticate can hold it.
 fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
+    let result = write_user_message_framed(shared, msg);
+    if result.is_ok() {
+        if let Some(hook) = &msg.on_delivered {
+            (hook.0)();
+        }
+    }
+    result
+}
+
+fn write_user_message_framed(shared: &Shared, msg: &PendingMessage) -> Result<()> {
     let prefix = lock_recover(&shared.note_prefix).take();
     match prefix {
         Some(note) => {
@@ -3795,6 +3899,7 @@ fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
                     text,
                     images: msg.images.clone(),
                     origin: msg.origin.clone(),
+                    on_delivered: None,
                 },
             );
             if result.is_err() {
