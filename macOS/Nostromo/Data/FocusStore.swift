@@ -150,7 +150,8 @@ final class FocusStore {
                 is_built_in:     f.isBuiltIn,
                 session_summary: f.sessionSummary,
                 initial_model:   f.initialModel,
-                initial_effort:  f.initialEffort
+                initial_effort:  f.initialEffort,
+                no_codebase:     f.noCodebase ? true : nil
             )
         }
     }
@@ -183,6 +184,6 @@ enum FocusCreation {
     static func commitFromSheet(_ focus: Focus, store: FocusStore, flushRegistry: () -> Void,
                                 switch switchTo: (Focus) -> Void) {
         commit(focus, store: store, flushRegistry: flushRegistry,
-               alwaysFlush: focus.resumedAt != nil, switch: switchTo)
+               alwaysFlush: focus.resumedAt != nil || focus.noCodebase, switch: switchTo)
     }
 }

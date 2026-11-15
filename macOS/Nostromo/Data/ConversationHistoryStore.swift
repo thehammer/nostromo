@@ -6,7 +6,8 @@ import Foundation
 protocol ConversationHistorySending: AnyObject {
     var daemonAdvertisesConversationHistory: Bool { get }
     func conversationHistoryGet(requestId: String)
-    func conversationResume(requestId: String, id: String, newTag: String, place: String?, confirmActiveElsewhere: Bool)
+    func conversationResume(requestId: String, id: String, newTag: String, place: String?,
+                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool)
     func conversationHistoryRename(requestId: String, id: String, title: String?)
     func conversationResumeRelease(tag: String)
     func conversationHistoryRemove(requestId: String, id: String)
@@ -52,7 +53,8 @@ final class ConversationHistoryStore {
     private let now: () -> Date
 
     /// request id → what it was for.
-    private var pending: [String: (sid: String, focusId: String, tag: String, startedAt: Date, place: String?, confirm: Bool)] = [:]
+    private var pending: [String: (sid: String, focusId: String, tag: String, startedAt: Date, place: String?,
+                                  noCodebaseFolder: String?, confirm: Bool)] = [:]
     /// Rows with a resume awaiting its reply: further gestures on them are ignored.
     private var inFlight: Set<String> = []
     /// Tags a `ready` reply reserved → the conversation they hold (for a later failure).
@@ -111,10 +113,13 @@ final class ConversationHistoryStore {
     /// Resume conversation `sid`. A second gesture on the same row before the reply is ignored.
     /// `place` is the main checkout to resume in when the worktree is gone; `confirmActiveElsewhere` is
     /// the user's "Resume anyway".
-    func resume(_ sid: String, place: String? = nil, confirmActiveElsewhere: Bool = false) {
+    /// `noCodebaseFolder` is a new empty folder to resume in with no codebase (the original is gone).
+    func resume(_ sid: String, place: String? = nil, noCodebaseFolder: String? = nil,
+                confirmActiveElsewhere: Bool = false) {
         guard let sender, sender.daemonAdvertisesConversationHistory, !inFlight.contains(sid) else { return }
         inFlight.insert(sid)
-        send(sid: sid, startedAt: now(), place: place, confirm: confirmActiveElsewhere)
+        send(sid: sid, startedAt: now(), place: place, noCodebaseFolder: noCodebaseFolder,
+             confirm: confirmActiveElsewhere)
     }
 
     /// The sheet closed (Cancel, or any way out): stop retrying and forget every request in flight, and
@@ -134,14 +139,25 @@ final class ConversationHistoryStore {
         sender?.conversationResumeRelease(tag: tag)
     }
 
-    private func send(sid: String, startedAt: Date, place: String?, confirm: Bool) {
+    /// The no-codebase clean-up, after each good listing (the first one after launch, and the one a purge brings).
+    var noCodebaseSweeper: (ConversationHistoryWire, Set<String>) -> Void = { wire, protected in
+        let open = Set(FocusStore.shared.focuses.compactMap { $0.noCodebase ? $0.workingDirectory : nil })
+        NoCodebaseCleanup.run(reply: wire, openWorkingDirectories: open, protectedFolders: protected)
+    }
+
+    private func sweepNoCodebaseFolders(_ wire: ConversationHistoryWire) {
+        // A folder a resume is about to use is not yet named by anything the daemon lists.
+        noCodebaseSweeper(wire, Set(pending.values.compactMap(\.noCodebaseFolder)))
+    }
+
+    private func send(sid: String, startedAt: Date, place: String?, noCodebaseFolder: String?, confirm: Bool) {
         let focusId = makeFocusId()
         // Exactly as `Focus.sessionTag` derives it for a focus this app mints.
         let tag = "\(entry(sid)?.agent ?? "")-\(focusId.prefix(8))"
         let requestId = makeRequestId()
-        pending[requestId] = (sid, focusId, tag, startedAt, place, confirm)
+        pending[requestId] = (sid, focusId, tag, startedAt, place, noCodebaseFolder, confirm)
         sender?.conversationResume(requestId: requestId, id: sid, newTag: tag, place: place,
-                                   confirmActiveElsewhere: confirm)
+                                   noCodebaseFolder: noCodebaseFolder, confirmActiveElsewhere: confirm)
     }
 
     // MARK: Frames
@@ -151,6 +167,7 @@ final class ConversationHistoryStore {
         case .conversationHistory(let wire):
             history = wire
             changes.send()
+            sweepNoCodebaseFolders(wire)
         case .conversationHistoryChanged:
             refresh()
         case .conversationResumeResult(let wire):
@@ -178,9 +195,17 @@ final class ConversationHistoryStore {
                 resumeResults.send((p.sid, .refused("unavailable")))
                 return
             }
+            // A conversation that runs with no codebase (its own folder, or a new one chosen because the
+            // original is gone) comes back the same way: the folder is its working directory, never a repo.
+            let noCodebase = p.noCodebaseFolder != nil || entry(p.sid)?.noCodebase == true
             var focus = Focus(id: p.focusId, agentTag: wire.agent ?? entry(p.sid)?.agent ?? "",
-                              projectPath: wire.projectPath, isBuiltIn: false,
+                              projectPath: noCodebase ? nil : wire.projectPath, isBuiltIn: false,
                               label: Focus.normalizedLabel(wire.label), resumedAt: now())
+            if noCodebase {
+                focus.noCodebase = true
+                focus.workingDirectory = wire.projectPath ?? p.noCodebaseFolder
+                focus.org = "Personal"
+            }
             // The daemon reserved a tag. When this focus would derive another (the agent differs from
             // the one the request guessed), it adopts the daemon's, so the reservation is never orphaned.
             let reserved = wire.tag ?? p.tag
@@ -197,7 +222,8 @@ final class ConversationHistoryStore {
                     resumeResults.send((p.sid, .waitingToStart))
                     schedule(Self.startRetryInterval) { [weak self] in
                         guard let self, self.inFlight.contains(p.sid) else { return }
-                        self.send(sid: p.sid, startedAt: p.startedAt, place: p.place, confirm: p.confirm)
+                        self.send(sid: p.sid, startedAt: p.startedAt, place: p.place,
+                                  noCodebaseFolder: p.noCodebaseFolder, confirm: p.confirm)
                     }
                 }
             } else {

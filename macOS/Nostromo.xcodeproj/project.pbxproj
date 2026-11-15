@@ -530,11 +530,15 @@
 		ZZ0000000000000000BA0301 /* TaskRequests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0300 /* TaskRequests.swift */; };
 		ZZ0000000000000000SC0101 /* SlashCommandStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC0100 /* SlashCommandStore.swift */; };
 		ZZ0000000000000000CH0301 /* ConversationHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0300 /* ConversationHistoryStore.swift */; };
+		ZZ0000000000000000NCA02 /* NoCodebaseCleanup.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCF02 /* NoCodebaseCleanup.swift */; };
+		ZZ0000000000000000NCA01 /* NoCodebaseFolder.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCF01 /* NoCodebaseFolder.swift */; };
 		ZZ0000000000000000CH0201 /* ConversationHistoryModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0200 /* ConversationHistoryModel.swift */; };
 		ZZ0000000000000000CH0101 /* ConversationHistoryWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0100 /* ConversationHistoryWire.swift */; };
 		ZZ0000000000000000BA0302 /* TaskRequests.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0300 /* TaskRequests.swift */; };
 		ZZ0000000000000000SC0102 /* SlashCommandStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000SC0100 /* SlashCommandStore.swift */; };
 		ZZ0000000000000000CH0302 /* ConversationHistoryStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0300 /* ConversationHistoryStore.swift */; };
+		ZZ0000000000000000NCB02 /* NoCodebaseCleanup.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCF02 /* NoCodebaseCleanup.swift */; };
+		ZZ0000000000000000NCB01 /* NoCodebaseFolder.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCF01 /* NoCodebaseFolder.swift */; };
 		ZZ0000000000000000CH0202 /* ConversationHistoryModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0200 /* ConversationHistoryModel.swift */; };
 		ZZ0000000000000000CH0102 /* ConversationHistoryWire.swift in TestSources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0100 /* ConversationHistoryWire.swift */; };
 		ZZ0000000000000000BA0401 /* BackgroundChip.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000BA0400 /* BackgroundChip.swift */; };
@@ -590,6 +594,12 @@
 		ZZ0000000000000000CH1001 /* NewSessionCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH1000 /* NewSessionCopyTests.swift */; };
 		ZZ0000000000000000CH0901 /* ConversationResumeFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0900 /* ConversationResumeFlowTests.swift */; };
 		ZZ0000000000000000CH0801 /* ResumeTabAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0800 /* ResumeTabAppearanceTests.swift */; };
+		ZZ0000000000000000NCH06 /* NoCodebaseResumeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG06 /* NoCodebaseResumeTests.swift */; };
+		ZZ0000000000000000NCH05 /* NoCodebaseCleanupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG05 /* NoCodebaseCleanupTests.swift */; };
+		ZZ0000000000000000NCH04 /* NoCodebaseSidebarAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG04 /* NoCodebaseSidebarAppearanceTests.swift */; };
+		ZZ0000000000000000NCH03 /* NoCodebaseSidebarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG03 /* NoCodebaseSidebarTests.swift */; };
+		ZZ0000000000000000NCH02 /* NoCodebaseCreateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG02 /* NoCodebaseCreateTests.swift */; };
+		ZZ0000000000000000NCH01 /* NoCodebaseFolderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000NCG01 /* NoCodebaseFolderTests.swift */; };
 		ZZ0000000000000000CH0701 /* ResumeTabTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0700 /* ResumeTabTests.swift */; };
 		ZZ0000000000000000CH0711 /* FolderGoneChoiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0710 /* FolderGoneChoiceTests.swift */; };
 		ZZ0000000000000000CH0721 /* RenameEntryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ZZ0000000000000000CH0720 /* RenameEntryTests.swift */; };
@@ -1167,6 +1177,8 @@
 		ZZ0000000000000000BA0300 /* TaskRequests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskRequests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000SC0100 /* SlashCommandStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlashCommandStore.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0300 /* ConversationHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHistoryStore.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000NCF02 /* NoCodebaseCleanup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseCleanup.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000NCF01 /* NoCodebaseFolder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseFolder.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0200 /* ConversationHistoryModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHistoryModel.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0100 /* ConversationHistoryWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationHistoryWire.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000BA0400 /* BackgroundChip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundChip.swift; sourceTree = "<group>"; };
@@ -1209,6 +1221,12 @@
 		ZZ0000000000000000CH1000 /* NewSessionCopyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewSessionCopyTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0900 /* ConversationResumeFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationResumeFlowTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0800 /* ResumeTabAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeTabAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000NCG06 /* NoCodebaseResumeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseResumeTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000NCG05 /* NoCodebaseCleanupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseCleanupTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000NCG04 /* NoCodebaseSidebarAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseSidebarAppearanceTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000NCG03 /* NoCodebaseSidebarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseSidebarTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000NCG02 /* NoCodebaseCreateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseCreateTests.swift; sourceTree = "<group>"; };
+		ZZ0000000000000000NCG01 /* NoCodebaseFolderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoCodebaseFolderTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0700 /* ResumeTabTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeTabTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0710 /* FolderGoneChoiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderGoneChoiceTests.swift; sourceTree = "<group>"; };
 		ZZ0000000000000000CH0720 /* RenameEntryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenameEntryTests.swift; sourceTree = "<group>"; };
@@ -1457,6 +1475,8 @@
 				ZZ0000000000000000BA0300 /* TaskRequests.swift */,
 				ZZ0000000000000000SC0100 /* SlashCommandStore.swift */,
 				ZZ0000000000000000CH0300 /* ConversationHistoryStore.swift */,
+				ZZ0000000000000000NCF02 /* NoCodebaseCleanup.swift */,
+				ZZ0000000000000000NCF01 /* NoCodebaseFolder.swift */,
 				ZZ0000000000000000CH0200 /* ConversationHistoryModel.swift */,
 				ZZ0000000000000000CH0100 /* ConversationHistoryWire.swift */,
 				ZZ0000000000000000TK0100 /* TrackerStore.swift */,
@@ -1902,6 +1922,12 @@
 				ZZ0000000000000000CH1000 /* NewSessionCopyTests.swift */,
 				ZZ0000000000000000CH0900 /* ConversationResumeFlowTests.swift */,
 				ZZ0000000000000000CH0800 /* ResumeTabAppearanceTests.swift */,
+				ZZ0000000000000000NCG06 /* NoCodebaseResumeTests.swift */,
+				ZZ0000000000000000NCG05 /* NoCodebaseCleanupTests.swift */,
+				ZZ0000000000000000NCG04 /* NoCodebaseSidebarAppearanceTests.swift */,
+				ZZ0000000000000000NCG03 /* NoCodebaseSidebarTests.swift */,
+				ZZ0000000000000000NCG02 /* NoCodebaseCreateTests.swift */,
+				ZZ0000000000000000NCG01 /* NoCodebaseFolderTests.swift */,
 				ZZ0000000000000000CH0700 /* ResumeTabTests.swift */,
 				ZZ0000000000000000CH0710 /* FolderGoneChoiceTests.swift */,
 				ZZ0000000000000000CH0720 /* RenameEntryTests.swift */,
@@ -2350,6 +2376,8 @@
 				ZZ0000000000000000BA0301 /* TaskRequests.swift in Sources */,
 				ZZ0000000000000000SC0101 /* SlashCommandStore.swift in Sources */,
 				ZZ0000000000000000CH0301 /* ConversationHistoryStore.swift in Sources */,
+				ZZ0000000000000000NCA02 /* NoCodebaseCleanup.swift in Sources */,
+				ZZ0000000000000000NCA01 /* NoCodebaseFolder.swift in Sources */,
 				ZZ0000000000000000CH0201 /* ConversationHistoryModel.swift in Sources */,
 				ZZ0000000000000000CH0101 /* ConversationHistoryWire.swift in Sources */,
 				ZZ0000000000000000BA0401 /* BackgroundChip.swift in Sources */,
@@ -2799,6 +2827,8 @@
 				ZZ0000000000000000BA0302 /* TaskRequests.swift in TestSources */,
 				ZZ0000000000000000SC0102 /* SlashCommandStore.swift in TestSources */,
 				ZZ0000000000000000CH0302 /* ConversationHistoryStore.swift in TestSources */,
+				ZZ0000000000000000NCB02 /* NoCodebaseCleanup.swift in TestSources */,
+				ZZ0000000000000000NCB01 /* NoCodebaseFolder.swift in TestSources */,
 				ZZ0000000000000000CH0202 /* ConversationHistoryModel.swift in TestSources */,
 				ZZ0000000000000000CH0102 /* ConversationHistoryWire.swift in TestSources */,
 				ZZ0000000000000000BA0402 /* BackgroundChip.swift in TestSources */,
@@ -2871,6 +2901,12 @@
 				ZZ0000000000000000CH1001 /* NewSessionCopyTests.swift in Sources */,
 				ZZ0000000000000000CH0901 /* ConversationResumeFlowTests.swift in Sources */,
 				ZZ0000000000000000CH0801 /* ResumeTabAppearanceTests.swift in Sources */,
+				ZZ0000000000000000NCH06 /* NoCodebaseResumeTests.swift in Sources */,
+				ZZ0000000000000000NCH05 /* NoCodebaseCleanupTests.swift in Sources */,
+				ZZ0000000000000000NCH04 /* NoCodebaseSidebarAppearanceTests.swift in Sources */,
+				ZZ0000000000000000NCH03 /* NoCodebaseSidebarTests.swift in Sources */,
+				ZZ0000000000000000NCH02 /* NoCodebaseCreateTests.swift in Sources */,
+				ZZ0000000000000000NCH01 /* NoCodebaseFolderTests.swift in Sources */,
 				ZZ0000000000000000CH0701 /* ResumeTabTests.swift in Sources */,
 				ZZ0000000000000000CH0711 /* FolderGoneChoiceTests.swift in Sources */,
 				ZZ0000000000000000CH0721 /* RenameEntryTests.swift in Sources */,

@@ -1,10 +1,10 @@
 import AppKit
 
-/// What the user is asked before a resume that needs a decision: a worktree that is gone (resume in the
-/// main checkout, or not at all), or a conversation that may be open in another Claude window. The first
+/// What the user is asked before a resume that needs a decision: a folder that is gone (resume in the
+/// main checkout, resume with no codebase in a new folder, or not at all), or a conversation that may be open in another Claude window. The first
 /// button is the default (Return); the one titled Cancel answers Esc. Pure: tests read it, the sheet shows it.
 struct ResumeChoice: Equatable {
-    enum Outcome: Equatable { case resumeInMain(String), resumeAnyway, cancel, showTranscript }
+    enum Outcome: Equatable { case resumeInMain(String), resumeWithNoCodebase, resumeAnyway, cancel, showTranscript }
     struct Button: Equatable {
         let title: String
         let outcome: Outcome
@@ -21,24 +21,38 @@ struct ResumeChoice: Equatable {
         switch e.status {
         case .activeElsewhere:
             return activeElsewhere()
-        case .folderGone(worktree: true, _):
-            let old = e.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? e.projectName ?? "its worktree"
-            let message = "This conversation ran in \(old), which no longer exists."
+        case .folderGone(let worktree, _):
+            let message: String
+            if e.noCodebase {
+                message = "This conversation\u{2019}s no-codebase folder no longer exists."
+            } else {
+                let old = e.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? e.projectName ?? "its worktree"
+                message = "This conversation ran in \(old), which no longer exists."
+            }
             var buttons: [Button] = []
-            if let main = e.mainCheckout {
+            let main = worktree && !e.noCodebase ? e.mainCheckout : nil
+            if let main {
                 let name = URL(fileURLWithPath: main).lastPathComponent
                 buttons.append(Button(title: "Resume in \(name)", outcome: .resumeInMain(main),
                                       accessibilityLabel: "Resume in the main checkout, \(name)"))
             }
+            // Always offered: it is the one way left when there is no main checkout.
+            buttons.append(Button(title: "Resume with no codebase", outcome: .resumeWithNoCodebase,
+                                  accessibilityLabel: "Resume with no codebase, in a new empty folder"))
             buttons.append(Button(title: "Cancel", outcome: .cancel, accessibilityLabel: "Cancel, do not resume"))
             if e.transcriptPath != nil {
                 buttons.append(Button(title: "Show Transcript in Finder", outcome: .showTranscript,
                                       accessibilityLabel: "Show the transcript file in Finder"))
             }
-            return ResumeChoice(message: message,
-                                detail: e.mainCheckout == nil ? "Its main checkout is gone too, so it can\u{2019}t be resumed here."
-                                                              : "It can continue in the main checkout instead.",
-                                buttons: buttons)
+            let detail: String
+            if main != nil {
+                detail = "It can continue in the main checkout, or with no codebase in a new empty folder."
+            } else if worktree && !e.noCodebase {
+                detail = "Its main checkout is gone too, so it can only continue with no codebase, in a new empty folder."
+            } else {
+                detail = "It can continue with no codebase, in a new empty folder."
+            }
+            return ResumeChoice(message: message, detail: detail, buttons: buttons)
         default:
             return nil
         }
@@ -404,8 +418,8 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
     static func isResumable(_ e: ConversationEntryWire) -> Bool {
         switch e.status {
         case .available, .running, .activeElsewhere: return true
-        // A gone worktree opens the choice (resume in the main checkout, or only Show Transcript).
-        case .folderGone(worktree: true, _): return true
+        // A gone folder opens the choice (resume in the main checkout, or with no codebase).
+        case .folderGone: return true
         // Unknown statuses are not resumable: only a status this app understands is.
         default: return false
         }

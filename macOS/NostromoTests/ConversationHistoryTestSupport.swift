@@ -7,6 +7,7 @@ final class RecordingHistorySender: ConversationHistorySending {
     private(set) var resumes: [(requestId: String, id: String, newTag: String)] = []
     private(set) var resumePlaces: [String?] = []
     private(set) var resumeConfirms: [Bool] = []
+    private(set) var resumeNoCodebaseFolders: [String?] = []
     private(set) var renames: [(id: String, title: String?)] = []
     private(set) var releases: [String] = []
     private(set) var removes: [String] = []
@@ -15,8 +16,10 @@ final class RecordingHistorySender: ConversationHistorySending {
     private(set) var settings: [Bool] = []
 
     func conversationHistoryGet(requestId: String) { gets += 1 }
-    func conversationResume(requestId: String, id: String, newTag: String, place: String?, confirmActiveElsewhere: Bool) {
+    func conversationResume(requestId: String, id: String, newTag: String, place: String?,
+                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool) {
         resumes.append((requestId, id, newTag)); resumePlaces.append(place); resumeConfirms.append(confirmActiveElsewhere)
+        resumeNoCodebaseFolders.append(noCodebaseFolder)
     }
     func conversationHistoryRename(requestId: String, id: String, title: String?) { renames.append((id, title)) }
     func conversationResumeRelease(tag: String) { releases.append(tag) }
@@ -44,18 +47,22 @@ enum HistoryFixtures {
     static func entry(_ id: String, title: String = "Title", agent: String = "cody", daysAgo: Double = 0,
                       project: String? = "nostromo", branch: String? = nil, prs: [Int] = [],
                       prompt: String? = nil, status: ConversationStatusWire = .available,
-                      sensitive: Bool = false, mainCheckout: String? = nil) -> ConversationEntryWire {
+                      sensitive: Bool = false, mainCheckout: String? = nil,
+                      noCodebase: Bool = false) -> ConversationEntryWire {
         ConversationEntryWire(id: id, title: title, agent: agent, lastActiveMs: ms(daysAgo: daysAgo), status: status,
                               projectName: project, projectPath: project.map { "/tmp/\($0)" }, branch: branch,
                               prNumbers: prs, firstPrompt: prompt, sensitive: sensitive,
-                              transcriptPath: "/tmp/\(id).jsonl", mainCheckout: mainCheckout)
+                              transcriptPath: "/tmp/\(id).jsonl", mainCheckout: mainCheckout, noCodebase: noCodebase)
     }
 
-    static func history(_ entries: [ConversationEntryWire], prompts: Bool = true, degraded: Int? = nil) -> ConversationHistoryWire {
+    /// `referenced` is the daemon's `referenced_space_folders` (nil: a daemon that does not say).
+    static func history(_ entries: [ConversationEntryWire], prompts: Bool = true, degraded: Int? = nil,
+                        referenced: [String]? = nil) -> ConversationHistoryWire {
         let json: [String: Any] = ["request_id": "r", "entries": [], "first_prompts_enabled": prompts, "revision": 1]
         var wire = try! JSONDecoder().decode(ConversationHistoryWire.self, from: JSONSerialization.data(withJSONObject: json))
         wire.entries = entries
         wire.degradedKept = degraded
+        wire.referencedSpaceFolders = referenced
         return wire
     }
 }

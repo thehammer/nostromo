@@ -2,7 +2,8 @@ import XCTest
 import AppKit
 
 /// The choice a resume needs when the worktree is gone or the conversation may be open elsewhere:
-/// its buttons, its default, its Esc, and that nothing is sent until the user chooses.
+/// its buttons, its default, its Esc, and that nothing is sent until the user chooses. (Resuming with no
+/// codebase has its own tests in `NoCodebaseResumeTests`.)
 final class FolderGoneChoiceTests: XCTestCase {
     private typealias F = HistoryFixtures
     private var sender: RecordingHistorySender!
@@ -41,12 +42,13 @@ final class FolderGoneChoiceTests: XCTestCase {
     func testTheChoiceNamesTheOldFolderAndOffersResumeInTheMainRepoAsTheDefault() throws {
         let choice = try XCTUnwrap(ResumeChoice.make(for: gone()))
         XCTAssertEqual(choice.message, "This conversation ran in nostromo-feature-x, which no longer exists.")
-        XCTAssertEqual(choice.buttons.map(\.title), ["Resume in nostromo", "Cancel", "Show Transcript in Finder"])
+        XCTAssertEqual(choice.buttons.map(\.title),
+                       ["Resume in nostromo", "Resume with no codebase", "Cancel", "Show Transcript in Finder"])
         XCTAssertEqual(choice.outcome(forButtonIndex: 0), .resumeInMain("/Users/x/Code/nostromo"), "Return picks it")
         let alert = choice.alert()
         XCTAssertEqual(alert.buttons.map(\.title), choice.buttons.map(\.title))
         XCTAssertEqual(alert.buttons[0].keyEquivalent, "\r", "the first button is the default")
-        XCTAssertEqual(alert.buttons[1].keyEquivalent, "\u{1b}", "Esc is Cancel")
+        XCTAssertEqual(alert.buttons[2].keyEquivalent, "\u{1b}", "Esc is Cancel")
     }
 
     func testEscapeCancelsAndSendsNothing() {
@@ -76,15 +78,16 @@ final class FolderGoneChoiceTests: XCTestCase {
         XCTAssertFalse(choice.detail.contains("gone too"))
     }
 
-    func testWithNoMainCheckoutOnlyCancelAndShowTranscript() throws {
+    func testWithNoMainCheckoutTheOnlyWayToResumeIsWithNoCodebase() throws {
         let choice = try XCTUnwrap(ResumeChoice.make(for: gone(main: nil)))
-        XCTAssertEqual(choice.buttons.map(\.title), ["Cancel", "Show Transcript in Finder"])
+        XCTAssertEqual(choice.buttons.map(\.title), ["Resume with no codebase", "Cancel", "Show Transcript in Finder"])
         XCTAssertFalse(choice.buttons.contains { if case .resumeInMain = $0.outcome { return true } else { return false } })
     }
 
-    func testAPlainGoneFolderAndAnAvailableRowNeedNoChoice() {
-        XCTAssertNil(ResumeChoice.make(for: F.entry("a", status: .folderGone(worktree: false))))
+    func testAnAvailableRowNeedsNoChoiceAndAPlainGoneFolderOffersNoCodebase() throws {
         XCTAssertNil(ResumeChoice.make(for: F.entry("a")))
+        let plain = try XCTUnwrap(ResumeChoice.make(for: F.entry("a", status: .folderGone(worktree: false))))
+        XCTAssertEqual(plain.buttons.first?.outcome, .resumeWithNoCodebase)
     }
 
     func testEveryButtonSpeaksInWordsForVoiceOver() throws {
@@ -119,14 +122,16 @@ final class FolderGoneChoiceTests: XCTestCase {
         XCTAssertNotEqual(alert.buttons[1].keyEquivalent, "\r")
         XCTAssertTrue(elsewhere.escapeCancelsFirstButton, "so Esc is handled by the sheet, and means Cancel")
         XCTAssertEqual(elsewhere.outcome(forButtonIndex: 0), .cancel)
-        // With no main checkout, Cancel is first there too.
+        // With no main checkout, the first button is Resume with no codebase and Cancel keeps Esc.
         let noMain = try XCTUnwrap(ResumeChoice.make(for: gone(main: nil)))
         XCTAssertEqual(noMain.alert().buttons[0].keyEquivalent, "\r")
-        XCTAssertTrue(noMain.escapeCancelsFirstButton)
-        // With a main checkout, the first button is Resume in main and Cancel keeps Esc.
+        XCTAssertFalse(noMain.escapeCancelsFirstButton)
+        XCTAssertEqual(noMain.alert().buttons[1].title, "Cancel")
+        XCTAssertEqual(noMain.alert().buttons[1].keyEquivalent, "\u{1b}")
+        // With a main checkout, the first button is Resume in main and Cancel (third) keeps Esc.
         let withMain = try XCTUnwrap(ResumeChoice.make(for: gone()))
         XCTAssertFalse(withMain.escapeCancelsFirstButton)
-        XCTAssertEqual(withMain.alert().buttons[1].keyEquivalent, "\u{1b}")
+        XCTAssertEqual(withMain.alert().buttons[2].keyEquivalent, "\u{1b}")
         let esc = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                                  windowNumber: 0, context: nil, characters: "\u{1b}",
                                                  charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
@@ -227,6 +232,7 @@ final class FolderGoneChoiceTests: XCTestCase {
         let plain = try JSONSerialization.jsonObject(with: JSONEncoder().encode(
             ClientConversationResume(requestId: "r", id: "s", newTag: "t"))) as! [String: Any]
         XCTAssertNil(plain["place"]); XCTAssertNil(plain["confirm_active_elsewhere"])
+        XCTAssertNil(plain["no_codebase_folder"])
         let chosen = try JSONSerialization.jsonObject(with: JSONEncoder().encode(
             ClientConversationResume(requestId: "r", id: "s", newTag: "t", place: "/m", confirmActiveElsewhere: true))) as! [String: Any]
         XCTAssertEqual(chosen["place"] as? String, "/m")

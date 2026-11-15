@@ -1212,9 +1212,11 @@ class NostromodClient {
         send(ClientConversationHistoryGet(requestId: requestId), type: "conversation_history_get")
     }
 
-    func conversationResume(requestId: String, id: String, newTag: String, place: String?, confirmActiveElsewhere: Bool) {
+    func conversationResume(requestId: String, id: String, newTag: String, place: String?,
+                            noCodebaseFolder: String?, confirmActiveElsewhere: Bool) {
         guard daemonAdvertisesConversationHistory else { return }
         send(ClientConversationResume(requestId: requestId, id: id, newTag: newTag, place: place,
+                                      noCodebaseFolder: noCodebaseFolder,
                                       confirmActiveElsewhere: confirmActiveElsewhere),
              type: "conversation_resume")
     }
@@ -1542,6 +1544,8 @@ class NostromodClient {
         /// focus's model record. Omitted from the JSON when nil.
         var initial_model: String? = nil
         var initial_effort: String? = nil
+        /// True for a focus with no codebase (it runs in a private folder). Omitted when false.
+        var no_codebase: Bool? = nil
     }
 
     private struct FocusRegistryPushMsg: Encodable {

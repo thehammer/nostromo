@@ -199,6 +199,33 @@ private final class FocusActivityMarkView: NSView {
     }
 }
 
+// MARK: - NoCodebaseGlyphView
+
+/// The speech bubble that marks a focus with no codebase, drawn in the activity mark's slot at the same 8 pt.
+/// Not an accessibility element: the row's name and second line say "No codebase".
+private final class NoCodebaseGlyphView: NSView {
+    private let image = NSImageView()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        image.image = NSImage(systemSymbolName: "bubble.left", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold))
+        image.imageScaling = .scaleProportionallyDown
+        image.contentTintColor = Theme.focusMark
+        image.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(image)
+        NSLayoutConstraint.activate([
+            image.leadingAnchor.constraint(equalTo: leadingAnchor),
+            image.trailingAnchor.constraint(equalTo: trailingAnchor),
+            image.topAnchor.constraint(equalTo: topAnchor),
+            image.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+}
+
 // MARK: - NavTabItem
 
 /// One focus row in the sidebar. Internal (not private) only so a logic test can lay it out.
@@ -254,6 +281,8 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     /// The mark's frame while one shows; `nil` when there is none.
     var activityMarkFrame: NSRect? { activityMark.isHidden ? nil : activityMark.frame }
     var activityToolTip: String? { activityMark.isHidden ? nil : activityMark.toolTip }
+    /// The no-codebase speech bubble's frame while it shows (the activity mark's slot); `nil` otherwise.
+    var noCodebaseGlyphFrame: NSRect? { noCodebaseMark.isHidden ? nil : noCodebaseMark.frame }
     var activityMarkIsAccessibilityElement: Bool { activityMark.isAccessibilityElement() }
     /// Where the name is laid out by its constraints (its alignment rect: the frame less the text field's own
     /// 2 pt side padding). The mark's slot is measured from this edge, so the 4 pt gap is to the text itself.
@@ -358,6 +387,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
     private let dot            = NSView()
     private let attentionDot   = NSView()
     private let activityMark   = FocusActivityMarkView(frame: .zero)
+    private let noCodebaseMark = NoCodebaseGlyphView(frame: .zero)
     /// The badge's spoken label (with its attention suffix), kept so the activity phrase can be composed on.
     private var badgeAccessibilityText: String?
     /// Keeps the primary label's text out from under the attention dot. Active only
@@ -395,7 +425,8 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         // to the tooltip and accessibility help. The (empty) label stays so the line keeps its height and
         // the pills their place. Built-ins keep their own status text.
         self.secondaryLabel  = secondary.map { text in
-            let tf = NSTextField(labelWithString: focus.isBuiltIn ? text : (focus.resumedLabel ?? ""))
+            // A no-codebase row says so on the second line (its words are the signal; the glyph is not).
+            let tf = NSTextField(labelWithString: focus.isBuiltIn || focus.noCodebase ? text : (focus.resumedLabel ?? ""))
             tf.font           = Theme.navSubFont
             tf.textColor      = Theme.fgMuted
             tf.alignment      = .left
@@ -415,7 +446,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             // branch / last-message help is reachable with or without a notification.
             setAccessibilityElement(true)
             setAccessibilityRole(.button)
-            setAccessibilityLabel(displayLabel)
+            setAccessibilityLabel(spokenName(displayLabel))
         }
 
         // The name and the second line start after the bars' inset and the activity mark's reserved slot.
@@ -518,6 +549,16 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
             activityMark.heightAnchor.constraint(equalToConstant: FocusActivityMarkView.size),
             activityMark.trailingAnchor.constraint(equalTo: label.leadingAnchor, constant: -Self.activityMarkGap),
             activityMark.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+        ])
+        // A no-codebase row's speech bubble: the same slot, the same size. It shows while no activity mark does.
+        noCodebaseMark.translatesAutoresizingMaskIntoConstraints = false
+        noCodebaseMark.isHidden = !focus.noCodebase || !activityMark.isHidden
+        addSubview(noCodebaseMark)
+        NSLayoutConstraint.activate([
+            noCodebaseMark.widthAnchor.constraint(equalToConstant: FocusActivityMarkView.size),
+            noCodebaseMark.heightAnchor.constraint(equalToConstant: FocusActivityMarkView.size),
+            noCodebaseMark.trailingAnchor.constraint(equalTo: activityMark.trailingAnchor),
+            noCodebaseMark.centerYAnchor.constraint(equalTo: activityMark.centerYAnchor),
         ])
 
         // Count pill — text only, on the title line (same line as the attention dot, to its
@@ -728,11 +769,19 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         guard state != activityState else { return }
         activityState = state
         activityMark.apply(state)
+        noCodebaseMark.isHidden = !focus.noCodebase || !activityMark.isHidden
         updateAccessibility()
     }
 
     /// The row's spoken label: the badge's phrases, then the activity phrase. A row with neither is not an
     /// accessibility element (its name is read from its label). The mark itself is never one.
+    /// What VoiceOver reads for the name: a no-codebase row says "no codebase" even when the user's own
+    /// label replaced the default name.
+    private func spokenName(_ name: String) -> String {
+        guard focus.noCodebase, !name.lowercased().contains("no codebase") else { return name }
+        return name + ", no codebase"
+    }
+
     private func updateAccessibility() {
         let phrase = activityState.accessibilityPhrase
         let text: String?
@@ -740,7 +789,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
         case (nil, nil): text = nil
         case (let badge?, nil): text = badge
         case (let badge?, let phrase?) where !badge.isEmpty: text = badge + ", " + phrase
-        case (_, let phrase?): text = displayOverride + ", " + phrase
+        case (_, let phrase?): text = spokenName(displayOverride) + ", " + phrase
         }
         if let text {
             setAccessibilityElement(true)
@@ -751,7 +800,7 @@ class NavTabItem: NSView, NSGestureRecognizerDelegate {
                 setAccessibilityElement(false)
                 setAccessibilityLabel(nil)
             } else {
-                setAccessibilityLabel(displayOverride)
+                setAccessibilityLabel(spokenName(displayOverride))
             }
         }
     }
