@@ -202,7 +202,7 @@ final class AuthoredPrsGroupHeaderView: NSView {
         addSubview(titleLabel)
         addSubview(countPill)
         NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             countPill.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 6),
             countPill.centerYAnchor.constraint(equalTo: centerYAnchor),

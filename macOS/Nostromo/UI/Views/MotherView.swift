@@ -456,7 +456,9 @@ class MotherView: NSView {
     // MARK: - My open PRs
 
     /// Whether the right side shows the Overview: no job selected and the daemon publishes the list.
-    var isShowingOverview: Bool { selectedJobId == nil && AppStore.shared.authoredPrsSupported }
+    var isShowingOverview: Bool { selectedJobId == nil && overviewSupported }
+    /// Whether the daemon publishes the list, as of the last publish (a sink runs before the store holds the value).
+    private var overviewSupported = false
     /// Whether the job list has its pinned Overview row.
     var hasPinnedOverviewRow: Bool { jobList.hasOverviewRow }
 
@@ -464,7 +466,7 @@ class MotherView: NSView {
     func showOverview() {
         pendingSelection?.cancel()
         pendingSelection = nil
-        guard AppStore.shared.authoredPrsSupported else { return }
+        guard overviewSupported else { return }
         if let old = shownDetail {
             old.setShown(false)
             old.removeFromSuperview()
@@ -475,6 +477,7 @@ class MotherView: NSView {
     }
 
     private func overviewAvailabilityChanged(supported: Bool, openCount: Int) {
+        overviewSupported = supported
         jobList.setOverview(openCount: supported ? openCount : nil)
         updateRightSide()
     }

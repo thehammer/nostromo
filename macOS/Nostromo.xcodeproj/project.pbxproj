@@ -426,6 +426,14 @@
 		MF000000000000000000B101 /* PlanDocumentViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B001 /* PlanDocumentViewTests.swift */; };
 		MF000000000000000000B102 /* PlanFileLoaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B002 /* PlanFileLoaderTests.swift */; };
 		MF000000000000000000B103 /* MotherDetailSwitchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B003 /* MotherDetailSwitchTests.swift */; };
+		AQ475077E8F964F0A6C4BA16 /* AuthoredPrsTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP475077E8F964F0A6C4BA16 /* AuthoredPrsTestSupport.swift */; };
+		AQC0DD72D28BF81EDBA99E3C /* AuthoredPrsOverviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = APC0DD72D28BF81EDBA99E3C /* AuthoredPrsOverviewTests.swift */; };
+		AQ5A093C812AC8A982FF77F6 /* AuthoredPrRowAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP5A093C812AC8A982FF77F6 /* AuthoredPrRowAppearanceTests.swift */; };
+		AQD939B8D6BC45C548C569C5 /* AuthoredPrsHeaderAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = APD939B8D6BC45C548C569C5 /* AuthoredPrsHeaderAppearanceTests.swift */; };
+		AQB87E4DF3AEC78B146FC5E0 /* AuthoredPrsKeyboardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = APB87E4DF3AEC78B146FC5E0 /* AuthoredPrsKeyboardTests.swift */; };
+		AQ078A6FC13D21AEEC9E1E84 /* AuthoredPrsAccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP078A6FC13D21AEEC9E1E84 /* AuthoredPrsAccessibilityTests.swift */; };
+		AQAC62F5CBF7BDC5C1B01D86 /* AuthoredPrsDemandTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = APAC62F5CBF7BDC5C1B01D86 /* AuthoredPrsDemandTests.swift */; };
+		AQAD04E13611F9C569D70650 /* AuthoredPrsRowHoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = APAD04E13611F9C569D70650 /* AuthoredPrsRowHoldTests.swift */; };
 		MF000000000000000000B107 /* MotherJobFilterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000B007 /* MotherJobFilterTests.swift */; };
 		MF000000000000000000BB01 /* MotherDependencyDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000BB00 /* MotherDependencyDecodeTests.swift */; };
 		MF000000000000000000BA01 /* MotherDependencySectionAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = MF000000000000000000BA00 /* MotherDependencySectionAppearanceTests.swift */; };
@@ -1050,6 +1058,14 @@
 		APDFD1C4A35BF7DBA0897436 /* AuthoredPrsDemandReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsDemandReporter.swift; sourceTree = "<group>"; };
 		APF971A11284C43B0D41BE5F /* AuthoredPrsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsViews.swift; sourceTree = "<group>"; };
 		AP490C0E254D7F44AD6C4E6A /* AuthoredPrsOverviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsOverviewView.swift; sourceTree = "<group>"; };
+		AP475077E8F964F0A6C4BA16 /* AuthoredPrsTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsTestSupport.swift; sourceTree = "<group>"; };
+		APC0DD72D28BF81EDBA99E3C /* AuthoredPrsOverviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsOverviewTests.swift; sourceTree = "<group>"; };
+		AP5A093C812AC8A982FF77F6 /* AuthoredPrRowAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrRowAppearanceTests.swift; sourceTree = "<group>"; };
+		APD939B8D6BC45C548C569C5 /* AuthoredPrsHeaderAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsHeaderAppearanceTests.swift; sourceTree = "<group>"; };
+		APB87E4DF3AEC78B146FC5E0 /* AuthoredPrsKeyboardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsKeyboardTests.swift; sourceTree = "<group>"; };
+		AP078A6FC13D21AEEC9E1E84 /* AuthoredPrsAccessibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsAccessibilityTests.swift; sourceTree = "<group>"; };
+		APAC62F5CBF7BDC5C1B01D86 /* AuthoredPrsDemandTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsDemandTests.swift; sourceTree = "<group>"; };
+		APAD04E13611F9C569D70650 /* AuthoredPrsRowHoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthoredPrsRowHoldTests.swift; sourceTree = "<group>"; };
 		MF000000000000000000A003 /* MotherJobFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherJobFilter.swift; sourceTree = "<group>"; };
 		MF000000000000000000A004 /* MotherListDivider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherListDivider.swift; sourceTree = "<group>"; };
 		MF000000000000000000A600 /* MotherDependencySection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotherDependencySection.swift; sourceTree = "<group>"; };
@@ -1763,6 +1779,14 @@
 				MF000000000000000000B003 /* MotherDetailSwitchTests.swift */,
 				MF000000000000000000B004 /* MotherFocusFitnessTests.swift */,
 				MF000000000000000000B007 /* MotherJobFilterTests.swift */,
+				APAD04E13611F9C569D70650 /* AuthoredPrsRowHoldTests.swift */,
+				APAC62F5CBF7BDC5C1B01D86 /* AuthoredPrsDemandTests.swift */,
+				AP078A6FC13D21AEEC9E1E84 /* AuthoredPrsAccessibilityTests.swift */,
+				APB87E4DF3AEC78B146FC5E0 /* AuthoredPrsKeyboardTests.swift */,
+				APD939B8D6BC45C548C569C5 /* AuthoredPrsHeaderAppearanceTests.swift */,
+				AP5A093C812AC8A982FF77F6 /* AuthoredPrRowAppearanceTests.swift */,
+				APC0DD72D28BF81EDBA99E3C /* AuthoredPrsOverviewTests.swift */,
+				AP475077E8F964F0A6C4BA16 /* AuthoredPrsTestSupport.swift */,
 				MF000000000000000000BB00 /* MotherDependencyDecodeTests.swift */,
 				MF000000000000000000BA00 /* MotherDependencySectionAppearanceTests.swift */,
 				MF000000000000000000B900 /* MotherDependencySectionTests.swift */,
@@ -2667,6 +2691,14 @@
 				MF000000000000000000B103 /* MotherDetailSwitchTests.swift in Sources */,
 				MF000000000000000000B104 /* MotherFocusFitnessTests.swift in Sources */,
 				MF000000000000000000B107 /* MotherJobFilterTests.swift in Sources */,
+				AQAD04E13611F9C569D70650 /* AuthoredPrsRowHoldTests.swift in Sources */,
+				AQAC62F5CBF7BDC5C1B01D86 /* AuthoredPrsDemandTests.swift in Sources */,
+				AQ078A6FC13D21AEEC9E1E84 /* AuthoredPrsAccessibilityTests.swift in Sources */,
+				AQB87E4DF3AEC78B146FC5E0 /* AuthoredPrsKeyboardTests.swift in Sources */,
+				AQD939B8D6BC45C548C569C5 /* AuthoredPrsHeaderAppearanceTests.swift in Sources */,
+				AQ5A093C812AC8A982FF77F6 /* AuthoredPrRowAppearanceTests.swift in Sources */,
+				AQC0DD72D28BF81EDBA99E3C /* AuthoredPrsOverviewTests.swift in Sources */,
+				AQ475077E8F964F0A6C4BA16 /* AuthoredPrsTestSupport.swift in Sources */,
 				MF000000000000000000BB01 /* MotherDependencyDecodeTests.swift in Sources */,
 				MF000000000000000000BA01 /* MotherDependencySectionAppearanceTests.swift in Sources */,
 				MF000000000000000000B901 /* MotherDependencySectionTests.swift in Sources */,

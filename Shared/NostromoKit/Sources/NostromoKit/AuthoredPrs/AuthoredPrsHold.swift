@@ -9,8 +9,10 @@ public enum AuthoredPrsHold {
     /// `incoming`. Once the hold ends, the next call applies every pending move and removal.
     public static func merge(displayed: [AuthoredPr], incoming: [AuthoredPr], held: Set<String>) -> [AuthoredPr] {
         guard !held.isEmpty else { return incoming }
+        // Only a held row that is on screen keeps its place; one that is not yet shown is a new row like any other.
+        let onScreen = Set(displayed.map(\.id))
         var byGroup: [AuthoredPrGroup: [AuthoredPr]] = [:]
-        for pr in incoming where !held.contains(pr.id) { byGroup[pr.group, default: []].append(pr) }
+        for pr in incoming where !(held.contains(pr.id) && onScreen.contains(pr.id)) { byGroup[pr.group, default: []].append(pr) }
 
         // Insert held rows from the top of each group down, so an earlier slot is filled before a later one.
         var holds: [(pr: AuthoredPr, slot: Int)] = []

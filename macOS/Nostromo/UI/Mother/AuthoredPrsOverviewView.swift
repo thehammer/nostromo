@@ -168,7 +168,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     var clock: () -> Date
     var timeZone: TimeZone
     /// Opens a validated PR URL. Tests record instead of launching a browser.
-    var opener: (URL) -> Void = { NSWorkspace.shared.open($0) }
+    var opener: (URL) -> Void = { ActivationAudit.note("authored-prs:open-on-github"); NSWorkspace.shared.open($0) }
     /// ⟳ and ⌘R.
     var refreshAction: () -> Void = { AppStore.shared.requestAuthoredPrsRefresh() }
     /// A Mother job id was pressed.
