@@ -19,6 +19,15 @@ import NostromoKit
 //        -> testAnOverviewIsOnScreenOnlyWhenItsViewItsAppAndItsWindowAreAllVisible
 //   M8 `viewDidMoveToWindow` does not tell the reporter (or `overviewRemoved` is not sent)
 //        -> testAnOverviewJoiningAWindowReportsVisibleAndLeavingItReportsHidden
+//   M9 a change is sent at once instead of after the debounce -> testAFlipStormSendsAtMostOneMessage,
+//        testTheFinalLevelIsTheOneSent, testTheDebounceIsOneSecondByDefault
+//   M10 the first level (nothing sent yet) is also held for the debounce -> testTheFirstLevelIsSentAtOnce
+//   M11 the timer sends the level it was scheduled for rather than the level now -> testTheFinalLevelIsTheOneSent
+//   M12 a flip back to the already-sent level still sends -> testAFlipBackToTheSentLevelSendsNothing
+//   M13 `connectionStarted()` waits for the pending timer -> testAReconnectResendsTheCurrentLevelAtOnceEvenWithATimerPending
+//   M14 `connectionLost()` leaves the pending timer alive -> testALostConnectionCancelsAPendingChange
+//   M15 `stop()` leaves the pending timer alive -> testAStoppedReporterCancelsAPendingChange
+//   M16 the timer fires a send to a daemon that has since stopped supporting the feature -> testAPendingChangeIsNotSentToADaemonWithoutTheFeature
 final class AuthoredPrsDemandTests: XCTestCase {
 
     private var windows: [NSWindow] = []
@@ -46,13 +55,41 @@ final class AuthoredPrsDemandTests: XCTestCase {
         let app = NotificationCenter()
         private(set) var reporter: AuthoredPrsDemandReporter!
 
-        init(visibleCheck: (() -> Bool)? = nil) {
+        init(visibleCheck: (() -> Bool)? = nil, debounce: TimeInterval = 0,
+             schedule: AuthoredPrsDemandReporter.Scheduler? = nil) {
+            let schedule = schedule ?? AuthoredPrsDemandReporter.timerScheduler
             reporter = AuthoredPrsDemandReporter(
                 supported: { [unowned self] in self.supported },
                 send: { [unowned self] level in self.sent.append(level) },
                 idleSeconds: { [unowned self] in self.idle },
                 isOverviewVisible: visibleCheck ?? { [unowned self] in self.overviewVisible },
-                distributedCenter: distributed, workspaceCenter: workspace, appCenter: app)
+                distributedCenter: distributed, workspaceCenter: workspace, appCenter: app,
+                debounce: debounce, schedule: schedule)
+        }
+    }
+
+    /// A scheduler that runs nothing until told to: the test is the clock.
+    private final class FakeScheduler {
+        private final class Item { let delay: TimeInterval; let work: () -> Void; var cancelled = false
+            init(_ d: TimeInterval, _ w: @escaping () -> Void) { delay = d; work = w } }
+        private var items: [Item] = []
+        private(set) var delays: [TimeInterval] = []
+        var pending: Int { items.filter { !$0.cancelled }.count }
+
+        var scheduler: AuthoredPrsDemandReporter.Scheduler {
+            return { [unowned self] delay, work in
+                let item = Item(delay, work)
+                self.items.append(item)
+                self.delays.append(delay)
+                return { item.cancelled = true }
+            }
+        }
+
+        /// Time passes: every timer not cancelled goes off.
+        func fireAll() {
+            let due = items.filter { !$0.cancelled }
+            items = []
+            for item in due { item.work() }
         }
     }
 
@@ -254,6 +291,120 @@ final class AuthoredPrsDemandTests: XCTestCase {
         rig.supported = true
         rig.reporter.connectionStarted()
 
+        XCTAssertEqual(rig.sent, ["visible"])
+    }
+
+    // MARK: - Debounce
+
+    private func debouncedRig(visible: Bool, debounce: TimeInterval = 1) -> (rig: Rig, clock: FakeScheduler) {
+        let clock = FakeScheduler()
+        let rig = Rig(debounce: debounce, schedule: clock.scheduler)
+        rig.overviewVisible = visible
+        reporters.append(rig.reporter)
+        rig.reporter.start()
+        return (rig, clock)
+    }
+
+    private func set(_ visible: Bool, _ rig: Rig) {
+        rig.overviewVisible = visible
+        rig.reporter.evaluate()
+    }
+
+    func testTheFirstLevelIsSentAtOnce() {
+        let (rig, clock) = debouncedRig(visible: true)
+        XCTAssertEqual(rig.sent, ["visible"], "nothing was sent before, so nothing waits")
+        XCTAssertEqual(clock.pending, 0)
+    }
+
+    func testAFlipStormSendsAtMostOneMessage() {
+        let (rig, clock) = debouncedRig(visible: true)
+        for i in 0..<10 { set(i % 2 == 0 ? false : true, rig) }   // hidden, visible, hidden, ... visible
+        set(false, rig)
+        XCTAssertEqual(rig.sent, ["visible"], "nothing goes out while the storm lasts")
+
+        clock.fireAll()
+        XCTAssertEqual(rig.sent, ["visible", "hidden"], "one message when it settles")
+        clock.fireAll()
+        XCTAssertEqual(rig.sent, ["visible", "hidden"], "and nothing after")
+    }
+
+    func testTheFinalLevelIsTheOneSent() {
+        let (rig, clock) = debouncedRig(visible: false)
+        set(true, rig)
+        set(false, rig)
+        set(true, rig)
+        clock.fireAll()
+        XCTAssertEqual(rig.sent, ["hidden", "visible"])
+
+        // The final level can be idle too.
+        set(false, rig)
+        rig.idle = 5000
+        rig.reporter.evaluate()
+        clock.fireAll()
+        XCTAssertEqual(rig.sent, ["hidden", "visible", "idle"], "the last level before the timer, not the first")
+    }
+
+    func testAFlipBackToTheSentLevelSendsNothing() {
+        let (rig, clock) = debouncedRig(visible: true)
+        set(false, rig)
+        set(true, rig)
+        clock.fireAll()
+        XCTAssertEqual(rig.sent, ["visible"], "the daemon already has it")
+    }
+
+    func testTheDebounceIsOneSecondByDefault() {
+        let clock = FakeScheduler()
+        let center = NotificationCenter()
+        var sent: [String] = []
+        var visible = true
+        let reporter = AuthoredPrsDemandReporter(supported: { true }, send: { sent.append($0) }, idleSeconds: { 0 },
+                                                 isOverviewVisible: { visible },
+                                                 distributedCenter: center, workspaceCenter: center, appCenter: center,
+                                                 schedule: clock.scheduler)
+        reporters.append(reporter)
+        reporter.start()
+        visible = false
+        reporter.evaluate()
+        XCTAssertEqual(clock.delays, [1], "a change is held for one second")
+        XCTAssertEqual(sent, ["visible"])
+    }
+
+    func testAReconnectResendsTheCurrentLevelAtOnceEvenWithATimerPending() {
+        let (rig, clock) = debouncedRig(visible: true)
+        set(false, rig)
+        XCTAssertEqual(clock.pending, 1, "precondition: a change is waiting")
+
+        rig.reporter.connectionStarted()
+
+        XCTAssertEqual(rig.sent, ["visible", "hidden"], "the new connection is told now, not in a second")
+        clock.fireAll()
+        XCTAssertEqual(rig.sent, ["visible", "hidden"], "and the old timer adds nothing")
+    }
+
+    func testALostConnectionCancelsAPendingChange() {
+        let (rig, clock) = debouncedRig(visible: true)
+        set(false, rig)
+        rig.reporter.connectionLost()
+        clock.fireAll()
+        XCTAssertEqual(rig.sent, ["visible"], "nobody is there to tell")
+
+        rig.reporter.connectionStarted()
+        XCTAssertEqual(rig.sent, ["visible", "hidden"], "the next connection is told the current level")
+    }
+
+    func testAStoppedReporterCancelsAPendingChange() {
+        let (rig, clock) = debouncedRig(visible: true)
+        set(false, rig)
+        rig.reporter.stop()
+        clock.fireAll()
+        XCTAssertEqual(rig.sent, ["visible"])
+    }
+
+    func testAPendingChangeIsNotSentToADaemonWithoutTheFeature() {
+        let (rig, clock) = debouncedRig(visible: true)
+        set(false, rig)
+        rig.supported = false
+        clock.fireAll()
         XCTAssertEqual(rig.sent, ["visible"])
     }
 

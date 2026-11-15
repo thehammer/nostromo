@@ -27,6 +27,10 @@ import NostromoKit
 //        -> testTheSkeletonShowsForFiveSecondsThenAMessage
 //   M10 ⌘0 moved to another key, or the Debug item given a key equivalent
 //        -> testTheViewMenuOffersShowMyPrsOnCommandZero
+//   M3b `AuthoredPrsLinks` ignores the row's repo or number (see also AuthoredPrsLinksTests in NostromoKit)
+//        -> testAUrlThatDisagreesWithTheRowsRepoOrNumberIsNeverOpened, testTheUrlOpenedIsTheRowsOwnPullUrlWhateverCaseTheDaemonSent
+//   M12 a daemon-sent base of `main` in any case gets a base chip, or a feature branch loses it
+//        -> testAMainBaseHasNoChipInAnyCaseButAFeatureBranchDoes
 //   M11 the Overview's availability is read from the property before it has changed (the @Published trap)
 //        -> testTheOverviewAppearsAsSoonAsTheDaemonConnectsEvenBeforeTheFirstSnapshot,
 //           testReconnectingToAnOldDaemonPutsSelectAJobBack
@@ -368,6 +372,10 @@ final class AuthoredPrsOverviewTests: XCTestCase {
             "https://github.com/carefeed/portal/issues/1",
             "https://evil.example/carefeed/portal/pull/1",
             "https://github.com.evil.example/carefeed/portal/pull/1",
+            "https://github.com.evil.com/carefeed/portal/pull/1",
+            "https://user@github.com/carefeed/portal/pull/1",
+            "https://github.com/carefeed/other/pull/1",
+            "https://github.com/someone/portal/pull/1",
             " https://github.com/carefeed/portal/pull/1",
             "https://github.com/carefeed/portal/pull/1\n",
             "javascript:alert(1)",
@@ -375,7 +383,11 @@ final class AuthoredPrsOverviewTests: XCTestCase {
             "",
         ]
         let control = APT.pr(1, url: validURL, group: .needsYou)
-        let hostile = bad.enumerated().map { APT.pr(100 + $0.offset, url: $0.element, group: .waiting) }
+        // Each url carries its own row's number, so what refuses it is its shape or repo, not a number mismatch.
+        let hostile = bad.enumerated().map {
+            APT.pr(100 + $0.offset, url: $0.element.replacingOccurrences(of: "/pull/1", with: "/pull/\(100 + $0.offset)"),
+                   group: .waiting)
+        }
         let (overview, opened) = overviewForOpening([control] + hostile)
 
         // Control: the harness does open a good URL, so "nothing opened" below means something.
@@ -393,6 +405,30 @@ final class AuthoredPrsOverviewTests: XCTestCase {
             }
         }
         XCTAssertEqual(opened().count, 1, "no URL but the control's was opened; opened: \(opened())")
+    }
+
+    func testAUrlThatDisagreesWithTheRowsRepoOrNumberIsNeverOpened() {
+        let mismatched = [
+            APT.pr(7, url: "https://github.com/carefeed/portal/pull/8", group: .waiting),
+            APT.pr(8, url: "https://github.com/carefeed/portal/pull/008", group: .waiting),
+            APT.pr(9, url: "https://github.com/carefeed/other/pull/9", group: .waiting),
+            APT.pr(10, url: "https://github.com/other/portal/pull/10", group: .waiting),
+        ]
+        let (overview, opened) = overviewForOpening(mismatched)
+        for pr in mismatched {
+            overview.selectRow(id: pr.id)
+            overview.outline.onOpenOnGitHub?()
+            if let row = overview.outlineRow(forRowId: pr.id) { overview.outline.onCommandClick?(row) }
+        }
+        XCTAssertTrue(opened().isEmpty, "opened: \(opened())")
+    }
+
+    func testTheUrlOpenedIsTheRowsOwnPullUrlWhateverCaseTheDaemonSent() {
+        let pr = APT.pr(458, url: "https://github.com/CareFeed/Portal/pull/458", group: .needsYou)
+        let (overview, opened) = overviewForOpening([pr])
+        overview.selectRow(id: pr.id)
+        overview.outline.onOpenOnGitHub?()
+        XCTAssertEqual(opened(), [URL(string: validURL)!], "rebuilt from the row's repo and number")
     }
 
     // MARK: - Refresh
@@ -686,5 +722,23 @@ final class AuthoredPrsOverviewTests: XCTestCase {
         XCTAssertTrue(row.reviewLabel.stringValue.contains(hostile))
         XCTAssertTrue(row.baseLabel.stringValue.contains(hostile))
         isPlainEverywhere(row)
+    }
+
+    // MARK: - Base chip
+
+    func testAMainBaseHasNoChipInAnyCaseButAFeatureBranchDoes() throws {
+        for base in ["main", "Main", "MAIN"] {
+            let snapshot = try APT.decodedSnapshot(prs: [prJSON(title: "t", base: base)])
+            let overview = makeOverview(snapshot)
+            let row = try XCTUnwrap(overview.rowView(forRowId: "carefeed/portal#7"))
+            XCTAssertTrue(row.baseLabel.isHidden, "\(base): no chip")
+            XCTAssertEqual(row.baseLabel.stringValue, "", base)
+            XCTAssertFalse((row.accessibilityLabel() ?? "").contains("base"), "\(base): \(row.accessibilityLabel() ?? "")")
+        }
+        let snapshot = try APT.decodedSnapshot(prs: [prJSON(title: "t", base: "slash-commands-0")])
+        let row = try XCTUnwrap(makeOverview(snapshot).rowView(forRowId: "carefeed/portal#7"))
+        XCTAssertFalse(row.baseLabel.isHidden)
+        XCTAssertTrue(row.baseLabel.stringValue.contains("slash-commands-0"))
+        XCTAssertTrue((row.accessibilityLabel() ?? "").contains("base slash-commands-0"))
     }
 }

@@ -253,7 +253,7 @@ public enum AuthoredPrsPresentation {
             numberText: "#\(pr.number)", title: pr.title, repoChip: chipText,
             age: pr.updatedAt.map { age(from: $0, now: now) } ?? "",
             checksLine: checks.line, checksTooltip: checks.tooltip, reviewLine: reviewLine(pr),
-            base: pr.baseRef, isDraft: pr.draft,
+            base: shownBase(pr.baseRef), isDraft: pr.draft,
             ownerPrefix: owner.prefix, ownerJobId: owner.jobId, ownerSuffix: owner.suffix,
             detailsUnavailable: pr.detailsUnavailable, lifecycle: pr.lifecycle, accessibilityLabel: "")
         model.accessibilityLabel = accessibilityLabel(pr, chip: chipText)
@@ -304,9 +304,20 @@ public enum AuthoredPrsPresentation {
         case .reviewRequested: text = who.isEmpty ? "Review requested" : "Review requested from \(who)"
         case .none, .unknown: text = "No review yet"
         }
-        if pr.newComments > 0 { text += " · \(pr.newComments) new comment\(pr.newComments == 1 ? "" : "s")" }
+        if pr.newComments > 0 { text += " · \(commentCount(pr.newComments)) new comment\(pr.newComments == 1 ? "" : "s")" }
         if pr.unresolvedThreads > 0 { text += " · \(pr.unresolvedThreads)\(pr.threadsTruncated ? "+" : "") unresolved" }
         return text
+    }
+
+    /// The count capped by the daemon at 999 is shown `999+`: there may be more.
+    static func commentCount(_ n: Int) -> String {
+        n >= Int(AuthoredPrsBounds.newComments) ? "\(n)+" : "\(n)"
+    }
+
+    /// The base branch worth a chip: anything but `main` (any case). `main` is the norm and not worth saying.
+    static func shownBase(_ base: String?) -> String? {
+        guard let base, base.caseInsensitiveCompare("main") != .orderedSame else { return nil }
+        return base
     }
 
     static func ownerParts(_ o: AuthoredPrOwner) -> (prefix: String, jobId: String?, suffix: String) {
@@ -349,9 +360,9 @@ public enum AuthoredPrsPresentation {
         case .reviewRequested: parts.append(who.isEmpty ? "review requested" : "review requested from \(who)")
         case .none, .unknown: parts.append("no review yet")
         }
-        if pr.newComments > 0 { parts.append("\(pr.newComments) new comment\(pr.newComments == 1 ? "" : "s")") }
+        if pr.newComments > 0 { parts.append("\(commentCount(pr.newComments)) new comment\(pr.newComments == 1 ? "" : "s")") }
         if pr.unresolvedThreads > 0 { parts.append("\(pr.unresolvedThreads) unresolved thread\(pr.unresolvedThreads == 1 ? "" : "s")") }
-        if let base = pr.baseRef { parts.append("base \(base)") }
+        if let base = shownBase(pr.baseRef) { parts.append("base \(base)") }
         let name = pr.owner.name ?? ""
         switch pr.owner.kind {
         case .motherJob: parts.append(name.isEmpty ? "owner Mother job" : "owner \(name), Mother job")

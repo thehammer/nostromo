@@ -11,7 +11,10 @@ import NostromoKit
 /// - `hidden`: anything else. The app in the background while the user works elsewhere is still `hidden`:
 ///   the daemon keeps a slow cadence so the pills (slice 3) stay current.
 ///
-/// A level goes out only when it changes, and again after every reconnect's welcome. An old daemon gets nothing.
+/// A level goes out only when it changes, and again at once after every reconnect's welcome. A change is held
+/// for `debounce` (1 s) so flipping tabs sends only the final level; the daemon does not debounce demand itself
+/// (its 250 ms debounce is for snapshot publishing). Even a change to `visible` waits that second: the freshness
+/// criterion is about seconds, and the Overview shows the last snapshot meanwhile. An old daemon gets nothing.
 final class AuthoredPrsDemandReporter {
     enum Level: String, Equatable {
         case visible, hidden, idle
@@ -21,6 +24,16 @@ final class AuthoredPrsDemandReporter {
     static let idleThreshold: TimeInterval = 900
     /// How often the level is re-evaluated when nothing notified.
     static let reevaluateEvery: TimeInterval = 60
+    /// A level change is held this long, so a flip storm sends one message.
+    static let debounceInterval: TimeInterval = 1
+
+    /// Runs `work` after `delay` seconds; the returned closure cancels it.
+    typealias Scheduler = (TimeInterval, @escaping () -> Void) -> () -> Void
+
+    static let timerScheduler: Scheduler = { delay, work in
+        let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in work() }
+        return { timer.invalidate() }
+    }
 
     private let supported: () -> Bool
     private let send: (String) -> Void
@@ -29,6 +42,9 @@ final class AuthoredPrsDemandReporter {
     private let distributedCenter: NotificationCenter
     private let workspaceCenter: NotificationCenter
     private let appCenter: NotificationCenter
+    private let debounce: TimeInterval
+    private let schedule: Scheduler
+    private var cancelPending: (() -> Void)?
 
     private(set) var lastSent: Level?
     private var screenLocked = false
@@ -50,7 +66,11 @@ final class AuthoredPrsDemandReporter {
          isOverviewVisible: (() -> Bool)? = nil,
          distributedCenter: NotificationCenter = DistributedNotificationCenter.default(),
          workspaceCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
-         appCenter: NotificationCenter = .default) {
+         appCenter: NotificationCenter = .default,
+         debounce: TimeInterval = AuthoredPrsDemandReporter.debounceInterval,
+         schedule: @escaping Scheduler = AuthoredPrsDemandReporter.timerScheduler) {
+        self.debounce = debounce
+        self.schedule = schedule
         self.supported = supported
         self.send = send
         self.idleSeconds = idleSeconds
@@ -95,6 +115,8 @@ final class AuthoredPrsDemandReporter {
         observers.removeAll()
         timer?.invalidate()
         timer = nil
+        cancelPending?()
+        cancelPending = nil
     }
 
     /// A connection came up (after its welcome): the daemon knows nothing of the last level.
@@ -106,6 +128,8 @@ final class AuthoredPrsDemandReporter {
     /// The connection dropped: whatever was last sent is gone with it.
     func connectionLost() {
         lastSent = nil
+        cancelPending?()
+        cancelPending = nil
     }
 
     // MARK: Views
@@ -130,16 +154,34 @@ final class AuthoredPrsDemandReporter {
         return isOverviewVisible() ? .visible : .hidden
     }
 
-    /// Work out the level and send it if it changed. Sends nothing to a daemon without the feature.
+    /// Work out the level and send it if it changed: at once when the daemon was told nothing yet (first
+    /// evaluation, reconnect), else after the debounce, sending whatever the level is by then.
+    /// Sends nothing to a daemon without the feature.
     @discardableResult
     func evaluate() -> Level {
         let now = level
         guard supported() else { return now }
-        if now != lastSent {
-            lastSent = now
-            send(now.rawValue)
+        if lastSent == nil || debounce <= 0 {
+            cancelPending?()
+            cancelPending = nil
+            sendIfChanged(now)
+        } else if now == lastSent {
+            cancelPending?()
+            cancelPending = nil
+        } else if cancelPending == nil {
+            cancelPending = schedule(debounce) { [weak self] in
+                guard let self else { return }
+                self.cancelPending = nil
+                self.sendIfChanged(self.level)
+            }
         }
         return now
+    }
+
+    private func sendIfChanged(_ level: Level) {
+        guard supported(), level != lastSent else { return }
+        lastSent = level
+        send(level.rawValue)
     }
 
     // MARK: Visibility

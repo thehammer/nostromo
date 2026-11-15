@@ -13,6 +13,10 @@
 //        -> testFiveFailingChecksWithFiveNamesShowThreeThenPlusTwoMore
 //   3. Show a hidden empty group
 //        -> testEmptyGroupsAreHidden
+//   4. The 999 wire cap shown as a bare "999" (no "+"), in the review line or in the accessibility label
+//        -> testNewCommentsAtTheWireCapShowAPlus
+//   5. A PR based on `main` (any case) gets a base chip, or a feature branch loses it
+//        -> testMainInAnyCaseIsNotWorthABaseChip
 
 import XCTest
 @testable import NostromoKit
@@ -309,6 +313,31 @@ final class AuthoredPrsRowTests: XCTestCase {
     func testBaseIsNilUnlessTheRowHasABaseRef() {
         XCTAssertNil(row(pr(baseRef: nil)).base)
         XCTAssertEqual(row(pr(baseRef: "slash-commands-0")).base, "slash-commands-0")
+    }
+
+    func testMainInAnyCaseIsNotWorthABaseChip() {
+        for name in ["main", "Main", "MAIN"] {
+            let model = row(pr(baseRef: name))
+            XCTAssertNil(model.base, name)
+            XCTAssertFalse(model.accessibilityLabel.contains("base"), "\(name): \(model.accessibilityLabel)")
+        }
+        let feature = row(pr(baseRef: "mainline"))
+        XCTAssertEqual(feature.base, "mainline", "only main itself is the norm")
+        XCTAssertTrue(feature.accessibilityLabel.contains("base mainline"))
+    }
+
+    // MARK: New comments cap
+
+    func testNewCommentsAtTheWireCapShowAPlus() {
+        let review = AuthoredPrReview(state: .none)
+        let capped = row(pr(review: review, newComments: 999))
+        XCTAssertEqual(capped.reviewLine, "No review yet · 999+ new comments")
+        XCTAssertTrue(capped.accessibilityLabel.contains("999+ new comments"), capped.accessibilityLabel)
+
+        let under = row(pr(review: review, newComments: 998))
+        XCTAssertEqual(under.reviewLine, "No review yet · 998 new comments")
+        XCTAssertTrue(under.accessibilityLabel.contains("998 new comments"), under.accessibilityLabel)
+        XCTAssertFalse(under.accessibilityLabel.contains("998+"))
     }
 
     // MARK: Owner

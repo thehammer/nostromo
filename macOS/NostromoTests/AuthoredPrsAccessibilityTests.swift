@@ -12,6 +12,8 @@ import NostromoKit
 //        -> testEachRowIsOneElementThatReadsTheWholeRow
 //   M3 a group header loses the heading role or its count -> testGroupHeadersAreHeadingsWithTheirCount
 //   M4 the label is cut to the displayed title -> testALongTitleIsReadInFullEvenThoughItIsTruncatedOnScreen
+//   M6 the custom action is missing, misnamed, or does not open the job; or is offered on a row with no job
+//        -> testARowWithAMotherJobOffersAShowJobAction, testARowWithoutAJobOffersNoCustomAction
 //   M5 the refresh button or the list lose their labels -> testTheListAndTheRefreshButtonHaveNames
 final class AuthoredPrsAccessibilityTests: XCTestCase {
 
@@ -92,6 +94,29 @@ final class AuthoredPrsAccessibilityTests: XCTestCase {
 
         XCTAssertEqual(row.titleLabel.lineBreakMode, .byTruncatingTail, "on screen the title is shortened")
         XCTAssertTrue(try XCTUnwrap(row.accessibilityLabel()).contains(longTitle), "the label has all 200 characters")
+    }
+
+    func testARowWithAMotherJobOffersAShowJobAction() throws {
+        let prs = fixtures()
+        let overview = makeOverview(APT.snapshot(prs))
+        var opened: [String] = []
+        overview.onOpenJob = { opened.append($0) }
+        let row = try XCTUnwrap(overview.rowView(forRowId: prs[0].id))
+        let actions = row.accessibilityCustomActions() ?? []
+
+        XCTAssertEqual(actions.map(\.name), ["Show Mother job a1b2c3"])
+        XCTAssertTrue(opened.isEmpty, "precondition")
+        XCTAssertTrue(try XCTUnwrap(actions.first).handler?() ?? false, "the action reports it was handled")
+        XCTAssertEqual(opened, ["a1b2c3"])
+    }
+
+    func testARowWithoutAJobOffersNoCustomAction() throws {
+        let prs = fixtures()
+        let overview = makeOverview(APT.snapshot(prs))
+        for pr in prs where pr.owner.jobId == nil {
+            let row = try XCTUnwrap(overview.rowView(forRowId: pr.id))
+            XCTAssertTrue((row.accessibilityCustomActions() ?? []).isEmpty, "\(pr.id)")
+        }
     }
 
     // MARK: - Group headers

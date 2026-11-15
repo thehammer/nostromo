@@ -63,7 +63,7 @@ final class AuthoredPrsOutlineView: NSOutlineView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingArea { removeTrackingArea(trackingArea) }
-        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)
         trackingArea = area
@@ -651,7 +651,7 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
 
     /// Open the PR on GitHub, but only a URL that is exactly `https://github.com/<owner>/<repo>/pull/<n>`.
     func openOnGitHub(_ model: AuthoredPrRowModel) {
-        guard let url = AuthoredPrsLinks.pullRequestURL(model.url) else { return }
+        guard let url = AuthoredPrsLinks.pullRequestURL(model.url, repo: model.repo, number: model.number) else { return }
         opener(url)
     }
 

@@ -393,6 +393,14 @@ final class AuthoredPrRowView: NSView {
         setAccessibilityRole(.row)
         setAccessibilityLabel(model.accessibilityLabel)
         setAccessibilityChildren([])
+        if let job = model.ownerJobId {
+            setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Show Mother job \(job)") { [weak self] in
+                self?.jobPressed()
+                return true
+            }])
+        } else {
+            setAccessibilityCustomActions(nil)
+        }
         needsLayout = true
     }
 

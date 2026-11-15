@@ -35,13 +35,22 @@ public enum AuthoredPrsHold {
 
 /// The only URLs the Overview opens.
 public enum AuthoredPrsLinks {
-    private static let pattern = try! NSRegularExpression(
-        pattern: #"^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/\d+\z"#)
+    private static let ident = "[A-Za-z0-9._-]+"
 
-    /// `url` as a URL, only if it is exactly `https://github.com/<owner>/<repo>/pull/<number>`.
-    public static func pullRequestURL(_ url: String) -> URL? {
-        let range = NSRange(url.startIndex..., in: url)
-        guard pattern.firstMatch(in: url, range: range) != nil else { return nil }
-        return URL(string: url)
+    /// The PR's own URL, `https://github.com/<repo>/pull/<number>`, rebuilt from the row's `repo` and `number`.
+    /// `url` (as sent by the daemon) must be exactly that shape and name the same repo (owner and repo compare
+    /// case-insensitively, as GitHub does) and the same number; anything else yields nil.
+    public static func pullRequestURL(_ url: String, repo: String, number: Int) -> URL? {
+        let pattern = "^https://github\\.com/(\(ident))/(\(ident))/pull/(\\d+)\\z"
+        guard number > 0, let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: url, range: NSRange(url.startIndex..., in: url)),
+              match.numberOfRanges == 4 else { return nil }
+        func part(_ i: Int) -> String? { Range(match.range(at: i), in: url).map { String(url[$0]) } }
+        guard let owner = part(1), let name = part(2), let n = part(3), Int(n) == number, !n.hasPrefix("0") else { return nil }
+        let repoParts = repo.split(separator: "/", omittingEmptySubsequences: false)
+        guard repoParts.count == 2,
+              repoParts[0].caseInsensitiveCompare(owner) == .orderedSame,
+              repoParts[1].caseInsensitiveCompare(name) == .orderedSame else { return nil }
+        return URL(string: "https://github.com/\(repo)/pull/\(number)")
     }
 }
