@@ -126,3 +126,65 @@ fn the_file_is_re_read_when_it_changes() {
         Some("second.atlassian.net")
     );
 }
+
+#[test]
+fn the_site_is_sent_as_the_bare_lowercase_host_the_jira_client_uses() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = env_file(&dir, None);
+    for (given, sent) in [
+        ("carefeed", "carefeed.atlassian.net"),
+        ("Carefeed.Atlassian.Net", "carefeed.atlassian.net"),
+        ("https://carefeed.atlassian.net/", "carefeed.atlassian.net"),
+        ("  carefeed.atlassian.net  ", "carefeed.atlassian.net"),
+        ("carefeed.atlassian.net", "carefeed.atlassian.net"),
+    ] {
+        let got = with_env(None, || {
+            JiraSite::new(Some(given.into()), path.clone()).lookup()
+        });
+        assert_eq!(got.as_deref(), Some(sent), "given {given:?}");
+        assert!(sent.len() <= 63 + ".atlassian.net".len(), "bounded");
+    }
+    // Even a hostile, huge value sends nothing of itself.
+    let huge = format!("{}.atlassian.net", "a".repeat(10_000));
+    let got = with_env(None, || JiraSite::new(Some(huge), path).lookup());
+    assert_eq!(got, None, "an over-long label is refused, not truncated");
+}
+
+#[test]
+fn a_value_that_is_not_a_single_label_atlassian_host_sends_no_site() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = env_file(&dir, None);
+    for given in [
+        "evil.example",
+        "github.com.evil.example",
+        "a.b.atlassian.net",
+        "https://carefeed.atlassian.net/browse/CORE-1",
+        "carefeed.atlassian.net:8443",
+        "user@carefeed.atlassian.net",
+        "",
+    ] {
+        let got = with_env(None, || {
+            JiraSite::new(Some(given.into()), path.clone()).lookup()
+        });
+        assert_eq!(got, None, "given {given:?}");
+    }
+}
+
+#[test]
+fn every_source_is_normalised_the_same_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = env_file(&dir, Some("ATLASSIAN_SITE_NAME=Carefeed\n"));
+    assert_eq!(
+        with_env(None, || JiraSite::new(None, file.clone()).lookup()).as_deref(),
+        Some("carefeed.atlassian.net"),
+        "file"
+    );
+    assert_eq!(
+        with_env(Some("https://Env.atlassian.net/"), || {
+            JiraSite::new(None, file.clone()).lookup()
+        })
+        .as_deref(),
+        Some("env.atlassian.net"),
+        "environment"
+    );
+}

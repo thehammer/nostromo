@@ -197,6 +197,11 @@ show terminal pixels in the real app (`com.hammer.nostromo`, where
   neither a staged command nor its note can reach an agent through app-control (`AppControlAX.isWithheld`).
   The QA instance (the synthetic-input gate relaxed) is unchanged and reads the rows, which is what
   `scripts/qa/terminal-staging.sh` relies on. VoiceOver is unaffected: it uses the system accessibility API.
+- The **Perri review side pane** (the signed-in GitHub/Jira web view at the right edge of a Perri focus) is
+  painted over the same way, whole area, labelled `review pane hidden from app-control`. In the real app
+  `tree`, `find` and `ax` read it as one entry with that fixed text and no children, so tab titles, the
+  host and path and the pane's notices never reach an agent through app-control. The QA instance is
+  unchanged. The pane is outside the daemon's pane tree and Webster cannot see it.
 - The capture is made in memory and painted over **before** the PNG is encoded. The unredacted image
   is never written to disk, not even to a temp file (`ScreenshotRedaction.pngData`; the server writes
   only what it returns).

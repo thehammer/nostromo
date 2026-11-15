@@ -116,12 +116,19 @@ impl JiraSite {
         )
     }
 
-    /// The site, if any. Reads a file: call from a blocking context.
+    /// The site as the bare lowercase host the Jira client talks to
+    /// (`carefeed.atlassian.net`), if any: whatever form the setting is in
+    /// (`carefeed`, `https://Carefeed.atlassian.net/`) is reduced by the Jira
+    /// client's own `validate_site`, so the Mac's host allowlist sees the host
+    /// the client uses. A value that is not a single-label `atlassian.net`
+    /// host yields `None` (and nothing else of it is ever sent). Reads a file:
+    /// call from a blocking context.
     pub fn lookup(&self) -> Option<String> {
         let usable = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         usable(self.configured.clone())
             .or_else(|| usable(std::env::var(JIRA_SITE_VAR).ok()))
             .or_else(|| usable(self.file.file_value(JIRA_SITE_VAR)))
+            .and_then(|raw| super::jira::validate_site(&raw))
     }
 }
 
