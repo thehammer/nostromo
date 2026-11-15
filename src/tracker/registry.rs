@@ -472,6 +472,14 @@ impl TrackerRegistry {
         self.open(tag, "conversation-resume", &args).is_ok()
     }
 
+    /// Drops `tag`'s binding (the board file stays). No-op when unbound.
+    pub fn unbind(&self, tag: &str) {
+        let mut inner = self.lock();
+        if inner.bindings.remove(tag).is_some() {
+            self.persist(&inner);
+        }
+    }
+
     /// Applies `ops` atomically to the board bound to `tag`, attributed to
     /// `author`: re-reads the file first, ingesting any external edit, then
     /// writes the result. `session` is the writer's session (the cursor the
@@ -1433,6 +1441,10 @@ impl TrackerFrameProvider for TrackerRegistry {
 
     fn bind_existing_board(&self, tag: &str, path: &Path) -> bool {
         self.bind_existing(tag, path)
+    }
+
+    fn unbind_board(&self, tag: &str) {
+        self.unbind(tag)
     }
 }
 

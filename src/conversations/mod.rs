@@ -29,10 +29,53 @@ pub fn now_ms() -> i64 {
 /// The longest title a user may give a conversation (the same as a focus label).
 pub const MAX_TITLE_CHARS: usize = 60;
 
-/// A user's title as stored: trimmed, cut at [`MAX_TITLE_CHARS`] and trimmed
-/// again; `None` when nothing is left (which clears the title).
+/// A user's title as stored: one line, with control, bidi, zero-width and
+/// line-separator characters dropped, whitespace runs collapsed, cut at
+/// [`MAX_TITLE_CHARS`] and trimmed again; `None` when nothing is left (which
+/// clears the title).
 pub fn normalized_title(raw: Option<&str>) -> Option<String> {
-    let capped: String = raw?.trim().chars().take(MAX_TITLE_CHARS).collect();
+    let line = crate::data::work::untrusted::one_line(raw?, usize::MAX);
+    let capped: String = line.chars().take(MAX_TITLE_CHARS).collect();
     let capped = capped.trim();
     (!capped.is_empty()).then(|| capped.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_title_loses_every_invisible_class_and_stays_on_one_line() {
+        let classes: [(&str, &str); 8] = [
+            ("control", "A\u{1}B\u{7f}C"),
+            (
+                "bidi override",
+                "A\u{202A}B\u{202B}C\u{202C}\u{202D}\u{202E}",
+            ),
+            ("bidi isolate", "A\u{2066}B\u{2067}C\u{2068}\u{2069}"),
+            ("direction mark", "A\u{200E}B\u{200F}C"),
+            ("zero width", "A\u{200B}B\u{200C}C\u{200D}\u{FEFF}"),
+            ("line separator", "A\u{2028}B\u{2029}C"),
+            ("newline", "A\nB\r\nC"),
+            ("tab", "A\tB\tC"),
+        ];
+        for (name, raw) in classes {
+            let got = normalized_title(Some(raw)).unwrap();
+            let visible: String = got.chars().filter(|c| !c.is_whitespace()).collect();
+            assert_eq!(visible, "ABC", "{name}: {got:?}");
+            assert!(
+                got.chars()
+                    .all(|c| !c.is_control() && !crate::data::work::untrusted::is_invisible(c)),
+                "{name}: {got:?}"
+            );
+            assert!(!got.contains('\n'), "{name}");
+        }
+        assert_eq!(normalized_title(Some("\u{200B}\u{202E}\n")), None);
+    }
+
+    #[test]
+    fn a_title_is_cut_after_cleaning_not_before() {
+        let raw = format!("\u{200B}{}", "x".repeat(80));
+        assert_eq!(normalized_title(Some(&raw)).unwrap().chars().count(), 60);
+    }
 }

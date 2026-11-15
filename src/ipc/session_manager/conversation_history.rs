@@ -36,7 +36,24 @@ pub(super) struct ResumePlace {
     /// The note has been shown in the transcript.
     #[serde(default)]
     pub shown: bool,
+    /// The conversation it was made for: a later conversation under the same
+    /// tag (New Session) is not this one and gets no place.
+    #[serde(default)]
+    pub sid: String,
+    /// What the history entry held before the move, put back when the resume
+    /// is cancelled or fails.
+    #[serde(default)]
+    pub old_path: Option<String>,
+    #[serde(default)]
+    pub old_main: Option<String>,
+    /// When it was made (ms), for pruning.
+    #[serde(default)]
+    pub at_ms: i64,
 }
+
+/// Places kept at most this many, newest first, and at most this old.
+const PLACES_MAX: usize = 64;
+const PLACES_MAX_AGE_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 
 /// The text of a resume into another place. Names both folders, and both
 /// branches when they differ.
@@ -107,7 +124,7 @@ impl SessionManager {
         self.store_path.with_file_name("resume-places.json")
     }
 
-    fn load_places(&self) -> HashMap<String, ResumePlace> {
+    pub(super) fn load_places(&self) -> HashMap<String, ResumePlace> {
         crate::mother::origin::load_json(&self.places_path())
     }
 
@@ -117,9 +134,27 @@ impl SessionManager {
         }
     }
 
-    /// Where `tag` runs because of a resume, if it does.
-    pub(super) fn resume_place_for(&self, tag: &str) -> Option<ResumePlace> {
-        self.load_places().remove(tag)
+    /// Where `tag` runs because of a resume of conversation `sid`, if it does.
+    pub(super) fn resume_place_for(&self, tag: &str, sid: &str) -> Option<ResumePlace> {
+        self.load_places()
+            .remove(tag)
+            .filter(|p| !p.sid.is_empty() && p.sid == sid)
+    }
+
+    pub(super) fn insert_place(&self, tag: &str, place: ResumePlace) {
+        let mut places = self.load_places();
+        places.insert(tag.to_owned(), place);
+        let now = now_ms();
+        places.retain(|_, p| now - p.at_ms <= PLACES_MAX_AGE_MS);
+        if places.len() > PLACES_MAX {
+            let mut by_age: Vec<(String, i64)> =
+                places.iter().map(|(t, p)| (t.clone(), p.at_ms)).collect();
+            by_age.sort_by_key(|(_, at)| *at);
+            for (t, _) in by_age.into_iter().take(places.len() - PLACES_MAX) {
+                places.remove(&t);
+            }
+        }
+        self.save_places(&places);
     }
 
     /// The note for `tag`'s place has been shown.
@@ -131,10 +166,27 @@ impl SessionManager {
         }
     }
 
-    fn forget_place(&self, tag: &str) {
+    /// `tag` no longer runs in a resumed place (New Session, or its focus is gone).
+    pub(super) fn forget_place(&self, tag: &str) {
         let mut places = self.load_places();
         if places.remove(tag).is_some() {
             self.save_places(&places);
+        }
+    }
+
+    /// Reverse what a resume that never opened its conversation did beyond the
+    /// tag: the entry's folder, the place record and the tracker binding.
+    fn undo_resume_effects(&self, tag: &str, sid: &str) {
+        let mut places = self.load_places();
+        if let Some(p) = places.remove(tag) {
+            if p.sid == sid {
+                self.conversations
+                    .restore_place(sid, p.old_path, p.old_main, now_ms());
+            }
+            self.save_places(&places);
+        }
+        if let Some(provider) = &self.tracker_frame_provider {
+            provider.unbind_board(tag);
         }
     }
 
@@ -360,7 +412,7 @@ impl SessionManager {
         self.session_history.undo_move(&sid, &old_tag, tag);
         self.conversations.restore_tag(&sid, &old_tag, now_ms());
         self.conv.reserved.remove(&sid);
-        self.forget_place(tag);
+        self.undo_resume_effects(tag, &sid);
         self.notify_resume_failed(tag);
         tracing::warn!(tag, "a resumed conversation could not be opened");
     }
@@ -382,7 +434,7 @@ impl SessionManager {
         self.session_history.undo_move(&sid, &old_tag, tag);
         self.conversations.restore_tag(&sid, &old_tag, now_ms());
         self.conv.reserved.remove(&sid);
-        self.forget_place(tag);
+        self.undo_resume_effects(tag, &sid);
     }
 
     /// Is `tag` a focus handed a conversation by a resume whose first turn has
@@ -444,10 +496,17 @@ impl SessionManager {
             }
             // Only the conversation's own main checkout will do, and only when
             // the app asked for it.
-            ConversationStatus::FolderGone { .. } => {
+            // The same two-minute rule as any other resume applies too: both
+            // confirmations, enforced here, when both apply.
+            ConversationStatus::FolderGone {
+                active_elsewhere, ..
+            } => {
                 moving = Self::usable_place(&entry, options.place);
                 if moving.is_none() {
                     return refuse("folder_gone");
+                }
+                if active_elsewhere && !options.confirm_active_elsewhere {
+                    return refuse("active_elsewhere");
                 }
             }
             // The daemon holds the line even for a client that skipped the prompt.
@@ -533,16 +592,18 @@ impl SessionManager {
                 entry.branch.as_deref(),
                 current_branch(Path::new(place)).as_deref(),
             );
-            let mut places = self.load_places();
-            places.insert(
-                new_tag.to_owned(),
+            self.insert_place(
+                new_tag,
                 ResumePlace {
                     path: place.clone(),
                     notice,
                     shown: false,
+                    sid: sid.to_owned(),
+                    old_path: entry.project_path.clone(),
+                    old_main: entry.main_checkout.clone(),
+                    at_ms: now_ms(),
                 },
             );
-            self.save_places(&places);
             self.conversations.set_place(sid, place, now_ms());
             project_path = Some(place.clone());
         }

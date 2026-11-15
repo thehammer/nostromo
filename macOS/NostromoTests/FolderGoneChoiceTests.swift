@@ -67,6 +67,15 @@ final class FolderGoneChoiceTests: XCTestCase {
         XCTAssertTrue(sender.resumes.isEmpty)
     }
 
+    func testASensitiveGoneWorktreeStillOffersTheMainCheckoutAndNeverSaysItIsGone() throws {
+        // The daemon sends a sensitive entry no path but its main checkout.
+        var e = F.entry("s", status: .folderGone(worktree: true), sensitive: true, mainCheckout: "/Users/x/Code/nostromo")
+        e.projectPath = nil; e.projectName = nil
+        let choice = try XCTUnwrap(ResumeChoice.make(for: e))
+        XCTAssertEqual(choice.buttons.first?.title, "Resume in nostromo")
+        XCTAssertFalse(choice.detail.contains("gone too"))
+    }
+
     func testWithNoMainCheckoutOnlyCancelAndShowTranscript() throws {
         let choice = try XCTUnwrap(ResumeChoice.make(for: gone(main: nil)))
         XCTAssertEqual(choice.buttons.map(\.title), ["Cancel", "Show Transcript in Finder"])
@@ -99,6 +108,112 @@ final class FolderGoneChoiceTests: XCTestCase {
         XCTAssertEqual(choice.alert().buttons[0].keyEquivalent, "\r")
         _ = show(e, answering: .cancel)
         XCTAssertTrue(sender.resumes.isEmpty)
+    }
+
+    func testCancelIsTheDefaultAndEscapeStillCancels() throws {
+        // A first button titled Cancel would lose Return to NSAlert's implicit Esc binding; it must hold Return.
+        let elsewhere = try XCTUnwrap(ResumeChoice.make(for: F.entry("a", status: .activeElsewhere)))
+        let alert = elsewhere.alert()
+        XCTAssertEqual(alert.buttons[0].title, "Cancel")
+        XCTAssertEqual(alert.buttons[0].keyEquivalent, "\r", "Return is Cancel")
+        XCTAssertNotEqual(alert.buttons[1].keyEquivalent, "\r")
+        XCTAssertTrue(elsewhere.escapeCancelsFirstButton, "so Esc is handled by the sheet, and means Cancel")
+        XCTAssertEqual(elsewhere.outcome(forButtonIndex: 0), .cancel)
+        // With no main checkout, Cancel is first there too.
+        let noMain = try XCTUnwrap(ResumeChoice.make(for: gone(main: nil)))
+        XCTAssertEqual(noMain.alert().buttons[0].keyEquivalent, "\r")
+        XCTAssertTrue(noMain.escapeCancelsFirstButton)
+        // With a main checkout, the first button is Resume in main and Cancel keeps Esc.
+        let withMain = try XCTUnwrap(ResumeChoice.make(for: gone()))
+        XCTAssertFalse(withMain.escapeCancelsFirstButton)
+        XCTAssertEqual(withMain.alert().buttons[1].keyEquivalent, "\u{1b}")
+        let esc = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                                 windowNumber: 0, context: nil, characters: "\u{1b}",
+                                                 charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        XCTAssertTrue(ResumeChoice.isEscape(esc))
+    }
+
+    // MARK: a gone worktree that may also be open elsewhere
+
+    private func answering(_ answers: [ResumeChoice.Outcome]) -> () -> [ResumeChoice] {
+        var asked: [ResumeChoice] = []
+        var remaining = answers
+        sheet.choicePresenter = { choice, done in
+            asked.append(choice)
+            if !remaining.isEmpty { done(remaining.removeFirst()) }
+        }
+        return { asked }
+    }
+
+    private func goneAndActive() -> ConversationEntryWire {
+        var e = gone()
+        e.status = .folderGone(worktree: true, activeElsewhere: true)
+        return e
+    }
+
+    private func open(_ e: ConversationEntryWire) {
+        store.ingest(.conversationHistory(F.history([e])))
+        sheet.selectTab(.resume)
+        sheet.resumeTab.resumeSelected()
+    }
+
+    func testAGoneWorktreeThatIsAlsoActiveElsewhereAsksBothAndSendsBothAnswers() {
+        let asked = answering([.resumeInMain("/Users/x/Code/nostromo"), .resumeAnyway])
+        open(goneAndActive())
+        XCTAssertEqual(asked().count, 2, "the place first, then the open-elsewhere question")
+        XCTAssertEqual(asked()[1].buttons.map(\.title), ["Cancel", "Resume anyway"])
+        XCTAssertEqual(sender.resumePlaces, ["/Users/x/Code/nostromo"])
+        XCTAssertEqual(sender.resumeConfirms, [true])
+    }
+
+    func testCancellingTheSecondQuestionSendsNothing() {
+        let asked = answering([.resumeInMain("/Users/x/Code/nostromo"), .cancel])
+        open(goneAndActive())
+        XCTAssertEqual(asked().count, 2)
+        XCTAssertTrue(sender.resumes.isEmpty)
+    }
+
+    func testAGoneWorktreeNotActiveElsewhereAsksOnlyOnce() {
+        let asked = answering([.resumeInMain("/Users/x/Code/nostromo")])
+        open(gone())
+        XCTAssertEqual(asked().count, 1)
+        XCTAssertEqual(sender.resumeConfirms, [false])
+    }
+
+    func testTheFolderGoneStatusDecodesItsActiveElsewhereFlag() throws {
+        let json = #"{"id":"a","title":"T","agent":"cody","last_active_ms":1,"status":{"kind":"folder_gone","worktree":true,"active_elsewhere":true}}"#
+        let e = try JSONDecoder().decode(ConversationEntryWire.self, from: Data(json.utf8))
+        XCTAssertEqual(e.status, .folderGone(worktree: true, activeElsewhere: true))
+        XCTAssertTrue(e.status.isAlsoActiveElsewhere)
+        let old = #"{"id":"a","title":"T","agent":"cody","last_active_ms":1,"status":{"kind":"folder_gone","worktree":true}}"#
+        XCTAssertFalse(try JSONDecoder().decode(ConversationEntryWire.self, from: Data(old.utf8)).status.isAlsoActiveElsewhere)
+    }
+
+    // MARK: a stale list: the daemon refuses with active_elsewhere
+
+    private func refuse(_ reason: String) {
+        let j: [String: Any] = ["request_id": sender.resumes.last!.requestId, "outcome": "refused", "reason": reason]
+        let w = try! JSONDecoder().decode(ConversationResumeResultWire.self, from: JSONSerialization.data(withJSONObject: j))
+        store.ingest(.conversationResumeResult(w))
+    }
+
+    func testARefusalForActiveElsewhereOffersResumeAnywayAndKeepsThePlace() {
+        let asked = answering([.resumeInMain("/Users/x/Code/nostromo"), .resumeAnyway])
+        open(gone())
+        XCTAssertEqual(sender.resumes.count, 1)
+        refuse("active_elsewhere")
+        XCTAssertEqual(asked().count, 2, "the refusal asked, rather than showing an error")
+        XCTAssertEqual(asked()[1].buttons.map(\.title), ["Cancel", "Resume anyway"])
+        XCTAssertEqual(sender.resumes.count, 2)
+        XCTAssertEqual(sender.resumePlaces, ["/Users/x/Code/nostromo", "/Users/x/Code/nostromo"])
+        XCTAssertEqual(sender.resumeConfirms, [false, true])
+    }
+
+    func testCancellingAfterAStaleRefusalSendsNoSecondRequest() {
+        _ = answering([.resumeInMain("/Users/x/Code/nostromo"), .cancel])
+        open(gone())
+        refuse("active_elsewhere")
+        XCTAssertEqual(sender.resumes.count, 1)
     }
 
     func testResumeAnywaySendsTheConfirmation() {

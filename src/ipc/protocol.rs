@@ -1208,9 +1208,13 @@ pub enum ConversationStatus {
     UnavailableDeleted,
     /// The file is empty or is not a transcript.
     UnavailableUnreadable,
-    /// The working directory no longer exists (`worktree`: it was a linked worktree).
+    /// The working directory no longer exists (`worktree`: it was a linked
+    /// worktree; `active_elsewhere`: the transcript was also written to in the
+    /// last two minutes, so a resume needs that confirmation too).
     FolderGone {
         worktree: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        active_elsewhere: bool,
     },
     /// The transcript was written to in the last two minutes and no Nostromo
     /// session runs it: it may be open in another Claude window.
@@ -9056,7 +9060,10 @@ mod slash_commands_wire_tests {
                 first_prompt_withheld: Some("image".into()),
                 sensitive: false,
                 last_active_ms: 5,
-                status: ConversationStatus::FolderGone { worktree: true },
+                status: ConversationStatus::FolderGone {
+                    worktree: true,
+                    active_elsewhere: false,
+                },
                 resumed_from_tag: None,
                 transcript_path: None,
                 main_checkout: Some("/m".into()),

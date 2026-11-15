@@ -194,6 +194,10 @@ struct State {
     verdicts: HashMap<String, FileVerdict>,
     /// Entries a background locate already failed for this run.
     not_found: HashSet<String>,
+    /// Conversation → when (ms) Nostromo itself last stopped its session. A
+    /// transcript last written at that moment was written by us, not by
+    /// another Claude window. Memory only.
+    stopped_at: HashMap<String, i64>,
     /// The first message of a conversation not yet delivered: `sid` → (text,
     /// has images), or `None` once that message was held for a sign-in (it,
     /// and any message queued behind it, is then never a first prompt).
@@ -259,6 +263,7 @@ impl ConversationHistory {
                 revision: 0,
                 verdicts: HashMap::new(),
                 not_found: HashSet::new(),
+                stopped_at: HashMap::new(),
                 candidates: HashMap::new(),
                 dirty: false,
                 flush_scheduled: false,
@@ -507,6 +512,22 @@ impl ConversationHistory {
         s.revision += 1;
     }
 
+    /// Nostromo stopped the session running conversation `sid`, at `now`.
+    pub fn note_stopped(&self, sid: &str, now: i64) {
+        lock(&self.inner).stopped_at.insert(sid.to_owned(), now);
+    }
+
+    /// Forget that Nostromo stopped `sid`'s session (tests modelling an earlier run).
+    #[cfg(test)]
+    pub fn clear_stopped(&self, sid: &str) {
+        lock(&self.inner).stopped_at.remove(sid);
+    }
+
+    /// When Nostromo itself last stopped a session running `sid` (this run).
+    pub fn stopped_at(&self, sid: &str) -> Option<i64> {
+        lock(&self.inner).stopped_at.get(sid).copied()
+    }
+
     pub fn was_not_found(&self, sid: &str) -> bool {
         lock(&self.inner).not_found.contains(sid)
     }
@@ -615,6 +636,21 @@ impl ConversationHistory {
         self.mutate_one(sid, now, |e| {
             e.project_path = Some(path.to_owned());
             e.main_checkout = None;
+        });
+    }
+
+    /// Put back the folder a resume into another place replaced (the resume
+    /// was cancelled or could not open the conversation).
+    pub fn restore_place(
+        &self,
+        sid: &str,
+        project_path: Option<String>,
+        main_checkout: Option<String>,
+        now: i64,
+    ) {
+        self.mutate_one(sid, now, |e| {
+            e.project_path = project_path;
+            e.main_checkout = main_checkout;
         });
     }
 

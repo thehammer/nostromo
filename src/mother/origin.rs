@@ -286,6 +286,25 @@ impl SessionHistory {
             seen.retain(|s| now_ms - s.last_seen() <= HISTORY_MAX_AGE_MS);
         }
         state.tags.retain(|_, seen| !seen.is_empty());
+        // A pointer for a conversation no tag holds any more has nothing left to
+        // answer for: the file stays as small as the history.
+        let before = state.moves.len();
+        let held: std::collections::HashSet<&str> = state
+            .tags
+            .values()
+            .flatten()
+            .map(|s| s.sid.as_str())
+            .collect();
+        let kept: BTreeMap<String, String> = state
+            .moves
+            .iter()
+            .filter(|(sid, _)| held.contains(sid.as_str()))
+            .map(|(sid, tag)| (sid.clone(), tag.clone()))
+            .collect();
+        state.moves = kept;
+        if state.moves.len() != before {
+            state.persist_moves();
+        }
         if let Some(path) = &state.path {
             if write_private(path, &state.tags).is_err() {
                 tracing::warn!("focus session history could not be written");
@@ -360,25 +379,31 @@ impl SessionHistory {
     }
 
     /// The focus tag that has the conversation a job was stamped for, now.
-    /// `stamped` is the tag recorded at the time. The conversation is found by
-    /// its full session id; an older entry that kept only the 8-character
-    /// `prefix` is found by it when exactly one moved conversation starts with
-    /// it. Anything else (never moved, no id, an ambiguous prefix) is `stamped`.
-    pub fn current_tag(&self, sid: Option<&str>, prefix: Option<&str>, stamped: &str) -> String {
+    /// `stamped` is the tag recorded at the time and `prefix` the 8-character
+    /// start of the session id (the origin book keeps nothing more of it). The
+    /// full id is looked up here, among the sessions this history holds for
+    /// `stamped`: when exactly one starts with `prefix`, the tag it was resumed
+    /// into is the answer. Anything else (never moved, no prefix, an ambiguous
+    /// prefix, a record that aged out) is `stamped`.
+    pub fn current_tag(&self, prefix: Option<&str>, stamped: &str) -> String {
         let state = lock(&self.inner);
-        if let Some(tag) = sid.and_then(|sid| state.moves.get(sid)) {
-            return tag.clone();
-        }
-        if let Some(prefix) = prefix.filter(|p| !p.is_empty()) {
-            let mut hits = state
+        let Some(prefix) = prefix.filter(|p| !p.is_empty()) else {
+            return stamped.to_owned();
+        };
+        let mut hits = state
+            .tags
+            .get(stamped)
+            .into_iter()
+            .flatten()
+            .filter(|s| s.sid.starts_with(prefix));
+        match (hits.next(), hits.next()) {
+            (Some(seen), None) => state
                 .moves
-                .iter()
-                .filter(|(sid, _)| sid.starts_with(prefix));
-            if let (Some((_, tag)), None) = (hits.next(), hits.next()) {
-                return tag.clone();
-            }
+                .get(&seen.sid)
+                .cloned()
+                .unwrap_or_else(|| stamped.to_owned()),
+            _ => stamped.to_owned(),
         }
-        stamped.to_owned()
     }
 
     /// The one tag the daemon spawned session `sid` for. `None` when no tag
@@ -413,10 +438,6 @@ pub struct OriginEntry {
     pub name_snapshot: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_prefix: Option<String>,
-    /// The whole session id the job was queued from (entries written before
-    /// this field keep only `session_prefix`). Never put on the wire.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
     pub via: Via,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<NotifyLevel>,
@@ -488,7 +509,6 @@ pub struct Stamp {
     focus_tag: Option<String>,
     name_snapshot: Option<String>,
     session_prefix: Option<String>,
-    session_id: Option<String>,
     via: Via,
     notify: Option<NotifyLevel>,
     sensitive: bool,
@@ -509,10 +529,6 @@ impl Stamp {
             focus_tag: Some(tag.to_owned()),
             name_snapshot: name.and_then(clean_name),
             session_prefix: session.and_then(session_prefix),
-            session_id: session
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned),
             via,
             notify,
             sensitive: false,
@@ -526,7 +542,6 @@ impl Stamp {
             focus_tag: None,
             name_snapshot: None,
             session_prefix: None,
-            session_id: None,
             via: Via::App,
             notify,
             sensitive: false,
@@ -773,7 +788,6 @@ impl OriginBook {
                     focus_tag: stamp.focus_tag,
                     name_snapshot: stamp.name_snapshot,
                     session_prefix: stamp.session_prefix,
-                    session_id: stamp.session_id,
                     via: stamp.via,
                     notify: stamp.notify,
                     sensitive: stamp.sensitive,
@@ -875,13 +889,8 @@ impl OriginBook {
             .and_then(|o| o.focus.as_deref())
             .map(str::trim)
             .filter(|f| !f.is_empty());
-        let entry = |kind,
-                     focus_tag: Option<String>,
-                     name_snapshot,
-                     session_prefix,
-                     session_id: Option<&str>| OriginEntry {
+        let entry = |kind, focus_tag: Option<String>, name_snapshot, session_prefix| OriginEntry {
             kind,
-            session_id: session_id.map(str::to_owned),
             via: Via::Shell,
             notify: None,
             sensitive: focus_tag.as_deref().is_some_and(is_sensitive),
@@ -902,37 +911,19 @@ impl OriginBook {
             if let Some((sid, tag)) = session.and_then(|sid| Some((sid, self.history.tag_of(sid)?)))
             {
                 let name = focuses.name_of(&tag);
-                return entry(
-                    OriginKind::Focus,
-                    Some(tag),
-                    name,
-                    session_prefix(sid),
-                    Some(sid),
-                );
+                return entry(OriginKind::Focus, Some(tag), name, session_prefix(sid));
             }
-            return entry(OriginKind::Unknown, None, None, None, None);
+            return entry(OriginKind::Unknown, None, None, None);
         };
         let tag = is_tag_like(claimed).then(|| claimed.to_owned());
         match (tag, session) {
             (Some(tag), Some(sid)) if self.history.contains(&tag, sid) => {
                 let name = focuses.name_of(&tag).or_else(|| claimed_name(origin));
-                entry(
-                    OriginKind::Focus,
-                    Some(tag),
-                    name,
-                    session_prefix(sid),
-                    Some(sid),
-                )
+                entry(OriginKind::Focus, Some(tag), name, session_prefix(sid))
             }
             // Only what was claimed: the registry's name for a tag nobody
             // vouched for would lend the claim a real focus's face.
-            (tag, _) => entry(
-                OriginKind::Unverified,
-                tag,
-                claimed_name(origin),
-                None,
-                None,
-            ),
+            (tag, _) => entry(OriginKind::Unverified, tag, claimed_name(origin), None),
         }
     }
 }
@@ -980,11 +971,7 @@ fn effective_tag(entry: &OriginEntry, history: &SessionHistory) -> Option<String
     if entry.kind != OriginKind::Focus {
         return Some(stamped.to_owned());
     }
-    Some(history.current_tag(
-        entry.session_id.as_deref(),
-        entry.session_prefix.as_deref(),
-        stamped,
-    ))
+    Some(history.current_tag(entry.session_prefix.as_deref(), stamped))
 }
 
 fn view_of(entry: &OriginEntry, focuses: &FocusDirectory, history: &SessionHistory) -> OriginView {
@@ -1312,7 +1299,7 @@ mod tests {
         // The stamped entry is never rewritten.
         let e = b.entry("j1").unwrap();
         assert_eq!(e.focus_tag.as_deref(), Some("claudia-1"));
-        assert_eq!(e.session_id.as_deref(), Some(SID));
+        assert_eq!(e.session_prefix.as_deref(), Some("sid-aaaa"));
 
         // A network peer still sees no tag.
         let mut net = ann.clone();
@@ -1338,12 +1325,11 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_with_only_a_prefix_follows_the_one_move_it_matches() {
+    fn an_entry_follows_the_one_conversation_its_prefix_matches() {
         let b = book();
         b.history().record("claudia-1", SID);
         let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
         b.annotate(&mut jobs);
-        lock(&b.state).entries.get_mut("j1").unwrap().session_id = None;
 
         b.history().move_session(SID, "claudia-1", "claudia-2");
         let mut jobs = vec![job("j1", None)];
@@ -1361,17 +1347,16 @@ mod tests {
     }
 
     #[test]
-    fn a_prefix_two_moved_conversations_share_names_the_stamped_tag() {
+    fn a_prefix_two_conversations_of_the_tag_share_names_the_stamped_tag() {
         let b = book();
         b.history().record("claudia-1", SID);
-        b.history().record("claudia-9", "sid-aaaaaaaa-2");
+        b.history().record("claudia-1", "sid-aaaaaaaa-2");
         let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
         b.annotate(&mut jobs);
-        lock(&b.state).entries.get_mut("j1").unwrap().session_id = None;
 
         b.history().move_session(SID, "claudia-1", "claudia-2");
         b.history()
-            .move_session("sid-aaaaaaaa-2", "claudia-9", "claudia-8");
+            .move_session("sid-aaaaaaaa-2", "claudia-1", "claudia-8");
         let mut jobs = vec![job("j1", None)];
         b.annotate(&mut jobs);
         assert_eq!(
@@ -1438,9 +1423,29 @@ mod tests {
         );
         let reopened = SessionHistory::open(path);
         assert_eq!(
-            reopened.current_tag(Some(SID), None, "claudia-1"),
+            reopened.current_tag(Some("sid-aaaa"), "claudia-1"),
             "claudia-2"
         );
+    }
+
+    #[test]
+    fn a_move_for_a_conversation_the_history_no_longer_holds_is_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("focus-session-history.json");
+        let h = SessionHistory::open(path.clone());
+        h.record("claudia-1", SID);
+        h.move_session(SID, "claudia-1", "claudia-2");
+        // The conversation's records age out (91 days on).
+        let later = now_ms() + 91 * 24 * 60 * 60 * 1000;
+        h.record_at("claudia-7", "sid-other", later);
+        let moves: BTreeMap<String, String> =
+            load_json(&dir.path().join("conversation-moves.json"));
+        assert!(moves.is_empty(), "pruned on disk too: {moves:?}");
+        // A conversation still held keeps its pointer.
+        h.record("claudia-1", "sid-bbbbbbbb-1");
+        h.move_session("sid-bbbbbbbb-1", "claudia-1", "claudia-3");
+        h.record("claudia-9", "sid-cccccccc-1");
+        assert_eq!(h.current_tag(Some("sid-bbbb"), "claudia-1"), "claudia-3");
     }
 
     #[test]

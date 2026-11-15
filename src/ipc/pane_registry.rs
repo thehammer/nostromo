@@ -107,6 +107,9 @@ pub trait TrackerFrameProvider: Send + Sync {
     fn bind_existing_board(&self, _tag: &str, _path: &std::path::Path) -> bool {
         false
     }
+
+    /// Drop `tag`'s board binding (undoing [`Self::bind_existing_board`]).
+    fn unbind_board(&self, _tag: &str) {}
 }
 
 /// Told, after a layout mutation of `tag` that changed which panes exist,

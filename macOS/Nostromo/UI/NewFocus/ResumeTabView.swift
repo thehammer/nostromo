@@ -20,15 +20,8 @@ struct ResumeChoice: Equatable {
     static func make(for e: ConversationEntryWire) -> ResumeChoice? {
         switch e.status {
         case .activeElsewhere:
-            return ResumeChoice(
-                message: "This conversation may be open in another Claude window.",
-                detail: "Resuming it in two places can garble it. Resume anyway?",
-                buttons: [
-                    Button(title: "Cancel", outcome: .cancel, accessibilityLabel: "Cancel, do not resume"),
-                    Button(title: "Resume anyway", outcome: .resumeAnyway,
-                           accessibilityLabel: "Resume anyway, even though it may be open elsewhere"),
-                ])
-        case .folderGone(worktree: true):
+            return activeElsewhere()
+        case .folderGone(worktree: true, _):
             let old = e.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? e.projectName ?? "its worktree"
             let message = "This conversation ran in \(old), which no longer exists."
             var buttons: [Button] = []
@@ -51,6 +44,20 @@ struct ResumeChoice: Equatable {
         }
     }
 
+    /// "May be open in another Claude window": Cancel is the default, Resume anyway the way through.
+    /// Also asked after the worktree choice when both apply, and when the daemon refuses a resume the
+    /// list did not warn about.
+    static func activeElsewhere() -> ResumeChoice {
+        ResumeChoice(
+            message: "This conversation may be open in another Claude window.",
+            detail: "Resuming it in two places can garble it. Resume anyway?",
+            buttons: [
+                Button(title: "Cancel", outcome: .cancel, accessibilityLabel: "Cancel, do not resume"),
+                Button(title: "Resume anyway", outcome: .resumeAnyway,
+                       accessibilityLabel: "Resume anyway, even though it may be open elsewhere"),
+            ])
+    }
+
     /// The outcome for the button at `index` (NSAlert order).
     func outcome(forButtonIndex index: Int) -> Outcome {
         buttons.indices.contains(index) ? buttons[index].outcome : .cancel
@@ -64,15 +71,34 @@ struct ResumeChoice: Equatable {
         for (i, b) in buttons.enumerated() {
             let button = a.addButton(withTitle: b.title)
             button.setAccessibilityLabel(b.accessibilityLabel)
-            if i > 0, b.outcome == .cancel { button.keyEquivalent = "\u{1b}" }
+            // NSAlert gives any button titled "Cancel" the Esc key, even the first, which then loses
+            // Return. The first button is the default, so it takes Return explicitly; a later Cancel
+            // keeps Esc. A first Cancel gets its Esc from `present` (see `escapeCancelsFirstButton`).
+            if i == 0 { button.keyEquivalent = "\r" }
+            else if b.outcome == .cancel { button.keyEquivalent = "\u{1b}" }
         }
         return a
     }
 
+    /// Does Esc need handling beyond the buttons' own key equivalents? True when Cancel is the first
+    /// button: it holds Return, and a button has only one key.
+    var escapeCancelsFirstButton: Bool { buttons.first?.outcome == .cancel }
+
+    static func isEscape(_ event: NSEvent) -> Bool { event.keyCode == 53 }
+
     /// Show it as a sheet on `window` (never a free-floating modal) and report the outcome.
     func present(on window: NSWindow, completion: @escaping (Outcome) -> Void) {
         let a = alert()
+        var monitor: Any?
+        if escapeCancelsFirstButton {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak a, weak window] event in
+                guard Self.isEscape(event), let sheet = a?.window, sheet.isKeyWindow else { return event }
+                window?.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+                return nil
+            }
+        }
         a.beginSheetModal(for: window) { response in
+            if let monitor { NSEvent.removeMonitor(monitor) }
             let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
             completion(self.outcome(forButtonIndex: index))
         }
@@ -379,7 +405,7 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
         switch e.status {
         case .available, .running, .activeElsewhere: return true
         // A gone worktree opens the choice (resume in the main checkout, or only Show Transcript).
-        case .folderGone(worktree: true): return true
+        case .folderGone(worktree: true, _): return true
         // Unknown statuses are not resumable: only a status this app understands is.
         default: return false
         }

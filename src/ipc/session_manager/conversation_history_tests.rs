@@ -1308,7 +1308,10 @@ async fn a_conversation_whose_worktree_is_gone_resumes_in_the_main_checkout() {
     let entry = rig.mgr.conversations().get(&sid).unwrap();
     assert_eq!(
         list::status_now(&entry, &rig.mgr.conversations(), None),
-        ConversationStatus::FolderGone { worktree: true }
+        ConversationStatus::FolderGone {
+            worktree: true,
+            active_elsewhere: false
+        }
     );
     let before = rig.stdin_log();
 
@@ -1367,7 +1370,12 @@ async fn a_conversation_whose_worktree_is_gone_resumes_in_the_main_checkout() {
     // Nothing was typed into the conversation: the notice rides the spawn.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(rig.stdin_log(), before, "no user turn was written");
-    assert!(rig.mgr.resume_place_for("cody-bbbb2222").unwrap().shown);
+    assert!(
+        rig.mgr
+            .resume_place_for("cody-bbbb2222", &sid)
+            .unwrap()
+            .shown
+    );
 }
 
 #[tokio::test]
@@ -1376,7 +1384,11 @@ async fn the_notice_names_one_branch_when_both_places_are_on_it() {
     let (sid, main, _wt) = rig.gone_worktree_conversation("same", "same").await;
     rig.mgr
         .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
-    let notice = rig.mgr.resume_place_for("cody-bbbb2222").unwrap().notice;
+    let notice = rig
+        .mgr
+        .resume_place_for("cody-bbbb2222", &sid)
+        .unwrap()
+        .notice;
     assert!(!notice.contains("It was on"), "{notice}");
 }
 
@@ -1452,6 +1464,8 @@ async fn stopped_conversation(rig: &mut Rig, secs_ago: u64) -> (String, PathBuf)
     rig.wait_spawns(1).await;
     rig.mgr.stop_session("cody-aaaa1111");
     rig.mgr.sessions.remove("cody-aaaa1111");
+    // The file was last written by someone else, some time after any stop of ours.
+    rig.mgr.conversations().clear_stopped(&sid);
     age(&path, secs_ago);
     (sid, path)
 }
@@ -1619,12 +1633,18 @@ async fn a_resume_moves_the_conversation_for_mother_and_removing_the_entry_does_
     let (sid, _) = stopped_conversation(&mut rig, 3600).await;
     let history = rig.mgr.session_history();
     assert_eq!(
-        history.current_tag(Some(&sid), None, "cody-aaaa1111"),
+        history.current_tag(
+            crate::mother::origin::session_prefix(&sid).as_deref(),
+            "cody-aaaa1111"
+        ),
         "cody-aaaa1111"
     );
     rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
     assert_eq!(
-        history.current_tag(Some(&sid), None, "cody-aaaa1111"),
+        history.current_tag(
+            crate::mother::origin::session_prefix(&sid).as_deref(),
+            "cody-aaaa1111"
+        ),
         "cody-bbbb2222"
     );
     let now = crate::conversations::now_ms();
@@ -1632,7 +1652,10 @@ async fn a_resume_moves_the_conversation_for_mother_and_removing_the_entry_does_
     rig.mgr.conversations().purge_removed(now);
     assert!(rig.mgr.conversations().get(&sid).is_none());
     assert_eq!(
-        history.current_tag(Some(&sid), None, "cody-aaaa1111"),
+        history.current_tag(
+            crate::mother::origin::session_prefix(&sid).as_deref(),
+            "cody-aaaa1111"
+        ),
         "cody-bbbb2222",
         "the job still shows its origin"
     );
@@ -1693,5 +1716,308 @@ async fn a_resumed_sensitive_conversation_is_sensitive_to_a_network_peer_from_it
     assert!(
         rig.mgr.conversations().get(&sid).unwrap().sensitive,
         "the entry is marked at resume time too"
+    );
+}
+
+// ── a gone worktree is also checked for "open elsewhere" ─────────────────────
+
+fn set_mtime(path: &Path, when: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+fn transcript_of(rig: &Rig, sid: &str, wt: &Path) -> PathBuf {
+    rig.dir
+        .path()
+        .join("projects")
+        .join(crate::conversations::transcript::encode_cwd(
+            &wt.to_string_lossy(),
+        ))
+        .join(format!("{sid}.jsonl"))
+}
+
+fn confirmed_in(path: &Path) -> ResumeOptions<'_> {
+    ResumeOptions {
+        place: path.to_str(),
+        confirm_active_elsewhere: true,
+    }
+}
+
+#[tokio::test]
+async fn a_gone_worktree_written_to_a_moment_ago_needs_both_confirmations() {
+    let mut rig = Rig::new();
+    let (sid, main, wt) = rig.gone_worktree_conversation("trunk", "feature/old").await;
+    let path = transcript_of(&rig, &sid, &wt);
+    rig.mgr.conversations().clear_stopped(&sid);
+    age(&path, 30);
+    let history = rig.mgr.conversations();
+    let entry = history.get(&sid).unwrap();
+    assert_eq!(
+        list::status_now(&entry, &history, None),
+        ConversationStatus::FolderGone {
+            worktree: true,
+            active_elsewhere: true
+        }
+    );
+
+    // The place alone is not enough: the daemon refuses and starts nothing.
+    let no_confirm = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    assert_eq!(outcome(&no_confirm).2.as_deref(), Some("active_elsewhere"));
+    assert!(!load_id_store(&rig.mgr.store_path).contains_key("cody-bbbb2222"));
+    let e = history.get(&sid).unwrap();
+    assert_eq!(e.tag, "cody-aaaa1111");
+    assert_eq!(e.project_path.as_deref(), wt.to_str(), "nothing moved");
+    assert!(rig.mgr.resume_place_for("cody-bbbb2222", &sid).is_none());
+
+    // The confirmation alone is not enough: there is still the folder.
+    let no_place = rig.mgr.resume_conversation_with(
+        &sid,
+        "cody-bbbb2222",
+        ResumeOptions {
+            place: None,
+            confirm_active_elsewhere: true,
+        },
+    );
+    assert_eq!(outcome(&no_place).2.as_deref(), Some("folder_gone"));
+
+    // Both: it goes.
+    let both = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", confirmed_in(&main));
+    assert_eq!(outcome(&both).0, ConversationResumeOutcome::Ready);
+}
+
+#[tokio::test]
+async fn a_gone_worktree_last_written_two_minutes_ago_needs_only_the_place() {
+    let mut rig = Rig::new();
+    let (sid, main, wt) = rig.gone_worktree_conversation("trunk", "feature/old").await;
+    rig.mgr.conversations().clear_stopped(&sid);
+    age(&transcript_of(&rig, &sid, &wt), 180);
+    let quiet = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    assert_eq!(outcome(&quiet).0, ConversationResumeOutcome::Ready);
+}
+
+// ── a resume that does not open undoes the move ───────────────────────────────
+
+#[tokio::test]
+async fn a_cancelled_resume_into_the_main_checkout_leaves_the_conversation_in_its_gone_worktree() {
+    let mut rig = Rig::new();
+    let (reg, board) = tracker_rig(&rig);
+    rig.mgr.configure_tracker_frame_provider(reg.clone());
+    let (sid, main, wt) = rig.gone_worktree_conversation("trunk", "feature/old").await;
+    let before = rig.mgr.conversations().get(&sid).unwrap();
+    let reply = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+    assert_eq!(
+        reg.bound_path("cody-bbbb2222").as_deref(),
+        Some(board.as_path())
+    );
+
+    rig.mgr.release_resumed_tag("cody-bbbb2222");
+
+    let after = rig.mgr.conversations().get(&sid).unwrap();
+    assert_eq!(after.project_path, before.project_path);
+    assert_eq!(after.main_checkout, before.main_checkout);
+    assert_eq!(after.project_path.as_deref(), wt.to_str());
+    assert!(rig.mgr.resume_place_for("cody-bbbb2222", &sid).is_none());
+    assert!(
+        reg.bound_path("cody-bbbb2222").is_none(),
+        "the board binding is undone"
+    );
+    // The row reads "worktree gone" again, and a resume without the choice is refused.
+    assert_eq!(
+        list::status_now(&after, &rig.mgr.conversations(), None),
+        ConversationStatus::FolderGone {
+            worktree: true,
+            active_elsewhere: false
+        }
+    );
+    let again = rig.mgr.resume_conversation(&sid, "cody-cccc3333");
+    assert_eq!(outcome(&again).2.as_deref(), Some("folder_gone"));
+}
+
+#[tokio::test]
+async fn a_failed_resume_into_the_main_checkout_puts_the_folder_and_the_board_back() {
+    let mut rig = Rig::new();
+    let (reg, _board) = tracker_rig(&rig);
+    rig.mgr.configure_tracker_frame_provider(reg.clone());
+    let (sid, main, wt) = rig.gone_worktree_conversation("trunk", "feature/old").await;
+    let before = rig.mgr.conversations().get(&sid).unwrap();
+    rig.mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    rig.spawn("cody-bbbb2222", "cody");
+
+    rig.mgr.fail_resumed_tag("cody-bbbb2222");
+
+    let after = rig.mgr.conversations().get(&sid).unwrap();
+    assert_eq!(after.project_path.as_deref(), wt.to_str());
+    assert_eq!(after.main_checkout, before.main_checkout);
+    assert_eq!(after.tag, "cody-aaaa1111");
+    assert!(rig.mgr.resume_place_for("cody-bbbb2222", &sid).is_none());
+    assert!(reg.bound_path("cody-bbbb2222").is_none());
+    let again = rig.mgr.resume_conversation(&sid, "cody-cccc3333");
+    assert_eq!(outcome(&again).2.as_deref(), Some("folder_gone"));
+}
+
+// ── the place record: per conversation, cleared, bounded ──────────────────────
+
+#[tokio::test]
+async fn the_place_belongs_to_its_conversation_and_goes_with_new_session_or_the_closed_focus() {
+    let mut rig = Rig::new();
+    let (sid, main, _wt) = rig.gone_worktree_conversation("trunk", "feature/old").await;
+    rig.mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    assert!(rig.mgr.resume_place_for("cody-bbbb2222", &sid).is_some());
+    assert!(
+        rig.mgr
+            .resume_place_for("cody-bbbb2222", "some-other-conversation")
+            .is_none(),
+        "another conversation under the tag has no place"
+    );
+
+    // New Session.
+    rig.mgr.new_session("cody-bbbb2222");
+    assert!(rig.mgr.resume_place_for("cody-bbbb2222", &sid).is_none());
+}
+
+#[tokio::test]
+async fn the_place_goes_when_its_focus_is_removed() {
+    let mut rig = Rig::new();
+    let (sid2, main2, _wt2) = rig.gone_worktree_conversation("trunk", "feature/old").await;
+    rig.mgr
+        .resume_conversation_with(&sid2, "cody-dddd4444", place(&main2));
+    rig.mgr
+        .set_focus_registry(vec![test_focus("cody-dddd4444")]);
+    assert!(rig.mgr.resume_place_for("cody-dddd4444", &sid2).is_some());
+    rig.mgr.set_focus_registry(vec![test_focus("cody-other")]);
+    rig.mgr.set_focus_registry(vec![test_focus("cody-other")]);
+    assert!(rig.mgr.resume_place_for("cody-dddd4444", &sid2).is_none());
+}
+
+#[tokio::test]
+async fn the_place_file_is_bounded() {
+    let rig = Rig::new();
+    let now = crate::conversations::now_ms();
+    for i in 0..70 {
+        rig.mgr.insert_place(
+            &format!("cody-{i:04}"),
+            conversation_history::ResumePlace {
+                path: "/m".into(),
+                notice: "n".into(),
+                shown: false,
+                sid: format!("sid-{i}"),
+                old_path: None,
+                old_main: None,
+                at_ms: now + i,
+            },
+        );
+    }
+    let places = rig.mgr.load_places();
+    assert_eq!(places.len(), 64);
+    assert!(!places.contains_key("cody-0000"), "the oldest went first");
+    assert!(places.contains_key("cody-0069"));
+    // An old one is dropped whatever the count.
+    rig.mgr.insert_place(
+        "cody-old",
+        conversation_history::ResumePlace {
+            path: "/m".into(),
+            notice: "n".into(),
+            shown: false,
+            sid: "sid-old".into(),
+            old_path: None,
+            old_main: None,
+            at_ms: 1,
+        },
+    );
+    assert!(!rig.mgr.load_places().contains_key("cody-old"));
+}
+
+// ── a sensitive conversation can still be resumed in its main checkout ────────
+
+#[tokio::test]
+async fn a_sensitive_gone_worktree_entry_carries_its_main_checkout_and_nothing_else_of_the_path() {
+    let mut rig = Rig::new();
+    let (sid, main, _wt) = rig.gone_worktree_conversation("trunk", "feature/old").await;
+    rig.mgr
+        .conversations()
+        .mark_sensitive(&sid, crate::conversations::now_ms());
+    let ServerMsg::ConversationHistory { entries, .. } =
+        rig.mgr.conversation_history_msg("r".into())
+    else {
+        panic!()
+    };
+    assert!(entries[0].sensitive);
+    assert_eq!(entries[0].main_checkout.as_deref(), main.to_str());
+    assert!(entries[0].project_path.is_none());
+    assert!(entries[0].branch.is_none());
+    // And the daemon resumes it there.
+    let reply = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    assert_eq!(outcome(&reply).0, ConversationResumeOutcome::Ready);
+}
+
+#[tokio::test]
+async fn a_main_checkout_that_is_not_a_git_checkout_is_refused() {
+    let mut rig = Rig::new();
+    let (sid, main, _wt) = rig.gone_worktree_conversation("trunk", "feature/old").await;
+    // The folder is still there, but is a plain directory now.
+    std::fs::remove_dir_all(main.join(".git")).unwrap();
+    assert!(main.is_dir());
+    let reply = rig
+        .mgr
+        .resume_conversation_with(&sid, "cody-bbbb2222", place(&main));
+    assert_eq!(outcome(&reply).2.as_deref(), Some("folder_gone"));
+    assert!(!load_id_store(&rig.mgr.store_path).contains_key("cody-bbbb2222"));
+}
+
+// ── closing a focus is not "open elsewhere" ───────────────────────────────────
+
+#[tokio::test]
+async fn resuming_right_after_closing_a_focus_is_not_active_elsewhere_but_a_later_foreign_write_is()
+{
+    let mut rig = Rig::new();
+    let sid = rig.spawn("cody-aaaa1111", "cody");
+    rig.send("cody-aaaa1111", "hello");
+    let path = rig.transcript(&sid, USER_LINE);
+    rig.wait_spawns(1).await;
+    // The focus was closed: Nostromo stopped its session, whose last write was a moment ago.
+    rig.mgr.stop_session("cody-aaaa1111");
+    rig.mgr.sessions.remove("cody-aaaa1111");
+    let history = rig.mgr.conversations();
+    assert!(history.stopped_at(&sid).is_some(), "the stop was noted");
+    set_mtime(&path, std::time::SystemTime::now());
+    let entry = history.get(&sid).unwrap();
+    assert_eq!(
+        list::status_now(&entry, &history, None),
+        ConversationStatus::Available,
+        "our own last write"
+    );
+    let reply = rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    assert_eq!(
+        outcome(&reply).0,
+        ConversationResumeOutcome::Ready,
+        "no confirmation asked"
+    );
+
+    // A write well after our stop is someone else's.
+    history.note_stopped(&sid, crate::conversations::now_ms() - 60_000);
+    set_mtime(
+        &path,
+        std::time::SystemTime::now() - Duration::from_secs(10),
+    );
+    assert_eq!(
+        list::status_now(&entry, &history, None),
+        ConversationStatus::ActiveElsewhere
     );
 }

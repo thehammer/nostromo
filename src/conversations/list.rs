@@ -21,6 +21,10 @@ pub static CONTENT_CHECKS: AtomicUsize = AtomicUsize::new(0);
 /// may be open in another Claude window.
 pub const ACTIVE_ELSEWHERE_MS: i64 = 2 * 60 * 1000;
 
+/// A transcript written this soon before Nostromo stopped its own session was
+/// written by that session.
+const OWN_WRITE_SLACK_MS: i64 = 2_000;
+
 /// The list, and the work it queued for the background pass.
 pub struct Listing {
     pub entries: Vec<ConversationEntryWire>,
@@ -111,19 +115,26 @@ fn status_of(
         }
         _ => q.to_check.push(e.sid.clone()),
     }
+    // Written to a moment ago by something that is not a Nostromo session: it
+    // may be open in another Claude window. A write at the moment Nostromo
+    // stopped its own session of it (closing the focus) is not.
+    let written_by_us = history
+        .stopped_at(&e.sid)
+        .is_some_and(|stopped| mtime_ms <= stopped + OWN_WRITE_SLACK_MS);
+    let active_elsewhere =
+        mtime_ms > 0 && super::now_ms() - mtime_ms < ACTIVE_ELSEWHERE_MS && !written_by_us;
     if let Some(pp) = &e.project_path {
         if !Path::new(pp).exists() {
             return (
                 ConversationStatus::FolderGone {
                     worktree: e.main_checkout.is_some(),
+                    active_elsewhere,
                 },
                 path,
             );
         }
     }
-    // Written to a moment ago by something that is not a Nostromo session: it
-    // may be open in another Claude window.
-    if mtime_ms > 0 && super::now_ms() - mtime_ms < ACTIVE_ELSEWHERE_MS {
+    if active_elsewhere {
         return (ConversationStatus::ActiveElsewhere, path);
     }
     (ConversationStatus::Available, path)
@@ -155,15 +166,20 @@ fn to_wire(
         transcript_path: None,
         main_checkout: None,
     };
-    if e.sensitive {
-        // Title, agent, time and "Sensitive" only.
-        return w;
-    }
-    if matches!(w.status, ConversationStatus::FolderGone { worktree: true }) {
+    // Where a gone worktree may resume is no conversation content: a sensitive
+    // entry carries it too, or it could never be resumed.
+    if matches!(
+        w.status,
+        ConversationStatus::FolderGone { worktree: true, .. }
+    ) {
         w.main_checkout = e
             .main_checkout
             .clone()
             .filter(|m| Path::new(m).join(".git").exists());
+    }
+    if e.sensitive {
+        // Title, agent, time and "Sensitive" only (and the main checkout above).
+        return w;
     }
     w.label = e.label.clone();
     w.project_path = e.project_path.clone();

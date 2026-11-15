@@ -8,14 +8,22 @@ enum ConversationStatusWire: Equatable, Decodable {
     case running(tag: String, open: Bool)
     case unavailableDeleted
     case unavailableUnreadable
-    case folderGone(worktree: Bool)
+    /// `activeElsewhere`: the transcript was also written to in the last two minutes, so a resume needs
+    /// that confirmation too.
+    case folderGone(worktree: Bool, activeElsewhere: Bool = false)
     /// Written to in the last two minutes by something that is not a Nostromo session.
     case activeElsewhere
     case available
     /// A kind this app does not know: shown, never resumable.
     case unknown
 
-    private enum K: String, CodingKey { case kind, tag, open, worktree }
+    /// A gone worktree whose transcript may also be open in another Claude window.
+    var isAlsoActiveElsewhere: Bool {
+        if case .folderGone(_, let elsewhere) = self { return elsewhere }
+        return false
+    }
+
+    private enum K: String, CodingKey { case kind, tag, open, worktree, activeElsewhere = "active_elsewhere" }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -25,7 +33,9 @@ enum ConversationStatusWire: Equatable, Decodable {
                             open: try c.decodeIfPresent(Bool.self, forKey: .open) ?? false)
         case "unavailable_deleted": self = .unavailableDeleted
         case "unavailable_unreadable": self = .unavailableUnreadable
-        case "folder_gone": self = .folderGone(worktree: try c.decodeIfPresent(Bool.self, forKey: .worktree) ?? false)
+        case "folder_gone":
+            self = .folderGone(worktree: try c.decodeIfPresent(Bool.self, forKey: .worktree) ?? false,
+                               activeElsewhere: try c.decodeIfPresent(Bool.self, forKey: .activeElsewhere) ?? false)
         case "active_elsewhere": self = .activeElsewhere
         case "available": self = .available
         default: self = .unknown

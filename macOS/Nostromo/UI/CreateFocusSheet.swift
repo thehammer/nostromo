@@ -488,20 +488,42 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     /// How a `ResumeChoice` is shown; tests replace it to answer without a window.
     var choicePresenter: ((ResumeChoice, @escaping (ResumeChoice.Outcome) -> Void) -> Void)?
 
+    /// The folder each conversation's last resume asked for, kept for a "Resume anyway" that follows.
+    private var resumePlaces: [String: String] = [:]
+
+    private func ask(_ choice: ResumeChoice, _ handle: @escaping (ResumeChoice.Outcome) -> Void) {
+        if let present = choicePresenter { present(choice, handle) }
+        else if let window { choice.present(on: window, completion: handle) }
+    }
+
+    private func startResume(_ id: String, place: String?, confirmActiveElsewhere: Bool) {
+        resumePlaces[id] = place
+        history.resume(id, place: place, confirmActiveElsewhere: confirmActiveElsewhere)
+    }
+
     private func beginResume(_ e: ConversationEntryWire) {
         resumeTab.showMessage(nil)
-        guard let choice = ResumeChoice.make(for: e) else { history.resume(e.id); return }
+        guard let choice = ResumeChoice.make(for: e) else { startResume(e.id, place: nil, confirmActiveElsewhere: false); return }
         // Nothing is sent until the user chooses; Cancel (the default for "open elsewhere") sends nothing.
-        let handle: (ResumeChoice.Outcome) -> Void = { [weak self] outcome in
+        ask(choice) { [weak self] outcome in
+            guard let self else { return }
             switch outcome {
-            case .resumeInMain(let place): self?.history.resume(e.id, place: place)
-            case .resumeAnyway: self?.history.resume(e.id, confirmActiveElsewhere: true)
-            case .showTranscript: self?.resumeTab.onShowTranscript?(e)
+            case .resumeInMain(let place):
+                // A gone worktree that may also be open elsewhere needs both answers.
+                if e.status.isAlsoActiveElsewhere {
+                    self.ask(ResumeChoice.activeElsewhere()) { [weak self] second in
+                        if second == .resumeAnyway {
+                            self?.startResume(e.id, place: place, confirmActiveElsewhere: true)
+                        }
+                    }
+                } else {
+                    self.startResume(e.id, place: place, confirmActiveElsewhere: false)
+                }
+            case .resumeAnyway: self.startResume(e.id, place: nil, confirmActiveElsewhere: true)
+            case .showTranscript: self.resumeTab.onShowTranscript?(e)
             case .cancel: break
             }
         }
-        if let present = choicePresenter { present(choice, handle) }
-        else if let window { choice.present(on: window, completion: handle) }
     }
 
     /// The Rename sheet: one field, the same 60-character rule as a focus label.
@@ -547,6 +569,13 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         case .switched: closeSheet()
         case .waitingToStart: resumeTab.showMessage("Nostromo is starting\u{2026}")
         case .gaveUp: resumeTab.showMessage("Nostromo couldn\u{2019}t start. Try again in a moment.")
+        // The list was stale: the daemon saw a recent write the row did not. Offer the choice
+        // instead of an error, and keep the place the user already picked.
+        case .refused("active_elsewhere"):
+            ask(ResumeChoice.activeElsewhere()) { [weak self] outcome in
+                guard outcome == .resumeAnyway else { return }
+                self?.startResume(id, place: self?.resumePlaces[id], confirmActiveElsewhere: true)
+            }
         case .refused(let reason): resumeTab.showMessage(Self.refusalText(reason))
         }
     }
