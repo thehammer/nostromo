@@ -434,6 +434,7 @@ fn focus_meta(tag: &str, name: &str) -> FocusMeta {
         select_for_client: None,
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
     }
 }
 

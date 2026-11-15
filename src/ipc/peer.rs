@@ -1499,6 +1499,7 @@ mod tests {
         let meta = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "t".into(),
             display_name: "T".into(),
             agent_name: "cody".into(),
@@ -1775,6 +1776,7 @@ mod tests {
         let meta = |tag: &str, agent: &str| FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.into(),
             display_name: "Cody on SECRET".into(),
             agent_name: agent.into(),
@@ -1888,6 +1890,7 @@ mod tests {
                 let meta = FocusMeta {
                     initial_model: None,
                     initial_effort: None,
+                    no_codebase: None,
                     tag: tag.into(),
                     display_name: "SECRET".into(),
                     agent_name: agent.into(),
@@ -2182,6 +2185,7 @@ mod tests {
                 id: "s1".into(),
                 new_tag: "t1".into(),
                 place: Some("/x".into()),
+                no_codebase_folder: Some("/y".into()),
                 confirm_active_elsewhere: true,
             },
             ClientMsg::ConversationHistoryRename {
@@ -4561,6 +4565,7 @@ mod tests {
                 first_prompts_enabled: true,
                 degraded_kept: None,
                 revision: 1,
+                referenced_space_folders: vec![],
             },
             ServerMsg::ConversationResumeResult {
                 request_id: "r".into(),
@@ -4948,6 +4953,7 @@ mod huey_surface_tests {
         FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.into(),
             display_name: "Huey on SECRET".into(),
             agent_name: agent.into(),

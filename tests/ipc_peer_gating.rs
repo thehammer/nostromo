@@ -3472,6 +3472,7 @@ fn meta(tag: &str, display_name: &str, agent: &str, built_in: bool) -> FocusMeta
     FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: tag.into(),
         display_name: display_name.into(),
         agent_name: agent.into(),
@@ -5080,6 +5081,7 @@ impl WorkService for AnnouncingWorkService {
         let secret_meta = FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.clone(),
             display_name: "Cody on SECRET-DISPLAY".into(),
             agent_name: "cody".into(),
@@ -5227,6 +5229,7 @@ fn junk_focus(i: usize) -> FocusMeta {
     FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: format!("{i:03}{}:fred", "j".repeat(3_999_000)),
         display_name: "x".into(),
         agent_name: "cody".into(),

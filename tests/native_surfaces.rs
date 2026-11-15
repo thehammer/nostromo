@@ -185,6 +185,7 @@ fn meta(tag: &str, agent: &str) -> FocusMeta {
     FocusMeta {
         initial_model: None,
         initial_effort: None,
+        no_codebase: None,
         tag: tag.into(),
         display_name: tag.into(),
         agent_name: agent.into(),

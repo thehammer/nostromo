@@ -4984,6 +4984,7 @@ mod tests {
         FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.into(),
             display_name: tag.into(),
             agent_name: tag.into(),
@@ -5388,6 +5389,7 @@ mod tests {
         mgr.set_focus_registry(vec![FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: "fred".into(),
             display_name: "Fred".into(),
             agent_name: "fred".into(),
@@ -8117,6 +8119,7 @@ mod work_send_scope_tests {
         FocusMeta {
             initial_model: None,
             initial_effort: None,
+            no_codebase: None,
             tag: tag.into(),
             display_name: "Cody on SECRET".into(),
             agent_name: "cody".into(),

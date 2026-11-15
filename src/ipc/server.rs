@@ -2687,6 +2687,7 @@ fn handle_client_msg(
             id,
             new_tag,
             place,
+            no_codebase_folder,
             confirm_active_elsewhere,
         } => {
             let mut reply = session_mgr.lock().unwrap().resume_conversation_with(
@@ -2694,6 +2695,7 @@ fn handle_client_msg(
                 &new_tag,
                 crate::ipc::session_manager::ResumeOptions {
                     place: place.as_deref(),
+                    no_codebase_folder: no_codebase_folder.as_deref(),
                     confirm_active_elsewhere,
                 },
             );
