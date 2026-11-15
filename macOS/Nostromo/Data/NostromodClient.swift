@@ -1212,9 +1212,17 @@ class NostromodClient {
         send(ClientConversationHistoryGet(requestId: requestId), type: "conversation_history_get")
     }
 
-    func conversationResume(requestId: String, id: String, newTag: String) {
+    func conversationResume(requestId: String, id: String, newTag: String, place: String?, confirmActiveElsewhere: Bool) {
         guard daemonAdvertisesConversationHistory else { return }
-        send(ClientConversationResume(requestId: requestId, id: id, newTag: newTag), type: "conversation_resume")
+        send(ClientConversationResume(requestId: requestId, id: id, newTag: newTag, place: place,
+                                      confirmActiveElsewhere: confirmActiveElsewhere),
+             type: "conversation_resume")
+    }
+
+    func conversationHistoryRename(requestId: String, id: String, title: String?) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationHistoryRename(requestId: requestId, id: id, title: title),
+             type: "conversation_history_rename")
     }
 
     func conversationResumeRelease(tag: String) {

@@ -1078,6 +1078,7 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::ConversationResume { .. }
         | ClientMsg::ConversationResumeRelease { .. }
         | ClientMsg::ConversationHistoryRemove { .. }
+        | ClientMsg::ConversationHistoryRename { .. }
         | ClientMsg::ConversationHistoryRestore { .. }
         | ClientMsg::ConversationHistoryPurgeRemoved { .. }
         | ClientMsg::ConversationHistorySettingsSet { .. }
@@ -1228,6 +1229,7 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::ConversationResume { .. }
         | ClientMsg::ConversationResumeRelease { .. }
         | ClientMsg::ConversationHistoryRemove { .. }
+        | ClientMsg::ConversationHistoryRename { .. }
         | ClientMsg::ConversationHistoryRestore { .. }
         | ClientMsg::ConversationHistoryPurgeRemoved { .. }
         | ClientMsg::ConversationHistorySettingsSet { .. }
@@ -2179,6 +2181,13 @@ mod tests {
                 request_id: "r".into(),
                 id: "s1".into(),
                 new_tag: "t1".into(),
+                place: Some("/x".into()),
+                confirm_active_elsewhere: true,
+            },
+            ClientMsg::ConversationHistoryRename {
+                request_id: "r".into(),
+                id: "s1".into(),
+                title: Some("x".into()),
             },
             ClientMsg::ConversationResumeRelease { tag: "t1".into() },
             ClientMsg::ConversationHistoryRemove {
@@ -2335,7 +2344,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 87;
+    const CLIENT_MSG_VARIANTS: usize = 88;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2427,6 +2436,7 @@ mod tests {
             ClientMsg::ConversationHistoryPurgeRemoved { .. } => 84,
             ClientMsg::ConversationHistorySettingsSet { .. } => 85,
             ClientMsg::ConversationResumeRelease { .. } => 86,
+            ClientMsg::ConversationHistoryRename { .. } => 87,
         }
     }
 
@@ -2469,9 +2479,9 @@ mod tests {
         // 72 with the two Approvals-log requests; 75 with the three persisted-rule verbs (AP6);
         // 76 with `TrackerOpenLink` (T6; expect a trivial conflict on this constant with T3a's tracker verbs);
         // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`;
-        // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs.
-        assert_eq!(CLIENT_MSG_VARIANTS, 87);
-        assert_eq!(every_client_msg().len(), 87);
+        // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs; 88 with the rename.
+        assert_eq!(CLIENT_MSG_VARIANTS, 88);
+        assert_eq!(every_client_msg().len(), 88);
     }
 
     #[test]
@@ -4532,7 +4542,7 @@ mod tests {
     #[test]
     fn every_conversation_verb_is_refused_for_a_network_peer() {
         let msgs = conversation_msgs();
-        assert_eq!(msgs.len(), 7, "a new Conversation verb needs a policy row");
+        assert_eq!(msgs.len(), 8, "a new Conversation verb needs a policy row");
         let tags = SensitiveTags::in_memory();
         for msg in msgs {
             assert_eq!(network_policy(&msg), NetworkPolicy::Refused, "{msg:?}");

@@ -1,5 +1,128 @@
 import AppKit
 
+/// What the user is asked before a resume that needs a decision: a worktree that is gone (resume in the
+/// main checkout, or not at all), or a conversation that may be open in another Claude window. The first
+/// button is the default (Return); the one titled Cancel answers Esc. Pure: tests read it, the sheet shows it.
+struct ResumeChoice: Equatable {
+    enum Outcome: Equatable { case resumeInMain(String), resumeAnyway, cancel, showTranscript }
+    struct Button: Equatable {
+        let title: String
+        let outcome: Outcome
+        /// What VoiceOver says, in words.
+        let accessibilityLabel: String
+    }
+
+    let message: String
+    let detail: String
+    let buttons: [Button]
+
+    /// The choice a resume of `e` needs, or nil when it needs none.
+    static func make(for e: ConversationEntryWire) -> ResumeChoice? {
+        switch e.status {
+        case .activeElsewhere:
+            return activeElsewhere()
+        case .folderGone(worktree: true, _):
+            let old = e.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? e.projectName ?? "its worktree"
+            let message = "This conversation ran in \(old), which no longer exists."
+            var buttons: [Button] = []
+            if let main = e.mainCheckout {
+                let name = URL(fileURLWithPath: main).lastPathComponent
+                buttons.append(Button(title: "Resume in \(name)", outcome: .resumeInMain(main),
+                                      accessibilityLabel: "Resume in the main checkout, \(name)"))
+            }
+            buttons.append(Button(title: "Cancel", outcome: .cancel, accessibilityLabel: "Cancel, do not resume"))
+            if e.transcriptPath != nil {
+                buttons.append(Button(title: "Show Transcript in Finder", outcome: .showTranscript,
+                                      accessibilityLabel: "Show the transcript file in Finder"))
+            }
+            return ResumeChoice(message: message,
+                                detail: e.mainCheckout == nil ? "Its main checkout is gone too, so it can\u{2019}t be resumed here."
+                                                              : "It can continue in the main checkout instead.",
+                                buttons: buttons)
+        default:
+            return nil
+        }
+    }
+
+    /// "May be open in another Claude window": Cancel is the default, Resume anyway the way through.
+    /// Also asked after the worktree choice when both apply, and when the daemon refuses a resume the
+    /// list did not warn about.
+    static func activeElsewhere() -> ResumeChoice {
+        ResumeChoice(
+            message: "This conversation may be open in another Claude window.",
+            detail: "Resuming it in two places can garble it. Resume anyway?",
+            buttons: [
+                Button(title: "Cancel", outcome: .cancel, accessibilityLabel: "Cancel, do not resume"),
+                Button(title: "Resume anyway", outcome: .resumeAnyway,
+                       accessibilityLabel: "Resume anyway, even though it may be open elsewhere"),
+            ])
+    }
+
+    /// The outcome for the button at `index` (NSAlert order).
+    func outcome(forButtonIndex index: Int) -> Outcome {
+        buttons.indices.contains(index) ? buttons[index].outcome : .cancel
+    }
+
+    func alert() -> NSAlert {
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = message
+        a.informativeText = detail
+        for (i, b) in buttons.enumerated() {
+            let button = a.addButton(withTitle: b.title)
+            button.setAccessibilityLabel(b.accessibilityLabel)
+            // NSAlert gives any button titled "Cancel" the Esc key, even the first, which then loses
+            // Return. The first button is the default, so it takes Return explicitly; a later Cancel
+            // keeps Esc. A first Cancel gets its Esc from `present` (see `escapeCancelsFirstButton`).
+            if i == 0 { button.keyEquivalent = "\r" }
+            else if b.outcome == .cancel { button.keyEquivalent = "\u{1b}" }
+        }
+        return a
+    }
+
+    /// Does Esc need handling beyond the buttons' own key equivalents? True when Cancel is the first
+    /// button: it holds Return, and a button has only one key.
+    var escapeCancelsFirstButton: Bool { buttons.first?.outcome == .cancel }
+
+    static func isEscape(_ event: NSEvent) -> Bool { event.keyCode == 53 }
+
+    /// Show it as a sheet on `window` (never a free-floating modal) and report the outcome.
+    func present(on window: NSWindow, completion: @escaping (Outcome) -> Void) {
+        let a = alert()
+        var monitor: Any?
+        if escapeCancelsFirstButton {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak a, weak window] event in
+                guard Self.isEscape(event), let sheet = a?.window, sheet.isKeyWindow else { return event }
+                window?.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+                return nil
+            }
+        }
+        a.beginSheetModal(for: window) { response in
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            let index = response.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            completion(self.outcome(forButtonIndex: index))
+        }
+    }
+}
+
+/// The one-field Rename sheet's alert: the field holds the current title and is the first responder.
+enum RenameEntryAlert {
+    static func make(currentTitle: String) -> (alert: NSAlert, field: NSTextField) {
+        let a = NSAlert()
+        a.messageText = "Rename conversation"
+        a.informativeText = "This changes the name in History only."
+        let rename = a.addButton(withTitle: "Rename")
+        rename.setAccessibilityLabel("Rename the conversation")
+        a.addButton(withTitle: "Cancel").setAccessibilityLabel("Cancel, keep the name")
+        let field = NSTextField(string: currentTitle)
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        field.setAccessibilityLabel("Conversation name")
+        a.accessoryView = field
+        a.window.initialFirstResponder = field
+        return (a, field)
+    }
+}
+
 /// One row of the Resume list: fixed-height, frame-laid-out so what is drawn is predictable.
 final class ResumeRowView: NSView {
     static let height: CGFloat = 82
@@ -112,6 +235,7 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
     var onResume: ((ConversationEntryWire) -> Void)?
     var onRemove: ((ConversationEntryWire) -> Void)?
     var onShowTranscript: ((ConversationEntryWire) -> Void)?
+    var onRename: ((ConversationEntryWire) -> Void)?
     var onCancel: (() -> Void)?
     var onSelectionChange: (() -> Void)?
     var onFirstPromptsToggled: ((Bool) -> Void)?
@@ -279,7 +403,9 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
 
     static func isResumable(_ e: ConversationEntryWire) -> Bool {
         switch e.status {
-        case .available, .running: return true
+        case .available, .running, .activeElsewhere: return true
+        // A gone worktree opens the choice (resume in the main checkout, or only Show Transcript).
+        case .folderGone(worktree: true, _): return true
         // Unknown statuses are not resumable: only a status this app understands is.
         default: return false
         }
@@ -288,6 +414,11 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
     func resumeSelected() {
         guard let e = selectedEntry, Self.isResumable(e) else { return }
         onResume?(e)
+    }
+
+    func renameSelected() {
+        guard let e = selectedEntry else { return }
+        onRename?(e)
     }
 
     func removeSelected() {
@@ -392,6 +523,7 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
             m.addItem(i)
         }
         add("Resume", #selector(menuResume(_:)), enabled: Self.isResumable(e))
+        add("Rename\u{2026}", #selector(menuRename(_:)))
         add("Remove from History", #selector(menuRemove(_:)))
         add("Show Transcript in Finder", #selector(menuShow(_:)), enabled: e.transcriptPath != nil)
         return m
@@ -405,6 +537,7 @@ final class ResumeTabView: NSView, NSSearchFieldDelegate, NSTableViewDataSource,
     }
 
     @objc private func menuResume(_ i: EntryItem) { if let e = i.entry { onResume?(e) } }
+    @objc private func menuRename(_ i: EntryItem) { if let e = i.entry { onRename?(e) } }
     @objc private func menuRemove(_ i: EntryItem) { if let e = i.entry { onRemove?(e) } }
     @objc private func menuShow(_ i: EntryItem) { if let e = i.entry { onShowTranscript?(e) } }
 

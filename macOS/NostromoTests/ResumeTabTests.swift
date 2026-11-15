@@ -158,7 +158,7 @@ final class ResumeTabTests: XCTestCase {
 
     func testRowMenuOffersResumeRemoveAndShowTranscript() {
         let e = F.entry("a")
-        XCTAssertEqual(sheet.resumeTab.menuTitles(for: e), ["Resume", "Remove from History", "Show Transcript in Finder"])
+        XCTAssertEqual(sheet.resumeTab.menuTitles(for: e), ["Resume", "Rename\u{2026}", "Remove from History", "Show Transcript in Finder"])
     }
 
     func testBannersForADegradedFileAndAnOldDaemon() {

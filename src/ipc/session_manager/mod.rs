@@ -84,6 +84,7 @@ mod activity_tests;
 mod compact_tests;
 mod control;
 mod conversation_history;
+pub use conversation_history::ResumeOptions;
 #[cfg(test)]
 #[path = "conversation_history_tests.rs"]
 mod conversation_history_tests;
@@ -1223,6 +1224,19 @@ impl SessionManager {
             }
         };
         args.extend(model_args(model.as_ref()));
+        // A tag resumed into another place (its worktree is gone) runs there and
+        // tells the agent so through the spawn: every spawn of the tag, never
+        // a user turn (that would wake the agent).
+        let place = resume
+            .then(|| self.resume_place_for(&tag, &effective_id))
+            .flatten();
+        let cwd = match &place {
+            Some(p) if Path::new(&p.path).is_dir() => Some(PathBuf::from(&p.path)),
+            _ => cwd,
+        };
+        if let Some(p) = &place {
+            conversation_history::append_system_prompt_extra(&mut args, &p.notice);
+        }
         self.note_conversation_spawn(
             &tag,
             &effective_id,
@@ -1247,6 +1261,10 @@ impl SessionManager {
 
         if let Some(text) = spawn_note {
             emit_note(&managed.shared, NoteKind::ModelUnavailable, text);
+        }
+        if let Some(p) = place.filter(|p| !p.shown) {
+            emit_note(&managed.shared, NoteKind::MovedHere, p.notice);
+            self.mark_place_shown(&tag);
         }
         self.sessions.insert(tag.clone(), managed);
 
@@ -1837,6 +1855,10 @@ impl SessionManager {
     /// [`Self::stop`] without the problem event: what a restart, a new session
     /// and the supervisor's own recovery stop a session with.
     fn stop_session(&mut self, tag: &str) {
+        if let Some(sid) = self.sessions.get(tag).and_then(|s| s.session_id.as_deref()) {
+            self.conversations
+                .note_stopped(sid, crate::conversations::now_ms());
+        }
         // A switch still waiting for the turn this stop cuts short takes
         // effect when the session next starts. Its store write is made on the
         // hub's IO thread, not here (this runs under the manager lock and the
@@ -2033,6 +2055,7 @@ impl SessionManager {
         self.stop_session(tag);
         self.sessions.remove(tag);
         save_id(&self.store_path, tag, None);
+        self.forget_place(tag);
         self.login_changed();
         debug!(tag, "session id cleared — next spawn is fresh");
     }
@@ -2433,6 +2456,7 @@ impl SessionManager {
         // the tag brings its own.
         for tag in &departed {
             self.focus_nonces.remove(tag);
+            self.forget_place(tag);
         }
         self.focus_registry = focuses;
         self.note_origin_registry(true);

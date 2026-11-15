@@ -1106,7 +1106,7 @@ where
                 let Some(msg) = outbound(trust, msg, &sensitive) else {
                     continue;
                 };
-                let Some(msg) = without_notes_unless_model(msg, &topics) else {
+                let Some(msg) = without_notes_unless_model(msg, &topics, trust) else {
                     continue;
                 };
                 let bytes = match serde_json::to_vec(&msg) {
@@ -2657,6 +2657,7 @@ fn handle_client_msg(
         | ClientMsg::ConversationResume { .. }
         | ClientMsg::ConversationResumeRelease { .. }
         | ClientMsg::ConversationHistoryRemove { .. }
+        | ClientMsg::ConversationHistoryRename { .. }
         | ClientMsg::ConversationHistoryRestore { .. }
         | ClientMsg::ConversationHistoryPurgeRemoved { .. }
         | ClientMsg::ConversationHistorySettingsSet { .. }
@@ -2685,8 +2686,17 @@ fn handle_client_msg(
             request_id,
             id,
             new_tag,
+            place,
+            confirm_active_elsewhere,
         } => {
-            let mut reply = session_mgr.lock().unwrap().resume_conversation(&id, &new_tag);
+            let mut reply = session_mgr.lock().unwrap().resume_conversation_with(
+                &id,
+                &new_tag,
+                crate::ipc::session_manager::ResumeOptions {
+                    place: place.as_deref(),
+                    confirm_active_elsewhere,
+                },
+            );
             if let ServerMsg::ConversationResumeResult { request_id: r, .. } = &mut reply {
                 *r = request_id;
             }
@@ -2700,6 +2710,15 @@ fn handle_client_msg(
         ClientMsg::ConversationHistoryRemove { id, .. } => {
             let history = session_mgr.lock().unwrap().conversations();
             history.remove(&id, crate::conversations::now_ms());
+        }
+
+        ClientMsg::ConversationHistoryRename { id, title, .. } => {
+            let history = session_mgr.lock().unwrap().conversations();
+            history.rename(
+                &id,
+                crate::conversations::normalized_title(title.as_deref()),
+                crate::conversations::now_ms(),
+            );
         }
 
         ClientMsg::ConversationHistoryRestore { id, .. } => {
@@ -3358,25 +3377,36 @@ fn wants_authored_prs(topics: &[Topic]) -> bool {
     topics.contains(&Topic::AuthoredPrs)
 }
 
-/// A session frame as a client that has not asked for model frames gets it:
-/// without transcript notes (see [`wants_model`]).
-fn without_notes_unless_model(msg: ServerMsg, topics: &[Topic]) -> Option<ServerMsg> {
+/// A session frame as a client gets it: without transcript notes unless it
+/// asked for model frames (see [`wants_model`]), and never, for a network peer,
+/// with the moved-here note (it names local folders).
+fn without_notes_unless_model(
+    msg: ServerMsg,
+    topics: &[Topic],
+    trust: PeerTrust,
+) -> Option<ServerMsg> {
     use crate::ipc::stream_json::{Turn, TurnBlock, TurnDelta};
-    fn strip(turn: &mut Turn) {
-        turn.blocks.retain(|b| !matches!(b, TurnBlock::Note { .. }));
-    }
-    if wants_model(topics) {
+    let all_notes = !wants_model(topics);
+    let network = trust.is_network();
+    if !all_notes && !network {
         return Some(msg);
     }
+    let dropped = |b: &TurnBlock| match b {
+        TurnBlock::Note { note_kind, .. } => {
+            all_notes || (network && *note_kind == crate::model::notes::NoteKind::MovedHere)
+        }
+        _ => false,
+    };
+    let strip = |turn: &mut Turn| turn.blocks.retain(|b| !dropped(b));
     match msg {
         ServerMsg::SessionTurns { tag, mut turns } => {
             turns.iter_mut().for_each(strip);
             Some(ServerMsg::SessionTurns { tag, turns })
         }
         ServerMsg::SessionTurnDelta {
-            delta: TurnDelta::Note { .. },
+            delta: TurnDelta::Note { block, .. },
             ..
-        } => None,
+        } if dropped(&block) => None,
         ServerMsg::SessionTurnDelta {
             tag,
             delta: TurnDelta::TurnStarted { mut turn },
@@ -4677,7 +4707,8 @@ mod tests {
             tag: "cody-1".into(),
             turns: vec![turn_with_note()],
         };
-        match without_notes_unless_model(turns.clone(), &[Topic::Activity]) {
+        match without_notes_unless_model(turns.clone(), &[Topic::Activity], PeerTrust::OperatorApp)
+        {
             Some(ServerMsg::SessionTurns { turns, .. }) => {
                 assert_eq!(
                     turns[0].blocks,
@@ -4693,10 +4724,71 @@ mod tests {
                 block: note_block(),
             },
         };
-        assert!(without_notes_unless_model(note.clone(), &[]).is_none());
+        assert!(without_notes_unless_model(note.clone(), &[], PeerTrust::OperatorApp).is_none());
         // A client that names the topic gets both untouched.
-        assert!(without_notes_unless_model(note, &[Topic::Model]).is_some());
-        match without_notes_unless_model(turns, &[Topic::Model]) {
+        assert!(
+            without_notes_unless_model(note, &[Topic::Model], PeerTrust::OperatorApp).is_some()
+        );
+        match without_notes_unless_model(turns, &[Topic::Model], PeerTrust::OperatorApp) {
+            Some(ServerMsg::SessionTurns { turns, .. }) => assert_eq!(turns[0].blocks.len(), 2),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn moved_here_block() -> crate::ipc::stream_json::TurnBlock {
+        crate::ipc::stream_json::TurnBlock::Note {
+            note_kind: crate::model::notes::NoteKind::MovedHere,
+            text: "This conversation ran in /work/gone, which no longer exists.".into(),
+            ts: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_network_peer_subscribed_to_model_never_gets_the_moved_here_note() {
+        use crate::ipc::stream_json::{Turn, TurnDelta};
+        let other_note = note_block();
+        let turns = ServerMsg::SessionTurns {
+            tag: "cody-1".into(),
+            turns: vec![Turn {
+                blocks: vec![moved_here_block(), other_note.clone()],
+                ..turn_with_note()
+            }],
+        };
+        let delta = ServerMsg::SessionTurnDelta {
+            tag: "cody-1".into(),
+            delta: TurnDelta::Note {
+                turn_id: Some("t0".into()),
+                block: moved_here_block(),
+            },
+        };
+        let started = ServerMsg::SessionTurnDelta {
+            tag: "cody-1".into(),
+            delta: TurnDelta::TurnStarted {
+                turn: Turn {
+                    blocks: vec![moved_here_block()],
+                    ..turn_with_note()
+                },
+            },
+        };
+        let model = [Topic::Model];
+        // The network peer keeps the other notes, and loses only this one.
+        match without_notes_unless_model(turns.clone(), &model, PeerTrust::Tcp) {
+            Some(ServerMsg::SessionTurns { turns, .. }) => {
+                assert_eq!(turns[0].blocks, vec![other_note])
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(without_notes_unless_model(delta.clone(), &model, PeerTrust::Tcp).is_none());
+        match without_notes_unless_model(started.clone(), &model, PeerTrust::Tcp) {
+            Some(ServerMsg::SessionTurnDelta {
+                delta: TurnDelta::TurnStarted { turn },
+                ..
+            }) => assert!(turn.blocks.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        // A local client that asked for model frames still gets it.
+        assert!(without_notes_unless_model(delta, &model, PeerTrust::OperatorApp).is_some());
+        match without_notes_unless_model(turns, &model, PeerTrust::OperatorApp) {
             Some(ServerMsg::SessionTurns { turns, .. }) => assert_eq!(turns[0].blocks.len(), 2),
             other => panic!("{other:?}"),
         }

@@ -210,6 +210,11 @@ pub struct SessionHistory {
 struct HistoryState {
     path: Option<PathBuf>,
     tags: BTreeMap<String, Vec<SessionSeen>>,
+    /// Conversation (Claude session id) → the focus tag that has it now, for
+    /// every resume. Read-only to origin resolution: a stamped entry is never
+    /// rewritten, a lookup goes through this instead.
+    moves: BTreeMap<String, String>,
+    moves_path: Option<PathBuf>,
 }
 
 impl SessionHistory {
@@ -223,10 +228,14 @@ impl SessionHistory {
     /// before anything can write over it).
     pub fn open(path: PathBuf) -> Self {
         let tags = load_json(&path);
+        let moves_path = path.with_file_name("conversation-moves.json");
+        let moves = load_json(&moves_path);
         Self {
             inner: Arc::new(Mutex::new(HistoryState {
                 path: Some(path),
                 tags,
+                moves,
+                moves_path: Some(moves_path),
             })),
         }
     }
@@ -237,6 +246,8 @@ impl SessionHistory {
             inner: Arc::new(Mutex::new(HistoryState {
                 path: None,
                 tags: BTreeMap::new(),
+                moves: BTreeMap::new(),
+                moves_path: None,
             })),
         }
     }
@@ -275,6 +286,25 @@ impl SessionHistory {
             seen.retain(|s| now_ms - s.last_seen() <= HISTORY_MAX_AGE_MS);
         }
         state.tags.retain(|_, seen| !seen.is_empty());
+        // A pointer for a conversation no tag holds any more has nothing left to
+        // answer for: the file stays as small as the history.
+        let before = state.moves.len();
+        let held: std::collections::HashSet<&str> = state
+            .tags
+            .values()
+            .flatten()
+            .map(|s| s.sid.as_str())
+            .collect();
+        let kept: BTreeMap<String, String> = state
+            .moves
+            .iter()
+            .filter(|(sid, _)| held.contains(sid.as_str()))
+            .map(|(sid, tag)| (sid.clone(), tag.clone()))
+            .collect();
+        state.moves = kept;
+        if state.moves.len() != before {
+            state.persist_moves();
+        }
         if let Some(path) = &state.path {
             if write_private(path, &state.tags).is_err() {
                 tracing::warn!("focus session history could not be written");
@@ -316,6 +346,10 @@ impl SessionHistory {
                 s.moved = false;
             }
         }
+        if state.moves.get(sid).map(String::as_str) == Some(to_tag) {
+            state.moves.insert(sid.to_owned(), from_tag.to_owned());
+            state.persist_moves();
+        }
         if let Some(path) = &state.path {
             let _ = write_private(path, &state.tags);
         }
@@ -338,8 +372,38 @@ impl SessionHistory {
                     s.moved = true;
                 }
             }
+            state.moves.insert(sid.to_owned(), to_tag.to_owned());
+            state.persist_moves();
         }
         self.record(to_tag, sid);
+    }
+
+    /// The focus tag that has the conversation a job was stamped for, now.
+    /// `stamped` is the tag recorded at the time and `prefix` the 8-character
+    /// start of the session id (the origin book keeps nothing more of it). The
+    /// full id is looked up here, among the sessions this history holds for
+    /// `stamped`: when exactly one starts with `prefix`, the tag it was resumed
+    /// into is the answer. Anything else (never moved, no prefix, an ambiguous
+    /// prefix, a record that aged out) is `stamped`.
+    pub fn current_tag(&self, prefix: Option<&str>, stamped: &str) -> String {
+        let state = lock(&self.inner);
+        let Some(prefix) = prefix.filter(|p| !p.is_empty()) else {
+            return stamped.to_owned();
+        };
+        let mut hits = state
+            .tags
+            .get(stamped)
+            .into_iter()
+            .flatten()
+            .filter(|s| s.sid.starts_with(prefix));
+        match (hits.next(), hits.next()) {
+            (Some(seen), None) => state
+                .moves
+                .get(&seen.sid)
+                .cloned()
+                .unwrap_or_else(|| stamped.to_owned()),
+            _ => stamped.to_owned(),
+        }
     }
 
     /// The one tag the daemon spawned session `sid` for. `None` when no tag
@@ -789,7 +853,7 @@ impl OriginBook {
                     }
                 };
                 job.nostromo = Some(JobAnnotation {
-                    origin: view_of(&entry, &state.focuses),
+                    origin: view_of(&entry, &state.focuses, &self.history),
                     notify: entry.notify,
                     notice: None,
                     origin_was_sensitive: entry.sensitive,
@@ -864,6 +928,16 @@ impl OriginBook {
     }
 }
 
+impl HistoryState {
+    fn persist_moves(&self) {
+        if let Some(path) = &self.moves_path {
+            if write_private(path, &self.moves).is_err() {
+                tracing::warn!("conversation moves could not be written");
+            }
+        }
+    }
+}
+
 impl BookState {
     fn persist(&self) {
         if let Some(path) = &self.path {
@@ -887,8 +961,22 @@ fn names_of(focuses: &[FocusMeta]) -> HashMap<String, String> {
         .collect()
 }
 
-fn view_of(entry: &OriginEntry, focuses: &FocusDirectory) -> OriginView {
-    let tag = entry.focus_tag.as_deref();
+/// The focus tag a job's origin names now: the stamped one, unless the
+/// conversation that queued the job was resumed under another tag since. The
+/// single place that decides it: the annotation (and with it the origin shown
+/// and the focus a notice goes to) is built from it. Only a verified focus
+/// moves; a claim nobody vouched for keeps what was claimed.
+fn effective_tag(entry: &OriginEntry, history: &SessionHistory) -> Option<String> {
+    let stamped = entry.focus_tag.as_deref()?;
+    if entry.kind != OriginKind::Focus {
+        return Some(stamped.to_owned());
+    }
+    Some(history.current_tag(entry.session_prefix.as_deref(), stamped))
+}
+
+fn view_of(entry: &OriginEntry, focuses: &FocusDirectory, history: &SessionHistory) -> OriginView {
+    let effective = effective_tag(entry, history);
+    let tag = effective.as_deref();
     // The registry speaks only for a focus the daemon vouched for; an
     // unverified claim shows what was claimed (its snapshot), flagged by kind.
     let focus_name = tag
@@ -900,7 +988,7 @@ fn view_of(entry: &OriginEntry, focuses: &FocusDirectory) -> OriginView {
     };
     OriginView {
         kind: entry.kind,
-        focus_tag: entry.focus_tag.clone(),
+        focus_tag: effective,
         name_snapshot: entry.name_snapshot.clone(),
         focus_name,
         closed,
@@ -1178,6 +1266,202 @@ mod tests {
             initial_model: None,
             initial_effort: None,
         }
+    }
+
+    // ── a resumed conversation: the job follows it ───────────────────────────
+
+    const SID: &str = "sid-aaaaaaaa-1";
+
+    #[test]
+    fn a_job_queued_by_a_conversation_names_the_tag_it_was_resumed_into() {
+        let b = book();
+        b.history().record("claudia-1", SID);
+        let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
+        b.annotate(&mut jobs);
+        assert_eq!(
+            jobs[0]
+                .nostromo
+                .as_ref()
+                .unwrap()
+                .origin
+                .focus_tag
+                .as_deref(),
+            Some("claudia-1")
+        );
+
+        b.history().move_session(SID, "claudia-1", "claudia-2");
+        let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
+        b.annotate(&mut jobs);
+        let ann = jobs[0].nostromo.as_ref().unwrap();
+        assert_eq!(ann.origin.focus_tag.as_deref(), Some("claudia-2"));
+        assert_eq!(ann.origin.kind, OriginKind::Focus);
+
+        // The stamped entry is never rewritten.
+        let e = b.entry("j1").unwrap();
+        assert_eq!(e.focus_tag.as_deref(), Some("claudia-1"));
+        assert_eq!(e.session_prefix.as_deref(), Some("sid-aaaa"));
+
+        // A network peer still sees no tag.
+        let mut net = ann.clone();
+        net.redact_for_network(|_| false);
+        assert_eq!(net.origin.focus_tag, None);
+    }
+
+    #[test]
+    fn a_resume_keeps_the_names_the_job_was_stamped_with() {
+        let b = book();
+        b.history().record("claudia-1", SID);
+        b.note_registry_push(&[focus_meta("claudia-1", "Original")]);
+        let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
+        b.annotate(&mut jobs);
+        b.history().move_session(SID, "claudia-1", "claudia-2");
+        b.note_registry_push(&[focus_meta("claudia-2", "Resumed")]);
+        let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
+        b.annotate(&mut jobs);
+        let o = &jobs[0].nostromo.as_ref().unwrap().origin;
+        assert_eq!(o.name_snapshot.as_deref(), Some("Original"));
+        assert_eq!(o.focus_name.as_deref(), Some("Resumed"));
+        assert_eq!(o.closed, Some(false));
+    }
+
+    #[test]
+    fn an_entry_follows_the_one_conversation_its_prefix_matches() {
+        let b = book();
+        b.history().record("claudia-1", SID);
+        let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
+        b.annotate(&mut jobs);
+
+        b.history().move_session(SID, "claudia-1", "claudia-2");
+        let mut jobs = vec![job("j1", None)];
+        b.annotate(&mut jobs);
+        assert_eq!(
+            jobs[0]
+                .nostromo
+                .as_ref()
+                .unwrap()
+                .origin
+                .focus_tag
+                .as_deref(),
+            Some("claudia-2")
+        );
+    }
+
+    #[test]
+    fn a_prefix_two_conversations_of_the_tag_share_names_the_stamped_tag() {
+        let b = book();
+        b.history().record("claudia-1", SID);
+        b.history().record("claudia-1", "sid-aaaaaaaa-2");
+        let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
+        b.annotate(&mut jobs);
+
+        b.history().move_session(SID, "claudia-1", "claudia-2");
+        b.history()
+            .move_session("sid-aaaaaaaa-2", "claudia-1", "claudia-8");
+        let mut jobs = vec![job("j1", None)];
+        b.annotate(&mut jobs);
+        assert_eq!(
+            jobs[0]
+                .nostromo
+                .as_ref()
+                .unwrap()
+                .origin
+                .focus_tag
+                .as_deref(),
+            Some("claudia-1"),
+            "an ambiguous prefix must not guess"
+        );
+    }
+
+    #[test]
+    fn a_failed_resume_gives_the_job_its_tag_back() {
+        let b = book();
+        b.history().record("claudia-1", SID);
+        let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
+        b.annotate(&mut jobs);
+        b.history().move_session(SID, "claudia-1", "claudia-2");
+        b.history().undo_move(SID, "claudia-1", "claudia-2");
+        let mut jobs = vec![job("j1", None)];
+        b.annotate(&mut jobs);
+        assert_eq!(
+            jobs[0]
+                .nostromo
+                .as_ref()
+                .unwrap()
+                .origin
+                .focus_tag
+                .as_deref(),
+            Some("claudia-1")
+        );
+    }
+
+    #[test]
+    fn an_unverified_claim_never_moves() {
+        let b = book();
+        // Nobody vouched for it: only what was claimed.
+        let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
+        b.annotate(&mut jobs);
+        b.history().move_session(SID, "claudia-1", "claudia-2");
+        let mut jobs = vec![job("j1", None)];
+        b.annotate(&mut jobs);
+        let o = &jobs[0].nostromo.as_ref().unwrap().origin;
+        assert_eq!(o.kind, OriginKind::Unverified);
+        assert_eq!(o.focus_tag.as_deref(), Some("claudia-1"));
+    }
+
+    #[test]
+    fn the_moves_survive_a_restart_and_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("focus-session-history.json");
+        let h = SessionHistory::open(path.clone());
+        h.record("claudia-1", SID);
+        h.move_session(SID, "claudia-1", "claudia-2");
+        let moves = dir.path().join("conversation-moves.json");
+        assert_eq!(
+            std::fs::metadata(&moves).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let reopened = SessionHistory::open(path);
+        assert_eq!(
+            reopened.current_tag(Some("sid-aaaa"), "claudia-1"),
+            "claudia-2"
+        );
+    }
+
+    #[test]
+    fn a_move_for_a_conversation_the_history_no_longer_holds_is_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("focus-session-history.json");
+        let h = SessionHistory::open(path.clone());
+        h.record("claudia-1", SID);
+        h.move_session(SID, "claudia-1", "claudia-2");
+        // The conversation's records age out (91 days on).
+        let later = now_ms() + 91 * 24 * 60 * 60 * 1000;
+        h.record_at("claudia-7", "sid-other", later);
+        let moves: BTreeMap<String, String> =
+            load_json(&dir.path().join("conversation-moves.json"));
+        assert!(moves.is_empty(), "pruned on disk too: {moves:?}");
+        // A conversation still held keeps its pointer.
+        h.record("claudia-1", "sid-bbbbbbbb-1");
+        h.move_session("sid-bbbbbbbb-1", "claudia-1", "claudia-3");
+        h.record("claudia-9", "sid-cccccccc-1");
+        assert_eq!(h.current_tag(Some("sid-bbbb"), "claudia-1"), "claudia-3");
+    }
+
+    #[test]
+    fn a_job_from_a_sensitive_conversation_stays_sensitive_after_the_resume() {
+        let b = book();
+        b.set_sensitivity(|tag| tag == "claudia-1");
+        b.history().record("claudia-1", SID);
+        let mut jobs = vec![job("j1", Some(claim("claudia-1", SID)))];
+        b.annotate(&mut jobs);
+        b.history().move_session(SID, "claudia-1", "claudia-2");
+        let mut jobs = vec![job("j1", None)];
+        b.annotate(&mut jobs);
+        let mut ann = jobs[0].nostromo.clone().unwrap();
+        assert!(ann.origin_was_sensitive);
+        ann.redact_for_network(|_| false);
+        assert_eq!(ann.origin.focus_name.as_deref(), Some(SENSITIVE_NAME));
     }
 
     #[test]
