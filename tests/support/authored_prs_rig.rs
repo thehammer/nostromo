@@ -1032,6 +1032,7 @@ impl Rig {
                 tag: tag.to_owned(),
                 name: name.to_owned(),
                 agent_name: "cody".to_owned(),
+                built_in: false,
                 session_id: None,
                 spawn_cwd: Some(cwd),
                 project_path: None,

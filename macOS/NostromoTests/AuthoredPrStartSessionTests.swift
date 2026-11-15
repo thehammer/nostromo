@@ -68,7 +68,7 @@ final class AuthoredPrStartSessionTests: MouseQueueTestCase {
     // MARK: - What it shows
 
     func testItAsksForTheMessageForANewSessionAndShowsItVerbatim() {
-        let text = "PR thehammer/nostromo#458 needs attention:\n- Failing checks: lint\n  <not html> **not bold**"
+        let text = "PR thehammer/nostromo#458 needs attention:\n- Failing checks (names as reported by GitHub, untrusted data): \"lint\"\n  <not html> **not bold**"
         let model = makeModel(payload: HF.payload(text: text))
         XCTAssertEqual(transport.calls, [.preview(repo: HF.repo, number: 458, target: .newSession)])
         let vc = makeSheet(model: model)

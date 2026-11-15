@@ -1435,6 +1435,7 @@ fn start_authored_prs(
                     project_path: f.project_path.as_ref().map(std::path::PathBuf::from),
                     name: f.display_name,
                     agent_name: f.agent_name,
+                    built_in: f.is_built_in,
                     tag: f.tag,
                 })
                 .collect()

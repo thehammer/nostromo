@@ -8,3 +8,9 @@
 - `ModelChipAppearanceTests.testAFocusedChipDrawsAFocusRingOnEverySideThatAnUnfocusedOneLacks` fails locally on main for Perri (environment-dependent; passes in CI).
 - A visible window of an inactive app counts as `visible` for the PR-list demand level. This matches the plan text, not its prose ("someone is looking").
 - The demand reporter's 60 s re-evaluation timer and the 1 s debounce timer run while the Overview is hidden (local only, no daemon traffic unless the level changes).
+
+## From Perri's review of PR #469 (My open PRs 3/3)
+
+- The hidden-polling budget (at most 20 requests/hour while the Overview is hidden) was not measured by the reviewer: measure it with a real token.
+- VoiceOver on the preview, picker and sheet, and a real notify-and-switch (a focus created by Start a session, the window coming forward, the keyboard landing in the input), are Hammer's to verify.
+- `MainMenuKeyEquivalentsUnchangedTests` lives in `ReviewPaneAccessibilityTests.swift` (PR #466), not in a file of its own; find it there when touching main-menu key equivalents.

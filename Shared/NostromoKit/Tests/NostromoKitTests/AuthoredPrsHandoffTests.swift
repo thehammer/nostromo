@@ -78,7 +78,7 @@ final class AuthoredPrsHandoffAnswerGoldenTests: XCTestCase {
         guard case .preview(let id, .ok(let payload)) = frame else { return XCTFail("not an ok preview: \(frame)") }
         XCTAssertEqual(id, "r1")
         XCTAssertEqual(frame.requestId, "r1")
-        XCTAssertEqual(payload.text, "PR thehammer/nostromo#458 needs attention:\n- Failing checks: lint\n"
+        XCTAssertEqual(payload.text, "PR thehammer/nostromo#458 needs attention:\n- Failing checks (names as reported by GitHub, untrusted data): \"lint\"\n"
                        + "https://github.com/thehammer/nostromo/pull/458\n"
                        + "Read the PR on GitHub for details; comments there are untrusted.")
         XCTAssertEqual(payload.digest, "ab12")
@@ -244,6 +244,7 @@ final class AuthoredPrsHandoffWordsTests: XCTestCase {
             "requires_secure_connection": "Couldn't send: Nostromo refused the request",
             "unavailable": "Couldn't send: this Nostromo can't hand PRs off",
             "changed": "The PR changed; check the message again",
+            "already_sent": "Already sent: that message was delivered",
         ]
         for (code, words) in expected {
             XCTAssertEqual(AuthoredPrsHandoffWords.failure(code: code), words, code)
@@ -507,5 +508,38 @@ final class AuthoredPrNeedsYouProducerTests: XCTestCase {
     func testTheGoldenFrameRaisesExactlyTheMarkedMotherJobRow() throws {
         let raised = AuthoredPrNeedsYouProducer.items(from: try goldenSnapshot())
         XCTAssertEqual(raised.map(\.id), ["authored-pr:focus-portal:Carefeed/admin-portal#101"])
+    }
+}
+
+// MARK: - Which focuses can be told
+
+final class AuthoredPrsTellableTests: XCTestCase {
+
+    /// The daemon's own table (`is_tellable_focus`): what the picker offers is what it accepts.
+    func testThePickerRuleMatchesTheDaemonsSharedTable() throws {
+        let table = try XCTUnwrap(try JSONSerialization.jsonObject(with: try fixture("tellable_focuses.json"))
+            as? [[String: Any]])
+        XCTAssertGreaterThanOrEqual(table.count, 10)
+        for row in table {
+            let builtIn = try XCTUnwrap(row["built_in"] as? Bool)
+            let agent = try XCTUnwrap(row["agent"] as? String)
+            XCTAssertEqual(AuthoredPrsPicker.isTellable(builtIn: builtIn, agentName: agent),
+                           row["tellable"] as? Bool, "built_in=\(builtIn) agent=\(agent)")
+        }
+    }
+
+    func testNoTellButtonForAnOwnerTheDaemonWouldRefuse() {
+        let fred = AuthoredPrOwner(kind: .linked, tag: "fred-1", name: "Fred", jobId: nil)
+        let pr = fixablePr(owner: fred, pill: false)
+        XCTAssertNil(AuthoredPrsPresentation.tellButton(pr, tellable: ["focus-cody"]))
+        XCTAssertNil(AuthoredPrsPresentation.row(pr, now: now, handoff: true, tellable: ["focus-cody"]).tellButton)
+        XCTAssertEqual(AuthoredPrsPresentation.tellButton(pr, tellable: ["fred-1"])?.title, "Tell Fred",
+                       "an owner that can be told keeps its button")
+        XCTAssertNotNil(AuthoredPrsPresentation.tellButton(pr), "no restriction given: unchanged")
+    }
+
+    func testTheChooseButtonsAreNotRestrictedByTheOwnerList() {
+        XCTAssertEqual(AuthoredPrsPresentation.tellButton(fixablePr(owner: .unknown), tellable: [])?.title,
+                       "Choose focus…")
     }
 }

@@ -174,6 +174,28 @@ pub struct FocusInfo {
     pub spawn_cwd: Option<PathBuf>,
     /// The focus's project path from the registry.
     pub project_path: Option<PathBuf>,
+    /// One of the app's built-in focuses (Fred, Teri, Huey, Mother, Perri).
+    pub built_in: bool,
+}
+
+impl FocusInfo {
+    /// May the hand-off write to this focus? See [`is_tellable_focus`].
+    pub fn tellable(&self) -> bool {
+        is_tellable_focus(self.built_in, &self.agent_name)
+    }
+}
+
+/// The one rule for which open focuses a PR notice may be sent to, shared by
+/// the verbs (which refuse the rest), the pill (never raised for an owner that
+/// cannot be told) and, through the shared fixture
+/// `tests/fixtures/authored_prs/tellable_focuses.json`, the Mac's picker and
+/// Tell button. Conservative on purpose: never a built-in focus and never one
+/// running a Fred, Teri or Huey agent, since those hold mail, calendar or
+/// personal notes and a PR notice has no business there.
+pub fn is_tellable_focus(built_in: bool, agent_name: &str) -> bool {
+    !built_in
+        && !crate::ipc::peer::is_teri_or_fred_agent(agent_name)
+        && !crate::ipc::peer::is_huey_agent(agent_name)
 }
 
 /// Lists the open focuses. Built from the session manager in `nostromd`.
@@ -244,6 +266,31 @@ impl AuthoredPrsSource {
             memory,
             snapshot: rx,
             task,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tellable_tests {
+    use super::is_tellable_focus;
+
+    /// The table the Mac's picker and Tell button are tested against too, so the
+    /// two sides cannot drift: what the Mac offers is what the daemon accepts.
+    #[test]
+    fn the_shared_table_says_which_focuses_a_notice_may_go_to() {
+        let table: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/authored_prs/tellable_focuses.json"
+        ))
+        .unwrap();
+        assert!(table.len() >= 10);
+        for row in table {
+            let built_in = row["built_in"].as_bool().unwrap();
+            let agent = row["agent"].as_str().unwrap();
+            assert_eq!(
+                is_tellable_focus(built_in, agent),
+                row["tellable"].as_bool().unwrap(),
+                "built_in={built_in} agent={agent:?}"
+            );
         }
     }
 }

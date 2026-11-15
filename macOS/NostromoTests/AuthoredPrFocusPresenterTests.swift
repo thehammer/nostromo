@@ -20,6 +20,8 @@ import NostromoKit
 //   M2 the presenter forgets to activate the app          -> testTheAppIsBroughtForward
 //   M3 no retry while the focus is arriving               -> testItRetriesWhileTheFocusIsStillArriving
 //   M4 retries never stop                                 -> testItGivesUpAfterItsAttempts
+//   M6 the window is ordered front on every retry          -> testTheWindowIsOrderedFrontOnceHoweverLongTheFocusTakesToArrive
+//   M7 the default attempts go back to 20                   -> testTheDefaultRetryBoundIsAtMostTenTries
 //   M5 `focusInput` does not make the input first responder -> testAReplViewTakesTheKeyboardInItsInput
 final class AuthoredPrFocusPresenterTests: MouseQueueTestCase {
 
@@ -84,6 +86,25 @@ final class AuthoredPrFocusPresenterTests: MouseQueueTestCase {
         XCTAssertEqual(origin.log.last, "focusInput")
         XCTAssertFalse(counters.delays.isEmpty, "it waited between tries")
         XCTAssertLessThan(try XCTUnwrap(counters.delays.max()), 2, "a short wait: the person is watching")
+    }
+
+    func testTheWindowIsOrderedFrontOnceHoweverLongTheFocusTakesToArrive() {
+        // The window shows the focus at once, but its input is on screen only on the fifth try.
+        let showing = FakeFocusHost(window: makeWindow(), shows: "cody-1", openTags: ["cody-1"], inputReadyAfter: 4)
+        let presenter = makeFakePresenter(hosts: { [showing] in [showing] })
+
+        presenter.show(tag: "cody-1", from: nil)
+
+        XCTAssertGreaterThanOrEqual(showing.inputCalls, 5, "precondition: it retried")
+        XCTAssertEqual(showing.log.filter { $0 == "bringToFront" }.count, 1, "ordered front once, not on every retry")
+    }
+
+    func testTheDefaultRetryBoundIsAtMostTenTries() {
+        let origin = FakeFocusHost(window: makeWindow(), openTags: [])
+        let presenter = makeFakePresenter(hosts: { [origin] in [origin] })
+        presenter.show(tag: "never", from: origin.nsWindow)
+        XCTAssertLessThanOrEqual(origin.switchCalls, 10, "a second of waiting at most")
+        XCTAssertGreaterThan(origin.switchCalls, 1)
     }
 
     func testItGivesUpAfterItsAttempts() {

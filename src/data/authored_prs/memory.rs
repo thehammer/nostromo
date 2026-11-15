@@ -130,6 +130,7 @@ mod tests {
             tag: tag.into(),
             name: format!("{tag} focus"),
             agent_name: agent.into(),
+            built_in: false,
             session_id: None,
             spawn_cwd: None,
             project_path: Some(PathBuf::from("/tmp/p")),

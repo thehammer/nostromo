@@ -67,10 +67,12 @@ class AppStore: ObservableObject {
         transport: authoredPrHandoffTransport,
         presenter: FocusPresenter(),
         openFocuses: {
-            FocusStore.shared.focuses.filter { !$0.isBuiltIn }.map {
-                AuthoredPrPickerFocus(tag: $0.sessionTag, name: $0.displayName,
-                                      repoName: $0.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent })
-            }
+            FocusStore.shared.focuses
+                .filter { AuthoredPrsPicker.isTellable(builtIn: $0.isBuiltIn, agentName: $0.agentTag) }
+                .map {
+                    AuthoredPrPickerFocus(tag: $0.sessionTag, name: $0.displayName,
+                                          repoName: $0.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent })
+                }
         },
         openFocusTags: FocusStore.shared.$focuses
             .map { Set($0.map(\.sessionTag)) }

@@ -198,6 +198,20 @@ struct PendingMessage {
     images: Vec<String>,
     /// The user's, or the daemon's (combinable; see `inject`).
     origin: PendingOrigin,
+    /// Run once the message has been written to the session's stdin; never run
+    /// for a message an interrupt dropped from the queue.
+    on_delivered: Option<DeliveredHook>,
+}
+
+/// What to do when a queued message is actually delivered (see
+/// [`SessionManager::send_user_message_then`]).
+#[derive(Clone)]
+struct DeliveredHook(Arc<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for DeliveredHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeliveredHook")
+    }
 }
 
 // ── shared, reader-thread-visible session state ───────────────────────────────
@@ -1540,12 +1554,33 @@ impl SessionManager {
     /// Enqueue a user message. Writes immediately to stdin if the session is
     /// idle, otherwise queues it to drain after the current turn completes.
     pub fn send_user_message(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
-        self.write_user_message_to(tag, text, images)?;
+        self.write_user_message_to(tag, text, images, None)?;
         self.note_conversation_send(tag, text, !images.is_empty());
         Ok(())
     }
 
-    fn write_user_message_to(&mut self, tag: &str, text: &str, images: &[String]) -> Result<()> {
+    /// [`send_user_message`](Self::send_user_message), running `on_delivered`
+    /// once the text has actually been written to the session: at once for an
+    /// idle session, after the turn for a queued one, and never if the user's
+    /// Stop drops it from the queue first.
+    pub fn send_user_message_then(
+        &mut self,
+        tag: &str,
+        text: &str,
+        on_delivered: impl Fn() + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.write_user_message_to(tag, text, &[], Some(DeliveredHook(Arc::new(on_delivered))))?;
+        self.note_conversation_send(tag, text, false);
+        Ok(())
+    }
+
+    fn write_user_message_to(
+        &mut self,
+        tag: &str,
+        text: &str,
+        images: &[String],
+        on_delivered: Option<DeliveredHook>,
+    ) -> Result<()> {
         // Text sent during a work-item send is that item's content: the
         // session it lands in is sensitive before the text is written.
         if in_work_send() {
@@ -1565,7 +1600,8 @@ impl SessionManager {
         // message is queued, not written, while a turn runs or a model switch
         // is being applied; queueing happens under the same lock so a turn end
         // draining the queue can't miss it.
-        let message = PendingMessage::user(text, images);
+        let mut message = PendingMessage::user(text, images);
+        message.on_delivered = on_delivered;
         let should_write = {
             let mut state = lock_recover(&session.shared.state);
             let applying = lock_recover(&session.shared.model).applying.is_some();
@@ -3805,6 +3841,16 @@ fn write_frame(stdin: &Arc<Mutex<Option<ChildStdin>>>, frame: &serde_json::Value
 /// any) in front of it. The exact frame is remembered (see `login::write_recorded`)
 /// so a turn that fails to authenticate can hold it.
 fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
+    let result = write_user_message_framed(shared, msg);
+    if result.is_ok() {
+        if let Some(hook) = &msg.on_delivered {
+            (hook.0)();
+        }
+    }
+    result
+}
+
+fn write_user_message_framed(shared: &Shared, msg: &PendingMessage) -> Result<()> {
     let prefix = lock_recover(&shared.note_prefix).take();
     match prefix {
         Some(note) => {
@@ -3818,6 +3864,7 @@ fn write_user_message(shared: &Shared, msg: &PendingMessage) -> Result<()> {
                     text,
                     images: msg.images.clone(),
                     origin: msg.origin.clone(),
+                    on_delivered: None,
                 },
             );
             if result.is_err() {

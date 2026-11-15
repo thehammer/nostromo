@@ -1422,10 +1422,15 @@ impl Engine {
                         .map_or_else(|| "a closed focus".to_owned(), |n| one_line(&n, MAX_NAME)),
                     at: t.at,
                 });
+                // A pill is a promise that Tell works: never raised for an owner
+                // the verbs would refuse (a built-in or a sensitive focus).
                 let known_open_owner = matches!(
                     owner.kind,
                     OwnerKind::MotherJob | OwnerKind::Linked | OwnerKind::OnBranch
-                );
+                ) && owner
+                    .tag
+                    .as_deref()
+                    .is_some_and(|tag| infos.iter().any(|f| f.tag == tag && f.tellable()));
                 let pill = group == Group::NeedsYou
                     && !p.draft
                     && p.lifecycle == Lifecycle::Open

@@ -230,7 +230,8 @@ public enum AuthoredPrsPresentation {
     // MARK: Groups and rows
 
     public static func groups(_ prs: [AuthoredPr], showAll: Set<AuthoredPrGroup> = [],
-                              now: Date, timeZone: TimeZone, handoff: Bool = false) -> [AuthoredPrsGroupModel] {
+                              now: Date, timeZone: TimeZone, handoff: Bool = false,
+                              tellable: Set<String>? = nil) -> [AuthoredPrsGroupModel] {
         let chips = repoChips(prs)
         return AuthoredPrGroup.displayOrder.compactMap { group in
             let members = prs.filter { $0.group == group }
@@ -239,7 +240,7 @@ public enum AuthoredPrsPresentation {
             let shown = members.prefix(limit)
             return AuthoredPrsGroupModel(
                 group: group, title: groupTitle(group), count: members.count,
-                rows: shown.map { row($0, chip: chips[$0.repo] ?? $0.repo, now: now, handoff: handoff) },
+                rows: shown.map { row($0, chip: chips[$0.repo] ?? $0.repo, now: now, handoff: handoff, tellable: tellable) },
                 hiddenCount: members.count - shown.count)
         }
     }
@@ -265,7 +266,10 @@ public enum AuthoredPrsPresentation {
         return chips
     }
 
-    public static func row(_ pr: AuthoredPr, chip: String? = nil, now: Date, handoff: Bool = false) -> AuthoredPrRowModel {
+    /// `tellable` is the tags of the open focuses the daemon would let a notice go to (nil: not restricted). A
+    /// row whose owner is not among them gets no Tell button: the daemon would refuse it.
+    public static func row(_ pr: AuthoredPr, chip: String? = nil, now: Date, handoff: Bool = false,
+                           tellable: Set<String>? = nil) -> AuthoredPrRowModel {
         let chipText = chip ?? repoChips([pr])[pr.repo] ?? pr.repo
         let (kind, glyph, word) = status(pr)
         let checks = checksLine(pr.checks)
@@ -285,7 +289,7 @@ public enum AuthoredPrsPresentation {
         model.ownerName = pr.owner.name
         model.ownerCandidates = pr.owner.candidates
         if handoff {
-            model.tellButton = tellButton(pr)
+            model.tellButton = tellButton(pr, tellable: tellable)
             model.toldText = toldText(pr.told, now: now)
             if let told = model.toldText { model.accessibilityLabel += ", \(told)" }
         }
@@ -307,12 +311,13 @@ public enum AuthoredPrsPresentation {
     }
 
     /// The button for a fixable row, worded from its owner; nil when there is nothing to fix.
-    public static func tellButton(_ pr: AuthoredPr) -> AuthoredPrTellButton? {
+    public static func tellButton(_ pr: AuthoredPr, tellable: Set<String>? = nil) -> AuthoredPrTellButton? {
         guard isFixable(pr) else { return nil }
         let n = pr.number
         switch pr.owner.kind {
         case .motherJob, .linked, .onBranch:
             if let tag = pr.owner.tag, !tag.isEmpty {
+                if let tellable, !tellable.contains(tag) { return nil }
                 let first = firstWord(pr.owner.name ?? "")
                 let who = first.isEmpty ? "focus" : first
                 return AuthoredPrTellButton(action: .tell(tag: tag), title: "Tell \(who)",

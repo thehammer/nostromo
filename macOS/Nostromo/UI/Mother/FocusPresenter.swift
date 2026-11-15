@@ -21,8 +21,9 @@ final class FocusPresenter {
     var activateApp: () -> Void
     /// Runs `work` after a delay: a focus a daemon just created may need a moment to appear. Tests run it at once.
     var later: (TimeInterval, @escaping () -> Void) -> Void
-    /// How many times the switch and the input focus are retried while the focus is still arriving.
-    var attempts = 20
+    /// How many times the switch and the input focus are retried while the focus is still arriving: a second
+    /// at most, at 0.1 s apart (a daemon-created focus shows up within a few tenths).
+    var attempts = 10
 
     init(hosts: @escaping () -> [FocusHostWindow] = { FocusPresenter.liveHosts() },
          activateApp: @escaping () -> Void = {
@@ -42,21 +43,28 @@ final class FocusPresenter {
     /// The window is switched directly rather than through `focusSelectionRequests`, which picks the key
     /// window and can race the popover that was just closed.
     func show(tag: String, from origin: NSWindow?) {
-        attempt(tag: tag, origin: origin, remaining: attempts, activated: false)
+        attempt(tag: tag, origin: origin, remaining: attempts, activated: false, raised: false)
     }
 
-    private func attempt(tag: String, origin: NSWindow?, remaining: Int, activated: Bool) {
+    private func attempt(tag: String, origin: NSWindow?, remaining: Int, activated: Bool, raised: Bool) {
         let all = hosts()
         let target: FocusHostWindow?
+        var raisedNow = raised
+        // The window is ordered front once, and not at all when it already is the key window: a retry must not
+        // keep pulling a window forward while the person has moved on.
+        let raise = { (host: FocusHostWindow) in
+            if !raisedNow && host.nsWindow?.isKeyWindow != true { host.bringToFront() }
+            raisedNow = true
+        }
         if let shown = all.first(where: { $0.shownFocusTag == tag }) {
             ActivationAudit.note("authored-pr:present-focus-window")
-            shown.bringToFront()
+            raise(shown)
             target = shown
         } else {
             let clicked = all.first(where: { origin != nil && $0.nsWindow === origin })
                 ?? all.first(where: { $0.nsWindow?.isKeyWindow == true })
             if let clicked, clicked.switchTo(tag: tag) {
-                clicked.bringToFront()
+                raise(clicked)
                 target = clicked
             } else {
                 target = nil
@@ -70,7 +78,7 @@ final class FocusPresenter {
         }
         guard remaining > 1 else { return }
         later(0.1) { [weak self] in
-            self?.attempt(tag: tag, origin: origin, remaining: remaining - 1, activated: activatedNow)
+            self?.attempt(tag: tag, origin: origin, remaining: remaining - 1, activated: activatedNow, raised: raisedNow)
         }
     }
 

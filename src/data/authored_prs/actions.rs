@@ -22,6 +22,18 @@ use super::{Clock, DemandBoard};
 use crate::mother::origin::SessionHistory;
 
 const REMEMBERED_STARTS: usize = 64;
+/// How long a delivered preview stays spent, and how many are remembered.
+const SENT_TTL_SECS: i64 = 600;
+const REMEMBERED_SENDS: usize = 64;
+
+/// One delivered preview: the PR, who it went to (`new` for a new session),
+/// and the digest of the text.
+struct SentMark {
+    pr: String,
+    target: String,
+    digest: String,
+    at: chrono::DateTime<chrono::Utc>,
+}
 
 pub struct AuthoredPrActions {
     board: Arc<DemandBoard>,
@@ -32,6 +44,9 @@ pub struct AuthoredPrActions {
     agents_dir: PathBuf,
     clock: Arc<dyn Clock>,
     starts: Mutex<VecDeque<(String, AuthoredPrResult<StartOk>)>>,
+    /// Previews already sent, so a replayed send (a dropped connection and a
+    /// second press) delivers nothing. A new preview of the PR re-arms it.
+    sent: Mutex<VecDeque<SentMark>>,
     /// Held for a whole "start a session", so two requests with one id cannot
     /// both create a focus.
     pub start_gate: tokio::sync::Mutex<()>,
@@ -81,6 +96,7 @@ impl AuthoredPrActions {
             agents_dir,
             clock,
             starts: Mutex::new(VecDeque::new()),
+            sent: Mutex::new(VecDeque::new()),
             start_gate: tokio::sync::Mutex::new(()),
         }
     }
@@ -187,6 +203,52 @@ impl AuthoredPrActions {
         while g.len() > REMEMBERED_STARTS {
             g.pop_front();
         }
+    }
+
+    /// Spend the preview (`repo#number`, `target`, `digest`) before delivering
+    /// it. `false` when it was already spent in the last ten minutes and not
+    /// previewed again since: the caller answers `already_sent` and delivers
+    /// nothing. Taken and checked in one step, so two sends at once cannot
+    /// both pass. Give it back with [`release_send`](Self::release_send) when
+    /// the delivery fails.
+    pub fn claim_send(&self, repo: &str, number: u64, target: &str, digest: &str) -> bool {
+        let now = self.clock.now();
+        let pr = key_string(repo, number);
+        let mut g = self.sent.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|m| now - m.at < chrono::Duration::seconds(SENT_TTL_SECS));
+        if g.iter()
+            .any(|m| m.pr == pr && m.target == target && m.digest == digest)
+        {
+            return false;
+        }
+        g.push_back(SentMark {
+            pr,
+            target: target.to_owned(),
+            digest: digest.to_owned(),
+            at: now,
+        });
+        while g.len() > REMEMBERED_SENDS {
+            g.pop_front();
+        }
+        true
+    }
+
+    /// Undo [`claim_send`](Self::claim_send): nothing was delivered.
+    pub fn release_send(&self, repo: &str, number: u64, target: &str, digest: &str) {
+        let pr = key_string(repo, number);
+        self.sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|m| !(m.pr == pr && m.target == target && m.digest == digest));
+    }
+
+    /// The PR was previewed again: its earlier sends are no longer spent.
+    pub fn rearm_sends(&self, repo: &str, number: u64) {
+        let pr = key_string(repo, number);
+        self.sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|m| m.pr != pr);
     }
 
     /// Is `agent` a name `~/.claude/agents` offers?

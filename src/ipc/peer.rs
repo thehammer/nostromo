@@ -2204,6 +2204,33 @@ mod tests {
                 level: "visible".into(),
             },
             ClientMsg::AuthoredPrsRefresh {},
+            ClientMsg::AuthoredPrPreviewRequest {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                target: crate::data::authored_prs::wire::PreviewTarget::Focus { tag: "x1".into() },
+            },
+            ClientMsg::AuthoredPrNotify {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                tag: "x1".into(),
+                digest: "d".into(),
+            },
+            ClientMsg::AuthoredPrStartSession {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                folder: "/tmp".into(),
+                agent: "claude".into(),
+                digest: "d".into(),
+            },
+            ClientMsg::AuthoredPrLink {
+                request_id: "r".into(),
+                repo: "o/r".into(),
+                number: 1,
+                tag: Some("x1".into()),
+            },
             ClientMsg::ConversationHistoryGet {
                 request_id: "r".into(),
             },
@@ -2367,7 +2394,7 @@ mod tests {
     /// number, bump this, and add a fixture to `every_client_msg()`; the test below fails
     /// otherwise, so a verb can't be added to the Allowed arm of `network_policy` without the
     /// fixture list (and so the exactness test) covering it.
-    const CLIENT_MSG_VARIANTS: usize = 87;
+    const CLIENT_MSG_VARIANTS: usize = 91;
 
     /// Wildcard-free: a new `ClientMsg` variant does not compile until it gets an ordinal.
     fn ordinal(msg: &ClientMsg) -> usize {
@@ -2505,9 +2532,10 @@ mod tests {
         // 72 with the two Approvals-log requests; 75 with the three persisted-rule verbs (AP6);
         // 76 with `TrackerOpenLink` (T6; expect a trivial conflict on this constant with T3a's tracker verbs);
         // 77 with `TerminalFollowInviteStagingOnly` (S3a); 78 with `SessionCommandsGet`;
-        // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs.
-        assert_eq!(CLIENT_MSG_VARIANTS, 87);
-        assert_eq!(every_client_msg().len(), 87);
+        // 80 with the two authored-PR verbs; 87 with the seven conversation-history verbs;
+        // 91 with the four authored-PR hand-off verbs (preview, notify, start session, link).
+        assert_eq!(CLIENT_MSG_VARIANTS, 91);
+        assert_eq!(every_client_msg().len(), 91);
     }
 
     #[test]

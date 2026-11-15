@@ -10,10 +10,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::data::authored_prs::actions::AuthoredPrActions;
+use crate::data::authored_prs::is_tellable_focus;
 use crate::data::authored_prs::snapshot::{AuthoredPr, MAX_NAME};
 use crate::data::authored_prs::wire::{AuthoredPrResult, Done, PreviewOk, PreviewTarget, StartOk};
 use crate::data::work::untrusted::one_line;
-use crate::ipc::peer::{is_huey_agent, is_teri_or_fred_agent};
 use crate::ipc::protocol::FocusMeta;
 use crate::ipc::SessionManager;
 use crate::mcp::tools::create_focus::{
@@ -30,9 +30,7 @@ fn open_focus(mgr: &Mgr, tag: &str) -> Option<FocusMeta> {
         .focus_registry()
         .into_iter()
         .find(|f| f.tag == tag)
-        .filter(|f| {
-            !f.is_built_in && !is_teri_or_fred_agent(&f.agent_name) && !is_huey_agent(&f.agent_name)
-        })
+        .filter(|f| is_tellable_focus(f.is_built_in, &f.agent_name))
 }
 
 fn names_tag(row: &AuthoredPr, tag: &str) -> bool {
@@ -53,6 +51,8 @@ pub fn preview(
         Ok(c) => c,
         Err(code) => return AuthoredPrResult::err(code),
     };
+    // A fresh preview is a fresh chance to send.
+    actions.rearm_sends(&composed.row.repo, composed.row.number);
     let last_told = AuthoredPrActions::last_told(&composed.row);
     let mut ok = PreviewOk {
         text: composed.text,
@@ -89,10 +89,13 @@ pub fn preview(
     AuthoredPrResult::Ok(ok)
 }
 
-/// Send the message to the open focus `tag`, behind a running turn, and record
-/// that it was told. Nothing is recorded unless the message was written or queued.
+/// Send the message to the open focus `tag`, behind a running turn. It is
+/// recorded as told only once the session has really been given it: a message
+/// queued behind a running turn that the user then stops never arrives, and
+/// must leave the pill up. Each preview is good for one send: a replay answers
+/// `already_sent` and delivers nothing.
 pub fn notify(
-    actions: &AuthoredPrActions,
+    actions: &Arc<AuthoredPrActions>,
     mgr: &Mgr,
     repo: &str,
     number: u64,
@@ -109,14 +112,30 @@ pub fn notify(
     if composed.digest != digest {
         return AuthoredPrResult::err("changed");
     }
-    {
-        let mut g = mgr.lock().unwrap();
-        if g.ensure_session(tag).is_err() || g.send_user_message(tag, &composed.text, &[]).is_err()
-        {
-            return AuthoredPrResult::err("not_running");
-        }
+    if !actions.claim_send(&composed.row.repo, composed.row.number, tag, digest) {
+        return AuthoredPrResult::err("already_sent");
     }
-    actions.record_told(&composed.row, tag);
+    let delivered = {
+        let (actions, row, tag) = (Arc::clone(actions), composed.row.clone(), tag.to_owned());
+        move || actions.record_told(&row, &tag)
+    };
+    // The manager lock is held across `ensure_session` (which may start the
+    // session's process) and the send, as it is for every spawn, restart and
+    // send in the daemon: `spawn_session` needs `&mut SessionManager`, so it
+    // cannot run with the lock released. Nothing here waits on the turn: the
+    // message is written to a pipe or queued, and a restart's wait for an
+    // in-flight write is capped at `WRITE_WAIT_LIMIT` (5 s), as for the user's
+    // own restart. The slow part, the CLI starting, is the child's, not ours.
+    let sent = {
+        let mut g = mgr.lock().unwrap();
+        g.ensure_session(tag).is_ok()
+            && g.send_user_message_then(tag, &composed.text, delivered)
+                .is_ok()
+    };
+    if !sent {
+        actions.release_send(&composed.row.repo, composed.row.number, tag, digest);
+        return AuthoredPrResult::err("not_running");
+    }
     AuthoredPrResult::Ok(Done {})
 }
 
@@ -171,6 +190,9 @@ async fn start_once(
     if !actions.agent_is_known(agent) {
         return AuthoredPrResult::err("unknown_agent");
     }
+    if !actions.claim_send(&composed.row.repo, composed.row.number, "new", digest) {
+        return AuthoredPrResult::err("already_sent");
+    }
     // No instruction: the create path would wrap it in its own framing, and the
     // first message must be byte-identical to the preview, so it goes in as
     // `first_message`, which is sent as it is.
@@ -197,12 +219,16 @@ async fn start_once(
     .await
     {
         Ok(o) => o,
-        Err(_) => return AuthoredPrResult::err("start_failed"),
+        Err(_) => {
+            actions.release_send(&composed.row.repo, composed.row.number, "new", digest);
+            return AuthoredPrResult::err("start_failed");
+        }
     };
     let Some(tag) = outcome
         .focus_tag
         .filter(|_| outcome.kind == OutcomeKind::Created)
     else {
+        actions.release_send(&composed.row.repo, composed.row.number, "new", digest);
         return AuthoredPrResult::err("already_open");
     };
     actions.set_link(&composed.row.repo, composed.row.number, Some(&tag));

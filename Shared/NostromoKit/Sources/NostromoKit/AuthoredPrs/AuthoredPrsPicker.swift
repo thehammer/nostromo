@@ -26,6 +26,16 @@ public struct AuthoredPrPickerEntry: Equatable, Sendable {
 public enum AuthoredPrsPicker {
     public static let startTitle = "Start a session…"
 
+    /// May a PR notice go to this focus? The daemon's rule (`is_tellable_focus` in `authored_prs/mod.rs`): never a
+    /// built-in focus and never one running a Fred, Teri or Huey agent, with or without a plugin qualifier.
+    /// Checked against the same table as the daemon's (`tests/fixtures/authored_prs/tellable_focuses.json`).
+    public static func isTellable(builtIn: Bool, agentName: String) -> Bool {
+        if builtIn { return false }
+        let bare = agentName.split(separator: ":", omittingEmptySubsequences: false).last
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        return !["fred", "teri", "huey"].contains(bare.lowercased())
+    }
+
     /// The entries, in order; the last is always Start a session…. Nothing is preselected by the caller.
     ///
     /// - ambiguous: the open candidates, each with how it was found.

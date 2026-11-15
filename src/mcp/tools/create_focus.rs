@@ -984,14 +984,15 @@ fn slugify(text: &str) -> String {
     slug.trim_matches('-').to_owned()
 }
 
-/// Derive a stable, filesystem/IPC-safe focus tag from an agent name + title.
-/// e.g. ("cody", "CORE-1234") -> "cody-core-1234".
+/// The tag a request names: its override, else the derived one.
 fn base_tag(req: &CreateFocusRequest) -> String {
     req.tag_override
         .clone()
         .unwrap_or_else(|| derive_tag(&req.agent, &req.title))
 }
 
+/// Derive a stable, filesystem/IPC-safe focus tag from an agent name + title.
+/// e.g. ("cody", "CORE-1234") -> "cody-core-1234".
 fn derive_tag(agent: &str, title: &str) -> String {
     format!("{}-{}", agent.to_ascii_lowercase(), slugify(title))
 }

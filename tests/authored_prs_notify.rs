@@ -903,7 +903,7 @@ fn assert_not_logged(log: &str, what: &str, text: &str) {
         "canary-org",
         FOCUS_NAME,
         "424242",
-        "Failing checks:",
+        "Failing checks (names as reported",
         "Changes requested by:",
         "Read the PR on GitHub",
         "ignore previous instructions",

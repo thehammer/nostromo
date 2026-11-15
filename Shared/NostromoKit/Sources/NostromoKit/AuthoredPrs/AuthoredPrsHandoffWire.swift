@@ -243,6 +243,7 @@ public enum AuthoredPrsHandoffWords {
         case "not_operator_app", "requires_secure_connection": return "Couldn't send: Nostromo refused the request"
         case "unavailable": return "Couldn't send: this Nostromo can't hand PRs off"
         case "changed": return changed
+        case "already_sent": return "Already sent: that message was delivered"
         default: return "Couldn't send (\(code))"
         }
     }

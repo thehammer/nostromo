@@ -30,6 +30,8 @@ use nostromo::data::authored_prs::notice::{compose, PrFacts};
 use nostromo::data::authored_prs::ownership::PrKey;
 use nostromo::data::authored_prs::snapshot::{Group, Lifecycle, OwnerKind};
 use nostromo::data::authored_prs::{AuthoredPrActions, FocusInfo, TokioClock};
+use nostromo::mother::origin::{JobAnnotation, OriginKind, OriginView};
+use nostromo::mother::MotherJob;
 use rig::*;
 
 const REPO: &str = "Carefeed/app";
@@ -181,9 +183,9 @@ fn ten_names_are_listed_in_full_and_the_eleventh_becomes_and_one_more() {
     let ten = compose(&facts(10)).unwrap();
     let eleven = compose(&facts(11)).unwrap();
 
-    assert!(ten.contains("c10\n") && !ten.contains("more"), "{ten}");
+    assert!(ten.contains("\"c10\"\n") && !ten.contains("more"), "{ten}");
     assert!(
-        eleven.contains("c10, and 1 more\n") && !eleven.contains("c11"),
+        eleven.contains("\"c10\" and 1 more\n") && !eleven.contains("c11"),
         "{eleven}"
     );
 }
@@ -208,6 +210,12 @@ fn a_hostile_login_or_check_name_never_adds_a_line_to_the_message() {
     // Header, failing checks, change requesters, link, closing sentence.
     assert_eq!(text.lines().count(), 5, "{text}");
     assert!(text.contains("- Changes requested by: dana\n"), "{text}");
+    let checks = text.lines().nth(1).unwrap();
+    assert!(
+        checks.starts_with("- Failing checks (names as reported by GitHub, untrusted data): \"")
+            && checks.ends_with('"'),
+        "the hostile name is one quoted, labelled datum: {checks}"
+    );
     assert!(!text.contains("root") && !text.contains("evil"), "{text}");
 }
 
@@ -410,6 +418,111 @@ async fn a_linked_pr_is_owned_by_the_focus_while_it_is_open_and_closed_when_it_i
     assert_eq!(owner_kind(&rig, 1), OwnerKind::Linked, "and open again");
 }
 
+/// A Mother job for PR `number` that a focus queued (vouched), named for `tag`.
+fn mother_job(id: &str, number: u64, tag: &str) -> MotherJob {
+    mother_job_closed(id, number, tag, None)
+}
+
+fn mother_job_closed(id: &str, number: u64, tag: &str, closed: Option<bool>) -> MotherJob {
+    MotherJob {
+        id: id.into(),
+        pr_url: Some(format!("https://github.com/Carefeed/app/pull/{number}")),
+        nostromo: Some(JobAnnotation {
+            origin: OriginView {
+                kind: OriginKind::Focus,
+                focus_tag: Some(tag.to_owned()),
+                name_snapshot: Some(format!("{tag} (then)")),
+                focus_name: Some(format!("{tag} now")),
+                closed,
+                session_prefix: None,
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn start_a_session_for_a_closed_mother_owner_leaves_the_pr_linked_to_the_new_focus() {
+    let (mut rig, _fake) = boot(vec![failing(1)]).await;
+    // The Mother job's focus is gone: the row reads Closed ("Start a session…").
+    rig.jobs_tx
+        .send(vec![mother_job_closed("job-1", 1, "gone", Some(true))])
+        .unwrap();
+    poked(&mut rig, 1).await;
+    assert_eq!(owner_kind(&rig, 1), OwnerKind::Closed);
+
+    // "Start and send" makes the new focus and links the PR to it.
+    open_focus(&rig, "fresh", "Fresh");
+    assert!(actions(&rig).set_link(REPO, 1, Some("fresh")));
+    poked(&mut rig, 1).await;
+
+    let row = rig.row(REPO, 1).unwrap();
+    assert_eq!(
+        row.owner.kind,
+        OwnerKind::Linked,
+        "the user's link outranks the closed Mother claim: {:?}",
+        row.owner
+    );
+    assert_eq!(row.owner.tag.as_deref(), Some("fresh"));
+    assert!(row.owner.candidates.is_empty());
+    assert!(row.pill, "a tellable open owner: the pill comes up");
+}
+
+#[tokio::test]
+async fn a_user_link_outranks_an_open_mother_owner_on_another_focus_until_it_is_removed() {
+    let (mut rig, _fake) = boot(vec![failing(1)]).await;
+    open_focus(&rig, "alpha", "Alpha");
+    open_focus(&rig, "beta", "Beta");
+    rig.jobs_tx
+        .send(vec![mother_job("job-1", 1, "alpha")])
+        .unwrap();
+    poked(&mut rig, 1).await;
+    assert_eq!(owner_kind(&rig, 1), OwnerKind::MotherJob);
+
+    // The operator chose beta (the picker only offers a choice for a PR the
+    // list could not settle; an explicit choice is the final word).
+    assert!(actions(&rig).set_link(REPO, 1, Some("beta")));
+    poked(&mut rig, 1).await;
+    let owner = rig.row(REPO, 1).unwrap().owner;
+    assert_eq!(
+        (owner.kind, owner.tag.as_deref()),
+        (OwnerKind::Linked, Some("beta"))
+    );
+
+    // Removing the link gives the claim back.
+    assert!(actions(&rig).set_link(REPO, 1, None));
+    poked(&mut rig, 1).await;
+    assert_eq!(owner_kind(&rig, 1), OwnerKind::MotherJob);
+}
+
+#[tokio::test]
+async fn a_picker_choice_on_an_ambiguous_pr_makes_it_linked() {
+    let (mut rig, _fake) = boot(vec![failing(1)]).await;
+    open_focus(&rig, "alpha", "Alpha");
+    open_focus(&rig, "beta", "Beta");
+    rig.jobs_tx
+        .send(vec![
+            mother_job("job-1", 1, "alpha"),
+            mother_job("job-2", 1, "beta"),
+        ])
+        .unwrap();
+    poked(&mut rig, 1).await;
+    assert_eq!(owner_kind(&rig, 1), OwnerKind::Ambiguous);
+
+    assert!(actions(&rig).set_link(REPO, 1, Some("beta")));
+    poked(&mut rig, 1).await;
+
+    let row = rig.row(REPO, 1).unwrap();
+    assert_eq!(
+        row.owner.kind,
+        OwnerKind::MotherJob,
+        "beta's own job names it"
+    );
+    assert_eq!(row.owner.tag.as_deref(), Some("beta"));
+    assert!(row.owner.candidates.is_empty(), "no longer ambiguous");
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // The pill
 // ═════════════════════════════════════════════════════════════════════════════
@@ -448,6 +561,49 @@ async fn the_pill_is_for_a_pr_that_needs_you_with_a_known_open_owner_only() {
     assert!(
         !rig.row(REPO, 4).unwrap().pill,
         "a closed owner cannot be told"
+    );
+}
+
+#[tokio::test]
+async fn no_pill_is_raised_for_an_owner_that_cannot_be_told() {
+    let (mut rig, _fake) = boot(vec![failing(1), failing(2), failing(3)]).await;
+    let plain = rig.dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let focus = |tag: &str, agent: &str, built_in: bool| FocusInfo {
+        tag: tag.into(),
+        name: tag.into(),
+        agent_name: agent.into(),
+        built_in,
+        session_id: None,
+        spawn_cwd: Some(plain.clone()),
+        project_path: None,
+    };
+    {
+        let mut g = rig.focuses.lock().unwrap();
+        g.push(focus("alpha", "cody", false));
+        g.push(focus("fred-1", "fred", false));
+        g.push(focus("mother", "mother", true));
+    }
+    for (n, tag) in [(1, "alpha"), (2, "fred-1"), (3, "mother")] {
+        rig.store.link(&key(n), tag, t0());
+        rig.demand.pr_changed(pr_key(n));
+    }
+    rig.run(secs(3), secs(1)).await;
+
+    for n in 1..=3 {
+        assert_eq!(owner_kind(&rig, n), OwnerKind::Linked, "#{n}");
+    }
+    assert!(
+        rig.row(REPO, 1).unwrap().pill,
+        "an ordinary focus can be told"
+    );
+    assert!(
+        !rig.row(REPO, 2).unwrap().pill,
+        "a Fred agent's focus is refused by the daemon"
+    );
+    assert!(
+        !rig.row(REPO, 3).unwrap().pill,
+        "a built-in focus is refused by the daemon"
     );
 }
 
@@ -554,6 +710,7 @@ async fn the_agent_and_folder_of_open_focuses_are_remembered_across_a_restart() 
         tag: "alpha".into(),
         name: "Alpha".into(),
         agent_name: "cody".into(),
+        built_in: false,
         session_id: None,
         spawn_cwd: None,
         project_path: Some(work.clone()),
@@ -563,6 +720,7 @@ async fn the_agent_and_folder_of_open_focuses_are_remembered_across_a_restart() 
         tag: "mystery".into(),
         name: "Mystery".into(),
         agent_name: String::new(),
+        built_in: false,
         session_id: None,
         spawn_cwd: None,
         project_path: None,

@@ -437,7 +437,9 @@ final class AuthoredPrsOverviewView: NSView, NSOutlineViewDataSource, NSOutlineV
     // MARK: Outline contents
 
     private var groupModels: [AuthoredPrsGroupModel] {
-        AuthoredPrsPresentation.groups(displayed, showAll: showAll, now: clock(), timeZone: timeZone, handoff: handoffAvailable)
+        AuthoredPrsPresentation.groups(displayed, showAll: showAll, now: clock(), timeZone: timeZone,
+                                       handoff: handoffAvailable,
+                                       tellable: handoff.map { Set($0.openFocuses().map(\.tag)) })
     }
 
     private func rebuildRows() {
