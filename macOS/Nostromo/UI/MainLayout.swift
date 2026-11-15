@@ -535,13 +535,32 @@ class MainLayout: NSView {
         }
     }
 
+    /// What the New Focus sheet does with the focus it hands over: a resumed one always flushes the
+    /// registry before it is switched to (`FocusCreation.commitFromSheet`). The closures are test seams.
+    func commitFocusFromSheet(_ focus: Focus,
+                              flushRegistry: () -> Void = { AppStore.shared.pushFocusRegistry() },
+                              switchTo: ((Focus) -> Void)? = nil) {
+        FocusCreation.commitFromSheet(focus, store: focusStore, flushRegistry: flushRegistry) { [self] in
+            if let switchTo { switchTo($0) } else { switchFocus($0) }
+        }
+        presentedSheet = nil
+    }
+
     private func presentCreateFocusSheet() {
         guard let window else { return }
-        let sheet = CreateFocusSheet { [weak self] focus in
-            guard let self else { return }
-            FocusCreation.commit(focus, store: self.focusStore,
-                                 flushRegistry: { AppStore.shared.pushFocusRegistry() }) { self.switchFocus($0) }
-            self.presentedSheet = nil
+        let sheet = CreateFocusSheet(switchToTag: { [weak self] tag in
+            guard let self, let focus = self.focusStore.focuses.first(where: { $0.sessionTag == tag }) else { return false }
+            // A window that already shows it comes to the front; otherwise this window switches.
+            let layouts = NSApp.windows.compactMap { $0.contentView as? MainLayout }
+            if let shown = layouts.first(where: { $0.activeFocusTag == tag }), shown !== self {
+                ActivationAudit.note("resume:switch-to-window-showing-focus")
+                shown.window?.makeKeyAndOrderFront(nil)
+                return true
+            }
+            self.switchFocus(focus)
+            return true
+        }) { [weak self] focus in
+            self?.commitFocusFromSheet(focus)
         }
         presentedSheet = sheet  // retain for the sheet's lifetime
         window.beginSheet(sheet.window!) { [weak self] _ in
