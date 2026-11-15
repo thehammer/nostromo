@@ -51,11 +51,32 @@ impl AuthoredPrActions {
         agents_dir: PathBuf,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        Self::from_parts(
+            Arc::clone(&handle.demand),
+            handle.snapshot.clone(),
+            Arc::clone(&handle.store),
+            Arc::clone(&handle.memory),
+            projects_root,
+            agents_dir,
+            clock,
+        )
+    }
+
+    /// The same from its parts, for a test that feeds the snapshot itself.
+    pub fn from_parts(
+        board: Arc<DemandBoard>,
+        snapshot: watch::Receiver<Option<AuthoredPrsSnapshot>>,
+        store: Arc<AuthoredPrStore>,
+        memory: Arc<FocusMemory>,
+        projects_root: PathBuf,
+        agents_dir: PathBuf,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         AuthoredPrActions {
-            board: Arc::clone(&handle.demand),
-            snapshot: handle.snapshot.clone(),
-            store: Arc::clone(&handle.store),
-            memory: Arc::clone(&handle.memory),
+            board,
+            snapshot,
+            store,
+            memory,
             projects_root,
             agents_dir,
             clock,
