@@ -134,9 +134,18 @@ pub struct SearchIssueItem {
     user: Option<GhUser>,
     draft: Option<bool>,
     updated_at: Option<String>,
-    /// Only scanned for ticket keys (see [`scan_body`]); never stored or logged.
-    #[serde(default)]
-    body: Option<String>,
+    /// The keys scanned out of the PR body while it was parsed. The body itself is
+    /// dropped there: this item is cached across polls and must not keep it.
+    #[serde(default, rename = "body", deserialize_with = "scan_body_field")]
+    body_keys: Vec<BodyKey>,
+}
+
+fn scan_body_field<'de, D>(d: D) -> Result<Vec<BodyKey>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let body: Option<String> = Deserialize::deserialize(d)?;
+    Ok(body.as_deref().map(scan_body).unwrap_or_default())
 }
 
 #[derive(Deserialize, Clone)]
@@ -445,7 +454,7 @@ impl Candidate {
                 my_review: None,
                 targeted_seen_at: None,
                 head_ref: String::new(),
-                body_keys: item.body.as_deref().map(scan_body).unwrap_or_default(),
+                body_keys: item.body_keys.clone(),
             }
         })
     }
@@ -2480,7 +2489,7 @@ mod tests {
             }),
             draft: Some(draft),
             updated_at: updated_at.map(|s| s.to_owned()),
-            body: None,
+            body_keys: Vec::new(),
         }
     }
 
