@@ -462,3 +462,29 @@ async fn a_replayed_peer_line_with_nothing_written_is_never_merged_into_an_open_
     assert_eq!(turns[1].user_input, peer_text("replayed human text"));
     mgr.stop("rm");
 }
+
+#[test]
+fn a_manager_dropped_with_its_cli_still_running_does_not_wedge_its_runtime() {
+    // A test that panics before `stop` (an assertion, a timeout) drops its
+    // manager with the stub alive. The reader and stderr drain are blocking
+    // tasks that end at EOF, so the runtime's drop used to wait on them for
+    // good: the failure never surfaced, the job hung until its limit.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut mgr = SessionManager::with_store_path(tmp_store());
+            spawn_stub(&mut mgr, "leak", "while IFS= read -r line; do :; done");
+            drop(mgr);
+        });
+        drop(rt);
+        let _ = done_tx.send(());
+    });
+    assert!(
+        done_rx.recv_timeout(Duration::from_secs(20)).is_ok(),
+        "the runtime never shut down: a dropped session left its CLI holding the reader's pipes"
+    );
+}
