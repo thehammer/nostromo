@@ -542,6 +542,7 @@ class MainLayout: NSView {
             // A window that already shows it comes to the front; otherwise this window switches.
             let layouts = NSApp.windows.compactMap { $0.contentView as? MainLayout }
             if let shown = layouts.first(where: { $0.activeFocusTag == tag }), shown !== self {
+                ActivationAudit.note("resume:switch-to-window-showing-focus")
                 shown.window?.makeKeyAndOrderFront(nil)
                 return true
             }
