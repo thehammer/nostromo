@@ -1,5 +1,6 @@
 import AppKit
 import XCTest
+import NostromoKit
 
 /// How a "No codebase" focus lives in the app's model and sidebar: it groups under Personal, says "No
 /// codebase" on its second line (or its summary), is never given a branch, a PR or a repo, and survives a
