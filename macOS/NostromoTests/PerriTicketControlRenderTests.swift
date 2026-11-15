@@ -27,15 +27,36 @@ final class PerriTicketControlRenderTests: XCTestCase {
         super.tearDown()
     }
 
+    /// Title bands as `PerriRowsRig.titleBands` finds them (bright text in the left 40%), ignoring pixels
+    /// inside a control button: at 200 pt the buttons reach into that region and their glyphs are bright too.
+    private func titleBands(_ r: PerriRowsRig) throws -> [ClosedRange<Int>] {
+        let (pixels, scale) = try r.render()
+        let boxes = r.buttonBoxes(pixels, scale: scale)
+        let xEnd = Int(CGFloat(pixels.width) * 0.4)
+        var bands: [ClosedRange<Int>] = []
+        var start: Int?
+        for y in 0..<pixels.height {
+            var bright = false
+            for x in 0..<xEnd where pixels.rgb(x, y).luminance > 180 {
+                if boxes.contains(where: { (($0.x0 - 1)...($0.x1 + 1)).contains(x) && (($0.y0 - 1)...($0.y1 + 1)).contains(y) }) { continue }
+                bright = true; break
+            }
+            if bright { if start == nil { start = y } }
+            else if let st = start { bands.append(st...(y - 1)); start = nil }
+        }
+        if let st = start { bands.append(st...(pixels.height - 1)) }
+        return bands
+    }
+
     func testNoRowMovesWhetherTheTicketControlIsDrawnOrNot() throws {
         for width in widths {
             let without = rig(width, keys: [], site: site)
             let one = rig(width, keys: ["CORE-2841"], site: site)
             let three = rig(width, keys: ["CORE-2841", "PAYM-77", "INT-9"], site: site)
-            let bands = without.titleBands(try without.render().pixels, regionWidthFraction: 0.15)
+            let bands = try titleBands(without)
             XCTAssertEqual(bands.count, 5, "five rows at \(Int(width)) pt: \(bands)")
-            XCTAssertEqual(one.titleBands(try one.render().pixels, regionWidthFraction: 0.15), bands, "one key: rows unmoved at \(Int(width)) pt")
-            XCTAssertEqual(three.titleBands(try three.render().pixels, regionWidthFraction: 0.15), bands, "three keys: rows unmoved at \(Int(width)) pt")
+            XCTAssertEqual(try titleBands(one), bands, "one key: rows unmoved at \(Int(width)) pt")
+            XCTAssertEqual(try titleBands(three), bands, "three keys: rows unmoved at \(Int(width)) pt")
         }
     }
 
