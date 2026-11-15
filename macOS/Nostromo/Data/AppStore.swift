@@ -498,6 +498,14 @@ class AppStore: ObservableObject {
 
     // MARK: - Session registry
 
+    /// The session for a focus, created with everything the focus says about where it runs: its folder, and
+    /// that a no-codebase focus must have one. Every path that may create a focus's session goes through
+    /// here, so none can make it first without the guard (an existing session ignores the flags).
+    func session(for focus: Focus) -> ChatSession {
+        session(for: focus.sessionTag, agentName: focus.agentTag, displayName: focus.displayName,
+                workingDirectory: focus.sessionWorkingDirectory, requiresWorkingDirectory: focus.noCodebase)
+    }
+
     /// Returns the shared `ChatSession` for `tag`, creating one if none
     /// exists yet. This is a **lazy creator**, which is exactly why the
     /// ordering in `FocusStore.remove(_:)` matters (see its comment): any

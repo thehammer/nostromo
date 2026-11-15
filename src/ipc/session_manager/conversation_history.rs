@@ -675,11 +675,13 @@ impl SessionManager {
 
 /// The folders under the spaces root that any entry not yet purged names, hidden
 /// or visible, sensitive or not. The app trashes every other folder there, so
-/// this errs toward listing: a path counts when it is a direct child of the root.
+/// this errs toward listing: a path counts when its parent IS the root by file
+/// identity (device and inode), however either is spelled.
 fn referenced_space_folders(paths: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = paths
         .into_iter()
         .filter(|p| crate::conversations::is_direct_space_child(p))
+        .map(|p| crate::conversations::space_folder_wire_name(&p))
         .collect();
     out.sort();
     out.dedup();

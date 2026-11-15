@@ -2538,7 +2538,8 @@ async fn the_history_names_every_folder_under_the_spaces_root_an_unpurged_entry_
     );
     shown("s-sibling");
 
-    let path = |name: &str| root.join(name).to_string_lossy().into_owned();
+    let canonical_root = std::fs::canonicalize(&root).unwrap();
+    let path = |name: &str| canonical_root.join(name).to_string_lossy().into_owned();
     assert_eq!(
         referenced(&mut rig),
         vec![
@@ -2555,6 +2556,72 @@ async fn the_history_names_every_folder_under_the_spaces_root_an_unpurged_entry_
         referenced(&mut rig),
         vec![path("a-visible"), path("b-hidden"), path("d-sensitive")]
     );
+}
+
+#[tokio::test]
+async fn a_daemon_root_left_as_a_symlink_still_names_a_folder_stored_by_its_real_path() {
+    use crate::conversations::store::SpawnNote;
+    let mut rig = Rig::new();
+    let real = std::fs::canonicalize(rig.spaces()).unwrap();
+    let link = rig.dir.path().join("spaces-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    // The daemon's root is spelled through the link; the history holds the real path.
+    std::env::set_var(SPACES_ROOT_ENV, &link);
+    let folder = rig.new_space("by-real-path");
+    let folder = real.join(folder.file_name().unwrap());
+    let history = rig.mgr.conversations();
+    let now = crate::conversations::now_ms();
+    history.note_spawn(
+        SpawnNote {
+            tag: "t",
+            sid: "s-real",
+            agent: "cody",
+            cwd: Some(&folder),
+            title: "T",
+            label: None,
+            model: None,
+            no_codebase: true,
+        },
+        now,
+    );
+    assert_eq!(
+        referenced(&mut rig),
+        vec![folder.to_string_lossy().into_owned()]
+    );
+}
+
+#[tokio::test]
+async fn a_no_codebase_focus_without_a_working_directory_is_never_started() {
+    let mut rig = Rig::new();
+    rig.mgr
+        .set_focus_registry(vec![no_codebase_focus("cody-aaaa1111")]);
+    let err = rig
+        .mgr
+        .spawn_session(
+            "cody-aaaa1111".into(),
+            "cody".into(),
+            "View".into(),
+            None,
+            None,
+            false,
+        )
+        .expect_err("no folder, no start");
+    assert!(err.to_string().contains("folder"), "{err}");
+    assert!(!rig.mgr.sessions.contains_key("cody-aaaa1111"));
+    // An ordinary focus with no directory still starts.
+    rig.mgr
+        .set_focus_registry(vec![test_focus("cody-bbbb2222")]);
+    assert!(rig
+        .mgr
+        .spawn_session(
+            "cody-bbbb2222".into(),
+            "cody".into(),
+            "View".into(),
+            None,
+            None,
+            false
+        )
+        .is_ok());
 }
 
 #[tokio::test]

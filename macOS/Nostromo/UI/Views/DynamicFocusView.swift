@@ -491,7 +491,7 @@ final class DynamicFocusView: NSView {
             // set_pane_content — no wire protocol changes needed.
             wrapper.onRefresh = { [weak self] in
                 guard let self else { return }
-                AppStore.shared.session(for: self.focus.sessionTag).send("refresh")
+                AppStore.shared.session(for: self.focus).send("refresh")
             }
             leafViews[paneId] = wrapper
             return wrapper

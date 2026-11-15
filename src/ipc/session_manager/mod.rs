@@ -1177,6 +1177,24 @@ impl SessionManager {
             }
         }
 
+        // A no-codebase focus runs only in its own private folder: with no working
+        // directory it would run in the daemon's `$HOME`. Refused here, whatever the
+        // client checked.
+        if cwd.is_none()
+            && self
+                .focus_registry
+                .iter()
+                .any(|f| f.tag == tag && f.no_codebase == Some(true))
+        {
+            warn!(
+                tag,
+                "session start refused: no-codebase focus without a folder"
+            );
+            return Err(anyhow!(
+                "a no-codebase focus needs its own folder to run in"
+            ));
+        }
+
         if self.awaiting_mcp_bridge {
             warn!(
                 tag,

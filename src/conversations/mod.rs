@@ -68,15 +68,46 @@ pub fn spaces_root_for_wire() -> Option<String> {
     Some(resolved.to_string_lossy().into_owned())
 }
 
-/// Is `path` a direct child of the spaces root (lexically; no `..`)?
+/// Is `path` a direct child of the spaces root? Decided by file identity (device
+/// and inode of the root and of the path's parent, both followed through
+/// symlinks, `..` and case folding), never by spelling alone. A raw-text match is
+/// kept as a second way in: it can only add folders, never drop one, so the
+/// answer errs toward "in use".
 pub fn is_direct_space_child(path: &str) -> bool {
-    let Some(root) = spaces_root() else {
+    spaces_root().is_some_and(|root| is_direct_space_child_of(&root, path))
+}
+
+/// [`is_direct_space_child`] for an explicit root.
+fn is_direct_space_child_of(root: &std::path::Path, path: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let p = std::path::Path::new(path);
+    let named = p
+        .file_name()
+        .is_some_and(|n| n != "." && n != ".." && !n.is_empty());
+    let Some(parent) = p.parent().filter(|_| named) else {
         return false;
     };
+    if parent == root {
+        return true;
+    }
+    match (std::fs::metadata(root), std::fs::metadata(parent)) {
+        (Ok(r), Ok(q)) => r.dev() == q.dev() && r.ino() == q.ino(),
+        _ => false,
+    }
+}
+
+/// The name the app is given for a folder the history uses: its parent resolved
+/// with `canonicalize`, plus the leaf as stored; the raw text when the parent
+/// cannot be resolved (the app then cannot stat it and declines to sweep).
+pub fn space_folder_wire_name(path: &str) -> String {
     let p = std::path::Path::new(path);
-    p.parent() == Some(root.as_path())
-        && p.file_name()
-            .is_some_and(|n| n != "." && n != ".." && !n.is_empty())
+    match (
+        p.parent().and_then(|d| std::fs::canonicalize(d).ok()),
+        p.file_name(),
+    ) {
+        (Some(dir), Some(name)) => dir.join(name).to_string_lossy().into_owned(),
+        _ => path.to_owned(),
+    }
 }
 
 /// The hyphenated 36-character form the app names its folders with.
@@ -332,5 +363,111 @@ mod tests {
             let nested = make(Path::new(&group), NAME, 0o700);
             assert!(!usable_space_folder_in(&s.root, &nested, s.me, s.me));
         }
+    }
+}
+
+#[cfg(test)]
+mod in_use_by_identity {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    const NAME: &str = "aaaaaaaa-1111-4222-8333-444444444444";
+
+    /// A real root with one folder in it, in a temp dir.
+    fn rig() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let root = base.join("spaces");
+        std::fs::create_dir_all(root.join(NAME)).unwrap();
+        (dir, base, root)
+    }
+
+    fn named(root: &std::path::Path, path: &std::path::Path) -> bool {
+        is_direct_space_child_of(root, path.to_str().unwrap())
+    }
+
+    #[test]
+    fn a_daemon_root_left_as_a_symlink_still_names_a_folder_stored_by_its_real_path() {
+        let (_d, base, real_root) = rig();
+        let link = base.join("home-link");
+        symlink(&real_root, &link).unwrap();
+        // The daemon's unresolved root is the link; the history stored the real path.
+        assert!(named(&link, &real_root.join(NAME)));
+        // And the other way round: root by real path, folder stored through the link.
+        assert!(named(&real_root, &link.join(NAME)));
+    }
+
+    #[test]
+    fn spellings_of_the_root_do_not_hide_a_folder() {
+        let (_d, base, root) = rig();
+        std::fs::create_dir_all(base.join("x")).unwrap();
+        let folder = root.join(NAME);
+        let root_s = root.to_str().unwrap();
+        for spelled in [
+            format!("{root_s}/"),
+            format!("{}//spaces", base.display()),
+            format!("{}/x/../spaces", base.display()),
+        ] {
+            assert!(
+                is_direct_space_child_of(std::path::Path::new(&spelled), folder.to_str().unwrap()),
+                "root spelled {spelled:?}"
+            );
+        }
+        // The folder spelled oddly, against the plain root.
+        for spelled in [
+            format!("{root_s}//{NAME}"),
+            format!("{}/x/../spaces/{NAME}", base.display()),
+        ] {
+            assert!(is_direct_space_child_of(&root, &spelled), "{spelled:?}");
+        }
+    }
+
+    #[test]
+    fn a_var_versus_private_var_pair_is_the_same_root() {
+        let (_d, base, root) = rig();
+        let alias = base.join("var");
+        symlink(base.join("spaces"), &alias).unwrap(); // `/var` -> the real directory
+        assert!(named(&alias, &root.join(NAME)));
+        assert!(named(&root, &alias.join(NAME)));
+    }
+
+    #[test]
+    fn a_case_difference_is_the_same_root_where_the_volume_ignores_case_and_a_symlink_stands_in_elsewhere(
+    ) {
+        let (_d, base, root) = rig();
+        let upper = base.join("SPACES");
+        if !upper.exists() {
+            // Case-sensitive volume: simulate the aliasing with a link.
+            symlink(&root, &upper).unwrap();
+        }
+        assert!(named(&upper, &root.join(NAME)));
+        assert!(named(&root, &upper.join(NAME)));
+    }
+
+    #[test]
+    fn a_folder_elsewhere_or_nested_or_the_root_itself_is_not_named() {
+        let (_d, base, root) = rig();
+        std::fs::create_dir_all(base.join("other").join(NAME)).unwrap();
+        std::fs::create_dir_all(root.join("group").join(NAME)).unwrap();
+        assert!(!named(&root, &base.join("other").join(NAME)));
+        assert!(!named(&root, &root.join("group").join(NAME)));
+        assert!(!named(&root, &root.join(NAME).join("..")));
+        assert!(!named(&root, &root));
+    }
+
+    #[test]
+    fn a_wire_name_resolves_the_parent_and_falls_back_to_the_raw_text() {
+        let (_d, base, real_root) = rig();
+        let link = base.join("home-link");
+        symlink(&real_root, &link).unwrap();
+        assert_eq!(
+            space_folder_wire_name(link.join(NAME).to_str().unwrap()),
+            real_root.join(NAME).to_str().unwrap()
+        );
+        let gone = base.join("no-such-dir").join(NAME);
+        assert_eq!(
+            space_folder_wire_name(gone.to_str().unwrap()),
+            gone.to_str().unwrap()
+        );
     }
 }

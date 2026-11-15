@@ -113,6 +113,7 @@ final class NoCodebaseCleanupTests: XCTestCase {
         // A trailing slash, a dot segment and a dot-dot segment still name the same folder.
         let used = try makeFolder()
         let name = used.lastPathComponent
+        try fm.createDirectory(at: root.appendingPathComponent("other"), withIntermediateDirectories: true)
         let spellings = [used.path + "/", root.path + "/./" + name, root.path + "/other/../" + name]
         for spelling in spellings {
             XCTAssertEqual(run(reply(referencing: [spelling])).trashed, [], spelling)
@@ -259,6 +260,97 @@ final class NoCodebaseCleanupTests: XCTestCase {
         let wire = F.history([], referenced: [canonicalRoot + "/" + kept.lastPathComponent], spacesRoot: canonicalRoot)
         let out = run(wire, root: viaLink)
         XCTAssertEqual(out.trashed, [orphan.lastPathComponent], "the named folder survives")
+    }
+
+    // MARK: Paths are compared by file identity, not spelling
+
+    /// A second spelling of `root` through a symlink; its folders are the very same ones.
+    private func aliasOfRoot(_ name: String = "alias") throws -> URL {
+        let link = base.appendingPathComponent(name)
+        try fm.createSymbolicLink(at: link, withDestinationURL: root)
+        return link
+    }
+
+    func testAFolderTheDaemonNamesThroughASymlinkedRootIsLeftAlone() throws {
+        // The daemon spells its root and the folder through a link; the app has the real root.
+        let used = try makeFolder(), orphan = try makeFolder()
+        let alias = try aliasOfRoot()
+        let wire = F.history([], referenced: [alias.appendingPathComponent(used.lastPathComponent).path],
+                             spacesRoot: alias.path)
+        let out = run(wire)
+        XCTAssertEqual(out.trashed, [orphan.lastPathComponent])
+        XCTAssertTrue(exists(used))
+    }
+
+    func testAFolderStoredByItsRealPathIsLeftAloneWhateverTheAppSpellsItsRootAs() throws {
+        // The app's root is the link; the daemon names the real path.
+        let used = try makeFolder(), orphan = try makeFolder()
+        let alias = try aliasOfRoot()
+        let wire = F.history([], referenced: [used.path], spacesRoot: root.path)
+        let out = run(wire, root: alias)
+        XCTAssertEqual(out.trashed, [orphan.lastPathComponent])
+    }
+
+    func testRootsSpelledWithATrailingSlashDoubleSlashOrDotDotStillAgreeAndProtectWhatIsNamed() throws {
+        let used = try makeFolder(), orphan = try makeFolder()
+        try fm.createDirectory(at: base.appendingPathComponent("x"), withIntermediateDirectories: true)
+        let spellings = [root.path + "/", base.path + "//spaces", base.path + "/x/../spaces"]
+        for spelled in spellings {
+            let named = spelled + "/" + used.lastPathComponent
+            let out = run(F.history([], referenced: [named], spacesRoot: spelled))
+            XCTAssertEqual(out.trashed, [orphan.lastPathComponent], spelled)
+        }
+    }
+
+    func testAVarVersusPrivateVarStylePairOfSpellingsIsOneRoot() throws {
+        // The temp directory is /var/... here and /private/var/... for the daemon, or the reverse.
+        let used = try makeFolder(), orphan = try makeFolder()
+        let alias = try aliasOfRoot("var")
+        let wire = F.history([], referenced: [alias.path + "/" + used.lastPathComponent], spacesRoot: alias.path)
+        XCTAssertEqual(run(wire).trashed, [orphan.lastPathComponent])
+        let reverse = F.history([], referenced: [used.path], spacesRoot: root.path)
+        XCTAssertEqual(run(reverse, root: alias).trashed, [orphan.lastPathComponent])
+    }
+
+    func testALetterCaseSpellingOfTheRootIsTheSameRootWhereTheVolumeIgnoresCase() throws {
+        // On a case-insensitive volume the upper-cased spelling is real; elsewhere a link stands in for it.
+        let used = try makeFolder(), orphan = try makeFolder()
+        var upper = base.appendingPathComponent("SPACES")
+        if !fm.fileExists(atPath: upper.path) { upper = try aliasOfRoot("SPACES") }
+        let wire = F.history([], referenced: [upper.path + "/" + used.lastPathComponent], spacesRoot: upper.path)
+        XCTAssertEqual(run(wire).trashed, [orphan.lastPathComponent])
+    }
+
+    func testAFolderTheDaemonNamesThatCannotBeResolvedMeansNoSweep() throws {
+        let orphan = try makeFolder()
+        let used = try makeFolder()
+        let unresolvable = [
+            base.path + "/no-such-parent/" + UUID().uuidString,   // its parent is missing too
+            "relative/" + UUID().uuidString,                       // not absolute
+            "",                                                    // empty
+        ]
+        for bad in unresolvable {
+            let out = run(reply(referencing: [used.path, bad]))
+            XCTAssertEqual(out.trashed, [], "named: \(bad)")
+            XCTAssertTrue(exists(orphan))
+        }
+    }
+
+    func testAFolderTheDaemonNamesThatNoLongerExistsUnderARealParentProtectsNothingAndStopsNothing() throws {
+        let orphan = try makeFolder()
+        let gone = root.appendingPathComponent(UUID().uuidString).path
+        XCTAssertEqual(run(reply(referencing: [gone])).trashed, [orphan.lastPathComponent])
+    }
+
+    func testRootsThatCannotBeReadOrAreNotAbsoluteRefuseTheSweep() throws {
+        let orphan = try makeFolder()
+        XCTAssertEqual(run(reply(daemonRoot: base.path + "/no-such-root")).count, 0, "daemon root unreadable")
+        XCTAssertEqual(run(reply(daemonRoot: "spaces")).count, 0, "daemon root relative")
+        XCTAssertEqual(run(reply(daemonRoot: "")).count, 0, "daemon root empty")
+        let relative = NoCodebaseCleanup.run(reply: reply(), openWorkingDirectories: [], root: URL(fileURLWithPath: "spaces"),
+                                             now: later, trash: { _ in XCTFail("trashed") })
+        XCTAssertEqual(relative, 0)
+        XCTAssertTrue(exists(orphan))
     }
 
     // MARK: The root and each folder must be private to this user

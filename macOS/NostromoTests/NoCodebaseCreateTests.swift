@@ -289,3 +289,77 @@ final class NoCodebaseCreateTests: XCTestCase {
         XCTAssertEqual(sheet.previewText, "\u{2192} Claudia in Beta")
     }
 }
+
+/// Where a no-codebase focus's session and terminal run, and which paths may create its session.
+/// A real `MainLayout` in an off-screen window over a private `FocusStore` in a temp file.
+final class NoCodebaseSessionPathTests: XCTestCase {
+
+    private var focusStore: FocusStore!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NoCodebaseSessionPathTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        focusStore = FocusStore(storageURL: dir.appendingPathComponent("focuses.json"))
+    }
+
+    private func layout(showing focus: Focus) -> MainLayout {
+        focusStore.add(focus)
+        let displayUUID = "paths-\(UUID().uuidString)"
+        let key = DisplayFocusKeys.activeTabKey(displayUUID: displayUUID)
+        UserDefaults.standard.set(focus.id, forKey: key)
+        addTeardownBlock { UserDefaults.standard.removeObject(forKey: key) }
+        let window = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 1000, height: 700),
+                              styleMask: [.titled, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        let layout = MainLayout(windowIndex: 0, displayUUID: displayUUID, focusStore: focusStore)
+        window.contentView = layout
+        window.orderFront(nil)
+        addTeardownBlock { window.orderOut(nil); window.contentView = nil }
+        return layout
+    }
+
+    private func noCodebaseFocus(folder: String?) -> Focus {
+        var f = Focus(id: UUID().uuidString, agentTag: "cody", projectPath: nil, isBuiltIn: false, org: "Personal")
+        f.noCodebase = true
+        f.workingDirectory = folder
+        return f
+    }
+
+    func testANewTerminalOpensInANoCodebaseFocusFolderButTheRemoteShellPickerGetsNoRepo() {
+        let l = layout(showing: noCodebaseFocus(folder: "/spaces/A"))
+        XCTAssertEqual(l.activeFocusProjectPath, "/spaces/A", "a terminal opens in the folder")
+        XCTAssertNil(l.activeFocusRepoPath, "the folder is not a project to preselect")
+    }
+
+    func testARepoFocusGivesTheSamePathToBoth() {
+        let repo = Focus(id: UUID().uuidString, agentTag: "cody", projectPath: "/Users/x/Code/app", isBuiltIn: false)
+        let l = layout(showing: repo)
+        XCTAssertEqual(l.activeFocusProjectPath, "/Users/x/Code/app")
+        XCTAssertEqual(l.activeFocusRepoPath, "/Users/x/Code/app")
+    }
+
+    func testTheSessionMadeForAFocusCarriesItsFolderAndTheNoFolderGuardWhoeverMakesItFirst() {
+        // The pane-refresh and force-start paths create a session through here, so the guard is never skipped.
+        let bare = noCodebaseFocus(folder: nil)
+        let bareSession = AppStore.shared.session(for: bare)
+        addTeardownBlock { bareSession.detach() }
+        XCTAssertTrue(bareSession.requiresWorkingDirectory)
+        XCTAssertNil(bareSession.workingDirectory)
+
+        let withFolder = noCodebaseFocus(folder: "/spaces/B")
+        let s = AppStore.shared.session(for: withFolder)
+        addTeardownBlock { s.detach() }
+        XCTAssertTrue(s.requiresWorkingDirectory)
+        XCTAssertEqual(s.workingDirectory, "/spaces/B")
+
+        let repo = Focus(id: UUID().uuidString, agentTag: "cody", projectPath: "/Users/x/Code/app", isBuiltIn: false)
+        let r = AppStore.shared.session(for: repo)
+        addTeardownBlock { r.detach() }
+        XCTAssertFalse(r.requiresWorkingDirectory)
+        XCTAssertEqual(r.workingDirectory, "/Users/x/Code/app")
+    }
+}

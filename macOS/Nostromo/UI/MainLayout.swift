@@ -502,13 +502,7 @@ class MainLayout: NSView {
     }
 
     private func forceStart(_ focus: Focus) {
-        AppStore.shared.session(
-            for: focus.sessionTag,
-            agentName: focus.agentTag,
-            displayName: focus.displayName,
-            workingDirectory: focus.sessionWorkingDirectory,
-            requiresWorkingDirectory: focus.noCodebase
-        ).restart()
+        AppStore.shared.session(for: focus).restart()
     }
 
     private func removeFocus(_ focus: Focus) {
