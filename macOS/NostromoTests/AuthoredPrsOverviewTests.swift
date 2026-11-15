@@ -382,7 +382,7 @@ final class AuthoredPrsOverviewTests: XCTestCase {
             "file:///etc/passwd",
             "",
         ]
-        let control = APT.pr(1, url: validURL, group: .needsYou)
+        let control = APT.pr(458, url: validURL, group: .needsYou)
         // Each url carries its own row's number, so what refuses it is its shape or repo, not a number mismatch.
         let hostile = bad.enumerated().map {
             APT.pr(100 + $0.offset, url: $0.element.replacingOccurrences(of: "/pull/1", with: "/pull/\(100 + $0.offset)"),
