@@ -1,11 +1,29 @@
 import AppKit
+import Combine
 import NostromoKit
+
+/// The sheet's window: it takes its own key equivalents (⌘1, ⌘2, ⌘⌫) before the main menu sees them, so
+/// nothing global is bound.
+final class FocusSheetWindow: NSWindow {
+    var onKeyEquivalent: ((NSEvent) -> Bool)?
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if onKeyEquivalent?(event) == true { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+}
 
 /// Sheet controller for creating a new dynamic Focus.
 ///
 /// Presented via `window.beginSheet(_:)`. Discovers available agents from
 /// `~/.claude/agents/*.md` and project directories from the code root (`~/Code` by default).
-final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
+final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowDelegate {
+
+    enum Tab: Int { case new, resume }
+    /// The tab the sheet opens on: the last one used in this app run (New after a relaunch).
+    static var rememberedTab: Tab = .new
+    static let newSize = NSSize(width: 360, height: 358)
+    static let resumeSize = NSSize(width: 600, height: 520)
+
 
     private let onCreate: (Focus) -> Void
     private let orgResolver: RepoOrgResolver
@@ -19,6 +37,16 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
     private let namePreview  = NSTextField(labelWithString: "")
     private let createBtn    = NSButton()
     private let modelPickers: CreateFocusModelPickers
+    private let tabControl = NSSegmentedControl(labels: ["New", "Resume"], trackingMode: .selectOne,
+                                                target: nil, action: nil)
+    private let resumeBtn = NSButton()
+    private var newTabViews: [NSView] = []
+    private var resumeConstraints: [NSLayoutConstraint] = []
+    let resumeTab = ResumeTabView()
+    private let history: ConversationHistoryStore
+    private let sheetUndo = UndoManager()
+    private var cancellables = Set<AnyCancellable>()
+    private(set) var currentTab: Tab = .new
 
     // Data
     private var agents:   [String] = []
@@ -28,13 +56,16 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
     init(orgResolver: RepoOrgResolver = RepoOrgResolver(),
          agents: [String]? = nil, projects: [String]? = nil,
          modelStore: ModelStore = .shared,
+         history: ConversationHistoryStore = .shared,
+         switchToTag: @escaping (String) -> Bool = { _ in false },
          onCreate: @escaping (Focus) -> Void) {
         self.onCreate = onCreate
+        self.history = history
         self.orgResolver = orgResolver
         self.modelPickers = CreateFocusModelPickers(store: modelStore)
 
-        let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 322),
+        let win = FocusSheetWindow(
+            contentRect: NSRect(origin: .zero, size: Self.newSize),
             styleMask:   [.titled],
             backing:     .buffered,
             defer:       false
@@ -55,6 +86,13 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
         createBtn.isEnabled = !self.agents.isEmpty
         updatePreview()
         modelPickers.agentChanged(to: selectedAgent)
+
+        win.delegate = self
+        win.onKeyEquivalent = { [weak self] in self?.handleKeyEquivalent($0) ?? false }
+        history.switchToTag = switchToTag
+        history.commitFocus = { [weak self] focus in self?.finishResume(with: focus) }
+        buildTabs()
+        selectTab(Self.rememberedTab)
     }
 
     private var selectedAgent: String? {
@@ -164,7 +202,7 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
         contentView.addSubview(cancelBtn)
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
+            titleLabel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 56),
             titleLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
 
             agentLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 20),
@@ -322,6 +360,200 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
 
     // MARK: - Actions
 
+    // MARK: - Tabs
+
+    private func buildTabs() {
+        guard let contentView = window?.contentView else { return }
+        let cancel = contentView.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Cancel" }
+        newTabViews = contentView.subviews.filter { $0 !== createBtn && $0 !== cancel }
+        tabControl.target = self
+        tabControl.action = #selector(tabChanged)
+        tabControl.segmentStyle = .texturedRounded
+        tabControl.setAccessibilityLabel("New or Resume")
+        tabControl.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(tabControl)
+
+        resumeBtn.title = "Resume"
+        resumeBtn.bezelStyle = .rounded
+        resumeBtn.target = self
+        resumeBtn.action = #selector(resumeTapped)
+        resumeBtn.translatesAutoresizingMaskIntoConstraints = false
+        resumeTab.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            tabControl.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 14),
+            tabControl.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+        ])
+
+        resumeTab.onResume = { [weak self] e in self?.beginResume(e) }
+        resumeTab.onRemove = { [weak self] e in self?.removeEntry(e) }
+        resumeTab.onShowTranscript = { e in
+            if let path = e.transcriptPath, ConversationHistoryStore.isShowableTranscript(path) {
+                ActivationAudit.note("resume:show-transcript-in-finder")
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            }
+        }
+        resumeTab.onCancel = { [weak self] in self?.cancelTapped() }
+        resumeTab.onSelectionChange = { [weak self] in self?.refreshResumeButton() }
+        resumeTab.onFirstPromptsToggled = { [weak history] on in history?.setFirstPrompts(enabled: on) }
+
+        // The store speaks on the main thread, so these are synchronous.
+        history.changes.sink { [weak self] in self?.reloadHistory() }.store(in: &cancellables)
+        history.resumeResults.sink { [weak self] id, result in self?.resumeFinished(id: id, result: result) }
+            .store(in: &cancellables)
+        reloadHistory()
+        history.refresh()
+    }
+
+    private func reloadHistory() {
+        resumeTab.update(history: history.history, supported: history.isSupported)
+    }
+
+    @objc private func tabChanged() { selectTab(Tab(rawValue: tabControl.selectedSegment) ?? .new) }
+
+    func selectTab(_ tab: Tab) {
+        currentTab = tab
+        Self.rememberedTab = tab
+        tabControl.selectedSegment = tab.rawValue
+        let onNew = tab == .new
+        newTabViews.forEach { $0.isHidden = !onNew }
+        createBtn.isHidden = !onNew
+        setResumeViewsAttached(!onNew)
+        createBtn.keyEquivalent = onNew ? "\r" : ""
+        resumeBtn.keyEquivalent = onNew ? "" : "\r"
+        window?.setContentSize(onNew ? Self.newSize : Self.resumeSize)
+        if onNew {
+            window?.makeFirstResponder(nil)
+        } else {
+            reloadHistory()
+            history.refresh()
+            window?.makeFirstResponder(resumeTab.searchField)
+        }
+        refreshResumeButton()
+    }
+
+    /// The Resume views live in the window only while that tab shows, so the New form is exactly as it was.
+    private func setResumeViewsAttached(_ attached: Bool) {
+        guard let contentView = window?.contentView else { return }
+        if !attached {
+            NSLayoutConstraint.deactivate(resumeConstraints)
+            resumeConstraints = []
+            resumeTab.removeFromSuperview()
+            resumeBtn.removeFromSuperview()
+            return
+        }
+        guard resumeTab.superview == nil else { return }
+        let cancel = contentView.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Cancel" }
+        contentView.addSubview(resumeTab)
+        contentView.addSubview(resumeBtn)
+        if let cancel { contentView.addSubview(cancel, positioned: .above, relativeTo: resumeTab) }
+        let anchor = cancel ?? createBtn
+        resumeConstraints = [
+            resumeTab.topAnchor.constraint(equalTo: tabControl.bottomAnchor, constant: 10),
+            resumeTab.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            resumeTab.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            resumeTab.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            resumeBtn.trailingAnchor.constraint(equalTo: anchor.leadingAnchor, constant: -8),
+            resumeBtn.centerYAnchor.constraint(equalTo: anchor.centerYAnchor),
+        ]
+        NSLayoutConstraint.activate(resumeConstraints)
+    }
+
+    private func refreshResumeButton() {
+        guard let e = resumeTab.selectedEntry else { resumeBtn.isEnabled = false; return }
+        resumeBtn.isEnabled = ResumeTabView.isResumable(e)
+    }
+
+    /// ⌘1 / ⌘2 switch tabs; ⌘⌫ removes the selected row on Resume. Local to the sheet.
+    func handleKeyEquivalent(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags == .command else { return false }
+        switch event.charactersIgnoringModifiers {
+        case "1": selectTab(.new); return true
+        case "2": selectTab(.resume); return true
+        default: break
+        }
+        if event.keyCode == 51, currentTab == .resume { resumeTab.removeSelected(); return true }
+        return false
+    }
+
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { sheetUndo }
+    var sheetUndoManager: UndoManager { sheetUndo }
+
+    // MARK: Resume and remove
+
+    @objc private func resumeTapped() { resumeTab.resumeSelected() }
+
+    private func beginResume(_ e: ConversationEntryWire) {
+        resumeTab.showMessage(nil)
+        history.resume(e.id)
+    }
+
+    /// The daemon holds the resumed tag for only its reservation window (15 s), so the org lookup
+    /// that groups the focus gets this long; after it the focus opens without an org.
+    static var resumeOrgLookupLimit: TimeInterval = 3
+
+    private func finishResume(with focus: Focus) {
+        // A resumed focus is grouped under its org like any other: look it up, then open it.
+        var finished = false
+        let finish: (String?) -> Void = { [weak self] org in
+            guard !finished, let self else { return }
+            finished = true
+            guard !self.isCancelled else {
+                // Cancelled while the lookup ran: the daemon still holds the tag.
+                self.history.releaseResumedTag(focus.sessionTag)
+                return
+            }
+            var focus = focus
+            focus.org = org
+            self.closeSheet()
+            self.onCreate(focus)
+        }
+        orgResolver.resolve(focus.projectPath ?? "", completion: finish)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resumeOrgLookupLimit) { finish(nil) }
+    }
+
+    private func resumeFinished(id: String, result: ConversationHistoryStore.ResumeResult) {
+        switch result {
+        case .opened: break   // `finishResume` closed the sheet
+        case .switched: closeSheet()
+        case .waitingToStart: resumeTab.showMessage("Nostromo is starting\u{2026}")
+        case .gaveUp: resumeTab.showMessage("Nostromo couldn\u{2019}t start. Try again in a moment.")
+        case .refused(let reason): resumeTab.showMessage(Self.refusalText(reason))
+        }
+    }
+
+    static func refusalText(_ reason: String) -> String {
+        switch reason {
+        case "not_found": return "This conversation is no longer in History."
+        case "folder_gone": return "The project folder is gone, so this can\u{2019}t be resumed here."
+        default: return "Claude can\u{2019}t open this conversation."
+        }
+    }
+
+    private func removeEntry(_ e: ConversationEntryWire) {
+        history.remove(e.id)
+        resumeTab.hide(e.id)
+        sheetUndo.registerUndo(withTarget: self) { target in target.restoreEntry(e.id) }
+        sheetUndo.setActionName("Remove from History")
+    }
+
+    private func restoreEntry(_ id: String) {
+        history.restore(id)
+        resumeTab.unhide(id)
+        sheetUndo.registerUndo(withTarget: self) { target in
+            if let e = target.history.entry(id) { target.removeEntry(e) }
+        }
+    }
+
+    /// Close the sheet; what was removed is deleted now (the undo window is the sheet's lifetime).
+    private func closeSheet() {
+        history.purgeRemoved()
+        history.cancelResumes()
+        history.commitFocus = nil
+        history.switchToTag = nil
+        if let window { window.sheetParent?.endSheet(window) }
+    }
+
     @objc func createTapped() {
         guard !isCreating, !isCancelled, !agents.isEmpty, !projects.isEmpty else { return }
         isCreating = true
@@ -343,14 +575,14 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
                               label: label,
                               initialModel: choice?.model,
                               initialEffort: choice?.effort)
-            if let window = self.window { window.sheetParent?.endSheet(window) }
+            self.closeSheet()
             self.onCreate(focus)
         }
     }
 
     @objc func cancelTapped() {
         isCancelled = true
-        if let window { window.sheetParent?.endSheet(window) }
+        closeSheet()
     }
 
     // MARK: - Test seams
@@ -366,4 +598,6 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate {
     var pickers: CreateFocusModelPickers { modelPickers }
     func selectAgent(at index: Int) { agentPopup.selectItem(at: index); pickerChanged() }
     func selectProject(at index: Int) { projectPopup.selectItem(at: index); updatePreview() }
+    var isResumeButtonEnabled: Bool { resumeBtn.isEnabled }
+    func pressResume() { resumeTapped() }
 }

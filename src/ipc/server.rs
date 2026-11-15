@@ -41,9 +41,9 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, FEATURE_AUTHORED_PRS, FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN,
-        FEATURE_SLASH_COMMANDS, FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION,
-        PROTOCOL_VERSION,
+        SessionAction, Topic, FEATURE_AUTHORED_PRS, FEATURE_CONVERSATION_HISTORY,
+        FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SLASH_COMMANDS,
+        FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
     session_manager::{ModelRequestOutcome, ResendTrigger, SessionManager, SwitchRequest},
 };
@@ -62,6 +62,10 @@ const PTY_HOST_REMOVED: &str =
 
 /// The refusal a `DecisionAnswer` from anyone but the verified Mac app gets.
 const NOT_OPERATOR_APP: &str = "not_operator_app: only the verified Nostromo app may answer";
+
+/// The reply to a conversation-history request from any peer but the verified app.
+const NOT_OPERATOR_APP_CONVERSATIONS: &str =
+    "conversation history is available to the Nostromo app only";
 
 /// What a local peer that is not the operator app is told when it tries to
 /// change a Mother notice switch.
@@ -563,6 +567,7 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
         FEATURE_TERMINAL_STAGING_ONLY.to_string(),
         FEATURE_FOCUS_ACTIVITY.to_string(),
         FEATURE_SLASH_COMMANDS.to_string(),
+        FEATURE_CONVERSATION_HISTORY.to_string(),
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
@@ -793,10 +798,15 @@ where
     {
         // The session manager keeps its own client-sender registry for session
         // attach fan-out.
-        let mgr = session_mgr.lock().unwrap();
-        let registry = mgr.client_sender_registry();
-        let mut senders = registry.lock().unwrap();
-        senders.insert(conn_key.clone(), targeted_tx.clone());
+        let registry = session_mgr.lock().unwrap().client_sender_registry();
+        registry
+            .lock()
+            .unwrap()
+            .insert(conn_key.clone(), targeted_tx.clone());
+        // Only the verified Mac app hears that the conversation history changed.
+        if trust == PeerTrust::OperatorApp {
+            session_mgr.lock().unwrap().mark_operator_conn(&conn_key);
+        }
     }
 
     // ── Terminal stream ───────────────────────────────────────────────────────
@@ -2640,6 +2650,74 @@ fn handle_client_msg(
                     message: code.to_string(),
                 });
             }
+        }
+
+        // ── conversation history (the verified app only; network refused above)
+        ClientMsg::ConversationHistoryGet { .. }
+        | ClientMsg::ConversationResume { .. }
+        | ClientMsg::ConversationResumeRelease { .. }
+        | ClientMsg::ConversationHistoryRemove { .. }
+        | ClientMsg::ConversationHistoryRestore { .. }
+        | ClientMsg::ConversationHistoryPurgeRemoved { .. }
+        | ClientMsg::ConversationHistorySettingsSet { .. }
+            if trust != PeerTrust::OperatorApp =>
+        {
+            // Agents are local processes and must never read the history.
+            warn!(
+                conn_key,
+                ?trust,
+                "a conversation history request was refused: not the verified Nostromo app"
+            );
+            let _ = targeted_tx.send(ServerMsg::Error {
+                message: NOT_OPERATOR_APP_CONVERSATIONS.to_string(),
+            });
+        }
+
+        ClientMsg::ConversationHistoryGet { request_id } => {
+            let reply = session_mgr
+                .lock()
+                .unwrap()
+                .conversation_history_msg(request_id);
+            let _ = targeted_tx.send(reply);
+        }
+
+        ClientMsg::ConversationResume {
+            request_id,
+            id,
+            new_tag,
+        } => {
+            let mut reply = session_mgr.lock().unwrap().resume_conversation(&id, &new_tag);
+            if let ServerMsg::ConversationResumeResult { request_id: r, .. } = &mut reply {
+                *r = request_id;
+            }
+            let _ = targeted_tx.send(reply);
+        }
+
+        ClientMsg::ConversationResumeRelease { tag } => {
+            session_mgr.lock().unwrap().release_resumed_tag(&tag);
+        }
+
+        ClientMsg::ConversationHistoryRemove { id, .. } => {
+            let history = session_mgr.lock().unwrap().conversations();
+            history.remove(&id, crate::conversations::now_ms());
+        }
+
+        ClientMsg::ConversationHistoryRestore { id, .. } => {
+            let history = session_mgr.lock().unwrap().conversations();
+            history.restore(&id, crate::conversations::now_ms());
+        }
+
+        ClientMsg::ConversationHistoryPurgeRemoved { .. } => {
+            let history = session_mgr.lock().unwrap().conversations();
+            history.purge_removed(crate::conversations::now_ms());
+        }
+
+        ClientMsg::ConversationHistorySettingsSet {
+            first_prompts_enabled,
+            ..
+        } => {
+            let history = session_mgr.lock().unwrap().conversations();
+            history.set_first_prompts_enabled(first_prompts_enabled, crate::conversations::now_ms());
         }
 
         // ── The author's PR list: who is looking, and a reconcile (the verified

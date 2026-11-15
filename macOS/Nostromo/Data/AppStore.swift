@@ -591,6 +591,8 @@ class AppStore: ObservableObject {
         ModelStore.shared.sender = client
         TaskRequests.shared.sender = client
         SlashCommandStore.shared.sender = client
+        ConversationHistoryStore.shared.sender = client
+        ConversationHistoryStore.shared.onResumeFailed = { ConversationHistoryStore.presentResumeFailure(transcriptPath: $0) }
         ApprovalsLogStore.shared.sender = client
 
         // IPC messages (session, activity)
@@ -1921,6 +1923,10 @@ class AppStore: ObservableObject {
         case .authoredPrs(let snapshot):
             if snapshot != authoredPrs { authoredPrs = snapshot }
             if authoredPrsConnection != .connected { authoredPrsConnection = .connected }
+
+        // The conversation history and the resume rules' answers: the Resume tab reads the store.
+        case .conversationHistory, .conversationResumeResult, .conversationHistoryChanged, .conversationResumeFailed:
+            ConversationHistoryStore.shared.ingest(msg)
 
         // The tracker pane's board and the focus's counts: every window's pane reads them from the store.
         case .trackerBoard, .trackerSummary:

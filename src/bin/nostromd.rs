@@ -199,6 +199,8 @@ async fn main() -> Result<()> {
     // predates a fresh process's in-memory index) still attribute correctly
     // from the first event, not just after this process spawns/restarts them.
     session_mgr.lock().unwrap().seed_reverse_index();
+    // Fill the conversation history from the session-id history, once, off-thread.
+    session_mgr.lock().unwrap().start_conversation_backfill();
     // A model switch that was waiting for a turn to end when the daemon last
     // stopped will never apply: clear it, with a note, before anything can
     // connect and respawn the session.
@@ -410,6 +412,7 @@ async fn main() -> Result<()> {
                     let mgr = &mut *session_mgr.lock().unwrap();
                     mgr.reap_and_recover();
                     mgr.emit_pending_summaries();
+                    mgr.flush_conversation_nudge();
                     sweep_due.then(|| mgr.approvals().cloned()).flatten()
                 };
                 if sweep_due {
