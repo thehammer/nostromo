@@ -165,7 +165,7 @@ impl Review {
 #[serde(rename_all = "snake_case")]
 pub enum OwnerKind {
     MotherJob,
-    /// Reserved for slice 3 (a link the user made); never produced yet.
+    /// A link the user made from the picker.
     Linked,
     OnBranch,
     Ambiguous,
@@ -222,6 +222,14 @@ impl Owner {
     }
 }
 
+/// The focus last told about this PR, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Told {
+    pub tag: String,
+    pub name: String,
+    pub at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthoredPr {
     /// `owner/name`.
@@ -247,6 +255,16 @@ pub struct AuthoredPr {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub threads_truncated: bool,
     pub owner: Owner,
+    /// Who was last told (a notify the user sent); absent when nobody was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub told: Option<Told>,
+    /// This PR needs the user's attention and its known, open owner has not
+    /// been told about the current state: the Mac raises one waiting pill.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pill: bool,
+    /// A hash of the facts a notify recorded; stays in the daemon.
+    #[serde(skip)]
+    pub attention_key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -433,6 +451,9 @@ mod tests {
             unresolved_threads: 0,
             threads_truncated: false,
             owner: Owner::unknown(),
+            told: None,
+            pill: false,
+            attention_key: String::new(),
         };
         let v = serde_json::to_value(&pr).unwrap();
         let obj = v.as_object().unwrap();
@@ -441,6 +462,9 @@ mod tests {
             "base_ref",
             "details_unavailable",
             "threads_truncated",
+            "told",
+            "pill",
+            "attention_key",
         ] {
             assert!(!obj.contains_key(absent), "{absent} should be absent: {v}");
         }

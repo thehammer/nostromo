@@ -794,6 +794,10 @@ async fn main() -> Result<()> {
                 &session_mgr,
                 broadcast_tx.clone(),
                 server.subscribe_republish(),
+                socket_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .to_path_buf(),
             );
         }
     }
@@ -1404,6 +1408,7 @@ fn start_authored_prs(
     session_mgr: &Arc<std::sync::Mutex<nostromo::ipc::session_manager::SessionManager>>,
     broadcast_tx: tokio::sync::broadcast::Sender<ServerMsg>,
     mut republish: tokio::sync::watch::Receiver<u64>,
+    state_root: std::path::PathBuf,
 ) {
     use nostromo::data::authored_prs::{AuthoredPrsSource, Deps, FocusInfo, SystemClock};
     let github =
@@ -1428,6 +1433,7 @@ fn start_authored_prs(
                     spawn_cwd: mgr.cwd_for(&f.tag),
                     project_path: f.project_path.as_ref().map(std::path::PathBuf::from),
                     name: f.display_name,
+                    agent_name: f.agent_name,
                     tag: f.tag,
                 })
                 .collect()
@@ -1449,13 +1455,25 @@ fn start_authored_prs(
         relay_rx: Some(relay_rx),
         jobs_rx,
         focuses,
-        projects_root,
+        projects_root: projects_root.clone(),
         clock: Arc::new(SystemClock),
+        state_root: Some(state_root),
     });
-    session_mgr
-        .lock()
-        .unwrap()
-        .configure_authored_prs(Arc::clone(&handle.demand));
+    {
+        let mut mgr = session_mgr.lock().unwrap();
+        mgr.configure_authored_prs(Arc::clone(&handle.demand));
+        mgr.configure_authored_pr_actions(Arc::new(
+            nostromo::data::authored_prs::AuthoredPrActions::new(
+                &handle,
+                projects_root,
+                dirs_next::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                    .join(".claude")
+                    .join("agents"),
+                Arc::new(SystemClock),
+            ),
+        ));
+    }
     let mut snapshot_rx = handle.snapshot;
     tokio::spawn(async move {
         let _keep_alive = handle.task;

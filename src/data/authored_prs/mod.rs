@@ -11,14 +11,19 @@
 //! changes only; never a title, branch, check name, login, repo, PR number,
 //! URL or token. The in-memory head branch and SHA never leave the process.
 
+pub mod actions;
 pub mod budget;
 pub mod classify;
 mod engine;
 pub mod github;
+pub mod links;
+pub mod memory;
+pub mod notice;
 pub mod ownership;
 mod safe_read;
 pub mod snapshot;
 pub mod usage;
+pub mod wire;
 pub mod working_copy;
 
 use std::collections::HashMap;
@@ -27,6 +32,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, watch};
+use ownership::PrKey;
 use tokio::time::Instant;
 
 use crate::data::github_client::GithubClient;
@@ -34,6 +40,7 @@ use crate::data::relay_client::{QueueSignal, RelayStatus};
 use crate::mother::MotherJob;
 
 pub use budget::Demand;
+pub use actions::AuthoredPrActions;
 pub use snapshot::AuthoredPrsSnapshot;
 
 /// Wall-clock time, injectable. Scheduling uses `tokio::time::Instant`, which
@@ -85,26 +92,31 @@ pub struct DemandBoard {
     levels: Mutex<HashMap<String, Demand>>,
     tx: watch::Sender<Demand>,
     refresh_tx: mpsc::UnboundedSender<()>,
+    told_tx: mpsc::UnboundedSender<PrKey>,
 }
 
 pub(crate) struct DemandInputs {
     pub demand_rx: watch::Receiver<Demand>,
     pub refresh_rx: mpsc::UnboundedReceiver<()>,
+    pub told_rx: mpsc::UnboundedReceiver<PrKey>,
 }
 
 impl DemandBoard {
     pub(crate) fn new() -> (Arc<DemandBoard>, DemandInputs) {
         let (tx, demand_rx) = watch::channel(Demand::Idle);
         let (refresh_tx, refresh_rx) = mpsc::unbounded_channel();
+        let (told_tx, told_rx) = mpsc::unbounded_channel();
         (
             Arc::new(DemandBoard {
                 levels: Mutex::new(HashMap::new()),
                 tx,
                 refresh_tx,
+                told_tx,
             }),
             DemandInputs {
                 demand_rx,
                 refresh_rx,
+                told_rx,
             },
         )
     }
@@ -139,6 +151,12 @@ impl DemandBoard {
         let _ = self.refresh_tx.send(());
     }
 
+    /// A link or told record for this PR changed: the engine reads it again and
+    /// publishes now.
+    pub fn pr_changed(&self, key: PrKey) {
+        let _ = self.told_tx.send(key);
+    }
+
     pub fn current(&self) -> Demand {
         *self.tx.borrow()
     }
@@ -149,6 +167,8 @@ impl DemandBoard {
 pub struct FocusInfo {
     pub tag: String,
     pub name: String,
+    /// The persona the focus runs (`cody`); empty when unknown.
+    pub agent_name: String,
     pub session_id: Option<String>,
     /// The directory the session was spawned in.
     pub spawn_cwd: Option<PathBuf>,
@@ -184,10 +204,15 @@ pub struct Deps {
     /// `~/.claude/projects` in production.
     pub projects_root: PathBuf,
     pub clock: Arc<dyn Clock>,
+    /// Where links, told records and the focus memory persist; `None` keeps
+    /// them in memory only (tests).
+    pub state_root: Option<PathBuf>,
 }
 
 pub struct AuthoredPrsHandle {
     pub demand: Arc<DemandBoard>,
+    pub store: Arc<links::AuthoredPrStore>,
+    pub memory: Arc<memory::FocusMemory>,
     /// The latest snapshot; `None` until the engine publishes its first.
     pub snapshot: watch::Receiver<Option<AuthoredPrsSnapshot>>,
     pub task: tokio::task::JoinHandle<()>,
@@ -200,9 +225,23 @@ impl AuthoredPrsSource {
     pub fn spawn(deps: Deps) -> AuthoredPrsHandle {
         let (demand, inputs) = DemandBoard::new();
         let (tx, rx) = watch::channel(None);
-        let task = tokio::spawn(engine::Engine::new(deps, inputs, tx).run());
+        let (store, memory) = match &deps.state_root {
+            Some(root) => (
+                Arc::new(links::AuthoredPrStore::open(root)),
+                Arc::new(memory::FocusMemory::open(root)),
+            ),
+            None => (
+                Arc::new(links::AuthoredPrStore::in_memory()),
+                Arc::new(memory::FocusMemory::in_memory()),
+            ),
+        };
+        let task = tokio::spawn(
+            engine::Engine::new(deps, inputs, tx, Arc::clone(&store), Arc::clone(&memory)).run(),
+        );
         AuthoredPrsHandle {
             demand,
+            store,
+            memory,
             snapshot: rx,
             task,
         }

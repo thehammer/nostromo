@@ -41,7 +41,7 @@ use super::{
     },
     protocol::{
         ActivityStreamWire, ClaudeLoginActionKind, ClientMsg, MotherActionKind, ServerMsg,
-        SessionAction, Topic, FEATURE_AUTHORED_PRS, FEATURE_CONVERSATION_HISTORY,
+        SessionAction, Topic, FEATURE_AUTHORED_PRS, FEATURE_AUTHORED_PRS_NOTIFY, FEATURE_CONVERSATION_HISTORY,
         FEATURE_FOCUS_ACTIVITY, FEATURE_LOGIN, FEATURE_SLASH_COMMANDS,
         FEATURE_TERMINAL_STAGING_ONLY, MAX_FRAME_LEN, MIN_CLIENT_VERSION, PROTOCOL_VERSION,
     },
@@ -49,6 +49,7 @@ use super::{
 };
 use crate::approvals::broker::ApprovalBroker;
 use crate::approvals::wire::{AnswerRefusal, RefusalChannel};
+use crate::data::authored_prs::wire::AuthoredPrResult;
 use crate::data::work::{
     fred_detail_service, work_service, SendOutcome, SendRequest, SourceState, WorkError, WorkResult,
 };
@@ -571,6 +572,9 @@ fn welcome_msg(mgr: &SessionManager, operator_nonce: Option<String>) -> ServerMs
     ];
     if mgr.authored_prs().is_some() {
         features.push(FEATURE_AUTHORED_PRS.to_string());
+        if mgr.authored_pr_actions().is_some() {
+            features.push(FEATURE_AUTHORED_PRS_NOTIFY.to_string());
+        }
     }
     ServerMsg::Welcome {
         protocol_version: PROTOCOL_VERSION,
@@ -1452,6 +1456,7 @@ fn handle_client_msg(
             );
             return;
         }
+        log_authored_pr_refusal(&msg, "requires_secure_connection");
         refuse_over_network(&msg, targeted_tx);
         return;
     }
@@ -2728,6 +2733,119 @@ fn handle_client_msg(
             debug!(conn_key, ?trust, "authored-prs verb ignored: not the verified app");
         }
 
+        // ── The hand-off: tell a focus about a PR, start one, link one. The
+        // verified app only; anyone else is told no and it is logged by code.
+        msg @ (ClientMsg::AuthoredPrPreviewRequest { .. }
+        | ClientMsg::AuthoredPrNotify { .. }
+        | ClientMsg::AuthoredPrStartSession { .. }
+        | ClientMsg::AuthoredPrLink { .. })
+            if trust != PeerTrust::OperatorApp =>
+        {
+            log_authored_pr_refusal(&msg, "not_operator_app");
+            let _ = targeted_tx.send(authored_pr_refusal_reply(&msg, "not_operator_app"));
+        }
+
+        ClientMsg::AuthoredPrPreviewRequest {
+            request_id,
+            repo,
+            number,
+            target,
+        } => {
+            let actions = session_mgr.lock().unwrap().authored_pr_actions();
+            let result = match actions {
+                Some(a) => crate::ipc::authored_pr_verbs::preview(
+                    &a,
+                    session_mgr,
+                    &repo,
+                    number,
+                    &target,
+                ),
+                None => AuthoredPrResult::err("unavailable"),
+            };
+            let _ = targeted_tx.send(ServerMsg::AuthoredPrPreview { request_id, result });
+        }
+
+        ClientMsg::AuthoredPrNotify {
+            request_id,
+            repo,
+            number,
+            tag,
+            digest,
+        } => {
+            let actions = session_mgr.lock().unwrap().authored_pr_actions();
+            let result = match actions {
+                Some(a) => crate::ipc::authored_pr_verbs::notify(
+                    &a,
+                    session_mgr,
+                    &repo,
+                    number,
+                    &tag,
+                    &digest,
+                ),
+                None => AuthoredPrResult::err("unavailable"),
+            };
+            debug!(code = authored_pr_code(&result), "authored-pr notify answered");
+            let _ = targeted_tx.send(ServerMsg::AuthoredPrNotifyResult { request_id, result });
+        }
+
+        ClientMsg::AuthoredPrStartSession {
+            request_id,
+            repo,
+            number,
+            folder,
+            agent,
+            digest,
+        } => {
+            let actions = session_mgr.lock().unwrap().authored_pr_actions();
+            let host = crate::mcp::tools::create_focus::FocusHost {
+                session_mgr: Arc::clone(session_mgr),
+                broadcast_tx: broadcast_tx.clone(),
+            };
+            let tx = targeted_tx.clone();
+            let client_id = client_id.to_owned();
+            tokio::spawn(async move {
+                let result = match actions {
+                    Some(a) => {
+                        crate::ipc::authored_pr_verbs::start_session(
+                            &a,
+                            host,
+                            &client_id,
+                            &request_id,
+                            &repo,
+                            number,
+                            &folder,
+                            &agent,
+                            &digest,
+                        )
+                        .await
+                    }
+                    None => AuthoredPrResult::err("unavailable"),
+                };
+                debug!(code = authored_pr_code(&result), "authored-pr start answered");
+                let _ = tx.send(ServerMsg::AuthoredPrStartSessionResult { request_id, result });
+            });
+        }
+
+        ClientMsg::AuthoredPrLink {
+            request_id,
+            repo,
+            number,
+            tag,
+        } => {
+            let actions = session_mgr.lock().unwrap().authored_pr_actions();
+            let result = match actions {
+                Some(a) => crate::ipc::authored_pr_verbs::link(
+                    &a,
+                    session_mgr,
+                    &repo,
+                    number,
+                    tag.as_deref(),
+                ),
+                None => AuthoredPrResult::err("unavailable"),
+            };
+            let _ = targeted_tx.send(ServerMsg::AuthoredPrLinkResult { request_id, result });
+        }
+
         ClientMsg::AuthoredPrsDemand { level } => {
             let board = session_mgr.lock().unwrap().authored_prs();
             if let Some(board) = board {
@@ -3794,6 +3912,53 @@ fn refuse_over_network(msg: &ClientMsg, targeted_tx: &mpsc::UnboundedSender<Serv
     let _ = targeted_tx.send(network_refusal_reply(msg));
 }
 
+/// The refusal frame for one of the four hand-off verbs, carrying `code` only.
+fn authored_pr_refusal_reply(msg: &ClientMsg, code: &str) -> ServerMsg {
+    match msg {
+        ClientMsg::AuthoredPrPreviewRequest { request_id, .. } => ServerMsg::AuthoredPrPreview {
+            request_id: request_id.clone(),
+            result: AuthoredPrResult::err(code),
+        },
+        ClientMsg::AuthoredPrNotify { request_id, .. } => ServerMsg::AuthoredPrNotifyResult {
+            request_id: request_id.clone(),
+            result: AuthoredPrResult::err(code),
+        },
+        ClientMsg::AuthoredPrStartSession { request_id, .. } => {
+            ServerMsg::AuthoredPrStartSessionResult {
+                request_id: request_id.clone(),
+                result: AuthoredPrResult::err(code),
+            }
+        }
+        ClientMsg::AuthoredPrLink { request_id, .. } => ServerMsg::AuthoredPrLinkResult {
+            request_id: request_id.clone(),
+            result: AuthoredPrResult::err(code),
+        },
+        _ => ServerMsg::Error {
+            message: code.to_owned(),
+        },
+    }
+}
+
+/// The audit line for a refused hand-off verb: the verb and the code, never a
+/// repo, number, tag or message.
+fn log_authored_pr_refusal(msg: &ClientMsg, code: &str) {
+    let verb = match msg {
+        ClientMsg::AuthoredPrPreviewRequest { .. } => "preview",
+        ClientMsg::AuthoredPrNotify { .. } => "notify",
+        ClientMsg::AuthoredPrStartSession { .. } => "start_session",
+        ClientMsg::AuthoredPrLink { .. } => "link",
+        _ => return,
+    };
+    warn!(verb, code, "authored-pr verb refused");
+}
+
+fn authored_pr_code<T>(result: &AuthoredPrResult<T>) -> &str {
+    match result {
+        AuthoredPrResult::Ok(_) => "ok",
+        AuthoredPrResult::Err(e) => e.code.as_str(),
+    }
+}
+
 /// The frame `refuse_over_network` sends for `msg`.
 fn network_refusal_reply(msg: &ClientMsg) -> ServerMsg {
     let refusal = WorkError::requires_secure_connection();
@@ -3806,6 +3971,12 @@ fn network_refusal_reply(msg: &ClientMsg) -> ServerMsg {
             request_id: request_id.clone(),
             result: WorkResult::Err(refusal),
         },
+        ClientMsg::AuthoredPrPreviewRequest { .. }
+        | ClientMsg::AuthoredPrNotify { .. }
+        | ClientMsg::AuthoredPrStartSession { .. }
+        | ClientMsg::AuthoredPrLink { .. } => {
+            authored_pr_refusal_reply(msg, "requires_secure_connection")
+        }
         ClientMsg::WorkSend { request_id, .. } | ClientMsg::FredSeed { request_id, .. } => {
             ServerMsg::WorkSendResult {
                 request_id: request_id.clone(),

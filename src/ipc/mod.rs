@@ -21,6 +21,7 @@
 //! - [`focus_activity`]  — per-session counters of finished turns, agent messages and problems (sidebar marks)
 
 pub mod auth_failure;
+pub mod authored_pr_verbs;
 pub mod claude_login;
 pub mod client;
 pub mod codec;

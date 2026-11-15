@@ -793,6 +793,10 @@ pub struct Rig {
     pub fake: Fake,
     pub server: MockServer,
     pub demand: Arc<DemandBoard>,
+    pub store: Arc<nostromo::data::authored_prs::links::AuthoredPrStore>,
+    pub memory: Arc<nostromo::data::authored_prs::memory::FocusMemory>,
+    /// Where the engine keeps links, told records and the focus memory.
+    pub state_root: PathBuf,
     pub snap: watch::Receiver<Option<AuthoredPrsSnapshot>>,
     pub relay_tx: mpsc::UnboundedSender<QueueSignal>,
     pub relay_status: Arc<RelayStatus>,
@@ -856,7 +860,10 @@ impl Rig {
             let f = Arc::clone(&focuses);
             Arc::new(move || f.lock().unwrap_or_else(|e| e.into_inner()).clone())
         };
+        let state_root = dir.path().join("state");
+        std::fs::create_dir_all(&state_root).unwrap();
         let handle = AuthoredPrsSource::spawn(Deps {
+            state_root: Some(state_root.clone()),
             api_base: server.uri(),
             github,
             token_resolver: opts.token_resolver.clone(),
@@ -878,6 +885,9 @@ impl Rig {
             fake,
             server,
             demand: handle.demand,
+            store: handle.store,
+            memory: handle.memory,
+            state_root,
             snap: handle.snapshot,
             relay_tx,
             relay_status,
@@ -1001,6 +1011,7 @@ impl Rig {
             .push(FocusInfo {
                 tag: tag.to_owned(),
                 name: name.to_owned(),
+                agent_name: "cody".to_owned(),
                 session_id: None,
                 spawn_cwd: Some(cwd),
                 project_path: None,

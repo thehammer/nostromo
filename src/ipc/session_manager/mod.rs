@@ -691,6 +691,8 @@ pub struct SessionManager {
     notice_engine: Option<Arc<crate::mother::notices::NoticeEngine>>,
     /// Who is looking at the author's PR list; `None` when the feature is off.
     authored_prs: Option<Arc<crate::data::authored_prs::DemandBoard>>,
+    /// The hand-off verbs of that list (tell, start, link); `None` until wired.
+    authored_pr_actions: Option<Arc<crate::data::authored_prs::AuthoredPrActions>>,
     /// Every focus's activity counters, for the daemon's lifetime: a restart of
     /// the focus's process reuses its entry (see `focus_activity`).
     activity: ActivityBook,
@@ -795,6 +797,7 @@ impl SessionManager {
             turn_hook: Arc::new(std::sync::RwLock::new(None)),
             notice_engine: None,
             authored_prs: None,
+            authored_pr_actions: None,
             activity: ActivityBook::default(),
             commands: slash_commands::CommandBook::default(),
         }
@@ -2593,6 +2596,19 @@ impl SessionManager {
         self.authored_prs = Some(board);
     }
 
+    /// Switch the hand-off verbs on (advertised as `authored_prs_notify_v1`).
+    pub fn configure_authored_pr_actions(
+        &mut self,
+        actions: Arc<crate::data::authored_prs::AuthoredPrActions>,
+    ) {
+        self.authored_pr_actions = Some(actions);
+    }
+
+    /// The hand-off verbs, when wired.
+    pub fn authored_pr_actions(&self) -> Option<Arc<crate::data::authored_prs::AuthoredPrActions>> {
+        self.authored_pr_actions.clone()
+    }
+
     /// The authored-PR demand board, when the feature is enabled.
     pub fn authored_prs(&self) -> Option<Arc<crate::data::authored_prs::DemandBoard>> {
         self.authored_prs.clone()
@@ -2660,6 +2676,35 @@ impl SessionManager {
             .get(tag)
             .and_then(|s| s.session_id.clone())
             .or_else(|| load_id_store(&self.store_path).remove(tag))
+    }
+
+    /// Make sure the open focus `tag` has a running session: a live one is left
+    /// alone, a dead one is restarted, and one the daemon has not started yet is
+    /// spawned from the registry (its agent and folder, resuming its last
+    /// session id). Errors when the tag is not in the registry or the spawn fails.
+    pub fn ensure_session(&mut self, tag: &str) -> Result<()> {
+        if self.has_live_session(tag) {
+            return Ok(());
+        }
+        if self.sessions.contains_key(tag) {
+            return self.restart(tag);
+        }
+        let meta = self
+            .focus_registry
+            .iter()
+            .find(|f| f.tag == tag)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown focus: {tag}"))?;
+        let sid = self.current_session_id(tag);
+        self.spawn_session(
+            tag.to_owned(),
+            meta.agent_name,
+            meta.display_name,
+            meta.project_path.map(PathBuf::from),
+            sid,
+            false,
+        )?;
+        Ok(())
     }
 
     pub fn has_live_session(&self, tag: &str) -> bool {

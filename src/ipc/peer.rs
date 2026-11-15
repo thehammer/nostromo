@@ -784,7 +784,11 @@ pub fn classify_server_msg(msg: &ServerMsg) -> ServerClass<'_> {
         ServerMsg::MotherNoticeState { .. } => ServerClass::LocalOnly,
         // The author's open PRs: repos, titles, check names and the focuses
         // that own them. Local peers only (SP3), and only on request.
-        ServerMsg::AuthoredPrs { .. } => ServerClass::LocalOnly,
+        ServerMsg::AuthoredPrs { .. }
+        | ServerMsg::AuthoredPrPreview { .. }
+        | ServerMsg::AuthoredPrNotifyResult { .. }
+        | ServerMsg::AuthoredPrStartSessionResult { .. }
+        | ServerMsg::AuthoredPrLinkResult { .. } => ServerClass::LocalOnly,
         // A focus's model is withheld exactly like its transcript.
         ServerMsg::SessionModelState(state) => ServerClass::Focus(&state.tag),
 
@@ -1117,7 +1121,13 @@ pub fn network_policy(msg: &ClientMsg) -> NetworkPolicy {
         | ClientMsg::MotherNoticeSettingsSet { .. }
         // What the operator is looking at, and a reconcile: the verified app only.
         | ClientMsg::AuthoredPrsDemand { .. }
-        | ClientMsg::AuthoredPrsRefresh { .. } => NetworkPolicy::Refused,
+        | ClientMsg::AuthoredPrsRefresh { .. }
+        // Telling a focus about a PR, starting one, linking one: the verified
+        // app only (SP4).
+        | ClientMsg::AuthoredPrPreviewRequest { .. }
+        | ClientMsg::AuthoredPrNotify { .. }
+        | ClientMsg::AuthoredPrStartSession { .. }
+        | ClientMsg::AuthoredPrLink { .. } => NetworkPolicy::Refused,
     }
 }
 
@@ -1233,7 +1243,11 @@ pub fn targets_sensitive_session(msg: &ClientMsg, tags: &SensitiveTags) -> bool 
         | ClientMsg::ConversationHistorySettingsSet { .. }
         // Name no session; refused for a network peer anyway.
         | ClientMsg::AuthoredPrsDemand { .. }
-        | ClientMsg::AuthoredPrsRefresh { .. } => false,
+        | ClientMsg::AuthoredPrsRefresh { .. }
+        | ClientMsg::AuthoredPrPreviewRequest { .. }
+        | ClientMsg::AuthoredPrNotify { .. }
+        | ClientMsg::AuthoredPrStartSession { .. }
+        | ClientMsg::AuthoredPrLink { .. } => false,
     }
 }
 
@@ -2427,6 +2441,10 @@ mod tests {
             ClientMsg::ConversationHistoryPurgeRemoved { .. } => 84,
             ClientMsg::ConversationHistorySettingsSet { .. } => 85,
             ClientMsg::ConversationResumeRelease { .. } => 86,
+            ClientMsg::AuthoredPrPreviewRequest { .. } => 87,
+            ClientMsg::AuthoredPrNotify { .. } => 88,
+            ClientMsg::AuthoredPrStartSession { .. } => 89,
+            ClientMsg::AuthoredPrLink { .. } => 90,
         }
     }
 

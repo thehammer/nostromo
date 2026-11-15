@@ -1,0 +1,10 @@
+{
+  "type": "authored_pr_start_session_result",
+  "request_id": "r4",
+  "result": {
+    "status": "ok",
+    "value": {
+      "tag": "cody-pr-nostromo-458"
+    }
+  }
+}
