@@ -1400,6 +1400,7 @@ fn daemon_log_dir() -> PathBuf {
 /// Start the author's PR list: its engine, the demand board the session
 /// manager routes the Mac's verbs to, and the task that broadcasts each
 /// snapshot on the local-only `authored_prs` topic.
+#[allow(clippy::too_many_arguments)]
 fn start_authored_prs(
     config: &nostromo::config::Config,
     relay_rx: tokio::sync::mpsc::UnboundedReceiver<nostromo::data::relay_client::QueueSignal>,

@@ -127,12 +127,20 @@ mod tests {
         FocusMemory::open(dir.path()).observe(&[focus("cody", "cody")], now);
         let again = FocusMemory::open(dir.path());
         let r = again.get("cody").unwrap();
-        assert_eq!((r.agent_name.as_str(), r.project_path.as_deref()), ("cody", Some("/tmp/p")));
+        assert_eq!(
+            (r.agent_name.as_str(), r.project_path.as_deref()),
+            ("cody", Some("/tmp/p"))
+        );
         let raw: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("focus-memory.json")).unwrap(),
         )
         .unwrap();
-        let mut keys: Vec<&str> = raw["cody"].as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = raw["cody"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(keys, ["agent_name", "last_seen", "name", "project_path"]);
     }

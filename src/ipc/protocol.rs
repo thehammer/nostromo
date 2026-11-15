@@ -3355,8 +3355,9 @@ pub enum ServerMsg {
     /// Targeted answer to `AuthoredPrNotify`.
     AuthoredPrNotifyResult {
         request_id: String,
-        result:
-            crate::data::authored_prs::wire::AuthoredPrResult<crate::data::authored_prs::wire::Done>,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::Done,
+        >,
     },
     /// Targeted answer to `AuthoredPrStartSession`.
     AuthoredPrStartSessionResult {
@@ -3368,8 +3369,9 @@ pub enum ServerMsg {
     /// Targeted answer to `AuthoredPrLink`.
     AuthoredPrLinkResult {
         request_id: String,
-        result:
-            crate::data::authored_prs::wire::AuthoredPrResult<crate::data::authored_prs::wire::Done>,
+        result: crate::data::authored_prs::wire::AuthoredPrResult<
+            crate::data::authored_prs::wire::Done,
+        >,
     },
     /// The author's open PRs (`Topic::AuthoredPrs`, local peers only, and only
     /// to a client that names the topic). Sent on change and after Subscribe.

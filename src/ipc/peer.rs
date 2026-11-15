@@ -28,6 +28,7 @@ use tracing::warn;
 use super::protocol::{
     ClientMsg, FocusMeta, PaneContentWire, ServerMsg, TaskOutputOutcome, TaskStopOutcome, Topic,
 };
+use crate::data::authored_prs::wire::AuthoredPrResult;
 use crate::data::work::WorkResult;
 
 /// Wire transport a connection arrived on.
@@ -902,6 +903,23 @@ pub fn is_refusal(msg: &ServerMsg) -> bool {
         }
         | ServerMsg::WorkSendResult {
             result: WorkResult::Err(e),
+            ..
+        } => is_secure_refusal(&e.code),
+        // The refusals of the four PR hand-off verbs, which carry a code and no text.
+        ServerMsg::AuthoredPrPreview {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrNotifyResult {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrStartSessionResult {
+            result: AuthoredPrResult::Err(e),
+            ..
+        }
+        | ServerMsg::AuthoredPrLinkResult {
+            result: AuthoredPrResult::Err(e),
             ..
         } => is_secure_refusal(&e.code),
         ServerMsg::Error { message } => message.starts_with("requires_secure_connection"),

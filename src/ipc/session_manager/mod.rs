@@ -81,6 +81,8 @@ use crate::mother::{OriginBook, SessionHistory};
 #[cfg(test)]
 mod activity_tests;
 #[cfg(test)]
+mod authored_pr_tests;
+#[cfg(test)]
 mod compact_tests;
 mod control;
 mod conversation_history;

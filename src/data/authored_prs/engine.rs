@@ -1373,7 +1373,10 @@ impl Engine {
         self.memory.observe(infos, wall);
         if self.checked_at.is_some() {
             let prs = &self.prs;
-            let find = |key: &str| prs.iter().find(|(k, _)| key_string(&k.repo, k.number) == key);
+            let find = |key: &str| {
+                prs.iter()
+                    .find(|(k, _)| key_string(&k.repo, k.number) == key)
+            };
             self.store.prune(
                 wall,
                 |key| find(key).is_some_and(|(_, p)| p.lifecycle != Lifecycle::Open),

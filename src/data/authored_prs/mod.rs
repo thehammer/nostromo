@@ -31,16 +31,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, watch};
 use ownership::PrKey;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
 use crate::data::github_client::GithubClient;
 use crate::data::relay_client::{QueueSignal, RelayStatus};
 use crate::mother::MotherJob;
 
-pub use budget::Demand;
 pub use actions::AuthoredPrActions;
+pub use budget::Demand;
 pub use snapshot::AuthoredPrsSnapshot;
 
 /// Wall-clock time, injectable. Scheduling uses `tokio::time::Instant`, which

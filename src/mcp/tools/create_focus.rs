@@ -90,6 +90,10 @@ pub struct CreateFocusRequest {
     pub model: Option<String>,
     /// The effort for the new focus; `None`: the model's default.
     pub effort: Option<String>,
+    /// The tag to create the focus under, instead of one derived from the agent and title. For a caller
+    /// whose title names something that must not reach a log line (a tag is logged). Absent from the MCP
+    /// tool: an agent never chooses a tag.
+    pub tag_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,7 +259,7 @@ async fn create(
         .to_owned();
 
     let key = req.source_item.as_ref().map_or_else(
-        || format!("tag:{}", derive_tag(&req.agent, &req.title)),
+        || format!("tag:{}", base_tag(&req)),
         |i| format!("item:{}", i.id),
     );
     let _serialized = lock_key(key).await;
@@ -409,13 +413,14 @@ async fn create_focus_session(
         source_item,
         select_for_client,
         caller,
+        tag_override,
         ..
     } = req;
 
     // Without a source item the tag is the only identity: a live focus under
     // it is "the same one". With one, a live tag belongs to something else (the
     // same item was handled above), so take the next free suffix.
-    let base = derive_tag(&agent, &title);
+    let base = tag_override.unwrap_or_else(|| derive_tag(&agent, &title));
     let existing = |tag: String, label: String| {
         Ok(CreateFocusOutcome {
             kind: OutcomeKind::Existing,
@@ -965,6 +970,12 @@ fn slugify(text: &str) -> String {
 
 /// Derive a stable, filesystem/IPC-safe focus tag from an agent name + title.
 /// e.g. ("cody", "CORE-1234") -> "cody-core-1234".
+fn base_tag(req: &CreateFocusRequest) -> String {
+    req.tag_override
+        .clone()
+        .unwrap_or_else(|| derive_tag(&req.agent, &req.title))
+}
+
 fn derive_tag(agent: &str, title: &str) -> String {
     format!("{}-{}", agent.to_ascii_lowercase(), slugify(title))
 }
@@ -1081,6 +1092,8 @@ fn parse_request(
         queued_by_app: false,
         model: string("model")?.filter(|s| !s.is_empty()),
         effort: string("effort")?.filter(|s| !s.is_empty()),
+        // Deliberately not an argument: an agent never chooses a tag.
+        tag_override: None,
     })
 }
 

@@ -160,6 +160,7 @@ async fn send_once(hub: &WorkHub, request: SendRequest) -> Result<SendOutcome, W
         queued_by_app: true,
         model: None,
         effort: None,
+        tag_override: None,
     };
     let outcome = create_focus_on(host, core_request)
         .await

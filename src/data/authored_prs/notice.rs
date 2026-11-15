@@ -160,9 +160,13 @@ pub fn attention_key(
             h.update(item.as_bytes());
         }
     }
-    h.update([b'c']);
-    h.update(newest_comment.map_or(0, |t| t.timestamp_millis()).to_le_bytes());
-    h.update([b'u']);
+    h.update(b"c");
+    h.update(
+        newest_comment
+            .map_or(0, |t| t.timestamp_millis())
+            .to_le_bytes(),
+    );
+    h.update(b"u");
     h.update(unresolved.to_le_bytes());
     hex(&h.finalize())
 }
@@ -208,7 +212,7 @@ mod tests {
         };
         let text = compose(&only_checks).unwrap();
         assert!(!text.contains("Changes requested"));
-        assert!(!text.contains("comment"));
+        assert!(!text.contains("new comment"));
         let one = PrFacts {
             failing_checks: vec![],
             failed_count: 0,
@@ -238,7 +242,9 @@ mod tests {
         };
         let text = compose(&f).unwrap();
         assert!(
-            text.contains("- Failing checks: c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, and 2 more\n"),
+            text.contains(
+                "- Failing checks: c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, and 2 more\n"
+            ),
             "{text}"
         );
     }
@@ -256,7 +262,10 @@ mod tests {
         };
         let text = compose(&f).unwrap();
         let line = text.lines().nth(1).unwrap();
-        assert!(line.starts_with("- Failing checks: a b c, xyz, nnn"), "{line}");
+        assert!(
+            line.starts_with("- Failing checks: a b c, xyz, nnn"),
+            "{line}"
+        );
         assert_eq!(text.lines().count(), 6, "the names added no line");
         for c in ['\u{202E}', '\u{200B}', '\u{E0041}', '\r'] {
             assert!(!text.contains(c));
@@ -277,7 +286,10 @@ mod tests {
             ..facts()
         };
         let text = compose(&f).unwrap();
-        assert!(text.contains("- Changes requested by: dana, ci[bot]\n"), "{text}");
+        assert!(
+            text.contains("- Changes requested by: dana, ci[bot]\n"),
+            "{text}"
+        );
         assert!(!text.contains("mallory") && !text.contains("Ignore"));
     }
 

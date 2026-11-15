@@ -11,9 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::data::authored_prs::actions::AuthoredPrActions;
 use crate::data::authored_prs::snapshot::{AuthoredPr, MAX_NAME};
-use crate::data::authored_prs::wire::{
-    AuthoredPrResult, Done, PreviewOk, PreviewTarget, StartOk,
-};
+use crate::data::authored_prs::wire::{AuthoredPrResult, Done, PreviewOk, PreviewTarget, StartOk};
 use crate::data::work::untrusted::one_line;
 use crate::ipc::protocol::FocusMeta;
 use crate::ipc::SessionManager;
@@ -61,9 +59,7 @@ pub fn preview(
     match target {
         PreviewTarget::Focus { tag } => match open_focus(mgr, tag) {
             Some(f) => ok.target_name = one_line(&f.display_name, MAX_NAME),
-            None if names_tag(&composed.row, tag) => {
-                return AuthoredPrResult::err("owner_closed")
-            }
+            None if names_tag(&composed.row, tag) => return AuthoredPrResult::err("owner_closed"),
             None => return AuthoredPrResult::err("unknown_focus"),
         },
         PreviewTarget::NewSession { new_session: true } => {
@@ -136,7 +132,10 @@ pub async fn start_session(
     if let Some(earlier) = actions.remembered_start(request_id) {
         return earlier;
     }
-    let result = start_once(actions, host, client_id, repo, number, folder, agent, digest).await;
+    let result = start_once(
+        actions, host, client_id, repo, number, folder, agent, digest,
+    )
+    .await;
     actions.remember_start(request_id, &result);
     result
 }
@@ -174,6 +173,12 @@ async fn start_once(
         CreateFocusRequest {
             agent: agent.to_owned(),
             title: format!("PR {}#{}", composed.row.repo, composed.row.number),
+            // The title names the PR, and a tag is logged: give the focus a tag that does not.
+            tag_override: Some(format!(
+                "{}-pr-{}",
+                agent.to_ascii_lowercase(),
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            )),
             working_directory: Some(dir),
             select_for_client: Some(client_id.to_owned()),
             queued_by_app: true,
@@ -185,7 +190,10 @@ async fn start_once(
         Ok(o) => o,
         Err(_) => return AuthoredPrResult::err("start_failed"),
     };
-    let Some(tag) = outcome.focus_tag.filter(|_| outcome.kind == OutcomeKind::Created) else {
+    let Some(tag) = outcome
+        .focus_tag
+        .filter(|_| outcome.kind == OutcomeKind::Created)
+    else {
         return AuthoredPrResult::err("already_open");
     };
     {

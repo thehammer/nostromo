@@ -197,10 +197,20 @@ mod tests {
         let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["link", "told"]);
-        let mut link_keys: Vec<&str> = entry["link"].as_object().unwrap().keys().map(String::as_str).collect();
+        let mut link_keys: Vec<&str> = entry["link"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         link_keys.sort_unstable();
         assert_eq!(link_keys, ["at", "tag"]);
-        let mut told_keys: Vec<&str> = entry["told"].as_object().unwrap().keys().map(String::as_str).collect();
+        let mut told_keys: Vec<&str> = entry["told"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         told_keys.sort_unstable();
         assert_eq!(told_keys, ["at", "attention_key", "tag"]);
         use std::os::unix::fs::PermissionsExt;
