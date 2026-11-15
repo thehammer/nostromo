@@ -5460,6 +5460,9 @@ fn every_conversation_verb() -> Vec<ClientMsg> {
             id: "sid-conv".into(),
             title: Some("A new title".into()),
         },
+        ClientMsg::ConversationResumeRelease {
+            tag: "cody-resumed".into(),
+        },
         ClientMsg::ConversationHistoryRemove {
             request_id: "r".into(),
             id: "sid-conv".into(),
@@ -5554,6 +5557,63 @@ fn every_conversation_verb_from_a_local_process_that_is_not_the_app_is_refused_a
         assert!(history.first_prompts_enabled(), "Settings ran");
         let removed = history.get("sid-removed").expect("Purge ran");
         assert!(removed.removed_at_ms.is_some(), "Restore ran");
+    });
+}
+
+/// A local process that is not the app cannot cancel a resume still inside its
+/// reservation window; the app's own release still can.
+#[test]
+fn a_pending_resume_reservation_survives_a_release_from_a_local_process_that_is_not_the_app() {
+    run(GUARDED, |rig| async move {
+        let history = seed_conversations(&rig);
+        let reply = rig
+            .session_mgr
+            .lock()
+            .unwrap()
+            .resume_conversation("sid-conv", "cody-resumed");
+        assert!(
+            matches!(reply, ServerMsg::ConversationResumeResult { ref tag, .. } if tag.as_deref() == Some("cody-resumed")),
+            "{reply:?}"
+        );
+        let reserved = || history.pending_resume_for_tag("cody-resumed");
+        assert_eq!(
+            reserved(),
+            Some(("sid-conv".to_string(), "cody-orig".to_string()))
+        );
+
+        let mut agent = rig.agent(vec![]).await;
+        agent
+            .send(&ClientMsg::ConversationResumeRelease {
+                tag: "cody-resumed".into(),
+            })
+            .await;
+        agent
+            .next("the refusal", |m| {
+                matches!(m, ServerMsg::Error { message } if message.contains("Nostromo app only"))
+            })
+            .await;
+        settle().await;
+        agent.sync().await;
+        assert!(
+            reserved().is_some(),
+            "a release from a non-app process cancelled the reservation"
+        );
+        assert_eq!(history.get("sid-conv").unwrap().tag, "cody-resumed");
+
+        // Control: the verified app's release gives the tag back.
+        let mut app = rig.app(true).await;
+        app.send(&ClientMsg::ConversationResumeRelease {
+            tag: "cody-resumed".into(),
+        })
+        .await;
+        for _ in 0..50 {
+            if reserved().is_none() {
+                break;
+            }
+            settle().await;
+        }
+        assert!(reserved().is_none(), "the app's release did not apply");
+        assert_eq!(history.get("sid-conv").unwrap().tag, "cody-orig");
     });
 }
 
