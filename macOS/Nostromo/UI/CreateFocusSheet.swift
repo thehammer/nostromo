@@ -486,16 +486,13 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
     @objc private func resumeTapped() { resumeTab.resumeSelected() }
 
     /// How a `ResumeChoice` is shown; tests replace it to answer without a window.
-    var choicePresenter: (ResumeChoice, @escaping (ResumeChoice.Outcome) -> Void) -> Void = { [weak self] choice, done in
-        guard let window = self?.window else { done(.cancel); return }
-        choice.present(on: window, completion: done)
-    }
+    var choicePresenter: ((ResumeChoice, @escaping (ResumeChoice.Outcome) -> Void) -> Void)?
 
     private func beginResume(_ e: ConversationEntryWire) {
         resumeTab.showMessage(nil)
         guard let choice = ResumeChoice.make(for: e) else { history.resume(e.id); return }
         // Nothing is sent until the user chooses; Cancel (the default for "open elsewhere") sends nothing.
-        choicePresenter(choice) { [weak self] outcome in
+        let handle: (ResumeChoice.Outcome) -> Void = { [weak self] outcome in
             switch outcome {
             case .resumeInMain(let place): self?.history.resume(e.id, place: place)
             case .resumeAnyway: self?.history.resume(e.id, confirmActiveElsewhere: true)
@@ -503,6 +500,8 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
             case .cancel: break
             }
         }
+        if let present = choicePresenter { present(choice, handle) }
+        else if let window { choice.present(on: window, completion: handle) }
     }
 
     /// The Rename sheet: one field, the same 60-character rule as a focus label.
