@@ -34,7 +34,40 @@ public enum NeedsYouReason: Equatable {
     case decisionOpen
     case approvalPending(Int)
     case trackerWaiting
+    /// One of the user's open PRs needs them (a failing check, changes requested, new comments or unresolved
+    /// threads) and its known focus has not been told. Waiting, never blocking.
+    case prAttention(number: Int)
     case other(String)
+}
+
+extension NeedsYouReason {
+    /// What VoiceOver reads for a reason that has its own words; nil for the ones described elsewhere.
+    public var spokenText: String? {
+        switch self {
+        case .prAttention(let number): return "PR #\(number) needs attention"
+        default: return nil
+        }
+    }
+}
+
+/// The app-wide needs-you producer for the author's open PRs: one waiting item per PR the daemon marks `pill`,
+/// on the PR's open owner focus. Drafts, unknown and closed owners raise nothing: the daemon already left
+/// `pill` false for them, and nothing here raises one the daemon did not.
+public enum AuthoredPrNeedsYouProducer {
+    public static let name = "authored-pr"
+
+    public static func items(from snapshot: AuthoredPrsSnapshot?) -> [NeedsYouItem] {
+        guard let snapshot else { return [] }
+        return snapshot.prs.compactMap { pr in
+            guard pr.pill, pr.lifecycle == .open, !pr.draft, let tag = pr.owner.tag, !tag.isEmpty else { return nil }
+            switch pr.owner.kind {
+            case .motherJob, .linked, .onBranch: break
+            case .ambiguous, .closed, .unknown: return nil
+            }
+            return NeedsYouItem(id: "\(name):\(tag):\(pr.repo)#\(pr.number)", source: .focus(tag),
+                                reason: .prAttention(number: pr.number))
+        }
+    }
 }
 
 public struct NeedsYouItem: Equatable, Identifiable {
