@@ -71,8 +71,7 @@ refused (and the snapshot says `refresh_blocked`) while one runs or while paused
 ## Ownership
 
 A PR's owner is, in order: a Mother job whose PR is this one and whose origin is a
-focus the daemon vouches for (`mother_job`); a user-made link (`linked`, reserved
-for slice 3); an open focus whose working copy is on the PR's repo and head branch
+focus the daemon vouches for (`mother_job`); a link the user made from the picker (`linked`); an open focus whose working copy is on the PR's repo and head branch
 (`on_branch`). Two plausible owners are `ambiguous`; a vanished owner is `closed`;
 no evidence is `unknown`. Unverified, You and Unknown origins are never owners.
 
@@ -90,6 +89,33 @@ matches `on_branch` (its head branch is in another repo). Every `.git` file is r
 bounded (256 KiB), regular files only, a final symlink not followed, on a blocking
 thread. Ambiguous candidates say which of them is `closed`.
 
+## Telling a focus about a PR (`authored_prs_notify_v1`)
+
+One explicit click opens a preview of a message the **daemon** composes from structured facts only
+(`notice.rs`): the repo, number and rebuilt URL, failing check names (one sanitised line each, at most 10, then
+`and N more`), change-requesting logins (validated), the new-comment and unresolved-thread counts and fixed
+sentences. The facts type has no title, body, comment or check-output field, so none can be sent. The Mac shows
+the text verbatim and echoes its SHA-256 digest; the daemon recomposes at send time and answers `changed` when
+the facts moved (the Mac previews again, never sends stale text).
+
+Send writes the text as the operator's own message through the session manager's normal send: it queues behind
+a running turn and never interrupts it. A dead session is restarted first (`ensure_session`); a failure answers
+`not_running` and records nothing. Start a session creates a focus **without an instruction** (the create path
+would wrap one in its own framing) and sends the text through the same send, so the first message is
+byte-identical to the preview; the PR is then linked to the new focus.
+
+All four verbs (`authored_pr_preview_request`, `authored_pr_notify`, `authored_pr_start_session`,
+`authored_pr_link`) are honoured only from the verified operator app; a plain local client gets
+`not_operator_app`, a TCP peer `requires_secure_connection`, and the refusal is logged as verb + code only. The
+Mac passes each through `HumanGesture.permit` first.
+
+Persisted: `<state_root>/authored-pr-links.json` (0600; `owner/name#number` → `link {tag, at}`, `told {tag, at,
+attention_key}`; at most 500, dropped when the PR ends or after 30 days unseen) and `focus-memory.json`
+(`tag → {agent_name, project_path, name, last_seen}`, at most 200, 90 days) so a closed owner's agent can be
+offered again. No title, branch, check or comment data is stored or logged. The snapshot gains `told` and `pill`;
+`pill` is true when a needs-you, non-draft PR has a known open owner that has not been told its current
+`attention_key` (a hash of the failing checks, change requesters, newest new-comment time and unresolved count).
+
 ## What is logged
 
 Counts, durations, error classes and posture changes only. Never a title, branch,
@@ -106,4 +132,8 @@ check name, login, repo, PR number, URL or token. The relay client's event line 
 - `ServerMsg::AuthoredPrs { snapshot }`: `ServerClass::LocalOnly`; a TCP peer gets nothing.
 - `ClientMsg::AuthoredPrsDemand`, `ClientMsg::AuthoredPrsRefresh`: refused for network peers.
 - Published on change only, debounced 250 ms.
-- Golden frame: `tests/fixtures/authored_prs/frame-authored-prs.json`.
+- Feature `authored_prs_notify_v1`: the four hand-off verbs and their answers (`authored_pr_preview`,
+  `authored_pr_notify_result`, `authored_pr_start_session_result`, `authored_pr_link_result`; each
+  `{request_id, result: {status: ok|err, value}}`, `LocalOnly`), and the additive `told` / `pill` row fields.
+  The Mac shows buttons, pickers and pills only when it is advertised.
+- Golden frames: `tests/fixtures/authored_prs/frame-authored-pr*.json`.

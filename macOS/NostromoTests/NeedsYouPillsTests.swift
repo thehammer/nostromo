@@ -101,6 +101,8 @@ private enum ReasonTable {
         ReasonCase(name: "motherAttention(decisionAwaiting)", reason: .motherAttention(.decisionAwaiting), expected: .waiting),
         ReasonCase(name: "motherAttention(unknown)", reason: .motherAttention(.unknown("x")), expected: .waiting),
         ReasonCase(name: "other(x)", reason: .other("x"), expected: .waiting),
+        // One of the user's open PRs needs them: waiting, never blocking.
+        ReasonCase(name: "prAttention(458)", reason: .prAttention(number: 458), expected: .waiting),
 
         // Open decisions keep the purple attention dot and are in neither pill.
         ReasonCase(name: "decisionOpen", reason: .decisionOpen, expected: .excluded),
@@ -115,12 +117,13 @@ private enum ReasonTable {
         case .decisionOpen: return "decisionOpen"
         case .approvalPending: return "approvalPending"
         case .trackerWaiting: return "trackerWaiting"
+        case .prAttention: return "prAttention"
         case .other: return "other"
         }
     }
 
     static let allKinds: Set<String> = [
-        "motherHold", "motherAwaiting", "motherAttention", "decisionOpen", "approvalPending", "trackerWaiting", "other",
+        "motherHold", "motherAwaiting", "motherAttention", "decisionOpen", "approvalPending", "trackerWaiting", "prAttention", "other",
     ]
 }
 
