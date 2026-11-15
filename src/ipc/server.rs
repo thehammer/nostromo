@@ -1533,16 +1533,18 @@ fn handle_client_msg(
             cwd,
             session_id,
             remote_control,
+            no_codebase,
         } => {
             let (result, registry) = {
                 let mut mgr = session_mgr.lock().unwrap();
-                let result = mgr.spawn_session(
+                let result = mgr.spawn_session_requested(
                     tag.clone(),
                     agent_name,
                     view_name,
                     cwd,
                     session_id,
                     remote_control,
+                    no_codebase,
                 );
                 (result, mgr.pane_registry())
             };

@@ -102,9 +102,17 @@ enum NoCodebaseCleanup {
     }
 
     /// A file's device and inode.
-    private struct FileID: Hashable {
+    struct FileID: Hashable {
         let dev: UInt64
         let ino: UInt64
+
+        /// The same file only when device AND inode both match (inode numbers repeat across volumes).
+        static func == (a: FileID, b: FileID) -> Bool { a.dev == b.dev && a.ino == b.ino }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(dev)
+            hasher.combine(ino)
+        }
     }
 
     private enum Resolved {
@@ -113,7 +121,8 @@ enum NoCodebaseCleanup {
         case unresolvable
     }
 
-    private static func isAbsolute(_ path: String) -> Bool { !path.isEmpty && path.hasPrefix("/") }
+    /// A root is accepted only as a non-empty absolute path: not empty, not relative, not `~`.
+    static func isAbsolute(_ path: String) -> Bool { !path.isEmpty && path.hasPrefix("/") }
 
     /// `stat` (follows symlinks) or `lstat`; nil when the path cannot be read.
     private static func identity(_ path: String, followLinks: Bool = true) -> FileID? {

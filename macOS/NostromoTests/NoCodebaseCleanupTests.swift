@@ -282,13 +282,28 @@ final class NoCodebaseCleanupTests: XCTestCase {
         XCTAssertTrue(exists(used))
     }
 
-    func testAFolderStoredByItsRealPathIsLeftAloneWhateverTheAppSpellsItsRootAs() throws {
-        // The app's root is the link; the daemon names the real path.
+    func testAFolderStoredByItsRealPathIsLeftAloneWhateverTheDaemonSpellsItsRootAs() throws {
+        // The app's root is the real directory; the daemon's root is spelled through a link, and the history
+        // names the folder by its real path.
         let used = try makeFolder(), orphan = try makeFolder()
         let alias = try aliasOfRoot()
-        let wire = F.history([], referenced: [used.path], spacesRoot: root.path)
-        let out = run(wire, root: alias)
+        let wire = F.history([], referenced: [used.path], spacesRoot: alias.path)
+        let out = run(wire)
         XCTAssertEqual(out.trashed, [orphan.lastPathComponent])
+        XCTAssertTrue(exists(used))
+    }
+
+    func testAnAppRootThatIsALinkTrashesNothingHoweverTheDaemonSpellsItsOwn() throws {
+        // The root must be a real directory, never a symlink: the sweep is refused, so a folder stored by its
+        // real path is left alone, and so is the orphan.
+        let used = try makeFolder(), orphan = try makeFolder()
+        let alias = try aliasOfRoot()
+        for daemonRoot in [root.path, alias.path] {
+            let wire = F.history([], referenced: [used.path], spacesRoot: daemonRoot)
+            XCTAssertEqual(run(wire, root: alias).trashed, [], daemonRoot)
+        }
+        XCTAssertTrue(exists(used))
+        XCTAssertTrue(exists(orphan))
     }
 
     func testRootsSpelledWithATrailingSlashDoubleSlashOrDotDotStillAgreeAndProtectWhatIsNamed() throws {
@@ -308,8 +323,11 @@ final class NoCodebaseCleanupTests: XCTestCase {
         let alias = try aliasOfRoot("var")
         let wire = F.history([], referenced: [alias.path + "/" + used.lastPathComponent], spacesRoot: alias.path)
         XCTAssertEqual(run(wire).trashed, [orphan.lastPathComponent])
+        // And the reverse: the folder named by its real path, the daemon's root spelled the other way.
         let reverse = F.history([], referenced: [used.path], spacesRoot: root.path)
-        XCTAssertEqual(run(reverse, root: alias).trashed, [orphan.lastPathComponent])
+        XCTAssertEqual(run(reverse).trashed, [orphan.lastPathComponent])
+        // An app root that is itself the link is refused outright (a root is never a symlink).
+        XCTAssertEqual(run(reverse, root: alias).trashed, [])
     }
 
     func testALetterCaseSpellingOfTheRootIsTheSameRootWhereTheVolumeIgnoresCase() throws {
@@ -351,6 +369,39 @@ final class NoCodebaseCleanupTests: XCTestCase {
                                              now: later, trash: { _ in XCTFail("trashed") })
         XCTAssertEqual(relative, 0)
         XCTAssertTrue(exists(orphan))
+    }
+
+    // MARK: Rules on file identity and on the shape of a root
+
+    func testTheSameInodeOnAnotherDeviceIsNotTheSameFile() {
+        typealias ID = NoCodebaseCleanup.FileID
+        XCTAssertEqual(ID(dev: 1, ino: 42), ID(dev: 1, ino: 42))
+        XCTAssertNotEqual(ID(dev: 1, ino: 42), ID(dev: 2, ino: 42))
+        XCTAssertNotEqual(ID(dev: 1, ino: 42), ID(dev: 1, ino: 43))
+        XCTAssertEqual(Set([ID(dev: 1, ino: 42), ID(dev: 2, ino: 42)]).count, 2)
+    }
+
+    func testARootIsAcceptedOnlyAsANonEmptyAbsolutePath() {
+        for bad in ["", "spaces", "./spaces", "../spaces", "~", "~/spaces", " /spaces"] {
+            XCTAssertFalse(NoCodebaseCleanup.isAbsolute(bad), "\(bad)")
+        }
+        XCTAssertTrue(NoCodebaseCleanup.isAbsolute("/"))
+        XCTAssertTrue(NoCodebaseCleanup.isAbsolute("/tmp/spaces"))
+    }
+
+    func testARelativeDaemonRootIsRefusedEvenWhenItWouldResolveToTheRealRoot() throws {
+        // With the working directory at `base`, the relative "spaces" stats as the very root the app has, so
+        // only the explicit absolute-path rule (not the later stat) stops the sweep.
+        let orphan = try makeFolder()
+        let previous = fm.currentDirectoryPath
+        XCTAssertTrue(fm.changeCurrentDirectoryPath(base.path))
+        defer { _ = fm.changeCurrentDirectoryPath(previous) }
+        for relative in ["spaces", "./spaces", "../" + base.lastPathComponent + "/spaces"] {
+            XCTAssertEqual(run(reply(daemonRoot: relative)).trashed, [], relative)
+        }
+        XCTAssertTrue(exists(orphan))
+        XCTAssertEqual(run(reply(daemonRoot: root.path)).trashed, [orphan.lastPathComponent],
+                       "the same root, absolute, sweeps")
     }
 
     // MARK: The root and each folder must be private to this user

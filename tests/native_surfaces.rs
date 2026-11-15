@@ -440,6 +440,7 @@ async fn spawn_fresh(s: &mut UnixStream, tag: &str) {
             cwd: None,
             session_id: None,
             remote_control: false,
+            no_codebase: false,
         },
     )
     .await;

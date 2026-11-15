@@ -1472,6 +1472,11 @@ pub enum ClientMsg {
         /// Spawn with `--remote-control <view_name>` for native cross-device
         /// (phone) control via Anthropic's relay.
         remote_control: bool,
+        /// The focus has no codebase and must run in its own folder: the daemon
+        /// refuses the spawn when `cwd` is absent, without waiting for the focus
+        /// registry push (which the app debounces). Absent: not claimed.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_codebase: bool,
     },
 
     /// Attach to a session: daemon replies with a `SessionTurns` snapshot then
@@ -3518,6 +3523,7 @@ mod tests {
             cwd: Some("/tmp".into()),
             session_id: Some("sid-1".into()),
             remote_control: true,
+            no_codebase: false,
         });
         round_trip_client(ClientMsg::SessionAttach { tag: "fred".into() });
         round_trip_client(ClientMsg::SessionDetach { tag: "fred".into() });

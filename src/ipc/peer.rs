@@ -1724,6 +1724,7 @@ mod tests {
             cwd: None,
             session_id: None,
             remote_control: false,
+            no_codebase: false,
         };
         assert!(refuse_for_network(&spawn("anything", "fred"), &tags));
         assert!(refuse_for_network(&spawn("anything", "Teri"), &tags));
@@ -2025,6 +2026,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 session_id: None,
                 remote_control: false,
+                no_codebase: false,
             },
             ClientMsg::SessionAttach { tag: "x1".into() },
             ClientMsg::SessionDetach { tag: "x1".into() },
@@ -2600,6 +2602,7 @@ mod tests {
             cwd: Some("/tmp".into()),
             session_id: None,
             remote_control: false,
+            no_codebase: false,
         };
         assert!(refuse_for_network(&spawn, &tags));
     }

@@ -677,11 +677,10 @@ impl SessionManager {
 /// or visible, sensitive or not. The app trashes every other folder there, so
 /// this errs toward listing: a path counts when its parent IS the root by file
 /// identity (device and inode), however either is spelled.
-fn referenced_space_folders(paths: Vec<String>) -> Vec<String> {
+fn referenced_space_folders(paths: Vec<(String, bool)>) -> Vec<String> {
     let mut out: Vec<String> = paths
         .into_iter()
-        .filter(|p| crate::conversations::is_direct_space_child(p))
-        .map(|p| crate::conversations::space_folder_wire_name(&p))
+        .flat_map(|(p, no_codebase)| crate::conversations::space_folders_named_by(&p, no_codebase))
         .collect();
     out.sort();
     out.dedup();

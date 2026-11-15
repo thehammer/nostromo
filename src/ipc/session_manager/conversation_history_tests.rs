@@ -2530,6 +2530,9 @@ async fn the_history_names_every_folder_under_the_spaces_root_an_unpurged_entry_
     // Not a direct child of the root.
     note("s-outside", &rig.cwd);
     shown("s-outside");
+    // (Their parents exist: a no-codebase entry whose parent cannot be read is named as text, below.)
+    std::fs::create_dir_all(root.join("group")).unwrap();
+    std::fs::create_dir_all(rig.dir.path().join("spaces-sibling")).unwrap();
     note("s-nested", &root.join("group").join("nested"));
     shown("s-nested");
     note(
@@ -2588,6 +2591,89 @@ async fn a_daemon_root_left_as_a_symlink_still_names_a_folder_stored_by_its_real
         referenced(&mut rig),
         vec![folder.to_string_lossy().into_owned()]
     );
+}
+
+/// One no-codebase entry whose stored path runs through `link`, which `after` then removes or re-points.
+fn history_with_entry_stored_through_a_link(
+    rig: &mut Rig,
+    after: impl FnOnce(&Path, &Path),
+) -> (PathBuf, String) {
+    use crate::conversations::store::SpawnNote;
+    let real = std::fs::canonicalize(rig.spaces()).unwrap();
+    let folder = rig.new_space("through-a-link");
+    let leaf = folder.file_name().unwrap().to_owned();
+    let link = rig.dir.path().join("a-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let stored = link.join(&leaf);
+    rig.mgr.conversations().note_spawn(
+        SpawnNote {
+            tag: "t",
+            sid: "s-link",
+            agent: "cody",
+            cwd: Some(&stored),
+            title: "T",
+            label: None,
+            model: None,
+            no_codebase: true,
+        },
+        crate::conversations::now_ms(),
+    );
+    after(&link, &real);
+    (real.join(leaf), stored.to_string_lossy().into_owned())
+}
+
+#[tokio::test]
+async fn a_folder_stored_through_a_symlink_that_was_later_removed_is_still_named() {
+    let mut rig = Rig::new();
+    let (folder, stored) = history_with_entry_stored_through_a_link(&mut rig, |link, _| {
+        std::fs::remove_file(link).unwrap()
+    });
+    assert!(folder.is_dir(), "the folder is still under the root");
+    let named = referenced(&mut rig);
+    // Its stored path is passed on as text, so the app cannot resolve it and declines to sweep...
+    assert!(named.contains(&stored), "{named:?}");
+    // ...and the root's own child of that name is protected on top.
+    assert!(
+        named.contains(&folder.to_string_lossy().into_owned()),
+        "{named:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_folder_stored_through_a_symlink_that_now_points_elsewhere_is_still_named() {
+    let mut rig = Rig::new();
+    let elsewhere = rig.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (folder, _stored) = history_with_entry_stored_through_a_link(&mut rig, |link, _| {
+        std::fs::remove_file(link).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, link).unwrap();
+    });
+    assert!(folder.is_dir());
+    assert_eq!(
+        referenced(&mut rig),
+        vec![folder.to_string_lossy().into_owned()]
+    );
+}
+
+#[tokio::test]
+async fn a_spawn_request_that_says_no_codebase_without_a_folder_is_refused_before_any_registry_push(
+) {
+    let mut rig = Rig::new();
+    // The registry is empty: the app's push has not landed yet.
+    let err = rig
+        .mgr
+        .spawn_session_requested(
+            "cody-cccc3333".into(),
+            "cody".into(),
+            "View".into(),
+            None,
+            None,
+            false,
+            true,
+        )
+        .expect_err("the request itself says no-codebase");
+    assert!(err.to_string().contains("folder"), "{err}");
+    assert!(!rig.mgr.sessions.contains_key("cody-cccc3333"));
 }
 
 #[tokio::test]

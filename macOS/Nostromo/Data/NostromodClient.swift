@@ -655,9 +655,11 @@ private struct SessionSpawnMsg: Encodable {
     let cwd: String?
     let sessionId: String?
     let remoteControl: Bool
+    /// The focus has no codebase: the daemon refuses the spawn without a `cwd`, whatever its registry says.
+    let noCodebase: Bool
     enum CodingKeys: String, CodingKey {
         case type_ = "type", tag, agentName = "agent_name", viewName = "view_name"
-        case cwd, sessionId = "session_id", remoteControl = "remote_control"
+        case cwd, sessionId = "session_id", remoteControl = "remote_control", noCodebase = "no_codebase"
     }
 }
 
@@ -1080,9 +1082,10 @@ class NostromodClient {
 
     /// Spawn (or resume) a focus's persistent daemon-hosted session. Idempotent.
     func sessionSpawn(tag: String, agentName: String, viewName: String,
-                      cwd: String?, sessionId: String?, remoteControl: Bool) {
+                      cwd: String?, sessionId: String?, remoteControl: Bool, noCodebase: Bool = false) {
         send(SessionSpawnMsg(tag: tag, agentName: agentName, viewName: viewName,
-                             cwd: cwd, sessionId: sessionId, remoteControl: remoteControl),
+                             cwd: cwd, sessionId: sessionId, remoteControl: remoteControl,
+                             noCodebase: noCodebase),
              type: "session_spawn", tag: tag)
     }
 

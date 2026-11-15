@@ -199,7 +199,8 @@ class ChatSession: ObservableObject {
         // name if/when we ever drive a focus in interactive mode). See the PRD's
         // "Remote control — disproven" note for the path forward (our own client).
         client.sessionSpawn(tag: tag, agentName: agentName, viewName: displayName,
-                            cwd: workingDirectory, sessionId: nil, remoteControl: false)
+                            cwd: workingDirectory, sessionId: nil, remoteControl: false,
+                            noCodebase: requiresWorkingDirectory)
         client.sessionAttach(tag: tag)
     }
 

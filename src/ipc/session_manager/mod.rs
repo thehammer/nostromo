@@ -1143,6 +1143,52 @@ impl SessionManager {
 
     // ── spawn ───────────────────────────────────────────────────────────────
 
+    /// A no-codebase focus runs only in its own private folder: with no working
+    /// directory it would run in the daemon's `$HOME`. Refused when the focus is
+    /// in the registry as no-codebase, or when the spawn request itself says so
+    /// (`claimed`): the registry push is debounced on the app side, so it may not
+    /// have landed before the first spawn.
+    fn refuse_no_codebase_without_folder(
+        &self,
+        tag: &str,
+        cwd: Option<&std::path::Path>,
+        claimed: bool,
+    ) -> Result<()> {
+        if cwd.is_none()
+            && (claimed
+                || self
+                    .focus_registry
+                    .iter()
+                    .any(|f| f.tag == tag && f.no_codebase == Some(true)))
+        {
+            warn!(
+                tag,
+                "session start refused: no-codebase focus without a folder"
+            );
+            return Err(anyhow!(
+                "a no-codebase focus needs its own folder to run in"
+            ));
+        }
+        Ok(())
+    }
+
+    /// [`Self::spawn_session`] for a client's `SessionSpawn`, which may carry the
+    /// no-codebase flag itself.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_session_requested(
+        &mut self,
+        tag: String,
+        agent_name: String,
+        view_name: String,
+        cwd: Option<PathBuf>,
+        session_id: Option<String>,
+        remote_control: bool,
+        no_codebase: bool,
+    ) -> Result<Option<String>> {
+        self.refuse_no_codebase_without_folder(&tag, cwd.as_deref(), no_codebase)?;
+        self.spawn_session(tag, agent_name, view_name, cwd, session_id, remote_control)
+    }
+
     /// Spawn (or resume) a focus's persistent session. Idempotent: if the tag
     /// already has a live child this is a no-op returning the known session id.
     pub fn spawn_session(
@@ -1177,23 +1223,7 @@ impl SessionManager {
             }
         }
 
-        // A no-codebase focus runs only in its own private folder: with no working
-        // directory it would run in the daemon's `$HOME`. Refused here, whatever the
-        // client checked.
-        if cwd.is_none()
-            && self
-                .focus_registry
-                .iter()
-                .any(|f| f.tag == tag && f.no_codebase == Some(true))
-        {
-            warn!(
-                tag,
-                "session start refused: no-codebase focus without a folder"
-            );
-            return Err(anyhow!(
-                "a no-codebase focus needs its own folder to run in"
-            ));
-        }
+        self.refuse_no_codebase_without_folder(&tag, cwd.as_deref(), false)?;
 
         if self.awaiting_mcp_bridge {
             warn!(

@@ -1547,6 +1547,7 @@ async fn spawn_fake_session(unix: &mut UnixStream, tag: &str, agent: &str, view:
             cwd: None,
             session_id: Some(format!("sid-{view}")),
             remote_control: false,
+            no_codebase: false,
         },
     )
     .await;
@@ -1979,6 +1980,7 @@ async fn a_tcp_client_cannot_spawn_a_session_under_a_sensitive_tag_or_for_a_fred
                 cwd: None,
                 session_id: Some(format!("sid-{view}")),
                 remote_control: false,
+                no_codebase: false,
             },
         )
         .await;
@@ -3347,6 +3349,7 @@ async fn a_tcp_client_cannot_reach_a_fred_session_spawned_under_a_plugin_qualifi
                 cwd: None,
                 session_id: None,
                 remote_control: false,
+                no_codebase: false,
             },
         )
         .await;
@@ -4157,6 +4160,7 @@ fn spawn_msg(tag: &str, agent: &str, view: &str, session_id: Option<&str>) -> Cl
         cwd: Some("/tmp".into()),
         session_id: session_id.map(str::to_string),
         remote_control: false,
+        no_codebase: false,
     }
 }
 
@@ -8322,6 +8326,7 @@ mod background_tasks {
                 cwd: Some(cwd.clone()),
                 session_id: Some(format!("sid-{view}")),
                 remote_control: false,
+                no_codebase: false,
             },
         )
         .await;
@@ -9182,6 +9187,7 @@ mod background_tasks {
                     cwd: Some(cwd.clone()),
                     session_id: Some(format!("sid-{view}")),
                     remote_control: false,
+                    no_codebase: false,
                 },
             )
             .await;

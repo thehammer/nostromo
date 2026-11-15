@@ -77,9 +77,30 @@ pub fn is_direct_space_child(path: &str) -> bool {
     spaces_root().is_some_and(|root| is_direct_space_child_of(&root, path))
 }
 
+/// A file's identity: device and inode.
+#[derive(Clone, Copy, Debug)]
+struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+impl FileId {
+    fn of(m: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: m.dev(),
+            ino: m.ino(),
+        }
+    }
+
+    /// The same file only when device AND inode both match (inodes repeat across volumes).
+    fn is_same_file(&self, other: &FileId) -> bool {
+        self.dev == other.dev && self.ino == other.ino
+    }
+}
+
 /// [`is_direct_space_child`] for an explicit root.
 fn is_direct_space_child_of(root: &std::path::Path, path: &str) -> bool {
-    use std::os::unix::fs::MetadataExt;
     let p = std::path::Path::new(path);
     let named = p
         .file_name()
@@ -91,14 +112,50 @@ fn is_direct_space_child_of(root: &std::path::Path, path: &str) -> bool {
         return true;
     }
     match (std::fs::metadata(root), std::fs::metadata(parent)) {
-        (Ok(r), Ok(q)) => r.dev() == q.dev() && r.ino() == q.ino(),
+        (Ok(r), Ok(q)) => FileId::of(&r).is_same_file(&FileId::of(&q)),
         _ => false,
     }
 }
 
+/// What to tell the app about one history entry's folder, always erring toward
+/// "in use". An entry whose parent is the root (by file identity) is named by its
+/// resolved path. For a `no_codebase` entry that is not, two more things are
+/// named, because its folder may still be sitting under the root behind a path
+/// that no longer resolves (a symlink since removed or re-pointed):
+/// the stored path as raw text when its parent cannot be read (the app then
+/// resolves it itself and, failing that, declines the whole sweep), and the
+/// root's child of the same UUID leaf. Other entries (repo worktrees) are not
+/// held to this, so a deleted worktree never blocks the sweep.
+pub fn space_folders_named_by(path: &str, no_codebase: bool) -> Vec<String> {
+    match spaces_root() {
+        Some(root) => space_folders_named_by_in(&root, path, no_codebase),
+        None => Vec::new(),
+    }
+}
+
+fn space_folders_named_by_in(root: &std::path::Path, path: &str, no_codebase: bool) -> Vec<String> {
+    if is_direct_space_child_of(root, path) {
+        return vec![space_folder_wire_name(path)];
+    }
+    if !no_codebase {
+        return Vec::new();
+    }
+    let p = std::path::Path::new(path);
+    let mut out = Vec::new();
+    if p.parent().is_none_or(|d| std::fs::metadata(d).is_err()) {
+        out.push(path.to_owned());
+    }
+    if let Some(leaf) = p.file_name().filter(|n| is_uuid_name(n)) {
+        out.push(space_folder_wire_name(&root.join(leaf).to_string_lossy()));
+    }
+    out
+}
+
 /// The name the app is given for a folder the history uses: its parent resolved
 /// with `canonicalize`, plus the leaf as stored; the raw text when the parent
-/// cannot be resolved (the app then cannot stat it and declines to sweep).
+/// cannot be resolved. The app then resolves that text itself: if it cannot
+/// either, it declines the whole sweep, but if the text happens to name a folder
+/// there (or names none under a parent that resolves) the app decides from that.
 pub fn space_folder_wire_name(path: &str) -> String {
     let p = std::path::Path::new(path);
     match (
@@ -468,6 +525,72 @@ mod in_use_by_identity {
         assert_eq!(
             space_folder_wire_name(gone.to_str().unwrap()),
             gone.to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn the_same_inode_on_another_device_is_not_the_same_file() {
+        let a = FileId { dev: 1, ino: 42 };
+        assert!(a.is_same_file(&FileId { dev: 1, ino: 42 }));
+        assert!(!a.is_same_file(&FileId { dev: 2, ino: 42 }));
+        assert!(!a.is_same_file(&FileId { dev: 1, ino: 43 }));
+    }
+
+    #[test]
+    fn a_no_codebase_folder_stored_through_a_since_removed_symlink_is_still_named() {
+        let (_d, base, root) = rig();
+        let link = base.join("gone-link");
+        symlink(&root, &link).unwrap();
+        let stored = link.join(NAME).to_str().unwrap().to_owned();
+        std::fs::remove_file(&link).unwrap();
+        // The folder still exists under the root, but its stored path no longer resolves.
+        assert!(!is_direct_space_child_of(&root, &stored));
+        let named = space_folders_named_by_in(&root, &stored, true);
+        assert!(
+            named.contains(&stored),
+            "raw text passed through: {named:?}"
+        );
+        assert!(
+            named.contains(&root.join(NAME).to_str().unwrap().to_owned()),
+            "the root's child of the same leaf: {named:?}"
+        );
+    }
+
+    #[test]
+    fn a_no_codebase_folder_stored_through_a_symlink_now_pointing_elsewhere_is_still_named() {
+        let (_d, base, root) = rig();
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let link = base.join("moved-link");
+        symlink(&root, &link).unwrap();
+        let stored = link.join(NAME).to_str().unwrap().to_owned();
+        std::fs::remove_file(&link).unwrap();
+        symlink(&elsewhere, &link).unwrap();
+        assert!(!is_direct_space_child_of(&root, &stored));
+        let named = space_folders_named_by_in(&root, &stored, true);
+        assert_eq!(named, vec![root.join(NAME).to_str().unwrap().to_owned()]);
+    }
+
+    #[test]
+    fn an_entry_that_is_not_no_codebase_never_names_a_folder_it_cannot_resolve() {
+        let (_d, base, root) = rig();
+        let gone = base.join("deleted-worktree").join(NAME);
+        assert!(space_folders_named_by_in(&root, gone.to_str().unwrap(), false).is_empty());
+        // And a no-codebase entry whose leaf is not a folder of ours adds only the raw text.
+        let other = base.join("deleted").join("not-a-uuid");
+        assert_eq!(
+            space_folders_named_by_in(&root, other.to_str().unwrap(), true),
+            vec![other.to_str().unwrap().to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_direct_child_is_named_once_by_its_resolved_path() {
+        let (_d, _base, root) = rig();
+        let p = root.join(NAME);
+        assert_eq!(
+            space_folders_named_by_in(&root, p.to_str().unwrap(), true),
+            vec![p.to_str().unwrap().to_owned()]
         );
     }
 }

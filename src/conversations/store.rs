@@ -589,12 +589,12 @@ impl ConversationHistory {
 
     /// The working directory of every entry not yet purged: visible, hidden
     /// (no message yet) or soft-removed. For the no-codebase folder sweep.
-    pub fn all_project_paths(&self) -> Vec<String> {
+    pub fn all_project_paths(&self) -> Vec<(String, bool)> {
         lock(&self.inner)
             .data
             .entries
             .iter()
-            .filter_map(|e| e.project_path.clone())
+            .filter_map(|e| e.project_path.clone().map(|p| (p, e.no_codebase)))
             .collect()
     }
 
