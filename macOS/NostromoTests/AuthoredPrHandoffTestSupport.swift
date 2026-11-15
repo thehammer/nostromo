@@ -358,6 +358,12 @@ final class OverviewRig {
     init(_ prs: [AuthoredPr], handoffAvailable: Bool = true, allowEverything: Bool = false) {
         let window = GestureFixtures.offscreenWindow(size: NSSize(width: 700, height: 700))
         let rig = HandoffRig(window: window)
+        // The Overview only offers "Tell <focus>" for an owner whose focus is open (`openFocuses`): the rows'
+        // owners are open focuses here, as they are for a person with those sessions running.
+        for pr in prs {
+            guard let tag = pr.owner.tag, !tag.isEmpty, !rig.focuses.contains(where: { $0.tag == tag }) else { continue }
+            rig.focuses.append(AuthoredPrPickerFocus(tag: tag, name: pr.owner.name ?? tag, repoName: nil))
+        }
         let clock = APT.FakeClock()
         let overview = AuthoredPrsOverviewView(clock: clock.read, timeZone: APT.utc, store: nil)
         self.window = window

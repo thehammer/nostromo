@@ -112,6 +112,11 @@ final class AuthoredPrTellButtonTests: MouseQueueTestCase {
         windows.append(window)
         let store = AppStore.shared
         store.daemonConnectedForTesting(authoredPrs: true, notify: false)
+        // The owner's focus is open, so "Tell Cody" is offered once the daemon can hand off.
+        let ownerTag = try XCTUnwrap(fixable.owner.tag)
+        let savedOpenFocuses = store.authoredPrHandoff.openFocuses
+        store.authoredPrHandoff.openFocuses = { [AuthoredPrPickerFocus(tag: ownerTag, name: "Cody", repoName: nil)] }
+        addTeardownBlock { store.authoredPrHandoff.openFocuses = savedOpenFocuses }
         let overview = AuthoredPrsOverviewView(clock: APT.FakeClock().read, timeZone: APT.utc, store: store)
         window.contentView = overview
         overview.layoutSubtreeIfNeeded()
