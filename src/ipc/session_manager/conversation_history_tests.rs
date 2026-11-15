@@ -315,6 +315,61 @@ async fn a_removed_focus_with_a_live_child_is_stopped_then_resumed_once() {
 }
 
 #[tokio::test]
+async fn releasing_a_cancelled_resume_gives_the_tag_and_the_entry_back() {
+    let mut rig = Rig::new();
+    let sid = rig.spawn("cody-aaaa1111", "cody");
+    rig.send("cody-aaaa1111", "hello");
+    rig.transcript(&sid, USER_LINE);
+    rig.mgr.stop_session("cody-aaaa1111");
+    rig.mgr.sessions.remove("cody-aaaa1111");
+    let first = rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    assert_eq!(outcome(&first).0, ConversationResumeOutcome::Ready);
+    rig.mgr.release_resumed_tag("cody-bbbb2222");
+    assert!(
+        !load_id_store(&rig.mgr.store_path).contains_key("cody-bbbb2222"),
+        "no orphan tag -> session id entry"
+    );
+    assert_eq!(
+        rig.mgr.conversations().get(&sid).unwrap().tag,
+        "cody-aaaa1111",
+        "the entry is back with its previous owner"
+    );
+    // The reservation is gone: a later resume gets a fresh tag, not a switch.
+    let again = rig.mgr.resume_conversation(&sid, "cody-cccc3333");
+    assert_eq!(
+        outcome(&again),
+        (
+            ConversationResumeOutcome::Ready,
+            Some("cody-cccc3333".into()),
+            None
+        )
+    );
+}
+
+#[tokio::test]
+async fn releasing_a_tag_whose_focus_is_open_changes_nothing() {
+    let mut rig = Rig::new();
+    let sid = rig.spawn("cody-aaaa1111", "cody");
+    rig.send("cody-aaaa1111", "hello");
+    rig.transcript(&sid, USER_LINE);
+    rig.mgr.stop_session("cody-aaaa1111");
+    rig.mgr.sessions.remove("cody-aaaa1111");
+    rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
+    rig.open_in_registry("cody-bbbb2222");
+    rig.mgr.release_resumed_tag("cody-bbbb2222");
+    assert_eq!(
+        load_id_store(&rig.mgr.store_path)
+            .get("cody-bbbb2222")
+            .map(String::as_str),
+        Some(sid.as_str())
+    );
+    assert_eq!(
+        rig.mgr.conversations().get(&sid).unwrap().tag,
+        "cody-bbbb2222"
+    );
+}
+
+#[tokio::test]
 async fn a_second_resume_of_the_same_conversation_switches_to_the_first_tag() {
     let mut rig = Rig::new();
     let sid = rig.spawn("cody-aaaa1111", "cody");
@@ -377,6 +432,8 @@ async fn a_resumed_spawn_has_a_fresh_spawns_arguments_apart_from_the_id_flag() {
     let sid = rig.spawn("cody-aaaa1111", "cody");
     rig.send("cody-aaaa1111", "hello");
     rig.transcript(&sid, USER_LINE);
+    // Stopping right after the spawn can kill the stub before it logs its argv.
+    rig.wait_spawns(1).await;
     rig.mgr.stop_session("cody-aaaa1111");
     rig.mgr.sessions.remove("cody-aaaa1111");
     rig.mgr.resume_conversation(&sid, "cody-bbbb2222");
@@ -407,6 +464,31 @@ async fn a_resumed_spawn_has_a_fresh_spawns_arguments_apart_from_the_id_flag() {
             .iter()
             .map(|w| w.replace("cody-cccc3333", "cody-bbbb2222"))
             .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn a_history_write_inside_the_debounce_window_survives_a_clean_shutdown() {
+    let mut rig = Rig::new();
+    let sid = rig.spawn("cody-aaaa1111", "cody");
+    rig.send("cody-aaaa1111", "hello");
+    let path = rig.dir.path().join("conversation-history.json");
+    let before = std::fs::read_to_string(&path).unwrap();
+    // Only a time moves: debounced, so not on disk yet.
+    rig.mgr.conversations().note_user_send(
+        &sid,
+        "later",
+        false,
+        false,
+        crate::conversations::now_ms() + 60_000,
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    rig.mgr
+        .kill_all_on_shutdown_with_grace(std::time::Duration::from_millis(500));
+    assert_ne!(
+        std::fs::read_to_string(&path).unwrap(),
+        before,
+        "the pending write was flushed by the shutdown"
     );
 }
 
@@ -679,6 +761,64 @@ async fn a_first_message_held_for_a_sign_in_is_not_the_first_prompt() {
     assert!(e.has_turn);
     assert_eq!(e.first_prompt, FirstPrompt::None);
     assert!(!history_file(&rig).contains("HELDWORDS"));
+}
+
+/// A first message written, bound to a turn that failed to sign in: `tag` holds it.
+/// Returns the hold's id. The conversation history is told nothing of the failure,
+/// so the message is still its candidate: only a discard can drop it.
+fn hold_first_message(rig: &mut Rig, tag: &str, text: &str) -> String {
+    use crate::ipc::auth_failure::{AuthSignal, TurnAuthOutcome};
+    rig.mgr.send_user_message(tag, text, &[]).unwrap();
+    let shared = rig.mgr.sessions[tag].shared.clone();
+    login::on_turn_started(&shared);
+    login::on_turn_end(
+        &shared,
+        tag,
+        Some(TurnAuthOutcome {
+            signal: AuthSignal::ErrorField,
+            resendable: true,
+        }),
+    );
+    match rig.mgr.login_snapshot() {
+        ServerMsg::ClaudeLoginState { sessions, .. } => sessions
+            .into_iter()
+            .find(|s| s.tag == tag)
+            .and_then(|s| s.hold_id)
+            .expect("a hold holding the message"),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn assert_next_message_is_first_prompt(rig: &mut Rig, sid: &str, tag: &str) {
+    rig.send(tag, "SECONDWORDS now");
+    let e = rig.mgr.conversations().get(sid).unwrap();
+    assert_eq!(
+        e.first_prompt,
+        FirstPrompt::Text("SECONDWORDS now".into()),
+        "the discarded message became the first prompt"
+    );
+    assert!(!history_file(rig).contains("HELDWORDS"));
+}
+
+#[tokio::test]
+async fn a_discarded_held_message_never_becomes_the_first_prompt() {
+    let mut rig = Rig::new();
+    let sid = rig.spawn("cody-aaaa1111", "cody");
+    let hold = hold_first_message(&mut rig, "cody-aaaa1111", "HELDWORDS please");
+    assert!(rig.mgr.discard_held("cody-aaaa1111", Some(&hold)));
+    assert_next_message_is_first_prompt(&mut rig, &sid, "cody-aaaa1111");
+}
+
+#[tokio::test]
+async fn a_held_message_stopped_by_the_user_never_becomes_the_first_prompt() {
+    let mut rig = Rig::new();
+    let sid = rig.spawn("cody-aaaa1111", "cody");
+    hold_first_message(&mut rig, "cody-aaaa1111", "HELDWORDS please");
+    // The failed turn has ended: the session is idle behind the hold.
+    *lock_recover(&rig.mgr.sessions["cody-aaaa1111"].shared.state) = SessionState::Idle;
+    let out = rig.mgr.interrupt("cody-aaaa1111").unwrap();
+    assert!(matches!(out, InterruptOutcome::DiscardedHold), "{out:?}");
+    assert_next_message_is_first_prompt(&mut rig, &sid, "cody-aaaa1111");
 }
 
 #[tokio::test]
@@ -1016,6 +1156,41 @@ async fn no_first_prompt_title_label_or_branch_reaches_a_log_line() {
 }
 
 // ── the transcript folder is a boundary ───────────────────────────────────────
+
+#[test]
+fn the_content_check_never_opens_a_file_behind_a_symlinked_project_folder() {
+    let _lock = CLAUDE_BIN_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let projects = dir.path().join("projects");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&projects).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("esc-sid.jsonl"), USER_LINE).unwrap();
+    std::os::unix::fs::symlink(&outside, projects.join("linked")).unwrap();
+    std::env::set_var(PROJECTS_DIR_ENV, &projects);
+    let history = ConversationHistory::open(dir.path().join("conversation-history.json"));
+    history.note_spawn(
+        crate::conversations::store::SpawnNote {
+            tag: "cody-aaaa1111",
+            sid: "esc-sid",
+            agent: "cody",
+            cwd: None,
+            title: "A title",
+            label: None,
+            model: None,
+        },
+        crate::conversations::now_ms(),
+    );
+    history.set_transcript_path("esc-sid", &projects.join("linked").join("esc-sid.jsonl"));
+    list::run_background(&history, &["esc-sid".to_owned()], &[]);
+    std::env::remove_var(PROJECTS_DIR_ENV);
+    assert!(
+        history.verdict("esc-sid").is_some_and(|v| v.unreadable),
+        "a file outside the projects folder was read"
+    );
+}
 
 #[test]
 fn a_symlinked_project_folder_never_leads_a_read_out_of_the_projects_folder() {

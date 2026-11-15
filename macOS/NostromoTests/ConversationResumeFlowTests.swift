@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 
 /// The resume rules' Mac side: the store, a recording sender and a temp focus store.
 final class ConversationResumeFlowTests: XCTestCase {
@@ -167,6 +168,22 @@ final class ConversationResumeFlowTests: XCTestCase {
         XCTAssertEqual(sender.resumes.count, 2, "the row is free again after Cancel")
     }
 
+    func testCancelReleasesTheTagOfEveryRequestInFlight() {
+        store.resume("sid1")
+        let tag = sender.resumes[0].newTag
+        store.cancelResumes()
+        XCTAssertEqual(sender.releases, [tag])
+        store.cancelResumes()
+        XCTAssertEqual(sender.releases, [tag], "nothing left in flight to release")
+    }
+
+    func testCancelAfterTheReplyReleasesNothing() {
+        store.resume("sid1")
+        store.ingest(reply("ready", tag: "cody-ABCDEF12", agent: "cody", project: "/tmp/nostromo"))
+        store.cancelResumes()
+        XCTAssertTrue(sender.releases.isEmpty, "the focus exists; the daemon's tag is in use")
+    }
+
     func testCancelStopsTheStartingRetry() {
         store.resume("sid1")
         store.ingest(reply("refused", reason: "starting"))
@@ -232,5 +249,110 @@ final class ConversationResumeFlowTests: XCTestCase {
         store.ingest(.conversationHistory(F.history([F.entry("sid1", prompt: "hi")], prompts: false)))
         store.appWillTerminate()
         XCTAssertNil(store.history)
+    }
+}
+
+
+// The New Focus sheet's callback in a real `MainLayout`: a resumed focus flushes the registry to the
+// daemon before it is switched to (the daemon reserved its tag and needs the registry entry before the
+// spawn); a plain new focus without a chosen model does not.
+final class MainLayoutResumeSheetTests: XCTestCase {
+    private var focusStore: FocusStore!
+    private var layout: MainLayout!
+    private var window: NSWindow!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MainLayoutResumeSheetTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        focusStore = FocusStore(storageURL: dir.appendingPathComponent("focuses.json"))
+        let displayUUID = "resume-sheet-\(UUID().uuidString)"
+        window = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 1000, height: 700),
+                          styleMask: [.titled, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        layout = MainLayout(windowIndex: 0, displayUUID: displayUUID, focusStore: focusStore)
+        window.contentView = layout
+        window.alphaValue = 0
+        addTeardownBlock { [window] in window?.orderOut(nil); window?.contentView = nil }
+    }
+
+    func testAResumedFocusFlushesTheRegistryBeforeItIsSwitchedTo() {
+        var events: [String] = []
+        let focus = Focus(id: UUID().uuidString, agentTag: "cody", projectPath: "/tmp/p", isBuiltIn: false,
+                          label: nil, resumedAt: Date())
+        layout.commitFocusFromSheet(focus, flushRegistry: { events.append("flush") },
+                                    switchTo: { _ in events.append("switch") })
+        XCTAssertEqual(events, ["flush", "switch"])
+        XCTAssertTrue(focusStore.focuses.contains { $0.id == focus.id })
+    }
+
+    func testAPlainNewFocusWithoutAModelDoesNotFlush() {
+        var events: [String] = []
+        let focus = Focus(id: UUID().uuidString, agentTag: "cody", projectPath: "/tmp/p", isBuiltIn: false, label: nil)
+        layout.commitFocusFromSheet(focus, flushRegistry: { events.append("flush") },
+                                    switchTo: { _ in events.append("switch") })
+        XCTAssertEqual(events, ["switch"])
+    }
+}
+
+
+// A resumed focus waits for its org lookup only briefly: the daemon holds the reserved tag for 15 s.
+final class ResumeOrgLookupBoundTests: XCTestCase {
+    private var sender: RecordingHistorySender!
+    private var store: ConversationHistoryStore!
+    private var gate: DispatchSemaphore!
+    private var savedLimit: TimeInterval!
+
+    override func setUp() {
+        super.setUp()
+        sender = RecordingHistorySender()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("focuses-\(UUID().uuidString).json")
+        let focusStore = FocusStore(storageURL: url)
+        store = ConversationHistoryStore(sender: sender, focusStore: { focusStore })
+        gate = DispatchSemaphore(value: 0)
+        savedLimit = CreateFocusSheet.resumeOrgLookupLimit
+        CreateFocusSheet.resumeOrgLookupLimit = 0.2
+    }
+
+    override func tearDown() {
+        gate.signal()   // let the stuck lookup finish
+        CreateFocusSheet.resumeOrgLookupLimit = savedLimit
+        super.tearDown()
+    }
+
+    private func makeSheet(onCreate: @escaping (Focus) -> Void) -> CreateFocusSheet {
+        let gate = self.gate!
+        return CreateFocusSheet(orgResolver: RepoOrgResolver(lookup: { _ in gate.wait(); return .resolved("Org") }),
+                                agents: ["cody"], projects: ["/tmp/p"], history: store, onCreate: onCreate)
+    }
+
+    private func resumed() -> Focus {
+        Focus(id: UUID().uuidString, agentTag: "cody", projectPath: "/tmp/never-resolved", isBuiltIn: false,
+              label: nil, resumedAt: Date())
+    }
+
+    func testAStuckOrgLookupDoesNotHoldTheResumedFocusBack() {
+        let created = expectation(description: "opened without an org")
+        var opened: Focus?
+        let sheet = makeSheet { opened = $0; created.fulfill() }
+        store.commitFocus?(resumed())
+        wait(for: [created], timeout: 5)
+        XCTAssertNil(opened?.org)
+        _ = sheet
+    }
+
+    func testCancellingDuringTheLookupGivesTheTagBack() {
+        var opened = false
+        let sheet = makeSheet { _ in opened = true }
+        let focus = resumed()
+        store.commitFocus?(focus)
+        sheet.cancelTapped()
+        let pumped = expectation(description: "past the limit")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { pumped.fulfill() }
+        wait(for: [pumped], timeout: 5)
+        XCTAssertFalse(opened)
+        XCTAssertEqual(sender.releases, [focus.sessionTag])
     }
 }

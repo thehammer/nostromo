@@ -488,15 +488,28 @@ final class CreateFocusSheet: NSWindowController, NSTextFieldDelegate, NSWindowD
         history.resume(e.id)
     }
 
+    /// The daemon holds the resumed tag for only its reservation window (15 s), so the org lookup
+    /// that groups the focus gets this long; after it the focus opens without an org.
+    static var resumeOrgLookupLimit: TimeInterval = 3
+
     private func finishResume(with focus: Focus) {
         // A resumed focus is grouped under its org like any other: look it up, then open it.
-        orgResolver.resolve(focus.projectPath ?? "") { [weak self] org in
-            guard let self, !self.isCancelled else { return }
+        var finished = false
+        let finish: (String?) -> Void = { [weak self] org in
+            guard !finished, let self else { return }
+            finished = true
+            guard !self.isCancelled else {
+                // Cancelled while the lookup ran: the daemon still holds the tag.
+                self.history.releaseResumedTag(focus.sessionTag)
+                return
+            }
             var focus = focus
             focus.org = org
             self.closeSheet()
             self.onCreate(focus)
         }
+        orgResolver.resolve(focus.projectPath ?? "", completion: finish)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.resumeOrgLookupLimit) { finish(nil) }
     }
 
     private func resumeFinished(id: String, result: ConversationHistoryStore.ResumeResult) {

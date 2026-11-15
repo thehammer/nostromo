@@ -1185,6 +1185,11 @@ class NostromodClient {
         send(ClientConversationResume(requestId: requestId, id: id, newTag: newTag), type: "conversation_resume")
     }
 
+    func conversationResumeRelease(tag: String) {
+        guard daemonAdvertisesConversationHistory else { return }
+        send(ClientConversationResumeRelease(tag: tag), type: "conversation_resume_release")
+    }
+
     func conversationHistoryRemove(requestId: String, id: String) {
         guard daemonAdvertisesConversationHistory else { return }
         send(ClientConversationHistoryEdit(type: "conversation_history_remove", requestId: requestId, id: id),

@@ -245,6 +245,25 @@ impl SessionManager {
         tracing::warn!(tag, "a resumed conversation could not be opened");
     }
 
+    /// The app cancelled a resume before it made the focus: undo the reservation
+    /// as a failed open would, minus the notice. Ignored when the tag is not a
+    /// pending reservation, or a focus or session already holds it.
+    pub fn release_resumed_tag(&mut self, tag: &str) {
+        if self.sessions.contains_key(tag) || self.focus_registry.iter().any(|f| f.tag == tag) {
+            return;
+        }
+        let Some((sid, old_tag)) = self.conversations.pending_resume_for_tag(tag) else {
+            return;
+        };
+        if self.conv.reserved.get(&sid).map(|(t, _)| t.as_str()) != Some(tag) {
+            return;
+        }
+        save_id(&self.store_path, tag, None);
+        self.session_history.undo_move(&sid, &old_tag, tag);
+        self.conversations.restore_tag(&sid, &old_tag, now_ms());
+        self.conv.reserved.remove(&sid);
+    }
+
     /// Is `tag` a focus handed a conversation by a resume whose first turn has
     /// not succeeded yet? (Kept in the history file: a daemon restart keeps it.)
     pub(super) fn is_resumed_tag(&self, tag: &str) -> bool {

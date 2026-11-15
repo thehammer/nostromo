@@ -298,6 +298,23 @@ fn the_backup_kept_while_degraded_loses_its_prompts_when_prompts_are_turned_off(
 }
 
 #[test]
+fn a_leftover_backup_is_scrubbed_when_prompts_are_turned_off_in_a_healthy_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let bak = dir.path().join("conversation-history.json.bak");
+    // Left by an earlier degraded run; the history itself is healthy now.
+    std::fs::write(
+        &bak,
+        r#"{"entries":[{"sid":"s1","first_prompt":{"kind":"text","value":"OLDPROMPTMARK"}}]}"#,
+    )
+    .unwrap();
+    let h = open(dir.path());
+    assert!(!h.counts().2, "healthy");
+    h.set_first_prompts_enabled(false, NOW);
+    let after = std::fs::read_to_string(&bak).unwrap_or_default();
+    assert!(!after.contains("OLDPROMPTMARK"), "{after}");
+}
+
+#[test]
 fn a_backup_that_is_not_json_is_removed_when_prompts_are_turned_off() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("conversation-history.json");

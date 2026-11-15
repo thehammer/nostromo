@@ -2655,6 +2655,7 @@ fn handle_client_msg(
         // ── conversation history (the verified app only; network refused above)
         ClientMsg::ConversationHistoryGet { .. }
         | ClientMsg::ConversationResume { .. }
+        | ClientMsg::ConversationResumeRelease { .. }
         | ClientMsg::ConversationHistoryRemove { .. }
         | ClientMsg::ConversationHistoryRestore { .. }
         | ClientMsg::ConversationHistoryPurgeRemoved { .. }
@@ -2690,6 +2691,10 @@ fn handle_client_msg(
                 *r = request_id;
             }
             let _ = targeted_tx.send(reply);
+        }
+
+        ClientMsg::ConversationResumeRelease { tag } => {
+            session_mgr.lock().unwrap().release_resumed_tag(&tag);
         }
 
         ClientMsg::ConversationHistoryRemove { id, .. } => {

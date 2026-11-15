@@ -535,6 +535,17 @@ class MainLayout: NSView {
         }
     }
 
+    /// What the New Focus sheet does with the focus it hands over: a resumed one always flushes the
+    /// registry before it is switched to (`FocusCreation.commitFromSheet`). The closures are test seams.
+    func commitFocusFromSheet(_ focus: Focus,
+                              flushRegistry: () -> Void = { AppStore.shared.pushFocusRegistry() },
+                              switchTo: ((Focus) -> Void)? = nil) {
+        FocusCreation.commitFromSheet(focus, store: focusStore, flushRegistry: flushRegistry) { [self] in
+            if let switchTo { switchTo($0) } else { switchFocus($0) }
+        }
+        presentedSheet = nil
+    }
+
     private func presentCreateFocusSheet() {
         guard let window else { return }
         let sheet = CreateFocusSheet(switchToTag: { [weak self] tag in
@@ -549,10 +560,7 @@ class MainLayout: NSView {
             self.switchFocus(focus)
             return true
         }) { [weak self] focus in
-            guard let self else { return }
-            FocusCreation.commitFromSheet(focus, store: self.focusStore,
-                                          flushRegistry: { AppStore.shared.pushFocusRegistry() }) { self.switchFocus($0) }
-            self.presentedSheet = nil
+            self?.commitFocusFromSheet(focus)
         }
         presentedSheet = sheet  // retain for the sheet's lifetime
         window.beginSheet(sheet.window!) { [weak self] _ in

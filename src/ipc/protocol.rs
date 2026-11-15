@@ -2085,6 +2085,11 @@ pub enum ClientMsg {
         id: String,
         new_tag: String,
     },
+    /// The resume the app asked for was cancelled before its focus existed:
+    /// give the reserved `tag` back. Ignored once a focus or session holds it.
+    ConversationResumeRelease {
+        tag: String,
+    },
     /// Hide an entry (undoable until `ConversationHistoryPurgeRemoved`).
     ConversationHistoryRemove {
         request_id: String,
@@ -9000,6 +9005,7 @@ mod slash_commands_wire_tests {
         let msgs = [
             r#"{"type":"conversation_history_get","request_id":"r"}"#,
             r#"{"type":"conversation_resume","request_id":"r","id":"s1","new_tag":"t1"}"#,
+            r#"{"type":"conversation_resume_release","tag":"t1"}"#,
             r#"{"type":"conversation_history_remove","request_id":"r","id":"s1"}"#,
             r#"{"type":"conversation_history_restore","request_id":"r","id":"s1"}"#,
             r#"{"type":"conversation_history_purge_removed","request_id":"r"}"#,

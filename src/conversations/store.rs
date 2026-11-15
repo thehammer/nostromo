@@ -575,9 +575,9 @@ impl ConversationHistory {
                 }
             }
             s.candidates.clear();
-            // A degraded history writes nothing, but the `.bak` it keeps must
-            // not hold the prompts the user just turned off.
-            if let Some(path) = s.path.clone().filter(|_| s.degraded.is_some()) {
+            // A `.bak` (kept by this run or an earlier degraded one) must not
+            // hold the prompts the user just turned off.
+            if let Some(path) = s.path.clone() {
                 scrub_backups(&path);
             }
         }

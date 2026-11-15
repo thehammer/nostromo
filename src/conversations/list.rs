@@ -219,7 +219,8 @@ pub fn run_background(
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_millis() as i64);
-        let unreadable = check_unreadable(&path);
+        // A file reached through a symlinked folder is never opened.
+        let unreadable = !transcript::is_safe_transcript(&path) || check_unreadable(&path);
         history.set_verdict(
             sid,
             FileVerdict {

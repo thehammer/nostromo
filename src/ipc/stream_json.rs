@@ -3299,7 +3299,7 @@ pub fn load_scrollback_from(
             continue;
         }
         let candidate = entry.path().join(format!("{session_id}.jsonl"));
-        if candidate.is_file() {
+        if crate::conversations::transcript::is_safe_transcript_under(projects, &candidate) {
             if let Some(content) = read_scrollback_text(&candidate) {
                 return transcript_from_jsonl(&content, max_turns);
             }
@@ -3937,6 +3937,26 @@ mod tests {
         let link = folder.join("link.jsonl");
         std::os::unix::fs::symlink(&small, &link).unwrap();
         assert!(read_scrollback_text(&link).is_none());
+    }
+
+    #[test]
+    fn scrollback_never_follows_a_symlinked_project_folder_out_of_the_projects_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("esc.jsonl"), SCROLLBACK).unwrap();
+        std::os::unix::fs::symlink(&outside, projects.join("linked")).unwrap();
+        assert!(load_scrollback_from(&projects, "esc", 30)
+            .snapshot()
+            .is_empty());
+        std::fs::create_dir_all(projects.join("real")).unwrap();
+        std::fs::write(projects.join("real").join("ok.jsonl"), SCROLLBACK).unwrap();
+        assert_eq!(
+            load_scrollback_from(&projects, "ok", 30).snapshot().len(),
+            2
+        );
     }
 
     #[test]

@@ -2792,6 +2792,13 @@ impl SessionManager {
 
     /// [`Self::kill_all_on_shutdown`] with an explicit grace.
     pub fn kill_all_on_shutdown_with_grace(&mut self, grace: Duration) {
+        self.stop_sessions_on_shutdown(grace);
+        // A conversation-history change still inside its debounce window must
+        // reach disk before the daemon exits.
+        self.conversations.flush();
+    }
+
+    fn stop_sessions_on_shutdown(&mut self, grace: Duration) {
         if self.sessions.is_empty() {
             // Nothing running; tidy up what `stop` left in the ledger.
             self.ledger.clear();

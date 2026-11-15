@@ -168,6 +168,12 @@ struct ClientConversationResume: Encodable {
     enum CodingKeys: String, CodingKey { case type, id, requestId = "request_id", newTag = "new_tag" }
 }
 
+struct ClientConversationResumeRelease: Encodable {
+    let type = "conversation_resume_release"
+    let tag: String
+    enum CodingKeys: String, CodingKey { case type, tag }
+}
+
 /// `conversation_history_remove` / `_restore`, told apart by `type`.
 struct ClientConversationHistoryEdit: Encodable {
     let type: String

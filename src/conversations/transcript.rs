@@ -69,7 +69,12 @@ pub fn open_regular(path: &Path) -> std::io::Result<std::fs::File> {
 /// Is `path` a regular file (not a symlink) that really lives under the
 /// projects folder? A symlinked folder cannot lead a read out of it.
 pub fn is_safe_transcript(path: &Path) -> bool {
-    let Some(root) = projects_dir().and_then(|r| r.canonicalize().ok()) else {
+    projects_dir().is_some_and(|root| is_safe_transcript_under(&root, path))
+}
+
+/// [`is_safe_transcript`] against an explicit projects folder `root`.
+pub fn is_safe_transcript_under(root: &Path, path: &Path) -> bool {
+    let Ok(root) = root.canonicalize() else {
         return false;
     };
     let Ok(meta) = std::fs::symlink_metadata(path) else {

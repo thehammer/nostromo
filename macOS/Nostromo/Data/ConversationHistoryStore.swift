@@ -7,6 +7,7 @@ protocol ConversationHistorySending: AnyObject {
     var daemonAdvertisesConversationHistory: Bool { get }
     func conversationHistoryGet(requestId: String)
     func conversationResume(requestId: String, id: String, newTag: String)
+    func conversationResumeRelease(tag: String)
     func conversationHistoryRemove(requestId: String, id: String)
     func conversationHistoryRestore(requestId: String, id: String)
     func conversationHistoryPurgeRemoved(requestId: String)
@@ -107,12 +108,21 @@ final class ConversationHistoryStore {
         send(sid: sid, startedAt: now())
     }
 
-    /// The sheet closed (Cancel, or any way out): stop retrying and forget every request in flight. A
-    /// reply that arrives later matches nothing and is ignored; the daemon's reservation for its tag
-    /// lapses on its own (`RESERVED_TAG_TTL`), so no focus is made and nothing is left to clean up here.
+    /// The sheet closed (Cancel, or any way out): stop retrying and forget every request in flight, and
+    /// give each one's tag back to the daemon (sent after the resume on the same connection, so it lands
+    /// after any reservation). A reply that arrives later matches nothing and is ignored; the daemon
+    /// ignores a release for a tag that already has a focus. Its reservation window
+    /// (`RESERVATION_WINDOW`) is only the backstop if this frame is lost.
     func cancelResumes() {
+        for p in pending.values { sender?.conversationResumeRelease(tag: p.tag) }
         pending.removeAll()
         inFlight.removeAll()
+    }
+
+    /// Give back the tag of a resume whose focus was never made.
+    func releaseResumedTag(_ tag: String) {
+        resumedSids.removeValue(forKey: tag)
+        sender?.conversationResumeRelease(tag: tag)
     }
 
     private func send(sid: String, startedAt: Date) {

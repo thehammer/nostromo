@@ -5,6 +5,7 @@ final class RecordingHistorySender: ConversationHistorySending {
     var daemonAdvertisesConversationHistory = true
     private(set) var gets = 0
     private(set) var resumes: [(requestId: String, id: String, newTag: String)] = []
+    private(set) var releases: [String] = []
     private(set) var removes: [String] = []
     private(set) var restores: [String] = []
     private(set) var purges = 0
@@ -12,6 +13,7 @@ final class RecordingHistorySender: ConversationHistorySending {
 
     func conversationHistoryGet(requestId: String) { gets += 1 }
     func conversationResume(requestId: String, id: String, newTag: String) { resumes.append((requestId, id, newTag)) }
+    func conversationResumeRelease(tag: String) { releases.append(tag) }
     func conversationHistoryRemove(requestId: String, id: String) { removes.append(id) }
     func conversationHistoryRestore(requestId: String, id: String) { restores.append(id) }
     func conversationHistoryPurgeRemoved(requestId: String) { purges += 1 }
