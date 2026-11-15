@@ -108,7 +108,6 @@ final class AuthoredPrsHeaderView: NSView {
     let titleLabel = plainLabel(font: .systemFont(ofSize: 13, weight: .semibold), color: AuthoredPrsPalette.text, truncates: false)
     let freshnessLabel = plainLabel(font: .systemFont(ofSize: 11), color: AuthoredPrsPalette.muted)
     let refreshButton = NSButton()
-    private let notes = NSStackView()
     private var noteLabels: [NSTextField] = []
     var onRefresh: (() -> Void)?
 
@@ -129,12 +128,7 @@ final class AuthoredPrsHeaderView: NSView {
         refreshButton.setAccessibilityLabel("Refresh my open PRs")
         refreshButton.translatesAutoresizingMaskIntoConstraints = false
 
-        notes.orientation = .vertical
-        notes.alignment = .leading
-        notes.spacing = 0
-        notes.translatesAutoresizingMaskIntoConstraints = false
-
-        for v in [titleLabel, freshnessLabel, refreshButton, notes] as [NSView] { addSubview(v) }
+        for v in [titleLabel, freshnessLabel, refreshButton] as [NSView] { addSubview(v) }
         let bar = Self.barHeight
         NSLayoutConstraint.activate([
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
@@ -146,10 +140,6 @@ final class AuthoredPrsHeaderView: NSView {
             freshnessLabel.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -6),
             freshnessLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12),
             freshnessLabel.centerYAnchor.constraint(equalTo: topAnchor, constant: bar / 2),
-            notes.topAnchor.constraint(equalTo: topAnchor, constant: bar),
-            notes.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            notes.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            notes.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
         ])
         apply(model: nil, notes: [])
     }
@@ -168,16 +158,22 @@ final class AuthoredPrsHeaderView: NSView {
         titleLabel.setAccessibilityLabel(model.map { "\($0.countText). \($0.freshness)" } ?? "My open PRs")
 
         noteLabels.forEach { $0.removeFromSuperview() }
+        // Each note is its own line, pinned to the header's padding: a long one truncates, never widens the header.
         noteLabels = newNotes.map { note in
             let label = plainLabel(font: .systemFont(ofSize: 11), color: note.isWarning ? AuthoredPrsPalette.warning : AuthoredPrsPalette.muted)
             label.stringValue = note.text
             label.toolTip = note.text
-            label.heightAnchor.constraint(equalToConstant: Self.noteHeight).isActive = true
+            label.setContentCompressionResistancePriority(.init(250), for: .horizontal)
             return label
         }
-        for label in noteLabels {
-            notes.addArrangedSubview(label)
-            label.widthAnchor.constraint(equalTo: notes.widthAnchor).isActive = true
+        for (index, label) in noteLabels.enumerated() {
+            addSubview(label)
+            NSLayoutConstraint.activate([
+                label.topAnchor.constraint(equalTo: topAnchor, constant: Self.barHeight + CGFloat(index) * Self.noteHeight),
+                label.heightAnchor.constraint(equalToConstant: Self.noteHeight),
+                label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+                label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            ])
         }
     }
 
