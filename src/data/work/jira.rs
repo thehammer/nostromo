@@ -1063,7 +1063,7 @@ fn rejected_reason(code: u16) -> String {
 /// or ending with `-`. One leading `https://` and one trailing `/` are
 /// forgiven, case is folded. Everything else (other hosts, userinfo, ports,
 /// paths, spaces, non-ASCII) is refused, because the API token is sent to this host.
-fn validate_site(raw: &str) -> Option<String> {
+pub(crate) fn validate_site(raw: &str) -> Option<String> {
     let lowered = raw.trim().to_ascii_lowercase();
     let site = lowered.strip_prefix("https://").unwrap_or(&lowered);
     let site = site.strip_suffix('/').unwrap_or(site);

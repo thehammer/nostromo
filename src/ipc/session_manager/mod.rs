@@ -431,6 +431,17 @@ struct ManagedSession {
     crash_counted: bool,
 }
 
+/// A manager's session dropped with its CLI still running (a panicking test, an
+/// error path) must not leave the process holding the reader's pipes: the
+/// reader and stderr drain are blocking tasks that end only at EOF, and a
+/// runtime's drop waits for them, forever. `stop` and shutdown have already
+/// signalled the child by then, and a reaped child is never signalled.
+impl Drop for ManagedSession {
+    fn drop(&mut self) {
+        self.signal_kill();
+    }
+}
+
 impl ManagedSession {
     fn alive(&self) -> bool {
         !self.shared.exited.load(Ordering::SeqCst)

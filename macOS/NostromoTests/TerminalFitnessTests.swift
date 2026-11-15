@@ -1272,9 +1272,9 @@ final class TerminalFitnessTests: XCTestCase {
             let rest = code[start.upperBound...]
             let end = rest.range(of: "private func ")?.lowerBound ?? rest.endIndex
             let text = String(rest[..<end])
-            XCTAssertTrue(text.contains("v is StagingDrawerView"), "\(function) must stop at a staging drawer:\n\(text)")
+            XCTAssertTrue(text.contains("AppControlAX.isWithheldRoot(v)"), "\(function) must stop at a withheld root (staging drawer, review pane):\n\(text)")
             XCTAssertTrue(text.contains("AppControlAX.isWithheld(v)"), "\(function) must use the one rule:\n\(text)")
-            XCTAssertTrue(text.contains("stagedHiddenText"), "\(function) must answer with the fixed text:\n\(text)")
+            XCTAssertTrue(text.contains("withheldText(for: v)"), "\(function) must answer with the fixed text:\n\(text)")
         }
         XCTAssertTrue(code.contains("if AppControlAX.isWithheld(t) { return o }"), "`ax` must not add view properties for a withheld view")
     }

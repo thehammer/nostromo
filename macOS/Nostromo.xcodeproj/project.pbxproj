@@ -7,6 +7,37 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		RT0000000000000000000002 /* ReviewNavigationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000001 /* ReviewNavigationPolicyTests.swift */; };
+		RT0000000000000000000004 /* ReviewPaneHostsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000003 /* ReviewPaneHostsTests.swift */; };
+		RT0000000000000000000006 /* ReviewPaneModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000005 /* ReviewPaneModelTests.swift */; };
+		RT0000000000000000000008 /* ReviewPaneStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000007 /* ReviewPaneStoreTests.swift */; };
+		RT0000000000000000000010 /* ReviewPaneTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000009 /* ReviewPaneTestSupport.swift */; };
+		RT0000000000000000000012 /* ReviewWebViewIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000011 /* ReviewWebViewIntegrationTests.swift */; };
+		RT0000000000000000000014 /* PerriRowControlsRenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000013 /* PerriRowControlsRenderTests.swift */; };
+		RT0000000000000000000016 /* PerriRowControlsHitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000015 /* PerriRowControlsHitTests.swift */; };
+		RT0000000000000000000018 /* PerriFocusContainerLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000017 /* PerriFocusContainerLayoutTests.swift */; };
+		RT0000000000000000000020 /* ReviewPaneRedactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000019 /* ReviewPaneRedactionTests.swift */; };
+		RT0000000000000000000022 /* ReviewPaneAccessibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RT0000000000000000000021 /* ReviewPaneAccessibilityTests.swift */; };
+		RP0000000000000000000029 /* PerriRowControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000028 /* PerriRowControls.swift */; };
+		RP0000000000000000000030 /* PerriRowControls.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000028 /* PerriRowControls.swift */; };
+		RP0000000000000000000026 /* PerriFocusContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000025 /* PerriFocusContainerView.swift */; };
+		RP0000000000000000000027 /* PerriFocusContainerView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000025 /* PerriFocusContainerView.swift */; };
+		RP0000000000000000000023 /* ReviewSidePaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000022 /* ReviewSidePaneView.swift */; };
+		RP0000000000000000000024 /* ReviewSidePaneView.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000022 /* ReviewSidePaneView.swift */; };
+		RP0000000000000000000020 /* ReviewTabController.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000019 /* ReviewTabController.swift */; };
+		RP0000000000000000000021 /* ReviewTabController.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000019 /* ReviewTabController.swift */; };
+		RP0000000000000000000017 /* ReviewWebViewFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000016 /* ReviewWebViewFactory.swift */; };
+		RP0000000000000000000018 /* ReviewWebViewFactory.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000016 /* ReviewWebViewFactory.swift */; };
+		RP0000000000000000000014 /* ReviewPaneStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000013 /* ReviewPaneStore.swift */; };
+		RP0000000000000000000015 /* ReviewPaneStore.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000013 /* ReviewPaneStore.swift */; };
+		RP0000000000000000000011 /* ReviewPaneModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000010 /* ReviewPaneModel.swift */; };
+		RP0000000000000000000012 /* ReviewPaneModel.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000010 /* ReviewPaneModel.swift */; };
+		RP0000000000000000000008 /* ReviewNavigationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000007 /* ReviewNavigationPolicy.swift */; };
+		RP0000000000000000000009 /* ReviewNavigationPolicy.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000007 /* ReviewNavigationPolicy.swift */; };
+		RP0000000000000000000005 /* ReviewPaneHosts.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000004 /* ReviewPaneHosts.swift */; };
+		RP0000000000000000000006 /* ReviewPaneHosts.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000004 /* ReviewPaneHosts.swift */; };
+		RP0000000000000000000002 /* BrowserProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000001 /* BrowserProfile.swift */; };
+		RP0000000000000000000003 /* BrowserProfile.swift in TestSources */ = {isa = PBXBuildFile; fileRef = RP0000000000000000000001 /* BrowserProfile.swift */; };
 		AP0000000000000000001011 /* SyntheticInputGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000001010 /* SyntheticInputGate.swift */; };
 		AP0000000000000000001012 /* SyntheticInputGate.swift in TestSources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000001010 /* SyntheticInputGate.swift */; };
 		AP0000000000000000001021 /* HumanGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = AP0000000000000000001020 /* HumanGesture.swift */; };
@@ -808,6 +839,27 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		RT0000000000000000000001 /* ReviewNavigationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewNavigationPolicyTests.swift; sourceTree = "<group>"; };
+		RT0000000000000000000003 /* ReviewPaneHostsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneHostsTests.swift; sourceTree = "<group>"; };
+		RT0000000000000000000005 /* ReviewPaneModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneModelTests.swift; sourceTree = "<group>"; };
+		RT0000000000000000000007 /* ReviewPaneStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneStoreTests.swift; sourceTree = "<group>"; };
+		RT0000000000000000000009 /* ReviewPaneTestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneTestSupport.swift; sourceTree = "<group>"; };
+		RT0000000000000000000011 /* ReviewWebViewIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewWebViewIntegrationTests.swift; sourceTree = "<group>"; };
+		RT0000000000000000000013 /* PerriRowControlsRenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriRowControlsRenderTests.swift; sourceTree = "<group>"; };
+		RT0000000000000000000015 /* PerriRowControlsHitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriRowControlsHitTests.swift; sourceTree = "<group>"; };
+		RT0000000000000000000017 /* PerriFocusContainerLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriFocusContainerLayoutTests.swift; sourceTree = "<group>"; };
+		RT0000000000000000000019 /* ReviewPaneRedactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneRedactionTests.swift; sourceTree = "<group>"; };
+		RT0000000000000000000021 /* ReviewPaneAccessibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneAccessibilityTests.swift; sourceTree = "<group>"; };
+		RP0000000000000000000028 /* PerriRowControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriRowControls.swift; sourceTree = "<group>"; };
+		RP0000000000000000000025 /* PerriFocusContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerriFocusContainerView.swift; sourceTree = "<group>"; };
+		RP0000000000000000000022 /* ReviewSidePaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewSidePaneView.swift; sourceTree = "<group>"; };
+		RP0000000000000000000019 /* ReviewTabController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewTabController.swift; sourceTree = "<group>"; };
+		RP0000000000000000000016 /* ReviewWebViewFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewWebViewFactory.swift; sourceTree = "<group>"; };
+		RP0000000000000000000013 /* ReviewPaneStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneStore.swift; sourceTree = "<group>"; };
+		RP0000000000000000000010 /* ReviewPaneModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneModel.swift; sourceTree = "<group>"; };
+		RP0000000000000000000007 /* ReviewNavigationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewNavigationPolicy.swift; sourceTree = "<group>"; };
+		RP0000000000000000000004 /* ReviewPaneHosts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewPaneHosts.swift; sourceTree = "<group>"; };
+		RP0000000000000000000001 /* BrowserProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserProfile.swift; sourceTree = "<group>"; };
 		AP0000000000000000001010 /* SyntheticInputGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticInputGate.swift; sourceTree = "<group>"; };
 		AP0000000000000000001020 /* HumanGesture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HumanGesture.swift; sourceTree = "<group>"; };
 		AP0000000000000000001030 /* SyntheticInputGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticInputGateTests.swift; sourceTree = "<group>"; };
@@ -1600,6 +1652,7 @@
 				ZZ0000000000000000M20090 /* Model */,
 				ZZ0000000000000000BA9000 /* Background */,
 				AA0000020000000000000021 /* Views */,
+				RP0000000000000000009999 /* ReviewPane */,
 				ZZ0000000000000000TK9000 /* Tracker */,
 				CL0000000000000000000030 /* Login */,
 			);
@@ -1808,6 +1861,17 @@
 				JJ0000000000000000000003 /* IPCLatencyStatsTests.swift */,
 				KK0000000000000000000003 /* LayoutChangeClassifierTests.swift */,
 				TB0000000000000000000001 /* TabRegionViewTests.swift */,
+				RT0000000000000000000001 /* ReviewNavigationPolicyTests.swift */,
+				RT0000000000000000000003 /* ReviewPaneHostsTests.swift */,
+				RT0000000000000000000005 /* ReviewPaneModelTests.swift */,
+				RT0000000000000000000007 /* ReviewPaneStoreTests.swift */,
+				RT0000000000000000000009 /* ReviewPaneTestSupport.swift */,
+				RT0000000000000000000011 /* ReviewWebViewIntegrationTests.swift */,
+				RT0000000000000000000013 /* PerriRowControlsRenderTests.swift */,
+				RT0000000000000000000015 /* PerriRowControlsHitTests.swift */,
+				RT0000000000000000000017 /* PerriFocusContainerLayoutTests.swift */,
+				RT0000000000000000000019 /* ReviewPaneRedactionTests.swift */,
+				RT0000000000000000000021 /* ReviewPaneAccessibilityTests.swift */,
 				SS0000000000000000000011 /* SplitViewSwapTests.swift */,
 				QQ0000000000000000000003 /* PaneRenderPlanTests.swift */,
 				QQ0000000000000000000004 /* RatioSolverTests.swift */,
@@ -2069,6 +2133,23 @@
 				MF000000000000000000A500 /* MotherDependencyPresentation.swift */,
 			);
 			path = Mother;
+			sourceTree = "<group>";
+		};
+		RP0000000000000000009999 /* ReviewPane */ = {
+			isa = PBXGroup;
+			children = (
+				RP0000000000000000000001 /* BrowserProfile.swift */,
+				RP0000000000000000000004 /* ReviewPaneHosts.swift */,
+				RP0000000000000000000007 /* ReviewNavigationPolicy.swift */,
+				RP0000000000000000000010 /* ReviewPaneModel.swift */,
+				RP0000000000000000000013 /* ReviewPaneStore.swift */,
+				RP0000000000000000000016 /* ReviewWebViewFactory.swift */,
+				RP0000000000000000000019 /* ReviewTabController.swift */,
+				RP0000000000000000000022 /* ReviewSidePaneView.swift */,
+				RP0000000000000000000025 /* PerriFocusContainerView.swift */,
+				RP0000000000000000000028 /* PerriRowControls.swift */,
+			);
+			path = ReviewPane;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -2364,6 +2445,16 @@
 				JJ0000000000000000000013 /* DaemonDiagnostics.swift in Sources */,
 				KK0000000000000000000011 /* LayoutChangeClassifier.swift in Sources */,
 				KK0000000000000000000021 /* TabRegionView.swift in Sources */,
+				RP0000000000000000000029 /* PerriRowControls.swift in Sources */,
+				RP0000000000000000000026 /* PerriFocusContainerView.swift in Sources */,
+				RP0000000000000000000023 /* ReviewSidePaneView.swift in Sources */,
+				RP0000000000000000000020 /* ReviewTabController.swift in Sources */,
+				RP0000000000000000000017 /* ReviewWebViewFactory.swift in Sources */,
+				RP0000000000000000000014 /* ReviewPaneStore.swift in Sources */,
+				RP0000000000000000000011 /* ReviewPaneModel.swift in Sources */,
+				RP0000000000000000000008 /* ReviewNavigationPolicy.swift in Sources */,
+				RP0000000000000000000005 /* ReviewPaneHosts.swift in Sources */,
+				RP0000000000000000000002 /* BrowserProfile.swift in Sources */,
 				SS0000000000000000000002 /* SplitViewSwap.swift in Sources */,
 				QQ0000000000000000000101 /* PaneRenderPlan.swift in Sources */,
 				QQ0000000000000000000201 /* RatioSolver.swift in Sources */,
@@ -2738,8 +2829,29 @@
 				KK0000000000000000000012 /* LayoutChangeClassifier.swift in TestSources */,
 				KK0000000000000000000031 /* LayoutChangeClassifierTests.swift in Sources */,
 				KK0000000000000000000022 /* TabRegionView.swift in TestSources */,
+				RP0000000000000000000030 /* PerriRowControls.swift in TestSources */,
+				RP0000000000000000000027 /* PerriFocusContainerView.swift in TestSources */,
+				RP0000000000000000000024 /* ReviewSidePaneView.swift in TestSources */,
+				RP0000000000000000000021 /* ReviewTabController.swift in TestSources */,
+				RP0000000000000000000018 /* ReviewWebViewFactory.swift in TestSources */,
+				RP0000000000000000000015 /* ReviewPaneStore.swift in TestSources */,
+				RP0000000000000000000012 /* ReviewPaneModel.swift in TestSources */,
+				RP0000000000000000000009 /* ReviewNavigationPolicy.swift in TestSources */,
+				RP0000000000000000000006 /* ReviewPaneHosts.swift in TestSources */,
+				RP0000000000000000000003 /* BrowserProfile.swift in TestSources */,
 				SS0000000000000000000003 /* SplitViewSwap.swift in TestSources */,
 				TB0000000000000000000002 /* TabRegionViewTests.swift in Sources */,
+				RT0000000000000000000002 /* ReviewNavigationPolicyTests.swift in Sources */,
+				RT0000000000000000000004 /* ReviewPaneHostsTests.swift in Sources */,
+				RT0000000000000000000006 /* ReviewPaneModelTests.swift in Sources */,
+				RT0000000000000000000008 /* ReviewPaneStoreTests.swift in Sources */,
+				RT0000000000000000000010 /* ReviewPaneTestSupport.swift in Sources */,
+				RT0000000000000000000012 /* ReviewWebViewIntegrationTests.swift in Sources */,
+				RT0000000000000000000014 /* PerriRowControlsRenderTests.swift in Sources */,
+				RT0000000000000000000016 /* PerriRowControlsHitTests.swift in Sources */,
+				RT0000000000000000000018 /* PerriFocusContainerLayoutTests.swift in Sources */,
+				RT0000000000000000000020 /* ReviewPaneRedactionTests.swift in Sources */,
+				RT0000000000000000000022 /* ReviewPaneAccessibilityTests.swift in Sources */,
 				SS0000000000000000000012 /* SplitViewSwapTests.swift in Sources */,
 				QQ0000000000000000000102 /* PaneRenderPlan.swift in TestSources */,
 				QQ0000000000000000000202 /* RatioSolver.swift in TestSources */,
