@@ -191,11 +191,6 @@ impl JiraProvider {
         }
     }
 
-    /// Whether credentials resolved (the project list needs them).
-    pub fn is_configured(&self) -> bool {
-        self.credentials.is_some()
-    }
-
     /// Every project key on the site: `GET /rest/api/3/project/search`, paged
     /// 50 at a time until `isLast`. Only keys are kept; the token never leaves
     /// this provider.

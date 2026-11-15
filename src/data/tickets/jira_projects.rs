@@ -13,6 +13,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use super::jira::JiraProvider;
+use super::TicketProvider;
 use crate::data::ticket_keys::{ProjectFilter, TicketScope};
 
 /// How often the list is refreshed.
