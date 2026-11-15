@@ -25,7 +25,9 @@ final class FocusPresenter {
     var attempts = 20
 
     init(hosts: @escaping () -> [FocusHostWindow] = { FocusPresenter.liveHosts() },
-         activateApp: @escaping () -> Void = { NSApp.activate(ignoringOtherApps: true) },
+         activateApp: @escaping () -> Void = {
+             ActivationAudit.note("authored-pr:activate-app"); NSApp.activate(ignoringOtherApps: true)
+         },
          later: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          }) {

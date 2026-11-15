@@ -56,8 +56,9 @@ enum AuthoredPrHandoffUI {
 
     private static func showSheet(_ controller: NSViewController, from anchor: NSView, model: AuthoredPrStartSessionModel) {
         guard let parent = anchor.window else { return }
-        let window = NSWindow(contentViewController: controller)
-        window.styleMask = [.titled]
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 380),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = controller
         sheet = window
         sheetParent = parent
         parent.beginSheet(window) { _ in }
