@@ -48,7 +48,7 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         pane = nil
         model = nil
         window = nil
-        spin(0.3)
+        await spinA(0.3)
         await world.removeDataStore()
         world = nil
         try await super.tearDown()
@@ -70,8 +70,10 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
     /// Waits for the tab's start page to have loaded and the page to answer a script.
     private func waitForLoaded(_ tab: ReviewTab, file: StaticString = #filePath, line: UInt = #line) async throws {
         let c = try controller(tab, file: file, line: line)
-        XCTAssertTrue(spinUntil(15) { !c.webView.isLoading && c.webView.url == tab.startURL && c.contentView.cover.isHidden },
-                      "the fixture page loaded", file: file, line: line)
+        await assertTrueA(await spinUntilA(15) { !c.webView.isLoading && c.webView.url == tab.startURL && c.contentView.cover.isHidden },
+                      "the fixture page loaded: isLoading \(c.webView.isLoading), url \(String(describing: c.webView.url)) vs \(tab.startURL), "
+                      + "cover \"\(c.contentView.cover.message)\" hidden \(c.contentView.cover.isHidden), frame \(c.webView.frame), "
+                      + "handler saw \(world.handler.requested.map(\.absoluteString))", file: file, line: line)
         _ = try await c.webView.evaluateJavaScript("1")
         window.contentView?.layoutSubtreeIfNeeded()
     }
@@ -85,7 +87,7 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if await check() { return true }
-            spin(0.05)
+            await spinA(0.05)
         }
         return await check()
     }
@@ -164,7 +166,7 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
     func testTheReviewPaneLoadsItsStartPageThroughItsOwnController() async throws {
         let tab = openTab()
         let c = try controller(tab)
-        let loaded = spinUntil(20) { !c.webView.isLoading && c.webView.url == tab.startURL }
+        let loaded = await spinUntilA(20) { !c.webView.isLoading && c.webView.url == tab.startURL }
         let diagnostics = "isLoading \(c.webView.isLoading), progress \(c.webView.estimatedProgress), url \(String(describing: c.webView.url)), "
             + "frame \(c.webView.frame), window visible \(String(describing: c.webView.window?.isVisible)), "
             + "occlusion \(String(describing: c.webView.window?.occlusionState.rawValue)), handler saw \(world.handler.requested.count), "
@@ -178,12 +180,12 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
     private func assertRedirectBlocked(_ html: String, file: StaticString = #filePath, line: UInt = #line) async throws {
         serve(mainPath, ReviewFixtureHandler.html(html))
         let tab = openTab()
-        XCTAssertTrue(spinUntil(15) { self.notice(tab)?.isHidden == false },
+        await assertTrueA(await spinUntilA(15) { self.notice(tab)?.isHidden == false },
                       "the notice appears", file: file, line: line)
         XCTAssertTrue(notice(tab)?.message.contains("evil.example") == true,
                       "SR2: the notice names the host: \(notice(tab)?.message ?? "nil")", file: file, line: line)
         XCTAssertEqual(notice(tab)?.buttonTitle, "Open in Browser", file: file, line: line)
-        spin(0.7)       // a stray load would have reached the handler by now
+        await spinA(0.7)       // a stray load would have reached the handler by now
         assertTabStayedPut(tab, file: file, line: line)
         assertNoRequestReachedEvil(file: file, line: line)
         XCTAssertEqual(world.openedExternally, [], "nothing opens the browser without a click", file: file, line: line)
@@ -204,7 +206,7 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
     func testTheNoticesOpenInBrowserButtonOpensTheBlockedURLOnlyWhenPressed() async throws {
         serve(mainPath, ReviewFixtureHandler.html("<script>location.assign('nostromo-fixture://evil.example/landing')</script>"))
         let tab = openTab()
-        XCTAssertTrue(spinUntil(15) { self.notice(tab)?.isHidden == false })
+        await assertTrueA(await spinUntilA(15) { self.notice(tab)?.isHidden == false })
         XCTAssertEqual(world.openedExternally, [])
         notice(tab)?.press()
         XCTAssertEqual(world.openedExternally, [reviewFixtureURL("evil.example/landing")])
@@ -219,8 +221,8 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
 
         try realClick(tab, x: 100, y: 60)
 
-        XCTAssertTrue(spinUntil(10) { !self.world.openedExternally.isEmpty }, "the click reached the page and the link opened")
-        spin(0.5)
+        await assertTrueA(await spinUntilA(10) { !self.world.openedExternally.isEmpty }, "the click reached the page and the link opened")
+        await spinA(0.5)
         XCTAssertEqual(world.openedExternally, [reviewFixtureURL("evil.example/landing")], "exactly once, with the URL")
         assertTabStayedPut(tab)
         assertNoRequestReachedEvil()
@@ -233,9 +235,9 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
 
         _ = await js(tab, "document.getElementById('out').click(); true")
 
-        XCTAssertTrue(spinUntil(10) { self.notice(tab)?.isHidden == false }, "blocked with a notice instead")
+        await assertTrueA(await spinUntilA(10) { self.notice(tab)?.isHidden == false }, "blocked with a notice instead")
         XCTAssertTrue(notice(tab)?.message.contains("evil.example") == true)
-        spin(0.3)
+        await spinA(0.3)
         XCTAssertEqual(world.openedExternally, [], "SR3: script is not a person")
         assertTabStayedPut(tab)
         assertNoRequestReachedEvil()
@@ -247,11 +249,11 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         try await waitForLoaded(tab)
 
         try realClick(tab, x: 100, y: 240)          // a real click on empty page: a human event, but not on the link
-        spin(ReviewWebView.gestureWindow + 0.5)     // the gesture has gone stale
+        await spinA(ReviewWebView.gestureWindow + 0.5)     // the gesture has gone stale
         _ = await js(tab, "document.getElementById('out').click(); true")
 
-        XCTAssertTrue(spinUntil(10) { self.notice(tab)?.isHidden == false })
-        spin(0.3)
+        await assertTrueA(await spinUntilA(10) { self.notice(tab)?.isHidden == false })
+        await spinA(0.3)
         XCTAssertEqual(world.openedExternally, [], "SR3: a click from long ago is not a gesture")
         assertTabStayedPut(tab)
     }
@@ -266,8 +268,8 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         ReviewEvents.click(at: point, in: window)
         SyntheticInputGate.end()
 
-        XCTAssertTrue(spinUntil(10) { self.notice(tab)?.isHidden == false }, "blocked with a notice")
-        spin(0.3)
+        await assertTrueA(await spinUntilA(10) { self.notice(tab)?.isHidden == false }, "blocked with a notice")
+        await spinA(0.3)
         XCTAssertEqual(world.openedExternally, [], "an agent driving app-control is not a person")
         assertTabStayedPut(tab)
     }
@@ -281,7 +283,7 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
 
         try realClick(tab, x: 100, y: 60)
 
-        XCTAssertTrue(spinUntil(10) { tab.currentURL == reviewFixtureURL("github.com/acme/web/pull/7/files") },
+        await assertTrueA(await spinUntilA(10) { tab.currentURL == reviewFixtureURL("github.com/acme/web/pull/7/files") },
                       "an allowed host loads in the pane")
         XCTAssertEqual(world.openedExternally, [])
         XCTAssertEqual(model.tabs.count, 1)
@@ -296,9 +298,9 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
 
         try realClick(tab, x: 100, y: 60)
 
-        XCTAssertTrue(spinUntil(10) { !self.world.openedExternally.isEmpty })
+        await assertTrueA(await spinUntilA(10) { !self.world.openedExternally.isEmpty })
         XCTAssertEqual(world.openedExternally, [reviewFixtureURL("evil.example/landing")])
-        spin(0.3)
+        await spinA(0.3)
         XCTAssertEqual(model.tabs.count, 1)
         assertNoRequestReachedEvil()
     }
@@ -313,11 +315,11 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
 
         try realClick(tab, x: 100, y: 60)
 
-        XCTAssertTrue(spinUntil(10) { self.model.tabs.count == 2 }, "the popup became a pane tab")
+        await assertTrueA(await spinUntilA(10) { self.model.tabs.count == 2 }, "the popup became a pane tab")
         let popup = try XCTUnwrap(model.tabs.first { $0.id != tab.id })
         if case .page = popup.target {} else { XCTFail("a popup is a page tab, not \(popup.target)") }
         XCTAssertEqual(popup.pr, pr, "it belongs to the PR it was opened from")
-        XCTAssertTrue(spinUntil(10) { self.world.handler.requestCount(host: "github.com", pathPrefix: "/acme/web/issues/9") >= 1 },
+        await assertTrueA(await spinUntilA(10) { self.world.handler.requestCount(host: "github.com", pathPrefix: "/acme/web/issues/9") >= 1 },
                       "and it loaded the allowed page")
         XCTAssertEqual(world.openedExternally, [])
     }
@@ -331,10 +333,10 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
             """))
         let tab = openTab()
         try await waitForLoaded(tab)
-        spin(0.6)       // the script's navigation has been tried
+        await spinA(0.6)       // the script's navigation has been tried
 
         try realClick(tab, x: 100, y: 60)
-        spin(0.8)
+        await spinA(0.8)
 
         XCTAssertEqual(tab.controller?.webView.url, tab.startURL, "an http page never loads")
         XCTAssertEqual(tab.currentURL, tab.startURL)
@@ -362,14 +364,14 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         private var web: WKWebView?
 
         @MainActor
-        func obtain(dataStore: WKWebsiteDataStore) -> WKFrameInfo? {
+        func obtain(dataStore: WKWebsiteDataStore) async -> WKFrameInfo? {
             let config = WKWebViewConfiguration()
             config.websiteDataStore = dataStore
             config.userContentController.add(self, name: "probe")
             let w = WKWebView(frame: .zero, configuration: config)
             web = w
             w.loadHTMLString("<script>window.webkit.messageHandlers.probe.postMessage('x')</script>", baseURL: nil)
-            spinUntil(10) { self.frameInfo != nil }
+            _ = await spinUntilA(10) { self.frameInfo != nil }
             w.configuration.userContentController.removeScriptMessageHandler(forName: "probe")
             web = nil
             return frameInfo
@@ -386,7 +388,8 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         try await waitForLoaded(tab)
         let c = try controller(tab)
         let probe = FrameProbe()
-        let frame = try XCTUnwrap(probe.obtain(dataStore: world.dataStore), "a real frame to ask about")
+        let obtained = await probe.obtain(dataStore: world.dataStore)
+        let frame = try XCTUnwrap(obtained, "a real frame to ask about")
 
         for type: WKMediaCaptureType in [.camera, .microphone, .cameraAndMicrophone] {
             var decision: WKPermissionDecision?
@@ -402,7 +405,8 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         let tab = openTab()
         try await waitForLoaded(tab)
         let c = try controller(tab)
-        let frame = try XCTUnwrap(FrameProbe().obtain(dataStore: world.dataStore))
+        let obtained = await FrameProbe().obtain(dataStore: world.dataStore)
+        let frame = try XCTUnwrap(obtained)
 
         var alerted = false
         c.webView(c.webView, runJavaScriptAlertPanelWithMessage: "hi", initiatedByFrame: frame) { alerted = true }
@@ -437,7 +441,7 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         }
         let tab = openTab()
 
-        XCTAssertTrue(spinUntil(15) { self.notice(tab)?.isHidden == false }, "the notice appears")
+        await assertTrueA(await spinUntilA(15) { self.notice(tab)?.isHidden == false }, "the notice appears")
         XCTAssertEqual(notice(tab)?.message, "Downloads open in your browser.")
         XCTAssertEqual(notice(tab)?.buttonTitle, "Open in Browser")
         XCTAssertEqual(tab.controller?.webView.url, tab.startURL, "the tab stayed on its page")
@@ -457,9 +461,9 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
 
         try realClick(tab, x: 100, y: 60)
 
-        XCTAssertTrue(spinUntil(10) { self.notice(tab)?.isHidden == false }, "the download notice appears")
+        await assertTrueA(await spinUntilA(10) { self.notice(tab)?.isHidden == false }, "the download notice appears")
         XCTAssertEqual(notice(tab)?.message, "Downloads open in your browser.")
-        spin(0.3)
+        await spinA(0.3)
         XCTAssertEqual(world.handler.requestCount(host: "github.com", pathPrefix: "/acme/web/archive/file.bin"), 0,
                        "SR8: nothing was even requested")
         XCTAssertEqual(tab.controller?.webView.url, tab.startURL)
@@ -661,7 +665,7 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         let tab = openTab()
         let c = try controller(tab)
 
-        XCTAssertTrue(spinUntil(15) { c.contentView.cover.buttonTitle == "Retry" && !c.contentView.cover.isHidden },
+        await assertTrueA(await spinUntilA(15) { c.contentView.cover.buttonTitle == "Retry" && !c.contentView.cover.isHidden },
                       "the error cover with a Retry button appears")
         XCTAssertTrue(c.contentView.cover.message.contains("github.com"), "it names the host: \(c.contentView.cover.message)")
         XCTAssertFalse(c.contentView.cover.message.contains("/acme/web"), "and not the path")
@@ -671,9 +675,9 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         c.contentView.cover.press()
         c.contentView.cover.press()      // a second press while it reloads must not load again
 
-        XCTAssertTrue(spinUntil(15) { c.contentView.cover.isHidden && !c.webView.isLoading && c.webView.url == tab.startURL },
+        await assertTrueA(await spinUntilA(15) { c.contentView.cover.isHidden && !c.webView.isLoading && c.webView.url == tab.startURL },
                       "the page loaded and the cover went away")
-        spin(0.5)
+        await spinA(0.5)
         XCTAssertEqual(world.handler.requestCount(host: "github.com", pathPrefix: mainPath), requestsBefore + 1,
                        "Retry reloaded exactly once")
     }
@@ -686,6 +690,9 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
         let second = model.open(pr: pr, target: .diff, url: reviewFixtureURL("github.com/acme/web/pull/7/files"))
         let secondController = model.ensureController(for: second)
         let c = try controller(first)
+        // Opening it shows it, which starts its load: let that finish, so "not covered" means the crash did not cover it.
+        await assertTrueA(await spinUntilA(15) { secondController.contentView.cover.isHidden && !secondController.webView.isLoading },
+                          "the second tab loaded")
 
         XCTAssertTrue(c.webView.navigationDelegate === c, "WebKit reports a crash to the tab's own controller")
         XCTAssertTrue(c.webView.uiDelegate === c)
@@ -701,7 +708,7 @@ final class ReviewWebViewIntegrationTests: XCTestCase {
 
         let before = world.handler.requestCount(host: "github.com", pathPrefix: mainPath)
         c.contentView.cover.press()
-        XCTAssertTrue(spinUntil(15) { c.contentView.cover.isHidden && !c.webView.isLoading }, "Reload brings the page back")
+        await assertTrueA(await spinUntilA(15) { c.contentView.cover.isHidden && !c.webView.isLoading }, "Reload brings the page back")
         XCTAssertGreaterThan(world.handler.requestCount(host: "github.com", pathPrefix: mainPath), before)
     }
 }

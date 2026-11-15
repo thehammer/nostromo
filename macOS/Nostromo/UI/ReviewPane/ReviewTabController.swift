@@ -124,6 +124,7 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var failedURL: URL?
     /// A window the page opened that starts at about:blank is judged on its next navigation.
     private var isPopup = false
+    private var loadStarted = false
 
     /// Called when the tab should close itself (`window.close()`).
     var onClose: (() -> Void)?
@@ -151,9 +152,12 @@ final class ReviewTabController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     /// Loads the tab's last URL. Called once, when the tab is first shown. A popup already has its request.
     func loadInitial() {
-        guard !isPopup, webView.url == nil else { return }
+        guard !isPopup, !loadStarted, webView.url == nil else { return }
+        loadStarted = true
         contentView.cover.show("Loading…", spinning: true)
-        webView.load(URLRequest(url: tab.currentURL))
+        // Handing the request to WebKit takes tens of milliseconds: after the pane has appeared, not before.
+        let request = URLRequest(url: tab.currentURL)
+        DispatchQueue.main.async { [weak self] in self?.webView.load(request) }
     }
 
     func teardown() {

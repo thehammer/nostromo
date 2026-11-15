@@ -6,6 +6,9 @@ import NostromoKit
 struct PerriRowActions {
     var openConversation: (_ repo: String, _ number: Int) -> Void
     var openDiff: (_ repo: String, _ number: Int) -> Void
+    /// Draws the controls on this PR's row as if the pointer were over it. For tests only: a real
+    /// pointer cannot be delivered to a window parked off screen in CI.
+    var hoverOverride: Int? = nil
 }
 
 /// The PR a focus is reviewing right now when it is not in the queue ("Reviewing #N").
@@ -89,7 +92,7 @@ struct PerriQueueRow: View {
     var body: some View {
         NostromoKit.PerriPRRow(model: model, onLoad: onLoad, onClear: {})
             .overlay(alignment: .bottomTrailing) {
-                if model.marked || hovered {
+                if model.marked || hovered || actions.hoverOverride == number {
                     PerriRowControls(repo: repo, number: number, actions: actions,
                                      backing: model.marked ? Color(red: 0.07, green: 0.12, blue: 0.2) : .black)
                 }

@@ -16,6 +16,9 @@ final class ReviewWebView: WKWebView {
         return ProcessInfo.processInfo.systemUptime - last <= Self.gestureWindow
     }
 
+    /// The first click on a link in an inactive window follows the link, as in a browser.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) { note(event); super.mouseDown(with: event) }
     override func rightMouseDown(with event: NSEvent) { note(event); super.rightMouseDown(with: event) }
     override func keyDown(with event: NSEvent) { note(event); super.keyDown(with: event) }

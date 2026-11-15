@@ -240,12 +240,12 @@ final class PerriFocusContainerLayoutTests: XCTestCase {
         }
         let tab = openTab(rig)
         let controller = try XCTUnwrap(tab.controller)
-        XCTAssertTrue(spinUntil(15) { !controller.webView.isLoading && controller.webView.url == tab.startURL })
+        await assertTrueA(await spinUntilA(15) { !controller.webView.isLoading && controller.webView.url == tab.startURL })
         _ = try await controller.webView.evaluateJavaScript("window.scrollTo(0, 400); true")
         var scrolled = false
         for _ in 0..<100 where !scrolled {
             scrolled = (try? await controller.webView.evaluateJavaScript("window.scrollY") as? Double) == 400
-            if !scrolled { spin(0.05) }
+            if !scrolled { await spinA(0.05) }
         }
         XCTAssertTrue(scrolled, "precondition: the page is scrolled")
         let loads = rig.world.handler.requestCount(host: "github.com", pathPrefix: "/acme/web/pull/7")
@@ -255,7 +255,7 @@ final class PerriFocusContainerLayoutTests: XCTestCase {
         rig.model.open(pr: pr, target: .conversation, url: reviewFixtureURL("github.com/acme/web/pull/7"))
         openTab(rig, .diff, path: "/acme/web/pull/7/files")
         rig.model.open(pr: pr, target: .conversation, url: reviewFixtureURL("github.com/acme/web/pull/7"))
-        spin(0.6)
+        await spinA(0.6)
 
         XCTAssertEqual(rig.model.tabs.count, 2)
         XCTAssertEqual(rig.model.activeID, tab.id)

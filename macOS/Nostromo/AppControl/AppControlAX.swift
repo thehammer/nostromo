@@ -34,7 +34,12 @@ enum AppControlAX {
 
     /// The one fixed entry a withheld region reads as.
     static func withheldText(for view: NSView) -> String {
-        view is ReviewSidePaneView ? reviewPaneHiddenText : stagedHiddenText
+        var current: NSView? = view
+        while let v = current {
+            if v is ReviewSidePaneView { return reviewPaneHiddenText }
+            current = v.superview
+        }
+        return stagedHiddenText
     }
 
     /// Whether `view` is a staging drawer or a confirm sheet's content (the sheet is its own window), or inside

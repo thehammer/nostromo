@@ -313,3 +313,51 @@ final class ReviewPaneAccessibilityTests: XCTestCase {
         XCTAssertTrue(spinUntil(2) { rig.window.firstResponder === rig.focus }, "\(String(describing: rig.window.firstResponder))")
     }
 }
+
+// MARK: - Criterion 41: no new key equivalents
+
+@MainActor
+final class MainMenuKeyEquivalentsUnchangedTests: XCTestCase {
+
+    private func equivalents(_ menu: NSMenu) -> [String] {
+        menu.items.flatMap { item -> [String] in
+            var out: [String] = []
+            if !item.keyEquivalent.isEmpty {
+                out.append("\(item.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask).rawValue)|\(item.keyEquivalent)|\(item.title)")
+            }
+            if let sub = item.submenu { out += equivalents(sub) }
+            return out
+        }
+    }
+
+    /// The side pane adds no shortcut anywhere (criterion 41): the main menu's set is the one main had.
+    func testTheMainMenuHasExactlyTheKeyEquivalentsItHadBeforeTheSidePane() {
+        let actual = equivalents(MainMenu.make(target: nil)).sorted()
+        XCTAssertEqual(actual, [
+            "1048576|Z|Redo",
+            "1048576|a|Select All",
+            "1048576|c|Copy",
+            "1048576|f|Find…",
+            "1048576|g|Find Next",
+            "1048576|q|Quit Nostromo",
+            "1048576|t|New Terminal",
+            "1048576|v|Paste",
+            "1048576|x|Cut",
+            "1048576|z|Undo",
+            "1179648|b|Background Activity…",
+            "1179648|d|Copy transcript diagnostics",
+            "1179648|i|Copy daemon diagnostics",
+            "1179648|j|Focus Staged Commands",
+            "1179648|k|Copy code-pane diagnostics",
+            "1179648|m|Model…",
+            "1179648|p|Copy pane diagnostics",
+            "1179648|t|New Remote Shell…",
+            "1179648|w|Close Terminal Pane",
+            "1572864|a|Go to Approval Card",
+            "1572864||Focus",
+            "1572864||Show All Activity",
+            "1703936|b|Capture render state now",
+            "1835008|n|Open Second Window (QA)",
+        ])
+    }
+}

@@ -72,6 +72,7 @@ final class ReviewTabStripView: NSView {
         stack.spacing = 3
         stack.edgeInsets = NSEdgeInsets(top: 3, left: 4, bottom: 3, right: 4)
         scroll.documentView = stack
+        stack.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasHorizontalScroller = false
         scroll.hasVerticalScroller = false
         scroll.drawsBackground = false
@@ -80,7 +81,9 @@ final class ReviewTabStripView: NSView {
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor), scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
             scroll.topAnchor.constraint(equalTo: topAnchor), scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.heightAnchor.constraint(equalTo: scroll.heightAnchor),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            stack.heightAnchor.constraint(equalTo: scroll.contentView.heightAnchor),
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.tabGroup)
@@ -187,6 +190,11 @@ final class ReviewSidePaneView: NSView, TerminalPixelSource {
         }
         guard isPresenter, window != nil else { return }
         let active = tabs.first { $0.id == activeID }
+        // Already showing this tab's web view: moving it out of the window and back would restart its activity.
+        if let active, let shown = shownController, shown === active.controller, shown.contentView.superview === contentArea {
+            updateChrome(shown)
+            return
+        }
         detachShown()
         guard let active else { updateChrome(nil); return }
         let controller = model.ensureController(for: active)
@@ -297,11 +305,15 @@ final class ReviewSidePaneView: NSView, TerminalPixelSource {
     @MainActor
     static func runDiscardSheet(tab: ReviewTab, window: NSWindow?) async -> Bool {
         let alert = NSAlert()
-        alert.messageText = "Discard the text you typed in \(tab.title)?"
+        // A page's own title never goes into a native sheet app-control could read (SR7).
+        let label: String
+        if case .page = tab.target { label = "#\(tab.pr.number) page" } else { label = tab.title }
+        alert.messageText = "Discard the text you typed in \(label)?"
         alert.informativeText = "It hasn't been sent. Closing the tab loses it."
         alert.addButton(withTitle: "Keep Tab")        // default
         alert.addButton(withTitle: "Close Tab")
-        guard let window else { return alert.runModal() == .alertSecondButtonReturn }
+        // No window to attach a sheet to: keep the tab (never a free-floating modal).
+        guard let window else { return false }
         return await withCheckedContinuation { continuation in
             alert.beginSheetModal(for: window) { continuation.resume(returning: $0 == .alertSecondButtonReturn) }
         }

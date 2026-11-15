@@ -21,10 +21,20 @@ struct ReviewPaneStore {
         init(tab: ReviewTab, jiraSite: String?) {
             let hosts = ReviewPaneHosts(jiraSite: jiraSite)
             let host = tab.currentURL.host?.lowercased()
+            let path = tab.currentURL.path.lowercased()
+            let isSignInPath = path == "/login" || path.hasPrefix("/login/") || path.hasPrefix("/session")
+                || path.hasPrefix("/authorize")
             let persistable = hosts.isAllowed(tab.currentURL)
-                && (host == "github.com" || host == hosts.jiraHost)
+                && (host == "github.com" || host == hosts.jiraHost) && !isSignInPath
             self.init(repo: tab.pr.repo, number: tab.pr.number, target: tab.target, startURL: tab.startURL,
-                      lastURL: persistable ? tab.currentURL : tab.startURL, title: tab.title)
+                      lastURL: persistable ? Self.withoutQuery(tab.currentURL) : tab.startURL, title: tab.title)
+        }
+
+        /// Query strings can carry one-time codes (SR4); the fragment (diff anchors) is kept.
+        private static func withoutQuery(_ url: URL) -> URL {
+            guard var c = URLComponents(url: url, resolvingAgainstBaseURL: false), c.query != nil else { return url }
+            c.query = nil
+            return c.url ?? url
         }
     }
 

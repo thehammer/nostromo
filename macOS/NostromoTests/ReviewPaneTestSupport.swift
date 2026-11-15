@@ -31,6 +31,29 @@ func spinUntil(_ timeout: TimeInterval = 10, _ condition: () -> Bool) -> Bool {
     return condition()
 }
 
+/// `spinUntil` for async tests. An async test body runs inside a main-queue block, so a nested run loop
+/// cannot run the main-queue blocks WebKit's callbacks and completion handlers need; sleeping yields instead.
+@MainActor
+func spinUntilA(_ timeout: TimeInterval = 10, _ condition: @MainActor () -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition(), Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
+    return condition()
+}
+
+/// `XCTAssertTrue` whose condition may await (the XCTest autoclosure cannot).
+@MainActor
+func assertTrueA(_ value: @autoclosure () async -> Bool, _ message: @autoclosure () -> String = "",
+                 file: StaticString = #filePath, line: UInt = #line) async {
+    let ok = await value()
+    XCTAssertTrue(ok, message(), file: file, line: line)
+}
+
+/// `spin` for async tests (see `spinUntilA`).
+@MainActor
+func spinA(_ seconds: TimeInterval) async {
+    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+}
+
 /// Runs the main run loop for `seconds` (to let something that must NOT happen have its chance).
 @MainActor
 func spin(_ seconds: TimeInterval) {
@@ -295,14 +318,18 @@ final class PerriRowsRig {
         }
         // Built before `self` is usable by the closures: they reach the spies through this box.
         let box = SpyBox()
-        let actions = PerriRowActions(openConversation: { _, n in box.conversations.append(n) },
-                                      openDiff: { _, n in box.diffs.append(n) })
-        let root = PaneContentView(
-            content: .prList(items), selectedPR: selected.map { PRRef(repo: Self.repo, number: $0) },
-            onLoadPR: { _, n in box.loads.append(n) }, isPerriFocus: true,
-            rowActions: withActions ? actions : nil, reviewing: reviewing)
+        let makeRoot: (Int?) -> PaneContentView = { hovered in
+            var actions = PerriRowActions(openConversation: { _, n in box.conversations.append(n) },
+                                          openDiff: { _, n in box.diffs.append(n) })
+            actions.hoverOverride = hovered
+            return PaneContentView(
+                content: .prList(items), selectedPR: selected.map { PRRef(repo: Self.repo, number: $0) },
+                onLoadPR: { _, n in box.loads.append(n) }, isPerriFocus: true,
+                rowActions: withActions ? actions : nil, reviewing: reviewing)
+        }
+        self.makeRoot = makeRoot
         self.box = box
-        let host = ReviewFirstMouseHostingView(rootView: root)
+        let host = ReviewFirstMouseHostingView(rootView: makeRoot(nil))
         let win = ReviewTestWindow.make(size: NSSize(width: width, height: height))
         hosting = host
         window = win
@@ -319,6 +346,7 @@ final class PerriRowsRig {
         var diffs: [Int] = []
     }
     private let box: SpyBox
+    private let makeRoot: (Int?) -> PaneContentView
 
     var recordedLoads: [Int] { box.loads }
     var recordedConversations: [Int] { box.conversations }
@@ -415,21 +443,26 @@ final class PerriRowsRig {
         ReviewEvents.click(at: windowPoint(px: px, py: py, scale: scale), in: window)
     }
 
-    /// Moves the pointer over a pixel position: what a mouse entering the list and moving would do.
+    /// Puts the pointer over the row at a pixel position. The row's hover state is driven through
+    /// `PerriRowActions.hoverOverride`: a real pointer cannot reach a window parked off screen in CI.
     func hover(px: Int, py: Int, scale: CGFloat) {
         let point = windowPoint(px: px, py: py, scale: scale)
-        window.makeFirstResponder(hosting)
-        let enter = NSEvent.enterExitEvent(with: .mouseEntered, location: point, modifierFlags: [],
-                                           timestamp: ProcessInfo.processInfo.systemUptime,
-                                           windowNumber: window.windowNumber, context: nil, eventNumber: 0,
-                                           trackingNumber: 0, userData: nil)
-        let move = NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [],
-                                      timestamp: ProcessInfo.processInfo.systemUptime,
-                                      windowNumber: window.windowNumber, context: nil, eventNumber: 0,
-                                      clickCount: 0, pressure: 0)
-        if let enter { hosting.mouseEntered(with: enter) }
-        if let move { window.sendEvent(move); hosting.mouseMoved(with: move) }
+        let local = hosting.convert(point, from: nil)
+        let rowIndex = rowIndexAt(viewY: hosting.isFlipped ? local.y : hosting.bounds.height - local.y)
+        hosting.rootView = makeRoot(rowIndex.map { Self.numbers[$0] })
         settle(0.3)
+    }
+
+    /// Rows are laid out top to bottom; rows are found by their title bands in the last render.
+    private func rowIndexAt(viewY: CGFloat) -> Int? {
+        guard let (pixels, scale) = try? render() else { return nil }
+        let bands = titleBands(pixels)
+        let py = Int(viewY * scale)
+        for (i, band) in bands.enumerated() {
+            let next = i + 1 < bands.count ? bands[i + 1].lowerBound : pixels.height
+            if py >= band.lowerBound - 4 && py < next - 4 { return i }
+        }
+        return nil
     }
 }
 
