@@ -571,6 +571,8 @@ pub struct SessionManager {
     conversations: crate::conversations::ConversationHistory,
     /// Resume bookkeeping, the nudge debounce, the operator connections.
     conv: conversation_history::ConversationState,
+    /// Conversations started in a terminal (only while the user's switch is on).
+    outside: crate::conversations::outside::OutsideIndex,
     /// Who queued each Mother job, when the daemon wires one in. Fed the
     /// focus registry here so a focus's current name and `closed` follow it.
     origin_book: Option<OriginBook>,
@@ -774,6 +776,9 @@ impl SessionManager {
                 crate::conversations::ConversationHistory::path_beside(&store_path),
             ),
             conv: conversation_history::ConversationState::default(),
+            outside: crate::conversations::outside::OutsideIndex::open(
+                crate::conversations::outside::path_beside(&store_path),
+            ),
             origin_book: None,
             store_path,
             focus_registry: Vec::new(),

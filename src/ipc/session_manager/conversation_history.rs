@@ -6,9 +6,11 @@
 
 use super::{load_id_store, save_id, SessionManager};
 use crate::conversations::list::{self, status_now};
-use crate::conversations::store::{MetaUpdate, SpawnNote};
-use crate::conversations::{backfill, now_ms, ConversationHistory};
-use crate::ipc::protocol::{ConversationResumeOutcome, ConversationStatus, ServerMsg};
+use crate::conversations::store::{ConversationEntry, MetaUpdate, Snapshot, SpawnNote};
+use crate::conversations::{backfill, now_ms, outside, ConversationHistory, FirstPrompt, Reason};
+use crate::ipc::protocol::{
+    ConversationEntryWire, ConversationResumeOutcome, ConversationStatus, ServerMsg,
+};
 use crate::model::store::{self as model_store, FocusModelRecord, ModelSource};
 use crate::model::ModelTarget;
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,8 @@ const NUDGE_MIN_GAP: Duration = Duration::from_millis(500);
 /// A tag reserved by a resume stands in for a registry entry this long (the
 /// Mac pushes the new focus a moment after the reply).
 const RESERVATION_WINDOW: Duration = Duration::from_secs(15);
+/// With the outside switch on, the transcripts are looked at again at most this often.
+const OUTSIDE_RESCAN_GAP: Duration = Duration::from_secs(30);
 
 /// Where a resumed tag runs when its conversation's worktree is gone, and what
 /// to tell the agent about it. Kept per tag beside the stored session id and
@@ -127,6 +131,9 @@ pub struct ResumeOptions<'a> {
     pub no_codebase_folder: Option<&'a str>,
     /// The user chose "Resume anyway" for a conversation that may be open elsewhere.
     pub confirm_active_elsewhere: bool,
+    /// The agent to continue a terminal conversation with, when the one Claude
+    /// recorded for it is not an agent Nostromo has. Ignored for any other.
+    pub agent: Option<&'a str>,
 }
 
 /// Resume bookkeeping and the nudge debounce, kept in one place.
@@ -138,6 +145,8 @@ pub(super) struct ConversationState {
     pub nudged_at: Option<Instant>,
     pub background_running: Arc<AtomicBool>,
     pub operator_conns: std::collections::HashSet<String>,
+    /// When the last terminal-conversation scan started.
+    pub outside_scanned_at: Option<Instant>,
 }
 
 impl SessionManager {
@@ -378,9 +387,22 @@ impl SessionManager {
                 running.store(false, Ordering::SeqCst);
             });
         }
+        let mut entries = listing.entries;
+        let mut outside_ready = false;
+        if snap.include_outside {
+            self.start_outside_scan();
+            outside_ready = self.outside.ready();
+            entries.extend(self.outside_wire(snap.first_prompts_enabled));
+            entries.sort_by_key(|e| std::cmp::Reverse(e.last_active_ms));
+        } else {
+            // Off means no index file at all.
+            self.outside.clear();
+        }
         ServerMsg::ConversationHistory {
             request_id,
-            entries: listing.entries,
+            entries,
+            include_outside: snap.include_outside,
+            outside_ready,
             first_prompts_enabled: snap.first_prompts_enabled,
             degraded_kept: snap.degraded_kept,
             revision: snap.revision,
@@ -389,6 +411,122 @@ impl SessionManager {
             ),
             spaces_root: crate::conversations::spaces_root_for_wire(),
         }
+    }
+
+    /// The outside switch changed (`ConversationHistorySettingsSet`). Off deletes
+    /// the index file now; on starts looking.
+    pub fn set_include_outside(&mut self, on: bool) {
+        self.conversations.set_include_outside(on, now_ms());
+        if on {
+            self.conv.outside_scanned_at = None;
+            self.start_outside_scan();
+        } else {
+            self.outside.clear();
+        }
+    }
+
+    /// First prompts went off: the terminal index drops its stored texts too.
+    pub fn withhold_outside_first_prompts(&self) {
+        self.outside.withhold_first_prompts();
+    }
+
+    /// Look for terminal conversations on a background thread, unless one runs
+    /// or the last look was a moment ago. Never blocks the list.
+    fn start_outside_scan(&mut self) {
+        if self.outside.ready()
+            && self
+                .conv
+                .outside_scanned_at
+                .is_some_and(|at| at.elapsed() < OUTSIDE_RESCAN_GAP)
+        {
+            return;
+        }
+        let Some(projects) = crate::conversations::transcript::projects_dir() else {
+            return;
+        };
+        if !self.outside.try_begin() {
+            return;
+        }
+        self.conv.outside_scanned_at = Some(Instant::now());
+        let (index, history, sensitive) = (
+            self.outside.clone(),
+            self.conversations.clone(),
+            self.sensitive.clone(),
+        );
+        std::thread::spawn(move || {
+            let known = history.known_sids();
+            let degraded = sensitive.is_degraded();
+            let is_sensitive = |agent: Option<&str>| {
+                degraded || agent.is_some_and(|a| sensitive.focus_is_sensitive("", a))
+            };
+            index.scan_and_store(&crate::conversations::outside::ScanEnv {
+                projects_dir: &projects,
+                known: &known,
+                first_prompts_enabled: history.first_prompts_enabled(),
+                is_sensitive: &is_sensitive,
+                now_ms: now_ms(),
+            });
+            // The list the app shows changed: it asks again.
+            history.touch();
+        });
+    }
+
+    /// The indexed terminal conversations as list rows, labelled `terminal`.
+    /// Rows for a conversation the history already holds are left out.
+    fn outside_wire(&self, first_prompts_enabled: bool) -> Vec<ConversationEntryWire> {
+        let known = self.conversations.known_sids();
+        let entries: Vec<_> = self
+            .outside
+            .entries()
+            .into_iter()
+            .filter(|i| !known.contains(&i.sid))
+            .map(|i| {
+                let agent = i
+                    .agent
+                    .as_deref()
+                    .filter(|a| outside::agent_exists(a))
+                    .unwrap_or("");
+                let mut e = i.to_entry(agent);
+                if !first_prompts_enabled && matches!(e.first_prompt, FirstPrompt::Text(_)) {
+                    e.first_prompt = FirstPrompt::Withheld(Reason::Off);
+                }
+                e
+            })
+            .collect();
+        let snap = Snapshot {
+            entries,
+            first_prompts_enabled,
+            include_outside: true,
+            degraded_kept: None,
+            revision: 0,
+            removed_pending: 0,
+        };
+        // The background checks the list queues are for the history's own
+        // entries; the index has none.
+        let mut rows = list::build(&snap, &self.conversations, &HashMap::new()).entries;
+        for r in &mut rows {
+            r.origin = Some("terminal".to_owned());
+        }
+        rows
+    }
+
+    /// The history entry for terminal conversation `sid`, not yet adopted, to
+    /// resume with `chosen` as its agent when Claude's recorded one is not an
+    /// agent Nostromo has. Err is the refusal reason.
+    fn outside_entry_for_resume(
+        &self,
+        sid: &str,
+        chosen: Option<&str>,
+    ) -> Result<ConversationEntry, &'static str> {
+        if !self.conversations.include_outside() {
+            return Err("not_found");
+        }
+        let indexed = self.outside.get(sid).ok_or("not_found")?;
+        let recorded = indexed.agent.as_deref().filter(|a| outside::agent_exists(a));
+        let agent = recorded
+            .or(chosen.filter(|a| outside::agent_exists(a)))
+            .ok_or("needs_agent")?;
+        Ok(indexed.to_entry(agent))
     }
 
     /// Tell the operator app's connections, at most every 500 ms, that the
@@ -511,12 +649,23 @@ impl SessionManager {
         if self.awaiting_mcp_bridge {
             return refuse("starting");
         }
-        let Some(entry) = self
+        let mut from_outside = false;
+        let entry = match self
             .conversations
             .get(sid)
             .filter(|e| e.has_turn && e.removed_at_ms.is_none())
-        else {
-            return refuse("not_found");
+        {
+            Some(e) => e,
+            None if self.conversations.get(sid).is_some() => return refuse("not_found"),
+            // A conversation found in a terminal: held outside the history
+            // until the resume is certain to go ahead.
+            None => match self.outside_entry_for_resume(sid, options.agent) {
+                Ok(e) => {
+                    from_outside = true;
+                    e
+                }
+                Err(reason) => return refuse(reason),
+            },
         };
         let live = self.live_conversations();
         let live_here = live.get(sid).cloned();
@@ -588,6 +737,9 @@ impl SessionManager {
             || load_id_store(&self.store_path).contains_key(new_tag)
         {
             return refuse("unavailable");
+        }
+        if from_outside {
+            self.conversations.adopt(entry.clone(), now_ms());
         }
         save_id(&self.store_path, new_tag, Some(sid));
         // The conversation's model, unless the new tag already has a record.

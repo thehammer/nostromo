@@ -2893,3 +2893,141 @@ async fn a_resume_into_a_fresh_no_codebase_folder_binds_no_board_and_creates_non
     assert!(!board.exists());
     assert_eq!(std::fs::read_dir(&fresh).unwrap().count(), 0);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Terminal conversations (session history 4): opt-in, labelled, resumable
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn terminal_transcript(rig: &Rig, sid: &str, agent: Option<&str>, secs_ago: u64) -> PathBuf {
+    let folder = rig.dir.path().join("projects").join("-term-folder");
+    std::fs::create_dir_all(&folder).unwrap();
+    let cwd = rig.cwd.to_string_lossy();
+    let mut body = String::new();
+    if let Some(a) = agent {
+        body += &format!("{{\"type\":\"agent-name\",\"agentName\":\"{a}\"}}\n");
+    }
+    body += &format!(
+        "{{\"type\":\"user\",\"entrypoint\":\"cli\",\"cwd\":{cwd:?},\"gitBranch\":\"main\",\
+         \"message\":{{\"content\":\"tidy the readme\"}}}}\n"
+    );
+    let path = folder.join(format!("{sid}.jsonl"));
+    std::fs::write(&path, body).unwrap();
+    age(&path, secs_ago);
+    path
+}
+
+fn agents_dir(rig: &Rig, names: &[&str]) {
+    let dir = rig.dir.path().join("agents");
+    std::fs::create_dir_all(&dir).unwrap();
+    for n in names {
+        std::fs::write(dir.join(format!("{n}.md")), "x").unwrap();
+    }
+    std::env::set_var(crate::conversations::outside::AGENTS_DIR_ENV, &dir);
+}
+
+fn listing(rig: &mut Rig) -> (Vec<crate::ipc::protocol::ConversationEntryWire>, bool, bool) {
+    let ServerMsg::ConversationHistory {
+        entries,
+        include_outside,
+        outside_ready,
+        ..
+    } = rig.mgr.conversation_history_msg("r".into())
+    else {
+        panic!("not a history");
+    };
+    (entries, include_outside, outside_ready)
+}
+
+fn wait_outside_ready(rig: &mut Rig) {
+    for _ in 0..250 {
+        if listing(rig).2 {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("the terminal index never became ready");
+}
+
+#[tokio::test]
+async fn terminal_rows_appear_only_while_the_switch_is_on_and_off_deletes_the_index() {
+    let mut rig = Rig::new();
+    terminal_transcript(&rig, "term-1", None, 3600);
+    let (rows, on, _) = listing(&mut rig);
+    assert!(!on && rows.is_empty(), "off by default: no terminal rows");
+
+    rig.mgr.set_include_outside(true);
+    wait_outside_ready(&mut rig);
+    let (rows, on, _) = listing(&mut rig);
+    assert!(on);
+    let row = rows.iter().find(|r| r.id == "term-1").expect("a terminal row");
+    assert_eq!(row.origin.as_deref(), Some("terminal"));
+    let index_file = crate::conversations::outside::path_beside(&rig.dir.path().join("daemon-sessions.json"));
+    assert!(index_file.exists());
+
+    rig.mgr.set_include_outside(false);
+    let (rows, on, _) = listing(&mut rig);
+    assert!(!on && rows.is_empty());
+    assert!(!index_file.exists(), "off deletes the index file");
+}
+
+#[tokio::test]
+async fn a_terminal_conversation_with_no_usable_agent_asks_for_one_and_adopts_nothing_until_it_starts() {
+    let mut rig = Rig::new();
+    agents_dir(&rig, &["cody"]);
+    terminal_transcript(&rig, "term-2", Some("not-an-agent"), 3600);
+    rig.mgr.set_include_outside(true);
+    wait_outside_ready(&mut rig);
+
+    let reply = rig.mgr.resume_conversation("term-2", "cody-cccc3333");
+    assert_eq!(outcome(&reply).2.as_deref(), Some("needs_agent"));
+    assert!(!rig.mgr.conversations().known_sids().contains("term-2"));
+
+    let reply = rig.mgr.resume_conversation_with(
+        "term-2",
+        "cody-cccc3333",
+        ResumeOptions {
+            agent: Some("cody"),
+            ..ResumeOptions::default()
+        },
+    );
+    let (kind, tag, _) = outcome(&reply);
+    assert_eq!(kind, ConversationResumeOutcome::Ready);
+    assert_eq!(tag.as_deref(), Some("cody-cccc3333"));
+    assert!(rig.mgr.conversations().known_sids().contains("term-2"));
+    let (rows, _, _) = listing(&mut rig);
+    assert_eq!(rows.iter().filter(|r| r.id == "term-2").count(), 1);
+    assert!(rows.iter().find(|r| r.id == "term-2").unwrap().origin.is_none(), "now a Nostromo conversation");
+    std::env::remove_var(crate::conversations::outside::AGENTS_DIR_ENV);
+}
+
+#[tokio::test]
+async fn a_terminal_conversation_written_to_a_moment_ago_is_refused_and_stays_a_terminal_row() {
+    let mut rig = Rig::new();
+    agents_dir(&rig, &["cody"]);
+    terminal_transcript(&rig, "term-3", Some("cody"), 10);
+    rig.mgr.set_include_outside(true);
+    wait_outside_ready(&mut rig);
+    let reply = rig.mgr.resume_conversation("term-3", "cody-dddd4444");
+    assert_eq!(outcome(&reply).2.as_deref(), Some("active_elsewhere"));
+    assert!(!rig.mgr.conversations().known_sids().contains("term-3"));
+    let confirmed = rig.mgr.resume_conversation_with(
+        "term-3",
+        "cody-dddd4444",
+        ResumeOptions {
+            confirm_active_elsewhere: true,
+            ..ResumeOptions::default()
+        },
+    );
+    assert_eq!(outcome(&confirmed).0, ConversationResumeOutcome::Ready, "the recorded agent exists: none asked");
+    std::env::remove_var(crate::conversations::outside::AGENTS_DIR_ENV);
+}
+
+#[tokio::test]
+async fn with_the_switch_off_a_terminal_conversation_cannot_be_resumed() {
+    let mut rig = Rig::new();
+    agents_dir(&rig, &["cody"]);
+    terminal_transcript(&rig, "term-4", Some("cody"), 3600);
+    let reply = rig.mgr.resume_conversation("term-4", "cody-eeee5555");
+    assert_eq!(outcome(&reply).2.as_deref(), Some("not_found"));
+    std::env::remove_var(crate::conversations::outside::AGENTS_DIR_ENV);
+}

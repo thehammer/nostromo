@@ -58,7 +58,17 @@ fn fill_from(e: &mut ConversationEntry, path: &std::path::Path, enabled: bool) {
     let Ok(head_bytes) = transcript::read_head(path) else {
         return;
     };
-    let head = transcript::scan(&head_bytes);
+    fill_with_head(e, path, transcript::scan(&head_bytes), enabled);
+}
+
+/// The rest of [`fill_from`], given the head already read and scanned: the
+/// last 256 KiB for the branch, PR numbers and last activity.
+pub(super) fn fill_with_head(
+    e: &mut ConversationEntry,
+    path: &std::path::Path,
+    head: transcript::Facts,
+    enabled: bool,
+) {
     let len = std::fs::metadata(path).map_or(0, |m| m.len());
     // The last 256 KiB for the branch, PR numbers and last activity.
     let tail_from = len.saturating_sub(transcript::TAIL_FALLBACK_BYTES);
