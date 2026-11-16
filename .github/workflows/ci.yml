@@ -43,7 +43,8 @@ jobs:
   # output is `true` and the Swift jobs run.
   changes:
     name: ${{ github.event_name == 'workflow_dispatch' && 'Detect changed paths (dispatch)' || 'Detect changed paths' }}
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: a moving image broke the PTY tests on 2026-11-16; bump on purpose, after the tests tolerate it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       swift: ${{ steps.classify.outputs.swift }}
@@ -93,7 +94,8 @@ jobs:
   rust-fmt:
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && 'Rust format (dispatch)' || 'Rust format' }}
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: a moving image broke the PTY tests on 2026-11-16; bump on purpose, after the tests tolerate it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -110,7 +112,8 @@ jobs:
   rust-clippy:
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && 'Rust clippy (dispatch)' || 'Rust clippy' }}
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: a moving image broke the PTY tests on 2026-11-16; bump on purpose, after the tests tolerate it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -127,7 +130,8 @@ jobs:
   rust-test:
     if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only)
     name: ${{ github.event_name == 'workflow_dispatch' && 'Rust tests (dispatch)' || 'Rust tests' }}
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: a moving image broke the PTY tests on 2026-11-16; bump on purpose, after the tests tolerate it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -171,7 +175,8 @@ jobs:
     if: always() && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","rust"]'), inputs.only))
     name: ${{ github.event_name == 'workflow_dispatch' && 'Build & Lint (dispatch)' || 'Build & Lint' }}
     needs: [rust-fmt, rust-clippy, rust-test]
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: a moving image broke the PTY tests on 2026-11-16; bump on purpose, after the tests tolerate it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
@@ -436,7 +441,8 @@ jobs:
     needs: [changes, swift-tests-mac-shard]
     if: always() && (github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","swift","mac"]'), inputs.only))
     name: ${{ github.event_name == 'workflow_dispatch' && 'Swift tests (Mac app) (dispatch)' || 'Swift tests (Mac app)' }}
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: a moving image broke the PTY tests on 2026-11-16; bump on purpose, after the tests tolerate it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     steps:
