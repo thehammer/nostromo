@@ -416,7 +416,7 @@ def check_single_job_builds_and_launches(text):
 
 def check_ci_yml_core_jobs_present(text):
     """`ci.yml`'s pre-existing jobs are untouched by this feature: `build`
-    (on `ubuntu-latest`) and `python-tooling` (on `macos-latest`) are both
+    (on `ubuntu-24.04`) and `python-tooling` (on `macos-latest`) are both
     still defined. Guards against someone "fixing" this feature by editing
     the wrong workflow file.
     """
@@ -425,8 +425,8 @@ def check_ci_yml_core_jobs_present(text):
         violations.append("no `build:` job found")
     if not re.search(r'^\s*python-tooling:\s*$', text, re.MULTILINE):
         violations.append("no `python-tooling:` job found")
-    if "runs-on: ubuntu-latest" not in text:
-        violations.append("no job runs on `ubuntu-latest` (expected for `build`)")
+    if "runs-on: ubuntu-24.04" not in text:
+        violations.append("no job runs on `ubuntu-24.04` (expected for `build`)")
     if "runs-on: macos-latest" not in text:
         violations.append("no job runs on `macos-latest` (expected for `python-tooling`)")
     return violations
@@ -706,7 +706,7 @@ class CiYmlCoreJobsPresentTests(unittest.TestCase):
         text = (
             "jobs:\n"
             "  build:\n"
-            "    runs-on: ubuntu-latest\n"
+            "    runs-on: ubuntu-24.04\n"
         )
         violations = check_ci_yml_core_jobs_present(text)
         self.assertTrue(any("python-tooling" in v for v in violations), violations)
@@ -720,13 +720,13 @@ class CiYmlCoreJobsPresentTests(unittest.TestCase):
             "    runs-on: macos-latest\n"
         )
         violations = check_ci_yml_core_jobs_present(text)
-        self.assertTrue(any("ubuntu-latest" in v for v in violations), violations)
+        self.assertTrue(any("ubuntu-24.04" in v for v in violations), violations)
 
     def test_passes_when_both_jobs_present_with_original_runners(self):
         text = (
             "jobs:\n"
             "  build:\n"
-            "    runs-on: ubuntu-latest\n"
+            "    runs-on: ubuntu-24.04\n"
             "  python-tooling:\n"
             "    runs-on: macos-latest\n"
         )
@@ -796,11 +796,11 @@ class ExtractJobNamesTests(unittest.TestCase):
             "on: push\n"
             "jobs:\n"
             "  build:\n"
-            "    runs-on: ubuntu-latest\n"
+            "    runs-on: ubuntu-24.04\n"
             "    steps:\n"
             "      - run: echo hi\n"
             "  test:\n"
-            "    runs-on: ubuntu-latest\n"
+            "    runs-on: ubuntu-24.04\n"
         )
         self.assertEqual(_extract_job_names(text), ["build", "test"])
 
