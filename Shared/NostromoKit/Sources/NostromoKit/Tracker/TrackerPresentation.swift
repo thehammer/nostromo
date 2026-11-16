@@ -38,15 +38,15 @@ public enum TrackerFilter: String, CaseIterable, Equatable {
 
 /// The user's disclosure choices, kept by the pane (never by the board).
 public struct TrackerFoldState: Equatable {
-    /// Items whose long note (more than 2 lines) is shown in full.
-    public var expandedNotes: Set<String>
+    /// Foldable items whose details (text after the title, and the note) are shown.
+    public var expandedItems: Set<String>
     /// Sections whose "Done (N)" group is open.
     public var expandedDoneGroups: Set<String>
     /// The Log shows every line, not just the newest 5.
     public var logExpanded: Bool
 
-    public init(expandedNotes: Set<String> = [], expandedDoneGroups: Set<String> = [], logExpanded: Bool = false) {
-        self.expandedNotes = expandedNotes
+    public init(expandedItems: Set<String> = [], expandedDoneGroups: Set<String> = [], logExpanded: Bool = false) {
+        self.expandedItems = expandedItems
         self.expandedDoneGroups = expandedDoneGroups
         self.logExpanded = logExpanded
     }
@@ -109,7 +109,7 @@ public struct TrackerNeedsYouSource: TrackerWaitingSource {
                 titles[id] = title
             case .item(let item) where item.status == .needsYou:
                 entries.append(TrackerWaitingEntry(key: "item:\(item.id)",
-                                                   text: TrackerText.plain(item.textSpans),
+                                                   text: TrackerTitle.split(TrackerTitle.stripInvisible(TrackerText.plain(item.textSpans))).title,
                                                    detail: titles[item.section],
                                                    target: .boardItem(item.id)))
             default:
@@ -134,7 +134,7 @@ public struct TrackerUnrunCommandSource: TrackerWaitingSource {
                 titles[id] = title
             case .item(let item) where item.kind == .command && !item.ran && item.status != .done:
                 entries.append(TrackerWaitingEntry(key: "item:\(item.id)",
-                                                   text: TrackerText.plain(item.textSpans),
+                                                   text: TrackerTitle.split(TrackerTitle.stripInvisible(TrackerText.plain(item.textSpans))).title,
                                                    detail: titles[item.section],
                                                    target: .boardItem(item.id)))
             default:
@@ -325,13 +325,17 @@ public struct TrackerItemRow: Equatable {
     /// "now", "4 m", "2 h", "Oct 14" (empty without a time).
     public let relativeTime: String
     public let noteBlocks: [MdBlock]
-    /// The note's first line as plain text (nil without a note): what a collapsed note shows,
-    /// and what a `blocked` item always shows.
+    /// The note's first line as plain text (nil without a note). A collapsed item no longer shows
+    /// it (the fold holds it); `tracker show` still reports it.
     public let noteFirstLine: String?
-    /// The note is longer than 2 lines, so it collapses to one with a disclosure.
-    public let noteIsCollapsible: Bool
-    /// The whole note is shown (a short note, or a long one the user expanded).
-    public let noteExpanded: Bool
+    /// The one-line title (`TrackerTitle.split` of `text`).
+    public let title: String
+    /// The text after the title, shown first under the fold (nil when the text is whole).
+    public let bodyLead: String?
+    /// There is something under the fold: text after the title, or a note.
+    public let isFoldable: Bool
+    /// Foldable and the user opened it.
+    public let isExpanded: Bool
     /// Link texts (what `tracker show` reports).
     public let linkTexts: [String]
     /// The links, rendered as chips.
@@ -441,12 +445,31 @@ public struct TrackerRow: Equatable {
     }
 }
 
+extension TrackerRow {
+    /// `other` and this row differ only in whether the item is expanded (the user's own fold
+    /// toggle, which is not a content change and must not flash the change highlight).
+    public func differsOnlyInFold(from other: TrackerRow) -> Bool {
+        guard key == other.key, case .item(let a) = content, case .item(let b) = other.content,
+              a.isExpanded != b.isExpanded else { return false }
+        return a.withExpanded(b.isExpanded) == b
+    }
+}
+
 extension TrackerItemRow {
+    func withExpanded(_ expanded: Bool) -> TrackerItemRow {
+        TrackerItemRow(id: id, sectionId: sectionId, sectionTitle: sectionTitle, status: status, mark: mark,
+                       textSpans: textSpans, text: text, owner: owner, updatedAt: updatedAt, relativeTime: relativeTime,
+                       noteBlocks: noteBlocks, noteFirstLine: noteFirstLine, title: title, bodyLead: bodyLead,
+                       isFoldable: isFoldable, isExpanded: expanded, linkTexts: linkTexts, links: links, bound: bound,
+                       staleFootnote: staleFootnote, env: env, envBadge: envBadge,
+                       isHazard: isHazard, kind: kind, source: source)
+    }
+
     func withTime(_ relative: String, _ updated: Date?) -> TrackerItemRow {
         TrackerItemRow(id: id, sectionId: sectionId, sectionTitle: sectionTitle, status: status, mark: mark,
                        textSpans: textSpans, text: text, owner: owner, updatedAt: updated, relativeTime: relative,
-                       noteBlocks: noteBlocks, noteFirstLine: noteFirstLine, noteIsCollapsible: noteIsCollapsible,
-                       noteExpanded: noteExpanded, linkTexts: linkTexts, links: links, bound: bound,
+                       noteBlocks: noteBlocks, noteFirstLine: noteFirstLine, title: title, bodyLead: bodyLead,
+                       isFoldable: isFoldable, isExpanded: isExpanded, linkTexts: linkTexts, links: links, bound: bound,
                        staleFootnote: staleFootnote, env: env, envBadge: envBadge,
                        isHazard: isHazard, kind: kind, source: source)
     }
@@ -662,7 +685,9 @@ public enum TrackerPresenter {
     static func itemRow(_ wire: TrackerItemWire, sectionTitle: String, folds: TrackerFoldState,
                         now: Date, timeZone: TimeZone) -> TrackerItemRow {
         let lines = TrackerText.lines(wire.noteBlocks)
-        let collapsible = lines.count > 2
+        let plain = TrackerText.plain(wire.textSpans)
+        let split = TrackerTitle.split(TrackerTitle.stripInvisible(plain))
+        let foldable = split.rest != nil || !wire.noteBlocks.isEmpty
         return TrackerItemRow(
             id: wire.id,
             sectionId: wire.section,
@@ -670,14 +695,16 @@ public enum TrackerPresenter {
             status: wire.status,
             mark: TrackerStatusMark.mark(for: wire.status),
             textSpans: wire.textSpans,
-            text: TrackerText.plain(wire.textSpans),
+            text: plain,
             owner: wire.owner,
             updatedAt: wire.updatedAt,
             relativeTime: TrackerRelativeTime.short(wire.updatedAt, now: now, timeZone: timeZone),
             noteBlocks: wire.noteBlocks,
             noteFirstLine: lines.first,
-            noteIsCollapsible: collapsible,
-            noteExpanded: !collapsible || folds.expandedNotes.contains(wire.id),
+            title: split.title,
+            bodyLead: split.rest,
+            isFoldable: foldable,
+            isExpanded: foldable && folds.expandedItems.contains(wire.id),
             linkTexts: wire.links.map(\.text),
             links: wire.links,
             bound: wire.bound,

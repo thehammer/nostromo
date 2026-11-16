@@ -107,8 +107,8 @@ final class TrackerRowHoldReleaseTests: XCTestCase {
         guard let row = scene.pane.rowViews[key] else {
             return XCTFail("no row \(key) to click \"\(title)\" on; rows: \(scene.pane.displayedRows.map(\.key))", file: file, line: line)
         }
-        guard let button = Fx.disclosure(in: row), button.attributedTitle.string == title else {
-            let offered = Fx.disclosure(in: row)?.attributedTitle.string ?? "no disclosure at all"
+        guard let button = Fx.disclosure(in: row), Fx.label(of: button) == title else {
+            let offered = Fx.disclosure(in: row).map { Fx.label(of: $0) } ?? "no disclosure at all"
             return XCTFail("row \(key) offers \"\(offered)\", not \"\(title)\"", file: file, line: line)
         }
         button.performClick(nil)
@@ -118,7 +118,7 @@ final class TrackerRowHoldReleaseTests: XCTestCase {
 
     private func expandTheNote(_ scene: Scene, file: StaticString = #filePath, line: UInt = #line) {
         click("more", onRow: Fx.targetKey, scene, file: file, line: line)
-        XCTAssertEqual(Fx.itemRow(Hold.target, in: scene.pane)?.row.item?.noteExpanded, true, "setup: the note is expanded",
+        XCTAssertEqual(Fx.itemRow(Hold.target, in: scene.pane)?.row.item?.isExpanded, true, "setup: the note is expanded",
                        file: file, line: line)
     }
 
@@ -359,7 +359,7 @@ final class TrackerRowHoldReleaseTests: XCTestCase {
         XCTAssertFalse(Fx.isListed(Hold.target, under: Hold.waiting, in: scene.pane), "the stub is gone from Waiting on you")
         XCTAssertFalse(scene.pane.displayedRows.contains { $0.key.hasPrefix(TrackerDeferral.movingPrefix) }, "no temporary row is left")
         let row = try XCTUnwrap(scene.pane.rowViews[Fx.targetKey], "the item sits in Next under its own key")
-        XCTAssertEqual(row.row.item?.noteExpanded, false)
+        XCTAssertEqual(row.row.item?.isExpanded, false)
         XCTAssertTrue(Fx.isListed(Hold.target, under: Hold.next, in: scene.pane))
     }
 

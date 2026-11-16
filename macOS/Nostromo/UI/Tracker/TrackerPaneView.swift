@@ -336,8 +336,8 @@ final class TrackerPaneView: NSView {
     /// whatever the board moved while the reader was looking folds away now.
     func toggleNote(item id: String) {
         clearSelection(inItem: id)
-        if folds.expandedNotes.remove(id) == nil {
-            folds.expandedNotes.insert(id)
+        if folds.expandedItems.remove(id) == nil {
+            folds.expandedItems.insert(id)
         } else {
             deferral.releaseAll()
         }
@@ -393,7 +393,9 @@ final class TrackerPaneView: NSView {
                 view.apply(row)
                 updated += 1
                 let renamedInPlace = result.renamed.values.contains(row.key)
-                if !row.differsOnlyInTime(from: old), !renamedInPlace { changed.append(view) }
+                if !row.differsOnlyInTime(from: old), !row.differsOnlyInFold(from: old), !renamedInPlace {
+                    changed.append(view)
+                }
             case .move:
                 break   // order comes from the rows themselves
             }

@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use nostromo::tracker::changelog::{MAX_CURSOR_SESSIONS, MAX_ENTRIES};
 use nostromo::tracker::format::serialise_item;
-use nostromo::tracker::ops::{LinkInput, MAX_BOARD_BYTES, MAX_ITEMS};
+use nostromo::tracker::ops::{LinkInput, MAX_BOARD_BYTES, MAX_ITEMS, MAX_TITLE_CHARS};
 use nostromo::tracker::view::{self, ViewNode};
 use nostromo::tracker::{
     apply_batch, apply_to_file, compact_full, delta_entries, diff, merge_external, parse,
@@ -5955,5 +5955,326 @@ fn merge_oracle_untouched_item_blocks_stay_byte_identical_through_the_file() {
         {
             assert!(theirs_at < mine.unwrap(), "seed {seed}: theirs first");
         }
+    }
+}
+
+// ===========================================================================
+// Title and body: the fold-friendly spellings of text and note
+//
+// `title` is the item text (one line, at most 80 characters) and `body` is
+// the note. They are aliases at the write boundary: the file cannot tell
+// which spelling produced an item.
+// ===========================================================================
+
+/// The reason of the invalid_args refusal of a single-op batch on board-60.
+fn refusal_reason(u: Upsert) -> String {
+    let (_, parsed) = board60();
+    match apply_batch(&parsed.board, &[Op::Upsert(u)], &agent(), stamp0()) {
+        Err(OpError::InvalidArgs { reason, .. }) => reason,
+        Err(other) => panic!("expected invalid_args, got {other}"),
+        Ok(_) => panic!("expected the upsert to be refused"),
+    }
+}
+
+fn fold_item(board: &Board) -> &Item {
+    find_item(board, |i| {
+        i.note.is_some() && !i.links.is_empty() && i.kind == Kind::Item
+    })
+}
+
+#[test]
+fn the_title_limit_is_eighty_characters() {
+    assert_eq!(MAX_TITLE_CHARS, 80);
+}
+
+#[test]
+fn a_title_sets_the_item_text_and_reads_back() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let (board, _) = apply_ok(
+        &parsed.board,
+        &[Op::Upsert(Upsert {
+            title: Some("A short title".into()),
+            ..upsert(&id)
+        })],
+        &agent(),
+    );
+    assert_eq!(board.item(&id).unwrap().text, "A short title");
+}
+
+#[test]
+fn a_title_of_exactly_eighty_characters_is_accepted() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let title = "t".repeat(MAX_TITLE_CHARS);
+    let (board, _) = apply_ok(
+        &parsed.board,
+        &[Op::Upsert(Upsert {
+            title: Some(title.clone()),
+            ..upsert(&id)
+        })],
+        &agent(),
+    );
+    assert_eq!(board.item(&id).unwrap().text, title);
+}
+
+#[test]
+fn a_title_counts_characters_not_bytes() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let title = "é".repeat(MAX_TITLE_CHARS);
+    assert!(title.len() > MAX_TITLE_CHARS);
+    let (board, _) = apply_ok(
+        &parsed.board,
+        &[Op::Upsert(Upsert {
+            title: Some(title.clone()),
+            ..upsert(&id)
+        })],
+        &agent(),
+    );
+    assert_eq!(board.item(&id).unwrap().text, title);
+}
+
+#[test]
+fn a_title_over_eighty_characters_is_invalid_args_naming_title() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let reason = refusal_reason(Upsert {
+        title: Some("t".repeat(MAX_TITLE_CHARS + 1)),
+        ..upsert(&id)
+    });
+    assert!(reason.contains("title"), "{reason}");
+}
+
+#[test]
+fn a_title_with_a_newline_is_invalid_args_naming_title() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let reason = refusal_reason(Upsert {
+        title: Some("first line\nsecond line".into()),
+        ..upsert(&id)
+    });
+    assert!(reason.contains("title"), "{reason}");
+}
+
+#[test]
+fn a_title_with_bidi_zero_width_or_line_separator_characters_is_invalid_args_naming_title() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let refused = [
+        '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{2028}', '\u{2029}',
+        '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+        '\u{2068}', '\u{2069}', '\u{FEFF}',
+    ];
+    for c in refused {
+        // In the middle, and at the edges where trimming could otherwise hide it.
+        for title in [
+            format!("pay{c}load"),
+            format!("{c}lead"),
+            format!("trail{c}"),
+        ] {
+            let reason = refusal_reason(Upsert {
+                title: Some(title),
+                ..upsert(&id)
+            });
+            assert!(reason.contains("title"), "U+{:04X}: {reason}", c as u32);
+        }
+    }
+}
+
+#[test]
+fn ordinary_non_ascii_titles_are_still_accepted() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let title = "Café – ünï 日本語 ✅ — done".to_string();
+    let (board, _) = apply_ok(
+        &parsed.board,
+        &[Op::Upsert(Upsert {
+            title: Some(title.clone()),
+            ..upsert(&id)
+        })],
+        &agent(),
+    );
+    assert_eq!(board.item(&id).unwrap().text, title);
+}
+
+#[test]
+fn an_empty_title_is_invalid_args_naming_title() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    for empty in ["", "   "] {
+        let reason = refusal_reason(Upsert {
+            title: Some(empty.into()),
+            ..upsert(&id)
+        });
+        assert!(reason.contains("title"), "{empty:?}: {reason}");
+    }
+}
+
+#[test]
+fn text_and_title_together_are_invalid_args_not_both() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let reason = refusal_reason(Upsert {
+        text: Some("one".into()),
+        title: Some("two".into()),
+        ..upsert(&id)
+    });
+    assert!(
+        reason.contains("not both") && reason.contains("title"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_body_sets_the_note_and_an_empty_body_clears_it() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let (board, _) = apply_ok(
+        &parsed.board,
+        &[Op::Upsert(Upsert {
+            body: Some("line one\nline two".into()),
+            ..upsert(&id)
+        })],
+        &agent(),
+    );
+    assert_eq!(
+        board.item(&id).unwrap().note.as_deref(),
+        Some("line one\nline two")
+    );
+
+    let (cleared, _) = apply_ok(
+        &board,
+        &[Op::Upsert(Upsert {
+            body: Some(String::new()),
+            ..upsert(&id)
+        })],
+        &agent(),
+    );
+    assert_eq!(cleared.item(&id).unwrap().note, None);
+}
+
+#[test]
+fn note_and_body_together_are_invalid_args_not_both() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let reason = refusal_reason(Upsert {
+        note: Some("one".into()),
+        body: Some("two".into()),
+        ..upsert(&id)
+    });
+    assert!(
+        reason.contains("not both") && reason.contains("body"),
+        "{reason}"
+    );
+}
+
+#[test]
+fn a_bad_body_is_refused_with_errors_that_name_body() {
+    let (_, parsed) = board60();
+    let id = fold_item(&parsed.board).id.clone();
+    let cases = [
+        ("control character", "bad\u{7}bell".to_string()),
+        ("too long", "b".repeat(MAX_NOTE_CHARS + 1)),
+        ("links line", "Links: https://example.com".to_string()),
+    ];
+    for (what, body) in cases {
+        let reason = refusal_reason(Upsert {
+            body: Some(body),
+            ..upsert(&id)
+        });
+        assert!(reason.contains("body"), "{what}: {reason}");
+    }
+}
+
+#[test]
+fn creating_an_item_with_only_a_title_works_and_its_id_is_generated_from_it() {
+    let (_, parsed) = board60();
+    let make = |u: Upsert| {
+        let (board, _) = apply_ok(&parsed.board, &[Op::Upsert(u)], &agent());
+        let id = board
+            .items
+            .iter()
+            .map(|i| i.id.clone())
+            .find(|i| !parsed.board.items.iter().any(|o| &o.id == i))
+            .expect("one new item");
+        let item = board.item(&id).unwrap().clone();
+        (id, item)
+    };
+    let (title_id, titled) = make(Upsert {
+        title: Some("Wire the fold into the pane".into()),
+        ..Default::default()
+    });
+    let (text_id, texted) = make(Upsert {
+        text: Some("Wire the fold into the pane".into()),
+        ..Default::default()
+    });
+
+    assert_eq!(titled.text, "Wire the fold into the pane");
+    assert_eq!(titled.status, Status::Todo);
+    assert_eq!(
+        title_id, text_id,
+        "the id comes from the title the way it comes from the text"
+    );
+    assert!(
+        title_id.contains("wire"),
+        "the id is derived from the title: {title_id}"
+    );
+    assert_eq!(titled.text, texted.text);
+}
+
+#[test]
+fn creating_an_item_with_neither_text_nor_title_is_invalid_args() {
+    let reason = refusal_reason(Upsert {
+        body: Some("only details".into()),
+        ..upsert("no-title-1")
+    });
+    assert!(reason.contains("title"), "{reason}");
+}
+
+#[test]
+fn title_and_body_write_the_same_bytes_as_text_and_note() {
+    let (src, parsed) = board60();
+    let cases = [
+        // An item with a note and links, and one with neither note nor links.
+        find_item(&parsed.board, |i| {
+            i.note.is_some() && !i.links.is_empty() && i.kind == Kind::Item
+        }),
+        find_item(&parsed.board, |i| {
+            i.note.is_none() && i.links.is_empty() && i.kind == Kind::Item
+        }),
+    ];
+    for item in cases {
+        let span = parsed.item_span(&item.id).unwrap();
+        let spelled = |title_body: bool| {
+            let u = if title_body {
+                Upsert {
+                    title: Some("Short title".into()),
+                    body: Some("line one\nline two".into()),
+                    ..upsert(&item.id)
+                }
+            } else {
+                Upsert {
+                    text: Some("Short title".into()),
+                    note: Some("line one\nline two".into()),
+                    ..upsert(&item.id)
+                }
+            };
+            apply_to_file(src.as_bytes(), &[Op::Upsert(u)], &agent(), stamp0())
+                .unwrap()
+                .bytes
+        };
+        let via_title_body = spelled(true);
+        let via_text_note = spelled(false);
+
+        assert_bytes_eq(&via_title_body, &via_text_note, "title/body vs text/note");
+
+        let out = String::from_utf8(via_title_body).unwrap();
+        assert_ne!(out, src, "the item changed");
+        assert_eq!(&out[..span.start], &src[..span.start], "bytes before");
+        assert!(out.ends_with(&src[span.end..]), "bytes after");
+        let new_span = replaced_span(&out, &src, &span);
+        assert!(new_span.contains("Short title"), "{new_span}");
+        assert!(new_span.contains("  line one\n  line two"), "{new_span}");
     }
 }
