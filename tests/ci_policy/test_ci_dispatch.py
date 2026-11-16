@@ -455,8 +455,8 @@ def check_mac_aggregate_judges_every_shard(text):
     violations = []
     if _needs_of(block) != NEEDS[MAC_AGGREGATE]:
         violations.append("job `%s` needs %r, expected %r" % (MAC_AGGREGATE, _needs_of(block), NEEDS[MAC_AGGREGATE]))
-    if _job_level(block, "runs-on") != "ubuntu-latest":
-        violations.append("job `%s` must run on ubuntu-latest (no macOS slot)" % MAC_AGGREGATE)
+    if _job_level(block, "runs-on") != "ubuntu-24.04":
+        violations.append("job `%s` must run on ubuntu-24.04 (no macOS slot)" % MAC_AGGREGATE)
     if "needs.%s.result" % SHARD_JOB not in block:
         violations.append("job `%s` never reads `needs.%s.result`" % (MAC_AGGREGATE, SHARD_JOB))
     if "needs.changes.outputs.swift" not in block:
@@ -576,7 +576,7 @@ def good_workflow(
         "    name: ${{ github.event_name == 'workflow_dispatch' && '%s (dispatch)' || '%s' }}"
         % (CHANGES_JOB[1], CHANGES_JOB[1])
     )
-    out += ["    runs-on: ubuntu-latest", "    steps:", "      - uses: actions/checkout@v4", ""]
+    out += ["    runs-on: ubuntu-24.04", "    steps:", "      - uses: actions/checkout@v4", ""]
     for key, (original, selectors, wrapper) in list(JOBS.items()) + [(SHARD_JOB, (None, SHARD_SELECTORS, None))]:
         if key == SHARD_JOB:
             default_name = (
@@ -603,7 +603,7 @@ def good_workflow(
             out.append("    needs: [%s]" % ", ".join(RUST_PARTS))
         if cond is not None:
             out.append("    if: %s" % cond)
-        out.append("    runs-on: %s" % ("macos-26" if key == SHARD_JOB else "ubuntu-latest"))
+        out.append("    runs-on: %s" % ("macos-26" if key == SHARD_JOB else "ubuntu-24.04"))
         if key == SHARD_JOB:
             out += ["    strategy:", "      fail-fast: false", "      matrix:", "        shard: [1, 2, 3]"]
         out.append("    concurrency:")
@@ -1033,7 +1033,7 @@ class MacAggregateTests(unittest.TestCase):
         text = good_workflow().replace(
             "  swift-tests-mac:\n    name:", "  swift-tests-mac:\n    name:", 1)
         block = _job_blocks(text)[MAC_AGGREGATE]
-        moved = text.replace(block, block.replace("runs-on: ubuntu-latest", "runs-on: macos-26"), 1)
+        moved = text.replace(block, block.replace("runs-on: ubuntu-24.04", "runs-on: macos-26"), 1)
         self.assertTrue(self._check(moved))
 
     def test_bites_when_the_verdict_step_is_conditional(self):
