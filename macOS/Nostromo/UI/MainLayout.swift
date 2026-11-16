@@ -587,8 +587,17 @@ class MainLayout: NSView {
         presentedSheet = nil
     }
 
-    private func presentCreateFocusSheet() {
+    /// Open the New Focus / Resume sheet on `tab` (nil: the tab last used). With the sheet already open in
+    /// this window, switch its tab instead of opening a second one (Resume puts the cursor in search).
+    /// Not while another sheet is attached.
+    func presentCreateFocusSheet(tab: CreateFocusSheet.Tab? = nil) {
         guard let window else { return }
+        if let open = presentedSheet {
+            if let tab { open.selectTab(tab) }
+            return
+        }
+        guard window.attachedSheet == nil else { return }
+        if let tab { CreateFocusSheet.rememberedTab = tab }
         let sheet = CreateFocusSheet(switchToTag: { [weak self] tag in
             guard let self, let focus = self.focusStore.focuses.first(where: { $0.sessionTag == tag }) else { return false }
             // A window that already shows it comes to the front; otherwise this window switches.
