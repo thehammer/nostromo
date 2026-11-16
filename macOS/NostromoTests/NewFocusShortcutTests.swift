@@ -5,6 +5,12 @@ import AppKit
 /// and that a terminal holding the keyboard does not take them from the menu.
 final class NewFocusShortcutTests: XCTestCase {
 
+    /// A source file of the app, read from the repo this test file lives in.
+    private func appSource(_ relative: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        return try String(contentsOf: root.appendingPathComponent("Nostromo/\(relative)"), encoding: .utf8)
+    }
+
     /// Records the two actions; answers `validateMenuItem` so the menu enables its items.
     private final class Recorder: NSObject {
         var calls: [String] = []
@@ -84,8 +90,9 @@ final class NewFocusShortcutTests: XCTestCase {
     }
 
     func testTheTerminalViewSourceNeverOverridesKeyEquivalents() throws {
-        let src = try Repo.read(Repo.app.appendingPathComponent("UI/Terminal/NostromoTerminalView.swift"))
-        XCTAssertFalse(Repo.codeLines(src).contains("performKeyEquivalent"),
+        let src = try appSource("UI/Terminal/NostromoTerminalView.swift")
+        let code = src.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        XCTAssertFalse(code.contains { $0.contains("performKeyEquivalent") },
                        "a terminal override of performKeyEquivalent could take ⌘N from the menu")
     }
 
@@ -141,7 +148,7 @@ final class NewFocusShortcutTests: XCTestCase {
     }
 
     func testTheItemsAreDisabledWithNoMainWindowAndEnabledForASheetOfOne() throws {
-        let code = try Repo.read(Repo.app.appendingPathComponent("AppDelegate.swift"))
+        let code = try appSource("AppDelegate.swift")
         XCTAssertTrue(code.contains("sheetParent?.contentView as? MainLayout"),
                       "with the sheet key, the shortcut still finds its parent main window")
         XCTAssertTrue(code.contains("menuItem.action == #selector(newFocus(_:)) || menuItem.action == #selector(resumeConversation(_:))"))
