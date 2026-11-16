@@ -256,9 +256,24 @@ final class TrackerFoldTests: XCTestCase {
     func testTheDisclosureCanTakeKeyboardFocusSoSpaceCanOperateIt() throws {
         let (rig, _) = try foldRig()
         let button = try disclosure(rig, foldItem)
-        XCTAssertTrue(button.acceptsFirstResponder, "the disclosure accepts first responder")
-        XCTAssertTrue(button.canBecomeKeyView, "the disclosure is in the key-view loop")
-        XCTAssertFalse(button.refusesFirstResponder)
+        assertKeyboardFocusable(button, fullKeyboardAccess: NSApp.isFullKeyboardAccessEnabled)
+    }
+
+    /// `canBecomeKeyView` for an NSButton is true only when Full Keyboard Access is on (System Settings >
+    /// Keyboard > Keyboard navigation), which CI runners have off; so it is asserted only then. The first
+    /// responder assertions hold either way and alone catch `refusesFirstResponder = true`.
+    private func assertKeyboardFocusable(_ button: NSButton, fullKeyboardAccess: Bool,
+                                         file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(button.acceptsFirstResponder, "the disclosure accepts first responder", file: file, line: line)
+        XCTAssertFalse(button.refusesFirstResponder, file: file, line: line)
+        if fullKeyboardAccess {
+            XCTAssertTrue(button.canBecomeKeyView, "the disclosure is in the key-view loop", file: file, line: line)
+        }
+    }
+
+    func testTheKeyboardFocusAssertionHoldsWithFullKeyboardAccessOffToo() throws {
+        let (rig, _) = try foldRig()
+        assertKeyboardFocusable(try disclosure(rig, foldItem), fullKeyboardAccess: false)
     }
 
     // MARK: - The fold's change highlight
