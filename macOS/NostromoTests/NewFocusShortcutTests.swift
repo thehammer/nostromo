@@ -30,10 +30,11 @@ final class NewFocusShortcutTests: XCTestCase {
         }.map(\.title)
     }
 
+    /// A real ⇧⌘N reports "N" as the characters and "n" ignoring modifiers.
     private func keyEvent(_ chars: String, flags: NSEvent.ModifierFlags, window: NSWindow? = nil) -> NSEvent {
         NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
                          windowNumber: window?.windowNumber ?? 0, context: nil, characters: chars,
-                         charactersIgnoringModifiers: chars, isARepeat: false, keyCode: 45)!
+                         charactersIgnoringModifiers: chars.lowercased(), isARepeat: false, keyCode: 45)!
     }
 
     func testTheFileMenuSitsBetweenTheAppMenuAndEditWithBothItems() throws {
